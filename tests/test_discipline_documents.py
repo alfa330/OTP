@@ -359,6 +359,18 @@ def test_package_is_clean(make):
     assert props.created.replace(tzinfo=None) == props.modified.replace(tzinfo=None) == CREATED - timedelta(hours=5)
 
 
+@pytest.mark.parametrize('make', [_act, _blank])
+def test_own_documents_pass_the_upload_check(make):
+    """Оператор заполняет наш бланк и прикладывает его объяснительной, глава
+    делает шаблон акта из нашего черновика: проверка DOCX (files.check_docx)
+    свои же документы не отклоняет."""
+    from discipline import files
+    buffer = BytesIO()
+    make().save(buffer)
+    files.check_docx(buffer.getvalue(), name='документ.docx')
+    files.check_docx(buffer.getvalue(), name='шаблон.docx', template=True)
+
+
 def test_act_composer_window_and_term_come_from_the_context():
     """Составитель — из контекста (СВ записи-основания), окно и срок — свои числа,
     а не значения по умолчанию (30 — и запасное значение в коде)."""

@@ -5,7 +5,7 @@ import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { apiError, saveBlob } from './disciplineApi';
 import { isPreviewable } from './disciplineRules';
-import { Spinner } from './disciplineUi';
+import { FileName, Spinner } from './disciplineUi';
 
 /*
  * Предпросмотр файла без скачивания (ТЗ п. 13): картинки — в общем окне
@@ -148,7 +148,7 @@ const FilePreview = ({ file, api, toast, onClose }) => {
     return (
         <div className="fixed inset-0 z-[300] flex flex-col bg-slate-900/85 backdrop-blur-sm" role="dialog" aria-label={file.name}>
             <div className="flex items-center gap-3 px-4 py-3 text-white" style={{ paddingTop: 'max(12px, env(safe-area-inset-top))' }}>
-                <span className="min-w-0 flex-1 truncate text-[14px] font-medium">{file.name}</span>
+                <FileName name={file.name} className="flex-1 text-[14px] font-medium" />
                 {mobile && !pdfFailed && state.url ? (
                     <span className="flex items-center gap-1">
                         <button type="button" aria-label="Мельче" disabled={zoom <= ZOOMS[0]}

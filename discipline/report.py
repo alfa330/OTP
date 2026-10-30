@@ -25,7 +25,7 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from . import catalog
+from . import catalog, files
 
 HEADER_FILL = PatternFill('solid', fgColor='1F2937')
 HEADER_FONT = Font(bold=True, color='FFFFFF')
@@ -426,6 +426,14 @@ _VALUE_LABELS = {
 def _human(key, value):
     if value in (None, ''):
         return '—'
+    if key in ('file', 'files'):
+        # Журнал не правится, а имя в нём — как его покажет список файлов:
+        # без невидимых символов, прятавших настоящее расширение. «files»
+        # бывает и числом («Файлов: 3») — его не трогаем.
+        if isinstance(value, str):
+            value = files.safe_name(value)
+        elif isinstance(value, list):
+            value = [files.safe_name(item) if isinstance(item, str) else item for item in value]
     if isinstance(value, bool):
         return 'да' if value else 'нет'
     if key in _VALUE_LABELS and value in _VALUE_LABELS[key]:

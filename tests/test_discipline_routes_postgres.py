@@ -260,11 +260,58 @@ def test_settings_roundtrip(client):
     duplicate = client.post('/api/discipline/types', headers=h(HEAD_SZOV), json={
         'department_id': SZOV, 'title': 'курение в неположенном месте', 'severity': 'light', 'weight': 1})
     assert duplicate.status_code == 400 and 'уже есть' in duplicate.get_json()['error']
+    # Шаблон — настоящий документ Word: архив с одной подписью «PK» проверка
+    # DOCX больше не пропускает (files.check_docx).
+    fake = client.post('/api/discipline/settings/template', headers=h(HEAD_SZOV),
+                       data={'department_id': str(SZOV), 'file': (io.BytesIO(b'PK\x03\x04' + b'0' * 50),
+                                                                   'шаблон.docx')},
+                       content_type='multipart/form-data')
+    assert fake.status_code == 400 and fake.get_json()['code'] == 'DISCIPLINE_DOCX_REFUSED'
+    from docx import Document
+    buffer = io.BytesIO()
+    Document().save(buffer)
     response = client.post('/api/discipline/settings/template', headers=h(HEAD_SZOV),
-                           data={'department_id': str(SZOV), 'file': (io.BytesIO(b'PK\x03\x04' + b'0' * 50),
-                                                                       'шаблон.docx')},
+                           data={'department_id': str(SZOV), 'file': (io.BytesIO(buffer.getvalue()), 'шаблон.docx')},
                            content_type='multipart/form-data')
     assert response.status_code == 200, response.get_json()
+
+
+def test_file_name_does_not_pass_one_type_for_another(client, db):
+    """Владелец, 30.10.2026 («нужно обезопасить»): U+202E разворачивает строку, и
+    «объяснительная‮fdp.doc» читалась как PDF. Имя чистится при загрузке, а у
+    файла, загруженного раньше, — в карточке, при скачивании и в журнале."""
+    rlo = chr(0x202E)
+    now = datetime.now().replace(second=0, microsecond=0)
+    record_id = _create(client, SV_A, OP_A, now - timedelta(days=1)).get_json()['id']
+    response = client.post('/api/discipline/records/%d/explanation' % record_id, headers=h(OP_A),
+                           data={'file': (io.BytesIO(PDF), 'объяснительная' + rlo + 'gpj.pdf')},
+                           content_type='multipart/form-data')
+    assert response.status_code == 200, response.get_json()
+    card = client.get('/api/discipline/records/%d' % record_id, headers=h(SV_A)).get_json()
+    explanation = next(f for f in card['files'] if f['kind'] == 'explanation')
+    assert explanation['name'] == 'объяснительнаяgpj.pdf'
+
+    # Загруженное до чистки имён: в базе имя с символом-разворотом.
+    with db.cursor() as cur:
+        cur.execute('UPDATE discipline_files SET file_name = %s WHERE id = %s',
+                    ('объяснительная' + rlo + 'fdp.pdf', explanation['id']))
+        cur.execute("""INSERT INTO discipline_audit (actor_id, action, entity, entity_id, operator_id, department_id,
+                                                     record_id, changes)
+                       VALUES (%s, 'upload_explanation', 'file', %s, %s, %s, %s, %s::jsonb)""",
+                    (OP_A, explanation['id'], OP_A, SZOV, record_id,
+                     '{"file": "объяснительная%sfdp.pdf"}' % rlo))
+    card = client.get('/api/discipline/records/%d' % record_id, headers=h(SV_A)).get_json()
+    assert next(f['name'] for f in card['files'] if f['id'] == explanation['id']) == 'объяснительнаяfdp.pdf'
+    for url in ('/api/discipline/files/%d', '/api/discipline/files/%d?inline=1'):
+        download = client.get(url % explanation['id'], headers=h(SV_A))
+        assert download.status_code == 200
+        disposition = download.headers['Content-Disposition']
+        assert '%E2%80%AE' not in disposition.upper() and rlo not in disposition
+        assert '.pdf' in disposition
+    audit = client.get('/api/discipline/audit', headers=h(HEAD_SZOV)).get_json()['items']
+    texts = [row['changes_text'] for row in audit if row['action'] == 'upload_explanation']
+    assert texts and all(rlo not in text for text in texts)
+    assert any('объяснительнаяfdp.pdf' in text for text in texts)
 
 
 def test_repeated_submission_returns_the_same_record(client, db):

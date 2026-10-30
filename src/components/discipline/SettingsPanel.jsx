@@ -5,8 +5,8 @@ import CustomSelect from '../ui/CustomSelect';
 import { apiError } from './disciplineApi';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    AttachButton, Chip, dBtnPrimary, dBtnSecondary, DepartmentPicker, dInput, EmptyState, Field, Group, INVALID_RING,
-    LoadingRows, Spinner, T,
+    AttachButton, Chip, dBtnPrimary, dBtnSecondary, DepartmentPicker, dInput, EmptyState, Field, FileName, Group,
+    INVALID_RING, LoadingRows, Spinner, T,
 } from './disciplineUi';
 import {
     addresseeProblem, filesProblem, fmtDateTime, ladderName, ladderProblems, ordinalWord, stepTitle,
@@ -524,7 +524,7 @@ const SettingsPanel = ({ api, toast, departments, version, userId = null }) => {
                                 {data.template ? (
                                     <span className="flex min-w-0 items-center gap-2 text-[13px] text-slate-700">
                                         <FileText size={16} className="shrink-0 text-blue-600" />
-                                        <span className="truncate">{data.template.name}</span>
+                                        <FileName name={data.template.name} />
                                         <span className="text-[12px] text-slate-400">· {fmtDateTime(data.template.uploaded_at)}</span>
                                     </span>
                                 ) : (

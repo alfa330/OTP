@@ -407,7 +407,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
         return {
             'can_invalidate': bool(ctx) and _can_invalidate(ctx, row, record),
             'id': row['id'], 'kind': row['kind'], 'kind_label': catalog.FILE_KINDS.get(row['kind'], {}).get('label'),
-            'name': row['file_name'], 'content_type': row['content_type'], 'size': row['size_bytes'],
+            # Имя — каким его прочтёт человек: загруженное до чистки имён могло
+            # прятать настоящее расширение невидимыми символами (files.safe_name).
+            'name': files.safe_name(row['file_name']), 'content_type': row['content_type'], 'size': row['size_bytes'],
             'sha256': row['sha256'], 'uploaded_at': _iso(row['uploaded_at']),
             'uploaded_by_name': row.get('uploaded_by_name'), 'superseded': bool(row.get('superseded_at')),
             'invalid': bool(row.get('invalid_at')), 'invalid_reason': row.get('invalid_reason'),
@@ -606,12 +608,13 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             raise service.DisciplineError('Файл не найден в хранилище', 404)
         inline = request.args.get('inline') in ('1', 'true') and (row['content_type'] or '') in (
             'application/pdf', 'image/jpeg', 'image/png')
+        file_name = files.safe_name(row['file_name'])
         response = send_file(BytesIO(data), mimetype=row['content_type'] or 'application/octet-stream',
-                             as_attachment=not inline, download_name=row['file_name'])
+                             as_attachment=not inline, download_name=file_name)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Cache-Control'] = 'private, no-store'
         if inline:
-            response.headers['Content-Disposition'] = "inline; filename*=UTF-8''%s" % quote(row['file_name'])
+            response.headers['Content-Disposition'] = "inline; filename*=UTF-8''%s" % quote(file_name)
         return response
 
     @route('/files/<int:file_id>/invalidate', methods=('POST',))
@@ -683,12 +686,15 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                            if act.get('composed_by') else ctx.get('name'))
             context = None if templates else service.act_draft_context(cursor, ctx, act, record,
                                                                        settings_for=service.SettingsCache(cursor))
-            queries.audit(cursor, ctx, 'act_docx', 'act', entity_id=act_id, operator_id=act['operator_id'],
-                          department_id=act.get('department_id'), record_id=act['trigger_record_id'])
         template_bytes = files.download(gcs, templates[0]['bucket'], templates[0]['blob_path']) if templates else None
         position = 'Стажёр' if (operator or {}).get('role') == 'trainee' else 'Оператор'
         data = act_docx.build(act, operator or {}, records, template_bytes=template_bytes, position=position,
                               today=today, composed_by=composed_by, context=context, created=now)
+        # В журнал — только выгруженный черновик: отказ по шаблону или сбой
+        # хранилища записью «выгружен» не становятся.
+        with db._get_cursor() as cursor:
+            queries.audit(cursor, ctx, 'act_docx', 'act', entity_id=act_id, operator_id=act['operator_id'],
+                          department_id=act.get('department_id'), record_id=act['trigger_record_id'])
         return send_file(BytesIO(data), mimetype=act_docx.DOCX_MIME, as_attachment=True,
                          download_name='Акт_%s.docx' % act['number'])
 

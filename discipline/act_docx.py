@@ -40,9 +40,11 @@ from io import BytesIO
 
 from docx import Document
 from docx.enum.text import WD_TAB_ALIGNMENT
+from docx.oxml.ns import qn
 from docx.shared import Cm
+from docx.text.paragraph import Paragraph
 
-from . import catalog, docx_layout as layout
+from . import catalog, docx_layout as layout, files
 
 DOCX_MIME = layout.DOCX_MIME
 
@@ -110,29 +112,61 @@ def _replace_in_paragraph(paragraph, values):
     replaced = text
     for key, value in values.items():
         replaced = replaced.replace(key, layout.clean(value))
-    if replaced == text or not paragraph.runs:
+    runs = paragraph.runs
+    if replaced == text or not runs:
         return
-    paragraph.runs[0].text = replaced
-    for run in paragraph.runs[1:]:
-        run.text = ''
+    # Текст — в первый прогон, где он был: прогон-картинка перед ним (логотип
+    # в начале строки) остаётся на своём месте.
+    target = next((run for run in runs if run.text), runs[0])
+    for run in runs:
+        _set_run_text(run, replaced if run is target else '')
 
 
-def _walk_paragraphs(container):
-    for paragraph in container.paragraphs:
-        yield paragraph
-    for table in getattr(container, 'tables', ()):
-        for row in table.rows:
-            for cell in row.cells:
-                yield from _walk_paragraphs(cell)
+# Что в прогоне не текст и должно пережить подстановку: картинка, надпись
+# (текстовое поле Word 2010+ лежит в mc:AlternateContent, старое — в w:pict),
+# внедрённый объект.
+_RUN_KEEP = frozenset((qn('w:drawing'), qn('w:pict'), qn('w:object'),
+                       '{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent'))
+
+
+def _set_run_text(run, text):
+    """run.text = text, но картинки и надписи прогона остаются: присваивание
+    python-docx стирает всё содержимое прогона, и надпись из абзаца с меткой
+    («УТВЕРЖДАЮ» рядом с «АКТ № …») пропадала из черновика."""
+    kept = [child for child in run._r if child.tag in _RUN_KEEP]
+    run.text = text
+    for child in kept:
+        run._r.append(child)
+
+
+def _walk_paragraphs(element, parent):
+    """Все абзацы части — тело, таблицы любой вложенности, надписи, поля
+    содержимого — и каждый ровно один раз. Обход через row.cells отдавал
+    ячейку на N колонок сетки N раз, и вложенные таблицы проходились
+    N^глубина раз: шаблон на 33 КБ держал сервер 74 с (замер 30.10.2026).
+    Список собирается до подстановок: живой обход дерева, которое тут же
+    правится, обрывался на первом абзаце с надписью."""
+    for paragraph in list(element.iter(qn('w:p'))):
+        yield Paragraph(paragraph, parent)
 
 
 def fill_template(template_bytes, values):
+    # Шаблон проверен при загрузке, но мог лечь в хранилище раньше этих
+    # проверок, — без них не разбираем: тяжёлый шаблон занял бы память сервера,
+    # а внешняя ссылка ушла бы в черновик. Скачивает черновик СВ — ему причина
+    # и совет загрузчику ни к чему, ему — кто и что должен сделать.
+    try:
+        files.check_docx(template_bytes, name='Шаблон акта', template=True)
+    except files.FileError:
+        raise files.FileError('Шаблон акта отдела не проходит проверку — руководителю нужно загрузить его заново '
+                              'в «Настройках». Пока шаблон не заменён, черновик не собирается',
+                              code='DISCIPLINE_TEMPLATE_REFUSED', status=409) from None
     document = Document(BytesIO(template_bytes))
-    for paragraph in _walk_paragraphs(document):
+    for paragraph in _walk_paragraphs(document.element.body, document._body):
         _replace_in_paragraph(paragraph, values)
     for section in document.sections:
         for part in (section.header, section.footer):
-            for paragraph in _walk_paragraphs(part):
+            for paragraph in _walk_paragraphs(part._element, part):
                 _replace_in_paragraph(paragraph, values)
     buffer = BytesIO()
     document.save(buffer)

@@ -176,6 +176,29 @@ const fileIcon = (file) => {
     return FileText;
 };
 
+/* Тип документа — по тому, что проверил сервер при загрузке (content_type), а
+   не по имени: PDF и DOC под одним значком путались. */
+const FILE_TYPE_LABELS = {
+    'application/pdf': 'PDF',
+    'application/msword': 'DOC',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+};
+export const fileTypeLabel = (file) => FILE_TYPE_LABELS[String(file?.content_type || '').toLowerCase()] || '';
+
+/* Имя файла, у которого расширение не уезжает за край: обрезается основа, а
+   «.pdf» или «.docx» видно всегда — как в Finder. */
+export const FileName = ({ name, className = '' }) => {
+    const text = String(name || '');
+    const dot = text.lastIndexOf('.');
+    const ext = dot > 0 && text.length - dot <= 11 ? text.slice(dot) : '';
+    return (
+        <span className={`flex min-w-0 ${className}`} dir="ltr">
+            <span className="truncate">{ext ? text.slice(0, dot) : text}</span>
+            {ext && <span className="shrink-0">{ext}</span>}
+        </span>
+    );
+};
+
 /* Список файлов записи: вид, имя, кто и когда; недействительный — зачёркнут с
    причиной, прежняя версия — приглушена. Файл не удаляется никогда (п. 13). */
 export const FileList = ({ files = [], onOpen, onInvalidate = null, canInvalidate = null, showKind = true, emptyText = null }) => {
@@ -186,16 +209,16 @@ export const FileList = ({ files = [], onOpen, onInvalidate = null, canInvalidat
         <ul className="divide-y divide-slate-100">
             {files.map((file) => {
                 const Icon = fileIcon(file);
+                const typeLabel = fileTypeLabel(file);
                 const dim = file.invalid || file.superseded;
                 return (
                     <li key={file.id} className="flex items-center gap-3 py-2 first:pt-0 last:pb-0">
                         <span className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${dim ? 'bg-slate-50 text-slate-300' : 'bg-blue-50 text-blue-600'}`}>
-                            <Icon size={16} />
+                            {typeLabel ? <span className="text-[10px] font-bold tracking-wide">{typeLabel}</span> : <Icon size={16} />}
                         </span>
                         <button type="button" onClick={() => onOpen?.(file)} className="min-w-0 flex-1 text-left">
-                            <span className={`block truncate text-[13px] font-medium ${dim ? 'text-slate-400' : 'text-slate-800'} ${file.invalid ? 'line-through' : ''} ${T.sub}`}>
-                                {file.name}
-                            </span>
+                            <FileName name={file.name}
+                                      className={`text-[13px] font-medium ${dim ? 'text-slate-400' : 'text-slate-800'} ${file.invalid ? 'line-through' : ''} ${T.sub}`} />
                             <span className={`block truncate text-[11.5px] text-slate-400 ${T.note}`}>
                                 {[showKind ? file.kind_label : null, fileSizeText(file.size), fmtDateTime(file.uploaded_at),
                                     file.uploaded_by_name, file.superseded ? 'прежняя версия' : null,

@@ -525,3 +525,27 @@ class ScanWindowWiringTests(unittest.TestCase):
         self.assertIn("if (!track || track.readyState !== 'live' || track.muted) {", self.SCANNER)
         self.assertIn("setCamera({ state: 'error', message: 'Камера не даёт кадр' });", self.SCANNER)
         self.assertIn('if (frameIsBlank(frame)) {', self.SCANNER)
+
+
+class FileNameDisplayTests(unittest.TestCase):
+    """Имя файла не выдаёт один тип за другой (владелец, 30.10.2026): тип
+    документа — в значке по content_type, расширение не уезжает за край."""
+    DIR = ROOT / 'src' / 'components' / 'discipline'
+    UI = (DIR / 'disciplineUi.jsx').read_text(encoding='utf-8')
+
+    def test_document_type_comes_from_the_checked_content_type(self):
+        self.assertIn("'application/pdf': 'PDF',", self.UI)
+        self.assertIn("'application/msword': 'DOC',", self.UI)
+        self.assertIn("'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',", self.UI)
+        self.assertIn('{typeLabel ? <span className="text-[10px] font-bold tracking-wide">{typeLabel}</span> '
+                      ': <Icon size={16} />}', self.UI)
+
+    def test_extension_stays_visible_wherever_a_stored_name_is_shown(self):
+        self.assertIn('<span className="truncate">{ext ? text.slice(0, dot) : text}</span>', self.UI)
+        self.assertIn('{ext && <span className="shrink-0">{ext}</span>}', self.UI)
+        self.assertIn('<FileName name={file.name}', self.UI)
+        self.assertNotIn('{file.name}\n                            </span>', self.UI)
+        preview = (self.DIR / 'FilePreview.jsx').read_text(encoding='utf-8')
+        self.assertIn('<FileName name={file.name} className="flex-1 text-[14px] font-medium" />', preview)
+        settings = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
+        self.assertIn('<FileName name={data.template.name} />', settings)
