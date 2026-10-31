@@ -65,28 +65,26 @@ def test_concurrent_capacity_rejects_without_waiting():
         assist._slots.release(); assist._slots.release()
 
 
-@pytest.mark.parametrize(('action', 'draft'), [
-    ('kk', 'Пришлите, пожалуйста, документы. Мы проверим их и сообщим результат.'),
-    ('rewrite', 'кужаттарды жиберши, тексерип жауап беремиз'),
-])
-def test_kazakh_translation_and_rewrite_send_the_same_service_style_to_provider(monkeypatch, action, draft):
+KAZAKH_LETTERS = set('әғқңөұүһі')
+KAZAKH_REPLY = 'Құжаттарды жіберуіңізді сұраймыз. Тексеріп, жауап береміз.'
+
+
+def fake_vertex(monkeypatch, language='kk', reply=KAZAKH_REPLY):
     from wiki.ai import providers
     calls = []
-    expected = 'Құжаттарды жіберуіңізді сұраймыз. Тексеріп, жауап береміз.'
 
     def generate(model, system, text, **limits):
         calls.append((model, system, text, limits))
-        return {'text': expected, 'finish': 'STOP'}
+        return {'text': language if system == assist._DETECT else reply, 'finish': 'STOP'}
 
     monkeypatch.setattr(providers, '_call_vertex', generate)
     monkeypatch.setenv('WAZZUP_DRAFT_AI_MODEL', 'fixture-model')
-    assert assist.transform(action, draft) == expected
-    model, prompt, actual_draft, limits = calls[0]
-    assert model == 'fixture-model' and actual_draft == draft
-    assert limits == {'max_tokens': 2400, 'timeout': 12}
+    return calls
+
+
+def assert_kazakh_service_style(prompt):
     # Verify the instructions actually sent through the production provider
     # boundary. A model stub does not establish translation quality.
-    assert assist._KAZAKH_STYLE in prompt
     assert 'умеренно официальный, спокойный и уважительный деловой тон' in prompt
     assert 'Всегда обращайся к клиенту на «Сіз»' in prompt
     assert 'Құжаттарды жіберуіңізді сұраймыз' in prompt
@@ -94,11 +92,143 @@ def test_kazakh_translation_and_rewrite_send_the_same_service_style_to_provider(
     assert 'редкие, архаичные' in prompt
     assert 'Имена, названия сервисов, номера, суммы, даты, телефоны, ссылки' in prompt
     assert 'Не добавляй приветствия, извинения, обещания' in prompt
-    if action == 'rewrite':
-        assert 'Не переводи казахское сообщение на русский' in prompt
-        assert 'без казахских букв' in prompt
-        assert 'применяй только к казахскому исходнику' in prompt
-        assert 'Русское сообщение перефразируй на русском по общим правилам' in prompt
+
+
+def test_kazakh_translation_sends_the_service_style_with_translation_examples(monkeypatch):
+    calls = fake_vertex(monkeypatch)
+    draft = 'Пришлите, пожалуйста, документы. Мы проверим их и сообщим результат.'
+    assert assist.transform('kk', draft) == KAZAKH_REPLY
+    [(model, prompt, actual_draft, limits)] = calls
+    assert model == 'fixture-model' and actual_draft == draft
+    assert limits == {'max_tokens': 2400, 'timeout': 12}
+    assert_kazakh_service_style(prompt)
+    assert '«Пришлите, пожалуйста, документы» → «Құжаттарды жіберуіңізді сұраймыз»' in prompt
+
+
+def test_kazakh_rewrite_detects_the_language_first_and_gets_no_translation_examples(monkeypatch):
+    calls = fake_vertex(monkeypatch, 'kk')
+    draft = 'кужаттарды жиберши, тексерип жауап беремиз'
+    assert assist.transform('rewrite', draft) == KAZAKH_REPLY
+    detect, rewrite = calls
+    assert detect == ('fixture-model', assist._DETECT, draft, {'max_tokens': 32, 'timeout': 6})
+    model, prompt, actual_draft, limits = rewrite
+    assert model == 'fixture-model' and actual_draft == draft
+    assert limits == {'max_tokens': 2400, 'timeout': 12}
+    assert_kazakh_service_style(prompt)
+    assert 'восстанови правильную казахскую кириллицу' in prompt
+    # Russian -> Kazakh example pairs are what pulled Russian drafts into Kazakh.
+    assert 'Пришлите' not in prompt and 'Подождите' not in prompt
+
+
+@pytest.mark.parametrize(('language', 'draft'), [
+    ('ru', 'Подождите пожалуйста'),
+    ('mixed', 'Құжаттар дайын. Документы готовы'),
+    ('other', 'Ok, thanks'),
+])
+def test_only_a_kazakh_draft_gets_the_kazakh_rules(monkeypatch, language, draft):
+    calls = fake_vertex(monkeypatch, language, draft)
+    assert assist.transform('rewrite', draft) == draft
+    prompt = calls[1][1]
+    assert prompt == assist._SYSTEM + '\n' + assist._REWRITE[language]
+    assert 'Всегда обращайся к клиенту на «Сіз»' not in prompt
+    assert 'не переводи' in prompt.lower()
+    if language == 'ru':
+        assert not KAZAKH_LETTERS & set(prompt.lower())
+
+
+@pytest.mark.parametrize('language', ['ru', 'kk', 'mixed', 'other'])
+def test_rewrite_keeps_digits_so_the_number_check_passes(language):
+    # «5 минут» → «пять минут» and «один день» → «1 день» failed the route's number check.
+    assert ('Числа пиши так же, как в исходнике: «5 минут», «1 заказ», «2 грузчика» — цифрами, '
+            '«один день» — словами.') in assist._REWRITE[language]
+
+
+def test_language_request_settles_greetings():
+    # «Сәлеметсіз бе! Пришлите фото» went to Kazakh as "mixed", and
+    # «Сәлеметсіз бе! 5 минут» went to Russian, before these two rules.
+    assert 'приветствие или благодарность на другом языке не делают текст смешанным' in assist._DETECT
+    assert 'язык черновика — язык приветствия или благодарности' in assist._DETECT
+
+
+@pytest.mark.parametrize(('answer', 'language'), [
+    ('kk', 'kk'), ('ru', 'ru'), ('`ru`.', 'ru'), ('MIXED\n', 'mixed'), ('other', 'other'),
+    ('Казахский', 'other'), ('', 'other'), ('uz', 'other'), ('Сіз қай қаладасыз?', 'other'),
+])
+def test_detected_language_is_read_strictly(monkeypatch, answer, language):
+    fake_vertex(monkeypatch, answer)
+    assert assist.draft_language('черновик') == language
+
+
+@pytest.mark.parametrize(('language', 'draft', 'reply'), [
+    ('ru', 'Подождите пожалуйста', 'Күте тұруыңызды сұраймыз.'),
+    ('ru', 'Рахмет за ожидание, ваши документы приняты', 'Күткеніңіз үшін рахмет, құжаттарыңыз қабылданды.'),
+    ('kk', 'Құжаттарды жіберіңізші, тексеріп жауап береміз', 'Пришлите документы, мы проверим и ответим.'),
+    ('kk', 'кужаттарды жиберши, тексерип жауап беремиз', 'Пришлите документы, мы проверим и ответим.'),
+    ('ru', 'Сәлеметсіз бе, құрметті серіктес! Документы получили', 'Здравствуйте, уважаемый партнёр! Документы получили.'),
+    ('other', 'Сіздің құжаттарыңыз дайын', 'Ваши документы готовы.'),
+])
+def test_rewrite_in_another_language_is_rejected_and_the_draft_kept(monkeypatch, language, draft, reply):
+    fake_vertex(monkeypatch, language, reply)
+    response = fixture(assist.transform).post('/assist', json=dict(account='op', action='rewrite', text=draft))
+    assert response.status_code == 422
+    assert response.json == {'error': 'ИИ изменил язык сообщения. Исходный текст сохранён, попробуйте ещё раз.'}
+
+
+@pytest.mark.parametrize(('language', 'draft', 'reply'), [
+    ('kk', 'кужаттарды жиберши', 'Құжаттарды жіберуіңізді сұраймыз.'),
+    ('kk', 'жарайды', 'Жарайды.'),
+    ('ru', 'Сәлеметсіз бе! Документы получили', 'Сәлеметсіз бе! Документы получены.'),
+    ('ru', 'Здравствуйте, Әлия! Пришлите фото', 'Здравствуйте, Әлия! Пришлите, пожалуйста, фото.'),
+    ('mixed', 'Құжаттар дайын. Документы готовы', 'Құжаттарыңыз дайын. Ваши документы готовы.'),
+    ('other', 'ок', 'Хорошо.'),
+])
+def test_rewrite_in_the_same_language_passes(monkeypatch, language, draft, reply):
+    fake_vertex(monkeypatch, language, reply)
+    response = fixture(assist.transform).post('/assist', json=dict(account='op', action='rewrite', text=draft))
+    assert response.status_code == 200 and response.json == {'text': reply}
+
+
+@pytest.mark.parametrize(('draft', 'language'), [
+    ('Құжаттарыңызды жіберіңіз', 'kk'), ('Сәлеметсіз бе! Документы получили', 'other'),
+    ('кужаттарды жиберши', 'other'), ('2500', 'other'),
+])
+def test_failed_language_request_does_not_fail_the_rewrite(monkeypatch, draft, language):
+    from wiki.ai import providers
+    calls = []
+
+    def generate(model, system, text, **limits):
+        calls.append(system)
+        if system == assist._DETECT:
+            raise providers.ProviderError('HTTP 429', status=429)
+        return {'text': draft, 'finish': 'STOP'}
+
+    monkeypatch.setattr(providers, '_call_vertex', generate)
+    assert assist.transform('rewrite', draft) == draft
+    assert calls == [assist._DETECT, assist._SYSTEM + '\n' + assist._REWRITE[language]]
+
+
+def test_vertex_overload_is_retried_once(monkeypatch):
+    from wiki.ai import providers
+    calls, sleeps = [], []
+    failures = [providers.ProviderError('HTTP 429', status=429)]
+
+    def generate(model, system, text, **limits):
+        calls.append(system)
+        if failures:
+            raise failures.pop()
+        return {'text': 'Пришлите документы', 'finish': 'STOP'}
+
+    monkeypatch.setattr(providers, '_call_vertex', generate)
+    monkeypatch.setattr(assist.time, 'sleep', sleeps.append)
+    assert assist.transform('ru', 'Құжаттарды жіберіңіз') == 'Пришлите документы'
+    assert len(calls) == 2 and sleeps == [1]
+    for repeated in ([providers.ProviderError('HTTP 429', status=429)] * 2,
+                     [providers.ProviderError('HTTP 500', status=500)]):
+        calls.clear()
+        failures[:] = repeated
+        with pytest.raises(providers.ProviderError):
+            assist.transform('ru', 'Құжаттарды жіберіңіз')
+        assert len(calls) == len(repeated)
 
 
 def test_russian_translation_keeps_its_existing_instructions(monkeypatch):
@@ -113,7 +243,7 @@ def test_russian_translation_keeps_its_existing_instructions(monkeypatch):
     assert assist.transform('ru', 'Құжаттарды жіберуіңізді сұраймыз') == 'Пришлите документы'
     assert calls == [(assist._SYSTEM + '\nПереведи сообщение на русский язык.',
                       'Құжаттарды жіберуіңізді сұраймыз')]
-    assert assist._KAZAKH_STYLE not in calls[0][0]
+    assert 'Всегда обращайся к клиенту на «Сіз»' not in calls[0][0]
 
 
 @pytest.mark.parametrize('action', ['kk', 'rewrite'])
