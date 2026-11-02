@@ -82,6 +82,7 @@ import {
 } from './components/schedule/MyShiftsMobile';
 import ShiftRequestComment from './components/schedule/ShiftRequestComment';
 import { momentPassed, moveTimeline, occupiedAroundDay, overlapsAny, requestIntervalText } from './components/schedule/shiftChangeForm';
+import { tenureStartDate } from './components/profile/profileFormat';
 import LeaveRequestFields from './components/leave/LeaveRequestFields';
 import { LeaveRequestListDesktop, LeaveRequestListPhone } from './components/leave/LeaveRequestList';
 import LeaveReviewPanel from './components/leave/LeaveReviewPanel';
@@ -18766,6 +18767,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Вкладка окна «Запросы» у руководителя и второй экран — настройки отделов.
             const [requestsTab, setRequestsTab] = useState('shifts');
             const [leaveSettingsOpen, setLeaveSettingsOpen] = useState(false);
+            // Окно открывается на той вкладке, где ждут решения. Ждут в обеих
+            // или ни в одной — остаётся та, что была: перескок без причины только сбивает.
+            const openRequestsTabWithPending = () => {
+                const leavePending = leaveReview.visible ? leaveReview.pendingCount : 0;
+                if (leavePending > 0 && reviewPendingCount === 0) setRequestsTab('leave');
+                else if (reviewPendingCount > 0 && leavePending === 0) setRequestsTab('shifts');
+            };
             const leaveFormProblem = leaveDraft ? leaveDraftProblem(leaveDraft, {
                 today: myLeave.today,
                 kinds: myLeave.kinds,
@@ -32865,6 +32873,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         onClick: () => {
                             setReviewError('');
                             setLeaveSettingsOpen(false);
+                            openRequestsTabWithPending();
                             setShowReviewModal(true);
                             loadReviewRequests({ silent: true });
                             leaveReview.reload({ silent: true });
@@ -34438,6 +34447,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         onClick={() => {
                                             setReviewError('');
                                             setLeaveSettingsOpen(false);
+                                            openRequestsTabWithPending();
                                             setShowReviewModal(true);
                                             loadReviewRequests({ silent: true });
                                             leaveReview.reload({ silent: true });
@@ -60764,25 +60774,23 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             const operatorUserRowForSalary = Array.isArray(users)
                                                 ? users.find((item) => Number(item?.id ?? item?.operator_id) === Number(user?.id))
                                                 : null;
-                                            const salaryExperience = resolveSalaryExperienceRange(
+                                            // Начало стажа — дата найма плюс дни длительного Б/С,
+                                            // который руководитель не засчитал в стаж (задача #358, п. 8).
+                                            const salaryTenureStart = tenureStartDate(
                                                 profileData?.hire_date ||
                                                 user?.hire_date ||
                                                 user?.hireDate ||
                                                 operatorUserRowForSalary?.hire_date ||
-                                                operatorUserRowForSalary?.hireDate
+                                                operatorUserRowForSalary?.hireDate,
+                                                profileData?.tenure_excluded_days
                                             );
+                                            const salaryExperience = resolveSalaryExperienceRange(salaryTenureStart);
                                             const {
                                                 quality: salaryQuality,
                                                 available: hasSalaryQuality,
                                             } = resolveMonthlySalaryQuality(op.salary_metrics, selectedMonth);
                                             // Стаж и метрики для чат-модели (оценка/время ответа — из chat_metrics за месяц)
-                                            const salaryChatExperience = resolveChatExperienceRange(
-                                                profileData?.hire_date ||
-                                                user?.hire_date ||
-                                                user?.hireDate ||
-                                                operatorUserRowForSalary?.hire_date ||
-                                                operatorUserRowForSalary?.hireDate
-                                            );
+                                            const salaryChatExperience = resolveChatExperienceRange(salaryTenureStart);
                                             const chatAvgScore = safeNum(op.aggregates?.chat_avg_score);
                                             const chatRespMinutes = safeNum(op.aggregates?.chat_avg_response_time_seconds) / 60;
                                             const estimatedOperatorSalary = calculateSalaryByFormula({
@@ -60827,8 +60835,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 : null;
                                             // Стаж в месяцах для модели Линия TEZ (в её формуле надбавка идёт по месяцам, а не по диапазону).
                                             const tezExperienceMonths = (() => {
-                                                const raw = profileData?.hire_date || user?.hire_date || user?.hireDate
-                                                    || operatorUserRowForSalary?.hire_date || operatorUserRowForSalary?.hireDate;
+                                                const raw = salaryTenureStart;
                                                 const parsed = raw ? new Date(raw) : null;
                                                 if (!parsed || Number.isNaN(parsed.getTime())) return 0;
                                                 const [my, mm] = String(selectedMonth || '').split('-').map((v) => parseInt(v, 10));

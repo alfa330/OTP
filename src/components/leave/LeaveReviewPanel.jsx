@@ -75,8 +75,9 @@ function OverlapNote({ overlaps, today, title = 'В эти даты уже от�
 }
 
 // Последний шаг заявки одной строкой: кто и что сделал. Подача не нужна —
-// она и так видна по заявке.
+// она и так видна по заявке; предложение дат — своей строкой выше.
 function LastStep({ item }) {
+    if (item.status === 'proposal') return null;
     const events = Array.isArray(item.events) ? item.events : [];
     const last = [...events].reverse().find((event) => event.action !== 'created');
     if (!last) return null;
@@ -177,6 +178,10 @@ function ReviewItem({ api, item, today, onDecided, onError }) {
     const [busy, setBusy] = useState(false);
     const [tenure, setTenure] = useState(Boolean(item.tenureDefault));
     useEffect(() => { setTenure(Boolean(item.tenureDefault)); }, [item.id, item.tenureDefault]);
+    // Глава может решить заявку, которая ещё у супервайзера, но это обход шага:
+    // кнопки такой заявки спрятаны за отдельным действием, а не стоят рядом с
+    // его собственной очередью.
+    const [bypass, setBypass] = useState(false);
 
     const meta = LEAVE_STATUS_META[item.status] || LEAVE_STATUS_META.supervisor;
     const actions = item.actions || [];
@@ -224,10 +229,14 @@ function ReviewItem({ api, item, today, onDecided, onError }) {
                     </div>
                     <ShiftRequestComment text={item.reason} className="mt-1.5" />
                     {item.status === 'proposal' && item.proposal && (
-                        <div className="mt-1.5 text-[12.5px] tabular-nums text-blue-700">
-                            Предложено {formatLeavePeriod(item.proposal.startDate, item.proposal.endDate, today)}
-                            {' · '}{daysText(item.proposal.days)} — ждём ответа оператора
-                        </div>
+                        <>
+                            <div className="mt-1.5 text-[12.5px] tabular-nums text-blue-700">
+                                {item.proposal.by?.name || 'Супервайзер'} предложил(а){' '}
+                                {formatLeavePeriod(item.proposal.startDate, item.proposal.endDate, today)}
+                                {' · '}{daysText(item.proposal.days)} — ждём ответа оператора
+                            </div>
+                            <ShiftRequestComment text={item.proposal.comment} className="mt-1" />
+                        </>
                     )}
                     {item.status === 'approved' && item.excludeFromTenure && (
                         <div className="mt-1 text-[12px] text-slate-500">Не учитывается в стаже</div>
@@ -240,6 +249,10 @@ function ReviewItem({ api, item, today, onDecided, onError }) {
 
             {proposing ? (
                 <ProposeEditor api={api} item={item} today={today} busy={busy} onCancel={() => setProposing(false)} onSubmit={send} />
+            ) : actions.length > 0 && !item.awaitsMe && !bypass ? (
+                <button type="button" className={`${iosBtnGhost} mt-1.5 -ml-3`} onClick={() => setBypass(true)}>
+                    Решить, не дожидаясь супервайзера
+                </button>
             ) : actions.length > 0 && (
                 <div className="mt-2.5 space-y-2">
                     {showTenure && (

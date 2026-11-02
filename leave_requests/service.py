@@ -18,6 +18,11 @@ from datetime import datetime
 from . import notify, queries, rules
 from .rules import LeaveError
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
 SCHEDULE_LABELS = {
     'annual_leave': 'Ежегодный отпуск',
     'bs': 'Б/С',
@@ -27,7 +32,11 @@ SCHEDULE_LABELS = {
 
 
 def _now():
-    return datetime.now()
+    """«Сейчас» наивным временем Алматы — как его пишет база (queries.NOW_SQL)."""
+    try:
+        return datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001 — без tzdata процесс и так живёт в Asia/Almaty
+        return datetime.now()
 
 
 # ── Общие проверки ──────────────────────────────────────────────────────────
@@ -242,7 +251,7 @@ def answer_proposal(cursor, deps, outbox, *, user, request_id, accept, data, tod
 def mark_seen(cursor, user):
     cursor.execute(
         """
-        UPDATE leave_requests SET operator_seen_at = CURRENT_TIMESTAMP
+        UPDATE leave_requests SET operator_seen_at = """ + queries.NOW_SQL + """
          WHERE operator_id = %s AND status IN ('approved', 'rejected') AND operator_seen_at IS NULL
         """,
         (int(user['id']),),

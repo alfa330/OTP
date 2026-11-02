@@ -6,6 +6,9 @@ from datetime import date, datetime
 
 from . import rules
 
+# Наивное время Алматы — так в портале хранится любое «когда» (см. schema._NOW).
+NOW_SQL = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+
 # Группа оператора — на «сегодня»: по ней очередь делится на группы СВ и
 # сортируются пересечения («сначала своя группа»). Покрывающее членство
 # выигрывает, иначе — последнее прошедшее (переведённого вчера покажем в старой).
@@ -226,7 +229,7 @@ def save_settings(cursor, department_id, values, updated_by):
         INSERT INTO leave_request_settings
             (department_id, enabled, allow_annual_leave, allow_bs, supervisor_step, long_bs_days,
              updated_by, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, """ + NOW_SQL + """)
         ON CONFLICT (department_id) DO UPDATE SET
             enabled = EXCLUDED.enabled,
             allow_annual_leave = EXCLUDED.allow_annual_leave,
@@ -234,7 +237,7 @@ def save_settings(cursor, department_id, values, updated_by):
             supervisor_step = EXCLUDED.supervisor_step,
             long_bs_days = EXCLUDED.long_bs_days,
             updated_by = EXCLUDED.updated_by,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = EXCLUDED.updated_at
         """,
         (int(department_id), bool(merged['enabled']), bool(merged['allow_annual_leave']),
          bool(merged['allow_bs']), bool(merged['supervisor_step']), merged['long_bs_days'],
@@ -287,8 +290,9 @@ def insert_request(cursor, *, operator_id, department_id, supervisor_id, kind, s
     cursor.execute(
         """
         INSERT INTO leave_requests
-            (operator_id, department_id, supervisor_id, kind, start_date, end_date, reason, status)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (operator_id, department_id, supervisor_id, kind, start_date, end_date, reason, status,
+             created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, """ + NOW_SQL + """, """ + NOW_SQL + """)
         RETURNING id
         """,
         (int(operator_id), department_id, supervisor_id, kind, start_date, end_date, reason, status),
@@ -309,7 +313,7 @@ def update_request(cursor, request_id, **values):
     params = dict(values)
     params['id'] = int(request_id)
     cursor.execute(
-        'UPDATE leave_requests SET ' + assignments + ', updated_at = CURRENT_TIMESTAMP WHERE id = %(id)s',
+        'UPDATE leave_requests SET ' + assignments + ', updated_at = ' + NOW_SQL + ' WHERE id = %(id)s',
         params,
     )
 
@@ -319,8 +323,8 @@ def insert_event(cursor, request_id, *, actor_id, actor_name, action, status_aft
     cursor.execute(
         """
         INSERT INTO leave_request_events
-            (request_id, actor_id, actor_name, action, status_after, start_date, end_date, comment)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (request_id, actor_id, actor_name, action, status_after, start_date, end_date, comment, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, """ + NOW_SQL + """)
         """,
         (int(request_id), actor_id, actor_name, action, status_after, start_date, end_date, comment),
     )

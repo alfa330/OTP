@@ -95,9 +95,11 @@ class RoleTests(unittest.TestCase):
     def test_roles(self):
         self.assertEqual('supervisor', rules.reviewer_role(self.SV, self.REQUEST, in_scope=True))
         self.assertIsNone(rules.reviewer_role(self.SV, self.REQUEST, in_scope=False))
-        self.assertEqual('head', rules.reviewer_role(self.HEAD, self.REQUEST, in_scope=False))
+        self.assertEqual('head', rules.reviewer_role(self.HEAD, self.REQUEST, in_scope=True))
+        # Отдел в заявке — снимок: переведённого оператора прежний глава не решает.
+        self.assertIsNone(rules.reviewer_role(self.HEAD, self.REQUEST, in_scope=False))
         self.assertIsNone(rules.reviewer_role(self.HEAD, {'department_id': 2}, in_scope=True))
-        self.assertEqual('head', rules.reviewer_role(self.ADMIN, {'department_id': 2}, in_scope=True))
+        self.assertEqual('head', rules.reviewer_role(self.ADMIN, {'department_id': 2}, in_scope=False))
 
     def test_supervisor_acts_only_on_own_step(self):
         self.assertEqual(('approve', 'propose', 'reject'), rules.reviewer_actions('supervisor', 'supervisor'))

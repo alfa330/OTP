@@ -81,6 +81,8 @@ class _Db:
         with conn.cursor() as cur:
             cur.execute('SET search_path TO ' + self.name)
             cur.execute("SET statement_timeout TO '20s'")
+            # Как на проде: сессия Render живёт в UTC.
+            cur.execute("SET TIME ZONE 'UTC'")
         conn.commit()
         return conn
 
@@ -323,6 +325,18 @@ def test_supervisor_of_another_department_is_out_of_scope(db):
         decide(db, deps, SV_OP, item['id'], action='approve')
 
 
+def test_head_loses_request_of_operator_moved_out_of_department(db):
+    deps = Deps()
+    item = create(db, deps, OP_A, '2026-12-01', '2026-12-14')
+    DEPARTMENT_MEMBERS[1].discard(OP_A)
+    try:
+        with pytest.raises(LeaveError, match='не в вашем периметре'):
+            decide(db, deps, HEAD, item['id'], action='approve')
+        assert decide(db, deps, ADMIN, item['id'], action='approve')['status'] == 'approved'
+    finally:
+        DEPARTMENT_MEMBERS[1].add(OP_A)
+
+
 def test_any_supervisor_of_department_may_take_first_step(db):
     """Как «Запросы по сменам»: решает периметр отдела, колокол — только прямому СВ."""
     deps = Deps()
@@ -519,6 +533,27 @@ def test_operator_payload_counts_what_needs_attention(db):
     assert payload['kinds'] == ['annual_leave', 'bs']
     assert payload['attentionCount'] == 1
     assert payload['requests'][0]['actions'] == ['accept', 'decline', 'edit', 'cancel']
+
+
+# ── Время ───────────────────────────────────────────────────────────────────
+
+def test_times_are_almaty_wall_clock_even_when_session_is_utc(db):
+    """Портал хранит наивное время Алматы: голый CURRENT_TIMESTAMP в UTC-сессии
+    записал бы в журнал заявки час на пять раньше."""
+    deps = Deps()
+    item = create(db, deps, OP_A, '2026-12-01', '2026-12-03')
+    decide(db, deps, HEAD, item['id'], action='approve')
+    utc_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
+    with db.cursor() as cur:
+        for sql in (
+            'SELECT created_at - ' + utc_now + ' FROM leave_requests WHERE id = %s',
+            'SELECT updated_at - ' + utc_now + ' FROM leave_requests WHERE id = %s',
+            'SELECT decided_at - ' + utc_now + ' FROM leave_requests WHERE id = %s',
+            'SELECT MAX(created_at) - ' + utc_now + ' FROM leave_request_events WHERE request_id = %s',
+        ):
+            cur.execute(sql, (item['id'],))
+            hours = cur.fetchone()[0].total_seconds() / 3600
+            assert 4.9 < hours < 5.1, (sql, hours)
 
 
 # ── Стаж в монолите: дни «не в стаж» ────────────────────────────────────────

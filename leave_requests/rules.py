@@ -196,13 +196,18 @@ def reviewer_role(viewer, request, in_scope):
     'head' — глава отдела заявки или админ без своего отдела: решает
     окончательно. 'supervisor' — СВ, в чьём периметре оператор (тот же
     периметр, что у «Запросов по сменам»).
+
+    Периметр нужен и главе: отдел в заявке — снимок на день подачи, и
+    переведённого с тех пор оператора прежний глава решать уже не должен.
     """
     if viewer.get('is_admin'):
         return 'head'
+    if not in_scope:
+        return None
     department_id = request.get('department_id')
     if department_id is not None and int(department_id) in set(viewer.get('headed_department_ids') or ()):
         return 'head'
-    if viewer.get('is_supervisor') and in_scope:
+    if viewer.get('is_supervisor'):
         return 'supervisor'
     return None
 

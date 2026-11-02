@@ -32,6 +32,16 @@ export const formatHireDate = (value) => {
     return `${date.d} ${MONTHS_GENITIVE[date.m - 1]} ${date.y}`;
 };
 
+// Начало стажа: дата найма, сдвинутая на дни, которые не идут в стаж — длительный
+// Б/С по решению руководителя (задача #358, п. 8). Сервер отдаёт их в профиле
+// (tenure_excluded_days). Нет таких дней — дата найма как есть.
+export const tenureStartDate = (hireDate, excludedDays = 0) => {
+    const days = Math.max(0, Math.floor(Number(excludedDays) || 0));
+    const date = parseIsoDate(hireDate);
+    if (!days || !date) return hireDate;
+    return new Date(Date.UTC(date.y, date.m - 1, date.d + days)).toISOString().slice(0, 10);
+};
+
 // Стаж по календарным месяцам: «1 год 2 месяца», «5 месяцев», «Меньше месяца».
 // Счёт тот же, что был в плитке «Стаж работы» (разница месяцев без учёта дня).
 export const formatTenure = (hireDate, today = new Date()) => {

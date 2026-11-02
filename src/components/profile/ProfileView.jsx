@@ -2,7 +2,7 @@ import React from 'react';
 import MobileScrollTitle from '../common/MobileScrollTitle';
 import './profile-mobile.css';
 import { APPLE_FONT, iosCard } from '../ui/ios';
-import { formatHireDate, formatTenure, toneClass } from './profileFormat';
+import { formatHireDate, formatTenure, tenureStartDate, toneClass } from './profileFormat';
 import { ProfileEmpty, ProfileGroup, ProfileRow, ProfileSkeletonValue, ProfileValue, textSize } from './profileUi';
 import FaIcon from '../common/FaIcon';
 import { DeskGroup, DeskRow, IconSquare, RowSkeleton, RowValue, pillButton } from './profileDesktop';
@@ -138,7 +138,7 @@ function PhoneTop({
     onRetry = null,
 }) {
     const hireDate = formatHireDate(profile?.hire_date);
-    const tenure = formatTenure(profile?.hire_date);
+    const tenure = formatTenure(tenureStartDate(profile?.hire_date, profile?.tenure_excluded_days));
     // Строка под именем: направление у линии, должность у бэк-офиса. Внизу
     // в группе «Работа» они не повторяются.
     const subtitle = hidesOperatorBlocks ? profile?.job_title : profile?.direction;
@@ -338,7 +338,7 @@ function DesktopTop({
     }
 
     const hireDate = formatHireDate(profile?.hire_date);
-    const tenure = formatTenure(profile?.hire_date);
+    const tenure = formatTenure(tenureStartDate(profile?.hire_date, profile?.tenure_excluded_days));
     const canChangeRate = typeof onChangeRate === 'function';
     // Под именем — направление (у бэк-офиса должность) и стаж: стажу не нужна
     // своя строка, а ряд «Работы» остаётся в три строки, как колонки «Моих данных».

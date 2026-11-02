@@ -24,6 +24,10 @@ Database._init_db (init_leave_requests_schema) под своим SAVEPOINT — �
   настройки меняет админ, и выключенный отдел старт не включит обратно.
 """
 
+# Время — наивное по Алматы, как во всём портале: сессия базы на проде в UTC,
+# и голый CURRENT_TIMESTAMP записал бы в журнал заявки час на пять раньше.
+_NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
+
 _STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS leave_request_settings (
@@ -34,7 +38,7 @@ _STATEMENTS = (
         supervisor_step BOOLEAN NOT NULL DEFAULT TRUE,
         long_bs_days INTEGER NULL,
         updated_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT %(now)s,
         CONSTRAINT leave_request_settings_kinds_check
             CHECK (NOT enabled OR allow_annual_leave OR allow_bs),
         CONSTRAINT leave_request_settings_long_bs_check
@@ -59,8 +63,8 @@ _STATEMENTS = (
         decided_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
         decided_at TIMESTAMP NULL,
         operator_seen_at TIMESTAMP NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT %(now)s,
+        updated_at TIMESTAMP NOT NULL DEFAULT %(now)s,
         CONSTRAINT leave_requests_kind_check CHECK (kind IN ('annual_leave', 'bs')),
         CONSTRAINT leave_requests_status_check
             CHECK (status IN ('supervisor', 'head', 'proposal', 'approved', 'rejected', 'cancelled')),
@@ -82,7 +86,7 @@ _STATEMENTS = (
         start_date DATE NULL,
         end_date DATE NULL,
         comment TEXT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP NOT NULL DEFAULT %(now)s
     )
     """,
     # Свои заявки оператора, свежие сверху.
@@ -121,7 +125,7 @@ _SEED = """
 
 def init_leave_requests_schema(cursor):
     for statement in _STATEMENTS:
-        cursor.execute(statement)
+        cursor.execute(statement % {'now': _NOW} if '%(now)s' in statement else statement)
     cursor.execute(_SEED)
 
 
