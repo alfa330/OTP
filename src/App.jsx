@@ -82,6 +82,15 @@ import {
 } from './components/schedule/MyShiftsMobile';
 import ShiftRequestComment from './components/schedule/ShiftRequestComment';
 import { momentPassed, moveTimeline, occupiedAroundDay, overlapsAny, requestIntervalText } from './components/schedule/shiftChangeForm';
+import LeaveRequestFields from './components/leave/LeaveRequestFields';
+import { LeaveRequestListDesktop, LeaveRequestListPhone } from './components/leave/LeaveRequestList';
+import LeaveReviewPanel from './components/leave/LeaveReviewPanel';
+import LeaveSettingsPanel from './components/leave/LeaveSettingsPanel';
+import { useLeaveReview, useMyLeaveRequests } from './components/leave/useLeaveRequests';
+import {
+    LEAVE_OPTION_HINT, LEAVE_REQUEST_OPTION, clearLeaveLink, createLeaveApi, draftFromRequest, emptyLeaveDraft,
+    leaveApiError, leaveBellTargetId, leaveDraftProblem, leaveModalTitle, leaveOptionLabel, readLeaveLinkId
+} from './components/leave/leaveRequests';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { buildMyShiftsTrackLayout, describeMyShiftsTrack, formatTrackDuration, formatTrackTime } from './components/schedule/myShiftsTrackLayout';
 import { defaultSwapIntervalForDate } from './components/schedule/swapDefaultInterval';
@@ -18736,6 +18745,33 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Фронт офисы: оператору нельзя видеть смены коллег — табы
             // «Замены»/«Смены коллег» и кнопки обмена сменами скрыты.
             const operatorColleagueShiftsHidden = isOperatorSelfSchedules && departmentHidesColleagueSchedules(user);
+            /* ─── Заявки на отпуск и Б/С (задача #358) ───────────────────────
+               Оператор подаёт их тем же «Новым запросом» (пункт «Отпуск или Б/С»),
+               и они лежат во вкладке «Запросы» своей группой. СВ и глава
+               разбирают их во вкладке «Отпуск и Б/С» окна «Запросы». Правила и
+               экраны — src/components/leave/, маршрут — leave_requests/ на сервере. */
+            const leaveApi = useMemo(() => createLeaveApi(API_BASE_URL, withAccessTokenHeader), []);
+            const myLeave = useMyLeaveRequests({ enabled: isOperatorSelfSchedules && !!user, api: leaveApi });
+            const [leaveReviewFilter, setLeaveReviewFilter] = useState('pending');
+            const leaveReview = useLeaveReview({
+                enabled: !isOperatorSelfSchedules && !plannerReadOnly && !!user,
+                api: leaveApi,
+                statusFilter: leaveReviewFilter,
+            });
+            // Не null — окно «Новый запрос» показывает поля отпуска вместо смены.
+            const [leaveDraft, setLeaveDraft] = useState(null);
+            const [leaveFormError, setLeaveFormError] = useState('');
+            const [leaveSubmitting, setLeaveSubmitting] = useState(false);
+            const [leaveBusyId, setLeaveBusyId] = useState(null);
+            // Вкладка окна «Запросы» у руководителя и второй экран — настройки отделов.
+            const [requestsTab, setRequestsTab] = useState('shifts');
+            const [leaveSettingsOpen, setLeaveSettingsOpen] = useState(false);
+            const leaveFormProblem = leaveDraft ? leaveDraftProblem(leaveDraft, {
+                today: myLeave.today,
+                kinds: myLeave.kinds,
+                maxPeriodDays: myLeave.payload?.maxPeriodDays,
+                maxAheadDays: myLeave.payload?.maxAheadDays,
+            }) : '';
             /* На телефоне у оператора один период — неделя: полоса дней сверху и
                список выбранного дня под ней. «День» и «Месяц» настольного вида
                там не рисуются, и данные под них не нужны. */
@@ -26171,6 +26207,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 return () => { cancelled = true; };
             }, [operatorSelfTab, shiftChangeUnseenCount, loadShiftChangeRequests]);
 
+            // Решения по заявкам на отпуск гаснут так же — открытием «Запросов».
+            // Предложенные даты так не гаснут: на них нужно ответить (сервер).
+            const leaveUnseenCount = myLeave.unseenCount;
+            const reloadMyLeave = myLeave.reload;
+            useEffect(() => {
+                if (operatorSelfTab !== 'requests' || leaveUnseenCount === 0) return;
+                let cancelled = false;
+                leaveApi.seen()
+                    .then(() => { if (!cancelled) reloadMyLeave({ silent: true }); })
+                    .catch((error) => console.warn('Error marking leave requests seen:', error));
+                return () => { cancelled = true; };
+            }, [operatorSelfTab, leaveUnseenCount, leaveApi, reloadMyLeave]);
+
             /* Смены выбранного дня. Берём из «живой» выдачи (−7/+90 дней), а не
                из видимого периода: заявку подают и на день, которого нет на
                экране, — например открыв «Запросы» в режиме месяца. */
@@ -26220,8 +26269,56 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     comment: ''
                 });
                 setShiftChangeError('');
+                setLeaveDraft(null);
                 setShowShiftChangeModal(true);
             }, []);
+
+            /* Окно то же, что у заявки по смене: открыть его сразу в виде
+               «Отпуск или Б/С» — новая заявка или правка своей (request). */
+            const openLeaveDraft = useCallback((request = null) => {
+                setLeaveDraft(request ? draftFromRequest(request) : emptyLeaveDraft(myLeave.kinds));
+                setLeaveFormError('');
+                setShiftChangeError('');
+                setShowShiftChangeModal(true);
+            }, [myLeave.kinds]);
+
+            const submitLeaveDraft = useCallback(async () => {
+                if (!leaveDraft || leaveSubmitting || leaveFormProblem) return;
+                setLeaveSubmitting(true);
+                setLeaveFormError('');
+                try {
+                    const data = leaveDraft.id
+                        ? await leaveApi.edit(leaveDraft)
+                        : await leaveApi.create(leaveDraft);
+                    if (data?.request) myLeave.replace(data.request);
+                    setShowShiftChangeModal(false);
+                    setOperatorSelfTab('requests');
+                    emitAppToast(leaveDraft.id ? 'Заявка изменена' : 'Заявка отправлена', 'success');
+                    myLeave.reload({ silent: true });
+                } catch (error) {
+                    setLeaveFormError(leaveApiError(error, 'Не удалось отправить заявку'));
+                } finally {
+                    setLeaveSubmitting(false);
+                }
+            }, [leaveDraft, leaveSubmitting, leaveFormProblem, leaveApi, myLeave]);
+
+            /* Ответ на предложенные даты и отзыв — прямо из списка «Запросов». */
+            const actOnLeaveRequest = useCallback(async (item, action) => {
+                if (!item?.id || leaveBusyId) return;
+                setLeaveBusyId(item.id);
+                try {
+                    const data = action === 'cancel'
+                        ? await leaveApi.cancel(item.id)
+                        : await leaveApi.answer(item.id, action === 'accept');
+                    if (data?.request) myLeave.replace(data.request);
+                    myLeave.setError('');
+                    myLeave.reload({ silent: true });
+                } catch (error) {
+                    myLeave.setError(leaveApiError(error, 'Не удалось обработать заявку'));
+                } finally {
+                    setLeaveBusyId(null);
+                }
+            }, [leaveBusyId, leaveApi, myLeave]);
 
             /* Выбрали другой день/кусок — новые границы обязаны переехать за ним.
                Иначе в форме остаётся время от прошлой смены, и «внутри смены»
@@ -26282,6 +26379,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 });
                 setShiftChangeError('');
             }, [shiftChangeShiftsForDate]);
+
+            // Пункт «Что нужно»: вид смены или «Отпуск или Б/С» — в том же окне.
+            const pickRequestKind = useCallback((value) => {
+                if (value === LEAVE_REQUEST_OPTION) {
+                    setLeaveDraft(prev => prev || emptyLeaveDraft(myLeave.kinds));
+                    setLeaveFormError('');
+                    return;
+                }
+                setLeaveDraft(null);
+                setShiftChangeKind(value);
+            }, [myLeave.kinds, setShiftChangeKind]);
 
             /* Смены выбранного дня в минутах от полуночи, с поднятыми за 1440
                ночными хвостами — общая система координат для таймлайна и для
@@ -26589,19 +26697,47 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                гаснет отметка «не видел решение»), руководителю — очередь на
                разбор. Реагируем на nonce, а не на id: два уведомления об одной
                заявке подряд должны открывать раздел оба раза. */
+            const reloadLeaveReview = leaveReview.reload;
             useEffect(() => {
                 if (!shiftRequestFocus?.nonce) return;
+                const aboutLeave = shiftRequestFocus.kind === 'leave';
                 if (isOperatorSelfSchedules) {
                     setOperatorSelfTab('requests');
-                    loadShiftChangeRequests({ silent: true });
+                    if (aboutLeave) reloadMyLeave({ silent: true });
+                    else loadShiftChangeRequests({ silent: true });
                     return;
                 }
                 setReviewError('');
-                setReviewStatusFilter('pending');
+                setLeaveSettingsOpen(false);
+                if (aboutLeave) {
+                    setRequestsTab('leave');
+                    setLeaveReviewFilter('pending');
+                    reloadLeaveReview({ silent: true });
+                } else {
+                    setRequestsTab('shifts');
+                    setReviewStatusFilter('pending');
+                    loadReviewRequests({ silent: true });
+                }
                 setShowReviewModal(true);
-                loadReviewRequests({ silent: true });
             }, [shiftRequestFocus?.nonce, isOperatorSelfSchedules,
-                loadShiftChangeRequests, loadReviewRequests]);
+                loadShiftChangeRequests, loadReviewRequests, reloadMyLeave, reloadLeaveReview]);
+
+            /* Ссылка из Telegram на заявку (?leave=<id>) — тот же переход, что из
+               колокола. Адрес чистим сразу: перезагрузка страницы не должна
+               снова открывать окно. */
+            useEffect(() => {
+                if (!user || !readLeaveLinkId()) return;
+                clearLeaveLink();
+                if (isOperatorSelfSchedules) {
+                    setOperatorSelfTab('requests');
+                    return;
+                }
+                if (plannerReadOnly) return;
+                setRequestsTab('leave');
+                setShowReviewModal(true);
+                // Только при входе: дальше ссылка уже вычищена из адреса.
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [user?.id]);
 
             const respondReviewRequest = useCallback(async (requestId, action) => {
                 if (!requestId || reviewRespondingId) return;
@@ -28272,9 +28408,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     <IosModal
                                         open={showShiftChangeModal}
                                         onClose={() => setShowShiftChangeModal(false)}
-                                        title="Заявка по смене"
-                                        subtitle="Уйдёт вашему руководителю на согласование"
+                                        title={leaveDraft ? leaveModalTitle(leaveDraft, myLeave.kinds) : 'Заявка по смене'}
+                                        subtitle={leaveDraft
+                                            ? (myLeave.payload?.supervisorStep === false
+                                                ? 'Уйдёт руководителю отдела на утверждение'
+                                                : 'Согласуют супервайзер и руководитель отдела')
+                                            : 'Уйдёт вашему руководителю на согласование'}
                                         maxWidth="max-w-md"
+                                        sizeKey={leaveDraft ? 'leave' : 'shift'}
                                         footer={(
                                             <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-end">
                                                 {/* На телефоне экран закрывает шеврон в шапке — вторая «Отмена» лишняя. */}
@@ -28290,10 +28431,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 <button
                                                     type="button"
                                                     className={`${iosBtnPrimary} w-full sm:w-auto`}
-                                                    disabled={!!shiftChangeFormProblem || shiftChangeSubmitting}
-                                                    onClick={submitShiftChangeRequest}
+                                                    disabled={leaveDraft
+                                                        ? (!!leaveFormProblem || leaveSubmitting)
+                                                        : (!!shiftChangeFormProblem || shiftChangeSubmitting)}
+                                                    onClick={leaveDraft ? submitLeaveDraft : submitShiftChangeRequest}
                                                 >
-                                                    {shiftChangeSubmitting ? 'Отправляем…' : 'Отправить'}
+                                                    {(leaveDraft ? leaveSubmitting : shiftChangeSubmitting)
+                                                        ? 'Отправляем…'
+                                                        : (leaveDraft?.id ? 'Сохранить' : 'Отправить')}
                                                 </button>
                                             </div>
                                         )}
@@ -28303,6 +28448,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 подписи в полосу на телефоне не помещаются, а сегменты
                                                 в проекте — для двух-трёх вариантов. Чем виды
                                                 отличаются, сказано под «i». */}
+                                            {/* Отпуск и Б/С (задача #358) — пятым пунктом того же списка, у
+                                                отделов, где заявки включены. Правка своей заявки на отпуск
+                                                вид не меняет: там списка нет вовсе. */}
+                                            {!leaveDraft?.id && (
                                             <div className="space-y-1.5">
                                                 {/* «i» стоит рядом с подписью, а не внутри неё: подпись
                                                     набрана прописными, и пузырёк унаследовал бы их. */}
@@ -28310,7 +28459,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <span className={iosGroupLabel}>Что нужно</span>
                                                     <IosHint
                                                         align="left"
-                                                        text={SHIFT_CHANGE_KIND_HINTS.map(line => (
+                                                        text={(myLeave.canFile
+                                                            ? [...SHIFT_CHANGE_KIND_HINTS, LEAVE_OPTION_HINT]
+                                                            : SHIFT_CHANGE_KIND_HINTS).map(line => (
                                                             <span key={line} className="block [&+span]:mt-1">{line}</span>
                                                         ))}
                                                     />
@@ -28319,13 +28470,40 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     variant="ios"
                                                     className="w-full"
                                                     textClassName="text-[14px] text-slate-900"
-                                                    value={shiftChangeForm.kind}
-                                                    onChange={setShiftChangeKind}
-                                                    options={SHIFT_CHANGE_KIND_OPTIONS}
+                                                    value={leaveDraft ? LEAVE_REQUEST_OPTION : shiftChangeForm.kind}
+                                                    onChange={pickRequestKind}
+                                                    options={myLeave.canFile
+                                                        ? [...SHIFT_CHANGE_KIND_OPTIONS, { value: LEAVE_REQUEST_OPTION, label: leaveOptionLabel(myLeave.kinds) }]
+                                                        : SHIFT_CHANGE_KIND_OPTIONS}
                                                     ariaLabel="Что нужно изменить"
                                                 />
                                             </div>
+                                            )}
 
+                                            {leaveDraft ? (
+                                                <>
+                                                    <LeaveRequestFields
+                                                        draft={leaveDraft}
+                                                        onChange={(next) => { setLeaveDraft(next); setLeaveFormError(''); }}
+                                                        kinds={leaveDraft.id && !myLeave.kinds.includes(leaveDraft.kind)
+                                                            ? [...myLeave.kinds, leaveDraft.kind]
+                                                            : myLeave.kinds}
+                                                        today={myLeave.today}
+                                                        maxPeriodDays={myLeave.payload?.maxPeriodDays}
+                                                        maxAheadDays={myLeave.payload?.maxAheadDays}
+                                                    />
+                                                    {/* Та же «одна строка на всё», что у заявки по смене. */}
+                                                    {(leaveFormError || leaveFormProblem) && (
+                                                        <div className={`rounded-xl px-3.5 py-2.5 text-[12.5px] ${
+                                                            leaveFormError
+                                                                ? 'bg-rose-50 text-rose-700 ring-1 ring-rose-200/70'
+                                                                : 'bg-slate-100 text-slate-500'
+                                                        }`}>
+                                                            {leaveFormError || leaveFormProblem}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            ) : (<>
                                             <div className="space-y-1.5">
                                                 <div className={iosGroupLabel}>{shiftChangeForm.kind === 'change' ? 'День смены' : 'День'}</div>
                                                 <IosDatePicker
@@ -28509,6 +28687,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     {shiftChangeError || shiftChangeFormProblem}
                                                 </div>
                                             )}
+                                            </>)}
                                         </div>
                                     </IosModal>
                 );
@@ -28874,21 +29053,35 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                        на компьютере: на телефоне он и так экран. */
                     const renderPhoneRequests = () => (
                         <>
-                            <PhoneGroup hint="Заявка уходит вашему руководителю. После одобрения смена меняется в графике сама.">
+                            <PhoneGroup hint={myLeave.canFile
+                                ? 'Заявка по смене уходит вашему руководителю. Отпуск и Б/С согласуют супервайзер и руководитель отдела. После решения график меняется сам.'
+                                : 'Заявка уходит вашему руководителю. После одобрения смена меняется в графике сама.'}>
                                 <PhoneLinkRow
                                     icon={PHONE_ICONS.plus}
                                     tileClassName="bg-blue-600"
                                     title="Новый запрос"
-                                    subtitle="Изменить смену или взять выходной"
+                                    subtitle={myLeave.canFile ? 'Смена, выходной, отпуск или Б/С' : 'Изменить смену или взять выходной'}
                                     onClick={() => openShiftChangeModal('shorten', { date: phoneToday })}
                                 />
                             </PhoneGroup>
                             {shiftChangeError && !showShiftChangeModal ? phoneErrorNote(shiftChangeError) : null}
+                            {myLeave.error ? phoneErrorNote(myLeave.error) : null}
+                            <LeaveRequestListPhone
+                                items={myLeave.requests}
+                                today={myLeave.today}
+                                busyId={leaveBusyId}
+                                onAccept={(item) => actOnLeaveRequest(item, 'accept')}
+                                onDecline={(item) => actOnLeaveRequest(item, 'decline')}
+                                onEdit={(item) => openLeaveDraft(item)}
+                                onCancel={(item) => actOnLeaveRequest(item, 'cancel')}
+                            />
                             <PhoneGroup
-                                label="Заявки"
+                                label={myLeave.requests.length > 0 ? 'Заявки по сменам' : 'Заявки'}
                                 hint={shiftChangeLoading && shiftChangeRequests.length === 0
                                     ? 'Загружаю заявки…'
-                                    : (shiftChangeRequests.length === 0 ? 'Заявок пока нет' : null)}
+                                    : (shiftChangeRequests.length === 0
+                                        ? (myLeave.requests.length > 0 ? 'Заявок по сменам нет' : 'Заявок пока нет')
+                                        : null)}
                             >
                                 {shiftChangeRequests.map(item => {
                                     const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
@@ -29374,7 +29567,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     options={[
                                         { value: 'schedule', label: 'Смены' },
                                         operatorColleagueShiftsHidden ? null : { value: 'swaps', label: 'Замены', count: swapPendingIncomingCount },
-                                        { value: 'requests', label: 'Запросы', count: shiftChangeUnseenCount },
+                                        { value: 'requests', label: 'Запросы', count: shiftChangeUnseenCount + myLeave.attentionCount },
                                         operatorColleagueShiftsHidden ? null : { value: 'direction', label: 'Коллеги' }
                                     ]}
                                 />
@@ -29461,9 +29654,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     {/* Бейдж — только про НЕПРОЧИТАННЫЕ решения. Свои
                                                         ожидающие заявки сюда не считаем: оператор их
                                                         только что отправил, напоминать не о чем. */}
-                                                    {shiftChangeUnseenCount > 0 && (
+                                                    {shiftChangeUnseenCount + myLeave.attentionCount > 0 && (
                                                         <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${operatorSelfTab === 'requests' ? 'bg-white/20 text-white' : 'bg-amber-500 text-white'}`}>
-                                                            {shiftChangeUnseenCount}
+                                                            {shiftChangeUnseenCount + myLeave.attentionCount}
                                                         </span>
                                                     )}
                                                 </button>
@@ -30016,7 +30209,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <span className="ml-1.5 inline-flex align-middle">
                                                         <IosHint
                                                             align="left"
-                                                            text="Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Изменить смену — поставить ей другое время или перенести на другой день. Выходной снимает все смены дня. Перенос и выходной просят до начала смены. Заявки принимаются на сегодня и на 45 дней вперёд."
+                                                            text={"Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Изменить смену — поставить ей другое время или перенести на другой день. Выходной снимает все смены дня. Перенос и выходной просят до начала смены. Заявки принимаются на сегодня и на 45 дней вперёд." + (myLeave.canFile
+                                                                ? " Отпуск или Б/С сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встанет в график, а смены на эти дни снимутся. Заявку на отпуск можно изменить или отозвать, пока её не утвердили."
+                                                                : "")}
                                                         />
                                                     </span>
                                                 </div>
@@ -30028,22 +30223,46 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </div>
                                             )}
 
+                                            {myLeave.error && (
+                                                <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
+                                                    {myLeave.error}
+                                                </div>
+                                            )}
+
+                                            {/* Заявки на отпуск и Б/С — своей группой над заявками по
+                                                сменам: у них другой путь (два шага) и свой ответ оператора. */}
+                                            <LeaveRequestListDesktop
+                                                items={myLeave.requests}
+                                                today={myLeave.today}
+                                                busyId={leaveBusyId}
+                                                onAccept={(item) => actOnLeaveRequest(item, 'accept')}
+                                                onDecline={(item) => actOnLeaveRequest(item, 'decline')}
+                                                onEdit={(item) => openLeaveDraft(item)}
+                                                onCancel={(item) => actOnLeaveRequest(item, 'cancel')}
+                                            />
+
                                             {shiftChangeLoading && shiftChangeRequests.length === 0 ? (
                                                 <div className={`${iosCard} px-4 py-8 text-center text-[13px] text-slate-500`}>
                                                     <FaIcon className="fas fa-spinner fa-spin mr-2 text-slate-400"></FaIcon>
                                                     Загружаем заявки…
                                                 </div>
-                                            ) : shiftChangeRequests.length === 0 ? (
+                                            ) : shiftChangeRequests.length === 0 ? (myLeave.requests.length > 0 ? null : (
                                                 <div className={`${iosCard} px-4 py-10 text-center`}>
                                                     <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                                                         <FaIcon className="fas fa-calendar-check"></FaIcon>
                                                     </div>
                                                     <div className="text-[14px] font-semibold text-slate-700">Заявок пока нет</div>
                                                     <div className="mt-0.5 text-[12.5px] text-slate-500">
-                                                        Заявку по своей смене можно подать кнопкой «Новый запрос».
+                                                        {myLeave.canFile
+                                                            ? 'Заявку по смене, на отпуск или Б/С можно подать кнопкой «Новый запрос».'
+                                                            : 'Заявку по своей смене можно подать кнопкой «Новый запрос».'}
                                                     </div>
                                                 </div>
-                                            ) : (
+                                            )) : (
+                                                <section className="space-y-1.5">
+                                                {myLeave.requests.length > 0 && (
+                                                    <div className={iosGroupLabel}>Заявки по сменам</div>
+                                                )}
                                                 <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                                                     {shiftChangeRequests.map(item => {
                                                         const statusMeta = SHIFT_CHANGE_STATUS_META[item.status] || SHIFT_CHANGE_STATUS_META.pending;
@@ -30091,6 +30310,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         );
                                                     })}
                                                 </div>
+                                                </section>
                                             )}
                                         </div>
                                     )}
@@ -32023,30 +32243,80 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 ﻿                {/* ── Очередь «Запросы»: заявки операторов на изменение смены ─────
                     Разбирается здесь, а не в отдельном разделе: решение меняет
                     график, и человек уже стоит перед ним. */}
+                {/* Заявки на отпуск и Б/С (задача #358) — второй вкладкой того же
+                    окна: «Запросы» остаются одной кнопкой с общим счётчиком. Вкладки
+                    нет у тех, чей отдел заявки не принимает. Настройки отделов —
+                    вторым экраном окна (шеврон назад), только у админа. */}
                 <IosModal
                     open={showReviewModal}
-                    onClose={() => setShowReviewModal(false)}
-                    title="Запросы по сменам"
-                    subtitle="Заявки операторов на изменение своих смен"
+                    onClose={() => { setShowReviewModal(false); setLeaveSettingsOpen(false); }}
+                    onBack={leaveSettingsOpen ? () => setLeaveSettingsOpen(false) : null}
+                    title={leaveSettingsOpen
+                        ? 'Настройки заявок на отпуск'
+                        : (leaveReview.visible ? 'Запросы' : 'Запросы по сменам')}
+                    subtitle={leaveSettingsOpen
+                        ? 'Какие отделы принимают заявки на отпуск и Б/С'
+                        : (leaveReview.visible
+                            ? 'Заявки операторов по сменам, на отпуск и Б/С'
+                            : 'Заявки операторов на изменение своих смен')}
                     maxWidth="max-w-2xl"
+                    sizeKey={leaveSettingsOpen ? 'leave-settings' : (requestsTab === 'leave' && leaveReview.visible ? 'leave' : 'shifts')}
                     footer={(
                         <div className="flex w-full items-center justify-between gap-2">
-                            <span className="text-[12px] text-slate-500">
-                                {reviewPendingCount > 0
-                                    ? `Ожидают решения: ${reviewPendingCount}`
-                                    : 'Нерассмотренных заявок нет'}
+                            <span className="text-[12px] tabular-nums text-slate-500">
+                                {leaveSettingsOpen
+                                    ? 'Изменения сохраняются сразу'
+                                    : requestsTab === 'leave' && leaveReview.visible
+                                        ? (leaveReview.pendingCount > 0
+                                            ? `Ждут вашего решения: ${leaveReview.pendingCount}`
+                                            : 'Нерассмотренных заявок нет')
+                                        : (reviewPendingCount > 0
+                                            ? `Ожидают решения: ${reviewPendingCount}`
+                                            : 'Нерассмотренных заявок нет')}
                             </span>
                             <button
                                 type="button"
                                 className={`${iosBtnSecondary} shrink-0`}
-                                onClick={() => setShowReviewModal(false)}
+                                onClick={() => { setShowReviewModal(false); setLeaveSettingsOpen(false); }}
                             >
                                 Закрыть
                             </button>
                         </div>
                     )}
                 >
+                    {leaveSettingsOpen ? (
+                        <LeaveSettingsPanel api={leaveApi} />
+                    ) : (
                     <div className="space-y-3">
+                        {leaveReview.visible && (
+                            <IosSegmented
+                                value={requestsTab}
+                                onChange={setRequestsTab}
+                                stretch
+                                ariaLabel="Какие запросы показывать"
+                                options={[
+                                    { value: 'shifts', label: 'Смены', count: reviewPendingCount },
+                                    { value: 'leave', label: 'Отпуск и Б/С', count: leaveReview.pendingCount },
+                                ]}
+                            />
+                        )}
+                        {requestsTab === 'leave' && leaveReview.visible ? (
+                            <LeaveReviewPanel
+                                api={leaveApi}
+                                review={leaveReview}
+                                statusFilter={leaveReviewFilter}
+                                onStatusFilter={setLeaveReviewFilter}
+                                onOpenSettings={() => setLeaveSettingsOpen(true)}
+                                onDecided={(updated) => {
+                                    leaveReview.reload({ silent: true });
+                                    if (updated?.status === 'approved') {
+                                        // Утверждение ПРАВИТ график — сетку надо перечитать.
+                                        fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, { force: true });
+                                        emitAppToast('Заявка утверждена, период в графике', 'success');
+                                    }
+                                }}
+                            />
+                        ) : (<>
                         <div className="flex items-center justify-between gap-2">
                             <IosSegmented
                                 value={reviewStatusFilter}
@@ -32219,7 +32489,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 ))}
                             </div>
                         )}
+                        </>)}
                     </div>
+                    )}
                 </IosModal>
 
                 {/* ── «Уведомления об изменениях»: суточная сводка правок ─────────
@@ -32587,13 +32859,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         icon: 'fa-inbox',
                         tile: 'bg-amber-500',
                         title: 'Запросы',
-                        subtitle: reviewPendingCount > 0
-                            ? `Ожидают решения: ${reviewPendingCount}`
-                            : 'Заявки операторов по своим сменам',
+                        subtitle: reviewPendingCount + leaveReview.pendingCount > 0
+                            ? `Ожидают решения: ${reviewPendingCount + leaveReview.pendingCount}`
+                            : (leaveReview.visible ? 'Смены, отпуск и Б/С' : 'Заявки операторов по своим сменам'),
                         onClick: () => {
                             setReviewError('');
+                            setLeaveSettingsOpen(false);
                             setShowReviewModal(true);
                             loadReviewRequests({ silent: true });
+                            leaveReview.reload({ silent: true });
                         }
                     },
                     wsIsDayMode ? {
@@ -34163,19 +34437,23 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         type="button"
                                         onClick={() => {
                                             setReviewError('');
+                                            setLeaveSettingsOpen(false);
                                             setShowReviewModal(true);
                                             loadReviewRequests({ silent: true });
+                                            leaveReview.reload({ silent: true });
                                         }}
                                         className={PLANNER_TOOLBAR_BTN}
-                                        title="Заявки операторов на изменение своих смен"
+                                        title={leaveReview.visible
+                                            ? 'Заявки операторов по сменам, на отпуск и Б/С'
+                                            : 'Заявки операторов на изменение своих смен'}
                                     >
                                         <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-inbox'} text-slate-400`}></FaIcon>
                                         Запросы
                                         {/* Счётчик — только ожидающие. Цветом помечаем то, что
                                             требует действия; ноль не рисуем вовсе. */}
-                                        {reviewPendingCount > 0 && (
+                                        {reviewPendingCount + leaveReview.pendingCount > 0 && (
                                             <span className="rounded-full bg-amber-500 px-1.5 py-0.5 text-[10.5px] font-semibold leading-none tabular-nums text-white">
-                                                {reviewPendingCount}
+                                                {reviewPendingCount + leaveReview.pendingCount}
                                             </span>
                                         )}
                                     </button>
@@ -54238,6 +54516,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (nextView === 'work_schedules' && Number(target)) {
                     setShiftRequestFocus((prev) => ({
                         requestId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
+                // Заявка на отпуск или Б/С: цель «leave:<id>» (notifications/sources.py:
+                // leave_requests). Раздел тот же — открывается вкладка «Отпуск и Б/С».
+                const leaveTargetId = nextView === 'work_schedules' ? leaveBellTargetId(target) : null;
+                if (leaveTargetId) {
+                    setShiftRequestFocus((prev) => ({
+                        kind: 'leave',
+                        requestId: leaveTargetId,
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }

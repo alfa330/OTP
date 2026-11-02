@@ -109,6 +109,8 @@ const PILL_TONES = {
   blue: 'bg-blue-600 text-white',
   orange: 'bg-orange-500 text-white',
   rose: 'bg-rose-50 text-rose-600',
+  // Нейтральный ответ рядом с главным: «Не согласен», «Изменить» (заявки на отпуск, #358).
+  slate: 'bg-slate-100 text-slate-700',
 };
 
 export const AuctionPhonePill = ({ label, tone = 'blue', onClick, busy = false, disabled = false, ariaLabel }) => (
