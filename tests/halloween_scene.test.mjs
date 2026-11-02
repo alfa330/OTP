@@ -359,17 +359,18 @@ test('разделы праздник не перекрашивает: тёмн�
 
 test('тыква в шарике — по выбранному облику, своим чанком, при сбое остаётся знак', () => {
     const orb = read('../src/components/assistant/Orb.jsx');
-    assert.match(orb, /const wantsPumpkin = effect === PUMPKIN_APPEARANCE;/);
-    assert.match(orb, /import\('\.\/pumpkin\/PumpkinMascot\.jsx'\)/);
+    // Талисманы (тыква, котик) грузятся одним механизмом — каждый своим чанком.
+    assert.match(orb, /const mascot = MASCOT_CHUNKS\.has\(effect\) \? effect : null;/);
+    assert.match(orb, /\[PUMPKIN_APPEARANCE, \(\) => import\('\.\/pumpkin\/PumpkinMascot\.jsx'\)\]/);
     // В праздник (у всех) и после — у выбравших тыкву: грузится со стартом портала.
-    assert.match(orb, /if \(typeof window !== 'undefined' && \(isHalloweenTime\(\) \|\| pumpkinChosenHere\(\)\)\) loadPumpkin\(\);/);
-    assert.match(orb, /LoadedPumpkin = module\?\.default \|\| null;/);
+    assert.match(orb, /const early = mascotsChosenHere\(\);\n\s+if \(isHalloweenTime\(\)\) early\.add\(PUMPKIN_APPEARANCE\);\n\s+early\.forEach\(loadMascot\);/);
+    assert.match(orb, /loadedMascots\.set\(id, module\?\.default \|\| null\);/);
     assert.match(orb, /: <IcoreAssistantMark /, 'без тыквы — прежний знак');
     assert.doesNotMatch(orb, /<Suspense|lazy\(/, 'Suspense показал бы знак кадр-другой перед тыквой');
     // Выбор облика: тыква в списке, превью — картинкой.
     const picker = read('../src/components/assistant/AssistantAppearancePicker.jsx');
     assert.match(picker, /ASSISTANT_APPEARANCES\.map/);
-    assert.match(picker, /effect === PUMPKIN_APPEARANCE/);
+    assert.match(picker, /\[PUMPKIN_APPEARANCE, pumpkinLogo\]/);
 });
 
 test('слой не мешает работе: некликабелен, гаснет при окне, не встаёт на кнопки, снимается по сроку', () => {

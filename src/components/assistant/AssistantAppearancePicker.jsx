@@ -1,13 +1,15 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { ChevronDown, X } from 'lucide-react';
 import IcoreAssistantMark from './IcoreAssistantMark.jsx';
-import { ASSISTANT_APPEARANCES, DEFAULT_ASSISTANT_EFFECT, PUMPKIN_APPEARANCE } from './assistantAppearance.js';
+import { ASSISTANT_APPEARANCES, CAT_APPEARANCE, DEFAULT_ASSISTANT_EFFECT, PUMPKIN_APPEARANCE } from './assistantAppearance.js';
 import pumpkinLogo from './pumpkin/assets/mascot-logo.webp';
+import catLogo from './cat/assets/cat-logo.webp';
 import './assistant-appearance.css';
 
-/* Тыква в выборе — неподвижная картинка: живая тыква с эмоциями только в самом шарике. */
-const AppearanceIcon = ({ effect, size, animated }) => (effect === PUMPKIN_APPEARANCE
-    ? <img className="aorb-appearance-pumpkin" src={pumpkinLogo} alt="" width={size} height={size} draggable={false} />
+/* Талисманы в выборе — неподвижные картинки: живые, с эмоциями, они только в самом шарике. */
+const MASCOT_LOGOS = new Map([[PUMPKIN_APPEARANCE, pumpkinLogo], [CAT_APPEARANCE, catLogo]]);
+const AppearanceIcon = ({ effect, size, animated }) => (MASCOT_LOGOS.has(effect)
+    ? <img className="aorb-appearance-mascot" src={MASCOT_LOGOS.get(effect)} alt="" width={size} height={size} draggable={false} />
     : <IcoreAssistantMark effect={effect} size={size} animated={animated} />);
 
 export default function AssistantAppearancePicker({ effect = DEFAULT_ASSISTANT_EFFECT, onChange }) {

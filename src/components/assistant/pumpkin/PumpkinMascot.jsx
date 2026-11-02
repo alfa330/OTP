@@ -1,5 +1,6 @@
-import React, { useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { isLowEndDevice } from '../../../utils/devicePerformance';
+import useMascotMood from '../mascot/useMascotMood.js';
 import './pumpkin-mascot.css';
 import bodyUrl from './assets/mascot-body.webp';
 import logoUrl from './assets/mascot-logo.webp';
@@ -15,14 +16,7 @@ import faceLove from './assets/mascot-face-love.webp';
 import faceFear from './assets/mascot-face-fear.webp';
 import faceCool from './assets/mascot-face-cool.webp';
 import faceNeutral from './assets/mascot-face-neutral.webp';
-import {
-    EMOTIONS,
-    SLEEP_AFTER_MS,
-    displayEmotion,
-    initialMood,
-    lookVector,
-    moodReducer,
-} from './mascotMood';
+import pumpkinMood, { EMOTIONS } from './mascotMood';
 
 /* Облик помощника «Тыква» — появился к Хэллоуину-2026 (наброски владельца
  * «Тыква (эмоции)») и остался на выбор в «Внешнем виде помощника». Тело и 12
@@ -31,18 +25,15 @@ import {
  * лицо смещается к курсору, тыква чуть наклоняется следом — «следит», эмоция
  * меняется подменой лица. Свечение запечено в картинки — без CSS-фильтров.
  *
- * Помощника тыква не трогает: открытие, перетаскивание и окно делает кнопка
- * AssistantOrb, а тыква только слушает её (наведение, нажатие, класс
- * aorb-dragging, aria-expanded) — так ни один жест шарика не меняется.
+ * Помощника тыква не трогает: жесты шарика она только слушает — общим для
+ * талисманов хуком ../mascot/useMascotMood.js.
  *
  * Дёшево для любого компьютера: лица грузятся в простое после первой
- * отрисовки, в разметке — только уже показанные; положение тыквы для взгляда
- * читается не чаще раза в полсекунды; на слабой машине тыква не дышит и не
- * мерцает (isLowEndDevice).
+ * отрисовки, в разметке — только уже показанные; на слабой машине тыква не
+ * дышит и не мерцает (isLowEndDevice).
  */
 
 const LOW_END = isLowEndDevice();
-const RECT_TTL_MS = 500;
 
 const FACE_URLS = {
     normal: faceNormal,
@@ -159,8 +150,8 @@ const preloadFaces = () => {
 
 export default function PumpkinMascot({ variant = 'orb', animated = true }) {
     const rootRef = useRef(null);
-    const [mood, dispatch] = useReducer(moodReducer, undefined, initialMood);
-    const [, setTick] = useState(0);
+    const tiltRef = useRef(null);
+    const faceRef = useRef(null);
     const shownRef = useRef(new Set(['normal']));
     const interactive = variant !== 'mini';
 
@@ -168,121 +159,13 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
         if (interactive) preloadFaces();
     }, [interactive]);
 
-    /* Подмена лица по истечении временной эмоции — перерисовка ровно в срок. */
-    useEffect(() => {
-        const until = mood.override?.until;
-        if (!until || !Number.isFinite(until)) return undefined;
-        const timer = window.setTimeout(() => setTick((n) => n + 1), Math.max(0, until - Date.now()) + 16);
-        return () => window.clearTimeout(timer);
-    }, [mood.override]);
-
-    useEffect(() => {
-        const root = rootRef.current;
-        if (!root || !interactive) return undefined;
-        const target = root.closest('.aorb-button') || root;
-        const now = () => Date.now();
-        let lastDragEnd = 0;
-        let dragging = target.classList.contains('aorb-dragging');
-        let expanded = target.getAttribute('aria-expanded') === 'true';
-
-        const onEnter = () => dispatch({ type: 'enter', now: now() });
-        const onLeave = () => dispatch({ type: 'leave', now: now() });
-        const onDown = () => dispatch({ type: 'press', now: now() });
-        const onClick = () => {
-            if (now() - lastDragEnd < 150) return;  // это был конец перетаскивания
-            dispatch({ type: 'click', now: now() });
-        };
-        target.addEventListener('pointerenter', onEnter);
-        target.addEventListener('pointerleave', onLeave);
-        target.addEventListener('pointerdown', onDown);
-        target.addEventListener('click', onClick);
-
-        const observer = new MutationObserver(() => {
-            const nextDragging = target.classList.contains('aorb-dragging');
-            if (nextDragging !== dragging) {
-                dragging = nextDragging;
-                if (dragging) dispatch({ type: 'dragStart', now: now() });
-                else {
-                    lastDragEnd = now();
-                    dispatch({ type: 'dragEnd', now: now() });
-                }
-            }
-            const nextExpanded = target.getAttribute('aria-expanded') === 'true';
-            if (nextExpanded !== expanded) {
-                if (expanded && !nextExpanded) dispatch({ type: 'close', now: now() });
-                expanded = nextExpanded;
-            }
-        });
-        if (target !== root) observer.observe(target, { attributes: true, attributeFilter: ['class', 'aria-expanded'] });
-
-        /* Взгляд — мимо React и мимо пересчёта стилей всей тыквы: transform
-           пишется прямо в два узла (наклон и лицо), и только когда взгляд
-           заметно сдвинулся. Положение тыквы читается не чаще раза в полсекунды. */
-        const tilt = root.querySelector('.hw-mascot__tilt');
-        const face = root.querySelector('.hw-mascot__face');
-        let frame = 0;
-        let pointer = null;
-        let rect = null;
-        let rectAt = 0;
-        let lookX = 0;
-        let lookY = 0;
-        const setLook = (x, y) => {
-            if (Math.abs(x - lookX) < 0.02 && Math.abs(y - lookY) < 0.02) return;
-            lookX = x;
-            lookY = y;
-            if (tilt) tilt.style.transform = `rotate(${(x * 6).toFixed(2)}deg)`;
-            if (face) face.style.transform = `translate(${(x * 5.5).toFixed(2)}%, ${(y * 4).toFixed(2)}%)`;
-        };
-        const applyLook = () => {
-            frame = 0;
-            if (!pointer) return;
-            const at = Date.now();
-            if (!rect || at - rectAt > RECT_TTL_MS || dragging) {
-                rect = root.getBoundingClientRect();
-                rectAt = at;
-            }
-            const look = lookVector(pointer.x - (rect.left + rect.width / 2), pointer.y - (rect.top + rect.height / 2));
-            setLook(look.x, look.y);
-        };
-        /* Сон — через 45 с без движения. Таймер не перезаводится на каждом
-           движении мыши: раз в секунду сверяемся с моментом последнего движения. */
-        let lastActive = now();
-        const idleTimer = setInterval(() => {
-            if (now() - lastActive >= SLEEP_AFTER_MS) dispatch({ type: 'sleep', now: now() });
-        }, 1000);
-        idleTimer?.unref?.();
-        const onMove = (event) => {
-            pointer = { x: event.clientX, y: event.clientY };
-            if (!frame) frame = window.requestAnimationFrame(applyLook);
-            lastActive = now();
-            dispatch({ type: 'wake', now: lastActive });
-        };
-        const onOut = (event) => {
-            if (event.relatedTarget) return;      // ушли не за окно, а на другой элемент
-            pointer = null;
-            setLook(0, 0);
-        };
-        const onKey = () => {
-            lastActive = now();
-            dispatch({ type: 'wake', now: lastActive });
-        };
-        window.addEventListener('pointermove', onMove, { passive: true });
-        document.addEventListener('pointerout', onOut);
-        window.addEventListener('keydown', onKey, { passive: true });
-
-        return () => {
-            target.removeEventListener('pointerenter', onEnter);
-            target.removeEventListener('pointerleave', onLeave);
-            target.removeEventListener('pointerdown', onDown);
-            target.removeEventListener('click', onClick);
-            observer.disconnect();
-            window.removeEventListener('pointermove', onMove);
-            document.removeEventListener('pointerout', onOut);
-            window.removeEventListener('keydown', onKey);
-            window.cancelAnimationFrame?.(frame);
-            clearInterval(idleTimer);
-        };
-    }, [interactive]);
+    /* Взгляд — прямо в два узла (наклон и лицо), мимо пересчёта стилей всей тыквы:
+       лицо смещается к курсору сильнее тела — так и читается взгляд. */
+    const onLook = useCallback((x, y) => {
+        if (tiltRef.current) tiltRef.current.style.transform = `rotate(${(x * 6).toFixed(2)}deg)`;
+        if (faceRef.current) faceRef.current.style.transform = `translate(${(x * 5.5).toFixed(2)}%, ${(y * 4).toFixed(2)}%)`;
+    }, []);
+    const emotion = useMascotMood(rootRef, pumpkinMood, { interactive, onLook });
 
     if (!interactive) {
         return (
@@ -292,7 +175,6 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
         );
     }
 
-    const emotion = displayEmotion(mood, Date.now());
     shownRef.current.add(emotion);
     return (
         <span
@@ -301,9 +183,9 @@ export default function PumpkinMascot({ variant = 'orb', animated = true }) {
             aria-hidden="true"
         >
             <span className="hw-mascot__breathe">
-                <span className="hw-mascot__tilt">
+                <span ref={tiltRef} className="hw-mascot__tilt">
                     <img className="hw-mascot__body" src={bodyUrl} alt="" draggable={false} />
-                    <span className="hw-mascot__face">
+                    <span ref={faceRef} className="hw-mascot__face">
                         {EMOTIONS.filter((name) => shownRef.current.has(name)).map((name) => (
                             <img
                                 key={name}

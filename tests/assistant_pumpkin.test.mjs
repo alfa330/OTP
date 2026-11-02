@@ -80,6 +80,9 @@ test('закрыли помощника — грусть ненадолго', ()
     const closed = run([{ type: 'close', now: 0 }]);
     assert.equal(displayEmotion(closed, 100), 'sad');
     assert.equal(displayEmotion(closed, 2000), 'normal');
+    // Закрыли щелчком по шарику: click приходит после закрытия и грусть не перебивает.
+    const byOrb = run([{ type: 'press', now: 0 }, { type: 'close', now: 80 }, { type: 'click', now: 85 }]);
+    assert.equal(displayEmotion(byOrb, 200), 'sad');
 });
 
 test('простой — сон, шевельнули мышь — удивление и снова обычная', () => {
@@ -125,7 +128,7 @@ const { isLowEndDevice } = await import('../src/utils/devicePerformance.js');
 test('тыква — облик в выборе, но не эффект знака iCORE', () => {
     const ids = appearance.ASSISTANT_APPEARANCES.map((item) => item.id);
     assert.ok(ids.includes('pumpkin'));
-    assert.equal(ids.length, appearance.ICORE_ASSISTANT_EFFECTS.length + 1);
+    assert.equal(ids.length, appearance.ICORE_ASSISTANT_EFFECTS.length + appearance.MASCOT_APPEARANCES.length);
     assert.ok(!appearance.ICORE_ASSISTANT_EFFECTS.some((item) => item.id === 'pumpkin'), 'знак с эффектом «pumpkin» нарисовался бы пустым');
     assert.equal(appearance.normalizeAssistantAppearance('pumpkin'), 'pumpkin');
     assert.equal(appearance.normalizeAssistantAppearance('мусор'), appearance.DEFAULT_ASSISTANT_EFFECT);

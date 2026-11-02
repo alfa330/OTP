@@ -13,18 +13,22 @@ export const normalizeAssistantEffect = value => (
     ICORE_ASSISTANT_EFFECTS.some(item => item.id === value) ? value : DEFAULT_ASSISTANT_EFFECT
 );
 
-/* Облик помощника — один из эффектов знака iCORE или тыква с эмоциями (появилась
-   к Хэллоуину-2026 и осталась на выбор). Тыква — не эффект знака, поэтому в
-   ICORE_ASSISTANT_EFFECTS её нет: тот список рисует знак и в лаборатории иконок. */
+/* Облик помощника — один из эффектов знака iCORE или талисман с эмоциями: тыква
+   (появилась к Хэллоуину-2026 и осталась на выбор) и котик (02.11.2026).
+   Талисманы — не эффекты знака, поэтому в ICORE_ASSISTANT_EFFECTS их нет: тот
+   список рисует знак и в лаборатории иконок. */
 export const PUMPKIN_APPEARANCE = 'pumpkin';
+export const CAT_APPEARANCE = 'cat';
+export const MASCOT_APPEARANCES = [PUMPKIN_APPEARANCE, CAT_APPEARANCE];
 
 export const ASSISTANT_APPEARANCES = [
     ...ICORE_ASSISTANT_EFFECTS,
     { id: PUMPKIN_APPEARANCE, number: '05', name: 'Тыква', caption: 'С характером', description: 'Следит за курсором и меняет эмоции: радуется наведению, удивляется нажатию, засыпает без дела.' },
+    { id: CAT_APPEARANCE, number: '06', name: 'Котик', caption: 'Девять эмоций', description: 'Вислоухий котёнок: радуется наведению, пугается, когда шарик тащат, грустит, когда помощника закрыли, зевает и засыпает клубочком без дела.' },
 ];
 
 export const normalizeAssistantAppearance = value => (
-    value === PUMPKIN_APPEARANCE ? value : normalizeAssistantEffect(value)
+    MASCOT_APPEARANCES.includes(value) ? value : normalizeAssistantEffect(value)
 );
 
 export const assistantAppearanceKey = userId => (

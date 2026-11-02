@@ -1,0 +1,199 @@
+/* Облик помощника «Котик» (CatMascot.jsx). Котик занимает место знака iCORE
+   в шарике — тот же квадрат .aorb, без своей геометрии, поэтому перетаскивание
+   и стыковка шарика не меняются; крупнее он только на вид (scale): в кадре
+   запас под самую широкую позу, сидящий котик занимает его меньшую часть.
+
+   Для слабых машин: анимируются только transform и opacity (их считает
+   видеокарта, а не процессор), фильтров нет — тень запечена в картинки,
+   на .is-lite (isLowEndDevice) постоянных анимаций нет вовсе. */
+
+.cat-mascot {
+    position: absolute;
+    inset: 0;
+    display: block;
+    pointer-events: none;
+}
+
+.cat-mascot--orb {
+    scale: 1.42;
+    translate: 0 -8%;
+}
+
+.cat-mascot--hero {
+    scale: 1.3;
+}
+
+.cat-mascot img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    object-fit: contain;
+    -webkit-user-drag: none;
+    user-select: none;
+}
+
+.cat-mascot--mini img {
+    border-radius: 50%;
+}
+
+.cat-mascot__breathe,
+.cat-mascot__lean {
+    position: absolute;
+    inset: 0;
+    display: block;
+}
+
+/* Дыхание — едва заметно, от лап; наклон к курсору — тоже от лап. */
+.cat-mascot__breathe {
+    animation: cat-breathe 3.6s ease-in-out infinite;
+    transform-origin: 50% 90%;
+    will-change: transform;
+}
+
+@keyframes cat-breathe {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.012, 1.03); }
+}
+
+/* Наклон к курсору CatMascot пишет прямо в style.transform. */
+.cat-mascot__lean {
+    transform-origin: 50% 90%;
+    transition: transform 0.2s ease-out;
+}
+
+/* Смена кадра — короткая растушёвка; моргание успевает за 150 мс. */
+.cat-mascot__lean img {
+    opacity: 0;
+    transition: opacity 0.12s ease-out;
+}
+
+.cat-mascot__lean img.is-on {
+    opacity: 1;
+}
+
+/* Радость, восторг, удивление — короткий подскок. */
+.cat-mascot.is-happy .cat-mascot__lean,
+.cat-mascot.is-excited .cat-mascot__lean,
+.cat-mascot.is-surprised .cat-mascot__lean {
+    animation: cat-hop 0.42s cubic-bezier(0.2, 0.9, 0.3, 1.3);
+}
+
+@keyframes cat-hop {
+    0% { translate: 0 0; }
+    40% { translate: 0 -7%; }
+    100% { translate: 0 0; }
+}
+
+/* Страх — мелкая дрожь, пока шарик тащат. */
+.cat-mascot.is-scared .cat-mascot__breathe {
+    animation: cat-shiver 0.11s linear infinite;
+}
+
+@keyframes cat-shiver {
+    0%, 100% { transform: translate(0, 0); }
+    25% { transform: translate(-1.2%, 0.4%); }
+    50% { transform: translate(1.2%, -0.4%); }
+    75% { transform: translate(-0.8%, -0.4%); }
+}
+
+/* Сон клубочком — дыхание медленнее и глубже. */
+.cat-mascot.is-asleep .cat-mascot__breathe {
+    animation-duration: 5.4s;
+}
+
+
+/* ── Значки вокруг ─────────────────────────────────────────────────────── */
+
+.cat-mascot__extras {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.cat-mascot__extras .cat-x {
+    fill: none;
+    stroke: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.cat-mascot__extras .cat-x--heart { stroke: #f06a6a; stroke-width: 1.3; }
+.cat-mascot__extras .cat-x--spark { fill: #f6c12c; }
+.cat-mascot__extras .cat-x--burst { stroke: #f5b22a; stroke-width: 1.5; }
+.cat-mascot__extras .cat-x--burst-thin { stroke: #f06a6a; stroke-width: 1; }
+.cat-mascot__extras .cat-x--vein { stroke: #e5484d; stroke-width: 1.5; }
+.cat-mascot__extras .cat-x--ink { stroke: #5b4740; stroke-width: 1; }
+.cat-mascot__extras .cat-x--bang { stroke: #f5b400; stroke-width: 2.2; }
+.cat-mascot__extras .cat-x--bang-dot { fill: #f5b400; }
+.cat-mascot__extras .cat-x--ask { fill: #7c4dbd; }
+.cat-mascot__extras .cat-x--zzz { fill: #5b4740; }
+.cat-mascot__extras .cat-x--zzz.cat-x--soft { fill: #9a94a3; }
+
+.cat-mascot__extras text.cat-x {
+    font: 800 7.5px/1 -apple-system, BlinkMacSystemFont, 'SF Pro Rounded', 'Segoe UI', sans-serif;
+}
+
+.cat-mascot__extras text.cat-x--ask {
+    font-size: 15px;
+}
+
+.cat-x--late { animation-delay: 0.25s !important; }
+.cat-x--later { animation-delay: 0.5s !important; }
+
+.cat-x--float { animation: cat-x-float 1.6s ease-in-out infinite alternate both; }
+.cat-x--pulse { animation: cat-x-pulse 0.5s ease-in-out infinite alternate both; }
+.cat-x--twinkle { animation: cat-x-twinkle 0.9s ease-in-out infinite alternate both; }
+.cat-x--pop { animation: cat-x-pop 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
+.cat-x--jitter { animation: cat-x-jitter 0.12s linear infinite; }
+.cat-x--zzz { animation: cat-x-zzz 2.4s ease-in-out infinite both; }
+.cat-x--wobble { animation: cat-x-wobble 0.8s ease-in-out infinite alternate both; }
+.cat-x--puff { animation: cat-x-puff 1.1s ease-out infinite both; }
+
+@keyframes cat-x-float { from { translate: 0 1px; opacity: 0.8; } to { translate: 0 -2px; opacity: 1; } }
+@keyframes cat-x-pulse { from { scale: 0.85; } to { scale: 1.1; } }
+@keyframes cat-x-twinkle { from { scale: 0.7; opacity: 0.6; } to { scale: 1.15; opacity: 1; } }
+@keyframes cat-x-pop { from { scale: 0.2; opacity: 0; } to { scale: 1; opacity: 1; } }
+@keyframes cat-x-jitter { 0%, 100% { translate: 0 0; } 50% { translate: 0.6px -0.6px; } }
+@keyframes cat-x-zzz { from { translate: 0 3px; opacity: 0; } 30% { opacity: 1; } to { translate: 1.5px -5px; opacity: 0; } }
+@keyframes cat-x-wobble { from { rotate: -10deg; } to { rotate: 10deg; } }
+@keyframes cat-x-puff { from { translate: 2px 0; opacity: 0.2; } 30% { opacity: 1; } to { translate: -3px 0; opacity: 0; } }
+
+/* Тёмная тема: тёмно-коричневые значки светлее, иначе тонут в фоне. */
+html[data-otp-theme="dark"] .cat-mascot__extras .cat-x--ink { stroke: #d9cfca; }
+html[data-otp-theme="dark"] .cat-mascot__extras .cat-x--zzz { fill: #d9cfca; }
+html[data-otp-theme="dark"] .cat-mascot__extras .cat-x--ask { fill: #b394e6; }
+
+/* Вкладка в фоне — анимации стоят (как у знака iCORE). */
+.cat-mascot.is-paused *,
+.cat-mascot.is-paused {
+    animation-play-state: paused !important;
+}
+
+/* Слабая машина: котик не дышит, значки эмоций без движения. */
+.cat-mascot.is-lite .cat-mascot__breathe,
+.cat-mascot.is-lite .cat-mascot__extras .cat-x,
+.cat-mascot.is-lite .cat-mascot__extras .cat-x--puff,
+.cat-mascot.is-lite .cat-mascot__extras .cat-x--pop {
+    animation: none;
+    will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .cat-mascot *,
+    .cat-mascot {
+        animation: none !important;
+        transition: none !important;
+    }
+
+    .cat-mascot__lean {
+        transform: none !important;
+    }
+}
