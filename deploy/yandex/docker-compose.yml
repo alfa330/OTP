@@ -1,0 +1,122 @@
+# Портал на одной виртуальной машине Yandex Cloud. Один образ бэкенда в трёх ролях
+# (OTP_ROLE в bot_schedule2.py) плюс Caddy:
+#   api      — обычные запросы /api;
+#   realtime — SSE-потоки (колокол, чаты, аукцион, АТС, табло) со своим бюджетом нитей:
+#              события идут через Postgres NOTIFY, поэтому хабы работают в любом процессе;
+#   worker   — бот, планировщик, таймеры и сторожа; ровно один: polling Telegram второго
+#              не переживёт;
+#   web      — статика фронта, TLS, прокси /api на api и путей стримов на realtime.
+# База — Managed Service for PostgreSQL; для стенда или дешёвого варианта есть override
+# docker-compose.localdb.yml.
+#
+# Образы берутся из реестра (Container Registry): на VM ничего не собирается.
+# Сборка и публикация — docker-compose.build.yml. Все переменные — в .env рядом
+# (образец .env.example; выгрузка из Render — scripts/render_env_export.py).
+# Порядок переезда — README.md, раздел «Docker и Yandex Cloud».
+
+name: otp
+
+# Общее для трёх ролей одного образа.
+x-backend: &backend
+  image: ${IMAGE_PREFIX:-otp}/api:${IMAGE_TAG:-latest}
+  env_file: .env
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+  networks:
+    - internal
+
+services:
+  api:
+    <<: *backend
+    environment:
+      OTP_ROLE: api
+      PORT: "8080"
+      TZ: Asia/Almaty
+    expose:
+      - "8080"
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  realtime:
+    <<: *backend
+    environment:
+      OTP_ROLE: realtime
+      PORT: "8080"
+      TZ: Asia/Almaty
+      # Бюджет нитей под потоки: спящий поток SSE стоит десятки килобайт и базу не держит
+      # (один слушатель NOTIFY на процесс). Соединений больше нитей — лишние ждут в очереди.
+      # Сумма лимитов меньше нитей: остаток на подключение и короткие ответы.
+      WAITRESS_THREADS: "1000"
+      WAITRESS_CONN_LIMIT: "1500"
+      BELL_STREAM_LIMIT: "400"
+      WAZZUP_PILOT_STREAM_LIMIT: "200"
+      SHIFT_AUCTION_STREAM_LIMIT: "200"
+      PBX_STREAM_LIMIT: "50"
+      OP_WALLBOARD_LIVE_STREAM_LIMIT: "50"
+    expose:
+      - "8080"
+    stop_grace_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  worker:
+    <<: *backend
+    environment:
+      OTP_ROLE: worker
+      TZ: Asia/Almaty
+    # HTTP у worker нет, проверка из образа (/api/health) к нему не подходит.
+    # Живость — по логам: «Планировщик запущен», «Бот запущен».
+    healthcheck:
+      disable: true
+    # Джобы и отбивки дорабатывают после SIGTERM столько.
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  web:
+    image: ${IMAGE_PREFIX:-otp}/web:${IMAGE_TAG:-latest}
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?Адрес портала, например portal.example.kz — задать в .env}
+      ACME_EMAIL: ${ACME_EMAIL:?Почта для сертификата Let's Encrypt — задать в .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      api:
+        # Не ждём здоровья API: статика и экран входа должны отдаваться, пока API стартует
+        # (схема базы при старте занимает до двух минут), а /api в это время отвечает 502.
+        condition: service_started
+      realtime:
+        condition: service_started
+    restart: unless-stopped
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - internal
+
+volumes:
+  # Сертификаты Let's Encrypt: без тома каждое пересоздание контейнера = новый выпуск,
+  # а у Let's Encrypt лимит выпусков на домен в неделю.
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:

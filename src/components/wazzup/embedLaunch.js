@@ -23,7 +23,7 @@
 import { parseEmbedIdentity } from './embedBridge.js';
 
 // Тот же адрес, что API_BASE_URL в App.jsx (тест сверяет): App.jsx здесь импортировать нельзя.
-export const EMBED_API_BASE_URL = 'https://otp-2-fos4.onrender.com';
+export const EMBED_API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
 export const EMBED_SCOPE = 'crm_embed';
 const ACCESS_KEY = 'otp_access_token';
 const REFRESH_KEY = 'otp_refresh_token';

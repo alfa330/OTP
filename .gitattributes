@@ -7,6 +7,10 @@
 
 # Скрипты исполняет Linux на Render: CRLF ломает shebang («\r: command not found»).
 *.sh text eol=lf
+# Dockerfile и Caddyfile (deploy/yandex) читают Docker и Caddy на Linux — тоже LF.
+*.Dockerfile text eol=lf
+Caddyfile text eol=lf
+.dockerignore text eol=lf
 
 # Бинарники — без нормализации и без попыток слить содержимое.
 *.png binary

@@ -15,6 +15,65 @@ npm run build
 
 `dist/` will contain ready static files.
 
+## Docker и Yandex Cloud
+
+Всё для переезда лежит в `deploy/yandex/`: `docker-compose.yml`, `api.Dockerfile`,
+`web.Dockerfile` (сборка Vite → Caddy), `Caddyfile`, `.env.example`. Переменные — один файл
+`deploy/yandex/.env` (в git не попадает). Фронт и API живут на одном домене: Caddy отдаёт
+статику, проксирует `/api` и сам получает сертификат Let's Encrypt.
+
+Бэкенд — один образ в трёх ролях (`OTP_ROLE` в `bot_schedule2.py`): `api` отвечает на обычные
+запросы, `realtime` держит SSE-потоки (колокол, чаты, аукцион, АТС, табло) со своим бюджетом
+нитей, `worker` крутит бота, планировщик и сторожа и существует ровно в одном экземпляре.
+Пути стримов Caddy отправляет в `realtime`; новый стрим без строки в `@realtime` ловит
+`tests/test_process_roles.py`. Без `OTP_ROLE` процесс работает как на Render — всё в одном.
+
+Что нужно в облаке:
+
+1. Managed Service for PostgreSQL той же мажорной версии, что на Render (`SELECT version()`).
+   Расширения `vector`, `pg_trgm`, `pgcrypto` включить в настройках кластера — через SQL
+   Managed PostgreSQL их не ставит; `max_connections` не меньше 100; часовой пояс базы UTC.
+2. Container Registry под образы `otp/api` и `otp/web`.
+3. ВМ 4 vCPU / 8 ГБ (Ubuntu 24.04 + Docker или Container Optimized Image; три процесса Python
+   по 1–2 ГБ плюс Caddy) с сервисным
+   аккаунтом-puller'ом реестра, статический публичный адрес, группа безопасности с 22/80/443,
+   A-запись домена на этот адрес.
+
+Переезд (один раз, с простоем):
+
+```bash
+cp deploy/yandex/.env.example deploy/yandex/.env   # заполнить PUBLIC_HOST, ACME_EMAIL, IMAGE_PREFIX, POSTGRES_*
+python scripts/render_env_export.py                 # дописывает ~130 ключей интеграций из Render
+cd deploy/yandex
+docker compose -f docker-compose.yml -f docker-compose.build.yml build
+docker compose -f docker-compose.yml -f docker-compose.build.yml push
+```
+
+Затем остановить сервис OTP-2 на Render (второй polling бота и второй планировщик с тем же
+Telegram и той же базой работать не могут), снять дамп и залить его в Managed PostgreSQL
+**до первого старта контейнера** — схема на пустой базе не встаёт:
+
+```bash
+pg_dump --format=custom --no-owner --no-privileges "$RENDER_DATABASE_URL" > otp.dump
+pg_restore --no-owner --no-privileges --dbname="$YANDEX_DATABASE_URL" otp.dump
+```
+
+На ВМ: положить `docker-compose.yml` и `.env` в одну папку, затем
+
+```bash
+docker compose pull && docker compose up -d
+docker compose logs -f worker     # ждать «Планировщик запущен», «Бот запущен»
+curl -s https://$PUBLIC_HOST/api/health
+```
+
+После старта перевести на новый адрес всё, что ходит в API снаружи: вебхуки Wazzup,
+Chat2Desk (`scripts/chat2desk_webhook_setup.py`), Binotel, CRM yataxi и OLX (`OLX_REDIRECT_URI`),
+мост CDR и автоинформатор на VM шлюза, агенты Oktell Guard и iCORE Phone, ключи партнёров
+(Syntony). На GitHub Pages оставить редирект на новый домен.
+
+Обновление: `build` + `push` с рабочей машины (или в CI), на ВМ `docker compose pull && docker compose up -d`.
+Postgres в контейнере вместо Managed — `docker-compose.localdb.yml` (стенд или экономия).
+
 ## Chat2Desk daily metrics sync
 
 The backend can import chat-manager response time and ratings from Chat2Desk once per day for the previous day.

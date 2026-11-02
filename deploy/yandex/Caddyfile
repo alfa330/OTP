@@ -1,0 +1,56 @@
+# Один домен: статика портала и /api на нём же. Caddy сам получает и продлевает
+# сертификат Let's Encrypt (нужны открытые 80 и 443 и A-запись на адрес VM).
+#
+# Почему Caddy, а не nginx: TLS без certbot и cron, HTTP/2 и HTTP/3 из коробки,
+# ответы text/event-stream (SSE аукциона, табло, колокола) отдаёт без буферизации
+# сам, а X-Forwarded-For от клиента затирает — на него опирается _client_ip()
+# и лимит неудачных входов по IP в bot_schedule2.py.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		-Server
+	}
+
+	# SSE-потоки живут в контейнере realtime со своим бюджетом нитей (OTP_ROLE в
+	# bot_schedule2.py). Каждый путь с text/event-stream обязан быть здесь — иначе поток
+	# осядет в api и съест его нити; tests/test_process_roles.py это сверяет.
+	# /api/trainer/speak тоже стрим, но на секунды (озвучка) — остаётся в api.
+	@realtime path /api/notifications/stream /api/wazzup/pilot/stream /api/op_wallboard/live /api/pbx/stream /api/pbx/agent/stream /api/shift_auction/test_events
+
+	handle /api/* {
+		# Загрузки: фото задач, файлы вики, вложения чатов, импорт CSV/XLSX.
+		request_body {
+			max_size 64MB
+		}
+		# route — чтобы порядок был буквальным: сначала потоки, остальное в api.
+		# Таймаутов на ответ нет намеренно: SSE держит соединение часами, выгрузки
+		# считаются до двух минут (WAITRESS_CHANNEL_TIMEOUT у API).
+		route {
+			reverse_proxy @realtime realtime:8080
+			reverse_proxy api:8080
+		}
+	}
+
+	handle {
+		root * /srv
+
+		# Хэшированные чанки неизменяемы; index.html, воркер и манифест — всегда свежие,
+		# иначе после выкладки телефоны месяц сидят на старом бандле.
+		@immutable path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+		@entry path / /index.html /sw.js /manifest.webmanifest /offline.html /404.html
+		header @entry Cache-Control "no-cache"
+
+		# SPA: адреса разделов (/wiki/…, ?view=…) отдаёт index.html; отдельные страницы
+		# (call_evaluation.html, trainers.html, offices.html) лежат файлами и находятся сами.
+		try_files {path} /index.html
+		file_server
+	}
+}

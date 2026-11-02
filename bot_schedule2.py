@@ -208,6 +208,23 @@ MEMORY_TRIM_ENABLED = _env_bool('MEMORY_TRIM_ENABLED', True)
 MEMORY_TRIM_INTERVAL_SECONDS = _env_int('MEMORY_TRIM_INTERVAL_SECONDS', 900, minimum=0)
 MEMORY_TRIM_RSS_THRESHOLD_MB = _env_int('MEMORY_TRIM_RSS_THRESHOLD_MB', 700, minimum=0)
 MEMORY_TRIM_LOG_DETAILS = _env_bool('MEMORY_TRIM_LOG_DETAILS', False)
+
+# Роль процесса (deploy/yandex, один образ на все роли). «all» — как на Render: HTTP, бот и
+# планировщик в одном процессе. «api» — только HTTP. «realtime» — тот же HTTP, но Caddy шлёт
+# сюда одни SSE-потоки, и бюджет нитей у него свой. «worker» — бот, планировщик, таймеры и
+# сторожа, без HTTP. Из Flask в Telegram шлют через цикл бота (_bot_event_loop) — у ролей без
+# polling его поднимает _start_bot_sender_loop.
+OTP_ROLE = (os.getenv('OTP_ROLE') or 'all').strip().lower()
+if OTP_ROLE not in ('all', 'api', 'realtime', 'worker'):
+    raise Exception(f"OTP_ROLE={OTP_ROLE!r}: допустимы all, api, realtime, worker")
+ROLE_SERVES_HTTP = OTP_ROLE != 'worker'
+ROLE_RUNS_BOT = OTP_ROLE in ('all', 'worker')
+# Нити waitress — общий бюджет и для запросов, и для SSE-потоков (каждый держит нить всё
+# соединение), поэтому потолки потоков ниже считаются от него. 96 — как на Render; у роли
+# realtime свой, больше (deploy/yandex/docker-compose.yml). Соединений — больше нитей:
+# каждый поток SSE это соединение, а лишние ждут нить в очереди waitress.
+WAITRESS_THREADS = _env_int('WAITRESS_THREADS', 96, minimum=32, maximum=4000)
+WAITRESS_CONN_LIMIT = _env_int('WAITRESS_CONN_LIMIT', 180, minimum=80, maximum=8000)
 _memory_trim_lock = threading.Lock()
 _memory_trim_next_due = 0.0
 _malloc_trim = None
@@ -688,6 +705,23 @@ ALLOWED_ORIGINS = {
     "https://table-7kx.pages.dev",
     "https://base-pmy9.onrender.com"
 }
+
+
+# Свой домен (TASK_WEB_APP_BASE_URL — адрес портала, по нему же строятся ссылки в Telegram)
+# и явный список CORS_EXTRA_ORIGINS через запятую. На своём домене (deploy/yandex) фронт и
+# API живут на одном origin, и без этого проверка Origin пишущих запросов (_is_allowed_origin
+# ниже) отбивала бы каждый POST с самого портала. Render и GitHub Pages ничего не теряют.
+def _origins_from_env():
+    found = set()
+    raw_values = [os.getenv('TASK_WEB_APP_BASE_URL') or ''] + (os.getenv('CORS_EXTRA_ORIGINS') or '').split(',')
+    for raw in raw_values:
+        parts = urlparse(raw.strip())
+        if parts.scheme in ('http', 'https') and parts.netloc:
+            found.add(f"{parts.scheme}://{parts.netloc}")
+    return found
+
+
+ALLOWED_ORIGINS |= _origins_from_env()
 CALL_FEEDBACK_TRAINING_REASON = "Тренинг по качеству. Разбор ошибок"
 
 if not JWT_SECRET:
@@ -743,7 +777,7 @@ shift_auction_event_listener_lock = threading.Lock()
 # на каждом мониторе живого аукциона, чтобы нити кончились и портал перестал
 # отвечать целиком: не деградация раздела, а остановка всего.
 # Сверх потолка отдаём 503 — фронт продолжает жить перечиткой лотов по кнопке.
-SHIFT_AUCTION_STREAM_LIMIT = _env_int('SHIFT_AUCTION_STREAM_LIMIT', 50, minimum=10, maximum=120)
+SHIFT_AUCTION_STREAM_LIMIT = _env_int('SHIFT_AUCTION_STREAM_LIMIT', 50, minimum=10, maximum=WAITRESS_THREADS)
 shift_auction_stream_lock = threading.Lock()
 shift_auction_active_streams = 0
 
@@ -9869,7 +9903,7 @@ app.register_blueprint(build_pilot_blueprint(
     gcs={'client': get_gcs_client, 'bucket_name': lambda: (
         os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()},
     access=_wazzup_chat_access,
-    stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=60),
+    stream_limit=_env_int('WAZZUP_PILOT_STREAM_LIMIT', 24, minimum=4, maximum=WAITRESS_THREADS),
 ))
 wazzup_syntony.start_worker(db)
 # Доставка событий партнёрам по их подпискам (partner_keys/webhooks.py): свой
@@ -44179,6 +44213,18 @@ def _bot_event_loop():
     return None
 
 
+def _start_bot_sender_loop():
+    """Роли api и realtime: polling Telegram здесь нет, а Flask шлёт через цикл бота
+    (отбивка табло СЗоВ, отчёты опозданий, _group_late_run_on_bot_loop). Поднимаем свой
+    цикл в daemon-нити и запоминаем его там же, где его запоминает on_startup при polling.
+    Сессию aiohttp aiogram создаёт в том цикле, где впервые шлёт, поэтому любой подходит."""
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, name='bot-sender-loop', daemon=True).start()
+    _SZOV_BOT_LOOP['loop'] = loop
+    logging.info("Цикл отправки в Telegram поднят без polling (роль %s)", OTP_ROLE)
+    return loop
+
+
 async def _szov_broadcast_prepare(hour_to=None, scheduled=False):
     """Собрать отбивку целиком: данные, текст и картинки — таблицу, табло и последний час.
 
@@ -58102,8 +58148,8 @@ def run_flask():
         app,
         host='0.0.0.0',
         port=int(os.getenv('PORT', 8080)),
-        threads=_env_int('WAITRESS_THREADS', 96, minimum=32, maximum=140),
-        connection_limit=_env_int('WAITRESS_CONN_LIMIT', 180, minimum=80, maximum=300),
+        threads=WAITRESS_THREADS,
+        connection_limit=WAITRESS_CONN_LIMIT,
         channel_timeout=_env_int('WAITRESS_CHANNEL_TIMEOUT', 120, minimum=15, maximum=600),
         cleanup_interval=30,
         ident='OTP-2'
@@ -69751,7 +69797,7 @@ try:
         # слушатель реалтайма живёт всё время работы процесса (pbx/realtime.py).
         listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
         # Потоки «Сейчас на линии» в «Касаниях»: каждый занимает нить waitress.
-        stream_limit=_env_int('PBX_STREAM_LIMIT', 10, minimum=2, maximum=40),
+        stream_limit=_env_int('PBX_STREAM_LIMIT', 10, minimum=2, maximum=WAITRESS_THREADS),
     ))
     logging.info("Раздел «АТС»: Blueprint подключён на /api/pbx")
 except Exception:
@@ -69817,7 +69863,7 @@ try:
         # «Сейчас» в реальном времени (коннектор АТС): тот же слушатель pbx_live, что у раздела
         # «АТС», и свой потолок потоков — стена и экраны СВ.
         listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
-        live_stream_limit=_env_int('OP_WALLBOARD_LIVE_STREAM_LIMIT', 10, minimum=2, maximum=40),
+        live_stream_limit=_env_int('OP_WALLBOARD_LIVE_STREAM_LIMIT', 10, minimum=2, maximum=WAITRESS_THREADS),
     )
     # Снимок из того же кэша — отбивке (op_broadcast_job): картинка в Telegram обязана
     # совпадать с экраном, а второй запрос к базе ради этого не нужен.
@@ -70079,7 +70125,7 @@ try:
         # слушателя аукциона. Лимит SSE-слотов держит бюджет нитей waitress
         # (их ~96 на всё): сверх лимита колокол живёт обновлением по фокусу.
         listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
-        stream_limit=_env_int('BELL_STREAM_LIMIT', 50, minimum=10, maximum=120),
+        stream_limit=_env_int('BELL_STREAM_LIMIT', 50, minimum=10, maximum=WAITRESS_THREADS),
     ))
     logging.info("Центр уведомлений: Blueprint подключён на /api/notifications")
 except Exception:
@@ -71385,7 +71431,7 @@ def _training_report_scope(requester_id, requester):
 def training_report_subscription():
     """Переключатель Telegram-сводок по тренингам (раздел «Тренинги»)."""
     if request.method == 'OPTIONS':
-        return build_cors_preflight_response()
+        return _build_cors_preflight_response()
     try:
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -71468,7 +71514,7 @@ def training_report_preview():
     а «пришло или нет» — единственный вопрос, который задают о рассылке.
     """
     if request.method == 'OPTIONS':
-        return build_cors_preflight_response()
+        return _build_cors_preflight_response()
     try:
         requester_id, requester, auth_error = _get_authenticated_requester()
         if auth_error:
@@ -71722,7 +71768,7 @@ def work_schedule_change_report_subscription():
     GET — состояние для меню, POST — {enabled: true|false}.
     """
     if request.method == 'OPTIONS':
-        return build_cors_preflight_response()
+        return _build_cors_preflight_response()
     try:
         requester_id, requester, auth_error = _resolve_work_schedule_viewer()
         if auth_error:
@@ -71776,7 +71822,7 @@ def work_schedule_change_report_preview():
     рассылки она не съедает.
     """
     if request.method == 'OPTIONS':
-        return build_cors_preflight_response()
+        return _build_cors_preflight_response()
     try:
         requester_id, requester, auth_error = _resolve_work_schedule_viewer()
         if auth_error:
@@ -73062,10 +73108,18 @@ async def _on_bot_startup(_dispatcher=None):
 
 if __name__ == '__main__':
 
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    
+    if not ROLE_RUNS_BOT:
+        # Роли api и realtime: без polling и планировщика (они у worker). HTTP — в главной
+        # нити, цикл для отправки в Telegram — рядом.
+        _start_bot_sender_loop()
+        run_flask()
+        raise SystemExit(0)
+
+    # Запускаем Flask в отдельном потоке. У worker HTTP нет: Caddy к нему не ходит.
+    if ROLE_SERVES_HTTP:
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+
     # Настраиваем и запускаем планировщик
     async def monthly_auto_fill_norm():
         """Coroutine executed on the 1st day of each month to auto-fill norm_hours."""

@@ -11,7 +11,7 @@ import {
     describeDismissalChip, describeTransferChip, isFiredStatus, normalizeEmploymentStatus,
 } from './employmentTabs';
 import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
-const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';

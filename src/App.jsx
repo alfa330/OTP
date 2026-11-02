@@ -356,7 +356,9 @@ if (CHATS_EMBED) {
     // Пользователь CRM в адресе окна — чтобы CRM видела авторов сообщений.
     adoptEmbedIdentityFromSearch(window.location.search);
 }
-const API_BASE_URL = 'https://otp-2-fos4.onrender.com';
+/* Адрес API. На своём домене (deploy/yandex) зашивается при сборке через VITE_API_BASE_URL,
+   без него — Render. Та же строка в embedLaunch.js и трёх отдельных входах. */
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
 /* В окне CRM портал рисует одни чаты: фоновые запросы других разделов окну не нужны, а
    сессии окна сервер их и не откроет (wazzup/embed_auth.py) — не шлём их вовсе. */
 if (CHATS_EMBED) {

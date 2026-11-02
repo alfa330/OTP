@@ -1,0 +1,58 @@
+# Postgres в контейнере рядом с бэкендом — для стенда или если Managed PostgreSQL не нужен.
+# Образ с pgvector обязателен: схема call_qa делает CREATE EXTENSION vector.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.localdb.yml up -d
+#
+# POSTGRES_DB / POSTGRES_USER / POSTGRES_PASSWORD берутся из .env — те же, что читает бэкенд,
+# поэтому задавать их дважды не нужно; POSTGRES_HOST в .env при этом должен быть «db».
+
+x-on-db: &on-db
+  environment:
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+  depends_on:
+    db:
+      condition: service_healthy
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      # UTF-8 локаль обязательна: в C-локали кириллица в ILIKE и pg_trgm не работает.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
+      TZ: UTC
+      PGTZ: UTC
+    # Три процесса по пулу 16..40 плюс слушатели NOTIFY и свои соединения call_qa.
+    command: >-
+      postgres -c max_connections=200 -c shared_buffers=256MB -c timezone=UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - internal
+
+  api:
+    <<: *on-db
+
+  realtime:
+    <<: *on-db
+
+  worker:
+    <<: *on-db
+
+volumes:
+  pgdata:

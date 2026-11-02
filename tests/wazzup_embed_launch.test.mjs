@@ -73,7 +73,8 @@ test('в окне запросы — только чаты, вход и выхо
         assert.equal(isEmbedApiAllowed(`${api}${path}`), false, path);
     }
     assert.equal(isEmbedApiAllowed('https://cdn.example.test/emoji.png'), true);
-    assert.match(read('src/App.jsx'), new RegExp(`const API_BASE_URL = '${EMBED_API_BASE_URL.replace(/\./g, '\\.')}';`),
+    assert.match(read('src/App.jsx'),
+        new RegExp(`const API_BASE_URL = import\\.meta\\.env\\?\\.VITE_API_BASE_URL \\|\\| '${EMBED_API_BASE_URL.replace(/\./g, '\\.')}';`),
         'адрес API — тот же, что у портала');
 });
 

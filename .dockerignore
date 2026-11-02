@@ -1,0 +1,29 @@
+# Контекст сборки для deploy/yandex/*.Dockerfile — только исходники.
+# Выгрузки с персональными данными, секреты и чужие сборки в образ не едут.
+.git
+.github
+.claude
+.vscode
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+node_modules
+dist
+.vite
+outputs
+asr_test
+microsip_dnd_shield
+oktell_recall_guard
+cdr_bridge
+tests
+docs
+.env
+.env.*
+.chatapp_token.json
+deploy/yandex/.env
+*.key
+agent.key*
+gw.env

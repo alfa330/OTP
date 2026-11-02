@@ -79,6 +79,16 @@ def _is_schema_lock_conflict(error):
     return getattr(error, 'pgcode', None) in ('55P03', '40P01')
 
 
+def get_gcs_client():
+    from google.cloud import storage as gcs_storage
+    credentials_content = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_CONTENT')
+    if credentials_content:
+        from google.oauth2 import service_account
+        credentials = service_account.Credentials.from_service_account_info(json.loads(credentials_content))
+        return gcs_storage.Client(credentials=credentials)
+    return gcs_storage.Client()
+
+
 # Global connection pool. Keep a warm floor so the first browser burst does not
 # pay for creating PostgreSQL connections one by one on the request path.
 MIN_CONN = _env_int('POSTGRES_POOL_MIN_CONN', 16, minimum=1)

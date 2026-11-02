@@ -1,0 +1,23 @@
+# Сборка образов и публикация в реестр — на рабочей машине или в CI, не на VM.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml push
+#
+# Контекст сборки — корень репозитория: Dockerfile копируют исходники оттуда,
+# а лишнее (node_modules, outputs, .env*) отсекает /.dockerignore.
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/yandex/api.Dockerfile
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/yandex/web.Dockerfile
+      args:
+        # Адрес API зашивается в бандл при сборке (src/App.jsx и ещё четыре входа).
+        # Фронт и API живут на одном домене, поэтому это тот же PUBLIC_HOST.
+        VITE_API_BASE_URL: https://${PUBLIC_HOST:?PUBLIC_HOST не задан в .env}
+        VITE_BASE_PATH: /
