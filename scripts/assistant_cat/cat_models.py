@@ -54,6 +54,7 @@ SIZE = int(os.environ.get('CAT_SIZE', '800'))
 FUR = float(os.environ.get('CAT_FUR', '1'))          # густота шерсти; 0 — черновик без шерсти
 MB_RES = float(os.environ.get('CAT_MB_RES', '0.014'))
 ZOOM = float(os.environ.get('CAT_ZOOM', '1'))          # крупнее для черновиков
+HEAD_ONLY = os.environ.get('CAT_HEAD_ONLY') == '1'     # только голова — сверять форму с наброском
 FUR_PER_UNIT2 = 20000                                 # волосков на единицу площади при FUR=1
 
 # Поле метабола Blender: s·(1 − d²/R²)³, поверхность там, где сумма = 0.6. У
@@ -169,7 +170,7 @@ GREY = lin('#c4c7cd')
 GREY_MID = lin('#a8abb3')
 STRIPE = lin('#575a62')
 STRIPE_DARK = lin('#46494f')
-STRIPE_HEAD = lin('#4b4e56')
+STRIPE_HEAD = lin('#696c74')
 TAIL_RING = lin('#686b73')
 BLUSH = lin('#f4a3a8')
 PAD_PINK = lin('#f39aa4')
@@ -275,7 +276,7 @@ def fur_material():
     return mat
 
 
-IRIS = 0.88           # радиус радужки в долях глаза: белок — тонкий серпик, как на набросках
+IRIS = 0.88           # радиус радужки в долях глаза: белок — тонкий серпик, как на набросках (см. HEAD_SHAPE)
 
 
 def eye_material():
@@ -540,7 +541,8 @@ def pattern_head(part, P, Nn, t):
     warp = fbm(P, 3.0, seed=3) * 0.28
     # «М» на лбу: пять полос вдоль меридианов, к бровям тоньше и обрываются.
     taper = smoothstep(edge + 0.02, edge + 0.4, z)
-    fore = bands(theta / 0.3 + 0.5 + warp * 1.25, width=0.46 + 0.22 * taper, soft=0.12)
+    # Полосы на лбу — тоньше, чаще и волнистее, чем бруски «штрихкода» (как на наброске).
+    fore = bands(theta / 0.2 + 0.5 + warp * 1.5, width=0.3 + 0.2 * taper, soft=0.16)
     fore *= smoothstep(edge + 0.03, edge + 0.16, z) * smoothstep(0.78, 0.5, np.abs(theta))
     fore *= smoothstep(-0.35, 0.1, fbm(P, 5.5, seed=17) + 0.25 - 0.3 * smoothstep(0.75, 0.95, z))
     # По бокам головы — две поперечные полосы, рваные.
@@ -1093,20 +1095,25 @@ def build_ear(name, head, side, droop, mats, face):
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=40, v_segments=20, radius=1.0)
     hp = head.params
-    w_half, h_half, thick = hp.get('ear_size', (0.3, 0.22, 0.065))
+    ear = HEAD_SHAPE['ear']
+    w_half, h_half, thick = hp.get('ear_size', ear['size'])
+    flare = math.radians(ear.get('flare', -16))       # клапан откинут на сгибе: низ отходит от головы
     for v in bm.verts:
         x, y, z = v.co
         w = 0.32 + 0.68 * (z + 1) / 2                    # широкий сгиб сверху, острый кончик внизу
         v.co = Vector((x * w_half * w, y * thick, z * h_half))
         v.co.y += 1.0 * (v.co.x ** 2) + 0.7 * (v.co.z ** 2)   # края загнуты к голове (+y)
+        dz = v.co.z - h_half
+        v.co.y, v.co.z = (v.co.y * math.cos(flare) - dz * math.sin(flare),
+                          h_half + v.co.y * math.sin(flare) + dz * math.cos(flare))
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
     mesh.shade_smooth()
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
-    az = math.radians(hp.get('ear_az', 50)) * side
-    el = math.radians(hp.get('ear_el', 50) - droop * 12)
+    az = math.radians(hp.get('ear_az', ear['az'])) * side
+    el = math.radians(hp.get('ear_el', ear['el']) - droop * 12)
     d_local = Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el)))
     R = head.frame.to_3x3()
     centre = head.frame.translation
@@ -1123,12 +1130,16 @@ def build_ear(name, head, side, droop, mats, face):
     y_axis = -normal
     x_axis = y_axis.cross(z_axis).normalized()
     basis = Matrix((x_axis, y_axis, z_axis)).transposed()
-    tilt = Matrix.Rotation(math.radians((hp.get('ear_tilt', 30) + droop * 16) * side), 3, normal)
-    obj.matrix_world = Matrix.Translation(loc + normal * hp.get('ear_lift', 0.035)) @ (tilt @ basis).to_4x4()
-    # Окрас — гладкий светло-серый, без полос (на набросках ушко однотонное).
+    tilt = Matrix.Rotation(math.radians((hp.get('ear_tilt', ear['tilt']) + droop * 16) * side), 3, normal)
+    obj.matrix_world = Matrix.Translation(loc + normal * hp.get('ear_lift', ear['lift'])) @ (tilt @ basis).to_4x4()
+    # Окрас — гладкий серый в тон «шапочки», без полос; у сгиба чуть темнее.
     P, Nn = mesh_arrays(obj)
     n = len(P)
-    col = np.tile(lin('#d8dadf'), (n, 1))
+    co = np.empty(n * 3)
+    mesh.vertices.foreach_get('co', co)
+    co = co.reshape(-1, 3)
+    col = np.tile(lin(ear.get('color', '#c3c6cc')), (n, 1))
+    col = mix_rows(col, np.tile(lin('#a9acb3'), (n, 1)), smoothstep(h_half * 0.2, h_half, co[:, 2]) * 0.55)
     attr = mesh.color_attributes.new('col', 'FLOAT_COLOR', 'POINT')
     attr.data.foreach_set('color', np.concatenate([col, np.ones((n, 1))], axis=1).astype(np.float32).ravel())
     mesh.materials.append(mats['skin'])
@@ -1138,7 +1149,26 @@ def build_ear(name, head, side, droop, mats, face):
 
 # ---------------------------------------------------------------- позы
 
-HEAD_RADII = (0.68, 0.6, 0.6)
+# Форма головы подогнана к наброскам «1 в 1» (просьба владельца 02.11.2026): силуэт
+# головы с листа (Surprised, Excited, Sad) и голова рендера (CAT_HEAD_ONLY=1) сведены
+# к одной высоте, сравнивалась полуширина по высоте и место/размер глаз. Итог: голова
+# шире высоты в ~1.45 раза, скруглённый купол, щёки широкие книзу, ушки — клапаны на
+# верхних углах кончиком вниз-наружу; разлёт глаз ~0.37 ширины головы, радужка ~0.2,
+# белок — тонкий серпик (на наброске глаз почти целиком радужка).
+# CAT_HEAD='{"radii": [...]}' переопределяет значения для такой подгонки без правки файла.
+HEAD_SHAPE = dict(
+    radii=(0.81, 0.6, 0.65),
+    temple=((0.3, 0.03, 0.04), (0.4, 0.44, 0.33), 1.45),
+    cheek=((0.42, -0.15, -0.2), (0.46, 0.34, 0.34), 1.9),
+    ear=dict(az=61, el=30, size=(0.39, 0.34, 0.075), tilt=46, lift=0.03, flare=-8),
+    eye=(0.36, -0.02, 0.212, 0.225),
+    iris=0.94,
+)
+if os.environ.get('CAT_HEAD'):
+    HEAD_SHAPE.update(json.loads(os.environ['CAT_HEAD']))
+HEAD_RADII = tuple(HEAD_SHAPE['radii'])
+IRIS = HEAD_SHAPE.get('iris', IRIS)
+HEAD_WIDEN = HEAD_RADII[0] / 0.68          # во сколько голова шире первой версии — румянец, усы
 
 
 def head_part(center, rot, face_params, droop=0.0):
@@ -1146,16 +1176,18 @@ def head_part(center, rot, face_params, droop=0.0):
     head = Part('head', 'head', frame, radii=HEAD_RADII, face=face_params, droop=droop)
     # Голова — широкий эллипсоид, щёчки и мордочка — элементы в её системе координат.
     head.local((0, 0, 0), HEAD_RADII)
+    (tx, ty, tz), t_radii, t_stiff = HEAD_SHAPE['temple']
+    (cx, cy, cz), c_radii, c_stiff = HEAD_SHAPE['cheek']
     for s in (-1, 1):
-        # Виски — голова круглая с широким лбом, а не «колокол» с узкой макушкой.
-        head.local((0.27 * s, 0.03, 0.15), (0.38, 0.44, 0.34), stiffness=1.45)
-        head.local((0.3 * s, -0.17, -0.26), (0.38, 0.32, 0.3), stiffness=1.8)
+        # Виски — широкий плоский верх, а не «колокол» с узкой макушкой; щёчки — пухлый низ.
+        head.local((tx * s, ty, tz), t_radii, stiffness=t_stiff)
+        head.local((cx * s, cy, cz), c_radii, stiffness=c_stiff)
     head.local((0, -0.42, -0.16), (0.26, 0.17, 0.17), stiffness=1.3)
     return head
 
 
 def default_face():
-    return dict(blush=(0.43, -0.14, 0.12))
+    return dict(blush=(0.43 * HEAD_WIDEN, -0.15, 0.13))
 
 
 def add_leg(parts, s, path, radii, outward, sock=0.72, stripes=3.2):
@@ -1343,7 +1375,7 @@ def pose_curl(face=None):
 
 # ---------------------------------------------------------------- мордочки
 
-EYE_CX, EYE_CY, EYE_RX, EYE_RY = 0.32, 0.0, 0.168, 0.18
+EYE_CX, EYE_CY, EYE_RX, EYE_RY = HEAD_SHAPE['eye']
 NOSE_Y = -0.052
 MOUTH_Y = NOSE_Y - 0.033            # от низа носа
 
@@ -1548,7 +1580,7 @@ def build_face(face, mats, spec):
 def whiskers(face, mats):
     for side in (-1, 1):
         for k, (v, tip_z, back) in enumerate(((-0.08, 0.12, 0.12), (-0.115, 0.0, 0.16), (-0.15, -0.13, 0.2))):
-            root = face.point(0.27 * side, v, 0.0)
+            root = face.point(0.27 * HEAD_WIDEN * side, v, 0.0)
             R = face.R
             pts = [root,
                    root + R @ Vector((0.26 * side, back * 0.4, tip_z * 0.45 + 0.03)),
@@ -1672,8 +1704,8 @@ def anchors(cam, head):
         'head': (0.0, 0.0, 0.0),
         'top': (0.0, 0.0, 0.66),
         'forehead': (0.26, -0.42, 0.36),
-        'left': (-0.86, 0.0, 0.3),
-        'right': (0.86, 0.0, 0.3),
+        'left': (-0.86 * HEAD_WIDEN, 0.0, 0.3),
+        'right': (0.86 * HEAD_WIDEN, 0.0, 0.3),
         'mouth': (0.0, -0.6, -0.12),
     }
     out = {}
@@ -1708,6 +1740,10 @@ def main():
             cam.location = centre + (cam.location - Vector((0.0, 0.0, 1.1))).normalized() * 14.0
             render_to(key)
             continue
+        if HEAD_ONLY:
+            body.hide_render = True
+            if bpy.data.objects.get('BodyFur'):
+                bpy.data.objects['BodyFur'].hide_render = True
         render_to(key)
         layout[key] = anchors(cam, head)
         with open(layout_path, 'w') as fh:
