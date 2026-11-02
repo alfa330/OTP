@@ -395,6 +395,20 @@ class IncomingNotificationEffectsTest(unittest.TestCase):
         shell = (ROOT / 'src' / 'components' / 'common' / 'mobile-shell.css').read_text(encoding='utf-8')
         self.assertIn('body.mobile-shell .notifications-toast-floating', shell)
 
+    def test_desktop_card_lives_outside_the_sidebar(self):
+        """Потомком сайдбара карточка мигала под курсором: наведение на неё
+        будило свёрнутый сайдбар, пауза otp-bell-arm снимала с неё
+        pointer-events, сайдбар терял наведение — и так по кругу."""
+        start = self.SOURCE.index('const toastCard =')
+        block = self.SOURCE[start:self.SOURCE.index('const toastNode =', start)]
+        self.assertNotIn('absolute left-full', block)
+        self.assertIn('const toastNode = toastCard ? createPortal(toastCard, document.body) : null;', self.SOURCE)
+        # К колоколу карточку прикладывают по координатам, а пока курсор на
+        # ней — не двигают: иначе она уезжала бы из-под мыши за колоколом.
+        effect = self.SOURCE[self.SOURCE.index('const toastVisible = Boolean(toast) && !open;'):start]
+        self.assertIn('anchor.getBoundingClientRect()', effect)
+        self.assertIn("card.matches(':hover')", effect)
+
     def test_details_are_shown_on_the_card(self):
         """Ради деталей карточка и раскрывается — в списке им места нет."""
         start = self.SOURCE.index('const toastCard =')

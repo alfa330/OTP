@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
 import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, UserPlus, X } from 'lucide-react';
@@ -89,6 +89,10 @@ const MAX_PAGE_SIZE = 50;
 // Сколько висит всплывающая карточка нового уведомления: хватает прочитать
 // заголовок с деталями и нажать, но она не заслоняет меню надолго.
 const TOAST_VISIBLE_MS = 7000;
+// Зазор между колоколом и карточкой — тот же ml-2, что у панели списка.
+const TOAST_GAP_PX = 8;
+// За сколько отпущенная карточка догоняет колокол — как его переезд в styles.css.
+const TOAST_GLIDE_MS = 300;
 const SSE_STALL_MS = 90 * 1000;
 
 const fmtWhen = (iso) => {
@@ -169,7 +173,9 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const [desktopPerm, setDesktopPerm] = useState('default');
     const [desktopOn, setDesktopOn] = useState(false);
 
+    const rootRef = useRef(null);
     const buttonRef = useRef(null);
+    const toastRef = useRef(null);
     const panelRef = useRef(null);
     const scrollRef = useRef(null);
     const sentinelRef = useRef(null);
@@ -651,6 +657,73 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         }, 200);
     }, []);
 
+    /* На компьютере карточка тоже живёт порталом в body, а к колоколу её
+       прикладываем по координатам. Внутри сайдбара она была его потомком, и
+       наведение на неё включало :hover свёрнутого сайдбара: тот начинал
+       разворачиваться, а пауза на клик по едущему колоколу (otp-bell-arm
+       снимает pointer-events со слота — и с карточки внутри него) делала её
+       прозрачной для курсора. Сайдбар терял наведение и сворачивался, карточка
+       снова ловила курсор — и так по кругу: карточка мигала под мышью.
+       Место пересчитываем каждый кадр, пока карточка на экране: колокол
+       переезжает между рельсом и шапкой CSS-переходом, и событий о каждом его
+       шаге нет. Это семь секунд и один getBoundingClientRect на кадр.
+       Пока курсор на карточке, она стоит на месте, даже если колокол уехал:
+       курсор, ушедший из развёрнутого сайдбара к карточке, сворачивает его, и
+       без этого карточка уезжала бы из-под мыши. Отпустили — догоняет колокол
+       за те же 0,3 с, что и его переезд. */
+    const toastVisible = Boolean(toast) && !open;
+    useLayoutEffect(() => {
+        if (!toastVisible || isNarrow) return undefined;
+        const reduceMotion = typeof window.matchMedia === 'function'
+            && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        let frame = 0;
+        let x = null;
+        let y = null;
+        let held = false;
+        let glide = null; // { fromX, fromY, at } — догоняем колокол после наведения
+        const place = (now) => {
+            const card = toastRef.current;
+            const anchor = rootRef.current;
+            if (card && anchor) {
+                if (x !== null && card.matches(':hover')) {
+                    held = true;
+                    glide = null;
+                } else {
+                    const rect = anchor.getBoundingClientRect();
+                    const targetX = rect.right + TOAST_GAP_PX;
+                    const targetY = rect.top;
+                    if (held && !reduceMotion) glide = { fromX: x, fromY: y, at: now };
+                    held = false;
+                    if (glide) {
+                        const progress = Math.min(1, (now - glide.at) / TOAST_GLIDE_MS);
+                        const eased = 1 - (1 - progress) ** 3;
+                        x = glide.fromX + (targetX - glide.fromX) * eased;
+                        y = glide.fromY + (targetY - glide.fromY) * eased;
+                        if (progress === 1) glide = null;
+                    } else {
+                        x = targetX;
+                        y = targetY;
+                    }
+                    const left = `${x}px`;
+                    const top = `${y}px`;
+                    if (card.style.left !== left) card.style.left = left;
+                    if (card.style.top !== top) card.style.top = top;
+                }
+            }
+            frame = window.requestAnimationFrame(place);
+        };
+        place(performance.now());
+        return () => {
+            window.cancelAnimationFrame(frame);
+            // Повернули телефон боком посреди показа — место там задаёт CSS
+            // оболочки, и наши координаты его бы перебили.
+            if (toastRef.current) {
+                toastRef.current.style.left = '';
+                toastRef.current.style.top = '';
+            }
+        };
+    }, [toastVisible, isNarrow]);
+
     /* Читаем при входе и при смене пользователя: за одним компьютером сидят
        посменно, и чужая галочка не должна доставаться следующему. */
     useEffect(() => {
@@ -1079,18 +1152,21 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
     const toastItem = toast?.item;
     const toastMeta = toastItem ? (SOURCE_META[toastItem.source] || {}) : {};
     const ToastIcon = toastMeta.icon || Bell;
-    /* На телефоне карточка всегда уходит порталом в body и раскрывается из-под
-       колокола — тот висит в углу экрана, вне шторки с разделами. Состояние
-       шторки роли не играет: колокол на месте и при открытой, и при закрытой. */
+    /* На телефоне карточка раскрывается из-под колокола — тот висит в углу
+       экрана, вне шторки с разделами, и место ей задаёт CSS оболочки. Состояние
+       шторки роли не играет: колокол на месте и при открытой, и при закрытой.
+       На компьютере она стоит сбоку от колокола по его координатам (эффект
+       выше) и, как и на телефоне, живёт порталом в body — вне сайдбара. */
     const toastDetached = isNarrow;
     const toastCard = toast && !open ? (
         <div
+            ref={toastRef}
             role="status"
             aria-live="polite"
             style={{ fontFamily: APPLE_FONT }}
             className={`${toastDetached
                 ? 'notifications-toast-floating fixed z-[72] origin-top'
-                : 'notifications-toast absolute left-full top-0 z-40 ml-2 w-[320px] origin-top'} overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
+                : 'notifications-toast fixed z-50 w-[320px] origin-top'} overflow-hidden rounded-2xl border border-black/5 bg-white/95 text-slate-900 shadow-[0_20px_60px_rgba(0,0,0,0.18)] backdrop-blur-xl ${toastClosing ? 'animate-dropdown-reverse' : 'animate-dropdown'}`}
         >
             <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
                 <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
@@ -1143,16 +1219,14 @@ export default function NotificationsBell({ apiBaseUrl, user, getHeaders, onNavi
         </div>
     ) : null;
 
-    const toastNode = toastCard && toastDetached
-        ? createPortal(toastCard, document.body)
-        : toastCard;
+    const toastNode = toastCard ? createPortal(toastCard, document.body) : null;
 
     /* Кнопка собрана по образцу остальных пунктов меню: подпись живёт в
        .sidebar-text и показывается самим CSS сайдбара — в том числе при
        наведении на свёрнутый сайдбар, чего проп collapsed дать не мог; бейдж
        в свёрнутом состоянии — общий .sidebar-surveys-collapsed-badge. */
     return (
-        <div className="relative">
+        <div ref={rootRef} className="relative">
             <button
                 ref={buttonRef}
                 type="button"
