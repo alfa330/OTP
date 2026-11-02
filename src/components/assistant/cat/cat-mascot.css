@@ -16,7 +16,6 @@
 
 .cat-mascot--orb {
     scale: 1.42;
-    translate: 0 -8%;
 }
 
 .cat-mascot--hero {
@@ -135,7 +134,7 @@
 .cat-mascot__extras .cat-x--bang-dot { fill: #f5b400; }
 .cat-mascot__extras .cat-x--ask { fill: #7c4dbd; }
 .cat-mascot__extras .cat-x--zzz { fill: #5b4740; }
-.cat-mascot__extras .cat-x--zzz.cat-x--soft { fill: #9a94a3; }
+.cat-mascot__extras .cat-x--zzz.cat-x--soft { fill: #7a6e70; }
 
 .cat-mascot__extras text.cat-x {
     font: 800 7.5px/1 -apple-system, BlinkMacSystemFont, 'SF Pro Rounded', 'Segoe UI', sans-serif;
@@ -162,7 +161,8 @@
 @keyframes cat-x-twinkle { from { scale: 0.7; opacity: 0.6; } to { scale: 1.15; opacity: 1; } }
 @keyframes cat-x-pop { from { scale: 0.2; opacity: 0; } to { scale: 1; opacity: 1; } }
 @keyframes cat-x-jitter { 0%, 100% { translate: 0 0; } 50% { translate: 0.6px -0.6px; } }
-@keyframes cat-x-zzz { from { translate: 0 3px; opacity: 0; } 30% { opacity: 1; } to { translate: 1.5px -5px; opacity: 0; } }
+/* «Zzz» не гаснут до нуля — у спящего они главный знак (разбор: на белом не читались). */
+@keyframes cat-x-zzz { from { translate: 0 3px; opacity: 0.4; } 30% { opacity: 1; } to { translate: 1.5px -5px; opacity: 0.4; } }
 @keyframes cat-x-wobble { from { rotate: -10deg; } to { rotate: 10deg; } }
 @keyframes cat-x-puff { from { translate: 2px 0; opacity: 0.2; } 30% { opacity: 1; } to { translate: -3px 0; opacity: 0; } }
 

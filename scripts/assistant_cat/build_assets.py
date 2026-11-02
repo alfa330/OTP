@@ -2,6 +2,10 @@
 
     python build_assets.py <папка с рендерами> [корень репозитория]
 
+Нужны Pillow и cwebp (brew install webp). Папка — ЧИСТОВЫЕ кадры одного
+размера (команда в шапке cat_models.py); черновики туда не класть — сборщик
+падает, если кадры разного размера или в layout.json не хватает поз.
+
 Все кадры режутся одной квадратной рамкой — объединением по альфе всех поз: при
 смене эмоции котик не прыгает и не меняет размер, лапы стоят на одной линии.
 Тень запечена в картинку (мягкая снизу и у лап), а не CSS-фильтром: белый котик
@@ -67,21 +71,40 @@ def with_shadow(im):
     return canvas
 
 
+def edges_clear(im):
+    """Края кадра прозрачны: тень и шерсть не срезаны рамкой."""
+    alpha = im.getchannel('A')
+    w, h = im.size
+    strips = (alpha.crop((0, 0, w, 1)), alpha.crop((0, h - 1, w, h)),
+              alpha.crop((0, 0, 1, h)), alpha.crop((w - 1, 0, w, h)))
+    return all(strip.getextrema()[1] <= 2 for strip in strips)
+
+
 def main():
+    missing = [name for name in FRAMES + ['portrait'] if not (SRC / f'{name}.png').exists()]
+    if missing:
+        sys.exit(f'нет кадров: {missing}')
     renders = {name: Image.open(SRC / f'{name}.png').convert('RGBA') for name in FRAMES}
+    sizes = {im.size for im in renders.values()}
+    if len(sizes) != 1:
+        sys.exit(f'кадры разного размера {sizes} — черновик в папке чистовика?')
     layout = json.loads((SRC / 'layout.json').read_text())
-    W, H = next(iter(renders.values())).size
+    if set(FRAMES) - set(layout):
+        sys.exit(f'в layout.json нет поз: {sorted(set(FRAMES) - set(layout))}')
+    W, H = sizes.pop()
     boxes = [alpha_box(im) for im in renders.values()]
     left = min(b[0] for b in boxes)
     top = min(b[1] for b in boxes)
     right = max(b[2] for b in boxes)
     bottom = max(b[3] for b in boxes)
     pad = round(max(right - left, bottom - top) * 0.05)
-    side = max(right - left, bottom - top) + 2 * pad
+    floor = round(pad * 2.4)                       # снизу — запас под тень у лап
+    side = max(right - left + 2 * pad, bottom - top + pad + floor)
     cx = (left + right) / 2
     x0 = round(cx - side / 2)
-    y0 = bottom + pad - side                       # низ общий: лапы на одной линии
+    y0 = bottom + floor - side                     # низ общий: лапы на одной линии
     box = (x0, y0, x0 + side, y0 + side)
+    print('рамка', box, 'сторона', side, 'запас', pad, 'снизу', floor)
     DST.mkdir(parents=True, exist_ok=True)
 
     def to_pct(x, y):
@@ -94,7 +117,10 @@ def main():
         frame.alpha_composite(im.crop(box))
         frame = frame.resize((SIZE, SIZE), Image.LANCZOS)
         fb = alpha_box(frame)
-        total += webp(with_shadow(frame), f'cat-{name}')
+        shaded = with_shadow(frame)
+        if not edges_clear(shaded):
+            sys.exit(f'{name}: тень или шерсть упирается в край кадра — поднимите запас')
+        total += webp(shaded, f'cat-{name}')
         points = {key: to_pct(*xy) for key, xy in layout[name].items()}
         points['box'] = [round(v / SIZE * 100, 1) for v in fb]
         anchors[name] = points

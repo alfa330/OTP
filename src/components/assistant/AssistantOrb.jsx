@@ -12,7 +12,7 @@ import {
     resizePanelRect, resolveDock, settledPanelSize, undock,
 } from './orbPosition';
 import {
-    canOpenPipWindow, cloneDocumentStyles, mirrorDocumentChrome, pipWindowTaken,
+    canOpenPipWindow, mirrorDocumentChrome, mirrorDocumentStyles, pipWindowTaken,
 } from '../../utils/pipWindow';
 import { CLASSIFIER_TAB } from './sourceTarget';
 import { answeringSpaceName } from './answeringSpace';
@@ -452,6 +452,13 @@ export default function AssistantOrb({
        Окно в документе ровно одно, и запрос при занятом ОТБИРАЕТ его молча —
        поэтому вместо кражи объясняем, почему не открылось: иначе помощник
        схлопнул бы табло линии, за которым следит смена. */
+    /* Зеркало стилей в окне поверх других: снимаем, когда окно уходит. */
+    const stopPipStylesRef = useRef(null);
+    const stopPipStyles = useCallback(() => {
+        stopPipStylesRef.current?.();
+        stopPipStylesRef.current = null;
+    }, []);
+
     const detach = useCallback(async () => {
         if (pipWindowTaken()) {
             showToast?.('Окно поверх других уже занято другим виджетом — закройте его '
@@ -469,7 +476,11 @@ export default function AssistantOrb({
                 height: Math.round(size.height),
             });
             win.document.title = 'Помощник';
-            cloneDocumentStyles(win);
+            /* Стили — зеркалом, а не разовым снимком: облик-талисман (котик, тыква)
+               приносит свой CSS отдельным чанком, и выбранный уже в окне он пришёл
+               бы туда без правил — столбиком картинок поверх пустого чата. */
+            stopPipStylesRef.current?.();
+            stopPipStylesRef.current = mirrorDocumentStyles(win);
             mirrorDocumentChrome(win);
             win.document.body.style.margin = '0';
             win.document.body.style.height = '100vh';
@@ -479,6 +490,7 @@ export default function AssistantOrb({
             win.document.body.appendChild(root);
             // Закрыли окно системным крестиком — помощник закрыт, а не «висит невидимым».
             win.addEventListener('pagehide', () => {
+                stopPipStyles();
                 setPipWindow(null);
                 setPipContainer(null);
             });
@@ -493,6 +505,7 @@ export default function AssistantOrb({
     }, [showToast]);
 
     const closePip = useCallback(() => {
+        stopPipStyles();
         try {
             pipWindow?.close?.();
         } catch (error) {
@@ -500,7 +513,7 @@ export default function AssistantOrb({
         }
         setPipWindow(null);
         setPipContainer(null);
-    }, [pipWindow]);
+    }, [pipWindow, stopPipStyles]);
 
     /* Вернуть панель в портал: окно закрывается, панель раскрывается на месте
        шарика. Разговор переживает переезд — он лежит в хуке выше, а не в панели. */
@@ -516,12 +529,17 @@ export default function AssistantOrb({
         closePip();
     }, [userId, pipWindow, closePip]);
 
-    /* Размонтировали шарик (выход, смена аккаунта) — окно за собой закрываем. */
+    /* Размонтировали шарик (выход, смена аккаунта) — окно за собой закрываем.
+       Очистка срабатывает и при ОТКРЫТИИ окна (прежнее значение — null): зеркало
+       стилей трогаем, только когда уходит настоящее окно, иначе оно снималось бы
+       в тот же миг, как его поставили, и окно оставалось без единого стиля. */
     useEffect(() => () => {
+        if (!pipWindow) return;
+        stopPipStyles();
         try {
-            pipWindow?.close?.();
+            pipWindow.close?.();
         } catch (error) { /* см. выше */ }
-    }, [pipWindow]);
+    }, [pipWindow, stopPipStyles]);
 
     const anchor = useMemo(() => {
         if (!position || !viewport) return null;

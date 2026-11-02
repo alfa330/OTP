@@ -35,14 +35,33 @@ const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const run = (events) => events.reduce(moodReducer, initialMood());
 const SKETCH = ['happy', 'excited', 'sad', 'angry', 'surprised', 'scared', 'sleepy', 'confused', 'mischievous'];
 
-test('девять эмоций листа и клубочек — у каждой кадр из Blender, лёгкий', () => {
+/* Ширина и высота WebP из заголовка (VP8X / VP8L / VP8) — без декодера. */
+const webpSize = (buf) => {
+    assert.equal(buf.toString('ascii', 0, 4), 'RIFF');
+    assert.equal(buf.toString('ascii', 8, 12), 'WEBP');
+    const chunk = buf.toString('ascii', 12, 16);
+    if (chunk === 'VP8X') return [1 + buf.readUIntLE(24, 3), 1 + buf.readUIntLE(27, 3)];
+    if (chunk === 'VP8L') {
+        const bits = buf.readUInt32LE(21);
+        return [1 + (bits & 0x3fff), 1 + ((bits >> 14) & 0x3fff)];
+    }
+    return [buf.readUInt16LE(26) & 0x3fff, buf.readUInt16LE(28) & 0x3fff];
+};
+
+test('девять эмоций листа и клубочек — у каждой кадр из Blender, лёгкий, одного размера', () => {
     for (const name of [...SKETCH, 'asleep']) assert.ok(EMOTIONS.includes(name), `нет эмоции ${name}`);
     for (const frame of [...FRAMES, 'logo']) {
         const file = new URL(`../src/components/assistant/cat/assets/cat-${frame}.webp`, import.meta.url);
         assert.ok(existsSync(file), `нет кадра ${frame}`);
         assert.ok(statSync(file).size < 24000, `кадр ${frame} тяжелее 24 КБ`);
+        // Общая рамка: все позы одного размера, иначе котик прыгает при смене эмоции.
+        assert.deepEqual(webpSize(readFileSync(file)), frame === 'logo' ? [96, 96] : [256, 256], `размер кадра ${frame}`);
     }
     for (const emotion of CLICK_CYCLE) assert.ok(EMOTIONS.includes(emotion));
+    // Сборщик режет те же кадры, что показывает сайт.
+    const builder = read('../scripts/assistant_cat/build_assets.py');
+    const listed = /FRAMES = \[([^\]]+)\]/.exec(builder)[1].match(/'([a-z-]+)'/g).map((q) => q.slice(1, -1));
+    assert.deepEqual([...listed].sort(), [...FRAMES].sort());
 });
 
 test('каждая эмоция достижима жестом шарика', () => {
@@ -101,6 +120,13 @@ test('закрыли щелчком по шарику — грусть, а не 
     // Следующий щелчок (открыть снова) — уже обычный, первая эмоция череды.
     const reopened = moodReducer(closedByOrb, { type: 'click', now: 80 + CLOSE_CLICK_MS + 500 });
     assert.equal(displayEmotion(reopened, 80 + CLOSE_CLICK_MS + 510), CLICK_CYCLE[0]);
+});
+
+test('закрыли с клавиатуры (click помечен closing) — грусть, череда стоит', () => {
+    const state = run([{ type: 'click', now: 100, closing: true }, { type: 'close', now: 101 }]);
+    assert.equal(displayEmotion(state, 200), 'sad');
+    assert.equal(state.cycle, 0);
+    assert.equal(state.clicks.length, 1, 'в счёт шквала щелчок идёт');
 });
 
 test('шквал щелчков злит, хотя каждый второй щелчок закрывает помощника', () => {
@@ -168,7 +194,9 @@ test('значки эмоций стоят у головы, в кадре', () =
         assert.ok(left < p.head[0] && p.head[0] < right && top < p.head[1] && p.head[1] < bottom, `${frame}: голова вне силуэта`);
         assert.ok(p.left[0] < p.head[0] && p.head[0] < p.right[0], `${frame}: бока головы перепутаны`);
         assert.ok(p.top[1] < p.head[1] && p.head[1] < p.mouth[1], `${frame}: макушка и рот перепутаны`);
-        assert.ok(bottom > 85, `${frame}: лапы не на общей линии`);
+        assert.ok(bottom > 80, `${frame}: лапы не на общей линии`);
+        // Под лапами запас на запечённую тень: у клубочка её срезал край кадра (разбор 02.11).
+        assert.ok(bottom <= 92.5, `${frame}: тени под лапами негде лечь (низ силуэта ${bottom}%)`);
     }
     // Лежачие позы ниже сидячих: голова клубочка и испуганного — в нижней половине.
     assert.ok(CAT_LAYOUT.asleep.head[1] > 60 && CAT_LAYOUT.scared.head[1] > 55);
@@ -198,16 +226,39 @@ test('котик — облик в выборе, но не эффект знак
     assert.equal(appearance.readAssistantEffect(key, false), 'cat', 'выбор котика переживает перезагрузку');
 });
 
+/* Хранилище браузера для mascotsToPreload: ключи по порядку, как у localStorage. */
+const fakeStorage = (entries) => ({
+    get length() { return entries.length; },
+    key: (i) => entries[i]?.[0] ?? null,
+    getItem: (key) => entries.find(([k]) => k === key)?.[1] ?? null,
+});
+
+test('со стартом портала котик грузится только тем, кто его выбрал', () => {
+    const { mascotsToPreload } = appearance;
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:5', 'cat']]))], ['cat']);
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:5', 'aurora']]))], [],
+        'кто остался на знаке, котика не качает');
+    // Праздничный выбор после праздника не в счёт; чужие ключи и мусор — тоже.
+    assert.deepEqual([...mascotsToPreload(fakeStorage([
+        ['otp:assistant:appearance:5:halloween-2026', 'cat'],
+        ['wiki:space', 'cat'],
+        ['otp:assistant:appearance:6', 'constructor'],
+    ]))], []);
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:7', 'pumpkin']]), true)], ['pumpkin']);
+    assert.deepEqual([...mascotsToPreload(null, true)], ['pumpkin'], 'закрытое хранилище — только праздничная тыква');
+    assert.deepEqual([...mascotsToPreload({ get length() { throw new Error('blocked'); } })], []);
+});
+
 test('шарик грузит котика своим чанком, при сбое остаётся знак', () => {
     const orb = read('../src/components/assistant/Orb.jsx');
-    assert.match(orb, /\[CAT_APPEARANCE, \(\) => import\('\.\/cat\/CatMascot\.jsx'\)\]/);
+    assert.match(orb, /\[CAT_APPEARANCE,\s*\(\)\s*=>\s*import\('\.\/cat\/CatMascot\.jsx'\)\]/);
     // Map, а не объект: облик «constructor» из хранилища не должен звать Object().
-    assert.match(orb, /const MASCOT_CHUNKS = new Map\(\[/);
-    assert.match(orb, /if \(MASCOT_CHUNKS\.has\(value\)\) chosen\.add\(value\);/);
-    assert.match(orb, /: <IcoreAssistantMark /, 'пока талисман не доехал — прежний знак');
+    assert.match(orb, /MASCOT_CHUNKS\s*=\s*new Map\(/);
+    assert.match(orb, /mascotsToPreload\(storage,\s*isHalloweenTime\(\)\)\.forEach\(loadMascot\)/);
+    assert.match(orb, /:\s*<IcoreAssistantMark /, 'пока талисман не доехал — прежний знак');
     assert.doesNotMatch(orb, /<Suspense|lazy\(/);
     const picker = read('../src/components/assistant/AssistantAppearancePicker.jsx');
-    assert.match(picker, /\[CAT_APPEARANCE, catLogo\]/, 'в выборе — неподвижный портрет, живой котик только в шарике');
+    assert.match(picker, /\[CAT_APPEARANCE,\s*catLogo\]/, 'в выборе — неподвижный портрет, живой котик только в шарике');
 });
 
 test('котик дёшев для слабого компьютера', () => {
@@ -217,7 +268,7 @@ test('котик дёшев для слабого компьютера', () => {
     assert.match(css, /\.cat-mascot\.is-lite \.cat-mascot__breathe,/);
     assert.match(css, /\.cat-mascot\.is-paused \*/);
     // В разметке только показанные кадры, недоехавший кадр не гасит прежний.
-    assert.match(jsx, /FRAMES\.filter\(\(name\) => shownRef\.current\.has\(name\)\)/);
-    assert.match(jsx, /const visible = loaded\.has\(frame\) \? frame : lastLoadedRef\.current;/);
+    assert.match(jsx, /FRAMES\.filter\(\(name\)\s*=>\s*shownRef\.current\.has\(name\)\)/);
+    assert.match(jsx, /visible\s*=\s*loaded\.has\(frame\)\s*\?\s*frame\s*:\s*lastLoadedRef\.current/);
     assert.match(jsx, /requestIdleCallback/);
 });

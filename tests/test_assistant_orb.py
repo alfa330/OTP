@@ -477,8 +477,17 @@ class DetachedWindowTests(unittest.TestCase):
         """PiP — отдельный документ: без переноса таблиц стилей там голый HTML,
         а без атрибута темы окно откроется белым у того единственного аккаунта,
         ради которого тёмный режим и делался."""
-        self.assertIn('cloneDocumentStyles(win)', self.orb)
         self.assertIn('mirrorDocumentChrome(win)', self.orb)
+        # Стили — зеркалом: CSS облика-талисмана, выбранного уже в окне, приезжает
+        # отдельным чанком после открепления (разбор облика «Котик», 02.11.2026).
+        self.assertIn('stopPipStylesRef.current = mirrorDocumentStyles(win);', self.orb)
+        self.assertNotIn('cloneDocumentStyles(win)', self.orb)
+        for place in ("win.addEventListener('pagehide', () => {\n                stopPipStyles();",
+                      'const closePip = useCallback(() => {\n        stopPipStyles();'):
+            self.assertIn(place, self.orb, 'зеркало стилей не снимается, когда окно уходит')
+        # Очистка эффекта [pipWindow] идёт и при открытии окна (null → окно): без
+        # этой проверки зеркало снималось сразу и окно оставалось без стилей (стенд).
+        self.assertIn('useEffect(() => () => {\n        if (!pipWindow) return;\n        stopPipStyles();', self.orb)
 
     def test_окно_закрывается_вместе_с_сессией_и_крестиком(self):
         """В окне лежит переписка с базой знаний. Оставить его открытым над

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { isLowEndDevice } from '../../../utils/devicePerformance';
 import useMascotMood from '../mascot/useMascotMood.js';
-import catMood, { BLINK_MS, FRAMES, frameFor, lookSide, nextBlinkDelay } from './catMood.js';
+import catMood, { BLINK_MS, FRAMES, LOOK_HOLD_MS, frameFor, lookSide, nextBlinkDelay } from './catMood.js';
 import { CAT_LAYOUT } from './catLayout.js';
 import './cat-mascot.css';
 import logoUrl from './assets/cat-logo.webp';
@@ -95,7 +95,7 @@ function Extras({ emotion }) {
         case 'angry':
             marks = (
                 <>
-                    <path className="cat-x cat-x--vein cat-x--pulse" transform={`${at(p.forehead)} scale(1.2)`} d={VEIN} />
+                    <path className="cat-x cat-x--vein cat-x--pulse" transform={`${at(p.forehead, -4, 3)} scale(1.2)`} d={VEIN} />
                     <g className="cat-x--puff" transform={`${at([p.box[0], (p.box[1] + p.box[3]) / 2], -4, 2)} scale(1.3)`}>
                         <path className="cat-x cat-x--ink" d={PUFF} />
                         <path className="cat-x cat-x--ink" d="M5.6 -1.4H8.4M5.8 1.2H8.8" />
@@ -182,16 +182,26 @@ export default function CatMascot({ variant = 'orb', animated = true }) {
     }, [interactive]);
 
     /* Взгляд: весь котик чуть наклоняется к курсору (прямо в узел, мимо React),
-       а голова поворачивается кадром — только когда курсор перешёл порог. */
+       а голова поворачивается кадром — только когда курсор перешёл порог. Курсор
+       замер на LOOK_HOLD_MS — котик снова смотрит на человека и моргает: шарик
+       стоит у края экрана, и иначе голова почти всё время была бы повёрнута. */
+    const turn = useCallback((next) => {
+        if (next === sideRef.current) return;
+        sideRef.current = next;
+        setSide(next);
+    }, []);
+    const holdRef = useRef(0);
     const onLook = useCallback((x) => {
         if (REDUCED) return;
         if (leanRef.current) leanRef.current.style.transform = `rotate(${(x * 3).toFixed(2)}deg)`;
-        const next = lookSide(sideRef.current, x);
-        if (next !== sideRef.current) {
-            sideRef.current = next;
-            setSide(next);
-        }
-    }, []);
+        turn(lookSide(sideRef.current, x));
+        window.clearTimeout(holdRef.current);
+        holdRef.current = window.setTimeout(() => {
+            if (leanRef.current) leanRef.current.style.transform = '';
+            turn('center');
+        }, LOOK_HOLD_MS);
+    }, [turn]);
+    useEffect(() => () => window.clearTimeout(holdRef.current), []);
     const emotion = useMascotMood(rootRef, catMood, { interactive, onLook });
 
     const canBlink = interactive && animated && !REDUCED && emotion === 'normal' && side === 'center';

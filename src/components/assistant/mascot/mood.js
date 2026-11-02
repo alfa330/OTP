@@ -53,8 +53,9 @@ export function createMascotMood(script) {
                 if (clicks.length >= RAPID_CLICKS) {
                     return { ...hold(state, rapid, now + HOLD.rapid), clicks: [] };
                 }
-                // Щелчок, которым помощника закрыли, в счёт «шквала» идёт, но грусть оставляет.
-                if (now - state.closedAt < CLOSE_CLICK_MS) return { ...state, clicks };
+                // Щелчок, которым помощника закрыли (мышью — сразу после «закрыли», с
+                // клавиатуры — помечен closing), в счёт «шквала» идёт, но грусть оставляет.
+                if (event.closing || now - state.closedAt < CLOSE_CLICK_MS) return { ...state, clicks };
                 const emotion = cycle[state.cycle % cycle.length];
                 return { ...hold(state, emotion, now + HOLD.click), clicks, cycle: state.cycle + 1 };
             }

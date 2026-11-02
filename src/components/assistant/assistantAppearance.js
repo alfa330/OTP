@@ -31,14 +31,35 @@ export const normalizeAssistantAppearance = value => (
     MASCOT_APPEARANCES.includes(value) ? value : normalizeAssistantEffect(value)
 );
 
-export const assistantAppearanceKey = userId => (
-    userId == null ? null : `otp:assistant:appearance:${userId}`
-);
-
 /* Хэллоуин: облик по умолчанию — тыква, а выбор этих дней хранится отдельно.
    Кто выбор не трогал, после праздника увидит свой прежний облик; кто выбрал в
    праздник (тыкву или знак) — тот выбор за ним и остаётся. */
 const HALLOWEEN_SUFFIX = ':halloween-2026';
+
+export const assistantAppearanceKey = userId => (
+    userId == null ? null : `otp:assistant:appearance:${userId}`
+);
+
+/* Какие талисманы грузить со стартом портала, чтобы облик встал в шарик без смены
+   на глазах: выбранные в этом браузере (любым аккаунтом — ключ на каждого) и тыква
+   в праздник. Праздничный выбор после праздника не в счёт — решает основной ключ.
+   Закрытое хранилище (или его нет) — только праздничная тыква: остальной
+   талисман подгрузится, когда его покажут. */
+export function mascotsToPreload(storage, halloween = false) {
+    const chosen = new Set(halloween ? [PUMPKIN_APPEARANCE] : []);
+    try {
+        for (let i = 0; i < storage.length; i += 1) {
+            const key = storage.key(i) || '';
+            if (!key.startsWith('otp:assistant:appearance:') || key.endsWith(HALLOWEEN_SUFFIX)) continue;
+            const value = storage.getItem(key);
+            if (MASCOT_APPEARANCES.includes(value)) chosen.add(value);
+        }
+    } catch {
+        // см. выше
+    }
+    return chosen;
+}
+
 const fallback = halloween => (halloween ? PUMPKIN_APPEARANCE : DEFAULT_ASSISTANT_EFFECT);
 
 export function readAssistantEffect(key, halloween = isHalloweenTime()) {

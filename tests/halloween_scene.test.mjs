@@ -363,7 +363,8 @@ test('тыква в шарике — по выбранному облику, с�
     assert.match(orb, /const mascot = MASCOT_CHUNKS\.has\(effect\) \? effect : null;/);
     assert.match(orb, /\[PUMPKIN_APPEARANCE, \(\) => import\('\.\/pumpkin\/PumpkinMascot\.jsx'\)\]/);
     // В праздник (у всех) и после — у выбравших тыкву: грузится со стартом портала.
-    assert.match(orb, /const early = mascotsChosenHere\(\);\n\s+if \(isHalloweenTime\(\)\) early\.add\(PUMPKIN_APPEARANCE\);\n\s+early\.forEach\(loadMascot\);/);
+    // Кому что грузить заранее, решает mascotsToPreload (поведение — в assistant_cat.test.mjs).
+    assert.match(orb, /mascotsToPreload\(storage,\s*isHalloweenTime\(\)\)\.forEach\(loadMascot\)/);
     assert.match(orb, /loadedMascots\.set\(id, module\?\.default \|\| null\);/);
     assert.match(orb, /: <IcoreAssistantMark /, 'без тыквы — прежний знак');
     assert.doesNotMatch(orb, /<Suspense|lazy\(/, 'Suspense показал бы знак кадр-другой перед тыквой');

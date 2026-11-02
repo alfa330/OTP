@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import IcoreAssistantMark from './IcoreAssistantMark.jsx';
-import { CAT_APPEARANCE, PUMPKIN_APPEARANCE } from './assistantAppearance.js';
+import { CAT_APPEARANCE, PUMPKIN_APPEARANCE, mascotsToPreload } from './assistantAppearance.js';
 import { isHalloweenTime } from '../seasonal/halloween/halloweenWindow.js';
 import './assistant-orb.css';
 
@@ -11,7 +11,8 @@ import './assistant-orb.css';
    едет, на его месте прежний знак, а не доехал — знак насовсем, без экрана
    ошибки. Кому талисман нужен сразу (тыква в праздник — всем, потом — тем, кто
    выбрал облик), тем он грузится со стартом портала и встаёт в шарик без смены
-   на глазах. Map, а не объект: облик из хранилища не должен найти «constructor». */
+   на глазах (mascotsToPreload). Map, а не объект: облик из хранилища не должен
+   найти «constructor». */
 const MASCOT_CHUNKS = new Map([
     [PUMPKIN_APPEARANCE, () => import('./pumpkin/PumpkinMascot.jsx')],
     [CAT_APPEARANCE, () => import('./cat/CatMascot.jsx')],
@@ -27,26 +28,14 @@ const loadMascot = (id) => {
     return mascotPromises.get(id);
 };
 
-const mascotsChosenHere = () => {
-    const chosen = new Set();
-    try {
-        for (let i = 0; i < window.localStorage.length; i += 1) {
-            const key = window.localStorage.key(i) || '';
-            // Праздничный выбор после праздника не в счёт — облик решает основной ключ.
-            if (!key.startsWith('otp:assistant:appearance:') || key.endsWith(':halloween-2026')) continue;
-            const value = window.localStorage.getItem(key);
-            if (MASCOT_CHUNKS.has(value)) chosen.add(value);
-        }
-    } catch {
-        // Хранилище закрыто — талисман подгрузится, когда его покажут.
-    }
-    return chosen;
-};
-
 if (typeof window !== 'undefined') {
-    const early = mascotsChosenHere();
-    if (isHalloweenTime()) early.add(PUMPKIN_APPEARANCE);
-    early.forEach(loadMascot);
+    let storage = null;
+    try {
+        storage = window.localStorage;
+    } catch {
+        // Хранилище закрыто — mascotsToPreload обойдётся без него.
+    }
+    mascotsToPreload(storage, isHalloweenTime()).forEach(loadMascot);
 }
 
 const VARIANT_CLASS = {

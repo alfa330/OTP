@@ -6,10 +6,11 @@ Sleepy, Confused, Mischievous) и отдельный набросок спяще
 с прозрачным фоном (Cycles, на Mac — Metal). Затем build_assets.py режет кадры
 общей рамкой и сжимает в WebP для src/components/assistant/cat/assets.
 
-    B=/Applications/Blender.app/Contents/MacOS/Blender
+    B=/Applications/Blender.app/Contents/MacOS/Blender      # 5.2; сборщику нужны Pillow и cwebp
     CAT_SAMPLES=128 CAT_SIZE=1100 $B -b --factory-startup -P cat_models.py -- out    # ~6 мин на M4 Pro
-    CAT_FUR=0 CAT_ZOOM=1.6 CAT_SIZE=640 $B ... -- out happy sad   # черновик: без шерсти, крупно, две позы
     python build_assets.py out
+    # черновик — в ОТДЕЛЬНУЮ папку: без шерсти, крупно, только нужные позы (20 с)
+    CAT_FUR=0 CAT_ZOOM=1.6 CAT_SIZE=640 $B -b --factory-startup -P cat_models.py -- draft happy sad
 
 Кадры: спокойная поза (normal, голова к курсору look-left/right, моргание
 blink), девять эмоций листа, спящий клубочек (asleep) и портрет (portrait —
@@ -168,6 +169,8 @@ GREY = lin('#c4c7cd')
 GREY_MID = lin('#a8abb3')
 STRIPE = lin('#575a62')
 STRIPE_DARK = lin('#46494f')
+STRIPE_HEAD = lin('#4b4e56')
+TAIL_RING = lin('#686b73')
 BLUSH = lin('#f4a3a8')
 PAD_PINK = lin('#f39aa4')
 EAR_INNER = lin('#efc3c6')
@@ -272,7 +275,7 @@ def fur_material():
     return mat
 
 
-IRIS = 0.78           # радиус радужки в долях глаза
+IRIS = 0.88           # радиус радужки в долях глаза: белок — тонкий серпик, как на набросках
 
 
 def eye_material():
@@ -293,8 +296,8 @@ def eye_material():
     links.new(attr.outputs['Vector'], length.inputs[0])
     ring = nodes.new('ShaderNodeValToRGB')
     k = IRIS
-    stops = ((0.0, '#0a0705'), (0.38 * k, '#0a0705'), (0.43 * k, '#2b190f'), (0.72 * k, '#4d301f'),
-             (0.9 * k, '#382115'), (0.98 * k, '#1b100a'), (1.0 * k, '#20140e'), (1.03 * k, '#fbfbfd'),
+    stops = ((0.0, '#080504'), (0.4 * k, '#080504'), (0.45 * k, '#20130b'), (0.72 * k, '#3a2416'),
+             (0.9 * k, '#29180e'), (0.98 * k, '#140b06'), (1.0 * k, '#1a100a'), (1.025 * k, '#fbfbfd'),
              (1.0, '#f3f4f8'))
     ramp = ring.color_ramp
     while len(ramp.elements) < len(stops):
@@ -332,7 +335,7 @@ def eye_material():
     warm.data_type = 'RGBA'
     links.new(m2.outputs['Value'], sock(warm.inputs, 'Factor', 'VALUE'))
     links.new(ring.outputs['Color'], sock(warm.inputs, 'A', 'RGBA'))
-    sock(warm.inputs, 'B', 'RGBA').default_value = (*lin('#a87650'), 1.0)
+    sock(warm.inputs, 'B', 'RGBA').default_value = (*lin('#6e4a32'), 1.0)
     # Белок под верхним веком в лёгкой тени.
     sep_xy = nodes.new('ShaderNodeSeparateXYZ')
     links.new(xy.outputs['Vector'], sep_xy.inputs[0])
@@ -537,7 +540,7 @@ def pattern_head(part, P, Nn, t):
     warp = fbm(P, 3.0, seed=3) * 0.28
     # «М» на лбу: пять полос вдоль меридианов, к бровям тоньше и обрываются.
     taper = smoothstep(edge + 0.02, edge + 0.4, z)
-    fore = bands(theta / 0.3 + 0.5 + warp * 1.25, width=0.4 + 0.22 * taper, soft=0.12)
+    fore = bands(theta / 0.3 + 0.5 + warp * 1.25, width=0.46 + 0.22 * taper, soft=0.12)
     fore *= smoothstep(edge + 0.03, edge + 0.16, z) * smoothstep(0.78, 0.5, np.abs(theta))
     fore *= smoothstep(-0.35, 0.1, fbm(P, 5.5, seed=17) + 0.25 - 0.3 * smoothstep(0.75, 0.95, z))
     # По бокам головы — две поперечные полосы, рваные.
@@ -546,7 +549,7 @@ def pattern_head(part, P, Nn, t):
     side *= smoothstep(-0.3, 0.2, fbm(P, 4.5, seed=13) + 0.2)
     back = bands(theta / 0.32 + warp, width=0.3, soft=0.18) * smoothstep(2.1, 2.6, np.abs(theta)) * cap
     stripes = np.clip(np.maximum(np.maximum(fore, side), back), 0, 1) * (0.8 + 0.2 * fbm(P, 7.0, seed=5))
-    col = mix_rows(col, np.tile(STRIPE, (n, 1)), np.clip(stripes * 1.1, 0, 1) * cap)
+    col = mix_rows(col, np.tile(STRIPE_HEAD, (n, 1)), np.clip(stripes * 1.15, 0, 1) * cap)
     # Румянец на щёчках под глазами.
     face = part.params['face']
     u, v = L[:, 0], L[:, 2]
@@ -653,9 +656,10 @@ def pattern_tail(part, P, Nn, t):
     """Хвост: серый в тёмных кольцах, кончик тёмный, шерсть длиннее — пушистый."""
     warp = fbm(P, 4.0, seed=51) * 0.08
     rings = bands(t * part.params.get('rings', 4.2) + 0.1 + warp, width=0.5, soft=0.16)
-    col = mix_rows(np.tile(lin('#d0d2d7'), (len(P), 1)), np.tile(STRIPE_DARK, (len(P), 1)), rings)
+    # Кольца — тоном полос спины, не чёрные: на шарике хвост иначе самое тёмное пятно.
+    col = mix_rows(np.tile(lin('#d0d2d7'), (len(P), 1)), np.tile(TAIL_RING, (len(P), 1)), rings)
     tip = smoothstep(0.86, 0.97, t)
-    col = mix_rows(col, np.tile(STRIPE_DARK, (len(P), 1)), tip * 0.9)
+    col = mix_rows(col, np.tile(TAIL_RING, (len(P), 1)), tip * 0.9)
     base = smoothstep(0.12, 0.0, t)
     col = mix_rows(col, np.tile(GREY, (len(P), 1)), base)
     path = part.params['path']
@@ -959,7 +963,7 @@ def build_eye(face, prefix, spec, mats):
     ring_pts = verts3[1 + (rings - 1) * n: 1 + rings * n]
     radii = []
     for (x, y) in outline:
-        radii.append(0.5 + 1.25 * smooth01((y + 0.1) / 0.9))
+        radii.append(0.14 + 1.9 * smooth01((y + 0.05) / 0.75))   # веко сверху, снизу — волосок
     tube(f'{prefix}Line', ring_pts, spec.get('line', 0.012), mats['line'], radii, cyclic=True)
     # Блики — на роговице над радужкой: едут вместе со взглядом.
     for k, (hx, hy, hr) in enumerate(spec.get('sparks', [(0.2, 0.22, 0.17), (-0.22, -0.24, 0.075)])):
@@ -1081,52 +1085,55 @@ def rounded_triangle(cx, cy, w, h, r=0.35, n=12):
 
 # ---------------------------------------------------------------- уши
 
-def build_ear(name, head, side, droop, mats):
-    """Вислое ушко: подушечка-треугольник лежит на голове, кончик смотрит вперёд-вниз-наружу."""
+def build_ear(name, head, side, droop, mats, face):
+    """Вислое ушко: гладкий треугольный клапан на верхнем углу головы, кончик вперёд-вниз-наружу.
+
+    Место — лучом из центра головы до её настоящей поверхности (виски и щёчки
+    меняют форму, эллипсоид врал бы)."""
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=40, v_segments=20, radius=1.0)
     hp = head.params
-    w_half, h_half, thick = hp.get('ear_size', (0.27, 0.21, 0.065))
+    w_half, h_half, thick = hp.get('ear_size', (0.3, 0.22, 0.065))
     for v in bm.verts:
         x, y, z = v.co
-        w = 0.5 + 0.5 * (z + 1) / 2                     # широкий сгиб сверху, узкий кончик внизу
+        w = 0.32 + 0.68 * (z + 1) / 2                    # широкий сгиб сверху, острый кончик внизу
         v.co = Vector((x * w_half * w, y * thick, z * h_half))
-        v.co.y += 1.1 * (v.co.x ** 2) + 0.8 * (v.co.z ** 2)   # края загнуты к голове (+y)
+        v.co.y += 1.0 * (v.co.x ** 2) + 0.7 * (v.co.z ** 2)   # края загнуты к голове (+y)
     mesh = bpy.data.meshes.new(name)
     bm.to_mesh(mesh)
     bm.free()
     mesh.shade_smooth()
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
-    radii = Vector(hp['radii'])
-    az = math.radians(hp.get('ear_az', 56)) * side
-    el = math.radians(hp.get('ear_el', 45) - droop * 10)
-    d = Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el)))
-    surface = Vector((d.x * radii.x, d.y * radii.y, d.z * radii.z))
-    normal = Vector((d.x / radii.x, d.y / radii.y, d.z / radii.z)).normalized()
-    up = Vector((0, 0, 1))
+    az = math.radians(hp.get('ear_az', 50)) * side
+    el = math.radians(hp.get('ear_el', 50) - droop * 12)
+    d_local = Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el)))
+    R = head.frame.to_3x3()
+    centre = head.frame.translation
+    direction = (R @ d_local).normalized()
+    loc, normal, _, _ = face.bvh.ray_cast(centre, direction, 5.0)
+    if loc is None:
+        radii = Vector(hp['radii'])
+        loc = head.frame @ Vector((d_local.x * radii.x, d_local.y * radii.y, d_local.z * radii.z))
+        normal = direction
+    if normal.dot(direction) < 0:
+        normal = -normal
+    up = R @ Vector((0, 0, 1))
     z_axis = (up - normal * up.dot(normal)).normalized()
     y_axis = -normal
     x_axis = y_axis.cross(z_axis).normalized()
     basis = Matrix((x_axis, y_axis, z_axis)).transposed()
     tilt = Matrix.Rotation(math.radians((hp.get('ear_tilt', 30) + droop * 16) * side), 3, normal)
-    basis = tilt @ basis
-    local = Matrix.Translation(surface + normal * hp.get('ear_lift', 0.05)) @ basis.to_4x4()
-    obj.matrix_world = head.frame @ local
-    # окрас уха: светло-серое, полоса поперёк, внутренняя сторона прижата к голове
+    obj.matrix_world = Matrix.Translation(loc + normal * hp.get('ear_lift', 0.035)) @ (tilt @ basis).to_4x4()
+    # Окрас — гладкий светло-серый, без полос (на набросках ушко однотонное).
     P, Nn = mesh_arrays(obj)
     n = len(P)
-    co = np.empty(n * 3)
-    mesh.vertices.foreach_get('co', co)
-    co = co.reshape(-1, 3)
-    col = np.tile(lin('#d7d9de'), (n, 1))
-    stripe = bands(co[:, 2] / 0.12 + 0.3 + 0.5 * co[:, 0], width=0.36, soft=0.25)
-    col = mix_rows(col, np.tile(GREY_MID, (n, 1)), stripe * 0.75)
+    col = np.tile(lin('#d8dadf'), (n, 1))
     attr = mesh.color_attributes.new('col', 'FLOAT_COLOR', 'POINT')
     attr.data.foreach_set('color', np.concatenate([col, np.ones((n, 1))], axis=1).astype(np.float32).ravel())
     mesh.materials.append(mats['skin'])
     comb = np.tile(np.array(obj.matrix_world.to_3x3() @ Vector((0, 0, -1))), (n, 1))
-    return obj, dict(P=P, N=Nn, col=col, length=np.full(n, 0.022), comb=comb, density=np.ones(n))
+    return obj, dict(P=P, N=Nn, col=col, length=np.full(n, 0.02), comb=comb, density=np.ones(n))
 
 
 # ---------------------------------------------------------------- позы
@@ -1140,7 +1147,9 @@ def head_part(center, rot, face_params, droop=0.0):
     # Голова — широкий эллипсоид, щёчки и мордочка — элементы в её системе координат.
     head.local((0, 0, 0), HEAD_RADII)
     for s in (-1, 1):
-        head.local((0.32 * s, -0.18, -0.26), (0.42, 0.34, 0.32), stiffness=1.9)
+        # Виски — голова круглая с широким лбом, а не «колокол» с узкой макушкой.
+        head.local((0.27 * s, 0.03, 0.15), (0.38, 0.44, 0.34), stiffness=1.45)
+        head.local((0.3 * s, -0.17, -0.26), (0.38, 0.32, 0.3), stiffness=1.8)
     head.local((0, -0.42, -0.16), (0.26, 0.17, 0.17), stiffness=1.3)
     return head
 
@@ -1237,42 +1246,49 @@ def pose_excited(face=None):
 
 
 def pose_stand(yaw=55.0, head_rot=(8, 0, 18), tail=None, paw_lift=False, droop=0.0, face=None):
-    """Angry и Mischievous: стоит на четырёх лапах вполоборота, хвост трубой."""
+    """Angry и Mischievous: стоит на четырёх лапах вполоборота, хвост трубой.
+
+    Mischievous крадётся: ближняя передняя лапа поднята на уровень груди и
+    согнута в запястье, кисть висит вниз (как на наброске)."""
     parts = []
     psi = math.radians(yaw)
     f = Vector((math.sin(psi), -math.cos(psi), 0.0))       # вперёд, к голове
     l = Vector((math.cos(psi), math.sin(psi), 0.0))        # вбок; +l — дальний от камеры бок
-    c = Vector((-0.05, 0.12, 0.62))
+    c = Vector((-0.05, 0.12, 0.72))                        # живот выше — лапы видны
     head = head_part(c + f * 0.6 + Vector((0, 0, 0.64)), head_rot, face or default_face(), droop)
     parts.append(head)
     torso = Part('torso', 'torso', frame_matrix(c, (90, 0, yaw)), radii=(0.46, 0.44, 0.7),
                  comb=(0.0, 0.3, -1.0))
-    torso.local((0, 0, 0), (0.46, 0.44, 0.66))
-    torso.local((0, -0.02, 0.42), (0.44, 0.44, 0.38), stiffness=1.8)
-    torso.local((0, 0.02, -0.42), (0.47, 0.44, 0.4), stiffness=1.8)
-    torso.local((0, -0.14, 0.0), (0.38, 0.32, 0.5), stiffness=1.3)
+    torso.local((0, 0, 0), (0.46, 0.42, 0.66))
+    torso.local((0, -0.02, 0.42), (0.44, 0.42, 0.38), stiffness=1.8)
+    torso.local((0, 0.02, -0.42), (0.47, 0.42, 0.4), stiffness=1.8)
+    torso.local((0, -0.12, 0.0), (0.36, 0.3, 0.48), stiffness=1.3)
     parts.append(torso)
+
+    def ground(point):
+        return Vector((point.x, point.y, 0.0))
+
     for s in (-1, 1):
         side = l * (0.25 * s)
-        shoulder = c + f * 0.44 + side + Vector((0, 0, -0.02))
+        shoulder = c + f * 0.44 + side + Vector((0, 0, -0.04))
         if paw_lift and s == -1:
-            elbow = shoulder + f * 0.3 + Vector((0, 0, -0.18))
-            paw_at = shoulder + f * 0.5 + Vector((0, 0, -0.26))
-            add_leg(parts, s, [shoulder, elbow, paw_at], [0.165, 0.155, 0.15], tuple(l * s + f * 0.3), sock=0.78)
-            add_paw(parts, f'paw{s}', tuple(paw_at + f * 0.08 + Vector((0, 0, -0.04))), (0.16, 0.2, 0.11),
-                    (-28, 0, yaw))
+            elbow = shoulder + f * 0.26 + Vector((0, 0, -0.14))
+            wrist = shoulder + f * 0.44 + Vector((0, 0, -0.12))
+            add_leg(parts, s, [shoulder, elbow, wrist], [0.165, 0.155, 0.15], tuple(l * s + f * 0.3), sock=0.8)
+            add_paw(parts, f'paw{s}', tuple(wrist + f * 0.06 + Vector((0, 0, -0.1))), (0.16, 0.2, 0.11),
+                    (60, 0, yaw))
         else:
-            paw_at = c + f * 0.5 + side
-            add_leg(parts, s, [shoulder, paw_at + Vector((0, 0, -0.3)), paw_at + Vector((0, 0, -0.46))],
+            foot = ground(c + f * 0.5 + side)
+            add_leg(parts, s, [shoulder, foot + Vector((0, 0, 0.32)), foot + Vector((0, 0, 0.16))],
                     [0.165, 0.16, 0.155], tuple(l * s + f * 0.3), sock=0.78)
-            add_paw(parts, f'paw{s}', tuple(paw_at + f * 0.06 + Vector((0, 0, -0.52))), (0.16, 0.2, 0.1), (0, 0, yaw))
+            add_paw(parts, f'paw{s}', tuple(foot + f * 0.06 + Vector((0, 0, 0.1))), (0.16, 0.2, 0.1), (0, 0, yaw))
         hip = c - f * 0.42 + l * (0.27 * s)
         add_haunch(parts, s, tuple(hip + Vector((0, 0, -0.02))), (0.26, 0.34, 0.32), (0, 0, yaw),
                    outward=tuple(l * s))
-        foot_at = c - f * 0.38 + l * (0.27 * s)
-        add_leg(parts, 10 + s, [hip + Vector((0, 0, -0.1)), foot_at + Vector((0, 0, -0.4))], [0.16, 0.15],
+        foot = ground(c - f * 0.38 + l * (0.27 * s))
+        add_leg(parts, 10 + s, [hip + Vector((0, 0, -0.1)), foot + Vector((0, 0, 0.2))], [0.16, 0.15],
                 tuple(l * s), sock=0.75, stripes=2.0)
-        add_paw(parts, f'foot{s}', tuple(foot_at + f * 0.05 + Vector((0, 0, -0.52))), (0.155, 0.2, 0.1), (0, 0, yaw))
+        add_paw(parts, f'foot{s}', tuple(foot + f * 0.05 + Vector((0, 0, 0.1))), (0.155, 0.2, 0.1), (0, 0, yaw))
     rear = c - f * 0.6
     pts = tail or [rear + Vector((0, 0, 0.12)), rear - f * 0.22 + Vector((0, 0, 0.42)),
                    rear - f * 0.3 + Vector((0, 0, 0.82)), rear - f * 0.16 + Vector((0, 0, 1.12)),
@@ -1305,21 +1321,23 @@ def pose_crouch(face=None):
 def pose_curl(face=None):
     """Спит клубочком (второй набросок): голова на лапках, хвост обнимает спереди."""
     parts = []
-    head = head_part((0.42, -0.28, 0.6), (12, 8, 14), face or default_face(), droop=0.35)
+    head = head_part((0.42, -0.22, 0.68), (12, 8, 14), face or default_face(), droop=0.35)
     parts.append(head)
     torso = Part('torso', 'torso', frame_matrix((-0.32, 0.24, 0.42), (90, 0, 90)), radii=(0.56, 0.42, 0.78))
     torso.local((0, 0, 0), (0.56, 0.42, 0.72))
     torso.local((0, 0.04, -0.42), (0.62, 0.44, 0.42), stiffness=1.8)
     torso.local((0, -0.02, 0.4), (0.5, 0.38, 0.4), stiffness=1.8)
     parts.append(torso)
-    add_leg(parts, -1, [(0.1, -0.12, 0.24), (0.2, -0.46, 0.12)], [0.15, 0.145], (0.0, -1.0, 0.0), sock=0.55)
-    add_paw(parts, 'paw-1', (0.22, -0.62, 0.1), (0.15, 0.19, 0.095), (0, 0, -10))
-    add_leg(parts, 1, [(0.36, -0.08, 0.24), (0.58, -0.4, 0.12)], [0.15, 0.145], (0.0, -1.0, 0.0), sock=0.55)
-    add_paw(parts, 'paw1', (0.66, -0.56, 0.1), (0.15, 0.19, 0.095), (0, 0, 18))
+    # Голова лежит на двух лапках: они выходят из-под подбородка белыми «булочками».
+    add_leg(parts, -1, [(0.1, -0.16, 0.24), (0.16, -0.62, 0.12)], [0.15, 0.145], (0.0, -1.0, 0.0), sock=0.5)
+    add_paw(parts, 'paw-1', (0.15, -0.84, 0.1), (0.165, 0.2, 0.1), (0, 0, -8))
+    add_leg(parts, 1, [(0.4, -0.14, 0.24), (0.56, -0.58, 0.12)], [0.15, 0.145], (0.0, -1.0, 0.0), sock=0.5)
+    add_paw(parts, 'paw1', (0.6, -0.8, 0.1), (0.165, 0.2, 0.1), (0, 0, 14))
     add_haunch(parts, -1, (-0.6, -0.04, 0.42), (0.34, 0.4, 0.34), (0, 0, 10), outward=(0.0, -1.0, 0.2))
     add_paw(parts, 'foot-1', (-0.3, -0.44, 0.09), (0.14, 0.19, 0.085), (0, 0, -30))
-    add_tail(parts, [(-1.02, 0.36, 0.2), (-1.18, -0.02, 0.19), (-0.92, -0.44, 0.16), (-0.42, -0.64, 0.14),
-                     (0.02, -0.7, 0.13)], [0.17, 0.19, 0.2, 0.19, 0.16])
+    # Хвост обвивает бок и кончиком выходит вперёд слева — не поперёк всего низа.
+    add_tail(parts, [(-1.02, 0.36, 0.2), (-1.22, 0.0, 0.19), (-1.1, -0.36, 0.17), (-0.8, -0.58, 0.15),
+                     (-0.46, -0.68, 0.14)], [0.17, 0.19, 0.2, 0.19, 0.16])
     return parts, head
 
 
@@ -1468,10 +1486,11 @@ def _m_o_small(face, mats):
 
 @mouth('wavy')
 def _m_wavy(face, mats):
-    top = [(-0.08, -0.05), (-0.055, -0.035), (-0.027, -0.05), (0.0, -0.036), (0.027, -0.05), (0.055, -0.035),
-           (0.08, -0.05)]
-    bottom = [(0.076, -0.08), (0.048, -0.102), (0.0, -0.11), (-0.048, -0.102), (-0.076, -0.08)]
-    return mouth_open(face, mats, top + bottom, tongue=(0.0, -0.092, 0.04, 0.014))
+    # Испуг: верх дрожит волной, низ «М» — середина выше уголков, уголки опущены.
+    top = [(-0.08, -0.052), (-0.055, -0.03), (-0.028, -0.052), (0.0, -0.033), (0.028, -0.052), (0.055, -0.03),
+           (0.08, -0.052)]
+    bottom = [(0.082, -0.114), (0.045, -0.1), (0.0, -0.088), (-0.045, -0.1), (-0.082, -0.114)]
+    return mouth_open(face, mats, top + bottom, tongue=(0.0, -0.077, 0.034, 0.009))
 
 
 @mouth('yawn')
@@ -1496,12 +1515,13 @@ def tears(face, mats):
         inner = -side
         u = EYE_CX * side + (-0.62) * EYE_RX * inner
         v = EYE_CY - EYE_RY * 0.78
-        drop = [(u + math.cos(a) * 0.04, v - 0.012 + math.sin(a) * 0.036) for a in
+        # Крупная голубая капля, как на наброске (в шарике мелкая не читалась).
+        drop = [(u + math.cos(a) * 0.058, v - 0.02 + math.sin(a) * 0.052) for a in
                 [2 * math.pi * k / 24 for k in range(24)]]
-        drop = [(x, y + (0.03 if y > v + 0.01 and abs(x - u) < 0.012 else 0.0)) for (x, y) in drop]
-        face_patch(face, f'Tear{side}', drop, mats['tear'], lift=0.03, dome=0.018)
-        face_patch(face, f'TearSpark{side}', ellipse2(u - 0.012, v + 0.002, 0.009, 0.008, n=12), mats['spark'],
-                   lift=0.052)
+        drop = [(x, y + (0.044 if y > v + 0.012 and abs(x - u) < 0.017 else 0.0)) for (x, y) in drop]
+        face_patch(face, f'Tear{side}', drop, mats['tear'], lift=0.032, dome=0.024)
+        face_patch(face, f'TearSpark{side}', ellipse2(u - 0.017, v - 0.004, 0.013, 0.012, n=12), mats['spark'],
+                   lift=0.06)
 
 
 def build_face(face, mats, spec):
@@ -1580,7 +1600,7 @@ EMOTIONS = {
     'excited': (lambda f: pose_excited(face=f),
                 dict(eyes=dict(look=(0.0, 0.06), scale=1.06, star=(0.06, 0.16, 0.36),
                                sparks=[(-0.26, -0.28, 0.08), (0.3, -0.12, 0.05)]), mouth='grin')),
-    'sad': (lambda f: pose_sit(head_rot=(10, 0, 0), head_shift=(0, -0.02, -0.04), lean=4, droop=0.8, face=f),
+    'sad': (lambda f: pose_sit(head_rot=(18, 0, 0), head_shift=(0, -0.04, -0.07), lean=5, droop=0.9, face=f),
             dict(eyes=dict(look=(0.0, -0.02), lids=lid(LID_SAD)), mouth='frown', tears=True)),
     'angry': (lambda f: pose_stand(yaw=55, head_rot=(9, 0, 16), face=f),
               dict(eyes=dict(look=(0.06, 0.02), lids=lid(LID_ANGRY)), mouth='pout')),
@@ -1638,7 +1658,7 @@ def build_pose(parts, head, mats, face_spec):
     mask_face_fur(head_fields, head, footprint)
     grow_fur('HeadFur', skull, head_fields, mats['fur'], seed=3)
     for side in (-1, 1):
-        ear, ear_fields = build_ear(f'Ear{side}', head, side, head.params.get('droop', 0.0), mats)
+        ear, ear_fields = build_ear(f'Ear{side}', head, side, head.params.get('droop', 0.0), mats, face)
         grow_fur(f'EarFur{side}', ear, ear_fields, mats['fur'], per_unit2=FUR_PER_UNIT2 * 0.8, seed=5 + side,
                  radius=0.0034)
     return body
@@ -1681,7 +1701,8 @@ def main():
         body = build_pose(parts, head, mats, face_spec)
         if key == 'portrait':
             body.hide_render = True
-            bpy.data.objects['BodyFur'].hide_render = True
+            if bpy.data.objects.get('BodyFur'):
+                bpy.data.objects['BodyFur'].hide_render = True
             centre = head.frame @ Vector((0.0, 0.0, 0.08))
             cam.data.lens = 105 * 2.3
             cam.location = centre + (cam.location - Vector((0.0, 0.0, 1.1))).normalized() * 14.0

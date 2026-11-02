@@ -3,7 +3,8 @@
  * талисманов — ../mascot/mood.js; здесь — какая поза котика на какой жест.
  * Проверяет tests/assistant_cat.test.mjs; сам котик — CatMascot.jsx.
  *
- *   спокойно        → сидит (normal), моргает, поворачивает голову к курсору;
+ *   спокойно        → сидит (normal), моргает; курсор двигается — поглядывает
+ *                     на него, замер — снова смотрит прямо;
  *   курсор над котиком → Happy;  нажатие → Surprised;
  *   щелчок          → по кругу: Excited, Mischievous, Confused, Happy, Surprised;
  *                     4 щелчка подряд → Angry;
@@ -42,9 +43,13 @@ export const { initialMood, moodReducer, displayEmotion, nextChangeAt } = catMoo
 export default catMood;
 
 /* Голова к курсору: дальше LOOK_TURN — повернуть, ближе LOOK_BACK — снова
-   прямо. Зазор между порогами — чтобы на границе голова не дёргалась. */
+   прямо. Зазор между порогами — чтобы на границе голова не дёргалась. Курсор
+   замер на LOOK_HOLD_MS — голова снова прямо: котик «оглядывается» на движение
+   и возвращается к человеку (разбор 02.11: шарик у правого края, и без этого
+   голова была повёрнута влево почти всё время, а моргание не наступало). */
 export const LOOK_TURN = 0.5;
 export const LOOK_BACK = 0.3;
+export const LOOK_HOLD_MS = 2500;
 
 export const lookSide = (current, x) => {
     if (x >= LOOK_TURN) return 'right';
