@@ -29624,15 +29624,33 @@ class Database:
                     UPDATE users SET direction_id = NULL WHERE direction_id = ANY(%s)
                 """, (removed_ids,))
 
-    def get_operator_credentials(self, operator_id, supervisor_id):
-        """Получить логин и хеш пароля оператора с проверкой принадлежности супервайзеру"""
+    def get_active_operators_for_access(self, department_ids=None, supervisor_id=None):
+        """Работающие операторы для «Управления операторами🔑» в боте (задача #380).
+
+        Круг тот же, что пускает сайт (_requester_can_access_target_user): операторы отделов
+        department_ids, а у СВ без отдела — только записанные за ним (supervisor_id). Уволенных
+        нет: менять им вход незачем. Группа оператора — его СВ, имя группы — имя СВ.
+        """
+        departments = [int(item) for item in (department_ids or ())]
+        if not departments and supervisor_id is None:
+            return []
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.login 
+                SELECT u.id, u.name, u.supervisor_id, s.name
                 FROM users u
-                WHERE u.id = %s AND u.role = 'operator' AND u.supervisor_id = %s
-            """, (operator_id, supervisor_id))
-            return cursor.fetchone()
+                LEFT JOIN users s ON s.id = u.supervisor_id
+                WHERE u.role = 'operator'
+                  AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+                  AND CASE WHEN cardinality(%(departments)s::int[]) > 0
+                           THEN u.department_id = ANY(%(departments)s::int[])
+                           ELSE u.supervisor_id = %(supervisor_id)s
+                      END
+                ORDER BY u.name, u.id
+            """, {'departments': departments, 'supervisor_id': supervisor_id})
+            return [
+                {'id': row[0], 'name': row[1], 'supervisor_id': row[2], 'supervisor_name': row[3]}
+                for row in cursor.fetchall()
+            ]
 
     def migrate_daily_fines_from_daily_hours(self):
         """
@@ -29686,18 +29704,7 @@ class Database:
                     RETURNING id
                 """, (new_login, operator_id))
                 return cursor.fetchone() is not None
-    
-    def update_operator_password(self, operator_id, supervisor_id, new_password):
-        """Обновить пароль оператора с проверкой принадлежности"""
-        password_hash = pbkdf2_sha256.hash(new_password)
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                UPDATE users SET password_hash = %s
-                WHERE id = %s AND role = 'operator' AND supervisor_id = %s
-                RETURNING id
-            """, (password_hash, operator_id, supervisor_id))
-            return cursor.fetchone() is not None
-            
+
     def get_user(self, **kwargs):
         from psycopg2 import sql
         conditions = []

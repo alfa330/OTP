@@ -60149,127 +60149,272 @@ async def handle_approve_reval(callback_query: types.CallbackQuery, state: FSMCo
 
 # === Супервайзерам =============================================================================================
 
+# «Управление операторами🔑» (задача #380): СВ меняет логин и пароль любому оператору своего отдела, а не
+# только тем, у кого записан руководителем, — как на сайте с 28.10.2026, граница та же
+# (_requester_can_access_target_user). Список по группам: первым экраном свои операторы, остальные группы
+# отдела — кнопкой ниже. В СЗоВ 89 работающих операторов в четырёх группах, одной простынёй их не пролистать.
+_SV_CREDENTIALS_PAGE_SIZE = 25
+
+
+def _sv_credentials_operators(requester):
+    """Работающие операторы, которым СВ меняет вход из бота: отдел тот же, что пускает сайт."""
+    requester_id = int(requester[0])
+    department_ids = sorted(_headed_department_ids(requester_id))
+    if not department_ids:
+        own_department_id = db.get_user_department_id(requester_id)
+        if own_department_id is not None:
+            department_ids = [own_department_id]
+    if department_ids:
+        return db.get_active_operators_for_access(department_ids=department_ids)
+    # У СВ без отдела и сайт пускает только к записанным за ним операторам.
+    return db.get_active_operators_for_access(supervisor_id=requester_id)
+
+
+def _sv_credentials_target_allowed(requester, target_user):
+    """Пускает ли бот СВ к логину и паролю этой учётки: только оператор и только в границе сайта."""
+    if not requester or not target_user or not _is_supervisor_role(requester[3]):
+        return False
+    if _normalize_user_role(target_user[3]) != 'operator':
+        return False
+    return _requester_can_access_target_user(
+        requester,
+        int(requester[0]),
+        target_user,
+        allow_self=False,
+        supervisor_target_roles=('operator',)
+    )
+
+
+def _sv_credentials_screen(requester_id, operators, group_id=None, page=0):
+    """Текст и кнопки экрана «Управление операторами🔑».
+
+    group_id — чья группа на экране: id её СВ, 0 — операторы без СВ. None или группа, которой
+    в отделе больше нет, — список групп. Первым экраном СВ видит свою группу, а без своих
+    операторов — сразу список групп."""
+    requester_id = int(requester_id)
+    groups = {}
+    for item in operators or ():
+        key = int(item.get('supervisor_id') or 0)
+        group = groups.setdefault(key, {'name': item.get('supervisor_name') or '', 'operators': []})
+        group['operators'].append(item)
+    if not groups:
+        return "<b>У вас нет операторов</b>", None
+
+    def title(key):
+        if key == requester_id:
+            return 'Ваша группа'
+        return groups[key]['name'] or ('Без супервайзера' if not key else f'Группа #{key}')
+
+    ikb = InlineKeyboardMarkup(row_width=1)
+    if group_id is None or group_id not in groups:
+        for key in sorted(groups, key=lambda key: (key != requester_id, not key, title(key).lower(), key)):
+            ikb.add(InlineKeyboardButton(
+                text=f"{title(key)} · {len(groups[key]['operators'])}",
+                callback_data=f"credg_{key}_0"
+            ))
+        return "<b>Группы вашего отдела</b>\nВыберите группу:", ikb
+
+    members = groups[group_id]['operators']
+    pages = (len(members) + _SV_CREDENTIALS_PAGE_SIZE - 1) // _SV_CREDENTIALS_PAGE_SIZE
+    page = min(max(int(page or 0), 0), pages - 1)
+    start = page * _SV_CREDENTIALS_PAGE_SIZE
+    for item in members[start:start + _SV_CREDENTIALS_PAGE_SIZE]:
+        ikb.add(InlineKeyboardButton(text=item['name'] or f"Оператор #{item['id']}",
+                                     callback_data=f"cred_{item['id']}"))
+    flip = []
+    if page > 0:
+        flip.append(InlineKeyboardButton('◀️', callback_data=f"credg_{group_id}_{page - 1}"))
+    if page < pages - 1:
+        flip.append(InlineKeyboardButton('▶️', callback_data=f"credg_{group_id}_{page + 1}"))
+    if flip:
+        ikb.row(*flip)
+    if group_id != requester_id:
+        ikb.add(InlineKeyboardButton('‹ Группы отдела', callback_data='credgl'))
+    elif len(groups) > 1:
+        ikb.add(InlineKeyboardButton('👥 Другие группы отдела', callback_data='credgl'))
+
+    text = "<b>Выберите оператора для управления доступом:</b>"
+    if group_id != requester_id:
+        heading = f'Группа: {title(group_id)}' if group_id else 'Операторы без супервайзера'
+        text = f"<b>{html.escape(heading)}</b>\nВыберите оператора для управления доступом:"
+    if pages > 1:
+        text += f"\nСтраница {page + 1} из {pages}"
+    return text, ikb
+
+
+async def _sv_credentials_busy(callback, state):
+    """Пока бот ждёт логин или пароль оператора, кнопки старых экранов не перебивают ввод: иначе
+    набранное ушло бы оператору, выбранному раньше, а не тому, что на экране. Чужие диалоги не
+    держат: в них «Отмены ❌» на клавиатуре может и не быть."""
+    if await state.get_state() != ChangeCredentials.waiting_for_value.state:
+        return False
+    await callback.answer('Сначала введите значение или нажмите «Отмена ❌»', show_alert=True)
+    return True
+
+
 @dp.message_handler(regexp='Управление операторами🔑')
 async def manage_operators_credentials(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
-    if user and user[3] == 'sv':
-        operators = db.get_operators_by_supervisor(user[0])
-        if not operators:
+    if user and _is_supervisor_role(user[3]):
+        text, ikb = _sv_credentials_screen(user[0], _sv_credentials_operators(user), group_id=int(user[0]))
+        if ikb is None:
             await bot.send_message(
                 chat_id=message.from_user.id,
-                text="<b>У вас нет операторов</b>",
+                text=text,
                 parse_mode='HTML',
                 reply_markup=ReplyKeyboardMarkup(resize_keyboard=True).add(KeyboardButton('Назад 🔙'))
             )
             return
 
-        ikb = InlineKeyboardMarkup(row_width=1)
-        for op in operators:
-            ikb.insert(InlineKeyboardButton(text=op['name'], callback_data=f"cred_{op['id']}"))
-        
         await bot.send_message(
             chat_id=message.from_user.id,
-            text="<b>Выберите оператора для управления доступом:</b>",
+            text=text,
             parse_mode='HTML',
             reply_markup=ikb
         )
     await message.delete()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('cred_'))
-async def operator_credentials_menu(callback: types.CallbackQuery):
-    operator_id = int(callback.data.split('_')[1])
+# «cred_back» — «Назад» с экранов до #380: такие сообщения остались в чатах СВ.
+@dp.callback_query_handler(
+    lambda c: c.data in ('credgl', 'cred_back') or bool(re.fullmatch(r'credg_\d+_\d+', c.data or '')),
+    state='*'
+)
+async def operator_credentials_list(callback: types.CallbackQuery, state: FSMContext):
+    if await _sv_credentials_busy(callback, state):
+        return
     user = db.get_user(telegram_id=callback.from_user.id)
-    
-    if user and user[3] == 'sv':
-        operator = db.get_operator_credentials(operator_id, user[0])
-        if not operator:
-            await bot.answer_callback_query(callback.id, text="Оператор не найден")
-            return
-
-        ikb = InlineKeyboardMarkup(row_width=2)
-        ikb.add(
-            InlineKeyboardButton("Изменить логин", callback_data=f"chlogin_{operator_id}"),
-            InlineKeyboardButton("Изменить пароль", callback_data=f"chpass_{operator_id}")
-        )
-        ikb.add(InlineKeyboardButton("Назад", callback_data="cred_back"))
-
-        await bot.edit_message_text(
-            chat_id=callback.from_user.id,
-            message_id=callback.message.message_id,
-            text=f"<b>Управление доступом оператора</b>\n\nЛогин: <code>{operator[1]}</code>",
-            parse_mode='HTML',
-            reply_markup=ikb
-        )
-
-@dp.callback_query_handler(lambda c: c.data.startswith('chlogin_'))
-async def change_login_start(callback: types.CallbackQuery, state: FSMContext):
-    operator_id = int(callback.data.split('_')[1])
-    await state.update_data(operator_id=operator_id, action="login")
+    if not user or not _is_supervisor_role(user[3]):
+        await callback.answer()
+        return
+    group_id, page = None, 0
+    if callback.data == 'cred_back':
+        group_id = int(user[0])
+    elif callback.data != 'credgl':
+        _, group_raw, page_raw = callback.data.split('_')
+        group_id, page = int(group_raw), int(page_raw)
+    text, ikb = _sv_credentials_screen(user[0], _sv_credentials_operators(user), group_id=group_id, page=page)
+    await callback.answer()
     await bot.edit_message_text(
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
-        text="Введите новый логин для оператора:",
-        reply_markup=None
+        text=text,
+        parse_mode='HTML',
+        reply_markup=ikb
     )
-    await ChangeCredentials.waiting_for_value.set()
 
-@dp.callback_query_handler(lambda c: c.data.startswith('chpass_'))
-async def change_password_start(callback: types.CallbackQuery, state: FSMContext):
-    operator_id = int(callback.data.split('_')[1])
-    await state.update_data(operator_id=operator_id, action="password")
+@dp.callback_query_handler(lambda c: bool(re.fullmatch(r'cred_\d+', c.data or '')), state='*')
+async def operator_credentials_menu(callback: types.CallbackQuery, state: FSMContext):
+    if await _sv_credentials_busy(callback, state):
+        return
+    user = db.get_user(telegram_id=callback.from_user.id)
+    operator = db.get_user(id=int(callback.data.split('_')[1]))
+    if not _sv_credentials_target_allowed(user, operator):
+        await callback.answer("Оператор не найден в вашем отделе", show_alert=True)
+        return
+
+    operator_id = int(operator[0])
+    ikb = InlineKeyboardMarkup(row_width=2)
+    ikb.add(
+        InlineKeyboardButton("Изменить логин", callback_data=f"chlogin_{operator_id}"),
+        InlineKeyboardButton("Изменить пароль", callback_data=f"chpass_{operator_id}")
+    )
+    # Назад — к группе оператора; своя группа и есть первый экран.
+    ikb.add(InlineKeyboardButton("‹ Назад", callback_data=f"credg_{int(operator[6] or 0)}_0"))
+
+    await callback.answer()
     await bot.edit_message_text(
         chat_id=callback.from_user.id,
         message_id=callback.message.message_id,
-        text="Введите новый пароль для оператора:",
-        reply_markup=None
+        text=(f"<b>Управление доступом оператора</b>\n\n{html.escape(operator[2] or '')}\n"
+              f"Логин: <code>{html.escape(operator[7] or '')}</code>"),
+        parse_mode='HTML',
+        reply_markup=ikb
     )
+
+@dp.callback_query_handler(lambda c: bool(re.fullmatch(r'ch(login|pass)_\d+', c.data or '')), state='*')
+async def operator_credentials_prompt(callback: types.CallbackQuery, state: FSMContext):
+    if await _sv_credentials_busy(callback, state):
+        return
+    user = db.get_user(telegram_id=callback.from_user.id)
+    operator = db.get_user(id=int(callback.data.split('_')[1]))
+    if not _sv_credentials_target_allowed(user, operator):
+        await callback.answer("Оператор не найден в вашем отделе", show_alert=True)
+        return
+
+    action = 'login' if callback.data.startswith('chlogin_') else 'password'
+    await callback.answer()
+    await state.update_data(operator_id=int(operator[0]), action=action)
     await ChangeCredentials.waiting_for_value.set()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass  # сообщению больше 48 часов — Telegram не даёт его удалить
+    # Вместо меню — «Отмена ❌»: пока бот ждёт значение, подпись любой кнопки меню стала бы логином
+    # или паролем оператора.
+    await bot.send_message(
+        chat_id=callback.from_user.id,
+        text=(f"Введите новый {'логин' if action == 'login' else 'пароль'} для оператора "
+              f"<b>{html.escape(operator[2] or '')}</b>:"),
+        parse_mode='HTML',
+        reply_markup=get_cancel_keyboard()
+    )
 
 @dp.message_handler(state=ChangeCredentials.waiting_for_value)
 async def process_credential_change(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
-    operator_id = user_data['operator_id']
-    action = user_data['action']
-    value = message.text.strip()
-    user = db.get_user(telegram_id=message.from_user.id)
-
+    operator_id = user_data.get('operator_id')
+    action = user_data.get('action')
+    value = (message.text or '').strip()
+    chat_id = message.from_user.id
+    # Набранное не остаётся в переписке — пароль тем более.
     try:
-        if action == "login":
-            success = db.update_operator_login(operator_id, user[0], value)
-            msg = f"Логин оператора изменён на: <code>{value}</code>"
-        else:
-            success = db.update_operator_password(operator_id, user[0], value)
-            msg = "Пароль оператора успешно изменён"
-        
-        if success:
-            operator = db.get_user(id=operator_id)
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text=f"✅ {msg}\n\nОператор: {operator[2]}",
-                parse_mode='HTML',
-                reply_markup=_main_menu_keyboard(user[0], user[3])
-            )
-        else:
-            await bot.send_message(
-                chat_id=message.from_user.id,
-                text="❌ Не удалось изменить данные оператора",
-                parse_mode='HTML'
-            )
+        await message.delete()
+    except Exception:
+        pass
+
+    # Правила те же, что у смены своего логина и пароля и у сайта.
+    if action == 'login' and len(value) < 4:
+        await bot.send_message(chat_id=chat_id, text="Логин должен быть не менее 4 символов. Попробуйте еще раз:",
+                               reply_markup=get_cancel_keyboard())
+        return
+    if action != 'login' and len(value) < 6:
+        await bot.send_message(chat_id=chat_id, text="Пароль должен быть не менее 6 символов. Попробуйте еще раз:",
+                               reply_markup=get_cancel_keyboard())
+        return
+
+    user = db.get_user(telegram_id=chat_id)
+    menu = _main_menu_keyboard(user[0], user[3]) if user else None
+    operator = db.get_user(id=int(operator_id)) if operator_id else None
+    # Граница ещё раз: оператора могли перевести в другой отдел, пока СВ набирал значение.
+    if not _sv_credentials_target_allowed(user, operator):
+        await state.finish()
+        await bot.send_message(chat_id=chat_id, text="❌ Оператор не найден в вашем отделе", reply_markup=menu)
+        return
+    if action == 'login':
+        existing = db.get_user_by_login(value)
+        if existing and int(existing[0]) != int(operator[0]):
+            await bot.send_message(chat_id=chat_id, text="Этот логин уже занят. Попробуйте другой:",
+                                   reply_markup=get_cancel_keyboard())
+            return
+
+    done = None
+    try:
+        if action == 'login':
+            if db.update_operator_login(int(operator[0]), None, value):
+                done = f"Логин оператора изменён на: <code>{html.escape(value)}</code>"
+        elif db.update_user_password(int(operator[0]), value):
+            done = "Пароль оператора успешно изменён"
     except Exception as e:
         logging.error(f"Error changing operator {action}: {e}")
-        await bot.send_message(
-            chat_id=message.from_user.id,
-            text=f"❌ Ошибка при изменении: {str(e)}",
-            parse_mode='HTML'
-        )
-    
-    await state.finish()
-    await message.delete()
 
-@dp.callback_query_handler(lambda c: c.data == "cred_back", state="*")
-async def credentials_back(callback: types.CallbackQuery, state: FSMContext):
     await state.finish()
-    await manage_operators_credentials(callback.message)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(f"✅ {done}\n\nОператор: {html.escape(operator[2] or '')}" if done
+              else "❌ Не удалось изменить данные оператора. Попробуйте позже."),
+        parse_mode='HTML',
+        reply_markup=menu
+    )
 
 
 @dp.message_handler(regexp='Добавить таблицу часов📊')
