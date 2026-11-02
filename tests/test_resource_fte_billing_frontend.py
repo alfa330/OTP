@@ -18,17 +18,37 @@ class BillingExportChoiceTests(unittest.TestCase):
             '<option value="efficiency">По эффективности операторов</option>',
             source,
         )
-        self.assertIn("report_type: billingExportType", source)
+        self.assertIn("report_type: billingExportChoice", source)
         self.assertIn("operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx", source)
         self.assertIn(
             "Excel по эффективности считается за полные дни; фильтр времени не применяется",
             source,
         )
-        self.assertIn("billingExportType === 'general' && !billingReport", source)
+        # Общей выгрузке и отчёту СЗоВ нужен сформированный отчёт, эффективности — нет.
+        self.assertIn("billingExportChoice !== 'efficiency' && !billingReport", source)
+
+    def test_szov_daily_format_is_offered_only_on_parks(self):
+        """#380, п. 4: формат ежедневного отчёта СЗоВ — дополнительный и только у «Таксопарков»."""
+        source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
+        self.assertIn(
+            "{billingMode === 'park' ? <option value=\"szov_daily\">Ежедневный отчёт СЗоВ</option> : null}",
+            source,
+        )
+        self.assertIn("...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ']] : []),", source)
+        # Ушли с «Таксопарков» — уходит общий вид, а не запрос, на который сервер ответит 400.
+        self.assertRegex(
+            source,
+            r"const billingExportChoice = billingExportType === 'szov_daily' && billingMode !== 'park'\s*"
+            r"\?\s*'general'\s*:\s*billingExportType;",
+        )
+        self.assertIn("oktell_billing_park_szov_${billingApplied.from}_${billingApplied.to}.xlsx", source)
+        self.assertIn("В отчёте СЗоВ часы и комментарии дня вписываются вручную", source)
+        # Сырой выбор читают только его объявление и производное значение.
+        self.assertEqual(len(re.findall(r"\bbillingExportType\b", source)), 3)
 
     def test_backend_routes_efficiency_to_grouped_workbook(self):
         source = BOT_PATH.read_text(encoding="utf-8-sig")
-        self.assertIn("report_type not in ('general', 'efficiency')", source)
+        self.assertIn("report_type not in ('general', 'efficiency', 'szov_daily')", source)
         self.assertIn("_oktell_billing_parse_date_args()", source)
         self.assertIn("db.get_billing_operator_efficiency_report(", source)
         self.assertIn("department_id=department_id", source)
@@ -151,7 +171,8 @@ class BillingGroupingFrontendTests(unittest.TestCase):
         self.assertIn("@app.route('/api/resource_fte/oktell_billing_grouping_comment', methods=['PUT', 'OPTIONS'])",
                       self.backend)
         self.assertIn("if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):", self.backend)
-        self.assertIn("_oktell_billing_grouping_workbook(report) if mode == 'grouping'", self.backend)
+        self.assertRegex(self.backend,
+                         r"if mode == 'grouping':\s*output = _oktell_billing_grouping_workbook\(report\)")
         # разрез по часам не должен уходить на ручку парков с group_by=grouping
         self.assertIn("} else if (targetMode === 'park' || targetMode === 'line') {", self.source)
 

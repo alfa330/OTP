@@ -12969,8 +12969,8 @@ def api_resource_fte_oktell_billing_export():
         return guard_response, guard_status
 
     report_type = str(request.args.get('report_type') or 'general').strip().lower()
-    if report_type not in ('general', 'efficiency'):
-        return jsonify({"error": "report_type должен быть general или efficiency"}), 400
+    if report_type not in ('general', 'efficiency', 'szov_daily'):
+        return jsonify({"error": "report_type должен быть general, efficiency или szov_daily"}), 400
 
     if report_type == 'efficiency':
         params, error_response, error_status = _oktell_billing_parse_date_args()
@@ -13016,6 +13016,8 @@ def api_resource_fte_oktell_billing_export():
     mode = str(request.args.get('mode') or 'park').strip().lower()
     if mode not in ('park', 'line', 'operator', 'detail', 'grouping'):
         return jsonify({"error": "mode должен быть park, line, operator, detail или grouping"}), 400
+    if report_type == 'szov_daily' and mode != 'park':
+        return jsonify({"error": "Формат ежедневного отчёта СЗоВ есть только у «Таксопарков»"}), 400
 
     direction, direction_error = _oktell_billing_parse_direction()
     if direction_error is not None:
@@ -13042,6 +13044,13 @@ def api_resource_fte_oktell_billing_export():
                 params['start_day'], params['end_day'],
                 params['minute_from'], params['minute_to'], sl_seconds, 'hour')
             report = _oktell_billing_grouping_report(params, raw_rows)
+        elif report_type == 'szov_daily':
+            # Неделей раньше начала — база плана первых семи дней (поступившие дня D-7).
+            raw_rows = _oktell_fetch_billing_rows(
+                params['start_day'] - timedelta(days=OKTELL_BILLING_SZOV_PLAN_BASE_DAYS_BACK), params['end_day'],
+                params['minute_from'], params['minute_to'], sl_seconds, 'park')
+            report = _oktell_billing_szov_daily(
+                _oktell_billing_build_report(raw_rows), params['start_day'], params['end_day'])
         else:
             raw_rows = _oktell_fetch_billing_rows(
                 params['start_day'], params['end_day'],
@@ -13051,9 +13060,15 @@ def api_resource_fte_oktell_billing_export():
         logging.exception("Oktell billing export failed")
         return jsonify({"error": "Не удалось получить данные из Oktell, попробуйте ещё раз"}), 502
 
-    output = (_oktell_billing_grouping_workbook(report) if mode == 'grouping'
-              else _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction))
+    if mode == 'grouping':
+        output = _oktell_billing_grouping_workbook(report)
+    elif report_type == 'szov_daily':
+        output = _oktell_billing_szov_daily_workbook(report)
+    else:
+        output = _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction)
     mode_part = f"{mode}_{direction}" if mode == 'operator' else mode
+    if report_type == 'szov_daily':
+        mode_part = 'park_szov'
     filename = (
         f"oktell_billing_{mode_part}_"
         f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
@@ -41778,6 +41793,397 @@ def _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction=
 
     output = BytesIO()
     wb.save(output)
+    output.seek(0)
+    return output
+
+
+# --- «Таксопарки» в формате ежедневного отчёта СЗоВ (задача #380, п. 4) ---------------------------
+# Образец постановщика — их таблица за октябрь 2026: блоки дней, в блоке строка на таксопарк и
+# «Итого» на голубой подложке, в конце такой же блок за период. Прежняя выгрузка «Таксопарков»
+# остаётся, формат выбирают при выгрузке (report_type=szov_daily).
+#   План парка — формулы файла: доля парка из колонки «Нужно удалить» × поступившие того же дня
+#     неделей раньше (итог дня D-7). Так сошлись 23 дня из 24, у которых неделя назад есть в самом
+#     файле; 31.10 у них взят итог 25.10 вместо 24.10 — описка. Доли в сумме дают 0,726, а не
+#     единицу: так считает файл — так и здесь, как у чатов (CHAT_BILLING_PARK_SHARES).
+#   Факт, принято, ATT и оценка — те же числа, что на экране «Таксопарков». Оценку образец пишет
+#     до сотых с округлением половины вверх (4,625 → 4,63).
+#   «План по часам», «Факт по часам» и «Комментарии» СЗоВ вписывает сама (решение владельца
+#     02.11.2026): в их файле это ручные цифры, наши данные их не повторяют. Ячейки на месте и
+#     пустые, «Разница» — формулой файла, но без #ДЕЛ/0!, пока часов нет.
+# Диапазоны итогов исправлены: в образце вес ATT и средняя оценка дня брали строки только до
+# Бизнес Партнера (SUM(H2:H18)), а SUMIF итога периода — не все дни ($D$2:$D$607).
+OKTELL_BILLING_SZOV_PARK_SHARES = (
+    ('iTaxi', 0.269100189122063),
+    ('Jana', 0.103584204889831),
+    ('Честный', 0.06909791054298539),
+    ('Салам Такси', 0.06909791054298539),
+    ('Ноль Такси', 0.03487365279012008),
+    ('Департамент', 0.03212796500102536),
+    ('Amanat', 0.027422699204775903),
+    ('Tenge_taxi', 0.026522660468931574),
+    ('Global', 0.0193109576867865),
+    ('Regions', 0.01487912137990749),
+    ('Halyk', 0.007701597283933739),
+    ('Taxi24', 0.012167612276984072),
+    ('Стабильный', 0.008009205459475472),
+    ('Qazaq', 0.01127896643653018),
+    ('Dongelek', 0.008738350764463282),
+    ('Бизнес Партнер', 0.004830587645544239),
+    ('iPartner', 0.0032014036047121014),
+    ('iTaxiVip', 0),
+    ('Достойный', 0.00345087212950181),
+    ('Hokage', 0.000564688166645752),
+)
+OKTELL_BILLING_SZOV_PLAN_BASE_DAYS_BACK = 7
+
+# (ключ, подпись, ширина, формат) — подписи дословно из образца, у «План по часам » и пробел в конце.
+# Ширины — в единицах Excel: файл хранит их с отступом +0,71 (22,71 у «Даты»). Форматы — последней
+# версии шаблона, за 31.10: с середины месяца у них «принято» в «0», а не «#,##0».
+_OKTELL_BILLING_SZOV_COLUMNS = (
+    ('date', 'Дата', 22.0, 'dd.mm.yyyy'),
+    ('park', 'Название очереди', 16.57, None),
+    ('plan_input', 'Нужно удалить', 8.29, '0.0'),
+    ('plan', 'План (звонки)', 11.29, '0'),
+    ('arrived', 'факт (звонки)', 10.14, '#,##0'),
+    ('plan_match', '% совпадения прогноза', 18.86, '0%'),
+    ('att', 'ATT, сек', 14.0, '0'),
+    ('served', 'принято', 14.14, '0'),
+    ('lost_share', '% упущенных', 16.86, '0%'),
+    ('rating', 'Сред оценка водителей в разрезе парков', 18.86, '0.0'),
+    ('planned_hours', 'План по часам ', None, '0'),
+    ('fact_hours', 'Факт по часам', None, '0'),
+    ('hours_delta', 'Разница', None, '0%'),
+    ('comment', 'Комментарии', 33.71, None),
+)
+# Суммы по дням в блоке периода у них мельче и в своих форматах.
+_OKTELL_BILLING_SZOV_PERIOD_SUM_FORMATS = {'plan': '0', 'arrived': 'General', 'served': '0'}
+# Объединены на весь блок парков дня — как в образце.
+_OKTELL_BILLING_SZOV_DAY_KEYS = ('date', 'planned_hours', 'fact_hours', 'hours_delta', 'comment')
+_OKTELL_BILLING_SZOV_TOTAL_FILL = '#9DC3E6'
+# «Сред оценка» итога в образце залита светлее остальной строки (тема Office, акцент 1 +40 %).
+_OKTELL_BILLING_SZOV_RATING_TOTAL_FILL = '#8FAADC'
+_OKTELL_BILLING_SZOV_METRICS = ('arrived', 'served', 'talk_seconds', 'rating_sum', 'rating_count')
+
+
+def _oktell_billing_szov_rating(rating_sum, rating_count):
+    """Средняя оценка до сотых, половина вверх, — как в образце. Целочисленно, без float:
+    4,625 должно дать 4,63, а не банковские 4,62."""
+    count = int(rating_count or 0)
+    if count <= 0:
+        return None
+    return ((200 * int(rating_sum or 0) + count) // (2 * count)) / 100
+
+
+def _oktell_billing_szov_att(item):
+    """ATT в целых секундах — усечение, как в Oktell и на экране (см. «Время разговора»)."""
+    served = int(item.get('served') or 0)
+    return int(float(item.get('talk_seconds') or 0) / served) if served > 0 else None
+
+
+def _oktell_billing_szov_daily(report, start_day, end_day):
+    """Отчёт «Таксопарков» за [start_day − 7, end_day] -> дни периода в составе и порядке файла СЗоВ.
+
+    Парки — доли файла в его порядке, за ними парки без доли, у которых в периоде были звонки,
+    по объёму: состав блока один на все дни, блоки сравнивают глазами строка к строке. Имя парка
+    с долей — как в файле (у Oktell «Бизнес партнер», у них «Бизнес Партнер»). База плана дня —
+    поступившие всех парков неделей раньше; не было тогда звонков — плана на день нет."""
+    def _key(park):
+        return str(park or '').strip().lower()
+
+    def _blank():
+        return {key: 0 for key in _OKTELL_BILLING_SZOV_METRICS}
+
+    arrived_by_day = {}
+    period_days = []
+    for day in (report or {}).get('days') or []:
+        day_date = datetime.strptime(day['date'], '%Y-%m-%d').date()
+        arrived_by_day[day_date] = sum(int(item.get('arrived') or 0) for item in day.get('parks') or [])
+        if start_day <= day_date <= end_day:
+            period_days.append((day_date, day))
+
+    order = [(_key(name), name, share) for name, share in OKTELL_BILLING_SZOV_PARK_SHARES]
+    known = {key for key, _name, _share in order}
+    extra_volume, extra_names = {}, {}
+    for _day_date, day in period_days:
+        for item in day.get('parks') or []:
+            key = _key(item.get('park'))
+            if key and key not in known:
+                extra_volume[key] = extra_volume.get(key, 0) + int(item.get('arrived') or 0)
+                extra_names.setdefault(key, str(item.get('park')).strip())
+    order += [(key, extra_names[key], None)
+              for key in sorted(extra_volume, key=lambda key: (-extra_volume[key], key))]
+
+    period = {key: {**_blank(), 'plan': None} for key, _name, _share in order}
+    bases = []
+    days = []
+    for day_date, day in period_days:
+        by_key = {}
+        for item in day.get('parks') or []:
+            target = by_key.setdefault(_key(item.get('park')), _blank())
+            for metric in _OKTELL_BILLING_SZOV_METRICS:
+                target[metric] += item.get(metric) or 0
+        base = arrived_by_day.get(day_date - timedelta(days=OKTELL_BILLING_SZOV_PLAN_BASE_DAYS_BACK)) or None
+        if base is not None:
+            bases.append(base)
+        rows = []
+        for key, name, share in order:
+            metrics = by_key.get(key) or _blank()
+            plan = share * base if share is not None and base is not None else None
+            rows.append({'park': name, 'share': share, 'plan': plan, **metrics})
+            for metric in _OKTELL_BILLING_SZOV_METRICS:
+                period[key][metric] += metrics[metric]
+            if plan is not None:
+                period[key]['plan'] = (period[key]['plan'] or 0) + plan
+        days.append({'date': day_date, 'base': base, 'parks': rows})
+
+    return {
+        'start_day': start_day,
+        'end_day': end_day,
+        'days': days,
+        'parks': [{'park': name, 'share': share, **period[key]} for key, name, share in order],
+        'base': sum(bases) if bases else None,
+    }
+
+
+def _oktell_billing_szov_daily_workbook(daily):
+    """Книга «Таксопарков» в формате ежедневного отчёта СЗоВ: блоки дней и блок за период.
+
+    Формулы файла (план, % совпадения, % упущенных, итоги) пишутся вместе с посчитанными
+    значениями: поправили долю или базу в «Нужно удалить» — Excel пересчитает, а предпросмотр,
+    который формулы не считает (телефон), всё равно видит числа. openpyxl значение формулы не
+    сохраняет, поэтому книга собирается xlsxwriter, как «Ежедневный отчёт по чатам»."""
+    keys = [key for key, _title, _width, _fmt in _OKTELL_BILLING_SZOV_COLUMNS]
+    formats = {key: fmt for key, _title, _width, fmt in _OKTELL_BILLING_SZOV_COLUMNS}
+    column_of = {key: index for index, key in enumerate(keys)}
+
+    def _ref(key, row, absolute=False):
+        letter = get_column_letter(column_of[key] + 1)
+        return f"${letter}${row + 1}" if absolute else f"{letter}{row + 1}"
+
+    def _span(key, first_row, last_row, absolute=False):
+        return f"{_ref(key, first_row, absolute)}:{_ref(key, last_row, absolute)}"
+
+    output = BytesIO()
+    # Имена парков пишутся как есть: строка с «=» не должна стать формулой.
+    workbook = xlsxwriter.Workbook(output, {'in_memory': True, 'strings_to_formulas': False,
+                                            'strings_to_urls': False})
+    styles = {}
+
+    def _style(num_format=None, bold=False, fill=None, color=None, align='center', wrap=False, size=12):
+        style_key = (num_format, bold, fill, color, align, wrap, size)
+        if style_key not in styles:
+            props = {'font_name': 'Calibri', 'font_size': size, 'border': 1, 'valign': 'vcenter'}
+            if align:
+                props['align'] = align
+            if num_format:
+                props['num_format'] = num_format
+            if bold:
+                props['bold'] = True
+            if fill:
+                props['bg_color'] = fill
+            if color:
+                props['font_color'] = color
+            if wrap:
+                props['text_wrap'] = True
+            styles[style_key] = workbook.add_format(props)
+        return styles[style_key]
+
+    # Итоговая строка образца: счётчики и пустые колонки часов — «#,##0», доли и средние — как у
+    # парков, у «Итого» дня доля упущенных — до десятых; дата не жирная, оценка на своей, более
+    # светлой заливке.
+    total_formats = {key: formats[key] if key in ('date', 'plan_match', 'att', 'lost_share', 'rating')
+                     else '#,##0' for key in keys}
+    total_formats['park'] = '0'
+
+    def _cell_style(key, fill=None, total=False, period=False):
+        if key == 'park':
+            return _style(total_formats['park'] if total else None, bold=True, fill=fill,
+                          align='left' if total else None)
+        if total:
+            if key == 'rating':
+                fill = _OKTELL_BILLING_SZOV_RATING_TOTAL_FILL
+            num_format = '0.0%' if key == 'lost_share' and not period else total_formats[key]
+            return _style(num_format, bold=key != 'date', fill=fill)
+        if period and key in _OKTELL_BILLING_SZOV_PERIOD_SUM_FORMATS:
+            return _style(_OKTELL_BILLING_SZOV_PERIOD_SUM_FORMATS[key], size=11)
+        if key == 'comment':
+            return _style(None, wrap=True)
+        return _style(formats.get(key))
+
+    def _put(ws, row, key, value, total=False, fill=None, period=False):
+        style = _cell_style(key, fill, total, period)
+        if value is None:
+            ws.write_blank(row, column_of[key], None, style)
+        else:
+            ws.write(row, column_of[key], value, style)
+
+    def _formula(ws, row, key, formula, value, total=False, fill=None, period=False):
+        ws.write_formula(row, column_of[key], formula, _cell_style(key, fill, total, period), value)
+
+    def _excel_date(day_date):
+        return (day_date - dt_date(1899, 12, 30)).days
+
+    red = workbook.add_format({'font_color': '#FF0000'})
+    dark_red = workbook.add_format({'font_color': '#9C0006'})
+
+    def _highlight(ws, first_row, last_row, rating_dark_first=False):
+        """Условное форматирование образца: ATT ≥ 200 и упущенные ≥ 10 % — красным шрифтом,
+        оценка ≤ 4,8 — красным, < 4,5 — тёмно-красным. Порядок правил оценки — как в образце:
+        в днях первым «≤ 4,8», в блоке периода — «< 4,5»."""
+        for key, criteria, value in (('att', '>=', 200), ('lost_share', '>=', 0.1)):
+            column = column_of[key]
+            ws.conditional_format(first_row, column, last_row, column,
+                                  {'type': 'cell', 'criteria': criteria, 'value': value, 'format': red})
+        column = column_of['rating']
+        rules = [{'type': 'cell', 'criteria': '<=', 'value': 4.8, 'format': red},
+                 {'type': 'cell', 'criteria': '<', 'value': 4.5, 'format': dark_red}]
+        for rule in (reversed(rules) if rating_dark_first else rules):
+            ws.conditional_format(first_row, column, last_row, column, rule)
+
+    days = daily.get('days') or []
+    start_day, end_day = daily['start_day'], daily['end_day']
+    period_text = f"{start_day.strftime('%d.%m.%Y')}-{end_day.strftime('%d.%m.%Y')}"
+    one_month = (start_day.year, start_day.month) == (end_day.year, end_day.month)
+    ws = workbook.add_worksheet(
+        f"{_CHAT_BILLING_MONTHS_RU[start_day.month - 1]} {start_day.year}" if one_month else period_text)
+    header = _style(bold=True, fill='#DCDCDC', wrap=True)
+    header_red = _style(bold=True, fill='#DCDCDC', color='#FF0000', wrap=True)
+    for column, (key, title, width, _fmt) in enumerate(_OKTELL_BILLING_SZOV_COLUMNS):
+        ws.write(0, column, title, header_red if key == 'plan_input' else header)
+        if width:
+            ws.set_column(column, column, width)
+    ws.set_row(0, 47.25)
+    ws.set_default_row(15.75)
+    if not days:
+        ws.write(1, 0, 'За выбранный период и окно времени звонков не нашлось')
+        workbook.close()
+        output.seek(0)
+        return output
+
+    def _merge_day_cells(first_row, last_row, day_values):
+        for key in _OKTELL_BILLING_SZOV_DAY_KEYS:
+            column = column_of[key]
+            ws.merge_range(first_row, column, last_row, column, None, _cell_style(key))
+            if key == 'hours_delta':
+                ws.write_formula(first_row, column,
+                                 f'=IFERROR(({_ref("fact_hours", first_row)}-{_ref("planned_hours", first_row)})'
+                                 f'/{_ref("planned_hours", first_row)},"")', _cell_style(key), '')
+            elif day_values.get(key) is not None:
+                ws.write(first_row, column, day_values[key], _cell_style(key))
+
+    def _write_parks(first_row, parks, total_row, period_rows=None):
+        """Строки парков блока. period_rows — (первая, последняя) строки дней для SUMIF итога периода."""
+        for offset, item in enumerate(parks):
+            row = first_row + offset
+            arrived = int(item.get('arrived') or 0)
+            served = int(item.get('served') or 0)
+            plan = item.get('plan')
+            _put(ws, row, 'park', item['park'])
+            _put(ws, row, 'plan_input', item.get('share'))
+            if period_rows is None:
+                if plan is None:
+                    _put(ws, row, 'plan', None)
+                else:
+                    _formula(ws, row, 'plan',
+                             f"={_ref('plan_input', row)}*{_ref('plan_input', total_row, True)}", plan)
+                # Парк без звонков в файле — пустые ячейки, а не нули.
+                _put(ws, row, 'arrived', arrived or None)
+                _put(ws, row, 'served', served if arrived else None)
+            else:
+                first, last = period_rows
+                for key, value in (('plan', plan or 0), ('arrived', arrived), ('served', served)):
+                    _formula(ws, row, key,
+                             f"=SUMIF({_span('park', first, last, True)},{_ref('park', row)},"
+                             f"{_span(key, first, last, True)})", value, period=True)
+            if plan:
+                # Пустой факт Excel считает нулём — 0 %, как в файле.
+                _formula(ws, row, 'plan_match', f"={_ref('arrived', row)}/{_ref('plan', row)}", arrived / plan)
+            else:
+                _put(ws, row, 'plan_match', None)
+            _put(ws, row, 'att', _oktell_billing_szov_att(item))
+            if arrived:
+                _formula(ws, row, 'lost_share',
+                         f"=({_ref('arrived', row)}-{_ref('served', row)})/{_ref('arrived', row)}",
+                         (arrived - served) / arrived)
+            else:
+                _put(ws, row, 'lost_share', None)
+            _put(ws, row, 'rating', _oktell_billing_szov_rating(item.get('rating_sum'), item.get('rating_count')))
+
+    def _write_total(first_row, last_row, total_row, parks, label_formula, label_value, base, period=False):
+        fill = _OKTELL_BILLING_SZOV_TOTAL_FILL
+        arrived = sum(int(item.get('arrived') or 0) for item in parks)
+        served = sum(int(item.get('served') or 0) for item in parks)
+        plans = [item['plan'] for item in parks if item.get('plan') is not None]
+        plan = sum(plans) if plans else None
+        weights = [(_oktell_billing_szov_att(item), int(item.get('served') or 0)) for item in parks]
+        ratings = [value for value in (_oktell_billing_szov_rating(item.get('rating_sum'), item.get('rating_count'))
+                                       for item in parks) if value is not None]
+        _formula(ws, total_row, 'date', label_formula, label_value, total=True, fill=fill, period=period)
+        _put(ws, total_row, 'park', 'Итого', total=True, fill=fill, period=period)
+        _put(ws, total_row, 'plan_input', base, total=True, fill=fill, period=period)
+        if plan is None:
+            _put(ws, total_row, 'plan', None, total=True, fill=fill, period=period)
+        else:
+            _formula(ws, total_row, 'plan', f"=SUM({_span('plan', first_row, last_row)})", plan,
+                     total=True, fill=fill, period=period)
+        _formula(ws, total_row, 'arrived', f"=SUM({_span('arrived', first_row, last_row)})", arrived,
+                 total=True, fill=fill, period=period)
+        if plan:
+            _formula(ws, total_row, 'plan_match', f"={_ref('arrived', total_row)}/{_ref('plan', total_row)}",
+                     arrived / plan, total=True, fill=fill, period=period)
+        else:
+            _put(ws, total_row, 'plan_match', None, total=True, fill=fill, period=period)
+        if served:
+            # ATT итога — среднее ATT парков, взвешенное по принятым, как в образце.
+            _formula(ws, total_row, 'att',
+                     f"=SUMPRODUCT({_span('att', first_row, last_row)},{_span('served', first_row, last_row)})"
+                     f"/SUM({_span('served', first_row, last_row)})",
+                     sum((att or 0) * weight for att, weight in weights) / served,
+                     total=True, fill=fill, period=period)
+        else:
+            _put(ws, total_row, 'att', None, total=True, fill=fill, period=period)
+        _formula(ws, total_row, 'served', f"=SUM({_span('served', first_row, last_row)})", served,
+                 total=True, fill=fill, period=period)
+        if arrived:
+            _formula(ws, total_row, 'lost_share',
+                     f"=({_ref('arrived', total_row)}-{_ref('served', total_row)})/{_ref('arrived', total_row)}",
+                     (arrived - served) / arrived, total=True, fill=fill, period=period)
+        else:
+            _put(ws, total_row, 'lost_share', None, total=True, fill=fill, period=period)
+        if ratings:
+            # Оценка итога — простое среднее парков, как в образце.
+            _formula(ws, total_row, 'rating', f"=AVERAGE({_span('rating', first_row, last_row)})",
+                     sum(ratings) / len(ratings), total=True, fill=fill, period=period)
+        else:
+            _put(ws, total_row, 'rating', None, total=True, fill=fill, period=period)
+        for key in ('planned_hours', 'fact_hours', 'hours_delta', 'comment'):
+            _put(ws, total_row, key, None, total=True, fill=fill, period=period)
+
+    first_row = 1
+    for day in days:
+        parks = day['parks']
+        last_row = first_row + len(parks) - 1
+        total_row = last_row + 1
+        _write_parks(first_row, parks, total_row)
+        _merge_day_cells(first_row, last_row, {'date': day['date']})
+        _write_total(first_row, last_row, total_row, parks, f"={_ref('date', first_row)}",
+                     _excel_date(day['date']), day.get('base'))
+        _highlight(ws, first_row, total_row)
+        first_row = total_row + 1
+    last_day_row = first_row - 1
+
+    # Блок за период — через три пустые строки, как в образце.
+    first_row = last_day_row + 4
+    parks = daily.get('parks') or []
+    last_row = first_row + len(parks) - 1
+    total_row = last_row + 1
+    _write_parks(first_row, parks, total_row, period_rows=(1, last_day_row))
+    _merge_day_cells(first_row, last_row, {'date': period_text})
+    _write_total(first_row, last_row, total_row, parks, f"={_ref('date', first_row)}", period_text,
+                 daily.get('base'), period=True)
+    _highlight(ws, first_row, total_row, rating_dark_first=True)
+
+    workbook.close()
     output.seek(0)
     return output
 

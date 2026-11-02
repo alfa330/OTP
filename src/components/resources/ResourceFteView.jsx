@@ -3526,6 +3526,11 @@ const ResourceFteView = ({
   const [isBillingLoading, setIsBillingLoading] = useState(false);
   const [isBillingExporting, setIsBillingExporting] = useState(false);
   const [billingExportType, setBillingExportType] = useState('general');
+  // Формат ежедневного отчёта СЗоВ есть только у «Таксопарков» (#380): на других вкладках
+  // выгружается общий вид, а вернулись на «Таксопарки» — выбор СЗоВ снова в силе.
+  const billingExportChoice = billingExportType === 'szov_daily' && billingMode !== 'park'
+    ? 'general'
+    : billingExportType;
   const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '', grouping: '' });
   const [billingExpandedDays, setBillingExpandedDays] = useState(() => new Set());
   const [billingDetailPage, setBillingDetailPage] = useState(1);
@@ -3803,7 +3808,7 @@ const ResourceFteView = ({
           time_from: billingApplied.timeFrom,
           time_to: billingApplied.timeTo,
           mode: billingMode,
-          report_type: billingExportType,
+          report_type: billingExportChoice,
           ...(billingMode === 'operator' && cfg.hasBillingTalkTime
             ? { direction: billingOperatorDirection }
             : {}),
@@ -3817,9 +3822,11 @@ const ResourceFteView = ({
       const url = window.URL.createObjectURL(response.data);
       const link = document.createElement('a');
       link.href = url;
-      link.download = billingExportType === 'efficiency'
+      link.download = billingExportChoice === 'efficiency'
         ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
-        : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark, billingOperatorDirection);
+        : billingExportChoice === 'szov_daily'
+          ? `oktell_billing_park_szov_${billingApplied.from}_${billingApplied.to}.xlsx`
+          : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark, billingOperatorDirection);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -3836,7 +3843,7 @@ const ResourceFteView = ({
     } finally {
       setIsBillingExporting(false);
     }
-  }, [apiRoot, billingApplied, billingExportType, billingGroupingPark, billingMode,
+  }, [apiRoot, billingApplied, billingExportChoice, billingGroupingPark, billingMode,
     billingOperatorDirection, buildHeaders, cfg, notify]);
 
   const saveBillingGroupingComment = useCallback(async ({ hourFrom, hourTo, comment }) => {
@@ -6151,9 +6158,15 @@ const ResourceFteView = ({
           {cfg.hasBillingExportTypes ? (
             <RfPhoneSelectRow
               label="Выгрузка Excel"
-              subtitle={billingExportType === 'efficiency' ? 'За полные дни, без фильтра времени' : null}
-              value={billingExportType}
-              options={[['general', 'Общая'], ['efficiency', 'По эффективности']]}
+              subtitle={billingExportChoice === 'efficiency'
+                ? 'За полные дни, без фильтра времени'
+                : billingExportChoice === 'szov_daily' ? 'Часы и комментарии дня СЗоВ вписывает сама' : null}
+              value={billingExportChoice}
+              options={[
+                ['general', 'Общая'],
+                ...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ']] : []),
+                ['efficiency', 'По эффективности'],
+              ]}
               onChange={setBillingExportType}
               disabled={isBillingExporting || isBillingLoading}
             />
@@ -6176,7 +6189,7 @@ const ResourceFteView = ({
               isBillingExporting
               || isBillingLoading
               || Boolean(billingRangeError)
-              || (billingExportType === 'general' && !billingReport)
+              || (billingExportChoice !== 'efficiency' && !billingReport)
             }
             className={RF_PHONE_BUTTON.white}
           >
@@ -8196,7 +8209,7 @@ const ResourceFteView = ({
                   </button>
                   {cfg.hasBillingExportTypes && (
                   <select
-                    value={billingExportType}
+                    value={billingExportChoice}
                     onChange={(event) => setBillingExportType(event.target.value)}
                     disabled={isBillingExporting || isBillingLoading}
                     aria-label="Вид выгрузки Excel"
@@ -8204,6 +8217,7 @@ const ResourceFteView = ({
                     className="h-14 max-w-[250px] rounded-xl border-2 border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <option value="general">Общая (текущая)</option>
+                    {billingMode === 'park' ? <option value="szov_daily">Ежедневный отчёт СЗоВ</option> : null}
                     <option value="efficiency">По эффективности операторов</option>
                   </select>
                   )}
@@ -8214,11 +8228,13 @@ const ResourceFteView = ({
                       isBillingExporting
                       || isBillingLoading
                       || Boolean(billingRangeError)
-                      || (billingExportType === 'general' && !billingReport)
+                      || (billingExportChoice !== 'efficiency' && !billingReport)
                     }
-                    title={billingExportType === 'efficiency'
+                    title={billingExportChoice === 'efficiency'
                       ? 'Скачать эффективность операторов по группам'
-                      : 'Скачать текущий разрез в Excel за применённый период'}
+                      : billingExportChoice === 'szov_daily'
+                        ? 'Скачать «Таксопарки» в формате ежедневного отчёта СЗоВ за применённый период'
+                        : 'Скачать текущий разрез в Excel за применённый период'}
                     className="inline-flex h-14 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <FileDown size={16} className={isBillingExporting ? 'animate-pulse text-emerald-600' : 'text-emerald-600'} />
@@ -8282,8 +8298,11 @@ const ResourceFteView = ({
                 <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <span className="tabular-nums">{billingPeriodDays > 0 ? `${billingPeriodDays} дн. · ${formatDate(billingFrom)} — ${formatDate(billingTo)}` : 'Период не выбран'}</span>
                   <span className="tabular-nums">время {billingTimeFrom}–{billingTimeTo} включительно</span>
-                  {cfg.hasBillingExportTypes && billingExportType === 'efficiency' ? (
+                  {cfg.hasBillingExportTypes && billingExportChoice === 'efficiency' ? (
                     <span>Excel по эффективности считается за полные дни; фильтр времени не применяется</span>
+                  ) : null}
+                  {cfg.hasBillingExportTypes && billingExportChoice === 'szov_daily' ? (
+                    <span>В отчёте СЗоВ часы и комментарии дня вписываются вручную</span>
                   ) : null}
                   {cfg.billing.modeHint ? (
                     <span>{cfg.billing.modeHint(billingMode, billingSlSeconds)}</span>
