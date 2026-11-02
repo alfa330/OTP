@@ -22,7 +22,7 @@ STREAM_PATHS = {
     '/api/op_wallboard/live': 'op_wallboard/routes.py',
     '/api/pbx/stream': 'pbx/routes.py',
     '/api/pbx/agent/stream': 'pbx/routes.py',
-    '/api/shift_auction/test_events': 'bot_schedule2.py',
+    '/api/shift_auction/test_events': 'shift_auction/routes.py',
 }
 # Стрим на секунды (озвучка тренажёра), остаётся в api — см. Caddyfile.
 SHORT_STREAM_FILES = {'voice_trainer/routes.py'}

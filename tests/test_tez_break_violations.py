@@ -350,7 +350,8 @@ class TezBreakWiringTests(unittest.TestCase):
         guard = SOURCE[SOURCE.index('def _szov_broadcast_guard():'):]
         guard = guard[:guard.index('\ndef ', 10)]
         self.assertIn('elif direction == SZOV_BROADCAST_DIRECTION_TEZ:', guard)
-        self.assertIn("globals().get('_tez_wallboard_department_id')", guard)
+        # Страж живёт в szov_wallboard/routes.py, резолвер отдела Тез — имя монолита.
+        self.assertIn("monolith_namespace.get('_tez_wallboard_department_id')", guard)
         self.assertIn('const canManageTezBroadcastForUser',
                       (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8-sig'))
 

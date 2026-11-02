@@ -813,7 +813,8 @@ class PersonalBroadcastTests(unittest.TestCase):
             '_normalize_user_role': lambda value: str(value or '').strip().lower(),
             '_is_global_admin_requester': lambda r, rid: r in ('admin', 'super_admin'),
             '_headed_department_id': lambda rid: None,
-            '_op_wallboard_department_id': lambda: 367,
+            # Резолвер отдела ОП страж ищет в пространстве имён монолита (szov_wallboard/routes.py).
+            'monolith_namespace': {'_op_wallboard_department_id': lambda: 367},
             '_szov_wallboard_department_id': lambda: 1,
             'request': type('Req', (), {'method': 'GET',
                                         'get_json': staticmethod(lambda silent=True: None)})(),

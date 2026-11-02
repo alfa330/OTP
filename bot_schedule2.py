@@ -754,22 +754,12 @@ CORS(app, resources={
     }
 })
 
-SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS = 15
-SHIFT_AUCTION_EVENT_LISTENER_RETRY_SECONDS = 2
 # How many recent events to keep in memory for SSE fan-out. The single PG
 # listener fetches new events ONCE and pushes them into this buffer; every
 # connected stream then reads from RAM instead of hitting the DB on each
 # notification. This converts the old O(streams x events) DB query storm
 # (which saturated the connection pool during a live auction) into O(events).
 SHIFT_AUCTION_EVENT_BUFFER_MAXLEN = _env_int('SHIFT_AUCTION_EVENT_BUFFER_MAXLEN', 2000, minimum=200)
-SHIFT_AUCTION_EVENT_FETCH_LIMIT = 500
-shift_auction_event_condition = threading.Condition()
-shift_auction_event_signal_id = 0
-shift_auction_event_buffer = collections.deque(maxlen=SHIFT_AUCTION_EVENT_BUFFER_MAXLEN)
-shift_auction_event_buffer_max_id = 0
-shift_auction_event_buffer_ready = False
-shift_auction_event_listener_started = False
-shift_auction_event_listener_lock = threading.Lock()
 
 # Потолок одновременных SSE-потоков аукциона. Каждый поток занимает нить waitress
 # на всё время соединения, а нитей на весь портал около 96 — и колокол со своим
@@ -777,32 +767,12 @@ shift_auction_event_listener_lock = threading.Lock()
 # на каждом мониторе живого аукциона, чтобы нити кончились и портал перестал
 # отвечать целиком: не деградация раздела, а остановка всего.
 # Сверх потолка отдаём 503 — фронт продолжает жить перечиткой лотов по кнопке.
-SHIFT_AUCTION_STREAM_LIMIT = _env_int('SHIFT_AUCTION_STREAM_LIMIT', 50, minimum=10, maximum=WAITRESS_THREADS)
-shift_auction_stream_lock = threading.Lock()
-shift_auction_active_streams = 0
 
 
-def _try_acquire_shift_auction_stream_slot(limit=None):
-    """Занять место под SSE-поток. False — мест нет, звать поток нельзя."""
-    global shift_auction_active_streams
-    ceiling = int(SHIFT_AUCTION_STREAM_LIMIT if limit is None else limit)
-    with shift_auction_stream_lock:
-        if shift_auction_active_streams >= ceiling:
-            return False
-        shift_auction_active_streams += 1
-        return True
 
 
-def _release_shift_auction_stream_slot():
-    """Освободить место. Вызывается на закрытии ответа, в том числе при обрыве."""
-    global shift_auction_active_streams
-    with shift_auction_stream_lock:
-        shift_auction_active_streams = max(0, shift_auction_active_streams - 1)
 
 
-def _shift_auction_active_stream_count():
-    with shift_auction_stream_lock:
-        return shift_auction_active_streams
 
 
 def _build_postgres_connection_params():
@@ -820,231 +790,26 @@ def _build_postgres_connection_params():
     }
 
 
-def _signal_shift_auction_event_waiters():
-    global shift_auction_event_signal_id
-    with shift_auction_event_condition:
-        shift_auction_event_signal_id += 1
-        shift_auction_event_condition.notify_all()
 
 
-def _get_shift_auction_event_signal_id():
-    with shift_auction_event_condition:
-        return shift_auction_event_signal_id
 
 
-def _wait_for_shift_auction_event_signal(last_seen_signal_id, timeout_seconds):
-    timeout_seconds = max(0.1, float(timeout_seconds or 0.1))
-    with shift_auction_event_condition:
-        if shift_auction_event_signal_id <= last_seen_signal_id:
-            shift_auction_event_condition.wait(timeout=timeout_seconds)
-        return shift_auction_event_signal_id
 
 
-def _fetch_shift_auction_events_with_cursor(cursor, after_id, limit=SHIFT_AUCTION_EVENT_FETCH_LIMIT):
-    """Fetch events after ``after_id`` using a caller-provided cursor.
-
-    Used by the PG listener on its OWN dedicated connection so the event
-    fan-out never touches the shared application connection pool.
-    """
-    cursor.execute(
-        """
-        SELECT id, event_type, payload, created_at, COALESCE(direction_mode, 'line')
-        FROM shift_auction_test_events
-        WHERE id > %s
-        ORDER BY id
-        LIMIT %s
-        """,
-        (int(after_id or 0), int(limit)),
-    )
-    return [
-        {
-            "id": row[0],
-            "event_type": row[1],
-            "payload": row[2] or {},
-            "created_at": row[3].isoformat() if row[3] else None,
-            "direction_mode": row[4] if len(row) > 4 else SHIFT_AUCTION_MODE_LINE,
-        }
-        for row in (cursor.fetchall() or [])
-    ]
 
 
-def _fetch_recent_shift_auction_events_with_cursor(cursor):
-    """Warm a new process with the newest buffer window, not the full history."""
-    cursor.execute(
-        """
-        SELECT id, event_type, payload, created_at, COALESCE(direction_mode, 'line')
-        FROM shift_auction_test_events
-        ORDER BY id DESC
-        LIMIT %s
-        """,
-        (int(SHIFT_AUCTION_EVENT_BUFFER_MAXLEN),),
-    )
-    rows = list(cursor.fetchall() or [])
-    rows.reverse()
-    return [
-        {
-            "id": row[0],
-            "event_type": row[1],
-            "payload": row[2] or {},
-            "created_at": row[3].isoformat() if row[3] else None,
-            "direction_mode": row[4] if len(row) > 4 else SHIFT_AUCTION_MODE_LINE,
-        }
-        for row in rows
-    ]
 
 
-def _publish_shift_auction_events(events):
-    """Append freshly fetched events to the in-memory buffer and wake waiters once."""
-    global shift_auction_event_signal_id, shift_auction_event_buffer_max_id
-    if not events:
-        return
-    with shift_auction_event_condition:
-        appended = False
-        for event in events:
-            try:
-                event_id = int(event.get("id") or 0)
-            except Exception:
-                event_id = 0
-            if event_id <= shift_auction_event_buffer_max_id:
-                continue
-            shift_auction_event_buffer.append(event)
-            shift_auction_event_buffer_max_id = event_id
-            appended = True
-        if appended:
-            shift_auction_event_signal_id += 1
-            shift_auction_event_condition.notify_all()
 
 
-def _read_shift_auction_events_from_buffer(after_id):
-    """Return ``(events, covered, signal_id, floor_id)`` after ``after_id``.
-
-    ``covered`` is True when the in-memory buffer is guaranteed to contain the
-    full contiguous range after ``after_id`` (so the caller can trust RAM and
-    skip the DB). It is False only when the client is further behind than the
-    buffer window — then the caller does a one-off DB catch-up.
-    """
-    after_id = int(after_id or 0)
-    with shift_auction_event_condition:
-        signal_id = shift_auction_event_signal_id
-        if not shift_auction_event_buffer:
-            # During listener warm-up, wait for its signal instead of making all
-            # newly connected streams hit the shared application DB pool.
-            return [], True, signal_id, None
-        min_buffered_id = int(shift_auction_event_buffer[0].get("id") or 0)
-        covered = (after_id + 1) >= min_buffered_id
-        # The buffer is strictly id-ascending, so scan from the tail and stop at
-        # the first already-seen id — O(new events) instead of O(buffer length).
-        events = []
-        for event in reversed(shift_auction_event_buffer):
-            if int(event.get("id") or 0) > after_id:
-                events.append(event)
-            else:
-                break
-        events.reverse()
-    return events, covered, signal_id, min_buffered_id
 
 
-def _drain_shift_auction_events(cursor):
-    """Fetch and broadcast ALL events after the buffer head, paging to exhaustion.
-
-    ``_publish_shift_auction_events`` advances ``shift_auction_event_buffer_max_id``,
-    so each iteration re-reads the global and makes monotonic progress. Looping
-    until a short page guarantees a large backlog — a reconnect after an outage,
-    or a burst of more than ``SHIFT_AUCTION_EVENT_FETCH_LIMIT`` NOTIFYs — is fully
-    drained instead of stranding the tail until the next live event arrives.
-    """
-    while True:
-        batch = _fetch_shift_auction_events_with_cursor(cursor, shift_auction_event_buffer_max_id)
-        if not batch:
-            break
-        _publish_shift_auction_events(batch)
-        if len(batch) < SHIFT_AUCTION_EVENT_FETCH_LIMIT:
-            break
 
 
-def _initialize_shift_auction_event_buffer(cursor):
-    """Load the recent window once and mark the process-local fan-out ready."""
-    global shift_auction_event_buffer_ready, shift_auction_event_signal_id
-    _publish_shift_auction_events(_fetch_recent_shift_auction_events_with_cursor(cursor))
-    with shift_auction_event_condition:
-        shift_auction_event_buffer_ready = True
-        # Also wake streams when the table is empty and no event was published.
-        shift_auction_event_signal_id += 1
-        shift_auction_event_condition.notify_all()
 
 
-def _run_shift_auction_pg_listener():
-    while True:
-        conn = None
-        cursor = None
-        try:
-            conn = psycopg2.connect(**_build_postgres_connection_params())
-            conn.set_session(autocommit=True)
-            cursor = conn.cursor()
-            cursor.execute(f"LISTEN {SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL}")
-            logging.info("Shift auction event listener connected")
-
-            # A new process needs only the recent window. A reconnect keeps its
-            # RAM buffer and drains every missed page to the current head.
-            if shift_auction_event_buffer_ready:
-                _drain_shift_auction_events(cursor)
-            else:
-                _initialize_shift_auction_event_buffer(cursor)
-
-            while True:
-                readable, _, _ = select.select([conn], [], [], SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS)
-                # Always poll + drain: a NOTIFY can be absorbed into conn.notifies
-                # as a side effect of running the events query below, so we must
-                # not rely on socket readability alone to detect new events.
-                conn.poll()
-                got_notify = False
-                while conn.notifies:
-                    conn.notifies.pop(0)
-                    got_notify = True
-                if not readable:
-                    # Idle heartbeat — keep the connection alive.
-                    cursor.execute("SELECT 1")
-                    # Executing a query can itself move pending NOTIFYs into
-                    # conn.notifies, so poll and drain once more afterwards.
-                    conn.poll()
-                    while conn.notifies:
-                        conn.notifies.pop(0)
-                        got_notify = True
-                if got_notify:
-                    # Fetch to exhaustion once, regardless of how many NOTIFYs
-                    # arrived. This also handles bursts larger than one page.
-                    _drain_shift_auction_events(cursor)
-        except Exception as error:
-            logging.warning("Shift auction event listener reconnecting after error: %s", error, exc_info=True)
-            _signal_shift_auction_event_waiters()
-            time.sleep(SHIFT_AUCTION_EVENT_LISTENER_RETRY_SECONDS)
-        finally:
-            try:
-                if cursor is not None:
-                    cursor.close()
-            except Exception:
-                pass
-            try:
-                if conn is not None:
-                    conn.close()
-            except Exception:
-                pass
 
 
-def _ensure_shift_auction_event_listener_started():
-    global shift_auction_event_listener_started
-    if shift_auction_event_listener_started:
-        return
-    with shift_auction_event_listener_lock:
-        if shift_auction_event_listener_started:
-            return
-        listener_thread = threading.Thread(
-            target=_run_shift_auction_pg_listener,
-            name="shift-auction-pg-listener",
-            daemon=True
-        )
-        listener_thread.start()
-        shift_auction_event_listener_started = True
 
 
 def get_gcs_client():
@@ -3247,51 +3012,12 @@ def _is_supervisor_role(role: str) -> bool:
 
 
 # Отдел, чьи супервайзеры управляют аукционом смен наравне с главой отдела.
-SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE = 'szov'
 
 
-def _resolve_shift_auction_direction(requester_id, requester_role, requested=None):
-    """Направление аукциона («линия» или «чат») для этого запроса.
-
-    У СВ и выше в разделе есть тумблер, поэтому им параметр направления разрешён.
-    У ОПЕРАТОРА направление жёстко своё — из карточки, что бы ни пришло в запросе:
-    иначе подменённым параметром можно было бы смотреть и разбирать чужой аукцион.
-    """
-    role = _normalize_user_role(requester_role)
-    if _is_admin_role(role) or _is_supervisor_role(role):
-        return normalize_shift_auction_mode(requested)
-    try:
-        own_mode = db.shift_auction_mode_for_operator(requester_id)
-    except Exception:
-        own_mode = None
-    return own_mode or SHIFT_AUCTION_MODE_LINE
 
 
-def _requested_shift_auction_direction(payload=None):
-    """Направление из запроса: тело (для POST/PUT) или строка запроса."""
-    if isinstance(payload, dict):
-        for key in ('direction', 'direction_mode'):
-            if payload.get(key) not in (None, ''):
-                return payload.get(key)
-    return request.args.get('direction') or request.args.get('direction_mode')
 
 
-def _is_shift_auction_manager(requester_id, requester_role) -> bool:
-    """Кто может управлять аукционом смен (запуск, контроль, публикация и т.п.).
-
-    Помимо админов — супервайзеры СЗоВ: им открыты те же действия, что и главе
-    отдела (admin). Соответствует фронтовому ``canManage`` в ShiftAuctionView.
-    """
-    role = _normalize_user_role(requester_role)
-    if _is_admin_role(role):
-        return True
-    if _is_supervisor_role(role) and requester_id:
-        try:
-            _, department_code = db.get_user_department(requester_id)
-        except Exception:
-            department_code = None
-        return str(department_code or '').lower() == SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE
-    return False
 
 
 def _current_almaty_datetime():
@@ -3394,13 +3120,6 @@ def _signed_audio_response_type(blob_name):
 
 
 # 'production' — тип для отдела маркетинга с брифом (задача #354, task_production).
-TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion', 'production'}
-TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
-TASK_ALLOWED_PRIORITIES = {'normal', 'urgent', 'critical'}
-TASK_ALLOWED_RECURRENCE_TYPES = {'daily', 'weekly', 'monthly'}
-TASK_MAX_FILES = 10
-TASK_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
-TASK_ATTACHMENTS_UPLOAD_FOLDER = (os.getenv('TASK_ATTACHMENTS_UPLOAD_FOLDER') or 'TaskAttachments/').strip()
 TASK_WEB_APP_BASE_URL = (os.getenv('TASK_WEB_APP_BASE_URL') or 'https://alfa330.github.io/OTP').strip()
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 TELEGRAM_MAX_CAPTION_CHARS = 1024
@@ -3455,13 +3174,6 @@ FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_00
 # ── Ивенты (раздел «Ивенты»): общедоступная лента постов с фото/видео ──
 # Потолок размера страницы /api/tasks. Клиент даёт выбрать 30/60/100, но защита
 # от «дай всё сразу» должна стоять на сервере, а не в интерфейсе.
-TASKS_MAX_PAGE_SIZE = int(os.getenv('TASKS_MAX_PAGE_SIZE', '200'))
-TASK_TAG_LABELS = {
-    'task': 'Задача',
-    'problem': 'Проблема',
-    'suggestion': 'Предложение',
-    'production': 'Продакшн'
-}
 TASK_PRIORITY_LABELS = {
     'normal': 'Обычная',
     'urgent': 'Срочная',
@@ -3528,148 +3240,22 @@ def _escape_telegram_html(text, max_chars=None):
     return html.escape(value)
 
 
-def _parse_task_bool(value):
-    if isinstance(value, bool):
-        return value
-    return str(value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
 
 
-def _parse_task_int(value, field_name, default=0, minimum=0, maximum=None):
-    raw = str(value if value is not None else '').strip()
-    if raw == '':
-        return int(default)
-    try:
-        parsed = int(raw)
-    except Exception:
-        raise ValueError(f"{field_name} must be an integer")
-    if parsed < minimum:
-        raise ValueError(f"{field_name} must be >= {minimum}")
-    if maximum is not None and parsed > maximum:
-        raise ValueError(f"{field_name} must be <= {maximum}")
-    return parsed
 
 
-def _parse_task_deadline_minutes(source):
-    days = _parse_task_int(source.get('deadline_days'), 'deadline_days', default=0, minimum=0, maximum=3650)
-    hours = _parse_task_int(source.get('deadline_hours'), 'deadline_hours', default=0, minimum=0, maximum=23)
-    minutes = _parse_task_int(source.get('deadline_minutes'), 'deadline_minutes', default=0, minimum=0, maximum=59)
-    total = days * 24 * 60 + hours * 60 + minutes
-    return total if total > 0 else None
 
 
-def _parse_task_estimate_minutes(source):
-    """Плановая длительность задачи: либо estimate_minutes, либо часы+минуты из формы."""
-    direct = source.get('estimate_minutes')
-    if direct is not None and str(direct).strip() != '':
-        total = _parse_task_int(direct, 'estimate_minutes', default=0, minimum=0, maximum=3650 * 24 * 60)
-        return total or None
-    hours = _parse_task_int(source.get('estimate_hours'), 'estimate_hours', default=0, minimum=0, maximum=3650 * 24)
-    minutes = _parse_task_int(source.get('estimate_extra_minutes'), 'estimate_extra_minutes', default=0, minimum=0, maximum=59)
-    total = hours * 60 + minutes
-    return total or None
 
 
-def _parse_task_spent_minutes(source):
-    """Фактические трудозатраты: либо spent_minutes, либо часы+минуты из формы."""
-    direct = source.get('spent_minutes')
-    if direct is not None and str(direct).strip() != '':
-        total = _parse_task_int(direct, 'spent_minutes', default=0, minimum=0, maximum=3650 * 24 * 60)
-        return total or None
-    hours = _parse_task_int(source.get('spent_hours'), 'spent_hours', default=0, minimum=0, maximum=3650 * 24)
-    minutes = _parse_task_int(source.get('spent_extra_minutes'), 'spent_extra_minutes', default=0, minimum=0, maximum=59)
-    total = hours * 60 + minutes
-    return total or None
 
 
-def _parse_task_assignee_ids(raw_value):
-    """Состав исполнителей из тела запроса.
-
-    Понимает и массив из JSON (PATCH), и строку «12,15,7» из multipart-формы
-    (POST принимает только form-data), и одиночный id — так же, как это делает
-    Database._normalize_task_assignees, чтобы правила «дубликаты свернуть,
-    порядок сохранить, потолок не превысить» жили в одном месте.
-
-    Порядок значим: первый становится tasks.assigned_to.
-    """
-    if raw_value is None:
-        raise ValueError("Выберите хотя бы одного исполнителя")
-    try:
-        return db._normalize_task_assignees(raw_value)
-    except ValueError as normalize_error:
-        code = str(normalize_error)
-        if code == 'TOO_MANY_ASSIGNEES':
-            raise ValueError(f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}")
-        if code == 'ASSIGNEE_REQUIRED':
-            raise ValueError("Выберите хотя бы одного исполнителя")
-        raise ValueError("assigned_to must be an integer")
 
 
-def _task_assignees_outside_scope(assignee_ids, requester_id, requester_role):
-    """Кому из состава поручать нельзя. Пустой список — всё в порядке.
-
-    Список разрешённых спрашиваем ОДИН раз на весь состав: раньше эта сверка
-    стояла отдельно в создании и в правке, дословно повторённая, и разъезжалась
-    при любой правке одной из двух копий.
-    """
-    allowed_recipients = db.get_task_recipients(
-        requester_id,
-        requester_role,
-        scope_department_id=getattr(g, 'task_scope_department_id', None)
-    )
-    allowed_ids = {int(item['id']) for item in allowed_recipients if item.get('id') is not None}
-    return [person_id for person_id in (assignee_ids or []) if int(person_id) not in allowed_ids]
 
 
-def _task_assignee_chat_ids(assignee_ids):
-    """Telegram-чаты исполнителей одним запросом (порядок — как в составе)."""
-    ids = [int(item) for item in (assignee_ids or []) if item]
-    if not ids:
-        return []
-    with db._get_cursor() as cursor:
-        cursor.execute(
-            "SELECT id, telegram_id FROM users"
-            " WHERE id = ANY(%s) AND telegram_id IS NOT NULL",
-            (ids,)
-        )
-        chat_by_id = {int(row[0]): row[1] for row in cursor.fetchall()}
-    return [chat_by_id[person_id] for person_id in ids if person_id in chat_by_id]
 
 
-def _parse_task_checklist_items(raw_value):
-    if raw_value is None:
-        return []
-    if isinstance(raw_value, list):
-        raw_items = raw_value
-    else:
-        raw_text = str(raw_value or '').strip()
-        if not raw_text:
-            return []
-        try:
-            parsed = json.loads(raw_text)
-            raw_items = parsed if isinstance(parsed, list) else []
-        except Exception:
-            raw_items = [line.strip() for line in raw_text.splitlines()]
-
-    items = []
-    seen = set()
-    for raw_item in raw_items:
-        if isinstance(raw_item, dict):
-            title = str(raw_item.get('title') or raw_item.get('text') or '').strip()
-            is_required = bool(raw_item.get('is_required', True))
-        else:
-            title = str(raw_item or '').strip()
-            is_required = True
-        if not title:
-            continue
-        title = title[:255]
-        dedup_key = title.casefold()
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-        items.append({"title": title, "is_required": is_required})
-        if len(items) >= 50:
-            break
-    return items
 
 
 def _format_task_due_for_notification(value):
@@ -3757,18 +3343,6 @@ def _build_task_notification_reply_markup(task_link):
     }
 
 
-def _build_task_subject_notification_html(task_ctx, task_link=None):
-    subject_safe = _escape_telegram_html(
-        task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}",
-        220
-    )
-    if not task_link:
-        return subject_safe
-    return (
-        f'<a href="{_escape_telegram_html(task_link, 500)}">'
-        f'{subject_safe}'
-        '</a>'
-    )
 
 
 def _get_telegram_error_text(response):
@@ -4093,276 +3667,14 @@ def _notify_super_admin_sensitive_access_approved(
         logging.error(f"notify_super_admin_sensitive_access_approved error: {notify_error}", exc_info=True)
 
 
-def _fetch_task_notification_context(task_id):
-    with db._get_cursor() as cursor:
-        cursor.execute("""
-            SELECT
-                t.id, t.subject, t.tag, t.priority, t.due_at, t.created_by,
-                creator.telegram_id, creator.name,
-                t.assigned_to, assignee.telegram_id, assignee.name,
-                t.requested_by_id, requester.telegram_id,
-                COALESCE(requester.name, t.requested_by_name),
-                t.production_brief
-            FROM tasks t
-            LEFT JOIN users creator ON creator.id = t.created_by
-            LEFT JOIN users assignee ON assignee.id = t.assigned_to
-            LEFT JOIN users requester ON requester.id = t.requested_by_id
-            WHERE t.id = %s
-            LIMIT 1
-        """, (int(task_id),))
-        row = cursor.fetchone()
-        # Весь состав исполнителей: задачу могли поручить нескольким, и знать о
-        # ней должен каждый. Скалярные assignee_* ниже оставлены для мест, где
-        # человек ровно один (текст «Исполнитель: …» в сообщении).
-        assignee_rows = []
-        if row:
-            cursor.execute("""
-                SELECT u.id, u.telegram_id, u.name
-                  FROM task_assignees ta
-                  JOIN users u ON u.id = ta.user_id
-                 WHERE ta.task_id = %s
-                 ORDER BY ta.position, ta.user_id
-            """, (int(task_id),))
-            assignee_rows = cursor.fetchall()
-    if not row:
-        return None
-    return {
-        "id": row[0],
-        "subject": row[1],
-        "tag": row[2],
-        "priority": row[3],
-        "due_at": row[4].isoformat() if hasattr(row[4], 'isoformat') else row[4],
-        "created_by": row[5],
-        "creator_telegram_id": row[6],
-        "creator_name": row[7],
-        "assigned_to": row[8],
-        "assignee_telegram_id": row[9],
-        "assignee_name": row[10],
-        "assignees": [
-            {"id": item[0], "telegram_id": item[1], "name": item[2]}
-            for item in assignee_rows
-        ],
-        # Поручитель принимает итог — он должен получать уведомления по задаче.
-        "requested_by": row[11],
-        "requester_telegram_id": row[12],
-        "requester_name": row[13],
-        # Бриф продакшна (#354): из него — строка «Что:» в сообщениях.
-        "production_brief": row[14]
-    }
 
 
-def _collect_task_notification_recipients(task_ctx, actor_user_id):
-    recipients = []
-    seen_chat_ids = set()
-
-    creator_chat_id = task_ctx.get('creator_telegram_id')
-    creator_id = task_ctx.get('created_by')
-    if creator_chat_id and (creator_id is None or int(creator_id) != int(actor_user_id)):
-        chat_key = str(creator_chat_id)
-        if chat_key not in seen_chat_ids:
-            seen_chat_ids.add(chat_key)
-            recipients.append({
-                "kind": "creator",
-                "chat_id": creator_chat_id,
-                "name": task_ctx.get('creator_name') or 'Постановщик'
-            })
-
-    # По строке на каждого исполнителя. Автора действия пропускаем — сообщать
-    # человеку о его же клике незачем. Если состав почему-то не приехал,
-    # откатываемся на скалярного исполнителя: молчать хуже, чем повторить.
-    assignee_people = task_ctx.get('assignees')
-    if not assignee_people:
-        assignee_people = [{
-            "id": task_ctx.get('assigned_to'),
-            "telegram_id": task_ctx.get('assignee_telegram_id'),
-            "name": task_ctx.get('assignee_name'),
-        }]
-    for person in assignee_people:
-        assignee_chat_id = person.get('telegram_id')
-        assignee_id = person.get('id')
-        if not assignee_chat_id:
-            continue
-        if assignee_id is not None and int(assignee_id) == int(actor_user_id):
-            continue
-        chat_key = str(assignee_chat_id)
-        if chat_key in seen_chat_ids:
-            continue
-        seen_chat_ids.add(chat_key)
-        recipients.append({
-            "kind": "assignee",
-            "chat_id": assignee_chat_id,
-            "name": person.get('name') or 'Исполнитель'
-        })
-
-    # Поручитель принимает итог, поэтому обновления по задаче должны доходить и до него.
-    requester_chat_id = task_ctx.get('requester_telegram_id')
-    requester_id = task_ctx.get('requested_by')
-    if requester_chat_id and (requester_id is None or int(requester_id) != int(actor_user_id)):
-        chat_key = str(requester_chat_id)
-        if chat_key not in seen_chat_ids:
-            seen_chat_ids.add(chat_key)
-            recipients.append({
-                "kind": "requester",
-                "chat_id": requester_chat_id,
-                "name": task_ctx.get('requester_name') or 'Поручитель'
-            })
-
-    return recipients
 
 
-def _build_task_status_notification_html(
-    action,
-    task_ctx,
-    actor_name,
-    recipient_kind,
-    comment=None,
-    completion_summary=None,
-    completion_files_count=0,
-    task_link=None,
-    spent_minutes=None
-):
-    action_norm = (action or '').strip().lower()
-    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
-    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
-    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
-    tag_safe = _escape_telegram_html(tag_label, 60)
-    priority_safe = _escape_telegram_html(priority_label, 60)
-    actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
-
-    header_map = {
-        'in_progress': '📥 Задача принята в работу',
-        'completed': '✅ Задача отмечена выполненной',
-        'accepted': '✅ Результат принят',
-        'returned': '↩️ Задача возвращена на доработку',
-        'reopened': '🔄 Задача возобновлена'
-    }
-    status_map = {
-        'in_progress': 'В работе',
-        'completed': 'Ожидает проверки',
-        'accepted': 'Принята',
-        'returned': 'Возвращена',
-        'reopened': 'Снова в работе'
-    }
-
-    lines = [
-        f"<b>{header_map.get(action_norm, '🔔 Обновление статуса задачи')}</b>",
-        "",
-        f"<b>Тип:</b> {tag_safe}",
-        f"<b>Срочность:</b> {priority_safe}",
-        f"<b>Тема:</b> {subject_safe}",
-        f"<b>Статус:</b> {status_map.get(action_norm, 'Обновлён')}",
-        f"<b>Кто изменил:</b> {actor_safe}"
-    ]
-    if due_label:
-        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-
-    if comment:
-        lines.extend([
-            "",
-            "<b>Комментарий:</b>",
-            _escape_telegram_html(comment, 800)
-        ])
-
-    if action_norm == 'completed':
-        lines.append(f"<b>Файлов:</b> {int(completion_files_count or 0)}")
-        spent_label = _format_task_spent_for_notification(spent_minutes)
-        if spent_label:
-            lines.append(f"<b>Затрачено:</b> {_escape_telegram_html(spent_label, 40)}")
-        lines.extend([
-            "",
-            "<b>Отчёт о проделанной работе:</b>",
-            _escape_telegram_html(completion_summary or "Отчёт не заполнен.", 2500)
-        ])
-        # Итог принимает поручитель — говорим ему об этом прямо, а не «просто уведомляем».
-        if (recipient_kind or '').strip() == 'requester':
-            lines.extend([
-                "",
-                "<b>Задача ждёт вашей приёмки:</b> проверьте итог и примите его или верните на доработку."
-            ])
-
-    message = "\n".join(lines)
-    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
-        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
-    return message
 
 
-def _task_production_item_line(production_brief):
-    """«Что:» в Telegram у продакшна (задача #354): тип без наименования ничего
-    не говорит исполнителю, а весь бриф — в карточке задачи."""
-    import task_production
-    item = task_production.item_label(production_brief)
-    return f"<b>Что:</b> {_escape_telegram_html(item, 120)}" if item else None
 
 
-def _build_task_event_notification_html(event, task_ctx, actor_name, changed_fields=None, task_link=None):
-    event_norm = (event or '').strip().lower()
-    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
-    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
-    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
-    tag_safe = _escape_telegram_html(tag_label, 60)
-    priority_safe = _escape_telegram_html(priority_label, 60)
-    actor_safe = _escape_telegram_html(actor_name or 'Сотрудник', 80)
-
-    header_map = {
-        'edited': '✏️ Задача обновлена',
-        'deleted': '🗑️ Задача удалена',
-        'promoted': '🆕 Задача из бэклога в работу',
-        'planned': '🗓️ Сроки задачи обновлены'
-    }
-
-    lines = [
-        f"<b>{header_map.get(event_norm, '🔔 Обновление задачи')}</b>",
-        "",
-        f"<b>Тип:</b> {tag_safe}",
-        f"<b>Срочность:</b> {priority_safe}",
-        f"<b>Тема:</b> {subject_safe}",
-        f"<b>Кто изменил:</b> {actor_safe}"
-    ]
-    if due_label:
-        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-    # Из бэклога задача впервые доходит до исполнителя — как и при постановке,
-    # ему сразу видно, что именно сделать.
-    production_line = _task_production_item_line(task_ctx.get('production_brief')) if event_norm == 'promoted' else None
-    if production_line:
-        lines.insert(3, production_line)
-
-    if event_norm in ('edited', 'planned'):
-        labels = {
-            'subject': 'тема',
-            'description': 'описание',
-            'tag': 'тип',
-            'priority': 'срочность',
-            'deadline': 'дедлайн',
-            'recurrence': 'регламент',
-            'checklist': 'чек-лист',
-            'assigned_to': 'состав исполнителей',
-            'estimate': 'оценка',
-            'planned_start': 'плановый старт',
-            'is_backlog': 'бэклог',
-            'backlog_rank': 'приоритет в бэклоге',
-            'requested_by': 'кто поручил',
-            'reminder': 'напоминание',
-            'production_brief': 'бриф'
-        }
-        changed_items = []
-        for item in (changed_fields or []):
-            key = str(item or '').strip()
-            if not key:
-                continue
-            changed_items.append(labels.get(key, key))
-        if changed_items:
-            lines.append(f"<b>Изменено:</b> {_escape_telegram_html(', '.join(changed_items), 120)}")
-
-    if event_norm == 'promoted':
-        lines.append("")
-        lines.append("<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>")
-
-    message = "\n".join(lines)
-    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
-        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
-    return message
 
 
 def _format_task_spent_for_notification(minutes):
@@ -4378,176 +3690,17 @@ def _format_task_spent_for_notification(minutes):
     return f"{days} д {rest_hours} ч" if rest_hours else f"{days} д"
 
 
-def _build_task_report_notification_html(task_ctx, actor_name, report, task_link=None):
-    is_final = (report or {}).get('kind') == 'completion'
-    header = '📄 Итоговый отчёт по задаче' if is_final else '📝 Отчёт о проделанной работе'
-    lines = [
-        f"<b>{header}</b>",
-        "",
-        f"<b>Тема:</b> {_build_task_subject_notification_html(task_ctx, task_link)}",
-        f"<b>Автор:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
-    ]
-    spent_label = _format_task_spent_for_notification((report or {}).get('spent_minutes'))
-    if spent_label:
-        lines.append(f"<b>Затрачено:</b> {_escape_telegram_html(spent_label, 40)}")
-    body = str((report or {}).get('body') or '').strip()
-    if body:
-        lines.append("")
-        lines.append(_escape_telegram_html(body, 1500))
-    message = "\n".join(lines)
-    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
-        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
-    return message
 
 
-TASK_MESSAGE_SAVED_LABELS = {
-    'note': 'Задача дополнена',
-    'request': 'Запрос отправлен постановщику',
-    'answer': 'Ответ отправлен исполнителю',
-}
-
-TASK_MESSAGE_NOTIFICATION_HEADERS = {
-    'note': '📌 Постановщик дополнил задачу',
-    'request': '❓ Исполнителю не хватает информации',
-    'answer': '💬 Ответ на запрос информации',
-}
 
 
-def _build_task_message_notification_html(task_ctx, actor_name, message, task_link=None):
-    """Уточнение по задаче: дополнение постановки, запрос информации либо ответ."""
-    kind = str((message or {}).get('kind') or 'note').strip().lower()
-    header = TASK_MESSAGE_NOTIFICATION_HEADERS.get(kind, '📌 Уточнение по задаче')
-    lines = [
-        f"<b>{header}</b>",
-        "",
-        f"<b>Тема:</b> {_build_task_subject_notification_html(task_ctx, task_link)}",
-        f"<b>Автор:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
-    ]
-    attachments = (message or {}).get('attachments') or []
-    if attachments:
-        lines.append(f"<b>Файлов:</b> {len(attachments)}")
-    body = str((message or {}).get('body') or '').strip()
-    if body:
-        lines.append("")
-        lines.append(_escape_telegram_html(body, 1500))
-    if kind == 'request':
-        lines.append("")
-        lines.append("Ответьте в карточке задачи — до ответа работа стоит.")
-    message_html = "\n".join(lines)
-    if len(message_html) > TELEGRAM_MAX_MESSAGE_CHARS:
-        message_html = message_html[:TELEGRAM_MAX_MESSAGE_CHARS]
-    return message_html
 
 
-def _build_task_checklist_notification_html(task_ctx, checklist_item, actor_name, is_done, task_link=None):
-    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
-    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
-    subject_safe = _build_task_subject_notification_html(task_ctx, task_link)
-    status_label = 'выполнен' if is_done else 'снова открыт'
-    lines = [
-        "<b>☑️ Обновление чек-листа</b>",
-        "",
-        f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
-        f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
-        f"<b>Тема:</b> {subject_safe}",
-        f"<b>Пункт:</b> {_escape_telegram_html(checklist_item.get('title') or 'Пункт чек-листа', 180)}",
-        f"<b>Статус:</b> {_escape_telegram_html(status_label, 40)}",
-        f"<b>Кто изменил:</b> {_escape_telegram_html(actor_name or 'Сотрудник', 80)}"
-    ]
-    if due_label:
-        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-    message = "\n".join(lines)
-    if len(message) > TELEGRAM_MAX_MESSAGE_CHARS:
-        message = message[:TELEGRAM_MAX_MESSAGE_CHARS]
-    return message
 
 
-def _collect_task_assignee_recipients(task_ctx, actor_user_id):
-    recipients = _collect_task_notification_recipients(task_ctx, actor_user_id)
-    return [item for item in recipients if (item.get('kind') or '').strip() == 'assignee']
 
 
-def _send_task_completion_attachments_to_telegram(chat_id, task_subject, attachments, task_link=None):
-    warnings = []
-    if not chat_id or not attachments:
-        return warnings
 
-    telegram_url = f"https://api.telegram.org/bot{API_TOKEN}/sendDocument"
-    gcs_client = None
-
-    for idx, attachment in enumerate(attachments, start=1):
-        try:
-            storage_type = str(attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
-            file_name = (attachment.get('file_name') or f'attachment_{idx}').strip() or f'attachment_{idx}'
-            content_type = (attachment.get('content_type') or '').strip() or 'application/octet-stream'
-
-            if storage_type == 'gcs':
-                bucket_name = (attachment.get('gcs_bucket') or '').strip()
-                blob_path = (attachment.get('gcs_blob_path') or '').strip()
-                if not bucket_name or not blob_path:
-                    warnings.append(f"Не удалось отправить файл '{file_name}': отсутствуют метаданные хранилища")
-                    continue
-                if gcs_client is None:
-                    gcs_client = get_gcs_client()
-                blob = gcs_client.bucket(bucket_name).blob(blob_path)
-                if not blob.exists():
-                    warnings.append(f"Не удалось отправить файл '{file_name}': файл не найден в хранилище")
-                    continue
-                file_bytes = blob.download_as_bytes()
-            else:
-                file_data = attachment.get('file_data')
-                if isinstance(file_data, memoryview):
-                    file_bytes = file_data.tobytes()
-                elif isinstance(file_data, bytearray):
-                    file_bytes = bytes(file_data)
-                elif isinstance(file_data, bytes):
-                    file_bytes = file_data
-                else:
-                    warnings.append(f"Не удалось отправить файл '{file_name}': неподдерживаемый формат данных")
-                    continue
-
-            files = {
-                'document': (file_name, file_bytes, content_type)
-            }
-            data = {
-                'chat_id': int(chat_id)
-            }
-            if content_type.lower().startswith('image/webp'):
-                # Фото задач теперь лежат в WebP (task_photos), а .webp,
-                # присланный документом, Telegram распознаёт и показывает
-                # СТИКЕРОМ — без подписи и без кнопки «сохранить файл».
-                data['disable_content_type_detection'] = 'true'
-            if idx == 1:
-                task_subject_html = _escape_telegram_html(task_subject or 'Без названия', 180)
-                if task_link:
-                    task_subject_html = (
-                        f'<a href="{_escape_telegram_html(task_link, 500)}">'
-                        f'{task_subject_html}'
-                        '</a>'
-                    )
-                caption = (
-                    "<b>📎 Файлы по задаче</b>\n"
-                    f"{task_subject_html}"
-                )
-                if len(caption) > TELEGRAM_MAX_CAPTION_CHARS:
-                    caption = caption[:TELEGRAM_MAX_CAPTION_CHARS]
-                if caption:
-                    data['caption'] = caption
-                    data['parse_mode'] = 'HTML'
-
-            response = requests.post(
-                telegram_url,
-                files=files,
-                data=data,
-                timeout=TASK_TELEGRAM_TIMEOUT_SECONDS
-            )
-            if response.status_code != 200:
-                warnings.append(f"Не удалось отправить файл '{file_name}': {_get_telegram_error_text(response)}")
-        except Exception as attachment_error:
-            warnings.append(f"Не удалось отправить файл '{attachment.get('file_name') or idx}': {_telegram_exception_text(attachment_error)}")
-
-    return warnings
 
 
 def _build_avatar_signed_url(bucket_name, blob_path):
@@ -4885,130 +4038,10 @@ def _task_route_guard():
 
 
 
-def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
-    if not gcs_bucket or not uploaded_blob_paths:
-        return
-    for uploaded_path in uploaded_blob_paths:
-        try:
-            gcs_bucket.blob(uploaded_path).delete()
-        except Exception:
-            pass
 
 
-def _delete_task_attachment_blobs_from_gcs(attachments):
-    warnings = []
-    if not attachments:
-        return warnings
-
-    try:
-        gcs_client = get_gcs_client()
-    except Exception as storage_error:
-        return [f"Failed to initialize GCS client: {storage_error}"]
-
-    for attachment in attachments:
-        storage_type = (attachment.get('storage_type') or 'gcs').strip().lower() or 'gcs'
-        if storage_type != 'gcs':
-            continue
-
-        bucket_name = (attachment.get('gcs_bucket') or '').strip()
-        blob_path = (attachment.get('gcs_blob_path') or '').strip()
-        file_name = (attachment.get('file_name') or 'attachment').strip() or 'attachment'
-        if not bucket_name or not blob_path:
-            warnings.append(f"Missing storage metadata for '{file_name}'")
-            continue
-
-        try:
-            gcs_client.bucket(bucket_name).blob(blob_path).delete()
-        except Exception as delete_error:
-            warnings.append(f"Failed to delete '{file_name}' from GCS: {delete_error}")
-
-        # Миниатюра фотографии — служебный файл: человеку о ней знать незачем,
-        # поэтому её осечка в предупреждения не попадает, только в журнал.
-        thumb_path = (attachment.get('thumb_blob_path') or '').strip()
-        if thumb_path:
-            try:
-                gcs_client.bucket(bucket_name).blob(thumb_path).delete()
-            except Exception:
-                logging.warning("Failed to delete task photo thumbnail %s", thumb_path, exc_info=True)
-
-    return warnings
 
 
-def _upload_task_attachments_to_gcs(files, stage='initial'):
-    file_items = [item for item in (files or []) if item and item.filename]
-    if len(file_items) > TASK_MAX_FILES:
-        raise ValueError(f"Too many files. Max allowed: {TASK_MAX_FILES}")
-    if not file_items:
-        return [], [], None
-
-    bucket_name = (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
-    if not bucket_name:
-        raise RuntimeError("GOOGLE_CLOUD_STORAGE_BUCKET_TASKS is not configured")
-
-    upload_folder = TASK_ATTACHMENTS_UPLOAD_FOLDER.strip('/')
-    upload_prefix = f"{upload_folder}/" if upload_folder else ""
-    gcs_client = get_gcs_client()
-    gcs_bucket = gcs_client.bucket(bucket_name)
-
-    attachments = []
-    uploaded_blob_paths = []
-
-    for idx, file_storage in enumerate(file_items):
-        file_data = file_storage.read() or b''
-        if len(file_data) > TASK_MAX_FILE_SIZE_BYTES:
-            raise ValueError(f"File '{file_storage.filename}' exceeds 10 MB limit")
-
-        safe_name = secure_filename(file_storage.filename) or f'attachment_{idx + 1}'
-        content_type = (file_storage.mimetype or '').strip() or 'application/octet-stream'
-
-        # Картинка уходит в бакет WebP'ом, рядом — миниатюра для плитки в
-        # карточке (task_photos). Всё, что не перевелось, ложится как есть:
-        # отказать во вложении из-за кодека хуже, чем сохранить исходник.
-        photo = None
-        try:
-            import task_photos
-            photo = task_photos.prepare(file_data, filename=file_storage.filename,
-                                        content_type=content_type)
-        except Exception:
-            logging.exception("Task photo conversion failed, storing the file as is")
-        if photo:
-            file_data = photo['data']
-            content_type = photo['content_type']
-            safe_name = photo['file_name']
-
-        blob_path = (
-            f"{upload_prefix}tasks/{stage}/"
-            f"{datetime.utcnow().strftime('%Y/%m/%d')}/"
-            f"{uuid.uuid4().hex}_{safe_name}"
-        )
-
-        blob = gcs_bucket.blob(blob_path)
-        blob.upload_from_string(file_data, content_type=content_type)
-        uploaded_blob_paths.append(blob_path)
-
-        # Миниатюра не обязательна: без неё плитка покажет полный кадр, поэтому
-        # её осечка не отменяет загрузку вложения.
-        thumb_path = None
-        if photo and photo.get('thumb'):
-            candidate = task_photos.thumb_blob_path(blob_path)
-            try:
-                gcs_bucket.blob(candidate).upload_from_string(photo['thumb'], content_type='image/webp')
-                uploaded_blob_paths.append(candidate)
-                thumb_path = candidate
-            except Exception:
-                logging.warning("Task photo thumbnail upload failed", exc_info=True)
-
-        attachments.append({
-            "file_name": safe_name,
-            "content_type": content_type,
-            "file_size": len(file_data),
-            "storage_type": "gcs",
-            "gcs_bucket": bucket_name,
-            "gcs_blob_path": blob_path,
-            "thumb_blob_path": thumb_path
-        })
-
-    return attachments, uploaded_blob_paths, gcs_bucket
 
 
 def _convert_legacy_task_photos():
@@ -10573,19 +9606,13 @@ app.register_blueprint(build_chatapp_blueprint(
 # только глобальным админам — как и команды бота в Telegram. Отдельным главам отделов
 # он отдаётся в границах ОДНОГО отдела Workpace: ключ — departments.code у нас,
 # значение — название отдела в Workpace. Сопоставление ручное: связи справочников нет.
-GROUP_LATE_BOT_DEPARTMENT_SCOPES = {'front_office': 'Регионы'}
 # Коды резолвим в id: id отделов засеяны миграцией и в разных окружениях разные.
-_GROUP_LATE_BOT_SCOPE_CACHE = {'ts': 0.0, 'by_department_id': None}
-_GROUP_LATE_BOT_SCOPE_CACHE_TTL = 600  # отделы меняются раз в никогда
 
 # Отдел, которому раздел открыт ЦЕЛИКОМ, без границы отдела Workpace: кадровый учёт
 # ведётся по всей компании, поэтому сужать HR до одного отдела бессмысленно (задача
 # #273, решение владельца). Сверяем по КОДУ, а не по id: id засеян миграцией и в
 # разных окружениях разный. Зеркало на фронте — GROUP_LATE_BOT_FULL_DEPARTMENT_CODES
 # в src/App.jsx.
-GROUP_LATE_BOT_FULL_DEPARTMENT_CODE = 'hr'
-_GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE = {'ts': 0.0, 'id': None}
-_GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
 
 # Сколько дней отметок отдаётся на экран за один запрос. Данные тянутся из двух
 # внешних API прямо в запросе, и каждый лишний день — ещё два обращения к Workpace.
@@ -10594,938 +9621,79 @@ _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL = 600
 # каждый день собирался из Workpace прямо в запросе. С кэшем дней ограничение
 # перестало быть про скорость и осталось только страховкой от случайного запроса
 # на десятилетие: год открывается из базы, а не из чужого API.
-GROUP_LATE_ATTENDANCE_MAX_DAYS = 365
 
 # Сколько человек можно выбрать в одну выгрузку. Предел не от базы, а от смысла:
 # длинный список ФИО в фильтре — это уже «весь отдел», и его надо брать отделом.
-GROUP_LATE_REPORT_MAX_EMPLOYEES = 50
 
 
-def _group_late_bot_scope_by_department_id():
-    """{id нашего отдела: название отдела Workpace} по GROUP_LATE_BOT_DEPARTMENT_SCOPES."""
-    now = time.time()
-    cache = _GROUP_LATE_BOT_SCOPE_CACHE
-    if cache['by_department_id'] is not None and now - cache['ts'] < _GROUP_LATE_BOT_SCOPE_CACHE_TTL:
-        return cache['by_department_id']
-    try:
-        mapping = {}
-        for department in (db.get_departments() or []):
-            code = str(department.get('code') or '').strip().lower()
-            scope = GROUP_LATE_BOT_DEPARTMENT_SCOPES.get(code)
-            if scope and department.get('id') is not None:
-                mapping[int(department['id'])] = scope
-    except Exception:
-        logging.exception("group_late: не удалось сопоставить отделы")
-        return cache['by_department_id'] or {}
-    cache['ts'], cache['by_department_id'] = now, mapping
-    return mapping
 
 
-def _group_late_bot_department_scope(requester_id, role):
-    """Отдел Workpace, которым ограничен глава отдела. None — ограничений нет."""
-    if not _is_admin_role(role):
-        return None
-    headed_id = _headed_department_id(requester_id)
-    if headed_id is None:
-        return None
-    return _group_late_bot_scope_by_department_id().get(int(headed_id))
 
 
-def _group_late_bot_full_department_id():
-    """id отдела, которому раздел открыт целиком (по коду, с кэшем)."""
-    now = time.time()
-    cache = _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE
-    if cache['id'] is not None and now - cache['ts'] < _GROUP_LATE_BOT_FULL_DEPARTMENT_CACHE_TTL:
-        return cache['id']
-    found = None
-    try:
-        for department in (db.get_departments() or []):
-            if str(department.get('code') or '').strip().lower() == GROUP_LATE_BOT_FULL_DEPARTMENT_CODE:
-                found = int(department['id'])
-                break
-    except Exception:
-        logging.exception("group_late: не удалось определить отдел полного доступа")
-        return cache['id']
-    cache.update(ts=now, id=found)
-    return found
 
 
-def _group_late_bot_has_full_access(requester_id, role):
-    """Член отдела кадрового учёта видит раздел целиком, как глобальный админ.
-
-    Роль тут не при чём намеренно: кадровый учёт ведут рядовые сотрудники отдела
-    (у постановщика задачи #273 роль hr_manager, уровень как у оператора), а
-    признак доступа — членство в отделе."""
-    department_id = _group_late_bot_full_department_id()
-    if department_id is None:
-        return False
-    try:
-        return db.get_user_department_id(requester_id) == department_id
-    except Exception:
-        logging.exception("group_late: не удалось прочитать отдел пользователя %s", requester_id)
-        return False
 
 
-def _group_late_bot_guard():
-    """(requester_id, department_scope, err).
-
-    department_scope — название отдела Workpace, которым ограничен запрашивающий:
-    у глобального админа None (видит весь раздел), у члена отдела кадрового учёта
-    тоже None, у главы отдела из GROUP_LATE_BOT_DEPARTMENT_SCOPES — его отдел.
-    Каждый эндпоинт обязан протащить это значение в db-вызов: там на нём и
-    держится граница."""
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return None, None, (jsonify({"error": message}), status_code)
-    role = _normalize_user_role(requester[3])
-    if _is_global_admin_requester(role, requester_id):
-        return requester_id, None, None
-    if _group_late_bot_has_full_access(requester_id, role):
-        return requester_id, None, None
-    scope = _group_late_bot_department_scope(requester_id, role)
-    if scope:
-        return requester_id, scope, None
-    return requester_id, None, (jsonify({"error": "forbidden"}), 403)
 
 
-def _group_late_bot_scope_forbidden(action):
-    """Действие вне границы отдела: правится не свой чат, не своё правило и т. п."""
-    return jsonify({"error": f"{action} доступно только администраторам бота"}), 403
 
 
-def _group_late_bot_actor(requester_id):
-    """Кто выполнил действие — попадает в created_by, чтобы в разделе было видно,
-    что правку сделали с сайта, а не командой в Telegram."""
-    try:
-        requester = db.get_user(id=int(requester_id))
-        name = str(requester[2] or '').strip() if requester else ''
-    except Exception:
-        name = ''
-    return f"web:{requester_id}:{name}" if name else f"web:{requester_id}"
 
 
-def _group_late_send_chat_message(chat_id, text):
-    """Отправить сообщение нашим ботом из потока Flask. (message_id, error)."""
-    async def _send():
-        return await _group_late_send_event(chat_id, text)
-
-    try:
-        return _group_late_run_on_bot_loop(_send, timeout=30)
-    except Exception as error:
-        return None, str(error)[:300]
 
 
-def _group_late_fetch_chat_card(chat_id):
-    """Название и тип чата из Telegram: по одному chat_id в разделе не понять,
-    что это за чат."""
-    async def _get_chat():
-        return await bot.get_chat(chat_id)
-
-    try:
-        chat = _group_late_run_on_bot_loop(_get_chat, timeout=20)
-        return {'title': getattr(chat, 'title', None) or getattr(chat, 'username', None),
-                'chat_type': getattr(chat, 'type', None)}
-    except Exception as error:
-        logging.debug("group_late: getChat(%s) не удался: %s", chat_id, error)
-        return {'title': None, 'chat_type': None}
 
 
-@app.route('/api/group_late_bot/overview', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_overview():
-    """Шапка раздела: состояние опроса Workpace, объёмы отбивок и отчётов."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        overview = db.get_group_late_overview(days=request.args.get('days', 7), department=scope)
-        overview['status'] = 'success'
-        # Без доступов к Workpace опрос не заводится и отчёты собрать нечем —
-        # раздел должен сказать об этом прямо, а не показывать пустые графики.
-        overview['workpace_configured'] = group_late.is_configured()
-        # Отдел, которым ограничен раздел: по нему фронт прячет общие для компании
-        # действия и не даёт выбрать чужой отдел в фильтрах.
-        overview['department_scope'] = scope
-        return jsonify(overview), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot overview failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/chats', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_chats():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        if request.method == 'GET':
-            result = db.get_group_late_chats(days=request.args.get('days', 7), department=scope)
-            result['status'] = 'success'
-            return jsonify(result), 200
-
-        payload = request.get_json(silent=True) or {}
-        chat_id = payload.get('chat_id')
-        title = payload.get('title')
-        # В границах отдела фильтр у чата всегда один — свой: иначе чат отдела получал
-        # бы чужие нарушения, а уже подключённый чужой чат уехал бы под наш фильтр
-        # (add_group_late_chat пишет через ON CONFLICT DO UPDATE).
-        departments = payload.get('departments')
-        if scope:
-            if db.glb_chat_department_state(chat_id, scope) == 'foreign':
-                return _group_late_bot_scope_forbidden(
-                    'Чат закреплён за другим отделом, его настройка')
-            departments = [scope]
-        # Название чата знает Telegram — берём оттуда, если его не указали руками.
-        card = _group_late_fetch_chat_card(chat_id) if chat_id else {}
-        result = db.add_group_late_chat(
-            chat_id,
-            title=title or card.get('title'),
-            chat_type=card.get('chat_type'),
-            departments=departments,
-            note=payload.get('note'),
-            created_by=_group_late_bot_actor(requester_id),
-        )
-        # Приветствие сразу проверяет, что бот действительно состоит в чате.
-        # Чат в списке остаётся в любом случае — предупреждение показываем в UI.
-        if payload.get('send_welcome', True):
-            message_id, send_error = _group_late_send_chat_message(
-                result['chat_id'], group_late.messages.build_welcome_message())
-            result['welcome_sent'] = bool(message_id)
-            if not message_id:
-                result['warning'] = ("Чат сохранён, но приветствие отправить не удалось — "
-                                     f"проверьте, что бот добавлен в чат ({send_error})")
-        return jsonify({"status": "success", **result}), 201
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot chats failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/chats/<chat_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_chat_item(chat_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        if request.method == 'DELETE':
-            return jsonify({"status": "success",
-                            **db.delete_group_late_chat(chat_id, department=scope)}), 200
-
-        payload = request.get_json(silent=True) or {}
-        result = {}
-        if any(key in payload for key in ('title', 'note', 'enabled')):
-            result = db.update_group_late_chat(
-                chat_id,
-                title=payload.get('title'),
-                note=payload.get('note'),
-                enabled=payload.get('enabled'),
-                department=scope,
-            )
-        if 'departments' in payload:
-            result = db.set_group_late_chat_departments(
-                chat_id,
-                [scope] if scope else payload.get('departments'),
-                created_by=_group_late_bot_actor(requester_id),
-                department=scope,
-            )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot chat update failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/available_chats', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_available_chats():
-    """Группы, где бот уже есть, но рассылка ещё не подключена."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    # Список групп, где бот уже состоит, общий: без него чат не подключить, а об
-    # отделах он ничего не рассказывает.
-    _, _, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        result = db.get_group_late_available_chats()
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except Exception as error:
-        logging.exception("group_late available chats failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/chats/<chat_id>/test', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_chat_test(chat_id):
-    """Проверка связи: бот шлёт в чат тестовое сообщение и возвращает его название."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    # Тест пишет в чат от имени бота — в чужой чат писать нельзя.
-    if scope:
-        try:
-            own = db.glb_chat_department_state(chat_id, scope) == 'own'
-        except ValueError as error:
-            return jsonify({"error": str(error)}), 400
-        if not own:
-            return _group_late_bot_scope_forbidden(
-                'Чат закреплён за другим отделом, отправка в него')
-    now_text = datetime.now(group_late.TZ).strftime('%H:%M')
-    message_id, send_error = _group_late_send_chat_message(
-        chat_id, group_late.messages.build_test_message(now_text))
-    if not message_id:
-        return jsonify({"error": f"Бот не смог написать в этот чат: {send_error}"}), 502
-    card = _group_late_fetch_chat_card(chat_id)
-    if card.get('title'):
-        db.glb_update_chat_title(chat_id, card['title'])
-    return jsonify({"status": "success", "message_id": message_id, **card}), 200
 
 
-@app.route('/api/group_late_bot/departments', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_departments():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        result = db.get_group_late_departments(department=scope)
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except Exception as error:
-        logging.exception("group_late_bot departments failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/departments/sync', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_departments_sync():
-    """Перечитать справочник отделов из Workpace."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    # Пересчёт справочника из Workpace ничего не раскрывает (в ответе только счётчик)
-    # и главе отдела нужен так же, как админу, — поэтому доступен и в границах отдела.
-    _, _, err = _group_late_bot_guard()
-    if err:
-        return err
-    if not group_late.is_configured():
-        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
-                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
-    try:
-        employees = group_late.workpace_client.get_employees()
-        count = db.glb_sync_departments(group_late.count_departments(employees))
-        # Состав отделов освежаем той же кнопкой: вкладка «Сотрудники» показывает
-        # весь отдел, а не только нарушителей, и ждать опроса ради этого незачем.
-        staff = db.glb_sync_employees(group_late.employee_roster(employees))
-        return jsonify({"status": "success", "departments": count, "employees": staff}), 200
-    except group_late.WorkpaceError as error:
-        return jsonify({"error": f"Workpace недоступен: {error}"}), 502
-    except Exception as error:
-        logging.exception("group_late departments sync failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/mutes', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_mutes():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        if request.method == 'GET':
-            result = db.get_group_late_mutes(department=scope)
-            result['status'] = 'success'
-            return jsonify(result), 200
-
-        payload = request.get_json(silent=True) or {}
-        mute_kind = str(payload.get('mute_kind') or '').strip().lower()
-        mute_value = payload.get('mute_value')
-        chat_id = payload.get('chat_id')
-        # В границах отдела правило либо действует в своём чате, либо глушит свой же
-        # отдел целиком. Глобальное правило по сотруднику или «выключить всё» замолчало
-        # бы и чужие чаты, поэтому оно остаётся за администраторами бота.
-        if scope:
-            if mute_kind == 'dept':
-                mute_value = scope
-            if chat_id:
-                if db.glb_chat_department_state(chat_id, scope) != 'own':
-                    return _group_late_bot_scope_forbidden(
-                        'Чат закреплён за другим отделом, правило тишины в нём')
-            elif mute_kind != 'dept':
-                return _group_late_bot_scope_forbidden('Правило тишины во всех чатах')
-        result = db.add_group_late_mute(
-            mute_kind,
-            mute_value=mute_value,
-            chat_id=chat_id,
-            created_by=_group_late_bot_actor(requester_id),
-        )
-        return jsonify({"status": "success", **result}), 201
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot mutes failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/mutes/<int:mute_id>', methods=['DELETE', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_mute_item(mute_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        return jsonify({"status": "success",
-                        **db.delete_group_late_mute(mute_id=mute_id, department=scope)}), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 404
-    except Exception as error:
-        logging.exception("group_late_bot mute delete failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/events', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_events():
-    """Лента отбивок: что нашли, куда отправили, кто отбил."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        result = db.get_group_late_events(
-            date_from=request.args.get('date_from'),
-            date_to=request.args.get('date_to'),
-            event_type=request.args.get('event_type'),
-            department=scope or request.args.get('department'),
-            chat_id=request.args.get('chat_id'),
-            search=request.args.get('q'),
-            limit=request.args.get('limit', 100),
-            offset=request.args.get('offset', 0),
-        )
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot events failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/attendance', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_attendance():
-    """Отметки прихода и ухода за период по обоим источникам (задачи #273, #307).
-
-    Период больше не ограничен неделей: прошедшие дни лежат в кэше
-    (`group_late.attendance_cache`), а из внешних API тянется только сегодняшний.
-    Дни, которые не успели добрать за один заход, возвращаются в `pending_days`
-    — молча обрезать период нельзя, иначе кадровик решит, что в эти дни никто не
-    отмечался."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    if not group_late.is_configured():
-        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
-                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
-    try:
-        from group_late import attendance as _attendance
-
-        def _as_day(value, fallback):
-            text = str(value or '').strip()[:10]
-            if not text:
-                return fallback
-            try:
-                return datetime.strptime(text, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('Дата должна быть в формате ГГГГ-ММ-ДД')
-
-        from group_late import attendance_cache as _attendance_cache
-        department = scope or request.args.get('department')
-        refresh = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
-        # «Последние отметки» (30.09.2026): без периода — каждый сотрудник один
-        # раз, днём своей последней отметки, от самых свежих.
-        latest = str(request.args.get('mode') or '').strip().lower() == 'latest'
-        if latest:
-            date_start = date_end = None
-            payload = _attendance_cache.latest_rows(db, department=department, refresh=refresh)
-        else:
-            today = datetime.now(group_late.TZ).date()
-            date_start = _as_day(request.args.get('date_start'), today)
-            date_end = _as_day(request.args.get('date_end'), date_start)
-            if date_end < date_start:
-                date_start, date_end = date_end, date_start
-            if (date_end - date_start).days > GROUP_LATE_ATTENDANCE_MAX_DAYS:
-                return jsonify({
-                    "error": f"Период не должен превышать "
-                             f"{GROUP_LATE_ATTENDANCE_MAX_DAYS + 1} дн.",
-                    "code": "PERIOD_TOO_LONG",
-                }), 400
-            payload = _attendance_cache.rows_for(
-                db, date_start, date_end, department=department, refresh=refresh)
-        rows = _attendance.search_rows(payload['rows'], request.args.get('q'))
-        rows = _attendance.sort_rows(rows, request.args.get('sort'))
-
-        # Фильтры экрана: тип отметки и конкретные сотрудники (ТЗ просит отчёт
-        # «по выбранному(-ым) сотруднику(-ам)»).
-        kind = (request.args.get('kind') or '').strip().lower()
-        if kind == 'in':
-            rows = [r for r in rows if r['fact_in']]
-        elif kind == 'out':
-            rows = [r for r in rows if r['fact_out']]
-        elif kind == 'absent':
-            rows = [r for r in rows if r['status'] == _attendance.STATUS_ABSENT]
-        employees = [e for e in (request.args.get('employees') or '').split(',') if e.strip()]
-        if employees:
-            wanted = {e.strip() for e in employees}
-            rows = [r for r in rows if r['employee_id'] in wanted]
-
-        # Счётчики по статусам — для полосы «Все · Опоздали · Не отметились…» над
-        # списком. Считаются ДО фильтра по статусу и до страниц: иначе, выбрав
-        # «Опоздали», человек видел бы у остальных статусов нули и не понимал бы,
-        # сколько всего людей за период.
-        status_counts = {}
-        for row in rows:
-            status_counts[row['status']] = status_counts.get(row['status'], 0) + 1
-        statuses = {s.strip() for s in (request.args.get('status') or '').split(',') if s.strip()}
-        if statuses:
-            rows = [r for r in rows if r['status'] in statuses]
-
-        total = len(rows)
-        try:
-            limit = max(1, min(int(request.args.get('limit', 200)), 1000))
-            offset = max(0, int(request.args.get('offset', 0)))
-        except (TypeError, ValueError):
-            limit, offset = 200, 0
-
-        return jsonify({
-            'status': 'success',
-            'rows': rows[offset:offset + limit],
-            'total': total,
-            'mode': 'latest' if latest else 'period',
-            'date_start': date_start.isoformat() if date_start else None,
-            'date_end': date_end.isoformat() if date_end else None,
-            'department_scope': scope,
-            'clockster_error': payload.get('clockster_error'),
-            'pending_days': payload.get('pending_days') or [],
-            'status_counts': status_counts,
-            'built_days': payload.get('built_days', 0),
-            'cached_days': payload.get('cached_days', 0),
-        }), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot attendance failed")
-        return jsonify({"error": str(error)}), 500
 
 
 # Сколько живёт состав Clockster в кэше, прежде чем раздел подтянет его сам.
 # Ночная джоба обновляет его раз в сутки; этот порог — страховка на случай, когда
 # ночи ещё не было (первый деплой) или джоба её пропустила: иначе центрального
 # офиса не было бы в фильтрах и в выборе людей для отчёта до следующей ночи.
-GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE = timedelta(hours=26)
-_group_late_roster_refresh_lock = threading.Lock()
 
 
-def _group_late_refresh_clockster_roster_if_stale():
-    """Подтягивает состав Clockster, если его нет или он старше суток с запасом.
-
-    Замок не ждём: второй одновременный запрос просто отдаёт то, что уже есть, а
-    не идёт в Clockster повторно. Любая ошибка источника раздел не роняет —
-    справочник отдаётся без центрального офиса, как было до задачи #307."""
-    from group_late import clockster as _clockster
-    from group_late import config as _group_late_config
-    if not _group_late_config.is_clockster_configured():
-        return
-    if not _group_late_roster_refresh_lock.acquire(blocking=False):
-        return
-    try:
-        synced_at = db.glb_roster_synced_at('clockster')
-        if synced_at is not None:
-            now = datetime.now(synced_at.tzinfo) if synced_at.tzinfo else datetime.now()
-            if now - synced_at < GROUP_LATE_CLOCKSTER_ROSTER_MAX_AGE:
-                return
-        saved = db.glb_sync_employees(
-            _clockster.roster(_clockster.clockster_client.get_users()), source='clockster')
-        logging.info("Отметки: состав Clockster подтянут при открытии раздела — %s чел.", saved)
-    except Exception:
-        logging.exception("Отметки: состав Clockster при открытии раздела не обновлён")
-    finally:
-        _group_late_roster_refresh_lock.release()
 
 
-@app.route('/api/group_late_bot/directory', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_directory():
-    """Справочники фильтров раздела «Отметки»: подразделения и состав (ТЗ #307).
-
-    Отдельно от `/departments`: тот справочник — про отделы Workpace и
-    маршрутизацию уведомлений по чатам, а здесь нужен ещё и центральный офис из
-    Clockster. Уведомления по нему не уходят и уходить не должны (п. 3), поэтому
-    в маршрутизации этих подразделений нет — а в фильтре и в выборе людей для
-    отчёта они обязаны быть."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    _group_late_refresh_clockster_roster_if_stale()
-    try:
-        payload = db.glb_attendance_directory(department=scope)
-        payload['status'] = 'success'
-        payload['department_scope'] = scope
-        return jsonify(payload), 200
-    except Exception as error:
-        logging.exception("group_late_bot directory failed")
-        return jsonify({"error": str(error)}), 500
 
 
-def _group_late_plan_rule_in_scope(rule, scope):
-    """Правило «своё», только если его адресат целиком внутри отдела запрашивающего."""
-    if not scope:
-        return True
-    needle = str(scope).strip().casefold()
-    if str(rule.get('scope') or '') == 'department':
-        return str(rule.get('target') or '').strip().casefold() == needle
-    return needle in str(rule.get('target_label') or '').casefold()
 
 
-@app.route('/api/group_late_bot/plan_rules', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_plan_rules():
-    """Свой график смен раздела «Отметки» (ТЗ #307, п. 5).
-
-    План ставится на проект целиком или на конкретного человека — в том числе на
-    выходные дни, которых нет ни в Workpace, ни в Clockster. Наш план ДОПОЛНЯЕТ
-    источники: он появляется только там, где смены нет. Иначе одно правило на
-    отдел перебило бы настоящий сменный график колл-центра."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    if request.method == 'GET':
-        try:
-            return jsonify({'status': 'success', 'items': db.glb_plan_rules(department=scope),
-                            'department_scope': scope}), 200
-        except Exception as error:
-            logging.exception("group_late_bot plan rules failed")
-            return jsonify({"error": str(error)}), 500
-
-    payload = request.get_json(silent=True) or {}
-    if not _group_late_plan_rule_in_scope(payload, scope):
-        return _group_late_bot_scope_forbidden('График на чужое подразделение')
-    try:
-        rule_id = db.glb_save_plan_rule(payload, created_by=requester_id)
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot plan rule save failed")
-        return jsonify({"error": str(error)}), 500
-    return jsonify({'status': 'success', 'id': rule_id}), 200
 
 
-@app.route('/api/group_late_bot/plan_rules/<int:rule_id>', methods=['DELETE', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_plan_rule_item(rule_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        if scope:
-            mine = {int(item['id']) for item in db.glb_plan_rules(department=scope)}
-            if int(rule_id) not in mine:
-                return _group_late_bot_scope_forbidden('График чужого подразделения')
-        if not db.glb_delete_plan_rule(rule_id):
-            return jsonify({"error": "Правило не найдено"}), 404
-        return jsonify({'status': 'success'}), 200
-    except Exception as error:
-        logging.exception("group_late_bot plan rule delete failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/employees', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_employees():
-    """Дисциплина по сотрудникам за период, разложенная по отделам Workpace."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        result = db.get_group_late_employee_stats(
-            date_from=request.args.get('date_from'),
-            date_to=request.args.get('date_to'),
-            department=scope or request.args.get('department'),
-            search=request.args.get('q'),
-            # Где сотрудника Workpace искать у нас: ровно там, где пара отделов
-            # объявлена вручную. Тот же справочник, что режет раздел главе отдела.
-            match_departments={
-                workpace_name: department_id
-                for department_id, workpace_name in _group_late_bot_scope_by_department_id().items()
-            },
-        )
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot employees failed")
-        return jsonify({"error": str(error)}), 500
 
 
-def _group_late_plan_snapshot(scope):
-    """Снимок «план из iCore» для отделов, доступных запрашивающему.
-
-    Состав Workpace берём из кэша `glb_employees`, а не из самого Workpace: раздел
-    на сайте туда не ходит, справочник ему привозит опрос."""
-    pairs = {
-        name: code for name, code in group_late.icore_plan.plan_pairs().items()
-        if not scope or name.casefold() == str(scope).casefold()
-    }
-    if not pairs:
-        return pairs, {'people': [], 'shifts': [], 'unlinked': [], 'departments': {}}
-    today = datetime.now(group_late.TZ).date()
-    snapshot = db.glb_icore_plan_snapshot(
-        pairs, today, today + timedelta(days=13),
-        db.glb_cached_employee_roster(pairs.keys()),
-    )
-    return pairs, snapshot
 
 
-@app.route('/api/group_late_bot/plan_links', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_plan_links():
-    """Мост «карточка Workpace → наш сотрудник» для отделов с планом из iCore.
-
-    Автоматически карточки сшиваются по ФИО; здесь видно результат и правится то,
-    что автоматике не даётся: смена фамилии, две карточки на одного человека,
-    чужая компания холдинга в том же отделе Workpace."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-
-    try:
-        pairs, snapshot = _group_late_plan_snapshot(scope)
-        if request.method == 'GET':
-            shifts_by_user = {}
-            for shift in snapshot['shifts']:
-                shifts_by_user[shift['user_id']] = shifts_by_user.get(shift['user_id'], 0) + 1
-            people = [
-                {**{key: person[key] for key in ('user_id', 'name', 'city', 'cards', 'link_source')},
-                 'department_name': snapshot['departments'].get(person['department_code']),
-                 'shifts_ahead': shifts_by_user.get(person['user_id'], 0)}
-                for person in snapshot['people']
-            ]
-            people.sort(key=lambda item: item['name'].lower())
-            return jsonify({
-                'status': 'success',
-                'departments': [{'workpace_name': name, 'department_code': code}
-                                for name, code in sorted(pairs.items())],
-                'people': people,
-                'unlinked': snapshot['unlinked'],
-                'schedule_days': 14,
-            }), 200
-
-        payload = request.get_json(silent=True) or {}
-        ext_id = str(payload.get('workpace_ext_id') or '').strip()
-        if not ext_id:
-            return jsonify({"error": "workpace_ext_id обязателен"}), 400
-
-        # Граница отдела: править можно только карточки своих отделов и привязывать
-        # только к своим сотрудникам. Обе стороны берём из уже собранного снимка —
-        # он и так посчитан по доступным отделам.
-        known_cards = {card['ext_id'] for person in snapshot['people'] for card in person['cards']}
-        known_cards.update(item['ext_id'] for item in snapshot['unlinked'])
-        if ext_id not in known_cards:
-            return _group_late_bot_scope_forbidden('Изменение привязки этой карточки')
-
-        if payload.get('reset'):
-            result = db.glb_delete_employee_link(ext_id)
-        else:
-            # user_id: null — это «не наш сотрудник», осмысленное значение. Поэтому
-            # отсутствие поля и явный null различаем: молча исключить карточку из-за
-            # опечатки в запросе хуже, чем отказать.
-            if 'user_id' not in payload:
-                return jsonify({"error": "нужен user_id (или null, чтобы исключить карточку)"}), 400
-            user_id = payload.get('user_id')
-            if user_id is not None:
-                known_users = {person['user_id'] for person in snapshot['people']}
-                if int(user_id) not in known_users:
-                    return _group_late_bot_scope_forbidden('Привязка к этому сотруднику')
-            result = db.glb_set_employee_link(ext_id, user_id, linked_by=requester_id)
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late_bot plan_links failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/reports', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_reports():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    if request.method == 'GET':
-        try:
-            result = db.get_group_late_reports(
-                date_from=request.args.get('date_from'),
-                date_to=request.args.get('date_to'),
-                status=request.args.get('status'),
-                source=request.args.get('source'),
-                limit=request.args.get('limit', 50),
-                offset=request.args.get('offset', 0),
-                department=scope,
-            )
-            result['status'] = 'success'
-            return jsonify(result), 200
-        except ValueError as error:
-            return jsonify({"error": str(error)}), 400
-        except Exception as error:
-            logging.exception("group_late_bot reports failed")
-            return jsonify({"error": str(error)}), 500
-
-    # Отчёт за период тянет из Workpace каждый день диапазона, поэтому считаем в
-    # фоне и сразу отдаём id карточки — раздел показывает её как «формируется».
-    if not group_late.is_configured():
-        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
-                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
-    payload = request.get_json(silent=True) or {}
-    date_from = str(payload.get('date_from') or '').strip()
-    date_to = str(payload.get('date_to') or '').strip() or date_from
-    # Отчёт «по всем отделам» в границах отдела недоступен: собирается только свой.
-    department = scope or str(payload.get('department') or '').strip()
-    send_to_chat_id = str(payload.get('send_to_chat_id') or '').strip()
-    # Отчёт по конкретным людям (ТЗ #273). Пустой список = весь отдел, как раньше.
-    employees = [str(x).strip() for x in (payload.get('employees') or []) if str(x).strip()]
-    if len(employees) > GROUP_LATE_REPORT_MAX_EMPLOYEES:
-        return jsonify({"error": f"За один раз можно выбрать не больше "
-                                 f"{GROUP_LATE_REPORT_MAX_EMPLOYEES} сотрудников"}), 400
-    try:
-        if scope and send_to_chat_id and db.glb_chat_department_state(send_to_chat_id, scope) != 'own':
-            return _group_late_bot_scope_forbidden(
-                'Чат закреплён за другим отделом, отправка отчёта в него')
-        report_id = db.glb_create_report(
-            date_from, date_to, department=department or None, source='web',
-            requested_chat_id=send_to_chat_id or None,
-            requested_by=_group_late_bot_actor(requester_id),
-            employees=employees or None,
-        )
-    except ValueError as error:
-        return jsonify({"error": str(error)}), 400
-    except Exception as error:
-        logging.exception("group_late report create failed")
-        return jsonify({"error": str(error)}), 500
-
-    group_late_pool.submit(
-        _group_late_generate_report, report_id, date_from, date_to, department, send_to_chat_id,
-        employees or None,
-    )
-    return jsonify({"status": "success", "report_id": report_id, "report_status": "running"}), 202
 
 
-@app.route('/api/group_late_bot/reports/<int:report_id>/file', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_report_file(report_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        report_file = db.get_group_late_report_file(report_id, department=scope)
-        if not report_file:
-            return jsonify({"error": "Файл отчёта не найден"}), 404
-        return send_file(
-            BytesIO(report_file['content']),
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            as_attachment=True,
-            download_name=report_file['file_name'] or f"report_{report_id}.xlsx",
-        )
-    except Exception as error:
-        logging.exception("group_late_bot report file failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/poll_runs', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_poll_runs():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    # Состояние опроса — здоровье общего источника данных, а не чьи-то цифры.
-    _, _, err = _group_late_bot_guard()
-    if err:
-        return err
-    try:
-        result = db.get_group_late_poll_runs(limit=request.args.get('limit', 30))
-        result['status'] = 'success'
-        return jsonify(result), 200
-    except Exception as error:
-        logging.exception("group_late_bot poll runs failed")
-        return jsonify({"error": str(error)}), 500
 
 
-@app.route('/api/group_late_bot/poll', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_group_late_bot_poll():
-    """Прогнать опрос Workpace прямо сейчас, не дожидаясь двухминутной джобы."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    _, scope, err = _group_late_bot_guard()
-    if err:
-        return err
-    # Опрос прогоняет ВСЮ компанию и рассылает найденное по всем чатам, поэтому
-    # запускать его вручную может только администратор бота: расписание общее.
-    if scope:
-        return _group_late_bot_scope_forbidden('Внеочередной опрос Workpace')
-    if not group_late.is_configured():
-        return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
-                        "code": "WORKPACE_NOT_CONFIGURED"}), 503
-    try:
-        # Цикл целиком уходит в event loop бота: сеть и база внутри него сами
-        # уезжают в пул потоков, а отправка идёт из «родного» цикла aiogram.
-        result = _group_late_run_on_bot_loop(_group_late_poll_cycle, timeout=180)
-    except RuntimeError as error:
-        return jsonify({"error": str(error)}), 503
-    except Exception as error:
-        logging.exception("group_late manual poll failed")
-        return jsonify({"error": str(error)}), 500
-    if not result.get('ok'):
-        return jsonify({"error": result.get('error') or 'Опрос не удался'}), 502
-    return jsonify({"status": "success", **result}), 200
 
 
 @app.route('/api/ca_eval/pick', methods=['POST', 'OPTIONS'])
@@ -13637,1042 +11805,89 @@ def api_resource_fte_engine_adjustment_delete(adjustment_id):
     return jsonify({"status": "success", "run": run_status}), 200
 
 
-@app.route('/api/shift_auction/test_access', methods=['GET', 'PUT', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_access():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-
-        requester_role = _normalize_user_role(requester[3])
-        if request.method == 'GET':
-            direction_mode = _resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction()
-            )
-            payload = db.get_shift_auction_test_access(
-                current_user_id=requester_id, direction_mode=direction_mode
-            )
-            payload["direction_mode"] = direction_mode
-            return jsonify({"status": "success", "test_access": payload}), 200
-
-        if not _is_shift_auction_manager(requester_id, requester_role):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can manage shift auction test access"}), 403
-
-        payload = request.get_json(silent=True) or {}
-        direction_mode = _resolve_shift_auction_direction(
-            requester_id, requester_role, _requested_shift_auction_direction(payload)
-        )
-        updated = db.update_shift_auction_test_access(
-            enabled=bool(payload.get('enabled')),
-            operator_ids=payload.get('operator_ids') or payload.get('selected_operator_ids') or [],
-            launch_note=payload.get('launch_note') or '',
-            updated_by=requester_id,
-            starts_at=_parse_shift_auction_test_datetime(payload.get('starts_at')),
-            ends_at=_parse_shift_auction_test_datetime(payload.get('ends_at')),
-            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('selected_schedule_plan_id'),
-            time_groups=_parse_shift_auction_time_groups(payload.get('time_groups')),
-            direction_mode=direction_mode,
-        )
-        updated["direction_mode"] = direction_mode
-        return jsonify({"status": "success", "test_access": updated}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction test access API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-def _parse_shift_auction_time_groups(raw_groups):
-    """Week time groups from the manager's form, with datetimes parsed.
-
-    ``None`` (field absent) means "leave the week's groups untouched", while an
-    empty list clears them — the distinction matters for clients that save only
-    part of the form.
-    """
-    if raw_groups is None:
-        return None
-    if not isinstance(raw_groups, list):
-        raise ValueError("AUCTION_GROUP_INVALID")
-    groups = []
-    for raw_group in raw_groups:
-        if not isinstance(raw_group, dict):
-            raise ValueError("AUCTION_GROUP_INVALID")
-        groups.append({
-            **raw_group,
-            "starts_at": _parse_shift_auction_test_datetime(raw_group.get('starts_at')),
-            "ends_at": _parse_shift_auction_test_datetime(raw_group.get('ends_at')),
-        })
-    return groups
-
-
-def _parse_shift_auction_test_datetime(value):
-    if value is None:
-        return None
-    text = str(value or '').strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-        return parsed
-    except Exception:
-        raise ValueError("INVALID_AUCTION_DATETIME")
-
-
-def _shift_auction_test_error_response(error):
-    code = str(error)
-    mapping = {
-        "AUCTION_NOT_OPEN": ("Аукцион еще не открыт", 409),
-        "AUCTION_NOT_AVAILABLE": ("Аукцион недоступен", 409),
-        "AUCTION_NOT_CLOSED": ("Сохранить итоговые графики можно только после завершения аукциона", 409),
-        "AUCTION_CANNOT_PAUSE": ("Приостановить можно только открытый аукцион", 409),
-        "AUCTION_NOT_PAUSED": ("Аукцион сейчас не приостановлен", 409),
-        "AUCTION_ALREADY_CLOSED": ("Аукцион уже завершен", 409),
-        "AUCTION_NO_LOTS": ("В аукционе нет смен для публикации", 409),
-        "AUCTION_NO_PARTICIPANTS": ("В аукционе нет участников для публикации", 409),
-        "AUCTION_PERIOD_ALREADY_PASSED": ("Период аукциона уже прошёл — сохранять его в графики нельзя", 409),
-        "AUCTION_NOTHING_CLAIMED": ("В аукционе никто не взял ни одной смены — сохранять в графики нечего", 409),
-        "INVALID_AUCTION_CONTROL_ACTION": ("Неизвестное действие управления аукционом", 400),
-        "NOT_TEST_PARTICIPANT": ("Вы не включены в тестовую группу аукциона", 403),
-        "OPERATOR_NOT_FOUND": ("Оператор не найден", 404),
-        "LOT_NOT_FOUND": ("Смена не найдена", 404),
-        "LOT_ALREADY_CLAIMED": ("Смену уже забрали", 409),
-        "LOT_NOT_CLAIMED": ("Эта смена сейчас не закреплена", 409),
-        "LOT_NOT_OWNED": ("Эта смена закреплена за другим оператором", 409),
-        "RATE_TOO_LOW": ("Смена недоступна по вашей ставке", 403),
-        "SHIFT_RATE_MISMATCH": ("Доступны только смены вашей ставки", 403),
-        "SHIFT_NORM_EXCEEDED": ("Эта смена превысит вашу норму часов на период", 409),
-        "SHIFT_AUCTION_STATUS_PERIOD_BLOCKED": ("Этот день закрыт статусным периодом оператора", 409),
-        "DAY_OFF_SELECTED": ("На этот день выбран выходной", 409),
-        "DAY_ALREADY_HAS_SHIFT": ("На этот день уже выбрана смена", 409),
-        "DAY_HAS_CLAIMED_SHIFT": ("На этот день уже выбрана смена", 409),
-        "SHIFT_OVERLAPS_EXISTING": ("Эта смена пересекается по времени с уже взятой", 409),
-        "NIGHT_SHIFT_ALREADY_ADJACENT": ("Две ночные смены подряд брать нельзя — соседняя ночь уже ваша", 409),
-        "TOPUP_NOT_ACTIVE": ("Режим добора ещё не включён", 409),
-        "TOPUP_ALREADY_ACTIVE": ("Режим добора уже включён", 409),
-        "DAY_OFF_LIMIT": ("Лимит выходных уже занят статусными периодами или выбранными выходными", 409),
-        "INVALID_AUCTION_DATETIME": ("Некорректная дата запуска аукциона", 400)
-    }
-    mapping.update({
-        "AUCTION_END_BEFORE_START": ("Время завершения должно быть позже старта", 400),
-        "AUCTION_GROUP_INVALID": ("Некорректные данные группы времени", 400),
-        "AUCTION_GROUP_LIMIT": ("Слишком много групп времени на один период", 400),
-        "AUCTION_GROUP_START_REQUIRED": ("У каждой группы должно быть время старта", 400),
-        "AUCTION_GROUP_WINDOW_EMPTY": ("Окно группы пустое: завершение должно быть позже её старта", 400),
-        "AUCTION_GROUP_WEEK_REQUIRED": ("Сначала выберите период аукциона — группы задаются для него", 400),
-        "SELF_SCHEDULE_NOT_ALLOWED": ("Свой график вам не открыт", 403),
-        "SELF_SCHEDULE_LIMIT_EXCEEDED": ("Лимит своего графика: не больше нормы плюс 10 часов", 409),
-        "AUCTION_PERIOD_NOT_FOUND": ("План графика для аукциона не найден", 404),
-        "AUCTION_PERIOD_INVALID": ("У плана некорректный период: дата окончания раньше начала", 409),
-        "AUCTION_PERIOD_EMPTY": ("В выбранном плане нет смен", 409),
-        "AUCTION_PERIOD_PAST": ("Прошедший период нельзя запустить заново", 409),
-        "POST_AUCTION_NOT_ACTIVE": ("Дополнительные смены можно забирать только после сохранения итогов в графики", 409),
-        "LOT_NOT_OPEN_FOR_POST_CLAIM": ("Эту смену больше нельзя забрать", 409),
-        "SHIFT_ALREADY_STARTED": ("Эта смена уже началась или прошла", 409),
-        "INVALID_PARTIAL_SHIFT_RANGE": ("Некорректный интервал частичной смены", 400),
-        "PARTIAL_SHIFT_NOT_ALLOWED": ("Эту смену можно взять только целиком", 409),
-        "PARTIAL_SHIFT_OUT_OF_RANGE": ("Выбранный интервал должен быть внутри исходной смены", 400),
-        "LOT_INVALID": ("Смена недоступна", 409),
-        "POST_AUCTION_LOT_NOT_RELEASABLE": ("Эту смену нельзя вернуть — она уже сохранена в графики", 409),
-        "SHIFT_OVERLAP": ("Смена пересекается по времени с другой сменой оператора", 409),
-        "SHIFT_NOT_FOUND": ("Смена не найдена в плане", 404),
-        "MISSING_TARGET": ("Не указан лот или смена", 400),
-        "CLAIM_NOT_FOUND": ("Эта смена не найдена среди ваших взятых", 404),
-        "CANCEL_WINDOW_EXPIRED": ("Отменить смену можно только в течение 10 минут после того, как вы её взяли", 409),
-        "INVALID_DURATION": ("Длина смены не соответствует ставке", 400),
-        "INVALID_RATE": ("Некорректная ставка смены", 400),
-        "INVALID_DATE": ("Некорректная дата смены", 400),
-        "DATE_OUT_OF_RANGE": ("Этот день не входит в текущий период аукциона", 409),
-    })
-    message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
-    return jsonify({"error": message, "code": code}), status
-
-
-@app.route('/api/shift_auction/test_snapshot', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_snapshot():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        is_admin_requester = _is_admin_role(requester_role)
-        can_monitor_auction = is_admin_requester or _is_supervisor_role(requester_role)
-        direction_mode = _resolve_shift_auction_direction(
-            requester_id, requester_role, _requested_shift_auction_direction()
-        )
-        snapshot = db.get_shift_auction_test_snapshot(
-            current_user_id=requester_id,
-            include_admin_fields=can_monitor_auction,
-            direction_mode=direction_mode
-        )
-        snapshot["direction_mode"] = direction_mode
-        # Тумблер «Линия / Чат» рисуется только тем, кому разрешено переключаться:
-        # у оператора направление одно и приходит с сервера.
-        snapshot["can_switch_direction"] = bool(can_monitor_auction)
-        has_period_history_access = False
-        if not (can_monitor_auction or snapshot.get('is_current_user_tester')):
-            has_period_history_access = db.has_shift_auction_history_access(requester_id)
-        snapshot["has_period_history_access"] = bool(has_period_history_access)
-        if not (can_monitor_auction or snapshot.get('is_current_user_tester') or has_period_history_access):
-            snapshot["lots"] = []
-            snapshot["my_day_offs"] = []
-            snapshot["my_blocked_dates"] = []
-            snapshot["my_work_shifts"] = []
-            snapshot["available_periods"] = []
-            snapshot["claim_journal"] = []
-            snapshot["participant_workloads"] = []
-        elif not can_monitor_auction:
-            snapshot["claim_journal"] = []
-            snapshot["participant_workloads"] = []
-            if has_period_history_access and not snapshot.get('is_current_user_tester'):
-                snapshot["lots"] = []
-                snapshot["my_day_offs"] = []
-                snapshot["my_blocked_dates"] = []
-                snapshot["my_work_shifts"] = []
-        snapshot_fingerprint = hashlib.sha1(
-            json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
-        ).hexdigest()
-        etag = f'W/"shift-auction-{requester_id}-{direction_mode}-{snapshot_fingerprint}"'
-        if request.headers.get('If-None-Match', '') == etag:
-            response = Response(status=304)
-            response.headers['ETag'] = etag
-            response.headers['Cache-Control'] = 'no-cache, private'
-            return response
-        response = jsonify({"status": "success", "snapshot": snapshot})
-        response.headers['ETag'] = etag
-        response.headers['Cache-Control'] = 'no-cache, private'
-        return response, 200
-    except Exception as error:
-        logging.error(f"Shift auction snapshot API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/lots_for_date', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_lots_for_date():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Not allowed"}), 403
-        date_arg = request.args.get('date')
-        if not date_arg:
-            return jsonify({"error": "Missing required parameter: date"}), 400
-        try:
-            target_date = datetime.strptime(date_arg, '%Y-%m-%d').date()
-        except Exception:
-            return jsonify({"error": "Invalid date format, expected YYYY-MM-DD"}), 400
-        payload = db.get_shift_auction_lots_for_planner_date(
-            target_date,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction()
-            )
-        )
-        return jsonify({"status": "success", **payload}), 200
-    except Exception as error:
-        logging.error(f"Shift auction lots_for_date API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/admin/unclaim_shift', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_admin_unclaim_shift():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Not allowed"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.admin_unclaim_shift(
-            admin_id=requester_id,
-            lot_id=payload.get('lot_id'),
-            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
-            source_schedule_shift_id=payload.get('source_schedule_shift_id'),
-            claimed_by=payload.get('claimed_by') or payload.get('operator_id'),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"admin_unclaim_shift API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/admin/claim_shift_for_operator', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_admin_claim_for_operator():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Not allowed"}), 403
-        payload = request.get_json(silent=True) or {}
-        operator_id = payload.get('operator_id')
-        if not operator_id:
-            return jsonify({"error": "operator_id is required"}), 400
-        result = db.admin_claim_shift_for_operator(
-            admin_id=requester_id,
-            operator_id=operator_id,
-            lot_id=payload.get('lot_id'),
-            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id'),
-            source_schedule_shift_id=payload.get('source_schedule_shift_id'),
-            claim_start_time=payload.get('claim_start_time'),
-            claim_end_time=payload.get('claim_end_time'),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"admin_claim_shift_for_operator API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/admin/add_lot', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_admin_add_lot():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Not allowed"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.admin_add_shift_auction_lot(
-            admin_id=requester_id,
-            shift_date=payload.get('shift_date') or payload.get('date'),
-            start_time=payload.get('start_time'),
-            end_time=payload.get('end_time'),
-            rate_min=payload.get('rate_min'),
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction(payload)
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"admin_add_shift_auction_lot API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/period_preview', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_period_preview():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        can_monitor_auction = _is_admin_role(requester_role) or _is_supervisor_role(requester_role)
-        schedule_plan_id = request.args.get('schedule_plan_id') or request.args.get('plan_id')
-        if not (can_monitor_auction or db.is_shift_auction_period_participant(requester_id, schedule_plan_id)):
-            return jsonify({"error": "Not allowed to view shift auction periods"}), 403
-        preview = db.get_shift_auction_period_preview(
-            schedule_plan_id=schedule_plan_id,
-            current_user_id=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction()
-            ),
-        )
-        return jsonify({"status": "success", "preview": preview}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction period preview API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_lots/seed', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_lots_seed():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_admin_role(requester[3]):
-            return jsonify({"error": "Only admins can seed test auction lots"}), 403
-        payload = request.get_json(silent=True) or {}
-        start_date_raw = str(payload.get('start_date') or '').strip()
-        start_date = datetime.strptime(start_date_raw, "%Y-%m-%d").date() if start_date_raw else None
-        result = db.seed_shift_auction_test_lots(
-            updated_by=requester_id,
-            start_date=start_date,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(payload)
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction seed API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_restart', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_restart():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can restart shift auctions"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.restart_shift_auction_test(
-            schedule_plan_id=payload.get('schedule_plan_id') or payload.get('plan_id'),
-            updated_by=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(payload)
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction restart API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_control', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_control():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can control shift auctions"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.control_shift_auction_test(
-            action=payload.get('action'),
-            updated_by=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(payload)
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction control API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_journal', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_journal():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        requester_role = _normalize_user_role(requester[3])
-        if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
-            return jsonify({"error": "Only admins and supervisors can view the auction journal"}), 403
-        try:
-            page = int(request.args.get('page') or 1)
-        except Exception:
-            page = 1
-        try:
-            per_page = int(request.args.get('per_page') or 50)
-        except Exception:
-            per_page = 50
-        result = db.get_shift_auction_test_journal(
-            page=page, per_page=per_page,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction()
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction journal API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_topup', methods=['POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_topup():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction top-up mode"}), 403
-        result = db.set_shift_auction_test_topup(
-            enabled=(request.method == 'POST'),
-            updated_by=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(request.get_json(silent=True))
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction top-up API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_rate_lock', methods=['POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_rate_lock():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction rate lock"}), 403
-        result = db.set_shift_auction_test_rate_lock(
-            enabled=(request.method == 'POST'),
-            updated_by=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(request.get_json(silent=True))
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction rate lock API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_export_excel', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_export_excel():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can export shift auction reports"}), 403
-
-        direction_mode = _resolve_shift_auction_direction(
-            requester_id, _normalize_user_role(requester[3]), _requested_shift_auction_direction()
-        )
-        output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report(
-            direction_mode=direction_mode
-        )
-        direction_slug = 'chat' if direction_mode == SHIFT_AUCTION_MODE_CHAT else 'line'
-        filename = (
-            f"shift_auction_report_{direction_slug}"
-            f"_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
-        )
-        return send_file(
-            output,
-            as_attachment=True,
-            download_name=filename,
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction Excel export API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_publish', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_publish():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can publish shift auctions"}), 403
-
-        result = db.publish_shift_auction_test_to_work_schedules(
-            updated_by=requester_id,
-            direction_mode=_resolve_shift_auction_direction(
-                requester_id, _normalize_user_role(requester[3]),
-                _requested_shift_auction_direction(request.get_json(silent=True))
-            ),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction publish API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-def _shift_auction_test_lot_mutation_response(lot_id, action, claim_start_time=None, claim_end_time=None):
-    try:
-        requester_started_at = time.perf_counter()
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        _record_elapsed_server_timing("auction-requester", requester_started_at)
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can claim shifts"}), 403
-        mutation_started_at = time.perf_counter()
-        if action == 'release':
-            result = db.release_shift_auction_test_lot(requester_id, lot_id)
-        else:
-            result = db.claim_shift_auction_test_lot(
-                requester_id, lot_id,
-                claim_start_time=claim_start_time,
-                claim_end_time=claim_end_time,
-            )
-        db_timings = result.pop("_timings", None) if isinstance(result, dict) else None
-        _record_elapsed_server_timing("auction-mutation", mutation_started_at)
-        if isinstance(db_timings, dict):
-            for name, duration_ms in db_timings.items():
-                _append_server_timing(f"auction-{name}", duration_ms)
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction claim API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-def _notify_admins_post_auction_claim(operator_name, lot_payload):
-    try:
-        recipients = db.get_admin_post_claim_notify_recipients()
-    except Exception as error:
-        logging.error(f"Failed to load post-auction notify recipients: {error}", exc_info=True)
-        return
-    if not recipients:
-        return
-
-    shift_date_raw = str(lot_payload.get('shift_date') or '').strip()
-    try:
-        shift_date_obj = datetime.strptime(shift_date_raw, '%Y-%m-%d').date() if shift_date_raw else None
-    except Exception:
-        shift_date_obj = None
-    date_label = shift_date_obj.strftime('%d.%m.%Y') if shift_date_obj else shift_date_raw or '—'
-    orig_start = str(lot_payload.get('start_time') or '').strip()
-    orig_end = str(lot_payload.get('end_time') or '').strip()
-    claim_start = str(lot_payload.get('claim_start_time') or lot_payload.get('post_claim_start_time') or '').strip()
-    claim_end = str(lot_payload.get('claim_end_time') or lot_payload.get('post_claim_end_time') or '').strip()
-    # Partial добор: operator took only a slice of the original shift window.
-    is_partial = bool(
-        claim_start and claim_end and orig_start and orig_end
-        and (claim_start != orig_start or claim_end != orig_end)
-    )
-    now_label = datetime.now().strftime('%d.%m.%Y %H:%M')
-    operator_label = str(operator_name or '').strip() or 'Оператор'
-
-    if is_partial:
-        time_block = (
-            f"🕒 Смена: <b>{orig_start}–{orig_end}</b>\n"
-            f"✂️ Взял часть: <b>{claim_start}–{claim_end}</b>\n"
-        )
-    else:
-        shown_start = claim_start or orig_start or '—'
-        shown_end = claim_end or orig_end or '—'
-        time_block = f"🕒 Время: <b>{shown_start}–{shown_end}</b>\n"
-
-    text = (
-        "📣 <b>Аукцион смен — дополнительная смена</b>\n\n"
-        f"Оператор <b>{operator_label}</b> взял "
-        f"{'часть смены (добор)' if is_partial else 'дополнительную смену'}.\n"
-        f"📅 Дата: <b>{date_label}</b>\n"
-        f"{time_block}"
-        f"⏱ Когда взял: {now_label}"
-    )
-    for recipient in recipients:
-        chat_id = recipient.get('telegram_id') if isinstance(recipient, dict) else None
-        if not chat_id:
-            continue
-        try:
-            _send_telegram_text_message(int(chat_id), text)
-        except Exception as error:
-            logging.error(
-                f"Failed to send post-auction claim notification to {chat_id}: {error}",
-                exc_info=True
-            )
-
-
-@app.route('/api/shift_auction/post_claim_lot', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_post_claim_lot():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can claim shifts"}), 403
-
-        payload = request.get_json(silent=True) or {}
-        source_shift_id = payload.get('source_schedule_shift_id') or payload.get('source_shift_id')
-        source_plan_id = payload.get('schedule_plan_id') or payload.get('source_schedule_plan_id')
-        claim_start_time = payload.get('claim_start_time') or payload.get('selected_start_time')
-        claim_end_time = payload.get('claim_end_time') or payload.get('selected_end_time')
-        if source_shift_id and source_plan_id:
-            result = db.post_auction_claim_saved_shift(
-                requester_id,
-                int(source_plan_id),
-                int(source_shift_id),
-                claim_start_time=claim_start_time,
-                claim_end_time=claim_end_time
-            )
-        else:
-            try:
-                lot_id = int(payload.get('lot_id') or payload.get('id'))
-            except Exception:
-                return jsonify({"error": "Lot id is required"}), 400
-            result = db.post_auction_claim_lot(
-                requester_id,
-                lot_id,
-                claim_start_time=claim_start_time,
-                claim_end_time=claim_end_time
-            )
-        operator_info = result.get('operator') or {}
-        operator_name = operator_info.get('name') or requester[1]
-        lot_payload = result.get('lot') or {}
-        try:
-            _notify_admins_post_auction_claim(operator_name, lot_payload)
-        except Exception as error:
-            logging.error(f"Post-auction claim notification dispatch failed: {error}", exc_info=True)
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Post-auction claim API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/my_post_claims', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_my_post_claims():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can view their claimed shifts"}), 403
-        claims = db.get_operator_recent_post_auction_claims(requester_id)
-        return jsonify({"status": "success", "claims": claims}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"My post-auction claims API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/cancel_post_claim', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_cancel_post_claim():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can cancel their claimed shifts"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.operator_cancel_post_auction_claim(
-            operator_id=requester_id,
-            lot_id=payload.get('lot_id'),
-            plan_id=payload.get('plan_id') or payload.get('schedule_plan_id') or payload.get('source_schedule_plan_id'),
-            source_schedule_shift_id=payload.get('source_schedule_shift_id') or payload.get('source_shift_id'),
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Cancel post-auction claim API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/admin_notify_settings', methods=['GET', 'PUT', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_admin_notify_settings():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if not _is_shift_auction_manager(requester_id, requester[3]):
-            return jsonify({"error": "Only admins and СЗоВ supervisors can change auction notification settings"}), 403
-
-        if request.method == 'GET':
-            enabled = db.get_admin_post_claim_notify_setting(requester_id)
-            return jsonify({"status": "success", "auction_post_claim_notify_enabled": bool(enabled)}), 200
-
-        payload = request.get_json(silent=True) or {}
-        if 'auction_post_claim_notify_enabled' not in payload:
-            return jsonify({"error": "auction_post_claim_notify_enabled is required"}), 400
-        raw_value = payload.get('auction_post_claim_notify_enabled')
-        if isinstance(raw_value, str):
-            enabled_value = raw_value.strip().lower() in ('1', 'true', 'yes', 'on')
-        else:
-            enabled_value = bool(raw_value)
-        saved = db.set_admin_post_claim_notify_setting(requester_id, enabled_value)
-        return jsonify({"status": "success", "auction_post_claim_notify_enabled": bool(saved)}), 200
-    except Exception as error:
-        logging.error(f"Auction admin notify settings API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_lots/claim', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_lot_claim_stable():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    payload = request.get_json(silent=True) or {}
-    try:
-        lot_id = int(payload.get('lot_id') or payload.get('id'))
-    except Exception:
-        return jsonify({"error": "Lot id is required"}), 400
-    action = str(payload.get('action') or 'claim').strip().lower()
-    if action not in ('claim', 'release'):
-        return jsonify({"error": "Unsupported auction lot action"}), 400
-    # Чат разбирает смену частями прямо в ходе аукциона: интервал приходит здесь.
-    return _shift_auction_test_lot_mutation_response(
-        lot_id,
-        action,
-        claim_start_time=payload.get('claim_start_time') or payload.get('selected_start_time'),
-        claim_end_time=payload.get('claim_end_time') or payload.get('selected_end_time'),
-    )
-
-
-@app.route('/api/shift_auction/test_lots/<int:lot_id>/claim', methods=['POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_lot_claim(lot_id):
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    action = 'release' if request.method == 'DELETE' else 'claim'
-    return _shift_auction_test_lot_mutation_response(lot_id, action)
-
-
-@app.route('/api/shift_auction/self_schedule', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_self_schedule():
-    """Operator of a "свой график" group puts a shift on a day themselves."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can set their own schedule"}), 403
-        payload = request.get_json(silent=True) or {}
-        result = db.self_schedule_shift_auction_shift(
-            requester_id,
-            str(payload.get('shift_date') or payload.get('date') or '').strip(),
-            str(payload.get('start_time') or '').strip(),
-        )
-        result["snapshot"] = db.get_shift_auction_test_snapshot(current_user_id=requester_id)
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction self-schedule API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_day_off', methods=['POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_day_off():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        if _normalize_user_role(requester[3]) != 'operator':
-            return jsonify({"error": "Only operators can choose days off"}), 403
-        payload = request.get_json(silent=True) or {}
-        day_off_date = str(payload.get('date') or '').strip()
-        if not day_off_date:
-            return jsonify({"error": "Date is required"}), 400
-        result = db.set_shift_auction_test_day_off(
-            requester_id,
-            day_off_date,
-            selected=request.method != 'DELETE'
-        )
-        return jsonify({"status": "success", **result}), 200
-    except ValueError as error:
-        return _shift_auction_test_error_response(error)
-    except Exception as error:
-        logging.error(f"Shift auction day off API error: {error}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/shift_auction/test_events', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_shift_auction_test_events():
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-
-    requester_role = _normalize_user_role(requester[3])
-    if not (
-        _is_admin_role(requester_role)
-        or _is_supervisor_role(requester_role)
-        or db.is_shift_auction_test_participant(requester_id)
-    ):
-        return jsonify({"error": "Forbidden"}), 403
-
-    try:
-        last_event_id = int(request.args.get('after') or 0)
-    except Exception:
-        last_event_id = 0
-
-    stream_direction = _resolve_shift_auction_direction(
-        requester_id, requester_role, _requested_shift_auction_direction()
-    )
-
-    _ensure_shift_auction_event_listener_started()
-
-    # Место занимаем ДО того, как отдан поток: иначе нить waitress уже занята,
-    # и считать её поздно. Освобождаем на закрытии ответа — см. call_on_close ниже.
-    if not _try_acquire_shift_auction_stream_slot():
-        logging.warning(
-            "Аукцион: SSE-поток отклонён, занято мест %d из %d",
-            _shift_auction_active_stream_count(), SHIFT_AUCTION_STREAM_LIMIT)
-        busy = jsonify({"status": "busy"})
-        busy.headers['Retry-After'] = '60'
-        return busy, 503
-
-    @stream_with_context
-    def generate():
-        nonlocal last_event_id
-        last_signal_id = _get_shift_auction_event_signal_id()
-        heartbeat_at = time.time()
-        yield f": connected {int(heartbeat_at)}\n\n"
-        while True:
-            events, covered, last_signal_id, buffer_floor_id = _read_shift_auction_events_from_buffer(last_event_id)
-            if not covered:
-                # Client is behind the in-memory window (fresh connect or long
-                # disconnect). One-off DB catch-up, then resume from RAM.
-                events = db.get_shift_auction_test_events_after(last_event_id, limit=SHIFT_AUCTION_EVENT_FETCH_LIMIT)
-                if not events and buffer_floor_id is not None:
-                    # Old rows may have been pruned. Advance across the deleted
-                    # gap so this stream can resume from the in-memory window.
-                    last_event_id = max(last_event_id, int(buffer_floor_id) - 1)
-                    continue
-            if events:
-                # Курсор двигаем по ВСЕМ событиям, а отдаём только свои: иначе поток
-                # застревал бы на чужом событии и перечитывал его без конца.
-                for event in events:
-                    last_event_id = max(last_event_id, int(event.get('id') or 0))
-                    if normalize_shift_auction_mode(event.get('direction_mode')) != stream_direction:
-                        continue
-                    yield f"id: {event['id']}\n"
-                    yield f"event: {event['event_type']}\n"
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                heartbeat_at = time.time()
-                continue
-
-            elapsed = time.time() - heartbeat_at
-            wait_seconds = max(0.1, SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS - elapsed)
-            last_signal_id = _wait_for_shift_auction_event_signal(last_signal_id, wait_seconds)
-
-            if time.time() - heartbeat_at >= SHIFT_AUCTION_EVENT_HEARTBEAT_SECONDS:
-                yield f": heartbeat {int(time.time())}\n\n"
-                heartbeat_at = time.time()
-
-    response = Response(generate(), mimetype='text/event-stream')
-    response.headers['Cache-Control'] = 'no-cache'
-    response.headers['X-Accel-Buffering'] = 'no'
-    # Единственное место, которое отдаёт слот обратно. Срабатывает и на штатном
-    # закрытии, и на обрыве соединения — без него счётчик уполз бы вверх навсегда
-    # и через несколько суток раздел перестал бы принимать кого-либо.
-    response.call_on_close(_release_shift_auction_stream_slot)
-    return response
+# Раздел «shift_auction»: ручки вынесены в shift_auction/routes.py (вынесено из bot_schedule2.py).
+from shift_auction.routes import build_shift_auction_blueprint  # noqa: E402
+app.register_blueprint(build_shift_auction_blueprint(
+        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
+        API_TOKEN=API_TOKEN,
+        ROLE_HIERARCHY=ROLE_HIERARCHY,
+        SHIFT_AUCTION_EVENT_BUFFER_MAXLEN=SHIFT_AUCTION_EVENT_BUFFER_MAXLEN,
+        TASK_TELEGRAM_TIMEOUT_SECONDS=TASK_TELEGRAM_TIMEOUT_SECONDS,
+        TELEGRAM_MAX_MESSAGE_CHARS=TELEGRAM_MAX_MESSAGE_CHARS,
+        WAITRESS_THREADS=WAITRESS_THREADS,
+        _append_server_timing=_append_server_timing,
+        _build_cors_preflight_response=_build_cors_preflight_response,
+        _build_postgres_connection_params=_build_postgres_connection_params,
+        _env_int=_env_int,
+        _get_authenticated_requester=_get_authenticated_requester,
+        _get_role_level=_get_role_level,
+        _has_min_role=_has_min_role,
+        _is_admin_role=_is_admin_role,
+        _is_allowed_origin=_is_allowed_origin,
+        _is_supervisor_role=_is_supervisor_role,
+        _normalize_origin=_normalize_origin,
+        _normalize_user_role=_normalize_user_role,
+        _record_elapsed_server_timing=_record_elapsed_server_timing,
+        _send_telegram_text_message=_send_telegram_text_message,
+        _truncate_for_telegram=_truncate_for_telegram,
+        require_api_key=require_api_key,
+))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @app.route('/api/login', methods=['POST', 'OPTIONS'])
 def login():
@@ -21258,1903 +18473,100 @@ app.register_blueprint(build_surveys_blueprint(
 
 
 
-@app.route('/api/tasks/recipients', methods=['GET', 'OPTIONS'])
-@require_api_key
-def get_task_recipients():
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-        recipients = db.get_task_recipients(
-            requester_id,
-            requester_role,
-            scope_department_id=getattr(g, 'task_scope_department_id', None)
-        )
-        return jsonify({
-            "status": "success",
-            "recipients": recipients
-        }), 200
-    except Exception as e:
-        logging.error(f"Error in get_task_recipients: {e}")
-        return jsonify({"error": f"Internal server error"}), 500
 
 
-@app.route('/api/tasks/board_people', methods=['GET', 'OPTIONS'])
-@require_api_key
-def get_task_board_people():
-    """Список сотрудников для переключателя досок: без уволенных, с отделами."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-        people = db.get_task_board_people(requester_id, requester_role)
-        for person in people:
-            person["avatar_url"] = _build_avatar_signed_url(
-                person.pop("avatar_bucket", None),
-                person.pop("avatar_blob_path", None)
-            )
-        return jsonify({"status": "success", "people": people}), 200
-    except Exception as e:
-        logging.error(f"Error in get_task_board_people: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/tasks/departments', methods=['GET', 'OPTIONS'])
-@require_api_key
-def get_task_departments():
-    """Отделы для переключателя раздела + отдел, выбранный по умолчанию.
-
-    Принадлежность задачи отделу выводится из членства того, кто её поставил.
-    Значение по умолчанию считает сервер: у главы отдела это возглавляемый
-    отдел, а не строка в его профиле, — на клиенте это не вычислить.
-    """
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-        departments = db.get_task_departments(requester_id, requester_role)
-
-        # У личного охвата отдела по умолчанию нет. Отдел задачи — это отдел
-        # того, кто её ПОСТАВИЛ, поэтому подставить рядовому сотруднику его
-        # собственный отдел значит спрятать от него всё, что поручили извне:
-        # переключатель молча срезал бы задачу, пришедшую от админа из другого
-        # отдела. Ему нужны все свои задачи, а не задачи своего отдела.
-        default_department_id = (
-            None if getattr(g, 'task_scope_is_personal', False)
-            else _department_scope_id_for_requester(requester_id)
-        )
-        # Отдел без единой видимой задачи по умолчанию не выбираем: раздел
-        # открылся бы пустым, и это читалось бы как «задачи пропали».
-        if default_department_id is not None and not any(
-            item.get('id') == default_department_id for item in departments
-        ):
-            default_department_id = None
-
-        return jsonify({
-            "status": "success",
-            "departments": departments,
-            "default_department_id": default_department_id
-        }), 200
-    except Exception as e:
-        logging.error(f"Error in get_task_departments: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/tasks/action_required', methods=['GET', 'OPTIONS'])
-@require_api_key
-def get_task_action_required_count():
-    """Бейдж сайдбара: сколько задач ждут действия лично от пользователя."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        summary = db.get_task_action_needs_summary(requester_id)
-        return jsonify({
-            "status": "success",
-            "count": summary.get("count", 0),
-            "breakdown": summary.get("breakdown", {})
-        }), 200
-    except Exception as e:
-        logging.error(f"Error in get_task_action_required_count: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/tasks/<int:task_id>/action_seen', methods=['POST', 'OPTIONS'])
-@require_api_key
-def mark_task_action_seen(task_id):
-    """Уведомление просмотрено: гасим его в счётчике, задачу не трогаем."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        payload = request.get_json(silent=True) or {}
-        try:
-            summary = db.mark_task_action_seen(requester_id, task_id, payload.get('kind'))
-        except ValueError as e:
-            error_code = str(e)
-            if error_code == 'INVALID_TASK_ACTION_KIND':
-                return jsonify({"error": "Invalid action kind"}), 400
-            if error_code == 'TASK_NOT_FOUND':
-                return jsonify({"error": "Task not found"}), 404
-            raise
-
-        return jsonify({
-            "status": "success",
-            "count": summary.get("count", 0),
-            "breakdown": summary.get("breakdown", {})
-        }), 200
-    except Exception as e:
-        logging.error(f"Error in mark_task_action_seen: {e}")
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/tasks/notes', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def handle_task_notes():
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        if request.method == 'GET':
-            notes = db.get_task_notes(requester_id)
-            return jsonify({
-                "status": "success",
-                "notes": notes
-            }), 200
-
-        data = request.get_json() or {}
-        title = str(data.get('title') or '').strip()
-        body = str(data.get('body') or data.get('text') or '')
-        priority = (str(data.get('priority') or 'normal').strip().lower() or 'normal')
-        due_at = data.get('due_at') if 'due_at' in data else None
-        is_task = _parse_task_bool(data.get('is_task'))
-        is_done = _parse_task_bool(data.get('is_done')) if is_task else False
-
-        if priority not in TASK_ALLOWED_PRIORITIES:
-            return jsonify({"error": "Invalid priority"}), 400
-
-        try:
-            note = db.create_task_note(
-                owner_id=requester_id,
-                title=title,
-                body=body,
-                priority=priority,
-                due_at=due_at,
-                is_task=is_task,
-                is_done=is_done,
-                reminder_minutes_before=data.get('reminder_minutes_before')
-            )
-        except ValueError as create_error:
-            code = str(create_error)
-            if code == 'INVALID_PRIORITY':
-                return jsonify({"error": "Invalid priority"}), 400
-            if code == 'INVALID_DUE_AT':
-                return jsonify({"error": "Invalid due_at"}), 400
-            if code == 'INVALID_REMINDER':
-                return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
-            return jsonify({"error": code}), 400
-
-        return jsonify({
-            "status": "success",
-            "message": "Note saved successfully",
-            "note": note
-        }), 201
-
-    except Exception as e:
-        logging.error(f"Error in handle_task_notes: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/tasks/notes/<int:note_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
-@require_api_key
-def handle_single_task_note(note_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        if request.method == 'PATCH':
-            data = request.get_json() or {}
-            has_title = 'title' in data
-            has_body = 'body' in data or 'text' in data
-            has_priority = 'priority' in data
-            has_due_at = 'due_at' in data
-            has_is_task = 'is_task' in data
-            has_is_done = 'is_done' in data
-            has_reminder = 'reminder_minutes_before' in data
-
-            if not any([has_title, has_body, has_priority, has_due_at, has_is_task, has_is_done, has_reminder]):
-                return jsonify({"error": "No fields to update"}), 400
-
-            priority = (str(data.get('priority') or '').strip().lower() or 'normal') if has_priority else None
-            if has_priority and priority not in TASK_ALLOWED_PRIORITIES:
-                return jsonify({"error": "Invalid priority"}), 400
-
-            edit_kwargs = {
-                "note_id": note_id,
-                "owner_id": requester_id
-            }
-            if has_title:
-                edit_kwargs["title"] = data.get('title')
-            if has_body:
-                edit_kwargs["body"] = data.get('body') if 'body' in data else data.get('text')
-            if has_priority:
-                edit_kwargs["priority"] = priority
-            if has_due_at:
-                edit_kwargs["due_at"] = data.get('due_at')
-            if has_is_task:
-                edit_kwargs["is_task"] = _parse_task_bool(data.get('is_task'))
-            if has_is_done:
-                edit_kwargs["is_done"] = _parse_task_bool(data.get('is_done'))
-            if has_reminder:
-                edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
-
-            try:
-                note = db.update_task_note(**edit_kwargs)
-            except ValueError as update_error:
-                code = str(update_error)
-                if code == 'NOTE_NOT_FOUND':
-                    return jsonify({"error": "Note not found"}), 404
-                if code == 'NOTHING_TO_UPDATE':
-                    return jsonify({"error": "No fields to update"}), 400
-                if code == 'INVALID_PRIORITY':
-                    return jsonify({"error": "Invalid priority"}), 400
-                if code == 'INVALID_DUE_AT':
-                    return jsonify({"error": "Invalid due_at"}), 400
-                if code == 'INVALID_REMINDER':
-                    return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
-                return jsonify({"error": code}), 400
-            except PermissionError:
-                return jsonify({"error": "You do not have access to this note"}), 403
-
-            return jsonify({
-                "status": "success",
-                "message": "Note updated successfully",
-                "note": note
-            }), 200
-
-        try:
-            result = db.delete_task_note(note_id=note_id, owner_id=requester_id)
-        except ValueError as delete_error:
-            code = str(delete_error)
-            if code == 'NOTE_NOT_FOUND':
-                return jsonify({"error": "Note not found"}), 404
-            return jsonify({"error": code}), 400
-
-        return jsonify({
-            "status": "success",
-            "message": "Note deleted successfully",
-            **result
-        }), 200
-
-    except Exception as e:
-        logging.error(f"Error in handle_single_task_note: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
 # Колонки выгрузки задач: ключ -> (заголовок, ширина). Набор у каждого листа
 # свой — «Завершена» в листе «В работе» или «Итог» в бэклоге были бы колонкой,
 # пустой в каждой строке.
-TASK_EXPORT_COLUMNS = {
-    'id':          ('№', 7),
-    'subject':     ('Тема', 52),
-    'tag':         ('Тип', 14),
-    'priority':    ('Срочность', 13),
-    'assignee':    ('Исполнители', 34),
-    'requester':   ('Поручил', 26),
-    'created':     ('Создана', 17),
-    'planned':     ('Плановый старт', 17),
-    'due':         ('Дедлайн', 17),
-    'estimate':    ('Оценка, ч', 11),
-    'started':     ('Начата', 17),
-    'spent':       ('Факт, ч', 10),
-    'completed':   ('Завершена', 17),
-    'summary':     ('Итог', 60),
-    'brief':       ('Бриф', 48),
-    'description': ('Описание', 60),
-}
 _TASK_EXPORT_BASE = ('id', 'subject', 'tag', 'priority', 'assignee', 'requester', 'created')
+# Раздел «tasks»: ручки вынесены в tasks/routes.py (вынесено из bot_schedule2.py).
+from tasks.routes import build_tasks_blueprint  # noqa: E402
+app.register_blueprint(build_tasks_blueprint(
+        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
+        API_TOKEN=API_TOKEN,
+        AVATAR_SIGNED_URL_CACHE=AVATAR_SIGNED_URL_CACHE,
+        AVATAR_SIGNED_URL_CACHE_LOCK=AVATAR_SIGNED_URL_CACHE_LOCK,
+        AVATAR_SIGNED_URL_CACHE_MAX_ITEMS=AVATAR_SIGNED_URL_CACHE_MAX_ITEMS,
+        AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS=AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS,
+        AVATAR_SIGNED_URL_TTL_SECONDS=AVATAR_SIGNED_URL_TTL_SECONDS,
+        TASK_PRIORITY_LABELS=TASK_PRIORITY_LABELS,
+        TASK_TELEGRAM_TIMEOUT_SECONDS=TASK_TELEGRAM_TIMEOUT_SECONDS,
+        TASK_WEB_APP_BASE_URL=TASK_WEB_APP_BASE_URL,
+        TELEGRAM_MAX_CAPTION_CHARS=TELEGRAM_MAX_CAPTION_CHARS,
+        TELEGRAM_MAX_MESSAGE_CHARS=TELEGRAM_MAX_MESSAGE_CHARS,
+        _TASK_EXPORT_BASE=_TASK_EXPORT_BASE,
+        _build_avatar_signed_url=_build_avatar_signed_url,
+        _build_current_task_deep_link=_build_current_task_deep_link,
+        _build_task_deep_link=_build_task_deep_link,
+        _build_task_notification_reply_markup=_build_task_notification_reply_markup,
+        _department_scope_id_for_requester=_department_scope_id_for_requester,
+        _escape_telegram_html=_escape_telegram_html,
+        _format_task_due_for_notification=_format_task_due_for_notification,
+        _format_task_spent_for_notification=_format_task_spent_for_notification,
+        _get_telegram_error_text=_get_telegram_error_text,
+        _is_allowed_origin=_is_allowed_origin,
+        _normalize_origin=_normalize_origin,
+        _normalize_user_role=_normalize_user_role,
+        _send_telegram_text_message=_send_telegram_text_message,
+        _task_route_guard=_task_route_guard,
+        _telegram_exception_text=_telegram_exception_text,
+        _truncate_for_telegram=_truncate_for_telegram,
+        get_gcs_client=get_gcs_client,
+        require_api_key=require_api_key,
+))
 # Лист на колонку доски, в том же порядке, что колонки в разделе.
-TASK_EXPORT_SHEETS = (
-    ('backlog',  'Бэклог',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'brief', 'description')),
-    ('todo',     'К выполнению',
-     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'brief', 'description')),
-    ('progress', 'В работе',
-     _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'brief', 'description')),
-    ('review',   'На проверке',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'brief', 'description')),
-    ('done',     'Готово',
-     _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'brief', 'description')),
-)
-TASK_EXPORT_DATE_KEYS = frozenset({'created', 'planned', 'due', 'started', 'completed'})
-TASK_EXPORT_HOUR_KEYS = frozenset({'estimate', 'spent'})
-TASK_EXPORT_FIELD_BY_DATE_KEY = {
-    'created': 'created_at',
-    'planned': 'planned_start_at',
-    'due': 'due_at',
-    'started': 'started_at',
-    'completed': 'completed_at',
-}
 # Задача закрыта — просрочка по ней уже ничего не значит. Тот же список статусов,
 # по которому раздел считает «просрочено» в сводке.
-TASK_EXPORT_CLOSED_STATUSES = frozenset({'completed', 'accepted'})
-
-
-def _task_export_column_of(task):
-    """В какой лист ложится задача. Повторяет BOARD_COLUMN_QUERY во фронте."""
-    if task.get('is_backlog'):
-        return 'backlog'
-    status = (task.get('status') or '').strip().lower()
-    if status in ('in_progress', 'returned'):
-        return 'progress'
-    if status == 'completed':
-        return 'review'
-    if status == 'accepted':
-        return 'done'
-    return 'todo'
-
-
-def _task_export_hours(minutes):
-    """Минуты -> часы: по колонке в Excel считают суммы, «3ч 30м» так не сложить."""
-    if minutes is None:
-        return None
-    return round(int(minutes) / 60, 2)
-
-
-def _task_export_value(key, task):
-    import task_production
-    if key == 'id':
-        return task.get('id')
-    if key == 'subject':
-        return task.get('subject') or ''
-    if key == 'tag':
-        return TASK_TAG_LABELS.get((task.get('tag') or 'task').strip().lower(), 'Задача')
-    if key == 'priority':
-        return TASK_PRIORITY_LABELS.get((task.get('priority') or 'normal').strip().lower(), 'Обычная')
-    if key == 'assignee':
-        return task.get('assignee_name') or ''
-    if key == 'requester':
-        return task.get('requested_by_name') or ''
-    if key == 'estimate':
-        return _task_export_hours(task.get('estimate_minutes'))
-    if key == 'spent':
-        return _task_export_hours(task.get('spent_minutes'))
-    if key == 'summary':
-        return task.get('completion_summary') or ''
-    if key == 'brief':
-        # Бриф продакшна строками «Поле: значение». У остальных задач клетка
-        # пустая, и лист без единого продакшна колонку не покажет вовсе.
-        return task_production.describe_text(task.get('production_brief'))
-    if key == 'description':
-        return task.get('description') or ''
-    return task.get(TASK_EXPORT_FIELD_BY_DATE_KEY[key])
-
-
-def _task_export_fill_sheet(sheet, columns, tasks, now):
-    values = {key: [_task_export_value(key, task) for task in tasks] for key in columns}
-    # Колонку, пустую во ВСЕХ строках листа, не выводим вовсе: заголовок без
-    # единого значения — шум, из-за которого лист приходится листать вбок.
-    if tasks:
-        columns = [
-            key for key in columns
-            if any(value not in (None, '') for value in values[key])
-        ]
-
-    header_font = Font(bold=True, color='FFFFFF')
-    header_fill = PatternFill(fill_type='solid', fgColor='1F2937')
-    overdue_font = Font(color='B91C1C')
-    for col, key in enumerate(columns, start=1):
-        title, width = TASK_EXPORT_COLUMNS[key]
-        cell = sheet.cell(row=1, column=col, value=title)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-        sheet.column_dimensions[get_column_letter(col)].width = width
-
-    for idx, task in enumerate(tasks, start=2):
-        # Красим только просроченный дедлайн: остальные состояния нейтральны, и
-        # цвет в них был бы шумом, а не подсказкой.
-        due_at = task.get('due_at')
-        is_overdue = bool(
-            due_at
-            and due_at < now
-            and (task.get('status') or '') not in TASK_EXPORT_CLOSED_STATUSES
-        )
-        for col, key in enumerate(columns, start=1):
-            cell = sheet.cell(row=idx, column=col, value=values[key][idx - 2])
-            if key in TASK_EXPORT_DATE_KEYS:
-                cell.number_format = 'DD.MM.YYYY HH:MM'
-                if key == 'due' and is_overdue:
-                    cell.font = overdue_font
-            elif key in TASK_EXPORT_HOUR_KEYS:
-                cell.number_format = '0.##'
-
-    # Шапка закреплена и с фильтром — по сотням строк иначе не поработать.
-    sheet.freeze_panes = 'A2'
-    last_column = get_column_letter(len(columns))
-    sheet.auto_filter.ref = 'A1:%s%d' % (last_column, max(len(tasks) + 1, 2))
-
-
-@app.route('/api/tasks/export', methods=['GET', 'OPTIONS'])
-@require_api_key
-def export_tasks_excel():
-    """Выгрузка задач в Excel: колонка доски = отдельный лист.
-
-    Охват тот же, что у доски: сервер отбирает задачи теми же условиями, что и
-    список раздела, поэтому в файл не попадёт ничего, чего человек не видит.
-    """
-    requester_id, requester, guard_response, guard_status = _task_route_guard()
-    if guard_response is not None:
-        return guard_response, guard_status
-
-    requester_role = getattr(g, 'effective_task_role', requester[3])
-    try:
-        tasks = db.get_tasks_for_export(
-            requester_id=requester_id,
-            requester_role=requester_role,
-            mine=(request.args.get('mine') or '').strip() or None,
-            person_id=request.args.get('person_id'),
-            person_scope=(request.args.get('person_scope') or '').strip() or None,
-            department_id=(request.args.get('department_id') or '').strip() or None,
-        )
-    except ValueError:
-        return jsonify({"error": "Invalid export filter"}), 400
-    except Exception:
-        logging.exception('tasks: выгрузка не удалась')
-        return jsonify({"error": "Internal server error"}), 500
-
-    by_column = collections.defaultdict(list)
-    for task in tasks:
-        by_column[_task_export_column_of(task)].append(task)
-
-    now = datetime.now()
-    workbook = Workbook()
-    workbook.remove(workbook.active)
-    for column_id, sheet_title, columns in TASK_EXPORT_SHEETS:
-        # Пустую колонку листом не заводим: шапка без строк читается как «файл не
-        # сформировался», а не как «здесь пусто».
-        if not by_column.get(column_id):
-            continue
-        _task_export_fill_sheet(
-            workbook.create_sheet(sheet_title), columns, by_column[column_id], now
-        )
-    if not workbook.sheetnames:
-        _task_export_fill_sheet(
-            workbook.create_sheet('Задачи'), TASK_EXPORT_SHEETS[1][2], [], now
-        )
-
-    stream = BytesIO()
-    workbook.save(stream)
-    stream.seek(0)
-    return send_file(
-        stream,
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        as_attachment=True,
-        download_name='Задачи_%s.xlsx' % now.strftime('%Y-%m-%d')
-    )
-
-
-@app.route('/api/tasks', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def handle_tasks():
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-
-        if request.method == 'GET':
-            try:
-                created_regulation_task_ids = db.materialize_due_regulation_tasks()
-                for created_task_id in created_regulation_task_ids[:20]:
-                    task_ctx = _fetch_task_notification_context(created_task_id)
-                    if not task_ctx:
-                        continue
-                    # Регламент мог быть поручен нескольким — тогда новая
-                    # итерация приходит каждому. Раньше здесь брался скаляр, и
-                    # соисполнители о ночной задаче в Telegram не узнавали.
-                    assignee_chat_ids = [
-                        person.get('telegram_id')
-                        for person in (task_ctx.get('assignees') or [])
-                        if person.get('telegram_id')
-                    ] or ([task_ctx.get('assignee_telegram_id')]
-                          if task_ctx.get('assignee_telegram_id') else [])
-                    if not assignee_chat_ids:
-                        continue
-                    task_link = _build_current_task_deep_link(created_task_id)
-                    tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
-                    priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
-                    due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
-                    task_subject_html = _build_task_subject_notification_html(task_ctx, task_link)
-                    lines = [
-                        "<b>🔁 Новая регламентная задача</b>",
-                        "",
-                        f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
-                        f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
-                        f"<b>Тема:</b> {task_subject_html}",
-                        "",
-                        "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
-                    ]
-                    if due_label:
-                        lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-                    production_line = _task_production_item_line(task_ctx.get('production_brief'))
-                    if production_line:
-                        lines.insert(3, production_line)
-                    for assignee_chat_id in assignee_chat_ids:
-                        _send_telegram_text_message(
-                            assignee_chat_id,
-                            "\n".join(lines),
-                            parse_mode='HTML',
-                            reply_markup=_build_task_notification_reply_markup(task_link)
-                        )
-            except Exception as materialize_error:
-                logging.warning("Failed to materialize due regulation tasks: %s", materialize_error)
-
-            query_text = (request.args.get('q') or request.args.get('search') or '').strip()
-            status_filter = (request.args.get('status') or '').strip().lower() or None
-            tag_filter = (request.args.get('tag') or '').strip().lower() or None
-            priority_filter = (request.args.get('priority') or '').strip().lower() or None
-            only_my_raw = (request.args.get('only_my') or '').strip().lower()
-            only_my = only_my_raw in {'1', 'true', 'yes', 'y', 'on'}
-            person_scope = (request.args.get('person_scope') or '').strip().lower() or None
-            backlog_filter = (request.args.get('backlog') or '').strip().lower() or None
-            mine_filter = (request.args.get('mine') or '').strip().lower() or None
-            task_id_filter = (request.args.get('task_id') or '').strip() or None
-            sort_order = (request.args.get('sort') or '').strip().lower() or None
-            # Отдел задачи = отдел её постановщика; 'none' — постановщики без отдела.
-            department_filter = (request.args.get('department_id') or '').strip().lower() or None
-            # summary=0 — не считать сводку: колонки доски просят её один раз на загрузку.
-            include_summary = (request.args.get('summary') or '').strip().lower() not in {'0', 'false', 'no'}
-            person_id_raw = request.args.get('person_id')
-            person_id = None
-            if person_id_raw is not None and str(person_id_raw).strip() != '':
-                try:
-                    person_id = int(person_id_raw)
-                except Exception:
-                    return jsonify({"error": "Invalid person_id param"}), 400
-
-            raw_limit = request.args.get('limit')
-            raw_offset = request.args.get('offset')
-            limit = None
-            offset = 0
-
-            if raw_limit is not None and str(raw_limit).strip() != '':
-                try:
-                    limit = int(raw_limit)
-                except Exception:
-                    return jsonify({"error": "Invalid limit param"}), 400
-                if limit < 1 or limit > TASKS_MAX_PAGE_SIZE:
-                    return jsonify({"error": f"limit must be in range 1..{TASKS_MAX_PAGE_SIZE}"}), 400
-
-            if raw_offset is not None and str(raw_offset).strip() != '':
-                try:
-                    offset = int(raw_offset)
-                except Exception:
-                    return jsonify({"error": "Invalid offset param"}), 400
-                if offset < 0:
-                    return jsonify({"error": "offset must be >= 0"}), 400
-
-            try:
-                payload = db.get_tasks_for_requester(
-                    requester_id=requester_id,
-                    requester_role=requester_role,
-                    search=query_text,
-                    status=status_filter,
-                    tag=tag_filter,
-                    priority=priority_filter,
-                    limit=limit,
-                    offset=offset,
-                    only_my=only_my,
-                    person_id=person_id,
-                    person_scope=person_scope,
-                    backlog=backlog_filter,
-                    mine=mine_filter,
-                    task_id=task_id_filter,
-                    sort=sort_order,
-                    department_id=department_filter,
-                    include_summary=include_summary
-                )
-            except ValueError as e:
-                error_code = str(e)
-                if error_code == 'INVALID_TASK_STATUS_FILTER':
-                    return jsonify({"error": "Invalid status filter"}), 400
-                if error_code == 'INVALID_TASK_TAG_FILTER':
-                    return jsonify({"error": "Invalid tag filter"}), 400
-                if error_code == 'INVALID_TASK_PRIORITY_FILTER':
-                    return jsonify({"error": "Invalid priority filter"}), 400
-                if error_code == 'INVALID_TASK_LIMIT':
-                    return jsonify({"error": "Invalid limit value"}), 400
-                if error_code == 'INVALID_TASK_OFFSET':
-                    return jsonify({"error": "Invalid offset value"}), 400
-                if error_code == 'INVALID_TASK_PERSON_ID_FILTER':
-                    return jsonify({"error": "Invalid person_id filter"}), 400
-                if error_code == 'INVALID_TASK_PERSON_SCOPE_FILTER':
-                    return jsonify({"error": "Invalid person_scope filter"}), 400
-                if error_code == 'INVALID_TASK_BACKLOG_FILTER':
-                    return jsonify({"error": "Invalid backlog filter (use only|exclude)"}), 400
-                if error_code == 'INVALID_TASK_MINE_FILTER':
-                    return jsonify({"error": "Invalid mine filter (use any|assignee|creator)"}), 400
-                if error_code == 'INVALID_TASK_ID_FILTER':
-                    return jsonify({"error": "Invalid task_id filter"}), 400
-                if error_code == 'INVALID_TASK_SORT':
-                    return jsonify({"error": "Invalid sort (use freshness|importance)"}), 400
-                if error_code == 'INVALID_TASK_DEPARTMENT_FILTER':
-                    return jsonify({"error": "Invalid department_id filter"}), 400
-                raise
-
-            tasks = payload.get("tasks") or []
-            for task in tasks:
-                # Первый исполнитель и весь состав: у карточки на доске лицо одно,
-                # в списке — стопка. Подписанные ссылки кешируются по (бакет, путь),
-                # поэтому десять исполнителей на страницу не стоят десяти подписей.
-                assignees = task.get("assignees")
-                if isinstance(assignees, list):
-                    for person in assignees:
-                        if not isinstance(person, dict):
-                            continue
-                        person["avatar_url"] = _build_avatar_signed_url(
-                            person.get("avatar_bucket"),
-                            person.get("avatar_blob_path")
-                        )
-                        person.pop("avatar_bucket", None)
-                        person.pop("avatar_blob_path", None)
-
-                assignee = task.get("assignee")
-                if isinstance(assignee, dict):
-                    assignee["avatar_url"] = _build_avatar_signed_url(
-                        assignee.get("avatar_bucket"),
-                        assignee.get("avatar_blob_path")
-                    )
-                    assignee.pop("avatar_bucket", None)
-                    assignee.pop("avatar_blob_path", None)
-
-                creator = task.get("creator")
-                if isinstance(creator, dict):
-                    creator["avatar_url"] = _build_avatar_signed_url(
-                        creator.get("avatar_bucket"),
-                        creator.get("avatar_blob_path")
-                    )
-                    creator.pop("avatar_bucket", None)
-                    creator.pop("avatar_blob_path", None)
-
-            total_filtered = int(payload.get("total_filtered", len(tasks)) or 0)
-            # Без сводки общего числа мы не считали — отдаём отфильтрованное, а не длину страницы.
-            total_all = int(payload.get("total_all") or 0) or total_filtered
-            returned = len(tasks)
-            # Потолок строк действует и без limit, поэтому «есть ещё» считаем всегда.
-            has_more = (offset + returned) < total_filtered
-
-            return jsonify({
-                "status": "success",
-                "tasks": tasks,
-                "summary": payload.get("summary") or {},
-                "totals": {
-                    "all": total_all,
-                    "filtered": total_filtered
-                },
-                "pagination": {
-                    "limit": limit,
-                    "offset": offset,
-                    "returned": returned,
-                    "has_more": has_more
-                },
-                "query": query_text,
-                "filters": {
-                    "status": status_filter,
-                    "tag": tag_filter,
-                    "priority": priority_filter,
-                    "only_my": only_my,
-                    "person_id": person_id,
-                    "person_scope": person_scope,
-                    "backlog": backlog_filter,
-                    "mine": mine_filter,
-                    "sort": sort_order,
-                    "department_id": department_filter
-                }
-            }), 200
-
-        subject = (request.form.get('subject') or '').strip()
-        description = (request.form.get('description') or '').strip()
-        tag = (request.form.get('tag') or 'task').strip().lower() or 'task'
-        priority = (request.form.get('priority') or 'normal').strip().lower() or 'normal'
-        recurrence_type = (request.form.get('recurrence_type') or '').strip().lower() or None
-        try:
-            recurrence_interval = _parse_task_int(request.form.get('recurrence_interval'), 'recurrence_interval', default=1, minimum=1, maximum=365)
-            is_regulation = _parse_task_bool(request.form.get('is_regulation')) or bool(recurrence_type)
-            deadline_minutes = _parse_task_deadline_minutes(request.form)
-            checklist_items = _parse_task_checklist_items(request.form.get('checklist_items'))
-            is_backlog = _parse_task_bool(request.form.get('is_backlog'))
-            estimate_minutes = _parse_task_estimate_minutes(request.form)
-        except ValueError as parse_error:
-            return jsonify({"error": str(parse_error)}), 400
-        due_at_raw = (request.form.get('due_at') or '').strip() or None
-        planned_start_raw = (request.form.get('planned_start_at') or '').strip() or None
-        requested_by_id_raw = (request.form.get('requested_by_id') or '').strip() or None
-        requested_by_name_raw = (request.form.get('requested_by_name') or '').strip() or None
-        reminder_raw = (request.form.get('reminder_minutes_before') or '').strip() or None
-        # Бриф продакшна — JSON-строкой: форма multipart, вложенный объект в
-        # ней иначе не передать. Разбирает и проверяет его task_production.
-        import task_production
-        production_brief_raw = (request.form.get('production_brief') or '').strip() or None
-        assigned_to_raw = request.form.get('assigned_to')
-        # Состав приезжает строкой «12,15,7»: multipart-поле одно, а порядок в
-        # нём значим — первый становится tasks.assigned_to.
-        assignee_ids_raw = (request.form.get('assignee_ids') or '').strip()
-
-        if not subject:
-            return jsonify({"error": "subject is required"}), 400
-        if tag not in TASK_ALLOWED_TAGS:
-            return jsonify({"error": "Invalid tag"}), 400
-        if priority not in TASK_ALLOWED_PRIORITIES:
-            return jsonify({"error": "Invalid priority"}), 400
-        if recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
-            return jsonify({"error": "Invalid recurrence_type"}), 400
-        if not assigned_to_raw and not assignee_ids_raw:
-            return jsonify({"error": "assigned_to is required"}), 400
-
-        try:
-            assignee_ids = _parse_task_assignee_ids(assignee_ids_raw or assigned_to_raw)
-        except ValueError as assignee_error:
-            return jsonify({"error": str(assignee_error)}), 400
-        assigned_to = assignee_ids[0]
-
-        forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
-        if forbidden:
-            return jsonify({"error": "You cannot assign a task to this user"}), 403
-
-        files = request.files.getlist('files')
-        try:
-            attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(files, stage='initial')
-        except ValueError as upload_error:
-            return jsonify({"error": str(upload_error)}), 400
-        except RuntimeError as upload_error:
-            return jsonify({"error": str(upload_error)}), 500
-        except Exception as upload_error:
-            logging.error(f"Task attachment upload failed: {upload_error}")
-            return jsonify({"error": "Failed to upload task attachments"}), 500
-
-        try:
-            created = db.create_task(
-                assignee_ids=assignee_ids,
-                subject=subject,
-                description=description,
-                tag=tag,
-                assigned_to=assigned_to,
-                created_by=requester_id,
-                attachments=attachments,
-                priority=priority,
-                deadline_minutes=deadline_minutes,
-                is_regulation=is_regulation,
-                recurrence_type=recurrence_type,
-                recurrence_interval=recurrence_interval,
-                checklist_items=checklist_items,
-                is_backlog=is_backlog,
-                estimate_minutes=estimate_minutes,
-                planned_start_at=planned_start_raw,
-                due_at=due_at_raw,
-                requested_by_id=requested_by_id_raw,
-                requested_by_name=requested_by_name_raw,
-                reminder_minutes_before=reminder_raw,
-                production_brief=production_brief_raw
-            )
-        except ValueError as create_error:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            code = str(create_error)
-            production_error = task_production.error_message(code)
-            if production_error:
-                return jsonify({"error": production_error, "code": code}), 400
-            error_map = {
-                "SUBJECT_REQUIRED": "subject is required",
-                "INVALID_TAG": "Invalid tag",
-                "INVALID_PRIORITY": "Invalid priority",
-                "INVALID_DEADLINE": "Invalid deadline",
-                "INVALID_RECURRENCE_TYPE": "Invalid recurrence_type",
-                "INVALID_RECURRENCE_INTERVAL": "Invalid recurrence_interval",
-                "INVALID_CHECKLIST": "Invalid checklist",
-                "INVALID_ESTIMATE": "Invalid estimate_minutes",
-                "INVALID_PLANNED_START": "Invalid planned_start_at",
-                "INVALID_REQUESTED_BY": "Invalid requested_by_id",
-                "INVALID_REMINDER": "Напоминание можно поставить максимум за сутки до дедлайна",
-                "INVALID_ASSIGNED_TO": "Invalid assigned_to value",
-                "ASSIGNEE_REQUIRED": "Выберите хотя бы одного исполнителя",
-                "TOO_MANY_ASSIGNEES": f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}"
-            }
-            return jsonify({"error": error_map.get(code, code)}), 400
-        except Exception:
-            # DB write failed after upload -> cleanup uploaded blobs
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            raise
-
-        telegram_warning = None
-        try:
-            # Один запрос на всех исполнителей вместо N вызовов get_user.
-            assignee_chat_ids = _task_assignee_chat_ids(created.get('assignee_ids') or assignee_ids)
-            # Карточка в бэклоге ещё не обязательство исполнителя — уведомляем только при выносе на доску.
-            if assignee_chat_ids and not is_backlog:
-                task_link = _build_current_task_deep_link(created.get("id"))
-                tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
-                priority_label = TASK_PRIORITY_LABELS.get(priority, 'Обычная')
-                due_label = _format_task_due_for_notification(created.get('due_at'))
-                requester_name = requester[2] if requester else 'Система'
-                task_subject_html = _escape_telegram_html(subject, 220)
-                if task_link:
-                    task_subject_html = (
-                        f'<a href="{_escape_telegram_html(task_link, 500)}">'
-                        f'{task_subject_html}'
-                        '</a>'
-                    )
-                message_lines = [
-                    "<b>🆕 Новая задача</b>",
-                    "",
-                    f"<b>Тип:</b> {_escape_telegram_html(tag_label, 60)}",
-                    f"<b>Срочность:</b> {_escape_telegram_html(priority_label, 60)}",
-                    f"<b>Тема:</b> {task_subject_html}",
-                    f"<b>От:</b> {_escape_telegram_html(requester_name, 80)}",
-                    "",
-                    "<b>Откройте раздел «Задачи», чтобы посмотреть детали.</b>"
-                ]
-                if due_label:
-                    message_lines.insert(4, f"<b>Дедлайн:</b> {_escape_telegram_html(due_label, 80)}")
-                production_line = _task_production_item_line(created.get('production_brief'))
-                if production_line:
-                    message_lines.insert(3, production_line)
-                message = "\n".join(message_lines)
-                reply_markup = _build_task_notification_reply_markup(task_link)
-                failures = []
-                for assignee_chat_id in assignee_chat_ids:
-                    tg_response = _send_telegram_text_message(
-                        assignee_chat_id,
-                        message,
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    if tg_response.status_code != 200:
-                        error_detail = _get_telegram_error_text(tg_response)
-                        failures.append(error_detail)
-                        logging.error(f"Task Telegram API error: {error_detail}")
-                if failures:
-                    telegram_warning = (
-                        "Task created, but Telegram notification failed: "
-                        + " | ".join(failures[:3])
-                    )
-        except Exception as notify_error:
-            telegram_warning = f"Task created, but Telegram notification failed: {str(notify_error)}"
-            logging.error(f"Task Telegram notification error: {_telegram_exception_text(notify_error)}")
-
-        response_payload = {
-            "status": "success",
-            "message": "Задача добавлена в бэклог" if is_backlog else "Task created successfully",
-            "task_id": created.get("id"),
-            "is_backlog": bool(is_backlog),
-            "due_at": created.get("due_at")
-        }
-        if telegram_warning:
-            response_payload["warning"] = telegram_warning
-
-        return jsonify(response_payload), 201
-
-    except Exception as e:
-        logging.error(f"Error in handle_tasks: {e}")
-        return jsonify({"error": f"Internal server error"}), 500
-
-
-@app.route('/api/tasks/<int:task_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
-@require_api_key
-def handle_single_task(task_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-        requester_role_norm = _normalize_user_role(requester_role)
-
-        if request.method == 'PATCH':
-            import task_production
-            data = request.get_json() or {}
-            has_subject = 'subject' in data
-            has_description = 'description' in data
-            has_tag = 'tag' in data
-            has_assigned_to = 'assigned_to' in data or 'assignee_ids' in data
-            has_priority = 'priority' in data
-            has_deadline = any(key in data for key in ('deadline_days', 'deadline_hours', 'deadline_minutes'))
-            has_due_at = 'due_at' in data
-            has_is_regulation = 'is_regulation' in data
-            has_recurrence_type = 'recurrence_type' in data
-            has_recurrence_interval = 'recurrence_interval' in data
-            has_checklist = 'checklist_items' in data
-            has_estimate = any(key in data for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes'))
-            has_planned_start = 'planned_start_at' in data
-            has_origin = 'requested_by_id' in data or 'requested_by_name' in data
-            has_reminder = 'reminder_minutes_before' in data
-            has_production_brief = 'production_brief' in data
-
-            if not any([
-                has_subject, has_description, has_tag, has_assigned_to,
-                has_priority, has_deadline, has_due_at, has_is_regulation,
-                has_recurrence_type, has_recurrence_interval, has_checklist,
-                has_estimate, has_planned_start, has_origin, has_reminder,
-                has_production_brief
-            ]):
-                return jsonify({"error": "No fields to update"}), 400
-
-            subject = data.get('subject') if has_subject else None
-            description = data.get('description') if has_description else None
-            tag = data.get('tag') if has_tag else None
-            priority = (str(data.get('priority') or '').strip().lower() or 'normal') if has_priority else None
-            assigned_to = None
-
-            if has_priority and priority not in TASK_ALLOWED_PRIORITIES:
-                return jsonify({"error": "Invalid priority"}), 400
-
-            try:
-                deadline_minutes = _parse_task_deadline_minutes(data) if has_deadline else None
-                recurrence_type = (str(data.get('recurrence_type') or '').strip().lower() or None) if has_recurrence_type else None
-                recurrence_interval = (
-                    _parse_task_int(data.get('recurrence_interval'), 'recurrence_interval', default=1, minimum=1, maximum=365)
-                    if has_recurrence_interval else None
-                )
-                is_regulation = _parse_task_bool(data.get('is_regulation')) if has_is_regulation else None
-                checklist_items = _parse_task_checklist_items(data.get('checklist_items')) if has_checklist else None
-                estimate_minutes = _parse_task_estimate_minutes(data) if has_estimate else None
-            except ValueError as parse_error:
-                return jsonify({"error": str(parse_error)}), 400
-
-            if has_recurrence_type and recurrence_type and recurrence_type not in TASK_ALLOWED_RECURRENCE_TYPES:
-                return jsonify({"error": "Invalid recurrence_type"}), 400
-
-            assignee_ids = None
-            if has_assigned_to:
-                raw_assignees = data.get('assignee_ids') if 'assignee_ids' in data else data.get('assigned_to')
-                try:
-                    assignee_ids = _parse_task_assignee_ids(raw_assignees)
-                except ValueError as assignee_error:
-                    return jsonify({"error": str(assignee_error)}), 400
-                assigned_to = assignee_ids[0]
-
-                forbidden = _task_assignees_outside_scope(assignee_ids, requester_id, requester_role)
-                if forbidden:
-                    return jsonify({"error": "You cannot assign a task to this user"}), 403
-
-            try:
-                edit_kwargs = {
-                    "task_id": task_id,
-                    "requester_id": requester_id,
-                    "requester_role": requester_role,
-                    "subject": subject if has_subject else None,
-                    "description": description if has_description else None,
-                    "tag": tag if has_tag else None,
-                    "assigned_to": assigned_to if has_assigned_to else None
-                }
-                if has_assigned_to:
-                    edit_kwargs["assignee_ids"] = assignee_ids
-                if has_priority:
-                    edit_kwargs["priority"] = priority
-                if has_deadline:
-                    edit_kwargs["deadline_minutes"] = deadline_minutes
-                if has_is_regulation:
-                    edit_kwargs["is_regulation"] = is_regulation
-                if has_recurrence_type:
-                    edit_kwargs["recurrence_type"] = recurrence_type
-                if has_recurrence_interval:
-                    edit_kwargs["recurrence_interval"] = recurrence_interval
-                if has_checklist:
-                    edit_kwargs["checklist_items"] = checklist_items
-                if has_due_at:
-                    edit_kwargs["due_at"] = data.get('due_at')
-                if has_estimate:
-                    edit_kwargs["estimate_minutes"] = estimate_minutes
-                if has_planned_start:
-                    edit_kwargs["planned_start_at"] = data.get('planned_start_at')
-                if has_origin:
-                    edit_kwargs["requested_by_id"] = data.get('requested_by_id')
-                    edit_kwargs["requested_by_name"] = data.get('requested_by_name')
-                if has_reminder:
-                    edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
-                if has_production_brief:
-                    edit_kwargs["production_brief"] = data.get('production_brief')
-
-                result = db.edit_task(**edit_kwargs)
-            except ValueError as value_error:
-                code = str(value_error)
-                production_error = task_production.error_message(code)
-                if production_error:
-                    return jsonify({"error": production_error, "code": code}), 400
-                if code == 'TASK_NOT_FOUND':
-                    return jsonify({"error": "Task not found"}), 404
-                if code == 'NOTHING_TO_UPDATE':
-                    return jsonify({"error": "No fields to update"}), 400
-                if code == 'SUBJECT_REQUIRED':
-                    return jsonify({"error": "subject is required"}), 400
-                if code == 'INVALID_TAG':
-                    return jsonify({"error": "Invalid tag"}), 400
-                if code == 'INVALID_PRIORITY':
-                    return jsonify({"error": "Invalid priority"}), 400
-                if code == 'INVALID_DEADLINE':
-                    return jsonify({"error": "Invalid deadline"}), 400
-                if code == 'INVALID_RECURRENCE_TYPE':
-                    return jsonify({"error": "Invalid recurrence_type"}), 400
-                if code == 'INVALID_RECURRENCE_INTERVAL':
-                    return jsonify({"error": "Invalid recurrence_interval"}), 400
-                if code == 'INVALID_CHECKLIST':
-                    return jsonify({"error": "Invalid checklist"}), 400
-                if code == 'INVALID_ASSIGNED_TO':
-                    return jsonify({"error": "Invalid assigned_to value"}), 400
-                if code == 'ASSIGNEE_REQUIRED':
-                    return jsonify({"error": "Выберите хотя бы одного исполнителя"}), 400
-                if code == 'TOO_MANY_ASSIGNEES':
-                    return jsonify({
-                        "error": f"Исполнителей у задачи не больше {db.TASK_MAX_ASSIGNEES}"
-                    }), 400
-                if code == 'INVALID_ESTIMATE':
-                    return jsonify({"error": "Invalid estimate_minutes"}), 400
-                if code == 'INVALID_PLANNED_START':
-                    return jsonify({"error": "Invalid planned_start_at"}), 400
-                if code == 'INVALID_REQUESTED_BY':
-                    return jsonify({"error": "Invalid requested_by_id"}), 400
-                if code == 'INVALID_REMINDER':
-                    return jsonify({"error": "Напоминание можно поставить максимум за сутки до дедлайна"}), 400
-                return jsonify({"error": code}), 400
-            except PermissionError as permission_error:
-                code = str(permission_error)
-                if code == 'ONLY_CREATOR_CAN_EDIT':
-                    return jsonify({"error": "Only task creator can edit this task"}), 403
-                if code == 'TASK_FORBIDDEN':
-                    return jsonify({"error": "You do not have access to this task"}), 403
-                return jsonify({"error": code}), 403
-
-            telegram_warnings = []
-            try:
-                if result.get('updated'):
-                    task_ctx = _fetch_task_notification_context(task_id)
-                    if task_ctx:
-                        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                        task_link = _build_current_task_deep_link(task_ctx.get('id'))
-                        reply_markup = _build_task_notification_reply_markup(task_link)
-                        recipients = _collect_task_assignee_recipients(task_ctx, requester_id)
-                        for recipient in recipients:
-                            message_html = _build_task_event_notification_html(
-                                event='edited',
-                                task_ctx=task_ctx,
-                                actor_name=actor_name,
-                                changed_fields=result.get('changed_fields') or [],
-                                task_link=task_link
-                            )
-                            response = _send_telegram_text_message(
-                                recipient.get('chat_id'),
-                                message_html,
-                                parse_mode='HTML',
-                                reply_markup=reply_markup
-                            )
-                            if response.status_code != 200:
-                                recipient_name = recipient.get('name') or 'исполнитель'
-                                telegram_warnings.append(
-                                    f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
-                                )
-            except Exception as notify_error:
-                telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-            response_payload = {
-                "status": "success",
-                "message": "Task updated successfully" if result.get('updated') else "No changes applied",
-                "task": result
-            }
-            if telegram_warnings:
-                response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
-            return jsonify(response_payload), 200
-
-        # DELETE
-        if requester_role_norm != 'super_admin':
-            return jsonify({"error": "Only super_admin can delete tasks"}), 403
-
-        task_ctx_before_delete = _fetch_task_notification_context(task_id)
-
-        try:
-            delete_result = db.delete_task(
-                task_id=task_id,
-                requester_id=requester_id,
-                requester_role=requester_role
-            )
-        except ValueError as value_error:
-            code = str(value_error)
-            if code == 'TASK_NOT_FOUND':
-                return jsonify({"error": "Task not found"}), 404
-            return jsonify({"error": code}), 400
-        except PermissionError as permission_error:
-            code = str(permission_error)
-            if code == 'ONLY_SUPER_ADMIN':
-                return jsonify({"error": "Only super_admin can delete tasks"}), 403
-            if code == 'TASK_FORBIDDEN':
-                return jsonify({"error": "You do not have access to this task"}), 403
-            return jsonify({"error": code}), 403
-
-        warnings = []
-        warnings.extend(_delete_task_attachment_blobs_from_gcs(delete_result.get('attachments') or []))
-        _delete_production_material_blobs(delete_result.get('production_blobs') or [])
-
-        try:
-            if task_ctx_before_delete:
-                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                recipients = _collect_task_assignee_recipients(task_ctx_before_delete, requester_id)
-                for recipient in recipients:
-                    message_html = _build_task_event_notification_html(
-                        event='deleted',
-                        task_ctx=task_ctx_before_delete,
-                        actor_name=actor_name,
-                        changed_fields=[]
-                    )
-                    response = _send_telegram_text_message(
-                        recipient.get('chat_id'),
-                        message_html,
-                        parse_mode='HTML'
-                    )
-                    if response.status_code != 200:
-                        recipient_name = recipient.get('name') or 'исполнитель'
-                        warnings.append(
-                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
-                        )
-        except Exception as notify_error:
-            warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-        response_payload = {
-            "status": "success",
-            "message": "Task deleted successfully",
-            "task_id": task_id
-        }
-        if warnings:
-            response_payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
-        return jsonify(response_payload), 200
-
-    except Exception as e:
-        logging.error(f"Error in handle_single_task: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/tasks/board', methods=['POST', 'OPTIONS'])
-@require_api_key
-def handle_tasks_board():
-    """
-    Планирующие правки с доски: перенос бэклог ↔ доска, порядок приоритезации,
-    оценка длительности и сроки. Батч — чтобы drag&drop переставлял соседей одним запросом.
-
-    Тело: {"items": [{"task_id": 12, "is_backlog": false, "backlog_rank": 2.5,
-                      "estimate_minutes": 120, "planned_start_at": "...", "due_at": "..."}]}
-    Допускается и одиночный объект без обёртки items.
-    """
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-        data = request.get_json(silent=True) or {}
-        raw_items = data.get('items')
-        if raw_items is None:
-            raw_items = [data] if data.get('task_id') is not None else []
-        if not isinstance(raw_items, list) or not raw_items:
-            return jsonify({"error": "items is required"}), 400
-        if len(raw_items) > 200:
-            return jsonify({"error": "Too many items (max 200)"}), 400
-
-        error_map = {
-            'TASK_NOT_FOUND': ("Task not found", 404),
-            'NOTHING_TO_UPDATE': ("No fields to update", 400),
-            'INVALID_ESTIMATE': ("Invalid estimate_minutes", 400),
-            'INVALID_PLANNED_START': ("Invalid planned_start_at", 400),
-            'INVALID_DEADLINE': ("Invalid due_at", 400),
-            'INVALID_BACKLOG_RANK': ("Invalid backlog_rank", 400),
-            'INVALID_REMINDER': ("Напоминание можно поставить максимум за сутки до дедлайна", 400),
-            'BACKLOG_ONLY_FOR_ASSIGNED': ("Только не начатую задачу можно вернуть в бэклог", 409),
-            'TASK_FORBIDDEN': ("You do not have access to this task", 403),
-            'ONLY_CREATOR_CAN_PLAN': ("Сроки задачи меняет постановщик или админ", 403)
-        }
-
-        results = []
-        promoted = []
-        for raw_item in raw_items:
-            if not isinstance(raw_item, dict):
-                return jsonify({"error": "Each item must be an object"}), 400
-            try:
-                item_task_id = int(raw_item.get('task_id'))
-            except Exception:
-                return jsonify({"error": "task_id must be an integer"}), 400
-
-            kwargs = {
-                "task_id": item_task_id,
-                "requester_id": requester_id,
-                "requester_role": requester_role
-            }
-            if 'is_backlog' in raw_item:
-                kwargs["is_backlog"] = _parse_task_bool(raw_item.get('is_backlog'))
-            if 'backlog_rank' in raw_item:
-                kwargs["backlog_rank"] = raw_item.get('backlog_rank')
-            if any(key in raw_item for key in ('estimate_minutes', 'estimate_hours', 'estimate_extra_minutes')):
-                try:
-                    kwargs["estimate_minutes"] = _parse_task_estimate_minutes(raw_item)
-                except ValueError as parse_error:
-                    return jsonify({"error": str(parse_error)}), 400
-            if 'planned_start_at' in raw_item:
-                kwargs["planned_start_at"] = raw_item.get('planned_start_at')
-            if 'due_at' in raw_item:
-                kwargs["due_at"] = raw_item.get('due_at')
-            if 'reminder_minutes_before' in raw_item:
-                kwargs["reminder_minutes_before"] = raw_item.get('reminder_minutes_before')
-
-            try:
-                result = db.update_task_board_state(**kwargs)
-            except ValueError as value_error:
-                message, code = error_map.get(str(value_error), (str(value_error), 400))
-                return jsonify({"error": message, "task_id": item_task_id}), code
-            except PermissionError as permission_error:
-                message, code = error_map.get(str(permission_error), (str(permission_error), 403))
-                return jsonify({"error": message, "task_id": item_task_id}), code
-
-            results.append(result)
-            if result.get('updated') and result.get('was_backlog') and not result.get('is_backlog'):
-                promoted.append(result)
-
-        warnings = []
-        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-        for result in promoted:
-            try:
-                task_ctx = _fetch_task_notification_context(result.get('task_id'))
-                if not task_ctx:
-                    continue
-                task_link = _build_current_task_deep_link(task_ctx.get('id'))
-                reply_markup = _build_task_notification_reply_markup(task_link)
-                for recipient in _collect_task_assignee_recipients(task_ctx, requester_id):
-                    response = _send_telegram_text_message(
-                        recipient.get('chat_id'),
-                        _build_task_event_notification_html(
-                            event='promoted',
-                            task_ctx=task_ctx,
-                            actor_name=actor_name,
-                            task_link=task_link
-                        ),
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    if response.status_code != 200:
-                        recipient_name = recipient.get('name') or 'исполнитель'
-                        warnings.append(
-                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
-                        )
-            except Exception as notify_error:
-                warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-        response_payload = {
-            "status": "success",
-            "message": "Доска обновлена" if any(item.get('updated') for item in results) else "Изменений нет",
-            "items": results,
-            "updated": sum(1 for item in results if item.get('updated'))
-        }
-        if warnings:
-            response_payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
-        return jsonify(response_payload), 200
-
-    except Exception as e:
-        logging.error(f"Error in handle_tasks_board: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-TASK_REPORT_ERRORS = {
-    'TASK_NOT_FOUND': ("Task not found", 404),
-    'REPORT_NOT_FOUND': ("Отчёт не найден", 404),
-    'REPORT_BODY_REQUIRED': ("Опишите проделанную работу", 400),
-    'INVALID_REPORT_KIND': ("Invalid report kind", 400),
-    'INVALID_SPENT_MINUTES': ("Invalid spent_minutes", 400),
-    'NOTHING_TO_UPDATE': ("No fields to update", 400),
-    'TASK_FORBIDDEN': ("You do not have access to this task", 403),
-    'ONLY_TASK_PARTICIPANT': ("Отчёт пишут исполнитель, постановщик или админ", 403),
-    'ONLY_REPORT_AUTHOR': ("Редактировать отчёт может только его автор", 403),
-    # Лента уточнений по задаче
-    'MESSAGE_NOT_FOUND': ("Уточнение не найдено", 404),
-    'MESSAGE_BODY_REQUIRED': ("Напишите текст или приложите файл", 400),
-    'INVALID_MESSAGE_KIND': ("Неизвестный вид уточнения", 400),
-    'ONLY_TASK_OWNER_ADDS': ("Дополнить задачу может постановщик, поручитель или админ", 403),
-    'ONLY_TASK_OWNER_ANSWERS': ("Ответить может постановщик, поручитель или админ", 403),
-    'ONLY_ASSIGNEE_ASKS': ("Запросить информацию может только исполнитель", 403),
-    'ONLY_REQUEST_AUTHOR': ("Снять запрос может только тот, кто его отправил", 403),
-    'REQUEST_ALREADY_OPEN': ("Запрос уже отправлен — дождитесь ответа", 409),
-    'NO_OPEN_REQUEST': ("По задаче нет открытого запроса информации", 409),
-    'NOT_A_REQUEST': ("Это не запрос информации", 400),
-    'NO_ONE_TO_ASK': ("Задача целиком ваша — спросить не у кого", 400),
-    'TASK_CLOSED_FOR_REQUEST': ("Работа уже сдана — запрашивать информацию поздно", 409),
-}
-
-
-def _task_report_error_response(error):
-    message, code = TASK_REPORT_ERRORS.get(str(error), (str(error), 400 if isinstance(error, ValueError) else 403))
-    return jsonify({"error": message}), code
-
-
-@app.route('/api/tasks/<int:task_id>/reports', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def handle_task_reports(task_id):
-    """Журнал отчётов о проделанной работе по задаче."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-
-        if request.method == 'GET':
-            try:
-                reports = db.get_task_reports(task_id, requester_id, requester_role)
-            except (ValueError, PermissionError) as error:
-                return _task_report_error_response(error)
-            return jsonify({
-                "status": "success",
-                "reports": reports,
-                "spent_minutes": sum(int(item.get('spent_minutes') or 0) for item in reports) or None
-            }), 200
-
-        data = request.get_json(silent=True) or request.form or {}
-        try:
-            spent_minutes = _parse_task_spent_minutes(data)
-        except ValueError as parse_error:
-            return jsonify({"error": str(parse_error)}), 400
-
-        try:
-            report = db.create_task_report(
-                task_id=task_id,
-                requester_id=requester_id,
-                requester_role=requester_role,
-                body=data.get('body') or data.get('report') or '',
-                spent_minutes=spent_minutes,
-                kind=data.get('kind') or 'progress'
-            )
-        except (ValueError, PermissionError) as error:
-            return _task_report_error_response(error)
-
-        warnings = []
-        try:
-            task_ctx = _fetch_task_notification_context(task_id)
-            if task_ctx:
-                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                task_link = _build_current_task_deep_link(task_ctx.get('id'))
-                for recipient in _collect_task_notification_recipients(task_ctx, requester_id):
-                    response = _send_telegram_text_message(
-                        recipient.get('chat_id'),
-                        _build_task_report_notification_html(
-                            task_ctx=task_ctx,
-                            actor_name=actor_name,
-                            report=report,
-                            task_link=task_link
-                        ),
-                        parse_mode='HTML',
-                        reply_markup=_build_task_notification_reply_markup(task_link)
-                    )
-                    if response.status_code != 200:
-                        warnings.append(
-                            f"Не удалось отправить уведомление ({recipient.get('name') or 'получатель'}): "
-                            f"{_get_telegram_error_text(response)}"
-                        )
-        except Exception as notify_error:
-            warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-        payload = {"status": "success", "message": "Отчёт добавлен", "report": report}
-        if warnings:
-            payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
-        return jsonify(payload), 201
-
-    except Exception as e:
-        logging.error(f"Error in handle_task_reports: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/tasks/reports/<int:report_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
-@require_api_key
-def handle_task_report_item(report_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-
-        if request.method == 'PATCH':
-            data = request.get_json(silent=True) or {}
-            kwargs = {
-                "report_id": report_id,
-                "requester_id": requester_id,
-                "requester_role": requester_role
-            }
-            if 'body' in data:
-                kwargs["body"] = data.get('body')
-            if any(key in data for key in ('spent_minutes', 'spent_hours', 'spent_extra_minutes')):
-                try:
-                    kwargs["spent_minutes"] = _parse_task_spent_minutes(data)
-                except ValueError as parse_error:
-                    return jsonify({"error": str(parse_error)}), 400
-            try:
-                report = db.update_task_report(**kwargs)
-            except (ValueError, PermissionError) as error:
-                return _task_report_error_response(error)
-            return jsonify({"status": "success", "message": "Отчёт обновлён", "report": report}), 200
-
-        try:
-            result = db.delete_task_report(report_id, requester_id, requester_role)
-        except (ValueError, PermissionError) as error:
-            return _task_report_error_response(error)
-        return jsonify({"status": "success", "message": "Отчёт удалён", **result}), 200
-
-    except Exception as e:
-        logging.error(f"Error in handle_task_report_item: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-def _notify_task_message(task_id, requester, requester_id, message):
-    """Уточнение уходит всем участникам задачи, кроме автора."""
-    warnings = []
-    try:
-        task_ctx = _fetch_task_notification_context(task_id)
-        if not task_ctx:
-            return warnings
-        actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-        task_link = _build_current_task_deep_link(task_ctx.get('id'))
-        message_html = _build_task_message_notification_html(
-            task_ctx=task_ctx,
-            actor_name=actor_name,
-            message=message,
-            task_link=task_link
-        )
-        for recipient in _collect_task_notification_recipients(task_ctx, requester_id):
-            response = _send_telegram_text_message(
-                recipient.get('chat_id'),
-                message_html,
-                parse_mode='HTML',
-                reply_markup=_build_task_notification_reply_markup(task_link)
-            )
-            if response.status_code != 200:
-                warnings.append(
-                    f"Не удалось отправить уведомление ({recipient.get('name') or 'получатель'}): "
-                    f"{_get_telegram_error_text(response)}"
-                )
-    except Exception as notify_error:
-        warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-    return warnings
-
-
-@app.route('/api/tasks/<int:task_id>/messages', methods=['GET', 'POST', 'OPTIONS'])
-@require_api_key
-def handle_task_messages(task_id):
-    """Лента уточнений по задаче: дополнения постановки и запросы информации."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        requester_role = getattr(g, 'effective_task_role', requester[3])
-
-        if request.method == 'GET':
-            try:
-                messages = db.get_task_messages(task_id, requester_id, requester_role)
-            except (ValueError, PermissionError) as error:
-                return _task_report_error_response(error)
-            return jsonify({"status": "success", "messages": messages}), 200
-
-        content_type = (request.content_type or '').lower()
-        if 'multipart/form-data' in content_type:
-            source = request.form
-            uploaded_files = request.files.getlist('files')
-        else:
-            source = request.get_json(silent=True) or {}
-            uploaded_files = []
-
-        kind = str(source.get('kind') or 'note').strip().lower()
-        body = str(source.get('body') or '').strip()
-
-        attachments = []
-        uploaded_blob_paths = []
-        gcs_bucket = None
-        if uploaded_files:
-            try:
-                attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
-                    uploaded_files, stage='clarification'
-                )
-            except ValueError as upload_error:
-                return jsonify({"error": str(upload_error)}), 400
-            except RuntimeError as upload_error:
-                return jsonify({"error": str(upload_error)}), 500
-            except Exception as upload_error:
-                logging.error(f"Task clarification upload failed: {upload_error}")
-                return jsonify({"error": "Failed to upload attachments"}), 500
-
-        try:
-            message = db.create_task_message(
-                task_id=task_id,
-                requester_id=requester_id,
-                requester_role=requester_role,
-                kind=kind,
-                body=body,
-                attachments=attachments
-            )
-        except (ValueError, PermissionError) as error:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            return _task_report_error_response(error)
-        except Exception:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            raise
-
-        warnings = _notify_task_message(task_id, requester, requester_id, message)
-        payload = {
-            "status": "success",
-            "message": TASK_MESSAGE_SAVED_LABELS.get(message.get('kind'), 'Уточнение добавлено'),
-            "task_message": message
-        }
-        if warnings:
-            payload["warning"] = _truncate_for_telegram(" | ".join(warnings), 1000)
-        return jsonify(payload), 201
-
-    except Exception as e:
-        logging.error(f"Error in handle_task_messages: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/tasks/messages/<int:message_id>/withdraw', methods=['POST', 'OPTIONS'])
-@require_api_key
-def withdraw_task_info_request(message_id):
-    """Снять свой запрос информации — разобрался сам, постановщика не держим."""
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        try:
-            result = db.withdraw_task_info_request(
-                message_id,
-                requester_id,
-                getattr(g, 'effective_task_role', requester[3])
-            )
-        except (ValueError, PermissionError) as error:
-            return _task_report_error_response(error)
-
-        return jsonify({"status": "success", "message": "Запрос снят", **result}), 200
-
-    except Exception as e:
-        logging.error(f"Error in withdraw_task_info_request: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/tasks/<int:task_id>/status', methods=['POST', 'OPTIONS'])
-@require_api_key
-def update_task_status(task_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        content_type = (request.content_type or '').lower()
-        is_multipart = 'multipart/form-data' in content_type
-
-        if is_multipart:
-            source = request.form
-            uploaded_files = request.files.getlist('files')
-        else:
-            source = request.get_json() or {}
-            uploaded_files = []
-
-        action = str(source.get('action') or '').strip().lower()
-        comment = str(source.get('comment') or '').strip()
-        # `report` — понятный алиас: при сдаче задачи это отчёт о проделанной работе.
-        completion_summary = str(source.get('completion_summary') or source.get('report') or '').strip()
-
-        if action not in TASK_ALLOWED_ACTIONS:
-            return jsonify({"error": "Invalid action"}), 400
-
-        try:
-            spent_minutes = _parse_task_spent_minutes(source)
-        except ValueError as parse_error:
-            return jsonify({"error": str(parse_error)}), 400
-
-        action_attachments = []
-        uploaded_blob_paths = []
-        gcs_bucket = None
-
-        actions_with_files = {'completed', 'returned', 'reopened'}
-        if action in actions_with_files:
-            try:
-                stage = 'result' if action == 'completed' else action
-                action_attachments, uploaded_blob_paths, gcs_bucket = _upload_task_attachments_to_gcs(
-                    uploaded_files,
-                    stage=stage
-                )
-            except ValueError as upload_error:
-                return jsonify({"error": str(upload_error)}), 400
-            except RuntimeError as upload_error:
-                return jsonify({"error": str(upload_error)}), 500
-            except Exception as upload_error:
-                logging.error(f"Task attachment upload failed ({action}): {upload_error}")
-                return jsonify({"error": "Failed to upload attachments"}), 500
-        elif uploaded_files:
-            return jsonify({"error": "Files can be attached only when completing, returning, or reopening a task"}), 400
-
-        try:
-            result = db.update_task_status(
-                task_id=task_id,
-                requester_id=requester_id,
-                requester_role=getattr(g, 'effective_task_role', requester[3]),
-                action=action,
-                comment=comment,
-                completion_summary=completion_summary if action == 'completed' else None,
-                completion_attachments=action_attachments,
-                spent_minutes=spent_minutes if action == 'completed' else None
-            )
-        except ValueError as value_error:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            code = str(value_error)
-            if code == 'TASK_NOT_FOUND':
-                return jsonify({"error": "Task not found"}), 404
-            if code in ('INVALID_ACTION', 'INVALID_TRANSITION'):
-                return jsonify({"error": "Invalid task status transition"}), 400
-            if code == 'CHECKLIST_INCOMPLETE':
-                return jsonify({"error": "Сначала завершите обязательные пункты чек-листа"}), 400
-            if code == 'INVALID_SPENT_MINUTES':
-                return jsonify({"error": "Invalid spent_minutes"}), 400
-            return jsonify({"error": code}), 400
-        except PermissionError as permission_error:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            code = str(permission_error)
-            if code in ('TASK_FORBIDDEN', 'ONLY_ASSIGNEE', 'ONLY_REVIEWER'):
-                return jsonify({"error": "You do not have permission for this action"}), 403
-            return jsonify({"error": code}), 403
-        except Exception:
-            _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
-            raise
-
-        telegram_warnings = []
-        try:
-            should_notify_participants = bool(result.get('history_id'))
-            if should_notify_participants:
-                task_ctx = _fetch_task_notification_context(task_id)
-                if task_ctx:
-                    actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                    task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
-                    task_link = _build_current_task_deep_link(task_ctx.get('id'))
-                    reply_markup = _build_task_notification_reply_markup(task_link)
-                    recipients = _collect_task_notification_recipients(task_ctx, requester_id)
-
-                    for recipient in recipients:
-                        message_html = _build_task_status_notification_html(
-                            action=action,
-                            task_ctx=task_ctx,
-                            actor_name=actor_name,
-                            recipient_kind=recipient.get('kind') or 'participant',
-                            comment=comment,
-                            completion_summary=completion_summary,
-                            completion_files_count=len(action_attachments),
-                            task_link=task_link,
-                            spent_minutes=spent_minutes
-                        )
-                        response = _send_telegram_text_message(
-                            recipient.get('chat_id'),
-                            message_html,
-                            parse_mode='HTML',
-                            reply_markup=reply_markup
-                        )
-                        if response.status_code != 200:
-                            recipient_name = recipient.get('name') or recipient.get('kind') or 'получатель'
-                            telegram_warnings.append(
-                                f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
-                            )
-                            continue
-
-                        if action == 'completed':
-                            telegram_warnings.extend(
-                                _send_task_completion_attachments_to_telegram(
-                                    recipient.get('chat_id'),
-                                    task_subject,
-                                    action_attachments,
-                                    task_link=task_link
-                                )
-                            )
-        except Exception as notify_error:
-            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-        action_messages = {
-            'in_progress': 'Task moved to in progress',
-            'completed': 'Task marked as completed',
-            'accepted': 'Task accepted',
-            'returned': 'Task returned for rework',
-            'reopened': 'Task reopened'
-        }
-        response_payload = {
-            "status": "success",
-            "message": action_messages.get(action, 'Task status updated'),
-            "task": result
-        }
-        if telegram_warnings:
-            response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
-        return jsonify(response_payload), 200
-
-    except Exception as e:
-        logging.error(f"Error in update_task_status: {e}")
-        return jsonify({"error": f"Internal server error"}), 500
-
-
-@app.route('/api/tasks/<int:task_id>/checklist/<int:item_id>', methods=['PATCH', 'OPTIONS'])
-@require_api_key
-def update_task_checklist_item(task_id, item_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        data = request.get_json() or {}
-        if 'is_done' not in data:
-            return jsonify({"error": "is_done is required"}), 400
-        is_done = _parse_task_bool(data.get('is_done'))
-
-        update_note = 'result_note' in data
-        result_note = data.get('result_note') if update_note else None
-        if result_note is not None and not isinstance(result_note, str):
-            result_note = str(result_note)
-        if isinstance(result_note, str) and len(result_note) > 2000:
-            result_note = result_note[:2000]
-
-        try:
-            item = db.update_task_checklist_item(
-                task_id=task_id,
-                checklist_item_id=item_id,
-                requester_id=requester_id,
-                requester_role=getattr(g, 'effective_task_role', requester[3]),
-                is_done=is_done,
-                result_note=result_note,
-                update_note=update_note
-            )
-        except ValueError as value_error:
-            code = str(value_error)
-            if code == 'CHECKLIST_ITEM_NOT_FOUND':
-                return jsonify({"error": "Checklist item not found"}), 404
-            return jsonify({"error": code}), 400
-        except PermissionError as permission_error:
-            code = str(permission_error)
-            if code == 'TASK_FORBIDDEN':
-                return jsonify({"error": "You do not have access to this task"}), 403
-            return jsonify({"error": code}), 403
-
-        telegram_warnings = []
-        try:
-            task_ctx = _fetch_task_notification_context(task_id)
-            if task_ctx:
-                actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                task_link = _build_current_task_deep_link(task_id)
-                reply_markup = _build_task_notification_reply_markup(task_link)
-                recipients = _collect_task_notification_recipients(task_ctx, requester_id)
-                for recipient in recipients:
-                    message_html = _build_task_checklist_notification_html(
-                        task_ctx=task_ctx,
-                        checklist_item=item,
-                        actor_name=actor_name,
-                        is_done=is_done,
-                        task_link=task_link
-                    )
-                    response = _send_telegram_text_message(
-                        recipient.get('chat_id'),
-                        message_html,
-                        parse_mode='HTML',
-                        reply_markup=reply_markup
-                    )
-                    if response.status_code != 200:
-                        recipient_name = recipient.get('name') or 'участник'
-                        telegram_warnings.append(
-                            f"Не удалось отправить уведомление ({recipient_name}): {_get_telegram_error_text(response)}"
-                        )
-        except Exception as notify_error:
-            telegram_warnings.append(f"Ошибка отправки Telegram-уведомления: {_telegram_exception_text(notify_error)}")
-
-        response_payload = {
-            "status": "success",
-            "message": "Checklist item updated",
-            "item": item
-        }
-        if telegram_warnings:
-            response_payload["warning"] = _truncate_for_telegram(" | ".join(telegram_warnings), 1000)
-        return jsonify(response_payload), 200
-
-    except Exception as e:
-        logging.error(f"Error in update_task_checklist_item: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
-
-
-@app.route('/api/tasks/attachments/<int:attachment_id>/download', methods=['GET', 'OPTIONS'])
-@require_api_key
-def download_task_attachment(attachment_id):
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        try:
-            attachment = db.get_task_attachment_for_requester(
-                attachment_id=attachment_id,
-                requester_id=requester_id,
-                requester_role=getattr(g, 'effective_task_role', requester[3])
-            )
-        except PermissionError:
-            return jsonify({"error": "You do not have access to this attachment"}), 403
-
-        if not attachment:
-            return jsonify({"error": "Attachment not found"}), 404
-
-        if attachment.get('storage_type') == 'gcs':
-            bucket_name = (attachment.get('gcs_bucket') or '').strip()
-            blob_path = (attachment.get('gcs_blob_path') or '').strip()
-            if not bucket_name or not blob_path:
-                return jsonify({"error": "Attachment storage metadata is invalid"}), 500
-            try:
-                gcs_client = get_gcs_client()
-                bucket = gcs_client.bucket(bucket_name)
-                blob = bucket.blob(blob_path)
-                if not blob.exists():
-                    return jsonify({"error": "Attachment object not found in storage"}), 404
-                file_bytes = blob.download_as_bytes()
-            except Exception as storage_error:
-                logging.error(f"Error downloading GCS task attachment: {storage_error}")
-                return jsonify({"error": "Failed to download attachment from storage"}), 500
-
-            return send_file(
-                BytesIO(file_bytes),
-                as_attachment=True,
-                download_name=attachment['file_name'],
-                mimetype=attachment.get('content_type') or 'application/octet-stream'
-            )
-
-        return send_file(
-            BytesIO(attachment['file_data']),
-            as_attachment=True,
-            download_name=attachment['file_name'],
-            mimetype=attachment.get('content_type') or 'application/octet-stream'
-        )
-    except Exception as e:
-        logging.error(f"Error in download_task_attachment: {e}")
-        return jsonify({"error": f"Internal server error"}), 500
-
-
-@app.route('/api/tasks/<int:task_id>/photos', methods=['GET', 'OPTIONS'])
-@require_api_key
-def get_task_photo_previews(task_id):
-    """Адреса картинок задачи для плиток карточки — одним запросом на карточку.
-
-    Подписанные ссылки, а не байты через API: <img> на другом домене не шлёт
-    заголовок авторизации, а прокси означал бы по запросу на каждую плитку.
-    Подробности — в шапке task_photos.
-    """
-    try:
-        requester_id, requester, guard_response, guard_status = _task_route_guard()
-        if guard_response is not None:
-            return guard_response, guard_status
-
-        import task_photos
-        try:
-            rows = db.list_task_photo_attachments_for_requester(
-                task_id=task_id,
-                requester_id=requester_id,
-                requester_role=getattr(g, 'effective_task_role', requester[3]),
-                content_types=task_photos.PREVIEW_TYPES,
-            )
-        except PermissionError:
-            return jsonify({"error": "You do not have access to this task"}), 403
-        if rows is None:
-            return jsonify({"error": "Task not found"}), 404
-
-        return jsonify({"photos": task_photos.sign_previews(get_gcs_client, rows)}), 200
-    except Exception as e:
-        logging.error(f"Error in get_task_photo_previews: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @app.route('/api/admin/monthly_report', methods=['GET'])
 @require_api_key
@@ -34528,74 +29940,12 @@ def _szov_wallboard_department_id():
     return found
 
 
-def _szov_wallboard_guard():
-    """(requester_id, err) для раздела «Табло СЗоВ».
-
-    Доступ: глобальные админы, глава отдела СЗоВ и СВ отдела СЗоВ. Границу отдела держим
-    строго, как в _chatapp_guard: главе/СВ чужого отдела нагрузка линии СЗоВ не нужна."""
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return None, (jsonify({"error": message}), status_code)
-    role = _normalize_user_role(requester[3])
-    if _is_global_admin_requester(role, requester_id):
-        return requester_id, None
-    department_id = _szov_wallboard_department_id()
-    if department_id is not None:
-        if _headed_department_id(requester_id) == department_id:
-            return requester_id, None
-        if _is_supervisor_role(role) and db.get_user_department_id(requester_id) == department_id:
-            return requester_id, None
-    return requester_id, (jsonify({"error": "forbidden"}), 403)
 
 
-def _szov_broadcast_guard():
-    """(requester_id, err) для НАСТРОЙКИ отбивки табло — она строже, чем само табло.
-
-    Табло СВ отдела видит, а вот кому и когда уходят уведомления руководству, решает
-    только руководитель: глобальные админы и глава отдела СЗоВ. Ту же границу держит
-    canManageSzovBroadcastForUser на фронте."""
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return None, (jsonify({"error": message}), status_code)
-    role = _normalize_user_role(requester[3])
-    if _is_global_admin_requester(role, requester_id):
-        return requester_id, None
-    # Направление решает, чей глава здесь хозяин: отбивку «Табло ОП» настраивает глава
-    # отдела продаж, а не СЗоВ. Неизвестное направление гейт не отвергает сам — это
-    # сделает ручка честным 400; здесь оно просто считается «Линией».
-    direction = SZOV_BROADCAST_DIRECTION_LINE
-    try:
-        direction = _szov_broadcast_direction_arg(
-            request.get_json(silent=True) if request.method == 'POST' else None)
-    except ValueError:
-        pass
-    if direction in (SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_OP_CHAT):
-        resolver = globals().get('_op_wallboard_department_id')
-        department_id = resolver() if resolver else None
-    elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
-        resolver = globals().get('_tez_wallboard_department_id')
-        department_id = resolver() if resolver else None
-    else:
-        department_id = _szov_wallboard_department_id()
-    if department_id is not None and _headed_department_id(requester_id) == department_id:
-        return requester_id, None
-    # Поимённый доступ «только лично себе» (см. OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS). Пометка
-    # в g — ручки по ней отказывают во всём, что касается групп, и не показывают их вовсе.
-    if (direction == SZOV_BROADCAST_DIRECTION_OP_CHAT
-            and int(requester_id) in OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS):
-        g.szov_broadcast_personal_only = True
-        return requester_id, None
-    return requester_id, (jsonify({"error": "forbidden"}), 403)
 
 
-def _szov_broadcast_is_personal_only():
-    """Запрос пропущен гардом отбивки только ради личной подписки — групп ему не показываем."""
-    return bool(getattr(g, 'szov_broadcast_personal_only', False))
 
 
-SZOV_BROADCAST_PERSONAL_ONLY_ERROR = "Вам открыта только отбивка лично себе — группы настраивает руководитель отдела"
 
 
 def _oktell_wallboard_totals_sql(sl_seconds):
@@ -35006,70 +30356,8 @@ def _szov_wallboard_snapshot():
         after=_szov_wallboard_persist_cache)
 
 
-@app.route('/api/szov_wallboard/snapshot', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_snapshot():
-    """Онлайн-табло входящей линии СЗоВ: очередь и статусы «на сейчас» + итоги за день."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
-    if err:
-        return err
-    if not _oktell_api_ready():
-        return jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
-    try:
-        return jsonify(_szov_wallboard_snapshot())
-    except Exception as exc:
-        logging.error("Табло СЗоВ: не удалось получить данные Oktell: %s", exc)
-        return jsonify({"error": "Не удалось получить данные Oktell", "detail": str(exc)[:300]}), 502
 
 
-@app.route('/api/szov_wallboard/break_violations', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_break_violations():
-    """Журнал выходов на перерыв мимо графика за период (задача #114).
-
-    Только чтение: строки пишет почасовой разбор отбивки, к Oktell эта ручка не ходит.
-    Доступ тот же, что у самого табло: нарушения смотрят те же СВ и руководители."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
-    if err:
-        return err
-    today = datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
-    date_from = (request.args.get('date_from') or '').strip() or today
-    date_to = (request.args.get('date_to') or '').strip() or date_from
-    if date_to < date_from:
-        date_from, date_to = date_to, date_from
-    direction = (request.args.get('direction') or '').strip().lower()
-    if direction not in (SZOV_BREAK_DIRECTION_LINE, SZOV_BREAK_DIRECTION_CHAT):
-        direction = SZOV_BREAK_DIRECTION_LINE
-    try:
-        violations = db.get_szov_break_violations(date_from, date_to, direction=direction)
-        # Дни, когда человек работал, а смены в графике у него не было: сверять было не с чем.
-        # Без этой строки пустой журнал читался бы как «нарушений нет», хотя проверка просто
-        # не работала — по чату график сейчас почти не заполняют.
-        unscheduled = db.get_szov_break_unscheduled_days(direction, date_from, date_to)
-    except Exception as exc:
-        logging.error("Перерывы вне графика: журнал не прочитан: %s", exc)
-        return jsonify({"error": "Не удалось получить журнал", "detail": str(exc)[:300]}), 500
-    return jsonify({
-        "date_from": date_from,
-        "date_to": date_to,
-        "direction": direction,
-        "violations": violations,
-        "unscheduled": {
-            "days": len(unscheduled),
-            "operators_max": max([item['operators'] for item in unscheduled] or [0]),
-            "by_day": unscheduled[:31],
-        },
-        # Порог и допуск показываем рядом со списком: без них непонятно, почему перерыв
-        # в 10 минут от плана в журнал не попал.
-        "rules": {
-            "min_minutes": SZOV_BREAK_MIN_MINUTES,
-            "tolerance_minutes": SZOV_BREAK_TOLERANCE_MINUTES,
-        },
-    })
 
 
 # === Отбивка показателей «Табло СЗоВ» в Telegram ================================================
@@ -35087,7 +30375,6 @@ SZOV_AR_MAX_PERCENT = float(os.getenv('SZOV_AR_MAX_PERCENT') or 5)
 # Нижняя граница SL — та же, при которой плитка на табло перестаёт быть зелёной.
 SZOV_SL_MIN_PERCENT = float(os.getenv('SZOV_SL_MIN_PERCENT') or 80)
 # Режимы получателя отбивки: каждая отбивка или только та, где есть отклонения от нормы.
-SZOV_BROADCAST_MODE_ALWAYS = 'always'
 SZOV_BROADCAST_MODE_DEVIATIONS = 'deviations'
 # Направления табло: у каждого свой список получателей, свои показатели и своё расписание.
 # 'osnova' — историческое имя направления «Линия». Подпись на экране сменили, а ключ трогать
@@ -35111,9 +30398,6 @@ SZOV_BROADCAST_DIRECTION_OP_CHAT = 'op_chat'
 # человек видит в форме одну строку «Лично мне». Зеркало на фронте —
 # OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS в App.jsx.
 OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS = {402}
-SZOV_BROADCAST_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_LINE, SZOV_BROADCAST_DIRECTION_CHAT,
-                             SZOV_BROADCAST_DIRECTION_OP, SZOV_BROADCAST_DIRECTION_TEZ,
-                             SZOV_BROADCAST_DIRECTION_OP_CHAT)
 
 
 def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
@@ -37482,8 +32766,6 @@ SZOV_CHAT_WALLBOARD_ONLINE_MIN_SECONDS = _env_int(
 # Потолок недели — решение владельца 19.08.2026: месяц — это ~400 запросов и минуты ожидания в
 # одном синхронном запросе, а квота Chat2Desk общая на компанию. Нужен период длиннее — поднять
 # env SZOV_CHAT_EXPORT_MAX_DAYS, но тогда сначала переделать выгрузку на фоновую задачу.
-SZOV_CHAT_EXPORT_MAX_DAYS = _env_int('SZOV_CHAT_EXPORT_MAX_DAYS', 7, minimum=1, maximum=92)
-SZOV_CHAT_EXPORT_WORKERS = _env_int('SZOV_CHAT_EXPORT_WORKERS', 4, minimum=1, maximum=8)
 
 # Событие статуса Chat2Desk / offline_type -> (ключ, подпись). Оба источника говорят одними и
 # теми же словами, поэтому и справочник один. Событий чатов (take_chat/transfer_chat) здесь нет:
@@ -38475,22 +33757,6 @@ def _szov_chat_wallboard_snapshot():
         lock_wait=SZOV_CHAT_WALLBOARD_LOCK_WAIT_SECONDS)
 
 
-@app.route('/api/szov_wallboard/chat_snapshot', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_chat_snapshot():
-    """Табло СЗоВ, направление «Чат»: статусы чатников сейчас + почасовой срез за сутки."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
-    if err:
-        return err
-    if not _chat2desk_authorization_header():
-        return jsonify({"error": "Интеграция с Chat2Desk недоступна: CHAT2DESK_API_TOKEN не задан"}), 503
-    try:
-        return jsonify(_szov_chat_wallboard_snapshot())
-    except Exception as exc:
-        logging.error("Табло СЗоВ (чат): снимок недоступен: %s", exc, exc_info=True)
-        return jsonify({"error": "Chat2Desk недоступен", "detail": str(exc)[:300]}), 503
 
 
 # --- Табло Тез КЦ: ТП и ОП по кабинету Binotel ---------------------------------------------------
@@ -39878,52 +35144,10 @@ async def _tez_broadcast_prepare(now=None, retry_missing_tp=True):
     return data, text, media
 
 
-async def _tez_broadcast_send(chat_id):
-    """Собрать и отправить отбивку в один чат — кнопка проверочной отправки.
-
-    Пишет и в спокойный час (картинки есть всегда), а нарушения перерывов прочитанными НЕ
-    помечает: проверка связи не должна отменять плановое предупреждение."""
-    data, text, media = await _tez_broadcast_prepare(retry_missing_tp=False)
-    await _szov_broadcast_deliver(chat_id, text, media)
-    return data
 
 
-_TEZ_BROADCAST_PREVIEW_IMAGES = {'tp_day': 'tez_tp_day.png', 'tp_hour': 'tez_tp_hour.png',
-                                  'op': 'tez_op.png'}
 
 
-def _tez_broadcast_preview():
-    """Предпросмотр отбивки Тез КЦ: подпись и картинки, ничего не отправляя.
-
-    Сбор идёт на цикле бота, как у проверочной отправки: ожидание журнала в нём асинхронное.
-    ?image=tp_day|tp_hour|op отдаёт картинку, без параметра — подпись и отклонения."""
-    loop = _bot_event_loop()
-    if loop is None:
-        return jsonify({"error": "Бот не запущен"}), 503
-    try:
-        data, text, media = asyncio.run_coroutine_threadsafe(
-            _tez_broadcast_prepare(retry_missing_tp=False), loop).result(timeout=180)
-    except Exception as exc:
-        logging.error("Предпросмотр отбивки (Тез КЦ): данные не собрались: %s", exc)
-        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-    images = dict(media)
-    which = (request.args.get('image') or '').strip()
-    if which:
-        blob = images.get(_TEZ_BROADCAST_PREVIEW_IMAGES.get(which, ''))
-        if blob is None:
-            return jsonify({"error": "Картинки нет", "images": sorted(images)}), 404
-        response = Response(blob, mimetype='image/png')
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-    regular, _bold = _szov_font_paths()
-    return jsonify({
-        "text": text,
-        "deviations": _tez_broadcast_deviations(data),
-        "hour": data.get('hour_label'),
-        "tp_hour": data.get('tp_hour'),
-        "images": sorted(images),
-        "font_path": regular,
-    })
 
 
 async def _tez_broadcast_mark_reported(data):
@@ -40142,702 +35366,29 @@ def api_tez_wallboard_export():
 
 # Цвет статуса в файле — тот же, что у чипа на табло (CHAT_STATUS_STYLE во фронте): столбец
 # статуса должен читаться одним взглядом так же, как список смены на стене.
-_SZOV_CHAT_EXPORT_STATUS_FILL = {
-    'online': 'DBEAFE',
-    'busy': 'EDE9FE',
-    'training': 'D1FAE5',
-    'break': 'FFEDD5',
-    'tech': 'FFEDD5',
-    # «Закрытие чатов» — янтарный, рядом с перерывом, и это не случайность: смысл у них общий
-    # («в системе, новых чатов не берёт»), а различает их слово в самой ячейке. Серым, как
-    # отсутствие, он был подписан по ошибке — вместе с неверной подписью «Отпуск».
-    'holiday': 'FEF3C7',
-    'offline': 'F1F5F9',
-}
 
 
-def _szov_chat_export_minutes(seconds, digits=1):
-    """Секунды -> минуты числом, в тех же единицах, что на табло. None остаётся None.
-
-    Пропуск от нуля отличаем намеренно: «отвечать было нечего» и «ответили мгновенно» — разные
-    вещи, а ноль вместо пропуска молча улучшил бы любое среднее, которое посчитают в Excel.
-    Число пишем числом, а не строкой «1,8 мин»: файл берут, чтобы считать по нему дальше."""
-    if seconds is None or isinstance(seconds, bool):
-        return None
-    try:
-        value = float(seconds)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(value):
-        return None
-    return round(value / 60.0, digits)
 
 
-def _szov_chat_export_hour_label(hour):
-    """Час — ПРОМЕЖУТОК, а не момент: подписываем «12:00–13:00», как почасовой отчёт в Telegram."""
-    return '%02d:00–%02d:00' % (int(hour) % 24, (int(hour) + 1) % 24)
 
 
-def _szov_chat_export_parse_day(value):
-    """«2026-08-18» -> date. None, если строка не разобралась."""
-    text = str(value or '').strip()
-    if not text:
-        return None
-    try:
-        return datetime.strptime(text[:10], '%Y-%m-%d').date()
-    except ValueError:
-        return None
 
 
-def _szov_chat_export_period(date_from, date_to, today):
-    """Дни периода по возрастанию. ValueError — если период не разобрался или слишком велик.
-
-    Период не выбрали — выгружаем сегодня: это самый частый случай (глянул на табло и забрал
-    цифры), и он не стоит ни одного запроса к Chat2Desk."""
-    start = _szov_chat_export_parse_day(date_from)
-    end = _szov_chat_export_parse_day(date_to)
-    if date_from and start is None:
-        raise ValueError('Начало периода должно быть в формате ГГГГ-ММ-ДД')
-    if date_to and end is None:
-        raise ValueError('Конец периода должен быть в формате ГГГГ-ММ-ДД')
-    if start is None and end is None:
-        start = end = today
-    start = start or end
-    end = end or start
-    if end < start:
-        start, end = end, start
-    if start > today:
-        raise ValueError('Период начинается в будущем — выгружать нечего')
-    # Хвост в будущем просто отрезаем: Chat2Desk отдал бы пустые сутки, а в файле они читались
-    # бы как день полного простоя.
-    if end > today:
-        end = today
-    length = (end - start).days + 1
-    if length > SZOV_CHAT_EXPORT_MAX_DAYS:
-        # «суток», а не «дней»: число подставляется, а «больше 31 дней» — не по-русски.
-        raise ValueError('Период больше %d суток: Chat2Desk качается по дню на день'
-                         % SZOV_CHAT_EXPORT_MAX_DAYS)
-    return [(start + timedelta(days=offset)).strftime('%Y-%m-%d') for offset in range(length)]
 
 
-def _szov_chat_export_day_people(hourly):
-    """{ФИО: секунды на линии за день} по почасовым строкам.
-
-    Атом счёта один на всех уровнях — «человек часа» (минуту и больше в этом часу): и день, и
-    период складываются из тех же людей, что стоят в подсказке графика. Свой порог на уровне
-    дня дал бы в одном файле две правды — сумма по часам не сходилась бы с днём."""
-    people = {}
-    for row in hourly or []:
-        for item in (row.get('operators') or []):
-            name = str((item or {}).get('name') or '').strip()
-            if not name:
-                continue
-            people[name] = people.get(name, 0) + int((item or {}).get('seconds') or 0)
-    return people
 
 
-def _szov_chat_export_finish_day(day_str, hourly, totals, *, events_truncated=False,
-                                 unmatched_names=(), error=None):
-    """День выгрузки одной формы, откуда бы он ни пришёл — из снимка табло или из Chat2Desk."""
-    hourly = [row for row in (hourly or []) if isinstance(row, dict)]
-    totals = totals or {}
-    return {
-        'day': day_str,
-        'hourly': hourly,
-        'chats': int(totals.get('chats') or 0),
-        'chats_open': (None if totals.get('chats_open') is None else int(totals['chats_open'])),
-        'first_reply_seconds': totals.get('first_reply_seconds'),
-        'inner_reply_seconds': totals.get('inner_reply_seconds'),
-        'reply_sums': totals.get('reply_sums') or {},
-        'people': _szov_chat_export_day_people(hourly),
-        'online_seconds': sum(int(row.get('online_seconds') or 0) for row in hourly),
-        'peak_online': max((int(row.get('operators_online') or 0) for row in hourly), default=0),
-        'events_truncated': bool(events_truncated),
-        'unmatched_names': sorted({str(name).strip() for name in (unmatched_names or [])
-                                   if str(name or '').strip()}),
-        'error': error,
-    }
 
 
-def _szov_chat_export_today_block(snapshot):
-    """Сегодня — из снимка табло: те же цифры, что на экране, и без запросов к Chat2Desk."""
-    snapshot = snapshot or {}
-    today = snapshot.get('today') or {}
-    diagnostics = snapshot.get('diagnostics') or {}
-    return _szov_chat_export_finish_day(
-        snapshot.get('day') or '', snapshot.get('hourly') or [], {
-            'chats': today.get('chats'),
-            'chats_open': today.get('chats_open'),
-            'first_reply_seconds': today.get('first_reply_seconds'),
-            'inner_reply_seconds': today.get('inner_reply_seconds'),
-            'reply_sums': today.get('reply_sums'),
-        },
-        events_truncated=diagnostics.get('events_truncated'),
-        unmatched_names=diagnostics.get('unmatched_names') or [])
 
 
-def _szov_chat_export_past_block(day_str, lookup):
-    """Прошедший день из Chat2Desk. Сутки закрыты, поэтому часы считаются все 24 и целиком."""
-    events_cache = {'day': None, 'rows': {}, 'newest': None, 'truncated': False}
-    events = _szov_chat_wallboard_fetch_events(day_str, cache=events_cache)
-    request_rows = _chat_hourly_fetch_requests(day_str, cache={'day': None, 'rows': {}})
-    timelines, unmatched = _szov_chat_wallboard_timelines(
-        events, lookup, truncated=bool(events_cache.get('truncated')))
-    first_sum, first_count, inner_sum, inner_count = _chat_hourly_response_sums(request_rows)
-    hourly = _szov_chat_wallboard_hourly(
-        # now здесь не при чём: сутки закрыты, границу часов задаёт full_day.
-        request_rows, timelines, None, full_day=True,
-        names=_szov_chat_wallboard_display_names(
-            set(timelines) | set(_szov_chat_wallboard_reply_sums(request_rows)), lookup))
-    return _szov_chat_export_finish_day(day_str, hourly, {
-        'chats': len(request_rows),
-        # «Открыто сейчас» у закрытых суток смысла не имеет (обращение либо давно закрыто, либо
-        # висит открытым неделю) — оставляем пустым, а не нулём.
-        'chats_open': None,
-        'first_reply_seconds': (first_sum / first_count) if first_count else None,
-        'inner_reply_seconds': (inner_sum / inner_count) if inner_count else None,
-        'reply_sums': {'first_sum': first_sum, 'first_count': first_count,
-                       'inner_sum': inner_sum, 'inner_count': inner_count},
-    }, events_truncated=bool(events_cache.get('truncated')), unmatched_names=unmatched)
 
 
-def _szov_chat_export_collect(date_from=None, date_to=None):
-    """Данные выгрузки: дни периода, а состав смены — только если в период входит сегодня."""
-    now = datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE))
-    today_str = now.strftime('%Y-%m-%d')
-    days = _szov_chat_export_period(date_from, date_to, now.date())
-    snapshot = _szov_chat_wallboard_snapshot() if today_str in days else None
-    blocks = {}
-    if snapshot is not None:
-        blocks[today_str] = _szov_chat_export_today_block(snapshot)
-
-    past_days = [day for day in days if day != today_str]
-    if past_days:
-        # Справочник сотрудников достаём ОДИН раз и в этом потоке: он ходит в БД, а потоки
-        # выгрузки к Flask-контексту доступа не имеют.
-        lookup, _department_id = _szov_chat_wallboard_operator_lookup()
-
-        def _one(day_str):
-            try:
-                return day_str, _szov_chat_export_past_block(day_str, lookup)
-            except Exception as exc:
-                # Один день не дался — остальные всё равно нужны: день уходит в файл строкой с
-                # причиной, а не молча нулями, которые прочитаются как простой смены.
-                logging.warning("Табло СЗоВ (чат): день %s не выгрузился: %s", day_str, exc)
-                return day_str, _szov_chat_export_finish_day(day_str, [], {},
-                                                             error=str(exc)[:200])
-
-        workers = max(1, min(SZOV_CHAT_EXPORT_WORKERS, len(past_days)))
-        with ThreadPoolExecutor(max_workers=workers,
-                                thread_name_prefix='szov-chat-export') as pool:
-            for day_str, block in pool.map(_one, past_days):
-                blocks[day_str] = block
-
-    return {
-        'from': days[0],
-        'to': days[-1],
-        'today': today_str,
-        'days': [blocks[day] for day in days if day in blocks],
-        'target_seconds': SZOV_CHAT_WALLBOARD_TARGET_SECONDS,
-        'now': (snapshot or {}).get('now'),
-        'chat2desk_now': (snapshot or {}).get('chat2desk_now'),
-        'stale': bool((snapshot or {}).get('stale')),
-        'age_seconds': (snapshot or {}).get('age_seconds'),
-        'error': (snapshot or {}).get('error'),
-        'generated_at': now.strftime('%Y-%m-%d %H:%M'),
-    }
-
-def _szov_chat_wallboard_workbook(payload):
-    """Показатели табло по чатам в .xlsx (bytes).
-
-    Листы: сводка, дни (если период больше суток), часы, два разреза «оператор × час» по
-    времени ответа и состав смены (если в период входит сегодня). Один день или неделя —
-    раскладка одна: у выгрузки не должно быть двух разных лиц."""
-    payload = payload or {}
-    days = [day for day in (payload.get('days') or []) if isinstance(day, dict)]
-    now_block = payload.get('now') or {}
-    target_seconds = int(payload.get('target_seconds') or 0) or SZOV_CHAT_WALLBOARD_TARGET_SECONDS
-    target_minutes = _szov_chat_export_minutes(target_seconds)
-    multi = len(days) > 1
-
-    thin = Side(style='thin', color='E2E8F0')
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    header_fill = PatternFill('solid', fgColor='1F2937')
-    total_fill = PatternFill('solid', fgColor='F1F5F9')
-    header_font = Font(bold=True, color='FFFFFF', size=11)
-    title_font = Font(bold=True, size=15, color='0F172A')
-    group_font = Font(bold=True, size=12, color='0F172A')
-    label_font = Font(bold=True, color='334155')
-    hint_font = Font(color='94A3B8', size=10)
-    note_font = Font(color='B45309')
-    total_font = Font(bold=True, color='0F172A')
-    good_font = Font(bold=True, color='15803D')
-    bad_font = Font(bold=True, color='B91C1C')
-    center = Alignment(horizontal='center', vertical='center')
-    left = Alignment(vertical='center')
-    wrap = Alignment(vertical='top', wrap_text=True)
-
-    def _int(value):
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    def _sum_key(key):
-        return sum(float((day.get('reply_sums') or {}).get(key) or 0) for day in days)
-
-    # Средние за период — по ОБРАЩЕНИЯМ всех дней, а не среднее средних по дням.
-    first_count, inner_count = int(_sum_key('first_count')), int(_sum_key('inner_count'))
-    period_first = (_sum_key('first_sum') / first_count) if first_count else None
-    period_inner = (_sum_key('inner_sum') / inner_count) if inner_count else None
-    period_inner_minutes = _szov_chat_export_minutes(period_inner)
-    period_inner_font = None
-    if period_inner is not None:
-        period_inner_font = good_font if period_inner <= target_seconds else bad_font
-
-    hour_rows = [(day.get('day') or '', row) for day in days for row in (day.get('hourly') or [])]
-    chats_total = sum(_int(day.get('chats')) for day in days)
-    online_seconds_total = sum(_int(day.get('online_seconds')) for day in days)
-    peak_online = max((_int(day.get('peak_online')) for day in days), default=0)
-
-    # Разные люди на линии за период: из них считается «Людей на линии» в сводке.
-    people_seconds = {}
-    for day in days:
-        for name, seconds in (day.get('people') or {}).items():
-            people_seconds[name] = people_seconds.get(name, 0) + _int(seconds)
-
-    # Разрез «оператор × час» под два листа времени ответа. Складываем СУММЫ, а не средние:
-    # клетка периода — это один и тот же час РАЗНЫХ дней, и среднее средних разошлось бы и с
-    # листом «По часам», и со сводкой. Ровно та же причина, по которой у дней есть reply_sums.
-    reply_matrix, reply_totals, reply_hour_chats = {}, {}, {}
-    for _day, row in hour_rows:
-        hour = _int(row.get('hour'))
-        reply_hour_chats[hour] = reply_hour_chats.get(hour, 0) + _int(row.get('chats'))
-        for item in (row.get('operators_reply') or []):
-            name = str((item or {}).get('name') or '').strip()
-            if not name:
-                continue
-            # Клетка часа и итог оператора копятся одним проходом: разойтись им нельзя.
-            for bucket in (reply_matrix.setdefault(name, {}).setdefault(hour, {}),
-                           reply_totals.setdefault(name, {})):
-                for key in ('chats', 'first_count', 'inner_count'):
-                    bucket[key] = _int(bucket.get(key)) + _int(item.get(key))
-                for key in ('first_sum', 'inner_sum'):
-                    bucket[key] = float(bucket.get(key) or 0.0) + float(item.get(key) or 0.0)
-    # Колонки — только часы, в которые чаты вообще приходили. Ночная смена принимает единицы
-    # обращений, и восемь заведомо пустых колонок из 24 читаются хуже, чем те же данные без них.
-    reply_hours = sorted(hour for hour, chats in reply_hour_chats.items() if chats > 0)
-    reply_order = sorted(reply_totals,
-                         key=lambda name: (-_int(reply_totals[name].get('chats')), name))
-    # Чаты, которые никто не взял (бот закрыл сам): в разрез по людям они не идут, и разница
-    # между итогом дня и суммой колонки «Чатов» должна быть подписана, а не оставлена загадкой.
-    unassigned_chats = chats_total - sum(_int(sums.get('chats')) for sums in reply_totals.values())
-
-    wb = Workbook()
-
-    # ── Лист 1: сводка ───────────────────────────────────────────────────────────────────────
-    ws = wb.active
-    ws.title = 'Показатели'
-    ws.column_dimensions['A'].width = 34
-    # B пошире прежнего: колонки пояснений больше нет, и строки «Внимание» живут теперь в ней.
-    # Ширину C не задаём намеренно — пустая соседка даёт длинной оговорке перелиться вправо,
-    # вместо того чтобы обрезаться по границе.
-    ws.column_dimensions['B'].width = 26
-    ws['A1'] = 'Табло СЗоВ · чаты'
-    ws['A1'].font = title_font
-
-    period_from, period_to = payload.get('from') or '', payload.get('to') or ''
-    head_rows = [
-        ('Период' if multi else 'Дата',
-         f'{period_from} — {period_to}' if multi else (period_from or period_to)),
-    ]
-    if payload.get('chat2desk_now'):
-        head_rows.append(('Данные Chat2Desk на', payload['chat2desk_now']))
-    head_rows.append(('Цель по ответу внутри чата, мин', target_minutes))
-    head_rows.append(('Выгружено', payload.get('generated_at') or ''))
-
-    row = 3
-    for label, value in head_rows:
-        ws.cell(row=row, column=1, value=label).font = label_font
-        ws.cell(row=row, column=2, value=value).alignment = left
-        row += 1
-
-    # Оговорки о качестве цифр стоят В ФАЙЛЕ, а не только на экране: файл уходит в переписку и
-    # живёт своей жизнью, а замерший снимок или обрезанные события меняют смысл этих чисел.
-    notes = []
-    if payload.get('stale'):
-        notes.append('Снимок за сегодня замер: данным %d мин (%s)'
-                     % (max(0, _int(payload.get('age_seconds'))) // 60,
-                        payload.get('error') or 'источник не отвечает'))
-    failed = [day for day in days if day.get('error')]
-    for day in failed:
-        notes.append('День %s не выгрузился: %s' % (day.get('day'), day.get('error')))
-    truncated = [day.get('day') for day in days if day.get('events_truncated')]
-    if truncated:
-        notes.append('События Chat2Desk обрезаны по лимиту страниц (%s): людей на линии в ранних '
-                     'часах этих дней может быть меньше, чем было' % ', '.join(truncated))
-    unmatched = sorted({name for day in days for name in (day.get('unmatched_names') or [])})
-    if unmatched:
-        notes.append('Имена Chat2Desk без сотрудника в OTP (в счётчики не вошли): '
-                     + ', '.join(unmatched))
-    for text in notes:
-        ws.cell(row=row, column=1, value='Внимание').font = label_font
-        ws.cell(row=row, column=2, value=text).font = note_font
-        row += 1
-
-    def _block(title, entries):
-        """Блок «шапка + показатель/значение». Колонки с пояснениями нет по решению владельца
-        20.08.2026: подписи показателей говорят сами за себя, а колонка текста рядом с числами
-        только удлиняла лист."""
-        nonlocal row
-        row += 1
-        ws.cell(row=row, column=1, value=title).font = group_font
-        row += 1
-        for column, name in ((1, 'Показатель'), (2, 'Значение')):
-            cell = ws.cell(row=row, column=column, value=name)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.border = border
-            cell.alignment = center if column == 2 else left
-        row += 1
-        for label, value, font in entries:
-            ws.cell(row=row, column=1, value=label).border = border
-            value_cell = ws.cell(row=row, column=2, value=value)
-            value_cell.border = border
-            value_cell.alignment = center
-            if font is not None:
-                value_cell.font = font
-            row += 1
-
-    # Состав смены «сейчас» есть только у сегодняшнего дня — и блок, и лист появляются вместе.
-    if now_block:
-        # Счётчика «В отпуске» здесь нет: отпуска в Chat2Desk не существует вовсе (его статус
-        # `holiday` — это «Закрытие чатов»), и отдельной строкой он не нужен — решение владельца
-        # 20.08.2026. Сами люди из этого статуса никуда не деваются: они стоят на листе
-        # «Чатники» со своим статусом, как и все остальные.
-        _block('Чатники · сейчас', [
-            ('Онлайн', _int(now_block.get('operators_online')), None),
-            ('Занят', _int(now_block.get('operators_busy')), None),
-            ('Тренинг', _int(now_block.get('operators_on_training')), None),
-            ('На перерыве', _int(now_block.get('operators_on_break')), None),
-            ('В прочих статусах', _int(now_block.get('operators_other')), None),
-            ('Не в системе', _int(now_block.get('operators_offline')), None),
-            ('Открыто чатов', _int(now_block.get('open_chats')), None),
-        ])
-
-    period_rows = [
-        ('Чатов', chats_total, None),
-    ]
-    if len(days) == 1 and days[0].get('chats_open') is not None:
-        period_rows.append(('Открыто сейчас', _int(days[0].get('chats_open')), None))
-    period_rows.extend([
-        ('Ответ внутри чата, мин', period_inner_minutes, period_inner_font),
-        ('Первый ответ, мин', _szov_chat_export_minutes(period_first), None),
-        ('Людей на линии', len(people_seconds), None),
-        ('Максимум людей в часе', peak_online, None),
-        ('На линии, мин', _szov_chat_export_minutes(online_seconds_total, 0), None),
-    ])
-    if multi:
-        period_rows.append(('Дней в периоде', len(days), None))
-    _block('Показатели за период' if multi else 'Показатели за день', period_rows)
-
-    def _sheet_head(sheet, headers, widths):
-        for index, title in enumerate(headers, start=1):
-            cell = sheet.cell(row=1, column=index, value=title)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.border = border
-            cell.alignment = center if index > 1 else left
-        for index, width in enumerate(widths, start=1):
-            sheet.column_dimensions[get_column_letter(index)].width = width
-        sheet.freeze_panes = 'A2'
-
-    # ── Лист «По дням» ───────────────────────────────────────────────────────────────────────
-    # Только когда дней больше одного: на однодневной выгрузке этот лист повторял бы сводку.
-    if multi:
-        ws_days = wb.create_sheet('По дням')
-        headers = ['День', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
-                   'Людей на линии', 'Максимум в часе', 'На линии, мин', 'Примечание']
-        _sheet_head(ws_days, headers, [13, 10, 22, 20, 16, 17, 15, 34])
-        for offset, day in enumerate(days):
-            inner = day.get('inner_reply_seconds')
-            note = []
-            if day.get('error'):
-                note.append('не выгрузился: %s' % day['error'])
-            if day.get('events_truncated'):
-                note.append('события обрезаны')
-            values = [
-                day.get('day') or '',
-                _int(day.get('chats')),
-                _szov_chat_export_minutes(inner),
-                _szov_chat_export_minutes(day.get('first_reply_seconds')),
-                len(day.get('people') or {}),
-                _int(day.get('peak_online')),
-                _szov_chat_export_minutes(day.get('online_seconds'), 0),
-                ' · '.join(note),
-            ]
-            for index, value in enumerate(values, start=1):
-                cell = ws_days.cell(row=2 + offset, column=index, value=value)
-                cell.border = border
-                cell.alignment = center if 1 < index < len(headers) else left
-                if index == 3 and inner is not None:
-                    cell.font = good_font if float(inner) <= target_seconds else bad_font
-        ws_days.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), len(days) + 1)
-
-    # ── Лист «По часам» ──────────────────────────────────────────────────────────────────────
-    ws_hours = wb.create_sheet('По часам')
-    # Колонки «В цели» (да/нет) здесь нет по решению владельца 20.08.2026 — она повторяла
-    # словами то, что уже видно цветом самой минуты, и добавляла столбец на ровном месте.
-    # Сама цель никуда не делась: по ней по-прежнему красится «Ответ внутри чата».
-    headers = ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
-               'Людей на линии', 'На линии, мин', 'Кто на линии', 'Примечание']
-    widths = [15, 10, 22, 20, 16, 15, 62, 26]
-    if multi:
-        headers.insert(0, 'День')
-        widths.insert(0, 13)
-    _sheet_head(ws_hours, headers, widths)
-    # Колонки ищем по подписи, а не по номеру: у периода слева добавляется «День», и любой
-    # арифметикой по индексам красились бы соседние столбцы.
-    names_column = headers.index('Кто на линии') + 1
-    inner_column = headers.index('Ответ внутри чата, мин') + 1
-    for offset, (day_str, hour_row) in enumerate(hour_rows):
-        excel_row = 2 + offset
-        inner_seconds = hour_row.get('inner_reply_seconds')
-        in_target = None if inner_seconds is None else float(inner_seconds) <= target_seconds
-        under = _int(hour_row.get('operators_under_minute'))
-        note = []
-        if hour_row.get('partial'):
-            note.append('час идёт')
-        if under:
-            note.append('ещё %d меньше минуты' % under)
-        values = [
-            _szov_chat_export_hour_label(hour_row.get('hour')),
-            _int(hour_row.get('chats')),
-            _szov_chat_export_minutes(inner_seconds),
-            _szov_chat_export_minutes(hour_row.get('first_reply_seconds')),
-            # Людей считаем головами (решение владельца 19.08.2026): кто был на линии минуту и
-            # больше — один человек, дробей в этой колонке нет.
-            _int(hour_row.get('operators_online')),
-            _szov_chat_export_minutes(hour_row.get('online_seconds'), 0),
-            ', '.join(str((item or {}).get('name') or '').strip()
-                      for item in (hour_row.get('operators') or [])),
-            ' · '.join(note),
-        ]
-        if multi:
-            values.insert(0, day_str)
-        for index, value in enumerate(values, start=1):
-            cell = ws_hours.cell(row=excel_row, column=index, value=value)
-            cell.border = border
-            if index == names_column:
-                cell.alignment = wrap
-            else:
-                cell.alignment = center if index > (2 if multi else 1) else left
-            if in_target is not None and index == inner_column:
-                cell.font = good_font if in_target else bad_font
-
-    last_hour_row = max(1, len(hour_rows) + 1)
-    totals = [
-        'За период' if multi else 'За сутки',
-        chats_total,
-        period_inner_minutes,
-        _szov_chat_export_minutes(period_first),
-        # В итоге по людям стоит максимум в часе, а не сумма голов: складывать головы разных
-        # часов нельзя — один и тот же человек попал бы в итог столько раз, сколько отработал.
-        peak_online,
-        _szov_chat_export_minutes(online_seconds_total, 0),
-        'разных людей: %d' % len(people_seconds),
-        '',
-    ]
-    if multi:
-        totals.insert(0, '%s — %s' % (period_from, period_to))
-    total_row = last_hour_row + 1
-    for index, value in enumerate(totals, start=1):
-        cell = ws_hours.cell(row=total_row, column=index, value=value)
-        cell.border = border
-        cell.fill = total_fill
-        cell.font = total_font
-        cell.alignment = center if index > (2 if multi else 1) else left
-    # Фильтр — только по часам: итоговая строка под ним и в отбор попадать не должна.
-    ws_hours.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), last_hour_row)
-
-    # ── Листы «оператор × час» ───────────────────────────────────────────────────────────────
-    # Два листа одной раскладки: строка — чатник, колонка — час, в клетке минуты. Первый ответ
-    # и ответ внутри чата разведены по разным листам намеренно: это разные показатели, и в
-    # одной таблице их пришлось бы либо чередовать колонками (48 столбцов), либо ставить парами
-    # в клетку — и то и другое не читается и не считается формулами.
-    # Прежнего листа «Люди на линии» здесь больше нет (решение владельца 20.08.2026): минуты на
-    # линии видны в «По часам» и в сводке, а времени ответа по людям не было нигде.
-    def _reply_sheet(title, kind, *, against_target=False):
-        """Лист времени ответа `kind` ('first' | 'inner') в разрезе «оператор × час»."""
-        sheet = wb.create_sheet(title)
-        headers = ['Сотрудник', 'Чатов', 'Среднее, мин'] + [
-            _szov_chat_export_hour_label(hour) for hour in reply_hours]
-        _sheet_head(sheet, headers, [34, 10, 15] + [13] * len(reply_hours))
-
-        def _put(excel_row, column, sums, *, bold=False):
-            """Клетка со средним. Пусто — «в этот час не отвечал», а не «ответил мгновенно»."""
-            seconds = _szov_chat_wallboard_reply_average(sums, kind)
-            cell = sheet.cell(row=excel_row, column=column,
-                              value=_szov_chat_export_minutes(seconds))
-            cell.border = border
-            cell.alignment = center
-            if bold:
-                cell.font = total_font
-            # Цветом красим только ответ внутри чата: цель задана ему одному, а красить
-            # первый ответ той же меркой значило бы придумать ему норму, которой нет.
-            if against_target and seconds is not None:
-                cell.font = good_font if seconds <= target_seconds else bad_font
-            return cell
-
-        for offset, name in enumerate(reply_order):
-            excel_row = 2 + offset
-            totals_sums = reply_totals.get(name) or {}
-            for index, value in enumerate((name, _int(totals_sums.get('chats'))), start=1):
-                cell = sheet.cell(row=excel_row, column=index, value=value)
-                cell.border = border
-                cell.alignment = center if index > 1 else left
-            _put(excel_row, 3, totals_sums)
-            hours = reply_matrix.get(name) or {}
-            for index, hour in enumerate(reply_hours, start=4):
-                _put(excel_row, index, hours.get(hour))
-
-        # Итоговая строка — сумма колонки, а не отдельный расчёт: обращения без оператора
-        # времени ответа не несут вовсе, поэтому эти средние сходятся с листом «По часам»
-        # и со сводкой до цифры.
-        total_row = len(reply_order) + 2
-        total_chats = sum(_int((reply_totals.get(name) or {}).get('chats')) for name in reply_order)
-        for index, value in enumerate(('Все чатники', total_chats), start=1):
-            cell = sheet.cell(row=total_row, column=index, value=value)
-            cell.border = border
-            cell.fill = total_fill
-            cell.font = total_font
-            cell.alignment = center if index > 1 else left
-
-        def _column_sums(hour=None):
-            """Сумма клеток колонки по всем чатникам: час периода или весь период целиком."""
-            merged = {}
-            for name in reply_order:
-                sums = (reply_matrix.get(name) or {}).get(hour) if hour is not None \
-                    else reply_totals.get(name)
-                for key, value in (sums or {}).items():
-                    merged[key] = (merged.get(key) or 0) + value
-            return merged
-
-        _put(total_row, 3, _column_sums(), bold=True).fill = total_fill
-        for index, hour in enumerate(reply_hours, start=4):
-            _put(total_row, index, _column_sums(hour), bold=True).fill = total_fill
-        # Фильтр — только по чатникам: итоговая строка под ним и в отбор попадать не должна.
-        sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
-                                             max(1, len(reply_order) + 1))
-        sheet.freeze_panes = 'D2'  # ФИО, чаты и среднее держим на виду, часы уезжают вбок
-        if not reply_order:
-            sheet.cell(row=total_row + 1, column=1,
-                       value='За период никто не отвечал в чатах').font = hint_font
-        elif unassigned_chats > 0:
-            # Только цифра, без объяснений (решение владельца 20.08.2026): разницу между итогом
-            # дня и суммой колонки «Чатов» подписать надо, а растолковывать — нет.
-            # Число ставим ПОСЛЕ слова: «131 чатов» по-русски не сходится ни в одном падеже.
-            sheet.cell(row=total_row + 2, column=1,
-                       value='Чатов без оператора: %d' % unassigned_chats).font = hint_font
-
-    _reply_sheet('Первый ответ по часам', 'first')
-    _reply_sheet('Ответ внутри чата по часам', 'inner', against_target=True)
-
-    # ── Лист «Чатники» (состав смены сейчас) ─────────────────────────────────────────────────
-    if now_block:
-        ws_shift = wb.create_sheet('Чатники')
-        # Лист повторяет правую колонку табло, и повторяет целиком: занятость без качества
-        # читается неверно — «7 в работе» у отвечающего за минуту и у держащего клиента десять
-        # это разные семь чатов. Время ответа тут за СУТКИ, а не «сейчас», как и на стене.
-        headers = ['Сотрудник', 'Статус', 'В статусе, мин', 'Чатов в работе', 'Чатов за сутки',
-                   'Первый ответ, мин', 'Ответ внутри чата, мин']
-        _sheet_head(ws_shift, headers, [34, 18, 16, 16, 16, 20, 22])
-        people = [item for item in (now_block.get('operators') or []) if isinstance(item, dict)]
-        for offset, item in enumerate(people):
-            # seconds=None — событий за сутки не было: человек в этом статусе с начала суток, и
-            # выдавать это числом нельзя, иначе «0 мин» прочитается как «только что зашёл».
-            since = item.get('seconds')
-            inner_seconds = item.get('inner_reply_seconds')
-            values = [
-                item.get('name') or '',
-                item.get('status') or '',
-                'с начала суток' if since is None else _szov_chat_export_minutes(since),
-                _int(item.get('open_chats')),
-                _int(item.get('chats')),
-                _szov_chat_export_minutes(item.get('first_reply_seconds')),
-                _szov_chat_export_minutes(inner_seconds),
-            ]
-            for index, value in enumerate(values, start=1):
-                cell = ws_shift.cell(row=2 + offset, column=index, value=value)
-                cell.border = border
-                cell.alignment = center if index > 1 else left
-                if index == 2:
-                    fill = _SZOV_CHAT_EXPORT_STATUS_FILL.get(item.get('status_key'))
-                    if fill:
-                        cell.fill = PatternFill('solid', fgColor=fill)
-                if index == len(headers) and inner_seconds is not None:
-                    cell.font = good_font if float(inner_seconds) <= target_seconds else bad_font
-        ws_shift.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
-                                                max(1, len(people) + 1))
-        # Вышедшие в список смены не идут (на табло они на своей вкладке «Не в системе»), но
-        # их число видно — иначе смена в файле выглядит меньше, чем она есть.
-        offline = _int(now_block.get('operators_offline'))
-        if offline:
-            note = ws_shift.cell(row=len(people) + 3, column=1,
-                                 value='Не в системе: %d' % offline)
-            note.font = hint_font
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
 
 
-def _szov_chat_export_file_name(payload):
-    """Имя файла: одна дата на однодневной выгрузке, обе — на периоде.
-
-    У сегодняшнего дня в имени стоит ещё и момент данных: две выгрузки подряд в пределах кэша
-    содержат один и тот же снимок и различаться именами не должны."""
-    payload = payload or {}
-    day_from = str(payload.get('from') or '').replace('-', '')
-    day_to = str(payload.get('to') or '').replace('-', '')
-    if day_from and day_to and day_from != day_to:
-        return 'szov_wallboard_chat_%s_%s.xlsx' % (day_from, day_to)
-    clock = str(payload.get('chat2desk_now') or '')[11:16].replace(':', '')
-    stamp = '_'.join(part for part in (day_from or day_to, clock) if part) or 'now'
-    return 'szov_wallboard_chat_%s.xlsx' % stamp
 
 
-@app.route('/api/szov_wallboard/chat_export', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_chat_export():
-    """Табло СЗоВ, направление «Чат»: показатели за период файлом .xlsx."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_wallboard_guard()
-    if err:
-        return err
-    if not _chat2desk_authorization_header():
-        return jsonify({"error": "Интеграция с Chat2Desk недоступна: CHAT2DESK_API_TOKEN не задан"}), 503
-    try:
-        payload = _szov_chat_export_collect(request.args.get('date_from'),
-                                            request.args.get('date_to'))
-    except ValueError as exc:
-        # Ошибка периода — вина запроса, а не источника: отвечаем 400 и человеческим текстом,
-        # который фронт покажет тостом как есть.
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        logging.error("Табло СЗоВ (чат): выгрузка не собралась: %s", exc, exc_info=True)
-        return jsonify({"error": "Не удалось собрать выгрузку", "detail": str(exc)[:300]}), 503
-    try:
-        content = _szov_chat_wallboard_workbook(payload)
-    except Exception as exc:
-        logging.error("Табло СЗоВ (чат): файл выгрузки не собрался: %s", exc, exc_info=True)
-        return jsonify({"error": "Не удалось собрать файл", "detail": str(exc)[:300]}), 500
-    return send_file(
-        BytesIO(content),
-        as_attachment=True,
-        download_name=_szov_chat_export_file_name(payload),
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
 
 
 # === Отбивка показателей табло, направление «Чат» ==============================================
@@ -41040,11 +35591,6 @@ async def _szov_chat_broadcast_prepare(scheduled=False):
     return data, text, media
 
 
-async def _szov_chat_broadcast_send(chat_id):
-    """Собрать и отправить отбивку чатов в один чат — кнопка «Отправить сейчас»."""
-    data, text, media = await _szov_chat_broadcast_prepare()
-    await _szov_broadcast_deliver(chat_id, text, media)
-    return data
 
 
 async def _szov_chat_broadcast_prepare_scheduled():
@@ -41171,18 +35717,6 @@ def _op_broadcast_group_view(data, group_id, day_parts):
     return out
 
 
-def _op_broadcast_group_options():
-    """[{id, label}] групп табло ОП для выбора в настройках отбивки. Табло недоступно — пусто:
-    настройки получателей от этого не ломаются, просто выбрать можно только весь отдел."""
-    provider = globals().get('_op_wallboard_snapshot')
-    if provider is None:
-        return []
-    try:
-        return [{'id': group['id'], 'label': group['label']}
-                for group in (provider().get('groups') or [])]
-    except Exception as exc:  # noqa: BLE001
-        logging.warning("Отбивка табло ОП: группы для настроек не собрались: %s", exc)
-        return []
 
 
 def _op_broadcast_scope(data):
@@ -41443,35 +35977,6 @@ def _op_render_hour_png(data):
                                   _op_broadcast_key_tiles(hour, data), stat_tiles)
 
 
-def _op_broadcast_preview():
-    """Предпросмотр отбивки ОП: текст и картинка, ничего не отправляя. Снимок — из кэша
-    табло, так что предпросмотр не стоит ни одного запроса к мосту или станции."""
-    try:
-        # ?group_id= — предпросмотр отбивки одной группы, ровно как её получит чат группы.
-        raw_group = str(request.args.get('group_id') or '').strip()
-        data = _op_broadcast_collect(group_id=int(raw_group) if raw_group.isdigit() else None)
-    except Exception as exc:
-        logging.error("Предпросмотр отбивки (ОП): данные не собрались: %s", exc)
-        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-    renderers = {'board': _op_render_wallboard_png, 'hour': _op_render_hour_png}
-    renderer = renderers.get((request.args.get('image') or '').strip())
-    if renderer is not None:
-        try:
-            blob = renderer(data)
-        except Exception as exc:
-            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
-        response = Response(blob, mimetype='image/png')
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-    regular, _bold = _szov_font_paths()
-    return jsonify({
-        # Ровно то, что уйдёт: с картинками — подпись из одних отклонений, без них — полный текст.
-        "text": _op_broadcast_caption(data) if regular else _op_broadcast_text(data),
-        "font_path": regular,
-        "images_available": bool(regular),
-        "deviations": _op_broadcast_deviations(data),
-        "hour": data.get('hour_label'),
-    })
 
 
 async def _op_broadcast_prepare(scheduled=False, group_id=None):
@@ -41495,17 +36000,6 @@ async def _op_broadcast_prepare(scheduled=False, group_id=None):
     return data, text, media
 
 
-async def _op_broadcast_send(chat_id):
-    """Собрать и отправить отбивку ОП в один чат — кнопка «Отправить сейчас». Группа — из
-    настроек этого чата: «Отправить сейчас» обязана прислать то же, что придёт по расписанию."""
-    loop = asyncio.get_event_loop()
-    chats = await loop.run_in_executor(
-        executor_pool, functools.partial(db.get_szov_broadcast_chats, SZOV_BROADCAST_DIRECTION_OP))
-    group_id = next((chat.get('group_id') for chat in chats
-                     if str(chat.get('chat_id')) == str(chat_id)), None)
-    data, text, media = await _op_broadcast_prepare(group_id=group_id)
-    await _szov_broadcast_deliver(chat_id, text, media)
-    return data
 
 
 async def _op_broadcast_prepare_scheduled(group_id=None):
@@ -41694,28 +36188,6 @@ def _op_render_chat_wallboard_png(data):
     return _szov_render_tiles_png('Табло ОП · чаты', subtitle, key_tiles, stat_tiles)
 
 
-def _op_chat_broadcast_preview():
-    """Предпросмотр отбивки «Чата» ОП: текст и картинка, ничего не отправляя."""
-    try:
-        data = _op_chat_broadcast_collect()
-    except Exception as exc:
-        logging.error("Предпросмотр отбивки (ОП, чат): данные не собрались: %s", exc)
-        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-    if (request.args.get('image') or '').strip() == 'board':
-        try:
-            blob = _op_render_chat_wallboard_png(data)
-        except Exception as exc:
-            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
-        response = Response(blob, mimetype='image/png')
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-    regular, _bold = _szov_font_paths()
-    return jsonify({
-        "text": _op_chat_broadcast_text(data),
-        "font_path": regular,
-        "images_available": bool(regular),
-        "deviations": _op_chat_broadcast_deviations(data),
-    })
 
 
 async def _op_chat_broadcast_prepare(scheduled=False):
@@ -41732,13 +36204,187 @@ async def _op_chat_broadcast_prepare(scheduled=False):
         # Без шрифта или при сбое отрисовки текст всё равно уходит — цифры важнее картинки.
         logging.error("Отбивка табло ОП (чат): не удалось собрать картинку: %s", exc)
     return data, text, media
+# Раздел «szov_wallboard»: ручки вынесены в szov_wallboard/routes.py (вынесено из bot_schedule2.py).
+from szov_wallboard.routes import build_szov_wallboard_blueprint  # noqa: E402
+app.register_blueprint(build_szov_wallboard_blueprint(
+        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
+        CHAT2DESK_API_BASE_URL=CHAT2DESK_API_BASE_URL,
+        CHAT2DESK_API_MAX_PAGES=CHAT2DESK_API_MAX_PAGES,
+        CHAT2DESK_API_PAGE_LIMIT=CHAT2DESK_API_PAGE_LIMIT,
+        CHAT2DESK_API_TIMEOUT_SECONDS=CHAT2DESK_API_TIMEOUT_SECONDS,
+        CHAT2DESK_API_TOKEN=CHAT2DESK_API_TOKEN,
+        CHAT2DESK_AUTH_SCHEME=CHAT2DESK_AUTH_SCHEME,
+        CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS=CHAT2DESK_STATISTICS_REPORT_OPERATOR_EVENTS,
+        CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS=CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS,
+        CHAT_HOURLY_REQUEST_TYPE=CHAT_HOURLY_REQUEST_TYPE,
+        CHAT_HOURLY_TIMEZONE=CHAT_HOURLY_TIMEZONE,
+        OKTELL_API_TOKEN=OKTELL_API_TOKEN,
+        OKTELL_API_URL=OKTELL_API_URL,
+        OPERATOR_NAME_VENDOR_MARK_RE=OPERATOR_NAME_VENDOR_MARK_RE,
+        OP_BROADCAST_LIVE_STALE_SECONDS=OP_BROADCAST_LIVE_STALE_SECONDS,
+        OP_BROADCAST_MIN_CALLS=OP_BROADCAST_MIN_CALLS,
+        OP_BROADCAST_SEND_TIMES=OP_BROADCAST_SEND_TIMES,
+        OP_BROADCAST_SL_MIN_PERCENT=OP_BROADCAST_SL_MIN_PERCENT,
+        OP_BROADCAST_TIMEZONE=OP_BROADCAST_TIMEZONE,
+        OP_CHAT_BROADCAST_MIN_CHATS=OP_CHAT_BROADCAST_MIN_CHATS,
+        OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS=OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS,
+        OP_CHAT_BROADCAST_SEND_TIMES=OP_CHAT_BROADCAST_SEND_TIMES,
+        ROLE_HIERARCHY=ROLE_HIERARCHY,
+        SZOV_AR_MAX_PERCENT=SZOV_AR_MAX_PERCENT,
+        SZOV_AR_MIN_PERCENT=SZOV_AR_MIN_PERCENT,
+        SZOV_BREAK_DIRECTION_CHAT=SZOV_BREAK_DIRECTION_CHAT,
+        SZOV_BREAK_DIRECTION_LINE=SZOV_BREAK_DIRECTION_LINE,
+        SZOV_BREAK_KIND_NOT_PLANNED=SZOV_BREAK_KIND_NOT_PLANNED,
+        SZOV_BREAK_KIND_NO_SHIFT=SZOV_BREAK_KIND_NO_SHIFT,
+        SZOV_BREAK_MIN_MINUTES=SZOV_BREAK_MIN_MINUTES,
+        SZOV_BREAK_NOTE_LIMIT=SZOV_BREAK_NOTE_LIMIT,
+        SZOV_BREAK_TOLERANCE_MINUTES=SZOV_BREAK_TOLERANCE_MINUTES,
+        SZOV_BROADCAST_DIRECTION_CHAT=SZOV_BROADCAST_DIRECTION_CHAT,
+        SZOV_BROADCAST_DIRECTION_LINE=SZOV_BROADCAST_DIRECTION_LINE,
+        SZOV_BROADCAST_DIRECTION_OP=SZOV_BROADCAST_DIRECTION_OP,
+        SZOV_BROADCAST_DIRECTION_OP_CHAT=SZOV_BROADCAST_DIRECTION_OP_CHAT,
+        SZOV_BROADCAST_DIRECTION_TEZ=SZOV_BROADCAST_DIRECTION_TEZ,
+        SZOV_BROADCAST_HOUR_MIN_CALLS=SZOV_BROADCAST_HOUR_MIN_CALLS,
+        SZOV_BROADCAST_SEND_TIMES=SZOV_BROADCAST_SEND_TIMES,
+        SZOV_BROADCAST_TIMEZONE=SZOV_BROADCAST_TIMEZONE,
+        SZOV_CHAT_BROADCAST_MIN_CHATS=SZOV_CHAT_BROADCAST_MIN_CHATS,
+        SZOV_CHAT_BROADCAST_SEND_TIMES=SZOV_CHAT_BROADCAST_SEND_TIMES,
+        SZOV_CHAT_WALLBOARD_EVENT_MAX_PAGES=SZOV_CHAT_WALLBOARD_EVENT_MAX_PAGES,
+        SZOV_CHAT_WALLBOARD_ONLINE_MIN_SECONDS=SZOV_CHAT_WALLBOARD_ONLINE_MIN_SECONDS,
+        SZOV_CHAT_WALLBOARD_TARGET_SECONDS=SZOV_CHAT_WALLBOARD_TARGET_SECONDS,
+        SZOV_SL_MIN_PERCENT=SZOV_SL_MIN_PERCENT,
+        TEZ_AR_TARGET_PERCENT=TEZ_AR_TARGET_PERCENT,
+        TEZ_BROADCAST_HOUR_MIN_CALLS=TEZ_BROADCAST_HOUR_MIN_CALLS,
+        TEZ_BROADCAST_SEND_TIMES=TEZ_BROADCAST_SEND_TIMES,
+        _KZ_TO_RU_FOLD=_KZ_TO_RU_FOLD,
+        _OP_BROADCAST_TABLE_ROWS=_OP_BROADCAST_TABLE_ROWS,
+        _SZOV_BROADCAST_HOURLY=_SZOV_BROADCAST_HOURLY,
+        _SZOV_CHAT_WALLBOARD_OTHER_KEY=_SZOV_CHAT_WALLBOARD_OTHER_KEY,
+        _SZOV_CHAT_WALLBOARD_STATUSES=_SZOV_CHAT_WALLBOARD_STATUSES,
+        _SZOV_FONT_CANDIDATES=_SZOV_FONT_CANDIDATES,
+        _SZOV_SHIFT_COLUMN_KEYS=_SZOV_SHIFT_COLUMN_KEYS,
+        _SZOV_TABLE_COLUMNS=_SZOV_TABLE_COLUMNS,
+        _bot_event_loop=_bot_event_loop,
+        _build_cors_preflight_response=_build_cors_preflight_response,
+        _chat2desk_api_base_url=_chat2desk_api_base_url,
+        _chat2desk_api_error_message=_chat2desk_api_error_message,
+        _chat2desk_api_token=_chat2desk_api_token,
+        _chat2desk_authorization_header=_chat2desk_authorization_header,
+        _chat2desk_extract_response_rows=_chat2desk_extract_response_rows,
+        _chat2desk_extract_total=_chat2desk_extract_total,
+        _chat2desk_row_first=_chat2desk_row_first,
+        _chat_hourly_fetch_requests=_chat_hourly_fetch_requests,
+        _chat_hourly_is_open=_chat_hourly_is_open,
+        _chat_hourly_number=_chat_hourly_number,
+        _chat_hourly_operator_name=_chat_hourly_operator_name,
+        _chat_hourly_request_start=_chat_hourly_request_start,
+        _chat_hourly_requests_cache=_chat_hourly_requests_cache,
+        _chat_hourly_response_sums=_chat_hourly_response_sums,
+        _chat_hourly_response_times=_chat_hourly_response_times,
+        _env_int=_env_int,
+        _get_authenticated_requester=_get_authenticated_requester,
+        _get_role_level=_get_role_level,
+        _has_min_role=_has_min_role,
+        _headed_department_id=_headed_department_id,
+        _is_admin_role=_is_admin_role,
+        _is_allowed_origin=_is_allowed_origin,
+        _is_global_admin_requester=_is_global_admin_requester,
+        _is_supervisor_role=_is_supervisor_role,
+        _normalize_origin=_normalize_origin,
+        _normalize_user_role=_normalize_user_role,
+        _oktell_api_ready=_oktell_api_ready,
+        _op_broadcast_attach_period=_op_broadcast_attach_period,
+        _op_broadcast_bridge_note=_op_broadcast_bridge_note,
+        _op_broadcast_caption=_op_broadcast_caption,
+        _op_broadcast_collect=_op_broadcast_collect,
+        _op_broadcast_deviations=_op_broadcast_deviations,
+        _op_broadcast_duration=_op_broadcast_duration,
+        _op_broadcast_group_view=_op_broadcast_group_view,
+        _op_broadcast_key_tiles=_op_broadcast_key_tiles,
+        _op_broadcast_percent=_op_broadcast_percent,
+        _op_broadcast_period_notes=_op_broadcast_period_notes,
+        _op_broadcast_prepare=_op_broadcast_prepare,
+        _op_broadcast_scope=_op_broadcast_scope,
+        _op_broadcast_send_times=_op_broadcast_send_times,
+        _op_broadcast_table=_op_broadcast_table,
+        _op_broadcast_text=_op_broadcast_text,
+        _op_broadcast_wait=_op_broadcast_wait,
+        _op_chat_broadcast_collect=_op_chat_broadcast_collect,
+        _op_chat_broadcast_deviations=_op_chat_broadcast_deviations,
+        _op_chat_broadcast_duration=_op_chat_broadcast_duration,
+        _op_chat_broadcast_notes=_op_chat_broadcast_notes,
+        _op_chat_broadcast_prepare=_op_chat_broadcast_prepare,
+        _op_chat_broadcast_send_times=_op_chat_broadcast_send_times,
+        _op_chat_broadcast_stream_note=_op_chat_broadcast_stream_note,
+        _op_chat_broadcast_text=_op_chat_broadcast_text,
+        _op_render_chat_wallboard_png=_op_render_chat_wallboard_png,
+        _op_render_hour_png=_op_render_hour_png,
+        _op_render_wallboard_png=_op_render_wallboard_png,
+        _operator_name_strip_vendor_mark=_operator_name_strip_vendor_mark,
+        _parse_boolean_setting=_parse_boolean_setting,
+        _status_import_dedupe_operator_infos=_status_import_dedupe_operator_infos,
+        _status_import_normalize_operator_name=_status_import_normalize_operator_name,
+        _status_import_resolve_operator_matches=_status_import_resolve_operator_matches,
+        _szov_break_violation_detail=_szov_break_violation_detail,
+        _szov_break_violation_notes=_szov_break_violation_notes,
+        _szov_broadcast_ar_notes=_szov_broadcast_ar_notes,
+        _szov_broadcast_collect=_szov_broadcast_collect,
+        _szov_broadcast_deliver=_szov_broadcast_deliver,
+        _szov_broadcast_deviations=_szov_broadcast_deviations,
+        _szov_broadcast_hour_notes=_szov_broadcast_hour_notes,
+        _szov_broadcast_notes=_szov_broadcast_notes,
+        _szov_broadcast_parse_times=_szov_broadcast_parse_times,
+        _szov_broadcast_send=_szov_broadcast_send,
+        _szov_broadcast_send_times=_szov_broadcast_send_times,
+        _szov_broadcast_shift_rows=_szov_broadcast_shift_rows,
+        _szov_broadcast_sl_note=_szov_broadcast_sl_note,
+        _szov_broadcast_stale_note=_szov_broadcast_stale_note,
+        _szov_broadcast_text=_szov_broadcast_text,
+        _szov_chat_broadcast_collect=_szov_chat_broadcast_collect,
+        _szov_chat_broadcast_deviations=_szov_chat_broadcast_deviations,
+        _szov_chat_broadcast_duration=_szov_chat_broadcast_duration,
+        _szov_chat_broadcast_notes=_szov_chat_broadcast_notes,
+        _szov_chat_broadcast_prepare=_szov_chat_broadcast_prepare,
+        _szov_chat_broadcast_send_times=_szov_chat_broadcast_send_times,
+        _szov_chat_broadcast_text=_szov_chat_broadcast_text,
+        _szov_chat_wallboard_day_seconds=_szov_chat_wallboard_day_seconds,
+        _szov_chat_wallboard_display_names=_szov_chat_wallboard_display_names,
+        _szov_chat_wallboard_events_cache=_szov_chat_wallboard_events_cache,
+        _szov_chat_wallboard_fetch_events=_szov_chat_wallboard_fetch_events,
+        _szov_chat_wallboard_hourly=_szov_chat_wallboard_hourly,
+        _szov_chat_wallboard_online_seconds=_szov_chat_wallboard_online_seconds,
+        _szov_chat_wallboard_operator_lookup=_szov_chat_wallboard_operator_lookup,
+        _szov_chat_wallboard_reply_average=_szov_chat_wallboard_reply_average,
+        _szov_chat_wallboard_reply_sums=_szov_chat_wallboard_reply_sums,
+        _szov_chat_wallboard_resolve=_szov_chat_wallboard_resolve,
+        _szov_chat_wallboard_snapshot=_szov_chat_wallboard_snapshot,
+        _szov_chat_wallboard_status=_szov_chat_wallboard_status,
+        _szov_chat_wallboard_timelines=_szov_chat_wallboard_timelines,
+        _szov_font=_szov_font,
+        _szov_font_paths=_szov_font_paths,
+        _szov_font_paths_cache=_szov_font_paths_cache,
+        _szov_format_age_ru=_szov_format_age_ru,
+        _szov_format_percent=_szov_format_percent,
+        _szov_format_seconds_mmss=_szov_format_seconds_mmss,
+        _szov_plural=_szov_plural,
+        _szov_render_chat_wallboard_png=_szov_render_chat_wallboard_png,
+        _szov_render_hour_png=_szov_render_hour_png,
+        _szov_render_hourly_table_png=_szov_render_hourly_table_png,
+        _szov_render_tiles_png=_szov_render_tiles_png,
+        _szov_render_wallboard_png=_szov_render_wallboard_png,
+        _szov_wallboard_department_id=_szov_wallboard_department_id,
+        _szov_wallboard_int=_szov_wallboard_int,
+        _szov_wallboard_snapshot=_szov_wallboard_snapshot,
+        _tez_broadcast_deviations=_tez_broadcast_deviations,
+        _tez_broadcast_prepare=_tez_broadcast_prepare,
+        _tez_broadcast_send_times=_tez_broadcast_send_times,
+        _wallboard_format_asa=_wallboard_format_asa,
+        executor_pool=executor_pool,
+        monolith_namespace=globals(),
+        require_api_key=require_api_key,
+))
 
 
-async def _op_chat_broadcast_send(chat_id):
-    """Собрать и отправить отбивку «Чата» ОП в один чат — кнопка «Отправить сейчас»."""
-    data, text, media = await _op_chat_broadcast_prepare()
-    await _szov_broadcast_deliver(chat_id, text, media)
-    return data
 
 
 async def _op_chat_broadcast_prepare_scheduled():
@@ -42472,306 +37118,24 @@ async def front_office_calls_broadcast_job():
 # параметром `direction`.
 
 
-def _szov_broadcast_direction_arg(payload=None):
-    """Направление отбивки из запроса. Пусто = «Линия».
-
-    Пустое значение допускаем намеренно: фронт едет отдельным деплоем (GitHub Pages против
-    Render), и бандл, ничего не знающий о втором направлении, обязан продолжать настраивать
-    «Линию», а не получать 400."""
-    raw = str(request.args.get('direction') or (payload or {}).get('direction') or '').strip()
-    direction = raw or SZOV_BROADCAST_DIRECTION_LINE
-    if direction not in SZOV_BROADCAST_DIRECTIONS:
-        raise ValueError("Неизвестное направление табло")
-    return direction
 
 
-def _szov_broadcast_direction_times(direction):
-    """Расписание направления — то, что форма показывает подписью под заголовком."""
-    if direction == SZOV_BROADCAST_DIRECTION_CHAT:
-        times = _szov_chat_broadcast_send_times()
-    elif direction == SZOV_BROADCAST_DIRECTION_OP:
-        times = _op_broadcast_send_times()
-    elif direction == SZOV_BROADCAST_DIRECTION_TEZ:
-        times = _tez_broadcast_send_times()
-    elif direction == SZOV_BROADCAST_DIRECTION_OP_CHAT:
-        times = _op_chat_broadcast_send_times()
-    else:
-        times = _szov_broadcast_send_times()
-    return [f"{hour:02d}:{minute:02d}" for hour, minute in times]
 
 
 # Табло, у которых есть отбивка лично себе: «Тез КЦ» (23.09.2026) и «Табло ОП · Чат» (#367,
 # 25.09.2026). Колонки подписки у каждого свои — Database.BROADCAST_PERSONAL_COLUMNS.
-SZOV_BROADCAST_PERSONAL_DIRECTIONS = (SZOV_BROADCAST_DIRECTION_TEZ, SZOV_BROADCAST_DIRECTION_OP_CHAT)
 
 
-def _szov_broadcast_personal_owner(direction):
-    """Учётка запросившего, если он вправе получать отбивку направления лично; иначе None.
-
-    Лично себе отбивку получают у «Тез КЦ» и у «Табло ОП · Чат», и только админы и
-    супер-админы, у которых этот раздел отображается (постановка владельца 23.09.2026):
-    супер-админ, админ без отдела и админ — глава отдела табло. Админу — главе чужого отдела
-    табло не видно, и гейт отбивки (_szov_broadcast_guard) его сюда уже не пустил; здесь
-    остаётся отсечь роль ниже админа — форму открывает любой глава отдела, но лично себе
-    получает админ."""
-    if direction not in SZOV_BROADCAST_PERSONAL_DIRECTIONS:
-        return None
-    _requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error or not requester:
-        return None
-    if _is_admin_role(requester[3]):
-        return requester
-    # Поимённый доступ «только лично» к отбивке «Чата» ОП — роль там ниже админа намеренно.
-    if (direction == SZOV_BROADCAST_DIRECTION_OP_CHAT
-            and int(requester[0]) in OP_CHAT_BROADCAST_PERSONAL_ONLY_USER_IDS):
-        return requester
-    return None
 
 
-def _szov_broadcast_personal_state(direction):
-    """Строка «лично мне» для формы отбивки. None — строки в форме нет вовсе."""
-    requester = _szov_broadcast_personal_owner(direction)
-    if requester is None:
-        return None
-    state = db.get_tez_broadcast_personal(requester[0], direction=direction)
-    return {
-        "enabled": bool(state.get('enabled')),
-        "mode": state.get('mode') or SZOV_BROADCAST_MODE_ALWAYS,
-        # Без Telegram бот не знает, куда писать: форма гасит переключатель и объясняет.
-        "telegram_connected": bool(requester[1]),
-    }
 
 
-@app.route('/api/szov_wallboard/broadcast', methods=['GET', 'POST', 'DELETE', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_broadcast():
-    """Получатели отбивки: кому слать, в каком режиме, история изменений и чаты бота.
-
-    POST добавляет получателя или меняет его режим / включённость (чат — ключ, дублей не
-    заводим), DELETE убирает из списка. Всё — в пределах одного направления: тот же чат в
-    «Линии» и в «Чате» это две независимые строки.
-
-    POST {personal: true|false, personal_mode: 'always'|'deviations'} — личная отбивка самому
-    себе (есть у «Тез КЦ» и «Табло ОП · Чат»), любое из полей по отдельности. В историю «кто менял» она не
-    пишется: это настройка человека о себе, а не общий список получателей."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_broadcast_guard()
-    if err:
-        return err
-    payload = request.get_json(silent=True) or {} if request.method in ('POST', 'DELETE') else {}
-    try:
-        direction = _szov_broadcast_direction_arg(payload)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    personal_only = _szov_broadcast_is_personal_only()
-    if personal_only and (request.method == 'DELETE' or (
-            request.method == 'POST' and not ('personal' in payload or 'personal_mode' in payload))):
-        return jsonify({"error": SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403
-    if request.method in ('POST', 'DELETE'):
-        try:
-            if request.method == 'DELETE':
-                db.delete_szov_broadcast_chat(
-                    payload.get('chat_id') or request.args.get('chat_id'),
-                    user_id=requester_id, direction=direction)
-            elif 'personal' in payload or 'personal_mode' in payload:
-                owner = _szov_broadcast_personal_owner(direction)
-                if owner is None:
-                    return jsonify({"error": "Лично себе отбивку этого табло получают только админы"}), 403
-                enabled = None
-                if 'personal' in payload:
-                    enabled, flag_error = _parse_boolean_setting(payload.get('personal'), 'personal')
-                    if flag_error:
-                        return jsonify({"error": "Некорректное значение personal"}), 400
-                if enabled and not owner[1]:
-                    return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
-                saved = db.set_tez_broadcast_personal(requester_id, enabled=enabled,
-                                                      mode=payload.get('personal_mode'),
-                                                      direction=direction)
-                logging.info("Отбивка %s: личная подписка у %s -> %s", direction, requester_id, saved)
-            else:
-                db.save_szov_broadcast_chat(payload, user_id=requester_id, direction=direction)
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except Exception as exc:
-            logging.error("Отбивка табло: не удалось сохранить настройку: %s", exc)
-            return jsonify({"error": "Не удалось сохранить настройку"}), 500
-    if personal_only:
-        # Групп такой человек не настраивает — и не видит: ни списка, ни чатов бота, ни истории.
-        return jsonify({
-            "direction": direction,
-            "groups_allowed": False,
-            "recipients": [], "history": [], "chats": [], "groups": [],
-            "send_times": _szov_broadcast_direction_times(direction),
-            "personal": _szov_broadcast_personal_state(direction),
-        })
-    return jsonify({
-        "direction": direction,
-        "groups_allowed": True,
-        "recipients": db.get_szov_broadcast_chats(direction),
-        "history": db.get_szov_broadcast_history(direction=direction),
-        "chats": db.list_bot_group_chats(),
-        "send_times": _szov_broadcast_direction_times(direction),
-        "personal": _szov_broadcast_personal_state(direction),
-        # Группы, по которым можно получать отбивку (только у табло ОП): те же подписи и
-        # тот же порядок, что у фильтра групп на стене.
-        "groups": _op_broadcast_group_options() if direction == SZOV_BROADCAST_DIRECTION_OP else [],
-    })
 
 
-@app.route('/api/szov_wallboard/broadcast_preview', methods=['GET', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_broadcast_preview():
-    """Показать, как будет выглядеть отбивка, НИЧЕГО не отправляя.
-
-    ?image=table|board|hour отдаёт картинку, без параметра — текст и диагностику шрифта.
-    ?direction=chat — то же для направления «Чат» (у него одна картинка, board).
-    Нужен и владельцу (посмотреть перед включением), и на проде — убедиться, что на
-    сервере вообще нашёлся шрифт с кириллицей."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_broadcast_guard()
-    if err:
-        return err
-    try:
-        direction = _szov_broadcast_direction_arg()
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    if direction == SZOV_BROADCAST_DIRECTION_CHAT:
-        return _szov_chat_broadcast_preview()
-    if direction == SZOV_BROADCAST_DIRECTION_OP:
-        return _op_broadcast_preview()
-    if direction == SZOV_BROADCAST_DIRECTION_TEZ:
-        return _tez_broadcast_preview()
-    if direction == SZOV_BROADCAST_DIRECTION_OP_CHAT:
-        return _op_chat_broadcast_preview()
-    hour_raw = (request.args.get('hour') or '').strip()
-    hour_to = int(hour_raw) if hour_raw.isdigit() and 0 <= int(hour_raw) <= 23 else None
-
-    # Только смены: Oktell не трогаем. Нужно, чтобы сверить план/факт с разделом даже
-    # когда прокси Oktell недоступен (а он периодически отваливается с Render).
-    if (request.args.get('shifts_only') or '').strip() in ('1', 'true', 'yes'):
-        day_iso = (request.args.get('date') or '').strip() \
-            or datetime.now(ZoneInfo(SZOV_BROADCAST_TIMEZONE)).strftime('%Y-%m-%d')
-        try:
-            rows = _szov_broadcast_shift_rows(day_iso)
-        except Exception as exc:
-            return jsonify({"error": "Не удалось посчитать смены", "detail": str(exc)[:300]}), 500
-        return jsonify({"date": day_iso, "shifts": [
-            {"hour": hour, **(rows.get(hour) or {})} for hour in sorted(rows)
-        ]})
-
-    try:
-        data = _szov_broadcast_collect(hour_to)
-    except Exception as exc:
-        logging.error("Предпросмотр отбивки: данные не собрались: %s", exc)
-        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-
-    which = (request.args.get('image') or '').strip()
-    renderers = {'table': lambda d: _szov_render_hourly_table_png(d['hourly']),
-                 'board': _szov_render_wallboard_png, 'hour': _szov_render_hour_png}
-    if which in renderers:
-        try:
-            blob = renderers[which](data)
-        except Exception as exc:
-            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
-        response = Response(blob, mimetype='image/png')
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-
-    regular, _bold = _szov_font_paths()
-    return jsonify({
-        "text": _szov_broadcast_text(data),
-        "hours": len(data['hourly']),
-        "hour": (data.get('hour') or {}).get('label'),
-        "font_path": regular,
-        "images_available": bool(regular),
-    })
 
 
-def _szov_chat_broadcast_preview():
-    """Предпросмотр отбивки чатов: текст и картинка, ничего не отправляя.
-
-    Нужен там же, где предпросмотр «Линии»: посмотреть вид перед включением и убедиться,
-    что на сервере нашёлся шрифт с кириллицей. Снимок берётся из кэша табло, поэтому
-    предпросмотр не тратит квоту Chat2Desk."""
-    try:
-        data = _szov_chat_broadcast_collect()
-    except Exception as exc:
-        logging.error("Предпросмотр отбивки (чат): данные не собрались: %s", exc)
-        return jsonify({"error": "Не удалось собрать показатели", "detail": str(exc)[:300]}), 502
-
-    if (request.args.get('image') or '').strip() == 'board':
-        try:
-            blob = _szov_render_chat_wallboard_png(data)
-        except Exception as exc:
-            return jsonify({"error": "Не удалось нарисовать картинку", "detail": str(exc)[:300]}), 500
-        response = Response(blob, mimetype='image/png')
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-
-    regular, _bold = _szov_font_paths()
-    return jsonify({
-        "text": _szov_chat_broadcast_text(data),
-        "font_path": regular,
-        "images_available": bool(regular),
-    })
 
 
-@app.route('/api/szov_wallboard/broadcast_test', methods=['POST', 'OPTIONS'])
-@require_api_key
-def api_szov_wallboard_broadcast_test():
-    """Отправить отбивку прямо сейчас — проверить, что чат и картинки настроены.
-
-    Шлём в явно указанный чат и только если он уже в получателях: кнопка проверяет
-    настроенную рассылку, а не служит способом написать в произвольную группу.
-    Режим «только при отклонениях» здесь не действует — проверяют вид сообщения.
-
-    {personal: true} — проверка личной отбивки: пишем самому нажавшему и никому больше."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    requester_id, err = _szov_broadcast_guard()
-    if err:
-        return err
-    payload = request.get_json(silent=True) or {}
-    try:
-        direction = _szov_broadcast_direction_arg(payload)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    if payload.get('personal'):
-        owner = _szov_broadcast_personal_owner(direction)
-        if owner is None:
-            return jsonify({"error": "Лично себе отбивку этого табло получают только админы"}), 403
-        if not owner[1]:
-            return jsonify({"error": "К учётной записи не привязан Telegram — отправлять некуда"}), 400
-        chat_id = int(owner[1])
-    elif _szov_broadcast_is_personal_only():
-        return jsonify({"error": SZOV_BROADCAST_PERSONAL_ONLY_ERROR}), 403
-    else:
-        raw = payload.get('chat_id')
-        recipients = {str(chat['chat_id']): chat
-                      for chat in db.get_szov_broadcast_chats(direction)}
-        if raw in (None, '') and len(recipients) == 1:
-            raw = next(iter(recipients))
-        if str(raw) not in recipients:
-            return jsonify({"error": "Сначала выберите чат"}), 400
-        chat_id = recipients[str(raw)]['chat_id']
-    send = {
-        SZOV_BROADCAST_DIRECTION_CHAT: _szov_chat_broadcast_send,
-        SZOV_BROADCAST_DIRECTION_OP: _op_broadcast_send,
-        SZOV_BROADCAST_DIRECTION_TEZ: _tez_broadcast_send,
-        SZOV_BROADCAST_DIRECTION_OP_CHAT: _op_chat_broadcast_send,
-    }.get(direction, _szov_broadcast_send)
-    try:
-        loop = _bot_event_loop()
-        if loop is None:
-            return jsonify({"error": "Бот не запущен"}), 503
-        future = asyncio.run_coroutine_threadsafe(send(int(chat_id)), loop)
-        future.result(timeout=180)
-        return jsonify({"status": "success", "chat_id": chat_id, "direction": direction})
-    except Exception as exc:
-        logging.error("Отбивка табло: тестовая отправка не удалась: %s", exc, exc_info=True)
-        return jsonify({"error": "Не удалось отправить", "detail": str(exc)[:300]}), 502
 
 
 # === Oktell: распределение звонков на оценку («Деление звонков») ================================
@@ -59061,33 +53425,6 @@ except Exception:
     logging.exception("Раздел «Продакшн»: Blueprint НЕ подключён")
 
 
-def _delete_production_material_blobs(blobs):
-    """Объекты материалов удалённой задачи. Осечка — в журнал, не человеку.
-
-    Незаконченные загрузки сначала отменяются: иначе браузер догрузил бы файл
-    уже после удаления задачи, и объект остался бы в бакете без хозяина.
-    """
-    if not blobs:
-        return
-    from task_production import storage as production_storage
-
-    for blob in blobs:
-        if blob.get('upload_session'):
-            production_storage.cancel_session(blob['upload_session'], origin=blob.get('upload_origin'))
-    try:
-        client = get_gcs_client()
-    except Exception:
-        logging.exception("Продакшн: нет клиента хранилища для уборки материалов")
-        return
-    for blob in blobs:
-        bucket_name, blob_path = blob.get('bucket'), blob.get('blob_path')
-        if not bucket_name or not blob_path:
-            continue
-        try:
-            client.bucket(bucket_name).blob(blob_path).delete()
-        except Exception as delete_error:
-            if delete_error.__class__.__name__ != 'NotFound':
-                logging.warning("Продакшн: не удалось удалить %s: %s", blob_path, delete_error)
 
 
 def _payments_section_open_for(user_id):
@@ -63010,6 +57347,29 @@ def _group_late_generate_report(report_id, date_from, date_to, department, send_
         except Exception as error:
             logging.error("group_late: отчёт %s не ушёл в чат %s: %s", report_id, send_to_chat_id, error)
     return file_bytes, filename, text
+# Раздел «group_late»: ручки вынесены в group_late/routes.py (вынесено из bot_schedule2.py).
+from group_late.routes import build_group_late_blueprint  # noqa: E402
+app.register_blueprint(build_group_late_blueprint(
+        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
+        ROLE_HIERARCHY=ROLE_HIERARCHY,
+        _build_cors_preflight_response=_build_cors_preflight_response,
+        _get_authenticated_requester=_get_authenticated_requester,
+        _get_role_level=_get_role_level,
+        _group_late_generate_report=_group_late_generate_report,
+        _group_late_poll_cycle=_group_late_poll_cycle,
+        _group_late_run_on_bot_loop=_group_late_run_on_bot_loop,
+        _group_late_send_event=_group_late_send_event,
+        _has_min_role=_has_min_role,
+        _headed_department_id=_headed_department_id,
+        _is_admin_role=_is_admin_role,
+        _is_allowed_origin=_is_allowed_origin,
+        _is_global_admin_requester=_is_global_admin_requester,
+        _normalize_origin=_normalize_origin,
+        _normalize_user_role=_normalize_user_role,
+        bot=bot,
+        group_late_pool=group_late_pool,
+        require_api_key=require_api_key,
+))
 
 
 async def _group_late_send_report(chat_id, file_bytes, filename, text):

@@ -59,8 +59,26 @@ def first_line(node):
     return min([node.lineno] + [d.lineno for d in getattr(node, 'decorator_list', [])])
 
 
+# Поиск имени строкой: после переноса globals()/vars() смотрят в пакет, а не в монолит, и
+# статический разбор этого не видит (03.11.2026: отбивка табло ОП и Тез искала резолверы отделов
+# через globals().get и в пакете тихо получала None). Такой код инструмент не переносит.
+DYNAMIC_CALLS = {'globals', 'vars', 'locals', 'eval', 'exec'}
+
+
+def dynamic_lookups(node):
+    """Места, где код ищет имя строкой или трогает пространство имён модуля."""
+    found = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id in DYNAMIC_CALLS:
+            found.append(f'{sub.func.id}() на строке {sub.lineno}')
+        elif (isinstance(sub, ast.Attribute) and sub.attr == 'modules'
+              and isinstance(sub.value, ast.Name) and sub.value.id == 'sys'):
+            found.append(f'sys.modules на строке {sub.lineno}')
+    return found
+
+
 def free_names(node):
-    loads, bound = set(), set()
+    loads, bound, declared_global = set(), set(), set()
     for sub in ast.walk(node):
         if isinstance(sub, ast.Name):
             (loads if isinstance(sub.ctx, ast.Load) else bound).add(sub.id)
@@ -74,9 +92,11 @@ def free_names(node):
         elif isinstance(sub, ast.ExceptHandler) and sub.name:
             bound.add(sub.name)
         elif isinstance(sub, ast.Global):
-            loads.update(sub.names)
-            bound.difference_update(sub.names)
-    return loads - bound
+            declared_global.update(sub.names)
+    # Объявленное global — имя модуля, даже если функция ему присваивает. Учитывать его надо
+    # после обхода: ast.walk идёт в ширину, и присваивание во вложенном блоке встречается позже
+    # объявления (так 03.11.2026 при выносе ручек потерялся флаг слушателя аукциона).
+    return (loads | declared_global) - (bound - declared_global)
 
 
 class Monolith:
@@ -277,11 +297,23 @@ def plan(mono, prefix, package):
     # Переносимые — в порядке объявления в монолите (константы зависят друг от друга).
     moved.sort(key=lambda n: first_line(mono.defs[n]))
     nested.sort(key=lambda n: first_line(mono.defs[n]))
+    # Код, который уедет в пакет: global в нём указывает на модуль пакета, поэтому имя обязано
+    # переехать на уровень модуля пакета (moved). Аргумент строителя или имя, оставшееся в
+    # монолите, через global не достать — NameError в проде, а склейка для тестов это прячет.
+    blocked = []
+    moving = [(node.name, node) for node, _, _ in routes] + [(name, mono.defs[name]) for name in moved + nested]
+    for owner, node in moving:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Global):
+                for name in sub.names:
+                    if name not in moved:
+                        blocked.append(f'{owner}: global {name} — имя не переезжает на уровень модуля пакета')
+        blocked.extend(f'{owner}: {item} — имя ищется строкой' for item in dynamic_lookups(node))
     reimport = []
     return {
         'routes': routes, 'moved': moved, 'nested': nested, 'injected': sorted(injected),
         'flask': sorted(set(flask)), 'imports': sorted(set(imports)), 'unknown': sorted(unknown),
-        'reimport': reimport,
+        'blocked': blocked, 'reimport': reimport,
     }
 
 
@@ -354,6 +386,10 @@ def main():
     print('flask:', p['flask'], '| импорты:', len(p['imports']))
     if p['unknown']:
         print('НЕИЗВЕСТНЫЕ имена:', p['unknown'])
+    if p['blocked']:
+        print('ПЕРЕНОС НЕВОЗМОЖЕН без ручной правки:')
+        for line in p['blocked']:
+            print('  ', line)
     tests = []
     names = [n.name for n, _, _ in p['routes']] + p['moved']
     for entry in sorted(os.listdir(os.path.join(ROOT, 'tests'))):
@@ -363,9 +399,11 @@ def main():
                 tests.append(entry)
     print(f'тесты, читающие эти имена из bot_schedule2: {len(tests)}', tests[:12])
     if args.report:
-        return 1 if p['unknown'] else 0
+        return 1 if p['unknown'] or p['blocked'] else 0
     if p['unknown']:
         raise SystemExit('есть неизвестные имена — перенос остановлен')
+    if p['blocked']:
+        raise SystemExit('global или поиск имени строкой в переносимом коде — перенос остановлен')
 
     target = os.path.join(ROOT, args.package, 'routes.py')
     if os.path.exists(target):

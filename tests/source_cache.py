@@ -150,6 +150,10 @@ def _unnest_routes_module(text):
         if isinstance(node, ast.Expr) and isinstance(getattr(node.value, "value", None), str):
             continue  # докстринг модуля
         if isinstance(node, ast.FunctionDef) and node.name.startswith("build_") and node.name.endswith("_blueprint"):
+            # Поздно связанные имена монолита строитель получает словарём monolith_namespace
+            # (globals() монолита). В склейке всё — один модуль, и этот словарь — его globals().
+            if any(arg.arg == "monolith_namespace" for arg in node.args.kwonlyargs):
+                parts.append("monolith_namespace = globals()")
             for child in node.body:
                 # Функции и константы раздела, завязанные на аргументы строителя, вложены в
                 # него; `bp = Blueprint(...)` и `return bp` — служебные, в склейку не идут.
