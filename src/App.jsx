@@ -11,6 +11,7 @@ import { attachmentCache } from './components/wazzup/attachmentCache';
 // Смена «список ↔ страница сотрудника» — переходом браузера (View Transitions):
 // модуль крошечный и нужен до того, как ленивая страница загрузится.
 import { runPageTransition, usesViewTransitions } from './components/employees/pageTransition';
+import { pageOfEmployeeGroups, pageOfEmployees } from './components/employees/employeesPaging';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
@@ -122,7 +123,7 @@ import useIsMobileShell from './components/common/useIsMobileShell';
 import useOverlayDismiss from './components/common/useOverlayDismiss';
 import sidebarLogo from './components/common/sidebar-logo.svg';
 import sidebarLogoMark from './components/common/sidebar-logo-mark.svg';
-import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
+import { APPLE_FONT, iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosModal, IosPager, IosSection, IosSegmented, IosToggle } from './components/ui/ios';
 // Только сам пикер: minutesToTime/timeToMinutes у модуля свои, а в App.jsx
 // функции с такими именами уже есть — импорт «звёздочкой» их бы перекрыл.
 import { IosTimePicker } from './components/ui/TimePicker';
@@ -44166,6 +44167,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const employeeListScrollRef = useRef(0);
             const employeeListRestoreRef = useRef(false);
             const employeeListFocusIdRef = useRef(null);
+            // Страница списка «Учета сотрудников» (employeesPaging.js) — одна на
+            // раздел: на экране всегда один список. Страница сотрудника
+            // открывается в том же списке, и «назад» приводит на ту же страницу.
+            const [employeeListPage, setEmployeeListPage] = useState(1);
+            const employeeListTopRef = useRef(null);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
             const [userModalGroups, setUserModalGroups] = useState([]);
@@ -51899,6 +51905,36 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 import('./components/employees/EmployeeCardPage').catch(() => {});
             }, [view, isMobileShell]);
 
+            // Сменился список, вкладка статуса, отдел, поиск или порядок — снова
+            // с первой страницы: на прежней пятой нового набора может не быть
+            // никого, а найденное по «Ив…» читают с начала. До отрисовки —
+            // иначе на кадр мелькнула бы прежняя страница.
+            useLayoutEffect(() => {
+                setEmployeeListPage(1);
+            }, [
+                view, isMobileShell,
+                activeUserTab, manageUsersDeptFilter, manageUsersSearchQuery,
+                activeSvTab, supervisorSearchQuery, svListDeptFilter,
+                activeTrainerTab, trainerSearchQuery,
+                activeAdminTab, adminSearchQuery,
+                activeTab, manageOperatorsDeptFilter, manageOperatorsSearchQuery,
+                usersSortField, usersSortDirection, sortField, sortDirection,
+            ]);
+
+            // Номер страницы нажимают под таблицей — новая страница должна
+            // начинаться с первой строки, а не с подвала. Верх списка ушёл за
+            // край поля — подводим его к краю; виден — прокрутку не трогаем.
+            // На телефоне поле не прокручивается (листает окно) — там это
+            // делает сам EmployeesMobileView.
+            const goEmployeeListPage = (nextPage) => {
+                setEmployeeListPage(nextPage);
+                const root = mainContentRef.current;
+                const top = employeeListTopRef.current;
+                if (!root || !top) return;
+                const shift = top.getBoundingClientRect().top - root.getBoundingClientRect().top;
+                if (shift < 0) root.scrollTop += shift - 16;
+            };
+
             // Строка открывает карточку сотрудника (решение владельца 30.09.2026:
             // вместо «трёх точек» в конце строки). Ссылка в ячейке — телефон,
             // Telegram — ведёт по своему адресу, а текст, выделенный мышью, —
@@ -52474,6 +52510,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     <EmployeesMobileView
                         loading={isAdminDataLoading}
                         {...config}
+                        page={employeeListPage}
+                        onPage={goEmployeeListPage}
                         statusTabs={USER_STATUS_FILTER_TABS}
                         isVisibleByStatus={isEmployeeVisibleByStatusTab}
                         statusCodeOf={normalizeEmployeeStatusCode}
@@ -52969,6 +53007,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 const filteredByStatus = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, activeStatusTab));
                 const searchedRows = filteredByStatus.filter((employee) => matchesEmployeeSearchQuery(employee, searchQuery));
                 const sortedRows = [...searchedRows].sort((a, b) => compareUsersByField(a, b, usersSortField));
+                const paged = pageOfEmployees(sortedRows, employeeListPage);
 
                 if (employeeCardId != null) {
                     return renderEmployeeCardPage({
@@ -53044,7 +53083,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         ) : rows.length === 0 ? (
                             <p className="text-center text-gray-600">{emptyText}</p>
                         ) : (
-                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                            <>
+                            <div ref={employeeListTopRef} className="overflow-x-auto rounded-lg border border-gray-200">
                                 <div className="mb-4">
                                     <input
                                         type="text"
@@ -53080,7 +53120,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         </thead>
 
                                         <tbody className="bg-white divide-y divide-gray-200">
-                                            {sortedRows.map((employee) => (
+                                            {paged.rows.map((employee) => (
                                                 <tr
                                                     key={employee.id}
                                                     data-employee-id={employee.id}
@@ -53103,8 +53143,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                         <tfoot className="bg-gray-50">
                                             <tr>
+                                                {/* Страниц несколько — счёт ведёт пейджер под
+                                                    таблицей («51–100 из 312»), второй раз то же
+                                                    число рядом не нужно. */}
                                                 <td className="px-6 py-3 font-medium text-gray-700">
-                                                    {sortedRows.length} {countLabel}
+                                                    {paged.pageCount === 1 && <>{sortedRows.length} {countLabel}</>}
                                                 </td>
                                                 <td colSpan={Math.max(1, columns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                     Показан раздел: {activeEmployeeTableSection.label}
@@ -53114,6 +53157,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </table>
                                 )}
                             </div>
+                            {paged.pageCount > 1 && (
+                                <div className="mt-3">
+                                    <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
+                                              from={paged.from} to={paged.to} onPage={goEmployeeListPage} unit="сотрудники" />
+                                </div>
+                            )}
+                            </>
                         )}
 
                         {renderEmployeeTableSectionSwitcher()}
@@ -58177,7 +58227,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         const searched = filteredUsers.filter((u) => filteredByStatus.includes(u));
 
                                         const sortedUsersFlat = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
-                                        const grouped = { __all__: sortedUsersFlat };
+                                        const paged = pageOfEmployees(sortedUsersFlat, employeeListPage);
+                                        const grouped = { __all__: paged.rows };
                                         const sortedSvNames = ['__all__'];
                                         const selectedManageUsersCount = selectedManageUsersIds.size;
                                         const hasBulkManageUsersChanges =
@@ -58190,7 +58241,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         const availableBulkGroups = (userModalGroups || []).filter((g) => g?.status !== 'archived');
 
                                         return (
-                                        <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                        <>
+                                        <div ref={employeeListTopRef} className="overflow-x-auto rounded-lg border border-gray-200">
                                             <div className="mb-4">
                                             <input
                                                 type="text"
@@ -58350,8 +58402,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                                     <tfoot className="bg-gray-50">
                                                     <tr>
+                                                        {/* Страниц несколько — счёт ведёт пейджер. */}
                                                         <td className="px-6 py-3 font-medium text-gray-700">
-                                                            {svUsers.length} сотрудников
+                                                            {paged.pageCount === 1 && <>{svUsers.length} сотрудников</>}
                                                         </td>
                                                         <td colSpan={Math.max(1, manageUsersSectionColumns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                             Показан раздел: {activeEmployeeTableSection.label}
@@ -58363,6 +58416,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             );
                                             })}
                                         </div>
+                                        {paged.pageCount > 1 && (
+                                            <div className="mt-3">
+                                                <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
+                                                          from={paged.from} to={paged.to} onPage={goEmployeeListPage} unit="сотрудники" />
+                                            </div>
+                                        )}
+                                        </>
                                         );
                                     })()
                                     )}
@@ -59330,8 +59390,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
                                             }
 
+                                            // Страница режет общий порядок «свои → направления»;
+                                            // шапка группы — на каждой странице с её людьми.
+                                            const paged = pageOfEmployeeGroups([
+                                                { key: 'mine', rows: myOperatorsSorted },
+                                                ...sortedDirectionNames.map((dirName) => ({ key: `dir:${dirName}`, title: dirName, rows: grouped[dirName] })),
+                                            ], employeeListPage);
+                                            const pagedMine = paged.groups.find((group) => group.key === 'mine');
+                                            const pagedDirections = paged.groups.filter((group) => group.key !== 'mine');
+
                                             return (
-                                            <div className="overflow-x-auto rounded-lg border border-gray-200">
+                                            <>
+                                            <div ref={employeeListTopRef} className="overflow-x-auto rounded-lg border border-gray-200">
                                                 <div className="mb-4 p-4">
                                                 <input
                                                     type="text"
@@ -59367,15 +59437,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </thead>
 
                                                 <tbody className="bg-white divide-y divide-gray-200">
-                                                    {myOperatorsSorted.length > 0 && (
+                                                    {pagedMine && (
                                                     <React.Fragment>
                                                         <tr className="bg-gray-100">
                                                         <td colSpan={employeeSectionColumns.length + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm font-semibold text-gray-700">
-                                                            Мои операторы <span className="ml-2 text-xs text-gray-500">({myOperatorsSorted.length})</span>
+                                                            Мои операторы <span className="ml-2 text-xs text-gray-500">({pagedMine.total})</span>
                                                         </td>
                                                         </tr>
 
-                                                        {myOperatorsSorted.map((op) => (
+                                                        {pagedMine.rows.map((op) => (
                                                         <tr key={`my-op-${op.id}`} className="hover:bg-gray-50 transition-colors duration-200">
                                                             {employeeSectionColumns.map((column) => (
                                                                 <td
@@ -59424,15 +59494,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     </React.Fragment>
                                                     )}
 
-                                                    {sortedDirectionNames.map((dirName) => (
-                                                    <React.Fragment key={dirName}>
+                                                    {pagedDirections.map((group) => (
+                                                    <React.Fragment key={group.key}>
                                                         <tr className="bg-gray-100">
                                                         <td colSpan={employeeSectionColumns.length + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm font-semibold text-gray-700">
-                                                            {dirName} <span className="ml-2 text-xs text-gray-500">({grouped[dirName].length})</span>
+                                                            {group.title} <span className="ml-2 text-xs text-gray-500">({group.total})</span>
                                                         </td>
                                                         </tr>
 
-                                                        {grouped[dirName].map((op) => (
+                                                        {group.rows.map((op) => (
                                                         <tr key={op.id} className="hover:bg-gray-50 transition-colors duration-200">
                                                             {employeeSectionColumns.map((column) => (
                                                                 <td
@@ -59484,7 +59554,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
-                                                    <td className="px-6 py-3 font-medium text-gray-700">{matched.length} операторов</td>
+                                                    {/* Страниц несколько — счёт ведёт пейджер. */}
+                                                    <td className="px-6 py-3 font-medium text-gray-700">{paged.pageCount === 1 && <>{matched.length} операторов</>}</td>
                                                     <td colSpan={employeeSectionColumns.length - 1 + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm text-gray-600">
                                                         Показан раздел: {activeEmployeeTableSection.label}
                                                     </td>
@@ -59492,6 +59563,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </tfoot>
                                                 </table>
                                             </div>
+                                            {paged.pageCount > 1 && (
+                                                <div className="mt-3">
+                                                    <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
+                                                              from={paged.from} to={paged.to} onPage={goEmployeeListPage} unit="сотрудники" />
+                                                </div>
+                                            )}
+                                            </>
                                             );
                                         })()
                                         )}

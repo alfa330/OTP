@@ -1,6 +1,7 @@
 import React from 'react';
 import MobileActionSheet from '../common/MobileActionSheet';
-import { IosModal } from '../ui/ios';
+import { IosModal, IosPager } from '../ui/ios';
+import { pageOfEmployeeGroups } from './employeesPaging';
 import {
     buildCardSections,
     countByStatus,
@@ -28,8 +29,9 @@ import './employees-mobile.css';
  *   • подтверждения и порядок — листами снизу, а не окнами посреди экрана;
  *   • массовая правка — режимом «Выбрать», как в «Сессиях».
  *
- * Состояние (поиск, вкладка, отдел, порядок, выбор) живёт в App.jsx и общее с
- * компьютером; правила списка — employeesPhoneList.js. Здесь только раскладка.
+ * Состояние (поиск, вкладка, отдел, порядок, выбор, страница) живёт в App.jsx
+ * и общее с компьютером; правила списка — employeesPhoneList.js, страницы —
+ * employeesPaging.js. Здесь только раскладка.
  * Один компонент на все пять списков раздела: «Супервайзеры», «Сотрудники»,
  * «Тренеры», «Админы» и «Операторы» у СВ и тренера.
  */
@@ -119,6 +121,8 @@ export default function EmployeesMobileView({
     sortDir,
     onSort,
     compare,
+    page = 1,
+    onPage,
     operatorGroups = null,
     subtitleOf = null,
     department = null,
@@ -143,6 +147,7 @@ export default function EmployeesMobileView({
     const lastCardRef = React.useRef(null);
     const lastPendingRef = React.useRef(null);
     const applyAskedRef = React.useRef(false);
+    const summaryRef = React.useRef(null);
 
     const allRows = Array.isArray(rows) ? rows : [];
     const rowsById = new Map(allRows.map((row) => [Number(row?.id), row]));
@@ -153,10 +158,12 @@ export default function EmployeesMobileView({
     const groups = operatorGroups
         ? groupOperators(matched, { ...operatorGroups, compare, sortField, sortDir })
         : [{ key: 'all', title: '', rows: [...matched].sort(compare) }];
+    // «Выбрать всех» — все найденные, а не одна страница.
     const visibleIds = groups
         .flatMap((group) => group.rows)
         .map((row) => Number(row?.id))
         .filter((id) => Number.isFinite(id));
+    const paged = pageOfEmployeeGroups(groups, page);
 
     const sortOptions = sortOptionsFromColumns(columnsFor('general'));
     const currentSort = sortOptions.find((option) => option.field === sortField) || sortOptions[0];
@@ -207,6 +214,17 @@ export default function EmployeesMobileView({
     const runAction = (action) => {
         if (action.confirm) setPending(action);
         else action.onClick();
+    };
+
+    /* Номер страницы нажимают под списком — новая страница начинается с
+       первой строки: подпись списка ушла под верх экрана — подводим её туда
+       (отступ от верха — scroll-margin-top в employees-mobile.css). */
+    const turnPage = (next) => {
+        onPage(next);
+        const summary = summaryRef.current;
+        if (!summary) return;
+        const margin = parseFloat(window.getComputedStyle(summary).scrollMarginTop) || 0;
+        if (summary.getBoundingClientRect().top < margin) summary.scrollIntoView({ block: 'start' });
     };
 
     const renderRow = (employee, groupKey) => {
@@ -467,7 +485,7 @@ export default function EmployeesMobileView({
                 <div className="emp-m-empty">{loading ? 'Загрузка…' : emptyText}</div>
             ) : (
                 <>
-                    <div className="emp-m-summary">
+                    <div className="emp-m-summary" ref={summaryRef}>
                         <span className="emp-m-caption">
                             {query ? `Найдено: ${matched.length}` : `${matched.length} ${plural(matched.length, countWords)}`}
                         </span>
@@ -481,16 +499,23 @@ export default function EmployeesMobileView({
 
                     {matched.length === 0 ? (
                         <div className="emp-m-empty">{query ? emptySearchText : emptyText}</div>
-                    ) : groups.map((group) => (
+                    ) : paged.groups.map((group) => (
                         <section key={group.key} className="emp-m-block">
                             {group.title && (
-                                <div className="emp-m-caption">{group.title} · {group.rows.length}</div>
+                                <div className="emp-m-caption">{group.title} · {group.total}</div>
                             )}
                             <ul className="emp-m-list" aria-busy={loading ? 'true' : undefined}>
                                 {group.rows.map((employee) => renderRow(employee, group.key))}
                             </ul>
                         </section>
                     ))}
+
+                    {paged.pageCount > 1 && (
+                        <div className="emp-m-pager">
+                            <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
+                                      from={paged.from} to={paged.to} onPage={turnPage} unit="сотрудники" />
+                        </div>
+                    )}
                 </>
             )}
 

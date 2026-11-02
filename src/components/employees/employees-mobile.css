@@ -258,6 +258,10 @@ body.mobile-shell .emp-m-summary {
     gap: 12px;
     margin: 22px 0 0;
     padding: 0 2px 0 16px;
+    /* Сюда список подъезжает при смене страницы: под полосу с именем
+       раздела (её высота — верхнее поле .main-content в mobile-shell.css),
+       а не под часы. */
+    scroll-margin-top: calc(54px + max(10px, env(safe-area-inset-top)));
 }
 
 body.mobile-shell .emp-m-summary + .emp-m-block {
@@ -306,6 +310,12 @@ body.mobile-shell .emp-m-list {
     overflow: hidden;
     background: var(--sheet-card);
     box-shadow: 0 0 0 0.5px var(--sheet-sep);
+}
+
+/* Страницы — общий IosPager под последней группой. */
+body.mobile-shell .emp-m-pager {
+    margin-top: 14px;
+    padding: 0 4px;
 }
 
 body.mobile-shell .emp-m-list[aria-busy="true"] {
