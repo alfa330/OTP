@@ -290,10 +290,19 @@ class DismissalInterruptTests(unittest.TestCase):
 
 
 class StatusPeriodWiringTests(unittest.TestCase):
-    """save_schedule_status_period — порядок и связка с детектором отработанных дней."""
+    """Запись периода статуса — порядок и связка с детектором отработанных дней.
+
+    Сама запись живёт в _save_schedule_status_period_tx (публичный
+    save_schedule_status_period только открывает транзакцию): её же зовёт
+    утверждение заявки на отпуск (задача #358)."""
 
     def setUp(self):
-        self.source = _method_source("save_schedule_status_period")
+        self.source = _method_source("_save_schedule_status_period_tx")
+
+    def test_public_method_only_wraps_the_tx_variant(self):
+        wrapper = _method_source("save_schedule_status_period")
+        self.assertIn("self._save_schedule_status_period_tx(", wrapper)
+        self.assertNotIn("_delete_shifts_for_period_tx", wrapper)
 
     def test_worked_days_are_computed_before_the_delete(self):
         detect = self.source.index("_schedule_days_with_worked_time_tx")

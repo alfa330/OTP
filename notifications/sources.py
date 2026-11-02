@@ -39,8 +39,8 @@ from datetime import datetime, time as day_time, timedelta
 #
 # «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
 SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'hiring', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events', 'four_you',
-           'birthdays')
+           'leave_requests', 'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events',
+           'four_you', 'birthdays')
 
 # В какие разделы ведут строки источника — все значения поля 'view' его
 # элементов. None — строка никуда не ведёт: день рождения и свой назначенный
@@ -58,6 +58,7 @@ SOURCE_VIEWS = {
     'wiki_questions': ('wiki',),
     'checkpoints': ('evaluation', 'call_evaluation'),
     'shift_requests': ('work_schedules',),
+    'leave_requests': ('work_schedules',),
     'crm': ('crm_tickets',),
     'complaints': ('complaints',),
     'training_plans': ('complaints', None),
@@ -1083,6 +1084,103 @@ def shift_requests(cursor, viewer, limit):
     } for row in rows]
 
 
+# ── Заявки на отпуск и Б/С ───────────────────────────────────────────────────
+
+_LEAVE_KIND_LABELS = {'annual_leave': 'Отпуск', 'bs': 'Б/С'}
+
+_LEAVE_OPERATOR_TITLES = {
+    'proposal': 'Предложены другие даты',
+    'approved': 'Заявка утверждена',
+    'rejected': 'Заявка отклонена',
+}
+
+
+def _leave_period(start, end):
+    if start == end:
+        return start.strftime('%d.%m')
+    return '%s — %s' % (start.strftime('%d.%m'), end.strftime('%d.%m'))
+
+
+def leave_requests(cursor, viewer, limit):
+    """Заявки на отпуск и Б/С (задача #358) — у каждой стороны свой ход.
+
+    ОПЕРАТОРУ — предложенные супервайзером даты (ждут его ответа) и решение
+    по заявке, пока он не открыл «Запросы». Предложение гаснет только ответом:
+    просмотром его не закрыть, иначе вопрос СВ остался бы без ответа.
+
+    СУПЕРВАЙЗЕРУ — заявки его людей на шаге СВ (supervisor_id — снимок СВ
+    группы на момент подачи). ГЛАВЕ — заявки его отдела на шаге руководителя
+    и осиротевшие на шаге СВ (СВ удалён). Разобранная уходит сама: колокол
+    считает заявки по состоянию, а не по отметкам прочтения.
+    """
+    params = {'user_id': viewer['user_id'], 'limit': limit}
+    if str(viewer.get('role') or '') == 'operator':
+        cursor.execute(
+            """
+            SELECT r.id, r.status, r.kind, r.start_date, r.end_date,
+                   r.proposed_start_date, r.proposed_end_date, r.updated_at,
+                   COUNT(*) OVER () AS total
+              FROM leave_requests r
+             WHERE r.operator_id = %(user_id)s
+               AND (r.status = 'proposal'
+                    OR (r.status IN ('approved', 'rejected') AND r.operator_seen_at IS NULL))
+             ORDER BY r.updated_at DESC, r.id DESC
+             LIMIT %(limit)s
+            """,
+            params,
+        )
+        rows = cursor.fetchall()
+        total = int(rows[0][8]) if rows else 0
+        items = []
+        for row in rows:
+            start, end = (row[5], row[6]) if row[1] == 'proposal' and row[5] else (row[3], row[4])
+            items.append({
+                'source': 'leave_requests',
+                'id': row[0],
+                'title': _LEAVE_OPERATOR_TITLES.get(row[1], 'Заявка на отпуск'),
+                'body': '%s · %s' % (_LEAVE_KIND_LABELS.get(row[2], ''), _leave_period(start, end)),
+                'at': _iso(row[7]),
+                'view': 'work_schedules',
+                'target': 'leave:%d' % row[0],
+                'tone': 'default',
+            })
+        return total, items
+
+    cursor.execute(
+        """
+        WITH headed AS (
+            SELECT d.id FROM departments d WHERE d.head_user_id = %(user_id)s
+        )
+        SELECT r.id, op.name, r.kind, r.start_date, r.end_date, r.created_at,
+               COUNT(*) OVER () AS total
+          FROM leave_requests r
+          JOIN users op ON op.id = r.operator_id
+         WHERE r.operator_id <> %(user_id)s
+           AND (
+                (r.status = 'supervisor' AND r.supervisor_id = %(user_id)s)
+             OR (r.status = 'head' AND r.department_id IN (SELECT id FROM headed))
+             OR (r.status = 'supervisor' AND r.supervisor_id IS NULL
+                 AND r.department_id IN (SELECT id FROM headed))
+           )
+         ORDER BY r.start_date, r.id
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+    rows = cursor.fetchall()
+    total = int(rows[0][6]) if rows else 0
+    return total, [{
+        'source': 'leave_requests',
+        'id': row[0],
+        'title': row[1] or 'Сотрудник',
+        'body': '%s · %s' % (_LEAVE_KIND_LABELS.get(row[2], ''), _leave_period(row[3], row[4])),
+        'at': _iso(row[5]),
+        'view': 'work_schedules',
+        'target': 'leave:%d' % row[0],
+        'tone': 'default',
+    } for row in rows]
+
+
 # ── Вопросы операторов ───────────────────────────────────────────────────────
 def wiki_questions(cursor, viewer, limit):
     """Вопросы, на которые помощник не ответил (задача #321, wiki/questions.py).
@@ -1156,6 +1254,7 @@ _HANDLERS = {
     'wiki_questions': wiki_questions,
     'checkpoints': checkpoints,
     'shift_requests': shift_requests,
+    'leave_requests': leave_requests,
     'crm': crm,
     'complaints': complaints,
     'training_plans': training_plans,

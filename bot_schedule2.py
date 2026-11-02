@@ -52868,6 +52868,71 @@ except Exception:
     logging.exception("Раздел «Дисциплина»: Blueprint НЕ подключён")
 
 
+# ── Заявки на отпуск и Б/С (задача #358) ─────────────────────────────────────
+# Подаёт оператор в «Моих сменах» → «Запросы», разбирают СВ и глава отдела в
+# «Графиках работы» → «Запросы». Кто кого видит — та же граница, что у
+# «Запросов по сменам» (_filter_operators_for_requester_scope); утверждённая
+# заявка ставит период в график тем же _tx-кодом, что и ручная отметка.
+def _leave_requests_viewer(requester_id, requester):
+    role = _normalize_user_role(requester[3])
+    headed = sorted(int(d) for d in _headed_department_ids(requester_id))
+    return {
+        'user_id': int(requester_id),
+        'role': role,
+        'department_id': db.get_user_department_id(requester_id),
+        'is_admin': _is_global_admin_requester(role, requester_id),
+        'is_supervisor': _is_supervisor_role(role),
+        'headed_department_ids': headed,
+        'is_manager': bool(_is_admin_role(role) or _is_supervisor_role(role) or headed),
+    }
+
+
+def _leave_requests_scope(requester, requester_id, operator_ids):
+    allowed = _filter_operators_for_requester_scope(
+        requester, requester_id, [{'id': int(oid)} for oid in operator_ids or []]
+    )
+    return [oid for oid in (_operator_item_id(item) for item in allowed) if oid is not None]
+
+
+def _leave_requests_supervisor(cursor, operator_id, day):
+    group_id = db._get_operator_group_id_tx(cursor, operator_id, day)
+    return db._group_active_supervisor_id_tx(cursor, group_id) if group_id else None
+
+
+def _leave_requests_apply_period(cursor, *, operator_id, kind, start, end, created_by,
+                                 exclude_from_tenure, comment):
+    from leave_requests.rules import LeaveError
+    try:
+        return db._save_schedule_status_period_tx(
+            cursor, operator_id, kind, start, end_date=end, comment=comment,
+            created_by=created_by, exclude_from_tenure=exclude_from_tenure,
+        )
+    except ValueError as exc:
+        # График отказал (например, ЧС-увольнение в эти даты) — это ответ
+        # человеку, а не сбой сервера.
+        raise LeaveError(str(exc), code='LEAVE_SCHEDULE_REJECTED', status=409) from None
+
+
+try:
+    from leave_requests.routes import build_leave_requests_blueprint  # noqa: E402
+
+    app.register_blueprint(build_leave_requests_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        viewer_context=_leave_requests_viewer,
+        scope_filter=_leave_requests_scope,
+        resolve_supervisor=_leave_requests_supervisor,
+        apply_period=_leave_requests_apply_period,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+    ))
+    logging.info("Заявки на отпуск и Б/С: Blueprint подключён на /api/leave_requests")
+except Exception:
+    logging.exception("Заявки на отпуск и Б/С: Blueprint НЕ подключён")
+
+
 # ── Раздел «Посылки» (реестр невостребованных посылок фронт-офисов) ──────────
 # Тот же приём, что у вики и обращений. Ключ sensitive-access тот же самый:
 # в карточке ФИО и телефон живого водителя, и оба отдела — фронт-офисы и СЗоВ —

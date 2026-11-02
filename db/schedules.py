@@ -1364,8 +1364,10 @@ class SchedulesMixin:
     def _serialize_schedule_status_period(self, row):
         period_id, operator_id, status_code, start_date_value, end_date_value, dismissal_reason, comment = row[:7]
         is_blacklist = bool(row[7]) if len(row) > 7 else False
+        exclude_from_tenure = bool(row[8]) if len(row) > 8 else False
         meta = SCHEDULE_SPECIAL_STATUS_META.get(status_code, {})
         return {
+            'excludeFromTenure': exclude_from_tenure,
             'id': int(period_id),
             'operatorId': int(operator_id),
             'statusCode': status_code,
@@ -2737,6 +2739,41 @@ class SchedulesMixin:
         Сохранить период специального статуса оператора.
         Новая запись замещает пересекающиеся периоды (с обрезкой/разделением при необходимости).
         """
+        with self._get_cursor() as cursor:
+            return self._save_schedule_status_period_tx(
+                cursor,
+                operator_id,
+                status_code,
+                start_date,
+                end_date=end_date,
+                dismissal_reason=dismissal_reason,
+                is_blacklist=is_blacklist,
+                comment=comment,
+                created_by=created_by
+            )
+
+    def _save_schedule_status_period_tx(
+        self,
+        cursor,
+        operator_id,
+        status_code,
+        start_date,
+        end_date=None,
+        dismissal_reason=None,
+        is_blacklist=False,
+        comment=None,
+        created_by=None,
+        exclude_from_tenure=False
+    ):
+        """То же, что save_schedule_status_period, но в транзакции вызывающего.
+
+        Нужен заявкам на отпуск и Б/С (задача #358): утверждение заявки и
+        период в графике — одна транзакция, иначе сбой между ними оставил бы
+        «утверждённую» заявку без отметки в графике или наоборот.
+
+        exclude_from_tenure — период не идёт в стаж (длительный Б/С, п. 8 ТЗ).
+        При разрезании пересекающегося периода его остатки флаг сохраняют.
+        """
         operator_id = int(operator_id)
         status_code_norm = self._normalize_schedule_status_code(status_code)
         start_date_obj = self._normalize_schedule_date(start_date)
@@ -2772,161 +2809,167 @@ class SchedulesMixin:
         infinite_date = date(9999, 12, 31)
         new_end_cmp = end_date_obj or infinite_date
 
-        with self._get_cursor() as cursor:
-            cursor.execute("""
-                SELECT id, status_code, start_date, end_date, dismissal_reason, comment, created_by, COALESCE(is_blacklist, FALSE)
-                FROM operator_schedule_status_periods
-                WHERE operator_id = %s
-                  AND start_date <= %s
-                  AND COALESCE(end_date, DATE '9999-12-31') >= %s
-                ORDER BY start_date, id
-            """, (operator_id, new_end_cmp, start_date_obj))
-            overlapping = cursor.fetchall()
+        cursor.execute("""
+            SELECT id, status_code, start_date, end_date, dismissal_reason, comment, created_by, COALESCE(is_blacklist, FALSE),
+                   COALESCE(exclude_from_tenure, FALSE)
+            FROM operator_schedule_status_periods
+            WHERE operator_id = %s
+              AND start_date <= %s
+              AND COALESCE(end_date, DATE '9999-12-31') >= %s
+            ORDER BY start_date, id
+        """, (operator_id, new_end_cmp, start_date_obj))
+        overlapping = cursor.fetchall()
 
-            has_blacklist_dismissal_overlap = any(
-                str(row[1]) == 'dismissal' and bool(row[7])
-                for row in overlapping
-            )
-            if has_blacklist_dismissal_overlap:
-                raise ValueError("ЧС-увольнение нельзя изменить или перекрыть другим статусом")
+        has_blacklist_dismissal_overlap = any(
+            str(row[1]) == 'dismissal' and bool(row[7])
+            for row in overlapping
+        )
+        if has_blacklist_dismissal_overlap:
+            raise ValueError("ЧС-увольнение нельзя изменить или перекрыть другим статусом")
 
-            for row in overlapping:
-                (
-                    existing_id,
-                    existing_status_code,
-                    existing_start,
-                    existing_end,
-                    existing_dismissal_reason,
-                    existing_comment,
-                    existing_created_by,
-                    existing_is_blacklist
-                ) = row
-                existing_end_cmp = existing_end or infinite_date
+        for row in overlapping:
+            (
+                existing_id,
+                existing_status_code,
+                existing_start,
+                existing_end,
+                existing_dismissal_reason,
+                existing_comment,
+                existing_created_by,
+                existing_is_blacklist,
+                existing_exclude_from_tenure
+            ) = row
+            existing_end_cmp = existing_end or infinite_date
 
-                left_exists = existing_start < start_date_obj
-                right_exists = (end_date_obj is not None) and (existing_end_cmp > end_date_obj)
+            left_exists = existing_start < start_date_obj
+            right_exists = (end_date_obj is not None) and (existing_end_cmp > end_date_obj)
 
-                if left_exists and right_exists:
-                    left_end = start_date_obj - timedelta(days=1)
-                    right_start = end_date_obj + timedelta(days=1)
-
-                    cursor.execute("""
-                        UPDATE operator_schedule_status_periods
-                        SET end_date = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (left_end, existing_id))
-
-                    cursor.execute("""
-                        INSERT INTO operator_schedule_status_periods (
-                            operator_id, status_code, start_date, end_date,
-                            dismissal_reason, is_blacklist, comment, created_by, created_at, updated_at
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    """, (
-                        operator_id,
-                        existing_status_code,
-                        right_start,
-                        existing_end,
-                        existing_dismissal_reason,
-                        bool(existing_is_blacklist),
-                        existing_comment,
-                        existing_created_by
-                    ))
-                    continue
-
-                if left_exists:
-                    left_end = start_date_obj - timedelta(days=1)
-                    cursor.execute("""
-                        UPDATE operator_schedule_status_periods
-                        SET end_date = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (left_end, existing_id))
-                    continue
-
-                if right_exists:
-                    right_start = end_date_obj + timedelta(days=1)
-                    cursor.execute("""
-                        UPDATE operator_schedule_status_periods
-                        SET start_date = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                    """, (right_start, existing_id))
-                    continue
+            if left_exists and right_exists:
+                left_end = start_date_obj - timedelta(days=1)
+                right_start = end_date_obj + timedelta(days=1)
 
                 cursor.execute("""
-                    DELETE FROM operator_schedule_status_periods
+                    UPDATE operator_schedule_status_periods
+                    SET end_date = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
-                """, (existing_id,))
+                """, (left_end, existing_id))
+
+                cursor.execute("""
+                    INSERT INTO operator_schedule_status_periods (
+                        operator_id, status_code, start_date, end_date,
+                        dismissal_reason, is_blacklist, comment, created_by, exclude_from_tenure,
+                        created_at, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, (
+                    operator_id,
+                    existing_status_code,
+                    right_start,
+                    existing_end,
+                    existing_dismissal_reason,
+                    bool(existing_is_blacklist),
+                    existing_comment,
+                    existing_created_by,
+                    bool(existing_exclude_from_tenure)
+                ))
+                continue
+
+            if left_exists:
+                left_end = start_date_obj - timedelta(days=1)
+                cursor.execute("""
+                    UPDATE operator_schedule_status_periods
+                    SET end_date = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (left_end, existing_id))
+                continue
+
+            if right_exists:
+                right_start = end_date_obj + timedelta(days=1)
+                cursor.execute("""
+                    UPDATE operator_schedule_status_periods
+                    SET start_date = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (right_start, existing_id))
+                continue
 
             cursor.execute("""
-                INSERT INTO operator_schedule_status_periods (
-                    operator_id, status_code, start_date, end_date,
-                    dismissal_reason, is_blacklist, comment, created_by, created_at, updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist
-            """, (
-                operator_id,
-                status_code_norm,
-                start_date_obj,
-                end_date_obj,
-                dismissal_reason_norm,
-                is_blacklist_norm,
-                comment_norm,
-                created_by_id
-            ))
-            saved_row = cursor.fetchone()
-            # В истории графика отпуск/больничный/увольнение виден как снятие смен:
-            # снимок берём только по дням, где действительно что-то стоит, — период
-            # увольнения открытый, и «до конца времён» снимать нечего и незачем.
-            audit_actor = self._schedule_change_actor(
-                cursor, actor_id=created_by_id, source='status_period'
+                DELETE FROM operator_schedule_status_periods
+                WHERE id = %s
+            """, (existing_id,))
+
+        cursor.execute("""
+            INSERT INTO operator_schedule_status_periods (
+                operator_id, status_code, start_date, end_date,
+                dismissal_reason, is_blacklist, comment, created_by, exclude_from_tenure,
+                created_at, updated_at
             )
-            audit_before = self._snapshot_schedule_days_tx(
-                cursor,
-                self._schedule_days_with_records_tx(cursor, operator_id, start_date_obj, end_date_obj)
-            )
-            # Отработанный день статус не снимает: иначе увольнение (или задним
-            # числом поставленный отпуск/больничный) обнуляет часы за смену,
-            # которую человек уже отработал.
-            worked_days = self._schedule_days_with_worked_time_tx(
-                cursor=cursor,
-                operator_id=operator_id,
-                start_date=start_date_obj,
-                end_date=end_date_obj
-            )
-            deleted_schedule = self._delete_shifts_for_period_tx(
-                cursor=cursor,
-                operator_id=operator_id,
-                start_date=start_date_obj,
-                end_date=end_date_obj,
-                keep_days=worked_days
-            )
-            self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
-            recalc_end_date_obj = end_date_obj
-            if recalc_end_date_obj is None:
-                recalc_end_date_obj = start_date_obj
-                if isinstance(deleted_schedule, dict):
-                    max_deleted_shift_date = deleted_schedule.get('max_deleted_shift_date')
-                    max_deleted_day_off_date = deleted_schedule.get('max_deleted_day_off_date')
-                    if isinstance(max_deleted_shift_date, date) and max_deleted_shift_date > recalc_end_date_obj:
-                        recalc_end_date_obj = max_deleted_shift_date
-                    if isinstance(max_deleted_day_off_date, date) and max_deleted_day_off_date > recalc_end_date_obj:
-                        recalc_end_date_obj = max_deleted_day_off_date
-            self._recalculate_auto_daily_hours_tx(
-                cursor=cursor,
-                operator_ids=[operator_id],
-                start_date=start_date_obj,
-                end_date=recalc_end_date_obj
-            )
-            self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
-            serialized = self._serialize_schedule_status_period(saved_row)
-            # Дни, смены за которые остались: раздел должен объяснить, почему смена
-            # уволенного никуда не делась, — по ней есть отработанные часы.
-            serialized['keptWorkedDays'] = [
-                day.strftime('%Y-%m-%d')
-                for day in ((deleted_schedule or {}).get('kept_shift_days') or [])
-            ]
-            return serialized
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            RETURNING id, operator_id, status_code, start_date, end_date, dismissal_reason, comment, is_blacklist,
+                      exclude_from_tenure
+        """, (
+            operator_id,
+            status_code_norm,
+            start_date_obj,
+            end_date_obj,
+            dismissal_reason_norm,
+            is_blacklist_norm,
+            comment_norm,
+            created_by_id,
+            bool(exclude_from_tenure)
+        ))
+        saved_row = cursor.fetchone()
+        # В истории графика отпуск/больничный/увольнение виден как снятие смен:
+        # снимок берём только по дням, где действительно что-то стоит, — период
+        # увольнения открытый, и «до конца времён» снимать нечего и незачем.
+        audit_actor = self._schedule_change_actor(
+            cursor, actor_id=created_by_id, source='status_period'
+        )
+        audit_before = self._snapshot_schedule_days_tx(
+            cursor,
+            self._schedule_days_with_records_tx(cursor, operator_id, start_date_obj, end_date_obj)
+        )
+        # Отработанный день статус не снимает: иначе увольнение (или задним
+        # числом поставленный отпуск/больничный) обнуляет часы за смену,
+        # которую человек уже отработал.
+        worked_days = self._schedule_days_with_worked_time_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            start_date=start_date_obj,
+            end_date=end_date_obj
+        )
+        deleted_schedule = self._delete_shifts_for_period_tx(
+            cursor=cursor,
+            operator_id=operator_id,
+            start_date=start_date_obj,
+            end_date=end_date_obj,
+            keep_days=worked_days
+        )
+        self._record_schedule_day_changes_tx(cursor, audit_before, audit_actor)
+        recalc_end_date_obj = end_date_obj
+        if recalc_end_date_obj is None:
+            recalc_end_date_obj = start_date_obj
+            if isinstance(deleted_schedule, dict):
+                max_deleted_shift_date = deleted_schedule.get('max_deleted_shift_date')
+                max_deleted_day_off_date = deleted_schedule.get('max_deleted_day_off_date')
+                if isinstance(max_deleted_shift_date, date) and max_deleted_shift_date > recalc_end_date_obj:
+                    recalc_end_date_obj = max_deleted_shift_date
+                if isinstance(max_deleted_day_off_date, date) and max_deleted_day_off_date > recalc_end_date_obj:
+                    recalc_end_date_obj = max_deleted_day_off_date
+        self._recalculate_auto_daily_hours_tx(
+            cursor=cursor,
+            operator_ids=[operator_id],
+            start_date=start_date_obj,
+            end_date=recalc_end_date_obj
+        )
+        self._sync_user_statuses_from_schedule_periods_tx(cursor, operator_ids=[operator_id])
+        serialized = self._serialize_schedule_status_period(saved_row)
+        # Дни, смены за которые остались: раздел должен объяснить, почему смена
+        # уволенного никуда не делась, — по ней есть отработанные часы.
+        serialized['keptWorkedDays'] = [
+            day.strftime('%Y-%m-%d')
+            for day in ((deleted_schedule or {}).get('kept_shift_days') or [])
+        ]
+        return serialized
 
     def delete_schedule_status_period(self, status_period_id, operator_id=None):
         """

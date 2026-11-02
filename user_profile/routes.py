@@ -190,6 +190,14 @@ def build_user_profile_blueprint(
             except Exception:
                 profile_data.setdefault("job_title", None)
                 profile_data.setdefault("department_name", None)
+            # Дни длительного Б/С, которые глава решил не считать в стаж (задача
+            # #358, п. 8): на них «Стаж» в профиле и стаж в оценке зарплаты
+            # начинаются позже даты найма. Сбой — стаж просто по найму, как раньше.
+            try:
+                profile_data["tenure_excluded_days"] = db.get_tenure_excluded_days(user[0])
+            except Exception:
+                logging.warning("Не удалось посчитать дни вне стажа для %s", user[0], exc_info=True)
+                profile_data["tenure_excluded_days"] = 0
 
             logging.info(f"Profile data fetched successfully for user_id: {user_id}")
             return jsonify({"status": "success", "profile": profile_data}), 200

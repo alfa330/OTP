@@ -2599,6 +2599,26 @@ class SchemaMixin:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Период, который не идёт в стаж (задача #358, п. 8: длительный Б/С).
+            # Флаг живёт на периоде графика, а не на заявке: стаж считается по
+            # тому, что стоит в графике, — заявка лишь один из путей туда.
+            # ALTER — только когда колонки ещё нет: даже с IF NOT EXISTS он берёт
+            # ACCESS EXCLUSIVE до конца инициализации, а таблицу читает каждый
+            # экран графиков.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'operator_schedule_status_periods'
+                           AND column_name = 'exclude_from_tenure'
+                    ) THEN
+                        ALTER TABLE operator_schedule_status_periods
+                            ADD COLUMN exclude_from_tenure BOOLEAN NOT NULL DEFAULT FALSE;
+                    END IF;
+                END $$;
+            """)
             # Временная ставка оператора на период — ТОЛЬКО для расчёта ресурсов и
             # аукциона смен. Заводится решением владельца 29.08.2026: график на
             # следующую неделю строится по ставкам, которых в карточках ещё нет
@@ -2699,6 +2719,13 @@ class SchemaMixin:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_end
                 ON operator_schedule_status_periods(operator_id, end_date);
+            """)
+            # Стаж: периоды «не в стаж» читаются при каждом расчёте цели оценок и
+            # профиля — частичный индекс крошечный, их единицы.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_tenure
+                ON operator_schedule_status_periods(operator_id)
+                WHERE exclude_from_tenure;
             """)
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_op_sched_status_periods_operator_range
@@ -5649,6 +5676,7 @@ class SchemaMixin:
             self._init_library_schema_tx(cursor)
             self._init_complaints_schema_tx(cursor)
             self._init_discipline_schema_tx(cursor)
+            self._init_leave_requests_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
             self._init_test_numbers_schema_tx(cursor)
@@ -5951,6 +5979,18 @@ class SchemaMixin:
                           AND d.head_user_id IS NOT NULL
                           AND (o.user_id IS NOT NULL OR NEW.supervisor_id IS NULL)
                     );
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.supervisor_id];
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'leave_requests' THEN
+                    -- Заявка на отпуск или Б/С (задача #358): оператор (ответ,
+                    -- предложенные даты), СВ из снимка (его шаг) и глава отдела
+                    -- (его шаг, утверждение). Глава будится при любой смене
+                    -- статуса: круг шире точного на одну перечитку сводки, зато
+                    -- без второй копии правила «чей сейчас ход» на PL/pgSQL.
+                    targets := ARRAY[NEW.operator_id, NEW.supervisor_id] || ARRAY(
+                        SELECT d.head_user_id FROM departments d
+                         WHERE d.id = NEW.department_id AND d.head_user_id IS NOT NULL);
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.supervisor_id];
                     END IF;
@@ -6259,6 +6299,20 @@ class SchemaMixin:
                     OR OLD.supervisor_id IS DISTINCT FROM NEW.supervisor_id
                 )""",
             ),
+            # Заявка на отпуск или Б/С (#358): подача и смена шага / отметка
+            # прочтения. Правка дат без смены шага колокол не меняет — WHEN
+            # отсекает её, как у заявок по сменам.
+            ('trg_bell_leave_requests_insert', 'leave_requests', 'AFTER INSERT', ''),
+            (
+                'trg_bell_leave_requests',
+                'leave_requests',
+                'AFTER UPDATE OF status, operator_seen_at, supervisor_id',
+                """WHEN (
+                    OLD.status IS DISTINCT FROM NEW.status
+                    OR OLD.operator_seen_at IS DISTINCT FROM NEW.operator_seen_at
+                    OR OLD.supervisor_id IS DISTINCT FROM NEW.supervisor_id
+                )""",
+            ),
         ):
             # Таблицы разделов создаются выше в этой же транзакции, каждая под
             # своим SAVEPOINT. Если схема раздела не применилась, его таблицы
@@ -6537,6 +6591,30 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT discipline_schema")
+
+    def _init_leave_requests_schema_tx(self, cursor):
+        """Заявки на отпуск и Б/С (таблицы leave_*, задача #358).
+
+        DDL — в пакете leave_requests/schema.py, импорт локальный (цикл). Под
+        SAVEPOINT, как у «Дисциплины»: сломанная миграция раздела не роняет
+        инициализацию, а API заявок честно отвечает 503.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT leave_requests_schema")
+        try:
+            from leave_requests.schema import init_leave_requests_schema
+            init_leave_requests_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT leave_requests_schema")
+            logging.exception(
+                "Схема заявок на отпуск не применилась — заявки будут недоступны, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT leave_requests_schema")
 
     def _init_payments_schema_tx(self, cursor):
         """Схема раздела «Оплата счетов» (задача #179): заявки, шаги маршрута,

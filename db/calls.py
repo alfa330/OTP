@@ -1425,8 +1425,15 @@ class CallsMixin:
             manual_phone_training_map,
             status_phone_training_map
         )
+        # Стаж для цели оценок — без периодов «не в стаж» (длительный Б/С,
+        # задача #358): начало стажа сдвигается на их прошедшие к концу месяца дни.
+        hire_date_value = self._shift_hire_date_by_excluded_days(
+            row[0],
+            self._tenure_excluded_days_tx(cursor, [operator_id], next_month_start - timedelta(days=1))
+            .get(int(operator_id), 0)
+        )
         return {
-            'hire_date_value': row[0],
+            'hire_date_value': hire_date_value,
             'regular_hours': float(row[1] or 0.0),
             'operator_norm_hours': float(row[2] or 0.0),
             'training_hours': max(

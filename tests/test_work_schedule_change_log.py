@@ -350,7 +350,10 @@ class ScheduleChangeActorWiringTests(unittest.TestCase):
             "toggle_day_off",
             "apply_work_schedule_bulk_actions",
             "import_work_schedule_excel_entries",
-            "save_schedule_status_period",
+            # Период статуса пишет _tx-вариант: его зовут и «Графики работы»
+            # (через save_schedule_status_period), и утверждение заявки на
+            # отпуск (задача #358).
+            "_save_schedule_status_period_tx",
             "save_shifts_bulk",
         )
         by_name = {

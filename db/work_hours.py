@@ -959,6 +959,46 @@ class WorkHoursMixin:
         days_in_month = (next_month_start - month_start_date).days
         return int(round(days_in_month / 7.0 * 5.0))
 
+    def _tenure_excluded_days_tx(self, cursor, operator_ids, as_of):
+        """{operator_id: дни} периодов графика «не в стаж», прошедшие к дате as_of.
+
+        Задача #358, п. 8: длительный Б/С по решению главы не идёт в стаж.
+        Период, не начавшийся к as_of, не считается; идущий — прошедшей частью.
+        На эти дни сдвигается начало стажа (_shift_hire_date_by_excluded_days).
+        """
+        ids = [int(v) for v in (operator_ids or []) if v is not None]
+        if not ids or as_of is None:
+            return {}
+        cursor.execute(
+            """
+            SELECT p.operator_id,
+                   SUM(LEAST(COALESCE(p.end_date, %(as_of)s), %(as_of)s) - p.start_date + 1)
+              FROM operator_schedule_status_periods p
+             WHERE p.operator_id = ANY(%(ids)s)
+               AND p.exclude_from_tenure
+               AND p.start_date <= %(as_of)s
+             GROUP BY p.operator_id
+            """,
+            {'ids': ids, 'as_of': as_of},
+        )
+        return {int(row[0]): max(0, int(row[1] or 0)) for row in cursor.fetchall()}
+
+    def get_tenure_excluded_days(self, user_id, as_of=None):
+        """Дни «не в стаж» одного сотрудника на дату (по умолчанию — сегодня по Алматы)."""
+        as_of = as_of or self._almaty_now().date()
+        with self._get_cursor() as cursor:
+            return self._tenure_excluded_days_tx(cursor, [user_id], as_of).get(int(user_id), 0)
+
+    @staticmethod
+    def _shift_hire_date_by_excluded_days(hire_date_value, excluded_days):
+        """Дата, с которой считается стаж: найм + дни «не в стаж». Строку и
+        пустое значение не трогаем — их разбирает _get_tenure_months_for_reference."""
+        if not excluded_days or not isinstance(hire_date_value, date):
+            return hire_date_value
+        if isinstance(hire_date_value, datetime):
+            hire_date_value = hire_date_value.date()
+        return hire_date_value + timedelta(days=int(excluded_days))
+
     def _get_tenure_months_for_reference(self, hire_date_value, reference_date: Optional[date]) -> Optional[int]:
         if not hire_date_value or not reference_date:
             return None
