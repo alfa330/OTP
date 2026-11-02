@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 from tests import source_cache  # noqa: E402
 
-BOT_PY = ROOT / 'bot_schedule2.py'
+BOT_PY = source_cache.monolith_flat_path()
 
 HELPERS = (
     'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_normalize_user_role', '_is_super_admin_role',
