@@ -34,7 +34,8 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = source_cache.database_flat_path()
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
+SIP_ROUTES_PATH = ROOT / "sip_config" / "routes.py"
 APP_PATH = ROOT / "src" / "App.jsx"
 VIEW_PATH = ROOT / "src" / "components" / "sip" / "SipSettingsView.jsx"
 
@@ -2318,19 +2319,27 @@ class SipEndpointTests(unittest.TestCase):
     def setUp(self):
         self.source = _read(BOT_PATH)
         self.module = source_cache.parse(self.source)
+        # Ручки раздела — в sip_config/routes.py (02.11.2026), вложены в строитель;
+        # телефон iCORE и общие гейты — по-прежнему в монолите.
+        self.routes_source = _read(SIP_ROUTES_PATH)
+        self.routes_module = source_cache.parse(self.routes_source)
 
     def _function(self, name):
-        node = next(
-            n for n in self.module.body
-            if isinstance(n, ast.FunctionDef) and n.name == name
-        )
-        return ast.get_source_segment(self.source, node)
+        for source, module in ((self.source, self.module), (self.routes_source, self.routes_module)):
+            node = next(
+                (n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == name),
+                None,
+            )
+            if node is not None:
+                # Вложенные в строитель функции выравниваем как верхнеуровневые.
+                return textwrap.dedent("\n".join(source.splitlines()[node.lineno - 1:node.end_lineno]))
+        raise LookupError(name)
 
     def test_routes_exist(self):
-        self.assertIn("@app.route('/api/sip_config/operators', methods=['GET', 'OPTIONS'])", self.source)
+        self.assertIn("@bp.route('/sip_config/operators', methods=['GET', 'OPTIONS'])", self.routes_source)
         self.assertIn(
-            "@app.route('/api/sip_config/operators/<int:target_user_id>', methods=['PUT', 'OPTIONS'])",
-            self.source,
+            "@bp.route('/sip_config/operators/<int:target_user_id>', methods=['PUT', 'OPTIONS'])",
+            self.routes_source,
         )
 
     def test_phone_download_is_limited_to_sales_tez_and_admins(self):
@@ -2382,12 +2391,12 @@ class SipEndpointTests(unittest.TestCase):
         for name in ("sip_config_operators_endpoint", "sip_config_operator_update_endpoint"):
             body = self._function(name)
             self.assertIn("_can_manage_sip_config(requester_id, role)", body)
-            self.assertIn("@require_api_key", self.source.split(f"def {name}")[0].rsplit("@app.route", 1)[1])
+            self.assertIn("@require_api_key", self.routes_source.split(f"def {name}")[0].rsplit("@bp.route", 1)[1])
 
     def test_department_settings_route_is_scoped_to_own_departments(self):
         self.assertIn(
-            "@app.route('/api/sip_config/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])",
-            self.source,
+            "@bp.route('/sip_config/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])",
+            self.routes_source,
         )
         body = self._function("sip_config_department_endpoint")
         self.assertIn("_can_manage_sip_config(requester_id, role)", body)
@@ -2399,9 +2408,9 @@ class SipEndpointTests(unittest.TestCase):
         self.assertIn("db.get_sip_department_configs(department_ids=department_ids)", body)
 
     def test_bulk_route_does_not_collide_with_the_single_one(self):
-        self.assertIn("@app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])", self.source)
+        self.assertIn("@bp.route('/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])", self.routes_source)
         # int-конвертер не матчит "bulk", поэтому маршруты не конфликтуют.
-        self.assertIn("<int:target_user_id>", self.source)
+        self.assertIn("<int:target_user_id>", self.routes_source)
 
     def test_bulk_endpoint_checks_gate_scope_role_and_existence(self):
         body = self._function("sip_config_operators_bulk_endpoint")
@@ -3390,12 +3399,17 @@ class SzovSupervisorAccessTests(unittest.TestCase):
     def setUp(self):
         self.app = _read(APP_PATH)
         self.bot = _read(BOT_PATH)
+        self.routes = _read(SIP_ROUTES_PATH)
 
     def _function(self, name):
-        module = source_cache.parse(self.bot)
-        node = next(n for n in module.body
-                    if isinstance(n, ast.FunctionDef) and n.name == name)
-        return ast.get_source_segment(self.bot, node)
+        # Гейты — в монолите, ручки раздела — вложены в строитель sip_config/routes.py.
+        for source in (self.bot, self.routes):
+            module = source_cache.parse(source)
+            node = next((n for n in ast.walk(module)
+                         if isinstance(n, ast.FunctionDef) and n.name == name), None)
+            if node is not None:
+                return textwrap.dedent("\n".join(source.splitlines()[node.lineno - 1:node.end_lineno]))
+        raise LookupError(name)
 
     def test_backend_lets_in_supervisors_of_both_local_pbx_departments(self):
         self.assertIn(

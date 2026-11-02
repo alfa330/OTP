@@ -6,7 +6,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 DATABASE_PATH = source_cache.database_flat_path()
 EVENTS_VIEW_PATH = ROOT / "src" / "components" / "events" / "EventsView.jsx"
 
@@ -16,20 +16,26 @@ def _read(path):
 
 
 def _function_source(path, function_name, class_name=None):
-    source = _read(path)
-    module = source_cache.parse(source)
-    body = module.body
-    if class_name:
-        class_node = next(
-            node for node in module.body
-            if isinstance(node, ast.ClassDef) and node.name == class_name
+    # Ручки «Ивентов» и их помощники — вложенные функции строителя в events/routes.py
+    # (02.11.2026); монолит и класс Database ищутся как раньше.
+    for candidate in ((path,) if class_name else (path, ROOT / "events" / "routes.py")):
+        source = _read(candidate)
+        module = source_cache.parse(source)
+        body = module.body
+        if class_name:
+            class_node = next(
+                node for node in module.body
+                if isinstance(node, ast.ClassDef) and node.name == class_name
+            )
+            body = class_node.body
+        function_node = next(
+            (node for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+             if isinstance(node, ast.FunctionDef) and node.name == function_name),
+            None,
         )
-        body = class_node.body
-    function_node = next(
-        node for node in body
-        if isinstance(node, ast.FunctionDef) and node.name == function_name
-    )
-    return textwrap.dedent(ast.get_source_segment(source, function_node))
+        if function_node is not None:
+            return textwrap.dedent(ast.get_source_segment(source, function_node))
+    raise LookupError(function_name)
 
 
 class EventsMultiDepartmentScopeTests(unittest.TestCase):

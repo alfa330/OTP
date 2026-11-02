@@ -14,7 +14,7 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "src" / "App.jsx"
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 
 
@@ -23,13 +23,19 @@ def _read(path):
 
 
 def _function_source(path, function_name):
-    source = _read(path)
-    module = source_cache.parse(source)
-    node = next(
-        item for item in module.body
-        if isinstance(item, ast.FunctionDef) and item.name == function_name
-    )
-    return textwrap.dedent(ast.get_source_segment(source, node))
+    # Ручки «Ивентов» и их помощники — в events/routes.py (scripts/extract_routes.py):
+    # после монолита ищем в вынесенных пакетах; вложенные def выравниваем как верхнеуровневые.
+    for candidate in (path, *source_cache.extracted_route_modules()):
+        source = _read(candidate)
+        module = source_cache.parse(source)
+        node = next(
+            (item for item in ast.walk(module)
+             if isinstance(item, ast.FunctionDef) and item.name == function_name),
+            None,
+        )
+        if node is not None:
+            return textwrap.dedent("\n".join(source.splitlines()[node.lineno - 1:node.end_lineno]))
+    raise LookupError(function_name)
 
 
 class EventsTrainerAccessTests(unittest.TestCase):

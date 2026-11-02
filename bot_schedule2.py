@@ -3646,15 +3646,6 @@ VERIFIER_CHATS_EXTRA_ACCESS_USER_IDS = {183}
 FOUR_YOU_MAX_IMAGE_PIXELS = int(os.getenv('FOUR_YOU_MAX_IMAGE_PIXELS', str(40_000_000)))
 # Совместная разметка фото 4 You (рисунок/стикеры/текст/комментарии/фон).
 # ── Ивенты (раздел «Ивенты»): общедоступная лента постов с фото/видео ──
-EVENTS_MAX_MEDIA_PER_POST = int(os.getenv('EVENTS_MAX_MEDIA_PER_POST', '10'))
-EVENTS_MAX_IMAGE_FILE_SIZE_BYTES = int(os.getenv('EVENTS_MAX_IMAGE_FILE_SIZE_BYTES', str(15 * 1024 * 1024)))
-EVENTS_MAX_VIDEO_FILE_SIZE_BYTES = int(os.getenv('EVENTS_MAX_VIDEO_FILE_SIZE_BYTES', str(200 * 1024 * 1024)))
-EVENTS_ALLOWED_VIDEO_MIME = frozenset({'video/mp4', 'video/webm', 'video/quicktime'})
-EVENTS_UPLOAD_FOLDER = (os.getenv('EVENTS_UPLOAD_FOLDER') or 'Events/').strip()
-EVENTS_BODY_MAX_CHARS = int(os.getenv('EVENTS_BODY_MAX_CHARS', '8000'))
-EVENTS_TITLE_MAX_CHARS = 255
-EVENTS_COMMENT_MAX_CHARS = int(os.getenv('EVENTS_COMMENT_MAX_CHARS', '2000'))
-EVENTS_VIDEO_SIGNED_URL_TTL_MINUTES = int(os.getenv('EVENTS_VIDEO_SIGNED_URL_TTL_MINUTES', '240'))
 # Потолок размера страницы /api/tasks. Клиент даёт выбрать 30/60/100, но защита
 # от «дай всё сразу» должна стоять на сервере, а не в интерфейсе.
 TASKS_MAX_PAGE_SIZE = int(os.getenv('TASKS_MAX_PAGE_SIZE', '200'))
@@ -4912,37 +4903,14 @@ def _four_you_convert_image_variants(raw_bytes):
 # ИВЕНТЫ: хранилище медиа (GCS), скоуп по отделам и сериализация постов.
 # Файлы лежат в закрытом бакете; клиенту отдаём короткоживущие signed URL.
 # ──────────────────────────────────────────────────────────────────────
-def _events_bucket_name():
-    return (
-        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_EVENTS') or '').strip()
-        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
-        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
-    )
 
 
-def _events_blob_path(suffix, ext):
-    folder = EVENTS_UPLOAD_FOLDER.strip('/')
-    prefix = f"{folder}/" if folder else ""
-    date_prefix = datetime.utcnow().strftime('%Y/%m/%d')
-    random_id = uuid.uuid4().hex
-    safe_ext = ext if (ext and re.match(r'^\.[a-z0-9]{1,6}$', ext)) else ''
-    return f"{prefix}{date_prefix}/{random_id}_{suffix}{safe_ext}"
 
 
-def _events_video_ext(filename, mime):
-    ext = os.path.splitext(secure_filename(filename or ''))[1].lower()
-    if re.match(r'^\.[a-z0-9]{1,5}$', ext):
-        return ext
-    return {'video/webm': '.webm', 'video/quicktime': '.mov'}.get(mime, '.mp4')
 
 
-def _events_can_publish(role, requester_id):
-    """Публиковать ивенты могут админы, супервайзеры и главы отделов."""
-    role = _normalize_user_role(role)
-    return _is_admin_role(role) or role == 'sv' or _headed_department_id(requester_id) is not None
 
 
-_EVENTS_UNSET = object()  # сентинел: «скоуп не передан» (None — валидное значение).
 
 
 def _events_viewer_scope(requester_id, role):
@@ -4988,204 +4956,22 @@ def _birthdays_viewer_scope(requester_id, role, known_department_id=_BIRTHDAYS_D
     return False, _department_scope_id_for_requester(requester_id)
 
 
-def _events_can_view(event_department_ids, is_global, viewer_dept):
-    """Видимость поста: глобальным — всё; пост без отделов — всем; иначе отдел
-    зрителя должен быть среди получателей. event_department_ids — список (или [])."""
-    if is_global or not event_department_ids:
-        return True
-    if viewer_dept is None:
-        return False
-    return int(viewer_dept) in {int(d) for d in event_department_ids}
 
 
-def _events_is_moderator_for(requester_id, role, event_department_ids, viewer_scope=_EVENTS_UNSET):
-    """Модератор поста: глобальный админ — везде; админ-глава/СВ/глава отдела —
-    только если их отдел среди получателей поста (не для постов «всем»).
-
-    viewer_scope можно передать заранее (на странице с множеством постов/
-    комментариев), чтобы не дёргать _department_scope_id_for_requester на каждый
-    элемент (его get_user_department_id не кэшируется)."""
-    role = _normalize_user_role(role)
-    if _is_global_admin_requester(role, requester_id):
-        return True
-    if _is_admin_role(role) or role == 'sv' or _headed_department_id(requester_id) is not None:
-        scope = viewer_scope if viewer_scope is not _EVENTS_UNSET else _department_scope_id_for_requester(requester_id)
-        if scope is None or not event_department_ids:
-            return False
-        return int(scope) in {int(d) for d in event_department_ids}
-    return False
 
 
-def _events_resolve_target_departments(role, requester_id, requested_raw):
-    """Возвращает (department_ids, error). Пустой список => виден всем отделам.
-    Глобальный админ выбирает любой набор отделов или «всем» (пустой); остальные
-    публикаторы жёстко привязаны к своему отделу (без рассылки «всем»)."""
-    role = _normalize_user_role(role)
-    # requested_raw — JSON-массив id (или 'all'/''/None/[] => «всем»).
-    requested_ids = []
-    if isinstance(requested_raw, list):
-        candidates = requested_raw
-    elif requested_raw in (None, '', 'all', 'null', '[]'):
-        candidates = []
-    else:
-        try:
-            parsed = json.loads(requested_raw)
-            candidates = parsed if isinstance(parsed, list) else [parsed]
-        except (TypeError, ValueError):
-            candidates = [requested_raw]
-    for c in candidates:
-        try:
-            cid = int(c)
-        except (TypeError, ValueError):
-            return None, "Некорректный отдел"
-        if cid not in requested_ids:
-            requested_ids.append(cid)
-
-    if _is_global_admin_requester(role, requester_id):
-        if not requested_ids:
-            return [], None  # всем
-        for cid in requested_ids:
-            dept = db.get_department_by_id(cid)
-            if not dept or not dept.get('is_active', True):
-                return None, "Отдел не найден"
-        return requested_ids, None
-    # Привязанный публикатор (СВ / глава отдела / админ-глава): только свой отдел.
-    scope = _department_scope_id_for_requester(requester_id)
-    if scope is None:
-        return None, "У вас не задан отдел для публикации"
-    return [int(scope)], None
 
 
-def _events_publish_options(role, requester_id):
-    """Опции для формы создания: можно ли публиковать, можно ли «всем»,
-    и список отделов-получателей, доступных публикатору."""
-    if not _events_can_publish(role, requester_id):
-        return {"can_publish": False, "can_target_all": False, "publish_departments": []}
-    if _is_global_admin_requester(role, requester_id):
-        options = [
-            {"id": d.get("id"), "name": d.get("name")}
-            for d in (db.get_departments() or [])
-            if d.get("is_active", True)
-        ]
-        return {"can_publish": True, "can_target_all": True, "publish_departments": options}
-    scope = _department_scope_id_for_requester(requester_id)
-    dept = db.get_department_by_id(scope) if scope else None
-    options = [{"id": dept.get("id"), "name": dept.get("name")}] if dept else []
-    return {"can_publish": True, "can_target_all": False, "publish_departments": options}
 
 
-def _events_can_delete_post(event, requester_id, role, viewer_scope=_EVENTS_UNSET):
-    author_id = event.get("author_id")
-    if author_id is not None and requester_id is not None and int(author_id) == int(requester_id):
-        return True
-    return _events_is_moderator_for(requester_id, role, event.get("department_ids") or [], viewer_scope)
 
 
-def _events_media_payload(media):
-    mtype = media.get("type")
-    if mtype == 'video':
-        return {
-            "id": media.get("id"),
-            "type": "video",
-            "url": _lms_signed_url(
-                media.get("bucket"), media.get("blob_path"),
-                expires_minutes=EVENTS_VIDEO_SIGNED_URL_TTL_MINUTES,
-                response_disposition='inline',
-                response_type=media.get("mime_type") or 'video/mp4',
-            ),
-            "poster_url": _build_avatar_signed_url(media.get("preview_bucket"), media.get("preview_blob_path")),
-            "width": int(media.get("width") or 0),
-            "height": int(media.get("height") or 0),
-            "duration_seconds": media.get("duration_seconds"),
-            "mime_type": media.get("mime_type"),
-        }
-    display_url = _build_avatar_signed_url(media.get("bucket"), media.get("blob_path"))
-    preview_url = _build_avatar_signed_url(media.get("preview_bucket"), media.get("preview_blob_path"))
-    return {
-        "id": media.get("id"),
-        "type": "image",
-        "url": display_url,
-        "preview_url": preview_url or display_url,
-        "width": int(media.get("width") or 0),
-        "height": int(media.get("height") or 0),
-    }
 
 
-def _events_event_payload(event, requester_id=None, role=None, viewer_scope=_EVENTS_UNSET):
-    department_ids = event.get("department_ids") or []
-    department_names = event.get("department_names") or []
-    legacy_department_name = None
-    if department_names:
-        legacy_department_name = department_names[0]
-        if len(department_names) > 1:
-            legacy_department_name = f"{legacy_department_name} +{len(department_names) - 1}"
-    return {
-        "id": event.get("id"),
-        "author_id": event.get("author_id"),
-        "author_name": event.get("author_name"),
-        "author_avatar_url": _build_avatar_signed_url(
-            event.get("author_avatar_bucket"), event.get("author_avatar_blob_path")
-        ),
-        "department_ids": department_ids,
-        "department_names": department_names,
-        "department_id": department_ids[0] if department_ids else None,
-        "department_name": legacy_department_name,
-        "title": event.get("title"),
-        "body": event.get("body"),
-        "created_at": event.get("created_at"),
-        "like_count": int(event.get("like_count") or 0),
-        "comment_count": int(event.get("comment_count") or 0),
-        "liked": bool(event.get("liked")),
-        "media": [_events_media_payload(m) for m in (event.get("media") or [])],
-        "can_delete": _events_can_delete_post(event, requester_id, role, viewer_scope),
-        "is_pinned": bool(event.get("is_pinned")),
-        # Закрепление строже удаления: свой пост автор убрать вправе, а поднять
-        # его над чужими поверх всей ленты — решение уровня отдела.
-        "can_pin": _events_is_moderator_for(
-            requester_id, role, event.get("department_ids") or [], viewer_scope),
-    }
 
 
-def _events_comment_payload(comment, requester_id=None, role=None,
-                            event_author_id=None, event_department_ids=None, moderator=None):
-    # moderator (bool) можно передать заранее: для всех комментов одного поста
-    # модераторский статус одинаков, считаем его один раз в роуте (а не на каждый).
-    can_delete = False
-    owner = comment.get("user_id")
-    if requester_id is not None:
-        if owner is not None and int(owner) == int(requester_id):
-            can_delete = True
-        elif event_author_id is not None and int(event_author_id) == int(requester_id):
-            can_delete = True
-        elif (moderator if moderator is not None
-              else _events_is_moderator_for(requester_id, role, event_department_ids or [])):
-            can_delete = True
-    return {
-        "id": comment.get("id"),
-        "user_id": comment.get("user_id"),
-        "user_name": comment.get("user_name"),
-        "author_avatar_url": _build_avatar_signed_url(
-            comment.get("author_avatar_bucket"), comment.get("author_avatar_blob_path")
-        ),
-        "body": comment.get("body"),
-        "created_at": comment.get("created_at"),
-        "can_delete": can_delete,
-    }
 
 
-def _delete_events_blobs(blobs):
-    client = None
-    for bucket_name, blob_path in (blobs or []):
-        bucket_name = str(bucket_name or '').strip()
-        blob_path = str(blob_path or '').strip()
-        if not bucket_name or not blob_path:
-            continue
-        try:
-            if client is None:
-                client = get_gcs_client()
-            client.bucket(bucket_name).blob(blob_path).delete()
-        except Exception:
-            logging.warning("Failed to delete event blob %s/%s", bucket_name, blob_path, exc_info=True)
 
 
 
@@ -16524,380 +16310,20 @@ app.register_blueprint(build_four_you_blueprint(
 # лайки, комментарии, бейдж новых постов. Видимость постов скоупится по
 # отделу на сервере; клиенту нельзя доверять выбор отдела.
 # ──────────────────────────────────────────────────────────────────────
-@app.route('/api/events', methods=['GET', 'POST', 'OPTIONS'])
-@require_auth
-def api_events():
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-
-    if request.method == 'GET':
-        before_raw = request.args.get('before')
-        try:
-            before_id = int(before_raw) if before_raw not in (None, '', 'null') else None
-        except (TypeError, ValueError):
-            before_id = None
-        try:
-            limit = int(request.args.get('limit') or 12)
-        except (TypeError, ValueError):
-            limit = 12
-        result = db.list_events(requester_id, viewer_dept, is_global, before_id, limit)
-        # viewer_dept уже равен _department_scope_id_for_requester для скоупных —
-        # передаём как viewer_scope, чтобы can_delete не дёргал БД на каждый пост.
-        events_payload = [
-            _events_event_payload(ev, requester_id, role, viewer_dept)
-            for ev in result["events"]
-        ]
-        # Закреплённые приходят отдельным списком и только к первой странице —
-        # иначе они ломали бы курсор по id (см. Database.list_events).
-        pinned_payload = [
-            _events_event_payload(ev, requester_id, role, viewer_dept)
-            for ev in result.get("pinned") or []
-        ]
-        response = jsonify({
-            "status": "success",
-            "events": events_payload,
-            "pinned": pinned_payload,
-            "has_more": result["has_more"],
-            "next_before": result["next_before"],
-            **_events_publish_options(role, requester_id),
-        })
-        response.headers['Cache-Control'] = 'private, max-age=10'
-        return response, 200
-
-    # POST — создание поста
-    if not _events_can_publish(role, requester_id):
-        return jsonify({"error": "Недостаточно прав для публикации ивентов"}), 403
-
-    title = str(request.form.get('title') or '').strip()[:EVENTS_TITLE_MAX_CHARS]
-    body = str(request.form.get('body') or '').strip()[:EVENTS_BODY_MAX_CHARS]
-    # department_ids — JSON-массив id ([] / 'all' => виден всем отделам).
-    requested_departments = (
-        request.form.get('department_ids')
-        if 'department_ids' in request.form
-        else request.form.get('department_id')
-    )
-    target_dept_ids, dept_error = _events_resolve_target_departments(
-        role, requester_id, requested_departments
-    )
-    if dept_error:
-        return jsonify({"error": dept_error}), 400
-
-    media_files = [f for f in request.files.getlist('media') if f and f.filename]
-    poster_files = [f for f in request.files.getlist('posters') if f and f.filename]
-    try:
-        media_meta = json.loads(request.form.get('media_meta') or '[]')
-        if not isinstance(media_meta, list):
-            media_meta = []
-    except Exception:
-        media_meta = []
-
-    if not body and not media_files:
-        return jsonify({"error": "Добавьте текст или медиа"}), 400
-    if len(media_files) > EVENTS_MAX_MEDIA_PER_POST:
-        return jsonify({"error": f"Не более {EVENTS_MAX_MEDIA_PER_POST} файлов в одном посте"}), 400
-    if media_files and len(media_meta) != len(media_files):
-        return jsonify({"error": "Несогласованные данные медиа"}), 400
-
-    bucket_name = _events_bucket_name() if media_files else None
-    if media_files and not bucket_name:
-        return jsonify({"error": "Хранилище ивентов не настроено"}), 500
-
-    # Предварительная проверка типов ДО создания поста — чтобы заведомо неверный
-    # файл отклонялся 400-кой без INSERT+rollback в БД (тела не читаем здесь).
-    for idx, fs in enumerate(media_files):
-        meta_i = media_meta[idx] if isinstance(media_meta[idx], dict) else {}
-        declared = str(meta_i.get('type') or '').strip().lower()
-        ct = str(fs.mimetype or '').strip().lower()
-        if declared == 'video' or ct.startswith('video/'):
-            if ct not in EVENTS_ALLOWED_VIDEO_MIME:
-                return jsonify({"error": f"Формат видео «{fs.filename}» не поддерживается"}), 400
-        elif not ct.startswith('image/'):
-            return jsonify({"error": f"Файл «{fs.filename}» не является изображением"}), 400
-
-    created_event_id = None
-    uploaded_blobs = []
-    poster_cursor = 0
-    try:
-        client = get_gcs_client() if media_files else None
-        bucket = client.bucket(bucket_name) if client else None
-        created_event_id = db.create_event(requester_id, title, body, target_dept_ids)
-
-        for index, file_storage in enumerate(media_files):
-            meta = media_meta[index] if index < len(media_meta) else {}
-            meta = meta if isinstance(meta, dict) else {}
-            declared_type = str(meta.get('type') or '').strip().lower()
-            content_type = str(file_storage.mimetype or '').strip().lower()
-            raw_bytes = file_storage.read() or b''
-            if not raw_bytes:
-                raise ValueError(f"Файл «{file_storage.filename}» пуст")
-
-            if declared_type == 'video' or content_type.startswith('video/'):
-                if len(raw_bytes) > EVENTS_MAX_VIDEO_FILE_SIZE_BYTES:
-                    max_mb = EVENTS_MAX_VIDEO_FILE_SIZE_BYTES // (1024 * 1024)
-                    raise ValueError(f"Видео «{file_storage.filename}» превышает лимит {max_mb} МБ")
-                if content_type not in EVENTS_ALLOWED_VIDEO_MIME:
-                    raise ValueError(f"Формат видео «{file_storage.filename}» не поддерживается")
-                video_path = _events_blob_path(f"{index}_video", _events_video_ext(file_storage.filename, content_type))
-                video_blob = bucket.blob(video_path)
-                video_blob.cache_control = 'private, max-age=31536000, immutable'
-                video_blob.upload_from_string(raw_bytes, content_type=content_type)
-                uploaded_blobs.append((bucket_name, video_path))
-
-                poster_bucket = poster_path = None
-                poster_w = poster_h = 0
-                # Постеры в posters[] идут по порядку ТОЛЬКО для видео, у которых
-                # клиент пометил has_poster=true (захват кадра удался). Так слот
-                # постера не «съезжает», если у раннего видео постер не сделался.
-                if bool(meta.get('has_poster')) and poster_cursor < len(poster_files):
-                    poster_fs = poster_files[poster_cursor]
-                    poster_cursor += 1
-                    poster_raw = poster_fs.read() or b''
-                    if poster_raw:
-                        try:
-                            poster_bytes, _disp_bytes, poster_w, poster_h = _four_you_convert_image_variants(poster_raw)
-                            poster_path = _events_blob_path(f"{index}_poster", '.webp')
-                            poster_blob = bucket.blob(poster_path)
-                            poster_blob.cache_control = 'private, max-age=31536000, immutable'
-                            poster_blob.upload_from_string(poster_bytes, content_type='image/webp')
-                            poster_bucket = bucket_name
-                            uploaded_blobs.append((bucket_name, poster_path))
-                        except Exception:
-                            poster_bucket = poster_path = None
-                            poster_w = poster_h = 0
-
-                duration = meta.get('duration')
-                try:
-                    duration = round(float(duration), 2) if duration is not None else None
-                except (TypeError, ValueError):
-                    duration = None
-                db.add_event_media(created_event_id, {
-                    "media_type": "video",
-                    "bucket": bucket_name, "blob_path": video_path,
-                    "preview_bucket": poster_bucket, "preview_blob_path": poster_path,
-                    "mime_type": content_type,
-                    "width": poster_w or int(meta.get('width') or 0),
-                    "height": poster_h or int(meta.get('height') or 0),
-                    "file_size": len(raw_bytes), "duration_seconds": duration,
-                    "sort_order": index,
-                })
-            else:
-                if not content_type.startswith('image/'):
-                    raise ValueError(f"Файл «{file_storage.filename}» не является изображением")
-                if len(raw_bytes) > EVENTS_MAX_IMAGE_FILE_SIZE_BYTES:
-                    max_mb = EVENTS_MAX_IMAGE_FILE_SIZE_BYTES // (1024 * 1024)
-                    raise ValueError(f"Изображение «{file_storage.filename}» превышает лимит {max_mb} МБ")
-                preview_bytes, display_bytes, width, height = _four_you_convert_image_variants(raw_bytes)
-                preview_path = _events_blob_path(f"{index}_preview", '.webp')
-                display_path = _events_blob_path(f"{index}_display", '.webp')
-                preview_blob = bucket.blob(preview_path)
-                preview_blob.cache_control = 'private, max-age=31536000, immutable'
-                preview_blob.upload_from_string(preview_bytes, content_type='image/webp')
-                display_blob = bucket.blob(display_path)
-                display_blob.cache_control = 'private, max-age=31536000, immutable'
-                display_blob.upload_from_string(display_bytes, content_type='image/webp')
-                uploaded_blobs.append((bucket_name, preview_path))
-                uploaded_blobs.append((bucket_name, display_path))
-                db.add_event_media(created_event_id, {
-                    "media_type": "image",
-                    "bucket": bucket_name, "blob_path": display_path,
-                    "preview_bucket": bucket_name, "preview_blob_path": preview_path,
-                    "mime_type": "image/webp", "width": width, "height": height,
-                    "file_size": len(display_bytes), "sort_order": index,
-                })
-
-        event = db.get_event(created_event_id, requester_id)
-        return jsonify({"status": "success", "event": _events_event_payload(event, requester_id, role)}), 201
-    except Exception as error:
-        if created_event_id:
-            try:
-                db.delete_event(created_event_id)
-            except Exception:
-                logging.warning("Failed to roll back event %s", created_event_id, exc_info=True)
-        _delete_events_blobs(uploaded_blobs)
-        if isinstance(error, ValueError):
-            return jsonify({"error": str(error)}), 400
-        logging.error("Event create failed: %s", error, exc_info=True)
-        return jsonify({"error": "Не удалось опубликовать ивент"}), 500
 
 
-@app.route('/api/events/seen', methods=['POST', 'OPTIONS'])
-@require_auth
-def api_events_seen():
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    db.mark_events_seen(requester_id)
-    return jsonify({"status": "success"}), 200
 
 
-@app.route('/api/events/unread_count', methods=['GET', 'OPTIONS'])
-@require_auth
-def api_events_unread_count():
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-    count = db.count_unread_events(requester_id, viewer_dept, is_global)
-    response = jsonify({"status": "success", "count": int(count)})
-    response.headers['Cache-Control'] = 'no-store'
-    return response, 200
 
 
-@app.route('/api/events/<int:event_id>/like', methods=['POST', 'OPTIONS'])
-@require_auth
-def api_event_like(event_id):
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_departments(event_id)
-    if not info:
-        return jsonify({"error": "Ивент не найден"}), 404
-    _author_id, dept_ids = info
-    is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-    if not _events_can_view(dept_ids, is_global, viewer_dept):
-        return jsonify({"error": "Ивент не найден"}), 404
-    result = db.toggle_event_like(event_id, requester_id)
-    return jsonify({"status": "success", **result}), 200
 
 
-@app.route('/api/events/<int:event_id>/comments', methods=['GET', 'POST', 'OPTIONS'])
-@require_auth
-def api_event_comments(event_id):
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_departments(event_id)
-    if not info:
-        return jsonify({"error": "Ивент не найден"}), 404
-    event_author_id, dept_ids = info
-    is_global, viewer_dept = _events_viewer_scope(requester_id, role)
-    if not _events_can_view(dept_ids, is_global, viewer_dept):
-        return jsonify({"error": "Ивент не найден"}), 404
-
-    if request.method == 'GET':
-        before_raw = request.args.get('before')
-        try:
-            before_id = int(before_raw) if before_raw not in (None, '', 'null') else None
-        except (TypeError, ValueError):
-            before_id = None
-        try:
-            limit = int(request.args.get('limit') or 20)
-        except (TypeError, ValueError):
-            limit = 20
-        result = db.list_event_comments(event_id, before_id, limit)
-        # Модераторский статус одинаков для всех комментов поста — считаем 1 раз.
-        viewer_is_moderator = _events_is_moderator_for(requester_id, role, dept_ids, viewer_dept)
-        return jsonify({
-            "status": "success",
-            "comments": [
-                _events_comment_payload(c, requester_id, role, event_author_id, dept_ids, viewer_is_moderator)
-                for c in result["comments"]
-            ],
-            "has_more": result["has_more"],
-            "next_before": result["next_before"],
-        }), 200
-
-    payload = request.get_json(silent=True) or {}
-    body = str(payload.get('body') or '').strip()[:EVENTS_COMMENT_MAX_CHARS]
-    if not body:
-        return jsonify({"error": "Введите комментарий"}), 400
-    comment = db.add_event_comment(event_id, requester_id, body)
-    return jsonify({
-        "status": "success",
-        "comment": _events_comment_payload(comment, requester_id, role, event_author_id, dept_ids),
-    }), 201
 
 
-@app.route('/api/events/<int:event_id>/comments/<int:comment_id>', methods=['DELETE', 'OPTIONS'])
-@require_auth
-def api_event_comment_delete(event_id, comment_id):
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    comment = db.get_event_comment(comment_id)
-    if not comment or int(comment["event_id"]) != int(event_id):
-        return jsonify({"error": "Комментарий не найден"}), 404
-    info = db.get_event_author_and_departments(event_id)
-    if not info:
-        return jsonify({"error": "Ивент не найден"}), 404
-    event_author_id, dept_ids = info
-    owner = comment.get("user_id")
-    allowed = (
-        (owner is not None and int(owner) == int(requester_id))
-        or (event_author_id is not None and int(event_author_id) == int(requester_id))
-        or _events_is_moderator_for(requester_id, role, dept_ids)
-    )
-    if not allowed:
-        return jsonify({"error": "Недостаточно прав"}), 403
-    db.delete_event_comment(comment_id)
-    return jsonify({"status": "success", "deleted_id": comment_id}), 200
 
 
-@app.route('/api/events/<int:event_id>', methods=['DELETE', 'OPTIONS'])
-@require_auth
-def api_event_delete(event_id):
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-    role = _normalize_user_role(requester[3])
-    info = db.get_event_author_and_departments(event_id)
-    if not info:
-        return jsonify({"error": "Ивент не найден"}), 404
-    author_id, dept_ids = info
-    can_delete = (
-        (author_id is not None and int(author_id) == int(requester_id))
-        or _events_is_moderator_for(requester_id, role, dept_ids)
-    )
-    if not can_delete:
-        return jsonify({"error": "Недостаточно прав"}), 403
-    blobs = db.delete_event(event_id)
-    if blobs is None:
-        return jsonify({"error": "Ивент не найден"}), 404
-    _delete_events_blobs(blobs)
-    return jsonify({"status": "success", "deleted_id": event_id}), 200
 
 
-@app.route('/api/events/<int:event_id>/pin', methods=['POST', 'OPTIONS'])
-@require_auth
-def api_event_pin(event_id):
-    """Закрепить/открепить пост. Право — только модератора, не автора.
-
-    Осознанно строже удаления: свой пост автор вправе убрать, но поднять его
-    над чужими поверх всей ленты — решение уровня отдела, а не автора.
-    """
-    requester_id, requester, auth_error = _get_authenticated_requester()
-    if auth_error:
-        message, status_code = auth_error
-        return jsonify({"error": message}), status_code
-
-    info = db.get_event_author_and_departments(event_id)
-    if not info:
-        return jsonify({"error": "Ивент не найден"}), 404
-    _author_id, dept_ids = info
-
-    role = _normalize_user_role(requester[3])
-    if not _events_is_moderator_for(requester_id, role, dept_ids):
-        return jsonify({"error": "Недостаточно прав"}), 403
-
-    payload = request.get_json(silent=True) or {}
-    pinned = db.set_event_pinned(event_id, bool(payload.get('pinned', True)))
-    if pinned is None:
-        return jsonify({"error": "Ивент не найден"}), 404
-    return jsonify({"status": "success", "id": event_id, "is_pinned": pinned}), 200
 
 
 @app.route('/api/average_scores', methods=['GET'])
@@ -29928,530 +29354,55 @@ def _can_manage_sip_config(requester_id, role) -> bool:
 # db.get_sip_config остался — его архивные строки читает вкладка «История».
 
 
-def _sip_department_scope(requester_id, role):
-    """Область видимости раздела «Настройки SIP».
-
-    Возвращает (department_ids, supervisor_id): None вместо списка отделов —
-    без ограничений (админ). Глава отдела видит свои отделы, СВ — свой отдел
-    плюс тех, кого ведёт лично.
-    """
-    if _is_admin_role(role) and not _headed_department_ids(requester_id):
-        return None, None
-    headed = _headed_department_ids(requester_id)
-    if headed:
-        return sorted(headed), None
-    dept_id = _department_scope_id_for_requester(requester_id)
-    return ([dept_id] if dept_id is not None else []), requester_id
 
 
-def _sip_section_allowed(requester_id, role, provider) -> bool:
-    """Открыт ли запросившему подраздел этого провайдера.
-
-    Глобальный админ ведёт обе телефонии. Остальным подраздел даёт не роль, а
-    отдел: главе Тез нечего делать в паролях отдела продаж, и наоборот. Провайдер
-    берём из настроек отдела, а не из кода отдела: код — лишь исходное значение,
-    переключают отдел в самой панели.
-    """
-    if _is_global_admin_requester(role, requester_id):
-        return True
-    department_ids, _supervisor_id = _sip_department_scope(requester_id, role)
-    # None = «без ограничений»: у такого запросившего оба подраздела и так свои.
-    if department_ids is None:
-        return True
-    if not department_ids:
-        return False
-    try:
-        configs = db.get_sip_department_configs(department_ids=department_ids)
-    except Exception:
-        # Провайдер не прочитали — считаем, что доступа нет: пустить «на всякий
-        # случай» здесь дороже, чем показать ошибку.
-        logging.error("Error reading sip department providers", exc_info=True)
-        return False
-    return any((c.get('provider') or 'asterisk') == provider for c in configs)
 
 
-def _sip_provider_arg(value):
-    """Провайдер из query/тела: ('', None) — не задан, (провайдер, None) или (None, ошибка).
-
-    Разбор общий с БД (normalize_sip_provider), а не свой список строк: молча
-    съеденный «binotel» отдал бы тезовцу пароль «база отдела + номер»."""
-    if value is None or str(value).strip() == '':
-        return '', None
-    try:
-        return normalize_sip_provider(value), None
-    except ValueError as e:
-        return None, str(e)
 
 
-@app.route('/api/sip_config/operators', methods=['GET', 'OPTIONS'])
-@require_api_key
-def sip_config_operators_endpoint():
-    """Список сотрудников с их SIP-аккаунтами (основной + автодозвон).
-
-    Область видимости — как в «Учёте сотрудников»: админ видит всех, глава
-    отдела свой отдел, СВ — свой отдел и своих операторов."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        # Подраздел выбирает фронт: «Таксопарки» шлёт asterisk, «Tez» — binotel.
-        # Пусто = всё, что и так в области видимости (админская сводка целиком).
-        provider, provider_error = _sip_provider_arg(request.args.get('provider'))
-        if provider_error:
-            return jsonify({"error": provider_error}), 400
-        if provider and not _sip_section_allowed(requester_id, role, provider):
-            return jsonify({"error": "Этот раздел телефонии не для вашего отдела"}), 403
-        include_inactive = str(request.args.get('include_inactive', '')).strip().lower() in ('1', 'true', 'yes')
-        operators = db.get_sip_operators(
-            department_ids=department_ids,
-            supervisor_id=supervisor_id,
-            include_inactive=include_inactive,
-        )
-        departments = db.get_sip_department_configs(department_ids=department_ids)
-        if provider:
-            # Фильтруем по провайдеру ОТДЕЛА: своего у сотрудника нет, он весь
-            # определяется отделом (department_provider в его строке). Оператор
-            # без отдела (взят по supervisor_id) считается на локальной АТС.
-            departments = [d for d in departments
-                           if (d.get('provider') or 'asterisk') == provider]
-            operators = [o for o in operators
-                         if (o.get('department_provider') or 'asterisk') == provider]
-        # Ключа "settings" здесь больше нет: общий ярус настроек снят, отделы
-        # держат свои сервер/базу пароля сами.
-        return jsonify({
-            "status": "success",
-            "operators": operators,
-            "departments": departments,
-        }), 200
-    except Exception as e:
-        logging.error(f"Error in sip_config operators: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
+# Раздел «sip_config»: ручки вынесены в sip_config/routes.py (вынесено из bot_schedule2.py).
+from sip_config.routes import build_sip_config_blueprint  # noqa: E402
+app.register_blueprint(build_sip_config_blueprint(
+        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
+        ROLE_HIERARCHY=ROLE_HIERARCHY,
+        _build_cors_preflight_response=_build_cors_preflight_response,
+        _can_manage_sip_config=_can_manage_sip_config,
+        _department_scope_id_for_requester=_department_scope_id_for_requester,
+        _get_authenticated_requester=_get_authenticated_requester,
+        _get_role_level=_get_role_level,
+        _has_min_role=_has_min_role,
+        _headed_department_ids=_headed_department_ids,
+        _is_admin_role=_is_admin_role,
+        _is_allowed_origin=_is_allowed_origin,
+        _is_global_admin_requester=_is_global_admin_requester,
+        _normalize_origin=_normalize_origin,
+        _normalize_user_role=_normalize_user_role,
+        require_api_key=require_api_key,
+))
 
 
-@app.route('/api/sip_config/departments/<int:department_id>', methods=['PUT', 'OPTIONS'])
-@require_api_key
-def sip_config_department_endpoint(department_id):
-    """Настройки SIP отдела: свой сервер/домен, база пароля и код автодозвона.
-    Пустые поля возвращают отдел к общим настройкам."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        department_ids, _supervisor_id = _sip_department_scope(requester_id, role)
-        if department_ids is not None and int(department_id) not in set(department_ids):
-            return jsonify({"error": "Это не ваш отдел"}), 403
-        payload = request.get_json(silent=True) or {}
-        # Провайдер отдела переключает саму механику (у Binotel нет ни базы
-        # пароля, ни автодозвона), поэтому мусор ловим до записи. Ключа нет —
-        # БД оставит текущее значение, и переключать подраздел не требуется.
-        if payload.get('provider') is not None:
-            provider, provider_error = _sip_provider_arg(payload.get('provider'))
-            if provider_error:
-                return jsonify({"error": provider_error}), 400
-            if provider and not _sip_section_allowed(requester_id, role, provider):
-                return jsonify({"error": "Этот раздел телефонии не для вашего отдела"}), 403
-            payload = dict(payload, provider=provider or 'asterisk')
-        department = db.update_sip_department_config(department_id, payload, user_id=requester_id)
-        return jsonify({"status": "success", "department": department}), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logging.error(f"Error in sip_config department: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
-def _sip_target_in_scope(target, department_ids, supervisor_id) -> bool:
-    """Попадает ли сотрудник в область видимости запросившего."""
-    if department_ids is None:
-        return True
-    dept = target.get('department_id')
-    if dept is not None and int(dept) in set(department_ids):
-        return True
-    if supervisor_id and target.get('supervisor_id') is not None:
-        return int(target['supervisor_id']) == int(supervisor_id)
-    return False
 
 
-def _binotel_operator_payload_error(target, payload):
-    """Что не так в форме сотрудника на Binotel; None — всё в порядке.
-
-    Логин и пароль у Binotel персональные, и пустое поле здесь не «взять из
-    отдела», а нерабочая регистрация — телефон молча не поднимется. Пароль
-    требуем только при первом заполнении: дальше пустое поле означает «не
-    менять», как и везде. Исключение — СЕРВЕР: у него с задачи #309 есть общий
-    ярус отдела, поэтому пустое поле допустимо ровно тогда, когда отделу задан
-    общий сервер; иначе это по-прежнему нерабочая регистрация.
-    """
-    def _value(key, current):
-        # Ключа нет = «не менять» (берём текущее); ключ с пустым значением = стереть.
-        if payload.get(key) is None:
-            return str(current or '').strip()
-        return str(payload[key]).strip()
-
-    # Автодозвон — механика локальной АТС: второй номер, код включения и свой
-    # FOP2. В Binotel этого нет вовсе, и молча съесть такое поле нельзя:
-    # руководитель решит, что автодозвон настроен.
-    if any(str(k).startswith('autodial_') and str(v or '').strip() for k, v in payload.items()):
-        return "В Binotel автодозвона нет: поля второго номера должны быть пустыми"
-    if not _value('sip_domain', target.get('sip_domain')) \
-            and not str(target.get('department_sip_server') or '').strip():
-        return "Укажите SIP-сервер Binotel (например sip52.binotel.com)"
-    if not _value('sip_login', target.get('sip_login')):
-        return "Укажите SIP-логин Binotel — регистрация идёт им, а не внутренним номером"
-    if not _value('sip_password', target.get('sip_password')):
-        return "Укажите SIP-пароль: у Binotel он персональный и из базы отдела не собирается"
-    return None
 
 
-@app.route('/api/sip_config/operators/bulk', methods=['PUT', 'OPTIONS'])
-@require_api_key
-def sip_config_operators_bulk_endpoint():
-    """Массово изменить пароль/домен и вход в FOP2 выбранным сотрудникам.
-
-    Номера остаются персональными — массово меняются только пароль и домен
-    (основного номера и номера автодозвона) и выключатель FOP2. Пустое значение
-    возвращает общие; непереданное поле не трогаем."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        payload = request.get_json(silent=True) or {}
-        raw_ids = payload.get('user_ids') or []
-        try:
-            user_ids = sorted({int(uid) for uid in raw_ids})
-        except (TypeError, ValueError):
-            return jsonify({"error": "Некорректный список сотрудников"}), 400
-        if not user_ids:
-            return jsonify({"error": "Не выбран ни один сотрудник"}), 400
-
-        targets = db.get_sip_operators_by_ids(user_ids)
-        if len(targets) != len(user_ids):
-            return jsonify({"error": "Часть сотрудников не найдена"}), 404
-        if any(t.get('role') not in ('operator', 'trainee') for t in targets):
-            return jsonify({"error": "SIP-аккаунты ведём только операторам и стажёрам"}), 400
-        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        if any(not _sip_target_in_scope(t, department_ids, supervisor_id) for t in targets):
-            return jsonify({"error": "В выборке есть сотрудники не из вашего отдела"}), 403
-        # Массовая правка держится на том, что у отдела есть общее: домен и база
-        # пароля. У Binotel общего нет ни одного поля, так что и менять скопом
-        # нечего — единый домен на всех просто снял бы всех с регистрации.
-        if any((t.get('department_provider') or 'asterisk') == 'binotel' for t in targets):
-            return jsonify({"error": "Для Binotel массовые изменения не поддерживаются: "
-                                     "сервер, логин и пароль у каждого свои"}), 400
-
-        operators = db.bulk_update_user_sip_overrides(user_ids, payload, changed_by=requester_id)
-        return jsonify({"status": "success", "operators": operators}), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logging.error(f"Error in sip_config bulk update: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/sip_config/operators/<int:target_user_id>', methods=['PUT', 'OPTIONS'])
-@require_api_key
-def sip_config_operator_update_endpoint(target_user_id):
-    """Сохранить SIP-аккаунты сотрудника: номер, персональные пароль/домен,
-    второй номер для автодозвона. Номер не должен дублировать чужой."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        target = db.get_sip_operator(target_user_id)
-        if not target:
-            return jsonify({"error": "Сотрудник не найден"}), 404
-        if target.get('role') not in ('operator', 'trainee'):
-            return jsonify({"error": "SIP-аккаунты ведём только операторам и стажёрам"}), 400
-        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        if not _sip_target_in_scope(target, department_ids, supervisor_id):
-            return jsonify({"error": "Сотрудник не из вашего отдела"}), 403
-        payload = request.get_json(silent=True) or {}
-        # Провайдер берём у отдела цели, а не из тела запроса: форма провайдера
-        # не выбирает, она лишь показывает поля того подраздела, где открыта.
-        if (target.get('department_provider') or 'asterisk') == 'binotel':
-            binotel_error = _binotel_operator_payload_error(target, payload)
-            if binotel_error:
-                return jsonify({"error": binotel_error}), 400
-        # Занятость номера и SIP-логина проверяет сама save_user_sip_settings —
-        # её ValueError ловит except ниже и отдаёт 400 с текстом для человека.
-        operator = db.save_user_sip_settings(target_user_id, payload, changed_by=requester_id)
-        return jsonify({"status": "success", "operator": operator}), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logging.error(f"Error in sip_config operator update: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
-@app.route('/api/sip_config/history', methods=['GET', 'OPTIONS'])
-@require_api_key
-def sip_config_history_endpoint():
-    """История изменений настроек SIP (вкладка «История»). Доступ как у панели."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        limit = request.args.get('limit', default=100, type=int)
-        history = db.get_sip_config_history(limit=limit)
-        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        if department_ids is not None:
-            # Своя история у каждого отдела: главе Тез незачем видеть, кому и
-            # когда меняли пароль в отделе продаж. Скоуп тот же, что у списка
-            # сотрудников, иначе «История» показывала бы больше самой панели.
-            # Уволенных берём тоже (include_inactive): их строки в истории есть.
-            allowed_departments = {int(d) for d in department_ids}
-            visible_user_ids = {int(o['id']) for o in db.get_sip_operators(
-                department_ids=department_ids,
-                supervisor_id=supervisor_id,
-                include_inactive=True,
-            )}
-
-            def _history_row_visible(row):
-                if row.get('target_user_id') is not None:
-                    return int(row['target_user_id']) in visible_user_ids
-                if row.get('department_id') is not None:
-                    return int(row['department_id']) in allowed_departments
-                # Ни сотрудника, ни отдела — строка снятого общего яруса. Это
-                # архив на всю компанию, показываем только админу.
-                return False
-
-            # Фильтруем уже выбранные limit строк, а не запрашиваем с запасом:
-            # «История» — вкладка для беглого взгляда, добор страниц ей не нужен.
-            history = [r for r in history if _history_row_visible(r)]
-        return jsonify({"status": "success", "history": history}), 200
-    except Exception as e:
-        logging.error(f"Error in sip_config history: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
 # Ручка кабинета со списком сотрудников: отсюда берём связку
 # «e-mail → employeeID / SIP-логин (extHash) / внутренний номер (extNumber)».
-BINOTEL_EMPLOYEES_MODULE_PATH = '/main/?module=ajax&action=listOfEmployeesForBce&mbav=1'
 
 
-def _binotel_cabinet_credentials(user_ids):
-    """{user_id: (адрес кабинета, логин, пароль)} — учётки для входа в Binotel.
-
-    Узкий геттер живёт здесь, а не в database.py, намеренно: пароль кабинета
-    наружу не отдаётся никогда (панель видит только признак «задан»), и нужен он
-    ровно одному сценарию — серверному входу от имени самого сотрудника.
-    """
-    ids = sorted({int(u) for u in (user_ids or []) if u is not None})
-    if not ids:
-        return {}
-    with db._get_cursor() as cursor:
-        cursor.execute("""
-            SELECT user_id, cabinet_url, cabinet_login, cabinet_password
-            FROM binotel_user_accounts
-            WHERE user_id = ANY(%s)
-        """, (ids,))
-        rows = cursor.fetchall()
-    return {
-        int(row[0]): (
-            (row[1] or '').strip() or 'https://my.binotel.kz',
-            (row[2] or '').strip(),
-            row[3] or '',
-        )
-        for row in rows
-    }
 
 
-def _binotel_employee_records(payload):
-    """Плоский список записей сотрудников из ответа listOfEmployeesForBce.
-
-    Кабинет раскладывает людей по состояниям присутствия
-    (listOfEmployees{Working,Break,Inactive,Without}PresenceStates), а нам нужна
-    одна конкретная запись — склеиваем группы в общий список. Ключом словаря
-    идёт e-mail: дублируем его внутрь записи, чтобы поиск не зависел от того,
-    положил ли кабинет поле email в саму запись.
-    """
-    records = []
-    scopes = [payload if isinstance(payload, dict) else {}]
-    page_data = scopes[0].get('pageData')
-    if isinstance(page_data, dict):
-        scopes.append(page_data)
-    for scope in scopes:
-        for key, group in scope.items():
-            key = str(key)
-            if not (key.startswith('listOfEmployees') and key.endswith('PresenceStates')):
-                continue
-            if isinstance(group, dict):
-                items = list(group.items())
-            elif isinstance(group, list):
-                items = [(None, value) for value in group]
-            else:
-                continue
-            for group_key, record in items:
-                if not isinstance(record, dict):
-                    continue
-                if group_key and not str(record.get('email') or '').strip():
-                    record = dict(record, email=group_key)
-                records.append(record)
-    return records
 
 
-def _binotel_employee_by_email(records, email):
-    """Запись сотрудника по e-mail (он же логин кабинета) или None."""
-    wanted = str(email or '').strip().lower()
-    if not wanted:
-        return None
-    for record in records:
-        if str(record.get('email') or '').strip().lower() == wanted:
-            return record
-    return None
 
 
-@app.route('/api/sip_config/binotel/resolve_employee_ids', methods=['POST', 'OPTIONS'])
-@require_api_key
-def sip_config_binotel_resolve_employee_ids_endpoint():
-    """Подтянуть из кабинета Binotel employeeID, SIP-логин и внутренний номер.
-
-    Руководителю остаётся ввести только учётку кабинета и SIP-пароль: всё
-    остальное кабинет знает сам, а переписанный руками employeeID — это молча
-    не переключающийся статус. Заходим учёткой САМОГО сотрудника: общей
-    админской у нас нет, и чужие записи для задачи не нужны."""
-    if request.method == 'OPTIONS':
-        return _build_cors_preflight_response()
-    try:
-        requester_id, requester, auth_error = _get_authenticated_requester()
-        if auth_error:
-            message, status_code = auth_error
-            return jsonify({"error": message}), status_code
-        role = requester[3]
-        if not _can_manage_sip_config(requester_id, role):
-            return jsonify({"error": "Forbidden"}), 403
-        if not _sip_section_allowed(requester_id, role, 'binotel'):
-            return jsonify({"error": "Этот раздел телефонии не для вашего отдела"}), 403
-        payload = request.get_json(silent=True) or {}
-        raw_ids = payload.get('user_ids') or []
-        try:
-            user_ids = sorted({int(uid) for uid in raw_ids})
-        except (TypeError, ValueError):
-            return jsonify({"error": "Некорректный список сотрудников"}), 400
-        if not user_ids:
-            return jsonify({"error": "Не выбран ни один сотрудник"}), 400
-
-        targets = {int(t['id']): t for t in db.get_sip_operators_by_ids(user_ids)}
-        if len(targets) != len(user_ids):
-            return jsonify({"error": "Часть сотрудников не найдена"}), 404
-        department_ids, supervisor_id = _sip_department_scope(requester_id, role)
-        if any(not _sip_target_in_scope(t, department_ids, supervisor_id) for t in targets.values()):
-            return jsonify({"error": "В выборке есть сотрудники не из вашего отдела"}), 403
-        if any((t.get('department_provider') or 'asterisk') != 'binotel' for t in targets.values()):
-            return jsonify({"error": "Связка с кабинетом есть только у отделов на Binotel"}), 400
-
-        # Форму входа держим в одном месте с ночной выгрузкой статусов: она уже
-        # знает про прогрев cookie и про признак «остались на форме логина».
-        from tez import status_sync as tez_status_sync
-
-        # Кнопку «Определить автоматически» жмут в карточке ДО сохранения:
-        # в binotel_user_accounts ещё пусто, а введённая рядом учётка уже есть.
-        # Поэтому для одного сотрудника принимаем её из тела запроса; для
-        # массового определения источником остаётся только база.
-        credentials = _binotel_cabinet_credentials(user_ids)
-        if len(user_ids) == 1:
-            target_id = user_ids[0]
-            saved_url, saved_login, saved_password = credentials.get(target_id, ('', '', ''))
-            login = str(payload.get('cabinet_login') or '').strip() or saved_login
-            # Пустое поле пароля означает «оставить сохранённый» — ровно как при
-            # сохранении карточки, поэтому им не затираем учётку из базы.
-            password = str(payload.get('cabinet_password') or '') or saved_password
-            url = str(payload.get('cabinet_url') or '').strip() or saved_url
-            credentials[target_id] = (url or 'https://my.binotel.kz', login, password)
-        operators = []
-        resolved = 0
-        for user_id in user_ids:
-            target = targets[user_id]
-            cabinet_url, cabinet_login, cabinet_password = credentials.get(user_id, ('', '', ''))
-            item = {
-                "user_id": user_id,
-                "employee_id": target.get('binotel_employee_id') or "",
-                "sip_login": target.get('sip_login') or "",
-                "sip_number": target.get('sip_number') or "",
-            }
-            try:
-                if not cabinet_login or not cabinet_password:
-                    raise ValueError("Не заполнены логин и пароль кабинета Binotel")
-                client = tez_status_sync.BinotelClient(
-                    cabinet_url, cabinet_login, cabinet_password).authenticate()
-                response = client.session.get(
-                    cabinet_url.rstrip('/') + BINOTEL_EMPLOYEES_MODULE_PATH,
-                    timeout=tez_status_sync.HTTP_TIMEOUT,
-                    headers={"X-Requested-With": "XMLHttpRequest"},
-                )
-                response.raise_for_status()
-                record = _binotel_employee_by_email(
-                    _binotel_employee_records(response.json()), cabinet_login)
-                if not record:
-                    raise ValueError("В кабинете нет сотрудника с таким e-mail")
-                update = {}
-                employee_id = str(record.get('employeeID') or '').strip()
-                sip_login = str(record.get('extHash') or '').strip()
-                ext_number = str(record.get('extNumber') or '').strip()
-                # Пишем только расхождения: одинаковое значение всё равно ушло бы
-                # в ранний return, но лишняя строка в истории изменений — мусор.
-                if employee_id and employee_id != (target.get('binotel_employee_id') or ''):
-                    update['binotel_employee_id'] = employee_id
-                if sip_login and sip_login != (target.get('sip_login') or ''):
-                    update['sip_login'] = sip_login
-                if ext_number and ext_number != (target.get('sip_number') or ''):
-                    update['sip_number'] = ext_number
-                saved = (db.save_user_sip_settings(user_id, update, changed_by=requester_id)
-                         if update else target)
-                item.update({
-                    "employee_id": saved.get('binotel_employee_id') or "",
-                    "sip_login": saved.get('sip_login') or "",
-                    "sip_number": saved.get('sip_number') or "",
-                })
-                resolved += 1
-            except Exception as e:
-                # Кабинет отвечает по одному сотруднику: чужой просроченный
-                # пароль не повод терять уже прочитанные записи остальных.
-                logging.error(
-                    f"Error resolving binotel employee for user {user_id}: {e}", exc_info=True)
-                # ValueError здесь — наши же проверки, они уже по-русски;
-                # всё остальное (сеть, HTTP, битый JSON) заворачиваем сами,
-                # чтобы руководителю не прилетело сообщение библиотеки.
-                item["error"] = (str(e) if isinstance(e, ValueError) and str(e)
-                                 else "Не удалось прочитать кабинет Binotel: %s" % (e or "нет ответа"))
-            operators.append(item)
-        return jsonify({"status": "success", "resolved": resolved, "operators": operators}), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logging.error(f"Error in sip_config binotel resolve: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error"}), 500
 
 
 @app.route('/api/operator/sip_settings', methods=['GET', 'OPTIONS'])
@@ -59702,6 +58653,31 @@ def _lms_signed_url(bucket_name, blob_path, expires_minutes=120, response_dispos
         )
     except Exception:
         return None
+# Раздел «events»: ручки вынесены в events/routes.py (вынесено из bot_schedule2.py).
+from events.routes import build_events_blueprint  # noqa: E402
+app.register_blueprint(build_events_blueprint(
+        AVATAR_SIGNED_URL_CACHE=AVATAR_SIGNED_URL_CACHE,
+        AVATAR_SIGNED_URL_CACHE_LOCK=AVATAR_SIGNED_URL_CACHE_LOCK,
+        AVATAR_SIGNED_URL_CACHE_MAX_ITEMS=AVATAR_SIGNED_URL_CACHE_MAX_ITEMS,
+        AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS=AVATAR_SIGNED_URL_CACHE_MIN_REMAINING_SECONDS,
+        AVATAR_SIGNED_URL_TTL_SECONDS=AVATAR_SIGNED_URL_TTL_SECONDS,
+        FOUR_YOU_MAX_IMAGE_PIXELS=FOUR_YOU_MAX_IMAGE_PIXELS,
+        ROLE_HIERARCHY=ROLE_HIERARCHY,
+        _build_avatar_signed_url=_build_avatar_signed_url,
+        _department_scope_id_for_requester=_department_scope_id_for_requester,
+        _events_viewer_scope=_events_viewer_scope,
+        _four_you_convert_image_variants=_four_you_convert_image_variants,
+        _get_authenticated_requester=_get_authenticated_requester,
+        _get_role_level=_get_role_level,
+        _has_min_role=_has_min_role,
+        _headed_department_id=_headed_department_id,
+        _is_admin_role=_is_admin_role,
+        _is_global_admin_requester=_is_global_admin_requester,
+        _lms_signed_url=_lms_signed_url,
+        _normalize_user_role=_normalize_user_role,
+        get_gcs_client=get_gcs_client,
+        require_auth=require_auth,
+))
 
 
 def _lms_collect_course_blob_refs_tx(cursor, course_id):
