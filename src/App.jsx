@@ -34453,9 +34453,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             leaveReview.reload({ silent: true });
                                         }}
                                         className={PLANNER_TOOLBAR_BTN}
-                                        title={leaveReview.visible
-                                            ? 'Заявки операторов по сменам, на отпуск и Б/С'
-                                            : 'Заявки операторов на изменение своих смен'}
+                                        title="Заявки операторов"
                                     >
                                         <FaIcon className={`fas ${reviewLoading ? 'fa-spinner fa-spin' : 'fa-inbox'} text-slate-400`}></FaIcon>
                                         Запросы

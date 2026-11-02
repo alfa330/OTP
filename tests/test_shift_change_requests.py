@@ -1569,8 +1569,13 @@ class FourKindsFrontendTests(unittest.TestCase):
         # Выбор — список проекта, а не сегменты: четыре подписи в полосу на
         # телефоне не помещаются. Якорь aria-подписи держит и тест формы.
         form = _js_block(self.app, "const shiftChangeModal = (", "</IosModal>")
-        self.assertIn("options={SHIFT_CHANGE_KIND_OPTIONS}", form)
+        # Пятым пунктом того же списка у отделов с заявками на отпуск идёт
+        # «Отпуск или Б/С» (задача #358) — сам список видов смены цел.
+        self.assertIn("[...SHIFT_CHANGE_KIND_OPTIONS, { value: LEAVE_REQUEST_OPTION", form)
+        self.assertIn(": SHIFT_CHANGE_KIND_OPTIONS}", form)
         self.assertIn('ariaLabel="Что нужно изменить"', form)
+        # Сегменты в окне — только у выбора «Отпуск / Б/С», и живут они в
+        # своём компоненте полей, а не в списке видов.
         self.assertNotIn("<IosSegmented", form)
 
     def test_every_kind_has_a_title_a_tile_and_a_hint_line(self):
