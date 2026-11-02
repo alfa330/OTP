@@ -37,7 +37,7 @@ from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOT_PATH = os.path.join(ROOT, 'bot_schedule2.py')
+BOT_PATH = str(source_cache.monolith_flat_path())
 APP_PATH = os.path.join(ROOT, 'src', 'App.jsx')
 
 LINE_DEPARTMENT = 1954   # отдел линии — удалённый КЦ

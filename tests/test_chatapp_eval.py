@@ -15,13 +15,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 from tez import chatapp_client  # noqa: E402
-from tests import source_cache
 
 
 def _chatapp_namespace(env=None):
@@ -297,7 +297,7 @@ class TokenStoreTests(unittest.TestCase):
         self.assertEqual(store.saves, 1)
 
 
-DB_PATH = ROOT / "database.py"
+DB_PATH = source_cache.database_flat_path()
 
 
 def _episode_builder():

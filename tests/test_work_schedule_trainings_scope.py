@@ -27,7 +27,7 @@ from types import SimpleNamespace
 from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOT_PATH = os.path.join(ROOT, 'bot_schedule2.py')
+BOT_PATH = str(source_cache.monolith_flat_path())
 
 HANDLERS = ('get_trainings', 'get_training_rejections')
 UNDER_TEST = HANDLERS + (
@@ -150,7 +150,7 @@ def _load(portal, requester_id, args):
         'WORK_SCHEDULE_SUPERVISOR_GRANTS': portal.grants,
         'g': SimpleNamespace(),
     }
-    module = source_cache.parse(_read('bot_schedule2.py'))
+    module = source_cache.parse(_read(source_cache.monolith_flat_path()))
     by_name = {node.name: node for node in module.body if isinstance(node, ast.FunctionDef)}
     selected = []
     for name in UNDER_TEST:
@@ -363,7 +363,7 @@ class SectionPerimeterTests(unittest.TestCase):
             self.assertEqual(ids, [], requester_id)
 
     def test_the_helper_calls_the_section_filter(self):
-        source = _read('bot_schedule2.py')
+        source = _read(source_cache.monolith_flat_path())
         body = source.split('def _work_schedule_operator_ids(', 1)[1].split('\ndef ', 1)[0]
         self.assertIn('_filter_operators_for_requester_scope(requester, requester_id, staff)', body)
 

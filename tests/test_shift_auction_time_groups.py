@@ -14,8 +14,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-ROUTES_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
+ROUTES_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 FRONTEND_SOURCE = (
     ROOT / "src" / "components" / "resources" / "ShiftAuctionView.jsx"
 ).read_text(encoding="utf-8-sig")

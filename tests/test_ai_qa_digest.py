@@ -1315,7 +1315,7 @@ class EvaluationDaysTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.routes = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.routes = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.tree = source_cache.parse(cls.routes)
 
     def _function(self, name):

@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 from dial_list import service as dial_service  # noqa: E402
 from tests import source_cache  # noqa: E402
 
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _employees(*lines):

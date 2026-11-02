@@ -44,8 +44,9 @@ from common import log_secrets  # noqa: E402
 from partner_keys import keys as partner_keys  # noqa: E402
 from sign_links import api_key, batch, external, iin, queries, sapar_link  # noqa: E402
 from sign_links.external import build_sign_links_external_blueprint  # noqa: E402
+from tests import source_cache
 
-BOT = ROOT / 'bot_schedule2.py'
+BOT = source_cache.monolith_flat_path()
 README = ROOT / 'README.md'
 META_JS = ROOT / 'src' / 'components' / 'sign_links' / 'signLinkMeta.js'
 VIEW_JSX = ROOT / 'src' / 'components' / 'sign_links' / 'SignLinksView.jsx'

@@ -35,8 +35,9 @@ except ImportError:  # pragma: no cover
 from olx_amo import cabinets, partner_events, partner_routes  # noqa: E402
 from olx_amo.service import ReplyRefused  # noqa: E402
 from partner_keys import keys, webhooks  # noqa: E402
+from tests import source_cache
 
-BOT = ROOT / 'bot_schedule2.py'
+BOT = source_cache.monolith_flat_path()
 KEY = 'otpk_FAKE-olx-key-for-tests-0123456789-abcdefgh'
 KEY_ROW = (7, 'CRM «Потока»', keys.mark(KEY), ['olx_chats'], 'operator', 1, 'СЗоВ', 'szov',
            3, 'Админ', None, None, 0, None, None, None)

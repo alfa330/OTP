@@ -22,8 +22,8 @@ import pytest
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 UPDATED_COLUMNS = ("name", "created_at", "created_date", "stage", "responsible", "tags",
                    "utm_source", "utm_medium", "utm_campaign", "utm_term", "registered",
                    "trip_done", "robot_closed")

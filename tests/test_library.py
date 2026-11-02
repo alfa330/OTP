@@ -38,6 +38,7 @@ from unittest import mock
 
 from library import epub, queries, routes, storage
 from library.epub import CHARS_PER_PAGE, EpubError, page_for_offset, pages_for_chars, parse_epub
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -472,7 +473,7 @@ class PermissionTests(unittest.TestCase):
         """«СВ и выше» — по шкале сервера, а вместе с читателями — вся шкала:
         роль, добавленная в шкалу позже, уронит тест, а не останется молча за
         дверью библиотеки."""
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         scale = ast.literal_eval(re.search(r'^ROLE_HIERARCHY = (\{.*?\n\})', source, re.M | re.S).group(1))
         self.assertEqual({role for role, level in scale.items() if level >= scale['sv']},
                          routes.MANAGER_ROLES - {'trainer'})
@@ -1021,12 +1022,12 @@ class SchemaTests(unittest.TestCase):
         self.assertNotRegex(text, r'--[^\n]*%(?!\(now\)s)')
 
     def test_schema_is_wired_into_database_init(self):
-        source = (ROOT / 'database.py').read_text(encoding='utf-8')
+        source = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         self.assertIn('self._init_library_schema_tx(cursor)', source)
         self.assertIn('from library.schema import init_library_schema', source)
 
     def test_blueprint_is_registered(self):
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         self.assertIn('from library.routes import build_library_blueprint', source)
 
 
@@ -1217,7 +1218,7 @@ class LibraryManagersTests(unittest.TestCase):
     def test_blueprint_is_built_with_exactly_the_factory_arguments(self):
         """Лишний или пропавший аргумент — TypeError при старте, и раздел молча
         не подключится: подключение обёрнуто в try."""
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         block = source[source.index('app.register_blueprint(build_library_blueprint('):]
         block = block[:block.index('\n    ))')]
         passed = set(re.findall(r'^ {8}(\w+)=', block, re.M))

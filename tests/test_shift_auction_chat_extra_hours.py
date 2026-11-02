@@ -17,9 +17,10 @@ import ast
 import os
 import unittest
 from datetime import datetime, time as dt_time, timedelta
+from tests import source_cache
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATABASE = os.path.join(REPO_ROOT, "database.py")
+DATABASE = str(source_cache.database_flat_path())
 VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ShiftAuctionView.jsx")
 
 

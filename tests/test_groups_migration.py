@@ -8,8 +8,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DB = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DB = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
+BOT = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 GROUPS_VIEW = (ROOT / "src" / "components" / "groups" / "GroupsView.jsx").read_text(encoding="utf-8-sig")
 USER_MODAL = (ROOT / "src" / "components" / "modals" / "UserEditModal.jsx").read_text(encoding="utf-8-sig")
@@ -49,7 +49,7 @@ def _membership_edit_database_class():
         "timedelta": timedelta,
     }
     test_module = ast.fix_missing_locations(ast.Module(body=[test_class], type_ignores=[]))
-    exec(compile(test_module, str(ROOT / "database.py"), "exec"), namespace)
+    exec(compile(test_module, str(source_cache.database_flat_path()), "exec"), namespace)
     return namespace["MembershipEditDatabase"]
 
 

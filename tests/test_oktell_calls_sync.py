@@ -22,7 +22,7 @@ from pathlib import Path
 from tests import source_cache
 
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _module():

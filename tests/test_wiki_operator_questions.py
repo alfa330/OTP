@@ -17,6 +17,7 @@ from wiki import access as wiki_access
 from wiki import questions as wiki_questions
 from wiki.ai import answer as ai_answer
 from wiki.ai import knowledge
+from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -220,7 +221,7 @@ class ChatMarksTests(unittest.TestCase):
 class BellRulesTests(unittest.TestCase):
     """Кого будит вопрос — одно правило в двух копиях (триггер и источник)."""
 
-    DATABASE = _read('database.py')
+    DATABASE = _read(source_cache.database_flat_path())
 
     def _trigger_block(self):
         start = self.DATABASE.index('def _init_bell_notify_schema_tx(self, cursor):')

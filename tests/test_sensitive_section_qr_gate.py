@@ -25,12 +25,13 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BOT_PATH = ROOT / 'bot_schedule2.py'
+BOT_PATH = source_cache.monolith_flat_path()
 
 try:
     from flask import Flask

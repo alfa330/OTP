@@ -60,11 +60,11 @@ class AiQaAccessControlTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.call_qa_view_source = (
             ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx"
         ).read_text(encoding="utf-8-sig")
-        cls.database_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.database_source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_frontend_allows_super_admin_and_moldir_user_id(self):
         # Поимённый список, а не один литерал: людей в нём прибавляется по

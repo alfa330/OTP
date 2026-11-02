@@ -15,7 +15,7 @@ class FourYouAccessControlTests(unittest.TestCase):
         cls.app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
         cls.department_views_source = (ROOT / "src" / "utils" / "departmentViews.js").read_text(encoding="utf-8-sig")
         cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-        cls.db_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.db_source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
         cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
 

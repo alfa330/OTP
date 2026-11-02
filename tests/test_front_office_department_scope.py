@@ -7,8 +7,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 APP_PATH = ROOT / "src" / "App.jsx"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
@@ -20,13 +20,20 @@ def _read(path):
 
 
 def _function_source(path, function_name):
-    source = _read(path)
-    module = source_cache.parse(source)
-    function_node = next(
-        node for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == function_name
-    )
-    return textwrap.dedent(ast.get_source_segment(source, function_node))
+    # Ручки разделов уезжают в <раздел>/routes.py (scripts/extract_routes.py): после
+    # монолита ищем там; вложенные в строитель def выравниваем как верхнеуровневые.
+    for candidate in (path, *source_cache.extracted_route_modules()):
+        source = _read(candidate)
+        module = source_cache.parse(source)
+        function_node = next(
+            (node for node in ast.walk(module)
+             if isinstance(node, ast.FunctionDef) and node.name == function_name),
+            None,
+        )
+        if function_node is not None:
+            lines = source.splitlines()[function_node.lineno - 1:function_node.end_lineno]
+            return textwrap.dedent("\n".join(lines))
+    raise LookupError(function_name)
 
 
 class FrontOfficeViewAllowlistTests(unittest.TestCase):
@@ -144,10 +151,8 @@ class _SurveysDB:
 
 
 def _bot_function_node(name):
-    return next(
-        node for node in source_cache.parse(_read(BOT_PATH)).body
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    )
+    # Ручки опросов живут в surveys/routes.py: function_node сам ищет в вынесенных пакетах.
+    return source_cache.function_node(str(BOT_PATH), name)
 
 
 class FrontOfficeSurveysBackendTests(unittest.TestCase):
@@ -162,12 +167,17 @@ class FrontOfficeSurveysBackendTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         body = []
-        for node in source_cache.parse(_read(BOT_PATH)).body:
-            if isinstance(node, ast.FunctionDef) and node.name in SURVEYS_GUARD_NAMES:
-                body.append(node)
-            elif isinstance(node, ast.Assign):
-                if {t.id for t in node.targets if isinstance(t, ast.Name)} & SURVEYS_GUARD_NAMES:
+        # Гард опросов и его помощники живут в surveys/routes.py (02.11.2026), общие
+        # помощники ролей — по-прежнему в монолите; вложенные в строитель функции
+        # берём так же, как верхнеуровневые. Пакеты перечисляет source_cache: пока
+        # раздел не вынесен, его ручки ещё в монолите, и список пакетов его не содержит.
+        for path in (BOT_PATH, *source_cache.extracted_route_modules()):
+            for node in ast.walk(source_cache.parse(_read(path))):
+                if isinstance(node, ast.FunctionDef) and node.name in SURVEYS_GUARD_NAMES:
                     body.append(node)
+                elif isinstance(node, ast.Assign):
+                    if {t.id for t in node.targets if isinstance(t, ast.Name)} & SURVEYS_GUARD_NAMES:
+                        body.append(node)
         module = ast.Module(body=body, type_ignores=[])
         ast.fix_missing_locations(module)
         cls._code = compile(module, "<surveys-guard>", "exec")
@@ -183,7 +193,7 @@ class FrontOfficeSurveysBackendTests(unittest.TestCase):
         }
         exec(self._code, ns)
         missing = sorted(name for name in SURVEYS_GUARD_NAMES if name not in ns)
-        self.assertEqual(missing, [], "не найдено в bot_schedule2.py")
+        self.assertEqual(missing, [], "не найдено ни в bot_schedule2.py, ни в surveys/routes.py")
         _, _, section_role, _, status = ns['_surveys_route_guard']()
         return section_role, getattr(ns['g'], 'survey_scope_department_id', 'не выставлена'), status
 

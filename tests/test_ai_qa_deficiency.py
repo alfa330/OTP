@@ -12,7 +12,7 @@ from call_qa.api import _ai_score, _human_display_verdict, _norm_verdict
 from call_qa.evaluation.evaluator import _criteria_block, _needs_escalation, assemble_results
 from tests import source_cache
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _direction(criteria):

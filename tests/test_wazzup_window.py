@@ -16,7 +16,7 @@ from wazzup.window import last_inbound_at
 
 def history_app(db):
     """Run the real route without importing the server or its production pool."""
-    path = Path(__file__).resolve().parents[1] / 'bot_schedule2.py'
+    path = source_cache.monolith_flat_path()
     source = source_cache.parse(path.read_text(encoding='utf-8-sig'))
     route = next(node for node in source.body
                  if isinstance(node, ast.FunctionDef) and node.name == 'api_wazzup_chat_messages')

@@ -19,7 +19,7 @@ from tests import source_cache
 from wazzup import access
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_SOURCE = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
 APP_SOURCE = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
 
 SECRET = 'unit-test-secret'

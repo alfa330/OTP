@@ -28,7 +28,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 
 def _load_report_builder():

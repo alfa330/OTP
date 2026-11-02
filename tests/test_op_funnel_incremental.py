@@ -18,6 +18,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from op_funnel import sync
+from tests import source_cache
 
 
 class _Cursor:
@@ -191,7 +192,7 @@ class IncrementalScheduleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8-sig') as fh:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8-sig') as fh:
             cls.source = fh.read()
 
     def test_deals_every_three_minutes_off_the_round_minutes(self):

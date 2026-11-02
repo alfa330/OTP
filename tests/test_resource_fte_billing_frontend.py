@@ -3,11 +3,12 @@
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_PATH = ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx"
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 class BillingExportChoiceTests(unittest.TestCase):

@@ -68,7 +68,7 @@ class _FakeSession:
 
 
 def _namespace(outcomes=(), token='secret', url='http://proxy.test:8085/query'):
-    source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+    source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
     session = _FakeSession(outcomes)
     ns = {
         'requests': requests,
@@ -108,7 +108,7 @@ class OktellSessionTests(unittest.TestCase):
 
     def test_real_session_reuses_one_connection_per_host(self):
         """Пул именно маленький: прокси низкоконкурентный, разгонять его нам нечем."""
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         ns = _load_names(source, {'_build_oktell_session', '_oktell_session'}, {'requests': requests})
         session = ns['_oktell_session']
         self.assertIsInstance(session, requests.Session)

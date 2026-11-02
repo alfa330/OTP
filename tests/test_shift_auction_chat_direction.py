@@ -16,8 +16,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
-BOT_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 VIEW_PATH = ROOT / "src" / "components" / "resources" / "ShiftAuctionView.jsx"
 
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
@@ -176,7 +176,9 @@ class ChatPartialClaimTests(unittest.TestCase):
         self.assertNotIn("direction_mode", signature)
 
         resolver_start = BOT_SOURCE.index("def _resolve_shift_auction_direction")
-        resolver = BOT_SOURCE[resolver_start:BOT_SOURCE.index("def _requested_shift_auction_direction")]
+        # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
+        resolver = BOT_SOURCE[resolver_start:]
+        resolver = resolver[:re.search(r"\n(?=\S)", resolver[1:]).start() + 1]
         self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", resolver)
         self.assertIn("db.shift_auction_mode_for_operator(requester_id)", resolver)
 

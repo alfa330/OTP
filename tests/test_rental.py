@@ -30,10 +30,11 @@ if str(ROOT) not in sys.path:
 
 from rental import access, collect, plates, report, rules  # noqa: E402
 from rental.sources import EfirSource, GlonassSource, SourceError, WialonSource, YumeSource  # noqa: E402
+from tests import source_cache
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
-BOT_PY = ROOT / 'bot_schedule2.py'
-DATABASE_PY = ROOT / 'database.py'
+BOT_PY = source_cache.monolith_flat_path()
+DATABASE_PY = source_cache.database_flat_path()
 
 NOW = 1793080800.0  # 27.10.2026 16:00 по Алматы
 

@@ -24,8 +24,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-DB_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+DB_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 VIEW = (ROOT / "src" / "components" / "monitoring" / "TezWallboardView.jsx").read_text(encoding="utf-8-sig")
 SZOV_VIEW = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
 
@@ -358,7 +358,9 @@ class TezBreakWiringTests(unittest.TestCase):
         """Кнопка проверки шлёт настоящую отбивку табло и нарушения прочитанными не помечает."""
         self.assertIn('SZOV_BROADCAST_DIRECTION_TEZ: _tez_broadcast_send,', SOURCE)
         send = SOURCE[SOURCE.index('async def _tez_broadcast_send('):]
-        send = send[:send.index('\n_TEZ_BROADCAST_PREVIEW_IMAGES')]
+        # До конца функции (следующая строка без отступа): соседняя константа уехала в
+        # szov_wallboard/routes.py, и соседство в склейке уже не прежнее.
+        send = send[:re.search(r'\n(?=\S)', send[1:]).start() + 1]
         self.assertNotIn('mark_szov_break_violations_reported', send)
         preview = SOURCE[SOURCE.index('def api_szov_wallboard_broadcast_preview():'):]
         preview = preview[:preview.index('\ndef ', 10)]

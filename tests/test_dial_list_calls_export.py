@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dial_list import calls_export  # noqa: E402
 from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 UTC = timezone.utc
@@ -356,7 +357,7 @@ class TextWarningTests(unittest.TestCase):
 
     def test_real_patch_lands_and_book_opens(self):
         from tests import source_cache
-        node = next(n for n in source_cache.tree(ROOT / 'bot_schedule2.py').body
+        node = next(n for n in source_cache.tree(source_cache.monolith_flat_path()).body
                     if isinstance(n, ast.FunctionDef) and n.name == '_excel_suppress_number_as_text_warning')
         namespace = {}
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot', 'exec'),
@@ -376,7 +377,7 @@ class TextWarningTests(unittest.TestCase):
         self.assertEqual((written, wb.sheetnames[0]), (1, 'Звонки'))
 
     def test_monolith_hands_the_helper_over(self):
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
         block = bot.split('_dial_list_bp = build_dial_list_blueprint(')[1].split('\n    )\n')[0]
         self.assertIn('excel_text_warning=_excel_suppress_number_as_text_warning', block)
         routes = (ROOT / 'dial_list/routes.py').read_text(encoding='utf-8')

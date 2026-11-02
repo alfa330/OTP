@@ -15,6 +15,7 @@ from pathlib import Path
 
 from discipline import access, catalog
 from notifications import sources
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
@@ -108,7 +109,7 @@ class AppWiringTests(unittest.TestCase):
         # пропавший аргумент там не уронит запуск, а молча выключит раздел на проде.
         import inspect
         from discipline.routes import build_discipline_blueprint
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = bot.index('app.register_blueprint(build_discipline_blueprint(')
         call = bot[start:bot.index('))', start)]
         passed = set(re.findall(r'^\s+(\w+)=', call, re.M))

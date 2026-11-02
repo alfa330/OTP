@@ -455,7 +455,7 @@ class RouteBehaviourTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.nodes = {node.name: node for node in source_cache.parse(cls.src).body
                      if isinstance(node, ast.FunctionDef) and node.name in (
                          "api_ai_qa_exclusion", "api_ai_qa_exclusions", "api_ai_qa_exclusion_categories")}
@@ -552,7 +552,7 @@ class RouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         # Только нужные функции: get_source_segment режет строки файла заново на
         # каждый вызов, и по всем трём тысячам функций это минуты.
         cls.functions = {

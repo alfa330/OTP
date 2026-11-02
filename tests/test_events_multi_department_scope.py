@@ -7,7 +7,7 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 EVENTS_VIEW_PATH = ROOT / "src" / "components" / "events" / "EventsView.jsx"
 
 

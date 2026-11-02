@@ -25,6 +25,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
 import task_board as cli  # noqa: E402
+from tests import source_cache
 
 
 # ─────────────── Документы-фикстуры ───────────────
@@ -454,7 +455,7 @@ class ServerContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+        cls.bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
         cls.needs_js = (ROOT / 'src' / 'components' / 'tasks' / 'taskActionNeeds.js').read_text(encoding='utf-8-sig')
 
     def test_upload_limits_match_server(self):
@@ -475,7 +476,7 @@ class ServerContractTests(unittest.TestCase):
         self.assertEqual(list(cli.ACTION_KIND_LABELS), frontend)
 
     def test_attachment_kinds_match_the_schema(self):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
         raw = re.search(r"attachment_kind VARCHAR\(16\).*?CHECK \(attachment_kind IN \(([^)]*)\)\)",
                         database, re.S).group(1)
         kinds = set(re.findall(r"'([a-z]+)'", raw))
@@ -491,12 +492,12 @@ class ServerContractTests(unittest.TestCase):
 
     def test_required_checklist_still_blocks_handover(self):
         # SKILL.md обещает: незакрытый обязательный пункт не даёт сдать задачу.
-        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
         self.assertIn('CHECKLIST_INCOMPLETE', database)
         self.assertIn('is_required = TRUE', database)
 
     def test_export_filter_values_match_server(self):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
         mine = set(re.findall(r"mine_norm not in \{([^}]*)\}", database)[0].replace("'", '').split(', '))
         self.assertEqual(mine | {'any'}, {'any', 'assignee', 'creator'})
         scope = re.findall(r"person_scope_norm not in \{([^}]*)\}", database)[0]

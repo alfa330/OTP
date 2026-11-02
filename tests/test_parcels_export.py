@@ -48,6 +48,7 @@ from parcels import queries as parcels_queries  # noqa: E402
 from parcels import report  # noqa: E402
 from parcels import schema as parcels_schema  # noqa: E402
 from parcels.routes import build_parcels_blueprint  # noqa: E402
+from tests import source_cache
 
 
 VIEW_PATH = ROOT / 'src' / 'components' / 'parcels' / 'ParcelsView.jsx'
@@ -452,7 +453,7 @@ class TextWarningPatchTests(unittest.TestCase):
         import io as _io
         from zipfile import ZipFile as _Zip, ZIP_DEFLATED as _DEFLATED
 
-        node = next(n for n in source_cache.tree(ROOT / 'bot_schedule2.py').body
+        node = next(n for n in source_cache.tree(source_cache.monolith_flat_path()).body
                     if isinstance(n, ast.FunctionDef)
                     and n.name == '_excel_suppress_number_as_text_warning')
         namespace = {}
@@ -521,7 +522,7 @@ class TextWarningWiringTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+        self.bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
         self.routes = (ROOT / 'parcels' / 'routes.py').read_text(encoding='utf-8')
 
     def test_monolith_hands_the_helper_to_the_section(self):

@@ -13,8 +13,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DB_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DB_PATH = source_cache.database_flat_path()
 
 
 def _bot_function(name):

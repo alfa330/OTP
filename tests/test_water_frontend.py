@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 
 from water import access, notify, report, routes, rules, schema
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 PARCELS_VIEW = ROOT / 'src' / 'components' / 'parcels' / 'ParcelsView.jsx'
@@ -654,7 +655,7 @@ class JournalCancelTests(unittest.TestCase):
 
 class WiringTests(unittest.TestCase):
     def test_schema_is_initialised_on_start(self):
-        database = _read(ROOT / 'database.py')
+        database = _read(source_cache.database_flat_path())
         self.assertIn('self._init_water_schema_tx(cursor)', database)
         self.assertIn('from water.schema import init_water_schema', database)
         # После вики: office_id — внешний ключ на wiki_offices.
@@ -662,7 +663,7 @@ class WiringTests(unittest.TestCase):
                         database.index('self._init_water_schema_tx(cursor)'))
 
     def test_blueprint_is_registered_with_its_dependencies(self):
-        bot = _read(ROOT / 'bot_schedule2.py')
+        bot = _read(source_cache.monolith_flat_path())
         block = bot.split('build_water_blueprint(\n')[1].split('))')[0]
         for name in ('sensitive_access_granted=_sensitive_access_granted_for_user',
                      'excel_text_warning=_excel_suppress_number_as_text_warning',

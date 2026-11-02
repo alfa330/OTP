@@ -1,3 +1,4 @@
+from tests import source_cache
 # -*- coding: utf-8 -*-
 """Калибровка «Журнала оценок» — руководителям и супервайзерам.
 
@@ -29,10 +30,9 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 JOURNAL_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
 
 CONSTANTS = ("ROLE_HIERARCHY", "CALIBRATION_FORBIDDEN_ERROR")

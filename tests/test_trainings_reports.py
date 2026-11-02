@@ -31,8 +31,8 @@ from tests import source_cache  # noqa: E402
 from trainings import access, reports  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / 'database.py'
-BOT_PATH = ROOT / 'bot_schedule2.py'
+DB_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _node_source(source, name, cls_name=None):

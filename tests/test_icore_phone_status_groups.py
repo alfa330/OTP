@@ -31,8 +31,8 @@ from op_wallboard import snapshot as wallboard_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DB_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DB_PATH = source_cache.database_flat_path()
 BOT_SOURCE = source_cache.read(BOT_PATH)
 DB_SOURCE = source_cache.read(DB_PATH)
 

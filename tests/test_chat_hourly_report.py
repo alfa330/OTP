@@ -19,7 +19,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
 NAMES = {
     '_env_int',
@@ -574,7 +574,7 @@ class ChatHourlyWiringTests(unittest.TestCase):
 
     def setUp(self):
         self.source = SOURCE
-        self.database = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        self.database = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_subscription_table_and_methods_exist(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS chat_hourly_subscriptions", self.database)

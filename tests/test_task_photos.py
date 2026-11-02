@@ -44,8 +44,8 @@ import task_photos  # noqa: E402
 from tests import source_cache  # noqa: E402
 from wiki import images as wiki_images  # noqa: E402
 
-BOT_PATH = ROOT / 'bot_schedule2.py'
-DATABASE_PATH = ROOT / 'database.py'
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 BOT_PY = source_cache.read(BOT_PATH)
 DATABASE_PY = source_cache.read(DATABASE_PATH)
 TASKS_DIR = ROOT / 'src' / 'components' / 'tasks'

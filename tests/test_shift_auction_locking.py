@@ -4,7 +4,7 @@ from pathlib import Path
 from tests import source_cache
 
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 
 def _database_class():

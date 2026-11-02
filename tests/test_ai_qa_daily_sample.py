@@ -504,7 +504,7 @@ class DatabaseWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = source_cache.read(ROOT / "database.py")
+        cls.source = source_cache.read(source_cache.database_flat_path())
 
     def body(self, name):
         start = self.source.index(f"    def {name}(")
@@ -546,7 +546,7 @@ class AdapterTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.source = source_cache.read(ROOT / "bot_schedule2.py")
+        cls.source = source_cache.read(source_cache.monolith_flat_path())
 
     def test_cdr_candidates_trust_only_own_recordings_of_a_single_owner(self):
         from cdr import queries as cdr_queries, touches as cdr_touches
@@ -816,7 +816,7 @@ class RouteTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.submitted = []
         self.guard_error = None
-        node = copy.deepcopy(source_cache.function_node(ROOT / "bot_schedule2.py",
+        node = copy.deepcopy(source_cache.function_node(source_cache.monolith_flat_path(),
                                                         "api_ai_qa_daily_sample"))
         node.decorator_list = []
         module = ast.Module(body=[node], type_ignores=[])
@@ -882,7 +882,7 @@ class RouteTests(unittest.TestCase):
 class MonolithWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = source_cache.read(ROOT / "bot_schedule2.py")
+        cls.source = source_cache.read(source_cache.monolith_flat_path())
 
     def test_schedule_runs_twice_in_the_morning_in_its_own_pool(self):
         self.assertIn("ai_qa_sample_pool = ThreadPoolExecutor(max_workers=1, "

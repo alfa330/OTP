@@ -14,6 +14,7 @@ import unittest
 from news import access as news_access
 from news import schema as news_schema
 from wiki import access as wiki_access
+from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1446,7 +1447,7 @@ class NewsSpaceTests(unittest.TestCase):
         self.assertIn('if not space_ready(cursor):', backfill)
         # Бэкфилл живёт под своим SAVEPOINT'ом: он читает таблицу вики, и её
         # сбой не должен уносить развёрнутые таблицы раздела.
-        db = _read('database.py')
+        db = _read(source_cache.database_flat_path())
         self.assertIn('SAVEPOINT news_spaces_backfill', db)
 
     def test_a_question_becomes_the_news_of_its_own_space(self):
@@ -2233,12 +2234,12 @@ class NewsScheduleTests(unittest.TestCase):
         launch = _function(routes, '_launch')
         self.assertLess(launch.index('_build_waves('), launch.index('queries.publish_post('))
         # И то же самое в кроне — второй точке выпуска.
-        job = _function(_read('bot_schedule2.py'), 'publish_scheduled_news_job')
+        job = _function(_read(source_cache.monolith_flat_path()), 'publish_scheduled_news_job')
         self.assertLess(job.index('set_waves('), job.index('publish_scheduled('))
 
     def test_the_cron_job_is_registered_and_never_touches_request(self):
         """Напоминания о задачах уже падали в кроне на `request` вне контекста."""
-        bot = _read('bot_schedule2.py')
+        bot = _read(source_cache.monolith_flat_path())
         self.assertIn("id='news_publish_scheduler'", bot)
         self.assertIn('run_news_scheduler_async', bot)
         job = _function(bot, 'publish_scheduled_news_job')
@@ -2627,7 +2628,7 @@ class NewsAuditJournalTests(unittest.TestCase):
     def test_the_scheduled_launch_is_written_without_an_author(self):
         """Выпустила система — приписать это тому, кто нажал «Опубликовать»
         накануне, значило бы соврать о времени."""
-        job = _function(_read('bot_schedule2.py'), 'publish_scheduled_news_job')
+        job = _function(_read(source_cache.monolith_flat_path()), 'publish_scheduled_news_job')
         self.assertIn("actor_id=None, action='news.publish'", job)
         self.assertIn("'by_schedule': True", job)
         # И журнал называет такого автора «Система», а не «автор неизвестен»:

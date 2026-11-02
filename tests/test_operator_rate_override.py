@@ -13,12 +13,13 @@ import ast
 import os
 import re
 import unittest
+from tests import source_cache
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATABASE = os.path.join(REPO_ROOT, "database.py")
+DATABASE = str(source_cache.database_flat_path())
 SERVICE = os.path.join(REPO_ROOT, "resource_fte", "service.py")
 CHAT = os.path.join(REPO_ROOT, "resource_fte", "chat.py")
-BACKEND = os.path.join(REPO_ROOT, "bot_schedule2.py")
+BACKEND = str(source_cache.monolith_flat_path())
 VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ResourceFteView.jsx")
 
 

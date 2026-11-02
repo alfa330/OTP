@@ -14,7 +14,7 @@ from typing import List, Optional
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 # Кто есть кто в сценариях ниже.
 OWNER = 10        # постановщик (created_by)

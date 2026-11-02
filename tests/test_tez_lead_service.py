@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from tez import lead_service as tez_lead_service  # noqa: E402
 from tez.op_leads import ALMATY_TZ  # noqa: E402
+from tests import source_cache
 
 
 def _xlsx_bytes(rows):
@@ -835,7 +836,7 @@ class BatchWriteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def _body(self, name, size=9000):
         """Тело метода до следующего `def` — срез фиксированной длины выталкивал

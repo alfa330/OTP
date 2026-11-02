@@ -33,10 +33,11 @@ from openpyxl import load_workbook
 
 from op_wallboard import chat as C, chat_export as X, routes as op_routes
 from tests.test_szov_wallboard import _load_names
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_SOURCE = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
-DB_SOURCE = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
+DB_SOURCE = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
 MONITORING = ROOT / 'src' / 'components' / 'monitoring'
 
 DAY = date(2026, 9, 25)

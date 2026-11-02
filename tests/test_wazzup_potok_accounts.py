@@ -14,10 +14,11 @@ from pathlib import Path
 from unittest import mock
 
 from wazzup import accounts, names, potok_client, potok_sync
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-API_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-DB_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+API_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+DB_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 VIEW_SOURCE = (ROOT / "src" / "components" / "wazzup" / "WazzupChatsView.jsx").read_text(encoding="utf-8-sig")
 APP_SOURCE = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 LINK_SOURCE = (ROOT / "src" / "components" / "wazzup" / "chatLink.js").read_text(encoding="utf-8-sig")

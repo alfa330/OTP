@@ -270,7 +270,7 @@ class CompatModeTests(unittest.TestCase):
 class RouteWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.tree = source_cache.parse(cls.src)
 
     def _function(self, name):

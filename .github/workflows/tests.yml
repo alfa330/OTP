@@ -62,7 +62,7 @@ jobs:
         # проде — ловушка разноса монолитов (02.11.2026: так нашлись get_gcs_client в
         # database.py и build_cors_preflight_response в bot_schedule2.py). Пока только F821:
         # F811 и F401 в монолите есть исторически, ими займёмся по мере разноса.
-        run: python -m ruff check --select F821 --output-format concise bot_schedule2.py database.py
+        run: python -m ruff check --select F821 --output-format concise bot_schedule2.py database.py db
 
       - name: pytest
         # Тестам, которым нужна боевая база, она нужна только для чтения, и без

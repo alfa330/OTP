@@ -29,8 +29,8 @@ from trainings.schema import CHECKPOINT_KINDS, CHECKPOINT_KIND_LABELS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 SCHEMA_PATH = ROOT / "trainings" / "schema.py"
 SOURCES_PATH = ROOT / "notifications" / "sources.py"
 MAIN_JSX_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"

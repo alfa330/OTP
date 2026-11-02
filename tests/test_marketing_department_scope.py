@@ -31,8 +31,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 DEPARTMENT_VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 ROLES_PATH = ROOT / "src" / "utils" / "roles.js"
 WIKI_ACCESS_PATH = ROOT / "wiki" / "access.py"
@@ -51,13 +51,20 @@ def _read(path):
 
 
 def _function_source(path, function_name):
-    source = _read(path)
-    module = source_cache.parse(source)
-    function_node = next(
-        node for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == function_name
-    )
-    return textwrap.dedent(ast.get_source_segment(source, function_node))
+    # Ручки разделов уезжают в <раздел>/routes.py (scripts/extract_routes.py): после
+    # монолита ищем там; вложенные в строитель def выравниваем как верхнеуровневые.
+    for candidate in (path, *source_cache.extracted_route_modules()):
+        source = _read(candidate)
+        module = source_cache.parse(source)
+        function_node = next(
+            (node for node in ast.walk(module)
+             if isinstance(node, ast.FunctionDef) and node.name == function_name),
+            None,
+        )
+        if function_node is not None:
+            lines = source.splitlines()[function_node.lineno - 1:function_node.end_lineno]
+            return textwrap.dedent("\n".join(lines))
+    raise LookupError(function_name)
 
 
 class RoleIsKnownEverywhereTests(unittest.TestCase):

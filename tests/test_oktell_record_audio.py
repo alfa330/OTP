@@ -11,7 +11,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 FRONTEND_PATH = ROOT / "src" / "call_evaluation" / "main.jsx"
 CONN_ID = "2b1f8608-1dc7-4059-945a-043b6d3aad9c"
 
@@ -309,7 +309,7 @@ class OktellRecordAudioTests(unittest.TestCase):
         self.assertLessEqual(active["peak"], 2)
 
     def test_distribution_database_import_persists_audio_path(self):
-        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         module = source_cache.parse(source)
         database_class = next(
             node for node in module.body

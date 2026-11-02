@@ -190,7 +190,7 @@ class AdminAccessContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_src = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_src = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.store_src = (ROOT / "call_qa" / "rag" / "store.py").read_text(encoding="utf-8-sig")
         cls.view_src = (ROOT / "src" / "components" / "call_qa" / "CallQaView.jsx").read_text(encoding="utf-8-sig")
         cls.rag_src = (ROOT / "src" / "components" / "call_qa" / "AdjudicationsRag.jsx").read_text(encoding="utf-8-sig")
@@ -242,14 +242,14 @@ class AdminAccessContractTests(unittest.TestCase):
 class AdminGuardBehaviorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         tree = source_cache.parse(source)
         node = next(item for item in tree.body
                     if isinstance(item, ast.FunctionDef) and item.name == "_ai_qa_admin_guard")
         node = copy.deepcopy(node)
         node.decorator_list = []
         cls.code = compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
-                           str(ROOT / "bot_schedule2.py"), "exec")
+                           str(source_cache.monolith_flat_path()), "exec")
 
     def _guard(self, role):
         user = (1, "Имя", "login", role)

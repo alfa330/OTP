@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from tests import source_cache
 from tez.op_leads import (  # noqa: E402
     ALMATY_TZ,
     DEFAULT_REACTIVATION_GAP_DAYS,
@@ -334,7 +335,7 @@ class SchemaTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.ddl = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.ddl = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_tables_declared(self):
         for table in [
@@ -569,7 +570,7 @@ class DormantCallsFetchTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_dormant_drivers_are_not_excluded_from_call_history(self):
         start = self.src.index("def get_tez_phones_needing_calls")
@@ -591,7 +592,7 @@ class GroupFilterTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.src = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.src = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_group_filter_uses_membership_interval_on_success_date(self):
         """Группа берётся из членства, активного в день успешки (не «текущая» группа)."""

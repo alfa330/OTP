@@ -25,6 +25,7 @@ from flask import Flask
 
 from cdr import routes as cdr_routes, touches as T
 from cdr_bridge import agent as bridge_mod
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 TOKEN = 'test-bridge-token-0123456789'
@@ -280,7 +281,7 @@ class AudioRouteTests(unittest.TestCase):
 class WiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+        cls.source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
         cls.journal = (ROOT / 'src' / 'call_evaluation' / 'main.jsx').read_text(encoding='utf-8-sig')
         cls.schema = (ROOT / 'cdr' / 'schema.py').read_text(encoding='utf-8-sig')
 

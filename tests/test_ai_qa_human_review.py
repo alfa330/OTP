@@ -165,7 +165,7 @@ class ApiWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.tree = source_cache.parse(cls.api_source)
 
     def _function(self, name):
@@ -249,7 +249,7 @@ class JournalTargetTests(unittest.TestCase):
     """Откуда берутся реквизиты строки журнала — по виду субъекта."""
 
     def _load(self, namespace):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         tree = source_cache.parse(source)
         node = next(item for item in tree.body
                     if isinstance(item, ast.FunctionDef) and item.name == "_ai_qa_journal_target")

@@ -18,9 +18,10 @@ import ast
 import os
 import unittest
 from datetime import time as dt_time
+from tests import source_cache
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATABASE = os.path.join(REPO_ROOT, "database.py")
+DATABASE = str(source_cache.database_flat_path())
 
 
 def _read(path):

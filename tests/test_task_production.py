@@ -26,8 +26,8 @@ if str(ROOT) not in sys.path:
 
 import task_production  # noqa: E402
 
-DATABASE_PATH = ROOT / "database.py"
-BOT_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 CLI_PATH = ROOT / "scripts" / "task_board.py"
 BRIEF_JS_PATH = ROOT / "src" / "components" / "tasks" / "productionBrief.js"
 BRIEF_UI_PATH = ROOT / "src" / "components" / "tasks" / "ProductionBriefUi.jsx"

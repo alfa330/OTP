@@ -11,10 +11,11 @@
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 VIEW = (ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx").read_text(encoding="utf-8-sig")
-BOT = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+BOT = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
 
 class MainScreenTests(unittest.TestCase):

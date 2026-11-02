@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from tests import source_cache
 
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 APP_PATH = Path(__file__).resolve().parents[1] / "src" / "App.jsx"
 
 

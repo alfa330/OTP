@@ -19,6 +19,7 @@ from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
 from dial_list import sign_report, signing  # noqa: E402
+from tests import source_cache
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALMATY = timezone(timedelta(hours=5))
@@ -195,7 +196,7 @@ class RefreshWindowTest(unittest.TestCase):
                 self.assertIsNone(sign_report.refresh_window(outside))
 
     def test_scheduler_fires_half_an_hour_before_each_slot(self):
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = bot.index('scheduler.add_job(\n        dial_list_sign_report_refresh_job,')
         block = bot[start:bot.index(')\n', bot.index("id='dial_list_sign_report_refresh'", start))]
         hours = ','.join(str(h - 1) for h in sign_report.SLOT_HOURS)
@@ -334,7 +335,7 @@ class WiringTest(unittest.TestCase):
         routes = (ROOT / 'dial_list' / 'routes.py').read_text(encoding='utf-8')
         self.assertIn("'/api/dial_list/departments/<int:department_id>/sign_report/chats'", routes)
         self.assertIn("'/api/dial_list/departments/<int:department_id>/sign_report/preview'", routes)
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = bot.index('scheduler.add_job(\n        dial_list_sign_report_job,')
         block = bot[start:bot.index(')\n', bot.index("id='dial_list_sign_report'", start))]
         self.assertIn("CronTrigger(hour='10,19', minute=0, timezone=ZoneInfo('Asia/Almaty'))", block)

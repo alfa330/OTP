@@ -24,6 +24,7 @@ from unittest import mock
 from flask import Flask
 
 from payments import access, directory, mail, requisites_mail, routes, routes_directory
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = json.loads((ROOT / 'tests' / 'data' / 'payments_requisites_mail_cases.json').read_text(encoding='utf-8'))
@@ -254,7 +255,7 @@ class AutoSendRemovedTests(unittest.TestCase):
     """27.10.2026: «пока убери автоотправку» — портал писем сам не отправляет."""
 
     def test_no_letters_job_in_the_scheduler(self):
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         for gone in ('payments_requisites_mail', 'requisites_mail.run'):
             with self.subTest(gone):
                 self.assertNotIn(gone, source)

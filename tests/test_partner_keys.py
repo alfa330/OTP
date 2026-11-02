@@ -36,8 +36,9 @@ except ImportError:  # pragma: no cover
 
 from partner_keys import auth, journal, keys, queries, schema, scopes  # noqa: E402
 from partner_keys.admin_routes import build_partner_keys_admin_blueprint  # noqa: E402
+from tests import source_cache
 
-BOT = ROOT / 'bot_schedule2.py'
+BOT = source_cache.monolith_flat_path()
 README = ROOT / 'README.md'
 
 # Ключ выдуман; настоящий живёт только в журнале выпуска.
@@ -351,7 +352,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn('partner_queries.cleanup_calls(cursor, days)', self.bot)
 
     def test_the_schema_is_deployed_under_its_own_savepoint(self):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
         self.assertIn('self._init_partner_keys_schema_tx(cursor)', database)
         self.assertIn('SAVEPOINT partner_keys_schema', database)
         self.assertNotIn('knowledge_api_schema', database)

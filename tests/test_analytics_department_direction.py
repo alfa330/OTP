@@ -32,8 +32,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"
 

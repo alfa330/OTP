@@ -16,7 +16,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 AUDIO_PATH = "my-app-audio-uploads/Uploads/oktell-1234.mp3"
 

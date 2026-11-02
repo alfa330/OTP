@@ -31,7 +31,7 @@ PORT = os.environ.get('OKTELL_CALLS_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (OKTELL_CALLS_TEST_PORT)')
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+SOURCE = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
 MODULE = source_cache.parse(SOURCE)
 DATABASE_CLASS = next(n for n in MODULE.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
 _LINES = SOURCE.splitlines(keepends=True)

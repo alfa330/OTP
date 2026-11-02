@@ -24,11 +24,12 @@
 import os
 import re
 import unittest
+from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP_JSX = os.path.join(ROOT, 'src', 'App.jsx')
-BOT = os.path.join(ROOT, 'bot_schedule2.py')
-DATABASE = os.path.join(ROOT, 'database.py')
+BOT = str(source_cache.monolith_flat_path())
+DATABASE = str(source_cache.database_flat_path())
 
 VIEW = 'op_funnel'
 

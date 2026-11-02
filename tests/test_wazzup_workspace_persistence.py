@@ -591,7 +591,7 @@ def test_other_messages_keep_their_authors(pg):
 
 def test_icore_authors_do_not_appear_in_the_manual_mapping_list(pg):
     connection, cursor, database, _ = pg
-    module = source_cache.parse((ROOT / 'database.py').read_text(encoding='utf-8-sig'))
+    module = source_cache.parse((source_cache.database_flat_path()).read_text(encoding='utf-8-sig'))
     cls = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
     wanted = [n for n in cls.body
               if (isinstance(n, ast.FunctionDef) and n.name == 'list_wazzup_authors')

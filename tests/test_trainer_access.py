@@ -10,6 +10,7 @@ import contextlib
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -118,7 +119,7 @@ class AccessTest(unittest.TestCase):
     def test_monolith_wires_the_trainer_with_the_shared_normalizer(self):
         """Роль тренера трактует монолит, а не раздел — та же причина, что у
         супер-админа (см. test_role_is_delegated_verbatim_to_the_shared_check)."""
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = source.index('app.register_blueprint(build_trainer_blueprint(')
         block = source[start:source.index('))', start)]
         self.assertIn('is_super_admin_role=_is_super_admin_role,', block)

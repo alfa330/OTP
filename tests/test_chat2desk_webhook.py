@@ -26,8 +26,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-DB_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+DB_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
 NAMES = {
     '_env_int', '_chat_metrics_parse_number', '_chat_metrics_parse_date',
@@ -761,7 +761,7 @@ class WebhookRouteTests(unittest.TestCase):
     """Ручка приёма: секрет в пути, тонкий обработчик, честный код ответа."""
 
     def setUp(self):
-        node = source_cache.function_copy(ROOT / "bot_schedule2.py", "chat2desk_webhook")
+        node = source_cache.function_copy(source_cache.monolith_flat_path(), "chat2desk_webhook")
         node.decorator_list = []
         module = ast.Module(body=[node], type_ignores=[])
         ast.fix_missing_locations(module)
@@ -841,18 +841,18 @@ class WebhookStorageTests(unittest.TestCase):
         self.assertIn('event_key TEXT NOT NULL UNIQUE', DB_SOURCE)
 
     def test_save_is_idempotent_by_event_key(self):
-        source = _function_source(ROOT / "database.py", "save_c2d_webhook_events",
+        source = _function_source(source_cache.database_flat_path(), "save_c2d_webhook_events",
                                   class_name='Database')
         self.assertIn('ON CONFLICT (event_key) DO NOTHING', source)
 
     def test_retention_is_one_week(self):
-        source = _function_source(ROOT / "database.py", "cleanup_c2d_eval_data",
+        source = _function_source(source_cache.database_flat_path(), "cleanup_c2d_eval_data",
                                   class_name='Database')
         self.assertIn('webhook_days=7', source)
         self.assertIn('DELETE FROM c2d_webhook_events WHERE day < CURRENT_DATE - %s', source)
 
     def test_wallboard_prefers_webhooks_and_falls_back_to_polling(self):
-        source = _function_source(ROOT / "bot_schedule2.py",
+        source = _function_source(source_cache.monolith_flat_path(),
                                   "_szov_chat_wallboard_day_requests")
         self.assertIn('_chat2desk_webhook_day_rows(day_str)', source)
         self.assertIn('_chat_hourly_fetch_requests(day_str)', source)

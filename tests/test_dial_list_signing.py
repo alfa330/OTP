@@ -27,6 +27,7 @@ from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
 from dial_list import sign_check, signing  # noqa: E402
+from tests import source_cache
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SIGN_JS = ROOT / 'src' / 'components' / 'dial_list' / 'signStatus.js'
@@ -739,7 +740,7 @@ class SchemaAndWiringTests(unittest.TestCase):
         self.assertIn('EXCEPTION WHEN unique_violation', unique)
 
     def test_scheduler_asks_every_half_hour(self):
-        text = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        text = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         job = text[text.index('async def dial_list_sign_check_job'):]
         self.assertIn("_dial_list_service.request_sign_check('планировщик')", job[:600])
         self.assertIn("id='dial_list_sign_check'", text)

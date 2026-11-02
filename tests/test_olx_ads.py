@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from olx_ads import access, ai, schema, service, validate
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -531,7 +532,7 @@ class SchemaTests(unittest.TestCase):
         self.assertLess(backfill, new_index)
 
     def test_schema_is_wired_into_database_init(self):
-        database = _read('database.py')
+        database = _read(source_cache.database_flat_path())
         self.assertIn('self._init_olx_ads_schema_tx(cursor)', database)
         self.assertIn('def _init_olx_ads_schema_tx', database)
         self.assertIn('SAVEPOINT olx_ads_schema', database)
@@ -588,7 +589,7 @@ class RoutesTests(unittest.TestCase):
             self.assertIn('manage=True', self._decorator_of(handler), handler)
 
     def test_blueprint_is_registered(self):
-        app = _read('bot_schedule2.py')
+        app = _read(source_cache.monolith_flat_path())
         self.assertIn('from olx_ads.routes import build_olx_ads_blueprint', app)
         self.assertIn('build_olx_ads_blueprint(', app)
 

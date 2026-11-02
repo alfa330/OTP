@@ -328,7 +328,7 @@ class SubjectFamilyTests(unittest.TestCase):
 
     def test_list_routes_take_the_family_and_the_card_does_not(self):
         """Карточке и разбору нужен РОВНО один вид: там семейство — бессмыслица."""
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         for route in ("api_ai_qa_evaluations", "api_ai_qa_review_queue"):
             node = next(item for item in source_cache.parse(source).body
                         if isinstance(item, ast.FunctionDef) and item.name == route)
@@ -654,7 +654,7 @@ class DepartmentScopeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def _namespace(self, *, role, user_id, headed_codes=(), department_code="",
                    marketing_observer=False):
@@ -748,7 +748,7 @@ class DepartmentScopeTests(unittest.TestCase):
 class RoutesTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_dead_binotel_route_is_gone(self):
         """Ручка импортировала call_qa.api.random_binotel_call, которой в
@@ -801,7 +801,7 @@ class WritePathDepartmentTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def _guard(self, allowed, direction_department):
         namespace = {
@@ -857,7 +857,7 @@ class SubjectByIdTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_card_route_checks_the_department(self):
         node = next(item for item in source_cache.parse(self.api_source).body
@@ -889,7 +889,7 @@ class VerifierChatsPerimeterTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.app = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 
     def test_backend_guard_lists_its_own_perimeter(self):
@@ -949,7 +949,7 @@ class PullCallTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.node = next(item for item in source_cache.parse(cls.api_source).body
                         if isinstance(item, ast.FunctionDef)
                         and item.name == "api_ai_qa_pull_call")
@@ -1147,7 +1147,7 @@ class DeleteGuardTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_ai_evaluated_imported_call_cannot_be_deleted(self):
         node = next(item for item in source_cache.parse(self.api_source).body
@@ -1307,7 +1307,7 @@ class RetentionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.database_source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.database_source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_ai_evaluated_chat2desk_snapshot_survives_retention(self):
         """Для переписки СЗоВ снапшот — САМ субъект оценки. Его удаление не

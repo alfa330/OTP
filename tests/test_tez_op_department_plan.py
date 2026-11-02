@@ -13,7 +13,7 @@ from tests import source_cache
 from tez import department_plan as plans
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_SOURCE = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
 
 
 class FakeDb:

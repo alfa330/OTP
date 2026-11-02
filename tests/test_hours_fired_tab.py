@@ -11,11 +11,12 @@
 import re
 import unittest
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PATH = ROOT / "src" / "App.jsx"
-DB_PATH = ROOT / "database.py"
+DB_PATH = source_cache.database_flat_path()
 
 
 class HoursFiredTabFrontendTests(unittest.TestCase):

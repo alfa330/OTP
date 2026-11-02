@@ -17,7 +17,7 @@ import pytest
 from tests import source_cache
 
 
-PATH = Path(__file__).resolve().parents[1] / 'database.py'
+PATH = source_cache.database_flat_path()
 
 
 def pg_error(code):

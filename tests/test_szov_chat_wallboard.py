@@ -16,6 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from tests.test_szov_wallboard import _FakeDb, _load_names
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -98,7 +99,7 @@ class _Harness:
     """Namespace с настоящими функциями табло и поддельными Chat2Desk/БД."""
 
     def _namespace(self, *, members=None, operators=None, requests_get=None):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         matched = operators if operators is not None else CHAT_MANAGERS
 
         class _FakeRequests:
@@ -897,7 +898,7 @@ class ChatWallboardManualLogoutSnapshotTests(_Harness, unittest.TestCase):
             '_status_import_parse_datetime': lambda value, default_date=None: None,
             '_chat2desk_webhook_day_rows': lambda day_str: ([], True),
         })
-        _load_names((ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig"), {
+        _load_names((source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig"), {
             'build_chat_webhook_status_rows', 'chat2desk_webhook_status_name',
             '_chat2desk_webhook_apply_open_chats',
             '_chat2desk_webhook_roster', '_chat2desk_webhook_status_rows',
@@ -1122,7 +1123,7 @@ class ChatWallboardWiringTests(unittest.TestCase):
         """Расчёт «сколько нужно под 2 минуты» убран: пропорция от факта завышала в разы."""
         self.assertNotIn('dataKey="required"', self.board)
         self.assertNotIn('Нужно под цель', self.board)
-        api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         self.assertNotIn('operators_required', api)
 
     def test_chat_direction_offers_the_excel_export(self):
@@ -1240,7 +1241,7 @@ def _export_namespace():
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
-    source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+    source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
     ns = {
         'math': math,
         'datetime': datetime,
@@ -1749,7 +1750,7 @@ class ChatBroadcastTests(unittest.TestCase):
     }
 
     def _namespace(self, snapshot=None, break_violations=None):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         ns = {
             'os': os, 're': re, 'logging': logging,
             'datetime': datetime, 'ZoneInfo': ZoneInfo,
@@ -1922,7 +1923,7 @@ class ChatBroadcastWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
     def _section(self, start, end):
         return self.api[self.api.index(start):self.api.index(end)]

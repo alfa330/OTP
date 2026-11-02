@@ -39,8 +39,8 @@ from tests import prod_db, source_cache
 from wiki.access import QR_GATED_ROLES
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / 'database.py'
-BOT_PATH = ROOT / 'bot_schedule2.py'
+DB_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 
 _DB_METHODS = {
     '_active_session_device_sql', '_live_sessions_cte', '_live_search_predicate',

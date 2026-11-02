@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _database_class():
-    source = source_cache.parse((ROOT / 'database.py').read_text(encoding='utf-8-sig'))
+    source = source_cache.parse((source_cache.database_flat_path()).read_text(encoding='utf-8-sig'))
     cls = next(n for n in source.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
     wanted = {'store_wazzup_messages', '_refresh_wazzup_chat_tx', 'update_wazzup_statuses'}
     methods = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in wanted]
@@ -33,7 +33,7 @@ def _database_class():
     module = ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
         name='Database', bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[]))
     namespace = {}
-    exec(compile(module, str(ROOT / 'database.py'), 'exec'), namespace)
+    exec(compile(module, str(source_cache.database_flat_path()), 'exec'), namespace)
     return namespace['Database']
 
 

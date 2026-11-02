@@ -417,7 +417,7 @@ class RefineRouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.node = next(node for node in source_cache.parse(source).body
                         if isinstance(node, ast.FunctionDef)
                         and node.name == "api_ai_qa_adjudicate_refine")

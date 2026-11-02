@@ -21,8 +21,8 @@ from pathlib import Path
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / 'database.py'
-BOT_PATH = ROOT / 'bot_schedule2.py'
+DATABASE_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
 PHONE = (ROOT / 'src' / 'components' / 'schedule' / 'MyShiftsMobile.jsx').read_text(encoding='utf-8')
 DATABASE_SRC = source_cache.read(DATABASE_PATH)

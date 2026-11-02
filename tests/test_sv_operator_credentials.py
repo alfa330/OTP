@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from tests import source_cache
 
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 REAL_HELPERS = (
     "_normalize_user_role",

@@ -31,10 +31,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from twofa import access, crypto, otpauth, rules, timer, totp  # noqa: E402
+from tests import source_cache
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
-BOT_PY = ROOT / 'bot_schedule2.py'
-DATABASE_PY = ROOT / 'database.py'
+BOT_PY = source_cache.monolith_flat_path()
+DATABASE_PY = source_cache.database_flat_path()
 SOURCES_PY = ROOT / 'notifications' / 'sources.py'
 FA_ICON = ROOT / 'src' / 'components' / 'common' / 'FaIcon.jsx'
 VIEW_JSX = ROOT / 'src' / 'components' / 'twofa' / 'TwofaView.jsx'

@@ -36,8 +36,9 @@ from knowledge_api import parks as park_match, routes  # noqa: E402
 from knowledge_api import search as knowledge_search  # noqa: E402
 from knowledge_api.routes import build_knowledge_blueprint  # noqa: E402
 from partner_keys import keys  # noqa: E402
+from tests import source_cache
 
-BOT = ROOT / 'bot_schedule2.py'
+BOT = source_cache.monolith_flat_path()
 README = ROOT / 'README.md'
 DOC = ROOT / 'docs' / 'SYNTONY_KNOWLEDGE_API.md'
 

@@ -6,6 +6,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import date
 
+from tests import source_cache
 from resource_fte.chat import (
     CHAT_ONLINE_STATUS_KEY,
     CHAT_RATES,
@@ -58,7 +59,7 @@ def _chat_tabs_block(source):
     block = source[source.index("const VIEW_TABS_CHAT = ["):]
     return block[:block.index("];")]
 CHAT_MODEL = os.path.join(REPO_ROOT, "resource_fte", "chat.py")
-BACKEND = os.path.join(REPO_ROOT, "bot_schedule2.py")
+BACKEND = str(source_cache.monolith_flat_path())
 
 
 def _read(path):
@@ -347,7 +348,7 @@ class ChatSectionFrontendTests(unittest.TestCase):
 
     def test_chat_templates_endpoint_serves_chat_set(self):
         """Ручка чата обязана отдавать ЧАТОВЫЕ шаблоны, а не набор линии."""
-        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        backend = _read(str(source_cache.monolith_flat_path()))
         chunk = backend[backend.index("def api_resource_fte_chat_shift_templates"):]
         chunk = chunk[:chunk.index("@app.route", 10)]
         self.assertIn("get_chat_shift_templates()", chunk)
@@ -521,11 +522,11 @@ class ChatSectionFrontendTests(unittest.TestCase):
 
     def test_saved_schedule_is_scoped_by_direction(self):
         """Планы линии и чата лежат в одной таблице — без фильтра они смешаются."""
-        schema = _read(os.path.join(REPO_ROOT, "database.py"))
+        schema = _read(str(source_cache.database_flat_path()))
         self.assertIn("ADD COLUMN IF NOT EXISTS direction_mode", schema)
         self.assertIn("direction_mode VARCHAR(10) NOT NULL DEFAULT 'line'", schema)
         self.assertIn("AND direction_mode = %s", schema)
-        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        backend = _read(str(source_cache.monolith_flat_path()))
         chunk = backend[backend.index("def api_resource_fte_chat_saved_schedule"):]
         chunk = chunk[:chunk.index("@app.route('/api/resource_fte/chat/schedule_preview'")]
         # считаем только исполняемые строки: в докстринге направление тоже упомянуто
@@ -549,7 +550,7 @@ class ChatSectionFrontendTests(unittest.TestCase):
             self.assertIn(token, source)
 
     def test_backend_routes_are_declared(self):
-        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        backend = _read(str(source_cache.monolith_flat_path()))
         for route in (
             "/api/resource_fte/chat/overview",
             "/api/resource_fte/chat/settings",
@@ -570,7 +571,7 @@ class ChatSectionFrontendTests(unittest.TestCase):
 
     def test_chat_schedule_uses_the_same_generator_as_the_line(self):
         """Смены для чата строит тот же алгоритм — иначе разъедутся правила смен."""
-        backend = _read(os.path.join(REPO_ROOT, "bot_schedule2.py"))
+        backend = _read(str(source_cache.monolith_flat_path()))
         chunk = backend[backend.index("def api_resource_fte_chat_schedule_preview"):]
         chunk = chunk[:chunk.index("@app.route('/api/resource_fte/schedule_preview'")]
         self.assertIn("_generate_schedule_preview_from_forecast", chunk)
@@ -579,7 +580,7 @@ class ChatSectionFrontendTests(unittest.TestCase):
 
 class ChatSettingsTableTests(unittest.TestCase):
     def test_settings_table_is_created_with_guards(self):
-        schema = _read(os.path.join(REPO_ROOT, "database.py"))
+        schema = _read(str(source_cache.database_flat_path()))
         self.assertIn("CREATE TABLE IF NOT EXISTS resource_chat_settings", schema)
         self.assertIn("resource_chat_settings_singleton", schema)
         self.assertIn("resource_chat_settings_capacity_check", schema)
@@ -587,7 +588,7 @@ class ChatSettingsTableTests(unittest.TestCase):
 
     def test_settings_are_separate_from_the_line_table(self):
         """У линии и чата разные вводные; смешивать их в одной строке нельзя."""
-        schema = _read(os.path.join(REPO_ROOT, "database.py"))
+        schema = _read(str(source_cache.database_flat_path()))
         chunk = schema[schema.index("CREATE TABLE IF NOT EXISTS resource_settings"):]
         chunk = chunk[:chunk.index("CREATE TABLE IF NOT EXISTS resource_chat_settings")]
         self.assertNotIn("capacity_per_hour", chunk)
@@ -1103,7 +1104,9 @@ class ChatPlannerBoundaryTests(unittest.TestCase):
         """
         backend = _read(BACKEND)
         start = backend.index("def _resolve_shift_auction_direction")
-        chunk = backend[start:backend.index("def _requested_shift_auction_direction", start)]
+        # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
+        chunk = backend[start:]
+        chunk = chunk[:re.search(r"\n(?=\S)", chunk[1:]).start() + 1]
         self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", chunk)
         self.assertIn("normalize_shift_auction_mode(requested)", chunk)
         self.assertIn("db.shift_auction_mode_for_operator(requester_id)", chunk)
@@ -1135,7 +1138,7 @@ class ChatAuctionIsolationTests(unittest.TestCase):
         оператор разбирал бы чатовые смены. Теперь у чата свой аукцион, поэтому фильтр
         не прибит к 'line', а идёт параметром: каждый прогон видит ТОЛЬКО свои недели.
         """
-        db = _read(os.path.join(REPO_ROOT, "database.py"))
+        db = _read(str(source_cache.database_flat_path()))
 
         for fn in ("_get_shift_auction_available_periods_tx",
                    "_get_shift_auction_period_row_tx"):
@@ -1156,7 +1159,7 @@ class ChatAuctionIsolationTests(unittest.TestCase):
         Пропуск колонки в любой из них означает, что сохранение/перезапуск одного
         направления стирает состояние второго.
         """
-        db = _read(os.path.join(REPO_ROOT, "database.py"))
+        db = _read(str(source_cache.database_flat_path()))
         for table in ("shift_auction_test_access",
                       "shift_auction_test_participants",
                       "shift_auction_test_lots",

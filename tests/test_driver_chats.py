@@ -44,6 +44,7 @@ except ImportError:  # pragma: no cover
 from driver_chats import access, chat2desk, queries, report, schema  # noqa: E402
 from driver_chats import routes as routes_module  # noqa: E402
 from driver_chats.routes import build_driver_chats_blueprint  # noqa: E402
+from tests import source_cache
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 JOURNAL_META = ROOT / 'src' / 'components' / 'driver_chats' / 'journalMeta.js'
@@ -308,7 +309,7 @@ class QrPolicyTests(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertIn(role, issuable)
 
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         self.assertIn('from driver_chats.access import QR_GATED_ROLES', bot,
                       'монолит обязан читать список раздела, а не догадываться')
         self.assertIn('SENSITIVE_QR_GATED_ROLES = frozenset(_WIKI_QR_GATED_ROLES) '
@@ -636,8 +637,8 @@ class WhatsAppIdentifierSyncTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.database = (ROOT / 'database.py').read_text(encoding='utf-8')
-        cls.bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        cls.database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
+        cls.bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
 
     def test_column_is_added_by_alter_with_its_own_index(self):
         self.assertIn('ALTER TABLE c2d_requests ADD COLUMN IF NOT EXISTS assigned_phone TEXT',
@@ -1251,7 +1252,7 @@ class SearchLatencyTests(unittest.TestCase):
 
     def test_phone_lookup_has_an_index(self):
         """Телефон — разрез раздела, и без индекса это полный проход таблицы."""
-        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         self.assertIn('idx_c2d_requests_client_phone', database)
         self.assertIn('ON c2d_requests(client_phone)', database)
         self.assertIn('idx_dch_cache_phone', '\n'.join(schema.DDL),
@@ -1568,7 +1569,7 @@ class FrontendAccessTests(unittest.TestCase):
 
     def test_profile_carries_the_direction_model(self):
         """Без этого поля фронт не отличит чат-менеджера от оператора линии."""
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         self.assertIn('"direction_model": direction_model,', bot)
 
 
@@ -2977,7 +2978,7 @@ class WebhookStreamTests(unittest.TestCase):
 
     def test_tail_expression_matches_the_index(self):
         """Разойдись выражение с индексом хоть пробелом — планировщик уйдёт в скан."""
-        database_source = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database_source = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         self.assertIn("right(regexp_replace(client_phone, '\\D', '', 'g'), 9)",
                       queries._WEBHOOK_CLIENT_BY_TAIL_SQL)
         self.assertIn("right(regexp_replace(client_phone, '\\D', '', 'g'), 9)",

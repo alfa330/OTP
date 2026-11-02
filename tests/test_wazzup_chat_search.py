@@ -271,7 +271,7 @@ def test_focus_window_runs_from_the_hit_to_the_end_with_some_context(pg, monkeyp
 
 def route_app(name, path, cursor, **extra):
     """Настоящая ручка из bot_schedule2.py без импорта сервера и его пула."""
-    source = source_cache.parse((Path(__file__).resolve().parents[1] / 'bot_schedule2.py')
+    source = source_cache.parse((source_cache.monolith_flat_path())
                                 .read_text(encoding='utf-8-sig'))
     route = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == name)
     route.decorator_list = []

@@ -18,10 +18,11 @@ import ast
 import os
 import unittest
 from datetime import datetime, timedelta
+from tests import source_cache
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATABASE = os.path.join(REPO_ROOT, "database.py")
-BACKEND = os.path.join(REPO_ROOT, "bot_schedule2.py")
+DATABASE = str(source_cache.database_flat_path())
+BACKEND = str(source_cache.monolith_flat_path())
 AUCTION_VIEW = os.path.join(REPO_ROOT, "src", "components", "resources", "ShiftAuctionView.jsx")
 
 

@@ -12,10 +12,11 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from hiring import access, hh, reports, rules, upload
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PY = ROOT / 'bot_schedule2.py'
-DATABASE_PY = ROOT / 'database.py'
+BOT_PY = source_cache.monolith_flat_path()
+DATABASE_PY = source_cache.database_flat_path()
 APP_JSX = ROOT / 'src' / 'App.jsx'
 SOURCES_PY = ROOT / 'notifications' / 'sources.py'
 BELL_JSX = ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx'

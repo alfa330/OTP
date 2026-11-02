@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from complaints import catalog, schema, telegram
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -138,8 +139,8 @@ class SchemaOrderTest(unittest.TestCase):
 
 
 class WiringTest(unittest.TestCase):
-    BOT = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
-    DATABASE = (ROOT / 'database.py').read_text(encoding='utf-8')
+    BOT = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
+    DATABASE = (source_cache.database_flat_path()).read_text(encoding='utf-8')
 
     def test_bot_handlers_register_right_after_crm(self):
         crm = self.BOT.index('crm_bot.register(dp, db, crm_pool, types)')

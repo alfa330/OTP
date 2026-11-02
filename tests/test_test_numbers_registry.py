@@ -33,10 +33,11 @@ except ImportError:  # pragma: no cover
     Flask = None
 
 from test_numbers import access, activity, keys, queries, routes, rules, schema  # noqa: E402
+from tests import source_cache
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
-DATABASE_PY = ROOT / 'database.py'
-BOT_PY = ROOT / 'bot_schedule2.py'
+DATABASE_PY = source_cache.database_flat_path()
+BOT_PY = source_cache.monolith_flat_path()
 
 
 def _read(path):

@@ -57,8 +57,8 @@ from tests import source_cache  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 META_JS = ROOT / 'src' / 'components' / 'baiga' / 'baigaMeta.js'
-DATABASE_PY = ROOT / 'database.py'
-BOT_PY = ROOT / 'bot_schedule2.py'
+DATABASE_PY = source_cache.database_flat_path()
+BOT_PY = source_cache.monolith_flat_path()
 
 NAME = 'Список байги - 21.09.2026 - 27.09.2026.xlsx'
 HEADER = ['Позиция', 'Дата', 'Неделя', 'Водитель', 'Наименование приза', 'Сумма', 'Поездок',

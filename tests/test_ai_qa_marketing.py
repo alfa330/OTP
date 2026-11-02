@@ -24,6 +24,7 @@ from call_qa.marketing import export as mkt_export
 from call_qa.marketing import brands
 from call_qa.marketing import linker
 from call_qa.marketing.schema import PARK_SEED, CHANNEL_SEED, QA_MARKETING_SCHEMA_SQL
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -204,7 +205,7 @@ class WiringTests(unittest.TestCase):
     """Модуль подключён туда, где обещано, — иначе всё выше тестирует воздух."""
 
     def test_schema_initialised_under_savepoint(self):
-        src = _read('database.py')
+        src = _read(source_cache.database_flat_path())
         self.assertIn('self._init_qa_marketing_schema_tx(cursor)', src)
         self.assertIn('SAVEPOINT qa_marketing_schema', src)
         self.assertIn('from call_qa.marketing.schema import init_qa_marketing_schema', src)
@@ -225,7 +226,7 @@ class WiringTests(unittest.TestCase):
         self.assertIn('def deal_for_subject(', src)
 
     def test_routes_and_scheduler(self):
-        src = _read('bot_schedule2.py')
+        src = _read(source_cache.monolith_flat_path())
         for route in ('/api/ai-qa/marketing-options', '/api/ai-qa/presets',
                       '/api/ai-qa/presets/<int:preset_id>', '/api/ai-qa/export',
                       '/api/ai-qa/marketing/relink'):
@@ -500,7 +501,7 @@ class TabWiringTests(unittest.TestCase):
     """Фильтры доступны на «Обзоре» и в «Базе разборов» (ТЗ #317, п. 2.1)."""
 
     def test_backend(self):
-        src = _read('bot_schedule2.py')
+        src = _read(source_cache.monolith_flat_path())
         stats_route = src.split("@app.route('/api/ai-qa/stats'", 1)[1].split('@app.route', 1)[0]
         self.assertIn('_ai_qa_list_filters()', stats_route)
         self.assertIn('filters=filters', stats_route)
@@ -568,7 +569,7 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIn('COUNT(DISTINCT (rc.subject_kind, rc.call_id)) FROM ai_review_cache rc', src)
 
     def test_export_is_not_capped_at_list_page(self):
-        src = _read('bot_schedule2.py')
+        src = _read(source_cache.monolith_flat_path())
         route = src.split("@app.route('/api/ai-qa/export'", 1)[1].split('@app.route', 1)[0]
         self.assertIn('max_limit=_export.MAX_ROWS + 1', route)
         self.assertIn("response.headers['X-Truncated']", route)
@@ -616,14 +617,14 @@ class MarketingAccessTests(unittest.TestCase):
     такой, каким был до модуля (решение владельца 25.09.2026)."""
 
     def test_single_server_rule(self):
-        src = _read('bot_schedule2.py')
+        src = _read(source_cache.monolith_flat_path())
         rule = src.split('def _ai_qa_can_use_marketing(', 1)[1].split('\ndef ', 1)[0]
         self.assertIn('_is_global_admin_requester(role, requester_id)', rule)
         self.assertIn('_is_marketing_observer(requester_id, role)', rule)
         self.assertIn("'marketing' in set(_headed_department_codes(requester_id))", rule)
 
     def test_every_entry_point_is_gated(self):
-        src = _read('bot_schedule2.py')
+        src = _read(source_cache.monolith_flat_path())
 
         def route(path):
             return src.split(f"@app.route('{path}'", 1)[1].split('@app.route', 1)[0]

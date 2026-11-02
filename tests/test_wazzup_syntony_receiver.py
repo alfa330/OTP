@@ -9,11 +9,12 @@ import pytest
 from flask import Flask, jsonify, request
 
 from wazzup import voice
+from tests import source_cache
 
 
 @pytest.fixture
 def receiver():
-    source = Path(__file__).resolve().parents[1] / 'bot_schedule2.py'
+    source = source_cache.monolith_flat_path()
     tree = ast.parse(source.read_text(encoding='utf-8-sig'))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'wazzup_webhook')
     node.decorator_list = []

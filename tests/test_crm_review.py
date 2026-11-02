@@ -40,6 +40,7 @@ from tests.test_crm_routing import (
     queue_row, route_row,
 )
 from tests.test_crm_service import FakeDb, FakeQueries, FakeTransport, PoolViolation
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1279,7 +1280,7 @@ class StoredFileRouteTest(unittest.TestCase):
 class BellTriggerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         start = database.index('def _init_bell_notify_schema_tx(self, cursor):')
         cls.block = database[start:database.index('def _init_amo_leads_schema_tx', start)]
         branch = cls.block[cls.block.index("TG_TABLE_NAME = 'crm_tickets'"):]
@@ -1508,7 +1509,7 @@ class FrontendWiringTest(unittest.TestCase):
         self.assertIn('|| Boolean(ticket.review_state)) && (', self.card)
 
     def test_blueprint_receives_the_storage(self):
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = bot.index('app.register_blueprint(build_crm_blueprint(')
         self.assertIn("gcs={'bucket_name': _crm_bucket_name, 'client': get_gcs_client}",
                       bot[start:start + 900])

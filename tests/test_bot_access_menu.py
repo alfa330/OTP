@@ -34,8 +34,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from twofa import rules  # noqa: E402
+from tests import source_cache
 
-BOT_PY = ROOT / 'bot_schedule2.py'
+BOT_PY = source_cache.monolith_flat_path()
 
 ACCESS = 'Доступ🔑'
 LOGOUT = 'Выход🚪'

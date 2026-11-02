@@ -40,6 +40,7 @@ from wiki import cities as wiki_cities  # noqa: E402
 from wiki import queries  # noqa: E402
 from wiki import schema as wiki_schema  # noqa: E402
 from wiki import yandex_tariffs  # noqa: E402
+from tests import source_cache
 
 SPACE = 11
 
@@ -720,7 +721,7 @@ class CitySchemaTest(unittest.TestCase):
             self.assertEqual(yandex_tariffs.canonical_url(url), url, name)
 
     def test_nightly_sync_is_registered_after_start(self):
-        source = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        source = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         block = source[source.index("id='wiki_city_tariffs_sync_daily'") - 600:
                        source.index("id='wiki_city_tariffs_sync_daily'") + 400]
         self.assertIn('run_wiki_city_tariffs_sync_async', block)

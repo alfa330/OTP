@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 
 from crm import access, queries, schema
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -554,7 +555,7 @@ class BellSourceTest(unittest.TestCase):
         self.assertFalse(sources.mark_seen(Cursor(), 1, 'crm'))
 
     def test_trigger_wakes_the_author_only(self):
-        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         start = database.index('def _init_bell_notify_schema_tx(self, cursor):')
         block = database[start:database.index('def _init_amo_leads_schema_tx', start)]
         self.assertIn("TG_TABLE_NAME = 'crm_tickets'", block)
@@ -562,7 +563,7 @@ class BellSourceTest(unittest.TestCase):
 
     def test_trigger_ignores_plain_thread_writes(self):
         """Исходящее сообщение двигает last_message_at — колоколу это не событие."""
-        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         start = database.index('def _init_bell_notify_schema_tx(self, cursor):')
         block = database[start:database.index('def _init_amo_leads_schema_tx', start)]
         self.assertIn('AFTER UPDATE OF author_unread_at, status, delivery_status', block)
@@ -570,7 +571,7 @@ class BellSourceTest(unittest.TestCase):
 
     def test_missing_table_does_not_kill_other_triggers(self):
         """Схема раздела ставится под своим SAVEPOINT и может не примениться."""
-        database = (ROOT / 'database.py').read_text(encoding='utf-8')
+        database = (source_cache.database_flat_path()).read_text(encoding='utf-8')
         start = database.index('def _init_bell_notify_schema_tx(self, cursor):')
         block = database[start:database.index('def _init_amo_leads_schema_tx', start)]
         self.assertIn('to_regclass', block)

@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from tests.test_oktell_billing_report import _extract_namespace
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,7 +50,7 @@ class HoursFooterFteTests(unittest.TestCase):
 class ShiftChangeReviewGroupsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.database = _read("database.py")
+        cls.database = _read(source_cache.database_flat_path())
         cls.app = _read("src/App.jsx")
         cls.select_sql = _between(
             cls.database, "SHIFT_CHANGE_REQUEST_SELECT = \"\"\"", "def _serialize_shift_change_request_row"
@@ -200,7 +201,7 @@ class TaskColleagueObserverTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.database = _read("database.py")
+        cls.database = _read(source_cache.database_flat_path())
         cls.view = _read("src/components/tasks/TasksView.jsx")
         cls.board = _read("src/components/tasks/TaskBoardWorkspace.jsx")
 

@@ -7,7 +7,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
 BOT_TREE = source_cache.parse(BOT_SOURCE)
 

@@ -28,7 +28,7 @@ PORT = os.environ.get('TEZ_CALLS_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (TEZ_CALLS_TEST_PORT)')
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+SOURCE = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
 _LINES = SOURCE.splitlines(keepends=True)
 
 ALMATY = timezone(timedelta(hours=5))

@@ -21,9 +21,9 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
-DATABASE_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
 
 def _bot_functions(*names, namespace):

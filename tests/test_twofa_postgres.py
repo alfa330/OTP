@@ -24,6 +24,7 @@ import pytest
 
 from twofa import access, crypto, queries, rules, schema, totp
 from twofa.service import Twofa
+from tests import source_cache
 
 PORT = os.environ.get('TWOFA_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (TWOFA_TEST_PORT)')
@@ -1074,7 +1075,7 @@ def test_bot_menu_runs_the_real_functions_from_the_bot(env):
     names = {'_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_role', '_is_admin_role',
              'get_admin_keyboard', 'get_sv_keyboard', 'get_operator_keyboard', '_main_menu_keyboard',
              '_twofa_can_request_for', '_twofa_reply_menu'}
-    bot = Path(__file__).resolve().parents[1] / 'bot_schedule2.py'
+    bot = source_cache.monolith_flat_path()
     body = [node for node in ast.parse(bot.read_text(encoding='utf-8-sig')).body
             if (isinstance(node, ast.FunctionDef) and node.name in names)
             or (isinstance(node, ast.Assign) and any(getattr(t, 'id', None) in names for t in node.targets))]
@@ -1115,7 +1116,7 @@ def test_profile_flag_runs_the_real_function_from_the_bot(env):
     import logging
     from pathlib import Path
 
-    bot = Path(__file__).resolve().parents[1] / 'bot_schedule2.py'
+    bot = source_cache.monolith_flat_path()
     tree = ast.parse(bot.read_text(encoding='utf-8-sig'))
     funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_twofa_section_open_for']
     assert len(funcs) == 1

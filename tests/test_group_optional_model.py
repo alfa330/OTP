@@ -27,7 +27,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 DATABASE_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
 DATABASE_MODULE = source_cache.parse(DATABASE_SOURCE)
 DATABASE_CLASS = next(
@@ -35,7 +35,7 @@ DATABASE_CLASS = next(
     for node in DATABASE_MODULE.body
     if isinstance(node, ast.ClassDef) and node.name == "Database"
 )
-BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 APP = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
 GROUPS_VIEW = (
     ROOT / "src" / "components" / "groups" / "GroupsView.jsx"

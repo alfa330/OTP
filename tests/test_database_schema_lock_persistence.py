@@ -16,6 +16,7 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 from psycopg2 import extensions, sql
+from tests import source_cache
 
 
 TEST_PORT = os.environ.get("OTP_SCHEMA_LOCK_TEST_PORT")
@@ -30,7 +31,7 @@ class _PrefixComplete(BaseException):
 
 
 def _load_startup_methods():
-    source = ROOT / "database.py"
+    source = source_cache.database_flat_path()
     parsed = ast.parse(source.read_text(encoding="utf-8-sig"))
     database = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Database")
     methods = [node for node in database.body

@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from tests import source_cache
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _c2d_namespace():
@@ -276,7 +276,7 @@ class C2dEvalHelpersTests(unittest.TestCase):
         self.assertEqual(quotes, [])
 
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 
 def _database_method(method_name):

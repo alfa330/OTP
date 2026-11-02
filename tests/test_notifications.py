@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from notifications import realtime, sources
-from tests import prod_db
+from tests import prod_db, source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 BELL_JSX = ROOT / 'src' / 'components' / 'notifications' / 'NotificationsBell.jsx'
@@ -1110,7 +1110,7 @@ class StreamEndpointTest(RealtimeStateMixin, unittest.TestCase):
 class RealtimeTriggersPinnedTest(unittest.TestCase):
     """Триггеры в схеме и слушатель обязаны говорить об одном канале."""
 
-    DATABASE = (ROOT / 'database.py').read_text(encoding='utf-8')
+    DATABASE = (source_cache.database_flat_path()).read_text(encoding='utf-8')
 
     def test_channel_name_matches_listener(self):
         self.assertIn("BELL_EVENTS_NOTIFY_CHANNEL = '%s'" % realtime.BELL_NOTIFY_CHANNEL,
@@ -1271,7 +1271,7 @@ class BirthdaysSourceTest(unittest.TestCase):
     """
 
     SOURCE = (ROOT / 'notifications' / 'sources.py').read_text(encoding='utf-8')
-    SERVER = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+    SERVER = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
 
     class Recorder(FakeCursor):
         """Курсор, запоминающий сам запрос и его параметры."""

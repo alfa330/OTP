@@ -21,8 +21,8 @@ from pathlib import Path
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
-ROUTES_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = source_cache.database_flat_path()
+ROUTES_PATH = source_cache.monolith_flat_path()
 VIEW_PATH = ROOT / "src" / "components" / "resources" / "ShiftAuctionView.jsx"
 
 NOW = datetime(2026, 10, 4, 21, 3, 37)

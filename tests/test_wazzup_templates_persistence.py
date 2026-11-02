@@ -26,13 +26,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _transaction_database():
     """Exercise the actual commit/rollback boundary without importing the app."""
-    module = source_cache.parse((ROOT / 'database.py').read_text(encoding='utf-8-sig'))
+    module = source_cache.parse((source_cache.database_flat_path()).read_text(encoding='utf-8-sig'))
     database = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == 'Database')
     method = next(node for node in database.body if isinstance(node, ast.FunctionDef) and node.name == '_get_cursor')
     source = ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
         name='Database', bases=[], keywords=[], body=[method], decorator_list=[])], type_ignores=[]))
     namespace = {'contextmanager': contextmanager}
-    exec(compile(source, str(ROOT / 'database.py'), 'exec'), namespace)
+    exec(compile(source, str(source_cache.database_flat_path()), 'exec'), namespace)
     return namespace['Database']
 
 

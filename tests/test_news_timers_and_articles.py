@@ -23,6 +23,7 @@ from news import access as news_access
 from news import article_draft
 from news import report_xlsx
 from news import schema as news_schema
+from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -493,7 +494,7 @@ class ArticleDraftDoorTests(unittest.TestCase):
     def test_door_is_registered_with_the_news_bucket(self):
         self.assertIn('routes_news.register(bp, wiki_route, db, _ip, gcs or {})',
                       _read('wiki', 'routes.py'))
-        self.assertIn("'news_bucket_name': _news_bucket_name,", _read('bot_schedule2.py'))
+        self.assertIn("'news_bucket_name': _news_bucket_name,", _read(source_cache.monolith_flat_path()))
 
     def test_the_article_must_be_visible_and_published(self):
         door = _between(self.code, 'def wiki_article_news_draft(', 'return jsonify({\n')

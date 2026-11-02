@@ -25,8 +25,8 @@ from openpyxl.utils import get_column_letter
 from tests import source_cache
 
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 
 FUNCTION_NAMES = [
     "_oktell_billing_range_exceeds_limit",
@@ -1153,7 +1153,7 @@ class GroupingReportTests(unittest.TestCase):
         """Таблица СЗоВ за 14.09 — по ней сделана «Группировка»; суммы часов взяты из Oktell
         (задача #380). Ожидание — среднее принятых плюс среднее неотвеченных, «Средн. Прод.» —
         длина принятого звонка целиком; обе — усечением дробной суммы."""
-        data = json.loads((BOT_PATH.parent / "tests" / "data" / "oktell_grouping_2026_09_14.json")
+        data = json.loads((source_cache.ROOT / "tests" / "data" / "oktell_grouping_2026_09_14.json")
                           .read_text(encoding="utf-8"))
         values = self.ns["_oktell_billing_grouping_values"]
         metrics_row = self.ns["_oktell_billing_metrics_row"]
@@ -1221,7 +1221,7 @@ class GroupingReportTests(unittest.TestCase):
         self.assertIn("не вернул", wb.active["A1"].value)
 
     def test_columns_and_alert_match_the_frontend(self):
-        front = (BOT_PATH.parent / "src" / "components" / "resources" / "billingGrouping.js").read_text(encoding="utf-8")
+        front = (source_cache.ROOT / "src" / "components" / "resources" / "billingGrouping.js").read_text(encoding="utf-8")
         block = front[front.index("export const BILLING_GROUPING_COLUMNS = ["):]
         block = block[:block.index("];")]
         front_columns = re.findall(r"\{ key: '(\w+)', label: '([^']+)'(?:, hint: '[^']+')? \}", block)

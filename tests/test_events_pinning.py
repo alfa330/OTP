@@ -97,7 +97,7 @@ class _FakeDatabase:
 
 
 def _load_list_events():
-    source = (ROOT / 'database.py').read_text(encoding='utf-8')
+    source = (source_cache.database_flat_path()).read_text(encoding='utf-8')
     tree = source_cache.parse(source)
     cls = next(node for node in tree.body
                if isinstance(node, ast.ClassDef) and node.name == 'Database')

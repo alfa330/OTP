@@ -31,11 +31,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from test_numbers import keys  # noqa: E402
+from tests import source_cache
 
 MARK = 'test_phone_numbers'
 TEST, NORM = '7000000101', '7000000202'
-BOT_PY = ROOT / 'bot_schedule2.py'
-DATABASE_PY = ROOT / 'database.py'
+BOT_PY = source_cache.monolith_flat_path()
+DATABASE_PY = source_cache.database_flat_path()
 
 
 @functools.lru_cache(maxsize=None)

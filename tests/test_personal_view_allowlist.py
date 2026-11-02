@@ -42,7 +42,7 @@ from tests import source_cache  # noqa: E402
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
 VIEWS_JS = ROOT / 'src' / 'utils' / 'departmentViews.js'
-BOT_PY = ROOT / 'bot_schedule2.py'
+BOT_PY = source_cache.monolith_flat_path()
 SOURCES_PY = ROOT / 'notifications' / 'sources.py'
 
 # Только id: ФИО в публичный репозиторий не кладём.

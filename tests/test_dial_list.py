@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
+from tests import source_cache
 
 # Ширина строки страницы журнала без сводки: колонки журнала + total + rn.
 PAGE_WIDTH = dial_service.DialListService._JOURNAL_COLUMN_COUNT + 2
@@ -464,12 +465,12 @@ class WiringTests(unittest.TestCase):
             return fh.read()
 
     def test_schema_is_initialised_in_init_db(self):
-        src = self._read('database.py')
+        src = self._read(source_cache.database_flat_path())
         self.assertIn('self._init_dial_list_schema_tx(cursor)', src)
         self.assertIn('def _init_dial_list_schema_tx(self, cursor):', src)
 
     def test_blueprint_and_phone_settings_are_wired(self):
-        src = self._read('bot_schedule2.py')
+        src = self._read(source_cache.monolith_flat_path())
         self.assertIn('build_dial_list_blueprint(', src)
         self.assertIn('"dial_list": _dial_list_phone_settings(requester_id)', src)
 

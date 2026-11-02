@@ -34,7 +34,7 @@ if str(ROOT) not in sys.path:
 from tests import source_cache  # noqa: E402
 from wiki.access import QR_GATED_ROLES  # noqa: E402
 
-BOT_PATH = ROOT / 'bot_schedule2.py'
+BOT_PATH = source_cache.monolith_flat_path()
 APP_PATH = ROOT / 'src' / 'App.jsx'
 VIEW_PATH = ROOT / 'src' / 'components' / 'qr' / 'QrAccessView.jsx'
 CSS_PATH = ROOT / 'src' / 'components' / 'qr' / 'qr-access.css'

@@ -15,10 +15,11 @@ import textwrap
 import unittest
 from datetime import date as dt_date, datetime
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _load_switch_namespace():

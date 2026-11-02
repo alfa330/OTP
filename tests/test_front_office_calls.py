@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from yataxi import front_office_calls as foc
+from tests import source_cache
 
 
 def _user(uid, name, email=None):
@@ -695,7 +696,7 @@ class BotWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from tests import source_cache
-        cls.bot_path = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+        cls.bot_path = source_cache.monolith_flat_path()
         cls.source_cache = source_cache
 
     @staticmethod

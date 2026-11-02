@@ -16,7 +16,7 @@ from pathlib import Path
 
 from tests import source_cache
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 DAY = date.today() - timedelta(days=5)          # старше 48 ч: открытого хвоста до «сейчас» нет
 AT = lambda h, m=0: datetime.combine(DAY, dt_time(h, m))  # noqa: E731

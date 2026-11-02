@@ -24,8 +24,8 @@ from wazzup import shift
 from wazzup import workspace_routes
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_SOURCE = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8-sig')
-DATABASE_SOURCE = (ROOT / 'database.py').read_text(encoding='utf-8-sig')
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding='utf-8-sig')
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding='utf-8-sig')
 
 NOW = datetime(2026, 10, 8, 14, 0, 0)                       # Алматы, как event_at статусов
 UTC = datetime(2026, 10, 8, 9, 0, 0, tzinfo=timezone.utc)   # часы кода и QR

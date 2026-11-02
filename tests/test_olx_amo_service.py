@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from olx_amo import cabinets, service  # noqa: E402
 from olx_amo.amo_writer import AmoWriteError  # noqa: E402
 from olx_amo.olx_client import OlxError  # noqa: E402
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -837,7 +838,7 @@ class AlertChatsTests(unittest.TestCase):
 
     def test_job_reads_recipients_from_the_database_not_from_the_environment(self):
         """Список меняют живые люди чаще, чем выкатывается релиз."""
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         self.assertNotIn('OLX_ALERT_CHAT_IDS', bot)
         job = bot[bot.index('async def olx_amo_alerts_job'):]
         job = job[:job.index('def _mark_olx_alert_sent')]
@@ -851,7 +852,7 @@ class PoolWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        cls.bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         cls.service = (ROOT / 'olx_amo' / 'service.py').read_text(encoding='utf-8')
 
     def test_job_dispatches_cabinets_to_the_dedicated_pool(self):

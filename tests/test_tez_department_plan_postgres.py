@@ -49,7 +49,7 @@ def db(request):
             plan_per_fte numeric, updated_by integer, updated_at timestamp,
             UNIQUE(department_id, year, month));
     ''')
-    tree = source_cache.parse((ROOT / 'database.py').read_text(encoding='utf-8-sig'))
+    tree = source_cache.parse((source_cache.database_flat_path()).read_text(encoding='utf-8-sig'))
     migration = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)
                      and 'CREATE TABLE IF NOT EXISTS tez_department_plan_snapshots' in n.value)
     if request.param == 'legacy':

@@ -22,6 +22,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from crm import access, queries, report, routes
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -168,7 +169,7 @@ class ExportQueryTest(unittest.TestCase):
         self.assertEqual(cursor.params['limit'], queries.EXPORT_LIMIT + 1)
 
     def test_blueprint_receives_the_excel_helper(self):
-        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         start = bot.index('app.register_blueprint(build_crm_blueprint(')
         block = bot[start:start + 700]
         self.assertIn('excel_text_warning=_excel_suppress_number_as_text_warning', block)

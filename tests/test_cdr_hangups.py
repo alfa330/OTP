@@ -28,7 +28,7 @@ from pathlib import Path
 from cdr import hangups, touches as touches_mod
 from tests import source_cache
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / 'database.py'
+DATABASE_PATH = source_cache.database_flat_path()
 
 
 def hangup(event_id, at, channel, source, cause=16, linkedid='1.1'):
@@ -317,7 +317,7 @@ class JournalUpdateTests(unittest.TestCase):
         self.assertEqual(len(db.cursor.statements), 1)
 
     def test_the_portal_wires_it_into_the_section(self):
-        source = source_cache.read(Path(__file__).resolve().parents[1] / 'bot_schedule2.py')
+        source = source_cache.read(source_cache.monolith_flat_path())
         self.assertIn('share_call_end_parties=db.update_cdr_call_end_parties', source)
 
 

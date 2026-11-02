@@ -84,7 +84,7 @@ class SzovWallboardBackendGuardTests(unittest.TestCase):
 
     def _guard(self, *, role, requester_id, headed_department_id=None, user_department_id=None,
                departments=None, global_admin=None, guard='_szov_wallboard_guard'):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         calls = {}
 
         def jsonify(payload):
@@ -194,7 +194,7 @@ class SzovWallboardSqlTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.ns = _load_names(source, {
             '_OKTELL_GREETING_ABANDON',
             '_OKTELL_FAILED_CALL',
@@ -294,7 +294,7 @@ class SzovWallboardOperatorMappingTests(unittest.TestCase):
     """Раскладка статусов Oktell по ведрам и отделение «Перезвона» от «Перерыва»."""
 
     def _build(self, rows, *, matched_names=None, members=None):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         matched = matched_names or {}
 
         ns = {
@@ -481,7 +481,7 @@ class _SnapshotHarness:
     }
 
     def _namespace(self, totals_row=None, state_rows=None, fail=False, db=None):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         state = {'calls': 0, 'timeouts': []}
 
         def fake_query(sql, timeout=None):
@@ -879,7 +879,7 @@ class SzovWallboardArCorridorTests(unittest.TestCase):
 
         Иначе одна и та же цифра была бы «в норме» на экране и «отклонением» в отбивке,
         а чат с режимом «только при отклонениях» получал бы письма невпопад."""
-        api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
         def backend(name):
             return float(re.search(rf"{name} = float\(os\.getenv\('{name}'\) or ([\d.]+)\)", api).group(1))
@@ -922,7 +922,7 @@ class SzovWallboardWiringTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
-        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         cls.view = (
             ROOT / "src" / "components" / "monitoring" / "SzovWallboardView.jsx"
         ).read_text(encoding="utf-8-sig")
@@ -1247,7 +1247,7 @@ class SzovBroadcastTests(unittest.TestCase):
     ]
 
     def _namespace(self, hourly_raw=None, snapshot=None, shift_rows=None, break_violations=None):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
         def fake_oktell(sql, timeout=None):
             return list(hourly_raw if hourly_raw is not None else self.HOURLY_RAW)
@@ -1340,7 +1340,7 @@ class SzovBroadcastTests(unittest.TestCase):
 
     def test_broadcast_never_touches_chat2desk(self):
         """Чаты уехали в отдельный почасовой отчёт — отбивка табло за ними не ходит."""
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         section = source[source.index("def _szov_broadcast_collect("):source.index("def _szov_plural(")]
         self.assertNotIn("_chat2desk_", section)
 
@@ -1394,7 +1394,7 @@ class SzovBroadcastTests(unittest.TestCase):
         картинка обязана остаться прежней до байта. Второй ряд удлиняет картинку ровно на ряд."""
         from io import BytesIO
         ns = {'os': os, 'logging': logging, 'BytesIO': BytesIO}
-        _load_names((ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig"), {
+        _load_names((source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig"), {
             '_SZOV_FONT_CANDIDATES', '_szov_font_paths_cache', '_szov_font_paths', '_szov_font',
             '_szov_render_tiles_png',
         }, ns)
@@ -1737,7 +1737,7 @@ class SzovBroadcastTests(unittest.TestCase):
         self.assertLess(notes.index('(за час 09:00–10:00)'), notes.index('Среднее время разговора'))
 
     def test_hour_picture_goes_third_and_on_its_own(self):
-        source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
         prepare = source[source.index("async def _szov_broadcast_prepare("):]
         prepare = prepare[:prepare.index("\n\n\n")]
         self.assertIn("media = [('table.png', table_png), ('board.png', board_png)]", prepare)
@@ -1783,8 +1783,8 @@ class SzovBroadcastWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-        cls.db = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+        cls.db = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         cls.view = (ROOT / "src" / "components" / "monitoring"
                     / "SzovWallboardView.jsx").read_text(encoding="utf-8-sig")
         cls.shared = (ROOT / "src" / "components" / "monitoring"
@@ -2040,7 +2040,7 @@ class SzovBroadcastRecipientTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         tree = source_cache.parse(source)
         db_class = next(node for node in tree.body
                         if isinstance(node, ast.ClassDef) and node.name == "Database")
@@ -2207,7 +2207,7 @@ class SzovShiftGroupingTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         tree = source_cache.parse(source)
         cls.db_class = next(node for node in tree.body
                             if isinstance(node, ast.ClassDef) and node.name == "Database")
@@ -2277,8 +2277,8 @@ class SzovShiftColumnsWiringTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.api = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
-        cls.db = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+        cls.api = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+        cls.db = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 
     def test_four_shift_columns_are_in_the_table(self):
         titles = re.findall(r"\('(\w+)', '([^']+)', \d+\)", self.api)

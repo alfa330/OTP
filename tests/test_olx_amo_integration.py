@@ -35,11 +35,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from olx_amo import access, amo_writer, cabinets, phones, schema, service  # noqa: E402
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JSX = ROOT / 'src' / 'App.jsx'
-BOT = ROOT / 'bot_schedule2.py'
-DATABASE = ROOT / 'database.py'
+BOT = source_cache.monolith_flat_path()
+DATABASE = source_cache.database_flat_path()
 
 
 def ctx(role='operator', user_id=10, department_code=None,

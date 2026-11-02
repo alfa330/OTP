@@ -36,8 +36,8 @@ if str(ROOT) not in sys.path:
 from notifications import sources  # noqa: E402
 from tests import source_cache  # noqa: E402
 
-BOT_PATH = ROOT / "bot_schedule2.py"
-DATABASE_PATH = ROOT / "database.py"
+BOT_PATH = source_cache.monolith_flat_path()
+DATABASE_PATH = source_cache.database_flat_path()
 VIEWS_PATH = ROOT / "src" / "utils" / "departmentViews.js"
 ROLES_PATH = ROOT / "src" / "utils" / "roles.js"
 MODAL_PATH = ROOT / "src" / "components" / "modals" / "UserEditModal.jsx"

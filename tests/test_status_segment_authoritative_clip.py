@@ -14,10 +14,11 @@ import textwrap
 import unittest
 from datetime import datetime, date as dt_date, time as dt_time
 from pathlib import Path
+from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
+DATABASE_PATH = source_cache.database_flat_path()
 
 
 def _load_clip():

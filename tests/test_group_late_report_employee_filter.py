@@ -18,10 +18,11 @@ import unittest
 from pathlib import Path
 
 from group_late.reports import _employee_selected
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_SRC = (ROOT / "database.py").read_text(encoding="utf-8-sig")
-BOT_SRC = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DB_SRC = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
+BOT_SRC = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 REPORTS_SRC = (ROOT / "group_late" / "reports.py").read_text(encoding="utf-8-sig")
 VIEW_SRC = (ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx").read_text(encoding="utf-8-sig")
 

@@ -1,3 +1,4 @@
+from tests import source_cache
 # -*- coding: utf-8 -*-
 """Кому засчитывается низкая оценка чата (задача #286).
 
@@ -26,11 +27,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "database.py"
-BOT_PATH = ROOT / "bot_schedule2.py"
+DB_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _exec_functions(path, names, namespace, class_name=None):

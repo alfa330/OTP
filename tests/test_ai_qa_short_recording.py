@@ -145,7 +145,7 @@ class SignedUrlTypeTests(unittest.TestCase):
     def test_same_rule_as_the_journal(self):
         # Журнал подписывает ссылки своей функцией в монолите (импортировать его нельзя);
         # правило у двух разделов обязано быть одно — исполняем обе и сверяем ответы.
-        node = copy.deepcopy(source_cache.function_node(ROOT / "bot_schedule2.py",
+        node = copy.deepcopy(source_cache.function_node(source_cache.monolith_flat_path(),
                                                         "_signed_audio_response_type"))
         namespace = {}
         exec(compile(ast.Module(body=[node], type_ignores=[]), "bot_schedule2.py", "exec"), namespace)

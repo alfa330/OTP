@@ -18,9 +18,10 @@ from openpyxl import load_workbook
 
 from group_late import attendance_cache, clockster, reports
 from group_late.config import TZ
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_SRC = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+DB_SRC = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 VIEW_SRC = (ROOT / "src" / "components" / "group_late" / "GroupLateBotView.jsx").read_text(encoding="utf-8-sig")
 
 

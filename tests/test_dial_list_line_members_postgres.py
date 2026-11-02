@@ -287,10 +287,10 @@ def test_overview_is_scoped_by_the_base_and_former_operators_are_listed(db):
 
 
 def _find_holder_method():
-    node = source_cache.function_copy(ROOT / 'database.py', 'find_dial_list_line_holder', class_name='Database')
+    node = source_cache.function_copy(source_cache.database_flat_path(), 'find_dial_list_line_holder', class_name='Database')
     module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
     namespace = {'logging': logging, 'Optional': __import__('typing').Optional}
-    exec(compile(module, str(ROOT / 'database.py'), 'exec'), namespace)
+    exec(compile(module, str(source_cache.database_flat_path()), 'exec'), namespace)
     return namespace['find_dial_list_line_holder']
 
 

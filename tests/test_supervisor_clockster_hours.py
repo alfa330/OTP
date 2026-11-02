@@ -13,10 +13,11 @@ from datetime import date
 from pathlib import Path
 
 import supervisor_hours as sh
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE = (ROOT / 'database.py').read_text(encoding='utf-8')
-BOT = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+DATABASE = (source_cache.database_flat_path()).read_text(encoding='utf-8')
+BOT = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
 APP = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
 DEPARTMENT_VIEWS = (ROOT / 'src' / 'utils' / 'departmentViews.js').read_text(encoding='utf-8')
 

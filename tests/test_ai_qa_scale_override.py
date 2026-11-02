@@ -10,6 +10,7 @@ import re
 import unittest
 from pathlib import Path
 from unittest import mock
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -268,23 +269,23 @@ class RouteWiringTests(unittest.TestCase):
     """Ручки и скоуп в bot_schedule2 — по тексту функций (модуль тянет весь Flask)."""
 
     def test_human_review_takes_the_same_scale(self):
-        body = _source_function("bot_schedule2.py", "api_ai_qa_human_review")
+        body = _source_function(source_cache.monolith_flat_path(), "api_ai_qa_human_review")
         self.assertIn("_qa_subjects.scale_direction_id(subject)", body)
 
     def test_supervisor_scope_gets_scale_only_directions_of_the_department(self):
-        body = _source_function("bot_schedule2.py", "_ai_qa_direction_scope")
+        body = _source_function(source_cache.monolith_flat_path(), "_ai_qa_direction_scope")
         self.assertIn("db.get_department_scale_direction_ids(int(dept_id))", body)
         # Пустой скоуп СВ не превращается в шкалы: видеть ему нечего.
         self.assertRegex(body, r"if not ids:\s+return ids")
 
     def test_department_scale_directions_query(self):
-        body = _source_function("database.py", "get_department_scale_direction_ids")
+        body = _source_function(source_cache.database_flat_path(), "get_department_scale_direction_ids")
         for needle in ("d.department_id = %s", "d.is_active = TRUE", "d.canonical_id IS NULL",
                        "ic.qa_direction_id = d.id"):
             self.assertIn(needle, body)
 
     def test_guidance_route_reads_for_scope_and_writes_only_for_heads(self):
-        body = _source_function("bot_schedule2.py", "api_ai_qa_direction_guidance")
+        body = _source_function(source_cache.monolith_flat_path(), "api_ai_qa_direction_guidance")
         self.assertIn("_ai_qa_guard()", body)
         self.assertIn("direction_in_scope(direction_id, scope)", body)
         self.assertIn("_ai_qa_direction_department_allowed(requester_id, direction_id)", body)
@@ -292,11 +293,11 @@ class RouteWiringTests(unittest.TestCase):
         self.assertIn('"can_edit": scope is None', body)
 
     def test_pull_does_not_narrow_people_by_a_scale_only_direction(self):
-        body = _source_function("bot_schedule2.py", "_ai_qa_department_operator_candidates")
+        body = _source_function(source_cache.monolith_flat_path(), "_ai_qa_department_operator_candidates")
         self.assertIn("OR NOT EXISTS (", body)
 
     def test_column_is_created_idempotently(self):
-        source = (ROOT / "database.py").read_text(encoding="utf-8")
+        source = (source_cache.database_flat_path()).read_text(encoding="utf-8")
         self.assertIn("ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS qa_direction_id INTEGER "
                       "REFERENCES directions(id) ON DELETE SET NULL", source)
         schema = (ROOT / "call_qa" / "rag" / "schema.sql").read_text(encoding="utf-8")

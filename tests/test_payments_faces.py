@@ -24,6 +24,7 @@ from unittest import mock
 from flask import Flask
 
 from payments import access, people, privacy, queries as real_queries, routes, workflow as wf
+from tests import source_cache
 
 ADMIN = access.SECTION_ADMIN_USER_IDS[0]
 INITIATOR, MANAGER, APPROVER, ACCOUNTANT = 10, 11, 12, 30
@@ -267,7 +268,7 @@ class MonolithWiringTests(unittest.TestCase):
     """Монолит отдаёт разделу свой подписчик ссылок — тот же, что у фото в «Задачах»."""
 
     def test_blueprint_receives_the_signer(self):
-        with open(os.path.join(ROOT, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             source = handle.read()
         start = source.index('app.register_blueprint(build_payments_blueprint(')
         call = source[start:source.index('logging.info("Раздел «Оплата счетов»: Blueprint подключён', start)]

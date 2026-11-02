@@ -6,15 +6,15 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8-sig")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tez import op_productivity as tez_op_productivity  # noqa: E402
-from tests import source_cache
 
 
 def _extract_function(name, namespace):

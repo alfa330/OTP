@@ -7,8 +7,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
-BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DATABASE_PATH = source_cache.database_flat_path()
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 
 
 def _load_recompute_method():

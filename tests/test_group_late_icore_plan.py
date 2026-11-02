@@ -35,8 +35,8 @@ from group_late.lateness import find_violations
 from group_late.mutes import MuteSnapshot
 
 ROOT = Path(__file__).resolve().parents[1]
-DB_PATH = ROOT / "database.py"
-BOT_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DB_PATH = source_cache.database_flat_path()
+BOT_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 REPORTS_SOURCE = (ROOT / "group_late" / "reports.py").read_text(encoding="utf-8-sig")
 LATENESS_SOURCE = (ROOT / "group_late" / "lateness.py").read_text(encoding="utf-8-sig")
 ATTENDANCE_SOURCE = (ROOT / "group_late" / "attendance.py").read_text(encoding="utf-8-sig")

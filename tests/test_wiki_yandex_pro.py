@@ -66,6 +66,7 @@ from wiki import yandex_pro  # noqa: E402
 from wiki import yandex_sync  # noqa: E402
 from wiki.access import collect_subjects  # noqa: E402
 from wiki.routes import build_wiki_blueprint  # noqa: E402
+from tests import source_cache
 
 PAGE_URL = ('https://pro.yandex.com/kz-ru/almaty/knowledge-base/taxi/tariffs/intercity')
 
@@ -1713,7 +1714,7 @@ class SchedulerTest(unittest.TestCase):
     """Ночная сверка: без неё «обновляется автоматически» остаётся обещанием."""
 
     def setUp(self):
-        self.monolith = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        self.monolith = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
 
     def test_job_is_registered_daily(self):
         self.assertIn("id='wiki_yandex_pro_sync_daily'", self.monolith)

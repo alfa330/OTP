@@ -29,7 +29,7 @@ from openpyxl.utils import get_column_letter
 
 from tests import source_cache
 
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 
 FUNCTIONS = (
     "_oktell_billing_int", "_oktell_billing_fraction_sec", "_oktell_billing_metrics_row",

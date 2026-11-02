@@ -14,6 +14,7 @@ from flask import Flask, jsonify
 
 from wazzup import pilot
 from wazzup.realtime import EventBroker
+from tests import source_cache
 
 
 CHANNEL = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
@@ -554,7 +555,7 @@ class PilotRoutesTests(unittest.TestCase):
         """Без Last-Event-ID в списке CORS браузер отверг бы предзапрос, и поток
         «Чатов ОП» не открылся бы вовсе. Списков три: flask-cors, ответ на OPTIONS
         и общий after_request — расходиться им нельзя."""
-        bot = (Path(__file__).resolve().parents[1] / 'bot_schedule2.py').read_text(encoding='utf-8')
+        bot = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         lines = [line for line in bot.splitlines()
                  if 'Access-Control-Allow-Headers' in line and 'X-Auth-Transport' in line]
         self.assertEqual(2, len(lines))

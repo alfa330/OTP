@@ -12,6 +12,7 @@ import numpy as np
 
 from resource_fte import calendar_model, erlang_a, forecast_engine, timesfm_bq
 from resource_fte import calculations
+from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -958,7 +959,7 @@ class LineIntegrationTests(unittest.TestCase):
 
 class RouteGuardTests(unittest.TestCase):
     def setUp(self):
-        self.source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8")
+        self.source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8")
         start = self.source.index("# ── Прогноз звонков по отделам (TimesFM в BigQuery)")
         self.block = self.source[start:self.source.index("@app.route('/api/shift_auction/test_access'", start)]
 

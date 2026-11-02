@@ -18,7 +18,7 @@ from test_numbers import keys as test_keys
 from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 TAIL_INDEX_EXPR = "right(regexp_replace(client_phone, '\\D', '', 'g'), 9)"
 
 

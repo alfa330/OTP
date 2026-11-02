@@ -23,7 +23,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_SOURCE = (ROOT / "database.py").read_text(encoding="utf-8-sig")
+DATABASE_SOURCE = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
 DATABASE_CLASS = next(
     node
     for node in source_cache.parse(DATABASE_SOURCE).body

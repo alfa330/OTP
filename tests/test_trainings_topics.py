@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from trainings import access, queries, schema  # noqa: E402
+from tests import source_cache
 
 
 class ReasonCatalogTest(unittest.TestCase):
@@ -365,7 +366,7 @@ class WritePathContractTest(unittest.TestCase):
     @staticmethod
     def _source():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             return handle.read()
 
     def _add_training_body(self):
@@ -402,7 +403,7 @@ class GroupScopeGuardTest(unittest.TestCase):
     @staticmethod
     def _handlers():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             source = handle.read()
         # Границу функции ищем по следующему def на нулевом отступе: 'ORDER BY'
         # встречается уже внутри LATERAL-подзапроса и обрезало бы блок раньше
@@ -444,7 +445,7 @@ class ArchivedTopicEditTest(unittest.TestCase):
     @staticmethod
     def _source():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             return handle.read()
 
     def test_resolver_takes_the_records_current_topic(self):
@@ -483,7 +484,7 @@ class SupervisorTargetRolesTest(unittest.TestCase):
     @staticmethod
     def _source():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             return handle.read()
 
     def test_constant_covers_the_whole_audience(self):
@@ -522,7 +523,7 @@ class GroupBranchOutcomeTest(unittest.TestCase):
     @staticmethod
     def _blocks():
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        with open(str(source_cache.monolith_flat_path()), encoding='utf-8') as handle:
             source = handle.read()
         out = []
         for name, after in (('def get_trainings():', 'def _training_reason_catalog'),

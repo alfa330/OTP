@@ -21,8 +21,8 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
-API_PATH = ROOT / "bot_schedule2.py"
+DATABASE_PATH = source_cache.database_flat_path()
+API_PATH = source_cache.monolith_flat_path()
 VIEW_PATH = ROOT / "src" / "components" / "wazzup" / "WazzupChatsView.jsx"
 APP_PATH = ROOT / "src" / "App.jsx"
 

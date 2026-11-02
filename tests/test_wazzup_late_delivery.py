@@ -31,8 +31,8 @@ from tests import source_cache
 from wazzup import delivery
 
 ROOT = Path(__file__).resolve().parents[1]
-DATABASE_PATH = ROOT / "database.py"
-API_SOURCE = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+DATABASE_PATH = source_cache.database_flat_path()
+API_SOURCE = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
 DB_SOURCE = DATABASE_PATH.read_text(encoding="utf-8-sig")
 VIEW_SOURCE = (ROOT / "src" / "components" / "wazzup" / "WazzupChatsView.jsx").read_text(encoding="utf-8-sig")
 QA_SCHEMA = (ROOT / "call_qa" / "rag" / "schema.sql").read_text(encoding="utf-8-sig")

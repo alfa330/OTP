@@ -19,6 +19,7 @@ from news import queries as news_queries
 from news import schema as news_schema
 from trainings import schema as trainings_schema
 from work_schedules import training_news
+from tests import source_cache
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -189,7 +190,7 @@ class RouteTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        source = _read('bot_schedule2.py')
+        source = _read(source_cache.monolith_flat_path())
         cls.body = source.split('def get_work_schedule_training_news', 1)[1].split('\n@app.route', 1)[0]
         cls.head = source.split('def get_work_schedule_training_news', 1)[0].rsplit('@app.route', 1)[1]
 

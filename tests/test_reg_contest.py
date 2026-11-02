@@ -18,8 +18,8 @@ from yataxi import reg_contest
 
 from tests import source_cache
 
-DATABASE_PATH = Path(__file__).resolve().parents[1] / "database.py"
-BOT_PATH = Path(__file__).resolve().parents[1] / "bot_schedule2.py"
+DATABASE_PATH = source_cache.database_flat_path()
+BOT_PATH = source_cache.monolith_flat_path()
 
 
 def _user(uid, name, email=None, direction="Основа", department="СЗоВ — Служба заботы о водителях"):

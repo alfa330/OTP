@@ -27,12 +27,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from task_production import materials, storage  # noqa: E402
+from tests import source_cache
 
 META_JS = ROOT / 'src' / 'components' / 'production' / 'productionMeta.js'
 APP_JSX = ROOT / 'src' / 'App.jsx'
 TASKS_VIEW = ROOT / 'src' / 'components' / 'tasks' / 'TasksView.jsx'
-BOT = ROOT / 'bot_schedule2.py'
-DATABASE = ROOT / 'database.py'
+BOT = source_cache.monolith_flat_path()
+DATABASE = source_cache.database_flat_path()
 
 
 def _read(path):
