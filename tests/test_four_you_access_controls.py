@@ -14,7 +14,9 @@ class FourYouAccessControlTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
         cls.department_views_source = (ROOT / "src" / "utils" / "departmentViews.js").read_text(encoding="utf-8-sig")
-        cls.api_source = (ROOT / "bot_schedule2.py").read_text(encoding="utf-8-sig")
+        cls.api_source = (source_cache.monolith_flat_path()).read_text(encoding="utf-8-sig")
+        # Ручки раздела живут в своём пакете (02.11.2026); доступ и колокол — по-прежнему в монолите.
+        cls.routes_source = (ROOT / "four_you" / "routes.py").read_text(encoding="utf-8-sig")
         cls.db_source = (source_cache.database_flat_path()).read_text(encoding="utf-8-sig")
         cls.lenta_source = (ROOT / "src" / "components" / "four_you" / "lenta.jsx").read_text(encoding="utf-8-sig")
         cls.lenta_css = (ROOT / "src" / "components" / "four_you" / "lenta.css").read_text(encoding="utf-8-sig")
@@ -42,6 +44,7 @@ class FourYouAccessControlTests(unittest.TestCase):
             ("src/App.jsx", self.app_source),
             ("src/utils/departmentViews.js", self.department_views_source),
             ("bot_schedule2.py", self.api_source),
+            ("four_you/routes.py", self.routes_source),
         ):
             self.assertTrue("FOUR_YOU_VIEWER" not in source, f"{label}: читатель 4 You вернулся")
             self.assertTrue("_four_you_viewer" not in source, f"{label}: читатель 4 You вернулся")
@@ -65,7 +68,7 @@ class FourYouAccessControlTests(unittest.TestCase):
     def _real_access_function(self, section_open):
         """Настоящая функция бэкенда, а не поиск строки: её же зовут гард ручек
         и колокол уведомлений (_notifications_viewer_context)."""
-        bot_path = ROOT / "bot_schedule2.py"
+        bot_path = source_cache.monolith_flat_path()
         nodes = [
             source_cache.function_copy(bot_path, "_normalize_user_role"),
             source_cache.function_copy(bot_path, "_four_you_access_for_requester"),
@@ -116,19 +119,19 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertNotIn("'four_you'", self.department_views_source.split("export const DEPARTMENT_VIEW_ALLOWLIST", 1)[1].split("};", 1)[0])
 
     def test_every_image_route_requires_authenticated_guard(self):
-        list_route = "@app.route('/api/four_you/images', methods=['GET', 'POST', 'OPTIONS'])\n@require_auth"
-        delete_route = "@app.route('/api/four_you/images/<image_id>', methods=['DELETE', 'OPTIONS'])\n@require_auth"
-        self.assertIn(list_route, self.api_source)
-        self.assertIn(delete_route, self.api_source)
-        self.assertIn("require_upload=request.method == 'POST'", self.api_source)
-        self.assertIn("_four_you_route_guard(require_upload=True)", self.api_source)
+        list_route = "    @bp.route('/four_you/images', methods=['GET', 'POST', 'OPTIONS'])\n    @require_auth"
+        delete_route = "    @bp.route('/four_you/images/<image_id>', methods=['DELETE', 'OPTIONS'])\n    @require_auth"
+        self.assertIn(list_route, self.routes_source)
+        self.assertIn(delete_route, self.routes_source)
+        self.assertIn("require_upload=request.method == 'POST'", self.routes_source)
+        self.assertIn("_four_you_route_guard(require_upload=True)", self.routes_source)
 
     def test_gallery_uses_private_optimized_storage(self):
         self.assertIn("CREATE TABLE IF NOT EXISTS four_you_images", self.db_source)
         self.assertIn("preview_blob_path", self.db_source)
         self.assertIn("display_blob_path", self.db_source)
         self.assertIn("format='WEBP'", self.api_source)
-        self.assertIn("max-age=31536000, immutable", self.api_source)
+        self.assertIn("max-age=31536000, immutable", self.routes_source)
 
     def test_lenta_preserves_original_motion_parameters(self):
         for expected in (
@@ -155,9 +158,9 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("window.innerHeight * 0.5", self.lenta_source)
 
     def test_bulk_delete_route_is_admin_guarded(self):
-        batch_route = "@app.route('/api/four_you/images/delete_batch', methods=['POST', 'OPTIONS'])\n@require_auth"
-        self.assertIn(batch_route, self.api_source)
-        self.assertIn("_four_you_route_guard(require_upload=True)", self.api_source)
+        batch_route = "    @bp.route('/four_you/images/delete_batch', methods=['POST', 'OPTIONS'])\n    @require_auth"
+        self.assertIn(batch_route, self.routes_source)
+        self.assertIn("_four_you_route_guard(require_upload=True)", self.routes_source)
         self.assertIn("def delete_four_you_images(self, image_ids)", self.db_source)
         # Пакетное удаление в коде идёт через параметризованный массив (без SQL-инъекций).
         self.assertIn("WHERE id = ANY(%s::uuid[])", self.db_source)
@@ -293,17 +296,17 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("def set_four_you_annotations", self.db_source)
         self.assertIn("def list_four_you_annotations_changed_since", self.db_source)
         self.assertIn(
-            "@app.route('/api/four_you/images/<image_id>/annotations', methods=['PUT', 'POST', 'OPTIONS'])",
-            self.api_source,
+            "@bp.route('/four_you/images/<image_id>/annotations', methods=['PUT', 'POST', 'OPTIONS'])",
+            self.routes_source,
         )
         self.assertIn(
-            "@app.route('/api/four_you/annotations/poll', methods=['GET', 'OPTIONS'])",
-            self.api_source,
+            "@bp.route('/four_you/annotations/poll', methods=['GET', 'OPTIONS'])",
+            self.routes_source,
         )
-        self.assertIn("def save_four_you_annotations(image_id):", self.api_source)
-        self.assertIn("_sanitize_four_you_annotations", self.api_source)
+        self.assertIn("def save_four_you_annotations(image_id):", self.routes_source)
+        self.assertIn("_sanitize_four_you_annotations", self.routes_source)
         # Разметку правит любой пользователь с доступом к 4 You (require_upload=False в гарде), а не только uploader.
-        self.assertIn("requester_id, _, guard_response, guard_status = _four_you_route_guard()", self.api_source)
+        self.assertIn("requester_id, _, guard_response, guard_status = _four_you_route_guard()", self.routes_source)
 
     def test_collab_editing_frontend_present(self):
         root_components = ROOT / "src" / "components" / "four_you"
@@ -329,8 +332,8 @@ class FourYouAccessControlTests(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS four_you_reads", self.db_source)
         self.assertIn("def mark_four_you_seen", self.db_source)
         self.assertIn("def count_unread_four_you_images", self.db_source)
-        self.assertIn("@app.route('/api/four_you/seen', methods=['POST', 'OPTIONS'])", self.api_source)
-        self.assertIn("@app.route('/api/four_you/unread_count', methods=['GET', 'OPTIONS'])", self.api_source)
+        self.assertIn("@bp.route('/four_you/seen', methods=['POST', 'OPTIONS'])", self.routes_source)
+        self.assertIn("@bp.route('/four_you/unread_count', methods=['GET', 'OPTIONS'])", self.routes_source)
         self.assertIn("fourYouUnreadCount", self.app_source)
         # Само число фронт больше не запрашивает отдельно: его приносит общий
         # ответ центра уведомлений (см. test_badges_come_from_one_request).
