@@ -20,7 +20,9 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = source_cache.database_flat_path()
-APP_PATH = ROOT / "bot_schedule2.py"
+APP_PATH = source_cache.monolith_flat_path()
+# Ручки и коды ошибок опросов — в своём пакете (02.11.2026).
+SURVEYS_ROUTES_PATH = ROOT / "surveys" / "routes.py"
 SURVEYS_VIEW_PATH = ROOT / "src" / "components" / "surveys" / "SurveysView.jsx"
 
 
@@ -49,12 +51,12 @@ def _survey_error_response():
         "_SURVEY_ERROR_PREFIX_MESSAGES",
         "_SURVEY_ERROR_NUMBERED_PREFIX_MESSAGES",
     }
-    for node in source_cache.tree(str(APP_PATH)).body:
+    for node in source_cache.tree(str(SURVEYS_ROUTES_PATH)).body:
         if isinstance(node, ast.Assign):
             names = {t.id for t in node.targets if isinstance(t, ast.Name)}
             if names & wanted_names:
                 body.append(node)
-    body.append(source_cache.function_node(str(APP_PATH), "_survey_error_response"))
+    body.append(source_cache.function_node(str(SURVEYS_ROUTES_PATH), "_survey_error_response"))
     module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
     namespace = {"jsonify": lambda payload: payload}

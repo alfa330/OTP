@@ -26,7 +26,9 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = source_cache.database_flat_path()
-APP_PATH = ROOT / "bot_schedule2.py"
+APP_PATH = source_cache.monolith_flat_path()
+# Ручки опросов — в своём пакете (02.11.2026); джобы планировщика по-прежнему в монолите.
+SURVEYS_ROUTES_PATH = ROOT / "surveys" / "routes.py"
 NOTIFICATIONS_SOURCES_PATH = ROOT / "notifications" / "sources.py"
 SURVEYS_VIEW_PATH = ROOT / "src" / "components" / "surveys" / "SurveysView.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
@@ -321,18 +323,19 @@ class SurveyArchiveApiTests(unittest.TestCase):
 
     def setUp(self):
         self.src = _read(APP_PATH)
+        self.routes = _read(SURVEYS_ROUTES_PATH)
 
     def test_list_route_is_paginated(self):
-        self.assertIn("db.get_surveys_page(", self.src)
-        self.assertIn("db.get_operator_surveys_page(", self.src)
-        self.assertIn("def _survey_archived_scope_requested(", self.src)
-        self.assertIn("def _survey_page_payload(", self.src)
+        self.assertIn("db.get_surveys_page(", self.routes)
+        self.assertIn("db.get_operator_surveys_page(", self.routes)
+        self.assertIn("def _survey_archived_scope_requested(", self.routes)
+        self.assertIn("def _survey_page_payload(", self.routes)
 
     def test_detail_and_count_routes_registered(self):
-        self.assertIn("@app.route('/api/surveys/<int:survey_id>/detail', methods=['GET', 'OPTIONS'])", self.src)
-        self.assertIn("@app.route('/api/surveys/pending_count', methods=['GET', 'OPTIONS'])", self.src)
-        self.assertIn("db.get_survey_detail_for_requester(", self.src)
-        self.assertIn("db.count_pending_surveys(", self.src)
+        self.assertIn("@bp.route('/surveys/<int:survey_id>/detail', methods=['GET', 'OPTIONS'])", self.routes)
+        self.assertIn("@bp.route('/surveys/pending_count', methods=['GET', 'OPTIONS'])", self.routes)
+        self.assertIn("db.get_survey_detail_for_requester(", self.routes)
+        self.assertIn("db.count_pending_surveys(", self.routes)
 
     def test_archive_job_registered_in_working_hours(self):
         self.assertIn("def archive_stale_surveys_job(", self.src)
@@ -364,7 +367,7 @@ class SurveyArchiveApiTests(unittest.TestCase):
         self.assertIn("SURVEY_ARCHIVE_NOTICE_MAX_TITLES", self.src)
 
     def test_archived_error_is_russian(self):
-        self.assertIn("'SURVEY_ARCHIVED': (\"Опрос в архиве и больше не принимает ответы\", 409)", self.src)
+        self.assertIn("'SURVEY_ARCHIVED': (\"Опрос в архиве и больше не принимает ответы\", 409)", self.routes)
 
 
 class SurveyArchiveNotificationScopeTests(unittest.TestCase):
@@ -418,7 +421,7 @@ class SurveyArchiveAccessTests(unittest.TestCase):
 
     def setUp(self):
         self.src = _read(SURVEYS_VIEW_PATH)
-        self.app = _read(APP_PATH)
+        self.app = _read(SURVEYS_ROUTES_PATH)
 
     def test_operator_list_route_ignores_archive_scope(self):
         route = self.app.split("def handle_surveys(")[1].split("def ")[0]

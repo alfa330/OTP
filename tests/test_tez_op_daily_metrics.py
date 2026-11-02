@@ -9,7 +9,7 @@ from tests import source_cache
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOT_PATH = ROOT / "bot_schedule2.py"
+BOT_PATH = source_cache.monolith_flat_path()
 DATABASE_PATH = source_cache.database_flat_path()
 
 
@@ -224,13 +224,11 @@ class TezOpChatSyncSafetyTests(unittest.TestCase):
         self.assertLess(failure_gate, metric_refresh)
 
     def test_author_mapping_reports_refresh_warning_after_mapping_is_saved(self):
-        bot_source = BOT_PATH.read_text(encoding="utf-8-sig")
-        route = bot_source[
-            bot_source.index("def api_chatapp_authors_map():"):
-            bot_source.index(
-                "\n@app.route('/api/ca_eval/pick'",
-                bot_source.index("def api_chatapp_authors_map():"),
-            )
+        # Ручки ChatApp — в chatapp/routes.py (02.11.2026); эта — последняя в строителе.
+        routes_source = (ROOT / "chatapp" / "routes.py").read_text(encoding="utf-8-sig")
+        route = routes_source[
+            routes_source.index("def api_chatapp_authors_map():"):
+            routes_source.index("\n    return bp", routes_source.index("def api_chatapp_authors_map():"))
         ]
         self.assertLess(
             route.index("db.upsert_chatapp_author_map("),

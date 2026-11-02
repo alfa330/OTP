@@ -16,7 +16,7 @@ from tests import source_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE_PATH = source_cache.database_flat_path()
-APP_PATH = ROOT / "bot_schedule2.py"
+APP_PATH = source_cache.monolith_flat_path()
 SURVEYS_VIEW_PATH = ROOT / "src" / "components" / "surveys" / "SurveysView.jsx"
 RESULTS_KIT_PATH = ROOT / "src" / "components" / "surveys" / "resultsKit.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
@@ -382,10 +382,12 @@ class KnowledgeTestQualityIntegrationTests(unittest.TestCase):
 
 class SurveyTestApiTests(unittest.TestCase):
     def setUp(self):
-        self.src = _read(APP_PATH)
+        # Ручки и помощники опросов — в surveys/routes.py (02.11.2026), джобы — в монолите.
+        self.src = _read(ROOT / "surveys" / "routes.py")
+        self.app_src = _read(APP_PATH)
 
     def test_attempt_draft_route(self):
-        self.assertIn("@app.route('/api/surveys/<int:survey_id>/attempt', methods=['PUT', 'OPTIONS'])", self.src)
+        self.assertIn("@bp.route('/surveys/<int:survey_id>/attempt', methods=['PUT', 'OPTIONS'])", self.src)
         self.assertIn("db.save_survey_attempt_draft(", self.src)
 
     def test_test_config_is_forwarded_to_create_and_update(self):
@@ -401,9 +403,9 @@ class SurveyTestApiTests(unittest.TestCase):
         self.assertIn("def _survey_error_response(", self.src)
 
     def test_autoclose_job_registered(self):
-        self.assertIn("id='survey_tests_autoclose'", self.src)
-        self.assertIn("def autoclose_due_survey_tests_job(", self.src)
-        self.assertIn("db.autoclose_due_survey_tests()", self.src)
+        self.assertIn("id='survey_tests_autoclose'", self.app_src)
+        self.assertIn("def autoclose_due_survey_tests_job(", self.app_src)
+        self.assertIn("db.autoclose_due_survey_tests()", self.app_src)
 
     def test_export_shows_required_statistics_columns(self):
         header_start = self.src.index("ws_scores = wb.create_sheet('Баллы теста')")
