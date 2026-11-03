@@ -122,6 +122,44 @@ class _Svc:
         self.calls.append(('overview', department_ids, extra))
         return []
 
+    def funnel(self, department_id, **filters):
+        self.calls.append(('funnel', department_id, filters))
+        return {"totals": {}}
+
+
+class FunnelRouteTests(unittest.TestCase):
+    """«Воронка ОП» Тез (задача #407): фильтры ручки — до сервиса проверены и приведены к типам."""
+
+    def test_filters_reach_the_service_typed(self):
+        svc = _Svc()
+        client = _client(svc, role='admin')
+        batch = '0b0e2f3a-1111-4c4c-8d8d-0123456789ab'
+        resp = client.get(f'/api/dial_list/departments/560/funnel?period=2026-10&batch_id={batch}'
+                          '&date_from=2026-10-01&date_to=2026-10-15&city=%D0%B0%D0%BB%D0%BC%D0%B0%D1%82%D1%8B')
+        self.assertEqual(resp.status_code, 200)
+        call = [c for c in svc.calls if c[0] == 'funnel'][-1]
+        self.assertEqual(call[1], 560)
+        self.assertEqual(call[2], {"period": date(2026, 10, 1), "batch_id": batch,
+                                   "date_from": date(2026, 10, 1), "date_to": date(2026, 10, 15),
+                                   "city": 'алматы'})
+        # Без фильтров — всё пустое, база — обзваниваемый месяц (сервис решит сам).
+        client.get('/api/dial_list/departments/560/funnel')
+        self.assertEqual([c for c in svc.calls if c[0] == 'funnel'][-1][2],
+                         {"period": None, "batch_id": None, "date_from": None, "date_to": None, "city": None})
+
+    def test_bad_filters_are_refused_before_the_service(self):
+        svc = _Svc()
+        client = _client(svc, role='admin')
+        self.assertEqual(client.get('/api/dial_list/departments/560/funnel?date_from=01.10.2026').status_code, 400)
+        self.assertEqual(client.get('/api/dial_list/departments/560/funnel?batch_id=abc').status_code, 404)
+        self.assertEqual(client.get('/api/dial_list/departments/560/funnel?period=2026-13').status_code, 400)
+        self.assertFalse([c for c in svc.calls if c[0] == 'funnel'])
+
+    def test_funnel_is_closed_to_an_operator(self):
+        svc = _Svc(scope=[])
+        self.assertEqual(_client(svc).get('/api/dial_list/departments/560/funnel').status_code, 403)
+        self.assertFalse([c for c in svc.calls if c[0] == 'funnel'])
+
 
 class OperatorRoutesTests(unittest.TestCase):
     def test_call_passes_auto_and_status_only_when_the_phone_sent_them(self):

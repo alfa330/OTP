@@ -86,8 +86,10 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False, with_ci
     ValueError: без неё база бесполезна, и молча загрузить её нельзя. Без шапки
     ИИН — третья колонка.
 
-    with_city (только вместе с with_iin) — к строке добавляется город из колонки с шапкой
-    из CITY_HEADERS; колонки нет — пустая строка: город необязателен."""
+    with_city — к строке добавляется город из колонки с шапкой из CITY_HEADERS; колонки нет —
+    пустая строка: город необязателен. Без with_iin (база «Воронки ОП Tez», 03.11.2026) строка —
+    (row_number, ФИО, сырой телефон, phone_norm, '', город): пустой ИИН на своём месте, чтобы
+    город стоял там же, где у базы с ИИН."""
     limit = int(max_rows) if max_rows is not None else MAX_LEAD_ROWS
     raw_rows = _read_rows(raw_bytes, file_ext)
 
@@ -102,7 +104,7 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False, with_ci
                 phone_idx = idx
             elif with_iin and name in IIN_HEADERS:
                 iin_idx = idx
-            elif with_iin and with_city and name in CITY_HEADERS and city_idx is None:
+            elif with_city and name in CITY_HEADERS and city_idx is None:
                 city_idx = idx
         start_at = 1
     elif with_iin and max(len(r) for r in raw_rows) >= 3:
@@ -125,7 +127,7 @@ def parse_leads_file(raw_bytes, file_ext, max_rows=None, with_iin=False, with_ci
                 f'В файле больше {limit} строк с данными. '
                 'Разделите его на несколько файлов.'
             )
-        if with_iin and with_city:
+        if with_city:
             city = str(raw[city_idx] or '').strip() if city_idx is not None and city_idx < len(raw) else ''
             rows.append((offset, fio, phone_raw, normalize_kz_phone(phone_raw), iin_raw, city))
         elif with_iin:

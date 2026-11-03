@@ -309,14 +309,20 @@ class CityListParseTest(unittest.TestCase):
                          [(2, 'Иванов Иван', '87011234567', '77011234567', '900101300007', 'Кокшетау')])
         plain = _xlsx([('fio', 'phone', 'iin'), ('Иванов Иван', '87011234567', '900101300007')])
         self.assertEqual(leads_file.parse_leads_file(plain, '.xlsx', with_iin=True, with_city=True)[0][5], '')
-        # Без with_city и у баз без ИИН — прежние строки: город туда не попадает.
+        # Без with_city — прежние строки: город туда не попадает.
         self.assertEqual(len(leads_file.parse_leads_file(raw, '.xlsx', with_iin=True)[0]), 5)
-        self.assertEqual(len(leads_file.parse_leads_file(raw, '.xlsx', with_city=True)[0]), 4)
+        self.assertEqual(len(leads_file.parse_leads_file(raw, '.xlsx')[0]), 4)
+        # База без ИИН (Тез, «Воронка ОП» по городам, 03.11.2026): город — на том же месте, ИИН пустой.
+        tez = _xlsx([('fio', 'phone', 'Город'), ('Иванов Иван', '87011234567', ' Кокшетау ')])
+        self.assertEqual(leads_file.parse_leads_file(tez, '.xlsx', with_city=True),
+                         [(2, 'Иванов Иван', '87011234567', '77011234567', '', 'Кокшетау')])
+        tez_plain = _xlsx([('fio', 'phone'), ('Иванов Иван', '87011234567')])
+        self.assertEqual(leads_file.parse_leads_file(tez_plain, '.xlsx', with_city=True)[0][4:], ('', ''))
 
-    def test_upload_route_reads_city_only_for_remote_cc(self):
+    def test_upload_route_reads_city_for_both_profiles(self):
         routes = (ROOT / 'dial_list' / 'routes.py').read_text(encoding='utf-8')
         self.assertIn('rows = parse_leads_file(raw_bytes, file_ext, with_iin=True, with_city=True)', routes)
-        self.assertIn('rows = parse_leads_file(raw_bytes, file_ext, with_iin=False)', routes)
+        self.assertIn('rows = parse_leads_file(raw_bytes, file_ext, with_iin=False, with_city=True)', routes)
         self.assertIn("'/api/dial_list/departments/<int:department_id>/leads/cities'", routes)
 
 

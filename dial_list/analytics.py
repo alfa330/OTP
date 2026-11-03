@@ -14,7 +14,7 @@
 
 Номеров, ИИН и ФИО здесь нет — только числа и имена операторов.
 """
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from crm import sapar
 from test_numbers import keys as test_keys
@@ -471,5 +471,204 @@ def tez_department_analytics(cur, department_id, period, today=None):
         "operators": operators,
         "offers": offers,
         "whatsapp": {"sent": totals["wa_sent"], "failed": int(w[1] or 0)},
+        "min_billsec": signing.SUCCESS_MIN_BILLSEC,
+    }
+
+
+# ── Воронка ОП Тез (задача #407 Алчинбаевой Анель, 03.11.2026) ─────────────────────────────────
+# База → (уже зарегистрированы) → состоялся диалог → (зарегистрировались после контакта) → вышли к
+# заказам, по городам; выбор базы (месяц и файл загрузки), периода звонков и города; отдельно —
+# причины отказа. Каждый водитель — один раз в каждом показателе.
+#
+#   диалог          разговор не короче 10 с в выбранный период (тот же «поговорили», что в дашборде
+#                   и в успешке): недозвон, сброс, сообщение сети и автоответчик — не диалог;
+#   вышли к заказам первый заказ месяца базы в TEZ APP (signed_at) позже ПЕРВОГО диалога водителя в
+#                   периоде: поездка до контакта в результат не идёт, и ранее работавшие, и новые;
+#   конверсия       вышли к заказам ÷ диалог × 100; нет диалогов — 0, а не ошибка деления.
+#
+# Регистрацию TEZ APP не отдаёт (проверено 03.11.2026: в ответе только даты заказов; владелец
+# решил запросить поле у TEZ APP) — шаги с ней приходят None, сайт пишет «ждём данные TEZ APP».
+#
+# Отказ — итог, название которого начинается с «Отказ»; причина — его тип: если у итога заведены
+# типы, телефон без типа итог не примет (set_attempt_outcome). Отказ водителя в отчёте — его
+# последний итог-отказ в периоде: водитель считается один раз, со своей последней причиной.
+# Город — колонка «город» файла базы (решение владельца 03.11.2026); без неё — «не указан».
+
+FUNNEL_CITY_NONE = "__none__"  # город фильтра «не указан»
+# Итог-отказ узнаём в Python, а не LIKE в SQL: lower() и ILIKE по кириллице зависят от локали
+# кластера (в C-локали «Отказ» не опускается) — правило не должно от неё зависеть.
+REFUSAL_NAME_PREFIX = "отказ"
+
+
+def is_refusal_outcome(name):
+    """Итог — отказ: название начинается с «Отказ» (без учёта регистра и пробелов по краям)."""
+    return str(name or "").strip().lower().startswith(REFUSAL_NAME_PREFIX)
+
+
+_FUNNEL_LEADS_CTE = """
+    leads AS (
+        SELECT l.id, l.signed_at, l.city, lower(btrim(l.city)) AS city_key
+        FROM dial_list_leads l
+        WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+          AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+          {lead_filters}
+    )
+"""
+
+_FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
+    dialogs AS (
+        SELECT a.lead_id, MIN(t.requested_at) AS first_at
+        FROM leads l
+        JOIN dial_list_assignments a ON a.lead_id = l.id
+        JOIN dial_list_attempts t ON t.assignment_id = a.id
+        WHERE t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
+          AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s
+          {call_filters}
+        GROUP BY a.lead_id
+    )
+    SELECT l.city_key, MAX(l.city), COUNT(*), COUNT(d.lead_id),
+           COUNT(*) FILTER (WHERE d.first_at IS NOT NULL AND l.signed_at > d.first_at)
+    FROM leads l
+    LEFT JOIN dialogs d ON d.lead_id = l.id
+    GROUP BY l.city_key
+"""
+
+_REFUSALS_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
+    refusals AS (
+        SELECT DISTINCT ON (a.lead_id) a.lead_id, t.outcome_subtype_id
+        FROM leads l
+        JOIN dial_list_assignments a ON a.lead_id = l.id
+        JOIN dial_list_attempts t ON t.assignment_id = a.id
+        WHERE t.outcome_id = ANY(%(refusal_ids)s::uuid[])
+          {call_filters}
+        ORDER BY a.lead_id, t.requested_at DESC, t.id DESC
+    )
+    SELECT r.outcome_subtype_id, s.name, COUNT(*)
+    FROM refusals r
+    LEFT JOIN dial_list_outcome_subtypes s ON s.id = r.outcome_subtype_id
+    GROUP BY r.outcome_subtype_id, s.name
+"""
+
+# Итоги отдела (и выключенные: история на них ссылается) и сколько у каждого включённых причин —
+# без причин телефон их не спросит.
+_OUTCOMES_REASONS_SQL = """
+    SELECT o.id, o.name, o.is_active, COUNT(s.id) FILTER (WHERE s.is_active)
+    FROM dial_list_outcomes o
+    LEFT JOIN dial_list_outcome_subtypes s ON s.outcome_id = o.id
+    WHERE o.department_id = %(department_id)s
+    GROUP BY o.id, o.name, o.is_active, o.position
+    ORDER BY o.position
+"""
+
+# Выбор фильтров: города базы (с учётом файла, но не города) и загрузки месяца.
+_FUNNEL_CITIES_SQL = """
+    SELECT lower(btrim(l.city)), MAX(l.city), COUNT(*)
+    FROM dial_list_leads l
+    WHERE l.department_id = %(department_id)s AND l.period = %(period)s
+      AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+      {batch_filter}
+    GROUP BY 1
+"""
+
+_FUNNEL_BATCHES_SQL = """
+    SELECT id, file_name, created_at, rows_total
+    FROM dial_list_lead_batches
+    WHERE department_id = %(department_id)s AND period = %(period)s
+    ORDER BY created_at DESC
+"""
+
+_BATCH_FILTER = "AND (l.first_batch_id = %(batch_id)s::uuid OR l.last_batch_id = %(batch_id)s::uuid)"
+
+
+def _pct0(part, whole):
+    """Доля в процентах; нет знаменателя — 0 (задача #407: «при отсутствии диалогов — 0%»)."""
+    return round(100.0 * part / whole, 1) if whole else 0.0
+
+
+def _day_start(day):
+    """Полночь дня по Алматы — граница периода звонков считается здесь, а не в SQL."""
+    return datetime.combine(day, time.min, tzinfo=signing.PERIOD_TZ)
+
+
+def _city_order(row):
+    # Сначала крупные города; «не указан» — в конце, как в отчёте о подписании.
+    return (row["city"] == "", -row["base"], row["city"].lower())
+
+
+def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_to=None, city=None):
+    """Воронка ОП базы месяца `period` (date первого дня). batch_id — файл загрузки (uuid строкой),
+    date_from/date_to — дни звонков (date, по Алматы, включительно), city — ключ города (lower) или
+    FUNNEL_CITY_NONE. Номеров и ФИО нет — только числа, города и названия причин."""
+    params = {"department_id": int(department_id), "period": period, "answered": ANSWERED_SQL,
+              "min_sec": signing.SUCCESS_MIN_BILLSEC}
+    batch_filter, lead_filters, call_filters = "", [], []
+    if batch_id:
+        params["batch_id"] = str(batch_id)
+        batch_filter = _BATCH_FILTER
+        lead_filters.append(_BATCH_FILTER)
+    if city == FUNNEL_CITY_NONE:
+        lead_filters.append("AND btrim(l.city) = ''")
+    elif city:
+        # Ключ города — ровно тот, что вернул этот же SQL в options.cities (lower на стороне базы):
+        # опускать его ещё и в Python нельзя — в C-локали кластера кириллица ниже не опускается.
+        params["city"] = str(city)
+        lead_filters.append("AND lower(btrim(l.city)) = %(city)s")
+    if date_from:
+        params["call_from"] = _day_start(date_from)
+        call_filters.append("AND t.requested_at >= %(call_from)s")
+    if date_to:
+        params["call_to"] = _day_start(date_to + timedelta(days=1))
+        call_filters.append("AND t.requested_at < %(call_to)s")
+    fmt = {"lead_filters": "\n          ".join(lead_filters), "call_filters": "\n          ".join(call_filters)}
+
+    cur.execute(_FUNNEL_SQL.format(**fmt), params)
+    by_city = []
+    for key, name, base, dialog, orders in cur.fetchall():
+        dialog, orders = int(dialog or 0), int(orders or 0)
+        by_city.append({"city": (name or "").strip() if key else "", "key": key or FUNNEL_CITY_NONE,
+                        "base": int(base or 0), "dialog": dialog, "orders_after": orders,
+                        "dialog_to_orders": _pct0(orders, dialog)})
+    by_city.sort(key=_city_order)
+    base = sum(r["base"] for r in by_city)
+    dialog = sum(r["dialog"] for r in by_city)
+    orders = sum(r["orders_after"] for r in by_city)
+
+    cur.execute(_OUTCOMES_REASONS_SQL, params)
+    refusal_rows = [row for row in cur.fetchall() if is_refusal_outcome(row[1])]
+    refusal_outcomes = [{"name": name or "", "reasons": int(count or 0)}
+                        for _oid, name, active, count in refusal_rows if active]
+    reasons = []
+    if refusal_rows:
+        params["refusal_ids"] = [str(row[0]) for row in refusal_rows]
+        cur.execute(_REFUSALS_SQL.format(**fmt), params)
+        reasons = [{"subtype_id": str(sid) if sid else None, "name": name or "", "count": int(count or 0)}
+                   for sid, name, count in cur.fetchall()]
+    refusals_total = sum(r["count"] for r in reasons)
+    for reason in reasons:
+        reason["share"] = _pct0(reason["count"], refusals_total)
+    # По убыванию количества; «без причины» при равенстве — последней.
+    reasons.sort(key=lambda r: (-r["count"], r["subtype_id"] is None, r["name"].lower()))
+
+    cur.execute(_FUNNEL_CITIES_SQL.format(batch_filter=batch_filter), params)
+    cities = [{"key": key or FUNNEL_CITY_NONE, "name": (name or "").strip() if key else "", "base": int(count or 0)}
+              for key, name, count in cur.fetchall()]
+    cities.sort(key=lambda c: (c["name"] == "", -c["base"], c["name"].lower()))
+    cur.execute(_FUNNEL_BATCHES_SQL, params)
+    batches = [{"id": str(bid), "file_name": file_name or "", "rows_total": int(rows_total or 0),
+                "created_at": created_at.isoformat() if created_at else None}
+               for bid, file_name, created_at, rows_total in cur.fetchall()]
+
+    return {
+        "profile": "tez",
+        "registration_available": False,
+        "totals": {"base": base, "already_registered": None, "dialog": dialog, "registered_after": None,
+                   "orders_after": orders},
+        "rates": {"dialog_to_registration": None, "dialog_to_orders": _pct0(orders, dialog)},
+        "by_city": by_city,
+        "refusals": {"total": refusals_total, "reasons": reasons, "outcomes": refusal_outcomes},
+        "options": {"cities": cities, "batches": batches},
+        "filters": {"batch_id": str(batch_id) if batch_id else "", "city": city or "",
+                    "date_from": date_from.isoformat() if date_from else "",
+                    "date_to": date_to.isoformat() if date_to else ""},
         "min_billsec": signing.SUCCESS_MIN_BILLSEC,
     }

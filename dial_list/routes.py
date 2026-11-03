@@ -150,11 +150,14 @@
     POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
                                                              ИИН обязателен, после загрузки — проверка подписания;
-                                                             у Тез — ФИО + телефон, проверка поездок и тот же
-                                                             файл в «Базу лидов ОП TEZ» (mirror)
+                                                             у Тез — ФИО + телефон (+ город), проверка поездок и
+                                                             тот же файл в базу успешек (mirror)
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
+    GET     /api/dial_list/departments/<id>/funnel           «Воронка ОП» Тез: база → диалог → вышли к заказам
+                                                             по городам и причины отказа (?period=&batch_id=
+                                                             &date_from=&date_to=&city=)
     GET     /api/dial_list/departments/<id>/announcement_stats  точность распознавания сообщения сети по речи
                                                              за ?days= (14): подозрительные плечи против
                                                              финалов Binotel — безопасен ли режим auto
@@ -751,7 +754,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         from common.leads_file import parse_leads_file
         try:
             if tez:
-                rows = parse_leads_file(raw_bytes, file_ext, with_iin=False)
+                # Город — необязательная колонка (03.11.2026): по ней «Воронка ОП» разбивается по городам.
+                rows = parse_leads_file(raw_bytes, file_ext, with_iin=False, with_city=True)
             else:
                 # Город — необязательная колонка: по ней строится отчёт о подписании по городам.
                 rows = parse_leads_file(raw_bytes, file_ext, with_iin=True, with_city=True)
@@ -829,6 +833,31 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(department_id)
         period = parse_period(request.args.get('period'))
         return jsonify({"status": "success", **svc.analytics(department_id, period=period)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/funnel', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def funnel(department_id):
+        """«Воронка ОП» Тез во вкладке «Аналитика» (задача #407): ?period=YYYY-MM — база месяца,
+        batch_id — файл загрузки, date_from/date_to — дни звонков (YYYY-MM-DD, по Алматы), city —
+        ключ города из options.cities ('__none__' — город не указан)."""
+        _manager(department_id)
+        args = request.args
+        days = {}
+        for key in ('date_from', 'date_to'):
+            raw = (args.get(key) or '').strip()
+            if raw:
+                try:
+                    days[key] = datetime.strptime(raw, '%Y-%m-%d').date()
+                except ValueError:
+                    raise DialListError(f"{key}: ожидается YYYY-MM-DD")
+        batch_id = args.get('batch_id') or None
+        if batch_id:
+            batch_id = _uuid_or_404(batch_id, "Файл загрузки")
+        city = (args.get('city') or '').strip()[:64] or None
+        return jsonify({"status": "success", **svc.funnel(
+            department_id, period=parse_period(args.get('period')), batch_id=batch_id,
+            date_from=days.get('date_from'), date_to=days.get('date_to'), city=city)}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/sign_report/chats', methods=['GET', 'PUT', 'OPTIONS'])
     @require_api_key

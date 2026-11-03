@@ -2614,7 +2614,8 @@ class DialListService:
 
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True):
         """rows — из common.leads_file.parse_leads_file(..., with_iin=True[, with_city=True]):
-        (row_number, fio, phone_raw, phone_norm, iin_raw[, city]). period — база какого месяца
+        (row_number, fio, phone_raw, phone_norm, iin_raw[, city]); у базы Тез ИИН пустой, город —
+        на том же месте (with_iin=False, with_city=True). period — база какого месяца
         (date, первый день); пусто — месяц, который обзванивается.
 
         ИИН обязателен (запрос владельца 29.09.2026): строка без него или с ошибкой
@@ -7052,6 +7053,26 @@ class DialListService:
             "active_period": settings["period"],
             "is_active_period": period == settings["_period"],
         })
+        return data
+
+    def funnel(self, department_id, period=None, batch_id=None, date_from=None, date_to=None, city=None):
+        """«Воронка ОП» во вкладке «Аналитика» Тез (задача #407, 03.11.2026): база → диалог → вышли к
+        заказам по городам и причины отказа (analytics.tez_funnel). Фильтры: файл загрузки, дни
+        звонков (date, включительно), город. У удалённого КЦ воронки нет — цель там подпись."""
+        from . import analytics as dial_analytics
+        department_id = int(department_id)
+        settings = self.department_settings(department_id)
+        if not is_tez(settings):
+            raise DialListError("Воронка ОП — только у отделов Тез")
+        if date_from and date_to and date_from > date_to:
+            raise DialListError("Период: начало позже конца")
+        period = period or settings["_period"]
+        with self.db._get_cursor() as cur:
+            data = dial_analytics.tez_funnel(cur, department_id, period, batch_id=batch_id, date_from=date_from,
+                                             date_to=date_to, city=city)
+        data.update({"department_id": department_id, "period": period.isoformat(),
+                     "period_label": period_label(period), "active_period": settings["period"],
+                     "is_active_period": period == settings["_period"]})
         return data
 
     # ------------------------------------------------------------ отчёт о подписании в Telegram

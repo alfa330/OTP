@@ -6,11 +6,15 @@ import CustomSelect from '../ui/CustomSelect';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { formatSeconds } from './tezAutodial';
+import TezFunnelPanel from './TezFunnelPanel';
 
 /*
  * Вкладка «Аналитика» раздела «Воронка ОП Tez» (до 03.11.2026 — «Автообзвон Тез»; контракт
  * 15.10.2026, §5 analytics). Успешки ОП для зарплаты — соседняя вкладка «Успешки»
  * (TezSuccessesPanel): там своя база лидов и свои правила зачёта.
+ *
+ * С 03.11.2026 у вкладки два разреза: «Воронка ОП» (задача #407 Анель — TezFunnelPanel: база →
+ * диалог → вышли к заказам по городам, причины отказа) и «Автообзвон» — дашборд ниже.
  *
  * Отдельный компонент, а не ветка внутри DialListAnalytics: у удалённого КЦ цель —
  * подпись документов (Sapar), у Тез — выход водителя на линию (TEZ APP), и у сервера
@@ -409,9 +413,18 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
     );
 };
 
+/* Разрезы вкладки (03.11.2026): «Воронка ОП» Анель — первой, это главный отчёт раздела; показатели
+   самого автообзвона — вторым. Месяц базы общий: выбор над разрезами. */
+const VIEWS = [
+    { value: 'funnel', label: 'Воронка ОП' },
+    { value: 'dial', label: 'Автообзвон' },
+];
+
 const TezAutodialAnalytics = ({
     apiBaseUrl, authHeaders, departmentId, periods = [], activePeriod = '', period = '', onPeriodChange, onOpenJournal,
 }) => {
+    const [view, setView] = useState('funnel');
+    const [funnelReload, setFunnelReload] = useState(0);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -439,7 +452,8 @@ const TezAutodialAnalytics = ({
         }
     }, [apiBaseUrl, authHeaders, departmentId, shownPeriod]);
 
-    useEffect(() => { load(); }, [load]);
+    // Дашборд автообзвона тянем только на его разрезе: у воронки свой запрос.
+    useEffect(() => { if (view === 'dial') load(); }, [load, view]);
 
     const periodOptions = useMemo(
         () => buildPeriodOptions(periods, { activePeriod, grouped: true }),
@@ -449,36 +463,57 @@ const TezAutodialAnalytics = ({
     // Сервер, который профиль tez ещё не знает, отдал бы аналитику удалённого КЦ
     // (документы Sapar) — её показывать нельзя: у Тез таких чисел нет.
     const ready = data && data.profile === 'tez' && data.totals;
+    const dial = view === 'dial';
 
     return (
         <section className="space-y-4">
+            <div className="-mx-1 overflow-x-auto px-1" style={{ scrollbarWidth: 'none' }}>
+                <IosSegmented value={view} onChange={setView} options={VIEWS} className="min-w-max" ariaLabel="Разрез аналитики" />
+            </div>
             <div className="flex items-center gap-2">
                 <CustomSelect
-                    value={shownPeriod || data?.period || activePeriod}
+                    value={shownPeriod || (dial ? data?.period : '') || activePeriod}
                     onChange={(v) => onPeriodChange?.(v)}
                     options={periodOptions}
                     variant="ios"
                     className="min-w-0 flex-1 sm:w-64 sm:flex-none"
                     ariaLabel="Месяц базы"
                 />
-                <button type="button" onClick={load} disabled={loading} className={`${iosBtnGhost} shrink-0`} aria-label="Обновить" title="Обновить">
-                    <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                <button
+                    type="button"
+                    onClick={() => (dial ? load() : setFunnelReload((n) => n + 1))}
+                    disabled={dial && loading}
+                    className={`${iosBtnGhost} shrink-0`}
+                    aria-label="Обновить"
+                    title="Обновить"
+                >
+                    <RefreshCw size={15} className={dial && loading ? 'animate-spin' : ''} />
                 </button>
             </div>
 
-            {error && !data && <div className="rounded-xl bg-rose-50 px-4 py-3 text-[13px] text-rose-700">{error}</div>}
+            {!dial && (
+                <TezFunnelPanel
+                    apiBaseUrl={apiBaseUrl}
+                    authHeaders={authHeaders}
+                    departmentId={departmentId}
+                    period={shownPeriod}
+                    reloadKey={funnelReload}
+                />
+            )}
 
-            {!data && loading && (
+            {dial && error && !data && <div className="rounded-xl bg-rose-50 px-4 py-3 text-[13px] text-rose-700">{error}</div>}
+
+            {dial && !data && loading && (
                 <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-[13px] text-slate-500`}>
                     <Loader2 size={15} className="animate-spin" /> Считаем показатели…
                 </div>
             )}
 
-            {data && !ready && !loading && (
+            {dial && data && !ready && !loading && (
                 <Notice>Сервер ещё не считает аналитику автообзвона Тез — показатели появятся после его обновления.</Notice>
             )}
 
-            {ready && (
+            {dial && ready && (
                 <div className={`space-y-4 transition-opacity ${loading ? 'opacity-60' : ''}`}>
                     <TezAnalyticsBody data={data} onOpenJournal={onOpenJournal} />
                     {data.is_active_period === false && data.active_period && (
