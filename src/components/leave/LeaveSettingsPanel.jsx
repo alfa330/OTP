@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
-import { IosHint, IosToggle, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
+import InfoHint from '../common/InfoHint';
+import { IosToggle, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
 import { leaveApiError } from './leaveRequests';
 
 /*
@@ -16,12 +17,25 @@ import { leaveApiError } from './leaveRequests';
 const STEP_HINT = 'Включено — заявку сначала согласует супервайзер группы оператора, затем утверждает руководитель отдела. Выключено — заявка сразу идёт руководителю. У оператора без супервайзера она идёт руководителю в любом случае.';
 const LONG_BS_HINT = 'Б/С от этого числа дней при утверждении по умолчанию отмечается «не учитывать в стаже». Руководитель видит переключатель и решает сам. Пусто — подсказки нет, переключатель выключен.';
 
+/* «i» — общий InfoHint: пузырёк рисуется поверх окна и краем карточки
+   (overflow-hidden) не обрезается. Значок держится за последнее слово подписи:
+   на узком экране она переносится, а одинокий значок на новой строке
+   читается как отдельный пункт. */
 function Row({ title, hint = null, children }) {
+    const words = title.split(' ');
+    const last = words.pop();
     return (
         <div className="flex items-center justify-between gap-3 px-4 py-2.5">
             <div className="min-w-0 text-[13px] text-slate-700">
-                {title}
-                {hint && <span className="ml-1.5 inline-flex align-middle"><IosHint align="left" text={hint} /></span>}
+                {hint ? (
+                    <>
+                        {words.length > 0 && `${words.join(' ')} `}
+                        <span className="whitespace-nowrap">
+                            {last}
+                            <InfoHint side="left" text={hint} className="ml-1.5 align-middle" />
+                        </span>
+                    </>
+                ) : title}
             </div>
             {children}
         </div>

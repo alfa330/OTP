@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Inbox, Loader2, RotateCw, Settings2 } from 'lucide-react';
 import IosDatePicker from '../ui/DatePicker';
+import InfoHint from '../common/InfoHint';
 import {
     IosBadge,
-    IosHint,
     IosSegmented,
     IosToggle,
     iosBtnGhost,
@@ -258,8 +258,11 @@ function ReviewItem({ api, item, today, onDecided, onError }) {
                     {showTenure && (
                         <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2 ring-1 ring-slate-200/70">
                             <div className="min-w-0 text-[12.5px] leading-snug text-slate-600">
-                                Не учитывать в стаже
-                                <span className="ml-1.5 inline-flex align-middle"><IosHint align="left" text={TENURE_HINT} /></span>
+                                Не учитывать в{' '}
+                                <span className="whitespace-nowrap">
+                                    стаже
+                                    <InfoHint side="left" text={TENURE_HINT} className="ml-1.5 align-middle" />
+                                </span>
                             </div>
                             <IosToggle checked={tenure} onChange={setTenure} disabled={busy} />
                         </div>
@@ -333,7 +336,7 @@ export default function LeaveReviewPanel({
                     ]}
                 />
                 <div className="flex items-center gap-1.5">
-                    <IosHint align="right" text={QUEUE_HINT} />
+                    <InfoHint side="right" text={QUEUE_HINT} />
                     {canManageSettings && (
                         <button type="button" className={`${iosBtnGhost} shrink-0`} onClick={onOpenSettings} title="Какие отделы принимают заявки">
                             <Settings2 size={13} className="text-slate-400" aria-hidden="true" />

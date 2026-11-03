@@ -1,6 +1,7 @@
 import React from 'react';
 import IosDatePicker from '../ui/DatePicker';
-import { IosHint, IosSegmented, iosGroupLabel, iosInput } from '../ui/ios';
+import InfoHint, { InfoHintLines } from '../common/InfoHint';
+import { IosSegmented, iosGroupLabel, iosInput } from '../ui/ios';
 import {
     LEAVE_KIND_HINTS,
     LEAVE_KIND_SEGMENTS,
@@ -43,12 +44,9 @@ export default function LeaveRequestFields({
                 <div className="space-y-1.5">
                     <div className="flex items-center gap-1.5">
                         <span className={iosGroupLabel}>Вид</span>
-                        <IosHint
-                            align="left"
-                            text={LEAVE_KIND_HINTS.map((line) => (
-                                <span key={line} className="block [&+span]:mt-1">{line}</span>
-                            ))}
-                        />
+                        <InfoHint side="left">
+                            <InfoHintLines lines={LEAVE_KIND_HINTS} />
+                        </InfoHint>
                     </div>
                     <IosSegmented
                         value={draft.kind}

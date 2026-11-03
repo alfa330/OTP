@@ -215,4 +215,21 @@ const InfoHint = ({ title = '', text = '', children, side = 'right', className =
   );
 };
 
+/* Пояснение из нескольких строк «Название — смысл»: по строке на вариант,
+   название жирным — так же читаются подсказки выбора в «Оплате счетов». */
+export const InfoHintLines = ({ lines = [] }) => (
+  <div className="space-y-1">
+    {lines.map((line) => {
+      const [name, ...rest] = String(line).split(' — ');
+      return (
+        <div key={line}>
+          {rest.length
+            ? <><span className="font-semibold text-slate-800">{name}</span> — {rest.join(' — ')}</>
+            : line}
+        </div>
+      );
+    })}
+  </div>
+);
+
 export default InfoHint;

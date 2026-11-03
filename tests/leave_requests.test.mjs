@@ -1,6 +1,7 @@
 // Заявки на отпуск и Б/С (#358): правила формы на клиенте и начало стажа.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
     LEAVE_KIND_LABELS,
@@ -18,6 +19,7 @@ import {
 import { tenureStartDate } from '../src/components/profile/profileFormat.js';
 
 const TODAY = '2026-11-02';
+const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
 test('дни периода — календарные, оба края включительно', () => {
     assert.equal(leavePeriodDays('2026-12-01', '2026-12-14'), 14);
@@ -83,4 +85,27 @@ test('начало стажа сдвигается на дни вне стажа
     assert.equal(tenureStartDate('2025-07-20', 42), '2025-08-31');
     assert.equal(tenureStartDate('2025-12-25', 10), '2026-01-04');
     assert.equal(tenureStartDate(null, 10), null);
+});
+
+test('«i» в окнах заявок — общий InfoHint: пузырь поверх окна, край карточки его не режет', () => {
+    // Серый IosHint раскрывался внутри карточки с overflow-hidden и обрезался
+    // её краем: от пояснения оставалась тёмная полоска.
+    for (const file of ['LeaveSettingsPanel.jsx', 'LeaveReviewPanel.jsx', 'LeaveRequestFields.jsx']) {
+        const source = read(`../src/components/leave/${file}`);
+        assert.ok(source.includes('<InfoHint'), file);
+        assert.ok(!source.includes('IosHint'), file);
+    }
+    // Те же окна «Запросов» по сменам: два вида «i» в одном окне — шум.
+    const app = read('../src/App.jsx');
+    for (const anchor of [
+        'Сократить можно только внутри уже назначенной смены',
+        'Одобрение сразу правит график',
+        'Без подписки уведомления о заявке',
+    ]) {
+        const at = app.indexOf(anchor);
+        assert.ok(at > 0, anchor);
+        assert.ok(app.slice(app.lastIndexOf('<', at), at).startsWith('<InfoHint'), anchor);
+    }
+    const label = app.indexOf('>Что нужно</span>');
+    assert.ok(app.slice(label, label + 200).includes('<InfoHint side="left">'));
 });

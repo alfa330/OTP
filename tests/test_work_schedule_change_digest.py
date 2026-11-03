@@ -997,7 +997,10 @@ class InterfaceTests(unittest.TestCase):
         """В разделе уже есть подписка «Уведомлять меня о заявках отдела».
         Два тумблера уведомлений обязаны называться по-разному."""
         source = self._app_source()
-        self.assertIn("Уведомлять меня о заявках отдела", source)
+        # Последнее слово подписи держится вместе с «i» (whitespace-nowrap),
+        # поэтому в разметке подпись разделена на две части.
+        self.assertIn("Уведомлять меня о заявках{' '}", source)
+        self.assertIn("отдела\n", source[source.index("Уведомлять меня о заявках{' '}"):][:200])
         self.assertIn("Уведомления об изменениях", source)
 
     def test_forbidden_is_not_an_error_on_the_client(self):

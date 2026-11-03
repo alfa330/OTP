@@ -52,7 +52,7 @@ import './components/lms/LmsRichText.css';
 import SzovWallboardWidget from './components/monitoring/SzovWallboardWidget';
 import FaIcon from './components/common/FaIcon';
 import RegLaurelWreath from './components/contests/RegLaurelWreath';
-import InfoHint from './components/common/InfoHint';
+import InfoHint, { InfoHintLines } from './components/common/InfoHint';
 import AuthEntranceSplash from './components/common/AuthEntranceSplash';
 import ProfileView from './components/profile/ProfileView';
 import LegacyProfileView from './components/profile/LegacyProfileView';
@@ -28461,18 +28461,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 вид не меняет: там списка нет вовсе. */}
                                             {!leaveDraft?.id && (
                                             <div className="space-y-1.5">
-                                                {/* «i» стоит рядом с подписью, а не внутри неё: подпись
-                                                    набрана прописными, и пузырёк унаследовал бы их. */}
                                                 <div className="flex items-center gap-1.5">
                                                     <span className={iosGroupLabel}>Что нужно</span>
-                                                    <IosHint
-                                                        align="left"
-                                                        text={(myLeave.canFile
+                                                    <InfoHint side="left">
+                                                        <InfoHintLines lines={myLeave.canFile
                                                             ? [...SHIFT_CHANGE_KIND_HINTS, LEAVE_OPTION_HINT]
-                                                            : SHIFT_CHANGE_KIND_HINTS).map(line => (
-                                                            <span key={line} className="block [&+span]:mt-1">{line}</span>
-                                                        ))}
-                                                    />
+                                                            : SHIFT_CHANGE_KIND_HINTS} />
+                                                    </InfoHint>
                                                 </div>
                                                 <CustomSelect
                                                     variant="ios"
@@ -30209,14 +30204,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         <div className="space-y-3 px-3 pb-3 sm:px-0">
                                             {/* Пояснение живёт под «i»: оно нужно один раз, а место
                                                 занимало бы всегда. Само правило — на сервере. */}
-                                            <div className={`${iosCard} flex items-start gap-2.5 px-3.5 py-2.5`}>
-                                                <FaIcon className="fas fa-info-circle mt-0.5 shrink-0 text-slate-400"></FaIcon>
-                                                <div className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-slate-500">
+                                            <div className={`${iosCard} px-3.5 py-2.5`}>
+                                                <div className="min-w-0 text-[12.5px] leading-relaxed text-slate-500">
                                                     Заявка уходит вашему руководителю. После одобрения смена
-                                                    меняется в графике сама.
-                                                    <span className="ml-1.5 inline-flex align-middle">
-                                                        <IosHint
-                                                            align="left"
+                                                    меняется в графике{' '}
+                                                    <span className="whitespace-nowrap">
+                                                        сама.
+                                                        <InfoHint
+                                                            side="left"
+                                                            className="ml-1.5 align-middle"
                                                             text={"Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Изменить смену — поставить ей другое время или перенести на другой день. Выходной снимает все смены дня. Перенос и выходной просят до начала смены. Заявки принимаются на сегодня и на 45 дней вперёд." + (myLeave.canFile
                                                                 ? " Отпуск или Б/С сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встанет в график, а смены на эти дни снимутся. Заявку на отпуск можно изменить или отозвать, пока её не утвердили."
                                                                 : "")}
@@ -32336,8 +32332,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 ]}
                             />
                             <div className="flex items-center gap-1.5">
-                                <IosHint
-                                    align="right"
+                                <InfoHint
+                                    side="right"
                                     text="Одобрение сразу правит график: смена сокращается, переезжает на новое время или в день добавляется новая часть; выходной снимает все смены дня. Перерывы пересчитываются по правилам направления, а изменение попадает в историю графика. Смену, которая уже началась, перенести или снять нельзя — такую заявку можно только отклонить. Отклонение график не трогает. Оператор увидит решение в разделе «Мои смены»."
                                 />
                                 <button
@@ -32358,10 +32354,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         {reviewCanWatch && (
                             <div className="flex items-center justify-between gap-3 rounded-xl bg-white px-3.5 py-2.5 ring-1 ring-slate-200/70">
                                 <div className="min-w-0 text-[12.5px] leading-snug text-slate-600">
-                                    Уведомлять меня о заявках отдела
-                                    <span className="ml-1.5 inline-flex align-middle">
-                                        <IosHint
-                                            align="left"
+                                    Уведомлять меня о заявках{' '}
+                                    <span className="whitespace-nowrap">
+                                        отдела
+                                        <InfoHint
+                                            side="left"
+                                            className="ml-1.5 align-middle"
                                             text="Без подписки уведомления о заявке приходят только прямому супервайзеру оператора — это его человек и его решение. С подпиской они будут приходить и вам, по всему отделу. Заявки оператора, у которого супервайзера нет, приходят вам в любом случае: иначе о них не узнает никто. Сама очередь «Запросы» видна вам всегда, независимо от подписки."
                                         />
                                     </span>
