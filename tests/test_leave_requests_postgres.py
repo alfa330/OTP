@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from leave_requests import notify, queries, schema, service
+from leave_requests import notify, queries, rules, schema, service
 from leave_requests.rules import LeaveError
 from notifications import sources
 
@@ -601,6 +601,152 @@ def test_bell_names_sick_leave(db):
     create(db, deps, OP_A, '2026-10-30', '2026-11-06', kind='sick_leave')
     total, items = bell(db, SV_A, 'sv')
     assert total == 1 and items[0]['body'] == 'Больничный · 30.10 — 06.11'
+
+
+# ── Настройки у главы ───────────────────────────────────────────────────────
+
+HEAD_OP_VIEWER = {'user_id': HEAD_OP, 'role': 'sv', 'department_id': 2, 'is_admin': False,
+                  'is_supervisor': True, 'headed_department_ids': [2], 'is_manager': True}
+
+
+def test_head_sees_and_changes_only_own_department_settings(db):
+    with db.cursor() as cur:
+        assert [d['id'] for d in service.settings_payload(cur, viewer=VIEWERS[HEAD])['departments']] == [1]
+        assert {d['id'] for d in service.settings_payload(cur, viewer=VIEWERS[ADMIN])['departments']} == {1, 2}
+        saved = service.save_department_settings(cur, viewer=VIEWERS[HEAD], department_id=1,
+                                                 data={'allow_bs': False})
+    assert saved['id'] == 1 and saved['allowBs'] is False and saved['enabled'] is True
+    with db.cursor() as cur, pytest.raises(LeaveError, match='другого отдела'):
+        service.save_department_settings(cur, viewer=VIEWERS[HEAD], department_id=2, data={'enabled': True})
+    with db.cursor() as cur, pytest.raises(LeaveError, match='руководитель отдела или администратор'):
+        service.settings_payload(cur, viewer=VIEWERS[SV_A])
+    with db.cursor() as cur:
+        assert queries.load_settings(cur, 2) is None  # отказ ничего не записал
+    assert review(db, HEAD)['canManageSettings'] is True
+    assert review(db, SV_A)['canManageSettings'] is False
+
+
+def test_head_keeps_the_tab_after_switching_requests_off(db):
+    with db.cursor() as cur:
+        service.save_department_settings(cur, viewer=VIEWERS[HEAD], department_id=1, data={'enabled': False})
+    # Вкладка осталась — главе есть где включить заявки обратно; супервайзеру
+    # выключенный отдел не показываем.
+    assert review(db, HEAD)['enabled'] is True
+    assert review(db, SV_A)['enabled'] is False
+    # Отдел, который администратор ещё не заводил, глава сам не включает.
+    with db.cursor() as cur:
+        payload = service.review_payload(cur, viewer=HEAD_OP_VIEWER, operator_ids=[OP_OP],
+                                         status_filter='pending', today=TODAY)
+    assert payload['enabled'] is False
+
+
+# ── Журнал и выгрузка ───────────────────────────────────────────────────────
+
+def journal(db, viewer_id, month, kind=None, status=None):
+    start, end = rules.parse_month(month, TODAY)
+    kind, statuses = rules.journal_filter(kind, status)
+    with db.cursor() as cur:
+        return service.journal_payload(cur, operator_ids=sorted(scope(viewer_id)), start=start, end=end,
+                                       kind=kind, statuses=statuses, today=TODAY)
+
+
+def names(payload):
+    return [item['operator']['name'] for item in payload['items']]
+
+
+def test_journal_lists_month_of_the_perimeter_with_filters(db):
+    deps = Deps()
+    approved = create(db, deps, OP_A, '2026-12-01', '2026-12-14')
+    decide(db, deps, SV_A, approved['id'], action='approve')
+    decide(db, deps, HEAD, approved['id'], action='approve')
+    create(db, deps, OP_B, '2026-11-28', '2026-12-03', kind='bs')
+    sick = create(db, deps, OP_C, '2026-10-30', '2026-11-06', kind='sick_leave', reason='Открыт больничный лист')
+    decide(db, deps, SV_B, sick['id'], action='reject')
+
+    december = journal(db, HEAD, '2026-12')
+    assert december['month'] == '2026-12' and december['truncated'] is False
+    # Период задевает месяц — заявка в журнале; порядок — по первому дню.
+    assert names(december) == ['Оператор Борис', 'Оператор Анна']
+    assert [e['action'] for e in december['items'][1]['events']] == ['created', 'supervisor_approved', 'approved']
+    assert names(journal(db, HEAD, '2026-11')) == ['Оператор Вера', 'Оператор Борис']
+    assert names(journal(db, HEAD, '2026-12', kind='bs')) == ['Оператор Борис']
+    assert names(journal(db, HEAD, '2026-12', status='approved')) == ['Оператор Анна']
+    assert names(journal(db, HEAD, '2026-11', status='rejected')) == ['Оператор Вера']
+    assert names(journal(db, HEAD, '2026-11', status='open')) == ['Оператор Борис']
+    assert names(journal(db, SV_OP, '2026-12')) == []  # чужой отдел
+
+
+def _xlsx(data):
+    import io
+    from openpyxl import load_workbook
+    return load_workbook(io.BytesIO(data))
+
+
+def test_journal_export_is_a_plain_table(db):
+    from leave_requests import report
+    deps = Deps()
+    item = create(db, deps, OP_A, '2026-12-01', '2026-12-14')
+    decide(db, deps, SV_A, item['id'], action='approve')
+    decide(db, deps, HEAD, item['id'], action='approve', comment='Хорошего отдыха')
+    create(db, deps, OP_B, '2026-12-10', '2026-12-12', kind='bs')
+    items = journal(db, HEAD, '2026-12')['items']
+
+    book = _xlsx(report.journal_workbook(items))
+    assert book.sheetnames == ['Журнал']
+    sheet = book['Журнал']
+    header = [cell.value for cell in sheet[1]]
+    assert header == ['№', 'Сотрудник', 'Группа', 'Вид', 'С', 'По', 'Дней', 'Статус', 'Причина', 'Подана',
+                      'Согласование СВ', 'Кем решено', 'Когда решено', 'Комментарий']
+    first = dict(zip(header, [cell.value for cell in sheet[2]]))
+    assert first['Сотрудник'] == 'Оператор Анна' and first['Вид'] == 'Ежегодный отпуск'
+    assert first['С'] == datetime(2026, 12, 1) and first['По'] == datetime(2026, 12, 14) and first['Дней'] == 14
+    assert first['Статус'] == 'Утверждена' and first['Комментарий'] == 'Хорошего отдыха'
+    assert first['Согласование СВ'] == 'Супервайзер Альфа' and first['Кем решено'] == 'Глава Сзовова'
+    assert isinstance(first['Подана'], datetime) and isinstance(first['Когда решено'], datetime)
+    assert sheet.freeze_panes == 'A2' and sheet.auto_filter.ref == 'A1:N3'
+    # «Отдел» — когда отделов в выгрузке несколько, «Не в стаже» — когда такой Б/С в ней есть.
+    mixed = [dict(items[0], department={'id': 2, 'name': 'Отдел продаж'}, excludeFromTenure=True)] + items[1:]
+    header = [cell.value for cell in _xlsx(report.journal_workbook(mixed))['Журнал'][1]]
+    assert 'Отдел' in header and header[-1] == 'Не в стаже'
+
+
+def _client(db, user_id):
+    from flask import Flask
+    from leave_requests.routes import build_leave_requests_blueprint
+
+    class Adapter:
+        _get_cursor = staticmethod(db.cursor)
+
+    deps = Deps()
+    app = Flask(__name__)
+    app.register_blueprint(build_leave_requests_blueprint(
+        db=Adapter(), require_api_key=lambda handler: handler,
+        build_cors_preflight_response=lambda: ('', 204),
+        resolve_requester=lambda: (user_id, (user_id,), None),
+        viewer_context=lambda requester_id, requester: VIEWERS[requester_id],
+        scope_filter=lambda requester, requester_id, ids: [i for i in ids if int(i) in scope(requester_id)],
+        resolve_supervisor=deps.resolve_supervisor, apply_period=deps.apply_period,
+    ))
+    return app.test_client()
+
+
+def test_routes_give_head_settings_journal_and_excel(db):
+    from leave_requests import report
+    create(db, Deps(), OP_A, '2026-12-01', '2026-12-14')
+    head = _client(db, HEAD)
+    assert [d['id'] for d in head.get('/api/leave_requests/settings').get_json()['departments']] == [1]
+    saved = head.put('/api/leave_requests/settings/1', json={'allow_bs': False}).get_json()['department']
+    assert saved['allowBs'] is False
+    assert head.put('/api/leave_requests/settings/2', json={'enabled': True}).status_code == 403
+    assert _client(db, SV_A).get('/api/leave_requests/settings').status_code == 403
+
+    body = head.get('/api/leave_requests/journal?month=2026-12').get_json()
+    assert names(body) == ['Оператор Анна']
+    assert head.get('/api/leave_requests/journal?month=2026-12&status=all').status_code == 400
+    response = head.get('/api/leave_requests/journal/export?month=2026-12&kind=annual_leave')
+    assert response.status_code == 200 and response.mimetype == report.XLSX_MIME
+    assert 'attachment' in response.headers['Content-Disposition']
+    assert [row[1] for row in _xlsx(response.data)['Журнал'].iter_rows(min_row=2, values_only=True)] == ['Оператор Анна']
 
 
 # ── Время ───────────────────────────────────────────────────────────────────

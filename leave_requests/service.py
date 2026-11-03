@@ -291,15 +291,19 @@ def review_candidates(cursor):
 
 def review_payload(cursor, *, viewer, operator_ids, status_filter, today, limit=300):
     ids = sorted({int(i) for i in operator_ids or ()})
-    viewer_departments = set(viewer.get('headed_department_ids') or ())
+    headed = set(viewer.get('headed_department_ids') or ())
+    viewer_departments = set(headed)
     if viewer.get('department_id') is not None:
         viewer_departments.add(int(viewer['department_id']))
     enabled_departments = queries.enabled_department_ids(cursor)
     payload = {
         'requests': [],
         'pendingCount': 0,
-        'canManageSettings': bool(viewer.get('is_admin')),
-        'enabled': bool(viewer.get('is_admin')) or bool(enabled_departments & viewer_departments),
+        'canManageSettings': rules.can_manage_settings(viewer),
+        # Глава видит вкладку и у отдела, где сам выключил заявки: иначе ему
+        # негде было бы включить их обратно.
+        'enabled': (bool(viewer.get('is_admin')) or bool(enabled_departments & viewer_departments)
+                    or bool(headed & queries.configured_department_ids(cursor))),
         # Какие виды приходят в эту очередь — по ним она себя и называет.
         'kinds': list(queries.enabled_kinds(cursor, None if viewer.get('is_admin') else viewer_departments)),
         'today': today.strftime('%Y-%m-%d'),
@@ -348,6 +352,48 @@ def review_payload(cursor, *, viewer, operator_ids, status_filter, today, limit=
         if int(row[1]) != int(viewer['user_id']) and rules.awaits(
             rules.reviewer_role(viewer, {'department_id': row[2]}, in_scope=True), row[3]))
     return payload
+
+
+def journal_payload(cursor, *, operator_ids, start, end, kind, statuses, today, limit=rules.JOURNAL_LIMIT):
+    """Журнал месяца: заявки периметра любого статуса, чей период задевает месяц."""
+    ids = sorted({int(i) for i in operator_ids or ()})
+    raws = queries.journal_requests(cursor, operator_ids=ids, start=start, end=end, kind=kind,
+                                    statuses=statuses, today=today, limit=limit + 1) if ids else []
+    events = queries.fetch_events(cursor, [raw['id'] for raw in raws[:limit]])
+    return {
+        'month': start.strftime('%Y-%m'),
+        'today': today.strftime('%Y-%m-%d'),
+        'items': [queries.serialize_request(raw, events.get(int(raw['id']), [])) for raw in raws[:limit]],
+        'truncated': len(raws) > limit,
+    }
+
+
+# ── Настройки ───────────────────────────────────────────────────────────────
+
+def _settings_scope(viewer):
+    scope = rules.settings_departments(viewer)
+    if scope is not None and not scope:
+        raise LeaveError('Настройки меняет руководитель отдела или администратор', code='LEAVE_FORBIDDEN',
+                         status=403)
+    return scope
+
+
+def settings_payload(cursor, *, viewer):
+    """Админу — все отделы, главе — только свои."""
+    return {'departments': queries.list_department_settings(cursor, _settings_scope(viewer)),
+            'longBsDaysMax': rules.LONG_BS_DAYS_MAX}
+
+
+def save_department_settings(cursor, *, viewer, department_id, data):
+    scope = _settings_scope(viewer)
+    if scope is not None and int(department_id) not in scope:
+        raise LeaveError('Это настройки другого отдела', code='LEAVE_FORBIDDEN', status=403)
+    cursor.execute("SELECT 1 FROM departments WHERE id = %s", (int(department_id),))
+    if not cursor.fetchone():
+        raise LeaveError('Отдел не найден', code='LEAVE_NOT_FOUND', status=404)
+    queries.save_settings(cursor, department_id, rules.normalize_settings_patch(data), viewer['user_id'])
+    saved = queries.list_department_settings(cursor, [department_id])
+    return saved[0] if saved else None
 
 
 def overlaps_preview(cursor, *, request_id, start, end, today):

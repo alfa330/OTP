@@ -100,6 +100,36 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(rules.default_exclude_from_tenure('annual_leave', 60, 30))
         self.assertFalse(rules.default_exclude_from_tenure('bs', 90, None))
 
+    def test_settings_belong_to_admin_and_heads_of_their_departments(self):
+        admin = {'user_id': 1, 'is_admin': True, 'headed_department_ids': []}
+        head = {'user_id': 100, 'is_admin': False, 'headed_department_ids': [1, '3']}
+        supervisor = {'user_id': 300, 'is_admin': False, 'headed_department_ids': []}
+        self.assertIsNone(rules.settings_departments(admin))
+        self.assertEqual(frozenset({1, 3}), rules.settings_departments(head))
+        self.assertEqual(frozenset(), rules.settings_departments(supervisor))
+        self.assertTrue(rules.can_manage_settings(admin))
+        self.assertTrue(rules.can_manage_settings(head))
+        self.assertFalse(rules.can_manage_settings(supervisor))
+
+
+class JournalTests(unittest.TestCase):
+    def test_month_bounds(self):
+        self.assertEqual((date(2026, 11, 1), date(2026, 11, 30)), rules.parse_month('2026-11', TODAY))
+        self.assertEqual((date(2026, 12, 1), date(2026, 12, 31)), rules.parse_month('2026-12', TODAY))
+        self.assertEqual((date(2028, 2, 1), date(2028, 2, 29)), rules.parse_month('2028-02', TODAY))
+        self.assertEqual((date(2026, 11, 1), date(2026, 11, 30)), rules.parse_month('', TODAY))
+        with self.assertRaisesRegex(LeaveError, 'месяц'):
+            rules.parse_month('ноябрь', TODAY)
+
+    def test_filters(self):
+        self.assertEqual((None, None), rules.journal_filter('', None))
+        self.assertEqual(('bs', ('approved',)), rules.journal_filter('bs', 'approved'))
+        self.assertEqual((None, ('supervisor', 'head', 'proposal')), rules.journal_filter(None, 'open'))
+        with self.assertRaises(LeaveError):
+            rules.journal_filter('dismissal', '')
+        with self.assertRaises(LeaveError):
+            rules.journal_filter('', 'all')
+
 
 class RoleTests(unittest.TestCase):
     SV = {'user_id': 300, 'is_supervisor': True, 'headed_department_ids': []}

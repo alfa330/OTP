@@ -204,6 +204,57 @@ def check_settings(settings):
                          code='LEAVE_SETTINGS_INVALID')
 
 
+def settings_departments(viewer):
+    """Чьи настройки смотрящий видит и меняет: None — все отделы (админ),
+    иначе отделы, которые он возглавляет; пустое множество — ничьи."""
+    if viewer.get('is_admin'):
+        return None
+    return frozenset(int(d) for d in viewer.get('headed_department_ids') or ())
+
+
+def can_manage_settings(viewer):
+    scope = settings_departments(viewer)
+    return scope is None or bool(scope)
+
+
+# ── Журнал ──────────────────────────────────────────────────────────────────
+
+# Отбор журнала по статусу: «на рассмотрении» — все открытые шаги разом.
+JOURNAL_STATUSES = {
+    'open': OPEN_STATUSES,
+    'approved': ('approved',),
+    'rejected': ('rejected',),
+    'cancelled': ('cancelled',),
+}
+JOURNAL_LIMIT = 1000
+EXPORT_LIMIT = 20000
+
+
+def parse_month(value, today):
+    """'2026-11' → (1 ноября, 30 ноября); пусто — месяц сегодняшнего дня."""
+    text = str(value or '').strip()
+    if not text:
+        start = today.replace(day=1)
+    else:
+        try:
+            start = datetime.strptime(text[:7], '%Y-%m').date()
+        except ValueError:
+            raise LeaveError('Укажите месяц', code='LEAVE_BAD_MONTH') from None
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return start, end
+
+
+def journal_filter(kind, status):
+    """Вид и статус из запроса → (вид или None, статусы или None)."""
+    kind = str(kind or '').strip()
+    status = str(status or '').strip()
+    if kind and kind not in KINDS:
+        raise LeaveError('Неизвестный вид заявки', code='LEAVE_BAD_KIND')
+    if status and status not in JOURNAL_STATUSES:
+        raise LeaveError('Неизвестный статус', code='LEAVE_BAD_STATUS')
+    return kind or None, JOURNAL_STATUSES.get(status)
+
+
 # ── Кто что может ───────────────────────────────────────────────────────────
 
 def reviewer_role(viewer, request, in_scope):

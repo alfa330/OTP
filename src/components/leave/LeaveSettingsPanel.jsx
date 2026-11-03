@@ -11,7 +11,7 @@ import { leaveApiError } from './leaveRequests';
  *
  * Сохраняется каждое изменение сразу, без кнопки «Сохранить»: переключатель,
  * который нужно ещё и подтвердить, на телефоне читается как сломанный.
- * Меняет только администратор (сервер проверяет сам).
+ * Меняют администратор — все отделы — и глава отдела — свои (сервер проверяет сам).
  */
 
 const STEP_HINT = 'Включено — заявку сначала согласует супервайзер группы оператора, затем утверждает руководитель отдела. Выключено — заявка сразу идёт руководителю. У оператора без супервайзера она идёт руководителю в любом случае.';
@@ -176,7 +176,7 @@ export default function LeaveSettingsPanel({ api }) {
             {error && (
                 <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">{error}</div>
             )}
-            <div className={iosGroupLabel}>Отделы</div>
+            {(departments || []).length > 1 && <div className={iosGroupLabel}>Отделы</div>}
             {(departments || []).map((department) => (
                 <DepartmentCard key={department.id} department={department} saving={savingId === department.id} onSave={save} />
             ))}

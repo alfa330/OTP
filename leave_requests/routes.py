@@ -15,17 +15,20 @@ scope_filter: это та же _filter_operators_for_requester_scope, что р�
     GET    /review                 очередь руководителя (?status=pending|all)
     GET    /review/<id>/overlaps   кто отдыхает в выбранные даты (?start_date&end_date)
     POST   /review/<id>            решение {action: approve|propose|reject}
-    GET    /settings               настройки отделов (админ)
-    PUT    /settings/<department>  изменить настройки отдела (админ)
+    GET    /journal                журнал месяца (?month=YYYY-MM&kind&status)
+    GET    /journal/export         он же в Excel
+    GET    /settings               настройки отделов (админ — все, глава — свои)
+    PUT    /settings/<department>  изменить настройки отдела (админ, глава отдела)
 """
 
 import logging
 from datetime import date, datetime
 from functools import wraps
+from io import BytesIO
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
-from . import notify, queries, rules, schema, service
+from . import notify, queries, report, rules, schema, service
 from .rules import LeaveError
 
 try:
@@ -192,26 +195,35 @@ def build_leave_requests_blueprint(*, db, require_api_key, build_cors_preflight_
                                  base_url=web_app_base_url)
         return jsonify({"request": updated}), 200
 
-    # ── Настройки ───────────────────────────────────────────────────────────
+    # ── Журнал ──────────────────────────────────────────────────────────────
 
-    def _require_admin(viewer):
-        if not viewer.get('is_admin'):
-            raise LeaveError('Настройки меняет администратор', code='LEAVE_FORBIDDEN', status=403)
+    def _journal(cursor, viewer, requester, today, limit):
+        _require_manager(viewer)
+        start, end = rules.parse_month(request.args.get('month'), today)
+        kind, statuses = rules.journal_filter(request.args.get('kind'), request.args.get('status'))
+        allowed = _allowed_ids(requester, viewer, service.review_candidates(cursor))
+        return service.journal_payload(cursor, operator_ids=allowed, start=start, end=end, kind=kind,
+                                       statuses=statuses, today=today, limit=limit)
+
+    @route('/journal')
+    def journal(*, cursor, viewer, requester, outbox, today):
+        return jsonify(_journal(cursor, viewer, requester, today, rules.JOURNAL_LIMIT)), 200
+
+    @route('/journal/export')
+    def journal_export(*, cursor, viewer, requester, outbox, today):
+        payload = _journal(cursor, viewer, requester, today, rules.EXPORT_LIMIT)
+        return send_file(BytesIO(report.journal_workbook(payload['items'])), mimetype=report.XLSX_MIME,
+                         as_attachment=True, download_name='Журнал заявок %s.xlsx' % payload['month'])
+
+    # ── Настройки ───────────────────────────────────────────────────────────
 
     @route('/settings')
     def list_settings(*, cursor, viewer, requester, outbox, today):
-        _require_admin(viewer)
-        return jsonify({"departments": queries.list_department_settings(cursor),
-                        "longBsDaysMax": rules.LONG_BS_DAYS_MAX}), 200
+        return jsonify(service.settings_payload(cursor, viewer=viewer)), 200
 
     @route('/settings/<int:department_id>', methods=('PUT',))
     def save_settings(department_id, *, cursor, viewer, requester, outbox, today):
-        _require_admin(viewer)
-        cursor.execute("SELECT 1 FROM departments WHERE id = %s", (department_id,))
-        if not cursor.fetchone():
-            raise LeaveError('Отдел не найден', code='LEAVE_NOT_FOUND', status=404)
-        queries.save_settings(cursor, department_id, rules.normalize_settings_patch(_body()), viewer['user_id'])
-        departments = queries.list_department_settings(cursor)
-        return jsonify({"department": next((d for d in departments if d['id'] == department_id), None)}), 200
+        saved = service.save_department_settings(cursor, viewer=viewer, department_id=department_id, data=_body())
+        return jsonify({"department": saved}), 200
 
     return bp

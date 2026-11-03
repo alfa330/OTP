@@ -179,12 +179,77 @@ export const formatLeavePeriod = (start, end, today = '') => {
     return `${one(start)} — ${one(end)}`;
 };
 
+/** «02.11 14:05» — время шага в истории заявки; год — только когда он не текущий. */
+export const formatLeaveDateTime = (iso, today = '') => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ''));
+    if (!match) return '';
+    const year = String(today || isoDay(Date.now())).slice(0, 4);
+    return `${match[3]}.${match[2]}${match[1] === year ? '' : `.${match[1]}`} ${match[4]}:${match[5]}`;
+};
+
 /** «Ежегодный отпуск · 01.12 — 14.12 · 14 дней». */
 export const leaveSummary = (item, today = '') => [
     LEAVE_KIND_LABELS[item?.kind] || 'Заявка',
     formatLeavePeriod(item?.startDate, item?.endDate, today),
     daysText(leavePeriodDays(item?.startDate, item?.endDate)),
 ].filter(Boolean).join(' · ');
+
+// ── Журнал ──────────────────────────────────────────────────────────────────
+
+// Отбор по статусу — те же значения, что у сервера (rules.JOURNAL_STATUSES).
+export const LEAVE_JOURNAL_STATUSES = [
+    { value: '', label: 'Все статусы' },
+    { value: 'open', label: 'На рассмотрении' },
+    { value: 'approved', label: 'Утверждены' },
+    { value: 'rejected', label: 'Отклонены' },
+    { value: 'cancelled', label: 'Отозваны' },
+];
+
+export const leaveJournalKinds = (kinds) => [
+    { value: '', label: 'Все виды' },
+    ...pickKinds(kinds).map((kind) => ({ value: kind, label: LEAVE_KIND_LABELS[kind] })),
+];
+
+const MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь',
+    'Октябрь', 'Ноябрь', 'Декабрь'];
+
+/** '2026-11' → 'Ноябрь 2026'. */
+export const leaveMonthLabel = (month) => {
+    const [year, number] = String(month || '').split('-').map(Number);
+    return year && number >= 1 && number <= 12 ? `${MONTH_NAMES[number - 1]} ${year}` : '';
+};
+
+/** Соседний месяц: ('2026-12', 1) → '2027-01'. */
+export const shiftLeaveMonth = (month, delta) => {
+    const [year, number] = String(month || '').split('-').map(Number);
+    if (!year || !number) return month;
+    return isoDay(Date.UTC(year, number - 1 + delta, 1)).slice(0, 7);
+};
+
+// Пустой вид или статус — «все»: в запрос не идут.
+export const leaveJournalQuery = ({ month, kind, status }) => ({
+    month,
+    ...(kind ? { kind } : {}),
+    ...(status ? { status } : {}),
+});
+
+export const leaveJournalFileName = (month) => `Журнал заявок ${month}.xlsx`;
+
+/* Файл — в этом же окне, временной ссылкой (правило портала: без новых
+   вкладок). Ссылка на blob, а не startFileDownload: выгрузку собирает наш API
+   за авторизацией, скрытый фрейм без заголовка получил бы отказ. */
+export const saveLeaveFile = (blob, name, doc = globalThis.document) => {
+    if (!doc?.body || typeof URL === 'undefined' || !URL.createObjectURL) return false;
+    const url = URL.createObjectURL(blob);
+    const link = doc.createElement('a');
+    link.href = url;
+    link.download = name;
+    doc.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+};
 
 // ── Форма ───────────────────────────────────────────────────────────────────
 
@@ -282,6 +347,20 @@ export const createLeaveApi = (apiBaseUrl, headers) => {
         headers: { 'Content-Type': 'application/json', ...headers() },
         withCredentials: true,
     }).then((response) => response.data);
+    /* Файл приходит blob'ом — и отказ сервера тоже: его JSON лежит внутри blob,
+       и без распаковки человек видел бы общий текст вместо настоящей причины. */
+    const file = (path, params) => axios.get(`${base}${path}`, {
+        params,
+        headers: headers(),
+        withCredentials: true,
+        responseType: 'blob',
+    }).then((response) => response.data).catch(async (error) => {
+        const data = error?.response?.data;
+        if (typeof Blob !== 'undefined' && data instanceof Blob && /json/i.test(data.type || '')) {
+            try { error.response.data = JSON.parse(await data.text()); } catch { /* останется общий текст */ }
+        }
+        throw error;
+    });
     return {
         mine: () => request('get', '/my'),
         create: (draft) => request('post', '/my', { data: draftPayload(draft) }),
@@ -294,6 +373,8 @@ export const createLeaveApi = (apiBaseUrl, headers) => {
             params: { start_date: start, end_date: end },
         }),
         decide: (id, body) => request('post', `/review/${id}`, { data: body }),
+        journal: (query) => request('get', '/journal', { params: leaveJournalQuery(query) }),
+        journalFile: (query) => file('/journal/export', leaveJournalQuery(query)),
         settings: () => request('get', '/settings'),
         saveSettings: (departmentId, body) => request('put', `/settings/${departmentId}`, { data: body }),
     };

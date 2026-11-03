@@ -12,6 +12,7 @@ import {
     iosInput,
 } from '../ui/ios';
 import ShiftRequestComment from '../schedule/ShiftRequestComment';
+import LeaveJournal from './LeaveJournal';
 import {
     LEAVE_EVENT_LABELS,
     LEAVE_KIND_LABELS,
@@ -19,6 +20,7 @@ import {
     LEAVE_STATUS_META,
     addDaysIso,
     daysText,
+    formatLeaveDateTime,
     formatLeavePeriod,
     leaveApiError,
     leaveKindsText,
@@ -35,6 +37,9 @@ import {
  * Пересечения (ТЗ п. 4) стоят жёлтым блоком прямо в заявке: это то, ради
  * чего руководитель останавливается, а «никто не отсутствует» не пишем вовсе —
  * обычное состояние не красим и не подписываем.
+ *
+ * Второй сегмент — «Журнал» (LeaveJournal.jsx): заявки месяца любого статуса
+ * с историей и выгрузкой в Excel.
  */
 
 const queueHint = (kinds) => [
@@ -53,11 +58,6 @@ const TENURE_HINT = 'Период Б/С не войдёт в стаж: «Ста�
 const BTN_REJECT = 'rounded-xl bg-slate-100 px-3.5 py-2 text-[13px] font-semibold text-slate-600 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50';
 const BTN_SECONDARY = 'rounded-xl bg-white px-3.5 py-2 text-[13px] font-semibold text-slate-700 ring-1 ring-slate-200 transition-all hover:bg-slate-50 active:scale-[0.98] disabled:opacity-50';
 const BTN_APPROVE = 'rounded-xl bg-blue-600 px-3.5 py-2 text-[13px] font-semibold text-white shadow-sm transition-all hover:bg-blue-700 active:scale-[0.98] disabled:opacity-50';
-
-const fmtDateTime = (iso) => {
-    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ''));
-    return match ? `${match[3]}.${match[2]} ${match[4]}:${match[5]}` : '';
-};
 
 function OverlapNote({ overlaps, today, title = 'В эти даты уже отсутствуют' }) {
     const total = Number(overlaps?.total) || 0;
@@ -87,7 +87,7 @@ function OverlapNote({ overlaps, today, title = 'В эти даты уже от�
 
 // Последний шаг заявки одной строкой: кто и что сделал. Подача не нужна —
 // она и так видна по заявке; предложение дат — своей строкой выше.
-function LastStep({ item }) {
+function LastStep({ item, today }) {
     if (item.status === 'proposal') return null;
     const events = Array.isArray(item.events) ? item.events : [];
     const last = [...events].reverse().find((event) => event.action !== 'created');
@@ -96,7 +96,7 @@ function LastStep({ item }) {
         <div className="mt-1 text-[11.5px] text-slate-400">
             {LEAVE_EVENT_LABELS[last.action] || last.action}
             {last.actor?.name ? ` · ${last.actor.name}` : ''}
-            {last.at ? ` · ${fmtDateTime(last.at)}` : ''}
+            {last.at ? ` · ${formatLeaveDateTime(last.at, today)}` : ''}
             {last.comment && last.action !== 'edited' ? <ShiftRequestComment text={last.comment} className="mt-1" /> : null}
         </div>
     );
@@ -252,7 +252,7 @@ function ReviewItem({ api, item, today, onDecided, onError }) {
                     {item.status === 'approved' && item.excludeFromTenure && (
                         <div className="mt-1 text-[12px] text-slate-500">Не учитывается в стаже</div>
                     )}
-                    <LastStep item={item} />
+                    <LastStep item={item} today={today} />
                 </div>
             </div>
 
@@ -321,8 +321,11 @@ export default function LeaveReviewPanel({
     onOpenSettings,
 }) {
     const [actionError, setActionError] = useState('');
+    // «Обновить» в журнале перечитывает журнал: у него свой запрос.
+    const [journalKey, setJournalKey] = useState(0);
     const { requests, loading, error, reload, canManageSettings } = review;
     const today = review.today;
+    const journal = statusFilter === 'journal';
 
     // Очередь делится на «ждут вас» и остальное: своё — первым, без поиска глазами.
     const groups = useMemo(() => {
@@ -330,39 +333,50 @@ export default function LeaveReviewPanel({
         const others = requests.filter((item) => !item.awaitsMe);
         return [
             { key: 'mine', label: 'Ждут вашего решения', items: mine },
-            { key: 'others', label: statusFilter === 'pending' ? 'На других шагах' : 'Остальные', items: others },
+            { key: 'others', label: 'На других шагах', items: others },
         ].filter((group) => group.items.length > 0);
-    }, [requests, statusFilter]);
+    }, [requests]);
 
     return (
         <div className="space-y-3">
             <div className="flex items-center justify-between gap-2">
                 <IosSegmented
-                    value={statusFilter}
+                    value={journal ? 'journal' : 'pending'}
                     onChange={onStatusFilter}
-                    ariaLabel="Какие заявки показывать"
+                    ariaLabel="Очередь или журнал"
                     options={[
                         { value: 'pending', label: 'Ожидают' },
-                        { value: 'all', label: 'Все' },
+                        { value: 'journal', label: 'Журнал' },
                     ]}
                 />
                 <div className="flex items-center gap-1.5">
-                    <InfoHint side="right" text={queueHint(review.kinds)} />
+                    {!journal && <InfoHint side="right" text={queueHint(review.kinds)} />}
+                    {/* На телефоне — одни значки: с подписями кнопки уходили второй строкой. */}
                     {canManageSettings && (
-                        <button type="button" className={`${iosBtnGhost} shrink-0`} onClick={onOpenSettings} title="Какие отделы принимают заявки">
+                        <button type="button" className={`${iosBtnGhost} shrink-0`} onClick={onOpenSettings}
+                                aria-label="Настройки" title="Как отдел принимает заявки">
                             <Settings2 size={13} className="text-slate-400" aria-hidden="true" />
-                            Настройки
+                            <span className="hidden sm:inline">Настройки</span>
                         </button>
                     )}
-                    <button type="button" className={`${iosBtnGhost} shrink-0`} disabled={loading} onClick={() => reload({ silent: false })}>
-                        {loading
+                    <button
+                        type="button"
+                        className={`${iosBtnGhost} shrink-0`}
+                        disabled={!journal && loading}
+                        onClick={() => (journal ? setJournalKey((key) => key + 1) : reload({ silent: false }))}
+                        aria-label="Обновить"
+                    >
+                        {!journal && loading
                             ? <Loader2 size={12} className="animate-spin text-slate-400" aria-hidden="true" />
                             : <RotateCw size={12} className="text-slate-400" aria-hidden="true" />}
-                        Обновить
+                        <span className="hidden sm:inline">Обновить</span>
                     </button>
                 </div>
             </div>
 
+            {journal ? (
+                <LeaveJournal api={api} kinds={review.kinds} today={today} reloadKey={journalKey} />
+            ) : (<>
             {(actionError || error) && (
                 <div className="rounded-xl bg-rose-50 px-3.5 py-2.5 text-[12.5px] text-rose-700 ring-1 ring-rose-200/70">
                     {actionError || error}
@@ -379,13 +393,9 @@ export default function LeaveReviewPanel({
                     <div className="mx-auto mb-2 grid h-11 w-11 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                         <Inbox size={18} aria-hidden="true" />
                     </div>
-                    <div className="text-[14px] font-semibold text-slate-700">
-                        {statusFilter === 'pending' ? 'Всё разобрано' : 'Заявок нет'}
-                    </div>
+                    <div className="text-[14px] font-semibold text-slate-700">Всё разобрано</div>
                     <div className="mt-0.5 text-[12.5px] text-slate-500">
-                        {statusFilter === 'pending'
-                            ? `Новые заявки на ${leaveKindsText(review.kinds)} появятся здесь и в колоколе.`
-                            : `Операторы ещё не подавали заявок на ${leaveKindsText(review.kinds)}.`}
+                        Новые заявки на {leaveKindsText(review.kinds)} появятся здесь и в колоколе.
                     </div>
                 </div>
             ) : (
@@ -417,6 +427,7 @@ export default function LeaveReviewPanel({
                     ))}
                 </div>
             )}
+            </>)}
         </div>
     );
 }

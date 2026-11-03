@@ -192,6 +192,12 @@ def enabled_department_ids(cursor):
     return {int(row[0]) for row in cursor.fetchall()}
 
 
+def configured_department_ids(cursor):
+    """Отделы, у которых настройка уже заведена — включённые и выключенные."""
+    cursor.execute("SELECT department_id FROM leave_request_settings")
+    return {int(row[0]) for row in cursor.fetchall()}
+
+
 def enabled_kinds(cursor, department_ids=None):
     """Виды, которые принимает хоть один включённый отдел из списка (None — любой):
     по ним очередь руководителя называет себя («Отпуск, Б/С и больничный»)."""
@@ -205,9 +211,9 @@ def enabled_kinds(cursor, department_ids=None):
     return tuple(kind for kind, on in zip(rules.KINDS, row) if on)
 
 
-def list_department_settings(cursor):
-    """Все отделы — и с настройкой, и без: выключенный отдел тоже надо видеть,
-    чтобы включить."""
+def list_department_settings(cursor, department_ids=None):
+    """Отделы — и с настройкой, и без: выключенный отдел тоже надо видеть,
+    чтобы включить. department_ids=None — все (админ), иначе только эти (глава)."""
     cursor.execute(
         """
         SELECT d.id, d.name, d.code,
@@ -222,8 +228,10 @@ def list_department_settings(cursor):
           LEFT JOIN leave_request_settings s ON s.department_id = d.id
           LEFT JOIN users hd ON hd.id = d.head_user_id
          WHERE COALESCE(d.is_active, TRUE)
+           AND (%(all)s OR d.id = ANY(%(ids)s))
          ORDER BY COALESCE(s.enabled, FALSE) DESC, d.name
-        """
+        """,
+        {'all': department_ids is None, 'ids': sorted({int(d) for d in department_ids or ()})},
     )
     return [{
         'id': int(row[0]), 'name': row[1], 'code': row[2],
@@ -274,6 +282,20 @@ def fetch_requests(cursor, where_sql, params, order_sql='r.created_at DESC, r.id
         query_params,
     )
     return [row_to_request(row) for row in cursor.fetchall()]
+
+
+def journal_requests(cursor, *, operator_ids, start, end, kind=None, statuses=None, today=None, limit=200):
+    """Журнал: заявки этих операторов, чей период задевает [start, end], — по дате начала."""
+    return fetch_requests(
+        cursor,
+        'r.operator_id = ANY(%(ids)s) AND r.start_date <= %(end)s AND r.end_date >= %(start)s'
+        ' AND (%(kind)s::text IS NULL OR r.kind = %(kind)s::text)'
+        ' AND (%(any_status)s OR r.status = ANY(%(statuses)s))',
+        {'ids': sorted({int(i) for i in operator_ids or ()}), 'start': start, 'end': end, 'kind': kind,
+         'any_status': not statuses, 'statuses': list(statuses or ()), 'today': today or date.today()},
+        order_sql='r.start_date, op.name, r.id',
+        limit=limit,
+    )
 
 
 def fetch_request(cursor, request_id, today=None):

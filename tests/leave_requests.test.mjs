@@ -10,20 +10,26 @@ import {
     addDaysIso,
     daysText,
     emptyLeaveDraft,
+    formatLeaveDateTime,
     formatLeavePeriod,
     leaveBellTargetId,
     leaveDraftProblem,
     leaveEarliestStart,
+    leaveJournalFileName,
+    leaveJournalKinds,
+    leaveJournalQuery,
     leaveKindHints,
     leaveKindsShortList,
     leaveKindsShortTitle,
     leaveKindsText,
     leaveKindsTitle,
     leaveModalTitle,
+    leaveMonthLabel,
     leaveOptionHint,
     leaveOptionLabel,
     leavePeriodDays,
     leaveSummary,
+    shiftLeaveMonth,
 } from '../src/components/leave/leaveRequests.js';
 import { tenureStartDate } from '../src/components/profile/profileFormat.js';
 
@@ -168,4 +174,36 @@ test('на телефоне вкладка очереди — короткой �
     const tab = app.slice(app.indexOf("value: 'leave',"), app.indexOf('count: leaveReview.pendingCount'));
     assert.match(tab, /className="sm:hidden">\{leaveKindsShortTitle\(leaveReview\.kinds\)\}/);
     assert.match(tab, /className="hidden sm:inline">\{leaveKindsTitle\(leaveReview\.kinds\)\}/);
+});
+
+test('журнал: месяц стрелками, подпись месяца и отбор без пустых полей', () => {
+    assert.equal(leaveMonthLabel('2026-11'), 'Ноябрь 2026');
+    assert.equal(leaveMonthLabel('2027-01'), 'Январь 2027');
+    assert.equal(leaveMonthLabel(''), '');
+    assert.equal(shiftLeaveMonth('2026-12', 1), '2027-01');
+    assert.equal(shiftLeaveMonth('2026-01', -1), '2025-12');
+    assert.equal(shiftLeaveMonth('2026-11', 0), '2026-11');
+    assert.deepEqual(leaveJournalQuery({ month: '2026-11', kind: '', status: '' }), { month: '2026-11' });
+    assert.deepEqual(leaveJournalQuery({ month: '2026-11', kind: 'bs', status: 'approved' }),
+        { month: '2026-11', kind: 'bs', status: 'approved' });
+    assert.equal(leaveJournalFileName('2026-11'), 'Журнал заявок 2026-11.xlsx');
+});
+
+test('журнал: виды в отборе — те, что принимает отдел; время шага с годом, только если он не текущий', () => {
+    assert.deepEqual(leaveJournalKinds(['annual_leave', 'bs']).map((o) => o.label), ['Все виды', 'Ежегодный отпуск', 'Б/С']);
+    assert.deepEqual(leaveJournalKinds([]).map((o) => o.value), ['', 'annual_leave', 'bs', 'sick_leave']);
+    assert.equal(formatLeaveDateTime('2026-11-02T14:05:33', TODAY), '02.11 14:05');
+    assert.equal(formatLeaveDateTime('2025-12-30T09:00:00', TODAY), '30.12.2025 09:00');
+    assert.equal(formatLeaveDateTime(null, TODAY), '');
+});
+
+test('очередь: второй сегмент — журнал, файл скачивается в том же окне', () => {
+    const panel = read('../src/components/leave/LeaveReviewPanel.jsx');
+    const journal = read('../src/components/leave/LeaveJournal.jsx');
+    assert.match(panel, /\{ value: 'journal', label: 'Журнал' \}/);
+    assert.doesNotMatch(panel, /value: 'all'/);
+    assert.match(journal, /saveLeaveFile\(await api\.journalFile/);
+    assert.doesNotMatch(journal, /window\.open/);
+    // Пояснений на экране журнала нет: подписи — только у отборов и пустого списка.
+    assert.doesNotMatch(journal, /<InfoHint|<p /);
 });

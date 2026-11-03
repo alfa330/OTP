@@ -18755,11 +18755,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                leave_requests/ на сервере. */
             const leaveApi = useMemo(() => createLeaveApi(API_BASE_URL, withAccessTokenHeader), []);
             const myLeave = useMyLeaveRequests({ enabled: isOperatorSelfSchedules && !!user, api: leaveApi });
+            // Сегмент вкладки: очередь ('pending') или журнал ('journal'). У журнала
+            // свой запрос по месяцу, очередь при его открытии не перечитывается.
             const [leaveReviewFilter, setLeaveReviewFilter] = useState('pending');
             const leaveReview = useLeaveReview({
                 enabled: !isOperatorSelfSchedules && !plannerReadOnly && !!user,
                 api: leaveApi,
-                statusFilter: leaveReviewFilter,
+                statusFilter: 'pending',
             });
             // Не null — окно «Новый запрос» показывает поля отпуска вместо смены.
             const [leaveDraft, setLeaveDraft] = useState(null);
@@ -32259,8 +32261,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     вкладкой того же окна: «Запросы» остаются одной кнопкой с общим
                     счётчиком. Вкладки нет у тех, чей отдел заявки не принимает;
                     подпись — по видам, которые принимают отделы смотрящего.
-                    Настройки отделов — вторым экраном окна (шеврон назад), только
-                    у админа. */}
+                    Настройки отделов — вторым экраном окна (шеврон назад): у админа
+                    все отделы, у главы — свои. */}
                 <IosModal
                     open={showReviewModal}
                     onClose={() => { setShowReviewModal(false); setLeaveSettingsOpen(false); }}
@@ -32269,12 +32271,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         ? 'Настройки заявок'
                         : (leaveReview.visible ? 'Запросы' : 'Запросы по сменам')}
                     subtitle={leaveSettingsOpen
-                        ? `Какие отделы принимают заявки на ${leaveKindsText()}`
+                        ? `Приём заявок на ${leaveKindsText()}`
                         : (leaveReview.visible
                             ? `Смены, ${leaveKindsText(leaveReview.kinds)}`
                             : 'Заявки операторов на изменение своих смен')}
                     maxWidth="max-w-2xl"
-                    sizeKey={leaveSettingsOpen ? 'leave-settings' : (requestsTab === 'leave' && leaveReview.visible ? 'leave' : 'shifts')}
+                    sizeKey={leaveSettingsOpen ? 'leave-settings' : (requestsTab === 'leave' && leaveReview.visible
+                        ? (leaveReviewFilter === 'journal' ? 'leave-journal' : 'leave')
+                        : 'shifts')}
                     footer={(
                         <div className="flex w-full items-center justify-between gap-2">
                             <span className="text-[12px] tabular-nums text-slate-500">
