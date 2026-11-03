@@ -42,16 +42,23 @@ import { currentTocIndex, pageAtFraction } from './libraryMeta.js';
 const FONT = 'ui-serif, "New York", "PT Serif", Georgia, "Times New Roman", serif';
 
 /* Бумага и краски — днём и ночью. Бумага тёплая: белый экран утомляет глаза
-   сильнее книжной страницы, и текст на нём выглядит документом, а не книгой. */
+   сильнее книжной страницы, и текст на нём выглядит документом, а не книгой.
+   Ночью (задача #405) — чёрные страницы и белый текст; белый чуть приглушён,
+   чтобы буквы не «светились» на чёрном при долгом чтении.
+   spine — корешок: у самого сгиба, через 18 точек, прозрачный край, край
+   одиночной страницы. Днём это тень; на чёрной бумаге тени не видно, и
+   корешок там — едва заметный отсвет, иначе разворот сливается в одно поле. */
 export const PALETTES = {
     day: {
         paper: '#fcfaf5', back: '#f2eee5', desk: '#eceae5', ink: '#24211d', soft: '#9a9285',
         link: '#2f5d9b', rule: '#cfc6b6', selection: 'rgba(47, 93, 155, 0.20)', edge: '#e4ddcf', gloss: 0.55,
+        spine: ['rgba(0,0,0,0.085)', 'rgba(0,0,0,0.02)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.045)'],
         night: false,
     },
     night: {
-        paper: '#1d1c1a', back: '#282622', desk: '#0e0e0d', ink: '#ddd8cf', soft: '#7f786d',
-        link: '#8fb4e6', rule: '#46423b', selection: 'rgba(143, 180, 230, 0.28)', edge: '#2c2a26', gloss: 0.10,
+        paper: '#000000', back: '#161616', desk: '#1c1c1e', ink: '#f0f0f0', soft: '#8e8e93',
+        link: '#8fb4e6', rule: '#3a3a3c', selection: 'rgba(143, 180, 230, 0.32)', edge: '#2c2c2e', gloss: 0.10,
+        spine: ['rgba(255,255,255,0.045)', 'rgba(255,255,255,0.012)', 'rgba(255,255,255,0)', 'rgba(255,255,255,0.025)'],
         night: true,
     },
 };
@@ -154,11 +161,25 @@ lr-flow > .lr-body {
 .lr-body sup, .lr-body sub { line-height: 0; }
 .lr-body ::selection { background: var(--selection); }
 /* Ночью цвета книги не спорят с бумагой: чёрный текст из Word/Calibre на
-   тёмной бумаге был бы невидим. */
+   тёмной бумаге был бы невидим. То же у буквицы и значков, которые книга
+   рисует псевдоэлементами, и у текста с заливкой; светлая градиентная
+   подложка книги под белым текстом съела бы его — её тоже нет. */
 lr-flow[data-night] .lr-body :where(*:not(a, [data-lr-href], [data-lr-ext], svg, svg *)) {
   color: inherit !important; background-color: transparent !important; border-color: var(--rule) !important;
+  background-image: none !important; -webkit-text-fill-color: currentColor !important;
+  text-decoration-color: currentColor !important;
+}
+lr-flow[data-night] .lr-body :where(*:not(a, [data-lr-href], [data-lr-ext], svg, svg *))::first-letter,
+lr-flow[data-night] .lr-body :where(*:not(a, [data-lr-href], [data-lr-ext], svg, svg *))::before,
+lr-flow[data-night] .lr-body :where(*:not(a, [data-lr-href], [data-lr-ext], svg, svg *))::after,
+lr-flow[data-night] .lr-body :where(li)::marker {
+  color: inherit !important; -webkit-text-fill-color: currentColor !important;
 }
 lr-flow[data-night] .lr-body :where(a, [data-lr-href], [data-lr-ext]) { color: var(--link) !important; }
+/* Схема или формула картинкой с прозрачным фоном нарисована чёрным по
+   бумаге — на чёрной странице её не видно. Ночью под картинкой светлая
+   подложка: у обычной (непрозрачной) картинки её не видно вовсе. */
+lr-flow[data-night] .lr-body img, lr-flow[data-night] .lr-body svg { background-color: #e6e6e6 !important; }
 `;
 
 const IMAGE_WAIT_MS = 2500;
@@ -293,11 +314,11 @@ class PageView {
     /* Бумага с тенью корешка: у левой страницы разворота — справа, у правой —
        слева, у одиночной страницы на столе — едва заметно слева. */
     paintPaper() {
-        const { paper } = this.palette;
+        const { paper, spine: [fold, near, clear, single] } = this.palette;
         const gutter = {
-            left: `linear-gradient(270deg, rgba(0,0,0,0.085), rgba(0,0,0,0.02) 18px, rgba(0,0,0,0) 44px), ${paper}`,
-            right: `linear-gradient(90deg, rgba(0,0,0,0.085), rgba(0,0,0,0.02) 18px, rgba(0,0,0,0) 44px), ${paper}`,
-            single: this.narrow ? paper : `linear-gradient(90deg, rgba(0,0,0,0.045), rgba(0,0,0,0) 30px), ${paper}`,
+            left: `linear-gradient(270deg, ${fold}, ${near} 18px, ${clear} 44px), ${paper}`,
+            right: `linear-gradient(90deg, ${fold}, ${near} 18px, ${clear} 44px), ${paper}`,
+            single: this.narrow ? paper : `linear-gradient(90deg, ${single}, ${clear} 30px), ${paper}`,
         };
         this.el.style.background = gutter[this.side] || paper;
     }
@@ -483,6 +504,17 @@ export class ReaderEngine {
     }
 
     get spread() { return this.metrics?.mode === 'spread'; }
+
+    /* Сменить тему на ходу (кнопка в шапке ридера). Меняются только краски:
+       вёрстка, номера страниц и место читателя те же, поэтому без перекладки
+       и пересчёта книги. Идущий ход берёт новые краски со следующего кадра. */
+    setPalette(palette) {
+        if (!palette || palette === this.palette) return;
+        this.palette = palette;
+        [...this.views, this.measurer].forEach((view) => view.applyPalette(palette));
+        this.flapPaper.style.background = palette.back;
+        this.paintBook();
+    }
 
     /* ---------- главы и порядок ---------- */
 
@@ -957,14 +989,25 @@ export class ReaderEngine {
         css(flap.el, { zIndex: '5', visibility: 'visible' });
 
         // Свет на обороте: тень у самого сгиба, блик по изгибу, тень к краю.
+        // Ночью тени на чёрной бумаге не видно, и лист сливался бы со
+        // страницами под ним: там его отделяет свет — кант у сгиба и у края,
+        // лёгкая вуаль по всему обороту.
         css(this.flapGloss, { left, transform: reflect, visibility: 'visible' });
         setClip(this.flapGloss, removed);
         const sheen = turn.flapIsPage ? 0.12 : this.palette.gloss;
-        this.flapGloss.style.backgroundImage = `linear-gradient(${angle}deg,`
-            + ` rgba(0,0,0,${((0.12 + 0.10 * lift) * k).toFixed(3)}) ${start}px,`
-            + ` rgba(255,255,255,0) ${start + Math.min(24, depth * 0.1)}px,`
-            + ` rgba(255,255,255,${(sheen * k).toFixed(3)}) ${start + depth * 0.42}px,`
-            + ` rgba(0,0,0,${(0.06 * k).toFixed(3)}) ${start + depth}px)`;
+        const crease = start + Math.min(24, depth * 0.1);
+        this.flapGloss.style.backgroundImage = this.palette.night
+            ? `linear-gradient(${angle}deg,`
+                + ` rgba(255,255,255,${(0.22 * k).toFixed(3)}) ${start}px,`
+                + ` rgba(255,255,255,${(0.07 * k).toFixed(3)}) ${crease}px,`
+                + ` rgba(255,255,255,${((0.07 + sheen) * k).toFixed(3)}) ${start + depth * 0.42}px,`
+                + ` rgba(255,255,255,${(0.07 * k).toFixed(3)}) ${Math.max(crease, start + depth - 5)}px,`
+                + ` rgba(255,255,255,${(0.2 * k).toFixed(3)}) ${start + depth}px)`
+            : `linear-gradient(${angle}deg,`
+                + ` rgba(0,0,0,${((0.12 + 0.10 * lift) * k).toFixed(3)}) ${start}px,`
+                + ` rgba(255,255,255,0) ${crease}px,`
+                + ` rgba(255,255,255,${(sheen * k).toFixed(3)}) ${start + depth * 0.42}px,`
+                + ` rgba(0,0,0,${(0.06 * k).toFixed(3)}) ${start + depth}px)`;
 
         // Тень поднятого листа на открывшейся странице — у самого сгиба.
         const reach = Math.min(W * 0.3, 20 + depth * 0.24);

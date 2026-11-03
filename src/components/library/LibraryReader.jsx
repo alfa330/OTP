@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import axios from 'axios';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
-import { ChevronLeft, ChevronRight, List, Loader2, Undo2, X } from 'lucide-react';
-import { APPLE_FONT, iosBtnSecondary } from '../ui/ios';
+import { ChevronLeft, ChevronRight, List, Loader2, Moon, Sun, Undo2, X } from 'lucide-react';
+import { APPLE_FONT } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
+import { usesViewTransitions } from '../employees/pageTransition';
 import { openEpub } from './epubLoader';
+import { initialReaderNight, writeReaderNight } from './readerTheme';
 import {
     CLOSE_OVERLAP, OPENING_EASING, OPENING_MS, coverBox, flightFrames, hingeFrames, reverseFrames,
 } from './bookOpening';
@@ -48,10 +51,32 @@ const WHEEL_STEP = 50;
    обязано быть видно, а не открываться под книгой. */
 const READER_Z = 110;
 
-/* Тёмная тема портала живёт атрибутом на <html> (src/utils/darkTheme.js):
-   тогда и книга ночная — тёмная бумага, светлый текст. */
-const isNightTheme = () => typeof document !== 'undefined'
-    && document.documentElement.getAttribute('data-otp-theme') === 'dark';
+/* Рамка ридера — шапка, подвал, кнопки, оглавление — в теме КНИГИ, а не
+   портала: ночная книга бывает и на светлом портале, и наоборот (тему
+   переключает читатель, readerTheme.js). Поэтому цвета заданы прямо, а не
+   классами text-slate-* и не общими кнопками iosBtn*: тёмный слой портала
+   перекрашивает такие классы с !important (src/theme-dark.css), и в дневной
+   книге на тёмном портале оглавление стало бы светлым текстом на белом.
+   Остальные классы ридера — в формах, которых сборщик слоя не берёт
+   (scripts/build_dark_theme.py: прозрачность в скобках, без названий цветов). */
+export const CHROME = {
+    day: {
+        text: '#8b857b', done: '#059669', pill: 'rgba(15, 23, 42, 0.80)', hover: 'hover:bg-black/[0.05]',
+        panel: 'rgba(255, 255, 255, 0.95)', title: '#0f172a', item: '#1e293b', secondary: '#64748b',
+        tertiary: '#94a3b8', current: '#2563eb', currentNumber: '#3b82f6', handle: '#cbd5e1',
+        line: 'border-black/[0.06]', row: 'border-black/[0.05]',
+        rowHover: 'hover:bg-black/[0.03] active:bg-black/[0.06]', close: 'bg-black/[0.05] hover:bg-black/[0.09]',
+        button: { background: '#f1f5f9', color: '#475569' }, buttonHover: 'hover:brightness-95',
+    },
+    night: {
+        text: '#8e8e93', done: '#30d158', pill: 'rgba(72, 72, 74, 0.92)', hover: 'hover:bg-white/[0.08]',
+        panel: 'rgba(28, 28, 30, 0.95)', title: '#f2f2f7', item: '#e5e5ea', secondary: '#98989f',
+        tertiary: '#7c7c82', current: '#0a84ff', currentNumber: '#409cff', handle: '#48484a',
+        line: 'border-white/[0.08]', row: 'border-white/[0.06]',
+        rowHover: 'hover:bg-white/[0.05] active:bg-white/[0.09]', close: 'bg-white/[0.10] hover:bg-white/[0.16]',
+        button: { background: '#2c2c2e', color: '#e5e5ea' }, buttonHover: 'hover:brightness-125',
+    },
+};
 
 /* Окно поверх ридера (новость дня и подобные): пока оно открыто, клавиши
    принадлежат ему — Escape закрыл бы книгу и то окно разом. */
@@ -117,8 +142,15 @@ const chapterLeft = (left) => {
 const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origin = null }) => {
     const isNarrow = useIsMobileShell();
     const reduceMotion = useReducedMotion();
-    const [night] = useState(isNightTheme);
+    const [night, setNight] = useState(initialReaderNight);
+    const nightRef = useRef(night);
+    nightRef.current = night;
     const palette = night ? PALETTES.night : PALETTES.day;
+    // Движок создаётся позже, когда книга распакуется: тема, выбранная за
+    // время загрузки, должна дойти и до него.
+    const paletteRef = useRef(palette);
+    paletteRef.current = palette;
+    const chrome = night ? CHROME.night : CHROME.day;
 
     const rootRef = useRef(null);
     const stageRef = useRef(null);
@@ -260,6 +292,55 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     }, [queueSave]);
     const handlePositionRef = useRef(handlePosition);
     handlePositionRef.current = handlePosition;
+
+    /* ---------- тема страниц (#405) ---------- */
+
+    // До отрисовки: в кадре, где сменилась рамка, и страницы уже другого цвета.
+    useLayoutEffect(() => {
+        engineRef.current?.setPalette(palette);
+    }, [palette]);
+
+    // Полосу состояния установленного приложения (Android, компьютер) система
+    // красит из <meta name="theme-color">: пока книга открыта, она цвета ридера,
+    // иначе над чёрными страницами шла бы светлая полоса портала.
+    useEffect(() => {
+        const meta = document.querySelector('meta[name="theme-color"]');
+        if (!meta) return undefined;
+        const previous = meta.getAttribute('content');
+        meta.setAttribute('content', isNarrow ? palette.paper : palette.desk);
+        return () => {
+            if (previous === null) meta.removeAttribute('content');
+            else meta.setAttribute('content', previous);
+        };
+    }, [isNarrow, palette]);
+
+    /* Переключить тему. Весь экран сменяется одним мягким наплывом (View
+       Transitions: браузер снимает «было» и проявляет «стало»); где их нет или
+       просили меньше движения — сразу. Вёрстка книги при этом не меняется:
+       номера страниц и место читателя те же. */
+    const toggleNight = useCallback(() => {
+        const next = !nightRef.current;
+        // Без наплыва второе быстрое нажатие приходит до перерисовки — оно
+        // должно переключить обратно, а не повторить первое.
+        nightRef.current = next;
+        writeReaderNight(next);
+        const apply = () => setNight(next);
+        // Наплыв — только над неподвижной книгой: снимок «было» застыл бы
+        // поверх идущего хода листа или раскрытия обложки, и на четверть
+        // секунды на экране было бы два изображения. Ход с клавиатуры сперва
+        // готовит страницы (preparing) — он уже начат.
+        const engine = engineRef.current;
+        const still = !engine?.turn && !engine?.preparing && ['open', 'closed'].includes(stageNowRef.current);
+        if (still && usesViewTransitions()) {
+            try {
+                document.startViewTransition(() => { flushSync(apply); }).ready?.catch?.(() => {});
+            } catch {
+                apply();
+            }
+        } else {
+            apply();
+        }
+    }, []);
 
     /* ---------- размер сцены ---------- */
 
@@ -517,7 +598,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                 onPosition: (place) => { if (!cancelled) handlePositionRef.current(place); },
                 onPagination: (state) => { if (!cancelled) setPagination({ ...state }); },
                 reducedMotion: Boolean(reduceMotion),
-                palette,
+                palette: paletteRef.current,
             });
             engineRef.current = engine;
             if (flight) engine.hold();
@@ -975,8 +1056,9 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
     const pillBottom = !metrics ? 12
         : metrics.mode === 'spread' ? metrics.top + 10 : metrics.top + metrics.pad.bottom + 8;
 
-    const deskChevron = 'absolute top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full opacity-0 transition hover:bg-black/[0.05] focus-visible:opacity-100 group-hover/stage:opacity-100';
-    const chromeText = night ? '#a39d93' : '#8b857b';
+    const deskChevron = `absolute top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full opacity-0 transition ${chrome.hover} focus-visible:opacity-100 group-hover/stage:opacity-100`;
+    const headerButton = `flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition ${chrome.hover} active:scale-95`;
+    const chromeText = chrome.text;
 
     return (
         <>
@@ -1000,28 +1082,43 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     className="relative flex shrink-0 items-center gap-1 px-2 sm:px-3"
                     style={{ paddingTop: 'env(safe-area-inset-top)', height: 'calc(50px + env(safe-area-inset-top))' }}
                 >
-                    <button
-                        type="button"
-                        onClick={close}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-black/[0.05] active:scale-95"
-                        style={{ color: chromeText }}
-                        aria-label="Закрыть книгу"
-                    >
-                        <X size={19} strokeWidth={2.1} />
-                    </button>
+                    {/* Кнопки по краям — группами одной ширины: название книги
+                        остаётся ровно посередине. */}
+                    <div className="flex w-[76px] shrink-0 items-center">
+                        <button
+                            type="button"
+                            onClick={close}
+                            className={headerButton}
+                            style={{ color: chromeText }}
+                            aria-label="Закрыть книгу"
+                        >
+                            <X size={19} strokeWidth={2.1} />
+                        </button>
+                    </div>
                     <div className="min-w-0 flex-1 truncate px-1 text-center text-[13px] font-medium tracking-[-0.005em]" style={{ color: chromeText }}>
                         {book?.title || origin?.title || ' '}
                     </div>
-                    <button
-                        type="button"
-                        onClick={() => setTocOpen(true)}
-                        disabled={!(ready || resting) || !toc.length}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition hover:bg-black/[0.05] active:scale-95 disabled:opacity-35"
-                        style={{ color: chromeText }}
-                        aria-label="Оглавление"
-                    >
-                        <List size={19} strokeWidth={2.1} />
-                    </button>
+                    <div className="flex w-[76px] shrink-0 items-center justify-end gap-1">
+                        <button
+                            type="button"
+                            onClick={toggleNight}
+                            className={headerButton}
+                            style={{ color: chromeText }}
+                            aria-label={night ? 'Включить светлую тему' : 'Включить тёмную тему'}
+                        >
+                            {night ? <Sun size={19} strokeWidth={2.1} /> : <Moon size={18} strokeWidth={2.1} />}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setTocOpen(true)}
+                            disabled={!(ready || resting) || !toc.length}
+                            className={`${headerButton} disabled:opacity-35`}
+                            style={{ color: chromeText }}
+                            aria-label="Оглавление"
+                        >
+                            <List size={19} strokeWidth={2.1} />
+                        </button>
+                    </div>
                 </header>
 
                 <div
@@ -1093,7 +1190,8 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                                     key="return"
                                     type="button"
                                     onClick={goBack}
-                                    className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-slate-900/80 px-3.5 py-2 text-[12.5px] font-medium text-white shadow-lg backdrop-blur-md active:scale-95"
+                                    className="pointer-events-auto flex items-center gap-1.5 rounded-full px-3.5 py-2 text-[12.5px] font-medium shadow-lg backdrop-blur-md active:scale-95"
+                                    style={{ background: chrome.pill, color: '#ffffff' }}
                                     initial={{ opacity: 0, y: 10, scale: 0.96 }}
                                     animate={{ opacity: 1, y: 0, scale: 1 }}
                                     exit={{ opacity: 0, y: 10, scale: 0.96 }}
@@ -1114,7 +1212,14 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                     {phase === 'error' && (
                         <div className="absolute inset-0 z-[5] flex flex-col items-center justify-center gap-4 px-6 text-center">
                             <p className="max-w-sm text-[14px]" style={{ color: chromeText }}>{error}</p>
-                            <button type="button" className={iosBtnSecondary} onClick={close}>Закрыть</button>
+                            <button
+                                type="button"
+                                className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-[13.5px] font-semibold transition-all active:scale-[0.98] ${chrome.buttonHover}`}
+                                style={chrome.button}
+                                onClick={close}
+                            >
+                                Закрыть
+                            </button>
                         </div>
                     )}
                 </div>
@@ -1143,7 +1248,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                                     {leftText && !showDone && <span>{leftText}</span>}
                                     {leftText && !showDone && <span className="opacity-40">·</span>}
                                     {showDone
-                                        ? <span className="font-medium text-emerald-600">Закончено</span>
+                                        ? <span className="font-medium" style={{ color: chrome.done }}>Закончено</span>
                                         : <span>{formatPercent(percent)}</span>}
                                 </>
                             )}
@@ -1236,7 +1341,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                                     style={{ background: 'linear-gradient(90deg, rgba(0,0,0,0.34), rgba(0,0,0,0.10) 18%, rgba(255,255,255,0.10) 30%, rgba(0,0,0,0.05) 48%, rgba(0,0,0,0) 100%)' }}
                                 />
                                 {/* Свет: обложка темнеет, отворачиваясь от него. */}
-                                <div ref={lightRef} className="absolute inset-0 bg-black" style={{ opacity: 0 }} />
+                                <div ref={lightRef} className="absolute inset-0" style={{ opacity: 0, background: '#000000' }} />
                             </div>
                             {/* Срез страниц у закрытой книги на столе — там же, где его
                                 потом нарисует раскрытая книга. */}
@@ -1271,7 +1376,7 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
                         <LibraryToc
                             key="toc"
                             narrow={isNarrow}
-                            night={night}
+                            chrome={chrome}
                             book={book}
                             toc={toc}
                             pages={pagination?.toc || []}
@@ -1292,8 +1397,8 @@ const LibraryReader = ({ bookId, apiBaseUrl, headers, onClose, onProgress, origi
    с номерами страниц справа. Текущая глава — единственный цвет в списке.
    Номера — из вёрстки под этот экран; пока она считается, номера появляются
    по мере готовности. На телефоне — шторка снизу (тянется вниз, чтобы
-   закрыть), на компьютере — панель слева. */
-const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentIndex, onSelect, onClose }) => {
+   закрыть), на компьютере — панель слева. Цвета — темы книги (CHROME). */
+export const LibraryToc = ({ narrow, chrome, book, toc, pages, folio, total, currentIndex, onSelect, onClose }) => {
     const listRef = useRef(null);
 
     useEffect(() => {
@@ -1309,7 +1414,7 @@ const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentInde
         <div className="absolute inset-0 z-10" role="dialog" aria-label="Оглавление">
             <motion.button
                 type="button"
-                className="absolute inset-0 bg-black/25"
+                className="absolute inset-0 bg-black/[0.25]"
                 onClick={onClose}
                 aria-label="Закрыть оглавление"
                 initial={{ opacity: 0 }}
@@ -1321,7 +1426,7 @@ const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentInde
                 className={narrow
                     ? 'absolute inset-x-0 bottom-0 flex h-[88%] flex-col overflow-hidden rounded-t-[16px] shadow-[0_-10px_40px_rgba(0,0,0,0.18)] backdrop-blur-xl'
                     : 'absolute inset-y-0 left-0 flex w-[400px] max-w-[88vw] flex-col shadow-[0_0_50px_rgba(0,0,0,0.16)] backdrop-blur-xl'}
-                style={{ background: night ? 'rgba(28,28,30,0.95)' : 'rgba(255,255,255,0.95)' }}
+                style={{ background: chrome.panel }}
                 {...panelMotion}
                 transition={{ type: 'spring', stiffness: 380, damping: 38 }}
                 drag={narrow ? 'y' : false}
@@ -1330,22 +1435,23 @@ const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentInde
                 dragListener={narrow}
                 onDragEnd={(_event, info) => { if (info.offset.y > 110 || info.velocity.y > 600) onClose(); }}
             >
-                {narrow && <div className="mx-auto mt-2 h-[5px] w-9 shrink-0 rounded-full bg-slate-300" aria-hidden="true" />}
-                <div className={`flex items-center gap-3 border-b border-black/[0.06] px-4 pb-3 ${narrow ? 'pt-2' : 'pt-4'}`}>
+                {narrow && <div className="mx-auto mt-2 h-[5px] w-9 shrink-0 rounded-full" style={{ background: chrome.handle }} aria-hidden="true" />}
+                <div className={`flex items-center gap-3 border-b ${chrome.line} px-4 pb-3 ${narrow ? 'pt-2' : 'pt-4'}`}>
                     {book?.cover_url ? (
-                        <img src={book.cover_url} alt="" className="h-[62px] w-[42px] shrink-0 rounded-[4px] object-cover shadow-md ring-1 ring-black/5" />
+                        <img src={book.cover_url} alt="" className="h-[62px] w-[42px] shrink-0 rounded-[4px] object-cover shadow-md ring-1 ring-black/[0.05]" />
                     ) : null}
                     <div className="min-w-0 flex-1">
-                        <div className="truncate text-[15px] font-semibold text-slate-900">{book?.title}</div>
-                        {book?.author && <div className="truncate text-[12.5px] text-slate-500">{book.author}</div>}
+                        <div className="truncate text-[15px] font-semibold" style={{ color: chrome.title }}>{book?.title}</div>
+                        {book?.author && <div className="truncate text-[12.5px]" style={{ color: chrome.secondary }}>{book.author}</div>}
                         {folio && total ? (
-                            <div className="text-[12px] tabular-nums text-slate-400">Страница {folio} из {total}</div>
+                            <div className="text-[12px] tabular-nums" style={{ color: chrome.tertiary }}>Страница {folio} из {total}</div>
                         ) : null}
                     </div>
                     <button
                         type="button"
                         onClick={onClose}
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-black/[0.05] text-slate-500 transition hover:bg-black/[0.09] active:scale-95"
+                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition active:scale-95 ${chrome.close}`}
+                        style={{ color: chrome.secondary }}
                         aria-label="Закрыть оглавление"
                     >
                         <X size={16} strokeWidth={2.2} />
@@ -1365,7 +1471,7 @@ const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentInde
                         return (
                             <motion.li
                                 key={`${item.href}-${index}`}
-                                className="border-b border-black/[0.05] last:border-0"
+                                className={`border-b ${chrome.row} last:border-0`}
                                 initial={{ opacity: 0, x: narrow ? 0 : -8, y: narrow ? 6 : 0 }}
                                 animate={{ opacity: 1, x: 0, y: 0 }}
                                 transition={{ duration: 0.22, delay: Math.min(index, 14) * 0.018 }}
@@ -1374,13 +1480,19 @@ const LibraryToc = ({ narrow, night, book, toc, pages, folio, total, currentInde
                                     type="button"
                                     data-current={current ? 'true' : undefined}
                                     onClick={() => onSelect(item)}
-                                    className={`flex w-full items-baseline gap-3 rounded-lg py-3 pr-2 text-left transition hover:bg-black/[0.03] active:bg-black/[0.06] ${current ? 'text-blue-600' : 'text-slate-800'}`}
-                                    style={{ paddingLeft: `${10 + Math.min(item.depth || 0, 4) * 14}px` }}
+                                    className={`flex w-full items-baseline gap-3 rounded-lg py-3 pr-2 text-left transition ${chrome.rowHover}`}
+                                    style={{
+                                        paddingLeft: `${10 + Math.min(item.depth || 0, 4) * 14}px`,
+                                        color: current ? chrome.current : chrome.item,
+                                    }}
                                 >
                                     <span className={`min-w-0 flex-1 text-[14.5px] leading-snug ${item.depth ? '' : 'font-semibold'}`}>
                                         {item.title}
                                     </span>
-                                    <span className={`shrink-0 text-[13px] tabular-nums transition-opacity ${current ? 'text-blue-500' : 'text-slate-400'} ${number ? 'opacity-100' : 'opacity-0'}`}>
+                                    <span
+                                        className={`shrink-0 text-[13px] tabular-nums transition-opacity ${number ? 'opacity-100' : 'opacity-0'}`}
+                                        style={{ color: current ? chrome.currentNumber : chrome.tertiary }}
+                                    >
                                         {number || '0'}
                                     </span>
                                 </button>

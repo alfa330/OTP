@@ -27,6 +27,7 @@
 
 import ast
 import contextlib
+import importlib.util
 import inspect
 import io
 import re
@@ -1943,6 +1944,119 @@ class ReaderRulesTests(unittest.TestCase):
         self.assertIn('touch-none', self.reader)
         self.assertNotIn('<iframe', self.reader + self.engine)
 
+
+class ReaderThemeTests(unittest.TestCase):
+    """Тёмная тема при чтении (задача #405): читатель сам переключает чёрные
+    страницы с белым текстом и обратно. Поведение красок и рамки — в
+    tests/library_reader_theme.test.mjs; здесь — проводка ридера."""
+
+    @classmethod
+    def setUpClass(cls):
+        base = ROOT / 'src/components/library'
+        cls.reader = (base / 'LibraryReader.jsx').read_text(encoding='utf-8')
+        cls.engine = (base / 'readerEngine.js').read_text(encoding='utf-8')
+        cls.toggle = cls.reader[cls.reader.index('const toggleNight = useCallback('):]
+        cls.toggle = cls.toggle[:cls.toggle.index('\n    }, []);\n')]
+
+    def test_toggle_sits_in_the_reader_header(self):
+        header = self.reader[self.reader.index('<header'):self.reader.index('</header>')]
+        self.assertIn('onClick={toggleNight}', header)
+        self.assertIn("aria-label={night ? 'Включить светлую тему' : 'Включить тёмную тему'}", header)
+        # Днём луна (включить ночь), ночью солнце (включить день).
+        self.assertIn('{night ? <Sun size={19} strokeWidth={2.1} /> : <Moon size={18} strokeWidth={2.1} />}', header)
+        # Кнопки по краям — группами одной ширины: название книги посередине.
+        self.assertEqual(header.count('w-[76px] shrink-0'), 2)
+        # Выбор читателя переживает закрытие книги и перезагрузку.
+        self.assertIn('\n        writeReaderNight(next);\n', self.toggle)
+        self.assertIn('useState(initialReaderNight)', self.reader)
+        # Второе нажатие до перерисовки переключает обратно, а не повторяет первое.
+        self.assertIn('\n        nightRef.current = next;\n', self.toggle)
+
+    def test_fade_only_over_a_still_book(self):
+        """Наплыв снимает весь экран: посреди хода листа (и пока ход готовится)
+        или раскрытия обложки застывший кадр лёг бы поверх живого движения."""
+        self.assertIn("const still = !engine?.turn && !engine?.preparing && ['open', 'closed'].includes(stageNowRef.current);",
+                      self.toggle)
+        self.assertIn('if (still && usesViewTransitions()) {', self.toggle)
+        # Перекраска — синхронно внутри перехода, иначе снимок «стало» старый.
+        self.assertIn('document.startViewTransition(() => { flushSync(apply); })', self.toggle)
+        self.assertNotIn('focus(', self.toggle)
+
+    def test_switch_repaints_without_relayout(self):
+        """Смена темы — только краски: номера страниц и место читателя те же,
+        книга не перевёрстывается."""
+        body = self.engine[self.engine.index('    setPalette(palette) {'):]
+        body = body[:body.index('\n    }\n')]
+        for relayout in ('layout(', 'startPagination', 'openAt', 'applyMetrics', 'setSection'):
+            self.assertNotIn(relayout, body)
+        self.assertIn('engineRef.current?.setPalette(palette);', self.reader)
+        # Страница берёт из палитры краски и метку ночи — по ней гасятся цвета книги.
+        paint = self.engine[self.engine.index('    applyPalette(palette) {'):]
+        paint = paint[:paint.index('\n    }\n')]
+        self.assertIn("'--ink': palette.ink, '--link': palette.link, '--rule': palette.rule", paint)
+        self.assertIn("this.flow.toggleAttribute('data-night', Boolean(palette.night));", paint)
+        self.assertIn('this.paintPaper();', paint)
+
+    def test_chrome_follows_the_book_theme(self):
+        """Шапка, подвал и оглавление берут рамку по теме книги."""
+        self.assertIn('const chrome = night ? CHROME.night : CHROME.day;', self.reader)
+        usage = self.reader[self.reader.index('<LibraryToc'):]
+        usage = usage[:usage.index('/>')]
+        self.assertIn('chrome={chrome}', usage)
+
+    def test_theme_chosen_while_loading_reaches_the_engine(self):
+        """Движок создаётся, когда книга распакована: тема, выбранная за время
+        загрузки, берётся из ref, а не из замыкания эффекта."""
+        self.assertIn('palette: paletteRef.current,', self.reader)
+        self.assertNotIn('                palette,\n', self.reader)
+
+    def test_reader_chrome_ignores_portal_dark_layer(self):
+        """Тёмный слой портала перекрашивает с !important всё, что берёт его
+        сборщик: названия цветов Tailwind (bg-black/25, text-slate-900),
+        цвета в скобках, общие кнопки iosBtn*. В ридере таких классов нет —
+        иначе дневная книга на тёмном портале получила бы тёмные куски."""
+        spec = importlib.util.spec_from_file_location('build_dark_theme', ROOT / 'scripts/build_dark_theme.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        self.assertEqual(sorted({m.group(0) for m in builder.TOKEN_RE.finditer(self.reader)}), [])
+        self.assertEqual(builder.ARBITRARY_RE.findall(self.reader), [])
+        self.assertIsNone(re.search(r'import \{[^}]*\biosBtn', self.reader))
+        self.assertNotIn('{iosBtn', self.reader)
+
+    def test_space_always_turns_the_page(self):
+        """Пробел листает, даже если фокус остался на кнопке после щелчка мышью
+        (стрелка у стола, оглавление): кнопку он не нажимает."""
+        keys = self.reader[self.reader.index('const onKey = (event) => {'):]
+        keys = keys[:keys.index("window.addEventListener('keydown', onKey);")]
+        self.assertNotIn("closest?.('button')", keys)
+        self.assertIn('event.preventDefault();\n                flip(forward);', keys)
+
+    def test_status_bar_follows_the_page_and_is_restored(self):
+        start = self.reader.index("const meta = document.querySelector('meta[name=\"theme-color\"]');")
+        effect = self.reader[start:self.reader.index('}, [isNarrow, palette]);', start)]
+        self.assertIn("meta.setAttribute('content', isNarrow ? palette.paper : palette.desk);", effect)
+        self.assertIn("else meta.setAttribute('content', previous);", effect)
+
+    def test_night_hides_nothing_the_book_draws_black(self):
+        """Ночью чёрное из книги не пропадает на чёрной бумаге: буквица и
+        значки псевдоэлементами, заливка текста, светлые градиенты книги под
+        белым текстом; схема картинкой с прозрачным фоном — на подложке."""
+        night = re.search(r'lr-flow\[data-night\] \.lr-body :where\(\*:not\([^)]*\)\) \{(.*?)\}', self.engine, re.S).group(1)
+        for rule in ('color: inherit !important', 'background-image: none !important',
+                     '-webkit-text-fill-color: currentColor !important'):
+            self.assertIn(rule, night)
+        for pseudo in ('::first-letter,', '::before,', '::after,', ':where(li)::marker {'):
+            self.assertIn(pseudo, self.engine)
+        self.assertIn('lr-flow[data-night] .lr-body img, lr-flow[data-night] .lr-body svg { background-color:', self.engine)
+
+    def test_turning_leaf_is_lit_at_night(self):
+        """На чёрной бумаге тени загиба не видно: ночью лист отделяет свет —
+        кант у сгиба и у края."""
+        curl = self.engine[self.engine.index('    paintCurl(geometry) {'):]
+        curl = curl[:curl.index('\n    setPoint(point) {')]
+        self.assertIn('this.flapGloss.style.backgroundImage = this.palette.night', curl)
+        lit = curl[curl.index('this.palette.night'):curl.index('            : `linear-gradient(')]
+        self.assertNotIn('rgba(0,0,0', lit)
 
 
 class ClosedBookTests(unittest.TestCase):
