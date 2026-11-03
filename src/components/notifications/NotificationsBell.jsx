@@ -44,8 +44,8 @@ const SOURCE_META = {
     wiki_questions: { label: 'Вопросы операторов', icon: MessageCircleQuestion, tint: 'text-cyan-600 bg-cyan-50' },
     checkpoints: { label: 'Контроль', icon: ShieldCheck, tint: 'text-orange-600 bg-orange-50' },
     shift_requests: { label: 'Запросы по сменам', icon: CalendarClock, tint: 'text-teal-600 bg-teal-50' },
-    // Заявки на отпуск и Б/С (#358): СВ и главе — их шаг, оператору — предложенные даты и решение.
-    leave_requests: { label: 'Отпуск и Б/С', icon: CalendarRange, tint: 'text-sky-600 bg-sky-50' },
+    // Заявки на отпуск, Б/С и больничный (#358, #346): СВ и главе — их шаг, оператору — предложенные даты и решение.
+    leave_requests: { label: 'Отпуск, Б/С, больничный', icon: CalendarRange, tint: 'text-sky-600 bg-sky-50' },
     crm: { label: 'Обращения', icon: Headset, tint: 'text-emerald-600 bg-emerald-50' },
     complaints: { label: 'Жалобы', icon: MessageSquareWarning, tint: 'text-red-600 bg-red-50' },
     training_plans: { label: 'Тренинги', icon: CalendarCheck, tint: 'text-lime-700 bg-lime-50' },

@@ -1,50 +1,110 @@
 import axios from 'axios';
 
 /*
- * Заявки на отпуск и Б/С (задача #358) — общие правила экрана, без React.
+ * Заявки на отпуск, Б/С и больничный (задачи #358, #346) — общие правила
+ * экрана, без React.
  *
  * Оператор подаёт заявку тем же «Новым запросом», что и заявки по сменам
- * (вид «Отпуск или Б/С»), СВ и глава разбирают её во вкладке очереди «Запросы».
- * Правила маршрута живут на сервере (leave_requests/rules.py) — здесь только
- * подписи, счёт дней и проверка формы ради подсказки, а не вместо права.
+ * (пункт «Отпуск, Б/С или больничный»), СВ и глава разбирают её во вкладке
+ * очереди «Запросы». Правила маршрута живут на сервере (leave_requests/rules.py)
+ * — здесь только подписи, счёт дней и проверка формы ради подсказки, а не
+ * вместо права.
+ *
+ * Какие виды принимает отдел, решает его настройка, поэтому подписи собираются
+ * из списка видов (leaveKindsText), а не написаны одной строкой: у отдела без
+ * больничного слова «больничный» в окне быть не должно.
  */
 
 // Значение вида в общем списке «Что нужно» окна заявки. Это не код заявки, а
-// пункт списка: конкретный вид (отпуск или Б/С) выбирается уже в форме.
+// пункт списка: конкретный вид выбирается уже в форме.
 export const LEAVE_REQUEST_OPTION = 'leave';
 
-export const LEAVE_KINDS = ['annual_leave', 'bs'];
+export const LEAVE_KINDS = ['annual_leave', 'bs', 'sick_leave'];
 
 // Коды — те же, что у статусов графика: утверждённая заявка ставит ровно такой период.
 export const LEAVE_KIND_LABELS = {
     annual_leave: 'Ежегодный отпуск',
     bs: 'Б/С',
+    sick_leave: 'Больничный',
 };
 
-// Подписи сегментов формы: два варианта — сегменты, оба названы словами.
+// Подписи сегментов формы: два-три варианта — сегменты, все названы словами.
 export const LEAVE_KIND_SEGMENTS = {
     annual_leave: 'Отпуск',
     bs: 'Б/С',
+    sick_leave: 'Больничный',
 };
 
-export const LEAVE_KIND_HINTS = [
-    'Отпуск — ежегодный оплачиваемый отпуск.',
-    'Б/С — отпуск без сохранения заработной платы.',
-];
+// Больничный подают и задним числом — до стольких дней назад
+// (leave_requests/rules.py: SICK_BACK_DAYS; сервер присылает своё значение).
+export const LEAVE_SICK_BACK_DAYS = 30;
 
-export const leaveOptionLabel = (kinds = []) => {
-    if (kinds.length === 1) return kinds[0] === 'bs' ? 'Взять Б/С' : 'Взять отпуск';
-    return 'Отпуск или Б/С';
+const KIND_HINT_LINES = {
+    annual_leave: 'Отпуск — ежегодный оплачиваемый отпуск.',
+    bs: 'Б/С — отпуск без сохранения заработной платы.',
+    sick_leave: `Больничный — если заболели. Можно подать и задним числом, до ${LEAVE_SICK_BACK_DAYS} дней назад.`,
 };
+
+const KIND_WORDS = { annual_leave: 'отпуск', bs: 'Б/С', sick_leave: 'больничный' };
+
+// Виды в порядке LEAVE_KINDS; пустой список — все: подпись без видов не бывает.
+const pickKinds = (kinds) => {
+    const list = LEAVE_KINDS.filter((kind) => (kinds || []).includes(kind));
+    return list.length ? list : LEAVE_KINDS;
+};
+
+// Слова через запятую; `last` — «и»/«или» перед последним, null — только запятые.
+const joinKinds = (list, last) => {
+    const words = list.map((kind) => KIND_WORDS[kind]);
+    if (words.length === 1 || !last) return words.join(', ');
+    return `${words.slice(0, -1).join(', ')} ${last} ${words[words.length - 1]}`;
+};
+
+const upperFirst = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** «отпуск, Б/С и больничный» — виды словами; `last` — «и» или «или». */
+export const leaveKindsText = (kinds, last = 'и') => joinKinds(pickKinds(kinds), last);
+
+export const leaveKindsTitle = (kinds, last = 'и') => upperFirst(leaveKindsText(kinds, last));
+
+/* Короткие подписи — для сегмента и строки списка на телефоне: строку они не
+   переносят, а «Отпуск, Б/С и больничный» шире половины экрана 390 px (164 px
+   текста при 152 px места). Когда видов три, Б/С — тоже отпуск, без сохранения
+   зарплаты, — входит в «отпуск». */
+const shortKinds = (kinds) => {
+    const list = pickKinds(kinds);
+    return list.length === LEAVE_KINDS.length ? list.filter((kind) => kind !== 'bs') : list;
+};
+
+/** «Отпуск и больничный» — вкладка очереди на телефоне. */
+export const leaveKindsShortTitle = (kinds) => upperFirst(joinKinds(shortKinds(kinds), 'и'));
+
+/** «отпуск, больничный» — перечень в подписи строки на телефоне. */
+export const leaveKindsShortList = (kinds) => joinKinds(shortKinds(kinds), null);
+
+/** Пояснение к выбору вида под «i» — ровно по строке на вариант формы. */
+export const leaveKindHints = (kinds) => pickKinds(kinds).map((kind) => KIND_HINT_LINES[kind]);
+
+const SINGLE_OPTION = { annual_leave: 'Взять отпуск', bs: 'Взять Б/С', sick_leave: 'Больничный' };
+const SINGLE_TITLE = { annual_leave: 'Заявка на отпуск', bs: 'Заявка на Б/С', sick_leave: 'Заявка на больничный' };
+
+export const leaveOptionLabel = (kinds = []) => (
+    kinds.length === 1 && SINGLE_OPTION[kinds[0]] ? SINGLE_OPTION[kinds[0]] : leaveKindsTitle(kinds, 'или')
+);
 
 export const leaveModalTitle = (draft, kinds = []) => {
     if (draft?.id) return 'Изменить заявку';
-    if (kinds.length === 1) return kinds[0] === 'bs' ? 'Заявка на Б/С' : 'Заявка на отпуск';
-    return 'Отпуск или Б/С';
+    if (kinds.length === 1 && SINGLE_TITLE[kinds[0]]) return SINGLE_TITLE[kinds[0]];
+    return leaveKindsTitle(kinds, 'или');
 };
 
 // Строка «i» у списка «Что нужно» окна заявки.
-export const LEAVE_OPTION_HINT = 'Отпуск или Б/С — на период: сначала согласует супервайзер, затем утверждает руководитель отдела, и период сам встаёт в график.';
+export const leaveOptionHint = (kinds) => `${leaveKindsTitle(kinds, 'или')} — на период: сначала согласует супервайзер, затем утверждает руководитель отдела, и период сам встаёт в график.`;
+
+/** Самое раннее начало: больничный — задним числом, остальное — с сегодня. */
+export const leaveEarliestStart = (kind, today, sickBackDays = LEAVE_SICK_BACK_DAYS) => (
+    kind === 'sick_leave' && today ? addDaysIso(today, -sickBackDays) : today
+);
 
 /* Статусы заявки. Цвет — только со смыслом: жёлтым то, что ещё в пути, синим
    то, что ждёт ответа самого оператора, зелёным и красным — итог. */
@@ -150,12 +210,18 @@ export const draftFromRequest = (item) => ({
  * Чего не хватает форме — одной строкой (так же, как у заявки по смене:
  * «одна строка на всё»). Пусто — можно отправлять. Сервер проверит заново.
  */
-export const leaveDraftProblem = (draft, { today = '', kinds = [], maxPeriodDays = 365, maxAheadDays = 365 } = {}) => {
+export const leaveDraftProblem = (draft, {
+    today = '', kinds = [], maxPeriodDays = 365, maxAheadDays = 365, sickBackDays = LEAVE_SICK_BACK_DAYS,
+} = {}) => {
     if (!draft) return 'Заполните заявку';
-    if (!draft.kind || (kinds.length && !kinds.includes(draft.kind) && !draft.id)) return 'Выберите: отпуск или Б/С';
+    if (!draft.kind || (kinds.length && !kinds.includes(draft.kind) && !draft.id)) return `Выберите: ${leaveKindsText(kinds, 'или')}`;
     if (!draft.startDate) return 'Выберите первый день';
     if (!draft.endDate) return 'Выберите последний день';
-    if (today && draft.startDate < today) return 'Начало уже прошло — выберите сегодняшний день или позже';
+    if (today && draft.startDate < leaveEarliestStart(draft.kind, today, sickBackDays)) {
+        return draft.kind === 'sick_leave'
+            ? `Больничный можно подать задним числом не больше чем на ${sickBackDays} дней`
+            : 'Начало уже прошло — выберите сегодняшний день или позже';
+    }
     if (draft.endDate < draft.startDate) return 'Последний день раньше первого';
     if (leavePeriodDays(draft.startDate, draft.endDate) > maxPeriodDays) return `Слишком длинный период: не больше ${maxPeriodDays} дней`;
     if (today && leavePeriodDays(today, draft.startDate) - 1 > maxAheadDays) return 'Слишком далеко: заявки принимаются на год вперёд';

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Telegram по заявкам на отпуск и Б/С (ТЗ п. 7).
+"""Telegram по заявкам на отпуск, Б/С и больничный (ТЗ п. 7).
 
 Сообщения копятся в «исходящие» и уходят ПОСЛЕ фиксации транзакции: откат не
 должен оставить в мессенджере уведомление о заявке, которой в базе нет.
@@ -22,6 +22,17 @@ class Outbox:
 
     def add(self, chat_id, text, markup=None):
         self.messages.append((int(chat_id), text, markup))
+
+
+_CREATED_TITLES = {
+    'annual_leave': 'Заявка на отпуск',
+    'bs': 'Заявка на Б/С',
+    'sick_leave': 'Заявка на больничный',
+}
+
+# Пересечения считаются по всем видам (queries.colleague_overlaps): рядом с
+# отпусками там и больничные, поэтому «отсутствуют», а не «отдыхают».
+_OVERLAPS_LINE = '\n⚠️ В эти даты уже отсутствуют: %d'
 
 
 def _esc(value):
@@ -75,12 +86,11 @@ def step_actor_ids(cursor, raw):
 
 
 def on_created(cursor, outbox, raw, *, actor_id, today, overlaps_total, base_url, edited=False):
-    title = 'Заявка изменена' if edited else (
-        'Заявка на отпуск' if raw['kind'] == 'annual_leave' else 'Заявка на Б/С')
+    title = 'Заявка изменена' if edited else _CREATED_TITLES.get(raw['kind'], 'Заявка')
     text = '<b>%s</b>\n%s\n%s' % (_esc(title), _esc(raw['operator_name']), _esc(_summary(raw, today)))
     text += _comment_line(raw.get('reason'), 'Причина')
     if overlaps_total:
-        text += '\n⚠️ В эти даты уже отдыхают: %d' % int(overlaps_total)
+        text += _OVERLAPS_LINE % int(overlaps_total)
     _send(cursor, outbox, step_actor_ids(cursor, raw), text,
           request_id=raw['id'], base_url=base_url, exclude=(actor_id,))
 
@@ -98,7 +108,7 @@ def on_supervisor_approved(cursor, outbox, raw, *, actor_id, actor_name, today, 
     head_text = '<b>Ждёт вашего утверждения</b>\n%s\n%s\nСогласовал(а): %s' % (
         _esc(raw['operator_name']), _esc(_summary(raw, today)), _esc(actor_name))
     if overlaps_total:
-        head_text += '\n⚠️ В эти даты уже отдыхают: %d' % int(overlaps_total)
+        head_text += _OVERLAPS_LINE % int(overlaps_total)
     _send(cursor, outbox, step_actor_ids(cursor, raw), head_text,
           request_id=raw['id'], base_url=base_url, exclude=(actor_id,))
     operator_text = '<b>Супервайзер согласовал заявку</b>\n%s\nТеперь её утверждает руководитель отдела.' % (

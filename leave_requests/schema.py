@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Схема заявок на отпуск и Б/С. Таблицы с префиксом leave_.
+"""Схема заявок на отпуск, Б/С и больничный. Таблицы с префиксом leave_.
 
 Идемпотентно: CREATE TABLE / INDEX IF NOT EXISTS. Вызывается при старте из
 Database._init_db (init_leave_requests_schema) под своим SAVEPOINT — сломанная
 миграция раздела не роняет базу.
 
-    leave_request_settings  отдел: включено ли, какие виды, нужен ли шаг СВ,
+    leave_request_settings  отдел: включено ли, какие виды (отпуск, Б/С,
+                            больничный), нужен ли шаг СВ,
                             с какой длины Б/С по умолчанию не идёт в стаж
     leave_requests          заявка: вид, период, причина, шаг маршрута
     leave_request_events    журнал заявки: кто, что, с какими датами и словами
@@ -35,12 +36,13 @@ _STATEMENTS = (
         enabled BOOLEAN NOT NULL DEFAULT FALSE,
         allow_annual_leave BOOLEAN NOT NULL DEFAULT TRUE,
         allow_bs BOOLEAN NOT NULL DEFAULT TRUE,
+        allow_sick_leave BOOLEAN NOT NULL DEFAULT FALSE,
         supervisor_step BOOLEAN NOT NULL DEFAULT TRUE,
         long_bs_days INTEGER NULL,
         updated_by INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
         updated_at TIMESTAMP NOT NULL DEFAULT %(now)s,
         CONSTRAINT leave_request_settings_kinds_check
-            CHECK (NOT enabled OR allow_annual_leave OR allow_bs),
+            CHECK (NOT enabled OR allow_annual_leave OR allow_bs OR allow_sick_leave),
         CONSTRAINT leave_request_settings_long_bs_check
             CHECK (long_bs_days IS NULL OR long_bs_days BETWEEN 1 AND 366)
     )
@@ -65,7 +67,7 @@ _STATEMENTS = (
         operator_seen_at TIMESTAMP NULL,
         created_at TIMESTAMP NOT NULL DEFAULT %(now)s,
         updated_at TIMESTAMP NOT NULL DEFAULT %(now)s,
-        CONSTRAINT leave_requests_kind_check CHECK (kind IN ('annual_leave', 'bs')),
+        CONSTRAINT leave_requests_kind_check CHECK (kind IN ('annual_leave', 'bs', 'sick_leave')),
         CONSTRAINT leave_requests_status_check
             CHECK (status IN ('supervisor', 'head', 'proposal', 'approved', 'rejected', 'cancelled')),
         CONSTRAINT leave_requests_period_check CHECK (end_date >= start_date),
@@ -111,12 +113,13 @@ _STATEMENTS = (
 )
 
 # Первый отдел процесса — СЗоВ (решение владельца 02.11.2026: «на данный
-# момент делай пока для СзоВ»). 30 дней — подсказка главе при утверждении Б/С,
-# решение о стаже всё равно принимает он.
+# момент делай пока для СзоВ»; 03.11.2026 — «добавить больничный тоже»).
+# 30 дней — подсказка главе при утверждении Б/С, решение о стаже всё равно
+# принимает он.
 _SEED = """
     INSERT INTO leave_request_settings
-        (department_id, enabled, allow_annual_leave, allow_bs, supervisor_step, long_bs_days)
-    SELECT d.id, TRUE, TRUE, TRUE, TRUE, 30
+        (department_id, enabled, allow_annual_leave, allow_bs, allow_sick_leave, supervisor_step, long_bs_days)
+    SELECT d.id, TRUE, TRUE, TRUE, TRUE, TRUE, 30
       FROM departments d
      WHERE lower(COALESCE(d.code, '')) = 'szov'
     ON CONFLICT (department_id) DO NOTHING

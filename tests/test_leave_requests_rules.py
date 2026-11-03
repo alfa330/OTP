@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Заявки на отпуск и Б/С (#358): чистые правила, без базы.
+"""Заявки на отпуск, Б/С и больничный (#358, #346): чистые правила, без базы.
 
 Что именно значат правила на схеме — tests/test_leave_requests_postgres.py.
 """
@@ -43,6 +43,16 @@ class PeriodTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaveError, 'год вперёд'):
             rules.validate_period(date(2027, 11, 3), date(2027, 11, 5), TODAY)
 
+    def test_sick_leave_goes_back_thirty_days_and_nothing_else_does(self):
+        rules.validate_period(date(2026, 10, 3), date(2026, 10, 5), TODAY, 'sick_leave')
+        with self.assertRaisesRegex(LeaveError, 'задним числом не больше чем на 30 дней'):
+            rules.validate_period(date(2026, 10, 2), date(2026, 10, 5), TODAY, 'sick_leave')
+        for kind in ('annual_leave', 'bs', None):
+            with self.subTest(kind), self.assertRaisesRegex(LeaveError, 'прошло'):
+                rules.validate_period(date(2026, 11, 1), date(2026, 11, 5), TODAY, kind)
+        self.assertEqual(date(2026, 10, 3), rules.earliest_start('sick_leave', TODAY))
+        self.assertEqual(TODAY, rules.earliest_start('bs', TODAY))
+
     def test_parse_date_says_what_is_missing(self):
         self.assertEqual(date(2026, 7, 1), rules.parse_date('2026-07-01'))
         self.assertEqual(date(2026, 7, 1), rules.parse_date('2026-07-01T00:00:00'))
@@ -57,6 +67,8 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(('annual_leave', 'bs'),
                          rules.allowed_kinds({'enabled': True, 'allow_annual_leave': True, 'allow_bs': True}))
         self.assertEqual(('bs',), rules.allowed_kinds({'enabled': True, 'allow_annual_leave': False, 'allow_bs': True}))
+        self.assertEqual(('annual_leave', 'bs', 'sick_leave'), rules.allowed_kinds(
+            {'enabled': True, 'allow_annual_leave': True, 'allow_bs': True, 'allow_sick_leave': True}))
 
     def test_first_status_skips_missing_or_disabled_supervisor_step(self):
         on = {'supervisor_step': True}
@@ -69,6 +81,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual({'enabled': True, 'long_bs_days': None},
                          rules.normalize_settings_patch({'enabled': 1, 'long_bs_days': '', 'junk': 5}))
         self.assertEqual({'long_bs_days': 30}, rules.normalize_settings_patch({'long_bs_days': '30'}))
+        self.assertEqual({'allow_sick_leave': False}, rules.normalize_settings_patch({'allow_sick_leave': 0}))
         with self.assertRaisesRegex(LeaveError, 'от 1 до 366'):
             rules.normalize_settings_patch({'long_bs_days': 400})
         with self.assertRaisesRegex(LeaveError, 'число дней'):
@@ -78,6 +91,8 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(LeaveError, 'хотя бы один вид'):
             rules.check_settings({'enabled': True, 'allow_annual_leave': False, 'allow_bs': False})
         rules.check_settings({'enabled': False, 'allow_annual_leave': False, 'allow_bs': False})
+        rules.check_settings({'enabled': True, 'allow_annual_leave': False, 'allow_bs': False,
+                              'allow_sick_leave': True})
 
     def test_long_bs_default_only_for_bs_from_threshold(self):
         self.assertTrue(rules.default_exclude_from_tenure('bs', 30, 30))
@@ -113,6 +128,13 @@ class RoleTests(unittest.TestCase):
         self.assertEqual((), rules.reviewer_actions('head', 'proposal'))
         self.assertEqual('approved', rules.status_after_approve('head'))
         self.assertEqual('head', rules.status_after_approve('supervisor'))
+
+    def test_sick_leave_is_never_moved_to_other_dates(self):
+        self.assertEqual(('approve', 'reject'), rules.reviewer_actions('supervisor', 'supervisor', 'sick_leave'))
+        self.assertEqual(('approve', 'reject'), rules.reviewer_actions('head', 'supervisor', 'sick_leave'))
+        self.assertEqual(('approve', 'reject'), rules.reviewer_actions('head', 'head', 'sick_leave'))
+        self.assertEqual(('approve', 'propose', 'reject'), rules.reviewer_actions('supervisor', 'supervisor', 'bs'))
+        self.assertFalse(rules.default_exclude_from_tenure('sick_leave', 90, 30))
 
     def test_awaits_counts_only_own_step(self):
         self.assertTrue(rules.awaits('supervisor', 'supervisor'))

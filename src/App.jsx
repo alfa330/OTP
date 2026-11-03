@@ -89,8 +89,9 @@ import LeaveReviewPanel from './components/leave/LeaveReviewPanel';
 import LeaveSettingsPanel from './components/leave/LeaveSettingsPanel';
 import { useLeaveReview, useMyLeaveRequests } from './components/leave/useLeaveRequests';
 import {
-    LEAVE_OPTION_HINT, LEAVE_REQUEST_OPTION, clearLeaveLink, createLeaveApi, draftFromRequest, emptyLeaveDraft,
-    leaveApiError, leaveBellTargetId, leaveDraftProblem, leaveModalTitle, leaveOptionLabel, readLeaveLinkId
+    LEAVE_REQUEST_OPTION, clearLeaveLink, createLeaveApi, draftFromRequest, emptyLeaveDraft,
+    leaveApiError, leaveBellTargetId, leaveDraftProblem, leaveKindsShortList, leaveKindsShortTitle, leaveKindsText,
+    leaveKindsTitle, leaveModalTitle, leaveOptionHint, leaveOptionLabel, readLeaveLinkId
 } from './components/leave/leaveRequests';
 import { colleaguesForPhoneDay, describeColleaguesPhoneDay, describeMyShiftsPhoneDay, formatPhoneWeekLabel, pickPhoneDayDate } from './components/schedule/myShiftsPhoneDays';
 import { buildMyShiftsTrackLayout, describeMyShiftsTrack, formatTrackDuration, formatTrackTime } from './components/schedule/myShiftsTrackLayout';
@@ -18746,11 +18747,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Фронт офисы: оператору нельзя видеть смены коллег — табы
             // «Замены»/«Смены коллег» и кнопки обмена сменами скрыты.
             const operatorColleagueShiftsHidden = isOperatorSelfSchedules && departmentHidesColleagueSchedules(user);
-            /* ─── Заявки на отпуск и Б/С (задача #358) ───────────────────────
-               Оператор подаёт их тем же «Новым запросом» (пункт «Отпуск или Б/С»),
-               и они лежат во вкладке «Запросы» своей группой. СВ и глава
-               разбирают их во вкладке «Отпуск и Б/С» окна «Запросы». Правила и
-               экраны — src/components/leave/, маршрут — leave_requests/ на сервере. */
+            /* ─── Заявки на отпуск, Б/С и больничный (задачи #358, #346) ─────
+               Оператор подаёт их тем же «Новым запросом» (пункт «Отпуск, Б/С или
+               больничный» — по видам своего отдела), и они лежат во вкладке
+               «Запросы» своей группой. СВ и глава разбирают их во второй вкладке
+               окна «Запросы». Правила и экраны — src/components/leave/, маршрут —
+               leave_requests/ на сервере. */
             const leaveApi = useMemo(() => createLeaveApi(API_BASE_URL, withAccessTokenHeader), []);
             const myLeave = useMyLeaveRequests({ enabled: isOperatorSelfSchedules && !!user, api: leaveApi });
             const [leaveReviewFilter, setLeaveReviewFilter] = useState('pending');
@@ -18779,6 +18781,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 kinds: myLeave.kinds,
                 maxPeriodDays: myLeave.payload?.maxPeriodDays,
                 maxAheadDays: myLeave.payload?.maxAheadDays,
+                sickBackDays: myLeave.sickBackDays,
             }) : '';
             /* На телефоне у оператора один период — неделя: полоса дней сверху и
                список выбранного дня под ней. «День» и «Месяц» настольного вида
@@ -26282,7 +26285,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, []);
 
             /* Окно то же, что у заявки по смене: открыть его сразу в виде
-               «Отпуск или Б/С» — новая заявка или правка своей (request). */
+               «Отпуск, Б/С или больничный» — новая заявка или правка своей (request). */
             const openLeaveDraft = useCallback((request = null) => {
                 setLeaveDraft(request ? draftFromRequest(request) : emptyLeaveDraft(myLeave.kinds));
                 setLeaveFormError('');
@@ -26388,7 +26391,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setShiftChangeError('');
             }, [shiftChangeShiftsForDate]);
 
-            // Пункт «Что нужно»: вид смены или «Отпуск или Б/С» — в том же окне.
+            // Пункт «Что нужно»: вид смены или «Отпуск, Б/С или больничный» — в том же окне.
             const pickRequestKind = useCallback((value) => {
                 if (value === LEAVE_REQUEST_OPTION) {
                     setLeaveDraft(prev => prev || emptyLeaveDraft(myLeave.kinds));
@@ -28456,7 +28459,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 подписи в полосу на телефоне не помещаются, а сегменты
                                                 в проекте — для двух-трёх вариантов. Чем виды
                                                 отличаются, сказано под «i». */}
-                                            {/* Отпуск и Б/С (задача #358) — пятым пунктом того же списка, у
+                                            {/* Отпуск, Б/С и больничный (задачи #358, #346) — пятым пунктом того же списка, у
                                                 отделов, где заявки включены. Правка своей заявки на отпуск
                                                 вид не меняет: там списка нет вовсе. */}
                                             {!leaveDraft?.id && (
@@ -28465,7 +28468,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <span className={iosGroupLabel}>Что нужно</span>
                                                     <InfoHint side="left">
                                                         <InfoHintLines lines={myLeave.canFile
-                                                            ? [...SHIFT_CHANGE_KIND_HINTS, LEAVE_OPTION_HINT]
+                                                            ? [...SHIFT_CHANGE_KIND_HINTS, leaveOptionHint(myLeave.kinds)]
                                                             : SHIFT_CHANGE_KIND_HINTS} />
                                                     </InfoHint>
                                                 </div>
@@ -28494,6 +28497,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         today={myLeave.today}
                                                         maxPeriodDays={myLeave.payload?.maxPeriodDays}
                                                         maxAheadDays={myLeave.payload?.maxAheadDays}
+                                                        sickBackDays={myLeave.sickBackDays}
                                                     />
                                                     {/* Та же «одна строка на всё», что у заявки по смене. */}
                                                     {(leaveFormError || leaveFormProblem) && (
@@ -29057,13 +29061,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     const renderPhoneRequests = () => (
                         <>
                             <PhoneGroup hint={myLeave.canFile
-                                ? 'Заявка по смене уходит вашему руководителю. Отпуск и Б/С согласуют супервайзер и руководитель отдела. После решения график меняется сам.'
+                                ? `Заявка по смене уходит вашему руководителю. ${leaveKindsTitle(myLeave.kinds)} согласуют супервайзер и руководитель отдела. После решения график меняется сам.`
                                 : 'Заявка уходит вашему руководителю. После одобрения смена меняется в графике сама.'}>
                                 <PhoneLinkRow
                                     icon={PHONE_ICONS.plus}
                                     tileClassName="bg-blue-600"
                                     title="Новый запрос"
-                                    subtitle={myLeave.canFile ? 'Смена, выходной, отпуск или Б/С' : 'Изменить смену или взять выходной'}
+                                    subtitle={myLeave.canFile ? `Смена, выходной, ${leaveKindsShortList(myLeave.kinds)}` : 'Изменить смену или взять выходной'}
                                     onClick={() => openShiftChangeModal('shorten', { date: phoneToday })}
                                 />
                             </PhoneGroup>
@@ -29071,6 +29075,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             {myLeave.error ? phoneErrorNote(myLeave.error) : null}
                             <LeaveRequestListPhone
                                 items={myLeave.requests}
+                                kinds={myLeave.kinds}
                                 today={myLeave.today}
                                 busyId={leaveBusyId}
                                 onAccept={(item) => actOnLeaveRequest(item, 'accept')}
@@ -30214,7 +30219,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             side="left"
                                                             className="ml-1.5 align-middle"
                                                             text={"Сократить можно только внутри уже назначенной смены — прийти позже и/или уйти раньше. Дополнительную часть можно попросить в любой день, включая выходной, если она не пересекается с текущей сменой. Изменить смену — поставить ей другое время или перенести на другой день. Выходной снимает все смены дня. Перенос и выходной просят до начала смены. Заявки принимаются на сегодня и на 45 дней вперёд." + (myLeave.canFile
-                                                                ? " Отпуск или Б/С сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встанет в график, а смены на эти дни снимутся. Заявку на отпуск можно изменить или отозвать, пока её не утвердили."
+                                                                ? ` ${leaveKindsTitle(myLeave.kinds, 'или')} сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встанет в график, а смены на эти дни снимутся. Такую заявку можно изменить или отозвать, пока её не утвердили.${
+                                                                    myLeave.kinds.includes('sick_leave') ? ` Больничный можно подать и задним числом — до ${myLeave.sickBackDays} дней назад.` : ''}`
                                                                 : "")}
                                                         />
                                                     </span>
@@ -30233,10 +30239,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </div>
                                             )}
 
-                                            {/* Заявки на отпуск и Б/С — своей группой над заявками по
-                                                сменам: у них другой путь (два шага) и свой ответ оператора. */}
+                                            {/* Заявки на отпуск, Б/С и больничный — своей группой над
+                                                заявками по сменам: у них другой путь (два шага) и свой
+                                                ответ оператора. */}
                                             <LeaveRequestListDesktop
                                                 items={myLeave.requests}
+                                                kinds={myLeave.kinds}
                                                 today={myLeave.today}
                                                 busyId={leaveBusyId}
                                                 onAccept={(item) => actOnLeaveRequest(item, 'accept')}
@@ -30258,7 +30266,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <div className="text-[14px] font-semibold text-slate-700">Заявок пока нет</div>
                                                     <div className="mt-0.5 text-[12.5px] text-slate-500">
                                                         {myLeave.canFile
-                                                            ? 'Заявку по смене, на отпуск или Б/С можно подать кнопкой «Новый запрос».'
+                                                            ? `Заявку по смене, на ${leaveKindsText(myLeave.kinds, 'или')} можно подать кнопкой «Новый запрос».`
                                                             : 'Заявку по своей смене можно подать кнопкой «Новый запрос».'}
                                                     </div>
                                                 </div>
@@ -32247,21 +32255,23 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 ﻿                {/* ── Очередь «Запросы»: заявки операторов на изменение смены ─────
                     Разбирается здесь, а не в отдельном разделе: решение меняет
                     график, и человек уже стоит перед ним. */}
-                {/* Заявки на отпуск и Б/С (задача #358) — второй вкладкой того же
-                    окна: «Запросы» остаются одной кнопкой с общим счётчиком. Вкладки
-                    нет у тех, чей отдел заявки не принимает. Настройки отделов —
-                    вторым экраном окна (шеврон назад), только у админа. */}
+                {/* Заявки на отпуск, Б/С и больничный (задачи #358, #346) — второй
+                    вкладкой того же окна: «Запросы» остаются одной кнопкой с общим
+                    счётчиком. Вкладки нет у тех, чей отдел заявки не принимает;
+                    подпись — по видам, которые принимают отделы смотрящего.
+                    Настройки отделов — вторым экраном окна (шеврон назад), только
+                    у админа. */}
                 <IosModal
                     open={showReviewModal}
                     onClose={() => { setShowReviewModal(false); setLeaveSettingsOpen(false); }}
                     onBack={leaveSettingsOpen ? () => setLeaveSettingsOpen(false) : null}
                     title={leaveSettingsOpen
-                        ? 'Настройки заявок на отпуск'
+                        ? 'Настройки заявок'
                         : (leaveReview.visible ? 'Запросы' : 'Запросы по сменам')}
                     subtitle={leaveSettingsOpen
-                        ? 'Какие отделы принимают заявки на отпуск и Б/С'
+                        ? `Какие отделы принимают заявки на ${leaveKindsText()}`
                         : (leaveReview.visible
-                            ? 'Заявки операторов по сменам, на отпуск и Б/С'
+                            ? `Смены, ${leaveKindsText(leaveReview.kinds)}`
                             : 'Заявки операторов на изменение своих смен')}
                     maxWidth="max-w-2xl"
                     sizeKey={leaveSettingsOpen ? 'leave-settings' : (requestsTab === 'leave' && leaveReview.visible ? 'leave' : 'shifts')}
@@ -32300,7 +32310,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 ariaLabel="Какие запросы показывать"
                                 options={[
                                     { value: 'shifts', label: 'Смены', count: reviewPendingCount },
-                                    { value: 'leave', label: 'Отпуск и Б/С', count: leaveReview.pendingCount },
+                                    {
+                                        value: 'leave',
+                                        // На телефоне полная подпись не помещается в сегмент.
+                                        label: (
+                                            <>
+                                                <span className="sm:hidden">{leaveKindsShortTitle(leaveReview.kinds)}</span>
+                                                <span className="hidden sm:inline">{leaveKindsTitle(leaveReview.kinds)}</span>
+                                            </>
+                                        ),
+                                        count: leaveReview.pendingCount,
+                                    },
                                 ]}
                             />
                         )}
@@ -32867,7 +32887,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         title: 'Запросы',
                         subtitle: reviewPendingCount + leaveReview.pendingCount > 0
                             ? `Ожидают решения: ${reviewPendingCount + leaveReview.pendingCount}`
-                            : (leaveReview.visible ? 'Смены, отпуск и Б/С' : 'Заявки операторов по своим сменам'),
+                            : (leaveReview.visible ? `Смены, ${leaveKindsText(leaveReview.kinds)}` : 'Заявки операторов по своим сменам'),
                         onClick: () => {
                             setReviewError('');
                             setLeaveSettingsOpen(false);
@@ -54525,8 +54545,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }
-                // Заявка на отпуск или Б/С: цель «leave:<id>» (notifications/sources.py:
-                // leave_requests). Раздел тот же — открывается вкладка «Отпуск и Б/С».
+                // Заявка на отпуск, Б/С или больничный: цель «leave:<id>» (notifications/sources.py:
+                // leave_requests). Раздел тот же — открывается вторая вкладка «Запросов».
                 const leaveTargetId = nextView === 'work_schedules' ? leaveBellTargetId(target) : null;
                 if (leaveTargetId) {
                     setShiftRequestFocus((prev) => ({

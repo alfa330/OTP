@@ -5,8 +5,8 @@ import { IosToggle, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
 import { leaveApiError } from './leaveRequests';
 
 /*
- * Настройки заявок на отпуск и Б/С по отделам (задача #358, «общее и
- * настраиваемое»). Второй экран окна «Запросы», как в «Настройках» iOS: строка
+ * Настройки заявок на отпуск, Б/С и больничный по отделам (задачи #358, #346,
+ * «общее и настраиваемое»). Второй экран окна «Запросы», как в «Настройках» iOS: строка
  * отдела с переключателем, а у включённого — что именно он принимает.
  *
  * Сохраняется каждое изменение сразу, без кнопки «Сохранить»: переключатель,
@@ -15,7 +15,8 @@ import { leaveApiError } from './leaveRequests';
  */
 
 const STEP_HINT = 'Включено — заявку сначала согласует супервайзер группы оператора, затем утверждает руководитель отдела. Выключено — заявка сразу идёт руководителю. У оператора без супервайзера она идёт руководителю в любом случае.';
-const LONG_BS_HINT = 'Б/С от этого числа дней при утверждении по умолчанию отмечается «не учитывать в стаже». Руководитель видит переключатель и решает сам. Пусто — подсказки нет, переключатель выключен.';
+const SICK_HINT = 'Больничный идёт тем же маршрутом, что и отпуск, но его можно подать задним числом — до 30 дней назад. Другие даты по нему не предлагают: его согласуют или отклоняют. В стаж больничный идёт.';
+const LONG_BS_HINT ='Б/С от этого числа дней при утверждении по умолчанию отмечается «не учитывать в стаже». Руководитель видит переключатель и решает сам. Пусто — подсказки нет, переключатель выключен.';
 
 /* «i» — общий InfoHint: пузырёк рисуется поверх окна и краем карточки
    (overflow-hidden) не обрезается. Значок держится за последнее слово подписи:
@@ -81,6 +82,10 @@ function DepartmentCard({ department, saving, onSave }) {
                         <IosToggle checked={department.allowBs} disabled={saving}
                                    onChange={(value) => onSave(department, { allow_bs: value })} />
                     </Row>
+                    <Row title="Больничный" hint={SICK_HINT}>
+                        <IosToggle checked={department.allowSickLeave} disabled={saving}
+                                   onChange={(value) => onSave(department, { allow_sick_leave: value })} />
+                    </Row>
                     <Row title="Сначала согласует супервайзер" hint={STEP_HINT}>
                         <IosToggle checked={department.supervisorStep} disabled={saving}
                                    onChange={(value) => onSave(department, { supervisor_step: value })} />
@@ -132,6 +137,7 @@ export default function LeaveSettingsPanel({ api }) {
             ...('enabled' in patch ? { enabled: patch.enabled } : {}),
             ...('allow_annual_leave' in patch ? { allowAnnualLeave: patch.allow_annual_leave } : {}),
             ...('allow_bs' in patch ? { allowBs: patch.allow_bs } : {}),
+            ...('allow_sick_leave' in patch ? { allowSickLeave: patch.allow_sick_leave } : {}),
             ...('supervisor_step' in patch ? { supervisorStep: patch.supervisor_step } : {}),
             ...('long_bs_days' in patch ? { longBsDays: patch.long_bs_days } : {}),
         } : d)));

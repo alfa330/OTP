@@ -1,5 +1,5 @@
 import React from 'react';
-import { CalendarMinus2, TreePalm } from 'lucide-react';
+import { CalendarMinus2, Thermometer, TreePalm } from 'lucide-react';
 import { IosBadge, iosCard, iosGroupLabel } from '../ui/ios';
 import ShiftRequestComment from '../schedule/ShiftRequestComment';
 import { MyShiftsRequestCard, PhoneGroup } from '../schedule/MyShiftsMobile';
@@ -8,14 +8,15 @@ import {
     LEAVE_STATUS_META,
     daysText,
     formatLeavePeriod,
+    leaveKindsTitle,
     leavePeriodDays,
 } from './leaveRequests';
 
 /*
- * Свои заявки оператора на отпуск и Б/С — группа во вкладке «Запросы» «Моих
- * смен», над заявками по сменам (задача #358). Два вида одной группы: строки
- * карточки на компьютере и карточки списка на телефоне (MyShiftsRequestCard —
- * та же разметка, что у заявок по сменам).
+ * Свои заявки оператора на отпуск, Б/С и больничный — группа во вкладке
+ * «Запросы» «Моих смен», над заявками по сменам (задачи #358, #346). Два вида
+ * одной группы: строки карточки на компьютере и карточки списка на телефоне
+ * (MyShiftsRequestCard — та же разметка, что у заявок по сменам).
  *
  * Предложенные супервайзером даты — единственное, что ждёт ответа самого
  * оператора, поэтому они стоят отдельным голубым блоком с двумя кнопками, а не
@@ -25,7 +26,12 @@ import {
 const PHONE_TILES = {
     annual_leave: { icon: TreePalm, tile: 'bg-sky-500' },
     bs: { icon: CalendarMinus2, tile: 'bg-violet-500' },
+    sick_leave: { icon: Thermometer, tile: 'bg-teal-500' },
 };
+
+// Подпись группы — по видам отдела и тем, что уже есть в списке: старая
+// заявка вида, который отдел потом выключил, тоже должна быть названа.
+const groupTitle = (items, kinds) => leaveKindsTitle([...(kinds || []), ...items.map((item) => item.kind)]);
 
 const periodText = (start, end, today) => `${formatLeavePeriod(start, end, today)} · ${daysText(leavePeriodDays(start, end))}`;
 
@@ -107,11 +113,11 @@ function DesktopRow({ item, today, busy, onAccept, onDecline, onEdit, onCancel }
     );
 }
 
-export function LeaveRequestListDesktop({ items = [], today, busyId = null, onAccept, onDecline, onEdit, onCancel }) {
+export function LeaveRequestListDesktop({ items = [], kinds = [], today, busyId = null, onAccept, onDecline, onEdit, onCancel }) {
     if (!items.length) return null;
     return (
         <section className="space-y-1.5">
-            <div className={iosGroupLabel}>Отпуск и Б/С</div>
+            <div className={iosGroupLabel}>{groupTitle(items, kinds)}</div>
             <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                 {items.map((item) => (
                     <DesktopRow
@@ -130,10 +136,10 @@ export function LeaveRequestListDesktop({ items = [], today, busyId = null, onAc
     );
 }
 
-export function LeaveRequestListPhone({ items = [], today, busyId = null, onAccept, onDecline, onEdit, onCancel }) {
+export function LeaveRequestListPhone({ items = [], kinds = [], today, busyId = null, onAccept, onDecline, onEdit, onCancel }) {
     if (!items.length) return null;
     return (
-        <PhoneGroup label="Отпуск и Б/С">
+        <PhoneGroup label={groupTitle(items, kinds)}>
             {items.map((item) => {
                 const meta = LEAVE_STATUS_META[item.status] || LEAVE_STATUS_META.supervisor;
                 const tile = PHONE_TILES[item.kind] || PHONE_TILES.annual_leave;

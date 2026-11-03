@@ -1,17 +1,26 @@
-// Заявки на отпуск и Б/С (#358): правила формы на клиенте и начало стажа.
+// Заявки на отпуск, Б/С и больничный (#358, #346): правила формы на клиенте и начало стажа.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
+    LEAVE_KINDS,
     LEAVE_KIND_LABELS,
+    LEAVE_KIND_SEGMENTS,
     addDaysIso,
     daysText,
     emptyLeaveDraft,
     formatLeavePeriod,
     leaveBellTargetId,
     leaveDraftProblem,
+    leaveEarliestStart,
+    leaveKindHints,
+    leaveKindsShortList,
+    leaveKindsShortTitle,
+    leaveKindsText,
+    leaveKindsTitle,
     leaveModalTitle,
+    leaveOptionHint,
     leaveOptionLabel,
     leavePeriodDays,
     leaveSummary,
@@ -70,7 +79,44 @@ test('один разрешённый вид выбран заранее и на
     assert.equal(leaveOptionLabel(['annual_leave']), 'Взять отпуск');
     assert.equal(leaveModalTitle({ id: null }, ['bs']), 'Заявка на Б/С');
     assert.equal(leaveModalTitle({ id: 5 }, ['bs']), 'Изменить заявку');
-    assert.deepEqual(Object.keys(LEAVE_KIND_LABELS), ['annual_leave', 'bs']);
+    assert.deepEqual(Object.keys(LEAVE_KIND_LABELS), ['annual_leave', 'bs', 'sick_leave']);
+    assert.equal(leaveModalTitle({ id: null }, ['sick_leave']), 'Заявка на больничный');
+    assert.equal(leaveOptionLabel(['sick_leave']), 'Больничный');
+});
+
+test('подписи собираются из видов отдела: без больничного — ни слова о нём', () => {
+    const all = ['annual_leave', 'bs', 'sick_leave'];
+    assert.equal(leaveKindsText(all), 'отпуск, Б/С и больничный');
+    assert.equal(leaveKindsTitle(all, 'или'), 'Отпуск, Б/С или больничный');
+    assert.equal(leaveOptionLabel(all), 'Отпуск, Б/С или больничный');
+    assert.equal(leaveModalTitle({ id: null }, all), 'Отпуск, Б/С или больничный');
+    assert.equal(leaveKindsText(['bs', 'annual_leave']), 'отпуск и Б/С', 'порядок — как в LEAVE_KINDS');
+    assert.equal(leaveKindsText(['sick_leave']), 'больничный');
+    assert.equal(leaveKindsText([]), 'отпуск, Б/С и больничный', 'без списка — все виды');
+    assert.ok(!leaveOptionHint(['annual_leave', 'bs']).includes('больничн'));
+    assert.match(leaveOptionHint(all), /^Отпуск, Б\/С или больничный — на период/);
+});
+
+test('пояснение под «i» называет ровно варианты сегментов', () => {
+    for (const kinds of [LEAVE_KINDS, ['annual_leave', 'sick_leave'], ['bs', 'sick_leave']]) {
+        const lines = leaveKindHints(kinds);
+        assert.equal(lines.length, kinds.length);
+        lines.forEach((line, index) => assert.ok(line.startsWith(`${LEAVE_KIND_SEGMENTS[kinds[index]]} — `), line));
+    }
+});
+
+test('больничный подают задним числом — до 30 дней, отпуск и Б/С — нет', () => {
+    const kinds = ['annual_leave', 'bs', 'sick_leave'];
+    const sick = { id: null, kind: 'sick_leave', startDate: '2026-10-28', endDate: '2026-11-04', reason: 'Больничный лист' };
+    assert.equal(leaveEarliestStart('sick_leave', TODAY), '2026-10-03');
+    assert.equal(leaveEarliestStart('annual_leave', TODAY), TODAY);
+    assert.equal(leaveDraftProblem(sick, { today: TODAY, kinds }), '');
+    assert.equal(leaveDraftProblem({ ...sick, startDate: '2026-10-03' }, { today: TODAY, kinds }), '');
+    assert.match(leaveDraftProblem({ ...sick, startDate: '2026-10-02' }, { today: TODAY, kinds }),
+        /задним числом не больше чем на 30 дней/);
+    assert.match(leaveDraftProblem({ ...sick, kind: 'annual_leave' }, { today: TODAY, kinds }), /прошло/);
+    assert.equal(leaveDraftProblem({ ...sick, kind: null }, { today: TODAY, kinds }),
+        'Выберите: отпуск, Б/С или больничный');
 });
 
 test('цель уведомления колокола — «leave:<id>»', () => {
@@ -108,4 +154,18 @@ test('«i» в окнах заявок — общий InfoHint: пузырь п�
     }
     const label = app.indexOf('>Что нужно</span>');
     assert.ok(app.slice(label, label + 200).includes('<InfoHint side="left">'));
+});
+
+test('на телефоне вкладка очереди — короткой подписью, на компьютере — полной', () => {
+    // Сегмент на 390 px вмещает 152 px текста; «Отпуск, Б/С и больничный» — 164 px.
+    const app = read('../src/App.jsx');
+    assert.equal(leaveKindsShortTitle(['annual_leave', 'bs', 'sick_leave']), 'Отпуск и больничный');
+    assert.equal(leaveKindsShortTitle(['annual_leave', 'bs']), 'Отпуск и Б/С');
+    // Строка «Новый запрос» на телефоне: 254 px места, с «Б/С» перечень — 297 px.
+    assert.equal(leaveKindsShortList(['annual_leave', 'bs', 'sick_leave']), 'отпуск, больничный');
+    assert.equal(leaveKindsShortList(['bs', 'sick_leave']), 'Б/С, больничный');
+    assert.match(app, /`Смена, выходной, \$\{leaveKindsShortList\(myLeave\.kinds\)\}`/);
+    const tab = app.slice(app.indexOf("value: 'leave',"), app.indexOf('count: leaveReview.pendingCount'));
+    assert.match(tab, /className="sm:hidden">\{leaveKindsShortTitle\(leaveReview\.kinds\)\}/);
+    assert.match(tab, /className="hidden sm:inline">\{leaveKindsTitle\(leaveReview\.kinds\)\}/);
 });

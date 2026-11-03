@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""SQL заявок на отпуск и Б/С. Все функции принимают готовый курсор и не
+"""SQL заявок на отпуск, Б/С и больничный. Все функции принимают готовый курсор и не
 коммитят: транзакцией управляет роут."""
 
 from datetime import date, datetime
@@ -172,7 +172,8 @@ def telegram_chats(cursor, user_ids):
 
 # ── Настройки ───────────────────────────────────────────────────────────────
 
-_SETTINGS_COLUMNS = ('enabled', 'allow_annual_leave', 'allow_bs', 'supervisor_step', 'long_bs_days')
+_SETTINGS_COLUMNS = ('enabled', 'allow_annual_leave', 'allow_bs', 'allow_sick_leave', 'supervisor_step',
+                     'long_bs_days')
 
 
 def load_settings(cursor, department_id):
@@ -191,6 +192,19 @@ def enabled_department_ids(cursor):
     return {int(row[0]) for row in cursor.fetchall()}
 
 
+def enabled_kinds(cursor, department_ids=None):
+    """Виды, которые принимает хоть один включённый отдел из списка (None — любой):
+    по ним очередь руководителя называет себя («Отпуск, Б/С и больничный»)."""
+    cursor.execute(
+        "SELECT " + ', '.join('COALESCE(bool_or(allow_%s), FALSE)' % kind for kind in rules.KINDS)
+        + " FROM leave_request_settings"
+          " WHERE enabled AND (%(all)s OR department_id = ANY(%(ids)s))",
+        {'all': department_ids is None, 'ids': sorted({int(d) for d in department_ids or ()})},
+    )
+    row = cursor.fetchone() or ()
+    return tuple(kind for kind, on in zip(rules.KINDS, row) if on)
+
+
 def list_department_settings(cursor):
     """Все отделы — и с настройкой, и без: выключенный отдел тоже надо видеть,
     чтобы включить."""
@@ -200,6 +214,7 @@ def list_department_settings(cursor):
                COALESCE(s.enabled, FALSE),
                COALESCE(s.allow_annual_leave, TRUE),
                COALESCE(s.allow_bs, TRUE),
+               COALESCE(s.allow_sick_leave, FALSE),
                COALESCE(s.supervisor_step, TRUE),
                s.long_bs_days,
                hd.name
@@ -213,13 +228,14 @@ def list_department_settings(cursor):
     return [{
         'id': int(row[0]), 'name': row[1], 'code': row[2],
         'enabled': bool(row[3]), 'allowAnnualLeave': bool(row[4]), 'allowBs': bool(row[5]),
-        'supervisorStep': bool(row[6]), 'longBsDays': row[7], 'headName': row[8],
+        'allowSickLeave': bool(row[6]), 'supervisorStep': bool(row[7]), 'longBsDays': row[8],
+        'headName': row[9],
     } for row in cursor.fetchall()]
 
 
 def save_settings(cursor, department_id, values, updated_by):
     merged = dict(load_settings(cursor, department_id) or {
-        'enabled': False, 'allow_annual_leave': True, 'allow_bs': True,
+        'enabled': False, 'allow_annual_leave': True, 'allow_bs': True, 'allow_sick_leave': False,
         'supervisor_step': True, 'long_bs_days': None,
     })
     merged.update(values)
@@ -227,21 +243,22 @@ def save_settings(cursor, department_id, values, updated_by):
     cursor.execute(
         """
         INSERT INTO leave_request_settings
-            (department_id, enabled, allow_annual_leave, allow_bs, supervisor_step, long_bs_days,
-             updated_by, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, """ + NOW_SQL + """)
+            (department_id, enabled, allow_annual_leave, allow_bs, allow_sick_leave, supervisor_step,
+             long_bs_days, updated_by, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, """ + NOW_SQL + """)
         ON CONFLICT (department_id) DO UPDATE SET
             enabled = EXCLUDED.enabled,
             allow_annual_leave = EXCLUDED.allow_annual_leave,
             allow_bs = EXCLUDED.allow_bs,
+            allow_sick_leave = EXCLUDED.allow_sick_leave,
             supervisor_step = EXCLUDED.supervisor_step,
             long_bs_days = EXCLUDED.long_bs_days,
             updated_by = EXCLUDED.updated_by,
             updated_at = EXCLUDED.updated_at
         """,
         (int(department_id), bool(merged['enabled']), bool(merged['allow_annual_leave']),
-         bool(merged['allow_bs']), bool(merged['supervisor_step']), merged['long_bs_days'],
-         int(updated_by) if updated_by else None),
+         bool(merged['allow_bs']), bool(merged['allow_sick_leave']), bool(merged['supervisor_step']),
+         merged['long_bs_days'], int(updated_by) if updated_by else None),
     )
     return merged
 
@@ -400,16 +417,18 @@ def schedule_periods(cursor, operator_id, start, end):
 
 
 def colleague_overlaps(cursor, *, department_id, operator_id, start, end, today, limit=8):
-    """Кто из отдела уже отдыхает в эти даты (ТЗ п. 4).
+    """Кто из отдела уже отсутствует в эти даты (ТЗ п. 4).
 
-    Источник — периоды графика «Ежегодный отпуск» и «Б/С», то есть уже
-    утверждённое: и заявками, и руками руководителя. Ожидающие заявки сюда не
-    попадают (ТЗ: «учитывать только утверждённые»). Сначала — своя группа.
+    Источник — периоды графика тех же видов, что у заявок («Ежегодный отпуск»,
+    «Б/С», «Больничный»), то есть уже утверждённое: и заявками, и руками
+    руководителя. Ожидающие заявки сюда не попадают (ТЗ: «учитывать только
+    утверждённые»). Сначала — своя группа.
     """
     if department_id is None:
         return 0, []
     params = {'department_id': int(department_id), 'operator_id': int(operator_id),
-              'start': start, 'end': end, 'today': today, 'limit': int(limit)}
+              'start': start, 'end': end, 'today': today, 'limit': int(limit),
+              'kinds': list(rules.KINDS)}
     cursor.execute(
         """
         WITH own AS (
@@ -427,7 +446,7 @@ def colleague_overlaps(cursor, *, department_id, operator_id, start, end, today,
         """ + _GROUP_LATERAL.format(operator='p.operator_id', alias='grp') + """
          WHERE u.department_id = %(department_id)s
            AND p.operator_id <> %(operator_id)s
-           AND p.status_code IN ('annual_leave', 'bs')
+           AND p.status_code = ANY(%(kinds)s)
            AND p.start_date <= %(end)s
            AND COALESCE(p.end_date, DATE '9999-12-31') >= %(start)s
            AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')

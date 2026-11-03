@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Заявки на отпуск и Б/С (#358) на настоящем Postgres: LEAVE_TEST_PORT — порт
+"""Заявки на отпуск, Б/С и больничный (#358, #346) на настоящем Postgres: LEAVE_TEST_PORT — порт
 локального кластера.
 
 Чистые правила — tests/test_leave_requests_rules.py. Здесь — весь маршрут на
@@ -464,14 +464,16 @@ def test_overlaps_show_only_approved_absences_of_the_department(db):
                 (402, 'annual_leave', '2026-12-10', '2026-12-20'),  -- другая группа отдела
                 (401, 'bs', '2026-12-12', '2026-12-13'),            -- своя группа
                 (404, 'annual_leave', '2026-12-01', '2026-12-31'),  -- другой отдел
-                (403, 'sick_leave', '2026-12-05', '2026-12-06')     -- не отпуск
+                (403, 'sick_leave', '2026-12-05', '2026-12-06'),    -- больничный — тоже отсутствие (#346)
+                (402, 'dismissal', '2026-12-13', NULL)              -- увольнение — не вид заявки
         """)
     mine = create(db, deps, OP_A, '2026-12-01', '2026-12-14')
     item = next(it for it in review(db, SV_A)['requests'] if it['id'] == mine['id'])
-    assert item['overlaps']['total'] == 2
+    assert item['overlaps']['total'] == 3
     names = [o['name'] for o in item['overlaps']['items']]
-    assert names == ['Оператор Борис', 'Оператор Вера']  # своя группа — первой
+    assert names == ['Оператор Борис', 'Оператор Без СВ', 'Оператор Вера']  # своя группа — первой
     assert item['overlaps']['items'][0]['sameGroup'] is True
+    assert item['overlaps']['items'][1]['kindLabel'] == 'Больничный'
 
 
 def test_review_counts_only_requests_waiting_for_this_person(db):
@@ -530,9 +532,75 @@ def test_operator_payload_counts_what_needs_attention(db):
     with db.cursor() as cur:
         payload = service.operator_payload(cur, user(cur, OP_A), TODAY)
     assert payload['enabled'] is True
-    assert payload['kinds'] == ['annual_leave', 'bs']
+    assert payload['kinds'] == ['annual_leave', 'bs', 'sick_leave']
+    assert payload['sickBackDays'] == 30
     assert payload['attentionCount'] == 1
     assert payload['requests'][0]['actions'] == ['accept', 'decline', 'edit', 'cancel']
+
+
+# ── Больничный (#346) ───────────────────────────────────────────────────────
+
+def test_sick_leave_is_filed_back_dated_but_not_older_than_thirty_days(db):
+    deps, outbox = Deps(), notify.Outbox()
+    item = create(db, deps, OP_A, '2026-10-28', '2026-11-04', kind='sick_leave',
+                  reason='Открыт больничный лист', outbox=outbox)
+    assert item['status'] == 'supervisor'
+    assert item['kindLabel'] == 'Больничный' and item['days'] == 8
+    assert 'Заявка на больничный' in outbox.messages[0][1]
+    # Ровно 30 дней назад — можно, 31 — уже правка прошлого графика руками.
+    assert create(db, deps, OP_B, '2026-10-03', '2026-10-05', kind='sick_leave')['status'] == 'supervisor'
+    with pytest.raises(LeaveError, match='задним числом не больше чем на 30 дней'):
+        create(db, deps, OP_C, '2026-10-02', '2026-10-05', kind='sick_leave')
+    # Отпуск задним числом по-прежнему не подать.
+    with pytest.raises(LeaveError, match='Начало уже прошло'):
+        create(db, deps, OP_C, '2026-11-01', '2026-11-05')
+
+
+def test_sick_leave_is_approved_or_rejected_but_never_moved(db):
+    deps = Deps()
+    item = create(db, deps, OP_A, '2026-10-30', '2026-11-06', kind='sick_leave')
+    queue = {it['id']: it for it in review(db, SV_A)['requests']}
+    assert queue[item['id']]['actions'] == ['approve', 'reject']
+    assert {it['id']: it for it in review(db, HEAD)['requests']}[item['id']]['actions'] == ['approve', 'reject']
+    with pytest.raises(LeaveError, match='другие даты не предлагают'):
+        decide(db, deps, SV_A, item['id'], action='propose', start_date='2026-11-10', end_date='2026-11-12')
+
+    assert decide(db, deps, SV_A, item['id'], action='approve')['status'] == 'head'
+    final = decide(db, deps, HEAD, item['id'], action='approve', exclude_from_tenure=True)
+    assert final['status'] == 'approved'
+    period = deps.periods[-1]
+    assert (period['kind'], period['start'], period['end']) == ('sick_leave', date(2026, 10, 30), date(2026, 11, 6))
+    assert period['exclude_from_tenure'] is False  # больничный идёт в стаж
+
+
+def test_sick_leave_follows_department_switch(db):
+    with db.cursor() as cur:
+        queries.save_settings(cur, 1, {'allow_sick_leave': False}, ADMIN)
+        payload = service.operator_payload(cur, user(cur, OP_A), TODAY)
+        settings = {d['id']: d for d in queries.list_department_settings(cur)}
+    assert payload['kinds'] == ['annual_leave', 'bs']
+    assert settings[1]['allowSickLeave'] is False and settings[2]['allowSickLeave'] is False
+    assert review(db, HEAD)['kinds'] == ['annual_leave', 'bs']
+    with pytest.raises(LeaveError, match='вид заявки'):
+        create(db, Deps(), OP_A, '2026-10-30', '2026-11-03', kind='sick_leave')
+    # Один больничный — тоже вид: отдел с ним одним включённым допустим.
+    with db.cursor() as cur:
+        queries.save_settings(cur, 1, {'allow_annual_leave': False, 'allow_bs': False, 'allow_sick_leave': True},
+                              ADMIN)
+    assert review(db, HEAD)['kinds'] == ['sick_leave']
+
+
+def test_review_names_the_kinds_its_departments_accept(db):
+    assert review(db, HEAD)['kinds'] == ['annual_leave', 'bs', 'sick_leave']
+    assert review(db, ADMIN)['kinds'] == ['annual_leave', 'bs', 'sick_leave']
+    assert review(db, SV_OP)['kinds'] == []  # отдел продаж заявки не принимает
+
+
+def test_bell_names_sick_leave(db):
+    deps = Deps()
+    create(db, deps, OP_A, '2026-10-30', '2026-11-06', kind='sick_leave')
+    total, items = bell(db, SV_A, 'sv')
+    assert total == 1 and items[0]['body'] == 'Больничный · 30.10 — 06.11'
 
 
 # ── Время ───────────────────────────────────────────────────────────────────

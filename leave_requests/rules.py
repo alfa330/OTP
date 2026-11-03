@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Чистые правила заявок на отпуск и Б/С: без базы, без Flask.
+"""Чистые правила заявок на отпуск, Б/С и больничный: без базы, без Flask.
 
 Маршрут заявки (ТЗ #358, п. 1–5):
 
@@ -19,6 +19,10 @@
 
 Оператор правит и отзывает заявку, пока она не утверждена (п. 5). Правка
 возвращает заявку на первый шаг: СВ согласовывал другие даты.
+
+Больничный (задача #346) идёт тем же маршрутом, но болезнь не планируют:
+его подают задним числом — до SICK_BACK_DAYS дней назад, — и другие даты по
+нему не предлагают: переносить болезнь некуда. В стаж больничный идёт.
 """
 
 from datetime import date, datetime, timedelta
@@ -26,9 +30,9 @@ from datetime import date, datetime, timedelta
 # Коды видов — те же, что у статусов графика (SCHEDULE_SPECIAL_STATUS_META в
 # database.py): утверждённая заявка ставит в график ровно такой период, какой
 # руководитель ставит руками, и второго словаря соответствий не нужно.
-KINDS = ('annual_leave', 'bs')
-KIND_LABELS = {'annual_leave': 'Ежегодный отпуск', 'bs': 'Б/С'}
-KIND_TITLES = {'annual_leave': 'Отпуск', 'bs': 'Б/С'}
+KINDS = ('annual_leave', 'bs', 'sick_leave')
+KIND_LABELS = {'annual_leave': 'Ежегодный отпуск', 'bs': 'Б/С', 'sick_leave': 'Больничный'}
+KIND_TITLES = {'annual_leave': 'Отпуск', 'bs': 'Б/С', 'sick_leave': 'Больничный'}
 
 STATUSES = ('supervisor', 'head', 'proposal', 'approved', 'rejected', 'cancelled')
 OPEN_STATUSES = ('supervisor', 'head', 'proposal')
@@ -53,6 +57,9 @@ EVENT_ACTIONS = (
 
 MAX_PERIOD_DAYS = 365
 MAX_AHEAD_DAYS = 365
+# Больничный подают и после начала: заболевший пишет, когда может. Дальше
+# месяца — уже не заявка, а правка прошлого графика руками руководителя.
+SICK_BACK_DAYS = 30
 REASON_MAX_CHARS = 1000
 COMMENT_MAX_CHARS = 1000
 LONG_BS_DAYS_MAX = 366
@@ -112,11 +119,19 @@ def format_period(start, end, today=None):
     return '%s — %s' % (one(start), one(end))
 
 
-def validate_period(start, end, today):
+def earliest_start(kind, today):
+    """Самое раннее начало заявки: больничный — задним числом, остальное — с сегодня."""
+    return today - timedelta(days=SICK_BACK_DAYS) if kind == 'sick_leave' else today
+
+
+def validate_period(start, end, today, kind=None):
     """Период заявки или предложенных дат. Отказ — словами, которые видит человек."""
     if end < start:
         raise LeaveError('Дата окончания раньше даты начала', code='LEAVE_PERIOD_REVERSED')
-    if start < today:
+    if start < earliest_start(kind, today):
+        if kind == 'sick_leave':
+            raise LeaveError('Больничный можно подать задним числом не больше чем на %d дней' % SICK_BACK_DAYS,
+                             code='LEAVE_PERIOD_PAST')
         raise LeaveError('Начало уже прошло — выберите сегодняшний день или позже', code='LEAVE_PERIOD_PAST')
     if (start - today).days > MAX_AHEAD_DAYS:
         raise LeaveError('Слишком далеко: заявки принимаются на год вперёд', code='LEAVE_PERIOD_TOO_FAR')
@@ -165,7 +180,7 @@ def normalize_settings_patch(data):
     """Тело PUT настроек отдела → значения колонок. Неизвестные поля молча не берём."""
     data = data or {}
     patch = {}
-    for key in ('enabled', 'allow_annual_leave', 'allow_bs', 'supervisor_step'):
+    for key in ('enabled', 'allow_annual_leave', 'allow_bs', 'allow_sick_leave', 'supervisor_step'):
         if key in data:
             patch[key] = bool(data.get(key))
     if 'long_bs_days' in data:
@@ -184,8 +199,9 @@ def normalize_settings_patch(data):
 
 
 def check_settings(settings):
-    if settings.get('enabled') and not (settings.get('allow_annual_leave') or settings.get('allow_bs')):
-        raise LeaveError('Оставьте хотя бы один вид заявки — отпуск или Б/С', code='LEAVE_SETTINGS_INVALID')
+    if settings.get('enabled') and not any(settings.get('allow_' + kind) for kind in KINDS):
+        raise LeaveError('Оставьте хотя бы один вид заявки — отпуск, Б/С или больничный',
+                         code='LEAVE_SETTINGS_INVALID')
 
 
 # ── Кто что может ───────────────────────────────────────────────────────────
@@ -212,16 +228,19 @@ def reviewer_role(viewer, request, in_scope):
     return None
 
 
-def reviewer_actions(role, status):
-    if role == 'head':
-        if status == 'supervisor':
-            return ('approve', 'propose', 'reject')
-        if status == 'head':
-            return ('approve', 'reject')
-        return ()
-    if role == 'supervisor' and status == 'supervisor':
-        return ('approve', 'propose', 'reject')
-    return ()
+def reviewer_actions(role, status, kind=None):
+    if role == 'head' and status == 'supervisor':
+        actions = ('approve', 'propose', 'reject')
+    elif role == 'head' and status == 'head':
+        actions = ('approve', 'reject')
+    elif role == 'supervisor' and status == 'supervisor':
+        actions = ('approve', 'propose', 'reject')
+    else:
+        actions = ()
+    # Болезнь не переносят: больничный только согласуют или отклоняют.
+    if kind == 'sick_leave':
+        actions = tuple(action for action in actions if action != 'propose')
+    return actions
 
 
 def awaits(role, status):

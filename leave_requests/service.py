@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Действия с заявками на отпуск и Б/С.
+"""Действия с заявками на отпуск, Б/С и больничный.
 
 Каждая функция работает в транзакции роута (курсор приходит готовым) и
 возвращает заявку так, как её увидит тот, кто действовал. Telegram копится в
@@ -43,7 +43,7 @@ def _now():
 
 def _require_operator(user):
     if not user or user.get('role') != 'operator':
-        raise LeaveError('Заявку на отпуск подаёт оператор', code='LEAVE_OPERATOR_ONLY', status=403)
+        raise LeaveError('Заявку подаёт оператор', code='LEAVE_OPERATOR_ONLY', status=403)
 
 
 def _own_locked(cursor, user, request_id):
@@ -131,6 +131,7 @@ def operator_payload(cursor, user, today):
         'today': today.strftime('%Y-%m-%d'),
         'maxPeriodDays': rules.MAX_PERIOD_DAYS,
         'maxAheadDays': rules.MAX_AHEAD_DAYS,
+        'sickBackDays': rules.SICK_BACK_DAYS,
         'requests': items,
         'attentionCount': attention,
     }
@@ -152,9 +153,9 @@ def create(cursor, deps, outbox, *, user, data, today, base_url=None):
     settings = queries.load_settings(cursor, user['department_id'])
     kinds = rules.allowed_kinds(settings)
     if not kinds:
-        raise LeaveError('В вашем отделе заявки на отпуск и Б/С не принимаются', code='LEAVE_DISABLED', status=403)
+        raise LeaveError('В вашем отделе такие заявки не принимаются', code='LEAVE_DISABLED', status=403)
     kind, start, end, reason = _read_form(data, kinds)
-    rules.validate_period(start, end, today)
+    rules.validate_period(start, end, today, kind)
     _ensure_free(cursor, user['id'], start, end, today)
 
     supervisor_id = deps.resolve_supervisor(cursor, user['id'], today) if settings.get('supervisor_step') else None
@@ -179,7 +180,7 @@ def edit(cursor, deps, outbox, *, user, request_id, data, today, base_url=None):
                          code='LEAVE_LOCKED', status=409)
     settings = queries.load_settings(cursor, locked['department_id']) or {}
     kind, start, end, reason = _read_form(data, rules.allowed_kinds(settings), current_kind=locked['kind'])
-    rules.validate_period(start, end, today)
+    rules.validate_period(start, end, today, kind)
     _ensure_free(cursor, user['id'], start, end, today, exclude_id=locked['id'])
 
     # Правка начинает маршрут заново: СВ согласовывал другие даты.
@@ -267,7 +268,8 @@ def _review_extra(viewer, raw, settings_by_department):
     days = rules.period_days(raw['start_date'], raw['end_date'])
     return {
         'role': role,
-        'actions': list(rules.reviewer_actions(role, raw['status'])) if int(raw['operator_id']) != int(viewer['user_id']) else [],
+        'actions': (list(rules.reviewer_actions(role, raw['status'], raw['kind']))
+                    if int(raw['operator_id']) != int(viewer['user_id']) else []),
         'awaitsMe': rules.awaits(role, raw['status']),
         # Утверждение СВ — промежуточное, главы и админа — окончательное.
         'approveIsFinal': rules.status_after_approve(role) == 'approved',
@@ -298,6 +300,8 @@ def review_payload(cursor, *, viewer, operator_ids, status_filter, today, limit=
         'pendingCount': 0,
         'canManageSettings': bool(viewer.get('is_admin')),
         'enabled': bool(viewer.get('is_admin')) or bool(enabled_departments & viewer_departments),
+        # Какие виды приходят в эту очередь — по ним она себя и называет.
+        'kinds': list(queries.enabled_kinds(cursor, None if viewer.get('is_admin') else viewer_departments)),
         'today': today.strftime('%Y-%m-%d'),
     }
     if not ids:
@@ -369,7 +373,10 @@ def decide(cursor, deps, outbox, *, viewer, actor, request_id, data, in_scope, t
 
     data = data or {}
     action = str(data.get('action') or '').strip().lower()
-    if action not in rules.reviewer_actions(role, locked['status']):
+    if action not in rules.reviewer_actions(role, locked['status'], locked['kind']):
+        if action == 'propose' and locked['kind'] == 'sick_leave':
+            raise LeaveError('По больничному другие даты не предлагают — его согласуют или отклоняют',
+                             code='LEAVE_LOCKED', status=409)
         raise LeaveError('Сейчас это недоступно: заявка — «%s»' % rules.STATUS_LABELS[locked['status']],
                          code='LEAVE_LOCKED', status=409)
     comment = rules.clean_text(data.get('comment'), rules.COMMENT_MAX_CHARS)

@@ -21,21 +21,32 @@ import {
     daysText,
     formatLeavePeriod,
     leaveApiError,
+    leaveKindsText,
     leavePeriodDays,
 } from './leaveRequests';
 
 /*
- * Очередь «Отпуск и Б/С» — вкладка окна «Запросы» в «Графиках работы»
- * (задача #358). Разбирают супервайзер (первый шаг) и глава отдела
- * (утверждение). Что кому можно, решает сервер и присылает в item.actions:
- * здесь кнопки только рисуются.
+ * Очередь «Отпуск, Б/С и больничный» — вкладка окна «Запросы» в «Графиках
+ * работы» (задачи #358, #346). Разбирают супервайзер (первый шаг) и глава
+ * отдела (утверждение). Что кому можно, решает сервер и присылает в
+ * item.actions: здесь кнопки только рисуются (у больничного «Другие даты» нет
+ * — сервер их не пришлёт).
  *
  * Пересечения (ТЗ п. 4) стоят жёлтым блоком прямо в заявке: это то, ради
- * чего руководитель останавливается, а «никто не отдыхает» не пишем вовсе —
+ * чего руководитель останавливается, а «никто не отсутствует» не пишем вовсе —
  * обычное состояние не красим и не подписываем.
  */
 
-const QUEUE_HINT = 'Заявку сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встаёт в график оператора, а смены на эти дни снимаются. Супервайзер может предложить другие даты: заявка вернётся оператору, и он ответит, согласен ли. Руководитель и администратор могут утвердить заявку сразу, не дожидаясь супервайзера. Жёлтым показано, кто из отдела уже отдыхает в эти даты — по утверждённым отпускам и Б/С в графике.';
+const queueHint = (kinds) => [
+    'Заявку сначала согласует супервайзер, затем утверждает руководитель отдела — после этого период сам встаёт в график оператора, а смены на эти дни снимаются.',
+    'Супервайзер может предложить другие даты: заявка вернётся оператору, и он ответит, согласен ли.',
+    (kinds || []).includes('sick_leave')
+        ? 'Больничный подают и задним числом; другие даты по нему не предлагают.'
+        : '',
+    'Руководитель и администратор могут утвердить заявку сразу, не дожидаясь супервайзера.',
+    `Жёлтым показано, кто из отдела уже отсутствует в эти даты — по утверждённым ${
+        (kinds || []).includes('sick_leave') ? 'отпускам, Б/С и больничным' : 'отпускам и Б/С'} в графике.`,
+].filter(Boolean).join(' ');
 
 const TENURE_HINT = 'Период Б/С не войдёт в стаж: «Стаж» в профиле и стаж в расчётах начнутся позже даты найма на эти дни. По настройке отдела переключатель сам включён для длительного Б/С — проверьте и решите сами.';
 
@@ -48,7 +59,7 @@ const fmtDateTime = (iso) => {
     return match ? `${match[3]}.${match[2]} ${match[4]}:${match[5]}` : '';
 };
 
-function OverlapNote({ overlaps, today, title = 'В эти даты уже отдыхают' }) {
+function OverlapNote({ overlaps, today, title = 'В эти даты уже отсутствуют' }) {
     const total = Number(overlaps?.total) || 0;
     if (!total) return null;
     const items = Array.isArray(overlaps?.items) ? overlaps.items : [];
@@ -147,7 +158,7 @@ function ProposeEditor({ api, item, today, busy, onCancel, onSubmit }) {
                 {days > 0 && <span className="font-semibold text-slate-700">{daysText(days)}</span>}
                 {previewLoading && <Loader2 size={12} className="animate-spin text-slate-400" aria-hidden="true" />}
             </div>
-            <OverlapNote overlaps={preview} today={today} title="В новые даты отдыхают" />
+            <OverlapNote overlaps={preview} today={today} title="В новые даты отсутствуют" />
             <input
                 type="text"
                 value={comment}
@@ -336,7 +347,7 @@ export default function LeaveReviewPanel({
                     ]}
                 />
                 <div className="flex items-center gap-1.5">
-                    <InfoHint side="right" text={QUEUE_HINT} />
+                    <InfoHint side="right" text={queueHint(review.kinds)} />
                     {canManageSettings && (
                         <button type="button" className={`${iosBtnGhost} shrink-0`} onClick={onOpenSettings} title="Какие отделы принимают заявки">
                             <Settings2 size={13} className="text-slate-400" aria-hidden="true" />
@@ -373,8 +384,8 @@ export default function LeaveReviewPanel({
                     </div>
                     <div className="mt-0.5 text-[12.5px] text-slate-500">
                         {statusFilter === 'pending'
-                            ? 'Новые заявки на отпуск и Б/С появятся здесь и в колоколе.'
-                            : 'Операторы ещё не подавали заявок на отпуск и Б/С.'}
+                            ? `Новые заявки на ${leaveKindsText(review.kinds)} появятся здесь и в колоколе.`
+                            : `Операторы ещё не подавали заявок на ${leaveKindsText(review.kinds)}.`}
                     </div>
                 </div>
             ) : (
