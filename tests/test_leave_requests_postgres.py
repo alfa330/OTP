@@ -759,7 +759,7 @@ def test_routes_give_head_settings_journal_and_excel(db):
 # ── Пилот ───────────────────────────────────────────────────────────────────
 
 def test_pilot_routes_supervisor_step_to_participant_and_hides_the_rest(db, monkeypatch):
-    # Как на проде: оператор-участник — в группе СВ вне пилота, СВ-участник — другой СВ отдела.
+    # Как в пилоте на проде 03.11: оператор-участник — в группе СВ вне пилота, СВ-участник — другой СВ отдела.
     monkeypatch.setattr(access, 'PILOT_USER_IDS', frozenset({OP_C, SV_A}))
     deps, outbox = Deps(), notify.Outbox()
     with db.cursor() as cur:

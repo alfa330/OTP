@@ -114,26 +114,25 @@ class SettingsTests(unittest.TestCase):
 
 
 class PilotTests(unittest.TestCase):
-    """Пилот 03.11.2026: подаёт оператор 56, разбирает СВ 55, главы и суперадмины — все."""
+    """Пилот 03.11.2026 (оператор 56, СВ 55) снят тем же вечером: дальше решают настройки отделов."""
 
-    def test_pilot_list_is_what_the_owner_approved(self):
-        self.assertEqual(frozenset({55, 56}), access.PILOT_USER_IDS)
+    def test_pilot_is_off(self):
+        self.assertIsNone(access.PILOT_USER_IDS)
+        self.assertTrue(access.allowed(57, 'operator'))
+        self.assertTrue(access.allowed(3, 'admin'))
+        self.assertTrue(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': []}))
 
-    def test_who_is_in(self):
-        self.assertTrue(access.allowed(56, 'operator'))
-        self.assertTrue(access.allowed(55, 'sv'))
-        self.assertTrue(access.allowed(2, 'super_admin'))
-        self.assertTrue(access.allowed(1, 'admin', headed=True))  # глава отдела
-        self.assertFalse(access.allowed(57, 'operator'))
-        self.assertFalse(access.allowed(300, 'sv'))
-        self.assertFalse(access.allowed(3, 'admin'))  # админ без отдела — не суперадмин
-        self.assertTrue(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': [4]}))
-        self.assertFalse(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': []}))
-
-    def test_opening_to_everyone_is_one_line(self):
-        with mock.patch.object(access, 'PILOT_USER_IDS', None):
-            self.assertTrue(access.allowed(57, 'operator'))
-            self.assertTrue(access.allowed(3, 'admin'))
+    def test_who_is_in_while_pilot_runs(self):
+        with mock.patch.object(access, 'PILOT_USER_IDS', frozenset({55, 56})):
+            self.assertTrue(access.allowed(56, 'operator'))
+            self.assertTrue(access.allowed(55, 'sv'))
+            self.assertTrue(access.allowed(2, 'super_admin'))
+            self.assertTrue(access.allowed(1, 'admin', headed=True))  # глава отдела
+            self.assertFalse(access.allowed(57, 'operator'))
+            self.assertFalse(access.allowed(300, 'sv'))
+            self.assertFalse(access.allowed(3, 'admin'))  # админ без отдела — не суперадмин
+            self.assertTrue(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': [4]}))
+            self.assertFalse(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': []}))
 
 
 class JournalTests(unittest.TestCase):
