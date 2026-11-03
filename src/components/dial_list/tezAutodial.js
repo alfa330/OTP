@@ -1,6 +1,8 @@
 /*
- * «Автообзвон Тез» (15.10.2026): чистая логика раздела, без React. На неё написан
- * node-тест (tests/dial_list_tez_autodial.test.mjs).
+ * Раздел Тез КЦ на движке обзвона (15.10.2026; до 03.11.2026 — «Автообзвон Тез», с
+ * 03.11.2026 — «Воронка ОП Tez»): чистая логика раздела, без React. На неё написан
+ * node-тест (tests/dial_list_tez_autodial.test.mjs). Логика вкладки «Успешки» — в
+ * tezSuccesses.js.
  *
  * Раздел — тот же движок обзвона (dial_list), что у «Удаленного КЦ», но отдел в нём
  * с ПРОФИЛЕМ 'tez' (контракт сервер ↔ сайт ↔ телефон от 15.10.2026, решения владельца):
@@ -25,7 +27,8 @@ import { isNewId } from './outcomeFormat.js';
 export const PROFILE_REMOTE_CC = 'remote_cc';
 export const PROFILE_TEZ = 'tez';
 
-export const TEZ_SECTION_TITLE = 'Автообзвон Тез';
+// Владелец 03.11.2026: раздел переименован, когда в него переехали успешки ОП из «Учёта часов».
+export const TEZ_SECTION_TITLE = 'Воронка ОП Tez';
 
 /** Профиль отдела: 'tez' или 'remote_cc'. Пустое и незнакомое — удалённый КЦ:
     сервер до профилей считал так все отделы раздела. */
@@ -382,14 +385,15 @@ export const tezUploadSummary = (data, periodText = '') => {
     return `${periodText ? `${periodText}: ` : ''}${parts.join(', ')}`;
 };
 
-/** Что стало с копией файла в «Базе лидов ОП TEZ» (контракт §0.3): {ok, text} или null. */
+/** Что стало с копией файла в базе успешек — вкладке «Успешки» (контракт §0.3; до 03.11.2026 —
+    окно «База лидов ОП TEZ» в «Учёте часов»): {ok, text} или null. */
 export const mirrorSummary = (mirror) => {
     if (!mirror || typeof mirror !== 'object') return null;
-    if (mirror.error) return { ok: false, text: `В «Базу лидов ОП TEZ» не попало: ${mirror.error}` };
+    if (mirror.error) return { ok: false, text: `Во вкладку «Успешки» не попало: ${mirror.error}` };
     const parts = [`новых ${mirror.rows_new ?? 0}`];
     if (mirror.rows_duplicate) parts.push(`повторов ${mirror.rows_duplicate}`);
     if (mirror.rows_invalid) parts.push(`без номера ${mirror.rows_invalid}`);
-    return { ok: true, text: `В «Базе лидов ОП TEZ»: ${parts.join(', ')}` };
+    return { ok: true, text: `Во вкладке «Успешки»: ${parts.join(', ')}` };
 };
 
 /* ─── акции и офферы ───────────────────────────────────────────────────── */

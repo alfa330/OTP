@@ -337,7 +337,7 @@ export function calculateTezOpMonthlyPlan({
     if (planFte <= 0 || fteNorm <= 0) {
         return { ...base, plan: null, caseCode: 'no_plan',
             caseLabel: planFte <= 0 ? 'План на 1 FTE не задан' : 'Норма часов на 1 FTE не задана',
-            lines: ['Задайте план и норму часов на 1 FTE в панели «План ОП TEZ».'] };
+            lines: ['Задайте план и норму часов на 1 FTE в разделе «Воронка ОП Tez», вкладка «Успешки».'] };
     }
     if (hire && hasPeriod && hire > monthEnd) {
         return { ...base, plan: null, caseCode: 'not_hired',

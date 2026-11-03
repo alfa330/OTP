@@ -15,7 +15,9 @@ import { monthLabel } from './dialListPeriods';
 import { sameSectionTitle } from './linePicker';
 import TezAutodialAnalytics from './TezAutodialAnalytics';
 import { TezOffersPanel, TezOperatorRow, TezWhatsAppPanel } from './TezAutodialPanels';
+import TezSuccessesPanel from './TezSuccessesPanel';
 import { PROFILE_REMOTE_CC, PROFILE_TEZ, TEZ_SECTION_TITLE, departmentsOfProfile, normalizeProfile } from './tezAutodial';
+import { currentMonthKey } from './tezSuccesses';
 
 /*
  * Раздел «Удаленный КЦ» (до 07.10.2026 — «Обзвон из телефона») — экран руководителя
@@ -39,15 +41,21 @@ import { PROFILE_REMOTE_CC, PROFILE_TEZ, TEZ_SECTION_TITLE, departmentsOfProfile
  * здесь ничего не «доказывает». Поэтому цифры могут догонять разговор на
  * несколько секунд.
  *
- * С 15.10.2026 тот же экран — раздел «Автообзвон Тез» (profile='tez'): тот же движок,
- * но отделы своего профиля, цель лида — выход на линию (TEZ APP), а в настройках —
- * автообзвон, постобработка, расписание недозвонов, офферы и WhatsApp. В статусе
- * «Активный» телефон оператора звонит сам, подряд; в «Исходе» — оператор сам.
+ * С 15.10.2026 тот же экран — раздел Тез КЦ (profile='tez'; до 03.11.2026 — «Автообзвон
+ * Тез», с 03.11.2026 — «Воронка ОП Tez»): тот же движок, но отделы своего профиля, цель
+ * лида — выход на линию (TEZ APP), а в настройках — автообзвон, постобработка,
+ * расписание недозвонов, офферы и WhatsApp. В статусе «Активный» телефон оператора
+ * звонит сам, подряд; в «Исходе» — оператор сам.
+ *
+ * С 03.11.2026 у Тез есть вкладка «Успешки» (TezSuccessesPanel) — переехавшее из «Учёта
+ * часов» окно «База лидов и успешки»: план отдела, воронка базы, успешки, лиды, загрузки.
  */
 
 const TABS = [
     { value: 'operators', label: 'Операторы', icon: <FaIcon className="fas fa-users" /> },
     { value: 'analytics', label: 'Аналитика', icon: <FaIcon className="fas fa-chart-bar" /> },
+    // Успешки ОП (03.11.2026) — только у Тез: окно «База лидов и успешки» из «Учёта часов».
+    { value: 'successes', label: 'Успешки', icon: <FaIcon className="fas fa-circle-check" /> },
     { value: 'lines', label: 'Линии', icon: <FaIcon className="fas fa-phone" /> },
     { value: 'leads', label: 'База водителей', icon: <FaIcon className="fas fa-address-book" /> },
     { value: 'journal', label: 'Журнал', icon: <FaIcon className="fas fa-clock-rotate-left" /> },
@@ -164,6 +172,10 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     // Месяц базы, который смотрим во вкладках «База водителей» и «Журнал»
     // ('' — обзваниваемый месяц отдела). Сбрасывается при смене отдела.
     const [period, setPeriod] = useState('');
+    // Месяц вкладки «Успешки» ('YYYY-MM') — свой: успешки смотрят и за месяцы до раздела
+    // (базы с июля 2026 грузили в «Учёте часов»), а месяц базы обзвона — только из своих баз.
+    // Живёт здесь, а не во вкладке, — чтобы пережить переход на другие вкладки и обратно.
+    const [successMonth, setSuccessMonth] = useState(() => currentMonthKey());
     const [date, setDate] = useState(todayIso);
     // Переход из «Аналитики» в журнал с готовым отбором: { sign | stage | operatorId, nonce }.
     const [journalPreset, setJournalPreset] = useState(null);
@@ -319,7 +331,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                 <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
                         <div className="grid h-10 w-10 place-items-center rounded-2xl bg-blue-50 text-blue-600">
-                            <FaIcon className="fas fa-list-check" style={{ width: 16, height: 16 }} />
+                            {/* У Тез — воронка, как у «Воронки ОП» и пункта меню. */}
+                            <FaIcon className={tez ? 'fas fa-filter' : 'fas fa-list-check'} style={{ width: 16, height: 16 }} />
                         </div>
                         <div>
                             <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-900">
@@ -446,6 +459,8 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             onChange={setTab}
                             options={TABS
                                 .filter((t) => !tez || t.value !== 'informer')
+                                // «Успешки» — только у Тез: успешки ОП Тез, у удалённого КЦ их нет.
+                                .filter((t) => tez || t.value !== 'successes')
                                 .map((t) => (t.value === 'leads' ? { ...t, count: dept.summary?.pool_available } : t))}
                             stretch
                             size="lg"
@@ -509,6 +524,19 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             period={period}
                             onPeriodChange={setPeriod}
                             onOpenJournal={openJournal}
+                        />
+                    )}
+
+                    {tab === 'successes' && tez && (
+                        <TezSuccessesPanel
+                            key={selected.department_id}
+                            apiBaseUrl={apiBaseUrl}
+                            authHeaders={authHeaders}
+                            departmentId={selected.department_id}
+                            month={successMonth}
+                            onMonthChange={setSuccessMonth}
+                            canEdit={canEdit}
+                            showToast={showToast}
                         />
                     )}
 

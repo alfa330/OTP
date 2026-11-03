@@ -93,7 +93,8 @@ test('офферы и шаблоны WhatsApp проверяются до зап
     assert.match(validateWaAllowed([{ id: 't', title: 'Бонус', text: 'Привет, {{1}}', params: ['{phone}'] }]),
         /подстановки \{phone\} нет/);
     assert.equal(mirrorSummary({ error: 'нет связи' }).ok, false);
-    assert.equal(mirrorSummary({ rows_new: 2, rows_duplicate: 1 }).text, 'В «Базе лидов ОП TEZ»: новых 2, повторов 1');
+    assert.equal(mirrorSummary({ error: 'нет связи' }).text, 'Во вкладку «Успешки» не попало: нет связи');
+    assert.equal(mirrorSummary({ rows_new: 2, rows_duplicate: 1 }).text, 'Во вкладке «Успешки»: новых 2, повторов 1');
     assert.equal(mirrorSummary(null), null);
 });
 

@@ -291,7 +291,9 @@ class UploadTests(unittest.TestCase):
             raise RuntimeError('база лидов недоступна')
         body = self._upload(_client(svc, role='admin', mirror=broken), TEZ).get_json()
         self.assertEqual(body["status"], 'success')
-        self.assertIn('загрузите его там вручную', body["mirror"]["error"])
+        # Своей загрузки у вкладки «Успешки» нет (03.11.2026): совет — загрузить файл здесь ещё раз.
+        self.assertIn('загрузите этот файл ещё раз', body["mirror"]["error"])
+        self.assertNotIn('там вручную', body["mirror"]["error"])
 
     def test_remote_cc_upload_is_unchanged(self):
         svc = _Svc()

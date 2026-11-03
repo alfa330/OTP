@@ -766,9 +766,11 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             if fresh:
                 svc.request_sign_check("загрузка базы")
             return jsonify({"status": "success", **counts}), 200
-        # Тез: кто уже ездит — тоже сразу (свой поток), и тот же файл — в «Базу лидов ОП TEZ»,
-        # где считаются успешки и зарплата (одна загрузка на обе, владелец 15.10.2026). Её сбой
-        # загрузку в раздел не отменяет: руководитель увидит mirror.error и загрузит файл там.
+        # Тез: кто уже ездит — тоже сразу (свой поток), и тот же файл — в базу успешек (tez_leads,
+        # вкладка «Успешки» раздела), где считаются успешки и зарплата (одна загрузка на обе,
+        # владелец 15.10.2026). Её сбой загрузку в раздел не отменяет: руководитель увидит
+        # mirror.error. Своей загрузки у вкладки «Успешки» нет (03.11.2026), поэтому лечится
+        # повторной загрузкой того же файла здесь: повторы ни в одной из баз не задваиваются.
         trip_check = ""
         if fresh:
             svc.request_trip_check("загрузка базы")
@@ -779,8 +781,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             try:
                 mirror = tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period_date)
             except Exception:
-                log.exception("dial_list: файл базы Тез не попал в «Базу лидов ОП TEZ» (отдел %s)", department_id)
-                mirror = {"error": "В «Базу лидов ОП TEZ» файл не попал — загрузите его там вручную"}
+                log.exception("dial_list: файл базы Тез не попал в базу успешек (отдел %s)", department_id)
+                mirror = {"error": "сбой сервера, загрузите этот файл ещё раз — повторы не задвоятся"}
         return jsonify({"status": "success", **counts, "mirror": mirror, "trip_check": trip_check}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/leads/cities', methods=['POST', 'OPTIONS'])

@@ -15,9 +15,6 @@ import { pageOfEmployeeGroups, pageOfEmployees } from './components/employees/em
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
-import TezOpPlanPanel from './components/salary/TezOpPlanPanel';
-import TezLeadsPanel from './components/salary/TezLeadsPanel';
-import FullscreenSheet from './components/common/FullscreenSheet';
 import TezDepartmentPlanSummary from './components/salary/TezDepartmentPlanSummary';
 import TezOpPlanCell from './components/salary/TezOpPlanCell';
 // Колокол виден всегда и на каждом экране — поэтому обычным импортом, а не
@@ -518,7 +515,7 @@ const DIAL_LIST_OVERSEER_DEPARTMENT_CODES = new Set(['szov']);
 // полным доступом»). Тот же список на бэкенде —
 // dial_list.service.DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES, и решающий он.
 const DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = new Set(['szov']);
-// Раздел «Автообзвон Тез» (15.10.2026): супервайзеры этого отдела работают в нём своим
+// Раздел «Воронка ОП Tez» (15.10.2026, до 03.11.2026 — «Автообзвон Тез»): супервайзеры этого отдела работают в нём своим
 // отделом. Тот же список на бэкенде — dial_list.service.DIAL_LIST_OWN_SUPERVISOR_CODES.
 const TEZ_AUTODIAL_DEPARTMENT_CODES = new Set(['tez']);
 // Глава этих отделов видит раздел только отчётами своей группы (владелец, 15.10.2026: «глава
@@ -631,7 +628,7 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // ограничены, а рядовым сотрудникам их задаёт набор «только это»
     // (DEPARTMENT_ONLY_VIEWS в departmentViews.js).
     dial_list: ['remote_cc'],
-    // «Автообзвон Тез» (15.10.2026) — тот же движок обзвона, отдел Тез КЦ (профиль tez).
+    // «Воронка ОП Tez» (15.10.2026, до 03.11.2026 — «Автообзвон Тез») — тот же движок обзвона, отдел Тез КЦ (профиль tez).
     tez_autodial: ['tez'],
     // Обучение
     trainings: ['szov', 'op'],
@@ -4550,15 +4547,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const [tezNormHoursFte, setTezNormHoursFte] = useState(null);
         // Общий план отдела и его закрытие приходят тем же запросом, что и план на
         // 1 FTE: { fte_total, plan_total, successes_total, closure_pct, ... }.
+        // Сам план, база лидов и сверка с 03.11.2026 — в разделе «Воронка ОП Tez»,
+        // вкладка «Успешки»; здесь — только колонки таблицы часов.
         const [tezPlanSummary, setTezPlanSummary] = useState(null);
+        // Перечитать план и успешки вместе с часами: от отработанных часов зависят
+        // фактический план отдела и «План успешек» (fetchDailyHoursAndTrainings).
         const [tezPlanReloadKey, setTezPlanReloadKey] = useState(0);
         // Успешки по оператору/дню для таба «Успешки» в учёте часов ОП:
         // { [operator_id]: { [деньМесяца]: количество } }.
         const [tezSuccessMap, setTezSuccessMap] = useState({});
-        const [tezSuccessReloadKey, setTezSuccessReloadKey] = useState(0);
-        // Полноэкранные окна ОП TEZ (план успешек / база лидов) — открываются из
-        // выпадашки «Работа», чтобы не занимать место в таблице часов.
-        const [salesOverlay, setSalesOverlay] = useState(null); // null | 'plan' | 'leads'
         const [selectedSvId, setSelectedSvId] = useState(user?.role === 'sv' ? user.id : '');
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' — последний выбор в окне отчёта
         const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
@@ -7109,13 +7106,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             return () => {
                 cancelled = true;
             };
-            // tezSuccessReloadKey — чтобы факт в общем плане обновлялся вместе с
-            // успешками после пересчёта базы лидов.
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey, tezSuccessReloadKey]);
+        }, [isTezOpContext, tezOpDeptId, month, user?.id, tezPlanReloadKey]);
 
         // Карта успешек оператор→день для таба «Успешки». Тянем ту же статистику,
-        // что и окно базы лидов (сужение по группе — на стороне сервера).
+        // что и вкладка «Успешки» раздела «Воронка ОП Tez» (сужение по группе — на
+        // стороне сервера).
         useEffect(() => {
             if (!isTezOpContext || !user?.id) {
                 setTezSuccessMap({});
@@ -7144,7 +7140,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 .catch(() => { if (!cancelled) setTezSuccessMap({}); });
             return () => { cancelled = true; };
             // eslint-disable-next-line react-hooks/exhaustive-deps
-        }, [isTezOpContext, selectedGroupId, month, user?.id, tezPlanReloadKey, tezSuccessReloadKey]);
+        }, [isTezOpContext, selectedGroupId, month, user?.id, tezPlanReloadKey]);
 
         useEffect(() => {
             setChatMetricsSurgeMonth(normalizeMonthKey(month));
@@ -9076,36 +9072,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     </div>
                 </div>
             )}
-            <FullscreenSheet
-                open={salesOverlay === 'leads'}
-                onClose={() => setSalesOverlay(null)}
-                icon="fa-users"
-                title="База лидов ОП TEZ"
-                subtitle={`План, успешки и воронка · ${month}`}
-            >
-                {tezOpDeptId != null && (
-                    <div className="mb-4">
-                        <TezOpPlanPanel
-                            apiBaseUrl={API_BASE_URL}
-                            userId={user.id}
-                            departmentId={tezOpDeptId}
-                            month={month}
-                            canEdit={true}
-                            refreshKey={tezSuccessReloadKey + tezPlanReloadKey}
-                            onSaved={() => setTezPlanReloadKey((k) => k + 1)}
-                        />
-                    </div>
-                )}
-                <TezLeadsPanel
-                    apiBaseUrl={API_BASE_URL}
-                    userId={user.id}
-                    departmentId={tezOpDeptId}
-                    groupId={selectedGroupId || null}
-                    month={month}
-                    canEdit={true}
-                    onDataChanged={() => setTezSuccessReloadKey((key) => key + 1)}
-                />
-            </FullscreenSheet>
             {/* Шапка раздела: название слева, месяц и действия справа. Подписи
                 «Параметры», «Действия», «Операторы» над группами кнопок убраны —
                 кнопки говорят сами за себя, а подписи только добавляли шум (#344). */}
@@ -9432,25 +9398,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     </button>
                                                 </div>
                                             )}
-                                            {isTezOpContext && groupHasCalls && (
-                                                <div className="mt-1 flex flex-col border-t border-slate-100 pt-1">
-                                                    <button
-                                                        type="button"
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            setSalesOverlay('leads');
-                                                            closeMenus();
-                                                        }}
-                                                        className={hoursMenuRowClass(false)}
-                                                        title="База лидов, план, воронка и успешки операторов ОП"
-                                                    >
-                                                        <span className="flex items-center gap-2.5">
-                                                            <FaIcon className="fas fa-users w-4 text-slate-400" />
-                                                            База лидов и успешки
-                                                        </span>
-                                                    </button>
-                                                </div>
-                                            )}
+                                            {/* База лидов ОП Тез, план отдела, воронка и сверка успешек с
+                                                03.11.2026 — вкладка «Успешки» раздела «Воронка ОП Tez». */}
                                         </div>
                                     </div>
                                 </div>
@@ -44077,7 +44026,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 || (isSupervisorRole(currentUserRole)
                     && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
                         normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));
-            // «Автообзвон Тез» (15.10.2026): тот же движок, что «Удаленный КЦ», но раздел
+            // «Воронка ОП Tez» (15.10.2026, до 03.11.2026 — «Автообзвон Тез»): тот же движок, что «Удаленный КЦ», но раздел
             // отдела Тез КЦ (профиль tez) — админы, глава Тез КЦ и его супервайзеры. Решающий —
             // сервер (dial_list.service.manager_scope: СВ отдела из DIAL_LIST_OWN_SUPERVISOR_CODES
             // видит свой отдел, глава — свой).
@@ -53958,7 +53907,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
                 // «Удаленный КЦ» — раздел отделов на Binotel, вне allowlist отдела.
                 if (view === 'dial_list' && canAccessDialListSection) return;
-                // «Автообзвон Тез» — так же, свой круг доступа.
+                // «Воронка ОП Tez» — так же, свой круг доступа.
                 if (view === 'tez_autodial' && canAccessTezAutodialSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
                 if (view === 'oktell_guard' && canAccessOktellGuard) return;
@@ -56615,7 +56564,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             onClick={(e) => handleSidebarViewNavigation(e, 'tez_autodial')}
                                                             className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_autodial' ? 'bg-blue-700' : ''}`}
                                                         >
-                                                            <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Автообзвон Тез</span>
+                                                            <FaIcon className="fas fa-filter"></FaIcon> <span className="sidebar-text">Воронка ОП Tez</span>
                                                         </button>
                                                     </li>
                                                 </SidebarDeptScope>
@@ -56723,7 +56672,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     onClick={(e) => handleSidebarViewNavigation(e, 'tez_autodial')}
                                                     className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'tez_autodial' ? 'bg-blue-700' : ''}`}
                                                 >
-                                                    <FaIcon className="fas fa-phone-volume"></FaIcon> <span className="sidebar-text">Автообзвон Тез</span>
+                                                    <FaIcon className="fas fa-filter"></FaIcon> <span className="sidebar-text">Воронка ОП Tez</span>
                                                 </button>
                                             </li>
                                             )}
@@ -59365,7 +59314,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 />
                             </Suspense>
                         ))}
-                        {/* «Автообзвон Тез»: тот же экран с профилем tez — телефон оператора звонит
+                        {/* «Воронка ОП Tez»: тот же экран с профилем tez — телефон оператора звонит
                             сам в статусе «Активный»; цель — выход водителя на линию. Свой круг доступа.
                             key — чтобы переход между двумя разделами не унёс состояние одного в другой. */}
                         {( view === "tez_autodial" && canAccessTezAutodialSection && (
