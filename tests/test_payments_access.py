@@ -13,9 +13,8 @@
    согласующий видит свои согласования, а не чужие; полный номер карты — только
    у финансового отдела; справочник карт ведёт он же.
 
-Рядовых участников в периметре на проде пока нет, поэтому тесты расширяют
-список на время проверки: правила должны быть верны к моменту, когда раздел
-откроют шире.
+Тесты расширяют список выдуманными id на время проверки: правила ролей не
+должны зависеть от того, кого владелец уже впустил в раздел.
 """
 
 import unittest
@@ -61,10 +60,13 @@ class SectionGateTests(unittest.TestCase):
         user_id = access.SECTION_ALLOWED_USER_IDS[0]
         self.assertTrue(access.can_open_section({'user_id': str(user_id)}))
 
-    def test_pilot_perimeter_is_owner_coexecutor_and_tz_author(self):
+    def test_perimeter_is_named_by_owner(self):
         # 14.10.2026 — постановщик ТЗ #381 (id 242), вход и администрирование, как у первых двух.
-        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2, 448, 242))
-        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2, 448, 242))
+        # 03.11.2026 — учредитель (214) с администрированием; 467, 455 и 603 — только вход.
+        self.assertEqual(tuple(access.SECTION_ALLOWED_USER_IDS), (2, 448, 242, 214, 467, 455, 603))
+        self.assertEqual(tuple(access.SECTION_ADMIN_USER_IDS), (2, 448, 242, 214))
+        # Администратор вне периметра не вошёл бы в раздел, которым управляет.
+        self.assertLessEqual(set(access.SECTION_ADMIN_USER_IDS), set(access.SECTION_ALLOWED_USER_IDS))
 
     def test_role_member_outside_the_perimeter_is_marked(self):
         """Роль в «Участниках» раздел не открывает — администратор должен это видеть."""
