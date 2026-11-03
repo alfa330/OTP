@@ -1549,8 +1549,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         return jsonify({
             'route': basis,
             'manager': manager,
-            # Компания не указана — первым заявку получит бухгалтерия: укажет компанию, и
-            # согласующего выберут заново, уже с ней (просьба владельца 15.10.2026).
+            # Компания не указана — после руководителя заявку получит бухгалтерия: укажет
+            # компанию, и утверждающего выберут заново, уже с ней (владелец 15.10 и 03.11.2026).
             'entity_step': workflow.needs_entity_step(draft),
             'contract_check': {'applies': draft['payment_method'] == workflow.METHOD_INVOICE,
                                'ok': ok, 'reason': reason},

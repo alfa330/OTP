@@ -488,18 +488,20 @@ class EntityStepTests(unittest.TestCase):
                          ['Выберите компанию-плательщика'])
         self.assertFalse(wf.needs_entity_step(regular), 'компанию регулярного платежа задаёт справочник')
 
-    def test_unknown_company_puts_accounting_first(self):
+    def test_unknown_company_goes_to_accounting_after_manager(self):
+        # Владелец 03.11.2026: сначала руководитель, потом бухгалтерия указывает компанию, потом утверждающий.
         route = wf.build_route(purchase(legal_entity_id=None), initiator=INITIATOR, manager=MANAGER)
-        self.assertEqual(kinds(route), ['initiation', 'entity_clarify', 'manager_approval', 'approval',
+        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'entity_clarify', 'approval',
                                         'invoice_payment', 'receiving', 'closing_docs'])
-        step = route[1]
+        step = route[2]
         self.assertEqual((step['role_code'], step['assignee_id'], step['state']), ('accounting', None, 'pending'),
                          'компанию указывает бухгалтерия целиком, как и оплату (п. 9)')
         # «Согласование», а не «Инициация»: на инициации заявка считалась бы у инициатора.
         self.assertEqual(step['stage'], 'approval')
         card = wf.build_route(purchase(legal_entity_id=None, payment_method='card', card_recipient='employee'),
                               initiator=INITIATOR, manager=None)
-        self.assertEqual(kinds(card)[:3], ['initiation', 'entity_clarify', 'manager_approval'])
+        self.assertEqual(kinds(card)[:3], ['initiation', 'manager_approval', 'entity_clarify'])
+        self.assertEqual(card[1]['state'], 'skipped', 'руководителя нет — этап пропущен, компания всё равно нужна')
 
     def test_known_company_goes_straight_to_approval(self):
         self.assertNotIn('entity_clarify', kinds(wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)))
@@ -521,8 +523,10 @@ class EntityStepTests(unittest.TestCase):
         self.assertEqual(accounting['columns'][0], ('entity', 'Уточнение компании'))
         self.assertNotIn('entity', accounting['work'], 'компанию выбирают в окне заявки, а не перетаскиванием')
         positions = {item['kind']: item['position'] for item in wf.SUBTASKS}
-        self.assertLess(positions['initiation'], positions['entity_clarify'])
-        self.assertLess(positions['entity_clarify'], positions['manager_approval'])
+        # Подзадачи идут по позиции (list_subtasks: ORDER BY position) — так advance и открывает их.
+        self.assertLess(positions['initiation'], positions['manager_approval'])
+        self.assertLess(positions['manager_approval'], positions['entity_clarify'])
+        self.assertLess(positions['entity_clarify'], positions['approval'])
         self.assertEqual(wf.ACTIONS['entity_clarify'], ('set_entity',))
         self.assertEqual(wf.ACTION_LABELS['set_entity'], 'Указать компанию')
         self.assertFalse(wf.can_move('entity_clarify', 'review'), 'ступеней у этапа нет')

@@ -556,7 +556,12 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
 
     Что решили люди, пока компанию уточняли, пересборка не отменяет: этап, который
     администратор передал другому, остаётся у того, кому передан. Руководитель — тот,
-    кто стоит на этапе; уволили его за это время — руководителя ищут заново."""
+    кто стоит на этапе; уволили его за это время — руководителя ищут заново.
+
+    С 03.11.2026 (владелец) руководитель согласует ДО уточнения компании: пройденный им
+    этап пересборка не трогает — иначе он ушёл бы в начало и согласовывать пришлось бы
+    заново. Заявка, отправленная при прежнем порядке (руководитель после компании),
+    идёт по-старому: его этап ещё не начат и строится заново."""
     request_id = request['id']
     entity = directory.read_legal_entity(cursor, entity_id)
     if not entity or not entity.get('is_active'):
@@ -566,7 +571,10 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
     request = queries.read_request(cursor, request_id)
     initiator = {'id': request.get('initiator_id'), 'name': request.get('initiator_name')}
     steps = {item['kind']: item for item in queries.list_subtasks(cursor, request_id)}
-    manager = _current_manager(cursor, request, steps.get(workflow.KIND_MANAGER))
+    manager_step = steps.get(workflow.KIND_MANAGER) or {}
+    manager_passed = manager_step.get('state') in ('done', 'skipped')
+    manager = ({'id': manager_step.get('assignee_id'), 'name': manager_step.get('assignee_name')} if manager_passed
+               else _current_manager(cursor, request, steps.get(workflow.KIND_MANAGER)))
     basis, route = plan_route(cursor, request, initiator, manager)
     # Утверждение администратор передал вручную — его выбор остаётся, даже если он совпал с
     # тем, кого матрица назвала при отправке без компании.
@@ -578,7 +586,8 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
 
     notices.clear_subtask(cursor, subtask['id'])
     queries.complete_subtask(cursor, subtask['id'], actor, outcome='entity_set', comment=comment)
-    queries.write_route(cursor, request_id, route, keep=(workflow.KIND_ENTITY,))
+    queries.write_route(cursor, request_id, route,
+                        keep=(workflow.KIND_ENTITY, workflow.KIND_MANAGER) if manager_passed else (workflow.KIND_ENTITY,))
     queries.set_route_basis(cursor, request_id, basis)
     # Условия, с которыми заявка ушла от инициатора, — теперь с компанией: иначе его ответ
     # на будущий возврат счёл бы её «сменой условий» и отправил заявку на согласование заново.

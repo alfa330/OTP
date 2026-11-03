@@ -7,7 +7,8 @@
 
 Правила шага — в workflow.py (их проверяет test_payments_workflow.EntityStepTests).
 Здесь — проводка, которой человек пользуется на самом деле: отправка заявки строит
-маршрут с бухгалтерией первой, действие бухгалтерии пишет компанию и строит маршрут
+маршрут с бухгалтерией после руководителя (владелец 03.11.2026; до того бухгалтерия шла
+первой), действие бухгалтерии пишет компанию и строит маршрут
 заново (согласующего выбирает матрица уже с компанией), ручка предпросмотра говорит
 форме, что первой будет бухгалтерия. База не нужна: запросы подменены unittest.mock —
 тем же средством, что и в test_payments_closing_wiring.py.
@@ -115,7 +116,30 @@ class SetEntityTests(unittest.TestCase):
     def act(self, **fields):
         return flow.act(mock.MagicMock(), REQUEST_ID, wf.KIND_ENTITY, 'set_entity', ACCOUNTANT, fields=fields)
 
+    def test_manager_who_already_approved_is_not_asked_again(self):
+        # Владелец 03.11.2026: руководитель согласует ДО уточнения компании — к выбору компании
+        # его этап пройден, и пересборка маршрута его не трогает.
+        self.steps = [step(wf.KIND_MANAGER, 8, 'Руководитель', state='done'), entity_subtask(),
+                      step(wf.KIND_APPROVAL, None, None)]
+        self.act(legal_entity_id=2)
+        route_call = self.queries.write_route.call_args
+        self.assertEqual(route_call.kwargs, {'keep': (wf.KIND_ENTITY, wf.KIND_MANAGER)})
+        self.assertEqual(route_entry(route_call.args[2], wf.KIND_APPROVAL)['assignee_id'], 30,
+                         'утверждающего выбирают уже по компании')
+        # Руководителя не перепроверяют и не ищут заново, поле заявки не переписывают: он уже согласовал.
+        self.assertNotIn(8, [call.args[1] for call in self.queries.user_brief.call_args_list])
+        self.queries.resolve_manager.assert_not_called()
+        self.queries.update_request_fields.assert_called_once_with(mock.ANY, REQUEST_ID, {'legal_entity_id': 2})
+        self.advance.assert_called_once()
+
+    def test_skipped_manager_stays_skipped(self):
+        self.steps = [step(wf.KIND_MANAGER, None, None, state='skipped'), entity_subtask(),
+                      step(wf.KIND_APPROVAL, None, None)]
+        self.act(legal_entity_id=2)
+        self.assertEqual(self.queries.write_route.call_args.kwargs, {'keep': (wf.KIND_ENTITY, wf.KIND_MANAGER)})
+
     def test_company_is_written_and_the_route_is_built_again_with_it(self):
+        # Заявка, отправленная при прежнем порядке: компания первой, руководитель ещё не начат.
         result = self.act(legal_entity_id=2, comment='Закуп для парка «Север»')
         self.assertEqual(result, {'next': wf.KIND_MANAGER})
         self.queries.update_request_fields.assert_called_once_with(mock.ANY, REQUEST_ID, {'legal_entity_id': 2})
@@ -235,7 +259,7 @@ class SetEntityTests(unittest.TestCase):
 
 
 class SubmitWithoutCompanyTests(unittest.TestCase):
-    """flow.submit: заявка без компании уходит сначала бухгалтерии."""
+    """flow.submit: заявка без компании уходит руководителю, потом бухгалтерии."""
 
     def submit(self, entities=(NORTH,), clarified=None, **overrides):
         row = purchase_row(stage='initiation', submitted_at=None, submitted_snapshot=None)
@@ -253,7 +277,7 @@ class SubmitWithoutCompanyTests(unittest.TestCase):
         directory.list_limits.return_value = []
         directory.list_routes.return_value = []
         directory.list_legal_entities.return_value = list(entities)
-        advance = mock.MagicMock(return_value=wf.KIND_ENTITY)
+        advance = mock.MagicMock(return_value=wf.KIND_MANAGER)
         for patcher in (mock.patch.object(flow, 'queries', queries),
                         mock.patch.object(flow, 'directory', directory),
                         mock.patch.object(flow, 'notices', mock.MagicMock()),
@@ -264,11 +288,13 @@ class SubmitWithoutCompanyTests(unittest.TestCase):
         result = flow.submit(mock.MagicMock(), REQUEST_ID, INITIATOR)
         return queries, result
 
-    def test_first_stop_is_accounting(self):
+    def test_manager_first_then_accounting(self):
         queries, result = self.submit()
-        self.assertEqual(result['next'], wf.KIND_ENTITY)
+        self.assertEqual(result['next'], wf.KIND_MANAGER)
         route = queries.write_route.call_args.args[2]
-        self.assertEqual([entry['kind'] for entry in route][:3], ['initiation', 'entity_clarify', 'manager_approval'])
+        self.assertEqual([entry['kind'] for entry in route][:4],
+                         ['initiation', 'manager_approval', 'entity_clarify', 'approval'])
+        self.assertEqual(route_entry(route, wf.KIND_MANAGER)['assignee_id'], 8)
         snapshot = queries.mark_submitted.call_args.kwargs['snapshot']
         self.assertIsNone(snapshot['legal_entity_id'], 'условия на момент отправки — без компании')
 
@@ -601,3 +627,16 @@ class RoutePreviewTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RouteOrderInFormTests(unittest.TestCase):
+    """Форма показывает маршрут в том же порядке, что строит сервер (владелец 03.11.2026)."""
+
+    def test_preview_shows_manager_before_accounting(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        form = (root / 'src' / 'components' / 'payments' / 'PaymentRequestForm.jsx').read_text(encoding='utf-8-sig')
+        block = form.split('Маршрут согласования <FieldHint', 1)[1].split('</IosModal>', 1)[0]
+        self.assertLess(block.index('{route.managerStep && ('), block.index('{entityStep && ('))
+        meta = (root / 'src' / 'components' / 'payments' / 'paymentsMeta.js').read_text(encoding='utf-8-sig')
+        self.assertIn('после руководителя компанию укажет бухгалтерия, и потом заявка уйдёт на утверждение', meta)

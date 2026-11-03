@@ -224,7 +224,7 @@ def submitted_invoice_request(cur, observers, *, with_entity=True):
     for role, user_id in (('approver', APPROVER), ('accounting', ACCOUNTANT)):
         cur.execute("INSERT INTO payment_role_members (role_code, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (role, user_id))
-    # Компания указана: без неё маршрут начинался бы с её уточнения бухгалтерией (KIND_ENTITY).
+    # Компания указана: без неё после руководителя её уточняла бы бухгалтерия (KIND_ENTITY).
     entity_id = None
     if with_entity:
         cur.execute("INSERT INTO payment_legal_entities (name) VALUES ('ТОО «Наблюдение»') RETURNING id")
@@ -300,8 +300,15 @@ def test_company_clarified_by_accounting_reaches_observers(db, monkeypatch):
     monkeypatch.setattr(access, 'SECTION_ALLOWED_USER_IDS', (INITIATOR, WATCHER, ACCOUNTANT, MANAGER, APPROVER))
     with db.cursor() as cur:
         rid = submitted_invoice_request(cur, [WATCHER], with_entity=False)
+        # Владелец 03.11.2026: сначала руководитель, и только после него бухгалтерия указывает компанию.
+        assert queries.read_subtask(cur, rid, workflow.KIND_MANAGER)['state'] == 'open'
+        assert queries.read_subtask(cur, rid, workflow.KIND_ENTITY)['state'] == 'pending'
+        act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         assert queries.read_subtask(cur, rid, workflow.KIND_ENTITY)['state'] == 'open'
         assert [kind for kind, _title in unread(cur, WATCHER, rid)] == ['watching']
         cur.execute("INSERT INTO payment_legal_entities (name) VALUES ('ТОО «Уточнённая»') RETURNING id")
         act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=cur.fetchone()[0])
         assert ('entity_set', 'Компания указана') in unread(cur, WATCHER, rid)
+        # Пересборка маршрута после компании согласование руководителя не сбрасывает.
+        assert queries.read_subtask(cur, rid, workflow.KIND_MANAGER)['state'] == 'done'
+        assert queries.read_subtask(cur, rid, workflow.KIND_APPROVAL)['state'] == 'open'
