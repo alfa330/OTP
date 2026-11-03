@@ -178,6 +178,7 @@ def build_leave_requests_blueprint(*, db, require_api_key, build_cors_preflight_
     @route('/review/<int:request_id>/overlaps')
     def review_overlaps(request_id, *, cursor, viewer, requester, outbox, today):
         _require_manager(viewer)
+        service.require_access(viewer)
         raw = queries.fetch_request(cursor, request_id, today)
         if not raw or not _in_scope_fn(requester, viewer)(raw['operator_id']):
             raise LeaveError('Заявка не найдена', code='LEAVE_NOT_FOUND', status=404)
@@ -199,6 +200,7 @@ def build_leave_requests_blueprint(*, db, require_api_key, build_cors_preflight_
 
     def _journal(cursor, viewer, requester, today, limit):
         _require_manager(viewer)
+        service.require_access(viewer)
         start, end = rules.parse_month(request.args.get('month'), today)
         kind, statuses = rules.journal_filter(request.args.get('kind'), request.args.get('status'))
         allowed = _allowed_ids(requester, viewer, service.review_candidates(cursor))

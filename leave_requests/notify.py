@@ -11,7 +11,7 @@
 
 import html
 
-from . import queries, rules
+from . import access, queries, rules
 
 
 class Outbox:
@@ -64,6 +64,9 @@ def _send(cursor, outbox, user_ids, text, *, request_id, base_url, exclude=()):
         return
     skip = {int(x) for x in exclude or () if x}
     targets = [int(u) for u in user_ids or () if u and int(u) not in skip]
+    # Пилот: Telegram — только тем, кому заявки открыты (access.py).
+    allowed = access.allowed_ids(cursor, targets)
+    targets = [u for u in targets if u in allowed]
     chats = queries.telegram_chats(cursor, targets)
     markup = _markup(request_link(base_url, request_id))
     for user_id in dict.fromkeys(targets):

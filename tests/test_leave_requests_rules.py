@@ -5,8 +5,9 @@
 """
 import unittest
 from datetime import date
+from unittest import mock
 
-from leave_requests import rules
+from leave_requests import access, rules
 from leave_requests.rules import LeaveError
 
 TODAY = date(2026, 11, 2)
@@ -110,6 +111,29 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(rules.can_manage_settings(admin))
         self.assertTrue(rules.can_manage_settings(head))
         self.assertFalse(rules.can_manage_settings(supervisor))
+
+
+class PilotTests(unittest.TestCase):
+    """Пилот 03.11.2026: подаёт оператор 56, разбирает СВ 55, главы и суперадмины — все."""
+
+    def test_pilot_list_is_what_the_owner_approved(self):
+        self.assertEqual(frozenset({55, 56}), access.PILOT_USER_IDS)
+
+    def test_who_is_in(self):
+        self.assertTrue(access.allowed(56, 'operator'))
+        self.assertTrue(access.allowed(55, 'sv'))
+        self.assertTrue(access.allowed(2, 'super_admin'))
+        self.assertTrue(access.allowed(1, 'admin', headed=True))  # глава отдела
+        self.assertFalse(access.allowed(57, 'operator'))
+        self.assertFalse(access.allowed(300, 'sv'))
+        self.assertFalse(access.allowed(3, 'admin'))  # админ без отдела — не суперадмин
+        self.assertTrue(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': [4]}))
+        self.assertFalse(access.viewer_allowed({'user_id': 9, 'role': 'sv', 'headed_department_ids': []}))
+
+    def test_opening_to_everyone_is_one_line(self):
+        with mock.patch.object(access, 'PILOT_USER_IDS', None):
+            self.assertTrue(access.allowed(57, 'operator'))
+            self.assertTrue(access.allowed(3, 'admin'))
 
 
 class JournalTests(unittest.TestCase):

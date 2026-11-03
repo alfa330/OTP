@@ -20,6 +20,8 @@
 import logging
 from datetime import datetime, time as day_time, timedelta
 
+from leave_requests import access as leave_access
+
 # Порядок здесь = порядок групп в колоколе. Сначала то, что требует действия с
 # дедлайном, потом то, что просто новое.
 #
@@ -1113,6 +1115,9 @@ def leave_requests(cursor, viewer, limit):
     и осиротевшие на шаге СВ (СВ удалён). Разобранная уходит сама: колокол
     считает заявки по состоянию, а не по отметкам прочтения.
     """
+    # Пилот (leave_requests/access.py): колокол — только тем, кому заявки открыты.
+    if not leave_access.allowed_ids(cursor, [viewer['user_id']]):
+        return 0, []
     params = {'user_id': viewer['user_id'], 'limit': limit}
     if str(viewer.get('role') or '') == 'operator':
         cursor.execute(

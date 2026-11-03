@@ -15,7 +15,7 @@ database.py, иначе тесты на настоящем Postgres тянули
 
 from datetime import datetime
 
-from . import notify, queries, rules
+from . import access, notify, queries, rules
 from .rules import LeaveError
 
 try:
@@ -44,6 +44,19 @@ def _now():
 def _require_operator(user):
     if not user or user.get('role') != 'operator':
         raise LeaveError('Заявку подаёт оператор', code='LEAVE_OPERATOR_ONLY', status=403)
+
+
+def require_access(viewer):
+    """Пилот (access.py): разбирать и настраивать — только участникам."""
+    if not access.viewer_allowed(viewer):
+        raise LeaveError('Заявки на отпуск пока открыты не всем', code='LEAVE_FORBIDDEN', status=403)
+
+
+def _step_supervisor(cursor, deps, user, today, step):
+    """СВ первого шага: СВ группы оператора, в пилоте — участник (access.pilot_supervisor)."""
+    if not step:
+        return None
+    return access.pilot_supervisor(cursor, user['department_id'], deps.resolve_supervisor(cursor, user['id'], today))
 
 
 def _own_locked(cursor, user, request_id):
@@ -110,7 +123,8 @@ def _overlaps_for(cursor, raw, today, *, start=None, end=None, limit=8):
 def operator_payload(cursor, user, today):
     """«Мои заявки»: доступные виды и свои заявки, свежие сверху."""
     settings = queries.load_settings(cursor, user.get('department_id')) if user else None
-    kinds = rules.allowed_kinds(settings) if user and user.get('role') == 'operator' else ()
+    kinds = (rules.allowed_kinds(settings)
+             if user and user.get('role') == 'operator' and access.allowed(user['id'], user['role']) else ())
     raws = queries.fetch_requests(
         cursor, 'r.operator_id = %(operator_id)s', {'operator_id': int(user['id']), 'today': today},
         limit=100) if user else []
@@ -151,14 +165,14 @@ def _read_form(data, kinds, *, current_kind=None):
 def create(cursor, deps, outbox, *, user, data, today, base_url=None):
     _require_operator(user)
     settings = queries.load_settings(cursor, user['department_id'])
-    kinds = rules.allowed_kinds(settings)
+    kinds = rules.allowed_kinds(settings) if access.allowed(user['id'], user['role']) else ()
     if not kinds:
         raise LeaveError('В вашем отделе такие заявки не принимаются', code='LEAVE_DISABLED', status=403)
     kind, start, end, reason = _read_form(data, kinds)
     rules.validate_period(start, end, today, kind)
     _ensure_free(cursor, user['id'], start, end, today)
 
-    supervisor_id = deps.resolve_supervisor(cursor, user['id'], today) if settings.get('supervisor_step') else None
+    supervisor_id = _step_supervisor(cursor, deps, user, today, settings.get('supervisor_step'))
     status = rules.first_status(settings, supervisor_id)
     request_id = queries.insert_request(
         cursor, operator_id=user['id'], department_id=user['department_id'], supervisor_id=supervisor_id,
@@ -184,7 +198,7 @@ def edit(cursor, deps, outbox, *, user, request_id, data, today, base_url=None):
     _ensure_free(cursor, user['id'], start, end, today, exclude_id=locked['id'])
 
     # Правка начинает маршрут заново: СВ согласовывал другие даты.
-    supervisor_id = deps.resolve_supervisor(cursor, user['id'], today) if settings.get('supervisor_step', True) else None
+    supervisor_id = _step_supervisor(cursor, deps, user, today, settings.get('supervisor_step', True))
     status = rules.first_status(settings, supervisor_id)
     queries.update_request(
         cursor, locked['id'], kind=kind, start_date=start, end_date=end, reason=reason, status=status,
@@ -290,6 +304,10 @@ def review_candidates(cursor):
 
 
 def review_payload(cursor, *, viewer, operator_ids, status_filter, today, limit=300):
+    if not access.viewer_allowed(viewer):
+        # Вне пилота вкладки нет вовсе: пустой ответ, а не отказ — экран просто её не рисует.
+        return {'requests': [], 'pendingCount': 0, 'canManageSettings': False, 'enabled': False,
+                'kinds': [], 'today': today.strftime('%Y-%m-%d')}
     ids = sorted({int(i) for i in operator_ids or ()})
     headed = set(viewer.get('headed_department_ids') or ())
     viewer_departments = set(headed)
@@ -371,6 +389,7 @@ def journal_payload(cursor, *, operator_ids, start, end, kind, statuses, today, 
 # ── Настройки ───────────────────────────────────────────────────────────────
 
 def _settings_scope(viewer):
+    require_access(viewer)
     scope = rules.settings_departments(viewer)
     if scope is not None and not scope:
         raise LeaveError('Настройки меняет руководитель отдела или администратор', code='LEAVE_FORBIDDEN',
@@ -408,6 +427,7 @@ def overlaps_preview(cursor, *, request_id, start, end, today):
 
 def decide(cursor, deps, outbox, *, viewer, actor, request_id, data, in_scope, today, base_url=None):
     """Решение СВ или главы: согласовать / утвердить, предложить даты, отклонить."""
+    require_access(viewer)
     locked = queries.lock_request(cursor, request_id)
     if not locked:
         raise LeaveError('Заявка не найдена', code='LEAVE_NOT_FOUND', status=404)

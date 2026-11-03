@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from leave_requests import notify, queries, rules, schema, service
+from leave_requests import access, notify, queries, rules, schema, service
 from leave_requests.rules import LeaveError
 from notifications import sources
 
@@ -122,6 +122,13 @@ def db():
             cur.execute('DROP SCHEMA %s CASCADE' % name)
         conn.commit()
         conn.close()
+
+
+@pytest.fixture(autouse=True)
+def open_to_all(monkeypatch):
+    """Маршрут проверяется без пилота — тот же код, когда заявки открыты всем.
+    Пилот (access.PILOT_USER_IDS) — своими тестами ниже."""
+    monkeypatch.setattr(access, 'PILOT_USER_IDS', None)
 
 
 class Deps:
@@ -747,6 +754,50 @@ def test_routes_give_head_settings_journal_and_excel(db):
     assert response.status_code == 200 and response.mimetype == report.XLSX_MIME
     assert 'attachment' in response.headers['Content-Disposition']
     assert [row[1] for row in _xlsx(response.data)['Журнал'].iter_rows(min_row=2, values_only=True)] == ['Оператор Анна']
+
+
+# ── Пилот ───────────────────────────────────────────────────────────────────
+
+def test_pilot_routes_supervisor_step_to_participant_and_hides_the_rest(db, monkeypatch):
+    # Как на проде: оператор-участник — в группе СВ вне пилота, СВ-участник — другой СВ отдела.
+    monkeypatch.setattr(access, 'PILOT_USER_IDS', frozenset({OP_C, SV_A}))
+    deps, outbox = Deps(), notify.Outbox()
+    with db.cursor() as cur:
+        assert service.operator_payload(cur, user(cur, OP_B), TODAY)['enabled'] is False
+        assert service.operator_payload(cur, user(cur, OP_C), TODAY)['enabled'] is True
+    with pytest.raises(LeaveError, match='не принимаются'):
+        create(db, deps, OP_B, '2026-12-01', '2026-12-03')
+
+    item = create(db, deps, OP_C, '2026-12-01', '2026-12-03', outbox=outbox)
+    # СВ группы — Бета, он вне пилота: шаг СВ ведёт участник Альфа, ему и Telegram.
+    assert item['status'] == 'supervisor' and item['supervisor']['id'] == SV_A
+    assert [chat for chat, _text, _markup in outbox.messages] == [9300]
+    assert review(db, SV_B)['enabled'] is False and review(db, SV_B)['requests'] == []
+    assert review(db, SV_A)['pendingCount'] == 1
+    assert review(db, HEAD)['enabled'] is True and review(db, ADMIN)['enabled'] is True
+    assert bell(db, SV_B, 'sv') == (0, [])
+    assert bell(db, SV_A, 'sv')[0] == 1
+    with pytest.raises(LeaveError, match='открыты не всем'):
+        decide(db, deps, SV_B, item['id'], action='approve')
+    with db.cursor() as cur, pytest.raises(LeaveError, match='руководитель отдела или администратор'):
+        service.settings_payload(cur, viewer=VIEWERS[SV_A])  # участнику-СВ — разбирать, не настраивать
+    plain_admin = {'user_id': 5, 'role': 'admin', 'department_id': None, 'is_admin': True,
+                   'is_supervisor': False, 'headed_department_ids': [], 'is_manager': True}
+    with db.cursor() as cur:
+        hidden = service.review_payload(cur, viewer=plain_admin, operator_ids=[OP_C], status_filter='pending',
+                                        today=TODAY)
+    assert hidden['enabled'] is False and hidden['requests'] == []
+
+    outbox = notify.Outbox()
+    decide(db, deps, SV_A, item['id'], outbox=outbox, action='approve')
+    assert [chat for chat, _text, _markup in outbox.messages] == [9100]  # глава
+    assert decide(db, deps, HEAD, item['id'], action='approve')['status'] == 'approved'
+
+
+def test_pilot_without_participant_supervisor_sends_request_to_head(db, monkeypatch):
+    monkeypatch.setattr(access, 'PILOT_USER_IDS', frozenset({OP_C}))
+    item = create(db, Deps(), OP_C, '2026-12-01', '2026-12-03')
+    assert item['status'] == 'head' and item['supervisor']['id'] is None
 
 
 # ── Время ───────────────────────────────────────────────────────────────────
