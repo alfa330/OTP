@@ -527,29 +527,38 @@ def local_coords(part, P):
 
 
 def pattern_head(part, P, Nn, t):
-    """Голова: светло-серая «шапочка» с полосами-«М» на лбу, пара полос по бокам, белая мордочка, румянец."""
+    """Голова: серебристая с полосами табби, белые только мордочка, щёчки под глазами и подбородок.
+
+    Как на наброске: серый охватывает макушку и бока дугой до уровня рта, белая
+    «маска» снизу посередине — так голова читается шаром, а не шапкой над белым
+    прямоугольником. Полосы: «М» на лбу до бровей, по две на висках от уголков глаз."""
     L = local_coords(part, P)
     radii = np.array(part.params['radii'])
     d = normalize_rows(L / radii)
     theta = np.arctan2(d[:, 0], -d[:, 1])           # 0 — середина мордочки, ±π/2 — бока
     z = d[:, 2]
     n = len(P)
-    wob = fbm(P, 3.2, seed=11) * 0.06
-    edge = 0.34 - 0.8 * smoothstep(0.3, 1.3, np.abs(theta)) - 0.2 * smoothstep(1.6, 2.8, np.abs(theta)) + wob
-    cap = smoothstep(edge - 0.05, edge + 0.12, z)
-    col = mix_rows(np.tile(WHITE, (n, 1)), np.tile(GREY, (n, 1)), cap * 0.9)
+    hu = L[:, 0] / radii[0]                         # доли полуширины и полувысоты головы
+    hv = L[:, 2] / radii[2]
+    wob = fbm(P, 3.2, seed=11) * 0.05
+    # Белая маска: верх — дуга от переносицы вниз к бокам, у висков белого нет.
+    edge = 0.02 - 0.9 * hu * hu + wob
+    white = smoothstep(edge + 0.1, edge - 0.14, hv) * smoothstep(-0.1, 0.35, -d[:, 1])
+    white = np.maximum(white, smoothstep(-0.58, -0.86, hv))          # подбородок и низ — как грудка
+    cap = 1.0 - white
+    col = mix_rows(np.tile(WHITE, (n, 1)), np.tile(GREY, (n, 1)), cap * 0.92)
     warp = fbm(P, 3.0, seed=3) * 0.28
-    # «М» на лбу: пять полос вдоль меридианов, к бровям тоньше и обрываются.
-    taper = smoothstep(edge + 0.02, edge + 0.4, z)
-    # Полосы на лбу — тоньше, чаще и волнистее, чем бруски «штрихкода» (как на наброске).
-    fore = bands(theta / 0.2 + 0.5 + warp * 1.5, width=0.3 + 0.2 * taper, soft=0.16)
-    fore *= smoothstep(edge + 0.03, edge + 0.16, z) * smoothstep(0.78, 0.5, np.abs(theta))
-    fore *= smoothstep(-0.35, 0.1, fbm(P, 5.5, seed=17) + 0.25 - 0.3 * smoothstep(0.75, 0.95, z))
-    # По бокам головы — две поперечные полосы, рваные.
-    side = bands(z / 0.24 + 0.2 + warp * 1.2, width=0.46, soft=0.16)
-    side *= smoothstep(0.62, 0.95, np.abs(theta)) * smoothstep(2.5, 1.9, np.abs(theta)) * cap
+    # «М» на лбу: полосы вдоль меридианов от макушки до бровей, к бровям тоньше.
+    taper = smoothstep(0.3, 0.75, hv)
+    fore = bands(theta / 0.34 + 0.5 + warp * 1.4, width=0.4 + 0.2 * taper, soft=0.22)
+    fore *= smoothstep(0.26, 0.42, hv) * smoothstep(0.85, 0.55, np.abs(theta))
+    fore *= smoothstep(-0.35, 0.1, fbm(P, 5.5, seed=17) + 0.25 - 0.3 * smoothstep(0.8, 0.97, z))
+    # На висках — по две поперечные полосы от уголков глаз назад, рваные.
+    side = bands(hv / 0.26 + 0.1 + warp * 1.2, width=0.44, soft=0.16)
+    side *= smoothstep(0.7, 1.0, np.abs(theta)) * smoothstep(2.5, 1.9, np.abs(theta))
+    side *= smoothstep(-0.62, -0.4, hv) * smoothstep(0.62, 0.4, hv)
     side *= smoothstep(-0.3, 0.2, fbm(P, 4.5, seed=13) + 0.2)
-    back = bands(theta / 0.32 + warp, width=0.3, soft=0.18) * smoothstep(2.1, 2.6, np.abs(theta)) * cap
+    back = bands(theta / 0.32 + warp, width=0.3, soft=0.18) * smoothstep(1.9, 2.5, np.abs(theta))
     stripes = np.clip(np.maximum(np.maximum(fore, side), back), 0, 1) * (0.8 + 0.2 * fbm(P, 7.0, seed=5))
     col = mix_rows(col, np.tile(STRIPE_HEAD, (n, 1)), np.clip(stripes * 1.15, 0, 1) * cap)
     # Румянец на щёчках под глазами.
@@ -966,7 +975,7 @@ def build_eye(face, prefix, spec, mats):
     radii = []
     for (x, y) in outline:
         radii.append(0.14 + 1.9 * smooth01((y + 0.05) / 0.75))   # веко сверху, снизу — волосок
-    tube(f'{prefix}Line', ring_pts, spec.get('line', 0.012), mats['line'], radii, cyclic=True)
+    tube(f'{prefix}Line', ring_pts, spec.get('line', 0.016), mats['line'], radii, cyclic=True)
     # Блики — на роговице над радужкой: едут вместе со взглядом.
     for k, (hx, hy, hr) in enumerate(spec.get('sparks', [(0.2, 0.22, 0.17), (-0.22, -0.24, 0.075)])):
         disc(face, f'{prefix}Spark{k}', cu, cv, rx, ry, inner, hx + look[0], hy + look[1], hr, bulge,
@@ -1088,19 +1097,19 @@ def rounded_triangle(cx, cy, w, h, r=0.35, n=12):
 # ---------------------------------------------------------------- уши
 
 def build_ear(name, head, side, droop, mats, face):
-    """Вислое ушко: гладкий треугольный клапан на верхнем углу головы, кончик вперёд-вниз-наружу.
+    """Вислое ушко: пухлый скруглённый клапан на верхнем углу головы, кончик наружу-вниз.
 
-    Место — лучом из центра головы до её настоящей поверхности (виски и щёчки
-    меняют форму, эллипсоид врал бы)."""
+    Место — лучом из центра головы до её настоящей поверхности; ось клапана задана
+    как на рисунке спереди, а не по касательной к голове (иначе ухо ложилось «полкой»)."""
     bm = bmesh.new()
     bmesh.ops.create_uvsphere(bm, u_segments=40, v_segments=20, radius=1.0)
-    hp = head.params
     ear = HEAD_SHAPE['ear']
-    w_half, h_half, thick = hp.get('ear_size', ear['size'])
-    flare = math.radians(ear.get('flare', -16))       # клапан откинут на сгибе: низ отходит от головы
+    w_half, h_half, thick = ear['size']
+    flare = math.radians(ear['flare'])               # клапан откинут на сгибе: низ отходит от головы
+    tip = ear['tip']                                 # ширина кончика в долях сгиба: 0.6 — скруглённый
     for v in bm.verts:
         x, y, z = v.co
-        w = 0.32 + 0.68 * (z + 1) / 2                    # широкий сгиб сверху, острый кончик внизу
+        w = tip + (1.0 - tip) * (z + 1) / 2              # широкий сгиб сверху, кончик внизу
         v.co = Vector((x * w_half * w, y * thick, z * h_half))
         v.co.y += 1.0 * (v.co.x ** 2) + 0.7 * (v.co.z ** 2)   # края загнуты к голове (+y)
         dz = v.co.z - h_half
@@ -1112,8 +1121,12 @@ def build_ear(name, head, side, droop, mats, face):
     mesh.shade_smooth()
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
-    az = math.radians(hp.get('ear_az', ear['az'])) * side
-    el = math.radians(hp.get('ear_el', ear['el']) - droop * 12)
+    hp = head.params
+    az = math.radians(ear['az']) * side
+    droop_el, droop_axis = ear['droop']
+    # На набросках ушки на одном месте при любом наклоне головы: кивок вниз иначе
+    # опускал бы их к вискам, а запрокинутая голова поднимала крылышками на макушку.
+    el = math.radians(ear['el'] + ear['follow'] * hp['pitch'] - droop * droop_el)
     d_local = Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el)))
     R = head.frame.to_3x3()
     centre = head.frame.translation
@@ -1125,21 +1138,25 @@ def build_ear(name, head, side, droop, mats, face):
         normal = direction
     if normal.dot(direction) < 0:
         normal = -normal
-    up = R @ Vector((0, 0, 1))
-    z_axis = (up - normal * up.dot(normal)).normalized()
+    # Клапан чуть развёрнут к зрителю: спереди виден во всю ширину.
+    normal = (normal + R @ Vector((0, -1, 0)) * ear['front']).normalized()
+    # Ось — от корня у макушки к кончику наружу-вниз под углом axis° к горизонтали,
+    # как на рисунке спереди; грусть и испуг опускают кончик ниже.
+    a = math.radians(ear['axis'] + droop * droop_axis)
+    root = R @ Vector((-side * math.cos(a), 0.0, math.sin(a)))
     y_axis = -normal
+    z_axis = (root - normal * root.dot(normal)).normalized()
     x_axis = y_axis.cross(z_axis).normalized()
     basis = Matrix((x_axis, y_axis, z_axis)).transposed()
-    tilt = Matrix.Rotation(math.radians((hp.get('ear_tilt', ear['tilt']) + droop * 16) * side), 3, normal)
-    obj.matrix_world = Matrix.Translation(loc + normal * hp.get('ear_lift', ear['lift'])) @ (tilt @ basis).to_4x4()
-    # Окрас — гладкий серый в тон «шапочки», без полос; у сгиба чуть темнее.
+    obj.matrix_world = Matrix.Translation(loc + normal * ear['lift']) @ basis.to_4x4()
+    # Окрас — серый в тон головы, без полос (светлый клапан выглядел «наушниками»); у сгиба темнее.
     P, Nn = mesh_arrays(obj)
     n = len(P)
     co = np.empty(n * 3)
     mesh.vertices.foreach_get('co', co)
     co = co.reshape(-1, 3)
-    col = np.tile(lin(ear.get('color', '#c3c6cc')), (n, 1))
-    col = mix_rows(col, np.tile(lin('#a9acb3'), (n, 1)), smoothstep(h_half * 0.2, h_half, co[:, 2]) * 0.55)
+    col = np.tile(lin(ear['color']), (n, 1))
+    col = mix_rows(col, np.tile(lin(ear['fold']), (n, 1)), smoothstep(h_half * 0.2, h_half, co[:, 2]) * 0.55)
     attr = mesh.color_attributes.new('col', 'FLOAT_COLOR', 'POINT')
     attr.data.foreach_set('color', np.concatenate([col, np.ones((n, 1))], axis=1).astype(np.float32).ravel())
     mesh.materials.append(mats['skin'])
@@ -1149,45 +1166,52 @@ def build_ear(name, head, side, droop, mats, face):
 
 # ---------------------------------------------------------------- позы
 
-# Форма головы подогнана к наброскам «1 в 1» (просьба владельца 02.11.2026): силуэт
-# головы с листа (Surprised, Excited, Sad) и голова рендера (CAT_HEAD_ONLY=1) сведены
-# к одной высоте, сравнивалась полуширина по высоте и место/размер глаз. Итог: голова
-# шире высоты в ~1.45 раза, скруглённый купол, щёки широкие книзу, ушки — клапаны на
-# верхних углах кончиком вниз-наружу; разлёт глаз ~0.37 ширины головы, радужка ~0.2,
-# белок — тонкий серпик (на наброске глаз почти целиком радужка).
+# Голова по наброскам (владелец 02–03.11.2026: «1 в 1», «круглая, а не прямоугольная»).
+# Сверялись голова (CAT_HEAD_ONLY=1) и вся фигура при одинаковой ширине головы. Голова —
+# шар шире высоты (~1.45 вместе с ушками) без «висков»: те делали верхние углы коробкой;
+# бока серые дугой до уровня рта, белая только мордочка снизу. Голова на 8% меньше
+# прежней и поднята на шею: под подбородком видна грудка, фигура ~1.3 ширины головы,
+# как на листе. Ушки — пухлые клапаны в верхних углах, купол над ними. Глаза мельче
+# (разлёт ~0.37, радужка ~0.16 ширины головы), нос и рот ниже — мордочка длиннее.
 # CAT_HEAD='{"radii": [...]}' переопределяет значения для такой подгонки без правки файла.
 HEAD_SHAPE = dict(
-    radii=(0.81, 0.6, 0.65),
-    temple=((0.3, 0.03, 0.04), (0.4, 0.44, 0.33), 1.45),
-    cheek=((0.42, -0.15, -0.2), (0.46, 0.34, 0.34), 1.9),
-    ear=dict(az=61, el=30, size=(0.39, 0.34, 0.075), tilt=46, lift=0.03, flare=-8),
-    eye=(0.36, -0.02, 0.212, 0.225),
-    iris=0.94,
+    radii=(0.79, 0.607, 0.598),
+    cheek=((0.368, -0.202, -0.221), (0.331, 0.276, 0.276), 1.0),
+    muzzle=((0.0, -0.442, -0.184), (0.239, 0.156, 0.156), 1.3),
+    half=0.828,                 # полуширина черепа со щёчками: румянец, усы, опоры значков
+    neck=0.1,                   # сидя и стоя голова выше прежней на столько
+    nose=-0.11,
+    eye=(0.317, 0.028, 0.19, 0.18),
+    iris=0.82,
+    ear=dict(az=68, el=23, follow=0.45, axis=54, front=0.1, size=(0.22, 0.26, 0.1), lift=0.075,
+             flare=-12, tip=0.6, droop=(4, 6), color='#b3b6bd', fold='#979aa1'),
 )
 if os.environ.get('CAT_HEAD'):
     HEAD_SHAPE.update(json.loads(os.environ['CAT_HEAD']))
 HEAD_RADII = tuple(HEAD_SHAPE['radii'])
 IRIS = HEAD_SHAPE.get('iris', IRIS)
-HEAD_WIDEN = HEAD_RADII[0] / 0.68          # во сколько голова шире первой версии — румянец, усы
+# Во сколько голова шире первой версии (полуширина черепа 0.8) — румянец, усы, опоры значков.
+HEAD_WIDEN = HEAD_SHAPE['half'] / 0.8
 
 
-def head_part(center, rot, face_params, droop=0.0):
-    frame = frame_matrix(center, rot)
-    head = Part('head', 'head', frame, radii=HEAD_RADII, face=face_params, droop=droop)
+def head_part(center, rot, face_params, droop=0.0, resting=False):
+    # Сидя и стоя голова поднята на шею (neck) — под подбородком видна грудка, как на
+    # наброске; лежащая на лапках опущена так, чтобы низ остался на месте.
+    lift = HEAD_RADII[2] - 0.65 if resting else HEAD_SHAPE['neck']
+    frame = frame_matrix(Vector(center) + Vector((0.0, 0.0, lift)), rot)
+    head = Part('head', 'head', frame, radii=HEAD_RADII, face=face_params, droop=droop, pitch=rot[0])
     # Голова — широкий эллипсоид, щёчки и мордочка — элементы в её системе координат.
     head.local((0, 0, 0), HEAD_RADII)
-    (tx, ty, tz), t_radii, t_stiff = HEAD_SHAPE['temple']
     (cx, cy, cz), c_radii, c_stiff = HEAD_SHAPE['cheek']
     for s in (-1, 1):
-        # Виски — широкий плоский верх, а не «колокол» с узкой макушкой; щёчки — пухлый низ.
-        head.local((tx * s, ty, tz), t_radii, stiffness=t_stiff)
         head.local((cx * s, cy, cz), c_radii, stiffness=c_stiff)
-    head.local((0, -0.42, -0.16), (0.26, 0.17, 0.17), stiffness=1.3)
+    (mx, my, mz), m_radii, m_stiff = HEAD_SHAPE['muzzle']
+    head.local((mx, my, mz), m_radii, stiffness=m_stiff)
     return head
 
 
 def default_face():
-    return dict(blush=(0.43 * HEAD_WIDEN, -0.15, 0.13))
+    return dict(blush=(0.43 * HEAD_WIDEN, NOSE_Y - 0.1, 0.13))
 
 
 def add_leg(parts, s, path, radii, outward, sock=0.72, stripes=3.2):
@@ -1332,7 +1356,7 @@ def pose_stand(yaw=55.0, head_rot=(8, 0, 18), tail=None, paw_lift=False, droop=0
 def pose_crouch(face=None):
     """Scared: припал к полу, лапки вперёд, голова низко, ушки прижаты."""
     parts = []
-    head = head_part((0.0, -0.26, 0.86), (6, 0, 0), face or default_face(), droop=1.0)
+    head = head_part((0.0, -0.26, 0.86), (6, 0, 0), face or default_face(), droop=1.0, resting=True)
     parts.append(head)
     torso = Part('torso', 'torso', frame_matrix((0, 0.36, 0.36), (90, 0, 0)), radii=(0.58, 0.36, 0.62))
     torso.local((0, 0, 0), (0.58, 0.36, 0.62))
@@ -1353,7 +1377,7 @@ def pose_crouch(face=None):
 def pose_curl(face=None):
     """Спит клубочком (второй набросок): голова на лапках, хвост обнимает спереди."""
     parts = []
-    head = head_part((0.42, -0.22, 0.68), (12, 8, 14), face or default_face(), droop=0.35)
+    head = head_part((0.42, -0.22, 0.68), (12, 8, 14), face or default_face(), droop=0.35, resting=True)
     parts.append(head)
     torso = Part('torso', 'torso', frame_matrix((-0.32, 0.24, 0.42), (90, 0, 90)), radii=(0.56, 0.42, 0.78))
     torso.local((0, 0, 0), (0.56, 0.42, 0.72))
@@ -1376,7 +1400,7 @@ def pose_curl(face=None):
 # ---------------------------------------------------------------- мордочки
 
 EYE_CX, EYE_CY, EYE_RX, EYE_RY = HEAD_SHAPE['eye']
-NOSE_Y = -0.052
+NOSE_Y = HEAD_SHAPE['nose']
 MOUTH_Y = NOSE_Y - 0.033            # от низа носа
 
 # Закрытые глаза — линии в нормированных координатах глаза (x — к носу).
@@ -1579,8 +1603,8 @@ def build_face(face, mats, spec):
 
 def whiskers(face, mats):
     for side in (-1, 1):
-        for k, (v, tip_z, back) in enumerate(((-0.08, 0.12, 0.12), (-0.115, 0.0, 0.16), (-0.15, -0.13, 0.2))):
-            root = face.point(0.27 * HEAD_WIDEN * side, v, 0.0)
+        for k, (dv, tip_z, back) in enumerate(((-0.028, 0.12, 0.12), (-0.063, 0.0, 0.16), (-0.098, -0.13, 0.2))):
+            root = face.point(0.27 * HEAD_WIDEN * side, NOSE_Y + dv, 0.0)
             R = face.R
             pts = [root,
                    root + R @ Vector((0.26 * side, back * 0.4, tip_z * 0.45 + 0.03)),
@@ -1641,8 +1665,8 @@ EMOTIONS = {
     'scared': (lambda f: pose_crouch(face=f),
                dict(eyes=dict(look=(0.0, 0.24), scale=1.06, lids=lid(LID_WORRY)), mouth='wavy')),
     'sleepy': (lambda f: pose_sit(head_rot=(-4, 7, 0), face=f, paw_up=dict(
-                   side=1, path=[(0.22, -0.3, 0.78), (0.34, -0.64, 0.7), (0.24, -0.76, 0.96)],
-                   paw=(0.22, -0.82, 1.0), paw_rot=(-90, 0, 180))),
+                   side=1, path=[(0.22, -0.3, 0.78), (0.34, -0.67, 0.84), (0.21, -0.81, 1.17)],
+                   paw=(0.185, -0.87, 1.235), paw_rot=(-90, 0, 180))),
                dict(eyes='sleepy', mouth='yawn')),
     'confused': (lambda f: pose_sit(head_rot=(-6, -12, 6), face=f),
                  dict(eyes=dict(look=(0.24, 0.22)), mouth='o_small')),
