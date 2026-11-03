@@ -2401,6 +2401,28 @@ def _requester_can_access_target_user(
     return False
 
 
+# Роли, у которых руководитель (supervisor_id) — СВ их группы: его ставит перевод
+# в группу, а не правка карточки.
+GROUP_MANAGED_ROLES = ('operator', 'trainee')
+
+
+def _manager_assignment_error(target_user_id, manager_id):
+    """Руководитель сотрудника вне групп операторов (СВ и выше) — поле карточки.
+
+    Владелец 03.11.2026: в «Оплате счетов» работают супервайзеры и выше, а
+    руководителя заявки раздел берёт из карточки; группы, из которой он
+    подставился бы сам, у них нет. Руководитель — работающий сотрудник уровня
+    СВ и выше и не сам человек."""
+    if int(manager_id) == int(target_user_id):
+        return "Сотрудник не может быть руководителем сам себе"
+    manager = db.get_user(id=manager_id)
+    if not manager or str(manager[11] or '').strip().lower() == 'fired':
+        return "Руководитель не найден"
+    if _normalize_user_role(manager[3]) in GROUP_MANAGED_ROLES:
+        return "Руководителем назначают супервайзера и выше"
+    return None
+
+
 def _validate_scoped_user_relation_update(requester_role, requester_id, target_user, field, value):
     """Validate direction/supervisor assignments made by a scoped manager."""
     if field not in ('direction_id', 'supervisor_id') or value is None:
@@ -13472,6 +13494,43 @@ def api_baiga_period_scores():
         logging.exception("Error in /api/baiga/period_scores: %s", e)
         return jsonify({"error": "Internal server error"}), 500
 
+@app.route('/api/admin/manager_candidates', methods=['GET'])
+@require_api_key
+def get_manager_candidates():
+    """Из кого выбирают «Руководителя» СВ и выше в карточке сотрудника.
+
+    Отдельно от /api/admin/users: тот супер-админов не отдаёт никому, а руководитель —
+    часто именно супер-админ (учредитель, директор по развитию). Только тем, кто это
+    поле правит (_manager_assignment_error и правка в admin_update_user): глобальному
+    админу и кадровику. Только имя, роль и отдел — без контактов и прочего профиля."""
+    try:
+        requester_id, requester, auth_error = _get_authenticated_requester()
+        if auth_error:
+            message, status_code = auth_error
+            return jsonify({"error": message}), status_code
+        requester_role = _normalize_user_role(requester[3])
+        if (not _is_global_admin_requester(requester_role, requester_id)
+                and not _is_employee_accounting_manager(requester_id)):
+            return jsonify({"error": "Forbidden"}), 403
+        with db._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT u.id, u.name, u.role, d.name
+                  FROM users u
+                  LEFT JOIN departments d ON d.id = u.department_id
+                 WHERE COALESCE(u.status, 'working') <> 'fired'
+                   AND lower(COALESCE(u.role, '')) <> ALL(%s)
+                 ORDER BY u.name
+            """, (list(GROUP_MANAGED_ROLES),))
+            managers = [
+                {"id": row[0], "name": row[1], "role": _normalize_user_role(row[2]), "department_name": row[3]}
+                for row in cursor.fetchall()
+            ]
+        return jsonify({"status": "success", "managers": managers})
+    except Exception as e:
+        logging.error(f"Error in get_manager_candidates: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/admin/users', methods=['GET'])
 @require_api_key
 def get_admin_users():
@@ -13758,7 +13817,7 @@ def admin_update_user():
         if field in ['direction_id', 'supervisor_id']:
             if target_role == 'trainer':
                 value = None
-            elif field == 'supervisor_id':
+            elif field == 'supervisor_id' and target_role in GROUP_MANAGED_ROLES:
                 # СВ оператора — производное от его группы (каскад при смене группы
                 # или СВ группы). Прямая правка ломала бы эту связь.
                 return jsonify({"error": "Супервайзер назначается группой оператора — измените группу в карточке сотрудника или разделе «Группы»"}), 400
@@ -13767,6 +13826,11 @@ def admin_update_user():
                     value = int(value) if value else None
                 except (TypeError, ValueError):
                     return jsonify({"error": f"Invalid {field}"}), 400
+                # У СВ и выше группы нет — руководителя указывают в карточке прямо.
+                if field == 'supervisor_id' and value is not None:
+                    manager_error = _manager_assignment_error(user_id, value)
+                    if manager_error:
+                        return jsonify({"error": manager_error}), 400
         elif field == 'department_id':
             try:
                 value = int(value) if value else None
@@ -13898,6 +13962,11 @@ def admin_update_user():
         if (target_role in ('admin', 'super_admin')
                 and requester_role != 'super_admin' and not personnel_manager):
             return jsonify({"error": "Only super admins can update admin users"}), 403
+        # Руководителя СВ и выше указывают глобальный админ и кадровик — те, у кого
+        # это поле есть в карточке; глава отдела и СВ его не правят.
+        if (field == 'supervisor_id' and target_role not in GROUP_MANAGED_ROLES and target_role != 'trainer'
+                and not _is_global_admin_requester(requester_role, requester_id) and not personnel_manager):
+            return jsonify({"error": "Руководителя сотрудника указывает администратор или кадровик"}), 403
         if (field == 'department_id'
                 and not _is_global_admin_requester(requester_role, requester_id)
                 and not personnel_manager):

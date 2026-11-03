@@ -43,10 +43,19 @@ def _load_functions(*names, namespace=None):
     return result
 
 
-def _user(user_id, role, *, telegram_id=None, supervisor_id=None):
+def _user(user_id, role, *, telegram_id=None, supervisor_id=None, status="working"):
     # Only indexes read by the permission functions are material here:
-    # 0=id, 1=telegram_id, 2=name, 3=role, 6=supervisor_id.
-    return (user_id, telegram_id, f"User {user_id}", role, None, None, supervisor_id)
+    # 0=id, 1=telegram_id, 2=name, 3=role, 6=supervisor_id, 11=status.
+    return (user_id, telegram_id, f"User {user_id}", role, None, None, supervisor_id,
+            None, None, None, True, status)
+
+
+def _module_constant(name):
+    module = source_cache.parse(BOT_PATH.read_text(encoding="utf-8-sig"))
+    for node in module.body:
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"Missing constant in bot_schedule2.py: {name}")
 
 
 def _response_status(result):
@@ -278,21 +287,23 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
             },
         )
 
-    def _load_namespace(self, request_payload=None, endpoint="admin_update_user"):
+    def _load_namespace(self, request_payload=None, endpoint="admin_update_user", global_admin=False):
         normalize_role = lambda role: str(role or "").strip().lower()
         namespace = _load_functions(
             "_validate_scoped_user_relation_update",
+            "_manager_assignment_error",
             endpoint,
             namespace={
                 "db": self.db,
                 "request": SimpleNamespace(get_json=lambda: request_payload),
                 "jsonify": lambda payload: payload,
                 "logging": logging,
+                "GROUP_MANAGED_ROLES": _module_constant("GROUP_MANAGED_ROLES"),
                 "_get_authenticated_requester": lambda: (10, self.requester, None),
                 "_normalize_user_role": normalize_role,
                 "_headed_department_id": lambda user_id: 7 if int(user_id) == 10 else None,
                 "_is_employee_accounting_manager": lambda *_a, **_k: False,
-                "_is_global_admin_requester": lambda _role, _user_id: False,
+                "_is_global_admin_requester": lambda _role, _user_id: global_admin,
                 "_is_super_admin_role": lambda role: normalize_role(role) == "super_admin",
                 "_is_admin_role": lambda role: normalize_role(role) in ("admin", "super_admin"),
                 "_is_supervisor_role": lambda role: normalize_role(role) in ("sv", "supervisor"),
@@ -340,6 +351,57 @@ class ScopedRelationAssignmentTests(unittest.TestCase):
                 result = namespace["admin_update_user"]()
 
                 self.assertEqual(_response_status(result), 400)
+                self.assertEqual(self.db.user_updates, [])
+
+    def test_operator_supervisor_stays_with_group_even_for_global_admin(self):
+        namespace = self._load_namespace({"user_id": 20, "field": "supervisor_id", "value": 31}, global_admin=True)
+
+        result = namespace["admin_update_user"]()
+
+        self.assertEqual(_response_status(result), 400)
+        self.assertIn("Супервайзер назначается группой оператора", result[0]["error"])
+        self.assertEqual(self.db.user_updates, [])
+
+    def test_department_head_does_not_set_manager_of_supervisor(self):
+        # Руководителя СВ и выше (владелец 03.11.2026) указывают глобальный админ и кадровик.
+        namespace = self._load_namespace({"user_id": 31, "field": "supervisor_id", "value": 30})
+
+        result = namespace["admin_update_user"]()
+
+        self.assertEqual(_response_status(result), 403)
+        self.assertEqual(result[0]["error"], "Руководителя сотрудника указывает администратор или кадровик")
+        self.assertEqual(self.db.user_updates, [])
+
+    def test_global_admin_sets_and_clears_manager_of_supervisor(self):
+        for value, saved in ((30, 30), ("", None), (None, None)):
+            with self.subTest(value=value):
+                self.db.user_updates.clear()
+                namespace = self._load_namespace({"user_id": 31, "field": "supervisor_id", "value": value},
+                                                 global_admin=True)
+
+                result = namespace["admin_update_user"]()
+
+                self.assertEqual(_response_status(result), 200)
+                self.assertEqual(self.db.user_updates, [(31, "supervisor_id", saved, 10)])
+
+    def test_manager_must_be_supervisor_or_above_and_not_self(self):
+        self.db.users[33] = _user(33, "admin", status="fired")
+        cases = (
+            (32, "Руководителем назначают супервайзера и выше"),   # оператор
+            (31, "Сотрудник не может быть руководителем сам себе"),
+            (33, "Руководитель не найден"),                       # уволен
+            (99, "Руководитель не найден"),
+        )
+        for value, message in cases:
+            with self.subTest(value=value):
+                self.db.user_updates.clear()
+                namespace = self._load_namespace({"user_id": 31, "field": "supervisor_id", "value": value},
+                                                 global_admin=True)
+
+                result = namespace["admin_update_user"]()
+
+                self.assertEqual(_response_status(result), 400)
+                self.assertEqual(result[0]["error"], message)
                 self.assertEqual(self.db.user_updates, [])
 
     def test_single_update_endpoint_writes_same_department_relations(self):

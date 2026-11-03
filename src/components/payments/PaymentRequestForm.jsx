@@ -611,6 +611,9 @@ const PaymentRequestForm = ({
     const initiatorName = (editing ? request.initiator_name : me?.name) || '';
     // Руководитель: у своей новой заявки — из справочного набора, у чужой на доработке — записанный в заявке.
     const managerName = (editing ? request.manager_name : dictionaries?.manager?.name) || routeManager;
+    // Откуда руководитель (владелец 03.11.2026: «из карточки»): по нему видно, где его поправить.
+    const managerSource = !editing && dictionaries?.manager?.source === 'supervisor' ? 'из карточки сотрудника'
+        : !editing && dictionaries?.manager?.source === 'department_head' ? 'глава отдела' : 'определён автоматически';
     const busy = Boolean(saving);
     const lunaWarn = !draft.card_id && cardDigits(draft.card_number).length >= 13 && !cardProblem(draft.card_number, meta?.card_digits)
         && !cardLuhnOk(draft.card_number);
@@ -909,7 +912,7 @@ const PaymentRequestForm = ({
                                 <Row label="Инициатор">{initiatorName}</Row>
                                 <Row label="Руководитель">
                                     {managerName || <span className="text-slate-500">не определён — этап руководителя будет пропущен</span>}
-                                    {managerName && <span className="text-slate-500"> · определён автоматически</span>}
+                                    {managerName && <span className="text-slate-500"> · {managerSource}</span>}
                                 </Row>
                             </div>
                             <RequisitesBox entity={legalEntity} />

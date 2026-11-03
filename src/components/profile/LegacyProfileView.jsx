@@ -128,6 +128,7 @@ export default function LegacyProfileView({
     isMobileShell,
     AvatarImage,
     hidesOperatorBlocks,
+    supervisorLabel = 'Супервайзер',
     stats = null,
     rateBanner = null,
     rateLabel = '',
@@ -240,7 +241,7 @@ export default function LegacyProfileView({
                                     <FaIcon className="fas fa-user-tie text-indigo-600 text-lg"></FaIcon>
                                 </div>
                                 <div className="min-w-0">
-                                    <p className="text-xs uppercase tracking-wide text-gray-500">Супервайзер</p>
+                                    <p className="text-xs uppercase tracking-wide text-gray-500">{supervisorLabel}</p>
                                     <p className="text-base sm:text-lg font-medium text-gray-900 truncate">{profileData.supervisor_name || '-'}</p>
                                 </div>
                             </div>

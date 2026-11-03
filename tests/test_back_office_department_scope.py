@@ -812,7 +812,8 @@ class ProfileSectionTests(unittest.TestCase):
         gated, _, _ = work.partition("workRow('Дата найма'")
         branch, _, operator = gated.partition(") : (")
         self.assertIn("workRow('Отдел', profile?.department_name)", branch)
-        self.assertIn("workRow('Супервайзер', profile?.supervisor_name)", operator)
+        # Подпись — по роли (03.11.2026): у оператора «Супервайзер», у СВ и выше «Руководитель».
+        self.assertIn("workRow(supervisorLabel, profile?.supervisor_name)", operator)
         self.assertIn("workRow('Ставка', rateLabel", operator)
         self.assertIn("const subtitle = hidesOperatorBlocks ? profile?.job_title : profile?.direction;", view)
 
@@ -823,7 +824,7 @@ class ProfileSectionTests(unittest.TestCase):
         back_office, _, operator = rows.partition("] : [")
         self.assertIn("label: 'Должность'", back_office)
         self.assertIn("label: 'Отдел'", back_office)
-        self.assertIn("label: 'Супервайзер'", operator.partition("label: 'Дата найма'")[0])
+        self.assertIn("label: supervisorLabel", operator.partition("label: 'Дата найма'")[0])
         self.assertIn("label: 'Ставка'", operator.partition("label: 'Дата найма'")[0])
         self.assertIn("hidesOperatorBlocks ? profile.job_title : profile.direction,", desktop)
 

@@ -635,9 +635,11 @@ class ExistingUserGroupEditTests(unittest.TestCase):
 
     def test_edit_flow_posts_group_membership_not_supervisor(self):
         self.assertIn("`${API_BASE_URL}/api/admin/groups/${nextGroupId}/operators`", APP)
-        # в edit-флоу больше нет прямого update_user(supervisor_id) для операторов —
-        # осталось только легаси-обнуление для тренеров
-        self.assertEqual(APP.count("field: 'supervisor_id'"), 1)
+        # в edit-флоу нет прямого update_user(supervisor_id) для операторов: легаси-обнуление
+        # для тренеров и «Руководитель» СВ и выше, выбранный в карточке руками (03.11.2026)
+        self.assertEqual(APP.count("field: 'supervisor_id'"), 2)
+        manager_block = APP.split("if (editedUser.manager_picked_by_hand) {", 1)[1].split("// Department reassignment", 1)[0]
+        self.assertIn("field: 'supervisor_id'", manager_block)
 
     def test_edit_flow_takes_direction_from_group_move(self):
         # Сначала перевод в группу (сервер проставляет её направление), потом —

@@ -44439,6 +44439,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Группы остальных отделов главы нескольких отделов — только карточке
             // сотрудника (fetchUserModalGroups); у всех прочих список пуст.
             const [userModalOtherDepartmentGroups, setUserModalOtherDepartmentGroups] = useState([]);
+            // Из кого выбирают «Руководителя» СВ и выше в карточке (fetchManagerCandidates).
+            const [managerCandidates, setManagerCandidates] = useState([]);
             const [showUsersReportModal, setShowUsersReportModal] = useState(false);
             const [usersReportOptions, setUsersReportOptions] = useState(DEFAULT_USERS_REPORT_OPTIONS);
             const [svOperators, setSvOperators] = useState([]);
@@ -49516,6 +49518,24 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     }
                 };
 
+                /* «Руководитель» в карточке: работающие СВ и выше вместе с супер-админами —
+                   /api/admin/users их не отдаёт, а руководитель часто именно супер-админ.
+                   Поле правят глобальный админ и кадровик, остальным список не нужен. */
+                const fetchManagerCandidates = async () => {
+                    if (!user || !user.id || !(isAdminLikeRole || isEmployeeAccountingManager)) return;
+                    try {
+                        const response = await axios.get(`${API_BASE_URL}/api/admin/manager_candidates`, {
+                            headers: withAccessTokenHeader({ 'X-User-Id': user.id }),
+                        });
+                        if (response.data?.status === 'success' && Array.isArray(response.data.managers) && isMounted.current) {
+                            setManagerCandidates(response.data.managers);
+                        }
+                    } catch (err) {
+                        // мягко игнорируем — в поле останется только записанный руководитель
+                        console.error('Fetch manager candidates error:', err);
+                    }
+                };
+
                 const fetchUserModalGroups = async () => {
                     if (!user || !user.id) return;
                     const requestGroups = (departmentId = null) => axios.get(`${API_BASE_URL}/api/groups`, {
@@ -50279,6 +50299,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 user_id: editedUser.id,
                                 field: 'direction_id',
                                 value: editedUser.direction_id
+                            }, {
+                                headers: { 'X-User-Id': user.id }
+                            });
+                        }
+                    }
+                    // Руководитель СВ и выше — поле карточки (у оператора его ставит группа).
+                    // Только выбранный руками: черновик формы подставляет в supervisor_id
+                    // своё значение по умолчанию, и без пометки оно ушло бы на сервер.
+                    if (editedUser.manager_picked_by_hand) {
+                        const nextManagerId = editedUser.supervisor_id ? Number(editedUser.supervisor_id) : null;
+                        const prevManagerId = userToEdit?.supervisor_id ? Number(userToEdit.supervisor_id) : null;
+                        if (nextManagerId !== prevManagerId) {
+                            await axios.post(`${API_BASE_URL}/api/admin/update_user`, {
+                                user_id: editedUser.id,
+                                field: 'supervisor_id',
+                                value: nextManagerId
                             }, {
                                 headers: { 'X-User-Id': user.id }
                             });
@@ -52882,6 +52918,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Группы остальных отделов главы нескольких отделов: карточка
                 // показывает группы того отдела, в котором сотрудник.
                 otherDepartmentGroups: userModalOtherDepartmentGroups,
+                managerCandidates,
                 user,
                 onSave: saveUserChanges,
                 onOpenSipSettings: (canAccessSipSettingsFleet || canAccessSipSettingsTez) ? ((departmentId) => {
@@ -52984,6 +53021,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         setUserToEdit(employee);
                         fetchUserModalGroups();
                         fetchDepartments();
+                        fetchManagerCandidates();
                     },
                     // «Отмена» и «Сохранить» форма кладёт в шапку страницы (actionsNode).
                     render: ({ back, actionsNode }) => (
@@ -53093,7 +53131,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (String(employee?.supervisor_name || '').trim()) {
                     items.push({
                         key: 'lead',
-                        label: 'Супервайзер',
+                        // У оператора и стажёра это СВ группы, у СВ и выше — руководитель из карточки.
+                        label: ['operator', 'trainee'].includes(normalizeRole(employee?.role)) ? 'Супервайзер' : 'Руководитель',
                         value: employee.supervisor_name,
                         note: employee?.direction ? `направление «${employee.direction}»` : '',
                     });
@@ -54010,6 +54049,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || view === 'sv_list'
                     || (view === 'manage_operators' && isDepartmentManager)) {
                     fetchUserModalGroups();
+                }
+                if (showUserEditModal) {
+                    fetchManagerCandidates();
                 }
             }, [showUserEditModal, view, user?.id, user?.role, isAdminLikeRole, isDepartmentManager, isEmployeeAccountingManager]);
 
@@ -60413,6 +60455,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     isMobileShell,
                                     AvatarImage,
                                     hidesOperatorBlocks: profileHidesOperatorBlocks,
+                                    // У оператора и стажёра это СВ группы, у СВ и выше — руководитель из карточки.
+                                    supervisorLabel: ['operator', 'trainee'].includes(normalizeRole(user?.role)) ? 'Супервайзер' : 'Руководитель',
                                     stats: profileHidesOperatorBlocks ? null : buildProfileStats(),
                                     rateBanner: profileHidesOperatorBlocks ? null : (
                                       <RateSelfChangeCard

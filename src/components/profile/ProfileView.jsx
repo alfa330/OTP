@@ -132,6 +132,7 @@ function PhoneTop({
     isMobileShell,
     AvatarImage,
     hidesOperatorBlocks,
+    supervisorLabel = 'Супервайзер',
     stats = null,
     rateLabel = '',
     onChangeRate = null,
@@ -200,7 +201,7 @@ function PhoneTop({
                     workRow('Отдел', profile?.department_name)
                 ) : (
                     <>
-                        {workRow('Супервайзер', profile?.supervisor_name)}
+                        {workRow(supervisorLabel, profile?.supervisor_name)}
                         {workRow('Ставка', rateLabel, typeof onChangeRate === 'function' ? {
                             // Окно смены ставки — 1-е число месяца: строка
                             // сама открывает то же окно, что и баннер сверху.
@@ -318,6 +319,7 @@ function DesktopTop({
     profile,
     AvatarImage,
     hidesOperatorBlocks,
+    supervisorLabel = 'Супервайзер',
     stats = null,
     rateLabel = '',
     onChangeRate = null,
@@ -355,7 +357,7 @@ function DesktopTop({
         { key: 'dept', icon: 'fa-layer-group', tone: 'blue', label: 'Отдел', value: profile.department_name },
         { key: 'hire', icon: 'fa-calendar-alt', tone: 'red', label: 'Дата найма', value: hireDate },
     ] : [
-        { key: 'sv', icon: 'fa-user-tie', tone: 'indigo', label: 'Супервайзер', value: profile.supervisor_name },
+        { key: 'sv', icon: 'fa-user-tie', tone: 'indigo', label: supervisorLabel, value: profile.supervisor_name },
         {
             key: 'rate',
             icon: 'fa-briefcase',

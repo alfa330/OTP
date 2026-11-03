@@ -9,6 +9,7 @@ import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
+import InfoHint from '../common/InfoHint';
 import './user-edit-mobile.css';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
@@ -246,7 +247,7 @@ const UemSection = ({ embedded, id, title, children }) => (
     ) : children
 );
 
-const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups: primaryGroups = [], otherDepartmentGroups = [], onSave, user, onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {
+const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = [], departments = [], groups: primaryGroups = [], otherDepartmentGroups = [], managerCandidates = [], onSave, user, onOpenSipSettings = null, embedded = false, actionsPortalNode = null }) => {
     /* Группы карточки: общий список портала (у главы — группы её первого отдела)
        и, у главы нескольких отделов, группы остальных её отделов. Вторые приходят
        отдельным пропсом: массовый перевод в «Учете сотрудников» читает только
@@ -502,6 +503,27 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
         }));
     };
     const isExistingUserEdit = Boolean(userToEdit?.id);
+    /* Руководитель СВ и выше (владелец 03.11.2026): у оператора и стажёра это СВ
+       их группы, у тренера руководителя нет, а остальным его указывают здесь —
+       по нему «Оплата счетов» выбирает руководителя заявки. Правят админ и
+       кадровик, как и на сервере. */
+    const canEditManager = isExistingUserEdit && isUnscopedRequester
+        && !isOperatorDraft(editedUser) && !isTraineeDraft(editedUser) && !isTrainerDraft(editedUser);
+    const managerOptions = React.useMemo(() => {
+        const selfId = Number(userToEdit?.id);
+        const currentId = Number(userToEdit?.supervisor_id) || null;
+        const people = (managerCandidates || [])
+            .filter((person) => person && Number(person.id) !== selfId
+                && !['operator', 'trainee'].includes(normalizeRole(person.role))
+                && String(person.status || '').toLowerCase() !== 'fired')
+            .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'ru'));
+        const options = people.map((person) => ({ value: String(person.id), label: person.name || `#${person.id}` }));
+        // Записанного руководителя, которого нет в списке (уволен, сменил роль), не теряем.
+        if (currentId && !options.some((option) => Number(option.value) === currentId)) {
+            options.unshift({ value: String(currentId), label: userToEdit?.supervisor_name || `#${currentId}` });
+        }
+        return [{ value: '', label: 'Не указан' }, ...options];
+    }, [managerCandidates, userToEdit?.id, userToEdit?.supervisor_id, userToEdit?.supervisor_name]);
     const isSupervisorRateEditDay = getAlmatyDayOfMonth() === 1;
     const isSupervisorRateLocked = isPureSupervisorRequester && isOperatorDraft(editedUser) && isExistingUserEdit && !isSupervisorRateEditDay;
     // Глава отдела (scoped head) — админ-подобная роль, но исключена из isAdminLikeRequester
@@ -2601,6 +2623,24 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                                 <p className="mt-1 text-xs text-slate-500">
                                     {isDeptScoped ? 'Отдел сотрудника закреплён за вашим отделом.' : 'Отдел определяет доступные сотруднику разделы.'}
                                 </p>
+                            </div>
+                            )}
+
+                            {canEditManager && (
+                            <div>
+                                <div className="mb-1 flex items-center gap-1.5">
+                                    <span className="text-sm font-medium text-gray-700">Руководитель</span>
+                                    <InfoHint text="Согласует заявки сотрудника в «Оплате счетов». Не указан — руководителем считается глава отдела." />
+                                </div>
+                                <CustomSelect
+                                value={editedUser?.supervisor_id ? String(editedUser.supervisor_id) : ''}
+                                onChange={(value) => setEditedUser({ ...editedUser, supervisor_id: value || '', manager_picked_by_hand: true })}
+                                disabled={fieldsLocked}
+                                searchable
+                                placeholder="Не указан"
+                                ariaLabel="Руководитель"
+                                options={managerOptions}
+                                />
                             </div>
                             )}
 
