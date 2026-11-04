@@ -218,12 +218,42 @@ test('котик — облик в выборе, но не эффект знак
     assert.ok(ids.includes('cat'));
     assert.equal(new Set(ids).size, ids.length, 'облики не повторяются');
     assert.ok(!appearance.ICORE_ASSISTANT_EFFECTS.some((item) => item.id === 'cat'), 'знак с эффектом «cat» нарисовался бы пустым');
-    assert.equal(appearance.normalizeAssistantAppearance('cat'), 'cat');
+    assert.equal(appearance.normalizeAssistantAppearance('cat', 448), 'cat');
     assert.equal(appearance.normalizeAssistantEffect('cat'), appearance.DEFAULT_ASSISTANT_EFFECT);
     storage.clear();
-    const key = appearance.assistantAppearanceKey(11);
+    const key = appearance.assistantAppearanceKey(448);
     appearance.storeAssistantEffect(key, 'cat', false);
     assert.equal(appearance.readAssistantEffect(key, false), 'cat', 'выбор котика переживает перезагрузку');
+});
+
+test('котик пока только у владельца (448) и Руслана (2), у остальных — знак по умолчанию', () => {
+    const { assistantAppearancesFor, normalizeAssistantAppearance, readAssistantEffect, storeAssistantEffect, assistantAppearanceKey } = appearance;
+    const ids = (userId) => assistantAppearancesFor(userId).map((item) => item.id);
+    assert.ok(ids(448).includes('cat'));
+    assert.ok(ids(2).includes('cat'));
+    assert.ok(ids('2').includes('cat'), 'id из ключа хранилища — строкой');
+    for (const userId of [11, 3, null, undefined, '448x']) {
+        assert.ok(!ids(userId).includes('cat'), `у ${userId} котика в выборе нет`);
+        assert.ok(ids(userId).includes('pumpkin'), 'остальные облики на месте');
+        assert.equal(normalizeAssistantAppearance('cat', userId), appearance.DEFAULT_ASSISTANT_EFFECT);
+    }
+    assert.equal(normalizeAssistantAppearance('pumpkin', 11), 'pumpkin', 'тыква — как была, всем');
+    storage.clear();
+    const key = assistantAppearanceKey(11);
+    storeAssistantEffect(key, 'cat', false);
+    assert.equal(readAssistantEffect(key, false), appearance.DEFAULT_ASSISTANT_EFFECT, 'выбранный раньше котик уступает знаку');
+    assert.equal(storage.get(key), 'cat', 'сам выбор не стёрт — вернётся, когда котика откроют');
+    storeAssistantEffect(key + ':halloween-2026', 'cat', false);
+    assert.equal(readAssistantEffect(key, true), appearance.DEFAULT_ASSISTANT_EFFECT, 'и праздничный выбор тоже');
+
+    const picker = read('../src/components/assistant/AssistantAppearancePicker.jsx');
+    assert.match(picker, /options\.map\(item =>/, 'выбор рисует переданный список, а не все облики');
+    assert.match(picker, /options = PUBLIC_APPEARANCES/, 'без списка — только облики для всех');
+    const orb = read('../src/components/assistant/AssistantOrb.jsx');
+    assert.match(orb, /assistantAppearancesFor\(userId\)/);
+    assert.match(orb, /appearanceOptions=\{appearanceOptions\}/);
+    assert.match(read('../src/components/assistant/AssistantPanel.jsx'), /options=\{appearanceOptions\}/);
+    assert.match(read('../src/components/assistant/useAssistantAppearance.js'), /normalizeAssistantAppearance\(value, userId\)/);
 });
 
 /* Хранилище браузера для mascotsToPreload: ключи по порядку, как у localStorage. */
@@ -235,12 +265,15 @@ const fakeStorage = (entries) => ({
 
 test('со стартом портала котик грузится только тем, кто его выбрал', () => {
     const { mascotsToPreload } = appearance;
-    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:5', 'cat']]))], ['cat']);
-    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:5', 'aurora']]))], [],
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:448', 'cat']]))], ['cat']);
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:2', 'cat']]))], ['cat']);
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:5', 'cat']]))], [],
+        'кому котик закрыт, тот его не качает, даже если выбрал раньше');
+    assert.deepEqual([...mascotsToPreload(fakeStorage([['otp:assistant:appearance:448', 'aurora']]))], [],
         'кто остался на знаке, котика не качает');
     // Праздничный выбор после праздника не в счёт; чужие ключи и мусор — тоже.
     assert.deepEqual([...mascotsToPreload(fakeStorage([
-        ['otp:assistant:appearance:5:halloween-2026', 'cat'],
+        ['otp:assistant:appearance:448:halloween-2026', 'cat'],
         ['wiki:space', 'cat'],
         ['otp:assistant:appearance:6', 'constructor'],
     ]))], []);

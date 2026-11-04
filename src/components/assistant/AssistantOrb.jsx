@@ -6,6 +6,7 @@ import lazyWithRetry from '../../utils/lazyWithRetry';
 import axios from 'axios';
 import Orb from './Orb.jsx';
 import useAssistantAppearance from './useAssistantAppearance.js';
+import { assistantAppearancesFor } from './assistantAppearance.js';
 import useAssistantChat from './useAssistantChat';
 import {
     PANEL_SIZE, clampPosition, defaultPosition, movedEnough, normalizePanelSize, panelAnchor,
@@ -154,6 +155,7 @@ export default function AssistantOrb({
 }) {
     const userId = user?.id;
     const [appearance, setAppearance] = useAssistantAppearance(userId);
+    const appearanceOptions = useMemo(() => assistantAppearancesFor(userId), [userId]);
     const [position, setPosition] = useState(null);   // null — ещё не примерились к окну
     const [open, setOpen] = useState(false);
     const [dragging, setDragging] = useState(false);
@@ -790,6 +792,7 @@ export default function AssistantOrb({
         )}>
             <AssistantPanel
                 appearance={appearance}
+                appearanceOptions={appearanceOptions}
                 onAppearanceChange={setAppearance}
                 chat={chat}
                 spaceName={spaceName}

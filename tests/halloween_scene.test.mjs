@@ -370,7 +370,7 @@ test('тыква в шарике — по выбранному облику, с�
     assert.doesNotMatch(orb, /<Suspense|lazy\(/, 'Suspense показал бы знак кадр-другой перед тыквой');
     // Выбор облика: тыква в списке, превью — картинкой.
     const picker = read('../src/components/assistant/AssistantAppearancePicker.jsx');
-    assert.match(picker, /ASSISTANT_APPEARANCES\.map/);
+    assert.match(picker, /options\.map\(item =>/, "выбор рисует список обликов, открытых этому человеку");
     assert.match(picker, /\[PUMPKIN_APPEARANCE, pumpkinLogo\]/);
 });
 

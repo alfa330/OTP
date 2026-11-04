@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { ChevronDown, X } from 'lucide-react';
 import IcoreAssistantMark from './IcoreAssistantMark.jsx';
-import { ASSISTANT_APPEARANCES, CAT_APPEARANCE, DEFAULT_ASSISTANT_EFFECT, PUMPKIN_APPEARANCE } from './assistantAppearance.js';
+import { CAT_APPEARANCE, DEFAULT_ASSISTANT_EFFECT, PUMPKIN_APPEARANCE, assistantAppearancesFor } from './assistantAppearance.js';
 import pumpkinLogo from './pumpkin/assets/mascot-logo.webp';
 import catLogo from './cat/assets/cat-logo.webp';
 import './assistant-appearance.css';
@@ -12,7 +12,10 @@ const AppearanceIcon = ({ effect, size, animated }) => (MASCOT_LOGOS.has(effect)
     ? <img className="aorb-appearance-mascot" src={MASCOT_LOGOS.get(effect)} alt="" width={size} height={size} draggable={false} />
     : <IcoreAssistantMark effect={effect} size={size} animated={animated} />);
 
-export default function AssistantAppearancePicker({ effect = DEFAULT_ASSISTANT_EFFECT, onChange }) {
+// Без списка — облики, открытые всем (котик — поимённо, см. assistantAppearancesFor).
+const PUBLIC_APPEARANCES = assistantAppearancesFor(null);
+
+export default function AssistantAppearancePicker({ effect = DEFAULT_ASSISTANT_EFFECT, options = PUBLIC_APPEARANCES, onChange }) {
     const [open, setOpen] = useState(false);
     const id = useId();
     const triggerRef = useRef(null);
@@ -72,7 +75,7 @@ export default function AssistantAppearancePicker({ effect = DEFAULT_ASSISTANT_E
                         <button type="button" onClick={() => close(true)} aria-label="Закрыть выбор иконки"><X size={15} /></button>
                     </div>
                     <div role="radiogroup" aria-labelledby={`${id}-label`}>
-                        {ASSISTANT_APPEARANCES.map(item => (
+                        {options.map(item => (
                             <label key={item.id} className="aorb-appearance-option">
                                 <AppearanceIcon effect={item.id} size={34} />
                                 <span>{item.name}</span>

@@ -28,14 +28,14 @@ export default function useAssistantAppearance(userId) {
     }, [key, halloween]);
 
     const chooseEffect = useCallback(value => {
-        const effect = normalizeAssistantAppearance(value);
+        const effect = normalizeAssistantAppearance(value, userId);
         setChoice({ key, halloween, effect });
         try {
             storeAssistantEffect(key, effect, halloween);
         } catch {
             // A blocked/full storage must not prevent choosing for this session.
         }
-    }, [key, halloween]);
+    }, [key, halloween, userId]);
 
     // Do not show the previous account's preference while its effect is pending.
     return [choice.key === key && choice.halloween === halloween ? choice.effect : readAssistantEffect(key, halloween), chooseEffect];
