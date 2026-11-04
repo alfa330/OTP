@@ -250,7 +250,7 @@ const VALUE_TITLE = {
     mode: { grant: 'выдача', deny: 'запрет' },
     /* Значения переноса и сверки. status делит словарь со статусом статьи —
        пересечений нет: у статьи draft/published/…, у сверки ok/changed/… */
-    source: { wikijs: 'старая вика', yandex_pro: 'Яндекс Про' },
+    source: { wikijs: 'старая вики', yandex_pro: 'Яндекс Про' },
     dedup: { unique: 'совпадений нет', duplicate: 'дубль', similar: 'похожая есть' },
     decision: { published: 'опубликована', kept: 'оставлена как была',
                 discarded: 'отклонена' },

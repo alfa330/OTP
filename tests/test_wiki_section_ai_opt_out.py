@@ -160,6 +160,24 @@ class ManagerTogglesTest(_Stubs, _RouteHarness, unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         self.assertEqual(self.subtree_asked, [SUBFOLDER])
 
+    def test_moving_to_another_space_reindexes_the_subtree(self):
+        """Переезд между пространствами: родитель из полей выпадает (fields.pop),
+        и пересборку зовёт только `moved`. Подпапка, унесённая из закрытого корня,
+        иначе осталась бы без кусков, а унесённая под закрытый — с кусками."""
+        client, cursor = self._client(None)
+        cursor.fetchone.side_effect = [
+            section_row(parent=OLD_WIKI, name='Подпапка'),
+            (None, 'active'),                         # целевое пространство
+        ]
+        self.addCleanup(setattr, structure, 'move_section_to_space',
+                        structure.move_section_to_space)
+        structure.move_section_to_space = lambda cursor, sid, **kw: 3
+        response = client.patch('/api/wiki/sections/%d' % SUBFOLDER,
+                                json={'space_id': 2, 'parent_section_id': ''})
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(self.subtree_asked, [SUBFOLDER])
+        self.assertIn('ai_index', response.get_json())
+
     def test_same_parent_does_not_reindex(self):
         client, _ = self._client(section_row(parent=OLD_WIKI, name='Подпапка'))
         response = client.patch('/api/wiki/sections/%d' % SUBFOLDER,
@@ -413,7 +431,7 @@ class ScreenSourceTest(unittest.TestCase):
 
     def test_closed_above_is_said_in_words(self):
         self.assertIn('aiClosedAbove(sections, sectionModal.parent_section_id)', self.structure)
-        self.assertIn('так задано у раздела', self.structure)
+        self.assertIn('Не читает — задано в «{modalAiClosedAbove}»', self.structure)
 
     def test_own_flag_keeps_the_choice_even_when_closed_above(self):
         """Свой флаг снимается и под закрытым родителем — иначе снять его нечем."""
@@ -422,6 +440,14 @@ class ScreenSourceTest(unittest.TestCase):
     def test_editor_tells_that_the_section_is_closed(self):
         self.assertIn('closedBy={aiClosedBy}', self.editor)
         self.assertIn('enabled && closedBy', self.draft)
+
+    def test_editor_reads_the_sections_chosen_in_the_form(self):
+        """По выбранным в форме разделам: перенос в закрытую папку виден до сохранения."""
+        self.assertIn('aiClosedSection(sections, sectionIds)', self.editor)
+
+    def test_closed_section_is_marked_in_the_tree(self):
+        self.assertRegex(self.structure, r'\{section\.ai_opt_out && \(\s*<IosBadge[^>]*>'
+                                         r'\s*<BotOff[^>]*/>\s*Без помощника')
 
 
 if __name__ == '__main__':

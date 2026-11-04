@@ -1017,12 +1017,23 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                         <InfoHintLines lines={AI_CHOICE_HINT} />
                                     </InfoHint>
                                 </div>
+                                {/* Строка собрана той же коробкой, что сегменты
+                                    (p-1 снаружи, py-2 внутри, тот же шрифт, одна
+                                    строка): смена родителя в форме переключает
+                                    строку и сегменты, и разная высота дёргала бы
+                                    окно. Длинное имя режется многоточием, целиком
+                                    — в подсказке браузера. */}
                                 {modalAiClosedAbove && !sectionModal.ai_opt_out ? (
-                                    <div className="flex items-center gap-2 rounded-2xl bg-slate-100 px-3 py-2.5 text-[13px] text-slate-600">
-                                        <BotOff size={14} className="shrink-0 text-slate-400" />
-                                        <span className="min-w-0">
-                                            Не читает — так задано у раздела «{modalAiClosedAbove}»
-                                        </span>
+                                    <div className="flex rounded-2xl bg-slate-100 p-1">
+                                        <div className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-[13px] text-slate-600">
+                                            <BotOff size={14} className="shrink-0 text-slate-400" />
+                                            <span
+                                                className="min-w-0 truncate"
+                                                title={`Не читает — задано в «${modalAiClosedAbove}»`}
+                                            >
+                                                Не читает — задано в «{modalAiClosedAbove}»
+                                            </span>
+                                        </div>
                                     </div>
                                 ) : (
                                     <div
