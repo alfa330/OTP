@@ -43,13 +43,15 @@ class GateSqliteTest(unittest.TestCase):
         db = sqlite3.connect(':memory:')
         db.executescript("""
             CREATE TABLE wiki_sections (id INTEGER PRIMARY KEY, ai_opt_out BOOLEAN,
-                                        parent_section_id INTEGER, status TEXT);
+                                        parent_section_id INTEGER, status TEXT,
+                                        name TEXT);
             CREATE TABLE wiki_articles (id INTEGER PRIMARY KEY, status TEXT,
                                         strict_mode BOOLEAN, ai_opt_out BOOLEAN,
                                         content TEXT, content_plain TEXT);
             CREATE TABLE wiki_article_sections (article_id INTEGER, section_id INTEGER);
         """)
-        db.executemany('INSERT INTO wiki_sections VALUES (?, ?, ?, ?)', _SECTIONS)
+        db.executemany('INSERT INTO wiki_sections VALUES (?, ?, ?, ?, ?)',
+                       [row + ('раздел %d' % row[0],) for row in _SECTIONS])
         for article_id, sections in _PLACES.items():
             db.execute("INSERT INTO wiki_articles VALUES (?, 'published', 0, 0, 'x', 'x')",
                        (article_id,))
@@ -87,6 +89,22 @@ class GateSqliteTest(unittest.TestCase):
         got = {aid for aid in _PLACES
                if self.db.execute(sql, (aid,)).fetchone()[3]}
         self.assertEqual(_OPEN, got)
+
+    def test_label_names_the_marked_section_not_the_subfolder(self):
+        """Метка в поиске и каталоге — имя ПОМЕЧЕННОГО раздела.
+
+        Подпапка «Старой вики» называется «actions», и метка с её именем ничего
+        бы не объяснила. И метка есть ровно у тех статей, которые закрыло
+        условие помощника: разойдись они, поиск подписывал бы «закрыто» то, что
+        помощник читает, или наоборот.
+        """
+        ids = ', '.join(str(i) for i in _PLACES)
+        sql = perimeter._AI_CLOSED_NAMES_SQL.replace('= ANY(%(ids)s)', 'IN (%s)' % ids)
+        self.assertNotIn('%(', sql)
+        got = dict(self.db.execute(sql).fetchall())
+        self.assertEqual({1: 'раздел 39', 2: 'раздел 39', 3: 'раздел 39', 5: 'раздел 39',
+                          7: 'раздел 61', 8: 'раздел 70'}, got)
+        self.assertEqual(set(_PLACES) - _OPEN, set(got))
 
 
 if __name__ == '__main__':

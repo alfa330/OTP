@@ -9,6 +9,7 @@ import WikiIndexPanel from './WikiIndexPanel';
 import WikiParkRail from './WikiParkRail';
 import WikiPark from './WikiPark';
 import { ArticleStamp, markedWord } from './WikiSearch';
+import AiClosedBadge from './AiClosedBadge';
 import WikiSearchFilters, { SearchFilterButton } from './WikiSearchFilters';
 import { EMPTY_FILTERS, filtersKey, searchParams } from './searchFilters';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
@@ -171,6 +172,7 @@ const ArticleCard = ({ article, onOpen }) => {
                         </span>
                         {meta && <IosBadge tone={meta.tone}>{meta.label}</IosBadge>}
                         <ArticleStamp status={article.status} createdAt={article.created_at} />
+                        <AiClosedBadge name={article.ai_closed_in} />
                         {/* Создатель — рядом с типом, а не отдельной строкой:
                             выбрав фильтр по человеку, его же и хочется увидеть
                             в выдаче, иначе фильтр нечем проверить глазами. */}

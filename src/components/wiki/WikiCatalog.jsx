@@ -12,6 +12,7 @@ import {
 import ArticleMovePanel from './ArticleMovePanel';
 import { sectionPathLabel } from './sectionPicker';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
+import AiClosedBadge from './AiClosedBadge';
 
 /* Вкладка «Статьи» — каталог: дерево разделов слева, статьи выбранного справа.
  *
@@ -310,7 +311,7 @@ const SectionRow = ({ section, depth, count, selected, open, hasChildren, onSele
  * на каждой строке значило бы засыпать список одним и тем же словом.
  */
 const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where,
-                     panel = null }) => {
+                     closedIn = null, panel = null }) => {
     const type = typeBadge(article.article_type);
     const ago = fmtAgo(article.updated_at);
     return (
@@ -347,6 +348,7 @@ const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where,
                         {article.historical && (
                             <IosBadge tone="red">не действует</IosBadge>
                         )}
+                        <AiClosedBadge name={closedIn} />
                     </span>
                     {article.summary && (
                         <span className="mt-0.5 block line-clamp-2 text-[12px] leading-relaxed text-slate-500">
@@ -354,7 +356,11 @@ const ArticleRow = ({ article, showStatus, onOpen, menu, busy, locked, where,
                         </span>
                     )}
                     <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-slate-400">
-                        {where && (
+                        {/* Подпись места молчит, когда она слово в слово
+                            повторяет метку закрытого раздела: у статьи из
+                            корня «Старой вики» иначе дважды стояло бы одно и
+                            то же. У статьи подпапки она остаётся — «actions». */}
+                        {where && where !== closedIn && (
                             <span className="inline-flex min-w-0 items-center gap-1">
                                 <Folder size={10} className="shrink-0 text-amber-500" />
                                 <span className="truncate">{where}</span>
@@ -1380,6 +1386,10 @@ export default function WikiCatalog({ base, headers, showToast, catalog, loading
                                     where={viewingAll
                                         ? whereOf(article)
                                         : alsoIn(article, sectionPaths, selected?.id)}
+                                    /* Метка закрытого от помощника раздела — только
+                                       в «Все статьи»: внутри самой папки она стояла
+                                       бы на каждой строке одним и тем же словом. */
+                                    closedIn={viewingAll ? article.ai_closed_in : null}
                                     onOpen={() => onOpenArticle(article.slug)}
                                     menu={menuFor(article)}
                                     busy={acting === article.id}

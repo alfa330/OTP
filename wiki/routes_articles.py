@@ -148,8 +148,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # его длины (permissions_for_articles).
         rights = wiki_articles.permissions_for_articles(
             cursor, ctx, items, subjects, sections, queries.section_rules_for_user)
+        # Та же метка, что в выдаче поиска: «Все статьи» — вторая дверь, через
+        # которую старая вики встаёт рядом с живыми статьями.
+        closed = wiki_perimeter.ai_closed_names(cursor, [item['id'] for item in items])
         for item in items:
             item['permissions'] = wiki_access.permissions_only(rights[item['id']])
+            item['ai_closed_in'] = closed.get(item['id'])
         return jsonify({"items": items, "total_visible": len(visible)})
 
     # ── Каталог по разделам ──────────────────────────────────────────────
@@ -281,6 +285,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
             limit=limit,
             with_trigram=wiki_schema.trigram_available(cursor),
         )
+        # Метка «из закрытого от помощника раздела» — именем этого раздела, одним
+        # запросом на всю выдачу. Без неё статья «Старой вики» стоит в поиске рядом
+        # с живым двойником и от него неотличима (решение владельца 04.11.2026).
+        closed = wiki_perimeter.ai_closed_names(cursor, [item['id'] for item in items])
+        for item in items:
+            item['ai_closed_in'] = closed.get(item['id'])
 
         # Адреса офисов и комиссии Яндекса живут во вкладках «Офисы» и «Города»,
         # а не в статьях (wiki/directory.py). Отдельным полем, а не в items:

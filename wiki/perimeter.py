@@ -81,6 +81,28 @@ AI_SECTION_GATE_SQL = """NOT EXISTS (
         WHERE ai_s.article_id = a.id
           AND ai_s.section_id IN (""" + AI_CLOSED_SECTIONS_SQL + """))"""
 
+# Какой ПОМЕЧЕННЫЙ раздел закрывает статью — именем. Для метки в выдаче поиска и в
+# каталоге (владелец 04.11.2026: «Да, меткой «Старая вики»»): после публикации
+# статьи старой вики встали в поиске рядом с живыми, и два «Номера телефонов»
+# стали неотличимы. Обход тот же, что у AI_CLOSED_SECTIONS_SQL, только несёт имя
+# помеченного раздела: подпапка «Старой вики» называется «actions», и метка с её
+# именем ничего бы не объяснила. Пары (раздел, имя) конечны — UNION остановится
+# и на петле.
+_AI_CLOSED_NAMES_SQL = """
+WITH RECURSIVE ai_closed AS (
+    SELECT id, name AS closed_by FROM wiki_sections WHERE ai_opt_out
+    UNION
+    SELECT child.id, parent.closed_by
+      FROM wiki_sections child
+      JOIN ai_closed parent ON child.parent_section_id = parent.id
+)
+SELECT s.article_id, min(c.closed_by)
+  FROM wiki_article_sections s
+  JOIN ai_closed c ON c.id = s.section_id
+ WHERE s.article_id = ANY(%(ids)s)
+ GROUP BY s.article_id
+"""
+
 # Статьи из личного периметра, которые вообще допустимы как источник для ИИ.
 # Отдельным запросом, а не условиями внутри _VISIBLE_ARTICLES_SQL: тот запрос —
 # единственный источник правды о ЧТЕНИИ, и дописывать в него условия помощника
@@ -145,6 +167,20 @@ def eligible_article_ids(cursor, candidates):
         return frozenset()
     cursor.execute(_AI_ELIGIBLE_SQL, {'candidates': candidates})
     return frozenset(row[0] for row in cursor.fetchall())
+
+
+def ai_closed_names(cursor, article_ids):
+    """{id статьи: имя раздела, закрывшего её от помощника} — только закрытые.
+
+    Одним запросом на всю выдачу, а не по строке; пустая выдача до базы не
+    доходит — как у eligible_article_ids. Статьи, которые человек видеть не
+    вправе, сюда не приходят: на вход идёт уже отфильтрованная выдача.
+    """
+    ids = sorted({int(x) for x in (article_ids or ())})
+    if not ids:
+        return {}
+    cursor.execute(_AI_CLOSED_NAMES_SQL, {'ids': ids})
+    return {int(row[0]): row[1] for row in cursor.fetchall()}
 
 
 def perimeter_hash(article_ids):

@@ -17,6 +17,7 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
 import { STATUS_LABELS, STATUS_TONES } from './articleTypes';
+import AiClosedBadge from './AiClosedBadge';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
 import { DirectorySection, directoryTab, openableDirectory } from './searchDirectory';
 import useStableCallback from './useStableCallback';
@@ -471,6 +472,7 @@ export function ResultsPane({
                                                         {item.title}
                                                     </span>
                                                     <ArticleStamp status={item.status} createdAt={item.created_at} />
+                                                    <AiClosedBadge name={item.ai_closed_in} />
                                                 </span>
                                                 {item.snippet ? (
                                                     <span

@@ -28,8 +28,10 @@ import unittest
 from pathlib import Path
 
 from tests.test_wiki_routes import _RouteHarness, _section_row, make_context
+from tests.test_wiki_search_filters import RouteHarness as SearchHarness
 from wiki import articles as wiki_articles
-from wiki import queries, structure
+from wiki import perimeter as wiki_perimeter
+from wiki import queries, search as wiki_search, structure
 from wiki.ai import index as ai_index
 
 try:
@@ -448,6 +450,105 @@ class ScreenSourceTest(unittest.TestCase):
     def test_closed_section_is_marked_in_the_tree(self):
         self.assertRegex(self.structure, r'\{section\.ai_opt_out && \(\s*<IosBadge[^>]*>'
                                          r'\s*<BotOff[^>]*/>\s*Без помощника')
+
+
+
+@unittest.skipIf(Flask is None, 'flask не установлен')
+class ClosedLabelRoutesTest(SearchHarness):
+    """Метка «из закрытого от помощника раздела» доезжает до выдачи.
+
+    Решение владельца 04.11.2026 («Да, меткой «Старая вики»»): после публикации
+    статьи старой вики встали в поиске рядом с живыми двойниками. Две двери — поиск
+    и список «Все статьи» — обязаны подписывать одинаково, и имя считает один
+    запрос на всю выдачу, а не по строке.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+
+        def _names(cursor, ids):
+            self.asked.append(list(ids))
+            return {7: 'Старая вики'}
+
+        self.patch(wiki_perimeter, 'ai_closed_names', _names)
+
+    def test_search_items_carry_the_label(self):
+        self.patch(wiki_search, 'search', lambda *a, **k: [
+            {'id': 7, 'slug': 'old-nomera', 'title': 'Номера телефонов'},
+            {'id': 8, 'slug': 'nomera', 'title': 'Номера телефонов'}])
+        response = self.client.get('/api/wiki/search?q=номера')
+        self.assertEqual(response.status_code, 200, response.data)
+        items = {item['id']: item for item in response.get_json()['items']}
+        self.assertEqual(items[7]['ai_closed_in'], 'Старая вики')
+        self.assertIsNone(items[8]['ai_closed_in'])
+        self.assertEqual(self.asked, [[7, 8]])
+
+    def test_article_list_carries_the_label(self):
+        self.patch(wiki_articles, 'list_articles', lambda *a, **k: [
+            {'id': 7, 'slug': 'old-nomera'}, {'id': 9, 'slug': 'nomera'}])
+        self.patch(wiki_articles, 'permissions_for_articles',
+                   lambda cursor, ctx, items, *a, **k: {item['id']: {} for item in items})
+        response = self.client.get('/api/wiki/articles')
+        self.assertEqual(response.status_code, 200, response.data)
+        items = {item['id']: item for item in response.get_json()['items']}
+        self.assertEqual(items[7]['ai_closed_in'], 'Старая вики')
+        self.assertIsNone(items[9]['ai_closed_in'])
+        self.assertEqual(self.asked, [[7, 9]])
+
+
+class ClosedNamesHelperTest(unittest.TestCase):
+    def test_empty_list_asks_nothing(self):
+        class ExplodingCursor:
+            def execute(self, *args, **kwargs):
+                raise AssertionError('запрос при пустой выдаче не нужен')
+
+        self.assertEqual({}, wiki_perimeter.ai_closed_names(ExplodingCursor(), []))
+
+    def test_ids_are_sent_once_and_sorted(self):
+        captured = {}
+
+        class _Cursor:
+            def execute(self, sql, params=None):
+                captured['params'] = params
+
+            def fetchall(self):
+                return [(523, 'Старая вики')]
+
+        got = wiki_perimeter.ai_closed_names(_Cursor(), [604, 523, '523'])
+        self.assertEqual({523: 'Старая вики'}, got)
+        self.assertEqual({'ids': [523, 604]}, captured['params'])
+
+
+class ClosedLabelScreenTest(unittest.TestCase):
+    """Три двери в одну выдачу — витрина, выпадашка поиска и «Все статьи»."""
+
+    @classmethod
+    def setUpClass(cls):
+        wiki = ROOT / 'src' / 'components' / 'wiki'
+        cls.search = (wiki / 'WikiSearch.jsx').read_text(encoding='utf-8')
+        cls.library = (wiki / 'WikiLibrary.jsx').read_text(encoding='utf-8')
+        cls.catalog = (wiki / 'WikiCatalog.jsx').read_text(encoding='utf-8')
+        cls.badge = (wiki / 'AiClosedBadge.jsx').read_text(encoding='utf-8')
+
+    def test_header_search_rows_are_labelled(self):
+        self.assertIn('<AiClosedBadge name={item.ai_closed_in} />', self.search)
+
+    def test_library_search_cards_are_labelled(self):
+        self.assertIn('<AiClosedBadge name={article.ai_closed_in} />', self.library)
+
+    def test_catalog_labels_only_the_full_list(self):
+        """Внутри самой папки метка стояла бы на каждой строке одним словом."""
+        self.assertIn('closedIn={viewingAll ? article.ai_closed_in : null}', self.catalog)
+        self.assertIn('<AiClosedBadge name={closedIn} />', self.catalog)
+
+    def test_catalog_does_not_say_the_same_word_twice(self):
+        self.assertIn('{where && where !== closedIn && (', self.catalog)
+
+    def test_badge_matches_the_tree_mark(self):
+        """Тот же значок, что у метки «Без помощника» в «Структуре»."""
+        self.assertIn('<BotOff size={11} /> {name}', self.badge)
+        self.assertIn('if (!name) return null;', self.badge)
 
 
 if __name__ == '__main__':
