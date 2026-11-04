@@ -47,18 +47,26 @@ MAX_LINKS_PER_ARTICLE = 200
 # ссылкой. Переменную читаем при каждом вызове, а не на импорте: тесты и
 # локальный стенд подменяют окружение уже после того, как модуль загружен.
 _DEFAULT_PUBLIC_BASE = 'https://alfa330.github.io/OTP'
+# Все адреса, по которым портал жил или живёт. Ссылка, вставленная в статью со старого
+# адреса, остаётся своей и после переезда на свой домен (04.11.2026: alfa330.github.io/OTP
+# → icorehub.kz): иначе «Связанные материалы» молча теряли бы её.
+_KNOWN_PUBLIC_BASES = ('https://alfa330.github.io/OTP', 'https://icorehub.kz', 'https://www.icorehub.kz')
 
 
-def _public_base():
-    """(множество своих хостов, свой путь) — с чем сверять абсолютный адрес."""
-    raw = (os.getenv('WIKI_PUBLIC_BASE_URL')
-           or os.getenv('TASK_WEB_APP_BASE_URL')
-           or _DEFAULT_PUBLIC_BASE).strip()
-    try:
-        parts = urlsplit(raw)
-    except ValueError:
-        parts = urlsplit(_DEFAULT_PUBLIC_BASE)
-    return {parts.netloc.lower()} - {''}, _trim_path(parts.path)
+def _public_bases():
+    """{свой хост: свой путь} — с чем сверять абсолютный адрес. Настроенный адрес первым."""
+    configured = (os.getenv('WIKI_PUBLIC_BASE_URL')
+                  or os.getenv('TASK_WEB_APP_BASE_URL')
+                  or _DEFAULT_PUBLIC_BASE).strip()
+    bases = {}
+    for raw in (configured, *_KNOWN_PUBLIC_BASES):
+        try:
+            parts = urlsplit(raw)
+        except ValueError:
+            continue
+        if parts.netloc:
+            bases.setdefault(parts.netloc.lower(), _trim_path(parts.path))
+    return bases
 
 
 def _trim_path(path):
@@ -112,15 +120,17 @@ def slug_from_href(href):
     # её не видит). urlsplit разбирает его с netloc='evil.example', и проверка
     # ниже его отвергает. Без неё чужая ссылка попала бы в «Связанные материалы»
     # как своя.
-    hosts, base_path = _public_base()
-    if parts.netloc and parts.netloc.lower() not in hosts:
+    bases = _public_bases()
+    if parts.netloc and parts.netloc.lower() not in bases:
         return ''
 
     # Путь. Портал — одностраничное приложение, статья живёт в параметрах, а не
     # в пути. Пустой путь у относительной ссылки ('?view=wiki&article=x') —
     # «тот же адрес», он и нужен.
+    # У своего хоста — его путь; у относительной ссылки — путь любого из адресов портала.
     path = _trim_path(parts.path)
-    if path and path != base_path:
+    allowed = {bases[parts.netloc.lower()]} if parts.netloc else set(bases.values())
+    if path and path not in allowed:
         return ''
 
     query = parse_qs(parts.query)

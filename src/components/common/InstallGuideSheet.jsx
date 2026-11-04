@@ -88,12 +88,20 @@ const MockRow = ({ label, icon: Icon, active = false, burst = false, width = 'w-
     </div>
 );
 
+/* Адрес портала на макетах браузера — тот, с которого человек смотрит подсказку: на своём
+   домене это icorehub.kz, на github.io — alfa330.github.io/OTP. */
+const portalHost = () => (typeof window === 'undefined' ? '' : window.location.host);
+const portalAddress = () => {
+    const base = String(import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+    return portalHost() + base;
+};
+
 const SafariBar = ({ highlight = false }) => (
     <div className="flex items-center gap-1.5">
         <ChevronLeft className="h-3.5 w-3.5 shrink-0 text-slate-300" aria-hidden="true" />
         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-200" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate rounded-full bg-slate-100 px-2 py-1 text-center text-[9px] text-slate-400">
-            alfa330.github.io
+            {portalHost()}
         </span>
         <span
             className={`relative grid h-6 w-6 shrink-0 place-items-center rounded-full ${
@@ -113,7 +121,7 @@ const ChromeBar = ({ highlight = false }) => (
     <div className="flex items-center gap-1.5">
         <span className="h-3.5 w-3.5 shrink-0 rounded-full bg-slate-200" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate rounded-full bg-slate-100 px-2 py-1 text-[9px] text-slate-400">
-            alfa330.github.io/OTP
+            {portalAddress()}
         </span>
         <span
             className={`relative grid h-6 w-6 shrink-0 place-items-center rounded-full ${
@@ -138,7 +146,7 @@ const ShareSheetHeader = () => (
         </span>
         <span className="min-w-0">
             <span className="block truncate text-[9.5px] font-semibold text-slate-800">iCORE — рабочий портал</span>
-            <span className="block truncate text-[8.5px] text-slate-400">alfa330.github.io</span>
+            <span className="block truncate text-[8.5px] text-slate-400">{portalHost()}</span>
         </span>
     </div>
 );

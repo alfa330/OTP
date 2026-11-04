@@ -45,7 +45,9 @@ jobs:
           node --test tests/stale_bundle_recovery.test.mjs tests/service_worker.test.mjs tests/pages_asset_retention.test.mjs
           npm run build
         env:
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          # На github.io портал живёт в /<репозиторий>/, на своём домене — в корне: тогда в
+          # переменной репозитория PAGES_BASE_PATH стоит «/» (включается вместе с доменом в Pages).
+          VITE_BASE_PATH: ${{ vars.PAGES_BASE_PATH || format('/{0}/', github.event.repository.name) }}
 
       - name: Setup Pages
         id: pages

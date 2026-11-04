@@ -119,6 +119,11 @@ export const readArticleSlugFromSearch = (search) => {
  * разбора такая ссылка перезагружала бы приложение целиком — с повторной
  * авторизацией и потерей места, откуда человек пришёл.
  */
+/* Прежние адреса портала. Ссылки, вставленные в статьи до переезда на свой домен
+   (04.11.2026: alfa330.github.io/OTP → icorehub.kz), — тоже свои: иначе они открывались бы
+   новой вкладкой через переадресацию GitHub, с повторной загрузкой приложения. */
+const LEGACY_PORTAL_BASES = [{ origin: 'https://alfa330.github.io', path: '/OTP' }];
+
 export const readArticleSlugFromHref = (href) => {
     if (typeof window === 'undefined' || !href) return '';
     /* Якорь внутри страницы ('#glava-2') разрешился бы в ТЕКУЩИЙ адрес вместе с
@@ -127,10 +132,12 @@ export const readArticleSlugFromHref = (href) => {
     if (String(href).trim().startsWith('#')) return '';
     try {
         const url = new URL(String(href), window.location.href);
-        if (url.origin !== window.location.origin) return '';
         // Путь сравниваем без хвостового слеша: '/OTP/' и '/OTP' — одна страница.
         const trim = (path) => String(path || '').replace(/\/+$/, '');
-        if (trim(url.pathname) !== trim(window.location.pathname)) return '';
+        const ownAddress = url.origin === window.location.origin
+            ? trim(url.pathname) === trim(window.location.pathname)
+            : LEGACY_PORTAL_BASES.some((base) => url.origin === base.origin && trim(url.pathname) === base.path);
+        if (!ownAddress) return '';
         const view = String(url.searchParams.get(APP_VIEW_QUERY_PARAM) || '').trim();
         if (view && view !== WIKI_VIEW) return '';
         return normalizeArticleSlug(url.searchParams.get(WIKI_ARTICLE_QUERY_PARAM));

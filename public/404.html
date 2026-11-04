@@ -10,14 +10,17 @@
       // to the repo root. index.html picks it up and restores the URL via
       // history.replaceState before the React app boots — no visible URL flash.
       (function () {
-        var segmentCount = 1; // number of path segments to keep (repo name)
+        // Сколько сегментов пути оставить: на github.io портал живёт в /OTP/ (имя репозитория),
+        // на своём домене (icorehub.kz) — в корне.
+        var segmentCount = /\.github\.io$/i.test(window.location.hostname) ? 1 : 0;
         var loc = window.location;
         var pathSegments = loc.pathname.split('/');
         var kept = pathSegments.slice(0, segmentCount + 1).join('/') || '/';
         var rest = '/' + pathSegments.slice(segmentCount + 1).join('/');
         var payload = rest + (loc.search || '') + (loc.hash || '');
         try { sessionStorage.setItem('__spa_redirect', payload); } catch (e) {}
-        loc.replace(kept + '/');
+        // В корне своего домена kept = '/', и kept + '/' дало бы '//' — адрес без хоста.
+        loc.replace(kept.replace(/\/+$/, '') + '/');
       })();
     </script>
   </head>

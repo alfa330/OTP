@@ -699,6 +699,9 @@ login_rate_limit_blocks = {}
 
 ALLOWED_ORIGINS = {
     "https://alfa330.github.io",
+    # Свой домен портала (04.11.2026): GitHub Pages переводит сюда и alfa330.github.io/OTP.
+    "https://icorehub.kz",
+    "https://www.icorehub.kz",
     "https://call-evalution.pages.dev",
     "https://szov.pages.dev",
     "https://moders.pages.dev",

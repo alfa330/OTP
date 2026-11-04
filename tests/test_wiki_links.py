@@ -67,6 +67,26 @@ class ParseTest(unittest.TestCase):
         html = '<a href="https://alfa330.github.io/OTP?view=wiki&amp;article=x">X</a>'
         self.assertEqual(wiki_links.article_slugs(html), ['x'])
 
+    def test_links_from_every_portal_address_are_internal(self):
+        """Портал переехал на свой домен (04.11.2026): ссылки, вставленные в статьи со старого
+        адреса, и ссылки с нового — обе свои, иначе «Связанные материалы» молча их теряют."""
+        for href in ('https://alfa330.github.io/OTP?view=wiki&amp;article=x',
+                     'https://alfa330.github.io/OTP/?view=wiki&amp;article=x',
+                     'https://icorehub.kz/?view=wiki&amp;article=x',
+                     'https://icorehub.kz?view=wiki&amp;article=x',
+                     'https://www.icorehub.kz/?view=wiki&amp;article=x',
+                     '/OTP?view=wiki&amp;article=x',
+                     '/?view=wiki&amp;article=x'):
+            with self.subTest(href=href):
+                self.assertEqual(wiki_links.article_slugs(f'<a href="{href}">X</a>'), ['x'])
+
+    def test_each_portal_host_keeps_its_own_path(self):
+        """На своём домене портал живёт в корне: /OTP там — уже не портал."""
+        self.assertEqual(
+            wiki_links.article_slugs('<a href="https://icorehub.kz/OTP?view=wiki&amp;article=x">X</a>'), [])
+        self.assertEqual(
+            wiki_links.article_slugs('<a href="https://alfa330.github.io/other?view=wiki&amp;article=x">X</a>'), [])
+
     def test_foreign_host_is_rejected(self):
         self.assertEqual(
             wiki_links.article_slugs('<a href="https://evil.example/OTP?article=x">X</a>'), [])
