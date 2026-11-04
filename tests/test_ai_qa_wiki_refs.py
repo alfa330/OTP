@@ -105,9 +105,12 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(out[0]["updated_at"], "2026-10-06T17:46:00")
         sql, params = cur.executed[0]
         self.assertEqual(params, (["все-акции", "draft-only"],))
-        # Периметр ИИ-помощника вики: опубликована, не строгий режим, не закрыта от ИИ.
+        # Периметр ИИ-помощника вики: опубликована, не строгий режим, не закрыта от ИИ
+        # ни сама, ни разделом, ни папкой выше — тем же фрагментом, что у помощника.
+        from wiki.perimeter import AI_SECTION_GATE_SQL
+        gate = " ".join(AI_SECTION_GATE_SQL.split())   # курсор схлопывает пробелы
         for condition in ("a.status = 'published'", "NOT a.strict_mode", "NOT a.ai_opt_out",
-                          "sec.ai_opt_out"):
+                          gate):
             self.assertIn(condition, sql)
 
     def test_long_article_is_cut_and_total_is_bounded(self):

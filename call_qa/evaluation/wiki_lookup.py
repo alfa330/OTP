@@ -13,7 +13,8 @@
 2. ПОИСК. Каждый запрос идёт тем же гибридным поиском, что у ИИ-помощника вики
    (wiki.ai.retrieve.search_hybrid: смысл + слова + названия), по периметру
    отдела (``perimeter``): статьи пространств отдела, пригодные для ИИ —
-   опубликованные, не «строгий режим», не закрытые от ИИ ни сами, ни разделом.
+   опубликованные, не «строгий режим», не закрытые от ИИ ни сами, ни разделом,
+   ни разделом выше по дереву (wiki.perimeter.AI_SECTION_GATE_SQL).
    Найденные выдержки уходят в сообщение оценщику блоком «ВЫДЕРЖКИ ИЗ ВИКИ»
    (evaluator.build_eval_body) с подписью статьи, раздела и даты; архивные и
    просроченные — с пометкой (wiki.ai.currency), как у помощника.
@@ -34,6 +35,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import time
+
+from wiki.perimeter import AI_SECTION_GATE_SQL
 
 from .. import config
 from .. import llm
@@ -62,10 +65,7 @@ SELECT DISTINCT a.id, a.title
   JOIN wiki_article_sections s ON s.section_id = sec.id
   JOIN wiki_articles a ON a.id = s.article_id
  WHERE a.status = 'published' AND NOT a.strict_mode AND NOT a.ai_opt_out
-   AND NOT EXISTS (SELECT 1
-                     FROM wiki_article_sections s2
-                     JOIN wiki_sections sec2 ON sec2.id = s2.section_id
-                    WHERE s2.article_id = a.id AND sec2.ai_opt_out)
+   AND """ + AI_SECTION_GATE_SQL + """
    AND EXISTS (SELECT 1 FROM wiki_ai_chunks c WHERE c.article_id = a.id)
  ORDER BY a.title
 """

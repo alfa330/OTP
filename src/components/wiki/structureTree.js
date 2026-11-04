@@ -213,6 +213,38 @@ export function reorderPatches(items, id, direction) {
         .filter((patch, i) => (Number(moved[i].position) || 0) !== patch.position);
 }
 
+/* ── ИИ-помощник ─────────────────────────────────────────────────────────── */
+
+/* Закрытие раздела от помощника наследуется: подпапка закрытого раздела закрыта
+   им же (wiki/perimeter.py). Цепочку предков считает сервер — у каждой строки
+   приезжает ai_closed_by, имя ближайшего закрытого предка, — и второй обход
+   дерева здесь не нужен. */
+
+/**
+ * Кто закроет от помощника раздел, положенный внутрь `parentId`: имя раздела
+ * или null. Берётся у РОДИТЕЛЯ, а не у самого раздела: в форме родителя можно
+ * сменить, и ответ обязан поехать вместе с ним.
+ */
+export function aiClosedAbove(sections, parentId) {
+    if (!parentId) return null;
+    const parent = (sections || []).find((x) => String(x.id) === String(parentId));
+    if (!parent) return null;
+    return parent.ai_opt_out ? parent.name : (parent.ai_closed_by || null);
+}
+
+/**
+ * Из-за какого раздела помощник не читает статью из разделов `sectionIds`:
+ * имя или null. Семантика строгая, как на сервере, — хватает одного закрытого.
+ */
+export function aiClosedSection(sections, sectionIds) {
+    for (const id of sectionIds || []) {
+        const section = (sections || []).find((x) => String(x.id) === String(id));
+        if (section?.ai_opt_out) return section.name;
+        if (section?.ai_closed_by) return section.ai_closed_by;
+    }
+    return null;
+}
+
 /* ── Подсветка найденного ────────────────────────────────────────────────── */
 
 /**

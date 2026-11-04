@@ -123,6 +123,18 @@ class IndexSqlMatchesSchemaTest(unittest.TestCase):
         self.assertIn('strict_mode', sql)
         self.assertIn('wiki_sections', sql)
 
+    def test_selection_uses_the_perimeter_gate(self):
+        """Закрытый раздел закрывает и подпапки — на входе в индекс тоже.
+
+        Условие о разделе обязано быть ТЕМ ЖЕ фрагментом, что у периметра
+        (wiki/perimeter.py): раньше оно было переписано руками в каждом месте, и
+        наследование, вписанное в одно, не дошло бы до другого — статья из
+        подпапки «Старой вики» отсекалась бы на выдаче, а текст её всё равно
+        уходил бы в эмбеддинги.
+        """
+        from wiki.perimeter import AI_SECTION_GATE_SQL
+        self.assertIn(AI_SECTION_GATE_SQL, ai_index._SELECT_ARTICLE)
+
     def test_reindex_all_can_clean_up_dropped_articles(self):
         """Выборка обязана включать статьи, у которых куски есть, а права уже нет."""
         self.assertIn('wiki_ai_chunks', ai_index.reindex_all.__doc__ or '')

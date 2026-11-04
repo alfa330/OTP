@@ -172,6 +172,10 @@ export default function WikiAiDraft({
     base, headers, showToast, enabled, onEnabledChange, onDraft, onContent,
     getSnapshot, excludeId = null, pendingUpdateFile = null, onPendingUsed = null,
     onUpdateExisting = null,
+    /* Имя раздела, который закрыт от помощника (сам или папкой выше), — если
+       статья лежит в нём. Флажок при этом по-прежнему решает про инструменты
+       правки ниже, а в ответы помощника статья не попадёт всё равно. */
+    closedBy = null,
     /* Пространство работы — ТОЛЬКО для журнала. Статьи ещё нет (черновик из
        документа) или она не сохранена (правка по указанию), и вывести её
        пространство сервер не может ни из чего: запись оказывается «ничьей»,
@@ -316,13 +320,22 @@ export default function WikiAiDraft({
         <section className="space-y-1.5">
             <div className={iosGroupLabel}>Помощник</div>
             <div className={`${iosCard} divide-y divide-slate-100`}>
-                <div className="flex items-center justify-between gap-3 p-4">
-                    <div className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900">
-                        <Sparkles size={15} className="text-indigo-500" />
-                        Поддержка ИИ
-                        <IosHint text={POWER_HINT} label="Что делает поддержка ИИ" />
+                <div className="p-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900">
+                            <Sparkles size={15} className="text-indigo-500" />
+                            Поддержка ИИ
+                            <IosHint text={POWER_HINT} label="Что делает поддержка ИИ" />
+                        </div>
+                        <IosToggle checked={enabled} onChange={onEnabledChange} />
                     </div>
-                    <IosToggle checked={enabled} onChange={onEnabledChange} />
+                    {/* Только при включённом флажке: у выключенного и так сказано,
+                        что в ответы статья не попадает (POWER_HINT). */}
+                    {enabled && closedBy && (
+                        <p className="mt-1.5 text-[12px] leading-relaxed text-slate-500">
+                            Раздел «{closedBy}» закрыт для помощника — в его ответы статья не попадёт.
+                        </p>
+                    )}
                 </div>
 
                 <div className="space-y-3 p-4">

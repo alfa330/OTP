@@ -76,8 +76,11 @@ class PerimeterTests(unittest.TestCase):
         self.assertEqual(scope["titles"][0], (33, "Все акции"))
         sql, params = cur.executed[0]
         self.assertEqual(params, {"code": "op"})
+        # Закрытый от ИИ раздел — вместе с подпапками, тем же фрагментом, что у помощника.
+        from wiki.perimeter import AI_SECTION_GATE_SQL
+        gate = " ".join(AI_SECTION_GATE_SQL.split())   # курсор схлопывает пробелы
         for condition in ("lower(d.code) = %(code)s", "a.status = 'published'", "NOT a.strict_mode",
-                          "NOT a.ai_opt_out", "sec2.ai_opt_out", "FROM wiki_ai_chunks"):
+                          "NOT a.ai_opt_out", gate, "FROM wiki_ai_chunks"):
             self.assertIn(condition, sql)
 
     def test_no_department_no_query(self):

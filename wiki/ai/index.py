@@ -14,15 +14,16 @@ version_number. Причины конкретные, обе проверены �
 
 import hashlib
 
+from ..perimeter import AI_SECTION_GATE_SQL
 from .chunker import chunk_article
 
+# Пригодность — тем же условием, что и у периметра: закрытый раздел действует и
+# на подразделы (wiki/perimeter.py). Разойдись они, статья из подпапки закрытого
+# раздела отсекалась бы на выдаче, но её текст по-прежнему уходил бы в эмбеддинги.
 _SELECT_ARTICLE = """
 SELECT a.status, coalesce(a.content, ''), coalesce(a.content_plain, ''),
        (a.status = 'published' AND NOT a.strict_mode AND NOT a.ai_opt_out
-        AND NOT EXISTS (SELECT 1
-                          FROM wiki_article_sections s
-                          JOIN wiki_sections sec ON sec.id = s.section_id
-                         WHERE s.article_id = a.id AND sec.ai_opt_out)) AS eligible
+        AND """ + AI_SECTION_GATE_SQL + """) AS eligible
   FROM wiki_articles a WHERE a.id = %(article_id)s
 """
 

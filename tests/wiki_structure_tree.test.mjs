@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    buildSpaceTree, collapseRows, filterRows, highlightParts, reorderPatches,
-    sectionSiblings, structureNeedles,
+    aiClosedAbove, aiClosedSection, buildSpaceTree, collapseRows, filterRows, highlightParts,
+    reorderPatches, sectionSiblings, structureNeedles,
 } from '../src/components/wiki/structureTree.js';
 
 /* Фикстура повторяет боевое дерево: внутри одного пространства две ветки
@@ -178,4 +178,35 @@ test('подсветка режет название по найденному, 
     ]);
     assert.deepEqual(highlightParts('Оператор', ['супер']), [{ text: 'Оператор', hit: false }]);
     assert.deepEqual(highlightParts('', ['оп']), [{ text: '', hit: false }]);
+});
+
+/* ── ИИ-помощник: кто закрыл раздел сверху ────────────────────────────────
+ * Дерево как у «Старой вики» на проде: 39 — закрытый корень, 43 — его подпапка
+ * (сервер уже назвал её закрытой сверху: ai_closed_by), 50 — открытая ветка. */
+const AI_TREE = [
+    { id: 39, parent_section_id: null, name: 'Старая вики', ai_opt_out: true, ai_closed_by: null },
+    { id: 43, parent_section_id: 39, name: 'Информацияпотаксопаркам', ai_opt_out: false, ai_closed_by: 'Старая вики' },
+    { id: 50, parent_section_id: null, name: 'Общий сотрудник', ai_opt_out: false, ai_closed_by: null },
+];
+
+test('новый раздел внутри закрытого закрыт им же — и в подпапке, и в корне', () => {
+    assert.equal(aiClosedAbove(AI_TREE, 39), 'Старая вики');
+    // Родитель сам открыт, но закрыт выше — имя того, кто закрыл, а не родителя.
+    assert.equal(aiClosedAbove(AI_TREE, '43'), 'Старая вики');
+});
+
+test('открытый родитель и верхний уровень ничего не закрывают', () => {
+    assert.equal(aiClosedAbove(AI_TREE, 50), null);
+    assert.equal(aiClosedAbove(AI_TREE, ''), null);
+    assert.equal(aiClosedAbove(AI_TREE, null), null);
+    assert.equal(aiClosedAbove(AI_TREE, 999), null);
+    assert.equal(aiClosedAbove(undefined, 39), null);
+});
+
+test('статью закрывает хотя бы один закрытый раздел — строго, как на сервере', () => {
+    assert.equal(aiClosedSection(AI_TREE, [50, 43]), 'Старая вики');
+    assert.equal(aiClosedSection(AI_TREE, ['39']), 'Старая вики');
+    assert.equal(aiClosedSection(AI_TREE, [50]), null);
+    assert.equal(aiClosedSection(AI_TREE, []), null);
+    assert.equal(aiClosedSection(AI_TREE, [999]), null);
 });

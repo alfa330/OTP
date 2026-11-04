@@ -1,21 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
-    Archive, ArchiveRestore, ArrowDown, ArrowUp, Building2, ChevronRight, FolderTree,
-    FoldVertical, Globe, KeyRound, Layers, Plus, Loader2, Pencil, Search, UnfoldVertical,
-    UserSearch, X,
+    Archive, ArchiveRestore, ArrowDown, ArrowUp, Bot, BotOff, Building2, ChevronRight,
+    FolderTree, FoldVertical, Globe, KeyRound, Layers, Plus, Loader2, Pencil, Search,
+    UnfoldVertical, UserSearch, X,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, iosBtnGhost,
     IosBadge, IosMenu, IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
+import InfoHint, { InfoHintLines } from '../common/InfoHint';
 import { selectableSections, sectionPathLabel } from './sectionPicker';
 import { plural } from './guestAccess';
 import WikiSectionAccess, { branchDepartment } from './WikiSectionAccess';
 import WikiAccessProbe from './WikiAccessProbe';
 import {
-    FOCUS_TESTS, buildSpaceTree, collapseRows, filterRows, highlightParts,
+    FOCUS_TESTS, aiClosedAbove, buildSpaceTree, collapseRows, filterRows, highlightParts,
     reorderPatches, sectionSiblings, structureNeedles,
 } from './structureTree';
 
@@ -99,6 +100,16 @@ const FOCUS_CHIPS = [
    позже самого раздела, и у ответа, отданного старым сервером, его нет вовсе —
    а .length по undefined роняет всю вкладку. */
 const publicDepts = (x) => x?.public_department_ids || [];
+
+/* Что значит выбор «ИИ-помощник» в форме раздела — под «i», по строке на
+   вариант. «И всех вложенных» — не украшение: закрытие действует на подпапки
+   (wiki/perimeter.py), и без этих слов папку закрывали бы в расчёте, что
+   подпапки останутся открытыми. Оценка звонков названа отдельно: она ищет по
+   вике сама, и закрытый раздел пропадает и у неё. */
+const AI_CHOICE_HINT = [
+    'Читает — статьи раздела и всех вложенных попадают в ответы ИИ-помощника и в справку ИИ-оценки звонков',
+    'Не читает — ни помощник, ни оценка звонков этих статей не видят. Людям они открыты как прежде — по правам доступа',
+];
 
 /* Строка живого раздела. Архивные сюда не попадают — у них своя вкладка,
    поэтому ни ветки «вернуть», ни бейджа «в архиве» здесь нет.
@@ -193,6 +204,18 @@ const SectionRow = ({ row, department, needles, collapsed, canMove, onToggle, on
                                 <Globe size={11} /> Публичный
                             </IosBadge>
                         )
+                    )}
+                    {/* Закрытый от помощника раздел — исключение, как и
+                        публичный, поэтому помечен он, а состояние по умолчанию
+                        нет. Метка только у самого закрытого: подпапки закрыты
+                        им же, и метка на каждой повторяла бы одно решение. */}
+                    {section.ai_opt_out && (
+                        <IosBadge
+                            tone="slate"
+                            title="ИИ-помощник не читает статьи этого раздела и всех вложенных"
+                        >
+                            <BotOff size={11} /> Без помощника
+                        </IosBadge>
                     )}
                     {/* Бейджа «доступа нет» у раздела без правил здесь нет:
                         по решению владельца строку он не помечает. То же самое
@@ -431,6 +454,11 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
     const spaceName = useMemo(
         () => new Map(spaces.map((sp) => [sp.id, sp.name])), [spaces]);
 
+    /* Закрыт ли раздел в форме от помощника СВЕРХУ — по выбранному родителю,
+       а не по тому, где раздел лежал: родителя в форме можно сменить. */
+    const modalAiClosedAbove = sectionModal
+        ? aiClosedAbove(sections, sectionModal.parent_section_id) : null;
+
     const saveSection = () => {
         const payload = {
             space_id: sectionModal.space_id,
@@ -446,6 +474,9 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
             public_department_ids: sectionModal.visibility_scope === 'public'
                 ? publicDepts(sectionModal)
                 : [],
+            // Шлём всегда, как и публичность: сервер сравнивает с текущим, и
+            // держателю ветки, которому блока не показали, отказа не будет.
+            ai_opt_out: !!sectionModal.ai_opt_out,
         };
         setBusy(true);
         const request = sectionModal.id
@@ -686,6 +717,7 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                         space_id: space.id, name: '', description: '',
                                         visibility_scope: 'restricted', parent_section_id: '',
                                         department_id: '', public_department_ids: [],
+                                        ai_opt_out: false,
                                     })}
                                 >
                                     <Plus size={13} /> Раздел
@@ -717,12 +749,14 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                             parent_section_id: x.parent_section_id ? String(x.parent_section_id) : '',
                                             department_id: x.department_id ? String(x.department_id) : '',
                                             public_department_ids: x.public_department_ids || [],
+                                            ai_opt_out: !!x.ai_opt_out,
                                         })}
                                         onAddChild={(x) => setSectionModal({
                                             space_id: x.space_id, name: '', description: '',
                                             visibility_scope: 'restricted',
                                             parent_section_id: String(x.id),
                                             department_id: '', public_department_ids: [],
+                                            ai_opt_out: false,
                                         })}
                                         onArchive={archiveSection}
                                         onAccess={setAccessSection}
@@ -961,6 +995,69 @@ export default function WikiStructure({ base, headers, showToast, structure, rel
                                 </p>
                             )}
                         </div>
+
+                        {/* Что читает ИИ-помощник. Решает тот же, кто делает
+                            раздел публичным: это граница того, что уходит во
+                            внешний API, и держателю ветки сервер отвечает 403 —
+                            блока у него нет. Два варианта названы словами, а не
+                            тумблером: у выключенного тумблера не видно, что
+                            именно выключено.
+
+                            Подпапка закрытого раздела закрыта им же, и выбирать
+                            здесь нечего: вместо выбора — строка с тем, кто
+                            закрыл. Выбор остаётся, если у раздела свой флаг, —
+                            его можно снять, даже когда сверху тоже закрыто. */}
+                        {canManageStructure && (
+                            <div className="space-y-1.5">
+                                <div className="flex items-center gap-1.5 px-1">
+                                    <span className="text-[12px] font-medium text-slate-500">
+                                        ИИ-помощник
+                                    </span>
+                                    <InfoHint side="left">
+                                        <InfoHintLines lines={AI_CHOICE_HINT} />
+                                    </InfoHint>
+                                </div>
+                                {modalAiClosedAbove && !sectionModal.ai_opt_out ? (
+                                    <div className="flex items-center gap-2 rounded-2xl bg-slate-100 px-3 py-2.5 text-[13px] text-slate-600">
+                                        <BotOff size={14} className="shrink-0 text-slate-400" />
+                                        <span className="min-w-0">
+                                            Не читает — так задано у раздела «{modalAiClosedAbove}»
+                                        </span>
+                                    </div>
+                                ) : (
+                                    <div
+                                        className="flex gap-1 rounded-2xl bg-slate-100 p-1"
+                                        role="tablist"
+                                        aria-label="ИИ-помощник"
+                                    >
+                                        {[
+                                            { off: false, label: 'Читает', icon: Bot },
+                                            { off: true, label: 'Не читает', icon: BotOff },
+                                        ].map(({ off, label, icon: Icon }) => {
+                                            const active = !!sectionModal.ai_opt_out === off;
+                                            return (
+                                                <button
+                                                    key={label}
+                                                    type="button"
+                                                    role="tab"
+                                                    aria-selected={active}
+                                                    onClick={() => setSectionModal({
+                                                        ...sectionModal, ai_opt_out: off,
+                                                    })}
+                                                    className={`flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
+                                                        active
+                                                            ? 'bg-white text-slate-900 shadow-sm'
+                                                            : 'text-slate-500 hover:text-slate-700'
+                                                    }`}
+                                                >
+                                                    <Icon size={14} /> {label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Публичный раздел виден МИМО ветки — это выдача доступа
                             всей компании, а не устройство своего дерева, и держателю

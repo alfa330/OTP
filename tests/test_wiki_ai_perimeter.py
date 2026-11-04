@@ -18,6 +18,12 @@ all() по пустому множеству истинно, и такая ст�
 и без записи в лог. На проде она ровно одна и содержательная — «Классификатор
 авто» (0 строк в wiki_article_sections), причём единственная, под которую заведены
 правила доступа.
+
+С 04.11.2026 рубильник раздела закрывает и всё, что под ним (решение владельца:
+«Старая вики» с восемью подпапками). Набор «наследование» ниже держит обе
+стороны: подпапка и внук закрыты, а сосед, родитель закрытой подпапки и статья
+в открытом втором разделе — нет, если её не закрывает другой раздел. Петля в
+дереве (битые данные) не должна подвесить запрос.
 """
 
 import unittest
@@ -37,20 +43,32 @@ wiki_article_sections AS (
       FROM (VALUES {sections}) AS t(article_id, section_id)
 ),
 wiki_sections AS (
-    SELECT id::int, ai_opt_out::boolean
-      FROM (VALUES {section_flags}) AS t(id, ai_opt_out)
+    SELECT id::int, ai_opt_out::boolean, parent_section_id::int
+      FROM (VALUES {section_flags}) AS t(id, ai_opt_out, parent_section_id)
 )
 """
 
 _EMPTY = {
     'articles': "(NULL::int, NULL::text, NULL::bool, NULL::bool)",
     'sections': "(NULL::int, NULL::int)",
-    'section_flags': "(NULL::int, NULL::bool)",
+    'section_flags': "(NULL::int, NULL::bool, NULL::int)",
 }
 
 
 def _values(rows, fallback):
     return ', '.join(rows) if rows else fallback
+
+
+def _flags(rows):
+    """Строки разделов «(id, флаг)» или «(id, флаг, родитель)»: без родителя —
+    раздел верхнего уровня. Так прежние тесты остались в прежней записи."""
+    out = []
+    for row in rows:
+        inner = row.strip()[1:-1]
+        if inner.count(',') == 1:
+            inner += ', NULL'
+        out.append('(%s)' % inner)
+    return out
 
 
 class AiPerimeterSqlTest(unittest.TestCase):
@@ -65,7 +83,7 @@ class AiPerimeterSqlTest(unittest.TestCase):
         stub = _STUBS.format(
             articles=_values(articles, _EMPTY['articles']),
             sections=_values(sections, _EMPTY['sections']),
-            section_flags=_values(section_flags, _EMPTY['section_flags']),
+            section_flags=_values(_flags(section_flags), _EMPTY['section_flags']),
         )
         # Боевой запрос начинается с "SELECT a.id" — заглушки приклеиваются
         # перед ним, сам текст не меняется.
@@ -145,6 +163,69 @@ class AiPerimeterSqlTest(unittest.TestCase):
             candidates=[36],
         )
         self.assertEqual({36}, got)
+
+    # ── Наследование: закрытый раздел закрывает и подпапки ───────────────────
+    # Дерево как у «Старой вики» на проде: 39 — корень, 43 — подпапка, 90 —
+    # подпапка подпапки; 50 — соседняя ветка того же пространства.
+    _TREE = ["(39, true)", "(43, false, 39)", "(90, false, 43)", "(50, false)"]
+
+    def test_subsection_of_a_closed_section_is_closed(self):
+        """Ради этого всё и делалось: статья подпапки «Старой вики»."""
+        got = self.eligible(
+            articles=["(523, 'published', false, false)"],
+            sections=["(523, 43)"],
+            section_flags=self._TREE,
+            candidates=[523],
+        )
+        self.assertEqual(set(), got)
+
+    def test_closing_reaches_any_depth(self):
+        got = self.eligible(
+            articles=["(7, 'published', false, false)"],
+            sections=["(7, 90)"],
+            section_flags=self._TREE,
+            candidates=[7],
+        )
+        self.assertEqual(set(), got)
+
+    def test_neighbour_branch_stays_open(self):
+        got = self.eligible(
+            articles=["(8, 'published', false, false)"],
+            sections=["(8, 50)"],
+            section_flags=self._TREE,
+            candidates=[8],
+        )
+        self.assertEqual({8}, got)
+
+    def test_closed_subsection_does_not_close_its_parent(self):
+        """Закрытие идёт ВНИЗ: статья родителя закрытой подпапки остаётся открытой."""
+        got = self.eligible(
+            articles=["(1, 'published', false, false)", "(2, 'published', false, false)"],
+            sections=["(1, 60)", "(2, 61)"],
+            section_flags=["(60, false)", "(61, true, 60)"],
+            candidates=[1, 2],
+        )
+        self.assertEqual({1}, got)
+
+    def test_one_closed_tree_is_enough_for_a_two_section_article(self):
+        """Строгая семантика и с наследованием: открытый второй раздел не спасает."""
+        got = self.eligible(
+            articles=["(5, 'published', false, false)"],
+            sections=["(5, 50)", "(5, 90)"],
+            section_flags=self._TREE,
+            candidates=[5],
+        )
+        self.assertEqual(set(), got)
+
+    def test_cycle_in_the_tree_does_not_hang(self):
+        """Петля в дереве — битые данные, но запрос обязан вернуться."""
+        got = self.eligible(
+            articles=["(1, 'published', false, false)", "(2, 'published', false, false)"],
+            sections=["(1, 70)", "(2, 80)"],
+            section_flags=["(70, true, 71)", "(71, false, 70)", "(80, false)"],
+            candidates=[1, 2],
+        )
+        self.assertEqual({2}, got)
 
     # ── Периметр не расширяется ──────────────────────────────────────────────
     def test_candidate_list_is_the_ceiling(self):

@@ -4,6 +4,7 @@
 обработчики, чтобы ни один файл не разросся до нечитаемого состояния.
 """
 
+import logging
 import re
 from datetime import date
 
@@ -13,6 +14,7 @@ from . import access as wiki_access
 from . import articles as wiki_articles
 from . import queries, structure
 from . import schema as wiki_schema
+from .ai import index as ai_index
 from .schema import CAPABILITY_TITLES, SUBJECT_TYPES
 
 
@@ -345,6 +347,42 @@ def register(bp, wiki_route, db, log_ip):
             return _SECTION_ABOVE_GRANTOR
         return None
 
+    def _sync_section_ai(cursor, section_id):
+        """Пересобрать индекс помощника под статьи раздела и всех вложенных.
+
+        Зовётся, когда пригодность для ИИ меняется у поддерева разом:
+        рубильник раздела переключили или раздел переехал под закрытый либо
+        из-под него. Ни одна статья при этом не сохраняется, значит сама она в
+        индексе не пересоберётся — и закрытый раздел продолжал бы лежать в
+        индексе кусками, то есть обещание «помощник не читает» нарушалось бы
+        там, где этого не видно. В обратную сторону открытая статья осталась бы
+        без кусков, и помощник её «не знал» бы до первого сохранения.
+
+        Только база, без внешних вызовов: векторы хранятся по хешу текста
+        (wiki/ai/embed.py), поэтому у вернувшихся кусков они почти всегда уже
+        есть, а недостающие досчитает следующее сохранение любой статьи или
+        пересборка индекса. Держать на внешнем API соединение из пула ради
+        переключателя в форме раздела — тот обмен, от которого предостерегает
+        embed_missing.
+
+        Своим савпоинтом: сбой индекса не отменяет уже сделанную правку
+        раздела — тот же выбор, что при сохранении статьи
+        (routes_edit._sync_ai_index).
+        """
+        summary = {'indexed': 0, 'unchanged': 0, 'removed': 0, 'missing': 0}
+        cursor.execute('SAVEPOINT wiki_section_ai')
+        try:
+            for article_id in structure.subtree_article_ids(cursor, section_id):
+                action = ai_index.reindex_article(cursor, article_id)['action']
+                summary[action] = summary.get(action, 0) + 1
+        except Exception as error:                       # noqa: BLE001
+            cursor.execute('ROLLBACK TO SAVEPOINT wiki_section_ai')
+            logging.exception('Вики: индекс помощника под раздел %s не пересобран',
+                              section_id)
+            return {'failed': str(error)[:200]}
+        cursor.execute('RELEASE SAVEPOINT wiki_section_ai')
+        return summary
+
     # ── Дерево структуры ─────────────────────────────────────────────────
     @wiki_route('/structure')
     def wiki_structure(cursor, ctx):
@@ -437,6 +475,33 @@ def register(bp, wiki_route, db, log_ip):
                 branch_of[ident] = found
             return found
 
+        closed_above = {}
+
+        def ai_closed_above(section_id):
+            """Имя ближайшего предка, закрытого от помощника, — или None.
+
+            Сам раздел не в счёт: его собственный рубильник приезжает полем
+            ai_opt_out. Форме нужно отличать «закрыт здесь» (переключатель можно
+            вернуть) от «закрыт выше» (возвращать здесь нечего — закрывает
+            родитель, wiki/perimeter.py), иначе подпапка «Старой вики» показывала
+            бы «Читает», а помощник её не читал бы.
+            """
+            if section_id in closed_above:
+                return closed_above[section_id]
+            found = None
+            current = (by_id.get(section_id) or {}).get('parent_section_id')
+            # Ограничитель тот же, что у подъёма за отделом ветки.
+            for _ in range(50):
+                node = by_id.get(current)
+                if not node:
+                    break
+                if node.get('ai_opt_out'):
+                    found = node['name']
+                    break
+                current = node['parent_section_id']
+            closed_above[section_id] = found
+            return found
+
         visible = []
         for section in sections:
             # Может ли текущий человек раздавать доступ ИМЕННО ТУТ: решает
@@ -509,6 +574,7 @@ def register(bp, wiki_route, db, log_ip):
             section['can_edit_section'] = can_edit_here
             section['can_archive_section'] = can_archive_here
             section['public_department_ids'] = public_departments.get(section['id'], [])
+            section['ai_closed_by'] = ai_closed_above(section['id'])
             section['context_only'] = False
             visible.append(section)
 
@@ -550,6 +616,7 @@ def register(bp, wiki_route, db, log_ip):
                 node['can_edit_section'] = False
                 node['can_archive_section'] = False
                 node['public_department_ids'] = public_departments.get(node['id'], [])
+                node['ai_closed_by'] = ai_closed_above(node['id'])
                 node['context_only'] = True
                 shown.add(node['id'])
                 parent = node['parent_section_id']
@@ -740,6 +807,9 @@ def register(bp, wiki_route, db, log_ip):
         scope = data.get('visibility_scope')
         if scope not in ('public', 'restricted'):
             scope = 'restricted'
+        # Рубильник помощника — только настоящим булевым: строка 'false' из
+        # кривого клиента иначе закрыла бы раздел.
+        ai_opt_out = data.get('ai_opt_out') is True
 
         # Отдел ветки. Из него выводится section_kind, и он же подставляется в
         # правила доступа подразделов: ветка «СЗоВ» делает раздел «Оператор»
@@ -770,6 +840,11 @@ def register(bp, wiki_route, db, log_ip):
             # назначает тот же, кто раздаёт доступ.
             scope = 'restricted'
             owner_user_id = None
+            # Что читает помощник, решает тот же, кто делает раздел публичным:
+            # это граница того, что уходит во внешний API, а не устройство
+            # своего дерева. Подраздел закрытого раздела закрыт и так —
+            # наследованием (wiki/perimeter.py), свой флаг ему не нужен.
+            ai_opt_out = False
             # Ветку можно завести только на отдел, которому выдано САМО
             # пространство. Иначе внутри своей ветки заводится ветка чужого
             # клиента, и по ней начинают считаться права его сотрудников.
@@ -802,15 +877,19 @@ def register(bp, wiki_route, db, log_ip):
             icon=_clean(data.get('icon'), 64), visibility_scope=scope,
             owner_user_id=owner_user_id,
             created_by=ctx['user_id'],
+            ai_opt_out=ai_opt_out,
         )
         if scope == 'public' and isinstance(data.get('public_department_ids'), list):
             structure.set_public_departments(cursor, section_id, data['public_department_ids'])
+        details = {'name': name, 'space_id': space_id, 'visibility_scope': scope,
+                   'department_id': department_id}
+        if ai_opt_out:
+            # Только когда закрыли: «участие в помощнике: включено» в каждой
+            # записи о новом разделе было бы шумом про состояние по умолчанию.
+            details['ai_opt_out'] = True
         queries.log_action(cursor, actor_id=ctx['user_id'], action='section.create',
                            entity_type='section', entity_id=section_id,
-                           details={'name': name, 'space_id': space_id,
-                                    'visibility_scope': scope,
-                                    'department_id': department_id},
-                           ip_address=log_ip())
+                           details=details, ip_address=log_ip())
         return jsonify({"id": section_id}), 201
 
     # Способность снята с декоратора по той же причине, что и у POST /sections:
@@ -828,7 +907,8 @@ def register(bp, wiki_route, db, log_ip):
         cursor.execute(
             """
             SELECT s.name, sp.department_id, s.space_id, s.parent_section_id,
-                   s.department_id, s.visibility_scope, s.status, s.owner_user_id
+                   s.department_id, s.visibility_scope, s.status, s.owner_user_id,
+                   s.ai_opt_out
               FROM wiki_sections s JOIN wiki_spaces sp ON sp.id = s.space_id
              WHERE s.id = %s
             """,
@@ -848,6 +928,7 @@ def register(bp, wiki_route, db, log_ip):
         section_scope = row[5]
         section_status = row[6]
         section_owner_id = row[7]
+        section_ai_off = bool(row[8])
 
         # ── Граница того, кому выдана ВЕТКА, а не способность ────────────
         #
@@ -894,6 +975,13 @@ def register(bp, wiki_route, db, log_ip):
             return jsonify({"status": "archived"})
 
         data = _body()
+        # Рубильник помощника — только настоящим булевым (см. POST), и правкой
+        # считается лишь ОТЛИЧИЕ от текущего: форма шлёт его при каждом
+        # сохранении, а переименование раздела не должно ни упираться в отказ
+        # держателю ветки, ни гонять пересборку индекса.
+        ai_off_change = (data['ai_opt_out']
+                         if isinstance(data.get('ai_opt_out'), bool)
+                         and data['ai_opt_out'] != section_ai_off else None)
 
         # ── Что именно вправе поменять держатель ветки ───────────────────
         #
@@ -912,6 +1000,16 @@ def register(bp, wiki_route, db, log_ip):
                 return jsonify({
                     "error": "Публичным раздел делает вышестоящий руководитель",
                     "code": "WIKI_SECTION_PUBLIC_FORBIDDEN",
+                }), 403
+            # Что читает помощник — граница того, что уходит во внешний API, и
+            # двигает её тот же, кто делает раздел публичным. В обе стороны:
+            # открыть закрытое значило бы отправить наружу то, что закрыл
+            # вышестоящий, а закрыть — решить за него, чего помощник не знает.
+            if ai_off_change is not None:
+                return jsonify({
+                    "error": "Закрыть раздел от помощника или открыть его может "
+                             "вышестоящий руководитель",
+                    "code": "WIKI_SECTION_AI_FORBIDDEN",
                 }), 403
             # Статус здесь НЕ запрещён: возврат из архива идёт именно этой
             # дверью (фронт шлёт PATCH {status:'active'}), а архив без возврата
@@ -999,6 +1097,8 @@ def register(bp, wiki_route, db, log_ip):
                 exclude_id=section_id)
         if data.get('visibility_scope') in ('public', 'restricted'):
             fields['visibility_scope'] = data['visibility_scope']
+        if ai_off_change is not None:
+            fields['ai_opt_out'] = ai_off_change
         if data.get('status') in ('active', 'archived'):
             fields['status'] = data['status']
         if 'owner_user_id' in data:
@@ -1088,8 +1188,16 @@ def register(bp, wiki_route, db, log_ip):
             queries.log_action(cursor, actor_id=ctx['user_id'], action='section.update',
                                entity_type='section', entity_id=section_id,
                                details=fields, ip_address=log_ip())
-        return jsonify({"status": "ok", "space_id": target_space_id,
-                        "sections_moved": moved})
+        # Пригодность для помощника меняется у всего поддерева: переключили
+        # рубильник, раздел переехал в другое пространство (moved) или под
+        # другого родителя — под закрытый раздел или из-под него. Родителя
+        # сравниваем с текущим: форма шлёт его при каждом сохранении.
+        response = {"status": "ok", "space_id": target_space_id,
+                    "sections_moved": moved}
+        if ('ai_opt_out' in fields or moved
+                or fields.get('parent_section_id', section_parent_id) != section_parent_id):
+            response['ai_index'] = _sync_section_ai(cursor, section_id)
+        return jsonify(response)
 
     # ── Правила доступа ──────────────────────────────────────────────────
     # Гейт не одной способностью, а любой из двух: справочник нужен и форме

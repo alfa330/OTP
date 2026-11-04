@@ -34,6 +34,7 @@ import WikiImage from './WikiImageNode';
 import WikiTrainerNode from './trainers/TrainerNode';
 import { TRAINER_CARDS, defaultButtonLabel, findTrainer } from './trainers/registry';
 import SectionTreeSelect from './SectionTreeSelect';
+import { aiClosedSection } from './structureTree';
 import ArticlePicker from './ArticlePicker';
 import { buildRelativeArticleLink, linkAttrsForSaving } from './articleLink';
 import useStableCallback from './useStableCallback';
@@ -280,6 +281,13 @@ export default function WikiEditor({
         return list.some((s) => chosen.includes(String(s.id))
             && s.permissions?.can_publish);
     }, [article, sections, sectionIds]);
+
+    /* Раздел статьи закрыт от помощника — сам или папкой выше. Тогда включённая
+       «Поддержка ИИ» не значит «помощник её читает», и промолчать об этом —
+       значит пообещать обратное. По выбранным в форме разделам, а не по
+       сохранённым: перенос в закрытую папку виден ещё до сохранения. */
+    const aiClosedBy = useMemo(() => aiClosedSection(sections, sectionIds),
+        [sections, sectionIds]);
 
     const editor = useEditor({
         extensions: [
@@ -874,6 +882,7 @@ export default function WikiEditor({
                 showToast={showToast}
                 spaceId={spaceId}
                 enabled={aiSupport}
+                closedBy={aiClosedBy}
                 onEnabledChange={(value) => { setAiSupport(value); setDirty(true); }}
                 excludeId={article?.id || null}
                 getSnapshot={() => ({ title, content: editor?.getHTML() || '' })}

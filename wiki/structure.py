@@ -249,7 +249,7 @@ def narrow_to_space(department_ids, space_department_ids):
 _SECTION_KEYS = ('id', 'space_id', 'parent_section_id', 'name', 'slug', 'description',
                  'icon', 'visibility_scope', 'owner_user_id', 'owner_name', 'status',
                  'position', 'department_id', 'department_name', 'section_kind',
-                 'articles_count', 'rules_count')
+                 'ai_opt_out', 'articles_count', 'rules_count')
 
 
 def list_sections(cursor, space_id=None, include_archived=False):
@@ -258,7 +258,7 @@ def list_sections(cursor, space_id=None, include_archived=False):
         SELECT s.id, s.space_id, s.parent_section_id, s.name, s.slug, s.description,
                s.icon, s.visibility_scope, s.owner_user_id, u.name AS owner_name,
                s.status, s.position, s.department_id, d.name AS department_name,
-               s.section_kind,
+               s.section_kind, s.ai_opt_out,
                (SELECT count(*) FROM wiki_article_sections a WHERE a.section_id = s.id),
                (SELECT count(*) FROM wiki_section_access_rules r WHERE r.section_id = s.id)
           FROM wiki_sections s
@@ -378,30 +378,60 @@ def department_branch_taken(cursor, *, space_id, parent_section_id, department_i
 
 def create_section(cursor, *, space_id, parent_section_id, name, slug, description,
                    icon, visibility_scope, owner_user_id, created_by,
-                   department_id=None):
+                   department_id=None, ai_opt_out=False):
     cursor.execute(
         """
         INSERT INTO wiki_sections (space_id, parent_section_id, name, slug, description,
                                    icon, visibility_scope, owner_user_id, position,
-                                   department_id, section_kind, created_by)
+                                   department_id, section_kind, ai_opt_out, created_by)
         VALUES (%(space)s, %(parent)s, %(name)s, %(slug)s, %(description)s, %(icon)s,
                 %(scope)s, %(owner)s,
                 COALESCE((SELECT max(position) + 1 FROM wiki_sections
                            WHERE space_id = %(space)s), 0),
-                %(dept)s, %(kind)s, %(created_by)s)
+                %(dept)s, %(kind)s, %(ai_off)s, %(created_by)s)
         RETURNING id
         """,
         {'space': space_id, 'parent': parent_section_id, 'name': name, 'slug': slug,
          'description': description, 'icon': icon, 'scope': visibility_scope,
          'owner': owner_user_id, 'dept': department_id,
-         'kind': section_kind_of(department_id), 'created_by': created_by},
+         'kind': section_kind_of(department_id), 'ai_off': bool(ai_opt_out),
+         'created_by': created_by},
     )
     return cursor.fetchone()[0]
 
 
 _SECTION_UPDATABLE = ('name', 'slug', 'description', 'icon', 'visibility_scope',
                       'owner_user_id', 'status', 'position', 'parent_section_id',
-                      'department_id', 'section_kind')
+                      'department_id', 'section_kind', 'ai_opt_out')
+
+
+def subtree_article_ids(cursor, section_id):
+    """Статьи раздела и всех его подразделов — любого статуса.
+
+    Нужны индексу помощника, когда раздел закрывают от него или открывают, а
+    также когда раздел переезжает под закрытый или из-под него: пригодность
+    статей поддерева меняется разом, а ни одна из них при этом не сохраняется —
+    сами они в индексе не пересоберутся. Статус не фильтруем: решает сам
+    reindex_article, и снятая с публикации статья обязана уйти из индекса тем
+    же проходом. UNION — защита от петли, как в perimeter.AI_CLOSED_SECTIONS_SQL.
+    """
+    cursor.execute(
+        """
+        WITH RECURSIVE tree AS (
+            SELECT id FROM wiki_sections WHERE id = %s
+            UNION
+            SELECT child.id
+              FROM wiki_sections child
+              JOIN tree parent ON child.parent_section_id = parent.id
+        )
+        SELECT DISTINCT s.article_id
+          FROM wiki_article_sections s
+         WHERE s.section_id IN (SELECT id FROM tree)
+         ORDER BY s.article_id
+        """,
+        (section_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
 
 
 def update_section(cursor, section_id, fields):

@@ -52,10 +52,10 @@ ROOT = Path(__file__).resolve().parents[1]
 ANCHOR, BRANCH, OUTSIDE = 1, 19, 33
 
 # SELECT в начале PATCH/DELETE: имя, отдел пространства, space_id, родитель,
-# отдел раздела, публичность, статус, владелец.
+# отдел раздела, публичность, статус, владелец, рубильник помощника.
 def section_row(*, parent, scope='restricted', status='active', owner=None,
-                department=None, name='Оператор'):
-    return (name, None, 11, parent, department, scope, status, owner)
+                department=None, name='Оператор', ai_off=False):
+    return (name, None, 11, parent, department, scope, status, owner, ai_off)
 
 
 @unittest.skipIf(Flask is None, 'flask не установлен')

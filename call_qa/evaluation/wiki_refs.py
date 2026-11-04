@@ -20,13 +20,16 @@ prompt_hash отпечатка меняется вместе с текстом �
 акции» с разным содержимым, и поиск по смыслу отдал бы модели обе.
 
 Периметр — тот же, что у ИИ-помощника вики (wiki/ai/index.py): опубликована,
-не «строгий режим», не отключена от ИИ ни сама, ни её раздел. Черновик или
-закрытая от ИИ статья в промпт не попадает, даже если на неё сослались.
+не «строгий режим», не отключена от ИИ ни сама, ни её раздел, ни раздел выше по
+дереву. Черновик или закрытая от ИИ статья в промпт не попадает, даже если на
+неё сослались.
 """
 from __future__ import annotations
 
 import logging
 import re
+
+from wiki.perimeter import AI_SECTION_GATE_SQL
 
 # Ссылка в тексте: полный адрес портала или относительный «?…article=…». Что
 # из найденного — статья вики, решает тот же разбор, что у самой вики
@@ -44,10 +47,7 @@ SELECT a.slug, a.title, a.updated_at, coalesce(a.content, ''), coalesce(a.conten
   FROM wiki_articles a
  WHERE a.slug = ANY(%s)
    AND a.status = 'published' AND NOT a.strict_mode AND NOT a.ai_opt_out
-   AND NOT EXISTS (SELECT 1
-                     FROM wiki_article_sections s
-                     JOIN wiki_sections sec ON sec.id = s.section_id
-                    WHERE s.article_id = a.id AND sec.ai_opt_out)
+   AND """ + AI_SECTION_GATE_SQL + """
 """
 
 
