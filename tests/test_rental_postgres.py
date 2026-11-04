@@ -28,6 +28,7 @@ PORT = os.environ.get('RENTAL_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (RENTAL_TEST_PORT)')
 
 SUPER, HEAD_OOZ, NIGHT_OP, STRANGER, FIRED = 1, 20, 500, 600, 700
+VIEWER = 206   # только просмотр поимённо (#409) — id из rental.access.READ_ONLY_USER_IDS
 NOW_TS = 1793124000.0   # 28.10.2026 04:00 по Алматы
 SLOT = datetime(2026, 10, 28, 1)
 
@@ -43,7 +44,8 @@ BASE_DDL = '''
         (20, 'Глава Оозова', 'admin', 'working', 2008),
         (500, 'Ночной Оператор', 'operator', 'working', 2008),
         (600, 'Чужой Оператор', 'operator', 'working', 1),
-        (700, 'Уволенный Ночной', 'operator', 'fired', 2008);
+        (700, 'Уволенный Ночной', 'operator', 'fired', 2008),
+        (206, 'Тренер Показа', 'trainer', 'working', 1);
 '''
 
 
@@ -352,3 +354,29 @@ def test_screen_state_export_and_locked_history(client, env):
     assert late['slot']['kind_label'] == '07:00' and late['slot']['can_collect'] is False
     # …а супер-админ может собрать отчёт текущего слота вне окна (проверка после выкладки).
     assert client.get('/api/rental', headers=_as(SUPER)).get_json()['slot']['can_collect'] is True
+
+
+def test_read_only_sees_the_report_and_writes_nothing(client, env):
+    """#409: только просмотр — тот же отчёт, что у ночной смены, но ни «Собрать», ни «Обновить»,
+    ни «Состояния», ни Excel; и сервис сам не даёт «Состояние», даже если ручку обойти."""
+    env['collector'].result['rows'] = [_row('111AAA02', address='Абая 10', in_fleet=True)]
+    empty = client.get('/api/rental', headers=_as(VIEWER)).get_json()
+    assert empty['capabilities']['read_only'] is True and empty['capabilities']['night_report'] is True
+    assert empty['report'] is None and empty['slot']['in_window'] is True and empty['slot']['can_collect'] is False
+    refused = client.post('/api/rental/reports', headers=_as(VIEWER))
+    assert (refused.status_code, refused.get_json()['code']) == (403, 'RENTAL_READ_ONLY')
+
+    report = env['service'].start(rules.KIND_NIGHT, SLOT, by=NIGHT_OP)
+    screen = client.get('/api/rental', headers=_as(VIEWER)).get_json()
+    assert screen['report']['id'] == report['id'] and [row['plate'] for row in screen['rows']] == ['111AAA02']
+    row_id = screen['rows'][0]['id']
+    for answer in (client.put('/api/rental/rows/%d/state' % row_id, json={'state': 'base'}, headers=_as(VIEWER)),
+                   client.post('/api/rental/reports/%d/refresh' % report['id'], headers=_as(VIEWER))):
+        assert (answer.status_code, answer.get_json()['code']) == (403, 'RENTAL_READ_ONLY')
+    exported = client.get('/api/rental/reports/%d/export' % report['id'], headers=_as(VIEWER))
+    assert (exported.status_code, exported.get_json()['code']) == (403, 'RENTAL_FORBIDDEN')
+    assert env['service'].set_state(env['service'].context(VIEWER), row_id, 'base') == ('forbidden', None)
+    with env['db']._get_cursor() as cur:
+        cur.execute('SELECT count(*) FROM rental_night_state_log')
+        assert cur.fetchone()[0] == 0
+    assert _rows(env['db'], report['id'])['111AAA02']['state'] is None

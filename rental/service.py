@@ -151,7 +151,7 @@ class RentalService:
             row = queries.get_row(cursor, row_id, for_update=True)
             if not row:
                 return 'not_found', None
-            if not access.can_open_night_report(ctx):
+            if not access.can_set_state(ctx):
                 return 'forbidden', None
             if row.get('state') == state and row.get('state_source') == rules.STATE_BY_HAND:
                 return 'ok', row

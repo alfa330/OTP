@@ -604,10 +604,14 @@ const FleetTab = ({ api, toast }) => {
                 <span>
                     {sync.synced_at ? `Занятые по Yume — на ${shortTime(sync.synced_at)}` : 'Занятые по Yume ещё не загружены'}
                 </span>
-                <button type="button" className={ICON_BTN} aria-label="Обновить занятые по Yume" onClick={refreshYume}
-                        disabled={sync.refreshing}>
-                    <RefreshCw size={14} className={sync.refreshing ? 'animate-spin' : ''} />
-                </button>
+                {/* Только просмотр (#409): обновление — запись, ручка его отклонит; снимок и так
+                    обновляется сам при открытии вкладки. */}
+                {!caps.read_only && (
+                    <button type="button" className={ICON_BTN} aria-label="Обновить занятые по Yume" onClick={refreshYume}
+                            disabled={sync.refreshing}>
+                        <RefreshCw size={14} className={sync.refreshing ? 'animate-spin' : ''} />
+                    </button>
+                )}
             </div>
             {sync.error && (
                 <Notice tone="amber" title="Yume не ответил">

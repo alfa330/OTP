@@ -53281,15 +53281,17 @@ def _rental_section_open_for(user_id, role=None, *, department_code=None, headed
     """Открыт ли раздел «Аренда авто» — то же правило, что у его ручек (rental/access.py).
 
     Ночной отчёт ведёт ООЗ (сотрудники и глава отдела), наличие авто и направления в офис —
-    отделы продаж и аренды; плюс супер-админ. Считается из того, что профиль уже знает, без
-    своего запроса; границу всё равно держит каждый роут.
+    отделы продаж и аренды; плюс супер-админ и поимённо — только просмотр (#409, по id).
+    Считается из того, что профиль уже знает, без своего запроса; границу всё равно держит
+    каждый роут.
     """
     if user_id is None:
         return False
     try:
         from rental import access as rental_access
         return rental_access.can_open_section({
-            'role': role, 'department_code': department_code, 'headed_codes': headed_codes or [],
+            'user_id': user_id, 'role': role, 'department_code': department_code,
+            'headed_codes': headed_codes or [],
         })
     except Exception:
         logging.exception("Не удалось определить доступ к «Аренде авто» пользователя %s", user_id)

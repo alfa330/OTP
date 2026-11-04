@@ -49,7 +49,7 @@ const GpsStatus = ({ row, collectedAt }) => {
     return <span className="text-slate-600">{GPS_LABELS[row.gps_status] || ''}</span>;
 };
 
-const StateCell = ({ row, saving, onChange, emptyLabel = null }) => {
+const StateCell = ({ row, saving, onChange, emptyLabel = null, readOnly = false }) => {
     const label = STATE_LABELS[row.state];
     const who = row.state_source === 'manual' && row.state_by_name
         ? `${row.state_by_name}${row.state_at ? `, ${shortTime(row.state_at)}` : ''}` : '';
@@ -60,11 +60,15 @@ const StateCell = ({ row, saving, onChange, emptyLabel = null }) => {
         </span>
     ) : row.needs_check ? (
         <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[12px] font-medium text-amber-800 ring-1 ring-amber-200/80">Уточнить</span>
-    ) : emptyLabel ? (
+    ) : emptyLabel && !readOnly ? (
         <span className="text-[13px] text-blue-600">{emptyLabel}</span>
     ) : (
         <span className="text-slate-300">—</span>
     );
+    // Только просмотр (#409): то же значение текстом, без меню выбора.
+    if (readOnly) {
+        return <span title={who || undefined} className="inline-flex h-8 max-w-full items-center px-2 text-[13px]">{text}</span>;
+    }
     return (
         <span title={who || undefined} className="inline-flex max-w-full">
             <IosMenu
@@ -218,7 +222,9 @@ const NightReport = ({ api, toast, initial }) => {
     const selected = data.selected || null;
     const history = data.history || {};
     const today = String(data.server_time || '').slice(0, 10);
-    const canRefresh = report && slot.report_id === report.id && slot.in_window && !collecting;
+    // Только просмотр (#409): ни «Состояния», ни «Обновить», ни Excel — ручки ответили бы отказом.
+    const readOnly = Boolean(data.capabilities?.read_only);
+    const canRefresh = report && slot.report_id === report.id && slot.in_window && !collecting && !readOnly;
     const showsRent = Boolean(report?.shows_rent);
     const failed = report ? failedSources(report.sources) : [];
 
@@ -274,7 +280,7 @@ const NightReport = ({ api, toast, initial }) => {
                     {busy.refresh ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />} Обновить
                 </button>
             )}
-            {report && report.status !== 'collecting' && rows.length > 0 && (
+            {report && report.status !== 'collecting' && rows.length > 0 && !readOnly && (
                 <button type="button" className={TOOLBAR_BTN} onClick={download} disabled={busy.export}>
                     {busy.export ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Excel
                 </button>
@@ -372,7 +378,7 @@ const NightReport = ({ api, toast, initial }) => {
                                         </td>
                                     )}
                                     <td className="whitespace-nowrap px-3 py-2"><GpsStatus row={row} collectedAt={report.collected_at} /></td>
-                                    <td className="px-1 py-1"><StateCell row={row} saving={busy[`row:${row.id}`]} onChange={changeState} /></td>
+                                    <td className="px-1 py-1"><StateCell row={row} saving={busy[`row:${row.id}`]} onChange={changeState} readOnly={readOnly} /></td>
                                     <td className="whitespace-nowrap px-3 py-2 tabular-nums text-slate-600">{shortTime(row.signal_at) || <span className="text-slate-300">—</span>}</td>
                                     <td className="max-w-[420px] px-4 py-2 text-slate-600">
                                         <span className="line-clamp-2" title={row.address || undefined}>{row.address || <span className="text-slate-300">—</span>}</span>
@@ -402,7 +408,7 @@ const NightReport = ({ api, toast, initial }) => {
                             </div>
                             {row.address && <div className="text-[13px] leading-snug text-slate-600">{row.address}</div>}
                             <div className="-ml-2">
-                                <StateCell row={row} saving={busy[`row:${row.id}`]} onChange={changeState} emptyLabel="Указать состояние" />
+                                <StateCell row={row} saving={busy[`row:${row.id}`]} onChange={changeState} emptyLabel="Указать состояние" readOnly={readOnly} />
                             </div>
                         </li>
                     ))}

@@ -113,6 +113,9 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
                         return jsonify({"error": "Пользователь не найден"}), 404
                     if not access.can_open_section(ctx):
                         return _bad('Раздел «Аренда авто» вам не открыт', 'RENTAL_SECTION_CLOSED', 403)
+                    # Только просмотр (#409): любая запись закрыта здесь, одним правилом на все ручки.
+                    if request.method != 'GET' and access.is_read_only(ctx):
+                        return _bad('Раздел «Аренда авто» открыт вам только для просмотра', 'RENTAL_READ_ONLY', 403)
                     return handler(*args, ctx=ctx, **kwargs)
                 except Exception as exc:  # noqa: BLE001
                     logging.exception('rental: ошибка в %s', rule)
@@ -138,7 +141,8 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
             'kind': kind, 'kind_label': rules.KIND_LABELS[kind], 'slot_at': _iso(slot),
             'report_id': existing['id'] if existing else None,
             'in_window': in_window,
-            'can_collect': existing is None and (in_window or access.can_collect_any_time(ctx)),
+            'can_collect': (existing is None and (in_window or access.can_collect_any_time(ctx))
+                            and not access.is_read_only(ctx)),
             'next_kind_label': rules.KIND_LABELS[next_kind], 'next_at': _iso(next_at),
         }
 
@@ -251,6 +255,9 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     @rental_route('/reports/<int:report_id>/export')
     def rental_export(report_id, ctx):
+        denied = _need(access.can_export(ctx))
+        if denied:
+            return denied
         with db._get_cursor() as cursor:
             report = queries.get_report(cursor, report_id)
             if not report:

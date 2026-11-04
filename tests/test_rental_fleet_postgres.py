@@ -33,6 +33,7 @@ PORT = os.environ.get('RENTAL_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (RENTAL_TEST_PORT)')
 
 SUPER, SALES_HEAD, SALES_OP, SALES_OP2, RENTAL, RENTAL_HEAD, OOZ, STRANGER = 1, 10, 11, 12, 20, 21, 30, 40
+VIEWER = 206   # только просмотр поимённо (#409) — id из rental.access.READ_ONLY_USER_IDS
 NOW = datetime(2026, 10, 28, 12, 0)
 
 BASE_DDL = '''
@@ -54,7 +55,8 @@ BASE_DDL = '''
         (20, 'Сотрудник Аренды', 'operator', 'working', 900),
         (21, 'Глава Аренды', 'operator', 'working', 900),
         (30, 'Ночной Оператор', 'operator', 'working', 2008),
-        (40, 'Чужой Оператор', 'operator', 'working', 1);
+        (40, 'Чужой Оператор', 'operator', 'working', 1),
+        (206, 'Тренер Показа', 'trainer', 'working', 1);
     INSERT INTO wiki_space_departments VALUES (11, 367), (11, 1);
     INSERT INTO wiki_taxi_parks (name, status, position, space_id) VALUES
         ('iTaxi', 'active', 1, 11), ('Jana такси', 'active', 2, 11), ('Старый парк', 'archived', 3, 11),
@@ -343,6 +345,48 @@ def test_routes_by_role(client, env):
     conditions = client.get('/api/rental/conditions', headers=_as(SALES_OP)).get_json()
     assert conditions['can_edit'] is False and len(conditions['current']['blocks']) == 5
     assert client.post('/api/rental/conditions', json={'blocks': []}, headers=_as(RENTAL)).status_code == 400
+
+
+def test_read_only_sees_fleet_and_every_direction_but_changes_nothing(client, env):
+    """#409: только просмотр — машины, условия и весь реестр, как у аренды; ни направить, ни статуса,
+    ни свободных, ни новой версии условий."""
+    card = _eqm5(env['db'])[0]
+    assert client.put('/api/rental/cards/%d/free' % card['id'], json={'free_count': 2},
+                      headers=_as(RENTAL)).status_code == 200
+    created = client.post('/api/rental/directions', headers=_as(SALES_OP), json={
+        'card_id': card['id'], 'phone': '+7 707 333 44 55', 'visit_date': '2026-10-28', 'visit_time': '18:00',
+        'park': 'Jana такси'})
+    direction_id = created.get_json()['direction']['id']
+
+    fleet = client.get('/api/rental/fleet', headers=_as(VIEWER)).get_json()
+    caps = fleet['capabilities']
+    assert (caps['fleet'], caps['read_only'], caps['send'], caps['edit_cards']) == (True, True, False, False)
+    assert fleet['parks'] == [] and 'yume_keys' not in fleet['cards'][0]
+    registry = client.get('/api/rental/directions', headers=_as(VIEWER)).get_json()
+    assert registry['all'] is True and [item['id'] for item in registry['items']] == [direction_id]
+    assert registry['operators'] == [{'id': SALES_OP, 'name': 'Оператор Продаж'}]
+    assert client.get('/api/rental/directions/%d/log' % direction_id, headers=_as(VIEWER)).status_code == 200
+    assert client.get('/api/rental/conditions', headers=_as(VIEWER)).get_json()['can_edit'] is False
+
+    blocks = client.get('/api/rental/conditions', headers=_as(RENTAL)).get_json()['current']['blocks']
+    for answer in (
+        client.post('/api/rental/directions', headers=_as(VIEWER), json={
+            'card_id': card['id'], 'phone': '+7 707 111 22 33', 'visit_date': '2026-10-28', 'visit_time': '18:00',
+            'park': 'Jana такси'}),
+        client.patch('/api/rental/directions/%d' % direction_id, json={'status': 'no_show'}, headers=_as(VIEWER)),
+        client.put('/api/rental/cards/%d/free' % card['id'], json={'free_count': 0}, headers=_as(VIEWER)),
+        client.post('/api/rental/conditions', json={'blocks': blocks}, headers=_as(VIEWER)),
+        client.post('/api/rental/fleet/refresh', headers=_as(VIEWER)),
+    ):
+        assert (answer.status_code, answer.get_json()['code']) == (403, 'RENTAL_READ_ONLY')
+    # И сервис сам: направить и сменить статус «только смотрящему» не даёт, даже если ручку обойти.
+    viewer = env['service'].context(VIEWER)
+    assert env['service'].create_direction(viewer, {'card_id': card['id']}) == ('forbidden', None)
+    assert env['service'].update_direction(viewer, direction_id, {'status': 'no_show'}) == ('forbidden', None)
+    after = client.get('/api/rental/directions', headers=_as(RENTAL)).get_json()
+    assert after['total'] == 1 and after['items'][0]['status'] == 'waiting'
+    cards = client.get('/api/rental/fleet', headers=_as(RENTAL)).get_json()['cards']
+    assert next(c for c in cards if c['id'] == card['id'])['free_count'] == 2
 
 
 def _jpeg(color):

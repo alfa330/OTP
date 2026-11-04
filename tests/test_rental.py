@@ -11,13 +11,15 @@
   * клиенты Yume, Wialon, ГЛОНАСС и Efir разбирают ответы так, как они приходят на самом деле
     (проверено на живых системах 27.10.2026), а сбой одного источника не роняет отчёт;
   * Excel — столбцы ТЗ, «Статус аренды» только за 01:00, строки из внешних систем — текстом;
-  * права: ООЗ и его глава, супер-админ; уволенный — нет;
+  * права: ООЗ и его глава, супер-админ; уволенный — нет; поимённый просмотр (#409) видит всё и
+    не пишет ничего — каждая ручка записи из Blueprint отвечает ему отказом;
   * раздел подключён: схема, Blueprint, флаг профиля, планировщик 01:00 и 07:00, меню и гарды.
 
 Процесс на настоящей базе — tests/test_rental_postgres.py.
 """
 
 import json
+import re
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -442,6 +444,106 @@ class AccessTests(unittest.TestCase):
         self.assertEqual((ooz['night_report'], ooz['fleet']), (True, False))
         self.assertFalse(access.capabilities({'role': 'operator', 'department_code': 'op', 'status': 'fired'})['fleet'])
 
+    def test_read_only_by_id_sees_everything_and_changes_nothing(self):
+        """#409: тренер СЗоВ поимённо — все вкладки и все направления, но ни одной записи и без Excel."""
+        viewer = {'user_id': 206, 'role': 'trainer', 'department_code': 'szov'}
+        caps = access.capabilities(viewer)
+        self.assertTrue(access.can_open_section(viewer))
+        self.assertEqual((caps['night_report'], caps['fleet'], caps['all_directions'], caps['read_only']),
+                         (True, True, True, True))
+        self.assertEqual((caps['send'], caps['work_directions'], caps['edit_cards'], caps['edit_conditions'],
+                          caps['collect_any_time']), (False, False, False, False, False))
+        self.assertFalse(access.can_set_state(viewer))
+        self.assertFalse(access.can_export(viewer))
+        self.assertTrue(access.is_read_only(dict(viewer, user_id='206')))
+        # Уволенный, другой тренер и профиль без id — раздел закрыт.
+        for closed in (dict(viewer, status='fired'), dict(viewer, user_id=207), {'role': 'trainer', 'department_code': 'szov'}):
+            with self.subTest(ctx=closed):
+                self.assertFalse(access.can_open_section(closed))
+                self.assertFalse(access.capabilities(closed)['read_only'])
+        # Попадёт в отдел раздела — права отдела, а не «только смотреть».
+        moved = access.capabilities(dict(viewer, department_code='op'))
+        self.assertEqual((moved['read_only'], moved['send'], moved['all_directions'], moved['night_report']),
+                         (False, True, False, False))
+
+    def test_the_circle_writes_as_before(self):
+        """Поимённый просмотр остальных не задел: ночная смена и супер-админ ставят «Состояние», Excel
+        по-прежнему у всех, кому открыт раздел, а не только смотрит никто из них."""
+        ooz = {'user_id': 30, 'role': 'operator', 'department_code': 'request_processing_department'}
+        sales = {'user_id': 11, 'role': 'operator', 'department_code': 'op'}
+        boss = {'user_id': 1, 'role': 'super_admin'}
+        for ctx in (ooz, sales, boss):
+            with self.subTest(ctx=ctx):
+                self.assertFalse(access.capabilities(ctx)['read_only'])
+                self.assertTrue(access.can_export(ctx))
+        self.assertTrue(access.can_set_state(ooz) and access.can_set_state(boss))
+        self.assertFalse(access.can_set_state(sales))
+        self.assertFalse(access.can_export({'user_id': 40, 'role': 'operator', 'department_code': 'szov'}))
+
+
+class ReadOnlyRoutesTests(unittest.TestCase):
+    """#409: «только просмотр» закрыт обёрткой раздела на КАЖДОЙ ручке записи — и на тех, что
+    появятся потом: список берётся из самого Blueprint, а не переписан сюда руками."""
+
+    VIEWER, OOZ = 206, 30
+
+    @classmethod
+    def setUpClass(cls):
+        from flask import Flask, jsonify, request
+
+        from rental.routes import build_rental_blueprint
+
+        contexts = {
+            cls.VIEWER: {'user_id': cls.VIEWER, 'name': 'Тренер', 'role': 'trainer', 'status': 'working',
+                         'department_code': 'szov', 'headed_codes': []},
+            cls.OOZ: {'user_id': cls.OOZ, 'name': 'Ночная смена', 'role': 'operator', 'status': 'working',
+                      'department_code': 'request_processing_department', 'headed_codes': []},
+        }
+
+        class Service:
+            def context(self, user_id):
+                return contexts.get(user_id)
+
+            def set_state(self, ctx, row_id, state):
+                return 'not_found', None
+
+        class NoDb:
+            def _get_cursor(self):
+                raise AssertionError('до базы дойти не должно')
+
+        app = Flask(__name__)
+        app.register_blueprint(build_rental_blueprint(
+            db=NoDb(), require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: jsonify({}),
+            resolve_requester=lambda: (int(request.headers['X-User-Id']), {}, None),
+            service=Service()))
+        cls.client = app.test_client()
+        cls.writes = sorted(
+            (method, re.sub(r'<(?:int:)?\w+>', '7', rule.rule))
+            for rule in app.url_map.iter_rules() if rule.endpoint.startswith('rental.')
+            for method in rule.methods - {'GET', 'HEAD', 'OPTIONS'})
+
+    def _as(self, user_id):
+        return {'X-User-Id': str(user_id)}
+
+    def test_every_write_is_refused(self):
+        # Пустой список прошёл бы молча — сверяем, что в нём есть известные ручки записи.
+        for known in (('PUT', '/api/rental/rows/7/state'), ('POST', '/api/rental/reports'),
+                      ('POST', '/api/rental/directions'), ('POST', '/api/rental/conditions')):
+            self.assertIn(known, self.writes)
+        for method, path in self.writes:
+            with self.subTest(method=method, path=path):
+                answer = self.client.open(path, method=method, headers=self._as(self.VIEWER), json={})
+                self.assertEqual(answer.status_code, 403)
+                self.assertEqual(answer.get_json()['code'], 'RENTAL_READ_ONLY')
+
+    def test_excel_is_refused_and_the_night_shift_still_writes(self):
+        answer = self.client.get('/api/rental/reports/7/export', headers=self._as(self.VIEWER))
+        self.assertEqual((answer.status_code, answer.get_json()['code']), (403, 'RENTAL_FORBIDDEN'))
+        # Ночная смена до ручки доходит: отказ уже от неё — строки нет.
+        answer = self.client.put('/api/rental/rows/7/state', headers=self._as(self.OOZ), json={'state': None})
+        self.assertEqual((answer.status_code, answer.get_json()['code']), (404, 'RENTAL_NOT_FOUND'))
+
 
 class CatalogTests(unittest.TestCase):
     def test_model_key_and_car_keys(self):
@@ -530,6 +632,22 @@ class WiringTests(unittest.TestCase):
         self.assertIn("if (view === 'rental' && canAccessRentalSection) return;", self.app)
         self.assertIn("handleSidebarViewNavigation(e, 'rental')", self.app)
         self.assertIn("{view === 'rental' && canAccessRentalSection && (", self.app)
+
+    def test_read_only_reaches_the_menu_and_the_screen(self):
+        """#409: флаг профиля считает правило вместе с id — без него поимённый просмотр не открыл бы
+        пункт меню; тренера с флагом гард вида не уводит в «Опросы»; экран прячет запись по read_only."""
+        start = self.bot.index('def _rental_section_open_for(')
+        body = self.bot[start:self.bot.index('\ndef ', start + 1)]
+        self.assertIn("'user_id': user_id,", body)
+        allowed = self.app.split('const TRAINER_ALLOWED_VIEWS = Object.freeze([', 1)[1].split(']);', 1)[0]
+        self.assertRegex(allowed, r"\n\s*'rental',\n")
+        night = (ROOT / 'src' / 'components' / 'rental' / 'NightReport.jsx').read_text(encoding='utf-8')
+        fleet = (ROOT / 'src' / 'components' / 'rental' / 'FleetTab.jsx').read_text(encoding='utf-8')
+        self.assertIn('const readOnly = Boolean(data.capabilities?.read_only);', night)
+        self.assertIn('&& !collecting && !readOnly;', night)
+        self.assertIn("rows.length > 0 && !readOnly && (", night)
+        self.assertEqual(night.count('readOnly={readOnly}'), 2)
+        self.assertIn('{!caps.read_only && (', fleet)
 
 
 class TariffTests(unittest.TestCase):
