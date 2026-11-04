@@ -82,7 +82,18 @@ def init_unread_schema(cursor):
                                      'a4bccb5e-5d41-483d-b7c1-a1079685577d',
                                      '33bc674a-727f-4e2d-b350-da1832ecfdd5',
                                      '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
-                                     '34da6a88-2b9c-4c5a-be8d-072e89bfd440') THEN RETURN NEW; END IF;
+                                     '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
+                                     'b88e8d3a-f3f4-4854-bbc8-076a0924d118',
+                                     'ee3372c2-f15f-4ace-8176-dba1a3838bb3',
+                                     '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef',
+                                     '7fede3da-b56a-4af4-918f-092145066b61',
+                                     '9f6271c6-5ef7-4687-a196-de82a4c2dc8f',
+                                     'e28a8bf4-49e4-46c5-a915-23123439a4fc',
+                                     'e24b4922-14f9-4fa3-8730-e5d804869f7e',
+                                     '56701573-92a4-4121-af25-9be630900778',
+                                     'c0055888-ab4a-4bd1-ab54-44fa8342202b',
+                                     'c4e9f91a-5a3c-4110-8319-345ce0229650',
+                                     'ec4209b1-c0f6-4cdd-9037-9ee18c34206d') THEN RETURN NEW; END IF;
             event_time := COALESCE(NEW.wazzup_dt,NEW.dt);
             IF NOT NEW.is_echo AND NOT NEW.is_deleted AND TG_OP='INSERT' THEN
                 SELECT answered_through INTO answered FROM wazzup_chat_read_state
@@ -188,7 +199,7 @@ def init_unread_schema(cursor):
             FOR EACH ROW EXECUTE FUNCTION wazzup_notify_unread();
 
         -- A channel excluded later (+77008541777 «Департамент», 30.10.2026; +77470943333
-        -- iTaxi and +77001551199 Salam Taxi, 04.11.2026) drops what
+        -- iTaxi, +77001551199 Salam Taxi and eleven more numbers, 04.11.2026) drops what
         -- the counter kept for it: the trigger above no longer sees its replies and
         -- «Ответ не нужен» is refused there, so its chats would wait forever, and the
         -- wallboard would read stale rows instead of its message rule, as for Global.
@@ -198,7 +209,18 @@ def init_unread_schema(cursor):
                                           'a4bccb5e-5d41-483d-b7c1-a1079685577d',
                                           '33bc674a-727f-4e2d-b350-da1832ecfdd5',
                                           '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
-                                          '34da6a88-2b9c-4c5a-be8d-072e89bfd440'];
+                                          '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
+                                          'b88e8d3a-f3f4-4854-bbc8-076a0924d118',
+                                          'ee3372c2-f15f-4ace-8176-dba1a3838bb3',
+                                          '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef',
+                                          '7fede3da-b56a-4af4-918f-092145066b61',
+                                          '9f6271c6-5ef7-4687-a196-de82a4c2dc8f',
+                                          'e28a8bf4-49e4-46c5-a915-23123439a4fc',
+                                          'e24b4922-14f9-4fa3-8730-e5d804869f7e',
+                                          '56701573-92a4-4121-af25-9be630900778',
+                                          'c0055888-ab4a-4bd1-ab54-44fa8342202b',
+                                          'c4e9f91a-5a3c-4110-8319-345ce0229650',
+                                          'ec4209b1-c0f6-4cdd-9037-9ee18c34206d'];
         BEGIN
             UPDATE wazzup_chat_read_state SET unread_count=0,revision=revision+1,updated_at=now()
                 WHERE account='op' AND channel_id=ANY(untracked) AND unread_count>0;

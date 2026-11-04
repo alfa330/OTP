@@ -33,6 +33,19 @@ EXCLUDED_CHANNELS = frozenset({
     # +77470943333 iTaxi and +77001551199 Salam Taxi: the same (owner, 04.11.2026).
     '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
     '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
+    # Eleven more numbers of the second Syntony list (owner, 04.11.2026); park and
+    # last digits of each — wazzup/syntony.py SYNTONY_NUMBERS.
+    'b88e8d3a-f3f4-4854-bbc8-076a0924d118',  # Global …1230
+    'ee3372c2-f15f-4ace-8176-dba1a3838bb3',  # iTaxi …0880
+    '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef',  # Jana Taxi …1372
+    '7fede3da-b56a-4af4-918f-092145066b61',  # Qazaq …9671
+    '9f6271c6-5ef7-4687-a196-de82a4c2dc8f',  # Аманат …2629
+    'e28a8bf4-49e4-46c5-a915-23123439a4fc',  # «Департамент» …7692
+    'e24b4922-14f9-4fa3-8730-e5d804869f7e',  # Достойный …6032
+    '56701573-92a4-4121-af25-9be630900778',  # Ноль …4569
+    'c0055888-ab4a-4bd1-ab54-44fa8342202b',  # Тенге …9716
+    'c4e9f91a-5a3c-4110-8319-345ce0229650',  # «Центр регистрации» …1223
+    'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',  # Честный …0602
 })
 MAX_TEXT = 4096
 # Every stream holds a Waitress thread for its whole lifetime, and the bell and

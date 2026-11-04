@@ -1,9 +1,10 @@
 """Forward the events of selected channels without making the webhook wait.
 
 Each route forwards its own channels to its own receiver: Global goes to
-Syntony; +77008541777 «Департамент», +77470943333 iTaxi and +77001551199
-Salam Taxi each to their own connection in Syntony; +77070253322 «Help Taxi»
-to the CRM of the «Поток» group. Routes
+Syntony; +77008541777 «Департамент», +77470943333 iTaxi, +77001551199
+Salam Taxi and the eleven numbers of SYNTONY_NUMBERS each to their own
+connection in Syntony; +77070253322 «Help Taxi» to the CRM of the «Поток»
+group. Routes
 share one durable queue and one worker; every route is enabled and configured
 separately, so one receiver never sees another route's events or credentials.
 
@@ -46,6 +47,24 @@ ITAXI_CHANNEL_IDS = frozenset({
 SALAM_CHANNEL_IDS = frozenset({
     '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
 })
+# Eleven more numbers, the same: each is a connection of its own in Syntony with
+# its own key (owner, 04.11.2026, the second Syntony list). Route name, settings
+# prefix, channel. Global, iTaxi and «Департамент» now have two numbers each, so
+# the name carries the number's last four digits; the older routes keep theirs.
+SYNTONY_NUMBERS = (
+    ('syntony_global_1230', 'SYNTONY_GLOBAL_1230_WEBHOOK', 'b88e8d3a-f3f4-4854-bbc8-076a0924d118'),
+    ('syntony_itaxi_0880', 'SYNTONY_ITAXI_0880_WEBHOOK', 'ee3372c2-f15f-4ace-8176-dba1a3838bb3'),
+    ('syntony_jana_1372', 'SYNTONY_JANA_1372_WEBHOOK', '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef'),
+    ('syntony_qazaq_9671', 'SYNTONY_QAZAQ_9671_WEBHOOK', '7fede3da-b56a-4af4-918f-092145066b61'),
+    ('syntony_amanat_2629', 'SYNTONY_AMANAT_2629_WEBHOOK', '9f6271c6-5ef7-4687-a196-de82a4c2dc8f'),
+    ('syntony_department_7692', 'SYNTONY_DEPARTMENT_7692_WEBHOOK', 'e28a8bf4-49e4-46c5-a915-23123439a4fc'),
+    ('syntony_dostoyny_6032', 'SYNTONY_DOSTOYNY_6032_WEBHOOK', 'e24b4922-14f9-4fa3-8730-e5d804869f7e'),
+    ('syntony_nol_4569', 'SYNTONY_NOL_4569_WEBHOOK', '56701573-92a4-4121-af25-9be630900778'),
+    ('syntony_tenge_9716', 'SYNTONY_TENGE_9716_WEBHOOK', 'c0055888-ab4a-4bd1-ab54-44fa8342202b'),
+    # «Центр регистрации».
+    ('syntony_registration_1223', 'SYNTONY_REGISTRATION_1223_WEBHOOK', 'c4e9f91a-5a3c-4110-8319-345ce0229650'),
+    ('syntony_chestny_0602', 'SYNTONY_CHESTNY_0602_WEBHOOK', 'ec4209b1-c0f6-4cdd-9037-9ee18c34206d'),
+)
 # +77070253322 «Help Taxi». Until 15.10.2026 this number lived in the «Поток»
 # Wazzup account, whose own webhook still points to the CRM of that group; the
 # number now belongs to the «op» account, whose webhook comes to iCORE. The CRM
@@ -94,12 +113,14 @@ SYNTONY = Route('syntony', 'SYNTONY_WEBHOOK', GLOBAL_CHANNEL_IDS)
 SYNTONY_DEPARTMENT = Route('syntony_department', 'SYNTONY_DEPARTMENT_WEBHOOK', DEPARTMENT_CHANNEL_IDS)
 SYNTONY_ITAXI = Route('syntony_itaxi', 'SYNTONY_ITAXI_WEBHOOK', ITAXI_CHANNEL_IDS)
 SYNTONY_SALAM = Route('syntony_salam', 'SYNTONY_SALAM_WEBHOOK', SALAM_CHANNEL_IDS)
+SYNTONY_NUMBER_ROUTES = tuple(Route(name, env, frozenset({channel}))
+                              for name, env, channel in SYNTONY_NUMBERS)
 # The CRM sees who wrote: the echo of an iCORE send gets its CRM user (crm_identity.py).
 POTOK_CRM = Route('potok_crm', 'POTOK_CRM_WEBHOOK', POTOK_CRM_CHANNEL_IDS,
                   prepare=crm_identity.attach_authors)
 # How soon a delivery waiting for its author is tried again.
 PREPARE_RETRY_SECONDS = 2
-ROUTES = (SYNTONY, SYNTONY_DEPARTMENT, SYNTONY_ITAXI, SYNTONY_SALAM, POTOK_CRM)
+ROUTES = (SYNTONY, SYNTONY_DEPARTMENT, SYNTONY_ITAXI, SYNTONY_SALAM, *SYNTONY_NUMBER_ROUTES, POTOK_CRM)
 _ROUTES_BY_NAME = {route.name: route for route in ROUTES}
 
 

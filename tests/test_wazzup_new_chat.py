@@ -15,7 +15,10 @@ from wazzup import new_chat, pilot
 WHATSAPP = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
 WABA = '6983db13-ae8e-4b27-b09d-6c10ae4f54cf'
 GLOBAL_TAXI = '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2'
-GLOBAL_BUSINESS = 'b88e8d3a-f3f4-4854-bbc8-076a0924d118'
+# Канал с «Global» в названии, которого нет среди исключённых: «+» закрывает правило
+# названия. Настоящий «Global Ватсап Бизнес» с 04.11.2026 исключён сам — отвечает Syntony.
+GLOBAL_BUSINESS = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff'
+GLOBAL_BUSINESS_SYNTONY = 'b88e8d3a-f3f4-4854-bbc8-076a0924d118'
 NO_FIRST = '0052314a-f3f0-4640-8c4a-49071d1ac392'
 BLOCKED = '7dc370c8-7542-43d4-9f92-168fb23ea37c'
 INSTAGRAM = '2efaa0a1-0378-4ada-8a9f-808a082adeab'
@@ -127,8 +130,11 @@ class NewChatSendTests(unittest.TestCase):
         for channel in (NO_FIRST, GLOBAL_BUSINESS):
             response = client.post('/api/wazzup/pilot/send', json=self.body(channel=channel, text='Привет'))
             self.assertEqual((403, 'NEW_CHAT_CHANNEL'), (response.status_code, response.get_json()['code']), channel)
-        # Global Taxi отправку закрывает раньше — своим правилом пилота.
-        self.assertEqual(403, client.post('/api/wazzup/pilot/send', json=self.body(channel=GLOBAL_TAXI)).status_code)
+        # Global Taxi и номера Syntony отправку закрывают раньше — своим правилом пилота.
+        for channel in (GLOBAL_TAXI, GLOBAL_BUSINESS_SYNTONY):
+            response = client.post('/api/wazzup/pilot/send', json=self.body(channel=channel))
+            self.assertEqual((403, 'Этот канал обрабатывается отдельно и исключён из отправки'),
+                             (response.status_code, response.get_json()['error']), channel)
         self.assertFalse(db.outbox)
         transport.post.assert_not_called()
 

@@ -134,11 +134,10 @@ def test_echo_deleted_group_other_account_and_global_do_not_increment(pg):
 
 
 @postgres
-@pytest.mark.parametrize('excluded', [
-    '33bc674a-727f-4e2d-b350-da1832ecfdd5',  # +77008541777 «Департамент», с 30.10.2026
-    '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',  # +77470943333 iTaxi, с 04.11.2026
-    '34da6a88-2b9c-4c5a-be8d-072e89bfd440',  # +77001551199 Salam Taxi, с 04.11.2026
-])
+@pytest.mark.parametrize('excluded', sorted(EXCLUDED_CHANNELS - {
+    # Global счётчик не вёл никогда; все остальные исключены позже: «Департамент»
+    # с 30.10.2026, iTaxi, Salam Taxi и 11 номеров второго списка Syntony с 04.11.2026.
+    '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2', 'a4bccb5e-5d41-483d-b7c1-a1079685577d'}))
 def test_channel_excluded_later_drops_its_counter_and_open_tabs_hear_it(pg, excluded):
     # Эти каналы вели счётчик до исключения: строки того времени
     # (ждущий чат и уже отвеченный) уходят при старте схемы, чужие каналы — нет.

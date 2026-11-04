@@ -32,6 +32,18 @@ EXCLUDED_CHANNELS = frozenset({
     '33bc674a-727f-4e2d-b350-da1832ecfdd5',  # +77008541777 «Департамент», like Global
     '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',  # +77470943333 iTaxi, like Global
     '34da6a88-2b9c-4c5a-be8d-072e89bfd440',  # +77001551199 Salam Taxi, like Global
+    # Eleven more of the second Syntony list (04.11.2026), see pilot.EXCLUDED_CHANNELS.
+    'b88e8d3a-f3f4-4854-bbc8-076a0924d118',
+    'ee3372c2-f15f-4ace-8176-dba1a3838bb3',
+    '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef',
+    '7fede3da-b56a-4af4-918f-092145066b61',
+    '9f6271c6-5ef7-4687-a196-de82a4c2dc8f',
+    'e28a8bf4-49e4-46c5-a915-23123439a4fc',
+    'e24b4922-14f9-4fa3-8730-e5d804869f7e',
+    '56701573-92a4-4121-af25-9be630900778',
+    'c0055888-ab4a-4bd1-ab54-44fa8342202b',
+    'c4e9f91a-5a3c-4110-8319-345ce0229650',
+    'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',
 })
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)

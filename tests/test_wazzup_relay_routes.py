@@ -24,10 +24,16 @@ CRM_URL = 'https://crm.example.test/icore/wazzup'
 SYNTONY_URL = 'https://relay.example.test/wazzup'
 ENV_NAMES = [f'{route.env}_{suffix}' for route in syntony.ROUTES
              for suffix in ('ENABLED', 'API_URL', 'API_KEY', 'AUTH_HEADER', 'AUTH_PREFIX')]
-# Подключения парков в Syntony: тот же приёмник, свой ключ у каждого.
+# Подключения номеров в Syntony: тот же приёмник, свой ключ у каждого.
 PARKS = [(syntony.SYNTONY_DEPARTMENT, 'synthetic-department-secret'),
          (syntony.SYNTONY_ITAXI, 'synthetic-itaxi-secret'),
-         (syntony.SYNTONY_SALAM, 'synthetic-salam-secret')]
+         (syntony.SYNTONY_SALAM, 'synthetic-salam-secret')] + [
+    (route, f'synthetic-{route.name}-secret') for route in syntony.SYNTONY_NUMBER_ROUTES]
+# Второй номер того же парка (второй список Syntony, 04.11.2026).
+GLOBAL_1230 = 'b88e8d3a-f3f4-4854-bbc8-076a0924d118'
+ITAXI_0880 = 'ee3372c2-f15f-4ace-8176-dba1a3838bb3'
+DEPARTMENT_7692 = 'e28a8bf4-49e4-46c5-a915-23123439a4fc'
+JANA_1372 = '24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef'
 needs_pg = pytest.mark.skipif(not PORT, reason='needs isolated local PG (WAZZUP_PILOT_TEST_PORT)')
 
 
@@ -69,7 +75,10 @@ def test_help_taxi_belongs_to_the_crm_route_only():
     assert syntony.POTOK_CRM.channels == {HELP_TAXI}
     assert not syntony.POTOK_CRM.channels & syntony.GLOBAL_CHANNEL_IDS
     assert [route.name for route in syntony.ROUTES] == [
-        'syntony', 'syntony_department', 'syntony_itaxi', 'syntony_salam', 'potok_crm']
+        'syntony', 'syntony_department', 'syntony_itaxi', 'syntony_salam',
+        'syntony_global_1230', 'syntony_itaxi_0880', 'syntony_jana_1372', 'syntony_qazaq_9671',
+        'syntony_amanat_2629', 'syntony_department_7692', 'syntony_dostoyny_6032', 'syntony_nol_4569',
+        'syntony_tenge_9716', 'syntony_registration_1223', 'syntony_chestny_0602', 'potok_crm']
 
 
 @pytest.mark.parametrize('route, key', PARKS, ids=[route.name for route, _ in PARKS])
@@ -270,6 +279,43 @@ def test_parks_reach_syntony_each_with_its_own_key_and_never_another_parks_event
     assert syntony.enqueue(relay_db, payload) == 0
     deliver_all(relay_db, sent)
     assert len(sent) == 4
+
+
+@needs_pg
+def test_second_number_of_a_park_goes_with_its_own_key_and_the_first_keeps_its_own(relay_db, clean_env):
+    # Syntony, 04.11.2026: «У Global, iTaxi и Департамента новый ключ — только для нового
+    # номера, прежний остаётся для прежнего номера». Событие с чужим ключом они отбросят.
+    enable_syntony(clean_env)
+    for route, key in PARKS:
+        enable_park(clean_env, route, key)
+    pairs = [('global', GLOBAL, GLOBAL_1230), ('itaxi', ITAXI, ITAXI_0880),
+             ('department', DEPARTMENT, DEPARTMENT_7692)]
+    messages = []
+    for park, first, second in pairs:
+        messages += [message(f'{park}-first', first), message(f'{park}-second', second)]
+    messages.append(message('jana-in', JANA_1372))
+    with relay_db._get_cursor() as cursor:
+        cursor.executemany("INSERT INTO wazzup_messages (message_id, channel_id, chat_id, dt, is_echo, account) "
+                           "VALUES (%s, %s, '70000000000', now(), TRUE, 'op')",
+                           [('global-1230-out', GLOBAL_1230), ('jana-out', JANA_1372)])
+    statuses = [{'messageId': 'jana-out', 'status': 'read'},
+                {'messageId': 'global-1230-out', 'status': 'delivered'}]
+    assert syntony.enqueue(relay_db, {'messages': messages, 'statuses': statuses}) == 7
+    sent = []
+    deliver_all(relay_db, sent)
+    by_key = {kwargs['headers']['Authorization']: json.loads(kwargs['data']) for _, kwargs in sent}
+    by_id = {message_['messageId']: message_ for message_ in messages}
+    assert by_key == {
+        'Bearer synthetic-syntony-secret': {'messages': [by_id['global-first']]},
+        'Bearer synthetic-syntony_global_1230-secret': {'messages': [by_id['global-second']],
+                                                        'statuses': [statuses[1]]},
+        'Bearer synthetic-itaxi-secret': {'messages': [by_id['itaxi-first']]},
+        'Bearer synthetic-syntony_itaxi_0880-secret': {'messages': [by_id['itaxi-second']]},
+        'Bearer synthetic-department-secret': {'messages': [by_id['department-first']]},
+        'Bearer synthetic-syntony_department_7692-secret': {'messages': [by_id['department-second']]},
+        'Bearer synthetic-syntony_jana_1372-secret': {'messages': [by_id['jana-in']],
+                                                      'statuses': [statuses[0]]},
+    }
 
 
 @needs_pg

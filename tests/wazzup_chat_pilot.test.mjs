@@ -78,8 +78,9 @@ test('timeouts and ambiguous server errors preserve the send identity', () => {
 test('chat identity separates account, channel and opaque chat identifiers', () => {
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('potok', chat));
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('op', { ...chat, channelId: 'other' }));
-    // Global (два канала), +77008541777 «Департамент», +77470943333 iTaxi и +77001551199 Salam Taxi.
-    assert.equal(GLOBAL_CHANNEL_IDS.size, 5);
+    // Global (два канала), +77008541777 «Департамент», +77470943333 iTaxi, +77001551199 Salam Taxi
+    // и 11 номеров второго списка Syntony.
+    assert.equal(GLOBAL_CHANNEL_IDS.size, 16);
 });
 
 test('empty composer has disabled send and does not perform requests on render', () => {

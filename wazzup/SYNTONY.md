@@ -1,11 +1,11 @@
-# Пересылка вебхуков: Global, «Департамент», iTaxi и Salam Taxi → Syntony, Help Taxi → CRM «Потока»
+# Пересылка вебхуков: Global, «Департамент», iTaxi, Salam Taxi и ещё 11 номеров → Syntony, Help Taxi → CRM «Потока»
 
 Приёмник iCORE остаётся `/api/wazzup/webhook/<token>`. После сохранения сообщений
 и статусов он записывает исходные события пересылаемых каналов в отдельную очередь
 PostgreSQL и отвечает Wazzup. Внешний POST выполняется фоновым работником;
 HTTP-запрос к получателю не держит транзакцию БД и не задерживает ответ приёмника.
 
-Маршрутов пять (`wazzup/syntony.py: ROUTES`), у каждого свои каналы, свой адрес,
+Маршрутов шестнадцать (`wazzup/syntony.py: ROUTES`), у каждого свои каналы, свой адрес,
 ключ и выключатель. Очередь и работник общие, колонка `route` очереди называет
 получателя. Всё, что ниже сказано про Syntony, верно и для остальных маршрутов.
 
@@ -15,6 +15,17 @@ HTTP-запрос к получателю не держит транзакцию
 | `syntony_department` | `33bc674a-727f-4e2d-b350-da1832ecfdd5` — +77008541777 «Департамент» | `SYNTONY_DEPARTMENT_WEBHOOK_*` |
 | `syntony_itaxi` | `771c4257-4f8f-45fb-8c6c-08b61ea7e7f5` — +77470943333 iTaxi | `SYNTONY_ITAXI_WEBHOOK_*` |
 | `syntony_salam` | `34da6a88-2b9c-4c5a-be8d-072e89bfd440` — +77001551199 Salam Taxi | `SYNTONY_SALAM_WEBHOOK_*` |
+| `syntony_global_1230` | `b88e8d3a-f3f4-4854-bbc8-076a0924d118` — Global, номер …1230 | `SYNTONY_GLOBAL_1230_WEBHOOK_*` |
+| `syntony_itaxi_0880` | `ee3372c2-f15f-4ace-8176-dba1a3838bb3` — iTaxi, номер …0880 | `SYNTONY_ITAXI_0880_WEBHOOK_*` |
+| `syntony_jana_1372` | `24ea28f0-ba8a-4be7-a9b9-6253ff3d39ef` — Jana Taxi, номер …1372 | `SYNTONY_JANA_1372_WEBHOOK_*` |
+| `syntony_qazaq_9671` | `7fede3da-b56a-4af4-918f-092145066b61` — Qazaq, номер …9671 | `SYNTONY_QAZAQ_9671_WEBHOOK_*` |
+| `syntony_amanat_2629` | `9f6271c6-5ef7-4687-a196-de82a4c2dc8f` — Аманат, номер …2629 | `SYNTONY_AMANAT_2629_WEBHOOK_*` |
+| `syntony_department_7692` | `e28a8bf4-49e4-46c5-a915-23123439a4fc` — «Департамент», номер …7692 | `SYNTONY_DEPARTMENT_7692_WEBHOOK_*` |
+| `syntony_dostoyny_6032` | `e24b4922-14f9-4fa3-8730-e5d804869f7e` — Достойный, номер …6032 | `SYNTONY_DOSTOYNY_6032_WEBHOOK_*` |
+| `syntony_nol_4569` | `56701573-92a4-4121-af25-9be630900778` — Ноль, номер …4569 | `SYNTONY_NOL_4569_WEBHOOK_*` |
+| `syntony_tenge_9716` | `c0055888-ab4a-4bd1-ab54-44fa8342202b` — Тенге, номер …9716 | `SYNTONY_TENGE_9716_WEBHOOK_*` |
+| `syntony_registration_1223` | `c4e9f91a-5a3c-4110-8319-345ce0229650` — «Центр регистрации», номер …1223 | `SYNTONY_REGISTRATION_1223_WEBHOOK_*` |
+| `syntony_chestny_0602` | `ec4209b1-c0f6-4cdd-9037-9ee18c34206d` — Честный, номер …0602 | `SYNTONY_CHESTNY_0602_WEBHOOK_*` |
 | `potok_crm` | `6983db13-ae8e-4b27-b09d-6c10ae4f54cf` — +77070253322 «Help Taxi» | `POTOK_CRM_WEBHOOK_*` |
 
 **«Департамент» → Syntony (30.10.2026).** Владелец: «отключить от чатов оп как и
@@ -30,6 +41,14 @@ HTTP-запрос к получателю не держит транзакцию
 каждого номера своё подключение в Syntony со своим ключом и свой маршрут; адрес — тот
 же. Salam Taxi — таксопарк, не «доставка». В «Чатах ОП» оба номера только для чтения,
 счётчик «ждут ответа» их не ведёт, накопленное снимается при старте схемы.
+
+**Ещё 11 номеров → Syntony (04.11.2026).** Второй список Syntony, владелец: «все эти … тоже».
+Тот же порядок: у каждого номера своё подключение со своим ключом и свой маршрут
+(`syntony.py: SYNTONY_NUMBERS`), в «Чатах ОП» — только чтение. У Global, iTaxi и
+«Департамента» теперь по два номера: ключ нового номера — только для него, прежний
+маршрут и ключ не меняются, поэтому в имени нового маршрута последние цифры номера.
+Полных номеров в коде и документации нет: страж `test_no_personal_data_in_repo` не
+пропускает больше десяти разных номеров в файле; номер — по channelId в Wazzup.
 
 **Help Taxi → CRM «Потока» (20.10.2026).** До 15.10.2026 номер жил в аккаунте
 Wazzup «Поток», чей вебхук смотрит в CRM группы. С 15.10 номер в аккаунте `op`,
@@ -57,6 +76,7 @@ awaiting_author`). Эхо отправки из самого Wazzup (с `authorI
 - `33bc674a-727f-4e2d-b350-da1832ecfdd5` — «Департамент», +77008541777, WABA (с 30.10.2026).
 - `771c4257-4f8f-45fb-8c6c-08b61ea7e7f5` — iTaxi, +77470943333, WABA (с 04.11.2026).
 - `34da6a88-2b9c-4c5a-be8d-072e89bfd440` — Salam Taxi, +77001551199, WABA (с 04.11.2026).
+- 11 каналов `SYNTONY_NUMBERS` из таблицы выше — номера WhatsApp, не WABA (с 04.11.2026).
 
 Входящие, исходящие (`isEcho: true`), правки и удаления в `messages`, все
 `statuses` (включая `edited` и `error`) и `channelsUpdates` проходят без
@@ -98,6 +118,11 @@ SYNTONY_ITAXI_WEBHOOK_API_KEY=<ключ подключения iTaxi в Syntony>
 SYNTONY_SALAM_WEBHOOK_ENABLED=true
 SYNTONY_SALAM_WEBHOOK_API_URL=<тот же HTTPS endpoint Syntony>
 SYNTONY_SALAM_WEBHOOK_API_KEY=<ключ подключения Salam Taxi в Syntony>
+
+# Так же каждый маршрут SYNTONY_NUMBERS — своим префиксом из таблицы, например:
+SYNTONY_JANA_1372_WEBHOOK_ENABLED=true
+SYNTONY_JANA_1372_WEBHOOK_API_URL=<тот же HTTPS endpoint Syntony>
+SYNTONY_JANA_1372_WEBHOOK_API_KEY=<ключ этого номера в Syntony>
 
 POTOK_CRM_WEBHOOK_ENABLED=true
 POTOK_CRM_WEBHOOK_API_URL=<HTTPS endpoint CRM «Потока»>
