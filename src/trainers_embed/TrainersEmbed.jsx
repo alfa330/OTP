@@ -46,7 +46,7 @@ const PHONE_TRAINERS = phoneTrainers(TRAINERS);
 
 const TrainerModal = lazyWithRetry(() => import('../components/wiki/trainers/TrainerPlayer'));
 
-const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://api.icorehub.kz';
 const WIKI_BASE = `${API_BASE_URL}/api/wiki`;
 // Сколько ждать от телефона "trainer:host" после "trainer:open": не ответил — значит,
 // окно он не открыл, и тренажёр монтируем во вкладке как есть.

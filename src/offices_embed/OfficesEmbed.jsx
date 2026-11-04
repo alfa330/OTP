@@ -44,7 +44,7 @@ import { ToastStack, useToastStack } from './ToastStack';
 
 // Строку держать дословно: её переписывает конфиг локального стенда
 // (vite.stand.config.mjs), как и в TrainersEmbed.jsx и App.jsx.
-const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://api.icorehub.kz';
 const WIKI_BASE = `${API_BASE_URL}/api/wiki`;
 // Выбранное пространство — своё, а портальное ('wiki:space') только читаем: страница
 // в браузере не должна переключать человеку вики в портале.

@@ -439,7 +439,13 @@ class InstallGuideTests(unittest.TestCase):
         self.assertIn('install-qr.svg', self.jsx)
         qr = ROOT / 'src' / 'components' / 'common' / 'install-qr.svg'
         self.assertTrue(qr.exists(), 'QR не собран: python3 scripts/build_install_qr.py')
-        self.assertIn('alfa330.github.io', read(ROOT / 'scripts' / 'build_install_qr.py'))
+        script = read(ROOT / 'scripts' / 'build_install_qr.py')
+        # Портал на своём домене с 04.11.2026: камера должна открывать его, а не старый адрес.
+        self.assertIn("URL = 'https://icorehub.kz/'", script)
+        # Короткий адрес segno кодирует версией 3, и знак в центре делает код нечитаемым для
+        # jsQR; версия не меньше 4 — как у прежнего адреса.
+        self.assertIn('MIN_VERSION = 4', script)
+        self.assertIn('version=max(MIN_VERSION, natural)', script)
 
     def test_mockups_are_drawn_not_photographed(self):
         """Снимок экрана устареет с ближайшим обновлением iOS или Chrome."""

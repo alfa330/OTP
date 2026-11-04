@@ -72,7 +72,7 @@ REPLY_REACTION = '👍'
 # переедет.
 WEB_APP_BASE_URL = (os.getenv('CRM_WEB_APP_BASE_URL')
                     or os.getenv('TASK_WEB_APP_BASE_URL')
-                    or 'https://alfa330.github.io/OTP').strip().rstrip('/')
+                    or 'https://icorehub.kz').strip().rstrip('/')
 
 
 def ticket_link(ticket_id):

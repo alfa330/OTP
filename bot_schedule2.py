@@ -3145,7 +3145,7 @@ def _signed_audio_response_type(blob_name):
 
 
 # 'production' — тип для отдела маркетинга с брифом (задача #354, task_production).
-TASK_WEB_APP_BASE_URL = (os.getenv('TASK_WEB_APP_BASE_URL') or 'https://alfa330.github.io/OTP').strip()
+TASK_WEB_APP_BASE_URL = (os.getenv('TASK_WEB_APP_BASE_URL') or 'https://icorehub.kz').strip()
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 TELEGRAM_MAX_CAPTION_CHARS = 1024
 TASK_TELEGRAM_TIMEOUT_SECONDS = 20

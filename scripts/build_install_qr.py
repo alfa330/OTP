@@ -48,12 +48,13 @@ MARK = os.path.join(ROOT, 'src', 'components', 'common', 'sidebar-logo-mark.svg'
 OUT = os.path.join(ROOT, 'src', 'components', 'common', 'install-qr.svg')
 
 # Адрес портала. Сменится домен — прогон повторить.
-URL = 'https://alfa330.github.io/OTP/'
+URL = 'https://icorehub.kz/'
 
 SIZE = 512                 # сторона картинки в единицах viewBox
 QUIET_ZONE = 4             # модулей белого поля по краям — столько требует стандарт;
                            # с двумя код читался глазом, но не читался декодером
 MODULE_COLOR = '#0f172a'
+MIN_VERSION = 4           # см. build(): короткий адрес не должен уменьшать код
 LOGO_SHARE = 0.26          # доля стороны под белую подложку со знаком
 GRADIENT = (('0', '#22409B'), ('0.45', '#4A3A96'), ('1', '#7B2E92'))
 
@@ -67,7 +68,11 @@ def mark_paths():
 
 
 def build():
-    qr = segno.make(URL, error='h')
+    # Не меньше версии 4. Для короткого адреса (icorehub.kz) segno сам берёт версию 3 —
+    # 29×29 модулей, и знак на LOGO_SHARE стороны закрывает слишком много: jsQR такой код
+    # не читал ни на одном размере (04.11.2026). У версии 4 под знаком ~9 %, читается.
+    natural = segno.make(URL, error='h').version
+    qr = segno.make(URL, error='h', version=max(MIN_VERSION, natural))
     matrix = [[bool(cell) for cell in row] for row in qr.matrix]
     count = len(matrix) + QUIET_ZONE * 2
     step = SIZE / count

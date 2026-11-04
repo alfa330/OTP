@@ -1,6 +1,7 @@
 # Ручка знаний iCORE для ИИ Syntony
 
-Версия 1 от 29.10.2026. Адрес API: `https://otp-2-fos4.onrender.com`.
+Версия 1.1 от 04.11.2026. Адрес API: `https://api.icorehub.kz`. Прежний адрес
+`https://otp-2-fos4.onrender.com` пока работает так же; о дате отключения предупредим заранее.
 
 Ваш ИИ отвечает водителям таксопарка. Когда в его базе знаний ответа нет, он
 присылает нам **таксопарк и вопрос**, а мы возвращаем **фрагменты** нашей базы
@@ -211,15 +212,15 @@ Content-Type: application/json
 ## Примеры
 
 ```bash
-curl -s https://otp-2-fos4.onrender.com/api/knowledge/ping -H "X-Api-Key: $KEY"
+curl -s https://api.icorehub.kz/api/knowledge/ping -H "X-Api-Key: $KEY"
 
-curl -s https://otp-2-fos4.onrender.com/api/knowledge/parks -H "X-Api-Key: $KEY"
+curl -s https://api.icorehub.kz/api/knowledge/parks -H "X-Api-Key: $KEY"
 
-curl -s https://otp-2-fos4.onrender.com/api/knowledge/search \
+curl -s https://api.icorehub.kz/api/knowledge/search \
   -H "X-Api-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"park_id": 5, "question": "Где офис в Алматы и как он работает?"}'
 
-curl -s https://otp-2-fos4.onrender.com/api/knowledge/search \
+curl -s https://api.icorehub.kz/api/knowledge/search \
   -H "X-Api-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"park": "global", "question": "Жолаушы затын салонда қалдырды, не істеу керек?", "limit": 5}'
 ```

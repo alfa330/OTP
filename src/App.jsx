@@ -366,7 +366,7 @@ if (CHATS_EMBED) {
 }
 /* Адрес API. На своём домене (deploy/yandex) зашивается при сборке через VITE_API_BASE_URL,
    без него — Render. Та же строка в embedLaunch.js и трёх отдельных входах. */
-const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://otp-2-fos4.onrender.com';
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://api.icorehub.kz';
 /* В окне CRM портал рисует одни чаты: фоновые запросы других разделов окну не нужны, а
    сессии окна сервер их и не откроет (wazzup/embed_auth.py) — не шлём их вовсе. */
 if (CHATS_EMBED) {
