@@ -30,6 +30,8 @@ EXCLUDED_CHANNELS = frozenset({
     '99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
     '33bc674a-727f-4e2d-b350-da1832ecfdd5',  # +77008541777 «Департамент», like Global
+    '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',  # +77470943333 iTaxi, like Global
+    '34da6a88-2b9c-4c5a-be8d-072e89bfd440',  # +77001551199 Salam Taxi, like Global
 })
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)

@@ -134,18 +134,22 @@ def test_echo_deleted_group_other_account_and_global_do_not_increment(pg):
 
 
 @postgres
-def test_channel_excluded_later_drops_its_counter_and_open_tabs_hear_it(pg):
-    # +77008541777 «Департамент» счётчик вёл до 30.10.2026: строки того времени
+@pytest.mark.parametrize('excluded', [
+    '33bc674a-727f-4e2d-b350-da1832ecfdd5',  # +77008541777 «Департамент», с 30.10.2026
+    '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',  # +77470943333 iTaxi, с 04.11.2026
+    '34da6a88-2b9c-4c5a-be8d-072e89bfd440',  # +77001551199 Salam Taxi, с 04.11.2026
+])
+def test_channel_excluded_later_drops_its_counter_and_open_tabs_hear_it(pg, excluded):
+    # Эти каналы вели счётчик до исключения: строки того времени
     # (ждущий чат и уже отвеченный) уходят при старте схемы, чужие каналы — нет.
     connection, cursor, database, connect = pg
-    department = '33bc674a-727f-4e2d-b350-da1832ecfdd5'
     cursor.execute('''INSERT INTO wazzup_chat_read_state
         (account,channel_id,chat_id,unread_count,last_inbound_id,revision)
         VALUES('op',%s,'70000000001',1,'waiting-1',4),('op',%s,'70000000002',0,'answered-1',2),
-              ('op','channel','70000000003',1,'kept-1',1)''', (department, department))
+              ('op','channel','70000000003',1,'kept-1',1)''', (excluded, excluded))
     cursor.execute('''INSERT INTO wazzup_unanswered_messages(account,channel_id,chat_id,message_id,sent_at)
         VALUES('op',%s,'70000000001','waiting-1',now()),('op','channel','70000000003','kept-1',now())''',
-                   (department,))
+                   (excluded,))
     connection.commit()
     listener = connect()
     listener.autocommit = True
@@ -158,13 +162,13 @@ def test_channel_excluded_later_drops_its_counter_and_open_tabs_hear_it(pg):
     events = [json.loads(event.payload) for event in listener.notifies]
     # Открытая вкладка слышит обнуление ждущего чата; удаление строки она бы не услышала.
     assert [(e['channelId'], e['chatId'], e['unreadCount']) for e in events
-            if e.get('kind') == 'unread'] == [(department, '70000000001', 0)]
+            if e.get('kind') == 'unread'] == [(excluded, '70000000001', 0)]
     cursor.execute('SELECT channel_id,chat_id FROM wazzup_chat_read_state')
     assert cursor.fetchall() == [('channel', '70000000003')]
     cursor.execute('SELECT channel_id,message_id FROM wazzup_unanswered_messages')
     assert cursor.fetchall() == [('channel', 'kept-1')]
-    database().store_wazzup_messages([inbound('department-new', channelId=department)])
-    cursor.execute('SELECT COUNT(*) FROM wazzup_chat_read_state WHERE channel_id=%s', (department,))
+    database().store_wazzup_messages([inbound('excluded-new', channelId=excluded)])
+    cursor.execute('SELECT COUNT(*) FROM wazzup_chat_read_state WHERE channel_id=%s', (excluded,))
     assert cursor.fetchone() == (0,)
 
 

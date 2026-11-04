@@ -1,8 +1,9 @@
 """Forward the events of selected channels without making the webhook wait.
 
 Each route forwards its own channels to its own receiver: Global goes to
-Syntony, +77008541777 «Департамент» to its own connection in Syntony,
-+77070253322 «Help Taxi» to the CRM of the «Поток» group. Routes
+Syntony; +77008541777 «Департамент», +77470943333 iTaxi and +77001551199
+Salam Taxi each to their own connection in Syntony; +77070253322 «Help Taxi»
+to the CRM of the «Поток» group. Routes
 share one durable queue and one worker; every route is enabled and configured
 separately, so one receiver never sees another route's events or credentials.
 
@@ -36,6 +37,14 @@ GLOBAL_CHANNEL_IDS = frozenset({
 # longer process it (owner, 30.10.2026).
 DEPARTMENT_CHANNEL_IDS = frozenset({
     '33bc674a-727f-4e2d-b350-da1832ecfdd5',
+})
+# +77470943333 iTaxi and +77001551199 Salam Taxi (the taxi park, not «доставка»):
+# the same, each with its own Syntony key (owner, 04.11.2026).
+ITAXI_CHANNEL_IDS = frozenset({
+    '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
+})
+SALAM_CHANNEL_IDS = frozenset({
+    '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
 })
 # +77070253322 «Help Taxi». Until 15.10.2026 this number lived in the «Поток»
 # Wazzup account, whose own webhook still points to the CRM of that group; the
@@ -83,12 +92,14 @@ SYNTONY = Route('syntony', 'SYNTONY_WEBHOOK', GLOBAL_CHANNEL_IDS)
 # In Syntony «Департамент» is a connection of its own, told apart by the key: with
 # Global's key its messages landed in Global's connection (Syntony, 30.10.2026).
 SYNTONY_DEPARTMENT = Route('syntony_department', 'SYNTONY_DEPARTMENT_WEBHOOK', DEPARTMENT_CHANNEL_IDS)
+SYNTONY_ITAXI = Route('syntony_itaxi', 'SYNTONY_ITAXI_WEBHOOK', ITAXI_CHANNEL_IDS)
+SYNTONY_SALAM = Route('syntony_salam', 'SYNTONY_SALAM_WEBHOOK', SALAM_CHANNEL_IDS)
 # The CRM sees who wrote: the echo of an iCORE send gets its CRM user (crm_identity.py).
 POTOK_CRM = Route('potok_crm', 'POTOK_CRM_WEBHOOK', POTOK_CRM_CHANNEL_IDS,
                   prepare=crm_identity.attach_authors)
 # How soon a delivery waiting for its author is tried again.
 PREPARE_RETRY_SECONDS = 2
-ROUTES = (SYNTONY, SYNTONY_DEPARTMENT, POTOK_CRM)
+ROUTES = (SYNTONY, SYNTONY_DEPARTMENT, SYNTONY_ITAXI, SYNTONY_SALAM, POTOK_CRM)
 _ROUTES_BY_NAME = {route.name: route for route in ROUTES}
 
 

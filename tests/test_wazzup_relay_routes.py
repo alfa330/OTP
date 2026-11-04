@@ -1,6 +1,6 @@
 """Маршруты пересылки вебхуков Wazzup: Global → Syntony, +77070253322 «Help Taxi» →
 CRM группы «Поток» (владелец, 20.10.2026: «пересылку вебхуков с канала +77070253322
-как для глобал»).
+как для глобал»); «Департамент», iTaxi и Salam Taxi → Syntony, каждый своим ключом.
 
 Без приложения, боевой базы и внешнего HTTP. Проверки с SQL — только на одноразовом
 локальном Postgres (WAZZUP_PILOT_TEST_PORT), как у остальных тестов пересылки.
@@ -18,11 +18,16 @@ from wazzup import syntony, syntony_schema
 
 HELP_TAXI = '6983db13-ae8e-4b27-b09d-6c10ae4f54cf'
 DEPARTMENT = '33bc674a-727f-4e2d-b350-da1832ecfdd5'
+ITAXI = '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5'
+SALAM = '34da6a88-2b9c-4c5a-be8d-072e89bfd440'
 CRM_URL = 'https://crm.example.test/icore/wazzup'
 SYNTONY_URL = 'https://relay.example.test/wazzup'
-ENV_NAMES = [f'{prefix}_{suffix}'
-             for prefix in ('SYNTONY_WEBHOOK', 'SYNTONY_DEPARTMENT_WEBHOOK', 'POTOK_CRM_WEBHOOK')
+ENV_NAMES = [f'{route.env}_{suffix}' for route in syntony.ROUTES
              for suffix in ('ENABLED', 'API_URL', 'API_KEY', 'AUTH_HEADER', 'AUTH_PREFIX')]
+# Подключения парков в Syntony: тот же приёмник, свой ключ у каждого.
+PARKS = [(syntony.SYNTONY_DEPARTMENT, 'synthetic-department-secret'),
+         (syntony.SYNTONY_ITAXI, 'synthetic-itaxi-secret'),
+         (syntony.SYNTONY_SALAM, 'synthetic-salam-secret')]
 needs_pg = pytest.mark.skipif(not PORT, reason='needs isolated local PG (WAZZUP_PILOT_TEST_PORT)')
 
 
@@ -45,11 +50,15 @@ def enable_syntony(monkeypatch):
     monkeypatch.setenv('SYNTONY_WEBHOOK_API_KEY', 'synthetic-syntony-secret')
 
 
+def enable_park(monkeypatch, route, key):
+    # Тот же приёмник Syntony, но ключ подключения этого парка.
+    monkeypatch.setenv(route.env + '_ENABLED', 'true')
+    monkeypatch.setenv(route.env + '_API_URL', SYNTONY_URL)
+    monkeypatch.setenv(route.env + '_API_KEY', key)
+
+
 def enable_department(monkeypatch):
-    # Тот же приёмник Syntony, но ключ подключения «Департамента».
-    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_ENABLED', 'true')
-    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_API_URL', SYNTONY_URL)
-    monkeypatch.setenv('SYNTONY_DEPARTMENT_WEBHOOK_API_KEY', 'synthetic-department-secret')
+    enable_park(monkeypatch, *PARKS[0])
 
 
 def help_taxi(message_id, **changes):
@@ -59,19 +68,28 @@ def help_taxi(message_id, **changes):
 def test_help_taxi_belongs_to_the_crm_route_only():
     assert syntony.POTOK_CRM.channels == {HELP_TAXI}
     assert not syntony.POTOK_CRM.channels & syntony.GLOBAL_CHANNEL_IDS
-    assert [route.name for route in syntony.ROUTES] == ['syntony', 'syntony_department', 'potok_crm']
+    assert [route.name for route in syntony.ROUTES] == [
+        'syntony', 'syntony_department', 'syntony_itaxi', 'syntony_salam', 'potok_crm']
 
 
-def test_department_has_its_own_switch_and_key(clean_env):
+@pytest.mark.parametrize('route, key', PARKS, ids=[route.name for route, _ in PARKS])
+def test_park_has_its_own_switch_and_key(clean_env, route, key):
     enable_syntony(clean_env)
-    # Настройки Global подключение «Департамента» не открывают.
-    assert syntony.load_config(syntony.SYNTONY_DEPARTMENT) is None
-    enable_department(clean_env)
-    department = syntony.load_config(syntony.SYNTONY_DEPARTMENT)
-    assert (department.url, department.key, department.auth_prefix) == (
-        SYNTONY_URL, 'synthetic-department-secret', 'Bearer')
+    for other, other_key in PARKS:
+        if other is not route:
+            enable_park(clean_env, other, other_key)
+    # Ни настройки Global, ни подключения других парков этот маршрут не открывают.
+    assert syntony.load_config(route) is None
+    enable_park(clean_env, route, key)
+    config = syntony.load_config(route)
+    assert (config.url, config.key, config.auth_header, config.auth_prefix) == (
+        SYNTONY_URL, key, 'Authorization', 'Bearer')
     assert syntony.load_config().key == 'synthetic-syntony-secret'
-    assert set(syntony.enabled_routes()) == {'syntony', 'syntony_department'}
+    assert set(syntony.enabled_routes()) == {'syntony'} | {other.name for other, _ in PARKS}
+    # Выключатель у каждого свой: выключенный парк не трогает соседей.
+    clean_env.setenv(route.env + '_ENABLED', 'false')
+    assert set(syntony.enabled_routes()) == {'syntony'} | {other.name for other, _ in PARKS
+                                                           if other is not route}
 
 
 def test_each_route_has_its_own_switch_and_credentials(clean_env):
@@ -207,6 +225,64 @@ def test_department_and_global_reach_syntony_each_with_its_own_key(relay_db, cle
         'Bearer synthetic-department-secret': {'messages': [department_in],
                                                'statuses': payload['statuses']},
     }
+
+
+@needs_pg
+def test_parks_reach_syntony_each_with_its_own_key_and_never_another_parks_events(relay_db, clean_env):
+    # Вебхук аккаунта несёт события разных номеров вперемешку: каждый парк получает
+    # только свои — сообщения, статусы (канал по messageId из базы) и состояние канала.
+    enable_syntony(clean_env)
+    for route, key in PARKS:
+        enable_park(clean_env, route, key)
+    itaxi_in, salam_in = message('itaxi-in', ITAXI, text='Сәлем'), message('salam-in', SALAM)
+    itaxi_echo = message('itaxi-echo', ITAXI, isEcho=True)
+    global_in, department_in = message('global-in'), message('department-in', DEPARTMENT)
+    with relay_db._get_cursor() as cursor:
+        cursor.executemany("INSERT INTO wazzup_messages (message_id, channel_id, chat_id, dt, is_echo, account) "
+                           "VALUES (%s, %s, '70000000000', now(), TRUE, 'op')",
+                           [('itaxi-out', ITAXI), ('salam-out', SALAM), ('private-out', OTHER)])
+    statuses = [{'messageId': 'salam-out', 'status': 'delivered'},
+                {'messageId': 'itaxi-out', 'status': 'read'},
+                {'messageId': 'private-out', 'status': 'read'}]
+    payload = {'messages': [itaxi_in, global_in, salam_in, message('private', OTHER),
+                            department_in, itaxi_echo],
+               'statuses': statuses,
+               'channelsUpdates': [{'channelId': SALAM, 'state': 'active'}]}
+    assert syntony.enqueue(relay_db, payload) == 4
+    assert sorted(routes_of(relay_db)) == [('syntony', 'ready'), ('syntony_department', 'ready'),
+                                           ('syntony_itaxi', 'ready'), ('syntony_salam', 'ready')]
+    sent = []
+    deliver_all(relay_db, sent)
+    assert {url for url, _ in sent} == {SYNTONY_URL}
+    by_key = {kwargs['headers']['Authorization']: json.loads(kwargs['data']) for _, kwargs in sent}
+    assert by_key == {
+        'Bearer synthetic-syntony-secret': {'messages': [global_in]},
+        'Bearer synthetic-department-secret': {'messages': [department_in]},
+        'Bearer synthetic-itaxi-secret': {'messages': [itaxi_in, itaxi_echo],
+                                          'statuses': [statuses[1]]},
+        'Bearer synthetic-salam-secret': {'messages': [salam_in], 'statuses': [statuses[0]],
+                                          'channelsUpdates': payload['channelsUpdates']},
+    }
+    # Одна доставка на подключение и стабильный ключ повтора у каждой своей.
+    assert len(sent) == 4
+    assert len({kwargs['headers']['Idempotency-Key'] for _, kwargs in sent}) == 4
+    # Повтор того же вебхука от Wazzup — ни одной новой доставки.
+    assert syntony.enqueue(relay_db, payload) == 0
+    deliver_all(relay_db, sent)
+    assert len(sent) == 4
+
+
+@needs_pg
+def test_pure_park_webhook_keeps_original_bytes(relay_db, clean_env):
+    route, key = PARKS[1]
+    enable_park(clean_env, route, key)
+    payload = {'messages': [message('itaxi-in', ITAXI, text='Тест')]}
+    raw = ('  ' + json.dumps(payload, ensure_ascii=False, indent=2)).encode('utf-8')
+    assert syntony.enqueue(relay_db, payload, raw_body=raw) == 1
+    sent = []
+    deliver_all(relay_db, sent)
+    assert [kwargs['headers']['Authorization'] for _, kwargs in sent] == ['Bearer ' + key]
+    assert sent[0][1]['data'] == raw
 
 
 @needs_pg

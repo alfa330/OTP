@@ -12,6 +12,9 @@ export const GLOBAL_CHANNEL_IDS = new Set([
     'a4bccb5e-5d41-483d-b7c1-a1079685577d',
     // +77008541777 «Департамент»: как Global, отвечает Syntony (владелец, 30.10.2026).
     '33bc674a-727f-4e2d-b350-da1832ecfdd5',
+    // +77470943333 iTaxi и +77001551199 Salam Taxi: так же (владелец, 04.11.2026).
+    '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
+    '34da6a88-2b9c-4c5a-be8d-072e89bfd440',
 ]);
 
 export const pilotChatKey = (account, chat) => chat

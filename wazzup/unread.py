@@ -80,7 +80,9 @@ def init_unread_schema(cursor):
             IF NEW.account<>'op' OR NEW.chat_type IS DISTINCT FROM 'whatsapp'
                OR NEW.channel_id IN ('99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
                                      'a4bccb5e-5d41-483d-b7c1-a1079685577d',
-                                     '33bc674a-727f-4e2d-b350-da1832ecfdd5') THEN RETURN NEW; END IF;
+                                     '33bc674a-727f-4e2d-b350-da1832ecfdd5',
+                                     '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
+                                     '34da6a88-2b9c-4c5a-be8d-072e89bfd440') THEN RETURN NEW; END IF;
             event_time := COALESCE(NEW.wazzup_dt,NEW.dt);
             IF NOT NEW.is_echo AND NOT NEW.is_deleted AND TG_OP='INSERT' THEN
                 SELECT answered_through INTO answered FROM wazzup_chat_read_state
@@ -185,7 +187,8 @@ def init_unread_schema(cursor):
         CREATE TRIGGER wazzup_unread_notify AFTER INSERT OR UPDATE ON wazzup_chat_read_state
             FOR EACH ROW EXECUTE FUNCTION wazzup_notify_unread();
 
-        -- A channel excluded later (+77008541777 «Департамент», 30.10.2026) drops what
+        -- A channel excluded later (+77008541777 «Департамент», 30.10.2026; +77470943333
+        -- iTaxi and +77001551199 Salam Taxi, 04.11.2026) drops what
         -- the counter kept for it: the trigger above no longer sees its replies and
         -- «Ответ не нужен» is refused there, so its chats would wait forever, and the
         -- wallboard would read stale rows instead of its message rule, as for Global.
@@ -193,7 +196,9 @@ def init_unread_schema(cursor):
         DO $$
         DECLARE untracked TEXT[] := ARRAY['99df6893-fb6b-4e1d-a78e-9e6e6b37abb2',
                                           'a4bccb5e-5d41-483d-b7c1-a1079685577d',
-                                          '33bc674a-727f-4e2d-b350-da1832ecfdd5'];
+                                          '33bc674a-727f-4e2d-b350-da1832ecfdd5',
+                                          '771c4257-4f8f-45fb-8c6c-08b61ea7e7f5',
+                                          '34da6a88-2b9c-4c5a-be8d-072e89bfd440'];
         BEGIN
             UPDATE wazzup_chat_read_state SET unread_count=0,revision=revision+1,updated_at=now()
                 WHERE account='op' AND channel_id=ANY(untracked) AND unread_count>0;
