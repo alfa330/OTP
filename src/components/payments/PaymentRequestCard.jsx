@@ -8,9 +8,9 @@ import PaymentStageForm from './PaymentStageForm';
 import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, MAX_OBSERVERS,
     OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
-    dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
-    isOverdue, netAmount, observersClosedLine, observersSummary, paidLabel, paidWord, recordView, requestState, routeSummary,
-    stageStatusLabel, stageStep, tonePill,
+    amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
+    isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel, paidWord, parseAmount,
+    recordView, requestState, routeSummary, stageStatusLabel, stageStep, tonePill,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FilePicker, Fold,
@@ -235,6 +235,7 @@ const PaymentRequestCard = ({
         request_info: 'Запрос отправлен инициатору', pay: 'Оплата записана', top_up: 'Пополнение записано',
         provide: 'Чек отправлен', confirm: 'Получение подтверждено', register: 'Имущество поставлено на учёт',
         docs_original: 'Отмечено: оригинал получен', docs_close: 'Документы закрыты', set_entity: 'Компания указана',
+        it_offers: 'Передано на утверждение', it_stock: 'Выдано из наличия — заявка закрыта',
     };
 
     const act = ({ action, fields, files }) => run(() => axios.post(
@@ -322,7 +323,16 @@ const PaymentRequestCard = ({
         if (event.kind === 'submitted') return false;
         return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');
     }, false), [data]);
-    const approverPending = entityPending && !approvalReassigned;
+    /* IT-закуп (владелец 04.11.2026): до Helpdesk IT нет ни поставщика, ни настоящей суммы — согласующего
+       матрица выберет уже по ним. Проверку прошли — что она решила (поставщики или выдача из наличия). */
+    const itStep = subtaskByKind.it_review || null;
+    const itPending = ['pending', 'open', 'waiting'].includes(itStep?.state);
+    const approverPending = (entityPending || itPending) && !approvalReassigned;
+    const approverPendingText = itPending ? 'после Helpdesk IT' : 'после выбора компании';
+    const stockIssued = useMemo(() => {
+        const event = [...(data?.events || [])].reverse().find((item) => item.kind === 'it_stock');
+        return event?.payload?.assets || [];
+    }, [data]);
     const canRemoveAttachment = (attachment) => {
         if (permissions.can_delete) return true;
         const stage = attachment.subtask_kind ? subtaskByKind[attachment.subtask_kind] : null;
@@ -485,7 +495,7 @@ const PaymentRequestCard = ({
         const who = item.assignee_name || item.role_label;
         let right = '';
         if (item.state === 'done' && item.done_at) right = `${item.done_by_name || ''} · ${shortDateTime(item.done_at)}`;
-        else if (item.state !== 'skipped') right = item.kind === 'approval' && approverPending ? 'после выбора компании' : who;
+        else if (item.state !== 'skipped') right = item.kind === 'approval' && approverPending ? approverPendingText : who;
         // Этапы бухгалтерии и финансового отдела выполняет подразделение целиком
         // (пп. 2 и 9 ТЗ) — сотрудника им не назначают.
         const canReassign = permissions.can_reassign && item.kind !== 'initiation'
@@ -584,11 +594,13 @@ const PaymentRequestCard = ({
                                 <div className="min-w-0 grow basis-0">
                                     <div className="text-[16px] font-semibold leading-snug text-slate-900">{request.expense_name}</div>
                                     <div className="mt-0.5 text-[13px] text-slate-500">
-                                        {[request.counterparty_name || 'Поставщик не выбран', request.legal_entity_name].filter(Boolean).join(' · ')}
+                                        {[request.counterparty_name || (itPending ? 'Поставщиков подберёт Helpdesk IT'
+                                            : (issuedFromStock(subtasks) ? 'Выдано из наличия' : 'Поставщик не выбран')),
+                                            request.legal_entity_name].filter(Boolean).join(' · ')}
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <div className="text-[20px] font-semibold tabular-nums text-slate-900">{fmtMoney(netAmount(request))}</div>
+                                    <div className="text-[20px] font-semibold tabular-nums text-slate-900" title={itPriceMissing(request) && itPending ? 'Цены поставит Helpdesk IT' : undefined}>{amountLabel(request)}</div>
                                     {request.refund_amount > 0 && (
                                         <div className="text-[12px] tabular-nums text-slate-500">{fmtMoney(request.amount)} − возврат {fmtMoney(request.refund_amount)}</div>
                                     )}
@@ -711,7 +723,14 @@ const PaymentRequestCard = ({
                                                 {(data.items || []).map((item) => (
                                                     <div key={item.id} className="flex flex-wrap items-baseline justify-between gap-x-3">
                                                         <span>{item.name}</span>
-                                                        <span className="tabular-nums text-slate-600">{fmtQty(item.quantity)}{item.unit ? ` ${item.unit}` : ''} × {fmtMoney(item.unit_price)} = {fmtMoney(item.total)}</span>
+                                                        <span className="tabular-nums text-slate-600">
+                                                            {fmtQty(item.quantity)}{item.unit ? ` ${item.unit}` : ''}
+                                                            {/* Цены у IT-закупа ставит Helpdesk IT — до него у строки только количество;
+                                                                выдали из наличия — цены не будет вовсе. */}
+                                                            {parseAmount(item.unit_price) > 0 || !itPriceMissing(request)
+                                                                ? ` × ${fmtMoney(item.unit_price)} = ${fmtMoney(item.total)}`
+                                                                : (itPending ? ' · цену поставит Helpdesk IT' : '')}
+                                                        </span>
                                                     </div>
                                                 ))}
                                             </div>
@@ -730,6 +749,39 @@ const PaymentRequestCard = ({
                                     </div>
                                     {permissions.can_edit && <RequisitesBox entity={data.legal_entity} />}
                                 </section>
+
+                                {/* IT-закуп (владелец 04.11.2026): что решил Helpdesk IT и что уже числится за
+                                    сотрудником — основание для руководителя и утверждающего. Пустым не рисуется. */}
+                                {itStep && (itStep.state === 'done' || (data.initiator_assets || []).length > 0) && (
+                                    <section className="space-y-1.5" data-card-helpdesk>
+                                        <SectionTitle>Helpdesk IT</SectionTitle>
+                                        <div className={`${iosCard} px-4 py-2`}>
+                                            {itStep.state === 'done' && (
+                                                <Row label="Проверка" wide>
+                                                    {issuedFromStock(subtasks)
+                                                        ? `Выдано из наличия${stockIssued.length ? `: ${stockIssued.map((item) => [item.name, item.inventory_number && `инв. ${item.inventory_number}`].filter(Boolean).join(', ')).join('; ')}` : ''}`
+                                                        : 'В наличии нет — подобраны поставщики'}
+                                                    <div className="text-[12.5px] text-slate-500">{[itStep.done_by_name, itStep.done_at && fmtDateTime(itStep.done_at)].filter(Boolean).join(' · ')}</div>
+                                                    {itStep.comment && <div className="text-[12.5px] text-slate-600">{itStep.comment}</div>}
+                                                </Row>
+                                            )}
+                                            {(data.initiator_assets || []).length > 0 && (
+                                                <Row label="Числится за сотрудником" wide>
+                                                    <div className="space-y-1">
+                                                        {data.initiator_assets.map((asset) => (
+                                                            <div key={asset.id}>
+                                                                {asset.name}
+                                                                <div className="text-[12.5px] text-slate-500">
+                                                                    {[asset.inventory_number && `инв. ${asset.inventory_number}`, asset.category_name, ASSET_STATUS_META[asset.status]?.label].filter(Boolean).join(' · ')}
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </Row>
+                                            )}
+                                        </div>
+                                    </section>
+                                )}
 
                                 {(data.offers || []).length > 0 && (
                                     <section className="space-y-1.5">
@@ -794,7 +846,8 @@ const PaymentRequestCard = ({
                                         )}
                                         <Row label="Руководитель" wide>{request.manager_name}</Row>
                                         <Row label="Согласует" wide>
-                                            {approverPending ? <span className="text-slate-500">определят после выбора компании</span> : approval ? (
+                                            {/* Утверждения не было (выдали из наличия) — и называть некого. */}
+                                            {subtaskByKind.approval?.state === 'skipped' ? null : approverPending ? <span className="text-slate-500">определят {approverPendingText}</span> : approval ? (
                                                 <span className="inline-flex flex-wrap items-center gap-1.5">
                                                     {approval.approver}
                                                     <ApprovalHint basis={request.route_basis} />

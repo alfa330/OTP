@@ -113,6 +113,37 @@ def of_user(cursor, user_id):
     return [_asset_row(row) for row in cursor.fetchall()]
 
 
+def issued_from_stock(cursor, asset_ids):
+    """Какие из этих вещей склада Helpdesk IT уже выдал по IT-заявке: {id имущества: {request_id, at}}.
+
+    Выдача из наличия (просьба владельца 04.11.2026) карточку имущества не трогает: передачу
+    сотруднику по акту оформляет учёт имущества (п. 11), и до неё вещь числится «На складе».
+    Чтобы её не выдали второй раз, склад показывает, по какой заявке её уже отдали, а выдача
+    такой вещи по другой заявке не проходит (routes._stock_assets). Отметка гаснет, когда вещь
+    передали: в истории после выдачи есть перемещение со сменой ответственного или статуса.
+    Правка описания и перенос места внутри склада её не снимают — вещь от этого не выдана."""
+    ids = sorted({int(value) for value in asset_ids or () if value})
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT DISTINCT ON (x.asset_id) x.asset_id, e.request_id, e.created_at
+          FROM payment_events e
+         CROSS JOIN LATERAL (
+               SELECT (item->>'id')::int AS asset_id
+                 FROM jsonb_array_elements(COALESCE(e.payload->'assets', '[]'::jsonb)) item) x
+         WHERE e.kind = 'it_stock' AND x.asset_id = ANY(%s)
+           AND NOT EXISTS (
+               SELECT 1 FROM payment_asset_moves m
+                WHERE m.asset_id = x.asset_id AND m.kind <> 'registered' AND m.moved_at > e.created_at
+                  AND (m.to_responsible_user_id IS DISTINCT FROM m.from_responsible_user_id
+                       OR m.to_status IS DISTINCT FROM m.from_status))
+         ORDER BY x.asset_id, e.id DESC
+        """,
+        (ids,))
+    return {row[0]: {'request_id': row[1], 'at': row[2]} for row in cursor.fetchall()}
+
+
 def read_asset(cursor, asset_id, *, lock=False):
     cursor.execute(_ASSET_SQL + ' WHERE a.id = %s' + (' FOR UPDATE OF a' if lock else ''), (int(asset_id),))
     row = cursor.fetchone()

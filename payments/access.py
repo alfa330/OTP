@@ -25,9 +25,10 @@
 2. **Что человек видит и делает внутри** — по ролям процесса (ТЗ «Закуп и
    оплата», п. 3). Роли раздаются в самом разделе, вкладка «Участники», и
    хранятся в payment_role_members: «Утвердитель», «Бухгалтерия», «Финансовый
-   отдел», «Ответственный за учёт имущества». Инициатор и руководитель — люди
-   конкретной заявки. Главное правило ТЗ (п. 16): каждый видит только те
-   задачи, по которым от него требуется действие.
+   отдел», «Ответственный за учёт имущества» и с 04.11.2026 «Helpdesk IT»
+   (проверяет IT-закупы после руководителя — просьба владельца). Инициатор и
+   руководитель — люди конкретной заявки. Главное правило ТЗ (п. 16): каждый
+   видит только те задачи, по которым от него требуется действие.
 """
 
 # Кому открыт раздел. 2 — Ядигаров Руслан (владелец), 448 — соисполнитель #179,
@@ -46,6 +47,7 @@ ROLE_APPROVER = 'approver'
 ROLE_ACCOUNTING = 'accounting'
 ROLE_FINANCE = 'finance'
 ROLE_ASSET_KEEPER = 'asset_keeper'
+ROLE_HELPDESK = 'helpdesk'
 
 # Роль, которой нужен реестр целиком, одна — бухгалтерия: она проверяет «историю
 # предыдущих оплат» (п. 8) и ведёт закрывающие документы по всем заявкам, а
@@ -58,6 +60,7 @@ FULL_REGISTRY_ROLES = (ROLE_ACCOUNTING,)
 BOARD_APPROVAL = 'approval'
 BOARD_ACCOUNTING = 'accounting'
 BOARD_FINANCE = 'finance'
+BOARD_HELPDESK = 'helpdesk'
 
 # Подзадачи согласования (workflow.APPROVAL_KINDS): этап руководителя и утверждение.
 APPROVAL_KINDS = ('manager_approval', 'approval')
@@ -159,14 +162,17 @@ def boards_for(ctx, roles=(), is_manager=False):
     """Доски, которые человеку показываются (пп. 7–9).
 
     «Согласование» — утверждающим и тем, у кого есть заявки подчинённых на
-    согласовании (`is_manager`); «Бухгалтерия» и «Финансовый отдел» — участникам
-    этих ролей. Администратор раздела видит все три.
+    согласовании (`is_manager`); «Helpdesk IT», «Бухгалтерия» и «Финансовый отдел» —
+    участникам этих ролей. Администратор раздела видит все. Порядок — по ходу заявки:
+    руководитель, Helpdesk IT, оплата.
     """
     owned = _roles(roles)
     admin = is_section_admin(ctx)
     boards = []
     if admin or ROLE_APPROVER in owned or is_manager:
         boards.append(BOARD_APPROVAL)
+    if admin or ROLE_HELPDESK in owned:
+        boards.append(BOARD_HELPDESK)
     if admin or ROLE_ACCOUNTING in owned:
         boards.append(BOARD_ACCOUNTING)
     if admin or ROLE_FINANCE in owned:
@@ -181,13 +187,13 @@ def can_open_board(ctx, board_code, roles=(), is_manager=False):
 def board_scope(ctx, board_code, roles=()):
     """Чьи карточки показывать на доске: 'all' — все, 'own' — только свои.
 
-    На досках подразделений (бухгалтерия, финансовый отдел) задача назначена
-    отделу — её видит каждый участник (п. 9). На доске согласования утверждающий
-    и руководитель видят СВОИ согласования (п. 16); администратор — все.
+    На досках подразделений (бухгалтерия, финансовый отдел, Helpdesk IT) задача
+    назначена списку — её видит каждый участник (п. 9). На доске согласования
+    утверждающий и руководитель видят СВОИ согласования (п. 16); администратор — все.
     """
     if is_section_admin(ctx):
         return 'all'
-    if board_code in (BOARD_ACCOUNTING, BOARD_FINANCE):
+    if board_code in (BOARD_ACCOUNTING, BOARD_FINANCE, BOARD_HELPDESK):
         return 'all'
     return 'own'
 
@@ -355,6 +361,32 @@ def can_view_assets(ctx, roles=()):
 
 def can_manage_assets(ctx, roles=()):
     return is_section_admin(ctx) or ROLE_ASSET_KEEPER in _roles(roles)
+
+
+def can_check_stock(ctx, roles=()):
+    """Что лежит на складе (имущество «На складе»): Helpdesk IT проверяет по нему, нет ли
+    нужного в наличии (просьба владельца 04.11.2026). Реестр целиком им не открывается —
+    только наличие; ведущие реестр видят его и так."""
+    return can_view_assets(ctx, roles) or ROLE_HELPDESK in _roles(roles)
+
+
+def sees_initiator_assets(ctx, request, roles=(), participant=False):
+    """Имущество, которое числится за инициатором IT-закупа, — в окне заявки.
+
+    Helpdesk IT проверяет по нему, что у сотрудника уже есть (владелец 04.11.2026);
+    руководитель и утверждающий решают, нужен ли закуп, — им это тоже основание. Ведущие
+    реестр видят его и так, инициатор — своё. `participant` — человек исполняет или
+    исполнял проверку Helpdesk IT либо утверждение этой заявки (администратор мог передать
+    этап тому, кто не в роли; утверждающего называет и лимит). Наблюдателю и финансовому
+    отделу не нужно: их дело — ход заявки и перевод."""
+    if not request:
+        return False
+    if participant:
+        return True
+    if is_section_admin(ctx) or _roles(roles) & {ROLE_HELPDESK, ROLE_APPROVER, ROLE_ASSET_KEEPER, ROLE_ACCOUNTING}:
+        return True
+    me = user_id(ctx)
+    return me is not None and me in (_int(request.get('initiator_id')), _int(request.get('manager_id')))
 
 
 # ─── Справочники ─────────────────────────────────────────────────────────────

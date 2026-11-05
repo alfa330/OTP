@@ -211,7 +211,9 @@ class RequestRightsTests(WiderPerimeter):
 
 class BoardTests(WiderPerimeter):
     def test_everyone_sees_only_their_board(self):
-        self.assertEqual(access.boards_for(ctx(ADMIN)), ['approval', 'accounting', 'finance'])
+        # Порядок — по ходу заявки: руководитель, Helpdesk IT (04.11.2026), оплата.
+        self.assertEqual(access.boards_for(ctx(ADMIN)), ['approval', 'helpdesk', 'accounting', 'finance'])
+        self.assertEqual(access.boards_for(ctx(INITIATOR), {'helpdesk'}), ['helpdesk'])
         self.assertEqual(access.boards_for(ctx(APPROVER), {'approver'}), ['approval'])
         self.assertEqual(access.boards_for(ctx(ACCOUNTANT), {'accounting'}), ['accounting'])
         self.assertEqual(access.boards_for(ctx(FINANCIER), {'finance'}), ['finance'])
@@ -405,7 +407,7 @@ class CapabilitiesTests(WiderPerimeter):
     def test_summary_for_the_frontend(self):
         admin = access.capabilities(ctx(ADMIN))
         self.assertTrue(admin['is_admin'] and admin['can_create'] and admin['sees_all_requests'])
-        self.assertEqual(admin['boards'], ['approval', 'accounting', 'finance'])
+        self.assertEqual(admin['boards'], ['approval', 'helpdesk', 'accounting', 'finance'])
         finance = access.capabilities(ctx(FINANCIER), {'finance'})
         self.assertEqual(finance['boards'], ['finance'])
         self.assertTrue(finance['can_manage_cards'])

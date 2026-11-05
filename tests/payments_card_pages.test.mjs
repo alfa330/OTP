@@ -84,10 +84,12 @@ const META = {
         { code: 'approval', columns: [{ key: 'new', label: 'Новые' }, { key: 'review', label: 'На рассмотрении' }, { key: 'clarification', label: 'Требуется уточнение' }, { key: 'approved', label: 'Согласовано' }] },
         { code: 'accounting', columns: [{ key: 'new', label: 'Новые счета' }, { key: 'checking', label: 'Проверка' }, { key: 'clarification', label: 'Требуется уточнение' }, { key: 'ready', label: 'Готово к оплате' }, { key: 'paying', label: 'На оплате' }, { key: 'paid', label: 'Оплачено' }] },
         { code: 'finance', columns: [{ key: 'new', label: 'Новые' }, { key: 'in_progress', label: 'В работе' }, { key: 'ready', label: 'Готово к пополнению' }, { key: 'topped_up', label: 'Пополнено' }] },
+        { code: 'helpdesk', columns: [{ key: 'new', label: 'Новые' }, { key: 'in_progress', label: 'В работе' }, { key: 'clarification', label: 'Требуется уточнение' }, { key: 'offers', label: 'Поставщики подобраны' }, { key: 'stock', label: 'Выдано из наличия' }] },
     ],
     subtasks: [
         { kind: 'initiation', board: null, statuses: ['draft', 'rework', 'clarification'] },
         { kind: 'manager_approval', board: 'approval', statuses: ['new', 'review'] },
+        { kind: 'it_review', board: 'helpdesk', statuses: ['new', 'in_progress'] },
         { kind: 'approval', board: 'approval', statuses: ['new', 'review'] },
         { kind: 'invoice_payment', board: 'accounting', statuses: ['new', 'checking', 'ready', 'paying'] },
         { kind: 'card_topup', board: 'finance', statuses: ['new', 'in_progress', 'ready'] },
@@ -113,7 +115,9 @@ test('этапам инициатора и этапам с одним стату
     // У «Инициации» три статуса, но меняет их действие (отправить, доработать), а не кнопка ступени.
     assert.deepEqual(stageStatusOptions(META, 'initiation'), []);
     for (const kind of ['receipt_confirm', 'receiving', 'closing_docs']) assert.deepEqual(stageStatusOptions(META, kind), [], kind);
-    assert.deepEqual(STAGE_STATUS_KINDS, ['manager_approval', 'approval', 'invoice_payment', 'card_topup', 'asset_registration']);
+    // Helpdesk IT (04.11.2026) — свои ступени: «Новые» → «В работе», как на его доске.
+    assert.deepEqual(STAGE_STATUS_KINDS, ['manager_approval', 'it_review', 'approval', 'invoice_payment', 'card_topup', 'asset_registration']);
+    assert.deepEqual(stageStatusOptions(META, 'it_review'), [{ value: 'new', label: 'Новые' }, { value: 'in_progress', label: 'В работе' }]);
     // Справочные данные ещё не пришли или этапа в них нет — подписывать нечего, но и не падаем.
     for (const meta of [null, undefined, {}, { subtasks: [] }, { boards: [], subtasks: [{ kind: 'approval' }] }]) assert.deepEqual(stageStatusOptions(meta, 'approval'), []);
     assert.deepEqual(stageStatusOptions(META, 'no_such_stage'), []);
@@ -181,7 +185,7 @@ test('ступени задачи идут по рабочим статусам 
     }
     assert.deepEqual(Object.keys(STAGE_STEPS).sort(), [...STAGE_STATUS_KINDS].sort());
     assert.deepEqual(Object.values(STAGE_STEPS).flatMap((steps) => Object.values(steps).map((item) => item.label)),
-        ['Взять на рассмотрение', 'Взять на рассмотрение', 'Взять в проверку', 'Счёт проверен', 'Начать оплату',
+        ['Взять на рассмотрение', 'Взять в работу', 'Взять на рассмотрение', 'Взять в проверку', 'Счёт проверен', 'Начать оплату',
             'Взять в работу', 'Готово к пополнению', 'Взять в работу']);
 });
 

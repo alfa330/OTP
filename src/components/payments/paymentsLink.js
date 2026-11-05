@@ -8,7 +8,7 @@
  * адрес повторяет то, что открыто:
  *
  *   ?view=payments                                   — «Мои задачи»;
- *   ?view=payments&section=requests                  — вкладка; доски — approval, accounting, finance;
+ *   ?view=payments&section=requests                  — вкладка; доски — approval, accounting, finance, helpdesk;
  *   ?view=payments&section=dictionaries&dict=routes  — справочник («Поставщики» — без метки);
  *   ?view=payments&section=assets&asset=2            — карточка имущества;
  *   …&request=5                                      — окно заявки поверх любой вкладки.
@@ -44,7 +44,7 @@ export const PAYMENTS_QUERY_PARAMS = [
    доходит только своё. Доски — коды payments/workflow.py::BOARDS; что списки совпадают с
    вкладками PaymentsView.jsx и досками сервера, сторожит tests/payments_link.test.mjs. */
 export const PAYMENTS_DEFAULT_TAB = 'desk';
-export const PAYMENTS_BOARD_CODES = ['approval', 'accounting', 'finance'];
+export const PAYMENTS_BOARD_CODES = ['approval', 'accounting', 'finance', 'helpdesk'];
 export const PAYMENTS_SECTION_KEYS = [PAYMENTS_DEFAULT_TAB, ...PAYMENTS_BOARD_CODES, 'requests', 'assets', 'dictionaries', 'roles'];
 const BOARD_TAB_PREFIX = 'board:';
 

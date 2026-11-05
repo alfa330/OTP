@@ -13,7 +13,7 @@ import PaymentsRoles from './PaymentsRoles';
 import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
     REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, dueLabel, expenseSubline,
-    exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, netAmount, normalizeRegistryColumns, pageRange,
+    CURRENT_KIND_LABELS, amountLabel, exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, normalizeRegistryColumns, pageRange,
     paidLabel, registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
     tonePill, toneText,
 } from './paymentsMeta';
@@ -454,7 +454,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             case 'amount':
                 return (
                     <div className="whitespace-nowrap">
-                        <div className={`font-semibold tabular-nums ${text.main}`}>{fmtMoney(netAmount(request))}</div>
+                        <div className={`font-semibold tabular-nums ${text.main}`}>{amountLabel(request)}</div>
                         {request.refund_amount > 0 && <div className={`text-[12px] leading-4 tabular-nums ${text.meta}`}>возврат {fmtMoney(request.refund_amount)}</div>}
                     </div>
                 );
@@ -473,8 +473,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     <>
                         <div className={`truncate ${text.main}`}>{request.stage_label || '—'}</div>
                         {st === 'clarification' && <div className="truncate text-[12px] leading-4 text-amber-700">{stageLine(request).toLowerCase()}</div>}
-                        {/* Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование. */}
-                        {request.current_kind === 'entity_clarify' && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>уточнение компании</div>}
+                        {/* Бухгалтерия и Helpdesk IT на «Согласовании» — уточнение компании и проверка IT-закупа. */}
+                        {CURRENT_KIND_LABELS[request.current_kind] && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{CURRENT_KIND_LABELS[request.current_kind].toLowerCase()}</div>}
                     </>
                 ) : <StatePill request={request} />;
             case 'responsible': {
@@ -781,7 +781,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                                     <span className="mt-1 text-[14px] font-semibold leading-snug text-slate-900 line-clamp-2">{request.expense_name}</span>
                                     {request.counterparty_name && <span className="mt-0.5 block truncate text-[12.5px] text-slate-600">{request.counterparty_name}</span>}
                                     <span className="mt-2.5 flex items-center justify-between gap-3 border-t border-slate-100 pt-2">
-                                        <span className="shrink-0 text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(netAmount(request))}</span>
+                                        <span className="shrink-0 text-[14px] font-semibold tabular-nums text-slate-900">{amountLabel(request)}</span>
                                         <span className="inline-flex min-w-0 grow basis-0 items-center justify-end gap-1.5 text-[12px] text-slate-500" title={where}>
                                             {tone && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tonePill(tone).dot}`} aria-hidden="true" />}
                                             <span className="truncate">{where}</span>

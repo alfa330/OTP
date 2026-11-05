@@ -185,6 +185,7 @@ _ROLE_WITHOUT_PEOPLE = {
     workflow.ROLE_ACCOUNTING: 'Оплатить счёт некому: в роли «Бухгалтерия» нет участников',
     workflow.ROLE_FINANCE: 'Пополнить карту некому: в роли «Финансовый отдел» нет участников',
     workflow.ROLE_ASSET_KEEPER: 'Поставить имущество на учёт некому: не назначен ответственный за учёт имущества',
+    workflow.ROLE_HELPDESK: 'Проверить IT-закуп некому: в роли «Helpdesk IT» нет участников',
 }
 # Этапы, которые роль выполняет помимо главного дела: уточнить компанию — тоже бухгалтерии,
 # но «оплатить счёт некому» сказало бы о другом.
@@ -193,18 +194,20 @@ _KIND_WITHOUT_PEOPLE = {
 }
 
 
-def route_gaps(route, members, initiator_id):
+def route_gaps(route, members, initiator_id, settled=()):
     """Подзадачи маршрута, которые некому выполнить: роль без участников.
 
     П. 1 ТЗ — «исключить потерю заявок»: заявка, ушедшая роли без людей, не
     появилась бы ни у кого на рабочем столе. Своя заявка утверждающему не
-    считается (см. access.approves_own_request).
+    считается (см. access.approves_own_request). `settled` — этапы, которые
+    пересборка маршрута не перезаписывает (уже пройдены или выполняются сейчас):
+    опустевшая с тех пор роль их не держит.
     """
     gaps, empty_roles = [], set()
     for entry in route:
         role = entry['role_code']
         if (entry.get('state') == 'skipped' or entry.get('assignee_id') or role not in _ROLE_WITHOUT_PEOPLE
-                or role in empty_roles):
+                or role in empty_roles or entry['kind'] in settled):
             continue
         people = {int(uid) for uid in (members or {}).get(role) or ()}
         if role == workflow.ROLE_APPROVER:
@@ -216,18 +219,19 @@ def route_gaps(route, members, initiator_id):
     return gaps
 
 
-def plan_route(cursor, request, initiator, manager):
+def plan_route(cursor, request, initiator, manager, settled=()):
     """Маршрут заявки по матрице согласования (п. 6): (основание, подзадачи).
 
-    Им пользуются отправка заявки и уточнение компании: компания — условие
-    матрицы, и после её выбора согласующего и этап руководителя выбирают заново.
-    Маршрут с этапом, который некому выполнить, не проходит — FlowError.
+    Им пользуются отправка заявки и пересборка после этапа, который поменял условия
+    матрицы (уточнение компании, подбор Helpdesk IT): согласующего и этап руководителя
+    выбирают заново. Маршрут с этапом, который некому выполнить, не проходит —
+    FlowError; `settled` — этапы, которые пересборка не трогает (см. route_gaps).
     """
     basis = approval_basis(cursor, request)
     approver = _approver_of(cursor, basis, initiator)
     route = workflow.build_route(request, initiator=initiator, manager=manager,
                                  manager_step=basis['manager_step'], approver=approver)
-    gaps = route_gaps(route, queries.role_member_ids(cursor), initiator['id'])
+    gaps = route_gaps(route, queries.role_member_ids(cursor), initiator['id'], settled=settled)
     if workflow.needs_entity_step(request) and not directory.list_legal_entities(cursor):
         # Без компании заявка ушла бы бухгалтерии, а той не из чего выбрать — застряла бы у неё.
         gaps.append('Компанию указать не из чего: в справочнике «Реквизиты компаний» нет действующих компаний')
@@ -357,6 +361,12 @@ def submit(cursor, request_id, actor, *, comment=None, outbox=None, base_url=Non
         queries.complete_subtask(cursor, initiation['id'], actor, outcome='submitted', comment=comment)
 
     if rerouted:
+        # IT-закуп (владелец 04.11.2026): идти ли через Helpdesk IT, решает отметка категории
+        # сейчас — и заявка запоминает это до следующего нового маршрута.
+        it_purchase = workflow.it_category(request)
+        if it_purchase != bool(request.get('it_purchase')):
+            queries.update_request_fields(cursor, request_id, {'it_purchase': it_purchase})
+            request = dict(request, it_purchase=it_purchase)
         basis, route = plan_route(cursor, request, initiator, manager)
         entity_step = any(entry['kind'] == workflow.KIND_ENTITY for entry in route)
         # Компанию бухгалтерия уже указала, а условия сменились по другой причине: этап уточнения
@@ -370,7 +380,7 @@ def submit(cursor, request_id, actor, *, comment=None, outbox=None, base_url=Non
             cursor, request_id, 'submitted', actor, comment=comment,
             payload={'first': first_time, 'changed': changed, 'approver': basis.get('approver_name'),
                      'basis': basis.get('basis'), 'manager_step': basis.get('manager_step'),
-                     'entity_step': entity_step})
+                     'entity_step': entity_step, 'it_step': workflow.needs_it_step(request)})
         following = advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)
         return {'rerouted': True, 'next': following, 'changed': changed}
 
@@ -437,7 +447,8 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
     own_kinds = {item['kind'] for item in queries.list_attachments(cursor, request_id)
                  if item.get('subtask_kind') == kind} | set(new_file_kinds or ())
     missing = workflow.missing_for_action(kind, action, request=request, fields=fields,
-                                          file_kinds=own_kinds, assets=assets or ())
+                                          file_kinds=own_kinds, assets=assets or (),
+                                          settings=directory.get_settings(cursor) if action == 'it_offers' else None)
     if missing:
         _fail_missing(missing, code='PAYMENT_ACTION_INCOMPLETE')
 
@@ -446,6 +457,12 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
     # ── Уточнение компании (просьба владельца 15.10.2026) ──
     if action == 'set_entity':
         return _set_entity(cursor, request, subtask, actor, fields.get('legal_entity_id'), comment, **done)
+
+    # ── Helpdesk IT (просьба владельца 04.11.2026) ──
+    if action == 'it_offers':
+        return _it_offers(cursor, request, subtask, actor, fields, comment, **done)
+    if action == 'it_stock':
+        return _it_stock(cursor, request, subtask, actor, fields.get('stock_assets') or [], comment, **done)
 
     # ── Согласование ──
     if action == 'approve':
@@ -554,20 +571,109 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
     матрицы согласования (п. 6), поэтому маршрут после этапа строится заново: кому
     из утверждающих уйдёт заявка и нужен ли этап руководителя, решается уже с ней.
 
-    Что решили люди, пока компанию уточняли, пересборка не отменяет: этап, который
-    администратор передал другому, остаётся у того, кому передан. Руководитель — тот,
-    кто стоит на этапе; уволили его за это время — руководителя ищут заново.
+    Что решили люди, пока компанию уточняли, пересборка не отменяет (`_replan`): этап,
+    который администратор передал другому, остаётся у того, кому передан. Руководитель —
+    тот, кто стоит на этапе; уволили его за это время — руководителя ищут заново.
 
     С 03.11.2026 (владелец) руководитель согласует ДО уточнения компании: пройденный им
     этап пересборка не трогает — иначе он ушёл бы в начало и согласовывать пришлось бы
     заново. Заявка, отправленная при прежнем порядке (руководитель после компании),
-    идёт по-старому: его этап ещё не начат и строится заново."""
+    идёт по-старому: его этап ещё не начат и строится заново. Так же остаётся пройденная
+    перед компанией проверка Helpdesk IT (04.11.2026)."""
     request_id = request['id']
     entity = directory.read_legal_entity(cursor, entity_id)
     if not entity or not entity.get('is_active'):
         raise FlowError('Компании нет среди действующих в справочнике «Реквизиты компаний»',
                         code='PAYMENT_ENTITY_UNKNOWN', missing=['Выберите компанию'])
     queries.update_request_fields(cursor, request_id, {'legal_entity_id': entity['id']})
+    request, basis, route, passed = _replan(cursor, request_id, workflow.KIND_ENTITY)
+    notices.clear_subtask(cursor, subtask['id'])
+    queries.complete_subtask(cursor, subtask['id'], actor, outcome='entity_set', comment=comment)
+    _rewrite(cursor, request, basis, route, keep=(workflow.KIND_ENTITY,) + passed)
+    queries.log_event(cursor, request_id, 'entity_set', actor, comment=comment, payload={
+        'kind': subtask['kind'], 'legal_entity_id': entity['id'], 'legal_entity_name': entity.get('name'),
+        'approver': basis.get('approver_name'), 'basis': basis.get('basis')})
+    # Инициатор компании не знал — теперь знает, на какую компанию просить счёт у поставщика.
+    _notify_initiator(cursor, request, notify.entity_set(request), outbox=outbox, base_url=base_url, actor=actor)
+    return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)}
+
+
+def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None, base_url=None):
+    """Helpdesk IT: нужного в наличии нет — варианты поставщиков и цены позиций по
+    рекомендуемому (просьба владельца 04.11.2026). Сумма и поставщик — условия матрицы
+    согласования (п. 6), поэтому маршрут после этапа строится заново, как после уточнения
+    компании: утверждающего выбирают уже по настоящей сумме у выбранного поставщика.
+
+    Возвращает {'next', 'offer_ids'}: к вариантам приложены коммерческие предложения — их
+    файлы ручка сохраняет следом, с номерами вариантов."""
+    request_id = request['id']
+    offers = list(fields.get('offers') or [])
+    amount_before = workflow.to_decimal(request.get('amount'))
+    offer_ids = queries.save_offers(cursor, request_id, offers)
+    amount = queries.replace_items(cursor, request_id, fields.get('items') or [])
+    recommended = next((offer for offer in offers if offer.get('is_recommended')), None) or {}
+    alone = bool(fields.get('no_alternatives'))
+    changes = {
+        'counterparty_id': recommended.get('counterparty_id'),
+        'no_alternatives': alone,
+        'no_alternatives_reason': fields.get('no_alternatives_reason') if alone else None,
+        'no_alternatives_comment': fields.get('no_alternatives_comment') if alone else None,
+        'supplier_choice_reason': None if alone else fields.get('supplier_choice_reason'),
+    }
+    if changes['counterparty_id'] != request.get('counterparty_id'):
+        # Сменился поставщик — договор и реквизиты прежнего к новому не относятся. Карта
+        # поставщика — тоже: пополнили бы карту прежнего (как и в форме, routes._request_fields).
+        changes.update(contract_id=None, counterparty_account_id=None)
+        if (request.get('payment_method') == workflow.METHOD_CARD
+                and request.get('card_recipient') == workflow.CARD_SUPPLIER):
+            changes['card_id'] = None
+            queries.set_card_number(cursor, request_id, '')
+    queries.update_request_fields(cursor, request_id, changes)
+    refreshed, basis, route, passed = _replan(cursor, request_id, workflow.KIND_IT)
+    notices.clear_subtask(cursor, subtask['id'])
+    queries.complete_subtask(cursor, subtask['id'], actor, outcome=workflow.IT_OUTCOME_OFFERS, comment=comment)
+    _rewrite(cursor, refreshed, basis, route, keep=(workflow.KIND_IT,) + passed)
+    queries.log_event(cursor, request_id, 'it_offers', actor, comment=comment, payload={
+        'kind': subtask['kind'], 'offers': len(offers), 'recommended': recommended.get('supplier_name'),
+        'amount': amount, 'amount_before': amount_before,
+        'approver': basis.get('approver_name'), 'basis': basis.get('basis')})
+    # Инициатор видит, у кого и за сколько предлагают купить, — дальше заявка у утверждающего.
+    _notify_initiator(cursor, refreshed, notify.it_offers(refreshed), outbox=outbox, base_url=base_url, actor=actor)
+    return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url), 'offer_ids': offer_ids}
+
+
+def _it_stock(cursor, request, subtask, actor, issued, comment, *, outbox=None, base_url=None):
+    """Helpdesk IT: нужное есть в наличии — его выдают, закупать не нужно (выбор владельца
+    04.11.2026). Заявка закрывается «Выдано из наличия»: утверждение, оплата и получение
+    ей не понадобились. Передачу имущества сотруднику по акту ведут в «Имуществе», как
+    всякое перемещение (п. 11). `issued` — что выдали: [{id, name, inventory_number}] из
+    наличия либо пусто, когда выданное описано комментарием."""
+    request_id = request['id']
+    notices.clear_subtask(cursor, subtask['id'])
+    queries.complete_subtask(cursor, subtask['id'], actor, outcome=workflow.IT_OUTCOME_STOCK, comment=comment)
+    queries.skip_pending(cursor, request_id, 'Не потребовалось: выдано из наличия')
+    queries.log_event(cursor, request_id, 'it_stock', actor, comment=comment,
+                      payload={'kind': subtask['kind'], 'assets': list(issued or [])})
+    queries.close_request(cursor, request_id, 'done', actor)
+    notices.clear_request(cursor, request_id)
+    closed = queries.read_request(cursor, request_id)
+    _notify_initiator(cursor, closed, notify.issued_from_stock(closed, issued), outbox=outbox, base_url=base_url,
+                      actor=actor)
+    return {'next': None}
+
+
+def _replan(cursor, request_id, current):
+    """Маршрут заново после этапа `current`, который поменял условия матрицы (п. 6):
+    компанию, поставщика, сумму. Возвращает (заявка, основание, маршрут, пройденные этапы)
+    — пишет их `_rewrite`, когда этап уже закрыт. Маршрут, который некому выполнить, не
+    проходит (FlowError из plan_route) — тогда ничего не записано; пройденные этапы и сам
+    `current` в этой проверке не участвуют: их пересборка не трогает.
+
+    Что решили люди, пересборка не отменяет. Пройденные этапы руководителя, Helpdesk IT и
+    уточнения компании остаются как были, с тем, кто и когда их прошёл: иначе они ушли бы
+    в начало и проходить их пришлось бы заново. Утверждение, которое администратор
+    передал вручную после отправки, остаётся у того, кому передано, — даже если он совпал
+    с тем, кого матрица назвала раньше."""
     request = queries.read_request(cursor, request_id)
     initiator = {'id': request.get('initiator_id'), 'name': request.get('initiator_name')}
     steps = {item['kind']: item for item in queries.list_subtasks(cursor, request_id)}
@@ -575,32 +681,29 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
     manager_passed = manager_step.get('state') in ('done', 'skipped')
     manager = ({'id': manager_step.get('assignee_id'), 'name': manager_step.get('assignee_name')} if manager_passed
                else _current_manager(cursor, request, steps.get(workflow.KIND_MANAGER)))
-    basis, route = plan_route(cursor, request, initiator, manager)
-    # Утверждение администратор передал вручную — его выбор остаётся, даже если он совпал с
-    # тем, кого матрица назвала при отправке без компании.
+    passed = tuple(kind for kind in (workflow.KIND_MANAGER, workflow.KIND_IT, workflow.KIND_ENTITY)
+                   if (steps.get(kind) or {}).get('state') in ('done', 'skipped'))
+    basis, route = plan_route(cursor, request, initiator, manager, settled=passed + (current,))
     approval = steps.get(workflow.KIND_APPROVAL) or {}
     if approval.get('state') == 'pending' and _reassigned_since_sent(cursor, request_id, workflow.KIND_APPROVAL):
         for entry in route:
             if entry['kind'] == workflow.KIND_APPROVAL:
                 entry.update(assignee_id=approval.get('assignee_id'), assignee_name=approval.get('assignee_name'))
+    return request, basis, route, passed
 
-    notices.clear_subtask(cursor, subtask['id'])
-    queries.complete_subtask(cursor, subtask['id'], actor, outcome='entity_set', comment=comment)
-    queries.write_route(cursor, request_id, route,
-                        keep=(workflow.KIND_ENTITY, workflow.KIND_MANAGER) if manager_passed else (workflow.KIND_ENTITY,))
+
+def _rewrite(cursor, request, basis, route, *, keep):
+    """Записывает маршрут, собранный `_replan`, — с основанием согласования и снимком условий."""
+    request_id = request['id']
+    queries.write_route(cursor, request_id, route, keep=keep)
     queries.set_route_basis(cursor, request_id, basis)
-    # Условия, с которыми заявка ушла от инициатора, — теперь с компанией: иначе его ответ
-    # на будущий возврат счёл бы её «сменой условий» и отправил заявку на согласование заново.
+    # Условия, с которыми заявка ушла от инициатора, — теперь с тем, что дописал этап
+    # (компания, поставщик, сумма): иначе его ответ на будущий возврат счёл бы это «сменой
+    # условий» и отправил заявку на согласование заново.
     snapshot = workflow.essentials(request)
     if (request.get('submitted_snapshot') or {}).get('stale'):
         snapshot['stale'] = True
     queries.touch_snapshot(cursor, request_id, snapshot)
-    queries.log_event(cursor, request_id, 'entity_set', actor, comment=comment, payload={
-        'kind': subtask['kind'], 'legal_entity_id': entity['id'], 'legal_entity_name': entity.get('name'),
-        'approver': basis.get('approver_name'), 'basis': basis.get('basis')})
-    # Инициатор компании не знал — теперь знает, на какую компанию просить счёт у поставщика.
-    _notify_initiator(cursor, request, notify.entity_set(request), outbox=outbox, base_url=base_url, actor=actor)
-    return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)}
 
 
 def _reassigned_since_sent(cursor, request_id, kind):

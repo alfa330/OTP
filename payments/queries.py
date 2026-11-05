@@ -244,19 +244,22 @@ _REQUEST_FIELDS = (
     'stage', 'status', 'current_subtask_id', 'current_role_code', 'current_assignee_id',
     'current_assignee_name', 'approver_user_id', 'approval_order_id', 'route_basis',
     'submitted_at', 'submitted_snapshot', 'approved_at', 'approved_by', 'approved_by_name',
-    'amount_approved', 'step_changed_at', 'closed_at', 'rejected_reason', 'legacy_step',
+    'amount_approved', 'step_changed_at', 'closed_at', 'rejected_reason', 'legacy_step', 'it_purchase',
 )
 _REQUEST_EXTRA = ('project_name', 'category_name', 'subcategory_name', 'counterparty_name',
                   'counterparty_bin', 'counterparty_vat', 'legal_entity_name', 'contract_number',
                   'template_name', 'current_kind', 'current_status', 'current_state',
                   'clarify_reason', 'clarify_comment', 'clarify_by_name', 'clarify_from',
-                  'has_card', 'attachments_count')
+                  'has_card', 'attachments_count', 'category_helpdesk', 'issued_from_stock')
 _REQUEST_SQL = """
     SELECT %s,
            p.name, c1.name, c2.name, cp.name, cp.bin, cp.vat_payer, le.name, ct.number, ft.name,
            cs.kind, cs.status, cs.state, cs.clarify_reason, cs.clarify_comment, cs.clarify_by_name, cs.outcome,
            (r.card_number_enc IS NOT NULL),
-           (SELECT COUNT(*) FROM payment_attachments a WHERE a.request_id = r.id)
+           (SELECT COUNT(*) FROM payment_attachments a WHERE a.request_id = r.id),
+           COALESCE(c1.via_helpdesk, FALSE),
+           EXISTS (SELECT 1 FROM payment_subtasks st WHERE st.request_id = r.id AND st.kind = 'it_review'
+                   AND st.state = 'done' AND st.outcome = 'from_stock')
       FROM payment_requests r
       LEFT JOIN payment_projects p ON p.id = r.project_id
       LEFT JOIN payment_categories c1 ON c1.id = r.category_id
@@ -283,7 +286,7 @@ EDITABLE_FIELDS = (
 PROCESS_FIELDS = (
     'department_name', 'manager_id', 'manager_name', 'paid_on', 'paid_amount', 'paid_comment',
     'refund_on', 'refund_amount', 'received_on', 'received_quantity', 'closing_docs_status',
-    'supplier_kind', 'supplier_vat',
+    'supplier_kind', 'supplier_vat', 'it_purchase',
 )
 
 
@@ -293,6 +296,9 @@ def _request_row(row):
         item[key] = value
     item['attachments_count'] = int(item.get('attachments_count') or 0)
     item['has_card'] = bool(item.get('has_card'))
+    item['it_purchase'] = bool(item.get('it_purchase'))
+    item['category_helpdesk'] = bool(item.get('category_helpdesk'))
+    item['issued_from_stock'] = bool(item.get('issued_from_stock'))
     item['card_mask'] = cards.mask(item.get('card_last4'))
     # В SQL колонка current_role_code: CURRENT_ROLE — зарезервированное слово Postgres.
     # Наружу ключ остаётся current_role, как его читают фронт и Telegram.
@@ -805,6 +811,15 @@ def reopen_initiation(cursor, request_id, *, status, reason, comment, actor, ask
     item = read_subtask(cursor, request_id, workflow.KIND_INITIATION)
     set_current(cursor, request_id, item)
     return item
+
+
+def skip_pending(cursor, request_id, comment):
+    """Этапы, до которых заявка не дошла, больше не нужны (Helpdesk IT выдал из наличия):
+    в «Ходе заявки» они стоят пропущенными с причиной, а не «ещё впереди»."""
+    cursor.execute(
+        "UPDATE payment_subtasks SET state = 'skipped', status = NULL, comment = %s "
+        "WHERE request_id = %s AND state = 'pending'",
+        (comment, int(request_id)))
 
 
 def complete_subtask(cursor, subtask_id, actor, *, outcome=None, comment=None):

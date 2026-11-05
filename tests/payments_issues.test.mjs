@@ -25,8 +25,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-    UNSTAFFED, invoiceIssues, invoiceProblems, issueKeys, issueSentence, issueStep, issuesByKey, legacyIssues, legacyProblems,
-    purchaseIssues, purchaseProblems, regularIssues, regularProblems,
+    CURRENT_KIND_LABELS, UNSTAFFED, invoiceIssues, invoiceProblems, issueKeys, issueSentence, issueStep, issuesByKey, legacyIssues,
+    legacyProblems, purchaseIssues, purchaseProblems, regularIssues, regularProblems,
 } from '../src/components/payments/paymentsMeta.js';
 
 const require = createRequire(import.meta.url);
@@ -260,9 +260,12 @@ test('компанию не знает инициатор: поле необяз
     assert.ok(card.includes("const entityPending = ['pending', 'open'].includes(subtaskByKind.entity_clarify?.state);"));
     assert.ok(card.includes('{request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}'));
     assert.ok(card.includes("set_entity: 'Компания указана'"));
-    // Реестр: бухгалтерия на «Согласовании» подписана — это уточнение компании; на столе — свой значок.
+    // Реестр: бухгалтерия на «Согласовании» подписана — это уточнение компании (и Helpdesk IT — проверка
+    // IT-закупа, 04.11.2026); на столе — свой значок.
     const view = source('src/components/payments/PaymentsView.jsx');
-    assert.ok(view.includes("{request.current_kind === 'entity_clarify' && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>уточнение компании</div>}"));
+    assert.ok(view.includes("{CURRENT_KIND_LABELS[request.current_kind] && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{CURRENT_KIND_LABELS[request.current_kind].toLowerCase()}</div>}"));
+    assert.equal(CURRENT_KIND_LABELS.entity_clarify, 'Уточнение компании');
+    assert.equal(CURRENT_KIND_LABELS.it_review, 'Проверка Helpdesk IT');
     const desk = source('src/components/payments/PaymentsDesk.jsx');
     assert.ok(desk.includes('    entity_clarify: Landmark,\n'));
     // У каждого этапа маршрута на столе свой значок — и у уточнения компании тоже.
@@ -275,14 +278,17 @@ test('компанию не знает инициатор: поле необяз
     for (const kind of kinds) assert.match(icons, new RegExp(`\\n\\s+${kind}: \\w+,`), kind);
     // Пока компании нет, согласующего не называют: ни под формой, ни в окне заявки, ни в «Ходе заявки».
     assert.ok(form.includes('const entityStep = entityOptional && Boolean(preview?.entity_step);'));
-    assert.ok(form.includes('{entityStep ? <span className="text-slate-500">согласующего выберут по компании</span> : ('));
-    assert.ok(form.includes('{route.basisText && !entityStep && <div'));
+    // То же у IT-закупа (04.11.2026): согласующего выберут по сумме поставщика, которого подберёт Helpdesk IT.
+    assert.ok(form.includes("{itStep || entityStep ? <span className=\"text-slate-500\">{itStep ? 'согласующего выберут по сумме поставщика' : 'согласующего выберут по компании'}</span> : ("));
+    assert.ok(form.includes('{route.basisText && !entityStep && !itStep && <div'));
     assert.ok(form.includes('hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired}'));
     assert.ok(card.includes("return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');"));
     assert.ok(card.includes("if (event.kind === 'submitted') return false;"));
-    assert.ok(card.includes('const approverPending = entityPending && !approvalReassigned;'));
-    assert.ok(card.includes("right = item.kind === 'approval' && approverPending ? 'после выбора компании' : who;"));
-    assert.ok(card.includes('{approverPending ? <span className="text-slate-500">определят после выбора компании</span> : approval ? ('));
+    assert.ok(card.includes('const approverPending = (entityPending || itPending) && !approvalReassigned;'));
+    assert.ok(card.includes("const approverPendingText = itPending ? 'после Helpdesk IT' : 'после выбора компании';"));
+    assert.ok(card.includes("right = item.kind === 'approval' && approverPending ? approverPendingText : who;"));
+    // Утверждения не было вовсе (Helpdesk IT выдал из наличия) — строки «Согласует» нет.
+    assert.ok(card.includes("{subtaskByKind.approval?.state === 'skipped' ? null : approverPending ? <span className=\"text-slate-500\">определят {approverPendingText}</span> : approval ? ("));
 });
 
 test('имущество: по пункту на пустое поле каждой карточки, повтор инвентарного — у обеих', async () => {

@@ -4,6 +4,7 @@
     "items": [
       {
         "amount": 25000,
+        "category_helpdesk": false,
         "counterparty_name": "ТОО «Бумага»",
         "current_assignee_name": "Утвердова Ульяна",
         "current_kind": "approval",
@@ -11,6 +12,7 @@
         "due_on": "2026-10-30",
         "expense_name": "Бумага А4",
         "id": 40,
+        "it_purchase": false,
         "lifecycle": [
           {
             "code": "initiation",
@@ -57,6 +59,7 @@
       },
       {
         "amount": 45000,
+        "category_helpdesk": false,
         "counterparty_name": "ИП Пример",
         "current_assignee_name": "Бухгалтерия",
         "current_kind": "invoice_payment",
@@ -64,6 +67,7 @@
         "due_on": null,
         "expense_name": "Картриджи",
         "id": 31,
+        "it_purchase": false,
         "lifecycle": [
           {
             "code": "initiation",
@@ -121,6 +125,7 @@
       "card_holder_name": null,
       "card_mask": "•••• 4242",
       "card_recipient": null,
+      "category_helpdesk": false,
       "clarify_by_name": null,
       "clarify_comment": null,
       "clarify_label": null,
@@ -137,6 +142,7 @@
       "initiator_name": "Инициаторова Ирина",
       "invoice_date": null,
       "invoice_number": null,
+      "it_purchase": false,
       "legal_entity_name": null,
       "opened_at": null,
       "own": true,

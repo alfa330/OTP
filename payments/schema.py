@@ -57,8 +57,9 @@ _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 # Инициатор и его руководитель — конкретные люди заявки, а не роли со списком,
 # поэтому их здесь нет. Исполнитель этапа оплаты — подразделение, а не человек
 # (п. 2, п. 9): «Бухгалтерия» и «Финансовый отдел» — это списки, и задачу видит
-# каждый из списка.
-MEMBER_ROLES = ('approver', 'accounting', 'finance', 'asset_keeper')
+# каждый из списка. «Helpdesk IT» (просьба владельца 04.11.2026) — тоже список:
+# IT-закуп после руководителя проверяет и подбирает любой из них.
+MEMBER_ROLES = ('approver', 'accounting', 'finance', 'asset_keeper', 'helpdesk')
 
 # До ТЗ «Закуп и оплата» согласующих было двое с разными правами: Учредитель и
 # Директор по развитию (по Приказу). Теперь это одна роль «Утвердитель», а кому
@@ -108,7 +109,9 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                # Бухгалтерия указала компанию, которой не знал инициатор (15.10.2026)
                'entity_set',
                # наблюдатели заявки: кого добавили и кого сняли одним действием
-               'observers')
+               'observers',
+               # Helpdesk IT (04.11.2026): подобрал поставщиков либо выдал из наличия
+               'it_offers', 'it_stock')
 
 _STATEMENTS = [
 
@@ -998,6 +1001,17 @@ _STATEMENTS = [
     "ALTER TABLE payment_requisites_mailings ADD COLUMN IF NOT EXISTS opened_by_name VARCHAR(200)",
     "ALTER TABLE payment_legal_entities ADD COLUMN IF NOT EXISTS letters_email VARCHAR(254)",
     "ALTER TABLE payment_legal_entities ADD COLUMN IF NOT EXISTS letters_provider VARCHAR(32)",
+
+    # ── Helpdesk IT (просьба владельца 04.11.2026) ─────────────────────────
+    #
+    # IT-закуп узнаётся по категории: у категории верхнего уровня отметка «Helpdesk
+    # IT — нужен» (`via_helpdesk`), и заявка такой категории после руководителя идёт
+    # в Helpdesk IT: они проверяют наличие и имущество сотрудника, подбирают
+    # поставщиков и ставят цены. Решение «через Helpdesk» заявка запоминает при
+    # отправке (`it_purchase`): отметку у категории могут снять или поставить, пока
+    # заявка идёт, — маршрут в пути от этого не перестраивается.
+    "ALTER TABLE payment_categories ADD COLUMN IF NOT EXISTS via_helpdesk BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS it_purchase BOOLEAN NOT NULL DEFAULT FALSE",
 
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #

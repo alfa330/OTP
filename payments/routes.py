@@ -51,6 +51,8 @@ DESK_PAGE_MAX = 200
 OWN_ON_DESK = 5
 # Сколько не пробовать подписывать фото после неудачной подписи (_avatar_urls).
 PHOTO_RETRY_SECONDS = 120
+# Сколько вещей из наличия показывать Helpdesk IT за один поиск (/stock).
+STOCK_PAGE_MAX = 30
 
 _LINK_RE = re.compile(r'^https?://', re.IGNORECASE)
 
@@ -289,6 +291,16 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             on_date=request_row.get('invoice_date') or queries.today_almaty())
         asset_rows = assets_sql.for_request(cursor, request_id)
         permissions = _permissions(ctx, request_row, subtasks, members)
+        # IT-закуп (владелец 04.11.2026): что уже числится за сотрудником — Helpdesk IT проверяет
+        # по этому, руководитель и утверждающий решают, нужен ли закуп. Без стоимости. Тот, кому
+        # администратор лично передал проверку или утверждение, видит его так же, как роль.
+        staged = any(item['kind'] in (workflow.KIND_IT, workflow.KIND_APPROVAL)
+                     and ctx['user_id'] in (item.get('assignee_id'), item.get('done_by')) for item in subtasks)
+        initiator_assets = ([{key: row.get(key) for key in _INITIATOR_ASSET_KEYS}
+                             for row in assets_sql.of_user(cursor, request_row['initiator_id'])]
+                            if (request_row.get('it_purchase') and request_row.get('initiator_id')
+                                and access.sees_initiator_assets(ctx, request_row, ctx['roles'], participant=staged))
+                            else None)
         current_kind = permissions['current_kind']
         observers = queries.list_observers(cursor, request_id)
         for person in observers:
@@ -318,6 +330,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'legal_entity': directory.read_legal_entity(cursor, request_row.get('legal_entity_id')),
             'counterparty_account': directory.read_account(cursor, request_row.get('counterparty_account_id')),
             'assets': asset_rows,
+            'initiator_assets': initiator_assets,
             'closing': workflow.closing_conditions(
                 request_row, subtasks, assets=asset_rows,
                 has_handover_act=any(item['kind'] == 'handover_act' for item in attachments)),
@@ -337,6 +350,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         if not access.sees_department_people(ctx, ctx['roles']):
             privacy.hide_department_people(full, members)
         return full
+
+    # Что из имущества сотрудника видно в окне IT-закупа: что это и где — без стоимости и заявки.
+    _INITIATOR_ASSET_KEYS = ('id', 'name', 'category_name', 'serial_number', 'inventory_number', 'received_on',
+                             'city', 'location', 'status', 'status_label')
 
     def _reply_card(full, status=200):
         """Ответ с карточкой заявки (_full). Фото наблюдателей подписываются здесь, когда
@@ -984,7 +1001,48 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             fields['received_quantity'] = as_text(data.get('received_quantity'), 'received_quantity')
         if 'legal_entity_id' in data:
             fields['legal_entity_id'] = as_int(data.get('legal_entity_id'), 'Компания')
+        if 'no_alternatives' in data:
+            # Helpdesk IT прикладывает поставщиков (04.11.2026) — с теми же полями, что у инициатора.
+            alone = as_bool(data.get('no_alternatives'))
+            fields['no_alternatives'] = alone
+            fields['no_alternatives_reason'] = as_choice(
+                data.get('no_alternatives_reason'), workflow.NO_ALTERNATIVES_LABELS,
+                'Причина отсутствия альтернатив не из списка') if alone else None
+            fields['no_alternatives_comment'] = as_text(data.get('no_alternatives_comment'),
+                                                        'no_alternatives_comment') if alone else None
+        if 'supplier_choice_reason' in data:
+            fields['supplier_choice_reason'] = as_text(data.get('supplier_choice_reason'), 'supplier_choice_reason')
         return fields
+
+    def _stock_assets(cursor, raw_ids, request_id):
+        """Что Helpdesk IT выдаёт из наличия: номера карточек имущества → [{id, name,
+        inventory_number}]. Выдать можно только то, что числится на складе и ещё не выдано
+        по другой заявке; карточки читаются под блокировкой — две одновременные выдачи
+        одной вещи не пройдут обе."""
+        if raw_ids in (None, ''):
+            return []
+        if not isinstance(raw_ids, list):
+            raise ApiError('Из наличия: ожидается список имущества', code='PAYMENT_REQUEST_INVALID')
+        ids = []
+        for value in raw_ids:
+            asset_id = as_int(value, 'Имущество')
+            if asset_id and asset_id not in ids:
+                ids.append(asset_id)
+        issued = []
+        for asset_id in sorted(ids):
+            asset = assets_sql.read_asset(cursor, asset_id, lock=True)
+            if not asset or asset.get('status') != 'in_stock':
+                raise ApiError('«%s» уже не на складе — обновите поиск' % ((asset or {}).get('name') or 'Имущество'),
+                               code='PAYMENT_STOCK_GONE', status=409)
+            issued.append({'id': asset['id'], 'name': asset['name'], 'inventory_number': asset['inventory_number']})
+        given = {asset_id: mark for asset_id, mark in assets_sql.issued_from_stock(cursor, ids).items()
+                 if mark['request_id'] != request_id}
+        for item in issued:
+            if item['id'] in given:
+                raise ApiError('«%s» уже выдан по заявке №%s — передачу оформляют в «Имуществе». Выберите '
+                               'другую вещь' % (item['name'], given[item['id']]['request_id']),
+                               code='PAYMENT_STOCK_GONE', status=409)
+        return sorted(issued, key=lambda item: ids.index(item['id']))
 
     def _guard_subtask(cursor, ctx, request_id, kind):
         """Заявка под блокировкой и открытая подзадача, на которую у человека есть право."""
@@ -1020,16 +1078,36 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             fields = _action_fields(data)
             asset_rows = routes_assets.parse_assets(cursor, data.get('assets'), request_row) \
                 if action == 'register' else None
+            if action == 'it_offers':
+                # Helpdesk IT (04.11.2026): варианты поставщиков и цены позиций — разбор тот же, что у
+                # формы заявки; рекомендуемый, вписанный названием, заводится в справочник.
+                errors = []
+                fields['items'] = _parse_items(data.get('items'), errors)
+                fields['offers'] = _parse_offers(cursor, data.get('offers'), ctx, errors)
+                if errors:
+                    raise ApiError('; '.join(errors), code='PAYMENT_REQUEST_INVALID', extra={'errors': errors})
+                recommended = next((offer for offer in fields['offers'] if offer['is_recommended']), None)
+                fields['counterparty_id'] = (recommended or {}).get('counterparty_id')
+            if action == 'it_stock':
+                fields['stock_assets'] = _stock_assets(cursor, data.get('stock_asset_ids'), request_id)
             # Проверка до загрузки файлов: считаем уже лежащие файлы подзадачи и присланные.
             own_kinds = {item['kind'] for item in queries.list_attachments(cursor, request_id)
                          if item.get('subtask_kind') == kind} | {k for _s, k, _o in uploads}
             missing = workflow.missing_for_action(kind, action, request=request_row, fields=fields,
-                                                  file_kinds=own_kinds, assets=asset_rows or ())
+                                                  file_kinds=own_kinds, assets=asset_rows or (),
+                                                  settings=directory.get_settings(cursor) if action == 'it_offers' else None)
             if missing:
                 raise ApiError('; '.join(missing), code='PAYMENT_ACTION_INCOMPLETE', extra={'missing': missing})
-            new_kinds = _store_files(cursor, request_id, uploads, actor, subtask_kind=kind)
-            result = flow.act(cursor, request_id, kind, action, actor, fields=fields, new_file_kinds=new_kinds,
-                              assets=asset_rows, outbox=outbox, base_url=web_app_base_url)
+            if action == 'it_offers':
+                # Коммерческие предложения привязаны к вариантам — файлы ложатся, когда у вариантов
+                # уже есть номера (та же транзакция).
+                result = flow.act(cursor, request_id, kind, action, actor, fields=fields, outbox=outbox,
+                                  base_url=web_app_base_url)
+                _store_files(cursor, request_id, uploads, actor, subtask_kind=kind, offer_ids=result.get('offer_ids'))
+            else:
+                new_kinds = _store_files(cursor, request_id, uploads, actor, subtask_kind=kind)
+                result = flow.act(cursor, request_id, kind, action, actor, fields=fields, new_file_kinds=new_kinds,
+                                  assets=asset_rows, outbox=outbox, base_url=web_app_base_url)
             full = _full(cursor, request_id, ctx)
         full.update({'status': 'success', 'next': result.get('next'), 'warnings': _flush(outbox)})
         return _reply_card(full)
@@ -1311,6 +1389,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'department_name': request_row.get('department_name'),
             'legal_entity_name': request_row.get('legal_entity_name'),
             'amount': request_row.get('amount'),
+            # IT-закуп: до Helpdesk IT цены может не быть — карточка пишет прочерк, а не «0 ₸»
+            # (и у черновика IT-категории, который ещё не отправлялся).
+            'it_purchase': request_row.get('it_purchase'),
+            'category_helpdesk': request_row.get('category_helpdesk'),
             'counterparty_name': request_row.get('counterparty_name'),
             'request_kind': request_row.get('request_kind'),
             'payment_method': request_row.get('payment_method'),
@@ -1431,6 +1513,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'expense_name': request_row.get('expense_name'),
             'counterparty_name': request_row.get('counterparty_name'),
             'amount': request_row.get('amount'),
+            'it_purchase': request_row.get('it_purchase'),
+            'category_helpdesk': request_row.get('category_helpdesk'),
             'refund_amount': request_row.get('refund_amount'),
             'payment_method': request_row.get('payment_method'),
             'due_on': request_row.get('due_on'),
@@ -1517,6 +1601,31 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 exclude_request_id=as_int(request.args.get('exclude')), **_history_scope(ctx))
         return jsonify({'items': rows})
 
+    @payments_route('/stock')
+    def stock(ctx):
+        """Что есть в наличии — имущество «На складе», поиском по названию, инвентарному и
+        серийному номеру (`q`). Helpdesk IT проверяет по нему IT-закуп (просьба владельца
+        04.11.2026): нет ли нужного у себя, прежде чем покупать."""
+        query = (request.args.get('q') or '').strip() or None
+        request_id = as_int(request.args.get('request'), 'request')
+        with db._get_cursor() as cursor:
+            if not access.can_check_stock(ctx, ctx['roles']):
+                # Этап Helpdesk IT администратор мог передать человеку не из роли — склад нужен и ему,
+                # но только пока проверка этой заявки у него.
+                step = queries.read_subtask(cursor, request_id, workflow.KIND_IT) if request_id else None
+                if not (step and access.can_act_on_subtask(ctx, step, queries.role_member_ids(cursor))):
+                    raise ApiError('Наличие проверяет Helpdesk IT', code='PAYMENTS_FORBIDDEN', status=403)
+            total, rows = assets_sql.list_assets(cursor, limit=STOCK_PAGE_MAX, status='in_stock', query=query)
+            # Уже выданное по другой IT-заявке, но ещё не переданное по акту, — с номером заявки.
+            issued = assets_sql.issued_from_stock(cursor, [row['id'] for row in rows])
+        keys = ('id', 'name', 'category_name', 'serial_number', 'inventory_number', 'city', 'location', 'received_on')
+        items = []
+        for row in rows:
+            item = {key: row.get(key) for key in keys}
+            item['issued_request_id'] = (issued.get(row['id']) or {}).get('request_id')
+            items.append(item)
+        return jsonify({'items': items, 'total': total})
+
     @payments_route('/route-preview')
     def route_preview(ctx):
         """Кто согласует заявку с такими параметрами — ещё до отправки (п. 6:
@@ -1537,6 +1646,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         with db._get_cursor() as cursor:
             counterparty = directory.read_counterparty(cursor, draft['counterparty_id'])
             draft['counterparty_name'] = (counterparty or {}).get('name')
+            draft['category_helpdesk'] = directory.category_helpdesk(cursor, draft['category_id'])
             basis = flow.approval_basis(cursor, draft)
             # Чужого руководителя показываем только администратору (он смотрит маршрут
             # чужой заявки); остальным — своего.
@@ -1552,6 +1662,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # Компания не указана — после руководителя заявку получит бухгалтерия: укажет
             # компанию, и утверждающего выберут заново, уже с ней (владелец 15.10 и 03.11.2026).
             'entity_step': workflow.needs_entity_step(draft),
+            # IT-категория — после руководителя заявку получит Helpdesk IT: подберёт поставщиков и
+            # цены, и утверждающего выберут уже по этой сумме (владелец 04.11.2026).
+            'it_step': workflow.it_category(draft),
             'contract_check': {'applies': draft['payment_method'] == workflow.METHOD_INVOICE,
                                'ok': ok, 'reason': reason},
         })

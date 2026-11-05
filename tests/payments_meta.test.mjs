@@ -811,8 +811,9 @@ test('выбор из двух вариантов: «не выбрано» от�
   assert.deepEqual(CARD_RECIPIENT_OPTIONS.map((option) => option.value), ['employee', 'supplier']);
 });
 
-test('участники: четыре роли со списком, две из них обязательны для любой заявки', () => {
-  assert.deepEqual(MEMBER_ROLES.map((role) => role.code), ['approver', 'accounting', 'finance', 'asset_keeper']);
+test('участники: пять ролей со списком, две из них обязательны для любой заявки', () => {
+  // Helpdesk IT — с 04.11.2026 (просьба владельца): нужен только IT-закупам, как финотдел — картам.
+  assert.deepEqual(MEMBER_ROLES.map((role) => role.code), ['approver', 'accounting', 'finance', 'asset_keeper', 'helpdesk']);
   assert.deepEqual(MEMBER_ROLES.filter((role) => role.required).map((role) => role.code), ['approver', 'accounting']);
   for (const role of MEMBER_ROLES) assert.ok(role.hint.length > 20, role.code);
 });

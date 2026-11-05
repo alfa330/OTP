@@ -70,12 +70,13 @@ class SpecificationListsTests(unittest.TestCase):
         self.assertEqual(wf.subtask_title('asset_registration'), 'Постановка имущества на учёт')             # п. 10.2
 
     def test_roles_are_the_six_from_clause_3(self):
+        # Шесть ролей п. 3 и седьмая сверх ТЗ — Helpdesk IT (просьба владельца 04.11.2026).
         self.assertEqual(wf.ROLE_LABELS, {
             'initiator': 'Инициатор', 'manager': 'Непосредственный руководитель', 'approver': 'Утвердитель',
             'accounting': 'Бухгалтерия', 'finance': 'Финансовый отдел',
-            'asset_keeper': 'Ответственный за учёт имущества'})
-        # Список участников ведут четырём ролям; инициатор и руководитель — люди заявки.
-        self.assertEqual(schema.MEMBER_ROLES, ('approver', 'accounting', 'finance', 'asset_keeper'))
+            'asset_keeper': 'Ответственный за учёт имущества', 'helpdesk': 'Helpdesk IT'})
+        # Список участников ведут пяти ролям; инициатор и руководитель — люди заявки.
+        self.assertEqual(schema.MEMBER_ROLES, ('approver', 'accounting', 'finance', 'asset_keeper', 'helpdesk'))
 
     def test_only_two_payment_methods_exist(self):
         self.assertEqual(set(wf.PAYMENT_METHOD_LABELS), {'invoice', 'card'})
@@ -93,8 +94,12 @@ class SpecificationListsTests(unittest.TestCase):
         self.assertEqual(columns['finance'], [
             'Новые', 'В работе', 'Требуется уточнение', 'Готово к пополнению', 'Пополнено', 'Ожидается чек',
             'Закрыто'])
+        # Доска Helpdesk IT — сверх ТЗ (04.11.2026): итоговых колонок две, по исходу проверки.
+        self.assertEqual(columns['helpdesk'], [
+            'Новые', 'В работе', 'Требуется уточнение', 'Поставщики подобраны', 'Выдано из наличия'])
         self.assertEqual([board['title'] for board in wf.BOARDS], [
-            'Согласование закупа', 'Бухгалтерия / Оплата счетов', 'Финансовый отдел / Пополнение карт'])
+            'Согласование закупа', 'Бухгалтерия / Оплата счетов', 'Финансовый отдел / Пополнение карт',
+            'Helpdesk IT / Проверка IT-закупов'])
 
     def test_every_column_says_what_lands_in_it(self):
         """Пустая колонка показывает подпись — что в неё попадает (как у колонок
@@ -133,7 +138,7 @@ class SpecificationListsTests(unittest.TestCase):
     def test_every_subtask_has_actions_and_a_known_board(self):
         for item in wf.SUBTASKS:
             self.assertIn(item['kind'], wf.ACTIONS, item['kind'])
-            self.assertIn(item['board'], (None, 'approval', 'accounting', 'finance'))
+            self.assertIn(item['board'], (None, 'approval', 'accounting', 'finance', 'helpdesk'))
             self.assertIn(item['role'], wf.ROLE_LABELS)
             self.assertTrue(item['brief'], 'исполнителю нужно сказать, что сделать')
         for board in wf.BOARDS:

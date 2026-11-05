@@ -179,9 +179,12 @@ def register(api):
         if name == 'asset_categories':
             return directory.upsert_asset_category(cursor, category_id=row_id, name=title, is_active=active,
                                                    actor_id=ctx['user_id'])
+        # «Helpdesk IT» у категории (04.11.2026): прислали — записываем, не прислали — не трогаем.
         return directory.upsert_category(
             cursor, category_id=row_id, parent_id=as_int(data.get('parent_id'), 'parent_id'), name=title,
-            position=as_int(data.get('position'), 'position') or 0, is_active=active, actor_id=ctx['user_id'])
+            position=as_int(data.get('position'), 'position') or 0, is_active=active,
+            via_helpdesk=as_bool(data.get('via_helpdesk')) if 'via_helpdesk' in data else None,
+            actor_id=ctx['user_id'])
 
     def _save_legal_entity(cursor, data, row_id, ctx, letters=None, current=None):
         if letters is None:

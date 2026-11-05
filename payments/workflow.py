@@ -40,8 +40,9 @@ ROLE_APPROVER = 'approver'
 ROLE_ACCOUNTING = 'accounting'
 ROLE_FINANCE = 'finance'
 ROLE_ASSET_KEEPER = 'asset_keeper'
+ROLE_HELPDESK = 'helpdesk'
 
-# Подписи — дословно из п. 3 ТЗ.
+# Подписи — дословно из п. 3 ТЗ. «Helpdesk IT» — сверх ТЗ, просьба владельца 04.11.2026.
 ROLE_LABELS = {
     ROLE_INITIATOR: 'Инициатор',
     ROLE_MANAGER: 'Непосредственный руководитель',
@@ -49,6 +50,7 @@ ROLE_LABELS = {
     ROLE_ACCOUNTING: 'Бухгалтерия',
     ROLE_FINANCE: 'Финансовый отдел',
     ROLE_ASSET_KEEPER: 'Ответственный за учёт имущества',
+    ROLE_HELPDESK: 'Helpdesk IT',
 }
 
 # ─── Этапы (п. 2, п. 20) ─────────────────────────────────────────────────────
@@ -166,10 +168,16 @@ KIND_RECEIVING = 'receiving'
 KIND_ASSETS = 'asset_registration'
 KIND_CLOSING = 'closing_docs'
 KIND_ENTITY = 'entity_clarify'
+KIND_IT = 'it_review'
 
 BOARD_APPROVAL = 'approval'
 BOARD_ACCOUNTING = 'accounting'
 BOARD_FINANCE = 'finance'
+BOARD_HELPDESK = 'helpdesk'
+
+# Чем закончилась проверка Helpdesk IT: подобрали поставщиков либо выдали из наличия.
+IT_OUTCOME_OFFERS = 'offers'
+IT_OUTCOME_STOCK = 'from_stock'
 
 # `statuses` — рабочие статусы открытой подзадачи (между ними карточку двигают
 # свободно); `position` — место в маршруте; `brief` — что сделать исполнителю,
@@ -184,6 +192,18 @@ SUBTASKS = (
         'kind': KIND_MANAGER, 'position': 10, 'stage': STAGE_APPROVAL, 'role': ROLE_MANAGER,
         'title': 'Согласование руководителем', 'board': BOARD_APPROVAL, 'statuses': ('new', 'review'),
         'brief': 'Проверьте, нужен ли этот закуп и верно ли выбран поставщик.',
+    },
+    # Просьба владельца 04.11.2026: IT-закуп (категория с отметкой «Helpdesk IT») после
+    # руководителя уходит в Helpdesk IT. Они проверяют, нет ли такого в наличии и что уже
+    # числится за сотрудником, и либо выдают из наличия — заявка закрывается без закупа, —
+    # либо прикладывают варианты поставщиков и ставят цены позиций по рекомендуемому. Сумма
+    # заявки после этого настоящая, и утверждающего матрица (п. 6) выбирает уже по ней.
+    # Ступень «Согласование»: это ещё решение, покупать ли и у кого.
+    {
+        'kind': KIND_IT, 'position': 12, 'stage': STAGE_APPROVAL, 'role': ROLE_HELPDESK,
+        'title': 'Проверка Helpdesk IT', 'board': BOARD_HELPDESK, 'statuses': ('new', 'in_progress'),
+        'brief': 'Проверьте, нет ли такого в наличии и что уже числится за сотрудником. Нет в наличии — '
+                 'приложите варианты поставщиков и поставьте цены позиций по рекомендуемому.',
     },
     # Просьба владельца 15.10.2026: компанию в новом закупе инициатор указывает, если знает.
     # Не знает — оставляет поле пустым, и компанию указывает бухгалтерия. С 03.11.2026 (тоже
@@ -280,6 +300,10 @@ def can_move(kind, to_status):
 # компании на доске бухгалтерии. Колонка стоит всегда, как остальные (выбор владельца).
 # В рабочие она не входит: карточку из неё не перетаскивают — компанию выбирают в
 # окне заявки.
+#
+# Доска Helpdesk IT — тоже сверх ТЗ (04.11.2026): этап, назначенный списку людей, стоит и
+# на их доске — урок 22.10.2026 («только в Моих задачах» читается как «заявка пропала»).
+# Итоговых колонок две — по исходу проверки: поставщики подобраны либо выдано из наличия.
 
 BOARDS = (
     {
@@ -324,6 +348,18 @@ BOARDS = (
         ),
         'work': ('new', 'in_progress', 'ready'),
     },
+    {
+        'code': BOARD_HELPDESK, 'title': 'Helpdesk IT / Проверка IT-закупов', 'short': 'Helpdesk IT',
+        'kinds': (KIND_IT,), 'roles': (ROLE_HELPDESK,),
+        'columns': (
+            ('new', 'Новые'),
+            ('in_progress', 'В работе'),
+            ('clarification', 'Требуется уточнение'),
+            ('offers', 'Поставщики подобраны'),
+            ('stock', 'Выдано из наличия'),
+        ),
+        'work': ('new', 'in_progress'),
+    },
 )
 BOARD_BY_CODE = {item['code']: item for item in BOARDS}
 
@@ -358,6 +394,13 @@ COLUMN_CAPTIONS = {
         'topped_up': 'Перевод сделан',
         'awaiting_receipt': 'Ждут чек от сотрудника',
         'closed': 'За последние 30 дней',
+    },
+    BOARD_HELPDESK: {
+        'new': 'Согласованы руководителем',
+        'in_progress': 'Проверяем наличие, подбираем поставщиков',
+        'clarification': 'Ждут ответа инициатора',
+        'offers': 'Ушли на утверждение',
+        'stock': 'За последние 30 дней',
     },
 }
 
@@ -451,6 +494,16 @@ def board_column(board_code, request, subtasks, focus_kind=None):
         if receipt.get('state') == 'done':
             return 'closed'
         return 'closed' if status == 'done' else 'topped_up'
+
+    if board_code == BOARD_HELPDESK:
+        check = by_kind.get(KIND_IT) or {}
+        if check.get('state') == 'waiting':
+            return 'clarification'
+        if check.get('state') == 'open':
+            return check.get('status') if check.get('status') in ('new', 'in_progress') else 'new'
+        if check.get('state') == 'done':
+            return 'stock' if check.get('outcome') == IT_OUTCOME_STOCK else 'offers'
+        return None
 
     return None
 
@@ -821,6 +874,11 @@ def manager_step_needed(route, request):
     маршрут молчит — у нового закупа этап есть, а у регулярного платежа нет:
     поставщик и условия там уже утверждены (п. 4), проверять нечего.
     """
+    if _new_purchase(request) and (request.get('it_purchase') or request.get('category_helpdesk')):
+        # IT-закуп (владелец 04.11.2026): «после создания заявки запрос поступает руководителю», потом
+        # Helpdesk IT. При отправке цены ещё нет, и маршрут «до N ₸ — без руководителя» по нулевой
+        # сумме поставил бы руководителя ПОСЛЕ Helpdesk, когда сумма станет настоящей.
+        return True, 'IT-закуп: руководитель согласует до Helpdesk IT'
     mode = str((route or {}).get('manager_step') or 'auto')
     if mode == 'required':
         return True, 'по маршруту «%s»' % route.get('name')
@@ -1011,6 +1069,41 @@ def needs_receipt(request):
             and request.get('card_recipient') == CARD_EMPLOYEE)
 
 
+def _new_purchase(request):
+    return request.get('request_kind') == KIND_PURCHASE and not accepted_before(request)
+
+
+def it_category(request):
+    """Категория заявки — IT-закуп: у неё отметка «Helpdesk IT» (просьба владельца 04.11.2026).
+    `category_helpdesk` — отметка категории сейчас (её отдаёт чтение заявки и предпросмотр
+    маршрута). По ней решается маршрут при отправке; регулярному платежу и заявке первой
+    версии этап не нужен — поставщик и условия у них уже есть."""
+    return _new_purchase(request) and bool(request.get('category_helpdesk'))
+
+
+def needs_it_step(request):
+    """Заявка идёт через Helpdesk IT. Решение — то, что заявка запомнила при отправке
+    (`it_purchase`): отметку у категории могут сменить, пока заявка в пути, а маршрут в пути
+    от этого не перестраивается (flow.submit записывает его заново только с новым маршрутом)."""
+    return _new_purchase(request) and bool(request.get('it_purchase'))
+
+
+def suppliers_by_helpdesk(request):
+    """Варианты поставщиков и цены приносит Helpdesk IT, а не инициатор: заявка пойдёт через
+    него, если отправить её сейчас. Новый маршрут (первая отправка или сменились существенные
+    условия — так же решает flow.submit) строится по отметке категории сейчас; ответ на
+    уточнение без смены условий идёт прежним маршрутом — тем, что заявка запомнила."""
+    if not request.get('submitted_at') or essentials_changed(request.get('submitted_snapshot'), request):
+        return it_category(request)
+    return needs_it_step(request)
+
+
+def issued_from_stock(subtasks):
+    """Helpdesk IT выдал нужное из наличия — заявка закрыта без закупа и оплаты."""
+    check = next((item for item in subtasks or [] if item.get('kind') == KIND_IT), None)
+    return bool(check and check.get('state') == 'done' and check.get('outcome') == IT_OUTCOME_STOCK)
+
+
 def build_route(request, *, initiator, manager=None, manager_step=True, approver=None):
     """Подзадачи заявки по порядку — этапы п. 2 для ЭТОЙ заявки.
 
@@ -1019,6 +1112,9 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
         но руководитель у инициатора не определён (владелец, глава без
         начальника) — подзадача ПРОПУСКАЕТСЯ с пометкой, иначе заявка зависла
         бы навсегда; утверждающий всё равно решает;
+      * проверка Helpdesk IT — после руководителя, у IT-закупа (владелец
+        04.11.2026, needs_it_step); после неё маршрут строится заново — с
+        поставщиком и настоящей суммой (flow.act, действие `it_offers`);
       * уточнение компании бухгалтерией — после руководителя (владелец
         03.11.2026), если инициатор нового закупа компанию не указал
         (needs_entity_step); после него маршрут строится заново, уже с
@@ -1045,6 +1141,8 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
         else:
             add(KIND_MANAGER, state='skipped',
                 comment='Этап пропущен: у инициатора не определён непосредственный руководитель')
+    if needs_it_step(request):
+        add(KIND_IT)
     if needs_entity_step(request):
         add(KIND_ENTITY)
     add(KIND_APPROVAL, assignee=approver if approver and approver.get('id') else None)
@@ -1120,7 +1218,9 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     название и стоимость; условия, ссылка, комментарий и вложение ТЗ
     обязательными не называет — их заполняют, когда они есть. Компания у нового
     закупа — исключение (просьба владельца 15.10.2026): не знает её инициатор —
-    её укажет бухгалтерия после руководителя (needs_entity_step).
+    её укажет бухгалтерия после руководителя (needs_entity_step). У IT-закупа
+    (владелец 04.11.2026) инициатор пишет, что и сколько нужно, а поставщиков и
+    цены приносит Helpdesk IT — их при отправке не требуем (suppliers_by_helpdesk).
 
     `attachments` — вложения заявки (list of {'kind'}); `card_number_ok` — номер
     карты введён и годится (сам номер сюда не передаётся). `invoice_required` —
@@ -1149,14 +1249,16 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
         # Компанию регулярного платежа задаёт справочник (п. 4.4) — без неё платёж
         # не отправить. У нового закупа пустая компания значит «не знаю».
         missing.append('Выберите компанию-плательщика')
+    helpdesk = suppliers_by_helpdesk(request)
     if not request.get('department_id'):
         missing.append('Укажите подразделение')
     if not str(request.get('expense_name') or '').strip():
         missing.append('Укажите наименование закупа')
-    if to_decimal(request.get('amount')) <= 0:
+    if to_decimal(request.get('amount')) <= 0 and not helpdesk:
         missing.append('Сумма заявки должна быть больше нуля')
     if not items:
-        missing.append('Добавьте хотя бы одну позицию: что, сколько и по какой цене')
+        missing.append('Добавьте хотя бы одну позицию: что и сколько' if helpdesk
+                       else 'Добавьте хотя бы одну позицию: что, сколько и по какой цене')
 
     if kind == KIND_REGULAR:
         # П. 4.4: поставщика, договор, реквизиты и назначение подставляет
@@ -1190,38 +1292,16 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     if method not in PAYMENT_METHOD_LABELS:
         missing.append('Выберите способ оплаты: оплата счёта или пополнение карты')
 
-    # ── Поставщики (пп. 4.2–4.3) ──
-    offers = list(offers or [])
-    incomplete = [index + 1 for index, offer in enumerate(offers)
-                  if not str(offer.get('supplier_name') or '').strip() or to_decimal(offer.get('amount')) <= 0]
-    recommended = [offer for offer in offers if offer.get('is_recommended')]
-    if request.get('no_alternatives'):
-        reason = request.get('no_alternatives_reason')
-        if reason not in NO_ALTERNATIVES_LABELS:
-            missing.append('Выберите причину отсутствия альтернатив')
-        elif reason == 'other' and not str(request.get('no_alternatives_comment') or '').strip():
-            missing.append('Опишите причину отсутствия альтернатив')
-        if not offers:
-            missing.append('Укажите поставщика и стоимость')
-    else:
-        need = setting(settings, SETTING_MIN_SUPPLIERS)
-        if len(offers) < need:
-            missing.append('Нужно не меньше %s — сейчас %s. Если сравнивать не с кем, отметьте '
-                           '«Альтернативные предложения отсутствуют»'
-                           % (_plural(need, ('варианта поставщика', 'вариантов поставщиков', 'вариантов поставщиков')),
-                              len(offers)))
-    if incomplete:
-        missing.append('У поставщика №%s укажите название и стоимость' % ', №'.join(str(n) for n in incomplete))
-    if offers:
-        if len(recommended) != 1:
-            missing.append('Отметьте одного рекомендуемого поставщика')
-        elif not request.get('counterparty_id'):
-            missing.append('Рекомендуемого поставщика нет в справочнике — выберите его из списка или добавьте')
-        if not request.get('no_alternatives') and not str(request.get('supplier_choice_reason') or '').strip():
-            missing.append('Обоснуйте выбор рекомендуемого поставщика')
+    # ── Поставщики (пп. 4.2–4.3) — у IT-закупа их приложит Helpdesk IT ──
+    if not helpdesk:
+        missing += offers_missing(request, offers, settings)
 
     # ── Оплата (п. 5) ──
-    if method == METHOD_CARD:
+    if method == METHOD_CARD and helpdesk and request.get('card_recipient') == CARD_SUPPLIER \
+            and not request.get('counterparty_id'):
+        # IT-закуп: поставщика ещё выберет Helpdesk IT — чью карту пополнять, пока неизвестно.
+        missing.append(IT_SUPPLIER_CARD)
+    elif method == METHOD_CARD:
         if request.get('card_recipient') not in CARD_RECIPIENT_LABELS:
             missing.append('Выберите, чью карту пополнить: сотрудника или поставщика')
         if not str(request.get('card_holder_name') or '').strip():
@@ -1238,6 +1318,11 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     return missing
 
 
+# Карту поставщика у IT-закупа указать не из чего: поставщика выберет Helpdesk IT.
+IT_SUPPLIER_CARD = ('Карту поставщика у IT-закупа не указать: поставщика выберет Helpdesk IT. '
+                    'Выберите карту сотрудника или оплату счёта')
+
+
 def _invoice_missing(request, kinds):
     missing = []
     if 'invoice' not in kinds:
@@ -1246,6 +1331,43 @@ def _invoice_missing(request, kinds):
         missing.append('Укажите номер счёта')
     if not request.get('invoice_date'):
         missing.append('Укажите дату счёта')
+    return missing
+
+
+def offers_missing(data, offers, settings=None):
+    """Чего не хватает вариантам поставщиков (пп. 4.2–4.3). `data` — где лежат «альтернатив
+    нет», её причина, обоснование выбора и поставщик заявки (`counterparty_id` —
+    рекомендуемый из справочника): у инициатора это поля заявки, у Helpdesk IT — то, что
+    он прислал с действием. Правила одни на обоих."""
+    missing = []
+    offers = list(offers or [])
+    incomplete = [index + 1 for index, offer in enumerate(offers)
+                  if not str(offer.get('supplier_name') or '').strip() or to_decimal(offer.get('amount')) <= 0]
+    recommended = [offer for offer in offers if offer.get('is_recommended')]
+    if data.get('no_alternatives'):
+        reason = data.get('no_alternatives_reason')
+        if reason not in NO_ALTERNATIVES_LABELS:
+            missing.append('Выберите причину отсутствия альтернатив')
+        elif reason == 'other' and not str(data.get('no_alternatives_comment') or '').strip():
+            missing.append('Опишите причину отсутствия альтернатив')
+        if not offers:
+            missing.append('Укажите поставщика и стоимость')
+    else:
+        need = setting(settings, SETTING_MIN_SUPPLIERS)
+        if len(offers) < need:
+            missing.append('Нужно не меньше %s — сейчас %s. Если сравнивать не с кем, отметьте '
+                           '«Альтернативные предложения отсутствуют»'
+                           % (_plural(need, ('варианта поставщика', 'вариантов поставщиков', 'вариантов поставщиков')),
+                              len(offers)))
+    if incomplete:
+        missing.append('У поставщика №%s укажите название и стоимость' % ', №'.join(str(n) for n in incomplete))
+    if offers:
+        if len(recommended) != 1:
+            missing.append('Отметьте одного рекомендуемого поставщика')
+        elif not data.get('counterparty_id'):
+            missing.append('Рекомендуемого поставщика нет в справочнике — выберите его из списка или добавьте')
+        if not data.get('no_alternatives') and not str(data.get('supplier_choice_reason') or '').strip():
+            missing.append('Обоснуйте выбор рекомендуемого поставщика')
     return missing
 
 
@@ -1282,6 +1404,7 @@ def _plural(count, forms):
 ACTIONS = {
     KIND_INITIATION: ('submit',),
     KIND_ENTITY: ('set_entity',),
+    KIND_IT: ('it_offers', 'it_stock', 'return'),
     KIND_MANAGER: ('approve', 'return', 'reject'),
     KIND_APPROVAL: ('approve', 'return', 'reject'),
     KIND_INVOICE: ('pay', 'request_info'),
@@ -1296,6 +1419,7 @@ ACTION_LABELS = {
     'reject': 'Отклонить', 'pay': 'Оплачено', 'top_up': 'Пополнено', 'request_info': 'Запросить информацию',
     'provide': 'Отправить чек', 'confirm': 'Подтвердить получение', 'register': 'Поставить на учёт',
     'docs_original': 'Оригинал получен', 'docs_close': 'Закрыть документы', 'set_entity': 'Указать компанию',
+    'it_offers': 'Передать на утверждение', 'it_stock': 'Выдать из наличия',
 }
 
 ASSET_REQUIRED_FIELDS = (
@@ -1330,12 +1454,13 @@ def asset_missing(asset):
     return missing
 
 
-def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), assets=()):
+def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), assets=(), settings=None):
     """Чего не хватает, чтобы выполнить действие подзадачи. Пустой список — можно.
 
     `fields` — то, что прислал исполнитель вместе с действием; `file_kinds` —
     виды файлов, уже лежащих в заявке и приложенных сейчас; `assets` — карточки
-    имущества заявки (для постановки на учёт).
+    имущества заявки (для постановки на учёт); `settings` — настройки процесса
+    (минимум поставщиков у Helpdesk IT тот же, что у инициатора).
     """
     fields = fields or {}
     kinds = set(file_kinds or ())
@@ -1384,6 +1509,25 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
             missing.append('Приложите акт приёма-передачи')              # п. 11, п. 15
     if action == 'set_entity' and not fields.get('legal_entity_id'):
         missing.append('Выберите компанию')
+    if action == 'it_offers':
+        # В наличии нет (владелец 04.11.2026): варианты поставщиков — по тем же правилам, что у
+        # инициатора, и цены позиций — по рекомендуемому: сумма заявки, по которой выберут
+        # утверждающего и которую оплатят, — стоимость рекомендуемого поставщика.
+        items = list(fields.get('items') or [])
+        offers = list(fields.get('offers') or [])
+        total = items_total(items)
+        if not items:
+            missing.append('Добавьте хотя бы одну позицию')
+        elif total <= 0:
+            missing.append('Поставьте цены позиций по рекомендуемому поставщику')
+        missing += offers_missing(fields, offers, settings)
+        recommended = [offer for offer in offers if offer.get('is_recommended')]
+        price = to_decimal(recommended[0].get('amount')) if len(recommended) == 1 else Decimal('0')
+        if total > 0 and price > 0 and total != price:
+            missing.append('Сумма позиций — %s, а у рекомендуемого поставщика — %s: поставьте цены позиций '
+                           'по нему' % (fmt_money(total), fmt_money(price)))
+    if action == 'it_stock' and not fields.get('stock_assets') and not comment:
+        missing.append('Выберите, что выдаёте из наличия, или напишите об этом в комментарии')
     if action == 'docs_close' and CLOSING_DOC_ORDER.get(request.get('closing_docs_status'), 0) < CLOSING_DOC_ORDER[DOCS_SCAN]:
         missing.append('Закрывающие документы ещё не получены — нужен скан или оригинал')
     return missing
@@ -1422,6 +1566,10 @@ def closing_conditions(request, subtasks, *, assets=(), has_handover_act=False):
     def done(kind):
         return (by_kind.get(kind) or {}).get('state') == 'done'
 
+    if issued_from_stock(subtasks):
+        # Нужное нашлось в наличии (владелец 04.11.2026): закупа и оплаты не было — заявка
+        # закрыта этим, условий п. 15 у неё нет.
+        return [{'label': 'Выдано из наличия', 'ok': True}]
     goods = request.get('object_type') == OBJECT_GOODS
     approved = done(KIND_APPROVAL) and (by_kind.get(KIND_APPROVAL) or {}).get('outcome') != 'rejected'
     conditions = [

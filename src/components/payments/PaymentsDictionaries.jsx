@@ -11,7 +11,7 @@ import FixedPaymentsPanel from './FixedPaymentsPanel';
 import RequisitesMailings from './RequisitesMailings';
 import SupplierLetters, { LetterWindow } from './SupplierLetters';
 import {
-    CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
+    CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HELPDESK_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
     DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, addressLetterState, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel,
     fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails,
@@ -99,7 +99,7 @@ const toDraft = (name, row = {}) => {
     const base = { id: row.id ?? null, name: row.name || '', note: row.note || '', is_active: row.is_active ?? true };
     switch (name) {
         case 'categories':
-            return { ...base, parent_id: row.parent_id ?? null, position: row.position ?? 0 };
+            return { ...base, parent_id: row.parent_id ?? null, position: row.position ?? 0, via_helpdesk: Boolean(row.via_helpdesk) };
         case 'legal_entities':
             return {
                 ...base, bin: row.bin || '', kind: row.kind || null, vat_payer: Boolean(row.vat_payer),
@@ -690,6 +690,13 @@ const PaymentsDictionaries = ({
                         row.approver_name ? `утверждает ${row.approver_name}` : 'утверждает любой из утверждающих'].filter(Boolean).join(' · '),
                     side: <Hidden active={row.is_active} label="отключён" />,
                 };
+            case 'categories':
+                // IT-категория: заявки с ней после руководителя идут в Helpdesk IT (04.11.2026).
+                return {
+                    title: row.name,
+                    sub: row.via_helpdesk ? 'через Helpdesk IT' : '',
+                    side: <Hidden active={row.is_active} />,
+                };
             default:
                 return { title: row.name, sub: '', side: <Hidden active={row.is_active} /> };
         }
@@ -786,6 +793,13 @@ const PaymentsDictionaries = ({
                         <Field label="Родительская категория" hint="Пусто — категория верхнего уровня. Подкатегория выбирается в заявке после категории.">
                             <FormSelect value={draft.parent_id} onChange={(v) => set('parent_id', v || null)} options={[{ value: '', label: 'Категория верхнего уровня' }, ...categoryRoots.filter((item) => item.id !== draft.id).map((item) => ({ value: item.id, label: item.name }))]} ariaLabel="Родительская категория" />
                         </Field>
+                        {/* IT-закуп (владелец 04.11.2026): заявки категории после руководителя идут в Helpdesk IT.
+                            Отметка — у категории верхнего уровня: подкатегория идёт порядком своей категории. */}
+                        {!draft.parent_id && (
+                            <Field as="div" label="Helpdesk IT" optionalMark={false} hint={HINTS.categoryHelpdesk}>
+                                <Choice value={Boolean(draft.via_helpdesk)} options={HELPDESK_OPTIONS} onChange={(v) => set('via_helpdesk', v)} ariaLabel="Нужен ли Helpdesk IT заявкам категории" />
+                            </Field>
+                        )}
                     </>
                 );
             case 'legal_entities':

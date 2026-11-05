@@ -264,7 +264,8 @@ test('реестр заявок: таблица строк-карточек с �
     assert.ok(table.includes('<td colSpan={visibleColumns.length} className="p-0"><GroupDivider>Завершённые</GroupDivider></td>'));
     // Главное в строке заметнее остального: название и сумма.
     assert.ok(view.includes('<div className={`truncate font-medium ${text.main}`}>{request.expense_name}</div>'));
-    assert.ok(view.includes('<div className={`font-semibold tabular-nums ${text.main}`}>{fmtMoney(netAmount(request))}</div>'));
+    // Сумма — за вычетом возврата; у IT-закупа до Helpdesk IT цены нет — прочерк, а не «0 ₸» (04.11.2026).
+    assert.ok(view.includes('<div className={`font-semibold tabular-nums ${text.main}`}>{amountLabel(request)}</div>'));
     // Пустой реестр — своей карточкой, а не пустой таблицей с шапкой.
     assert.ok(view.includes('{items.length > 0 && (\n                            <table className={CARD_TABLE}'));
     // На телефоне заявки идут карточками — и та же подпись стоит на том же стыке.

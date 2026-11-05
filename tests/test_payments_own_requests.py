@@ -32,6 +32,8 @@ SAMPLE = Path(__file__).parent / 'data' / 'payments_desk_mine.json'
 OWN_CARD_KEYS = {
     'id', 'expense_name', 'counterparty_name', 'amount', 'refund_amount', 'payment_method', 'due_on', 'paid_on',
     'status', 'stage', 'stage_label', 'current_kind', 'current_role', 'current_assignee_name', 'lifecycle',
+    # IT-закуп (04.11.2026): до Helpdesk IT цены нет — строка пишет прочерк, а не «0 ₸».
+    'it_purchase', 'category_helpdesk',
 }
 
 
@@ -46,7 +48,7 @@ def own_row(request_id, **overrides):
         'current_role': 'approver', 'current_role_code': 'approver', 'current_assignee_id': APPROVER,
         'current_assignee_name': 'Утвердова Ульяна', 'clarify_reason': None, 'clarify_by_name': None,
         'clarify_comment': None, 'clarify_from': None, 'card_mask': '•••• 4242', 'justification': 'Нужна бумага',
-        'submitted_snapshot': {'amount': 25000},
+        'submitted_snapshot': {'amount': 25000}, 'it_purchase': False, 'category_helpdesk': False,
     }
     row.update(overrides)
     return row

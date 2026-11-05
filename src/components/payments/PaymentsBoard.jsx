@@ -9,7 +9,7 @@ import PaymentsFilters from './PaymentsFilters';
 import {
     BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, BOARD_COLUMN_GAP, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META,
     EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardColumnsWithPhotos, boardHidden, boardLayout, boardPageStep,
-    boardScrollFor, boardThumb, canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort, fmtMoney,
+    amountLabel, boardScrollFor, boardThumb, canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort,
     normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
@@ -157,7 +157,7 @@ const BoardCard = ({ card, board, draggable = false, dragging = false, soonDays,
             <div className="mt-auto flex flex-wrap items-center gap-x-1.5 gap-y-1 pt-2">
                 <CardFaces faces={cardFaces(card)} />
                 <DueChip request={card} soonDays={soonDays} />
-                <span className="ml-auto shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{fmtMoney(card.amount)}</span>
+                <span className="ml-auto shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{amountLabel(card, card.amount)}</span>
             </div>
         </article>
     );

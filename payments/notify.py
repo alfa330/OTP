@@ -22,6 +22,7 @@ MAX_TITLE = 160
 # Что сделать исполнителю — заголовок уведомления о новой задаче.
 TASK_TITLES = {
     workflow.KIND_ENTITY: 'Уточните компанию',
+    workflow.KIND_IT: 'Проверьте IT-закуп',
     workflow.KIND_MANAGER: 'Согласуйте закуп',
     workflow.KIND_APPROVAL: 'Утвердите закуп',
     workflow.KIND_INVOICE: 'Новый счёт на оплату',
@@ -58,16 +59,24 @@ def reply_markup(link):
     return {'inline_keyboard': [[{'text': 'Открыть заявку', 'url': link}]]}
 
 
+def _amount(request):
+    """Сумма заявки словами для уведомления; у IT-закупа до Helpdesk IT её может не быть вовсе
+    (цены ставит он, владелец 04.11.2026) — тогда не «0 ₸», а ничего."""
+    total = workflow.to_decimal(request.get('amount'))
+    return workflow.fmt_money(total) if total > 0 else ''
+
+
 def brief(request):
     """Заявка одной строкой для колокола: «№12 · Бумага А4 · 25 000 ₸»."""
-    return '№%s · %s · %s' % (int(request.get('id') or 0), _cut(request.get('expense_name') or 'Заявка', 80),
-                              workflow.fmt_money(request.get('amount')))
+    parts = ['№%s' % int(request.get('id') or 0), _cut(request.get('expense_name') or 'Заявка', 80), _amount(request)]
+    return ' · '.join(part for part in parts if part)
 
 
 def _headline(request):
     number = int(request.get('id') or 0)
     name = _esc(request.get('expense_name') or 'Заявка на закуп', MAX_TITLE)
-    return '<b>Заявка №%s</b> · %s\n%s' % (number, workflow.fmt_money(request.get('amount')), name)
+    amount = _amount(request)
+    return '<b>Заявка №%s</b>%s\n%s' % (number, ' · %s' % amount if amount else '', name)
 
 
 def _who(request):
@@ -147,6 +156,34 @@ def entity_set(request):
         'body': '%s — %s' % (brief(request), _cut(entity, 120)),
         'telegram': _message('🏢 Оплата счетов — компания указана', request, [
             'Компания: %s' % _esc(entity, MAX_TITLE),
+        ]),
+    }
+
+
+def it_offers(request):
+    """Helpdesk IT подобрал поставщиков и поставил цены (просьба владельца 04.11.2026):
+    инициатор видит, у кого и за сколько предлагают купить, — дальше заявка у утверждающего."""
+    supplier = request.get('counterparty_name') or 'поставщик выбран'
+    return {
+        'kind': 'it_offers',
+        'title': 'Helpdesk IT подобрал поставщиков',
+        'body': '%s — %s' % (brief(request), _cut(supplier, 120)),
+        'telegram': _message('🖥 Оплата счетов — Helpdesk IT подобрал поставщиков', request, [
+            'Рекомендуемый поставщик: %s' % _esc(supplier, MAX_TITLE),
+        ]),
+    }
+
+
+def issued_from_stock(request, issued=()):
+    """Нужное нашлось в наличии — Helpdesk IT выдаёт его, заявка закрыта без закупа."""
+    names = ', '.join(_cut(item.get('name') or '', 80) for item in issued or [] if item.get('name'))
+    return {
+        'kind': 'it_stock',
+        'title': 'Выдано из наличия',
+        'body': '%s%s' % (brief(request), ' — %s' % _cut(names, 200) if names else ''),
+        'telegram': _message('📦 Оплата счетов — выдано из наличия', request, [
+            'Выдают: %s' % _esc(names, 600) if names else '',
+            'Закупать не нужно — за выданным обратитесь в Helpdesk IT.',
         ]),
     }
 

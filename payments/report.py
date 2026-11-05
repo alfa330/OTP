@@ -18,6 +18,7 @@
 """
 
 from datetime import datetime
+from decimal import Decimal
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
@@ -166,12 +167,18 @@ def enrich(request, items, offers=()):
     if row['stage_text'] and request.get('current_kind') == workflow.KIND_ENTITY:
         # Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
         row['stage_text'] += ' — уточнение компании'
+    if row['stage_text'] and request.get('current_kind') == workflow.KIND_IT:
+        # Helpdesk IT на «Согласовании» — проверка IT-закупа (владелец 04.11.2026).
+        row['stage_text'] += ' — проверка Helpdesk IT'
+    if request.get('issued_from_stock'):
+        # Нужное нашлось в наличии: закупа и оплаты не было — и в расход заявка не идёт.
+        row['state_label'] = 'Выдано из наличия'
     row['object_label'] = workflow.OBJECT_TYPE_LABELS.get(request.get('object_type'), '')
     row['accounting_label'] = workflow.ACCOUNTING_CATEGORY_LABELS.get(request.get('accounting_category'), '')
     row['method_label'] = workflow.PAYMENT_METHOD_LABELS.get(request.get('payment_method'), '')
     amount = workflow.to_decimal(request.get('amount'))
     refund = workflow.to_decimal(request.get('refund_amount'))
-    row['total_amount'] = amount - refund
+    row['total_amount'] = Decimal('0') if request.get('issued_from_stock') else amount - refund
     # Строка читается как в счёте: «что — сколько × цена = сумма строки»; сумма
     # расхода складывается из этих сумм.
     row['items_text'] = '\n'.join(

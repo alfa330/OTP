@@ -48,29 +48,47 @@ def find_or_create_project(cursor, name, actor_id=None):
 # ─── Категории закупа ────────────────────────────────────────────────────────
 
 def list_categories(cursor, include_inactive=False):
+    """`via_helpdesk` — IT-категория: заявки с ней после руководителя идут в Helpdesk IT
+    (просьба владельца 04.11.2026). Отметка бывает только у категории верхнего уровня."""
     cursor.execute(
-        "SELECT id, parent_id, name, position, is_active FROM payment_categories %s "
+        "SELECT id, parent_id, name, position, is_active, via_helpdesk FROM payment_categories %s "
         "ORDER BY parent_id NULLS FIRST, position, name"
         % ('' if include_inactive else 'WHERE is_active')
     )
-    return [{'id': r[0], 'parent_id': r[1], 'name': r[2], 'position': r[3], 'is_active': r[4]}
+    return [{'id': r[0], 'parent_id': r[1], 'name': r[2], 'position': r[3], 'is_active': r[4],
+             'via_helpdesk': bool(r[5])}
             for r in cursor.fetchall()]
 
 
 def upsert_category(cursor, *, category_id=None, parent_id=None, name, position=0, is_active=True,
-                    actor_id=None):
+                    via_helpdesk=None, actor_id=None):
+    """`via_helpdesk` — None: отметку не трогать (запрос о ней не говорит — например, форма
+    из прежней сборки, открытая во время выкладки). Подкатегория отметки не несёт: IT-закуп
+    узнаётся по категории, которую выбирают первой."""
+    helpdesk = bool(via_helpdesk) and not parent_id
     if category_id:
         cursor.execute(
-            "UPDATE payment_categories SET parent_id = %s, name = %s, position = %s, is_active = %s "
+            "UPDATE payment_categories SET parent_id = %s, name = %s, position = %s, is_active = %s, "
+            "via_helpdesk = CASE WHEN %s IS NULL THEN via_helpdesk AND %s ELSE %s END "
             "WHERE id = %s RETURNING id",
-            (parent_id, name, int(position or 0), bool(is_active), int(category_id)))
+            (parent_id, name, int(position or 0), bool(is_active), via_helpdesk, not parent_id, helpdesk,
+             int(category_id)))
     else:
         cursor.execute(
-            "INSERT INTO payment_categories (parent_id, name, position, is_active, created_by) "
-            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
-            (parent_id, name, int(position or 0), bool(is_active), actor_id))
+            "INSERT INTO payment_categories (parent_id, name, position, is_active, via_helpdesk, created_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+            (parent_id, name, int(position or 0), bool(is_active), helpdesk, actor_id))
     row = cursor.fetchone()
     return row[0] if row else None
+
+
+def category_helpdesk(cursor, category_id):
+    """Идут ли заявки этой категории через Helpdesk IT — для предпросмотра маршрута в форме."""
+    if not category_id:
+        return False
+    cursor.execute("SELECT via_helpdesk FROM payment_categories WHERE id = %s", (int(category_id),))
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 def find_or_create_category(cursor, name, parent_id=None, actor_id=None):

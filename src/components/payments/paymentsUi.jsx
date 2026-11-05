@@ -432,7 +432,8 @@ export const StatePill = ({ request, className = '' }) => {
     return (
         <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${pill.fill} ${className}`}>
             <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
-            {meta.label}
+            {/* Закрыта выдачей из наличия (Helpdesk IT, 04.11.2026) — так и сказано, это не закуп. */}
+            {state === 'done' && request?.issued_from_stock ? 'Выдано из наличия' : meta.label}
         </span>
     );
 };

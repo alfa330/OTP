@@ -1,15 +1,19 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, Check, Loader2, Pencil } from 'lucide-react';
+import axios from 'axios';
+import { AlertTriangle, Check, Loader2, Pencil, Search } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios';
 import PaymentAssetsEditor, { assetIssues, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
+import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
+import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
 import {
-    CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, fileKindOptions, fmtDate, fmtMoney, issueKeys, issueSentence, issuesByKey,
-    parseAmount, quantityText, stageAtFinal, stageTaken, todayISO,
+    ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, STOCK_OPTIONS, fileKindOptions,
+    fmtDate, fmtMoney, helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity,
+    itemsTotal, parseAmount, pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING, IssueNav,
-    NoticeBox, ReturnNotice, Row, TonePill, fromKeyboard, useIssueNav,
+    AmountInput, CardNumber, Choice, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING,
+    IssueNav, NoticeBox, ReturnNotice, Row, TonePill, errorText, fromKeyboard, useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -94,8 +98,8 @@ const Missing = ({ items }) => (items.length ? (
     <div className="px-1 text-[12.5px] leading-relaxed text-rose-600" data-issue-text>Чтобы продолжить: {items.join('; ')}.</div>
 ) : null);
 
-const Comment = ({ value, onChange, placeholder = 'Что важно знать следующему по маршруту' }) => (
-    <Field label="Комментарий">
+const Comment = ({ value, onChange, placeholder = 'Что важно знать следующему по маршруту', optional = true }) => (
+    <Field label="Комментарий" optionalMark={optional}>
         <textarea className={`${iosInput} min-h-[56px] resize-y`} value={value} onChange={(event) => onChange(event.target.value)} maxLength={4000} placeholder={placeholder} />
     </Field>
 );
@@ -151,6 +155,340 @@ const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
                 </button>
                 <button type="button" className={iosBtnSecondary} onClick={onCancel}>Отмена</button>
             </div>
+        </div>
+    );
+};
+
+/* ── Helpdesk IT: проверка IT-закупа (просьба владельца 04.11.2026) ─────────────────────────
+   После руководителя сюда приходит IT-закуп — заявка с категорией, у которой отметка «Helpdesk
+   IT». Нужное для решения — под рукой с первой ступени: что уже числится за сотрудником и что
+   лежит на складе. На ступени «В работе» — выбор «Есть в наличии?»:
+     «Есть» — отметить вещь из найденного на складе (или описать в комментарии) и выдать:
+              заявка закроется «Выдано из наличия», без закупа и оплаты (выбор владельца);
+     «Нет»  — варианты поставщиков по тем же правилам, что у инициатора, и цены позиций по
+              рекомендуемому: сумма позиций должна совпасть с его стоимостью — по ней раздел
+              выберет утверждающего (тоже выбор владельца: цены ставит Helpdesk IT).
+   «Вернуть на доработку» — когда из заявки не понять, что именно нужно. */
+
+const STOCK_SEARCH_MS = 300;
+// Порядок полей сверху вниз — по нему стрелки «Не хватает» ходят от поля к полю.
+const HELPDESK_FIELDS = ['in_stock', 'stock_ids', 'no_alternatives_reason', 'no_alternatives_comment', 'offers',
+    'supplier_choice_reason', 'items'];
+
+// Позиции заявки — строками редактора, как в форме заявки: количество так, как его набирают.
+const itemRows = (items) => {
+    const rows = (items || []).map((item) => {
+        const quantity = parseAmount(item.quantity);
+        return {
+            key: Math.random().toString(36).slice(2, 9), name: item.name || '',
+            quantity: quantity ? String(quantity).replace('.', ',') : '1', unit: item.unit || '',
+            unit_price: parseAmount(item.unit_price),
+        };
+    });
+    return rows.length ? rows : [newItem()];
+};
+
+const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers, busy, permissions, onAct, issueSlot }) => {
+    const request = data.request;
+    const minSuppliers = Number(dictionaries?.settings?.min_suppliers) || 3;
+    const [inStock, setInStock] = useState(null);
+    const [draft, setDraft] = useState(() => {
+        // Поставщики, уже лежащие в заявке (Helpdesk проверяет её второй раз), — с ними.
+        const offers = (data.offers || []).map(offerFromRow);
+        return {
+            offers: offers.length ? offers : Array.from({ length: minSuppliers }, () => newOffer()),
+            no_alternatives: Boolean(request.no_alternatives),
+            no_alternatives_reason: request.no_alternatives_reason ?? null,
+            no_alternatives_comment: request.no_alternatives_comment || '',
+            supplier_choice_reason: request.supplier_choice_reason || '',
+            items: itemRows(data.items),
+            comment: '',
+        };
+    });
+    const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
+    // Что выдают из наличия: строки склада целиком — выбранное видно и после нового поиска.
+    const [chosen, setChosen] = useState([]);
+    const [mode, setMode] = useState(null);                 // 'return'
+    const [reveal, setReveal] = useState(false);
+    const formRef = useRef(null);
+    const final = stageAtFinal(subtask.kind, subtask.status);
+
+    // ── Склад: имущество «На складе», поиском ──
+    const [query, setQuery] = useState('');
+    const [stock, setStock] = useState({ items: [], total: 0, loading: true, error: '' });
+    // Перечитать склад: выдача не прошла — вещь могли отдать по другой заявке.
+    const [reload, setReload] = useState(0);
+    useEffect(() => {
+        let cancelled = false;
+        setStock((prev) => ({ ...prev, loading: true, error: '' }));
+        const timer = setTimeout(() => {
+            // Номер заявки — склад открыт и тому, кому администратор передал эту проверку.
+            const params = new URLSearchParams({ request: String(request.id) });
+            if (query.trim()) params.set('q', query.trim());
+            axios.get(`${apiBaseUrl}/api/payments/stock?${params}`, { headers: headers() })
+                .then((response) => {
+                    if (!cancelled) setStock({ items: response.data?.items || [], total: response.data?.total || 0, loading: false, error: '' });
+                })
+                .catch((err) => {
+                    if (!cancelled) setStock({ items: [], total: 0, loading: false, error: errorText(err, 'Склад не загрузился') });
+                });
+        }, query ? STOCK_SEARCH_MS : 0);
+        return () => { cancelled = true; clearTimeout(timer); };
+    }, [apiBaseUrl, headers, query, request.id, reload]);
+
+    const offersShown = draft.no_alternatives ? draft.offers.slice(0, 1) : draft.offers;
+    const recommended = recommendedOffer(draft);
+    // Проверка видит то же, что на экране и уйдёт на сервер: при «альтернатив нет» — один вариант.
+    const issues = final ? helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },
+        { minSuppliers, inStock }) : [];
+    const byKey = issuesByKey(issues);
+    const keys = issueKeys(issues, HELPDESK_FIELDS);
+    const nav = useIssueNav(formRef, keys);
+    const issueOf = (key) => (reveal && byKey[key] ? issueSentence(byKey[key].map((item) => item.text)) : '');
+    const attempt = (run) => (event) => {
+        if (busy) return;
+        if (issues.length) { setMode(null); setReveal(true); nav.first({ focus: fromKeyboard(event) }); return; }
+        run();
+    };
+    const pick = (value) => { setInStock(value); setReveal(false); setMode(null); };
+    const toggle = (item) => setChosen((prev) => (prev.some((other) => other.id === item.id)
+        ? prev.filter((other) => other.id !== item.id) : [...prev, item]));
+
+    const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || [])
+        .map((item) => ({ value: item.id, label: item.bin ? `${item.name} · БИН ${item.bin}` : item.name })), [dictionaries]);
+    // Причины «альтернатив нет» — словарь сервера (п. 4.3), как в форме заявки.
+    const reasonOptions = useMemo(() => (meta?.no_alternatives_reasons || [])
+        .map((item) => ({ value: item.code, label: item.label })), [meta]);
+    const savedFilesByOffer = useMemo(() => {
+        const map = {};
+        (data.attachments || []).forEach((item) => { if (item.offer_id) (map[item.offer_id] ||= []).push(item); });
+        return map;
+    }, [data]);
+
+    const total = itemsTotal(draft.items.filter((item) => !isBlankItem(item)));
+    const price = parseAmount(recommended?.amount);
+    // Позиция одна, а сумма с поставщиком не сходится — цену можно поставить одной кнопкой.
+    const priced = recommended && price > 0 && Math.round(total * 100) !== Math.round(price * 100)
+        ? pricedByOffer(draft.items, price) : null;
+
+    const passOffers = () => {
+        const sent = offersShown.filter((offer) => !isBlankOffer(offer));
+        onAct({
+            action: 'it_offers',
+            fields: {
+                comment: draft.comment.trim(),
+                items: draft.items.filter((item) => !isBlankItem(item)).map((item) => ({
+                    name: item.name.trim(), quantity: itemQuantity(item), unit: item.unit || null,
+                    unit_price: parseAmount(item.unit_price),
+                })),
+                offers: sent.map((offer, index) => ({
+                    ...offerPayload(offer), is_recommended: draft.no_alternatives ? index === 0 : Boolean(offer.is_recommended),
+                })),
+                no_alternatives: Boolean(draft.no_alternatives),
+                no_alternatives_reason: draft.no_alternatives ? draft.no_alternatives_reason : null,
+                no_alternatives_comment: draft.no_alternatives ? draft.no_alternatives_comment.trim() : '',
+                supplier_choice_reason: draft.no_alternatives ? '' : draft.supplier_choice_reason.trim(),
+            },
+            // Коммерческие предложения — к своим вариантам: номер варианта среди отправленных.
+            files: sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean),
+        });
+    };
+    const issueStock = async () => {
+        const ok = await onAct({
+            action: 'it_stock', fields: { comment: draft.comment.trim(), stock_asset_ids: chosen.map((item) => item.id) }, files: [],
+        });
+        // Не вышло (вещь уже не на складе или выдана по другой заявке) — склад перечитан, выбор снят.
+        if (ok === false) { setChosen([]); setReload((value) => value + 1); }
+    };
+
+    const navigator = reveal && issueSlot && keys.length > 1
+        ? createPortal(<div className="order-first w-full"><IssueNav count={keys.length} onStep={nav.step} /></div>, issueSlot)
+        : null;
+
+    const assets = data.initiator_assets;
+    const selectable = final && inStock === true;
+    const stockEmpty = stock.error || (query.trim() ? 'Ничего не нашлось — уточните поиск' : 'На складе сейчас ничего нет');
+
+    return (
+        <div ref={formRef} data-stage-form={subtask.kind} className="space-y-3 rounded-2xl bg-white p-3.5 ring-1 ring-blue-100">
+            {permissions.acting_as_admin && (
+                <div className="text-[12px] text-slate-500">
+                    Вы действуете за исполнителя ({subtask.assignee_name || subtask.role_label}) как администратор раздела — это будет видно в истории.
+                </div>
+            )}
+            {subtask.brief && <div className="text-[12.5px] text-slate-600">{subtask.brief}</div>}
+
+            {/* Что уже числится за сотрудником — по реестру имущества. */}
+            {Array.isArray(assets) && (
+                <Field as="div" label="Имущество сотрудника" optionalMark={false} hint={HINTS.itAssets}>
+                    {assets.length ? (
+                        <div data-helpdesk-assets className="divide-y divide-slate-100 overflow-hidden rounded-xl ring-1 ring-slate-200/70">
+                            {assets.map((asset) => (
+                                <div key={asset.id} className="flex items-center gap-3 px-3 py-2">
+                                    <div className="min-w-0 grow basis-0">
+                                        <div className="truncate text-[13.5px] text-slate-900">{asset.name}</div>
+                                        <div className="truncate text-[12px] text-slate-500">
+                                            {[asset.inventory_number && `инв. ${asset.inventory_number}`, asset.category_name,
+                                                asset.received_on && `с ${fmtDate(asset.received_on)}`].filter(Boolean).join(' · ')}
+                                        </div>
+                                    </div>
+                                    {ASSET_STATUS_META[asset.status] && (
+                                        <TonePill tone={ASSET_STATUS_META[asset.status].tone}>{ASSET_STATUS_META[asset.status].label}</TonePill>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div data-helpdesk-assets className="rounded-xl bg-slate-50 px-3 py-2 text-[13px] text-slate-500">
+                            В реестре имущества за сотрудником ничего не числится.
+                        </div>
+                    )}
+                </Field>
+            )}
+
+            {/* Склад: есть ли нужное в наличии. На ступени «В работе», если отмечено «Есть», строки выбираются. */}
+            <Field as="div" label="Склад" optionalMark={false} hint="Имущество со статусом «На складе». Ищите по названию, инвентарному или серийному номеру." anchor="stock_ids" issue={issueOf('stock_ids')}>
+                <div className="relative">
+                    <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+                    <input className={`${iosInput} !pl-8`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти на складе" aria-label="Поиск по складу" maxLength={120} />
+                </div>
+                {selectable && chosen.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 px-0.5" data-stock-chosen>
+                        {chosen.map((item) => (
+                            <button key={item.id} type="button" onClick={() => toggle(item)} className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-[12.5px] text-blue-700 ring-1 ring-blue-200 transition active:scale-[0.97]" title="Убрать из выдачи">
+                                <Check size={12} strokeWidth={3} className="shrink-0" />
+                                <span className="truncate">{item.name}{item.inventory_number ? ` · ${item.inventory_number}` : ''}</span>
+                            </button>
+                        ))}
+                    </div>
+                )}
+                <div data-stock-list className="divide-y divide-slate-100 overflow-hidden rounded-xl ring-1 ring-slate-200/70">
+                    {stock.items.map((item) => {
+                        const on = chosen.some((other) => other.id === item.id);
+                        // Уже выдана по другой заявке — выбрать её нельзя (сервер такую выдачу тоже не примет).
+                        const pickable = selectable && !item.issued_request_id;
+                        const body = (
+                            <>
+                                <div className="min-w-0 grow basis-0">
+                                    <div className={`truncate text-[13.5px] ${on ? 'font-medium text-blue-700' : 'text-slate-900'}`}>{item.name}</div>
+                                    <div className="truncate text-[12px] text-slate-500">
+                                        {[item.inventory_number && `инв. ${item.inventory_number}`, item.category_name, item.city, item.location].filter(Boolean).join(' · ')}
+                                    </div>
+                                    {/* Выдали по другой заявке, а по акту ещё не передали: карточка пока «На складе». */}
+                                    {item.issued_request_id && (
+                                        <div className="text-[12px] leading-snug text-amber-700" data-stock-issued={item.issued_request_id}>
+                                            Уже выдан по заявке №{item.issued_request_id} — ещё не передан по акту
+                                        </div>
+                                    )}
+                                </div>
+                                {pickable && (on
+                                    ? <Check size={15} strokeWidth={3} className="shrink-0 text-blue-600" aria-hidden="true" />
+                                    : <span className="h-4 w-4 shrink-0 rounded-full ring-1 ring-slate-300" aria-hidden="true" />)}
+                            </>
+                        );
+                        return pickable ? (
+                            <button key={item.id} type="button" role="checkbox" aria-checked={on} data-stock-item={item.id} onClick={() => toggle(item)}
+                                className={`flex w-full items-center gap-3 px-3 py-2 text-left transition active:scale-[0.99] ${on ? 'bg-blue-50/60' : 'hover:bg-slate-50'}`}>
+                                {body}
+                            </button>
+                        ) : (
+                            <div key={item.id} data-stock-item={item.id} className="flex items-center gap-3 px-3 py-2">{body}</div>
+                        );
+                    })}
+                    {!stock.items.length && (
+                        <div className={`px-3 py-2.5 text-[13px] ${stock.error ? 'text-rose-600' : 'text-slate-500'}`}>
+                            {stock.loading ? 'Ищем на складе…' : stockEmpty}
+                        </div>
+                    )}
+                </div>
+                {stock.total > stock.items.length && (
+                    <div className="px-1 text-[12px] text-slate-500">Показаны {stock.items.length} из {stock.total} — уточните поиск.</div>
+                )}
+            </Field>
+
+            {/* Решение — когда задачу взяли в работу (кнопка внизу окна). */}
+            {final && (
+                <>
+                    <Field as="div" label="Есть в наличии?" required optionalMark={false} hint={HINTS.itStock} anchor="in_stock" issue={issueOf('in_stock')}>
+                        <Choice value={inStock} options={STOCK_OPTIONS} onChange={pick} ariaLabel="Есть ли нужное в наличии" />
+                    </Field>
+
+                    {inStock === false && (
+                        <>
+                            <Field as="div" label="Альтернативные предложения" required optionalMark={false} hint={HINTS.alternatives}>
+                                <Choice value={Boolean(draft.no_alternatives)} options={ALTERNATIVES_OPTIONS} onChange={(value) => set('no_alternatives', value)} ariaLabel="Альтернативные предложения" />
+                            </Field>
+                            {draft.no_alternatives && (
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <Field label="Причина отсутствия альтернатив" required anchor="no_alternatives_reason" issue={issueOf('no_alternatives_reason')}>
+                                        <FormSelect value={draft.no_alternatives_reason} onChange={(value) => set('no_alternatives_reason', value)} options={reasonOptions} placeholder="Выберите причину" ariaLabel="Причина отсутствия альтернатив" />
+                                    </Field>
+                                    <Field label="Пояснение" required={draft.no_alternatives_reason === 'other'} anchor="no_alternatives_comment" issue={issueOf('no_alternatives_comment')}>
+                                        <FormInput value={draft.no_alternatives_comment} onChange={(event) => set('no_alternatives_comment', event.target.value)} maxLength={2000} />
+                                    </Field>
+                                </div>
+                            )}
+                            <Field as="div" label={draft.no_alternatives ? 'Поставщик' : 'Варианты поставщиков'} required optionalMark={false} hint={draft.no_alternatives ? null : { ...HINTS.offers, intro: `${HINTS.offers.intro} Нужно не меньше ${minSuppliers}.` }} anchor="offers" issue={issueOf('offers')} issueFirst>
+                                <PaymentOffersEditor
+                                    offers={draft.offers}
+                                    onChange={(next) => set('offers', next)}
+                                    counterpartyOptions={counterpartyOptions}
+                                    savedFilesByOffer={savedFilesByOffer}
+                                    single={Boolean(draft.no_alternatives)}
+                                    issues={reveal ? byKey.offers || [] : []}
+                                />
+                            </Field>
+                            {!draft.no_alternatives && (
+                                <Field label="Обоснование выбора поставщика" required hint={HINTS.choiceReason} anchor="supplier_choice_reason" issue={issueOf('supplier_choice_reason')}>
+                                    <FormText className="min-h-[56px]" value={draft.supplier_choice_reason} onChange={(event) => set('supplier_choice_reason', event.target.value)} maxLength={2000} />
+                                </Field>
+                            )}
+                            <Field as="div" label="Позиции и цены" required optionalMark={false} hint={HINTS.itItems} anchor="items" issue={issueOf('items')} issueFirst>
+                                <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} issue={reveal ? byKey.items?.[0] || null : null} />
+                                {priced && (
+                                    <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => set('items', priced)} data-price-by-offer>
+                                        Поставить цену поставщика · {fmtMoney(price)}
+                                    </button>
+                                )}
+                            </Field>
+                        </>
+                    )}
+
+                    {inStock !== null && (
+                        <Comment
+                            value={draft.comment}
+                            onChange={(value) => set('comment', value)}
+                            // Выдают из наличия — без отмеченной вещи на складе словами о выдаче не обойтись.
+                            optional={!inStock}
+                            placeholder={inStock ? 'Что выдаёте и где сотрудник может забрать' : 'Что важно знать утверждающему (необязательно)'}
+                        />
+                    )}
+                    <div className="flex flex-wrap items-center gap-2">
+                        {inStock === true && (
+                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(issueStock)}>
+                                {busy && <Loader2 size={14} className="animate-spin" />} Выдать из наличия
+                            </button>
+                        )}
+                        {inStock === false && (
+                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(passOffers)}>
+                                {busy && <Loader2 size={14} className="animate-spin" />} Передать на утверждение
+                            </button>
+                        )}
+                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => { setMode((prev) => (prev === 'return' ? null : 'return')); setReveal(false); }}>
+                            Вернуть на доработку
+                        </button>
+                    </div>
+                    {mode && (
+                        <ReasonPanel
+                            mode={mode}
+                            busy={busy}
+                            onCancel={() => setMode(null)}
+                            onSubmit={({ reason, comment }) => onAct({ action: mode, fields: { reason, comment }, files: [] })}
+                        />
+                    )}
+                </>
+            )}
+            {navigator}
         </div>
     );
 };
@@ -266,6 +604,14 @@ const PaymentStageForm = ({
                     )}
                 </div>
             </>,
+        );
+    }
+
+    // ── Helpdesk IT: IT-закуп после руководителя (просьба владельца 04.11.2026) ──
+    if (kind === 'it_review') {
+        return (
+            <HelpdeskStage data={data} subtask={subtask} dictionaries={dictionaries} meta={meta} apiBaseUrl={apiBaseUrl}
+                headers={headers} busy={busy} permissions={permissions} onAct={onAct} issueSlot={issueSlot} />
         );
     }
 

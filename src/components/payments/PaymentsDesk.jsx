@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
     BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, Landmark, MessageCircleQuestion,
-    PackageCheck, Paperclip, PencilLine, ReceiptText, Send,
+    MonitorCheck, PackageCheck, Paperclip, PencilLine, ReceiptText, Send,
 } from 'lucide-react';
 import { iosCard } from '../ui/ios';
 import {
     DESK_PAGE_SIZE, TASK_FORMS, deskAnswer, deskLayout, deskSkeletonRows, deskTaskAbout, deskTaskReturned, dueChip,
-    fmtMoney, netAmount, ownRequestStatus, ownSkeletonRows, pageRange, stageProgress, stageProgressTitle,
+    amountLabel, ownRequestStatus, ownSkeletonRows, pageRange, stageProgress, stageProgressTitle,
 } from './paymentsMeta';
 import { Bone, DueChip, NoticeBox, Pager, SectionTitle, errorText, useFits } from './paymentsUi';
 import { recall, remember } from './paymentsEntry';
@@ -50,6 +50,7 @@ import { recall, remember } from './paymentsEntry';
    значок — того, что с ней происходит сейчас: согласуют, оплачивают, ставят на учёт. */
 const TASK_ICONS = {
     entity_clarify: Landmark,
+    it_review: MonitorCheck,
     manager_approval: BadgeCheck,
     approval: BadgeCheck,
     invoice_payment: Banknote,
@@ -82,7 +83,7 @@ const DeskRow = ({ task, first, soonDays, onOpen }) => {
     const about = deskTaskAbout(task);
     /* Сумма и срок стоят справа от текста; на телефоне они забирали бы у него половину
        ширины (название заявки обрезалось до двух слов), поэтому там уходят под текст. */
-    const amount = <span className="text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(task.amount)}</span>;
+    const amount = <span className="text-[14px] font-semibold tabular-nums text-slate-900">{amountLabel(task, task.amount)}</span>;
     const due = dueChip(task) ? <DueChip request={task} soonDays={soonDays} /> : null;
     return (
         <button
@@ -149,7 +150,7 @@ const OwnRow = ({ item, first, soonDays, onOpen }) => {
     const Icon = taskIcon({ task: item.current_kind });
     const about = [`№${item.id}`, item.counterparty_name].filter(Boolean).join(' · ');
     const where = [status.label, status.who].filter(Boolean).join(' · ');
-    const amount = <span className="text-[14px] font-semibold tabular-nums text-slate-900">{fmtMoney(netAmount(item))}</span>;
+    const amount = <span className="text-[14px] font-semibold tabular-nums text-slate-900">{amountLabel(item)}</span>;
     const due = dueChip(item) ? <DueChip request={item} soonDays={soonDays} /> : null;
     return (
         <button
