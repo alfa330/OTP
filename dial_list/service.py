@@ -7105,9 +7105,10 @@ class DialListService:
         return data
 
     def funnel(self, department_id, period=None, batch_id=None, date_from=None, date_to=None, city=None):
-        """«Воронка ОП» во вкладке «Аналитика» Тез (задача #407, 03.11.2026): база → диалог → вышли к
-        заказам по городам и причины отказа (analytics.tez_funnel). Фильтры: файл загрузки, дни
-        звонков (date, включительно), город. У удалённого КЦ воронки нет — цель там подпись."""
+        """«Воронка ОП» во вкладке «Аналитика» Тез (задача #407, 03.11.2026): база → уже
+        зарегистрированы → диалог → зарегистрировались после контакта → вышли к заказам по городам и
+        причины отказа (analytics.tez_funnel). Фильтры: файл загрузки, дни звонков (date,
+        включительно), город. У удалённого КЦ воронки нет — цель там подпись."""
         from . import analytics as dial_analytics
         department_id = int(department_id)
         settings = self.department_settings(department_id)

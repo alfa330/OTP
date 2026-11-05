@@ -2,16 +2,15 @@
  * «Воронка ОП» — разрез вкладки «Аналитика» раздела «Воронка ОП Tez» (задача #407 Алчинбаевой Анель,
  * 03.11.2026): чистая логика без React. Node-тест — tests/dial_list_tez_funnel.test.mjs.
  *
- * Считает сервер (dial_list/analytics.tez_funnel): база → (уже зарегистрированы) → состоялся диалог →
- * (зарегистрировались после контакта) → вышли к заказам, по городам, и причины отказа. Здесь — подписи,
+ * Считает сервер (dial_list/analytics.tez_funnel): база → уже зарегистрированы → состоялся диалог →
+ * зарегистрировались после контакта → вышли к заказам, по городам, и причины отказа. Здесь — подписи,
  * пояснения под «i», запрос с фильтрами и варианты выбора.
  *
- * Регистрацию TEZ APP пока не отдаёт (решение владельца 03.11.2026: запросить поле у TEZ APP): сервер
- * присылает по этим шагам null, а плитка пишет «ждём данные TEZ APP» — ноль соврал бы.
+ * Даты регистрации и поездок — от TEZ APP (поля с 04.11.2026). По водителю, о котором TEZ APP ещё не
+ * ответил, их нет: сколько таких, сервер присылает в tez_unchecked, и экран об этом предупреждает.
  */
 
 export const CITY_NONE = '__none__';
-export const REGISTRATION_PENDING = 'ждём данные TEZ APP';
 
 const NF = new Intl.NumberFormat('ru-RU');
 const num = (value) => NF.format(Number(value) || 0);
@@ -29,25 +28,18 @@ export const funnelQuery = ({ period = '', batchId = '', dateFrom = '', dateTo =
     return text ? `?${text}` : '';
 };
 
-/** Регистрации от TEZ APP ещё нет: сервер так и говорит, или шагов в ответе нет вовсе. */
-export const registrationPending = (data) => !data?.registration_available
-    || data?.totals?.already_registered == null;
-
-const pendingValue = (pending, value) => (pending ? '—' : num(value));
-
 /** Пять шагов воронки — плитки. */
 export const funnelSteps = (data) => {
     const t = data?.totals || {};
-    const pending = registrationPending(data);
     return [
         {
             key: 'base', label: 'База', value: num(t.base),
             help: 'Водители выбранной базы — месяц и, если выбран, файл загрузки. Номера «Реестра тестовых номеров» не считаются. Период звонков на базу не влияет.',
         },
         {
-            key: 'already_registered', label: 'Уже зарегистрированы', value: pendingValue(pending, t.already_registered),
-            hint: pending ? REGISTRATION_PENDING : null,
-            help: 'Водители базы, у которых регистрация в TEZ APP была до первого звонка. TEZ APP пока не отдаёт дату регистрации — её запросили; показатель появится, как только начнёт.',
+            key: 'already_registered', label: 'Уже зарегистрированы', value: num(t.already_registered),
+            hint: 'до первого звонка',
+            help: 'Водители базы, у которых аккаунт в TEZ APP создан раньше первого звонка им (недозвон — тоже звонок). Кому ещё не звонили — у кого аккаунт уже есть. Период звонков на этот шаг не влияет.',
         },
         {
             key: 'dialog', label: 'Состоялся диалог', value: num(t.dialog), hint: 'разговор от 10 с',
@@ -55,13 +47,13 @@ export const funnelSteps = (data) => {
         },
         {
             key: 'registered_after', label: 'Зарегистрировались после контакта',
-            value: pendingValue(pending, t.registered_after), hint: pending ? REGISTRATION_PENDING : null,
-            help: 'Водители, зарегистрировавшиеся в TEZ APP после диалога с оператором. Регистрации до контакта не считаются. TEZ APP пока не отдаёт дату регистрации — её запросили.',
+            value: num(t.registered_after), hint: 'после диалога',
+            help: 'Водители с диалогом, у которых аккаунт в TEZ APP создан позже их первого диалога в выбранный период. Регистрации до контакта не считаются.',
         },
         {
             key: 'orders_after', label: 'Вышли к заказам', value: num(t.orders_after), hint: 'после диалога',
             tone: Number(t.orders_after) > 0 ? 'good' : null,
-            help: 'Водители с диалогом, у которых первый заказ в TEZ APP в месяце базы — позже их первого диалога в выбранный период. Поездки до контакта не считаются; учитываются и ранее зарегистрированные, и новые.',
+            help: 'Водители с диалогом, у которых в TEZ APP есть завершённая поездка, начатая позже их первого диалога в выбранный период. Поездки следующего месяца учитываются до его 7-го числа — пока базу проверяют. Поездки до контакта не считаются; учитываются и ранее зарегистрированные, и новые.',
         },
     ];
 };
@@ -69,12 +61,10 @@ export const funnelSteps = (data) => {
 /** Две конверсии: формула — в подписи, ноль диалогов — 0%. */
 export const funnelConversions = (data) => {
     const r = data?.rates || {};
-    const pending = registrationPending(data);
     return [
         {
-            key: 'dialog_to_registration', label: 'Из диалога в регистрацию',
-            value: pending ? '—' : pctText(r.dialog_to_registration),
-            hint: pending ? REGISTRATION_PENDING : 'зарегистрировались после ÷ диалог',
+            key: 'dialog_to_registration', label: 'Из диалога в регистрацию', value: pctText(r.dialog_to_registration),
+            hint: 'зарегистрировались после ÷ диалог',
             help: 'Зарегистрировались после контакта ÷ состоялся диалог × 100%. Нет диалогов — 0%.',
         },
         {
@@ -83,6 +73,17 @@ export const funnelConversions = (data) => {
             help: 'Вышли к заказам ÷ состоялся диалог × 100%. Нет диалогов — 0%.',
         },
     ];
+};
+
+/**
+ * Водители базы, о которых TEZ APP ещё не ответил: регистрации и поездок у них нет, и шаги с ними
+ * меньше настоящих — об этом надо сказать, а не показывать молча. '' — ответил обо всех.
+ */
+export const uncheckedNotice = (data) => {
+    const unchecked = Number(data?.tez_unchecked) || 0;
+    if (unchecked <= 0) return '';
+    return `TEZ APP ещё не ответил по ${num(unchecked)} из ${num(data?.totals?.base)} водителей базы — `
+        + 'их регистрации и поездки в воронке пока не учтены.';
 };
 
 export const cityLabel = (name) => (String(name || '').trim() ? String(name).trim() : 'Город не указан');

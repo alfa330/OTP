@@ -1,6 +1,7 @@
 // «Воронка ОП» — разрез вкладки «Аналитика» раздела «Воронка ОП Tez» (задача #407, 03.11.2026): чистая
 // логика сайта (src/components/dial_list/tezFunnel.js) — запрос с фильтрами, плитки шагов и конверсий,
-// «ждём данные TEZ APP» вместо нуля, варианты выбора, подписи причин и подсказка о настройке «Отказа».
+// предупреждение о водителях, по которым TEZ APP ещё не ответил, варианты выбора, подписи причин и
+// подсказка о настройке «Отказа».
 //
 // Запуск: node --test tests/dial_list_tez_funnel.test.mjs
 
@@ -8,16 +9,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    CITY_NONE, REGISTRATION_PENDING, batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery,
-    funnelSteps, reasonLabel, refusalSetupNotice, registrationPending,
+    CITY_NONE, batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps, reasonLabel,
+    refusalSetupNotice, uncheckedNotice,
 } from '../src/components/dial_list/tezFunnel.js';
 
 const NF = new Intl.NumberFormat('ru-RU');
 
 const SAMPLE = {
-    registration_available: false,
-    totals: { base: 7195, already_registered: null, dialog: 3275, registered_after: null, orders_after: 320 },
-    rates: { dialog_to_registration: null, dialog_to_orders: 9.8 },
+    totals: { base: 7195, already_registered: 2410, dialog: 3275, registered_after: 512, orders_after: 320 },
+    rates: { dialog_to_registration: 15.6, dialog_to_orders: 9.8 },
+    tez_unchecked: 0,
 };
 
 test('запрос: пустые фильтры не уходят, месяц базы — YYYY-MM', () => {
@@ -30,42 +31,39 @@ test('запрос: пустые фильтры не уходят, месяц б
     assert.equal(funnelQuery({ city: CITY_NONE }), '?city=__none__');
 });
 
-test('шаги: пять в порядке задачи, регистрации без данных — «—» и «ждём данные TEZ APP», а не ноль', () => {
+test('шаги: пять в порядке задачи, у каждого — число и чем он отмерен', () => {
     const steps = funnelSteps(SAMPLE);
     assert.deepEqual(steps.map((s) => s.label), [
         'База', 'Уже зарегистрированы', 'Состоялся диалог', 'Зарегистрировались после контакта', 'Вышли к заказам']);
-    assert.equal(steps[0].value, NF.format(7195));
-    assert.deepEqual([steps[1].value, steps[1].hint], ['—', REGISTRATION_PENDING]);
-    assert.deepEqual([steps[3].value, steps[3].hint], ['—', REGISTRATION_PENDING]);
-    assert.equal(steps[2].hint, 'разговор от 10 с');
+    assert.deepEqual(steps.map((s) => s.value), [7195, 2410, 3275, 512, 320].map((n) => NF.format(n)));
+    assert.deepEqual(steps.map((s) => s.hint || null), [
+        null, 'до первого звонка', 'разговор от 10 с', 'после диалога', 'после диалога']);
     assert.equal(steps[4].tone, 'good');
     assert.ok(steps.every((s) => s.help && s.help.length > 20), 'у каждого шага — пояснение под «i»');
-    // Нет поездок — нейтрально, без зелёного.
+    assert.ok(steps.every((s) => !/ждём/.test(`${s.value} ${s.hint || ''} ${s.help}`)), 'данные TEZ APP уже есть');
+    // Нет поездок — нейтрально, без зелёного; пустой ответ — нули, а не «undefined».
     assert.equal(funnelSteps({ totals: { orders_after: 0 } })[4].tone, null);
-});
-
-test('регистрация придёт от TEZ APP — шаги покажут числа', () => {
-    const ready = { registration_available: true,
-        totals: { base: 10, already_registered: 3, dialog: 5, registered_after: 2, orders_after: 1 },
-        rates: { dialog_to_registration: 40, dialog_to_orders: 20 } };
-    assert.equal(registrationPending(ready), false);
-    const steps = funnelSteps(ready);
-    assert.deepEqual([steps[1].value, steps[1].hint, steps[3].value, steps[3].hint], ['3', null, '2', null]);
-    const conv = funnelConversions(ready);
-    assert.deepEqual(conv.map((c) => c.value), ['40%', '20%']);
-    assert.equal(conv[0].hint, 'зарегистрировались после ÷ диалог');
-    assert.equal(registrationPending(null), true);
-    assert.equal(registrationPending({ registration_available: true, totals: {} }), true);
+    assert.deepEqual(funnelSteps(null).map((s) => s.value), ['0', '0', '0', '0', '0']);
 });
 
 test('конверсии: формула в подписи, нет диалогов — 0%', () => {
     const conv = funnelConversions(SAMPLE);
     assert.deepEqual(conv.map((c) => [c.label, c.value, c.hint]), [
-        ['Из диалога в регистрацию', '—', REGISTRATION_PENDING],
+        ['Из диалога в регистрацию', '15,6%', 'зарегистрировались после ÷ диалог'],
         ['Из диалога в выход к заказам', '9,8%', 'вышли к заказам ÷ диалог'],
     ]);
-    assert.equal(funnelConversions({ rates: { dialog_to_orders: 0 } })[1].value, '0%');
-    assert.equal(funnelConversions({})[1].value, '0%');
+    assert.deepEqual(funnelConversions({ rates: { dialog_to_registration: 0, dialog_to_orders: 0 } }).map((c) => c.value),
+        ['0%', '0%']);
+    assert.deepEqual(funnelConversions({}).map((c) => c.value), ['0%', '0%']);
+});
+
+test('TEZ APP ответил не обо всех — предупреждение с числами; обо всех — молчим', () => {
+    assert.equal(uncheckedNotice(SAMPLE), '');
+    assert.equal(uncheckedNotice({}), '');
+    assert.equal(uncheckedNotice(null), '');
+    const notice = uncheckedNotice({ ...SAMPLE, tez_unchecked: 1200 });
+    assert.match(notice, new RegExp(`по ${NF.format(1200)} из ${NF.format(7195)} водителей`));
+    assert.match(notice, /регистрации и поездки в воронке пока не учтены/);
 });
 
 test('выбор города и файла: «все» первыми, «не указан» словами, у файла — дата загрузки', () => {

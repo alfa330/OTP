@@ -158,9 +158,11 @@
     GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
-    GET     /api/dial_list/departments/<id>/funnel           «Воронка ОП» Тез: база → диалог → вышли к заказам
-                                                             по городам и причины отказа (?period=&batch_id=
-                                                             &date_from=&date_to=&city=)
+    GET     /api/dial_list/departments/<id>/funnel           «Воронка ОП» Тез: база → уже зарегистрированы →
+                                                             диалог → зарегистрировались после контакта →
+                                                             вышли к заказам по городам и причины отказа
+                                                             (?period=&batch_id=&date_from=&date_to=&city=;
+                                                             tez_unchecked — о скольких TEZ APP не ответил)
     GET     /api/dial_list/departments/<id>/announcement_stats  точность распознавания сообщения сети по речи
                                                              за ?days= (14): подозрительные плечи против
                                                              финалов Binotel — безопасен ли режим auto

@@ -476,18 +476,29 @@ def tez_department_analytics(cur, department_id, period, today=None):
 
 
 # ── Воронка ОП Тез (задача #407 Алчинбаевой Анель, 03.11.2026) ─────────────────────────────────
-# База → (уже зарегистрированы) → состоялся диалог → (зарегистрировались после контакта) → вышли к
+# База → уже зарегистрированы → состоялся диалог → зарегистрировались после контакта → вышли к
 # заказам, по городам; выбор базы (месяц и файл загрузки), периода звонков и города; отдельно —
 # причины отказа. Каждый водитель — один раз в каждом показателе.
 #
+#   уже зарегистрированы  аккаунт в TEZ APP создан раньше ПЕРВОГО звонка водителю («до начала
+#                   обзвона» в ТЗ; недозвон — тоже звонок, а отменённый оператором и не ушедший в
+#                   Binotel — нет); кому ещё не звонили — у кого аккаунт уже есть. Это свойство
+#                   базы: от периода звонков не зависит;
 #   диалог          разговор не короче 10 с в выбранный период (тот же «поговорили», что в дашборде
 #                   и в успешке): недозвон, сброс, сообщение сети и автоответчик — не диалог;
-#   вышли к заказам первый заказ месяца базы в TEZ APP (signed_at) позже ПЕРВОГО диалога водителя в
-#                   периоде: поездка до контакта в результат не идёт, и ранее работавшие, и новые;
-#   конверсия       вышли к заказам ÷ диалог × 100; нет диалогов — 0, а не ошибка деления.
+#   зарегистрировались после контакта — аккаунт создан позже ПЕРВОГО диалога водителя в периоде;
+#   вышли к заказам начало последней завершённой поездки (last_order_at) или первый заказ месяца
+#                   базы (signed_at) позже первого диалога водителя в периоде: поездка до контакта
+#                   в результат не идёт, и ранее работавшие, и новые. last_order_at — за всё время,
+#                   поэтому звонок в конце месяца и поездка в начале следующего не теряются, пока
+#                   базу проверяют (до 7-го числа). Вышедшего на линию проверка больше не спрашивает
+#                   — его last_order_at застывает, и решает signed_at;
+#   конверсии       зарегистрировались после (вышли к заказам) ÷ диалог × 100; нет диалогов — 0, а
+#                   не ошибка деления.
 #
-# Регистрацию TEZ APP не отдаёт (проверено 03.11.2026: в ответе только даты заказов; владелец
-# решил запросить поле у TEZ APP) — шаги с ней приходят None, сайт пишет «ждём данные TEZ APP».
+# Даты регистрации и поездок — ответ TEZ APP (поля с 04.11.2026), их пишет проверка поездок
+# (trips_check.py). Водитель, о котором TEZ APP ещё не ответил, не учтён ни в регистрации, ни в
+# поездках; сколько таких — tez_unchecked: сайт предупреждает, а не показывает молча ноль.
 #
 # Отказ — итог, название которого начинается с «Отказ»; причина — его тип: если у итога заведены
 # типы, телефон без типа итог не примет (set_attempt_outcome). Отказ водителя в отчёте — его
@@ -507,7 +518,8 @@ def is_refusal_outcome(name):
 
 _FUNNEL_LEADS_CTE = """
     leads AS (
-        SELECT l.id, l.signed_at, l.city, lower(btrim(l.city)) AS city_key
+        SELECT l.id, l.signed_at, l.registered_at, l.last_order_at, l.trip_checked_at,
+               l.city, lower(btrim(l.city)) AS city_key
         FROM dial_list_leads l
         WHERE l.department_id = %(department_id)s AND l.period = %(period)s
           AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
@@ -516,6 +528,14 @@ _FUNNEL_LEADS_CTE = """
 """
 
 _FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
+    calls AS (
+        SELECT a.lead_id, MIN(t.requested_at) AS first_at
+        FROM leads l
+        JOIN dial_list_assignments a ON a.lead_id = l.id
+        JOIN dial_list_attempts t ON t.assignment_id = a.id
+        WHERE NOT t.cancelled AND t.state <> 'failed'
+        GROUP BY a.lead_id
+    ),
     dialogs AS (
         SELECT a.lead_id, MIN(t.requested_at) AS first_at
         FROM leads l
@@ -526,9 +546,14 @@ _FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
           {call_filters}
         GROUP BY a.lead_id
     )
-    SELECT l.city_key, MAX(l.city), COUNT(*), COUNT(d.lead_id),
-           COUNT(*) FILTER (WHERE d.first_at IS NOT NULL AND l.signed_at > d.first_at)
+    SELECT l.city_key, MAX(l.city), COUNT(*),
+           COUNT(*) FILTER (WHERE l.registered_at < COALESCE(c.first_at, 'infinity'::timestamptz)),
+           COUNT(d.lead_id),
+           COUNT(*) FILTER (WHERE l.registered_at > d.first_at),
+           COUNT(*) FILTER (WHERE GREATEST(l.signed_at, l.last_order_at) > d.first_at),
+           COUNT(*) FILTER (WHERE l.trip_checked_at IS NULL)
     FROM leads l
+    LEFT JOIN calls c ON c.lead_id = l.id
     LEFT JOIN dialogs d ON d.lead_id = l.id
     GROUP BY l.city_key
 """
@@ -622,16 +647,18 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
     fmt = {"lead_filters": "\n          ".join(lead_filters), "call_filters": "\n          ".join(call_filters)}
 
     cur.execute(_FUNNEL_SQL.format(**fmt), params)
-    by_city = []
-    for key, name, base, dialog, orders in cur.fetchall():
-        dialog, orders = int(dialog or 0), int(orders or 0)
+    by_city, unchecked = [], 0
+    for key, name, base, registered, dialog, registered_after, orders, not_checked in cur.fetchall():
+        dialog, registered_after, orders = int(dialog or 0), int(registered_after or 0), int(orders or 0)
+        unchecked += int(not_checked or 0)
         by_city.append({"city": (name or "").strip() if key else "", "key": key or FUNNEL_CITY_NONE,
-                        "base": int(base or 0), "dialog": dialog, "orders_after": orders,
+                        "base": int(base or 0), "already_registered": int(registered or 0), "dialog": dialog,
+                        "registered_after": registered_after, "orders_after": orders,
+                        "dialog_to_registration": _pct0(registered_after, dialog),
                         "dialog_to_orders": _pct0(orders, dialog)})
     by_city.sort(key=_city_order)
-    base = sum(r["base"] for r in by_city)
-    dialog = sum(r["dialog"] for r in by_city)
-    orders = sum(r["orders_after"] for r in by_city)
+    totals = {step: sum(r[step] for r in by_city)
+              for step in ("base", "already_registered", "dialog", "registered_after", "orders_after")}
 
     cur.execute(_OUTCOMES_REASONS_SQL, params)
     refusal_rows = [row for row in cur.fetchall() if is_refusal_outcome(row[1])]
@@ -660,10 +687,10 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
 
     return {
         "profile": "tez",
-        "registration_available": False,
-        "totals": {"base": base, "already_registered": None, "dialog": dialog, "registered_after": None,
-                   "orders_after": orders},
-        "rates": {"dialog_to_registration": None, "dialog_to_orders": _pct0(orders, dialog)},
+        "totals": totals,
+        "rates": {"dialog_to_registration": _pct0(totals["registered_after"], totals["dialog"]),
+                  "dialog_to_orders": _pct0(totals["orders_after"], totals["dialog"])},
+        "tez_unchecked": unchecked,
         "by_city": by_city,
         "refusals": {"total": refusals_total, "reasons": reasons, "outcomes": refusal_outcomes},
         "options": {"cities": cities, "batches": batches},

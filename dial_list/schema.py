@@ -401,6 +401,9 @@ DDL = [
     #                        по нему аналитика видит «обещал и не вышел»
     #   trip_*, month_first_order_at, last_order_before_at — ответ TEZ APP (trips_check.py);
     #                        вышел на линию — signed_at = month_first_order_at, sign_status 'online'
+    #   registered_at, last_order_at — тот же ответ (поля с 04.11.2026, «Воронка ОП» #407): создание
+    #                        аккаунта водителя и начало его последней завершённой поездки за всё
+    #                        время; NULL — аккаунта (поездок) нет
     #   driver_id            id водителя в TEZ APP — на будущее (API его пока не отдаёт)
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS next_call_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS owner_operator_id INTEGER"
@@ -412,6 +415,8 @@ DDL = [
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS trip_error TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS month_first_order_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS last_order_before_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS registered_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS last_order_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS driver_id VARCHAR(64) NOT NULL DEFAULT ''",
     # Итог с датой: 'callback' — «Перезвонить» (дата и время перезвона обязательны), 'online' —
     # «Согласен выйти на линию» (когда выйдет — обязательно). Такой итог всегда «перезвонить».

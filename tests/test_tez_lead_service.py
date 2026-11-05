@@ -569,7 +569,37 @@ class FirstOrdersContractTests(unittest.TestCase):
         client, _ = self._client_with_capture({'drivers': []})
         res = client.fetch_first_orders(['77000000101'], month='2026-07')
         self.assertEqual(res['77000000101'],
-                         {'month': None, 'prev': None, 'last_before': None})
+                         {'month': None, 'prev': None, 'last_before': None,
+                          'registered': None, 'last_order': None})
+
+    def test_parses_registered_at_and_last_order_at(self):
+        """Поля с 04.11.2026 («Воронка ОП» Тез): создание аккаунта и начало последней
+        завершённой поездки за всё время; null — нет."""
+        payload = {'drivers': [
+            {'phone': '+77000000101', 'month_first_order_at': '2026-10-31T23:56:00+05:00',
+             'last_order_before_at': '2026-04-29T02:06:00+05:00',
+             'registered_at': '2026-01-31T23:50:00+05:00', 'last_order_at': '2026-11-05T04:22:00+05:00'},
+            {'phone': '+77000000107', 'month_first_order_at': None, 'last_order_before_at': None,
+             'registered_at': None, 'last_order_at': None},
+        ]}
+        client, _ = self._client_with_capture(payload)
+        res = client.fetch_first_orders(['77000000101', '77000000107'], month='2026-10')
+        row = res['77000000101']
+        self.assertEqual((row['registered'].month, row['registered'].day, row['registered'].hour), (1, 31, 23))
+        self.assertEqual((row['last_order'].month, row['last_order'].day), (11, 5))
+        self.assertEqual((res['77000000107']['registered'], res['77000000107']['last_order']), (None, None))
+
+    def test_lost_funnel_fields_are_logged(self):
+        """Без registered_at и last_order_at воронка молча покажет нули — пропажу видно в журнале."""
+        payload = {'drivers': [{
+            'phone': '+77000000101',
+            'month_first_order_at': None,
+            'last_order_before_at': '2026-06-19T10:20:27+05:00',
+        }]}
+        client, _ = self._client_with_capture(payload)
+        with self.assertLogs('tez.first_orders', level='WARNING') as logs:
+            client.fetch_first_orders(['77000000101'], month='2026-08')
+        self.assertTrue(any('registered_at, last_order_at' in line for line in logs.output))
 
     def test_bad_number_does_not_sink_whole_batch(self):
         """400 из-за одного битого номера не должен терять остальные из батча:

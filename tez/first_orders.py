@@ -4,8 +4,19 @@
   - авторизация: заголовок X-Integration-Token (JWT/X-Admin-Token не нужны)
   - тело: {"month": "YYYY-MM", "drivers": [{"full_name": ..., "phone": "+7701..."}]}
   - ответ: {"drivers": [{..., "month_first_order_at": ...|null,
-                              "last_order_before_at": ...|null}]}
+                              "last_order_before_at": ...|null,
+                              "registered_at": ...|null, "last_order_at": ...|null}]}
   - лимит: от 1 до 100 водителей в одном запросе
+
+ДВА ПОЛЯ С 04.11.2026 (по нашему запросу для «Воронки ОП» Тез, задача #407;
+docs/API_REQ_TEZ_DRIVER_FIELDS_2026-11-04.md), проверено на живом API 05.11:
+  - registered_at — создание аккаунта водителя (начал регистрацию в приложении
+    или создан в админке), а не допуск к заказам; null — аккаунта нет или он
+    удалён. Восстановленный аккаунт — первая дата, новый после удаления — новая.
+  - last_order_at — НАЧАЛО последней завершённой поездки за всё время, от month
+    не зависит; null — завершённых поездок не было.
+Оба поля приходят всегда (null, а не отсутствие); водитель — по ТЕКУЩЕМУ
+номеру в профиле.
 
 СМЕНА КОНТРАКТА 11.08.2026 (проверено на живом API). Поле
 `previous_month_first_order_at` из ответа УБРАНО, вместо него приходит
@@ -243,7 +254,8 @@ class TezFirstOrdersClient:
         но с ним удобнее читать сырые ответы при разборе спорных случаев).
 
         Возвращает dict phone_norm -> {'month': datetime|None,
-        'prev': datetime|None, 'last_before': datetime|None}.
+        'prev': datetime|None, 'last_before': datetime|None,
+        'registered': datetime|None, 'last_order': datetime|None}.
         Невалидные номера в результат не попадают — их отдаёт свойство
         `.last_invalid`.
         """
@@ -298,11 +310,14 @@ class TezFirstOrdersClient:
                         # примем; если нет, БД своё не затирает (COALESCE).
                         "prev": parse_first_order_at(row.get("previous_month_first_order_at")),
                         "last_before": parse_first_order_at(row.get("last_order_before_at")),
+                        "registered": parse_first_order_at(row.get("registered_at")),
+                        "last_order": parse_first_order_at(row.get("last_order_at")),
                     }
             # Номера, которых почему-то не оказалось в ответе, тоже помечаем
             # проверенными — иначе они будут переспрашиваться каждую ночь.
             for p in chunk:
-                out.setdefault(p, {"month": None, "prev": None, "last_before": None})
+                out.setdefault(p, {"month": None, "prev": None, "last_before": None,
+                                   "registered": None, "last_order": None})
 
         for start in range(0, total, MAX_BATCH_SIZE):
             chunk = normalized[start:start + MAX_BATCH_SIZE]
@@ -323,6 +338,15 @@ class TezFirstOrdersClient:
                 "разрыва в 30 дней считать не на чем — успешки уснувшим водителям "
                 "начисляться не будут.",
                 ", ".join(sorted(seen_fields)),
+            )
+        # На этих полях стоит «Воронка ОП» Тез: без них регистрация и выход к
+        # заказам после диалога молча станут нулями.
+        lost = [f for f in ("registered_at", "last_order_at") if seen_fields and f not in seen_fields]
+        if lost:
+            log.warning(
+                "TEZ APP не отдаёт %s (пришли поля: %s). «Воронка ОП» Тез не увидит "
+                "регистраций и поездок после диалога.",
+                ", ".join(lost), ", ".join(sorted(seen_fields)),
             )
         self.last_fields = seen_fields
 
@@ -348,11 +372,14 @@ def _main():
     result = client.fetch_first_orders(
         [p for p in args.phones.split(",") if p.strip()], month=args.month
     )
-    print(f"{'номер':<14}{'заказ в ' + args.month:<34}последний заказ до месяца")
+    def iso(value):
+        return value.isoformat() if value else "—"
+
+    print(f"{'номер':<14}{'заказ в ' + args.month:<28}{'последний до месяца':<28}"
+          f"{'регистрация':<28}последний заказ")
     for phone, dates in sorted(result.items()):
-        cur = dates["month"].isoformat() if dates["month"] else "—"
-        last = dates.get("last_before")
-        print(f"{phone:<14}{cur:<34}{last.isoformat() if last else '—'}")
+        print(f"{phone:<14}{iso(dates['month']):<28}{iso(dates.get('last_before')):<28}"
+              f"{iso(dates.get('registered')):<28}{iso(dates.get('last_order'))}")
     if client.last_invalid:
         print("невалидные номера:", ", ".join(str(x) for x in client.last_invalid))
 

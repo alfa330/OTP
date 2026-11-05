@@ -6,7 +6,7 @@ import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import {
     batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps, reasonLabel,
-    refusalSetupNotice,
+    refusalSetupNotice, uncheckedNotice,
 } from './tezFunnel';
 
 /*
@@ -15,9 +15,8 @@ import {
  *
  * Фильтры — база (месяц выбирается над разрезами, файл загрузки — здесь), период звонков и город;
  * город и период действуют и на воронку, и на отчёт о причинах отказа. Плитки — пять шагов и две
- * конверсии, под ними — по городам и причины отказа. Шаги с регистрацией ждут поле от TEZ APP:
- * пока его нет, плитка пишет «ждём данные TEZ APP», а в разбивке по городам этих колонок нет —
- * колонка прочерков была бы только шумом.
+ * конверсии, под ними — те же шаги по городам и причины отказа. Если TEZ APP ещё не ответил по части
+ * водителей, над плитками — предупреждение: их регистрации и поездки пока не учтены.
  *
  * Считает сервер (GET …/funnel, dial_list/analytics.tez_funnel); подписи и запрос — tezFunnel.js.
  * Ответ, пришедший после смены фильтров, не ложится на новые: у запроса свой счётчик.
@@ -96,6 +95,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
     const reasons = Array.isArray(data?.refusals?.reasons) ? data.refusals.reasons : [];
     const refusalsTotal = Number(data?.refusals?.total) || 0;
     const setupNotice = refusalSetupNotice(data);
+    const tezNotice = uncheckedNotice(data);
 
     return (
         <div className="space-y-4">
@@ -109,7 +109,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
                 <div className="space-y-1.5">
                     <span className={`${FIELD_HEAD} gap-1.5`}>
                         Период звонков
-                        <IosHint text="Дни, когда состоялся диалог (по Алматы). Вышли к заказам — после первого диалога водителя в эти дни. Причины отказа — по отказам этих дней." label="Что значит «Период звонков»" />
+                        <IosHint text="Дни, когда состоялся диалог (по Алматы). Регистрация и выход к заказам — после первого диалога водителя в эти дни. Причины отказа — по отказам этих дней. База и «Уже зарегистрированы» от периода не зависят." label="Что значит «Период звонков»" />
                     </span>
                     <IosDateRangePicker
                         from={range.from}
@@ -140,8 +140,9 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
                     <section className="space-y-1.5">
                         <div className="flex items-center gap-1.5">
                             <span className={iosGroupLabel}>Воронка</span>
-                            <IosHint text="Каждый водитель учитывается один раз в каждом шаге. Регистрации и поездки до контакта с оператором в результат после контакта не идут." />
+                            <IosHint text="Каждый водитель учитывается один раз в каждом шаге. Регистрации и поездки до контакта с оператором в результат после контакта не идут. Даты регистрации и поездок — из TEZ APP." />
                         </div>
+                        {tezNotice && <Notice>{tezNotice}</Notice>}
                         <div className={`${iosCard} space-y-2 p-2`}>
                             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
                                 {steps.map((s, i) => (
@@ -160,7 +161,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
 
                     <PagedTable
                         title="По городам"
-                        help="Город — из колонки «город» в файле базы (вкладка «База водителей»); водители без города — строкой «Город не указан». Колонки регистрации появятся, когда TEZ APP начнёт отдавать дату регистрации."
+                        help="Те же шаги и конверсии по городам. Город — из колонки «город» в файле базы (вкладка «База водителей»); водители без города — строкой «Город не указан»."
                         rows={byCity}
                         perPage={10}
                         empty="В выбранной базе водителей нет."
@@ -168,8 +169,11 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
                             <tr>
                                 <Th>Город</Th>
                                 <Th right>База</Th>
+                                <Th right>Уже зарегистрированы</Th>
                                 <Th right>Диалог</Th>
+                                <Th right>Регистрация после</Th>
                                 <Th right>Вышли к заказам</Th>
+                                <Th right>Диалог → регистрация</Th>
                                 <Th right>Диалог → заказы</Th>
                             </tr>
                         )}
@@ -177,8 +181,11 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
                             <tr key={r.key}>
                                 <Td><span className={`whitespace-nowrap font-medium ${r.city ? 'text-slate-800' : 'text-slate-500'}`}>{cityLabel(r.city)}</span></Td>
                                 <Td right>{num(r.base)}</Td>
+                                <Td right>{num(r.already_registered)}</Td>
                                 <Td right>{num(r.dialog)}</Td>
+                                <Td right>{num(r.registered_after)}</Td>
                                 <Td right><span className="font-semibold text-slate-900">{num(r.orders_after)}</span></Td>
+                                <Td right>{pctText(r.dialog_to_registration)}</Td>
                                 <Td right>{pctText(r.dialog_to_orders)}</Td>
                             </tr>
                         )}

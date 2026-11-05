@@ -32,8 +32,11 @@
 — fail-open: выдаём и звоним, сбой — только в журнал; после сбоя NOW_BACKOFF_SEC не пробуем.
 
 Клиент TEZ APP здесь не импортируется (пакет tez — не зависимость раздела): fetch(phones,
-month, timeout=None) → {phone_norm: {'month': datetime|None, 'last_before': datetime|None}}
-передаёт фабрика из bot_schedule2. Номер водителя отсюда уходит только в этот запрос.
+month, timeout=None) → {phone_norm: {'month', 'last_before', 'registered', 'last_order':
+datetime|None}} передаёт фабрика из bot_schedule2. Номер водителя отсюда уходит только в этот
+запрос. registered (создание аккаунта) и last_order (начало последней завершённой поездки за
+всё время) TEZ APP отдаёт с 04.11.2026 — по ним считает «Воронка ОП» (analytics.tez_funnel);
+пишутся тем же прогоном, запросов не добавилось.
 """
 import logging
 import queue
@@ -358,15 +361,16 @@ class TripChecker:
 
     # ------------------------------------------------------------ запись
     def _write(self, chunk, answer, now):
-        """Ответ TEZ APP по пачке → строки лидов: даты заказов, время проверки, ошибка пуста.
-        Заказ в месяце базы — вышел на линию: signed_at = month_first_order_at (только у ещё не
-        вышедших). Номера, которого нет в ответе, у TEZ APP нет — проверен, заказов нет.
-        Возвращает id тех, кто вышел на линию этой записью."""
+        """Ответ TEZ APP по пачке → строки лидов: даты заказов и регистрации, время проверки,
+        ошибка пуста. Заказ в месяце базы — вышел на линию: signed_at = month_first_order_at
+        (только у ещё не вышедших). Номера, которого нет в ответе, у TEZ APP нет — проверен,
+        ни аккаунта, ни заказов. Возвращает id тех, кто вышел на линию этой записью."""
         values = []
         for lead_id, phone in chunk:
             info = answer.get(phone) if isinstance(answer, dict) else None
             info = info if isinstance(info, dict) else {}
-            values.append((lead_id, _moment(info.get("month")), _moment(info.get("last_before")), now))
+            values.append((lead_id, _moment(info.get("month")), _moment(info.get("last_before")),
+                           _moment(info.get("registered")), _moment(info.get("last_order")), now))
         if not values:
             return []
         # sign_status — текстом в запросе: у execute_values единственный %s — список VALUES.
@@ -375,6 +379,8 @@ class TripChecker:
                 UPDATE dial_list_leads l
                 SET month_first_order_at = v.month_first,
                     last_order_before_at = v.last_before,
+                    registered_at = v.registered,
+                    last_order_at = v.last_order,
                     trip_checked_at = v.now,
                     trip_error = '',
                     signed_at = v.month_first,
@@ -382,10 +388,11 @@ class TripChecker:
                     sign_status = CASE WHEN v.month_first IS NOT NULL THEN '""" + ONLINE_STATUS + """'
                                        ELSE l.sign_status END,
                     updated_at = CASE WHEN v.month_first IS NOT NULL THEN CURRENT_TIMESTAMP ELSE l.updated_at END
-                FROM (VALUES %s) AS v(id, month_first, last_before, now)
+                FROM (VALUES %s) AS v(id, month_first, last_before, registered, last_order, now)
                 WHERE l.id = v.id AND l.signed_at IS NULL
                 RETURNING l.id, l.signed_at IS NOT NULL
-            """, values, template="(%s::uuid, %s::timestamptz, %s::timestamptz, %s::timestamptz)",
+            """, values, template="(%s::uuid, %s::timestamptz, %s::timestamptz, %s::timestamptz, %s::timestamptz,"
+                                  " %s::timestamptz)",
                 page_size=WRITE_CHUNK, fetch=True)
         return [str(r[0]) for r in (rows or []) if r[1]]
 

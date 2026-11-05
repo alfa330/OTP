@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """«Воронка ОП» Тез во вкладке «Аналитика» (задача #407 Алчинбаевой Анель, 03.11.2026) на настоящем
-PostgreSQL: база → диалог → вышли к заказам по городам, фильтры базы (файл), периода и города,
-причины отказа. Звонки и поездки кладутся прямо в таблицы — проверяется счёт, а не путь звонка
-(путь звонка — test_dial_list_tez_postgres.py).
+PostgreSQL: база → уже зарегистрированы → диалог → зарегистрировались после контакта → вышли к заказам
+по городам, фильтры базы (файл), периода и города, причины отказа. Звонки и ответы TEZ APP (регистрация
+и поездки, поля с 04.11.2026) кладутся прямо в таблицы — проверяется счёт, а не путь звонка (путь
+звонка и запись ответа TEZ APP — test_dial_list_tez_postgres.py).
 
 Запуск: DIAL_LIST_TEST_PORT=<порт локального PostgreSQL> pytest tests/test_dial_list_tez_funnel_postgres.py
 (пользователь postgres без пароля; каждый тест — в своей схеме, схема удаляется)."""
@@ -104,7 +105,8 @@ class _Env:
                                    "AND phone_norm = %s", (TEZ, PERIOD, phone))[0]) for phone, _city in rows}
         return ids, counts["batch_id"]
 
-    def call(self, lead_id, when, disposition='ANSWER', billsec=30, auto_hangup='', outcome=None, reason=None):
+    def call(self, lead_id, when, disposition='ANSWER', billsec=30, auto_hangup='', outcome=None, reason=None,
+             state='finished', cancelled=False):
         if self.portion is None:
             self.portion = str(self.one("INSERT INTO dial_list_portions (operator_id, department_id, size) "
                                         "VALUES (%s, %s, 50) RETURNING id", (OPERATOR, TEZ))[0])
@@ -112,12 +114,18 @@ class _Env:
         assignment = self.one("INSERT INTO dial_list_assignments (portion_id, lead_id, operator_id, position, state) "
                               "VALUES (%s, %s, %s, 1, 'done') RETURNING id", (self.portion, lead_id, OPERATOR))[0]
         self.q("INSERT INTO dial_list_attempts (assignment_id, operator_id, requested_at, state, disposition, "
-               "billsec, auto_hangup, outcome_id, outcome_subtype_id) "
-               "VALUES (%s, %s, %s, 'finished', %s, %s, %s, %s, %s)",
-               (assignment, OPERATOR, when, disposition, billsec, auto_hangup, outcome, reason))
+               "billsec, auto_hangup, outcome_id, outcome_subtype_id, cancelled) "
+               "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+               (assignment, OPERATOR, when, state, disposition, billsec, auto_hangup, outcome, reason, cancelled))
 
     def trip(self, lead_id, when):
+        """Первый заказ в месяце базы — вышел на линию (так пишет проверка поездок)."""
         self.q("UPDATE dial_list_leads SET signed_at = %s, sign_status = 'online' WHERE id = %s", (when, lead_id))
+
+    def tez(self, lead_id, registered=None, last_order=None):
+        """Ответ TEZ APP о водителе: создание аккаунта и начало последней завершённой поездки."""
+        self.q("UPDATE dial_list_leads SET registered_at = %s, last_order_at = %s, trip_checked_at = now() "
+               "WHERE id = %s", (registered, last_order, lead_id))
 
     def outcome(self, name):
         return str(self.one("SELECT id FROM dial_list_outcomes WHERE department_id = %s AND name = %s",
@@ -162,37 +170,117 @@ def _row(data, city):
     return next(r for r in data["by_city"] if r["city"] == city)
 
 
-def test_steps_count_each_driver_once_and_only_trips_after_the_dialog(env):
+def test_steps_count_each_driver_once_and_only_results_after_the_dialog(env):
     leads, _batch = env.base([('77010000001', 'Алматы'), ('77010000002', 'Алматы'), ('77010000003', ' Алматы '),
                               ('77010000004', 'Тараз'), ('77010000005', ''), ('77010000006', 'Тараз')])
     a1, a2, a3, t4, n5, t6 = (leads[p] for p in sorted(leads))
-    # a1: два диалога — один водитель; поездка после первого диалога — вышел к заказам.
+    # a1: зарегистрирован до звонков; два диалога — один водитель; поездка после первого диалога.
     env.call(a1, _at(5), billsec=40)
     env.call(a1, _at(6), billsec=25)
     env.trip(a1, _at(7))
-    # a2: диалог, но поездка была ДО него — в «после контакта» не идёт.
+    env.tez(a1, registered=_at(1) - timedelta(days=30), last_order=_at(7))
+    # a2: диалог, но поездка была ДО него — в «после контакта» не идёт; аккаунт — до первого звонка.
     env.call(a2, _at(10), billsec=15)
     env.trip(a2, _at(3))
-    # a3: только короткий разговор (9 с), сообщение сети и недозвон — диалога нет; поездка без контакта.
+    env.tez(a2, registered=_at(2), last_order=_at(3))
+    # a3: только короткий разговор (9 с), сообщение сети и недозвон — диалога нет. Аккаунт создан после
+    # первого звонка — не «уже», а без диалога и не «после контакта»; поездка без контакта.
     env.call(a3, _at(4), billsec=9)
     env.call(a3, _at(4, 13), billsec=60, auto_hangup='announcement')
     env.call(a3, _at(4, 14), disposition='NOANSWER', billsec=0)
     env.trip(a3, _at(8))
-    # t4: диалог ровно 10 с — считается; поездки нет.
+    env.tez(a3, registered=_at(4, 15), last_order=_at(8))
+    # t4: диалог ровно 10 с — считается; зарегистрировался после него; поездки нет.
     env.call(t4, _at(9), billsec=10)
-    # n5 (без города): диалог и поездка после него.
+    env.tez(t4, registered=_at(9, 15))
+    # n5 (без города): диалог, регистрация и поездка после него.
     env.call(n5, _at(11), billsec=120)
     env.trip(n5, _at(12))
+    env.tez(n5, registered=_at(11, 15), last_order=_at(12))
+    # t6: не звонили — аккаунт есть, значит «уже зарегистрирован», когда бы ни появился.
+    env.tez(t6, registered=_at(20))
     data = env.funnel()
-    assert data["totals"] == {"base": 6, "already_registered": None, "dialog": 4, "registered_after": None,
+    assert data["totals"] == {"base": 6, "already_registered": 3, "dialog": 4, "registered_after": 2,
                               "orders_after": 2}
-    assert data["rates"] == {"dialog_to_registration": None, "dialog_to_orders": 50.0}
-    assert data["registration_available"] is False
+    assert data["rates"] == {"dialog_to_registration": 50.0, "dialog_to_orders": 50.0}
+    assert data["tez_unchecked"] == 0
     # Города: пробелы по краям не делят город; «не указан» — в конце; крупные — первыми.
-    assert [(r["city"], r["base"], r["dialog"], r["orders_after"], r["dialog_to_orders"]) for r in data["by_city"]] == [
-        ('Алматы', 3, 2, 1, 50.0), ('Тараз', 2, 1, 0, 0.0), ('', 1, 1, 1, 100.0)]
+    steps = ("city", "base", "already_registered", "dialog", "registered_after", "orders_after",
+             "dialog_to_registration", "dialog_to_orders")
+    assert [tuple(r[k] for k in steps) for r in data["by_city"]] == [
+        ('Алматы', 3, 2, 2, 0, 1, 0.0, 50.0), ('Тараз', 2, 1, 1, 1, 0, 100.0, 0.0), ('', 1, 0, 1, 1, 1, 100.0, 100.0)]
     assert [c["name"] for c in data["options"]["cities"]] == ['Алматы', 'Тараз', '']
     assert data["period"] == '2026-10-01'
+
+
+def test_trip_after_the_dialog_counts_in_any_month_and_frozen_dates_do_not_hide_it(env):
+    leads, _batch = env.base([('7701000000%d' % i, 'Алматы') for i in range(1, 6)])
+    l1, l2, l3, l4, l5 = (leads[p] for p in sorted(leads))
+    # l1: звонок в конце месяца, поездка в начале следующего — заказа в месяце базы нет, а результат есть.
+    env.call(l1, _at(30), billsec=30)
+    env.tez(l1, registered=_at(1) - timedelta(days=90), last_order=_at(30) + timedelta(days=3))
+    # l2: последняя поездка до диалога — не результат.
+    env.call(l2, _at(15), billsec=30)
+    env.tez(l2, registered=_at(1) - timedelta(days=90), last_order=_at(10))
+    # l3: зарегистрировался и вышел на линию после диалога — дата последней поездки застыла на выходе.
+    env.call(l3, _at(5), billsec=30)
+    env.trip(l3, _at(7))
+    env.tez(l3, registered=_at(6), last_order=_at(7))
+    # l4: первый заказ месяца до диалога, но последняя поездка после — результат.
+    env.call(l4, _at(20), billsec=30)
+    env.trip(l4, _at(7))
+    env.tez(l4, registered=_at(1) - timedelta(days=90), last_order=_at(25))
+    # l5: вышел на линию после диалога, а последнюю поездку TEZ APP не отдал — решает первый заказ.
+    env.call(l5, _at(20), billsec=30)
+    env.trip(l5, _at(25))
+    env.tez(l5, registered=_at(1) - timedelta(days=90))
+    data = env.funnel()
+    assert (data["totals"]["dialog"], data["totals"]["orders_after"]) == (5, 4)
+    assert (data["totals"]["already_registered"], data["totals"]["registered_after"]) == (4, 1)
+
+
+def test_start_of_calling_is_the_first_real_call_and_does_not_follow_the_period(env):
+    leads, _batch = env.base([('7701000000%d' % i, 'Алматы') for i in range(1, 6)])
+    r1, r2, r3, r4, r5 = (leads[p] for p in sorted(leads))
+    # r1: недозвон 2.10, аккаунт 3.10, диалог 10.10 — регистрация между звонком и диалогом: ни «уже»,
+    # ни «после контакта».
+    env.call(r1, _at(2), disposition='NOANSWER', billsec=0)
+    env.call(r1, _at(10), billsec=30)
+    env.tez(r1, registered=_at(3))
+    # r2: звонок, отменённый оператором до ответа, и r3: звонок, не ушедший в Binotel, — не начало обзвона.
+    env.call(r2, _at(1), disposition='NOANSWER', billsec=0, cancelled=True)
+    env.call(r2, _at(5), billsec=30)
+    env.tez(r2, registered=_at(2))
+    env.call(r3, _at(1), disposition='', billsec=0, state='failed')
+    env.call(r3, _at(5), billsec=30)
+    env.tez(r3, registered=_at(2))
+    # r4: диалог до периода и в периоде, аккаунт между ними: «после контакта» — только без периода.
+    env.call(r4, _at(2), billsec=30)
+    env.call(r4, _at(10), billsec=30)
+    env.tez(r4, registered=_at(5))
+    # r5: аккаунта нет — ни в одном шаге регистрации.
+    env.call(r5, _at(10), billsec=30)
+    env.tez(r5)
+    data = env.funnel()
+    assert (data["totals"]["already_registered"], data["totals"]["dialog"], data["totals"]["registered_after"]) == (
+        2, 5, 1)
+    # Период звонков двигает диалоги и «после контакта», а «уже зарегистрированы» — свойство базы.
+    data = env.funnel(date_from=date(2026, 10, 9), date_to=date(2026, 10, 10))
+    assert (data["totals"]["already_registered"], data["totals"]["dialog"], data["totals"]["registered_after"]) == (
+        2, 3, 0)
+    assert data["rates"]["dialog_to_registration"] == 0.0
+
+
+def test_drivers_tez_app_has_not_answered_about_are_counted_apart(env):
+    leads, _batch = env.base([('77010000001', 'Алматы'), ('77010000002', 'Алматы'), ('77010000003', 'Тараз'),
+                              ('77010000004', 'Алматы')])
+    env.tez(leads['77010000001'], registered=_at(1))
+    # Ответил «аккаунта нет» — это проверенный водитель, а не пробел в данных.
+    env.tez(leads['77010000004'])
+    data = env.funnel()
+    assert (data["tez_unchecked"], data["totals"]["already_registered"]) == (2, 1)
+    taraz = next(c["key"] for c in data["options"]["cities"] if c["name"] == 'Тараз')
+    assert env.funnel(city=taraz)["tez_unchecked"] == 1
 
 
 def test_period_bounds_dialogs_and_trips_count_after_the_first_dialog_inside_it(env):

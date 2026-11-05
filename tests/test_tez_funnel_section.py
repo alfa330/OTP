@@ -7,6 +7,7 @@ tests/dial_list_tez_funnel.test.mjs; здесь — проводка экран�
   * у «Аналитики» Тез два разреза, «Воронка ОП» — первый и открывается сразу;
   * дашборд автообзвона не грузится, пока открыт разрез воронки (лишний запрос);
   * панель воронки ходит в /funnel и сбрасывает файл и город при смене месяца базы;
+  * регистрация от TEZ APP (с 04.11.2026) — в плитках и по городам, пробелы в данных — предупреждением;
   * загрузка базы Тез принимает город, подсказка у загрузки говорит об этом;
   * ручка /funnel объявлена и описана в списке ручек раздела.
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ANALYTICS = (ROOT / "src" / "components" / "dial_list" / "TezAutodialAnalytics.jsx").read_text(encoding="utf-8-sig")
 PANEL = (ROOT / "src" / "components" / "dial_list" / "TezFunnelPanel.jsx").read_text(encoding="utf-8-sig")
+FUNNEL_LOGIC = (ROOT / "src" / "components" / "dial_list" / "tezFunnel.js").read_text(encoding="utf-8-sig")
 SETTINGS = (ROOT / "src" / "components" / "sip" / "DialListSettings.jsx").read_text(encoding="utf-8-sig")
 ROUTES = (ROOT / "dial_list" / "routes.py").read_text(encoding="utf-8-sig")
 
@@ -44,6 +46,14 @@ class AnalyticsViewsTests(unittest.TestCase):
         self.assertIn("const batchId = picked.scope === scope ? picked.batchId : '';", PANEL)
         self.assertIn("const city = picked.scope === scope ? picked.city : '';", PANEL)
         self.assertIn("if (my === seq.current) setData(body);", PANEL)
+
+    def test_registration_from_tez_app_is_shown_by_city_and_gaps_are_announced(self):
+        # Поля TEZ APP с 04.11.2026: по городам — все пять шагов и обе конверсии.
+        for cell in ("num(r.already_registered)", "num(r.registered_after)", "pctText(r.dialog_to_registration)"):
+            self.assertIn(cell, PANEL)
+        # По кому TEZ APP ещё не ответил — предупреждение над плитками, а не молчаливый ноль.
+        self.assertIn("{tezNotice && <Notice>{tezNotice}</Notice>}", PANEL)
+        self.assertNotIn("ждём данные TEZ APP", PANEL + FUNNEL_LOGIC)
 
 
 class UploadAndRouteTests(unittest.TestCase):
