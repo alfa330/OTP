@@ -155,6 +155,18 @@ class PublishTests(unittest.TestCase):
         self.assertIn('w.key_id = %(key)s', cursor.calls[0][0])
         self.assertEqual(cursor.calls[0][1]['key'], 7)
 
+    def test_receiver_check_ignores_the_event_list(self):
+        """05.11.2026: CRM подписалась на ["call.completed"], и проверка приёмника отвечала 409 —
+        ping отсекал фильтр событий. Проверка своей подписки его не проходит, остальное — проходит."""
+        events = 'cardinality(w.events) = 0 OR %(event)s = ANY(w.events)'
+        cursor = _Cursor(targets=(3,))
+        self.assertEqual(webhooks.publish_with_cursor(cursor, 'binotel_calls', webhooks.PING_EVENT, {}, key_id=7), 1)
+        self.assertNotIn(events, cursor.calls[0][0])
+        for event, key_id in (('call.completed', 7), (webhooks.PING_EVENT, None)):
+            cursor = _Cursor(targets=())
+            webhooks.publish_with_cursor(cursor, 'binotel_calls', event, {}, key_id=key_id)
+            self.assertIn(events, cursor.calls[0][0], (event, key_id))
+
     def test_publish_never_raises(self):
         db = MagicMock()
 

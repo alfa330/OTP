@@ -475,6 +475,25 @@ def test_routes_on_a_live_schema(db):
     assert http.delete('/api/calls/webhook', headers=headers).get_json() == {'status': 'deleted'}
 
 
+def test_receiver_check_with_an_explicit_event_list(db):
+    """Как подписалась CRM 05.11.2026: events=["call.completed"] — проверка приёмника всё равно
+    уходит (раньше 409), а события подписка получает только свои; выключенная — 409, как было."""
+    _learn(db)
+    _key_id, secret = _key(db, subscribe=False)
+    svc, _ = _service(db)
+    http = _client(db, svc)
+    headers = {partner_keys.HEADER: secret}
+    response = http.put('/api/calls/webhook', json={'url': 'https://crm.example/calls', 'events': ['call.completed']},
+                        headers=headers)
+    assert response.status_code == 200 and response.get_json()['subscription']['events'] == ['call.completed']
+    assert http.post('/api/calls/webhook/test', headers=headers).get_json() == {'status': 'queued', 'event': 'ping'}
+    assert svc.on_binotel_call(_webhook(9501, '915')) == 'new'
+    assert [event for event, _p, _k in _outbox(db)] == ['ping', 'call.completed']
+    _q(db, 'UPDATE partner_webhooks SET enabled = FALSE')
+    response = http.post('/api/calls/webhook/test', headers=headers)
+    assert (response.status_code, response.get_json()['code']) == (409, 'CALLS_API_SUBSCRIPTION_DISABLED')
+
+
 def test_operators_show_lines_and_phone_mode(db):
     svc, _ = _service(db)
     _q(db, 'INSERT INTO dial_list_user_settings (user_id, enabled) VALUES (%s, FALSE)', (FO2,))

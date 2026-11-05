@@ -57,6 +57,11 @@ MIN_SECRET = 16
 MAX_SECRET = 200
 MAX_EVENT = 64
 
+# Проверка приёмника: партнёр сам просит прислать её своей подписке (POST …/webhook/test).
+# Фильтр событий подписки её не отсекает — иначе подписку с явным списком событий не проверить
+# вовсе: 05.11.2026 CRM подписалась на ["call.completed"], и проверка дважды ответила 409.
+PING_EVENT = 'ping'
+
 SIGNATURE_HEADER = 'X-Partner-Signature'
 TIMESTAMP_HEADER = 'X-Partner-Timestamp'
 EVENT_HEADER = 'X-Partner-Event'
@@ -253,8 +258,10 @@ def publish_with_cursor(cursor, scope, event, payload, *, key_id=None):
     """Строка очереди на каждую подходящую подписку. Возвращает число строк."""
     params = {'scope': scope, 'event': event}
     where = ['w.scope = %(scope)s', 'w.enabled', 'k.revoked_at IS NULL',
-             '%(scope)s = ANY(k.scopes)',
-             '(cardinality(w.events) = 0 OR %(event)s = ANY(w.events))']
+             '%(scope)s = ANY(k.scopes)']
+    if key_id is None or event != PING_EVENT:
+        # Проверку приёмника (PING_EVENT одной подписке ключа) список событий не отсекает.
+        where.append('(cardinality(w.events) = 0 OR %(event)s = ANY(w.events))')
     if key_id is not None:
         where.append('w.key_id = %(key)s')
         params['key'] = int(key_id)
