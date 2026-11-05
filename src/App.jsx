@@ -66,6 +66,7 @@ import AssistantOrb from './components/assistant/AssistantOrb';
 import { baigaFocusOf, sourceDoor } from './components/assistant/sourceTarget';
 import IcoreMark from './components/common/IcoreMark';
 import InstallAppPrompt from './components/common/InstallAppPrompt';
+import ForgotPasswordWindow from './components/common/ForgotPasswordWindow';
 import InstallAppMenuItem from './components/common/InstallAppMenuItem';
 import MobileTabBar, { useMobileShell } from './components/common/MobileTabBar';
 import MobileScrollTitle from './components/common/MobileScrollTitle';
@@ -44111,6 +44112,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                паролем: экран входа — это ранний return из этого же компонента,
                своего состояния у него нет. */
             const [showLoginPassword, setShowLoginPassword] = useState(false);
+            /* Окно «Забыли пароль?» — кому написать в Telegram (там же). */
+            const [forgotPasswordOpen, setForgotPasswordOpen] = useState(false);
             const [toasts, setToasts] = useState([]);
             const [svList, setSvList] = useState([]);
             const [svData, setSvData] = useState(null);
@@ -57300,13 +57303,23 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                       <div className="mt-3.5 text-center">
                         <button
-                          onClick={() => console.log("Forgot password clicked")}
+                          type="button"
+                          onClick={() => setForgotPasswordOpen(true)}
                           className="text-[13px] font-medium text-indigo-600 hover:underline"
                         >
                           Забыл пароль?
                         </button>
                       </div>
                     </div>
+
+                    {/* Смонтировано всегда и закрывается через open: снятое
+                        условием окно не успело бы уйти анимацией. Логин из
+                        формы попадает в готовый текст сообщения. */}
+                    <ForgotPasswordWindow
+                      open={forgotPasswordOpen}
+                      onClose={() => setForgotPasswordOpen(false)}
+                      login={login}
+                    />
 
                     {/* Предложение установить портал живёт и здесь: до входа
                         человек проводит на этом экране столько же времени, а с
