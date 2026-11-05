@@ -27,7 +27,9 @@ import {
     reviewToast, rowBadges, stateFilters, statusView as ticketStatusView, unreadLabel,
 } from './ticketList';
 import { fitHeight, measureShell } from './layout';
-import { COMPLAINTS_FILTER, complaintStatusFor, mergeFeeds, withSortRank } from './feedMerge';
+import {
+    COMPLAINTS_FILTER, complaintStatusFor, complaintsMetaWanted, mergeFeeds, withSortRank,
+} from './feedMerge';
 import { TARGET_ICONS } from '../complaints/ComplaintDraft';
 import {
     isRecorded, openQuestion, rowBadges as complaintRowBadges,
@@ -2477,8 +2479,12 @@ export default function CrmTicketsView({
     }, [apiBaseUrl, headers]);
 
     /* Жалобы в разделе — только у того, кто вправе их заводить (СЗоВ, админ).
-       Остальным /api/complaints отвечает отказом, и раздел молча живёт без них. */
+       Остальным /api/complaints отвечает отказом, и раздел молча живёт без них.
+       Отделу-гостю (ОП, фронт-офисы) не спрашиваем вовсе: отказ там заведомый,
+       а людей ~60 (complaintsMetaWanted). */
+    const complaintsWanted = complaintsMetaWanted(capabilities);
     useEffect(() => {
+        if (!complaintsWanted) return undefined;
         let cancelled = false;
         axios.get(`${apiBaseUrl}/api/complaints/meta`, { headers: headers() })
             .then((response) => {
@@ -2488,7 +2494,7 @@ export default function CrmTicketsView({
             })
             .catch(() => { /* жалоб у этого пользователя нет */ });
         return () => { cancelled = true; };
-    }, [apiBaseUrl, headers, refreshComplaintCounters]);
+    }, [apiBaseUrl, headers, refreshComplaintCounters, complaintsWanted]);
 
     /* Один раз при входе: числа для шапки и признак, что схема развернулась.
        Агрегаты по периметру считаются только здесь — на каждый фильтр и каждую

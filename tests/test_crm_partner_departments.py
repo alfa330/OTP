@@ -171,6 +171,25 @@ class TopicsTest(unittest.TestCase):
                 self.assertFalse(topic.get('entry_only'), key)
                 self.assertFalse(topic.get('final_outcome'), key)
 
+    def test_szov_head_who_also_heads_a_guest_department_keeps_everything(self):
+        """СЗоВ проверяется РАНЬШЕ гостя: глава СЗоВ, заодно возглавляющий
+        фронт-офисы, не теряет Sapar, посылки и офисы."""
+        me = person(role='admin', department='szov', heads=['szov', 'front_office'])
+        self.assertIsNone(access.allowed_scenarios(me))
+        self.assertEqual(access.visibility_scope(me), access.SCOPE_ALL)
+        self.assertTrue(access.can_view_ticket(me, ticket()))
+        self.assertTrue(access.can_manage_queues(me))
+
+    def test_entry_needs_every_category_open(self):
+        """Вход по ИИН, у которого открыта гостю лишь часть категорий, закрыт
+        целиком — проверка Sapar ради одной категории гостю не делается."""
+        guest = person(department='op')
+        self.assertFalse(access.can_use_entry(
+            guest, {'categories': [COOP, 'sapar_sign_error'], 'no_documents': None}))
+        self.assertTrue(access.can_use_entry(guest, {'categories': [COOP], 'no_documents': None}))
+        self.assertFalse(access.can_use_entry(
+            guest, {'categories': [COOP], 'no_documents': 'sapar_docs_missing'}))
+
     def test_check_by_iin_is_closed_to_the_guest(self):
         """Вход «iTaxi Sapar» проверяет водителя по ИИН — гостю его категории
         закрыты, значит и сама проверка."""
@@ -231,12 +250,35 @@ class VisibilityTest(unittest.TestCase):
                                                             scenario_key=None)))
         self.assertFalse(access.can_view_ticket(head, ticket(department_id=SZOV)))
 
-    def test_head_from_another_department_sees_both(self):
-        """Глава отдела-гостя, сама числящаяся в другом отделе, видит обращения
-        обоих: возглавляемого и своего (у своего их нет, пока он не в разделе)."""
+    def test_head_from_another_department_sees_only_the_guest_department(self):
+        """Разбор 05.11.2026: глава фронт-офисов, числящаяся в IT, видела бы все
+        обращения IT любой тематики — Sapar с ИИН, заведённый админом из IT, тоже.
+        Целиком гостю открыт только отдел-гость, чужой — лишь тематикой."""
         head = person(role='admin', department='it', heads=['front_office'])
-        self.assertEqual(access.partner_department_ids(head),
-                         sorted([FRONT_OFFICE, DEPARTMENTS['it']]))
+        it_sapar = ticket(department_id=DEPARTMENTS['it'], scenario_key='sapar_sign_error')
+        self.assertEqual(access.partner_department_ids(head), [FRONT_OFFICE])
+        self.assertFalse(access.can_view_ticket(head, it_sapar))
+        self.assertFalse(access.can_reply(head, it_sapar))
+        self.assertTrue(access.can_view_ticket(
+            head, ticket(department_id=DEPARTMENTS['it'], scenario_key=COOP)))
+        _sql, params = queries.visibility_sql(head)
+        self.assertEqual(params['partner_departments'], [FRONT_OFFICE])
+
+    def test_head_of_a_guest_and_an_outside_department(self):
+        """Глава ОП, заодно глава Тез КЦ: обращения Тез КЦ ему открыты только
+        тематикой «Сотрудничество», не целиком."""
+        head = person(role='admin', department='op', heads=['op', 'tez'])
+        self.assertEqual(access.partner_department_ids(head), [OP])
+        self.assertFalse(access.can_view_ticket(
+            head, ticket(department_id=DEPARTMENTS['tez'], scenario_key='parcel_location')))
+        self.assertTrue(access.can_view_ticket(head, ticket(department_id=OP, scenario_key=None)))
+
+    def test_heads_are_read_in_pairs_from_one_ordered_query(self):
+        """partner_department_ids читает id и коды возглавляемых отделов парами —
+        значит, база обязана отдавать их в одном порядке."""
+        sql = ' '.join(queries._ACCESS_CONTEXT_SQL.split())
+        self.assertIn('array_agg(id ORDER BY id) FROM headed', sql)
+        self.assertIn('array_agg(code ORDER BY id) FROM headed', sql)
 
     def test_scope_reaches_the_interface(self):
         """Сегменты «Мои / Все» лента рисует при любом периметре, кроме «только своё»."""
@@ -467,6 +509,23 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertEqual(self.delivered, [])
 
+    def test_own_topic_asks_no_driver_data_either(self):
+        """Своя тематика открыта, но проверок по водителю у неё нет: Sapar по
+        любому ИИН и реестр посылок гость не получит и через неё (разбор
+        05.11.2026 — держала это одна строка без теста)."""
+        client = self.client()
+        response = client.post('/api/crm/scenarios/%s/sapar' % COOP,
+                               json={'iin': '060606202020', 'period': '2026-10'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json().get('skipped'))
+        self.assertNotIn('snapshot', response.get_json())
+        response = client.post('/api/crm/scenarios/%s/lookup' % COOP, json={'answers': {
+            'contact_number': '87011234567', 'driver_licence': '123456789',
+            'office_city': 'Алматы'}})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json().get('skipped'))
+        self.assertNotIn('snapshot', response.get_json())
+
     def test_cooperation_is_created_in_the_authors_department(self):
         response = self.client().post('/api/crm/tickets',
                                       json={'scenario_key': COOP, 'answers': PARKS})
@@ -527,6 +586,15 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", found.group(1))),
                          {access.SECTION_DEPARTMENT_CODE, *access.PARTNER_DEPARTMENT_SCENARIOS})
+
+    def test_guest_does_not_ask_for_complaints(self):
+        """Жалобы заводит только СЗоВ: гостю /api/complaints/meta ответил бы 403
+        на каждом входе — запрос стоит за complaintsMetaWanted (feedMerge.js)."""
+        view = (ROOT / 'src' / 'components' / 'crm' / 'CrmTicketsView.jsx').read_text(
+            encoding='utf-8')
+        start = view.index('const complaintsWanted = complaintsMetaWanted(capabilities);')
+        effect = view[start:view.index('/api/complaints/meta', start)]
+        self.assertIn('if (!complaintsWanted) return undefined;', effect)
 
     def test_department_guard_does_not_throw_the_guest_out(self):
         """У ОП и фронт-офисов есть карта разделов отдела — гард вида выкинул бы

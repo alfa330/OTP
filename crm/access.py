@@ -249,14 +249,27 @@ def visibility_scope(ctx):
 
 
 def partner_department_ids(ctx):
-    """Отделы, обращения которых гость видит целиком: возглавляемые и свой.
+    """Отделы, обращения которых гость видит целиком: свой и возглавляемые — и
+    только отделы-гости.
 
     Свой — потому что оператор ОП ничего не возглавляет, а обращения коллег по
-    отделу видеть должен. Порядок — чтобы параметр SQL не зависел от порядка, в
+    отделу видеть должен. Только гостевые — потому что глава бывает и не из
+    своего отдела, и нескольких отделов сразу: глава фронт-офисов, числящаяся
+    в IT, или глава ОП, заодно возглавляющий Тез КЦ, иначе получили бы ВСЕ
+    обращения IT или Тез КЦ любой тематики — Sapar с ИИН водителя в том числе
+    (разбор правки 05.11.2026). Чужой отдел гостю открыт только тематикой.
+
+    Возглавляемые — парами (id, код): load_access_context отдаёт их в одном
+    порядке. Порядок результата — чтобы параметр SQL не зависел от порядка, в
     котором отделы пришли из базы.
     """
-    ids = {int(x) for x in (ctx.get('headed_department_ids') or [])}
-    if ctx.get('department_id') is not None:
+    partners = set(PARTNER_DEPARTMENT_SCENARIOS)
+    ids = set()
+    for department_id, code in zip(ctx.get('headed_department_ids') or [],
+                                   ctx.get('headed_department_codes') or []):
+        if str(code or '').strip().lower() in partners:
+            ids.add(int(department_id))
+    if _own_code(ctx) in partners and ctx.get('department_id') is not None:
         ids.add(int(ctx['department_id']))
     return sorted(ids)
 

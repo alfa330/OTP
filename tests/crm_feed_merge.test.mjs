@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    COMPLAINTS_FILTER, compareEntries, complaintEntry, complaintStatusFor, mergeFeeds, ticketEntry,
-    withSortRank,
+    COMPLAINTS_FILTER, compareEntries, complaintEntry, complaintStatusFor, complaintsMetaWanted,
+    mergeFeeds, ticketEntry, withSortRank,
 } from '../src/components/crm/feedMerge.js';
 
 /* Одна лента «Обращений» из обращений и своих жалоб (решение владельца
@@ -104,4 +104,15 @@ test('фильтры состояния — в статусы жалоб', () =>
     assert.equal(complaintStatusFor('closed'), 'done');
     assert.equal(complaintStatusFor('all'), '');
     assert.equal(COMPLAINTS_FILTER, 'complaints');
+});
+
+test('жалобы не спрашиваем у отдела-гостя и до прав раздела', () => {
+    // Права ещё не пришли из /ping — решения нет, запроса тоже.
+    assert.equal(complaintsMetaWanted(null), null);
+    assert.equal(complaintsMetaWanted(undefined), null);
+    // ОП и фронт-офисы жалоб не заводят: отказ сервера заведомый (05.11.2026).
+    assert.equal(complaintsMetaWanted({ scope: 'partner' }), false);
+    // СЗоВ и админ — как раньше; права без периметра — тоже спрашиваем.
+    assert.equal(complaintsMetaWanted({ scope: 'all' }), true);
+    assert.equal(complaintsMetaWanted({}), true);
 });

@@ -19,6 +19,8 @@
     {"who": "СВ СЗоВ", "role": "sv", "department": "szov", "heads": [], "open": true},
     {"who": "тренер СЗоВ", "role": "trainer", "department": "szov", "heads": [], "open": true},
     {"who": "глава СЗоВ (и удалённого КЦ)", "role": "admin", "department": "szov", "heads": ["szov", "remote_cc"], "open": true},
+    {"who": "глава СЗоВ, сам числится в другом отделе", "role": "admin", "department": "it", "heads": ["szov"], "open": true},
+    {"who": "глава СЗоВ, заодно глава фронт-офисов", "role": "admin", "department": "szov", "heads": ["szov", "front_office"], "open": true},
     {"who": "оператор ОП", "role": "operator", "department": "op", "heads": [], "open": true},
     {"who": "стажёр ОП", "role": "trainee", "department": "op", "heads": [], "open": true},
     {"who": "СВ ОП", "role": "sv", "department": "op", "heads": [], "open": true},

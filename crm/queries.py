@@ -43,8 +43,8 @@ SELECT
     (SELECT role          FROM me),
     (SELECT department_id FROM me),
     (SELECT d.code FROM departments d WHERE d.id = (SELECT department_id FROM me)),
-    COALESCE((SELECT array_agg(id)       FROM headed),    '{}'),
-    COALESCE((SELECT array_agg(code)     FROM headed),    '{}'),
+    COALESCE((SELECT array_agg(id   ORDER BY id) FROM headed), '{}'),
+    COALESCE((SELECT array_agg(code ORDER BY id) FROM headed), '{}'),
     COALESCE((SELECT array_agg(group_id) FROM my_groups), '{}')
 """
 
@@ -55,6 +55,10 @@ def load_access_context(cursor, user_id):
     Группы берём только супервайзерские: раздел расширяет видимость СВ на
     операторов ЕГО групп, а собственное членство оператора в группе ничего
     к его правам не добавляет — свои обращения он и так видит по автору.
+
+    id и коды возглавляемых отделов идут в ОДНОМ порядке (по id): правило
+    отдела-гостя читает их парами (access.partner_department_ids), а два
+    array_agg без ORDER BY порядок друг другу не обещают.
     """
     cursor.execute(_ACCESS_CONTEXT_SQL, {'user_id': int(user_id)})
     row = cursor.fetchone()

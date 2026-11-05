@@ -57598,7 +57598,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         {view === "crm_tickets" && canAccessCrmSection && (sensitiveSectionsLocked ? (
                             <SensitiveSectionGate
                                 sectionTitle="Обращения"
-                                description="Здесь переписка с рабочими группами по живым водителям — телефоны, адреса, суммы. Раздел открывается после подтверждения доступа старшим."
+                                description="Здесь переписка с рабочими группами — телефоны, адреса, суммы. Раздел открывается после подтверждения доступа старшим."
                                 checking={sensitiveSectionsChecking}
                                 onRequestQr={requestSensitiveQrAccess}
                             />

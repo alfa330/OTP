@@ -27,6 +27,15 @@ const COMPLAINT_STATUS_BY_STATE = { active: 'open', answered: 'answered', closed
 
 export const complaintStatusFor = (stateKey) => COMPLAINT_STATUS_BY_STATE[stateKey] ?? '';
 
+/* Звать ли /api/complaints/meta. Жалобы в «Обращениях» заводит только СЗоВ и
+ * админ; отделу-гостю (ОП и фронт-офисы, scope 'partner' — crm/access.py) сервер
+ * жалоб ответит отказом, и на каждом входе в раздел это был бы 403 в консоли и
+ * строка ERROR в журнале прода. Права раздела приходят из /ping: пока их нет —
+ * null, решения ещё нет. */
+export const complaintsMetaWanted = (capabilities) => (
+    capabilities ? capabilities.scope !== 'partner' : null
+);
+
 /* Ярус «непрочитано» на момент загрузки — ставится строкам сразу из ответа
  * сервера. Открытие карточки гасит unread, но не sort_unread: строка стоит,
  * где стояла, до следующей загрузки списка. */
