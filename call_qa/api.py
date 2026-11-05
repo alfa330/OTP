@@ -2721,6 +2721,13 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
         asr_config=source["source_config"], transcript=asm["text"])
     # Кто завершил звонок — данные телефонии, вводная наравне с транскриптом.
     call_end_party = subject.get("call_end_party")
+    # И когда: конец звонка по голосам и время до отбоя (конец записи). Только по
+    # расшифровке Soniox — у второго прохода Gemini время реплик грубее, по отрезкам, —
+    # и только в отделах, где «конец записи = отбой» сверен (call_end.TIMELINE_DEPARTMENTS).
+    call_end_timeline = (call_end.timeline(lines, source.get("duration_ms"))
+                         if subject_kind in config.AUDIO_SUBJECT_KINDS and not source.get("asr")
+                         and department_code in call_end.TIMELINE_DEPARTMENTS
+                         else None)
     fingerprint, fingerprint_components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
         knowledge_snapshot=snapshot, use_rag=primary_use_rag,
@@ -2807,7 +2814,7 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
                     scale_revision_id=scale_revision_id, snapshot=snapshot,
                     primary_run_id=cached_run["id"], pair_id=cached_run.get("pair_id"),
                     refresh=False, department=department_code,
-                    call_end_party=call_end_party)
+                    call_end_party=call_end_party, call_end_timeline=call_end_timeline)
             legacy_fixed = _normalise_legacy_ai_verdicts(cached)
             # Keep the legacy queue projection available, but adjudication itself
             # is bound only to the immutable run metadata hydrated above. Прогон с
@@ -2840,7 +2847,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             asm["text"], direction, asr_low_spans=asm["low_conf_spans"],
             use_rag=primary_use_rag, knowledge_snapshot_id=snapshot["id"],
             subject_kind=subject_kind, department=department_code,
-            call_end_party=fingerprint_components["call_end_party"], subject_id=call_id)
+            call_end_party=fingerprint_components["call_end_party"], subject_id=call_id,
+            call_end_timeline=call_end_timeline)
         completed_at = runtime_store.now_utc()
     except Exception as exc:
         completed_at = runtime_store.now_utc()
@@ -2948,7 +2956,8 @@ def _evaluate_and_cache(call_id: int, model: str, refresh: bool,
             transcript_identity=transcript_identity,
             scale_revision_id=scale_revision_id, snapshot=snapshot,
             primary_run_id=run_id, pair_id=pair_id, refresh=refresh,
-            department=department_code, call_end_party=call_end_party)
+            department=department_code, call_end_party=call_end_party,
+            call_end_timeline=call_end_timeline)
 
     _cache_put(call_id, model, payload, subject_kind=subject_kind)
     _meta_upsert(call_id, model, payload, subject_kind=subject_kind)
@@ -2974,7 +2983,7 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
                         scale_revision_id: int,
                         snapshot: dict, primary_run_id: str, pair_id: str | None,
                         refresh: bool, subject_kind: str = config.SUBJECT_CALL,
-                        department=None, call_end_party=None):
+                        department=None, call_end_party=None, call_end_timeline=None):
     """Best-effort paired RAG-on run; it never changes the user-facing verdict."""
     fingerprint, components, retrieval_cfg = _evaluation_identity(
         transcript_hash=transcript_identity, direction=direction,
@@ -2996,7 +3005,8 @@ def _run_shadow_variant(*, call_id: int, direction_id: int, direction: dict, asm
             asm["text"], direction, asr_low_spans=asm.get("low_conf_spans") or [],
             use_rag=True, knowledge_snapshot_id=snapshot["id"],
             subject_kind=subject_kind, department=department,
-            call_end_party=components["call_end_party"], subject_id=call_id)
+            call_end_party=components["call_end_party"], subject_id=call_id,
+            call_end_timeline=call_end_timeline)
         completed = runtime_store.now_utc()
         shadow_payload = {
             "id": call_id, "subject_kind": subject_kind, "direction_id": direction_id,

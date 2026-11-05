@@ -38,6 +38,8 @@ from . import config
 from . import llm
 from . import providers
 from . import media as media_mod
+from . import call_end
+from . import speaker_roles
 from .call_end import normalise_call_end_party
 from . import subjects as subjects_mod
 from .asr import second_pass
@@ -350,6 +352,7 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                 "transcript_hash": cached["transcript_hash"],
                 "audio_fingerprint": audio_fp,
                 "asr_config_hash": asr_cfg_hash,
+                "duration_ms": cached.get("duration_ms"),
             }
         else:
             checkpoint = checkpoints.get(f"{config.SUBJECT_CALL}:{call['id']}") or {}
@@ -395,7 +398,8 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
             )
             rec.update({"segments": segments, "transcript_cache_id": transcript_cache_id,
                         "transcript_hash": transcript_hash,
-                        "audio_fingerprint": audio_fp, "asr_config_hash": asr_cfg_hash})
+                        "audio_fingerprint": audio_fp, "asr_config_hash": asr_cfg_hash,
+                        "duration_ms": duration_ms})
         rec.setdefault("source_model", config.SONIOX_MODEL)
         rec.setdefault("source_config", runtime_store.asr_config())
         with lock_write:
@@ -416,7 +420,9 @@ def asr_stage(calls: list[dict], workdir: str, workers: int) -> dict:
                    "transcript_cache_id": second["transcript_cache_id"],
                    "transcript_hash": second["transcript_hash"],
                    "source_model": second["source_model"],
-                   "source_config": second["source_config"]}
+                   "source_config": second["source_config"],
+                   # Время реплик Gemini — по отрезкам: время до отбоя по нему не считаем.
+                   "second_pass": True}
         return rec
 
     ok = fail = 0
@@ -783,6 +789,14 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
             prepared_wiki = evaluator.prepare_wiki_context(
                 info["direction"], info["t_crits"], rec["asm"]["text"],
                 subject_kind=subject_kind, department=department_code)
+            # Время до отбоя — как у карточки (api._evaluate_and_cache): реплики Soniox с
+            # метками голоса и конец записи; у второго прохода Gemini его нет.
+            end_timeline = (call_end.timeline(
+                speaker_roles.with_speaker_ids(rec.get("segments"), rec.get("toks")),
+                rec.get("duration_ms"))
+                if subject_kind in config.AUDIO_SUBJECT_KINDS and not rec.get("second_pass")
+                and department_code in call_end.TIMELINE_DEPARTMENTS
+                else None)
             body = evaluator.build_eval_body(
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
@@ -791,6 +805,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
                 call_end_party=components["call_end_party"],
                 wiki_text=prepared_wiki["wiki_text"],
+                call_end_timeline=end_timeline,
             )
             custom_id = f"{_SUBJECT_PREFIX.get(subject_kind, subject_kind)}-{call['id']}"
             entries[custom_id] = {
@@ -806,6 +821,8 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 "retrieval_config": retrieval_cfg,
                 "prepared_rag": prepared,
                 "prepared_wiki": prepared_wiki,
+                # Добивка видит то же время до отбоя, что и первый проход.
+                "call_end_timeline": end_timeline,
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "request_body_hash": content_hash(body),
                 "request_body": body,
@@ -996,6 +1013,9 @@ def process_results(batch: dict, calls: list[dict], transcripts: dict, workdir: 
                         # и первый проход: она подписана в отпечатке манифеста.
                         call_end_party=(entry.get("fingerprint_components") or {}).get(
                             "call_end_party"),
+                        # Манифест прежней версии времени до отбоя не несёт — тогда
+                        # только сторона, как и в первом проходе того пакета.
+                        call_end_timeline=entry.get("call_end_timeline"),
                     ),
                     tries=3, delay=20, what=f"завершение оценки call {cid}",
                 )

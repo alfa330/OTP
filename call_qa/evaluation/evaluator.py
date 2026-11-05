@@ -382,7 +382,7 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
                     subject_kind=config.SUBJECT_CALL, cache_ttl=None,
                     department=None, call_end_party=None, subject_id=None,
-                    wiki_text=None) -> dict:
+                    wiki_text=None, call_end_timeline=None) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API).
 
     cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
@@ -392,6 +392,8 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     call_end_party — кто завершил звонок по данным телефонии (call_end.py). Идёт в
     ПОЛЬЗОВАТЕЛЬСКОЕ сообщение рядом с транскриптом, а не в системный блок: это
     данные звонка, а системный промпт закреплён эталонным хэшем и кэшируется.
+    call_end_timeline — последние реплики и время от каждой до отбоя
+    (call_end.timeline): по нему модель видит, успевал ли оператор что-то сказать.
 
     wiki_text — выдержки из вики, найденные по запросам оценщика (prepare_wiki_context);
     пусто — блока нет, сообщение прежнее."""
@@ -406,7 +408,7 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     low = ("\nНЕУВЕРЕННЫЕ ФРАГМЕНТЫ РАСПОЗНАВАНИЯ (не штрафовать):\n"
            + json.dumps(asr_low_spans, ensure_ascii=False)) if asr_low_spans else ""
     # У переписки трубку не кладут; неизвестная сторона даёт '' — вход прежний.
-    end = (call_end.prompt_block(call_end_party)
+    end = (call_end.prompt_block(call_end_party, call_end_timeline)
            if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
     wiki = f"{_WIKI_SEARCH_HEADER}\n{wiki_text}\n\n" if str(wiki_text or "").strip() else ""
     user = (f"{_RAG_HEADER}\n{rag}\n\n{wiki}"
@@ -425,12 +427,14 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
 
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
                  rag_text=None, stage="primary", subject_kind=config.SUBJECT_CALL,
-                 department=None, call_end_party=None, wiki_text=None) -> dict:
+                 department=None, call_end_party=None, wiki_text=None,
+                 call_end_timeline=None) -> dict:
     """Оценка подмножества (transcript) критериев моделью `model`."""
     body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
                            use_rag=use_rag, model=model, rag_text=rag_text,
                            subject_kind=subject_kind, department=department,
-                           call_end_party=call_end_party, wiki_text=wiki_text)
+                           call_end_party=call_end_party, wiki_text=wiki_text,
+                           call_end_timeline=call_end_timeline)
     result = llm.post_body(body, timeout=120.0, include_meta=True)
     if result.get("_llm_meta") is not None:
         result["_llm_meta"]["stage"] = stage
@@ -498,7 +502,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
              primary_result=None, primary_llm_meta=None,
              subject_kind=config.SUBJECT_CALL, department=None,
              call_end_party=None, subject_id=None, prepared_wiki=None,
-             use_wiki=True) -> dict:
+             use_wiki=True, call_end_timeline=None) -> dict:
     """Полная оценка. Двухуровнево: массовая модель (BULK) первым проходом, затем спорные/
     критические критерии переоцениваются HARD-моделью. Плюс маршрутизация по источнику.
 
@@ -507,7 +511,10 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
 
     prepared_wiki — готовая справка из вики (prepare_wiki_context) — пакет готовит её при
     отправке, чтобы добивка HARD-моделью читала те же выдержки; None — собрать здесь.
-    use_wiki=False — оценка без поиска по вики (теневой вариант без базы, тесты)."""
+    use_wiki=False — оценка без поиска по вики (теневой вариант без базы, тесты).
+
+    call_end_timeline — последние реплики и время до отбоя (call_end.timeline): все
+    проходы видят его вместе со стороной завершения."""
     cc.apply_to_direction(direction)
     crit_by_idx = {c["idx"]: c for c in direction["criteria"]}
     t_crits = [c for c in direction["criteria"] if c["eval_source"] == cc.TRANSCRIPT]
@@ -550,7 +557,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
           (_claude_eval(transcript, direction, t_crits, asr_low_spans=asr_low_spans,
                         use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                         rag_text=rag_text, stage="bulk", subject_kind=subject_kind, department=department,
-                        call_end_party=call_end_party, wiki_text=wiki_text)
+                        call_end_party=call_end_party, wiki_text=wiki_text,
+                        call_end_timeline=call_end_timeline)
            if t_crits else {"per_criterion": [], "overall_comment": ""}))
     if primary_llm_meta and not ai.get("_llm_meta"):
         llm_calls.append(primary_llm_meta)
@@ -567,7 +575,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
         retry = _claude_eval(transcript, direction, missing, asr_low_spans=asr_low_spans,
                              use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                              rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind, department=department,
-                             call_end_party=call_end_party, wiki_text=wiki_text)
+                             call_end_party=call_end_party, wiki_text=wiki_text,
+                             call_end_timeline=call_end_timeline)
         if retry.get("_llm_meta"):
             llm_calls.append(retry["_llm_meta"])
         for idx, v in _collect_verdicts(retry.get("per_criterion")).items():
@@ -590,7 +599,8 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
             ai2 = _claude_eval(transcript, direction, escalate, asr_low_spans=asr_low_spans,
                                use_rag=use_rag, model=config.CLAUDE_MODEL_HARD,
                                rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind, department=department,
-                               call_end_party=call_end_party, wiki_text=wiki_text)
+                               call_end_party=call_end_party, wiki_text=wiki_text,
+                               call_end_timeline=call_end_timeline)
             if ai2.get("_llm_meta"):
                 llm_calls.append(ai2["_llm_meta"])
             for idx, v in _collect_verdicts(ai2.get("per_criterion")).items():
