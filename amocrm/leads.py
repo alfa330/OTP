@@ -131,6 +131,29 @@ def _stalled_body(exc):
     return _in_chain(exc, urllib3.exceptions.ReadTimeoutError)
 
 
+_CSRF_RE = re.compile(rb'name="csrf_token"\s+value="([^"]+)"')
+
+
+def _read_csrf_token(response):
+    """csrf_token со страницы входа — без дочитывания самой страницы.
+
+    Страница весит ~105 КБ и приходит без сжатия, а токен лежит на ~23-м КБ. С
+    05.11.2026 именно она зависала с Render чаще всего: после выкладки повтора все
+    19 повторов пришлись на неё, а запросы к /api/v4 в те же минуты проходили.
+    Остаток страницы не нужен — соединение закрываем, как только токен найден.
+    """
+    head = b""
+    try:
+        for chunk in response.iter_content(8192):
+            head += chunk
+            match = _CSRF_RE.search(head)
+            if match:
+                return match.group(1).decode()
+    finally:
+        response.close()
+    return None
+
+
 def is_configured() -> bool:
     """Без токена или пары логин/пароль ходить в amoCRM нечем."""
     return bool(AMO_ACCESS_TOKEN or (AMO_CRM_LOGIN and AMO_CRM_PASSWORD))
@@ -167,16 +190,20 @@ class AmoClient:
         self.session = session
         self._login()
 
-    def _request(self, method, url, **kwargs):
+    def _request(self, method, url, read=None, **kwargs):
         """Запрос к amoCRM с повтором на обрыве соединения или зависшей передаче.
 
         Повтор безопасен для всего, что делает клиент: страницы читаются GET'ом, а
         повторный вход просто выдаст ещё один токен. Всё остальное (таймаут до
         ответа, отказ в соединении, любой HTTP-код) отдаём наверх как есть.
+
+        `read` дочитывает ответ, взятый с `stream=True`, и его результат
+        возвращается вместо ответа — так зависание посреди чтения тоже повторяется.
         """
         for attempt in range(1, REQUEST_RETRIES + 1):
             try:
-                return self.session.request(method, url, **kwargs)
+                response = self.session.request(method, url, **kwargs)
+                return read(response) if read else response
             except requests.exceptions.RequestException as exc:
                 if attempt >= REQUEST_RETRIES or not (
                         _dropped_connection(exc) or _stalled_body(exc)):
@@ -189,9 +216,9 @@ class AmoClient:
     def _login(self):
         if not (AMO_CRM_LOGIN and AMO_CRM_PASSWORD):
             raise RuntimeError("amoCRM: не заданы AMO_ACCESS_TOKEN и AMO_CRM_LOGIN/AMO_CRM_PASSWORD")
-        page = self._request("GET", self.base + "/", timeout=REQUEST_TIMEOUT).text
-        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', page)
-        if not match:
+        csrf_token = self._request("GET", self.base + "/", read=_read_csrf_token,
+                                   stream=True, timeout=REQUEST_TIMEOUT)
+        if not csrf_token:
             raise RuntimeError("amoCRM: csrf_token не найден на странице входа")
         response = self._request(
             "POST",
@@ -202,7 +229,7 @@ class AmoClient:
             data={
                 "username": AMO_CRM_LOGIN,
                 "password": AMO_CRM_PASSWORD,
-                "csrf_token": match.group(1),
+                "csrf_token": csrf_token,
                 "temporary_auth": "N",
             },
         )

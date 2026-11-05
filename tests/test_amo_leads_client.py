@@ -196,6 +196,64 @@ def test_token_refresh_still_happens_on_401(monkeypatch):
     assert len(client.session.calls) == 2
 
 
+class _StreamedPage:
+    """Страница входа, отдаваемая кусками; кусок-исключение — зависшая передача."""
+
+    def __init__(self, chunks):
+        self.chunks = list(chunks)
+        self.read = 0
+        self.closed = False
+
+    def iter_content(self, _size):
+        for chunk in self.chunks:
+            if isinstance(chunk, BaseException):
+                raise chunk
+            self.read += 1
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+def _login_client(monkeypatch, outcomes):
+    monkeypatch.setattr(amo_leads, "AMO_CRM_LOGIN", "bot@example.test")
+    monkeypatch.setattr(amo_leads, "AMO_CRM_PASSWORD", "secret")
+    return _client(list(outcomes) + [
+        _FakeResponse(payload={"access_token": "fresh", "expires_in": 2400})])
+
+
+def test_login_page_is_read_only_up_to_the_csrf_token(monkeypatch):
+    """Страница ~105 КБ, токен на ~23-м: остаток не читаем и соединение закрываем."""
+    page = _StreamedPage([b"<html>" + b"x" * 8000,
+                          b'<input name="csrf_tok', b'en" value="abc123">',
+                          b"y" * 8000, b"z" * 8000])
+    client = _login_client(monkeypatch, [page])
+    client._login()
+    method, url, kwargs = client.session.calls[1]
+    assert (method, url) == ("POST", "https://amo.test/oauth2/authorize")
+    assert kwargs["data"]["csrf_token"] == "abc123"
+    assert client.session.calls[0][2]["stream"] is True
+    assert page.read == 3 and page.closed
+    assert client.session.headers["Authorization"] == "Bearer fresh"
+
+
+def test_login_page_stalling_before_the_token_is_retried(monkeypatch):
+    stalled = _StreamedPage([b"<html>" + b"x" * 8000, _stalled_body_error()])
+    page = _StreamedPage([b'<input name="csrf_token" value="abc123">'])
+    client = _login_client(monkeypatch, [stalled, page])
+    client._login()
+    assert stalled.closed
+    assert client.session.calls[2][2]["data"]["csrf_token"] == "abc123"
+
+
+def test_login_page_without_a_token_is_still_an_error(monkeypatch):
+    page = _StreamedPage([b"<html>dashboard</html>"])
+    client = _login_client(monkeypatch, [page])
+    with pytest.raises(RuntimeError, match="csrf_token не найден"):
+        client._login()
+    assert page.closed
+
+
 # Дальше — сам разбор причины: ищем её по цепочке исключений, а не по тексту
 # сообщения (наружу у всех обрывов одинаковое «Connection aborted.»).
 
