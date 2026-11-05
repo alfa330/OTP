@@ -3,6 +3,8 @@ import axios from 'axios';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
+import { IosSegmented } from '../ui/ios';
+import HonorBoard from './HonorBoard';
 
 /* ──────────────────────────────────────────────────────────────────────
  * Раздел «Ивенты»: общедоступная лента постов с фото/видео, лайками и
@@ -15,6 +17,14 @@ const PAGE_SIZE = 12;
 const COMMENTS_PAGE_SIZE = 20;
 const MAX_MEDIA = 10;
 const LAYOUT_STORAGE_KEY = 'events_layout';
+
+/* Вкладки раздела: лента постов и «Доска почёта» (задача #318). Раздел всегда
+   открывается лентой: вход в «Ивенты» гасит бейдж новых постов, и запомненная
+   доска прятала бы их от человека. */
+const EVENTS_TABS = [
+    { value: 'feed', label: 'Лента' },
+    { value: 'honor', label: 'Доска почёта' },
+];
 
 const cls = (...values) => values.filter(Boolean).join(' ');
 
@@ -531,6 +541,14 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
     const [composerOpen, setComposerOpen] = useState(false);
     const [detailEvent, setDetailEvent] = useState(null);
     const [likeBusy, setLikeBusy] = useState(() => new Set());
+    const [tab, setTab] = useState('feed');
+    // Доска монтируется при первом заходе и дальше живёт, как и лента: возврат
+    // на вкладку не перезагружает ни то, ни другое.
+    const [honorMounted, setHonorMounted] = useState(false);
+    const switchTab = useCallback((next) => {
+        setTab(next);
+        if (next === 'honor') setHonorMounted(true);
+    }, []);
 
     const showToastRef = useRef(showToast);
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -760,14 +778,36 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                         </div>
                         <div>
                             <h2 className="text-xl font-bold text-gray-900 leading-tight">Ивенты</h2>
-                            <p className="text-xs text-gray-500 mt-0.5">Новости, события и анонсы компании</p>
+                            <p className="text-xs text-gray-500 mt-0.5">
+                                {tab === 'honor' ? 'Лучшие сотрудники месяца' : 'Новости, события и анонсы компании'}
+                            </p>
                         </div>
                     </div>
-                    {headerActions}
+                    {tab === 'feed' && headerActions}
                 </div>
             </div>
 
+            <div>
+                <IosSegmented
+                    value={tab}
+                    options={EVENTS_TABS}
+                    onChange={switchTab}
+                    size="lg"
+                    stretch
+                    slide
+                    className="sm:inline-flex sm:w-auto"
+                    ariaLabel="Вкладки раздела «Ивенты»"
+                />
+            </div>
+
+            {honorMounted && (
+                <div hidden={tab !== 'honor'}>
+                    <HonorBoard user={user} apiRoot={apiRoot} authHeaders={authHeaders} notify={notify} />
+                </div>
+            )}
+
             {/* Лента */}
+            <div className="space-y-4" hidden={tab !== 'feed'}>
             {isLoading ? (
                 <div className={layout === 'grid'
                     ? 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3'
@@ -873,6 +913,7 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
                     )}
                 </>
             )}
+            </div>
 
             {detailEvent && (
                 <EventDetailModal

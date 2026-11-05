@@ -53832,6 +53832,28 @@ except Exception:
     logging.exception("Раздел «Библиотека»: Blueprint НЕ подключён")
 
 
+# ── «Доска почёта» во вкладке «Ивентов» (задача #318) ────────────────────────
+# Лучшие сотрудники месяца по ОП, СЗоВ и Фронт-офису. Видят все сотрудники;
+# итоги ведут тренер и супер-админ, Фронт-офис — ещё и глава этого отдела
+# (honor_board/routes.py: managed_departments). Фото победителя — из профиля,
+# той же подписанной ссылкой, что у аватарок.
+try:
+    from honor_board.routes import build_honor_board_blueprint  # noqa: E402
+
+    app.register_blueprint(build_honor_board_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        normalize_role=_normalize_user_role,
+        avatar_url=_build_avatar_signed_url,
+        headed_department_codes=_headed_department_codes,
+    ))
+    logging.info("«Доска почёта»: Blueprint подключён на /api/events/honor_board")
+except Exception:
+    logging.exception("«Доска почёта»: Blueprint НЕ подключён")
+
+
 # ── Раздел «Лиды OLX» (робот переноса откликов из чатов OLX в amoCRM) ────────
 # Задача #223. Раздел показывает журнал обращений, сводку за день и состояние
 # девяти кабинетов; сам перенос делает фоновая джоба olx_amo_poll_job ниже.

@@ -5680,6 +5680,7 @@ class SchemaMixin:
             self._init_leave_requests_schema_tx(cursor)
             self._init_water_schema_tx(cursor)
             self._init_thermoboxes_schema_tx(cursor)
+            self._init_honor_board_schema_tx(cursor)
             self._init_test_numbers_schema_tx(cursor)
             self._init_baiga_schema_tx(cursor)
             self._init_twofa_schema_tx(cursor)
@@ -8289,6 +8290,30 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT thermoboxes_schema")
+
+    def _init_honor_board_schema_tx(self, cursor):
+        """Схема «Доски почёта» во вкладке «Ивентов» (#318) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете honor_board/schema.py, как у библиотеки; импорт
+        локальный, иначе цикл. Не развернулась — доска отвечает пустой
+        (schema_ready=false), остальное приложение стартует штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT honor_board_schema")
+        try:
+            from honor_board.schema import init_honor_board_schema
+            init_honor_board_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT honor_board_schema")
+            logging.exception(
+                "Схема «Доски почёта» не применилась — доска будет недоступна, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT honor_board_schema")
 
     def _init_twofa_schema_tx(self, cursor):
         """Схема раздела «Коды 2FA» (#373) — своим SAVEPOINT'ом.
