@@ -5659,6 +5659,7 @@ class SchemaMixin:
             self._init_driver_chats_schema_tx(cursor)
             self._init_sign_links_schema_tx(cursor)
             self._init_partner_keys_schema_tx(cursor)
+            self._init_calls_api_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_driver_mailings_schema_tx(cursor)
@@ -6763,6 +6764,25 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT partner_keys_schema")
+
+    def _init_calls_api_schema_tx(self, cursor):
+        """Схема «Звонков Binotel» для партнёров (calls_api/schema.py): копия звонков
+        фронт-офиса для CRM и состояние сверки. Внешние ключи — на users и departments.
+        Под своим савпоинтом: при отказе ручки /api/calls отвечают 503, вебхук Binotel и
+        остальное приложение работают штатно."""
+        import logging
+
+        cursor.execute("SAVEPOINT calls_api_schema")
+        try:
+            from calls_api.schema import init_calls_api_schema
+            init_calls_api_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT calls_api_schema")
+            logging.exception("Схема «Звонков Binotel» не применилась — ручки /api/calls недоступны")
+        else:
+            cursor.execute("RELEASE SAVEPOINT calls_api_schema")
 
     def _init_olx_amo_schema_tx(self, cursor):
         """Схема робота «Лиды OLX» (таблицы olx_accounts/threads/journal/poll_runs).

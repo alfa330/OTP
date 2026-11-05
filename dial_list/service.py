@@ -502,6 +502,14 @@ SEAT_ANYONE_DENIED = ("Сотрудника другого отдела сажа
 # «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
 MEMBER_NOT_GIVEN = object()
 
+# Режим телефона сам (владелец 05.11.2026): менеджер «Фронт офисов» на линии удалённого КЦ
+# переключает телефон между обзвоном удалённого КЦ и обычным телефоном — в обычном работает
+# кнопка «Позвонить» из CRM («воронка регионов»). Коды отделов departments.code.
+MODE_SWITCH_DEPARTMENT_CODES = ("front_office",)
+PHONE_MODE_REMOTE_CC = "remote_cc"
+PHONE_MODE_PHONE = "phone"
+PHONE_MODES = (PHONE_MODE_REMOTE_CC, PHONE_MODE_PHONE)
+
 # ── Автообзвон Тез КЦ (ТЗ руководителя Тез и решения владельца 15.10.2026) ──────────────────
 # Тот же движок с ПРОФИЛЕМ отдела (dial_list_department_settings.profile). 'remote_cc' — удалённый
 # КЦ, всё как было; 'tez' — база ФИО + телефон без ИИН, «цель» лида — водитель вышел на линию
@@ -2427,6 +2435,8 @@ class DialListService:
         enabled = resolve_enabled(self.user_setting(user_id), dept["enabled"] if dept["configured"] else None)
         return {
             "enabled": enabled,
+            # Телефон показывает переключатель «Удалённый КЦ» в меню статуса (3.22.45+).
+            "switchable": self._mode_switchable(user_id, operator, dept),
             "portion_size": dept["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
             # Телефон в этом режиме прячет номера везде: история, окно звонка,
@@ -2438,6 +2448,45 @@ class DialListService:
             "profile": dept.get("profile") or PROFILE_REMOTE_CC,
             "auto": bool(is_tez(dept) and dept.get("auto_dial")),
         }
+
+    def _mode_switchable(self, user_id, operator, dept):
+        """Может ли сотрудник сам переключать режим телефона (MODE_SWITCH_DEPARTMENT_CODES):
+        сидит на линии удалённого КЦ, где обзвон включён отделом, а сам — из отдела-исключения.
+        operator — карточка глазами раздела (dial_operator): у сидящего на чужой линии в ней
+        отмечено line_member, а отдел подменён отделом линии, поэтому свой отдел читаем здесь."""
+        if not operator.get("line_member") or not dept.get("configured") or not dept.get("enabled"):
+            return False
+        if (dept.get("profile") or PROFILE_REMOTE_CC) != PROFILE_REMOTE_CC:
+            return False
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT lower(COALESCE(d.code, '')) FROM users u
+                LEFT JOIN departments d ON d.id = u.department_id
+                WHERE u.id = %s
+            """, (int(user_id),))
+            row = cur.fetchone()
+        return bool(row) and row[0] in MODE_SWITCH_DEPARTMENT_CODES
+
+    def set_phone_mode(self, user_id, mode):
+        """Сотрудник сам выбирает режим телефона: «remote_cc» — как у отдела линии (обзвон),
+        «phone» — обычный телефон (персональное «выключено»). Возвращает новый блок dial_list
+        для телефона; телефон после ответа перезапускается в выбранном режиме."""
+        mode = str(mode or "").strip().lower()
+        if mode not in PHONE_MODES:
+            raise DialListError("Режим телефона: remote_cc или phone")
+        member = self.line_member(user_id)
+        operator = self.dial_operator(user_id, member=member) or {}
+        if operator.get("department_provider") != "binotel" or operator.get("department_id") is None:
+            raise DialListError("Переключать режим можно только на линии удалённого КЦ", 403)
+        dept = self.department_settings(operator["department_id"])
+        if not self._mode_switchable(user_id, operator, dept):
+            raise DialListError("Режим телефона переключают только менеджеры фронт-офиса на линии удалённого КЦ",
+                                403)
+        self.save_user_setting(user_id, None if mode == PHONE_MODE_REMOTE_CC else False, changed_by=user_id)
+        log.info("dial_list: сотрудник %s сам переключил телефон: %s (линия %s)", user_id,
+                 "обзвон удалённого КЦ" if mode == PHONE_MODE_REMOTE_CC else "обычный телефон",
+                 member.get("internal_number") if member else "—")
+        return self.phone_settings(user_id, member=member)
 
     # ------------------------------------------------------------ Binotel
     def _default_client(self, department_id):

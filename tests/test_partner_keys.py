@@ -137,7 +137,8 @@ class KeyTests(unittest.TestCase):
 class ScopeTests(unittest.TestCase):
     def test_every_door_is_in_the_catalog(self):
         codes = [scope['code'] for scope in scopes.catalog()]
-        self.assertEqual(codes, [scopes.KNOWLEDGE, scopes.SIGN_LINKS, scopes.CRM_EMBED, scopes.OLX_CHATS, scopes.HIRING_LEADS])
+        self.assertEqual(codes, [scopes.KNOWLEDGE, scopes.SIGN_LINKS, scopes.CRM_EMBED, scopes.OLX_CHATS, scopes.HIRING_LEADS,
+                                 scopes.BINOTEL_CALLS])
         for scope in scopes.catalog():
             for field in ('code', 'title', 'hint', 'endpoints', 'header'):
                 self.assertTrue(scope[field], field)
@@ -280,7 +281,7 @@ class AdminTests(unittest.TestCase):
         self.assertEqual(item['acts_as']['department_code'], 'szov')
         self.assertNotIn('key_hash', item)
         self.assertEqual([scope['code'] for scope in payload['scopes']],
-                         ['knowledge', 'sign_links', 'crm_embed', 'olx_chats', 'hiring_leads'])
+                         ['knowledge', 'sign_links', 'crm_embed', 'olx_chats', 'hiring_leads', 'binotel_calls'])
         self.assertEqual(item['webhooks'], [])
         self.assertEqual(payload['header'], keys.HEADER)
 

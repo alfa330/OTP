@@ -24,6 +24,9 @@
                                                              last_comment_outcome: последний комментарий
                                                              этого оператора по водителю; last_attempt.
                                                              auto_hangup — почему плечо положил сам телефон)
+    POST /api/operator/dial_list/mode                        {mode: remote_cc|phone} — менеджер фронт-офиса
+                                                             на линии сам переключает телефон: обзвон или
+                                                             обычный (05.11.2026); ответ — блок dial_list
     GET  /api/operator/dial_list/progress                    «Мой прогресс»: счётчики за месяц и сегодня
                                                              (outcomes[].subtypes — счётчики по типам итога,
                                                              conversion — конверсия за базу месяца, salary —
@@ -395,6 +398,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_state():
         user_id, _ = _operator()
         return jsonify({"status": "success", **svc.get_state(user_id, phone_version=_phone_version())}), 200
+
+    @bp.route('/api/operator/dial_list/mode', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_phone_mode():
+        """Режим телефона сам (владелец 05.11.2026): менеджер фронт-офиса на линии удалённого КЦ
+        переключает iCORE Phone между обзвоном удалённого КЦ и обычным телефоном — пункт
+        «Удалённый КЦ» в меню статуса. Тело {"mode": "remote_cc" | "phone"}; в ответе — новый блок
+        dial_list (как в /api/operator/sip_settings), после него телефон перезапускается."""
+        user_id, _ = _operator()
+        body = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", "dial_list": svc.set_phone_mode(user_id, body.get("mode"))}), 200
 
     @bp.route('/api/operator/dial_list/progress', methods=['GET', 'OPTIONS'])
     @require_api_key

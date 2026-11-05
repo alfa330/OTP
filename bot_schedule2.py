@@ -54023,6 +54023,40 @@ except Exception:
     logging.exception("Раздел «Удаленный КЦ»: Blueprint НЕ подключён")
 
 
+# ── «Звонки Binotel» для CRM (calls_api, область ключа «Звонки Binotel», 05.11.2026) ──────────
+# Звонки менеджеров «Фронт офисов» с линий удалённого КЦ («воронка регионов» CRM): наблюдатель
+# вебхука «API Call Completed» кладёт их в calls_api_calls и ставит партнёру событие
+# call.completed; сверка с историей Binotel — джоба calls_api_sync ниже. Партнёр сотрудником не
+# является: ключ в заголовке X-Api-Key, require_api_key сюда не передаётся.
+_calls_api_service = None
+try:
+    from calls_api.routes import build_calls_api_blueprint  # noqa: E402
+    from calls_api.service import CallsApiService  # noqa: E402
+
+    _calls_api_service = CallsApiService(db, dial_list=lambda: _dial_list_service)
+    if _dial_list_service is not None:
+        _dial_list_service.call_observers.append(_calls_api_service.on_binotel_call)
+    app.register_blueprint(build_calls_api_blueprint(db=db, service=_calls_api_service,
+                                                     client_ip=_client_ip))
+    logging.info("Звонки Binotel для партнёров: вход подключён на /api/calls")
+except Exception:
+    logging.exception("Звонки Binotel для партнёров: вход НЕ подключён")
+
+
+def _calls_api_job(name):
+    """Задача планировщика «Звонков Binotel»: sync — сверка с историей, cleanup — срок хранения."""
+    if _calls_api_service is None:
+        return None
+    try:
+        if name == 'sync':
+            return _calls_api_service.sync_history()
+        if name == 'cleanup':
+            return _calls_api_service.cleanup()
+    except Exception:
+        logging.exception("Звонки Binotel для партнёров: задача %s упала", name)
+    return None
+
+
 def _dial_list_department_allowed(department_id):
     """Подключён ли отдел к «Обзвону из телефона» (строка настроек либо код remote_cc).
     По этому признаку отдел получает дистрибутив iCORE Phone (_can_download_icore_phone)."""
@@ -58891,6 +58925,35 @@ if __name__ == '__main__':
             coalesce=True
         )
     logging.info("⏰ Воронка найма: OLX, HeadHunter, контакты, возврат в пул и сводка просрочек поставлены")
+
+    # «Звонки Binotel» для CRM: сверка с историей Binotel раз в 10 минут — догоняет звонки, которых
+    # не донёс вебхук, и узнаёт ID кабинета удалённого КЦ; звонки старше 90 дней — ночью.
+    async def calls_api_job(name):
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(executor_pool, _calls_api_job, name)
+        except Exception as e:
+            logging.exception(f"Error running calls_api job {name}: {e}")
+
+    for _calls_api_name, _calls_api_trigger in (
+        ('sync', CronTrigger(minute='3,13,23,33,43,53', timezone=ZoneInfo('Asia/Almaty'))),
+        ('cleanup', CronTrigger(hour=3, minute=35, timezone=ZoneInfo('Asia/Almaty'))),
+    ):
+        scheduler.add_job(
+            calls_api_job,
+            _calls_api_trigger,
+            args=[_calls_api_name],
+            id='calls_api_%s' % _calls_api_name,
+            misfire_grace_time=600,
+            max_instances=1,
+            coalesce=True
+        )
+    # Первая сверка — через минуту после старта, а не ждать ближайших «…3 минут»: после выкладки
+    # ID кабинета нужен вебхуку сразу (до сверки звонок фронт-офиса ждёт её же).
+    _calls_api_start_timer = threading.Timer(60, _calls_api_job, args=('sync',))
+    _calls_api_start_timer.daemon = True
+    _calls_api_start_timer.start()
+    logging.info("⏰ Звонки Binotel для партнёров: сверка раз в 10 минут и ночная чистка поставлены")
 
     scheduler.start()
 

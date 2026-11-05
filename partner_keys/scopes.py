@@ -15,6 +15,7 @@ SIGN_LINKS = 'sign_links'
 CRM_EMBED = 'crm_embed'
 OLX_CHATS = 'olx_chats'
 HIRING_LEADS = 'hiring_leads'
+BINOTEL_CALLS = 'binotel_calls'
 
 SCOPES = (
     Scope(KNOWLEDGE, 'Ручка знаний',
@@ -45,6 +46,13 @@ SCOPES = (
           'ФИО, телефон, город, вакансия, кампания; отклик попадает в колонку «Отклики» '
           'раздела «Воронка найма», дубли по телефону склеиваются.',
           ('POST /api/hiring/external/responses',),
+          'X-Api-Key'),
+    Scope(BINOTEL_CALLS, 'Звонки Binotel',
+          'Звонки менеджеров «Фронт офисов» с линий Binotel удалённого КЦ: каждый звонок '
+          'сразу после окончания приходит вебхуком (исход, ожидание, разговор, запись); '
+          'история звонков, ссылка на запись и кто на какой линии. Для CRM.',
+          ('GET /api/calls', 'GET /api/calls/{id}', 'GET /api/calls/{id}/recording',
+           'GET /api/calls/operators', 'GET|PUT|DELETE /api/calls/webhook'),
           'X-Api-Key'),
 )
 BY_CODE = {scope.code: scope for scope in SCOPES}

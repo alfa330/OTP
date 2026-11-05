@@ -813,6 +813,9 @@ class BinotelApiClient:
             "recording_status": str(raw.get("recordingStatus") or "").strip().lower(),
             "call_end_party": normalize_call_end_party(who_hung_up, call_type),
             "call_end_raw": "" if who_hung_up is None else str(who_hung_up).strip(),
+            # Кабинет Binotel звонка. Номера линий у кабинетов пересекаются (у Тез свои 924, 925,
+            # 929 — те же цифры, что у линий удалённого КЦ), и отличить звонки можно только так.
+            "company_id": str(raw.get("companyID") or raw.get("companyId") or "").strip(),
         }
 
     @staticmethod
