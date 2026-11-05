@@ -549,8 +549,10 @@ const SIP_SETTINGS_TEZ_DEPARTMENT_ID = 560;
  * решает лишь «показывать ли пункт при выбранном отделе». Права считает
  * бэкенд, у каждого раздела свой access.py. Состав отделов у каждой строки
  * взят из предиката самого раздела, а не придуман:
- *   fleet_edm/crm_tickets/driver_chats/szov_wallboard — 'szov'
+ *   fleet_edm/driver_chats/szov_wallboard — 'szov'
  *   (FLEET_EDM_DEPARTMENT_CODE и соседние константы);
+ *   crm_tickets — 'szov' и отделы-гости 'op', 'front_office'
+ *   (CRM_SECTION_DEPARTMENT_CODE, CRM_PARTNER_DEPARTMENT_CODES);
  *   oktell_guard — 'szov' и 'op' (OKTELL_GUARD_DEPARTMENT_CODES);
  *   chatapp_chats/tez_wallboard — 'tez' (CHATAPP_DEPARTMENT_CODE);
  *   touches — 'op' (TOUCHES_SECTION_DEPARTMENT_CODE);
@@ -583,8 +585,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     call_division: ['szov', 'op', 'tez', 'marketing'],
     monitoring_scale: ['szov', 'op', 'tez'],
     ai_qa: ['szov', 'op', 'tez', 'marketing'],
-    // Диалоги
-    crm_tickets: ['szov'],
+    // Диалоги. ОП и фронт-офисам — только «Сотрудничество» (crm/access.py).
+    crm_tickets: ['szov', 'op', 'front_office'],
     // Жалобы принимает СЗоВ, разбирают отделы сотрудников (complaints/catalog.py:
     // HANDLER_DEPARTMENT_CODES) — пункт виден при выборе любого из них.
     complaints: ['szov', 'op', 'front_office', 'remote_cc', 'request_processing_department'],
@@ -2622,33 +2624,38 @@ const canAccessHiringSectionForUser = (userLike) => userLike?.hiring_access === 
 
 // Настройка отбивки строже самого табло: СВ отдела табло видит, но кому и когда уходят
 // уведомления руководству — не его решение. Ту же границу держит _szov_broadcast_guard.
-/* Раздел «Обращения» на время выката открыт не всем: отдел СЗоВ (глава и
-   супервайзеры), глобальные админы — и один оператор пилотом. Границу отдела
-   держим по КОДУ, а не по id: id СЗоВ засеян миграцией и в разных окружениях
-   разный, а /api/admin/departments оператору недоступен.
+/* Раздел «Обращения»: весь отдел СЗоВ, глобальные админы и — с 05.11.2026 —
+   отделы-гости (ОП и фронт-офисы), которым открыта одна тематика,
+   «Сотрудничество». Границу отдела держим по КОДУ, а не по id: id отделов
+   засеяны миграцией и в разных окружениях разные, а /api/admin/departments
+   оператору недоступен.
 
    Роль внутри отдела значения не имеет: обращение заводит тот, у кого возник
    вопрос. Тренер отдела тоже проходит — до 25.09.2026 он был единственным
    исключением, снятым по задаче #360 (тренер учит операторов работе в разделе,
    а показать то, чего сам не видит, не может). Ту же границу держит
    crm/access.py::can_open_section — там она и обязательная, а здесь только про
-   то, показывать ли пункт меню. */
+   то, показывать ли пункт меню. Что гостю видно и что он может завести внутри,
+   решает сервер (allowed_scenarios, visibility_scope). */
 const CRM_SECTION_DEPARTMENT_CODE = 'szov';
+// Зеркало PARTNER_DEPARTMENT_SCENARIOS в crm/access.py — тест сверяет состав.
+const CRM_PARTNER_DEPARTMENT_CODES = ['op', 'front_office'];
+const CRM_DEPARTMENT_CODES = [CRM_SECTION_DEPARTMENT_CODE, ...CRM_PARTNER_DEPARTMENT_CODES];
 
 const isCrmSectionDepartmentHead = (userLike) => (
     isDepartmentHead(userLike)
-    && aiQaHeadDepartmentCodesOf(userLike).includes(CRM_SECTION_DEPARTMENT_CODE)
+    && aiQaHeadDepartmentCodesOf(userLike).some((code) => CRM_DEPARTMENT_CODES.includes(code))
 );
 
 const canAccessCrmSectionForUser = (userLike) => {
     const role = normalizeRole(userLike?.role);
     if (role === 'super_admin') return true;
     // Глава отдела с базовой admin-ролью — не глобальный админ: главам чужих
-    // отделов обращения СЗоВ не нужны (глава СЗоВ проходит проверкой ниже).
+    // отделов обращения не нужны (главы СЗоВ и отделов-гостей проходят ниже).
     if (role === 'admin' && !isDepartmentHead(userLike)) return true;
     if (isCrmSectionDepartmentHead(userLike)) return true;
-    return normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode)
-        === CRM_SECTION_DEPARTMENT_CODE;
+    return CRM_DEPARTMENT_CODES.includes(
+        normalizeDepartmentCode(userLike?.department_code ?? userLike?.departmentCode));
 };
 
 /* «Жалобы» (задача #297) — раздел разбора: его видят супервайзеры и главы
@@ -53985,8 +53992,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Что человек увидит ВНУТРИ, решают правила разделов и статей на
                 // бэкенде: у раздела своя модель прав с точностью до статьи.
                 if (view === 'wiki' && wikiSectionEnabled) return;
-                // «Обращения» — свой предикат, не allowlist отдела: раздел общий,
-                // но на время выката открыт СЗоВ, админам и пилотному оператору.
+                // «Обращения» — свой предикат, не allowlist отдела: раздел открыт
+                // СЗоВ, админам и отделам-гостям (ОП, фронт-офисы), а у ОП и
+                // фронт-офисов есть allowlist — проверка ниже выбросила бы их.
                 if (view === 'crm_tickets' && canAccessCrmSection) return;
                 // «Жалобы» — свой предикат: их разбирают СВ отделов, у которых
                 // есть allowlist (ОП, Тез, фронт-офисы), и проверка по карте
@@ -56262,8 +56270,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     )}
 
                                     {/* «Обращения» — заявки в рабочие Telegram-группы.
-                                        На время выката пункт видят СЗоВ (глава и СВ), админы и
-                                        пилотный оператор; периметр внутри (свои / группы / отдел)
+                                        Пункт видят весь СЗоВ, админы и отделы-гости (ОП и
+                                        фронт-офисы — только «Сотрудничество»); что видно внутри,
                                         считает бэкенд. Бейдж — непрочитанные ответы, из колокола.
                                         Пункт объявлен ОДИН раз в общей части меню, а не по ролевым
                                         ветвям: иначе его легко забыть в одной из них. */}

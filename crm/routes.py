@@ -201,6 +201,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         with db._get_cursor() as cursor:
             items = queries.list_queues(cursor, include_inactive=include_inactive,
                                         expose_chat_id=manage)
+        # Гостю раздела (ОП, фронт-офисы) — только очереди его тематик: фильтр
+        # ленты по очереди иначе предлагал бы ему «iTaxi Sapar» и «Посылки», где
+        # его обращений нет и быть не может.
+        allowed = access.allowed_scenarios(ctx)
+        if allowed is not None:
+            codes = {item['queue_code'] for item in scenarios.SCENARIOS if item['key'] in allowed}
+            items = [item for item in items if item.get('code') in codes]
         return jsonify({"items": items})
 
     def _mention_changes(data):
@@ -443,8 +450,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         интерфейсе (src/utils/kazakhstanCities.js) и с сервера не едут: это
         справочник Казахстана, он не меняется от нашей базы.
         """
-        catalog = scenarios.public_catalog()
-        entries = scenarios.public_entries()
+        # Гостю раздела — только его тематики (access.allowed_scenarios), и вход
+        # по ИИН — только если открыто всё, куда он ведёт.
+        allowed = access.allowed_scenarios(ctx)
+        catalog = [item for item in scenarios.public_catalog()
+                   if allowed is None or item['key'] in allowed]
+        entries = [entry for entry in scenarios.public_entries()
+                   if access.can_use_entry(ctx, entry)]
         manage = access.can_manage_queues(ctx)
         with db._get_cursor() as cursor:
             context = queries.routing_context(cursor)
@@ -467,6 +479,21 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return jsonify({"items": catalog, "entries": entries,
                         "reference": {"taxi_parks": parks}})
 
+    def _topic_closed(ctx, key):
+        """403 на тематику, которую этому человеку заводить не положено, иначе None.
+
+        Каталог гостю раздела чужих тематик не отдаёт, но спрятанная в каталоге
+        тематика — не запрет: её проверки (Sapar по ИИН, реестр посылок,
+        справочник офисов) отвечают данными водителей, а запрос к ним
+        собирается руками.
+        """
+        if access.can_use_scenario(ctx, key):
+            return None
+        return jsonify({
+            "error": "Эта тематика вам не открыта",
+            "code": "CRM_TOPIC_CLOSED",
+        }), 403
+
     @crm_route('/scenarios/<key>/evaluate', methods=('POST',))
     def crm_scenario_evaluate(key, ctx):
         """Что будет с обращением при текущих ответах — решает СЕРВЕР.
@@ -476,6 +503,9 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         проверка, а весь смысл ТЗ в том, что без выполненных проверок обращение
         в группу не уходит.
         """
+        closed = _topic_closed(ctx, key)
+        if closed:
+            return closed
         data = _payload()
         answers = data.get('answers') if isinstance(data.get('answers'), dict) else {}
         # Ответы скрытой ветки — не ответы: их оператор оставил, уйдя в другую.
@@ -533,6 +563,9 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         как раньше. Считать молчание сервиса за «документов нет» нельзя, по
         такому выводу обращение закрыли бы зря.
         """
+        closed = _topic_closed(ctx, key)
+        if closed:
+            return closed
         data = _payload()
         iin = str(data.get('iin') or '').strip()
         period = str(data.get('period') or '').strip()
@@ -563,6 +596,13 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         entry = scenarios.entry_for_queue(code)
         if not entry:
             return jsonify({"error": "Неизвестная тематика"}), 404
+        # Проверка по ИИН отвечает документами водителя — гостю раздела, которому
+        # её категории закрыты, её не делаем.
+        if not access.can_use_entry(ctx, entry):
+            return jsonify({
+                "error": "Эта тематика вам не открыта",
+                "code": "CRM_TOPIC_CLOSED",
+            }), 403
         data = _payload()
         iin = str(data.get('iin') or '').strip()
         period = str(data.get('period') or '').strip()
@@ -642,6 +682,9 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         сам вопрос (список офисов города со статусами), а у посылок показывает
         найденное — решить, та ли это посылка, может только человек.
         """
+        closed = _topic_closed(ctx, key)
+        if closed:
+            return closed
         kind = scenarios.lookup_kind(key)
         if not kind:
             return jsonify({"skipped": True, "verdict": {"outcome": scenarios.PASS}})
@@ -682,6 +725,9 @@ def build_crm_blueprint(*, db, require_api_key, build_cors_preflight_response,
         scenario = scenarios.get(scenario_key)
         if not scenario:
             return jsonify({"error": "Выберите тематику обращения"}), 400
+        closed = _topic_closed(ctx, scenario_key)
+        if closed:
+            return closed
 
         answers = data.get('answers')
         if isinstance(answers, str):

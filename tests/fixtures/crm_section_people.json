@@ -1,0 +1,43 @@
+{
+  "_comment": "Кого пускают в «Обращения». Одна таблица на сервер (crm/access.py::can_open_section, tests/test_crm_partner_departments.py) и меню (canAccessCrmSectionForUser в src/App.jsx, tests/crm_section_access.test.mjs): разойдись они — пункт виден, а раздел отвечает 403, или наоборот. id отделов — как на проде 05.11.2026.",
+  "departments": {
+    "szov": 1,
+    "op": 367,
+    "tez": 560,
+    "front_office": 909,
+    "marketing": 1041,
+    "it": 1933,
+    "remote_cc": 1954,
+    "request_processing_department": 2008
+  },
+  "people": [
+    {"who": "супер-админ", "role": "super_admin", "department": null, "heads": [], "open": true},
+    {"who": "админ портала без отдела", "role": "admin", "department": null, "heads": [], "open": true},
+    {"who": "админ портала, числится в СЗоВ", "role": "admin", "department": "szov", "heads": [], "open": true},
+    {"who": "оператор СЗоВ", "role": "operator", "department": "szov", "heads": [], "open": true},
+    {"who": "стажёр СЗоВ", "role": "trainee", "department": "szov", "heads": [], "open": true},
+    {"who": "СВ СЗоВ", "role": "sv", "department": "szov", "heads": [], "open": true},
+    {"who": "тренер СЗоВ", "role": "trainer", "department": "szov", "heads": [], "open": true},
+    {"who": "глава СЗоВ (и удалённого КЦ)", "role": "admin", "department": "szov", "heads": ["szov", "remote_cc"], "open": true},
+    {"who": "оператор ОП", "role": "operator", "department": "op", "heads": [], "open": true},
+    {"who": "стажёр ОП", "role": "trainee", "department": "op", "heads": [], "open": true},
+    {"who": "СВ ОП", "role": "sv", "department": "op", "heads": [], "open": true},
+    {"who": "СВ ОП (роль supervisor)", "role": "supervisor", "department": "op", "heads": [], "open": true},
+    {"who": "тренер ОП", "role": "trainer", "department": "op", "heads": [], "open": true},
+    {"who": "глава ОП", "role": "admin", "department": "op", "heads": ["op"], "open": true},
+    {"who": "оператор фронт-офиса", "role": "operator", "department": "front_office", "heads": [], "open": true},
+    {"who": "глава фронт-офисов", "role": "admin", "department": "front_office", "heads": ["front_office"], "open": true},
+    {"who": "глава фронт-офисов, сама в другом отделе", "role": "admin", "department": "it", "heads": ["front_office"], "open": true},
+    {"who": "глава Тез КЦ, сам числится в СЗоВ", "role": "admin", "department": "szov", "heads": ["tez"], "open": true},
+    {"who": "оператор Тез КЦ", "role": "operator", "department": "tez", "heads": [], "open": false},
+    {"who": "СВ Тез КЦ", "role": "sv", "department": "tez", "heads": [], "open": false},
+    {"who": "тренер Тез КЦ", "role": "trainer", "department": "tez", "heads": [], "open": false},
+    {"who": "глава Тез КЦ", "role": "admin", "department": "tez", "heads": ["tez"], "open": false},
+    {"who": "сотрудник маркетинга", "role": "marketing_manager", "department": "marketing", "heads": [], "open": false},
+    {"who": "оператор удалённого КЦ", "role": "operator", "department": "remote_cc", "heads": [], "open": false},
+    {"who": "сотрудник ООЗ", "role": "operator", "department": "request_processing_department", "heads": [], "open": false},
+    {"who": "глава ООЗ", "role": "admin", "department": "request_processing_department", "heads": ["request_processing_department"], "open": false},
+    {"who": "оператор без отдела", "role": "operator", "department": null, "heads": [], "open": false},
+    {"who": "СВ без отдела", "role": "sv", "department": null, "heads": [], "open": false}
+  ]
+}

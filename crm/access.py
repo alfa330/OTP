@@ -20,6 +20,10 @@
 могли увидеть уже открытое (просьба СЗоВ 18.08.2026). Периметр держит вход в
 раздел (can_open_section), а не второй фильтр внутри него.
 
+С 05.11.2026 у раздела есть отделы-гости (ОП и фронт-офисы, см.
+PARTNER_DEPARTMENT_SCENARIOS): они заводят одну тематику — «Сотрудничество», —
+и видят обращения своего отдела плюс эту тематику всех отделов (SCOPE_PARTNER).
+
 Граница «глава отдела ≠ глобальный админ» — не новая выдумка, а действующая
 семантика портала: назначение главой ЗАМЕНЯЕТ базовую роль и жёстко режет
 периметр отделом (так же считают задачи, «Бот опозданий» и ИИ-оценка).
@@ -51,11 +55,36 @@ _KNOWN_ROLES = ('super_admin', 'admin', 'sv', 'supervisor', 'trainer', 'operator
 # обратно в «Опросы».
 SECTION_DEPARTMENT_CODE = 'szov'
 
+# Отделы-гости: раздел открыт им ради одной работы — завести обращение своей
+# тематики и дождаться ответа группы (владелец, 05.11.2026: «Сотрудничество» —
+# отделу продаж и фронт-офисам, «чтобы они могли заполнять и отправлять»).
+#
+# Тематики СЗоВ (Sapar, посылки, офисы, термокороба, жалобы) гостю не
+# показываются и сервером не принимаются: за ними стоят проверки по ИИН,
+# реестру посылок и справочнику офисов, то есть данные водителей. Видит гость
+# обращения своего отдела и обращения СВОИХ тематик во всех отделах, СЗоВ
+# включительно (тот же владелец, тот же день: «ОП может видеть обращения,
+# оставленные СЗоВ, так же и с фронт-офисами»): правило «кого пустили — видит
+# всё, чтобы не заводить дубли» действует и здесь, но по тематике — одну
+# компанию не заведут дважды, а ИИН и телефоны водителей из обращений СЗоВ
+# других тематик к гостю не попадают. Очереди и выгрузка остаются у СЗоВ:
+# очередь — адрес в рабочей группе на всю компанию.
+#
+# Роль внутри отдела-гостя значения не имеет, как и у СЗоВ: заводит тот, кому
+# позвонили. Глава проходит по возглавляемому отделу. Зеркало пункта меню —
+# CRM_PARTNER_DEPARTMENT_CODES в App.jsx; тест сверяет оба места.
+PARTNER_DEPARTMENT_SCENARIOS = {
+    'op': frozenset({'cooperation'}),
+    'front_office': frozenset({'cooperation'}),
+}
+
 _ADMIN_ROLES = ('super_admin', 'admin')
 _SUPERVISOR_ROLES = ('sv', 'supervisor')
 
 # Видимость: чем шире, тем больше видно. Значения используются и в SQL-слое.
 SCOPE_ALL = 'all'
+# Отдел-гость: свой отдел (и возглавляемые) плюс свои тематики всех отделов.
+SCOPE_PARTNER = 'partner'
 SCOPE_DEPARTMENT = 'department'
 SCOPE_GROUPS = 'groups'
 SCOPE_OWN = 'own'
@@ -91,6 +120,27 @@ def _codes(values):
     return {str(code).strip().lower() for code in (values or []) if code}
 
 
+def _own_code(ctx):
+    return str(ctx.get('department_code') or '').strip().lower()
+
+
+def is_section_home(ctx):
+    """Сотрудник (любая роль) или глава отдела-хозяина раздела — СЗоВ."""
+    if SECTION_DEPARTMENT_CODE in _codes(ctx.get('headed_department_codes')):
+        return True
+    return _own_code(ctx) == SECTION_DEPARTMENT_CODE
+
+
+def _sees_whole_section(ctx):
+    return is_global_admin(ctx) or is_section_home(ctx)
+
+
+def partner_codes(ctx):
+    """Отделы-гости, через которые человек входит в раздел: свой и возглавляемые."""
+    codes = _codes(ctx.get('headed_department_codes')) | {_own_code(ctx)}
+    return codes & set(PARTNER_DEPARTMENT_SCENARIOS)
+
+
 def can_open_section(ctx):
     """Пускать ли пользователя в раздел вообще.
 
@@ -98,14 +148,51 @@ def can_open_section(ctx):
     доступ, раздел открывается и прямым адресом ?view=crm_tickets.
 
     Границу отдела держим строго, как «Табло СЗоВ» и переписка ТЭЗ: главе и СВ
-    чужого отдела обращения СЗоВ ни к чему.
+    чужого отдела обращения СЗоВ ни к чему. Отдел-гость входит, но видит и
+    заводит в разделе только своё (allowed_scenarios, visibility_scope).
     """
-    if is_global_admin(ctx):
+    return _sees_whole_section(ctx) or bool(partner_codes(ctx))
+
+
+def allowed_scenarios(ctx):
+    """Тематики, которые человек может заводить и проверять: frozenset ключей
+    из crm/scenarios.py, или None — все (глобальный админ и СЗоВ).
+
+    Гостю — тематики его отделов. Тот, кого в раздел не пустили, получает
+    пустой набор: закрыто, а не «без ограничений».
+    """
+    if _sees_whole_section(ctx):
+        return None
+    allowed = set()
+    for code in partner_codes(ctx):
+        allowed |= PARTNER_DEPARTMENT_SCENARIOS[code]
+    return frozenset(allowed)
+
+
+def can_use_scenario(ctx, scenario_key):
+    """Можно ли заводить обращение этой тематики и звать её проверки.
+
+    Не только каталог: проверки по ИИН, реестру посылок и справочнику офисов
+    отвечают данными водителей, и запрос к ним собирается руками в обход
+    спрятанной в каталоге тематики.
+    """
+    allowed = allowed_scenarios(ctx)
+    return allowed is None or str(scenario_key or '') in allowed
+
+
+def can_use_entry(ctx, entry):
+    """Вход в тематику (проверка по ИИН до выбора категории) — только тому, кому
+    открыто ВСЁ, куда он ведёт: каждая категория и «документов нет».
+
+    Вход с частью закрытых категорий проверял бы водителя по Sapar ради выбора,
+    которого человеку всё равно не дадут.
+    """
+    allowed = allowed_scenarios(ctx)
+    if allowed is None:
         return True
-    if SECTION_DEPARTMENT_CODE in _codes(ctx.get('headed_department_codes')):
-        return True
-    own_code = str(ctx.get('department_code') or '').strip().lower()
-    return own_code == SECTION_DEPARTMENT_CODE
+    keys = [key for key in list(entry.get('categories') or []) + [entry.get('no_documents')]
+            if key]
+    return bool(keys) and all(key in allowed for key in keys)
 
 
 def requires_sensitive_qr(ctx):
@@ -136,21 +223,42 @@ def requires_sensitive_qr(ctx):
 def visibility_scope(ctx):
     """Насколько широкий список обращений положен пользователю.
 
-    Пустили в раздел — видно всё. Смысл раздела в том, чтобы обращение по
+    Глобальному админу и СЗоВ — всё. Смысл раздела в том, чтобы обращение по
     водителю было ОДНО: найти уже открытое можно только если оно видно, а
     невидимое коллеге обращение он заведёт заново.
 
-    Более узкие периметры (отдел, свои группы, только своё) никуда не делись —
-    они остаются в SQL-слое и в can_view_ticket и понадобятся, когда раздел
-    выйдет за пределы одного отдела. Сейчас же вход в раздел и есть периметр.
+    Отделу-гостю — SCOPE_PARTNER: обращения своего отдела (partner_department_ids)
+    и обращения своих тематик во всех отделах. Обращения СЗоВ других тематик, с
+    ИИН и телефонами водителей, — нет. Супервайзеру гостя свой отдел целиком
+    нужен ещё и потому, что «С Яндексом» проверяет любой СВ отдела автора
+    (can_review), и узкий периметр «свои группы» прятал бы от него его же задачу.
+
+    Остальные периметры (отдел, свои группы, только своё) — для тех, кого в
+    раздел не пустили: роуты их до сюда не доводят, но правило и SQL держат их
+    честно.
     """
-    if can_open_section(ctx):
+    if _sees_whole_section(ctx):
         return SCOPE_ALL
+    if partner_codes(ctx):
+        return SCOPE_PARTNER
     if is_department_head(ctx):
         return SCOPE_DEPARTMENT
     if is_supervisor(ctx):
         return SCOPE_GROUPS
     return SCOPE_OWN
+
+
+def partner_department_ids(ctx):
+    """Отделы, обращения которых гость видит целиком: возглавляемые и свой.
+
+    Свой — потому что оператор ОП ничего не возглавляет, а обращения коллег по
+    отделу видеть должен. Порядок — чтобы параметр SQL не зависел от порядка, в
+    котором отделы пришли из базы.
+    """
+    ids = {int(x) for x in (ctx.get('headed_department_ids') or [])}
+    if ctx.get('department_id') is not None:
+        ids.add(int(ctx['department_id']))
+    return sorted(ids)
 
 
 def can_manage_queues(ctx):
@@ -163,27 +271,28 @@ def can_manage_queues(ctx):
     админа ради привязки чата дороже: очередями пользуется СЗоВ, а заводит их
     сейчас не СЗоВ.
 
-    Границей остаётся сам раздел: `can_manage_queues` проверяется ПОСЛЕ
-    `can_open_section` (декоратор в routes.py), а он открыт узкому кругу.
-    Отдельного периметра «чьи очереди» нет и быть не может — очередь одна на
-    компанию, а не на отдел.
+    Глава и СВ — только СЗоВ, отдела-хозяина: отделу-гостю раздел открыт ради
+    его тематики (05.11.2026), а очередь одна на компанию, не на отдел.
+    Отдельного периметра «чьи очереди» нет и быть не может.
 
     Глава отдела здесь не по просьбе, а по здравому смыслу: иначе супервайзер
     может то, чего не может его руководитель.
     """
-    return is_global_admin(ctx) or is_department_head(ctx) or is_supervisor(ctx)
+    if is_global_admin(ctx):
+        return True
+    return is_section_home(ctx) and (is_department_head(ctx) or is_supervisor(ctx))
 
 
 def can_export(ctx):
     """Выгрузить обращения в Excel за период (владелец, 30.09.2026).
 
-    Тем же, кто настраивает очереди: глобальному админу, главе отдела и
-    супервайзеру. Выгрузка — это все обращения периода с ИИН и телефонами
-    водителей одним файлом; оператору в разделе они видны по одному, а файл
-    уносится с рабочего места целиком. Как и у очередей, проверяется ПОСЛЕ
-    can_open_section: супервайзер чужого отдела до выгрузки не доходит.
+    Тем же, кто настраивает очереди: глобальному админу, главе и супервайзеру
+    СЗоВ. Выгрузка — это все обращения периода с ИИН и телефонами водителей
+    одним файлом; оператору в разделе они видны по одному, а файл уносится с
+    рабочего места целиком. Отделу-гостю (ОП, фронт-офисы) выгрузку не открыли:
+    просили завести и отправить «Сотрудничество», не отчёт по нему.
     """
-    return is_global_admin(ctx) or is_department_head(ctx) or is_supervisor(ctx)
+    return can_manage_queues(ctx)
 
 
 def can_create_ticket(ctx):
@@ -200,6 +309,15 @@ def is_author(ctx, ticket):
     return author is not None and int(author) == int(ctx.get('user_id') or 0)
 
 
+def _belongs_to(ticket, department_ids):
+    """Обращение заведено в одном из отделов — или пришло в очередь одного из них."""
+    departments = {int(x) for x in (department_ids or [])}
+    dept = ticket.get('department_id')
+    queue_dept = ticket.get('queue_department_id')
+    return (dept is not None and int(dept) in departments) or \
+           (queue_dept is not None and int(queue_dept) in departments)
+
+
 def can_view_ticket(ctx, ticket):
     """Видит ли пользователь конкретное обращение.
 
@@ -211,12 +329,12 @@ def can_view_ticket(ctx, ticket):
     scope = visibility_scope(ctx)
     if scope == SCOPE_ALL:
         return True
+    if scope == SCOPE_PARTNER:
+        if ticket.get('scenario_key') in allowed_scenarios(ctx):
+            return True
+        return _belongs_to(ticket, partner_department_ids(ctx))
     if scope == SCOPE_DEPARTMENT:
-        dept = ticket.get('department_id')
-        queue_dept = ticket.get('queue_department_id')
-        headed = {int(x) for x in (ctx.get('headed_department_ids') or [])}
-        return (dept is not None and int(dept) in headed) or \
-               (queue_dept is not None and int(queue_dept) in headed)
+        return _belongs_to(ticket, ctx.get('headed_department_ids'))
     if scope == SCOPE_GROUPS:
         groups = {int(x) for x in (ctx.get('group_ids') or [])}
         author_groups = {int(x) for x in (ticket.get('author_group_ids') or [])}

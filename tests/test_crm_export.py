@@ -50,7 +50,8 @@ def values(item):
 class AccessTest(unittest.TestCase):
     def test_export_is_for_supervisors_and_heads(self):
         self.assertTrue(access.can_export({'role': 'sv', 'department_code': 'szov'}))
-        self.assertTrue(access.can_export({'role': 'operator', 'headed_department_ids': [1]}))
+        self.assertTrue(access.can_export({'role': 'operator', 'headed_department_ids': [1],
+                                           'headed_department_codes': ['szov']}))
         self.assertTrue(access.can_export({'role': 'super_admin'}))
         self.assertFalse(access.can_export({'role': 'operator', 'department_code': 'szov'}))
         self.assertFalse(access.can_export({'role': 'trainer', 'department_code': 'szov'}))

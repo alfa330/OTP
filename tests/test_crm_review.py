@@ -176,7 +176,7 @@ class AccessTest(unittest.TestCase):
 
     def test_supervisor_of_another_department_does_not(self):
         """Даже если автор — в его группе: проверяет отдел автора."""
-        stranger = viewer('sv', user_id=77, department_id=2, department_code='op', groups=(6,))
+        stranger = viewer('sv', user_id=77, department_id=2, department_code='tez', groups=(6,))
         self.assertTrue(access.can_view_ticket(stranger, pending()), 'видит — но не решает')
         self.assertFalse(access.can_review(stranger, pending()))
         self.assertFalse(access.can_review(viewer('sv', user_id=78, department_id=None), pending()))
@@ -1103,7 +1103,7 @@ class DecisionEndpointTest(unittest.TestCase):
     def test_outsider_is_stopped_at_the_door_of_the_section(self):
         """Раздел закрыт — закрыта и проверка, даже у супервайзера группы
         автора: периметр держит вход в раздел, и он стоит раньше любого права."""
-        self.ctx = viewer('sv', user_id=77, groups=(6,), department_code='op')
+        self.ctx = viewer('sv', user_id=77, groups=(6,), department_code='tez')
         response = self.post({'decision': 'resolve', 'note': 'итог'})
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()['code'], 'CRM_SECTION_CLOSED')

@@ -76,7 +76,7 @@ def load_access_context(cursor, user_id):
 def visibility_sql(ctx):
     """Условие «этот тикет виден пользователю» для WHERE. Возвращает (sql, params).
 
-    Ровно те же четыре правила, что и в access.can_view_ticket — но там по
+    Ровно те же правила, что и в access.can_view_ticket — но там по
     одному загруженному тикету, а здесь по списку. Две формы одного правила
     неизбежны (фильтровать список в Python значило бы вычитывать всю таблицу),
     поэтому они сверяются тестом test_crm_access.py.
@@ -89,7 +89,15 @@ def visibility_sql(ctx):
     # Автор видит своё при любом периметре.
     clauses = ['t.created_by = %(viewer_id)s']
 
-    if scope == access.SCOPE_DEPARTMENT:
+    if scope == access.SCOPE_PARTNER:
+        # Отдел-гость (ОП, фронт-офисы): свой отдел целиком и свои тематики во
+        # всех отделах — «Сотрудничество» СЗоВ видно, остальное СЗоВ нет.
+        params['partner_departments'] = access.partner_department_ids(ctx)
+        params['partner_scenarios'] = sorted(access.allowed_scenarios(ctx))
+        clauses.append('t.department_id = ANY(%(partner_departments)s)')
+        clauses.append('q.department_id = ANY(%(partner_departments)s)')
+        clauses.append('t.scenario_key = ANY(%(partner_scenarios)s)')
+    elif scope == access.SCOPE_DEPARTMENT:
         params['headed_departments'] = list(ctx.get('headed_department_ids') or [])
         clauses.append('t.department_id = ANY(%(headed_departments)s)')
         clauses.append('q.department_id = ANY(%(headed_departments)s)')

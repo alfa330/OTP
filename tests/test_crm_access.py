@@ -50,8 +50,8 @@ def ticket(created_by=10, department_id=1, queue_department_id=None,
 
 class ScopeTest(unittest.TestCase):
     def test_operator_sees_only_own(self):
-        # Вне СЗоВ: внутри отдела раздел открыт всем, и периметр там общий.
-        me = ctx(role='operator', user_id=10, department_code='op')
+        # Вне раздела: ни СЗоВ, ни отдел-гость (ОП и фронт-офисы — свои тесты).
+        me = ctx(role='operator', user_id=10, department_code='tez')
         self.assertEqual(access.visibility_scope(me), access.SCOPE_OWN)
         self.assertTrue(access.can_view_ticket(me, ticket(created_by=10)))
         self.assertFalse(access.can_view_ticket(me, ticket(created_by=11)))
@@ -67,7 +67,7 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(access.visibility_scope(me), access.SCOPE_ALL)
         self.assertTrue(access.can_view_ticket(me, ticket(created_by=11)))
         # Тренер чужого отдела — нет: граница отдела осталась строгой.
-        stranger = ctx(role='trainer', user_id=10, department_code='op')
+        stranger = ctx(role='trainer', user_id=10, department_code='tez')
         self.assertFalse(access.can_open_section(stranger))
         self.assertFalse(access.can_view_ticket(stranger, ticket(created_by=11)))
 
@@ -90,19 +90,20 @@ class ScopeTest(unittest.TestCase):
     def test_narrow_scopes_still_apply_outside_the_section(self):
         """Периметры «отдел» и «свои группы» никуда не делись.
 
-        Они выключены не потому, что от них отказались, а потому, что сейчас
-        раздел выкатан на один отдел и вход в него и есть периметр. Расширится
-        выкат — правило снова заработает, поэтому оно проверяется.
+        Раздел вышел за пределы СЗоВ (05.11.2026), но отделам-гостям положен
+        свой периметр — SCOPE_PARTNER (tests/test_crm_partner_departments.py).
+        «Отдел» и «свои группы» по-прежнему держат тех, кого в раздел не
+        пустили, поэтому проверяются на отделе вне раздела.
         """
-        head = ctx(role='admin', user_id=10, headed=(3,), headed_codes=['op'],
-                   department_code='op')
+        head = ctx(role='admin', user_id=10, headed=(3,), headed_codes=['tez'],
+                   department_code='tez')
         self.assertFalse(access.can_open_section(head))
         self.assertFalse(access.is_global_admin(head))
         self.assertEqual(access.visibility_scope(head), access.SCOPE_DEPARTMENT)
         self.assertTrue(access.can_view_ticket(head, ticket(created_by=11, department_id=3)))
         self.assertFalse(access.can_view_ticket(head, ticket(created_by=11, department_id=4)))
 
-        sv = ctx(role='sv', user_id=10, groups=(5, 6), department_code='op')
+        sv = ctx(role='sv', user_id=10, groups=(5, 6), department_code='tez')
         self.assertFalse(access.can_open_section(sv))
         self.assertEqual(access.visibility_scope(sv), access.SCOPE_GROUPS)
         self.assertTrue(access.can_view_ticket(
@@ -111,10 +112,18 @@ class ScopeTest(unittest.TestCase):
             sv, ticket(created_by=11, author_group_ids=(7,))))
 
     def test_department_head_sees_queue_of_own_department(self):
-        """Обращение сотрудника чужого отдела в НАШУ очередь глава видит."""
-        head = ctx(role='admin', user_id=10, headed=(3,))
+        """Обращение сотрудника чужого отдела в НАШУ очередь глава видит.
+
+        Глава — вне раздела (Тез КЦ): глава СЗоВ видит всё и так, и на нём
+        проверка отдела очереди молча ничего не проверяла бы.
+        """
+        head = ctx(role='admin', user_id=10, headed=(3,), headed_codes=['tez'],
+                   department_code='tez')
+        self.assertEqual(access.visibility_scope(head), access.SCOPE_DEPARTMENT)
         self.assertTrue(access.can_view_ticket(
             head, ticket(created_by=11, department_id=9, queue_department_id=3)))
+        self.assertFalse(access.can_view_ticket(
+            head, ticket(created_by=11, department_id=9, queue_department_id=4)))
 
     def test_global_admin_sees_everything(self):
         for role in ('super_admin', 'admin'):
@@ -141,8 +150,9 @@ class SectionGateTest(unittest.TestCase):
                 ctx(role=role, user_id=99999, department_code='szov')), role)
 
     def test_other_departments_are_not(self):
-        """«Только СЗоВ» — граница отдела строгая, как у «Табло СЗоВ»."""
-        for code in ('tez', 'op', 'front_office', 'marketing', None, ''):
+        """СЗоВ и отделы-гости — остальным граница отдела строгая, как у «Табло
+        СЗоВ». ОП и фронт-офисы — в tests/test_crm_partner_departments.py."""
+        for code in ('tez', 'marketing', 'remote_cc', 'request_processing_department', None, ''):
             self.assertFalse(access.can_open_section(
                 ctx(role='operator', user_id=99999, department_code=code)), repr(code))
 
@@ -151,7 +161,7 @@ class SectionGateTest(unittest.TestCase):
         не имеет вовсе, снаружи — не пускает никого, тренера тоже."""
         self.assertTrue(access.can_open_section(
             ctx(role='trainer', user_id=77, department_code='szov')))
-        for code in ('tez', 'op', 'front_office', None):
+        for code in ('tez', 'marketing', None):
             self.assertFalse(access.can_open_section(
                 ctx(role='trainer', user_id=77, department_code=code)), repr(code))
         # QR тренеру не нужен — гейт стоит на рядовых, как в «Вики».
@@ -222,7 +232,7 @@ class ActionsTest(unittest.TestCase):
 
     def test_outsider_writes_nothing(self):
         """Виден тикет или нет — решает периметр; невидимый неприкасаем."""
-        me = ctx(role='operator', user_id=10, department_code='op')
+        me = ctx(role='operator', user_id=10, department_code='tez')
         alien = ticket(created_by=11)
         self.assertFalse(access.can_reply(me, alien))
         self.assertFalse(access.can_change_status(me, alien))
@@ -280,7 +290,7 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
 
     def test_own_scope_filters_by_author_only(self):
         sql, params = queries.visibility_sql(
-            ctx(role='operator', user_id=10, department_code='op'))
+            ctx(role='operator', user_id=10, department_code='tez'))
         self.assertIn('t.created_by = %(viewer_id)s', sql)
         self.assertNotIn('group_operator_memberships', sql)
         self.assertNotIn('department_id', sql)
@@ -296,8 +306,8 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
     def test_department_scope_covers_both_sides(self):
         """Как и в Python: и отдел автора, и отдел очереди."""
         sql, params = queries.visibility_sql(
-            ctx(role='admin', user_id=10, headed=(3, 4), headed_codes=['op'],
-                department_code='op'))
+            ctx(role='admin', user_id=10, headed=(3, 4), headed_codes=['tez'],
+                department_code='tez'))
         self.assertIn('t.department_id = ANY(%(headed_departments)s)', sql)
         self.assertIn('q.department_id = ANY(%(headed_departments)s)', sql)
         self.assertEqual(params['headed_departments'], [3, 4])
@@ -305,7 +315,7 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
     def test_group_scope_uses_current_membership_only(self):
         """Ушедший из группы уносит переписку с собой — как в can_view_ticket."""
         sql, params = queries.visibility_sql(
-            ctx(role='sv', user_id=10, groups=(5,), department_code='op'))
+            ctx(role='sv', user_id=10, groups=(5,), department_code='tez'))
         self.assertIn('group_operator_memberships', sql)
         self.assertIn('gom.start_date <= CURRENT_DATE', sql)
         self.assertIn('gom.end_date IS NULL OR gom.end_date >= CURRENT_DATE', sql)
@@ -313,9 +323,12 @@ class VisibilitySqlMatchesPythonTest(unittest.TestCase):
 
     def test_author_clause_present_in_every_narrow_scope(self):
         """Свои обращения видны при любом периметре, иначе СВ потерял бы свои же."""
-        for me in (ctx(role='operator', user_id=10, department_code='op'),
-                   ctx(role='sv', user_id=10, groups=(5,), department_code='op'),
-                   ctx(role='admin', user_id=10, headed=(3,), headed_codes=['op'],
+        for me in (ctx(role='operator', user_id=10, department_code='tez'),
+                   ctx(role='sv', user_id=10, groups=(5,), department_code='tez'),
+                   ctx(role='admin', user_id=10, headed=(3,), headed_codes=['tez'],
+                       department_code='tez'),
+                   # Отдел-гость: свои обращения, заведённые ещё в другом отделе.
+                   ctx(role='operator', user_id=10, department_id=367,
                        department_code='op')):
             sql, _params = queries.visibility_sql(me)
             self.assertIn('t.created_by = %(viewer_id)s', sql)
@@ -912,6 +925,14 @@ class SqlComposesTest(unittest.TestCase):
             ctx(role='sv', user_id=10, groups=(5,)),
             ctx(role='admin', user_id=10, headed=(3,)),
             ctx(role='super_admin', user_id=10),
+            # Узкие периметры: отдел-гость, глава и СВ вне раздела, оператор вне.
+            ctx(role='operator', user_id=10, department_id=367, department_code='op'),
+            ctx(role='admin', user_id=10, headed=(909,), headed_codes=['front_office'],
+                department_id=909, department_code='front_office'),
+            ctx(role='admin', user_id=10, headed=(560,), headed_codes=['tez'],
+                department_code='tez'),
+            ctx(role='sv', user_id=10, groups=(5,), department_code='tez'),
+            ctx(role='operator', user_id=10, department_code='tez'),
         )
 
     def test_list_and_counters_compose_in_every_scope(self):

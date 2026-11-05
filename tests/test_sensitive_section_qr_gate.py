@@ -275,8 +275,8 @@ class CrmQrGateTest(CrmGateHarness, unittest.TestCase):
     def test_closed_section_answers_before_the_qr_gate(self):
         """Чужому отделу — «раздел не открыт», а не «покажите QR». Тренер чужого
         отдела здесь же: граница отдела касается и его."""
-        for context in (crm_ctx(role='trainer', department_code='op'),
-                        crm_ctx(role='operator', department_code='op')):
+        for context in (crm_ctx(role='trainer', department_code='tez'),
+                        crm_ctx(role='operator', department_code='tez')):
             with self.subTest(role=context['role'], dept=context['department_code']):
                 client, gate = self.build(context, granted=False)
                 response = client.get('/api/crm/ping')
