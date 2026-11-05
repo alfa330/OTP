@@ -99,13 +99,15 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         source = _read(APP_PATH)
 
         # Кадровик идёт по тому же широкому набору: список у него — вся компания.
-        self.assertIn("const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingManager)", source)
+        # Правило одно на полный список (fetchUsers) и на страницы с сервера.
+        self.assertIn("const manageOperatorRoleList = (isDepartmentManager || isEmployeeAccountingManager)", source)
         # Множество выросло вместе с бэк-офисом: тот же фильтр режет и его
         # сотрудников, см. test_back_office_department_scope.
         self.assertIn(
-            "new Set(['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES])",
+            "? ['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES]",
             source,
         )
+        self.assertIn("const manageOperatorRoles = new Set(manageOperatorRoleList);", source)
         self.assertIn("manageOperatorRoles.has(normalizeRole(u?.role))", source)
         self.assertIn("const canUseAdminEmployeeAccounting = isAdminLikeRole || isDepartmentHeadUser;", source)
         self.assertIn("const isDepartmentHeadAdminEmployeeView = canUseAdminEmployeeAccounting && isDepartmentHeadUser && ['sv_list', 'manage_users', 'manage_trainers'].includes(view);", source)
@@ -119,9 +121,11 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         # добавились роли бэк-офиса (см. test_back_office_department_scope).
         self.assertIn("isRankAndFileRole(employee?.role)", source)
         self.assertIn("buildUpcomingBirthdays(operatorUsers", source)
-        self.assertIn("const filteredUsers = operatorUsers.filter", source)
-        self.assertIn("const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])", source)
-        self.assertIn("const filteredByStatus = (operatorUsers || [])", source)
+        # Список «Сотрудников» приходит страницей с сервера (useEmployeesPage) —
+        # с тем же правилом «рядовой», что у operatorUsers; карточка и телефон
+        # ищут человека в самом operatorUsers.
+        self.assertIn("staffRoles: manageOperatorRoleList.filter(isRankAndFileRole),", source)
+        self.assertIn("rows: operatorUsers,", source)
 
     def test_trainer_department_head_is_not_treated_as_plain_trainer(self):
         source = _read(APP_PATH)
@@ -162,7 +166,7 @@ class TezDepartmentFrontendScopeTests(unittest.TestCase):
         )
         self.assertNotIn("user?.role === 'trainer'", redirect_guards)
 
-        self.assertIn("} else if (isPlainTrainer) {\n                    fetchUsers();", source)
+        self.assertIn("} else if (isPlainTrainer) {\n                    fetchUsers({ initial: true });", source)
         self.assertIn("{isPlainTrainer && (", source)
         self.assertIn("const isManageOperatorsReadOnly = isPlainTrainer;", source)
         self.assertIn("{(isDepartmentManager || isPlainTrainer) && (", source)

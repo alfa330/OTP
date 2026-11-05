@@ -845,15 +845,19 @@ class FrontendPerimeterTests(unittest.TestCase):
         """Кадровик правит карточки: без справочников селекты стоят пустыми."""
         branch_at = self.app.index("} else if (isEmployeeAccountingManager) {")
         branch = self.app[branch_at:self.app.index("}\n", self.app.index("fetchDepartments();", branch_at))]
-        for call in ("fetchSvList();", "fetchUsers();", "fetchDirections();", "fetchDepartments();"):
+        # initial — загрузка при входе: страница «Учета сотрудников» от неё не перечитывается.
+        for call in ("fetchSvList({ initial: true });", "fetchUsers({ initial: true });",
+                     "fetchDirections();", "fetchDepartments();"):
             with self.subTest(call=call):
                 self.assertIn(call, branch)
 
     def test_trainees_are_not_dropped_from_the_list(self):
+        # Правило одно на полный список (fetchUsers) и на страницы с сервера.
         self.assertIn(
-            "const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingManager)",
+            "const manageOperatorRoleList = (isDepartmentManager || isEmployeeAccountingManager)",
             self.app,
         )
+        self.assertIn("const manageOperatorRoles = new Set(manageOperatorRoleList);", self.app)
 
     def test_department_filter_is_available(self):
         self.assertIn(

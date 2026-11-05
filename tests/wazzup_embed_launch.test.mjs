@@ -161,7 +161,7 @@ test('в окне CRM портал не уводит с чатов и не гр�
     assert.match(redirect.slice(0, 600), /if \(CHATS_EMBED && nextView !== 'wazzup_chats'\) return;/);
     // Справочники при входе, данные СВ, разделы рядового и бейдж «Опросы» — только вне окна.
     for (const guard of [
-        "if (!user || !user.id || CHATS_EMBED) return;\n\n                if (isAdminLikeRole) {\n                    fetchSvList();",
+        "if (!user || !user.id || CHATS_EMBED) return;\n\n                if (isAdminLikeRole) {\n                    fetchSvList({ initial: true });",
         'if (!user || !user.id || CHATS_EMBED || !isSupervisorRole(user?.role)) return;\n                fetchSvData(',
         "if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead) return;\n\n                if (view === 'profile') {",
         "if (!user || !user.id || CHATS_EMBED || !isRankAndFileRole(currentUserRole) || isScopedDepartmentHead || view === 'shift_auction') return;\n                fetchSurveysPendingBadgeCount();",

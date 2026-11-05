@@ -1,15 +1,15 @@
 /*
- * «Учет сотрудников» на телефоне — правила списка без React.
+ * «Учет сотрудников» на телефоне — правила раскладки без React.
  *
  * Компьютер показывает таблицу, телефон — список людей и карточку. Кого
- * пропускает статус, поиск и порядок, решают те же функции, что у таблицы:
- * App.jsx передаёт их аргументами. Здесь только то, чего у таблицы нет вовсе:
- * какие метки статусов стоит показывать, как собрать группы «Мои операторы» и
- * направления, какие поля карточки пустые и когда статус нужен в строке.
- * Всё закреплено tests/employees_phone_list.test.mjs.
+ * пропускает статус, поиск и порядок и как складываются группы «Мои
+ * операторы» и направления, решает сервер (employees/page.py): телефон, как и
+ * таблица, получает готовую страницу. Здесь только то, чего у таблицы нет
+ * вовсе: какие метки статусов стоит показывать, какие поля карточки пустые и
+ * когда статус нужен в строке. Всё закреплено tests/employees_phone_list.test.mjs.
  */
 
-const collator = (a, b) => String(a || '').localeCompare(String(b || ''), 'ru', { sensitivity: 'base' });
+import { groupPageRows } from './employeesPaging.js';
 
 export const plural = (n, [one, few, many]) => {
     const abs = Math.abs(Number(n) || 0) % 100;
@@ -20,15 +20,33 @@ export const plural = (n, [one, few, many]) => {
     return many;
 };
 
-export const countByStatus = (rows, tabs, isVisible) => {
-    const counts = {};
-    (tabs || []).forEach((tab) => { counts[tab.key] = 0; });
-    (rows || []).forEach((row) => {
-        (tabs || []).forEach((tab) => {
-            if (isVisible(row?.status, tab.key)) counts[tab.key] += 1;
-        });
-    });
-    return counts;
+/* Страница с сервера (pageOfResponse) → то, что рисует телефон: строки по
+   группам, числа на метках, итог и номер страницы. Карточку и фото в «Днях
+   рождения» ищем по всему списку (rows), а строка страницы свежее — она и
+   побеждает. «Все выбраны» — когда выбраны все найденные (их id «Выбрать
+   всех» берёт у сервера App.jsx), а не одна страница. */
+export const phonePage = ({ pageData, rows, selectedIds }) => {
+    const pageRows = pageData?.rows || [];
+    const total = pageData?.total || 0;
+    const selected = selectedIds || new Set();
+    return {
+        pageRows,
+        rowsById: new Map([...(Array.isArray(rows) ? rows : []), ...pageRows].map((row) => [Number(row?.id), row])),
+        counts: pageData?.counts || {},
+        total,
+        listTotal: pageData?.listTotal || 0,
+        paged: {
+            groups: pageData?.groups
+                ? groupPageRows(pageRows, pageData.groups)
+                : [{ key: 'all', title: '', total, rows: pageRows }],
+            page: pageData?.page || 1,
+            pageCount: pageData?.pageCount || 1,
+            total,
+            from: pageData?.from || 0,
+            to: pageData?.to || 0,
+        },
+        allSelected: total > 0 && selected.size >= total && pageRows.every((row) => selected.has(Number(row?.id))),
+    };
 };
 
 /* Метки статусов над списком. На компьютере их шесть всегда, и на телефоне
@@ -46,38 +64,6 @@ export const visibleStatusChips = (tabs, counts, activeKey) => {
     });
     if (chips.length === 1 && chips[0].key === activeKey) return [];
     return chips;
-};
-
-export const filterEmployees = (rows, { statusTab, isVisible, query, matches }) => {
-    const q = String(query || '').trim();
-    return (rows || []).filter((row) => isVisible(row?.status, statusTab) && (!q || matches(row, q)));
-};
-
-/* «Операторы» у СВ и тренера: сначала свои, потом по направлениям — так же,
-   как таблица (App.jsx, view === 'manage_operators'). Порядок «по
-   направлению» переставляет сами группы, а внутри группы идёт по имени; любой
-   другой работает внутри группы, а группы стоят по алфавиту. */
-export const groupOperators = (rows, { isMine, directionOf, compare, sortField, sortDir }) => {
-    const byDirection = sortField === 'direction';
-    const sign = sortDir === 'desc' ? -1 : 1;
-    const inGroup = byDirection ? (a, b) => collator(a?.name, b?.name) * sign : compare;
-    const mine = [];
-    const byDir = new Map();
-    (rows || []).forEach((row) => {
-        if (isMine(row)) {
-            mine.push(row);
-            return;
-        }
-        const name = directionOf(row);
-        if (!byDir.has(name)) byDir.set(name, []);
-        byDir.get(name).push(row);
-    });
-    const groups = [];
-    if (mine.length) groups.push({ key: 'mine', title: 'Мои операторы', rows: [...mine].sort(inGroup) });
-    [...byDir.keys()]
-        .sort((a, b) => collator(a, b) * (byDirection ? sign : 1))
-        .forEach((name) => groups.push({ key: `dir:${name}`, title: name, rows: byDir.get(name).sort(inGroup) }));
-    return groups;
 };
 
 export const isEmptyValue = (value) => (

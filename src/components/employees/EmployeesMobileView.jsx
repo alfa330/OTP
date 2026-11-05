@@ -1,12 +1,9 @@
 import React from 'react';
 import MobileActionSheet from '../common/MobileActionSheet';
 import { IosModal, IosPager } from '../ui/ios';
-import { pageOfEmployeeGroups } from './employeesPaging';
 import {
     buildCardSections,
-    countByStatus,
-    filterEmployees,
-    groupOperators,
+    phonePage,
     plural,
     rowStatusNote,
     sortOptionsFromColumns,
@@ -30,8 +27,10 @@ import './employees-mobile.css';
  *   • массовая правка — режимом «Выбрать», как в «Сессиях».
  *
  * Состояние (поиск, вкладка, отдел, порядок, выбор, страница) живёт в App.jsx
- * и общее с компьютером; правила списка — employeesPhoneList.js, страницы —
- * employeesPaging.js. Здесь только раскладка.
+ * и общее с компьютером. Список приходит страницей с сервера (pageData:
+ * useEmployeesPage.js) — фильтр, порядок и числа на метках считает база;
+ * полный список (rows) нужен только карточке и фото в «Днях рождения».
+ * Правила раскладки — employeesPhoneList.js. Здесь только раскладка.
  * Один компонент на все пять списков раздела: «Супервайзеры», «Сотрудники»,
  * «Тренеры», «Админы» и «Операторы» у СВ и тренера.
  */
@@ -100,6 +99,10 @@ const PickRow = ({ label, value, options, onChange, disabled }) => {
 export default function EmployeesMobileView({
     title,
     rows,
+    pageData = null,
+    ready = false,
+    failed = false,
+    onRetry = null,
     loading = false,
     emptyText = 'Сотрудники не найдены.',
     emptySearchText = 'Никого не нашли.',
@@ -107,23 +110,18 @@ export default function EmployeesMobileView({
     statusTabs,
     statusTab,
     onStatusTab,
-    isVisibleByStatus,
     statusCodeOf,
     statusLabelOf,
     isBlacklist,
     search,
     onSearch,
-    matchesSearch,
     columnsFor,
     cardSectionList,
     renderValue,
     sortField,
     sortDir,
     onSort,
-    compare,
-    page = 1,
     onPage,
-    operatorGroups = null,
     subtitleOf = null,
     department = null,
     birthdays = null,
@@ -149,29 +147,16 @@ export default function EmployeesMobileView({
     const applyAskedRef = React.useRef(false);
     const summaryRef = React.useRef(null);
 
-    const allRows = Array.isArray(rows) ? rows : [];
-    const rowsById = new Map(allRows.map((row) => [Number(row?.id), row]));
-    const counts = countByStatus(allRows, statusTabs, isVisibleByStatus);
+    const selectedIds = selection?.ids || EMPTY_SET;
+    const { rowsById, counts, total, listTotal, paged, allSelected } = phonePage({ pageData, rows, selectedIds });
     const chips = visibleStatusChips(statusTabs, counts, statusTab);
     const query = String(search || '').trim();
-    const matched = filterEmployees(allRows, { statusTab, isVisible: isVisibleByStatus, query, matches: matchesSearch });
-    const groups = operatorGroups
-        ? groupOperators(matched, { ...operatorGroups, compare, sortField, sortDir })
-        : [{ key: 'all', title: '', rows: [...matched].sort(compare) }];
-    // «Выбрать всех» — все найденные, а не одна страница.
-    const visibleIds = groups
-        .flatMap((group) => group.rows)
-        .map((row) => Number(row?.id))
-        .filter((id) => Number.isFinite(id));
-    const paged = pageOfEmployeeGroups(groups, page);
 
     const sortOptions = sortOptionsFromColumns(columnsFor('general'));
     const currentSort = sortOptions.find((option) => option.field === sortField) || sortOptions[0];
 
-    const selectedIds = selection?.ids || EMPTY_SET;
     const bulk = selection?.bulk || null;
     const bulkSaving = Boolean(bulk?.saving);
-    const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
 
     const cardEmployee = cardId == null ? null : rowsById.get(cardId) || null;
     if (cardEmployee) lastCardRef.current = cardEmployee;
@@ -349,7 +334,7 @@ export default function EmployeesMobileView({
         <div className={`emp-m${selecting ? ' is-selecting' : ''}`}>
             <div className="emp-m-head">
                 <div className="emp-m-title" role="heading" aria-level={1}>{title}</div>
-                {selection && (allRows.length > 0 || selecting) && (
+                {selection && (listTotal > 0 || selecting) && (
                     <button type="button" className="emp-m-link" onClick={toggleSelecting} disabled={bulkSaving}>
                         {selecting ? 'Готово' : 'Выбрать'}
                     </button>
@@ -481,15 +466,25 @@ export default function EmployeesMobileView({
                 </div>
             )}
 
-            {allRows.length === 0 ? (
-                <div className="emp-m-empty">{loading ? 'Загрузка…' : emptyText}</div>
+            {!ready || !listTotal ? (
+                <div className="emp-m-empty">
+                    {!ready && failed && (
+                        <>
+                            Не удалось загрузить список.
+                            <br />
+                            {onRetry && <button type="button" className="emp-m-link" onClick={onRetry}>Повторить</button>}
+                        </>
+                    )}
+                    {!ready && !failed && 'Загрузка…'}
+                    {ready && emptyText}
+                </div>
             ) : (
                 <>
                     <div className="emp-m-summary" ref={summaryRef}>
                         <span className="emp-m-caption">
-                            {query ? `Найдено: ${matched.length}` : `${matched.length} ${plural(matched.length, countWords)}`}
+                            {query ? `Найдено: ${total}` : `${total} ${plural(total, countWords)}`}
                         </span>
-                        {sortOptions.length > 1 && matched.length > 1 && (
+                        {sortOptions.length > 1 && total > 1 && (
                             <button type="button" className="emp-m-sort" onClick={() => setSortOpen(true)} aria-haspopup="dialog">
                                 {currentSort.short}
                                 <ChevronDown />
@@ -497,7 +492,7 @@ export default function EmployeesMobileView({
                         )}
                     </div>
 
-                    {matched.length === 0 ? (
+                    {total === 0 ? (
                         <div className="emp-m-empty">{query ? emptySearchText : emptyText}</div>
                     ) : paged.groups.map((group) => (
                         <section key={group.key} className="emp-m-block">
@@ -524,8 +519,8 @@ export default function EmployeesMobileView({
                     <button
                         type="button"
                         className="emp-m-link"
-                        onClick={() => (allSelected ? selection.onClear() : selection.onSelectAll(visibleIds))}
-                        disabled={bulkSaving || visibleIds.length === 0}
+                        onClick={() => (allSelected ? selection.onClear() : selection.onSelectAll())}
+                        disabled={bulkSaving || total === 0}
                     >
                         {allSelected ? 'Снять выбор' : 'Выбрать всех'}
                     </button>

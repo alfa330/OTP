@@ -1,24 +1,24 @@
 /*
  * Список «Учета сотрудников» на телефоне.
  *
- * Кого показывать решают функции таблицы (App.jsx) — здесь закреплены правила,
- * которых у таблицы нет: какие метки статусов лишние, как складываются группы
- * «Операторов», что попадает в карточку и когда статус нужен в строке.
+ * Кого показывать и как складываются группы «Операторов», решает сервер
+ * (employees/page.py, tests/test_employees_page_postgres.py) — здесь закреплены
+ * правила раскладки, которых у таблицы нет: какие метки статусов лишние, что
+ * попадает в карточку и когда статус нужен в строке.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
     buildCardSections,
-    countByStatus,
-    filterEmployees,
-    groupOperators,
     isEmptyValue,
+    phonePage,
     plural,
     rowStatusNote,
     sortOptionsFromColumns,
     visibleStatusChips,
 } from '../src/components/employees/employeesPhoneList.js';
+import { pageOfResponse } from '../src/components/employees/employeesPaging.js';
 
 const TABS = [
     { key: 'active', label: 'Активные' },
@@ -29,22 +29,20 @@ const TABS = [
     { key: 'fired', label: 'Уволенные' },
 ];
 
-// Та же лестница, что isEmployeeVisibleByStatusTab в App.jsx.
-const filterKey = (status) => {
-    const value = String(status || '').trim().toLowerCase() || 'working';
-    if (value === 'unpaid_leave') return 'bs';
-    if (value === 'dismissal') return 'fired';
-    return value;
+// Числа на метках — как их отдаёт сервер (status_counts): «Активные» — все,
+// кроме уволенных; unpaid_leave считается в Б/С, «Увольнение» — в «Уволенных».
+const countsOf = (...statuses) => {
+    const counts = Object.fromEntries(TABS.map((tab) => [tab.key, 0]));
+    statuses.forEach((status) => {
+        const key = status === 'unpaid_leave' ? 'bs' : status === 'dismissal' ? 'fired' : status;
+        if (key !== 'fired') counts.active += 1;
+        if (key in counts && key !== 'active') counts[key] += 1;
+    });
+    return counts;
 };
-const isVisible = (status, tab) => {
-    const key = filterKey(status);
-    if (tab === 'active') return key !== 'fired';
-    if (tab === 'fired') return key === 'fired';
-    return key === tab;
-};
-const chipKeys = (rows, active) => visibleStatusChips(TABS, countByStatus(rows, TABS, isVisible), active)
+const chipKeys = (statuses, active) => visibleStatusChips(TABS, countsOf(...statuses), active)
     .map((tab) => tab.key);
-const people = (...statuses) => statuses.map((status, i) => ({ id: i + 1, name: `Сотрудник ${i + 1}`, status }));
+const people = (...statuses) => statuses;
 
 test('русские формы числа', () => {
     const words = ['сотрудник', 'сотрудника', 'сотрудников'];
@@ -74,59 +72,6 @@ test('отсутствующие появляются вместе с «Рабо
 
 test('выбранный статус остаётся, даже если за ним никого', () => {
     assert.deepEqual(chipKeys(people('working'), 'annual_leave'), ['active', 'annual_leave']);
-});
-
-test('фильтр списка — статус и поиск вместе', () => {
-    const rows = [
-        { id: 1, name: 'Алиев Арман', status: 'working' },
-        { id: 2, name: 'Бекова Дана', status: 'fired' },
-        { id: 3, name: 'Алимова Сая', status: 'dismissal' },
-    ];
-    const matches = (row, q) => row.name.toLowerCase().includes(q.toLowerCase());
-    const ids = (statusTab, query) => filterEmployees(rows, { statusTab, isVisible, query, matches }).map((r) => r.id);
-    assert.deepEqual(ids('active', ''), [1]);
-    assert.deepEqual(ids('fired', ''), [2, 3]);
-    assert.deepEqual(ids('fired', 'али'), [3]);
-    assert.deepEqual(ids('active', '  '), [1]);
-});
-
-const OPERATORS = [
-    { id: 1, name: 'Вера', direction: 'Чат', mine: true },
-    { id: 2, name: 'Анна', direction: 'Линия', mine: false },
-    { id: 3, name: 'Борис', direction: 'Чат', mine: false },
-    { id: 4, name: 'Галина', direction: 'Линия', mine: false },
-    { id: 5, name: 'Алия', direction: 'Линия', mine: true },
-];
-const byName = (a, b) => a.name.localeCompare(b.name, 'ru');
-const grouped = (sortField, sortDir) => groupOperators(OPERATORS, {
-    isMine: (row) => row.mine,
-    directionOf: (row) => row.direction,
-    compare: byName,
-    sortField,
-    sortDir,
-}).map((group) => [group.title, group.rows.map((row) => row.name)]);
-
-test('свои операторы первыми, дальше направления по алфавиту', () => {
-    assert.deepEqual(grouped('name', 'asc'), [
-        ['Мои операторы', ['Алия', 'Вера']],
-        ['Линия', ['Анна', 'Галина']],
-        ['Чат', ['Борис']],
-    ]);
-});
-
-test('порядок «по направлению» от Я переставляет группы и имена внутри', () => {
-    assert.deepEqual(grouped('direction', 'desc'), [
-        ['Мои операторы', ['Вера', 'Алия']],
-        ['Чат', ['Борис']],
-        ['Линия', ['Галина', 'Анна']],
-    ]);
-});
-
-test('без своих операторов группы «Мои операторы» нет', () => {
-    const groups = groupOperators(OPERATORS.filter((row) => !row.mine), {
-        isMine: (row) => row.mine, directionOf: (row) => row.direction, compare: byName, sortField: 'name', sortDir: 'asc',
-    });
-    assert.deepEqual(groups.map((group) => group.key), ['dir:Линия', 'dir:Чат']);
 });
 
 test('пустое значение — это пусто, прочерк и false, но не «Нет» и не ноль', () => {
@@ -195,4 +140,50 @@ test('порядок предлагается только по сортируе
         { key: 'mystery', sortField: 'mystery' },
     ]);
     assert.deepEqual(options.map((option) => [option.field, option.dir]), [['name', 'asc'], ['hire_date', 'desc']]);
+});
+
+// Страница с сервера: найдено 120 из 300 во всём списке, на экране вторая, 50 строк.
+const SERVER_PAGE = pageOfResponse({
+    employees: Array.from({ length: 50 }, (_, i) => ({ id: 51 + i, name: `Свежий ${51 + i}` })),
+    total: 120, list_total: 300, offset: 50, limit: 50,
+    status_counts: { active: 280, working: 270, fired: 20 },
+});
+
+test('телефон: итог, числа на метках и номер страницы — из ответа сервера', () => {
+    const view = phonePage({ pageData: SERVER_PAGE, rows: [], selectedIds: new Set() });
+    assert.equal(view.total, 120, 'найдено, а не весь список');
+    assert.equal(view.listTotal, 300);
+    assert.deepEqual(view.counts, { active: 280, working: 270, fired: 20 });
+    assert.deepEqual([view.paged.page, view.paged.pageCount, view.paged.from, view.paged.to], [2, 3, 51, 100]);
+    assert.deepEqual(view.paged.groups.map((group) => [group.key, group.rows.length, group.total]), [['all', 50, 120]]);
+});
+
+test('телефон: группы «Операторов» — шапки из ответа, число — вся группа', () => {
+    const pageData = pageOfResponse({
+        employees: [{ id: 1, list_group: 'mine' }, { id: 2, list_group: 'dir:Чат' }, { id: 3, list_group: 'dir:Чат' }],
+        total: 40, offset: 0, limit: 50,
+        groups: [{ key: 'mine', title: 'Мои операторы', total: 1 }, { key: 'dir:Чат', title: 'Чат', total: 39 }],
+    });
+    assert.deepEqual(phonePage({ pageData, rows: [] }).paged.groups.map((g) => [g.title, g.rows.length, g.total]),
+        [['Мои операторы', 1, 1], ['Чат', 2, 39]]);
+});
+
+test('телефон: «все выбраны» — только когда выбраны все найденные, а не одна страница', () => {
+    const page = (ids) => phonePage({ pageData: SERVER_PAGE, rows: [], selectedIds: new Set(ids) });
+    const onPage = SERVER_PAGE.rows.map((row) => row.id);
+    assert.equal(page(onPage).allSelected, false, '50 из 120');
+    const all = Array.from({ length: 120 }, (_, i) => i + 1);
+    assert.equal(page(all).allSelected, true);
+    assert.equal(page(all.filter((id) => id !== 60)).allSelected, false, 'снят один со страницы');
+    assert.equal(phonePage({ pageData: pageOfResponse({ employees: [], total: 0 }), rows: [], selectedIds: new Set() }).allSelected, false);
+});
+
+test('телефон: карточку ищем во всём списке, строка страницы свежее', () => {
+    const view = phonePage({
+        pageData: SERVER_PAGE,
+        rows: [{ id: 1, name: 'Только в полном списке' }, { id: 60, name: 'Старое имя' }],
+        selectedIds: new Set(),
+    });
+    assert.equal(view.rowsById.get(1)?.name, 'Только в полном списке');
+    assert.equal(view.rowsById.get(60)?.name, 'Свежий 60');
 });

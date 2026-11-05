@@ -11,7 +11,8 @@ import { attachmentCache } from './components/wazzup/attachmentCache';
 // Смена «список ↔ страница сотрудника» — переходом браузера (View Transitions):
 // модуль крошечный и нужен до того, как ленивая страница загрузится.
 import { runPageTransition, usesViewTransitions } from './components/employees/pageTransition';
-import { pageOfEmployeeGroups, pageOfEmployees } from './components/employees/employeesPaging';
+import { employeeListParamsFor, groupPageRows } from './components/employees/employeesPaging';
+import useEmployeesPage from './components/employees/useEmployeesPage';
 import SalaryCalculationResult from './components/salary/SalaryCalculationResult';
 import DualPeriodBreakdown from './components/salary/DualPeriodBreakdown';
 import SalaryComingSoon from './components/salary/SalaryComingSoon';
@@ -43907,6 +43908,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                Флаг взводится и у ГЛАВЫ отдела кадров — с 22.09.2026 их права
                по людям совпадают. */
             const isEmployeeAccountingManager = managesEmployeeAccounting(user);
+            /* Кто из ответа /api/admin/users попадает в списки «Учета сотрудников» —
+               одно правило на fetchUsers и на страницы с сервера (useEmployeesPage).
+               Пояснение, почему набор именно такой, — у fetchUsers. */
+            const manageOperatorRoleList = (isDepartmentManager || isEmployeeAccountingManager)
+                ? ['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES]
+                : ['operator', ...BACK_OFFICE_EMPLOYEE_ROLES];
             /* Фильтр по отделу кадровику обязателен: без него над списком всей
                компании нет ни одного способа сузить выборку, а колонки «Все
                отделы» он и так получает (manageUsersSelectedDeptCode). */
@@ -44436,6 +44443,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // открывается в том же списке, и «назад» приводит на ту же страницу.
             const [employeeListPage, setEmployeeListPage] = useState(1);
             const employeeListTopRef = useRef(null);
+            // Когда начался последний перечитанный запрос полного списка
+            // (performance.now()): по нему страница с сервера узнаёт о правке.
+            const [employeeListStamp, setEmployeeListStamp] = useState(0);
             // Группы для модалки создания сотрудника: оператор зачисляется в группу,
             // супервайзер наследуется от группы (бэкенд скоупит список по отделу).
             const [userModalGroups, setUserModalGroups] = useState([]);
@@ -45320,56 +45330,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const getSortIcon = (field) => {
             if (sortField !== field) return <span className="ml-2 text-gray-400 text-xs">⇅</span>;
             return sortDirection === 'asc' ? <span className="ml-2 text-xs">▲</span> : <span className="ml-2 text-xs">▼</span>;
-            };
-
-            const parseDateForSort = (str) => {
-            if (!str) return 0;
-            const [d, m, y] = str.split("-");
-            const dt = new Date(`${y}-${m}-${d}`);
-            return dt.getTime() || 0;
-            };
-
-            // compare with secondary key = name (combined sort)
-            const compareByField = (a, b, field) => {
-            const dir = sortDirection === 'asc' ? 1 : -1;
-
-            const safe = (v) => (v === null || typeof v === 'undefined') ? '' : v;
-
-            if (field === 'rate') {
-                const na = Number(a?.rate || 0);
-                const nb = Number(b?.rate || 0);
-                if (na === nb) return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
-                return (na - nb) * dir;
-            }
-
-            if (field === 'hire_date') {
-                const da = parseDateForSort(a?.hire_date);
-                const db = parseDateForSort(b?.hire_date);
-                if (da === db) return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
-                return (da - db) * dir;
-            }
-
-            if (field === 'status') {
-                // optional: define logical order for statuses (working -> unpaid_leave -> fired -> others)
-                const order = { working: 1, unpaid_leave: 2, fired: 3 };
-                const sa = a?.status || 'working';
-                const sb = b?.status || 'working';
-                const oa = order[sa] || 99;
-                const ob = order[sb] || 99;
-                if (oa === ob) {
-                return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
-                }
-                return (oa - ob) * dir;
-            }
-
-            // direction handled separately (groups); default: string compare then by name
-            const sa = safe(a?.[field]).toString();
-            const sb = safe(b?.[field]).toString();
-            const res = sa.localeCompare(sb, 'ru', { sensitivity: 'base' });
-            if (res === 0) {
-                return safe(a?.name).toString().localeCompare(safe(b?.name).toString(), 'ru', { sensitivity: 'base' }) * 1;
-            }
-            return res * dir;
             };
 
             const formatEmployeeTableDate = (value) => {
@@ -49621,10 +49581,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             };
 
-            const fetchUsers = async () => {
+            // initial — загрузка при входе: правки не было, страница «Учета
+            // сотрудников» перечитываться не должна (см. setEmployeeListStamp).
+            const fetchUsers = async ({ initial = false } = {}) => {
                 const requestKey = `fetchUsers:${user?.id || 'anonymous'}`;
                 return runSingleFlight(requestKey, async () => {
                     setIsAdminDataLoading(true);
+                    const startedAt = performance.now();
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/users`, {
@@ -49641,13 +49604,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             // управленцами: у него на экране вся компания, и
                             // узкий набор молча съел бы стажёров — их в фирме
                             // больше, чем кадровиков.
-                            const manageOperatorRoles = (isDepartmentManager || isEmployeeAccountingManager)
-                                ? new Set(['operator', 'trainee', 'sv', 'supervisor', ...BACK_OFFICE_EMPLOYEE_ROLES])
-                                : new Set(['operator', ...BACK_OFFICE_EMPLOYEE_ROLES]);
+                            const manageOperatorRoles = new Set(manageOperatorRoleList);
                             setAdminUsers(nextUsers);
                             setUsers(nextUsers.filter((u) => manageOperatorRoles.has(normalizeRole(u?.role))));
                             setSystemAdmins(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'admin'));
                             setTrainerUsers(nextUsers.filter((u) => String(u?.role || '').toLowerCase() === 'trainer'));
+                            // Список перечитан после правки — страница «Учета
+                            // сотрудников» перечитывается следом (useEmployeesPage).
+                            if (!initial) setEmployeeListStamp(startedAt);
                         } else {
                             showToast(data.error || 'Failed to fetch users', 'error');
                         }
@@ -51629,6 +51593,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     setTrainerUsers((prev) => patchCollectionAvatar(prev));
                     setSystemAdmins((prev) => patchCollectionAvatar(prev));
                     setSvList((prev) => patchCollectionAvatar(prev));
+                    // Своя строка на странице «Учета сотрудников» — с новым фото.
+                    setEmployeeListStamp(performance.now());
                     setSelectedSvData((prev) => {
                         if (!prev || Number(prev?.id) !== Number(user.id)) return prev;
                         return {
@@ -52036,10 +52002,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             };
 
-            const fetchSvList = async () => {
+            const fetchSvList = async ({ initial = false } = {}) => {
                 const requestKey = `fetchSvList:${user?.id || 'anonymous'}`;
                 return runSingleFlight(requestKey, async () => {
                     setIsAdminDataLoading(true);
+                    const startedAt = performance.now();
 
                     try {
                         const response = await axios.get(`${API_BASE_URL}/api/admin/sv_list`, {
@@ -52048,6 +52015,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         const data = response.data;
                         if (data.status === 'success' && isMounted.current) {
                             setSvList(data.sv_list || []);
+                            if (!initial) setEmployeeListStamp(startedAt);
                         } else {
                             showToast(data.error || 'Failed to fetch supervisor list', 'error');
                             console.error(data.error || 'Failed to fetch supervisor list', 'error');
@@ -52136,8 +52104,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     String(employee?.supervisor_name || '').toLowerCase().includes(q)
                 );
             };
-
-            const filteredUsers = operatorUsers.filter((u) => matchesEmployeeSearchQuery(u, manageUsersSearchQuery));
 
             const filteredTrainerUsers = trainerUsers.filter((u) => matchesEmployeeSearchQuery(u, trainerSearchQuery));
 
@@ -52233,6 +52199,62 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (!root || !top) return;
                 const shift = top.getBoundingClientRect().top - root.getBoundingClientRect().top;
                 if (shift < 0) root.scrollTop += shift - 16;
+            };
+
+            /* Список раздела, который сейчас на экране, — страницей с сервера
+               (GET /api/admin/employees/page, employees/page.py): вкладку статуса,
+               отдел, поиск, порядок и страницу считает база. Условия — те же, под
+               которыми список рисуется ниже: чужой раздел запрос не шлёт. Полные
+               списки (users, svList…) по-прежнему грузятся при входе: их читают
+               другие разделы, карточка сотрудника и «Дни рождения». */
+            const employeeListParams = employeeListParamsFor(view, {
+                userId: user?.id,
+                embed: CHATS_EMBED,
+                showsAdminLists: isAdminLikeRole || isDepartmentHeadAdminEmployeeView || isEmployeeAccountingManagerView,
+                showsAdmins: isSuperAdmin || isEmployeeAccountingManager,
+                showsOperators: isDepartmentManager || isPlainTrainer,
+                staffRoles: manageOperatorRoleList.filter(isRankAndFileRole),
+                operatorRoles: manageOperatorRoleList,
+                page: employeeListPage,
+                usersSort: { field: usersSortField, dir: usersSortDirection },
+                operatorsSort: { field: sortField, dir: sortDirection },
+                staff: { status: activeUserTab, department: manageUsersDeptFilter, search: manageUsersSearchQuery },
+                sv: { status: activeSvTab, department: svListDeptFilter, search: supervisorSearchQuery },
+                trainers: { status: activeTrainerTab, search: trainerSearchQuery },
+                admins: { status: activeAdminTab, search: adminSearchQuery },
+                operators: { status: activeTab, department: manageOperatorsDeptFilter, search: manageOperatorsSearchQuery },
+            });
+            const employeesPage = useEmployeesPage({
+                owner: user?.id,
+                params: employeeListParams,
+                refreshStamp: employeeListStamp,
+                load: (query, { signal }) => axios.get(`${API_BASE_URL}/api/admin/employees/page?${query}`, {
+                    headers: { 'X-User-Id': user.id },
+                    signal,
+                }).then((response) => response.data),
+                onPageMoved: setEmployeeListPage,
+                onError: (err) => showToast(err?.response?.data?.error || 'Не удалось загрузить список сотрудников', 'error'),
+            });
+            // Первой страницы списка ещё нет: идёт загрузка или запрос упал.
+            const renderEmployeeListPending = () => (
+                <p className="text-center text-gray-600">
+                    {employeesPage.failed ? (
+                        <>
+                            Не удалось загрузить список.{' '}
+                            <button type="button" onClick={employeesPage.retry} className="text-blue-600 hover:underline">
+                                Повторить
+                            </button>
+                        </>
+                    ) : 'Загрузка...'}
+                </p>
+            );
+            // «Выбрать всех» на телефоне — все найденные: их id отдаёт сервер.
+            const selectAllFoundManageUsers = async () => {
+                try {
+                    setSelectedManageUsersIds(new Set(await employeesPage.fetchIds()));
+                } catch (err) {
+                    showToast(err?.response?.data?.error || 'Не удалось выбрать всех', 'error');
+                }
             };
 
             // Строка открывает карточку сотрудника (решение владельца 30.09.2026:
@@ -52789,31 +52811,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setShowUserEditModal(true);
             };
 
-            // «Мои операторы» — то же правило, что у таблицы «Операторов»: по id
-            // супервайзера, а без него — по имени.
-            const isManagedOperatorMine = (op) => {
-                const requesterSupervisorId = Number(user?.id);
-                const opSupervisorId = Number(op?.supervisor_id);
-                if (Number.isFinite(requesterSupervisorId) && Number.isFinite(opSupervisorId)) {
-                    return opSupervisorId === requesterSupervisorId;
-                }
-                const requesterSupervisorName = String(user?.name || '').trim().toLowerCase();
-                const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
-                return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
-            };
-
             // Телефонная раскладка «Учета сотрудников» (src/components/employees):
             // список людей вместо таблицы и карточка сотрудника экраном. Данные,
             // права и действия — отсюда, общие с компьютером; там только раскладка.
             const renderEmployeesPhone = (config) => (
                 <Suspense fallback={null}>
                     <EmployeesMobileView
-                        loading={isAdminDataLoading}
                         {...config}
-                        page={employeeListPage}
+                        pageData={employeesPage.page}
+                        ready={employeesPage.ready}
+                        failed={employeesPage.failed}
+                        onRetry={employeesPage.retry}
+                        loading={employeesPage.loading}
                         onPage={goEmployeeListPage}
                         statusTabs={USER_STATUS_FILTER_TABS}
-                        isVisibleByStatus={isEmployeeVisibleByStatusTab}
                         statusCodeOf={normalizeEmployeeStatusCode}
                         statusLabelOf={(status) => getEmployeeStatusBadgeMeta(status).label}
                         isBlacklist={isEmployeeBlacklistDismissal}
@@ -53201,7 +53212,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     setUsersSortField(field);
                     setUsersSortDirection(dir);
                 },
-                compare: (a, b) => compareUsersByField(a, b, usersSortField),
             };
 
             const departmentNameOfEmployee = (employee) => (departments || []).find(
@@ -53230,10 +53240,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setDepartmentFilter = null,
                 departmentOptions = [],
             }) => {
+                // Полный список — для карточки сотрудника; на экран идёт страница
+                // с сервера (employeesPage выше): отдел, вкладка, поиск и порядок
+                // уже применены.
                 const allRows = Array.isArray(items) ? items : [];
-                const rows = departmentFilter
-                    ? allRows.filter((r) => Number(r?.department_id ?? r?.departmentId) === Number(departmentFilter))
-                    : allRows;
+                const listPage = employeesPage.page;
                 const columnsVariant = role === 'operator' ? 'operator' : 'staff';
                 // Действия над человеком — одни на телефоне и в карточке компьютера.
                 const actionsFor = (employee) => {
@@ -53284,7 +53295,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     };
                     return renderEmployeesPhone({
                         title,
-                        rows,
+                        rows: allRows,
                         emptyText,
                         emptySearchText,
                         countWords: countWordsByRole[role],
@@ -53292,7 +53303,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         onStatusTab: setActiveStatusTab,
                         search: searchQuery,
                         onSearch: setSearchQuery,
-                        matchesSearch: (employee, query) => matchesEmployeeSearchQuery(employee, query),
                         columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, columnsVariant),
                         ...usersSortPhone,
                         // Отдел в строке — только когда в списке люди разных отделов.
@@ -53306,11 +53316,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     });
                 }
                 const columns = buildEmployeeSectionColumns(role === 'operator' ? 'operator' : 'staff');
-
-                const filteredByStatus = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, activeStatusTab));
-                const searchedRows = filteredByStatus.filter((employee) => matchesEmployeeSearchQuery(employee, searchQuery));
-                const sortedRows = [...searchedRows].sort((a, b) => compareUsersByField(a, b, usersSortField));
-                const paged = pageOfEmployees(sortedRows, employeeListPage);
 
                 if (employeeCardId != null) {
                     return renderEmployeeCardPage({
@@ -53363,7 +53368,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                         <div className="flex flex-wrap gap-3 mb-6">
                             {USER_STATUS_FILTER_TABS.map((tab) => {
-                                const count = rows.filter((employee) => isEmployeeVisibleByStatusTab(employee?.status, tab.key)).length;
+                                const count = listPage?.counts?.[tab.key] ?? 0;
                                 const isActive = activeStatusTab === tab.key;
                                 return (
                                     <button
@@ -53381,9 +53386,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             })}
                         </div>
 
-                        {isAdminDataLoading ? (
-                            <p className="text-center text-gray-600">Загрузка...</p>
-                        ) : rows.length === 0 ? (
+                        {!listPage ? (
+                            renderEmployeeListPending()
+                        ) : listPage.listTotal === 0 ? (
                             <p className="text-center text-gray-600">{emptyText}</p>
                         ) : (
                             <>
@@ -53398,10 +53403,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     />
                                 </div>
 
-                                {sortedRows.length === 0 ? (
+                                {listPage.total === 0 ? (
                                     <p className="px-6 py-6 text-center text-gray-600">{emptySearchText}</p>
                                 ) : (
-                                    <table className="min-w-full border rounded-lg w-full">
+                                    <table className="min-w-full border rounded-lg w-full" aria-busy={employeesPage.loading ? 'true' : undefined}>
                                         <thead className="bg-gray-50">
                                             <tr>
                                                 {columns.map((column) => {
@@ -53422,8 +53427,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </tr>
                                         </thead>
 
-                                        <tbody className="bg-white divide-y divide-gray-200">
-                                            {paged.rows.map((employee) => (
+                                        <tbody className={`bg-white divide-y divide-gray-200 transition-opacity duration-200${employeesPage.loading ? ' opacity-60 delay-150' : ''}`}>
+                                            {listPage.rows.map((employee) => (
                                                 <tr
                                                     key={employee.id}
                                                     data-employee-id={employee.id}
@@ -53450,7 +53455,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     таблицей («51–100 из 312»), второй раз то же
                                                     число рядом не нужно. */}
                                                 <td className="px-6 py-3 font-medium text-gray-700">
-                                                    {paged.pageCount === 1 && <>{sortedRows.length} {countLabel}</>}
+                                                    {listPage.pageCount === 1 && <>{listPage.total} {countLabel}</>}
                                                 </td>
                                                 <td colSpan={Math.max(1, columns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                     Показан раздел: {activeEmployeeTableSection.label}
@@ -53460,10 +53465,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </table>
                                 )}
                             </div>
-                            {paged.pageCount > 1 && (
+                            {listPage.pageCount > 1 && (
                                 <div className="mt-3">
-                                    <IosPager page={paged.page} pageCount={paged.pageCount} total={paged.total}
-                                              from={paged.from} to={paged.to} onPage={goEmployeeListPage} unit="сотрудники" />
+                                    <IosPager page={listPage.page} pageCount={listPage.pageCount} total={listPage.total}
+                                              from={listPage.from} to={listPage.to} onPage={goEmployeeListPage} unit="сотрудники" />
                                 </div>
                             )}
                             </>
@@ -53874,17 +53879,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (!user || !user.id || CHATS_EMBED) return;
 
                 if (isAdminLikeRole) {
-                    fetchSvList();
+                    fetchSvList({ initial: true });
                     fetchDirections();
-                    fetchUsers();
+                    fetchUsers({ initial: true });
                     fetchDepartments();
                 } else if (isDepartmentManager) {
-                    fetchSvList();
-                    fetchUsers();
+                    fetchSvList({ initial: true });
+                    fetchUsers({ initial: true });
                     fetchDirections();
                     fetchDepartments();
                 } else if (isPlainTrainer) {
-                    fetchUsers();
+                    fetchUsers({ initial: true });
                     fetchDirections();
                     fetchDepartments();
                 } else if (isEmployeeAccountingManager) {
@@ -53893,8 +53898,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                        своё выше. Набор тот же, что у админа: он правит карточки
                        всей компании, и селекты направления и супервайзера без
                        этих справочников стояли бы пустыми. */
-                    fetchSvList();
-                    fetchUsers();
+                    fetchSvList({ initial: true });
+                    fetchUsers({ initial: true });
                     fetchDirections();
                     fetchDepartments();
                 }
@@ -54118,7 +54123,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (!user || !user.id || !['operator', 'trainee'].includes(currentUserRole) || isScopedDepartmentHead) return;
                 if (!['surveys', 'trainings', 'contests'].includes(view)) return;
                 fetchDirections();
-                fetchUsers();
+                fetchUsers({ initial: true });
             }, [user?.id, currentUserRole, isScopedDepartmentHead, view]);
 
             /* Бейдж «Опросы» у рядового. Предикат, а не список ['operator','trainee']:
@@ -58387,15 +58392,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                 {(view === 'manage_users' || view === 'employees') && isMobileShell && renderEmployeesPhone({
                                     title: 'Сотрудники',
-                                    rows: (operatorUsers || []).filter((employee) => (
-                                        !manageUsersDeptFilter || Number(employee?.department_id) === Number(manageUsersDeptFilter)
-                                    )),
+                                    rows: operatorUsers,
                                     emptySearchText: 'Сотрудники по запросу не найдены.',
                                     statusTab: activeUserTab,
                                     onStatusTab: setActiveUserTab,
                                     search: manageUsersSearchQuery,
                                     onSearch: setManageUsersSearchQuery,
-                                    matchesSearch: (employee, query) => matchesEmployeeSearchQuery(employee, query),
                                     columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, 'operator', manageUsersDeptFields),
                                     ...usersSortPhone,
                                     subtitleOf: (employee) => [
@@ -58416,7 +58418,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         ids: selectedManageUsersIds,
                                         onToggle: toggleManageUsersSelection,
                                         onClear: clearManageUsersSelection,
-                                        onSelectAll: (ids) => setSelectedManageUsersIds(new Set(ids)),
+                                        onSelectAll: selectAllFoundManageUsers,
                                         bulk: {
                                             showGroupAndDirection: manageUsersDeptFields.operatorFields,
                                             // У ООЗ группа есть, направлений нет вовсе.
@@ -58501,11 +58503,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     {/* Tabs */}
                                     <div className="flex flex-wrap gap-3 mb-6">
                                     {(() => {
-                                        const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
-                                        const allUsers = (Array.isArray(operatorUsers) ? operatorUsers : [])
-                                            .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
+                                        // Числа — с сервера: по отделу, без поиска (employees/page.py).
+                                        const counts = employeesPage.page?.counts || {};
                                         return USER_STATUS_FILTER_TABS.map((tab) => {
-                                            const count = allUsers.filter((u) => isEmployeeVisibleByStatusTab(u?.status, tab.key)).length;
+                                            const count = counts[tab.key] ?? 0;
                                             const isActive = activeUserTab === tab.key;
                                             return (
                                                 <button
@@ -58523,27 +58524,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     })()}
                                     </div>
 
-                                    {isAdminDataLoading ? (
-                                    <p className="text-center text-gray-600">Загрузка...</p>
+                                    {!employeesPage.page ? (
+                                    renderEmployeeListPending()
                                     ) : (
                                     (() => {
-                                        // Фильтруем по статусу и (опц.) по отделу
-                                        const _deptFilter = manageUsersDeptFilter ? Number(manageUsersDeptFilter) : null;
-                                        const filteredByStatus = (operatorUsers || [])
-                                            .filter((u) => isEmployeeVisibleByStatusTab(u?.status, activeUserTab))
-                                            .filter((u) => _deptFilter == null || Number(u?.department_id) === _deptFilter);
+                                        // Страница с сервера: отдел, вкладка статуса, поиск и порядок
+                                        // уже применены (employees/page.py).
+                                        const paged = employeesPage.page;
 
-                                        if (filteredByStatus.length === 0) {
+                                        if ((paged.counts[activeUserTab] ?? 0) === 0) {
                                         return <p className="text-center text-gray-600">
                                             Сотрудники не найдены.
                                         </p>;
                                         }
 
-                                        // применяем локальный поиск только для этого подраздела
-                                        const searched = filteredUsers.filter((u) => filteredByStatus.includes(u));
-
-                                        const sortedUsersFlat = [...searched].sort((a, b) => compareUsersByField(a, b, usersSortField));
-                                        const paged = pageOfEmployees(sortedUsersFlat, employeeListPage);
                                         const grouped = { __all__: paged.rows };
                                         const sortedSvNames = ['__all__'];
                                         const selectedManageUsersCount = selectedManageUsersIds.size;
@@ -58667,7 +58661,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     {svName}
                                                 </h3>
                                                 )}
-                                                <table className="min-w-full border rounded-lg w-full">
+                                                <table className="min-w-full border rounded-lg w-full" aria-busy={employeesPage.loading ? 'true' : undefined}>
                                                     <thead className="bg-gray-50">
                                                     <tr>
                                                         {manageUsersSectionColumns.map((column) => {
@@ -58688,7 +58682,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     </tr>
                                                     </thead>
 
-                                                    <tbody className="bg-white divide-y divide-gray-200">
+                                                    <tbody className={`bg-white divide-y divide-gray-200 transition-opacity duration-200${employeesPage.loading ? ' opacity-60 delay-150' : ''}`}>
                                                     {svUsers.map((u) => {
                                                         const isSelectedForBulk = selectedManageUsersIds.has(Number(u.id));
                                                         return (
@@ -58720,7 +58714,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     <tr>
                                                         {/* Страниц несколько — счёт ведёт пейджер. */}
                                                         <td className="px-6 py-3 font-medium text-gray-700">
-                                                            {paged.pageCount === 1 && <>{svUsers.length} сотрудников</>}
+                                                            {paged.pageCount === 1 && <>{paged.total} сотрудников</>}
                                                         </td>
                                                         <td colSpan={Math.max(1, manageUsersSectionColumns.length - 1)} className="px-6 py-3 text-sm text-gray-600">
                                                             Показан раздел: {activeEmployeeTableSection.label}
@@ -59502,15 +59496,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                                 {view === 'manage_operators' && isMobileShell && renderEmployeesPhone({
                                     title: 'Операторы',
-                                    rows: (() => {
-                                        const operators = (Array.isArray(users) && users.length > 0)
-                                            ? users
-                                            : (Array.isArray(svData?.operators) ? svData.operators : []);
-                                        return manageOperatorsDeptFilter
-                                            ? operators.filter((op) => Number(op?.department_id ?? op?.departmentId) === Number(manageOperatorsDeptFilter))
-                                            : operators;
-                                    })(),
-                                    loading: isLoading || isAdminDataLoading,
+                                    // Для карточки оператора; список — страницей с сервера.
+                                    rows: (Array.isArray(users) && users.length > 0)
+                                        ? users
+                                        : (Array.isArray(svData?.operators) ? svData.operators : []),
                                     emptyText: 'Операторы не найдены.',
                                     emptySearchText: 'Операторы по запросу не найдены.',
                                     countWords: ['оператор', 'оператора', 'операторов'],
@@ -59518,7 +59507,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     onStatusTab: setActiveTab,
                                     search: manageOperatorsSearchQuery,
                                     onSearch: setManageOperatorsSearchQuery,
-                                    matchesSearch: (op, query) => matchesEmployeeSearchQuery(op, query, getOperatorDirectionLabel(op)),
                                     columnsFor: (tableSection) => buildEmployeeColumnsOfSection(tableSection, departmentHidesOperatorFields(user) ? 'staff' : 'operator'),
                                     sortField,
                                     sortDir: sortDirection,
@@ -59526,8 +59514,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         setSortField(field);
                                         setSortDirection(dir);
                                     },
-                                    compare: (a, b) => compareByField(a, b, sortField),
-                                    operatorGroups: { isMine: isManagedOperatorMine, directionOf: getOperatorDirectionLabel },
                                     // В группе направления подпись — супервайзер; у своих и в
                                     // карточке — направление (супервайзер там — сам смотрящий).
                                     subtitleOf: (op, groupKey) => {
@@ -59601,15 +59587,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         {/* Tabs */}
                                         <div className="flex flex-wrap gap-3 mb-6">
                                         {(() => {
-                                            const allOps = (Array.isArray(users) && users.length > 0)
-                                                ? users
-                                                : (Array.isArray(svData?.operators) ? svData.operators : []);
-                                            const deptFilter = manageOperatorsDeptFilter ? Number(manageOperatorsDeptFilter) : null;
-                                            const filteredByDepartment = deptFilter == null
-                                                ? allOps
-                                                : allOps.filter((op) => Number(op?.department_id ?? op?.departmentId) === deptFilter);
+                                            // Числа — с сервера: по отделу, без поиска (employees/page.py).
+                                            const counts = employeesPage.page?.counts || {};
                                             return USER_STATUS_FILTER_TABS.map((tab) => {
-                                                const count = filteredByDepartment.filter((op) => isEmployeeVisibleByStatusTab(op?.status, tab.key)).length;
+                                                const count = counts[tab.key] ?? 0;
                                                 const isActive = activeTab === tab.key;
                                                 return (
                                                     <button
@@ -59629,91 +59610,26 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         })()}
                                         </div>
 
-                                        {(isLoading || isAdminDataLoading) ? (
-                                        <p className="text-center text-gray-600">Загрузка...</p>
+                                        {!employeesPage.page ? (
+                                        renderEmployeeListPending()
                                         ) : (
                                         (() => {
-                                            const operators = (Array.isArray(users) && users.length > 0)
-                                                ? users
-                                                : (Array.isArray(svData?.operators) ? svData.operators : []);
-                                            const deptFilter = manageOperatorsDeptFilter ? Number(manageOperatorsDeptFilter) : null;
-                                            const filteredByStatus = operators
-                                                .filter((op) => isEmployeeVisibleByStatusTab(op?.status, activeTab))
-                                                .filter((op) => deptFilter == null || Number(op?.department_id ?? op?.departmentId) === deptFilter);
+                                            // Страница с сервера: отдел, вкладка статуса, поиск, порядок и
+                                            // группы «свои → направления» уже посчитаны (employees/page.py,
+                                            // group=operators): «Мои операторы» — те, кого ведёт смотрящий,
+                                            // дальше направления по алфавиту, а «По направлению»
+                                            // переставляет сами группы.
+                                            const paged = employeesPage.page;
 
-                                            if (!filteredByStatus || filteredByStatus.length === 0) {
+                                            if ((paged.counts[activeTab] ?? 0) === 0) {
                                             return <p className="text-center text-gray-600">Операторы не найдены.</p>;
                                             }
 
-                                            // Применяем локальный поиск только для этого подраздела
-                                            const matched = filteredByStatus.filter((op) => {
-                                            const dirName = getOperatorDirectionLabel(op);
-                                            return matchesEmployeeSearchQuery(op, manageOperatorsSearchQuery, dirName);
-                                            });
-
-                                            const requesterSupervisorId = Number(user?.id);
-                                            const requesterSupervisorName = String(user?.name || '').trim().toLowerCase();
-                                            const myOperators = matched.filter((op) => {
-                                                const opSupervisorId = Number(op?.supervisor_id);
-                                                if (Number.isFinite(requesterSupervisorId) && Number.isFinite(opSupervisorId)) {
-                                                    return opSupervisorId === requesterSupervisorId;
-                                                }
-                                                const opSupervisorName = String(op?.supervisor_name || '').trim().toLowerCase();
-                                                return !!requesterSupervisorName && opSupervisorName === requesterSupervisorName;
-                                            });
-                                            const myOperatorIds = new Set(
-                                                myOperators
-                                                    .map((op) => Number(op?.id))
-                                                    .filter((id) => Number.isFinite(id))
-                                            );
-                                            const myOperatorsSorted = [...myOperators];
-                                            if (sortField === 'direction') {
-                                                myOperatorsSorted.sort((x, y) => (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (sortDirection === 'asc' ? 1 : -1));
-                                            } else {
-                                                myOperatorsSorted.sort((x, y) => compareByField(x, y, sortField));
-                                            }
-
-                                            // Группируем по направлению (оставляем группировку, но убираем колонку направления)
-                                            const grouped = matched.reduce((acc, op) => {
-                                            const opId = Number(op?.id);
-                                            if (Number.isFinite(opId) && myOperatorIds.has(opId)) return acc;
-                                            const dirName = getOperatorDirectionLabel(op);
-                                            if (!acc[dirName]) acc[dirName] = [];
-                                            acc[dirName].push(op);
-                                            return acc;
-                                            }, {});
-
-                                            // Сортируем группы: если сортируем по 'direction' — сортируем имена групп по направлению + вторично по ФИО
-                                            let sortedDirectionNames = Object.keys(grouped);
-                                            if (sortField === 'direction') {
-                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => {
-                                                const res = a.localeCompare(b, 'ru', { sensitivity: 'base' });
-                                                return sortDirection === 'asc' ? res : -res;
-                                            });
-                                            // внутри групп — комбинированная сортировка (direction primary, name secondary)
-                                            sortedDirectionNames.forEach((dir) => {
-                                                grouped[dir].sort((x, y) => {
-                                                // primary same for all in group, so compare by name (respect sortDirection for combined behavior)
-                                                return (x.name || '').localeCompare(y.name || '', 'ru', { sensitivity: 'base' }) * (sortDirection === 'asc' ? 1 : -1);
-                                                });
-                                            });
-                                            } else {
-                                            // для всех остальных полей — внутри каждой группы сортируем по (primary field, затем name)
-                                            sortedDirectionNames.forEach((dir) => {
-                                                grouped[dir].sort((x, y) => compareByField(x, y, sortField));
-                                            });
-                                            // сортируем список групп по имени направления для стабильного порядка
-                                            sortedDirectionNames = sortedDirectionNames.sort((a, b) => a.localeCompare(b, 'ru', { sensitivity: 'base' }));
-                                            }
-
-                                            // Страница режет общий порядок «свои → направления»;
-                                            // шапка группы — на каждой странице с её людьми.
-                                            const paged = pageOfEmployeeGroups([
-                                                { key: 'mine', rows: myOperatorsSorted },
-                                                ...sortedDirectionNames.map((dirName) => ({ key: `dir:${dirName}`, title: dirName, rows: grouped[dirName] })),
-                                            ], employeeListPage);
-                                            const pagedMine = paged.groups.find((group) => group.key === 'mine');
-                                            const pagedDirections = paged.groups.filter((group) => group.key !== 'mine');
+                                            // Шапка группы — на каждой странице с её людьми, число в
+                                            // шапке — вся группа.
+                                            const pagedGroups = groupPageRows(paged.rows, paged.groups);
+                                            const pagedMine = pagedGroups.find((group) => group.key === 'mine');
+                                            const pagedDirections = pagedGroups.filter((group) => group.key !== 'mine');
 
                                             return (
                                             <>
@@ -59728,7 +59644,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 />
                                                 </div>
 
-                                                <table className="min-w-full border rounded-lg w-full">
+                                                <table className="min-w-full border rounded-lg w-full" aria-busy={employeesPage.loading ? 'true' : undefined}>
                                                 <thead className="bg-gray-50">
                                                     <tr>
                                                     {employeeSectionColumns.map((column) => {
@@ -59752,7 +59668,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     </tr>
                                                 </thead>
 
-                                                <tbody className="bg-white divide-y divide-gray-200">
+                                                <tbody className={`bg-white divide-y divide-gray-200 transition-opacity duration-200${employeesPage.loading ? ' opacity-60 delay-150' : ''}`}>
                                                     {pagedMine && (
                                                     <React.Fragment>
                                                         <tr className="bg-gray-100">
@@ -59871,7 +59787,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 <tfoot className="bg-gray-50">
                                                     <tr>
                                                     {/* Страниц несколько — счёт ведёт пейджер. */}
-                                                    <td className="px-6 py-3 font-medium text-gray-700">{paged.pageCount === 1 && <>{matched.length} операторов</>}</td>
+                                                    <td className="px-6 py-3 font-medium text-gray-700">{paged.pageCount === 1 && <>{paged.total} операторов</>}</td>
                                                     <td colSpan={employeeSectionColumns.length - 1 + (isManageOperatorsReadOnly ? 0 : 1)} className="px-6 py-3 text-sm text-gray-600">
                                                         Показан раздел: {activeEmployeeTableSection.label}
                                                     </td>

@@ -53005,6 +53005,33 @@ except Exception:
     logging.exception("Заявки на отпуск и Б/С: Blueprint НЕ подключён")
 
 
+# ── «Учет сотрудников» по страницам ─────────────────────────────────────────
+# Пять списков раздела берут с сервера одну страницу: фильтр, порядок и
+# LIMIT/OFFSET — в SQL (employees/page.py). Границы видимости — те же, что у
+# get_admin_users и get_sv_list: полные ручки остаются, их читают другие разделы.
+try:
+    from employees.routes import build_employees_blueprint  # noqa: E402
+
+    app.register_blueprint(build_employees_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        get_authenticated_requester=_get_authenticated_requester,
+        normalize_role=_normalize_user_role,
+        is_admin_role=_is_admin_role,
+        is_super_admin_role=_is_super_admin_role,
+        is_global_admin_requester=_is_global_admin_requester,
+        headed_department_ids=_headed_department_ids,
+        department_scope_id_for_requester=_department_scope_id_for_requester,
+        is_employee_accounting_manager=_is_employee_accounting_manager,
+        build_avatar_signed_url=_build_avatar_signed_url,
+        back_office_roles=BACK_OFFICE_EMPLOYEE_ROLES,
+        proxy_status_labels=PROXY_STATUS_LABELS,
+    ))
+    logging.info("Учет сотрудников: Blueprint подключён на /api/admin/employees/page")
+except Exception:
+    logging.exception("Учет сотрудников: Blueprint НЕ подключён")
+
+
 # ── Раздел «Посылки» (реестр невостребованных посылок фронт-офисов) ──────────
 # Тот же приём, что у вики и обращений. Ключ sensitive-access тот же самый:
 # в карточке ФИО и телефон живого водителя, и оба отдела — фронт-офисы и СЗоВ —
