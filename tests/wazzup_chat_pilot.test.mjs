@@ -79,8 +79,8 @@ test('chat identity separates account, channel and opaque chat identifiers', () 
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('potok', chat));
     assert.notEqual(pilotChatKey('op', chat), pilotChatKey('op', { ...chat, channelId: 'other' }));
     // Global (два канала), +77008541777 «Департамент», +77470943333 iTaxi, +77001551199 Salam Taxi
-    // и 11 номеров второго списка Syntony.
-    assert.equal(GLOBAL_CHANNEL_IDS.size, 16);
+    // 11 номеров второго списка Syntony и JANA TAXI WABA.
+    assert.equal(GLOBAL_CHANNEL_IDS.size, 17);
 });
 
 test('empty composer has disabled send and does not perform requests on render', () => {

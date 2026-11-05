@@ -44,6 +44,7 @@ EXCLUDED_CHANNELS = frozenset({
     'c0055888-ab4a-4bd1-ab54-44fa8342202b',
     'c4e9f91a-5a3c-4110-8319-345ce0229650',
     'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',
+    '34403077-8ba8-4bb0-8c1e-576c0ce0db8e',  # JANA TAXI, WABA (05.11.2026)
 })
 _VARIABLE = re.compile(r'\[\[([^\[\]]+)\]\]')
 _CODE = re.compile(r'^@template:\s*([0-9a-fA-F-]{36})\s*\{(.*?)\}\s*$', re.S)

@@ -29,6 +29,8 @@ export const GLOBAL_CHANNEL_IDS = new Set([
     'c0055888-ab4a-4bd1-ab54-44fa8342202b',
     'c4e9f91a-5a3c-4110-8319-345ce0229650',
     'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',
+    // JANA TAXI, WABA …3322 (владелец, 05.11.2026).
+    '34403077-8ba8-4bb0-8c1e-576c0ce0db8e',
 ]);
 
 export const pilotChatKey = (account, chat) => chat

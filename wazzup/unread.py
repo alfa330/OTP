@@ -93,7 +93,8 @@ def init_unread_schema(cursor):
                                      '56701573-92a4-4121-af25-9be630900778',
                                      'c0055888-ab4a-4bd1-ab54-44fa8342202b',
                                      'c4e9f91a-5a3c-4110-8319-345ce0229650',
-                                     'ec4209b1-c0f6-4cdd-9037-9ee18c34206d') THEN RETURN NEW; END IF;
+                                     'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',
+                                     '34403077-8ba8-4bb0-8c1e-576c0ce0db8e') THEN RETURN NEW; END IF;
             event_time := COALESCE(NEW.wazzup_dt,NEW.dt);
             IF NOT NEW.is_echo AND NOT NEW.is_deleted AND TG_OP='INSERT' THEN
                 SELECT answered_through INTO answered FROM wazzup_chat_read_state
@@ -199,7 +200,8 @@ def init_unread_schema(cursor):
             FOR EACH ROW EXECUTE FUNCTION wazzup_notify_unread();
 
         -- A channel excluded later (+77008541777 «Департамент», 30.10.2026; +77470943333
-        -- iTaxi, +77001551199 Salam Taxi and eleven more numbers, 04.11.2026) drops what
+        -- iTaxi, +77001551199 Salam Taxi and eleven more numbers, 04.11.2026; JANA TAXI
+        -- WABA, 05.11.2026) drops what
         -- the counter kept for it: the trigger above no longer sees its replies and
         -- «Ответ не нужен» is refused there, so its chats would wait forever, and the
         -- wallboard would read stale rows instead of its message rule, as for Global.
@@ -220,7 +222,8 @@ def init_unread_schema(cursor):
                                           '56701573-92a4-4121-af25-9be630900778',
                                           'c0055888-ab4a-4bd1-ab54-44fa8342202b',
                                           'c4e9f91a-5a3c-4110-8319-345ce0229650',
-                                          'ec4209b1-c0f6-4cdd-9037-9ee18c34206d'];
+                                          'ec4209b1-c0f6-4cdd-9037-9ee18c34206d',
+                                          '34403077-8ba8-4bb0-8c1e-576c0ce0db8e'];
         BEGIN
             UPDATE wazzup_chat_read_state SET unread_count=0,revision=revision+1,updated_at=now()
                 WHERE account='op' AND channel_id=ANY(untracked) AND unread_count>0;

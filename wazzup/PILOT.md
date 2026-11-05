@@ -9,7 +9,7 @@ Global запрещена сервером. Архив Global остаётся �
 и Global, обрабатывает Syntony (`SYNTONY.md`); список — `pilot.py: EXCLUDED_CHANNELS`.
 С 04.11.2026 так же +77470943333 iTaxi (`771c4257-…`) и +77001551199 Salam Taxi
 (`34da6a88-…`), а следом ещё 11 номеров второго списка Syntony (`syntony.py:
-SYNTONY_NUMBERS`).
+SYNTONY_NUMBERS`); с 05.11.2026 — и JANA TAXI WABA (`34403077-…`).
 Статусы учётной записи `fired`/`dismissal` закрывают доступ. Признак
 `users.is_active` обозначает работу оператора на линии и не ограничивает админа.
 

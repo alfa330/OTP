@@ -2,7 +2,7 @@
 
 Each route forwards its own channels to its own receiver: Global goes to
 Syntony; +77008541777 «Департамент», +77470943333 iTaxi, +77001551199
-Salam Taxi and the eleven numbers of SYNTONY_NUMBERS each to their own
+Salam Taxi and the numbers of SYNTONY_NUMBERS each to their own
 connection in Syntony; +77070253322 «Help Taxi» to the CRM of the «Поток»
 group. Routes
 share one durable queue and one worker; every route is enabled and configured
@@ -64,6 +64,9 @@ SYNTONY_NUMBERS = (
     # «Центр регистрации».
     ('syntony_registration_1223', 'SYNTONY_REGISTRATION_1223_WEBHOOK', 'c4e9f91a-5a3c-4110-8319-345ce0229650'),
     ('syntony_chestny_0602', 'SYNTONY_CHESTNY_0602_WEBHOOK', 'ec4209b1-c0f6-4cdd-9037-9ee18c34206d'),
+    # JANA TAXI, WABA — the main Jana number; its own key, Jana …1372 keeps its own
+    # (owner, 05.11.2026).
+    ('syntony_jana_3322', 'SYNTONY_JANA_3322_WEBHOOK', '34403077-8ba8-4bb0-8c1e-576c0ce0db8e'),
 )
 # +77070253322 «Help Taxi». Until 15.10.2026 this number lived in the «Поток»
 # Wazzup account, whose own webhook still points to the CRM of that group; the

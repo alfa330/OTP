@@ -78,7 +78,8 @@ def test_help_taxi_belongs_to_the_crm_route_only():
         'syntony', 'syntony_department', 'syntony_itaxi', 'syntony_salam',
         'syntony_global_1230', 'syntony_itaxi_0880', 'syntony_jana_1372', 'syntony_qazaq_9671',
         'syntony_amanat_2629', 'syntony_department_7692', 'syntony_dostoyny_6032', 'syntony_nol_4569',
-        'syntony_tenge_9716', 'syntony_registration_1223', 'syntony_chestny_0602', 'potok_crm']
+        'syntony_tenge_9716', 'syntony_registration_1223', 'syntony_chestny_0602', 'syntony_jana_3322',
+        'potok_crm']
 
 
 @pytest.mark.parametrize('route, key', PARKS, ids=[route.name for route, _ in PARKS])
