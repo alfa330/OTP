@@ -2,6 +2,7 @@
 """«Активность операторов» (задача #392): смены, статусы, звонки, журнал, выгрузка, права."""
 
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
@@ -87,8 +88,10 @@ class ShiftSplitTests(unittest.TestCase):
         self.assertEqual(len(shifts), 2)
 
     def test_lunch_logout_keeps_one_shift(self):
-        shifts = A.split_shifts([ev('2026-10-05 09:00:00', 'исход'), ev('2026-10-05 13:00:00', 'выключен'),
-                                 ev('2026-10-05 14:00:00', 'исход'), ev('2026-10-05 18:00:00', 'выключен')])
+        shifts = A.split_shifts([ev('2026-10-05 09:00:00', 'исход'), ev('2026-10-05 09:05:00', 'соединение'),
+                                 ev('2026-10-05 09:05:40', 'исход'), ev('2026-10-05 13:00:00', 'выключен'),
+                                 ev('2026-10-05 14:00:00', 'исход'), ev('2026-10-05 14:02:00', 'соединение'),
+                                 ev('2026-10-05 14:02:40', 'исход'), ev('2026-10-05 18:00:00', 'выключен')])
         self.assertEqual(len(shifts), 1)
 
     def test_leading_logout_and_offline_only_blocks_are_not_shifts(self):
@@ -114,6 +117,180 @@ class ShiftSplitTests(unittest.TestCase):
         self.assertFalse(A.shift_finished(A.canonical_events(shift), NOW))
         idle = [ev('2026-10-19 06:00:00', 'исход'), ev('2026-10-19 07:00:00', 'офлайн')]
         self.assertTrue(A.shift_finished(idle, NOW))
+
+
+def sleep_loop(first_sleep, until, restored, period_minutes=60, wake_seconds=40):
+    """Компьютер без человека: засыпает по таймеру простоя («выключен») и через секунды
+    просыпается сам — телефон возвращает прежний статус. Пары с `first_sleep` до `until`."""
+    out, moment = [], at(first_sleep)
+    end = at(until)
+    while moment <= end:
+        out.append((moment, 'выключен'))
+        out.append((moment + timedelta(seconds=wake_seconds), restored))
+        moment += timedelta(minutes=period_minutes)
+    return out
+
+
+class UnattendedPhoneTests(unittest.TestCase):
+    """Телефон без человека: компьютер засыпает и просыпается сам, телефон возвращает статус."""
+
+    EVENING = [ev('2026-10-30 20:00:00', 'готов'), ev('2026-10-30 20:30:00', 'занят'),
+               ev('2026-10-30 20:35:00', 'готов')]
+    NEXT_EVENING = [ev('2026-10-31 19:52:00', 'соединение'), ev('2026-10-31 19:53:00', 'занят'),
+                    ev('2026-10-31 19:55:00', 'готов'), ev('2026-10-31 21:00:00', 'выключен')]
+
+    def test_sleep_loop_is_not_work_and_does_not_glue_days(self):
+        """Как у оператора с «сменой» 38 ч: после работы компьютер сутки засыпает и просыпается
+        каждый час, пауза в 4 ч не наступает. Петля не работа и смены не склеивает."""
+        events = (self.EVENING + sleep_loop('2026-10-30 21:35:00', '2026-10-31 19:35:00', 'готов')
+                  + self.NEXT_EVENING)
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 2)
+        first, second = shifts
+        self.assertEqual(first[-1], ev('2026-10-30 21:35:00', 'выключен'))
+        totals = A.status_totals(A.pieces(first, 'osnova'))
+        self.assertEqual(totals['worked_seconds'], 95 * 60)
+        # Вторая смена — с возврата статуса перед первым набором: в этом отрезке человек уже есть.
+        self.assertEqual(second[0], ev('2026-10-31 19:35:40', 'готов'))
+
+    def test_old_rule_would_glue_the_loop(self):
+        """Страж смысла: сырой поток без отбора — одна смена на сутки (так было до правки)."""
+        events = A.canonical_events(self.EVENING + sleep_loop('2026-10-30 21:35:00', '2026-10-31 19:35:00', 'готов')
+                                    + self.NEXT_EVENING)
+        gaps = [b[0] - a[0] for a, b in zip(events, events[1:])]
+        self.assertLess(max(gaps), A.SESSION_GAP)
+
+    def test_station_call_marks_a_person(self):
+        """Старый телефон «Соединение» не слал: человек звонил, а событий телефона нет. Исходящий
+        или принятый входящий на станции — человек у телефона; непринятый — наоборот."""
+        events = [ev('2026-10-02 14:53:29', 'перезвон'), ev('2026-10-02 14:53:58', 'выключен')]
+        outbound = A.human_call_moments([touch('2026-10-02 14:53:48', result='Не ответил')])
+        self.assertEqual(A.drop_unattended(events, outbound), events)
+        answered = A.human_call_moments([touch('2026-10-02 14:53:48', 'Входящий', talk=40, queue='3001')])
+        self.assertEqual(A.drop_unattended(events, answered), events)
+        missed = A.human_call_moments([touch('2026-10-02 14:53:48', 'Входящий (не приняли)', queue='3001')])
+        self.assertEqual(missed, [])
+        self.assertEqual(A.drop_unattended(events, missed), [events[1]])
+        # Звонок после выхода — уже не в этом отрезке.
+        later = A.human_call_moments([touch('2026-10-02 14:54:10')])
+        self.assertEqual(A.drop_unattended(events, later), [events[1]])
+
+    def test_automatic_offline_is_not_a_person(self):
+        """После пробуждения «Исход», через 5 минут телефон сам уводит в «Офлайн», потом сон."""
+        events = [ev('2026-10-07 09:00:00', 'исход'), ev('2026-10-07 09:01:00', 'соединение'),
+                  ev('2026-10-07 09:02:00', 'исход'), ev('2026-10-07 13:00:03', 'выключен'),
+                  ev('2026-10-07 13:00:10', 'исход'), ev('2026-10-07 13:05:10', 'офлайн'),
+                  ev('2026-10-07 13:30:25', 'выключен'),
+                  ev('2026-10-07 13:31:00', 'исход'), ev('2026-10-07 13:32:00', 'соединение'),
+                  ev('2026-10-07 13:33:00', 'исход'), ev('2026-10-07 18:00:00', 'выключен')]
+        kept = A.drop_unattended(events)
+        self.assertNotIn(ev('2026-10-07 13:00:10', 'исход'), kept)
+        self.assertNotIn(ev('2026-10-07 13:05:10', 'офлайн'), kept)
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 1)
+        totals = A.status_totals(A.pieces(shifts[0], 'yar'))
+        # 09:00–13:00:03 и 13:31–18:00; полчаса между ними — выход из телефона.
+        self.assertEqual(totals['worked_seconds'], (4 * 3600 + 3) + (4 * 3600 + 29 * 60))
+        self.assertEqual(totals['offline_seconds'], 30 * 60 + 57)
+
+    def test_status_nobody_confirmed_for_four_hours_is_not_presence(self):
+        """08:52 компьютер уснул и тут же проснулся, телефон вернул «Активный», дальше тишина;
+        человек принял звонок в 16:29. Тишина короче 8 ч после рабочего статуса не рвёт смену,
+        но этот статус никто не подтвердил — смена начинается со звонка."""
+        events = [ev('2026-11-04 08:52:10', 'выключен'), ev('2026-11-04 08:52:23', 'готов'),
+                  ev('2026-11-04 16:29:31', 'занят'), ev('2026-11-04 16:31:55', 'готов'),
+                  ev('2026-11-04 16:45:57', 'соединение'), ev('2026-11-04 16:46:24', 'готов'),
+                  ev('2026-11-04 16:48:49', 'выключен')]
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 1)
+        self.assertEqual(shifts[0][0], ev('2026-11-04 16:29:31', 'занят'))
+        self.assertEqual(A.status_totals(A.pieces(shifts[0], 'osnova'))['worked_seconds'], 19 * 60 + 18)
+        # Три часа до первого звонка — ещё ожидание: человек мог разбудить компьютер и ждать.
+        quick = [events[0], ev('2026-11-04 08:52:23', 'готов'), ev('2026-11-04 11:52:00', 'занят'),
+                 ev('2026-11-04 11:55:00', 'готов'), ev('2026-11-04 12:30:00', 'выключен')]
+        self.assertEqual(A.split_shifts(quick)[0][0], ev('2026-11-04 08:52:23', 'готов'))
+
+    def test_call_phase_after_wake_is_a_person(self):
+        events = [ev('2026-10-08 10:19:35', 'готов'), ev('2026-10-08 10:29:52', 'занят'),
+                  ev('2026-10-08 10:30:00', 'выключен')]
+        self.assertEqual(A.drop_unattended(events), events)
+        talk_first = [ev('2026-10-08 10:29:52', 'занят'), ev('2026-10-08 10:30:00', 'выключен')]
+        self.assertEqual(A.drop_unattended(talk_first), talk_first)
+
+    def test_training_through_sleeps_stays_when_the_person_returns(self):
+        """Тренинг 18:20–22:14: человек не у компьютера, тот засыпает каждые полчаса, телефон
+        возвращает «Тренинг». Вернулся раньше 4 часов — тренинг остаётся тренингом."""
+        events = ([ev('2026-10-28 17:32:00', 'готов'), ev('2026-10-28 17:40:00', 'занят'),
+                   ev('2026-10-28 17:45:00', 'готов'), ev('2026-10-28 18:20:29', 'тренинг')]
+                  + sleep_loop('2026-10-28 18:51:00', '2026-10-28 21:27:00', 'тренинг', period_minutes=31)
+                  + [ev('2026-10-28 22:14:56', 'готов'), ev('2026-10-28 22:20:00', 'занят'),
+                     ev('2026-10-28 22:25:00', 'готов'), ev('2026-10-29 00:00:07', 'выключен')])
+        self.assertEqual(A.drop_unattended(events), A.canonical_events(events))
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 1)
+        self.assertGreater(A.status_totals(A.pieces(shifts[0], 'osnova'))['training_seconds'], 3 * 3600)
+
+    def test_pause_left_for_days_is_dropped_and_splits(self):
+        """«Тех. перерыв» выбрал человек и ушёл; компьютер трое суток засыпает и просыпается,
+        телефон возвращает тех. перерыв. Это не перерыв, а оставленный телефон."""
+        events = ([ev('2026-10-09 19:05:52', 'готов'), ev('2026-10-09 19:07:00', 'занят'),
+                   ev('2026-10-09 19:09:00', 'готов'), ev('2026-10-09 19:11:46', 'тех причина')]
+                  + sleep_loop('2026-10-09 19:13:00', '2026-10-12 18:48:00', 'тех причина')
+                  + [ev('2026-10-12 19:49:10', 'готов'), ev('2026-10-12 19:52:00', 'занят'),
+                     ev('2026-10-12 19:55:00', 'готов'), ev('2026-10-13 08:00:00', 'выключен')])
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 2)
+        first = A.status_totals(A.pieces(shifts[0], 'osnova'))
+        self.assertEqual(first['tech_seconds'], 74)
+        self.assertEqual(shifts[0][-1], ev('2026-10-09 19:13:00', 'выключен'))
+        # Вторая смена — с последнего возврата: в этом отрезке человек уже сменил статус.
+        self.assertEqual(shifts[1][0], ev('2026-10-12 18:13:40', 'тех причина'))
+        tech = sum(A.status_totals(A.pieces(shift, 'osnova'))['tech_seconds'] for shift in shifts)
+        self.assertLess(tech, 2 * 3600)   # было 71 час
+
+    def test_pause_without_return_is_dropped(self):
+        """Выбрал «Тренинг» в конце смены и ушёл: два часа возвратов и тишина. Не тренинг."""
+        events = ([ev('2026-10-28 09:00:00', 'готов'), ev('2026-10-28 09:10:00', 'занят'),
+                   ev('2026-10-28 09:15:00', 'готов'), ev('2026-10-28 17:00:00', 'тренинг')]
+                  + sleep_loop('2026-10-28 17:30:00', '2026-10-28 19:30:00', 'тренинг', period_minutes=30)
+                  + [ev('2026-10-28 20:00:00', 'выключен')])
+        shifts = A.split_shifts(events)
+        self.assertEqual(len(shifts), 1)
+        self.assertEqual(shifts[0][-1], ev('2026-10-28 17:30:00', 'выключен'))
+        self.assertEqual(A.status_totals(A.pieces(shifts[0], 'osnova'))['training_seconds'], 30 * 60)
+
+    def test_report_row_ends_on_the_sleep_before_the_loop(self):
+        events = {7: self.EVENING + sleep_loop('2026-10-30 21:35:00', '2026-10-31 19:35:00', 'готов')
+                     + self.NEXT_EVENING}
+        report = A.build_report(
+            events_by_operator=events, names={7: 'Сидоров'}, exts={7: '6650'},
+            memberships={7: [{'id': 1, 'start_date': date(2026, 1, 1), 'end_date': None, 'group_id': 36,
+                              'model': 'op_osnova'}]},
+            touches=[touch('2026-10-30 20:30:00', 'Входящий', talk=300, ext='6650', queue='3001')],
+            day_from=date(2026, 10, 1), day_to=date(2026, 10, 31), now=at('2026-11-05 08:10:00'))
+        first = report['shifts'][0]
+        self.assertEqual((first['login_at'], first['logout_at']), ('2026-10-30T20:00:00', '2026-10-30T21:35:00'))
+        self.assertFalse(first['logout_missing'])
+        self.assertEqual(first['worked_seconds'], 95 * 60)
+        self.assertEqual(first['calls'], 1)
+        self.assertEqual(len(report['shifts']), 2)
+
+    def test_report_uses_station_calls_of_the_operator_number(self):
+        """Старый телефон: «Исход» до выхода и ни одного события, но со станции видно, что
+        человек звонил. Строка остаётся благодаря звонкам его номера, чужие не в счёт."""
+        def report(touches):
+            return A.build_report(
+                events_by_operator={7: [ev('2026-10-02 09:00:00', 'перезвон'),
+                                        ev('2026-10-02 10:30:00', 'выключен')]},
+                names={7: 'Сидоров'}, exts={7: '6650'},
+                memberships={7: [{'id': 1, 'start_date': date(2026, 1, 1), 'end_date': None,
+                                  'group_id': 15, 'model': 'op_yandex_reg'}]},
+                touches=touches, day_from=date(2026, 10, 1), day_to=date(2026, 10, 31),
+                now=at('2026-11-05 08:10:00'))['shifts']
+        rows = report([touch('2026-10-02 09:20:00', result='Не ответил', ext='6650')])
+        self.assertEqual([(r['login_at'], r['worked_seconds'], r['calls']) for r in rows],
+                         [('2026-10-02T09:00:00', 90 * 60, 1)])
+        self.assertEqual(report([touch('2026-10-02 09:20:00', result='Не ответил', ext='6651')]), [])
 
 
 class StatusColumnsTests(unittest.TestCase):
@@ -372,6 +549,113 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual(self.client.get(base + '&start=2026-10-05T09:00:00&end=2026-10-07T09:00:00').status_code, 400)
         self.assertEqual(self.client.get(base + '&start=2026-10-05T09:00:00&end=2026-10-05T08:00:00').status_code, 400)
         self.assertEqual(self.client.get('/api/op_wallboard/activity/journal?operator_id=x').status_code, 400)
+
+
+class JournalRouteTests(unittest.TestCase):
+    """Журнал смены выбрасывает то же время телефона без человека, что и строка отчёта."""
+
+    def setUp(self):
+        self.data = {'events': [], 'touches': []}
+        data = self.data
+
+        class _Cursor:
+            rows = []
+
+            def execute(self, sql, params=None):
+                if 'group_operator_memberships' in sql:
+                    self.rows = [(7, 1, date(2026, 1, 1), None, 36, 'op_osnova')]
+                elif 'FROM users' in sql:
+                    self.rows = [(7, 'Сидоров', '6650')]
+                elif 'cdr_touches' in sql:
+                    self.rows = data['touches']
+                elif 'operator_status_events' in sql:
+                    # Окно [начало, конец) ручки — как в базе, где время с долями секунды.
+                    _operator_id, since, until = params
+                    self.rows = [item for item in data['events'] if since <= item[0] < until]
+                else:
+                    raise AssertionError(sql)
+
+            def fetchall(self):
+                return list(self.rows)
+
+        class _Db:
+            @contextmanager
+            def _get_cursor(self_inner):
+                yield _Cursor()
+
+        app = Flask(__name__)
+        # Срок хранения с запасом: окно в октябре 2026 не должно стать «старым» со временем.
+        app.register_blueprint(R.build_op_activity_blueprint(
+            db=_Db(), require_api_key=lambda fn: fn, build_cors_preflight_response=lambda: ('', 204),
+            guard=lambda: (10, None), retention_days=100000))
+        self.client = app.test_client()
+
+    def journal(self, start, end):
+        response = self.client.get('/api/op_wallboard/activity/journal?operator_id=7&start=%s&end=%s'
+                                   % (start, end))
+        self.assertEqual(response.status_code, 200)
+        return response.get_json()
+
+    def test_sleep_loop_inside_a_shift_is_offline_like_in_the_row(self):
+        events = [ev('2026-10-30 20:00:00', 'готов'), ev('2026-10-30 20:30:00', 'занят'),
+                  ev('2026-10-30 20:35:00', 'готов'), ev('2026-10-30 21:35:00', 'выключен'),
+                  ev('2026-10-30 21:36:00', 'готов'), ev('2026-10-30 22:36:00', 'выключен'),
+                  ev('2026-10-30 22:37:00', 'готов'), ev('2026-10-30 22:50:00', 'занят'),
+                  ev('2026-10-30 22:55:00', 'готов'), ev('2026-10-30 23:40:00', 'выключен')]
+        self.data['events'] = events
+        body = self.journal('2026-10-30T20:00:00', '2026-10-30T23:40:00')
+        offline = [s for s in body['segments'] if s['kind'] == A.KIND_LOGOUT and s['seconds']]
+        self.assertEqual([(s['start_at'], s['end_at']) for s in offline],
+                         [('2026-10-30T21:35:00', '2026-10-30T22:37:00')])
+        report = A.build_report(
+            events_by_operator={7: events}, names={7: 'Сидоров'}, exts={7: '6650'},
+            memberships={7: [{'id': 1, 'start_date': date(2026, 1, 1), 'end_date': None, 'group_id': 36,
+                              'model': 'op_osnova'}]},
+            touches=[], day_from=date(2026, 10, 1), day_to=date(2026, 10, 31), now=at('2026-11-05 08:10:00'))
+        row = report['shifts'][0]
+        active = sum(s['seconds'] for s in body['segments'] if s['kind'] in ('talk', 'dial', 'wait'))
+        self.assertEqual(active, row['active_seconds'])
+        self.assertEqual(row['active_seconds'], (95 + 63) * 60)
+        self.assertFalse(body['logout_missing'])
+
+    def test_station_call_keeps_the_stretch_in_the_journal(self):
+        self.data['events'] = [ev('2026-10-02 14:50:00', 'перезвон'), ev('2026-10-02 14:51:00', 'занят'),
+                               ev('2026-10-02 14:52:00', 'перезвон'), ev('2026-10-02 14:52:30', 'выключен'),
+                               ev('2026-10-02 14:53:29', 'перезвон'), ev('2026-10-02 14:53:58', 'выключен')]
+        self.data['touches'] = [(at('2026-10-02 14:53:48'), None, '6650', 'Исходящий', 'Не ответил', 0, 10, '', None)]
+        body = self.journal('2026-10-02T14:50:00', '2026-10-02T14:53:58')
+        self.assertIn('2026-10-02T14:53:29', [s['start_at'] for s in body['segments']])
+        self.data['touches'] = []
+        body = self.journal('2026-10-02T14:50:00', '2026-10-02T14:53:58')
+        self.assertNotIn('2026-10-02T14:53:29', [s['start_at'] for s in body['segments']])
+
+    def test_logout_with_fractions_of_a_second_stays_in_the_window(self):
+        """В строке выход «21:00:00», в базе — 21:00:00.640: последний отрезок и выход журнал
+        не теряет."""
+        self.data['events'] = [(datetime(2026, 10, 5, 13, 0, 0, 120000), 'готов'),
+                               (datetime(2026, 10, 5, 13, 5, 0, 300000), 'занят'),
+                               (datetime(2026, 10, 5, 13, 10, 0, 900000), 'перерыв'),
+                               (datetime(2026, 10, 5, 21, 0, 0, 640000), 'выключен')]
+        body = self.journal('2026-10-05T13:00:00', '2026-10-05T21:00:00')
+        self.assertFalse(body['logout_missing'])
+        self.assertEqual([s['label'] for s in body['segments']],
+                         ['Ожидание', 'В разговоре', 'Перерыв', 'Офлайн'])
+        self.assertEqual(body['segments'][2]['seconds'], 7 * 3600 + 49 * 60 + 59)
+
+    def test_first_part_of_the_window_is_not_judged_again(self):
+        """Смена началась после паузы в 5 ч без «выключен»: в полном потоке её первое событие —
+        смена статуса человеком («Перерыв» → «Активный»), строка её оставила. Журнал видит только
+        окно — без доверия к первому отрезку он выбросил бы смену целиком."""
+        before = [ev('2026-10-05 09:00:00', 'готов'), ev('2026-10-05 09:10:00', 'занят'),
+                  ev('2026-10-05 09:15:00', 'готов'), ev('2026-10-05 14:00:00', 'перерыв')]
+        self.data['events'] = [ev('2026-10-05 19:00:00', 'готов'), ev('2026-10-05 19:30:00', 'выключен')]
+        shifts = A.split_shifts(before + self.data['events'])
+        self.assertEqual(shifts[-1], self.data['events'])
+        body = self.journal('2026-10-05T19:00:00', '2026-10-05T19:30:00')
+        self.assertEqual([(s['label'], s['seconds']) for s in body['segments'] if s['seconds']],
+                         [('Ожидание', 1800)])
+        # Без доверия к первому отрезку то же окно — пустое: отрезок «один статус до выхода».
+        self.assertEqual(A.drop_unattended(self.data['events']), [self.data['events'][1]])
 
 
 if __name__ == '__main__':

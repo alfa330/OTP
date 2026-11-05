@@ -31,6 +31,29 @@
 лежит в дате 20:00. Завершённой считается смена, которую уже ничто не продлит: последнее
 событие — «выключен» или тишина после него длиннее паузы, рвущей смену.
 
+Телефон без человека
+--------------------
+Компьютер засыпает — телефон шлёт «выключен»; просыпается — телефон САМ возвращает прежний
+статус (`OnPowerBroadcast` в iCORE Phone, на любое пробуждение, а не только от человека).
+Компьютер, который засыпает по таймеру простоя и тут же просыпается сам, крутит пары
+«выключен» → «Активный» круглые сутки: в октябре 2026 так склеились «смены» по 78–313 часов,
+а пауза в 4 часа не наступала никогда. Поэтому до нарезки смен (`drop_unattended`):
+
+  * отрезок между двумя «выключен», в котором после возвращённого статуса не было ничего,
+    кроме автоматического «Офлайн», и на станции не начался ни один звонок человека
+    (исходящий или принятый входящий), — это телефон без человека;
+  * такой отрезок в рабочем статусе (или в «Офлайн») выбрасывается: принимать звонки было
+    некому, и это не работа;
+  * перерыв, тех. перерыв и тренинг человек проводит вдали от компьютера, поэтому череда таких
+    отрезков остаётся, если человек вернулся (первый его признак после неё) раньше чем через
+    4 часа от её начала. Иначе это оставленный телефон — череда выбрасывается и рвёт смену;
+  * в отрезке, где человек появился лишь через 4 часа и позже, время до его первого признака
+    тоже выбрасывается: статус, который никто не подтвердил, — не присутствие (возврат статуса
+    в 08:52 и первый звонок в 16:29 иначе склеились бы правилом тихой ночи в 8 часов работы).
+
+Выброшенное время становится выходом из телефона (офлайн), а смена кончается на «выключен»
+перед ним — выход зафиксирован. Непринятый входящий — не след человека, а наоборот.
+
 Статусы и колонки
 -----------------
 Ключи телефона групп ОП (`oktell_guard/phone.py`): «Активный» ('готов') у Основы, «Исход»
@@ -81,6 +104,11 @@ SESSION_GAP = timedelta(hours=4)
 QUIET_WORK_GAP = timedelta(hours=8)
 MAX_SHIFT = timedelta(hours=16)
 TALK_MIN_SECONDS = 10
+# Пауза, которую телефон сам возвращает после сна компьютера, держится не дольше паузы,
+# рвущей смену: дальше это уже не перерыв, а оставленный телефон.
+UNATTENDED_PAUSE_LIMIT = SESSION_GAP
+# Звонки, которые делает человек: исходящий (любой исход) и принятый входящий.
+HUMAN_CALL_TYPES = frozenset({touches_mod.TYPE_OUT, touches_mod.TYPE_IN})
 
 # Звонок к смене: начался не раньше минуты до первого события и не позже двух минут после
 # последнего. Телефон шлёт статус раньше регистрации линии, а «выключен» — после отбоя.
@@ -125,6 +153,8 @@ _TECH_FLAT = frozenset({'техпричина', 'techbreak', 'statustechbreak', 
 # Статусы, после которых тишина — это ожидание звонка, а не уход: пауза в них рвёт смену
 # только длиннее QUIET_WORK_GAP.
 _WORK_KINDS = frozenset({_BASE, KIND_TALK, KIND_DIAL})
+# Паузы, на которых человек и не должен сидеть у компьютера (см. «Телефон без человека»).
+_PAUSE_KINDS = frozenset({KIND_BREAK, KIND_TECH, KIND_TRAINING})
 
 JOURNAL_LABELS = {
     KIND_TALK: 'В разговоре',
@@ -218,14 +248,107 @@ def _gap_breaks(prev_key, gap):
     return gap >= SESSION_GAP
 
 
-def split_shifts(events):
+def human_call_moments(touches):
+    """Отсортированные начала звонков, которые делает человек: исходящий (любой исход) и
+    принятый входящий. Непринятый входящий сюда не идёт — он след того, что у телефона пусто."""
+    moments = []
+    for touch in touches or []:
+        if touch.get('call_type') not in HUMAN_CALL_TYPES:
+            continue
+        started = parse_moment(touch.get('started_at'))
+        if started is not None:
+            moments.append(started)
+    moments.sort()
+    return moments
+
+
+def _person_moment(part, until, call_moments):
+    """Когда в отрезке `part` (события между выходами) у телефона впервые виден человек: фаза
+    звонка, смена статуса — кроме «Офлайн», куда телефон уводит сам, — или звонок человека на
+    станции с начала отрезка до `until` (None — без конца). None — человека не было. Первое
+    событие отрезка само ничего не доказывает: после сна компьютера его ставит телефон,
+    возвращая прежний статус."""
+    if classify(part[0][1])[0] in (KIND_TALK, KIND_DIAL):
+        return part[0][0]
+    moment = next((at for at, key in part[1:] if classify(key)[0] != KIND_IDLE), None)
+    index = bisect_left(call_moments, part[0][0])
+    if index < len(call_moments) and (until is None or call_moments[index] <= until):
+        if moment is None or call_moments[index] < moment:
+            moment = call_moments[index]
+    return moment
+
+
+def drop_unattended(events, call_moments=(), keep_first=False):
+    """События одного телефона без времени, когда телефон стоял без человека (докстринг модуля,
+    «Телефон без человека»). call_moments — `human_call_moments` его внутреннего номера.
+
+    keep_first — первый отрезок уже признан (журнал смены: окно начинается с события, которое
+    строка отчёта оставила, а начало отрезка лежит левее окна) — его не трогаем.
+
+    Возвращает канонические события: «выключен», оставшиеся подряд после выброса, сливаются
+    в первый — смена кончается на нём, а время до следующего события — выход из телефона."""
+    events = canonical_events(events)
+    parts = []                      # [(события между выходами, «выключен» после них или None)]
+    current = []
+    for item in events:
+        if classify(item[1])[0] == KIND_LOGOUT:
+            parts.append((current, item))
+            current = []
+        else:
+            current.append(item)
+    if current:
+        parts.append((current, None))
+    persons = [_person_moment(part, closer[0] if closer else None, call_moments) if part else None
+               for part, closer in parts]
+    lonely = [bool(part) and closer is not None and moment is None
+              for (part, closer), moment in zip(parts, persons)]
+    if keep_first and parts:
+        lonely[0] = False
+    keep = [True] * len(parts)
+    index = 0
+    while index < len(parts):
+        if not lonely[index]:
+            index += 1
+            continue
+        last = index
+        while last + 1 < len(parts) and lonely[last + 1]:
+            last += 1
+        # Череда отрезков без человека: пауза в ней остаётся, только если человек вернулся
+        # к телефону раньше UNATTENDED_PAUSE_LIMIT от её начала.
+        started = parts[index][0][0][0]
+        following, following_end = parts[last + 1] if last + 1 < len(parts) else ([], None)
+        back = (_person_moment(following, following_end[0] if following_end else None,
+                               call_moments) if following else None)
+        returned = back is not None and back - started < UNATTENDED_PAUSE_LIMIT
+        for position in range(index, last + 1):
+            keep[position] = returned and classify(parts[position][0][0][1])[0] in _PAUSE_KINDS
+        index = last + 1
+    out = []
+    changed = not all(keep)
+    for position, ((part, closer), kept, moment) in enumerate(zip(parts, keep, persons)):
+        # Статус, который телефон поставил после «выключен» и которого четыре часа никто не
+        # подтвердил, — тоже не присутствие (та же тишина, что рвёт смену): отрезок начинается
+        # с первого признака человека. Первый отрезок потока не трогаем: что было до него,
+        # неизвестно, и его начало может быть входом человека в тихую ночь.
+        if kept and position > 0 and moment is not None and moment - part[0][0] >= SESSION_GAP:
+            part = [item for item in part if item[0] >= moment]
+            changed = True
+        if kept:
+            out.extend(part)
+        if closer is not None:
+            out.append(closer)
+    return canonical_events(out) if changed else events
+
+
+def split_shifts(events, call_moments=()):
     """События одного телефона → смены [[(время, ключ)], ...] по правилам докстринга модуля.
 
-    Сначала режем по паузам от 4 ч, потом сшиваем соседние куски, если перед паузой был
-    рабочий статус, пауза короче QUIET_WORK_GAP и сшитая смена не длиннее MAX_SHIFT. Вторая
-    проверка нужна потерянному «выключен»: вечерняя смена без выхода и утренняя следующего
-    дня иначе слиплись бы в одну на сутки."""
-    events = canonical_events(events)
+    Сначала выбрасываем время телефона без человека (`drop_unattended`), потом режем по паузам
+    от 4 ч и сшиваем соседние куски, если перед паузой был рабочий статус, пауза короче
+    QUIET_WORK_GAP и сшитая смена не длиннее MAX_SHIFT. Вторая проверка нужна потерянному
+    «выключен»: вечерняя смена без выхода и утренняя следующего дня иначе слиплись бы в одну
+    на сутки."""
+    events = drop_unattended(events, call_moments)
     blocks = []
     for at, key in events:
         if not blocks or at - blocks[-1][-1][0] >= SESSION_GAP:
@@ -492,11 +615,16 @@ def build_report(*, events_by_operator, names, exts, memberships, touches, day_f
     for items in touches_by_ext.values():
         items.sort(key=lambda item: item[0])
     starts_by_ext = {ext: [item[0] for item in items] for ext, items in touches_by_ext.items()}
+    # Те же звонки, что и в колонках, — признак человека у телефона для `drop_unattended`.
+    human_by_ext = {ext: [started for started, touch in items
+                          if touch.get('call_type') in HUMAN_CALL_TYPES]
+                    for ext, items in touches_by_ext.items()}
 
     shifts = []
     operators = {}
     for operator_id, events in (events_by_operator or {}).items():
-        for shift in split_shifts(events):
+        ext = str((exts or {}).get(operator_id) or '')
+        for shift in split_shifts(events, human_by_ext.get(ext, ())):
             start_at, end_at = shift[0][0], shift[-1][0]
             day = start_at.date()
             if day < day_from or day > day_to or not shift_finished(shift, now):
@@ -504,7 +632,6 @@ def build_report(*, events_by_operator, names, exts, memberships, touches, day_f
             group_key, _group_id = group_on(memberships, operator_id, day)
             if group_key is None:
                 continue
-            ext = str((exts or {}).get(operator_id) or '')
             shift_touches = []
             if ext and ext in touches_by_ext:
                 starts = starts_by_ext[ext]

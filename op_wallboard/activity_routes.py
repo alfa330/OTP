@@ -319,20 +319,30 @@ def build_op_activity_blueprint(*, db, require_api_key, build_cors_preflight_res
                 group_key, _group_id = activity_mod.group_on(memberships, operator_id, start.date())
                 if group_key is None:
                     return jsonify({'error': 'Сотрудник в этот день не в группе ОП'}), 404
-                names, _exts = load_people(cursor, [operator_id])
+                names, exts = load_people(cursor, [operator_id])
+                # Вход и выход в строке — до секунды, а в базе время с долями: без запаса в
+                # секунду выход в 18:58:16.5 не попадал в окно «по 18:58:16», и журнал терял
+                # последний отрезок смены, а выход показывал незафиксированным.
                 cursor.execute("""
                     SELECT event_at, status_key
                       FROM operator_status_events
                      WHERE operator_id = %s
                        AND client_event_id IS NOT NULL
-                       AND event_at >= %s AND event_at <= %s
+                       AND event_at >= %s AND event_at < %s
                      ORDER BY event_at, id
-                """, (operator_id, start, end))
+                """, (operator_id, start, end + timedelta(seconds=1)))
                 events = cursor.fetchall()
+                # Время телефона без человека журнал выбрасывает так же, как строка отчёта
+                # (`drop_unattended`), — по тем же звонкам номера. Первый отрезок окна строка
+                # уже оставила (с него смена и начинается), а его начало может лежать левее
+                # окна, поэтому его не судим заново.
+                ext = exts.get(operator_id)
+                touches = load_touches(cursor, [ext], start.date(), end.date()) if ext else []
         except Exception:  # noqa: BLE001
             log.exception('%s: журнал %s не прочитался', label, operator_id)
             return jsonify({'error': 'Журнал статусов сейчас недоступен'}), 503
-        shift = activity_mod.canonical_events(events)
+        shift = activity_mod.drop_unattended(events, activity_mod.human_call_moments(touches),
+                                             keep_first=True)
         segments = activity_mod.journal(shift, group_key) if shift else []
         return jsonify({
             'operator_id': operator_id,
