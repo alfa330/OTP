@@ -387,6 +387,31 @@ def test_sync_follows_seat_changes_within_the_day(db):
         ('9301', FO2), ('9304', FO_IDLE)]
 
 
+def test_sync_finds_the_cabinet_in_quiet_days(db):
+    """Сегодня в кабинете тихо (так было 05.11.2026): ID ищется в прошлых сутках, один раз, и
+    старые звонки при этом в CRM не уходят; узнанный ID следующая сверка уже не ищет."""
+    _key(db)
+    client = FakeClient(days={'2026-11-03': [_history(9401, '915', at=datetime(2026, 11, 3, 5, 0, tzinfo=UTC))]})
+    svc, _ = _service(db, client)
+    assert svc.sync_history() == {'calls': 0, 'saved': 0}
+    assert client.requests == [('day', '2026-11-05'), ('day', '2026-11-04'), ('day', '2026-11-03')]
+    assert svc.company_id() == COMPANY
+    assert _q(db, 'SELECT count(*) FROM calls_api_calls') == [(0,)] and _outbox(db) == []
+    client.requests.clear()
+    svc.sync_history()
+    assert client.requests == [('day', '2026-11-05')]
+    # Теперь первый же вебхук — сразу событие.
+    assert svc.on_binotel_call(_webhook(9402, '915')) == 'new'
+
+
+def test_sync_gives_up_after_a_week_of_silence(db):
+    client = FakeClient()
+    svc, _ = _service(db, client)
+    assert svc.sync_history() == {'calls': 0, 'saved': 0}
+    assert len(client.requests) == 1 + calls_service.LEARN_LOOKBACK_DAYS
+    assert svc.company_id() is None
+
+
 def test_sync_looks_at_yesterday_only_after_midnight(db):
     client = FakeClient(days={'2026-11-04': [_history(6001, '915', at=datetime(2026, 11, 4, 18, 58, tzinfo=UTC))]})
     svc, _ = _service(db, client, now=datetime(2026, 11, 5, 0, 10, tzinfo=calls_rules.ALMATY))

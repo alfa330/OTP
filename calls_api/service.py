@@ -36,6 +36,10 @@ COMPANY_KEY = 'company_id:%s' % rules.COMPANY
 SYNCED_KEY = 'synced_at'
 # Вчерашние сутки сверяем ещё полчаса после полуночи: звонок 23:58 доходит до истории не сразу.
 YESTERDAY_GRACE = timedelta(minutes=30)
+# ID кабинета неизвестен, а сегодня в нём звонков нет (05.11.2026 у удалённого КЦ был один
+# звонок за сутки): ищем звонок в прошлых сутках, не дальше стольких дней. Один раз — потом ID
+# лежит в calls_api_state, и первый же вебхук из CRM уходит сразу, а не со сверкой.
+LEARN_LOOKBACK_DAYS = 7
 # Ждать ли очереди к Binotel (секунд): фоновая сверка лишний раз не стоит в очереди.
 SYNC_MAX_WAIT = 10
 RECORD_MAX_WAIT = 8
@@ -180,6 +184,17 @@ class CallsApiService(object):
         for day in days:
             raw_calls.extend(client.list_calls_for_day(day, max_wait=SYNC_MAX_WAIT))
         company = self._learn_company(raw_calls)
+        if not company and not self.company_id():
+            for back in range(1, LEARN_LOOKBACK_DAYS + 1):
+                day = local.date() - timedelta(days=back)
+                if day in days:
+                    continue
+                if self._learn_company(client.list_calls_for_day(day, max_wait=SYNC_MAX_WAIT)):
+                    break
+            company = self.company_id()
+            if not company:
+                log.warning('calls_api: ID кабинета %s не узнан — за %d дней в нём нет звонков; '
+                            'вебхуки звонков ждут сверки', rules.COMPANY, LEARN_LOOKBACK_DAYS)
         calls = [call for call in (rules.from_history(raw) for raw in raw_calls) if call]
         calls = [call for call in calls if not company or call['company_id'] in ('', company)]
         saved = 0
