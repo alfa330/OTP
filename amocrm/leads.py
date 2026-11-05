@@ -17,8 +17,8 @@ Google (C3) и Звонков (C11) перенесены дословно, ос�
     `amo_lead_syncs`, и отбивка показывает возраст данных;
   * пагинация идёт по `_links.next`, а не по «страница короче лимита»;
   * дата сделки считается в Asia/Almaty явно, а не в часовом поясе книги;
-  * обрыв соединения на середине выгрузки повторяется, а не выбрасывает все
-    восемь десятков уже вычитанных страниц.
+  * обрыв соединения или зависшая на середине страница повторяются, а не
+    выбрасывают все уже вычитанные страницы.
 """
 
 import html
@@ -31,6 +31,7 @@ from http.client import RemoteDisconnected
 from zoneinfo import ZoneInfo
 
 import requests
+import urllib3
 
 # ==== Настройки ===============================================================
 
@@ -57,7 +58,10 @@ FIELD_TRIP_DONE = int(os.getenv("AMO_FIELD_TRIP_DONE") or 1074671)
 FIELD_ROBOT_CLOSED = int(os.getenv("AMO_FIELD_ROBOT_CLOSED") or 1068877)
 
 PAGE_LIMIT = 250
-REQUEST_TIMEOUT = 60
+# (подключение, пауза между байтами ответа). Страница приходит за 1–3 с, так что
+# 30 с тишины — это уже зависшая передача, а не долгий ответ; ждать её дольше
+# значит держать поток общего пула бота впустую (см. `_stalled_body`).
+REQUEST_TIMEOUT = (10, 30)
 # Насколько окно сравнения может отставать от выгруженных данных, чтобы его ещё
 # не обрезать (см. `clamp_windows`).
 CLAMP_TOLERANCE = timedelta(minutes=5)
@@ -84,8 +88,8 @@ _DROPPED_CONNECTION_ERRORS = (
     RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
 
 
-def _dropped_connection(exc):
-    """Оборвалось ли соединение уже ПОСЛЕ установки.
+def _in_chain(exc, types):
+    """Есть ли исключение нужного типа где-то в цепочке.
 
     Причину ищем по всей цепочке, а не по тексту сообщения: requests заворачивает
     urllib3, urllib3 — http.client, и наружу выходит одинаковый на вид
@@ -98,12 +102,33 @@ def _dropped_connection(exc):
         if not isinstance(current, BaseException) or id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, _DROPPED_CONNECTION_ERRORS):
+        if isinstance(current, types):
             return True
         stack.append(current.__cause__)
         stack.append(current.__context__)
         stack.extend(getattr(current, "args", ()) or ())
     return False
+
+
+def _dropped_connection(exc):
+    """Оборвалось ли соединение уже ПОСЛЕ установки."""
+    return _in_chain(exc, _DROPPED_CONNECTION_ERRORS)
+
+
+def _stalled_body(exc):
+    """amoCRM уже ответил, но передача страницы встала на середине.
+
+    С 05.11.2026 ~02:30 так падали все выгрузки с Render: ответ 200 приходил,
+    чтение тела (`read_chunked`) висело до таймаута, а та же выгрузка с другой
+    сети шла без единой задержки, и соседние запросы с Render проходили. Это не
+    «сервис недоступен», а оборванная в пути передача — её повторяем, как обрыв.
+
+    requests отдаёт её как `ConnectionError` с `ReadTimeoutError` внутри; таймаут
+    ДО ответа приходит как `requests.exceptions.ReadTimeout` и повтора не получает.
+    """
+    if isinstance(exc, requests.exceptions.Timeout):
+        return False
+    return _in_chain(exc, urllib3.exceptions.ReadTimeoutError)
 
 
 def is_configured() -> bool:
@@ -143,20 +168,21 @@ class AmoClient:
         self._login()
 
     def _request(self, method, url, **kwargs):
-        """Запрос к amoCRM с повтором на обрыве соединения.
+        """Запрос к amoCRM с повтором на обрыве соединения или зависшей передаче.
 
         Повтор безопасен для всего, что делает клиент: страницы читаются GET'ом, а
-        повторный вход просто выдаст ещё один токен. Всё остальное (таймаут, отказ
-        в соединении, любой HTTP-код) отдаём наверх как есть.
+        повторный вход просто выдаст ещё один токен. Всё остальное (таймаут до
+        ответа, отказ в соединении, любой HTTP-код) отдаём наверх как есть.
         """
         for attempt in range(1, REQUEST_RETRIES + 1):
             try:
                 return self.session.request(method, url, **kwargs)
             except requests.exceptions.RequestException as exc:
-                if attempt >= REQUEST_RETRIES or not _dropped_connection(exc):
+                if attempt >= REQUEST_RETRIES or not (
+                        _dropped_connection(exc) or _stalled_body(exc)):
                     raise
                 logging.warning(
-                    "amoCRM: соединение оборвалось (%s), повтор %d из %d: %s",
+                    "amoCRM: передача оборвалась (%s), повтор %d из %d: %s",
                     exc, attempt + 1, REQUEST_RETRIES, url)
                 time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 

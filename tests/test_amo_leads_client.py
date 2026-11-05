@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Клиент amoCRM: повтор запроса на обрыве соединения.
+"""Клиент amoCRM: повтор запроса на обрыве соединения и зависшей передаче.
 
-Одна выгрузка лидов — около 86 запросов подряд, и amoCRM время от времени
+Одна выгрузка лидов — около 60 запросов подряд, и amoCRM время от времени
 закрывает соединение на середине (на проде 5 прогонов из 39 за 06–10.08, всегда
-через 12–13 с после старта). Без повтора обрыв выбрасывал все уже вычитанные
-страницы, и отбивка показывала «выгрузка не удалась» до следующего синка через
-три часа. Проверяем именно наши обязательства: повторяем только обрыв уже
-установленного соединения и не повторяем таймауты и отказ в соединении.
+через 12–13 с после старта), а с 05.11 ещё и замирает посреди отдачи страницы.
+Без повтора обрыв выбрасывал все уже вычитанные страницы, и отбивка показывала
+«выгрузка не удалась» до следующего синка через три часа. Проверяем именно наши
+обязательства: повторяем обрыв уже установленного соединения и зависшую после
+ответа передачу, но не таймаут до ответа и не отказ в соединении.
 """
 
 import os
@@ -14,6 +15,7 @@ import sys
 
 import pytest
 import requests
+import urllib3
 from http.client import RemoteDisconnected
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -63,6 +65,32 @@ def _dropped_connection_error():
         requests.packages.urllib3.exceptions.ProtocolError("Connection aborted.", inner))
 
 
+def _read_timeout_error():
+    """urllib3 так сообщает о тишине в сокете дольше read-таймаута."""
+    error = urllib3.exceptions.ReadTimeoutError(None, None, "Read timed out.")
+    error.__cause__ = TimeoutError("The read operation timed out")
+    return error
+
+
+def _stalled_body_error():
+    """Как упали выгрузки 05.11: ответ 200 пришёл, чтение тела встало.
+
+    requests/models.py, generate(): `except ReadTimeoutError as e: raise ConnectionError(e)`.
+    """
+    inner = _read_timeout_error()
+    error = requests.exceptions.ConnectionError(inner)
+    error.__context__ = inner
+    return error
+
+
+def _timeout_before_answer_error():
+    """Таймаут до ответа — requests/adapters.py: `raise ReadTimeout(e, request=request)`."""
+    inner = _read_timeout_error()
+    error = requests.exceptions.ReadTimeout(inner)
+    error.__context__ = inner
+    return error
+
+
 @pytest.fixture(autouse=True)
 def _no_backoff_wait(monkeypatch):
     """Пауза перед повтором в бою нужна, а тесту ждать её незачем."""
@@ -77,18 +105,28 @@ def test_dropped_connection_is_retried():
     assert len(client.session.calls) == 2
 
 
-def test_retries_are_not_endless():
+def test_stalled_body_is_retried():
+    client = _client([_stalled_body_error(),
+                      _FakeResponse(payload={"_embedded": {"leads": [{"id": 1}]}})])
+    data = client.get("/api/v4/leads")
+    assert data == {"_embedded": {"leads": [{"id": 1}]}}
+    assert len(client.session.calls) == 2
+
+
+@pytest.mark.parametrize("make_error", [_dropped_connection_error, _stalled_body_error])
+def test_retries_are_not_endless(make_error):
     """Три попытки — и наверх, иначе синк будет молча висеть на мёртвом сокете."""
-    client = _client([_dropped_connection_error() for _ in range(amo_leads.REQUEST_RETRIES)])
+    client = _client([make_error() for _ in range(amo_leads.REQUEST_RETRIES)])
     with pytest.raises(requests.exceptions.ConnectionError):
         client.get("/api/v4/leads")
     assert len(client.session.calls) == amo_leads.REQUEST_RETRIES
 
 
 def test_timeout_is_never_retried():
-    """Таймаут — это «amoCRM не отвечает»; повтор только добавит ему работы."""
-    for error in (requests.exceptions.ConnectTimeout("connect timeout=60"),
-                  requests.exceptions.ReadTimeout("read timeout=60")):
+    """Таймаут до ответа — это «amoCRM не отвечает»; повтор только добавит ему работы."""
+    for error in (requests.exceptions.ConnectTimeout("connect timeout=10"),
+                  requests.exceptions.ReadTimeout("read timeout=30"),
+                  _timeout_before_answer_error()):
         client = _client([error])
         with pytest.raises(requests.exceptions.Timeout):
             client.get("/api/v4/leads")
@@ -118,8 +156,9 @@ def test_no_content_means_end_of_list():
     assert client.get("/api/v4/leads") is None
 
 
-def test_pagination_survives_a_drop_in_the_middle(monkeypatch):
-    """Обрыв на середине не должен стоить уже вычитанных страниц."""
+@pytest.mark.parametrize("make_error", [_dropped_connection_error, _stalled_body_error])
+def test_pagination_survives_a_drop_in_the_middle(monkeypatch, make_error):
+    """Обрыв или зависание на середине не должны стоить уже вычитанных страниц."""
     monkeypatch.setattr(amo_leads, "REQUEST_PAUSE_SECONDS", 0)
 
     def page(number, has_next):
@@ -132,7 +171,7 @@ def test_pagination_survives_a_drop_in_the_middle(monkeypatch):
 
     client = _client([
         page(1, True),
-        _dropped_connection_error(),   # рвётся вторая страница
+        make_error(),                  # рвётся вторая страница
         page(2, True),
         page(3, False),
     ])
@@ -180,6 +219,14 @@ def test_detects_broken_pipe_in_context():
 def test_plain_timeout_is_not_a_dropped_connection():
     assert not amo_leads._dropped_connection(requests.exceptions.ConnectTimeout("timeout=60"))
     assert not amo_leads._dropped_connection(requests.exceptions.ReadTimeout("timeout=60"))
+
+
+def test_stalled_body_is_told_apart_from_timeout_before_answer():
+    """Внутри у обоих один и тот же ReadTimeoutError — различает только внешний тип."""
+    assert amo_leads._stalled_body(_stalled_body_error())
+    assert not amo_leads._stalled_body(_timeout_before_answer_error())
+    assert not amo_leads._stalled_body(requests.exceptions.ConnectTimeout("timeout=10"))
+    assert not amo_leads._stalled_body(_dropped_connection_error())
 
 
 def test_cycles_do_not_hang_the_walk():
