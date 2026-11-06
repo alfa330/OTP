@@ -11,11 +11,12 @@
 
 import logging
 import threading
+import uuid
 from datetime import datetime, timedelta
 
 import psycopg2
 
-from . import access, calls, hh, notices, queries, rules, upload
+from . import access, calls, hh, notices, queries, rules, upload, whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -1022,6 +1023,155 @@ class HiringService:
             if chat_id and self._telegram(chat_id, notices.overdue_digest_html(count, self._base_url), None):
                 sent += 1
         return sent
+
+    # ─── Номер WhatsApp найма (сервис на шлюзе, hiring/whatsapp.py) ──────────
+
+    def wa_poll(self, payload):
+        """Опрос сервиса шлюза: его состояние → строка интеграции; в ответ — команда человека.
+
+        Команда держится, пока сервис не подтвердит её номером (ack): потерянный ответ не теряет
+        «Подключить». Тревога руководителям — на входе в «Остановлен» и на возврате после него."""
+        payload = payload if isinstance(payload, dict) else {}
+        state = str(payload.get('state') or '').strip()
+        if state not in whatsapp.BRIDGE_STATES:
+            raise HiringError('HIRING_WA_BAD_STATE', 'Неизвестное состояние сервиса')
+        detail = whatsapp.clean_detail(payload.get('detail'))
+        ack = str(payload.get('ack') or '').strip() or None
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.wa_lock_integration(cursor, now)
+            before = whatsapp.view(row, now)['state']
+            if state == whatsapp.PAIRING and detail.get('qr'):
+                previous = row.get('cursor') or {}
+                same = previous.get('qr') == detail['qr'] and previous.get('qr_at')
+                detail['qr_at'] = previous['qr_at'] if same else now.isoformat(timespec='seconds')
+            queries.wa_save_state(cursor, state, detail, whatsapp.park_text(detail) if state == whatsapp.PARKED else None,
+                                  now, ok=state == whatsapp.CONNECTED)
+            command = (row.get('settings') or {}).get('command') or None
+            if command and ack and command.get('id') == ack:
+                queries.wa_set_command(cursor, None, now)
+                command = None
+            alert = whatsapp.alert_for(before, state, detail)
+            recipients = notices.whatsapp_alert(cursor, alert, now, tone='default' if state == whatsapp.CONNECTED else 'warning') \
+                if alert else []
+            chats = queries.telegram_chats(cursor, recipients) if alert and state == whatsapp.PARKED else {}
+        for chat_id in chats.values():
+            self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
+        busy = command or state in (whatsapp.PAIRING, whatsapp.CONNECTING)
+        return {'command': {'id': command['id'], 'action': command['action']} if command else None,
+                'next_poll_sec': 2 if busy else 10}
+
+    def wa_events(self, payload):
+        """Сообщения личных чатов номера от сервиса. Первое входящее чата — отклик в пуле; дальше
+        чат пишется в переписку карточки, пока она открыта. Повтор пачки безопасен."""
+        events = payload.get('events') if isinstance(payload, dict) else None
+        if not isinstance(events, list) or not events or len(events) > whatsapp.EVENTS_MAX:
+            raise HiringError('HIRING_WA_BAD_EVENTS', 'Ожидается список событий (1–%d)' % whatsapp.EVENTS_MAX)
+        messages = [message for message in (whatsapp.parse_message(item) for item in events) if message]
+        now = self._now()
+        outcomes = {}
+        with self._cursor() as cursor:
+            source = queries.source_by_code(cursor, whatsapp.SOURCE_CODE)
+            for message in messages:
+                outcome = self._wa_message(cursor, message, source, now)
+                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            queries.wa_add_received(cursor, outcomes.get('created', 0), now)
+        return {'accepted': len(events), 'outcomes': outcomes}
+
+    def _wa_message(self, cursor, message, source, now):
+        key = message['key']
+        if message['revoke_of']:
+            return 'revoked' if queries.wa_revoke_message(cursor, key, message['revoke_of'], now) else 'missing'
+        if message['edit_of']:
+            return 'edited' if queries.wa_edit_message(cursor, key, message['edit_of'], message['text'], now) else 'missing'
+        if queries.wa_insert_message(cursor, key, message, now) is None:
+            return 'duplicate'
+        inbound = not message['from_me']
+        phone = message['phone'] or (('+' + message['phone_digits'])[:16] if message['phone_digits'] else None)
+        chat = queries.wa_touch_chat(cursor, key, message['chat'], phone, message['lid'], message['push_name'],
+                                     message['at'] or now, inbound, now)
+        # Номер стал известен — чат «только LID» доклеивается к ключу номера вместе с перепиской.
+        if message['lid'] and not key.startswith('lid:') and queries.wa_chat_by_lid(cursor, message['lid'], lock=True):
+            queries.wa_move_chat(cursor, 'lid:' + message['lid'], key, now)
+            chat = queries.wa_get_chat(cursor, key)
+        if not inbound or not message['phone'] or not source or not source['is_active']:
+            return 'stored'
+        if chat.get('card_id'):
+            card = queries.get_card(cursor, chat['card_id'])
+            if card and not card['is_closed']:
+                return 'stored'
+        outcome, card_id = self._intake_one(
+            cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=source, now=now, by_name='WhatsApp',
+            full_name=chat.get('push_name') or '', platform_ref='wa:%s' % message['id'],
+            campaign=whatsapp.campaign_of(message['ad']), received_at=message['at'] or now,
+            comment=whatsapp.first_message_comment(message))
+        if card_id:
+            queries.wa_set_chat_card(cursor, key, card_id, now)
+        return outcome
+
+    def wa_status(self, ctx):
+        if not access.can_manage(ctx):
+            raise _forbidden('Подключение WhatsApp ведёт руководитель рекрутинга')
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.get_integration(cursor, whatsapp.INTEGRATION)
+            unmatched = queries.wa_unmatched(cursor)
+        data = whatsapp.view(row, now)
+        data['unmatched'] = unmatched
+        return data
+
+    def wa_command(self, ctx, action):
+        """«Подключить» (QR), «Возобновить» после остановки, «Отвязать» — команда сервису на шлюзе."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Подключение WhatsApp ведёт руководитель рекрутинга')
+        action = str(action or '').strip()
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.wa_lock_integration(cursor, now)
+            allowed, reason = whatsapp.can_command(action, whatsapp.view(row, now)['state'], row.get('cursor') or {})
+            if not allowed:
+                raise HiringError('HIRING_WA_COMMAND', reason, 409)
+            queries.wa_set_command(cursor, {'id': uuid.uuid4().hex[:16], 'action': action,
+                                            'at': now.isoformat(timespec='seconds'), 'by': ctx['user_id']}, now)
+        return self.wa_status(ctx)
+
+    def card_whatsapp(self, ctx, card_id):
+        """Переписка карточки с номером найма: чаты по телефону и WhatsApp карточки. Удалённому рекрутеру —
+        только в своих карточках, как и сам телефон (ТЗ 2)."""
+        with self._cursor() as cursor:
+            card = self._load_visible(cursor, ctx, card_id)
+            if not access.sees_phone(ctx, card):
+                raise HiringError('HIRING_PHONE_HIDDEN', 'Переписка откроется, когда возьмёте карточку в работу', 403)
+            chats = queries.wa_chats_for_phones(cursor, [card.get('phone'), card.get('whatsapp')])
+            messages = queries.wa_messages(cursor, [chat['key'] for chat in chats])
+        return {'chats': chats, 'messages': messages}
+
+    def wa_watchdog(self):
+        """Сторож (раз в минуту): сервис замолчал — «не на связи» и тревога; телефон с номером давно не
+        выходил в WhatsApp — тревога раз в сутки (через 14 дней привязка слетает)."""
+        now = self._now()
+        alert, chats = None, {}
+        with self._cursor() as cursor:
+            row = queries.wa_lock_integration(cursor, now)
+            detail = row.get('cursor') or {}
+            last_run = row.get('last_run_at')
+            if row.get('state') in whatsapp.BRIDGE_STATES and last_run and now - last_run > whatsapp.OFFLINE_AFTER:
+                queries.wa_save_state(cursor, whatsapp.OFFLINE, detail, 'Сервис на шлюзе не выходит на связь', now,
+                                      heartbeat=False)
+                alert = ('wa:offline:%s' % last_run.isoformat(timespec='minutes'),
+                         'WhatsApp найма: сервис на шлюзе не на связи',
+                         'С %s новые сообщения в воронку не попадают' % last_run.strftime('%d.%m %H:%M'))
+                chats = queries.telegram_chats(cursor, notices.whatsapp_alert(cursor, alert, now))
+            elif row.get('state') == whatsapp.CONNECTED:
+                days = whatsapp.phone_seen_days(detail, now)
+                if days is not None and days >= whatsapp.PHONE_ALERT_DAYS:
+                    alert = ('wa:phone:%s' % now.date().isoformat(), 'WhatsApp найма: телефон давно не в сети',
+                             'Телефон с номером не выходил в WhatsApp %d дн. Откройте на нём WhatsApp Business — '
+                             'через 14 дней без телефона привязка слетает' % days)
+                    chats = queries.telegram_chats(cursor, notices.whatsapp_alert(cursor, alert, now))
+        for chat_id in chats.values():
+            self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
+        return alert[0] if alert else None
 
     def _telegram(self, chat_id, html_text, reply_markup):
         if not self._send_telegram:

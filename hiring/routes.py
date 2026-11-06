@@ -335,6 +335,9 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                 'motivation': _json(queries.get_motivation(cursor, card_id)),
                 # Звонки из телефонии Binotel (исход, длительность, запись) — к касаниям по touch_id.
                 'calls': _json(queries.card_calls(cursor, card_id)),
+                # Переписка с номером WhatsApp найма — счётчик для вкладки, сама лента по запросу.
+                'whatsapp': _json(queries.wa_summary(cursor, [card.get('phone'), card.get('whatsapp')]))
+                if access.sees_phone(ctx, card) else None,
                 'repeat_of': None,
             }
             if card.get('repeat_of_card_id'):
@@ -907,6 +910,19 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = queries.list_integrations(cursor)
         return jsonify({'received': received, 'items': _json(rows)})
 
+    # Номер WhatsApp найма: состояние сервиса на шлюзе, QR привязки и команды — руководителю.
+    @hiring_route('/whatsapp')
+    def hiring_whatsapp(ctx):
+        return jsonify(_json(service.wa_status(ctx)))
+
+    @hiring_route('/whatsapp/command', methods=('POST',))
+    def hiring_whatsapp_command(ctx):
+        return jsonify(_json(service.wa_command(ctx, _body().get('action'))))
+
+    @hiring_route('/cards/<int:card_id>/whatsapp')
+    def hiring_card_whatsapp(card_id, ctx):
+        return jsonify(_json(service.card_whatsapp(ctx, card_id)))
+
     @hiring_route('/notifications/seen', methods=('POST',))
     def hiring_notifications_seen(ctx):
         with db._get_cursor() as cursor:
@@ -931,6 +947,67 @@ def _number(value):
         return float(value) if value not in (None, '') else None
     except (TypeError, ValueError):
         return None
+
+
+# ─── Сервис номера WhatsApp найма на шлюзе (wa_bridge/) ──────────────────────
+
+def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
+    """Ручки сервиса WhatsApp на шлюзе. Без логина портала: сервис доказывает, что он шлюз, подписью
+    Ed25519 — тем же протоколом и ключами, что мост «Касаний» и автоинформатор (cdr/agent_auth.py,
+    открытые ключи — CDR_AGENT_KEYS).
+
+        POST /api/hiring/wa/agent/poll    {state, detail, ack} → {command, next_poll_sec}
+        POST /api/hiring/wa/agent/events  {events: [...]}      → {accepted, outcomes}
+    """
+    from cdr import agent_auth
+    from cdr import config as cdr_config
+
+    bp = Blueprint('hiring_wa_agent', __name__, url_prefix='/api/hiring/wa/agent')
+
+    def _authenticate():
+        raw_keys = cdr_config.agent_keys_raw()
+        if not raw_keys:
+            return _bad('Шлюз не настроен на сервере: нет открытых ключей', 'HIRING_WA_NOT_READY', 503)
+        try:
+            keys = agent_auth.parse_public_keys(raw_keys)
+        except ValueError as exc:
+            log.error('WhatsApp найма: CDR_AGENT_KEYS задан с ошибкой: %s', exc)
+            return _bad('Шлюз не настроен на сервере: ключи заданы с ошибкой', 'HIRING_WA_NOT_READY', 503)
+        kid, reason = agent_auth.verify(request.headers, request.method, request.path, request.get_data(cache=True), keys)
+        if kid is None:
+            log.warning('WhatsApp найма: сервис шлюза не авторизован — %s', reason)
+            return _bad('Шлюз не авторизован', 'HIRING_WA_UNAUTHORIZED', 401)
+        return None
+
+    def agent_route(rule):
+        def decorator(handler):
+            @bp.route(rule, methods=['POST', 'OPTIONS'], endpoint='hiring_wa_agent_' + handler.__name__)
+            @wraps(handler)
+            def wrapper():
+                if request.method == 'OPTIONS':
+                    return build_cors_preflight_response()
+                refusal = _authenticate()
+                if refusal is not None:
+                    return refusal
+                try:
+                    return jsonify(handler(request.get_json(silent=True) or {}))
+                except HiringError as exc:
+                    return _bad(exc.message, exc.code, exc.status)
+                except Exception:  # noqa: BLE001
+                    log.exception('WhatsApp найма: ошибка в ручке сервиса %s', rule)
+                    return _bad('Внутренняя ошибка', 'HIRING_WA_INTERNAL', 500)
+            return wrapper
+        return decorator
+
+    @agent_route('/poll')
+    def poll(payload):
+        return service.wa_poll(payload)
+
+    @agent_route('/events')
+    def events(payload):
+        return service.wa_events(payload)
+
+    return bp
 
 
 # ─── Внешний вход откликов ───────────────────────────────────────────────────

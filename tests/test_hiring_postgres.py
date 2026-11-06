@@ -178,8 +178,14 @@ def test_seed_and_context(world):
         reasons = queries.list_reasons(cur)
         assert len(reasons) == 30
         assert {r['kind'] for r in reasons} == set(rules.REASON_KINDS)
-        assert [s['code'] for s in queries.list_sources(cur)][:4] == ['hh', 'kaspi', 'olx', 'target']
-        assert {row['code'] for row in queries.list_integrations(cur)} == {'hh', 'olx', 'webhook'}
+        sources = queries.list_sources(cur)
+        codes = [s['code'] for s in sources]
+        assert codes[:4] == ['hh', 'kaspi', 'olx', 'target']
+        # Номер WhatsApp найма появился после выкладки: долит в заполненный справочник один раз,
+        # последним из откликов (схема разворачивается дважды — рестарт прода).
+        assert codes.count('whatsapp') == 1
+        assert [s['code'] for s in sources if s['kind'] == 'responses'][-1] == 'whatsapp'
+        assert {row['code'] for row in queries.list_integrations(cur)} == {'hh', 'olx', 'webhook', 'whatsapp'}
     ctx = ctx_of(world, HR_HEAD)
     assert ctx['headed_codes'] == ['hr'] and ctx['grant'] is None
     assert ctx_of(world, TRAINER)['trainer_group_ids'] == [world['group_id']]
@@ -894,3 +900,182 @@ def test_pending_call_waits_for_telephony(world):
         assert queries.get_call(cur, stray_call_id)['touch_id'] == orphan_id
     assert service.adopt_orphan_pending_calls() == 0
     assert orphan['substage'] == 'dial'
+
+
+# ─── Номер WhatsApp найма (сервис на шлюзе, hiring/whatsapp.py) ───────────────
+
+WA_TS = 1792047600          # 2026-10-15 12:00 по Алматы — как NOW
+
+
+def wa_event(message_id, phone='77055552233', **extra):
+    base = {'type': 'message', 'id': message_id, 'chat': '%s@s.whatsapp.net' % phone, 'phone': phone,
+            'from_me': False, 'ts': WA_TS, 'push_name': 'Айгерим', 'kind': 'text', 'text': 'Здравствуйте'}
+    base.update(extra)
+    return base
+
+
+def test_whatsapp_first_message_becomes_response(world):
+    service = world['service']
+    ad = {'title': 'Оператор КЦ — Алматы', 'source_id': '120208', 'ctwa_clid': 'abc'}
+    result = service.wa_events({'events': [wa_event('m1', text='Хочу работать', ad=ad)]})
+    assert result == {'accepted': 1, 'outcomes': {'created': 1}}
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77055552233')
+        assert card['stage'] == 'responses' and card['full_name'] == 'Айгерим' and card['received_at'] == NOW
+        assert card['campaign'] == 'Оператор КЦ — Алматы' and card['comment'] == 'WhatsApp: «Хочу работать»'
+        # Ссылка на площадку — без телефона: её видят и удалённые рекрутеры, которым телефон пула скрыт.
+        assert card['platform_ref'] == 'wa:m1'
+        assert queries.get_source(cur, card['source_id'])['code'] == 'whatsapp'
+        chat = queries.wa_get_chat(cur, '+77055552233')
+        assert chat['card_id'] == card['id'] and chat['messages'] == 1
+        cur.execute("SELECT user_id FROM hiring_notifications WHERE kind = 'new_response' AND card_id = %s ORDER BY user_id",
+                    (card['id'],))
+        assert [row[0] for row in cur.fetchall()] == [REC1, REC2, REMOTE]
+        assert queries.get_integration(cur, 'whatsapp')['received_total'] == 1
+    # Дальше чат открытой карточки — только переписка: ни отклика, ни касаний, ни уведомлений. Ответ с
+    # телефона (from_me) имя кандидата не перетирает; повтор доставки — тот же «m1» — не дублируется.
+    again = service.wa_events({'events': [wa_event('m2', text='Есть вакансия?'),
+                                          wa_event('m3', from_me=True, push_name='Найм', text='Да, есть'),
+                                          wa_event('m1', text='Хочу работать')]})
+    assert again['outcomes'] == {'stored': 2, 'duplicate': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.card_touches(cur, card['id']) == []
+        cur.execute("SELECT COUNT(*) FROM hiring_notifications WHERE card_id = %s", (card['id'],))
+        assert cur.fetchone()[0] == 3
+        chat = queries.wa_get_chat(cur, '+77055552233')
+        assert chat['messages'] == 3 and chat['push_name'] == 'Айгерим'
+        assert queries.get_integration(cur, 'whatsapp')['received_total'] == 1
+    thread = service.card_whatsapp(ctx_of(world, HR_HEAD), card['id'])
+    assert [m['wa_id'] for m in thread['messages']] == ['m1', 'm2', 'm3']
+    assert [m['from_me'] for m in thread['messages']] == [False, False, True]
+    assert thread['messages'][0]['ad']['ctwa_clid'] == 'abc'
+
+
+def test_whatsapp_repeat_closed_and_employee(world):
+    service = world['service']
+    outcome, card = add_response(world, REC1, '8 705 555 33 44', full_name='Петров')
+    card = service.take(ctx_of(world, REC1), card['id'])
+    # Открытая карточка с тем же телефоном из другого источника — повторный отклик один раз на чат.
+    assert service.wa_events({'events': [wa_event('r1', phone='77055553344')]})['outcomes'] == {'repeat': 1}
+    assert service.wa_events({'events': [wa_event('r2', phone='77055553344')]})['outcomes'] == {'stored': 1}
+    with world['db']._get_cursor() as cur:
+        repeats = [t for t in queries.card_touches(cur, card['id']) if t['kind'] == rules.TOUCH_REPEAT]
+        assert len(repeats) == 1 and 'WhatsApp' in repeats[0]['body']
+        cur.execute("SELECT COUNT(*) FROM hiring_notifications WHERE kind = 'repeat_response' AND user_id = %s", (REC1,))
+        assert cur.fetchone()[0] == 1
+        assert queries.wa_get_chat(cur, '+77055553344')['card_id'] == card['id']
+        # Карточку закрыли — следующее обращение в WhatsApp заводит новую с пометкой «повторное».
+        cur.execute("UPDATE hiring_cards SET is_closed = TRUE, closed_at = %s WHERE id = %s", (NOW, card['id']))
+    assert service.wa_events({'events': [wa_event('r3', phone='77055553344')]})['outcomes'] == {'created': 1}
+    with world['db']._get_cursor() as cur:
+        fresh = queries.open_card_by_phone(cur, '+77055553344')
+        assert fresh['repeat_of_card_id'] == card['id'] and queries.wa_get_chat(cur, '+77055553344')['card_id'] == fresh['id']
+    # Телефон действующего сотрудника — не отклик; переписка всё равно хранится.
+    assert service.wa_events({'events': [wa_event('e1', phone='77779998877')]})['outcomes'] == {'employee': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77779998877') is None
+        assert queries.wa_get_chat(cur, '+77779998877')['card_id'] is None
+
+
+def test_whatsapp_hidden_and_foreign_numbers(world):
+    service = world['service']
+    lid = '205981234567890'
+    hidden = wa_event('h1', phone='', chat=lid + '@lid', lid=lid, text='Добрый день')
+    foreign = wa_event('f1', phone='998901234567')
+    assert service.wa_events({'events': [hidden, foreign]})['outcomes'] == {'stored': 2}
+    with world['db']._get_cursor() as cur:
+        assert queries.wa_unmatched(cur) == {'foreign': 1, 'hidden': 1}
+        assert queries.wa_get_chat(cur, 'lid:' + lid)['card_id'] is None
+    # Номер стал известен (сервис прислал и LID, и номер) — чат доклеивается вместе с перепиской и
+    # становится откликом.
+    known = wa_event('h2', phone='77055556677', chat=lid + '@lid', lid=lid, text='Я по вакансии')
+    assert service.wa_events({'events': [known]})['outcomes'] == {'created': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.wa_get_chat(cur, 'lid:' + lid) is None
+        chat = queries.wa_get_chat(cur, '+77055556677')
+        assert chat['messages'] == 2 and chat['lid'] == lid and chat['card_id']
+        assert [m['wa_id'] for m in queries.wa_messages(cur, ['+77055556677'])] == ['h1', 'h2']
+        assert queries.wa_unmatched(cur) == {'foreign': 1, 'hidden': 0}
+    # Источник «WhatsApp» выключен руководителем — переписка хранится, откликов нет.
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_sources SET is_active = FALSE WHERE code = 'whatsapp'")
+    assert service.wa_events({'events': [wa_event('o1', phone='77055558899')]})['outcomes'] == {'stored': 1}
+
+
+def test_whatsapp_edit_revoke_and_access(world):
+    service = world['service']
+    service.wa_events({'events': [wa_event('x1', text='Черновик')]})
+    edited = service.wa_events({'events': [wa_event('x2', edit_of='x1', text='Исправил')]})
+    revoked = service.wa_events({'events': [wa_event('x3', revoke_of='x1')]})
+    assert edited['outcomes'] == {'edited': 1} and revoked['outcomes'] == {'revoked': 1}
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77055552233')
+    message = service.card_whatsapp(ctx_of(world, REC1), card['id'])['messages'][0]
+    assert message['body'] is None and message['deleted_at'] and message['edited_at']
+    # Удалённому рекрутеру переписка карточки пула закрыта, как и телефон; чужому — карточки нет.
+    with pytest.raises(HiringError) as hidden:
+        service.card_whatsapp(ctx_of(world, REMOTE), card['id'])
+    assert hidden.value.status == 403 and hidden.value.code == 'HIRING_PHONE_HIDDEN'
+    with pytest.raises(HiringError) as stranger:
+        service.card_whatsapp(ctx_of(world, STRANGER), card['id'])
+    assert stranger.value.status == 404
+
+
+def test_whatsapp_poll_commands_alerts_and_watchdog(world):
+    service, clock = world['service'], world['clock']
+    lead = ctx_of(world, HR_HEAD)
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE users SET telegram_id = 2020 WHERE id = %s", (HR_HEAD,))
+    # Сервис ещё ни разу не выходил на связь — команду ставить некуда.
+    with pytest.raises(HiringError) as early:
+        service.wa_command(lead, 'pair')
+    assert early.value.status == 409
+    assert service.wa_poll({'state': 'unpaired', 'detail': {'version': 'wa-bridge 1.0.0'}}) == {'command': None, 'next_poll_sec': 10}
+    with pytest.raises(HiringError) as recruiter:
+        service.wa_command(ctx_of(world, REC1), 'pair')
+    assert recruiter.value.status == 403
+    assert service.wa_command(lead, 'pair')['pending'] == 'pair'
+    command = service.wa_poll({'state': 'unpaired', 'detail': {}})['command']
+    assert command['action'] == 'pair'
+    # Пока сервис не подтвердил номером команды — она держится (потерянный ответ не теряет «Подключить»).
+    assert service.wa_poll({'state': 'pairing', 'detail': {'qr': '2@one'}}) == {'command': command, 'next_poll_sec': 2}
+    shown = service.wa_status(lead)
+    assert shown['state'] == 'pairing' and shown['qr'] == '2@one' and shown['actions']['pair'] is False
+    assert service.wa_poll({'state': 'pairing', 'detail': {'qr': '2@one'}, 'ack': command['id']})['command'] is None
+    assert service.wa_status(lead)['pending'] is None
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'number': '77001112233',
+                                                       'connected_since': '2026-10-15T12:00:00'}})
+    # Остановка — тревога руководителям один раз, сколько бы опросов ни пришло; Telegram — у кого он есть.
+    parked = {'state': 'parked', 'detail': {'paired': True, 'park': {'reason': 'temp_ban', 'code': 101,
+                                                                      'since': '2026-10-15T12:01:00', 'until': '2026-10-16T12:01:00'}}}
+    service.wa_poll(parked)
+    service.wa_poll(parked)
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT user_id, body, tone FROM hiring_notifications WHERE kind = 'whatsapp' ORDER BY user_id")
+        rows = cur.fetchall()
+    assert [row[0] for row in rows] == [SUPER, HR_HEAD, LEAD_GRANT]
+    assert all('временно ограничил' in row[1] and row[2] == 'warning' for row in rows)
+    assert [chat_id for chat_id, _text, _markup in world['sent']] == [2020]
+    assert service.wa_status(lead)['reason'].startswith('WhatsApp временно ограничил номер')
+    # «Возобновить» — человек; после подключения — «снова подключён» без Telegram.
+    service.wa_command(lead, 'resume')
+    resume = service.wa_poll(parked)['command']
+    assert resume['action'] == 'resume'
+    service.wa_poll({'state': 'connected', 'ack': resume['id'],
+                     'detail': {'paired': True, 'connected_since': '2026-10-15T13:00:00',
+                                'phone_seen_at': (NOW - timedelta(days=13)).isoformat()}})
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM hiring_notifications WHERE kind = 'whatsapp' AND title LIKE '%%снова%%'")
+        assert cur.fetchone()[0] == 3
+    assert len(world['sent']) == 1
+    # Сторож: телефон 13 дней не в сети — тревога раз в сутки.
+    assert service.wa_watchdog() == 'wa:phone:2026-10-15'
+    service.wa_watchdog()
+    assert len(world['sent']) == 2
+    # Сервис замолчал дольше трёх минут — «не на связи», тревога один раз.
+    clock.now = NOW + timedelta(minutes=5)
+    assert service.wa_watchdog().startswith('wa:offline:')
+    assert service.wa_watchdog() is None
+    assert service.wa_status(lead)['state'] == 'offline' and len(world['sent']) == 3
+    with pytest.raises(HiringError):
+        service.wa_command(lead, 'logout')

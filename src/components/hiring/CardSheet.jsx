@@ -14,6 +14,7 @@ import {
     splitDateTime, todayIso,
 } from './hiringMeta';
 import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { WhatsAppThread } from './WhatsAppPanel';
 
 /*
  * Карточка кандидата (ТЗ 6): одно окно на весь раздел. Внутри — поля по группам ТЗ 6.1,
@@ -705,10 +706,13 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
     const shiftsDone = data?.shifts?.length || 0;
     const touchCount = (data?.touches || []).length;
     const showHire = Boolean(card && (card.stage === 'on_line' || data?.motivation));
+    // Переписка с номером WhatsApp найма — вкладкой, только когда она есть (и телефон виден человеку).
+    const whatsappCount = data?.whatsapp?.messages || 0;
     // Вкладки карточки (владелец 30.10.2026: карточка перегружена — поделить хотя бы на табы).
     const tabs = card ? [
         { value: 'card', label: 'Карточка' },
         { value: 'touches', label: touchCount ? `Касания · ${touchCount}` : 'Касания' },
+        ...(whatsappCount ? [{ value: 'whatsapp', label: `WhatsApp · ${whatsappCount}` }] : []),
         ...(showHire ? [{ value: 'hire', label: 'Смены и мотивация' }] : []),
         { value: 'history', label: 'История' },
     ] : [];
@@ -887,6 +891,7 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                             </div>
                         )}
 
+                        {activeTab === 'whatsapp' && <WhatsAppThread api={api} cardId={card.id} />}
                         {activeTab === 'history' && <StageHistory stages={data.stages || []} assignments={data.assignments || []} />}
                     </div>
                 )}

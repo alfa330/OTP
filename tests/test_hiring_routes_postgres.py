@@ -203,6 +203,7 @@ def client():
     app.register_blueprint(routes.build_hiring_external_blueprint(
         db=db, service=service, partner_auth=_FakeAuth(), partner_scopes=SimpleNamespace(HIRING_LEADS='hiring_leads'),
         partner_journal=journal, rate_limiter=RateLimiter(100)))
+    app.register_blueprint(routes.build_hiring_wa_agent_blueprint(service=service, build_cors_preflight_response=lambda: ('', 204)))
     test_client = app.test_client()
     test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db, 'dial_list': dial_list}
     try:
@@ -226,7 +227,7 @@ def test_boot_rights_and_dictionaries(client):
     assert lead['capabilities']['lead'] and lead['capabilities']['manage']
     assert lead['me']['scope_label'] == 'Руководитель рекрутинга'
     assert len(lead['meta']['stages']) == 10 and lead['meta']['shifts_to_hire'] == 7
-    assert {row['code'] for row in lead['integrations']} == {'hh', 'olx', 'webhook'}
+    assert {row['code'] for row in lead['integrations']} == {'hh', 'olx', 'webhook', 'whatsapp'}
     assert lead['dictionaries']['departments']
     recruiter = client.get('/api/hiring', headers=as_user(REC1)).get_json()
     assert recruiter['capabilities']['recruiter'] and not recruiter['capabilities']['manage']
@@ -314,11 +315,13 @@ def test_upload_reports_and_settings(client):
     assert client.post('/api/hiring/upload', data={'source_id': str(base['id'])}, content_type='multipart/form-data', headers=lead).status_code == 400
     assert client.get('/api/hiring/batches', headers=as_user(REC1)).status_code == 403
 
-    dashboard = client.get('/api/hiring/reports/dashboard', query_string={'month': '2026-10'}, headers=lead).get_json()
-    assert dashboard['filters']['month'] == '2026-10' and len(dashboard['funnel']) == 7 and dashboard['losses']['refused']['count'] == 0
-    export = client.get('/api/hiring/reports/dashboard/export', query_string={'month': '2026-10'}, headers=lead)
+    # Загрузка выше пишет карточку текущим временем — месяц отчёта тот же, иначе с ноября тест красный.
+    month = rules.month_of(rules.now_almaty())
+    dashboard = client.get('/api/hiring/reports/dashboard', query_string={'month': month}, headers=lead).get_json()
+    assert dashboard['filters']['month'] == month and len(dashboard['funnel']) == 7 and dashboard['losses']['refused']['count'] == 0
+    export = client.get('/api/hiring/reports/dashboard/export', query_string={'month': month}, headers=lead)
     assert export.status_code == 200 and export.data[:2] == b'PK' and 'filename*=UTF-8' in export.headers['Content-Disposition']
-    assert client.get('/api/hiring/reports/cards', query_string={'month': '2026-10', 'key': 'received'}, headers=lead).get_json()['total'] == 1
+    assert client.get('/api/hiring/reports/cards', query_string={'month': month, 'key': 'received'}, headers=lead).get_json()['total'] == 1
     assert client.get('/api/hiring/reports/cards', headers=lead).status_code == 400
     motivation = client.get('/api/hiring/reports/motivation', query_string={'month': '2026-10'}, headers=lead).get_json()
     assert motivation['items'] == []
@@ -455,3 +458,59 @@ def test_call_recording_link(client):
     assert client.get('/api/hiring/calls/%s/recording' % answered, headers=as_user(REC2)).status_code == 404
     assert client.get('/api/hiring/calls/%s/recording' % answered, headers=as_user(HR_HEAD)).status_code == 200
     assert client.get('/api/hiring/calls/999999/recording', headers=as_user(REC1)).status_code == 404
+
+
+def test_whatsapp_bridge_is_signed_and_buttons_are_lead_only(client, monkeypatch):
+    """Сервис WhatsApp на шлюзе входит подписью моста (CDR_AGENT_KEYS), как автоинформатор: без подписи,
+    повтором и с подменённым телом — отказ. Кнопки привязки — только руководителю рекрутинга."""
+    import json as _json_mod
+
+    from cdr_bridge import signing
+
+    private_b64, public_b64, _kid = signing.generate()
+    monkeypatch.setenv('CDR_AGENT_KEYS', public_b64)
+    signer = signing.Signer(signing.load_private_key(private_b64))
+
+    def signed(path, payload, **header_overrides):
+        body = _json_mod.dumps(payload).encode('utf-8')
+        headers = signer.headers('POST', path, body)
+        headers.update(header_overrides)
+        return client.post(path, data=body, content_type='application/json', headers=headers), headers, body
+
+    poll = '/api/hiring/wa/agent/poll'
+    assert client.post(poll, json={'state': 'unpaired'}).status_code == 401
+    response, headers, body = signed(poll, {'state': 'unpaired', 'detail': {'version': 'wa-bridge 1.0.0'}})
+    assert response.status_code == 200 and response.get_json() == {'command': None, 'next_poll_sec': 10}
+    # Тот же одноразовый номер второй раз — повтор; чужое тело под той же подписью — подмена.
+    assert client.post(poll, data=body, content_type='application/json', headers=headers).status_code == 401
+    tampered = signer.headers('POST', poll, body)
+    assert client.post(poll, data=body.replace(b'unpaired', b'connected'), content_type='application/json',
+                       headers=tampered).status_code == 401
+    assert signed(poll, {'state': 'nonsense'})[0].status_code == 400
+
+    lead, recruiter = as_user(HR_HEAD), as_user(REC1)
+    assert client.get('/api/hiring/whatsapp', headers=recruiter).status_code == 403
+    assert client.post('/api/hiring/whatsapp/command', json={'action': 'pair'}, headers=recruiter).status_code == 403
+    status = client.get('/api/hiring/whatsapp', headers=lead).get_json()
+    assert status['state'] == 'unpaired' and status['actions']['pair'] is True and status['unmatched'] == {'foreign': 0, 'hidden': 0}
+    queued = client.post('/api/hiring/whatsapp/command', json={'action': 'pair'}, headers=lead)
+    assert queued.status_code == 200 and queued.get_json()['pending'] == 'pair'
+    assert client.post('/api/hiring/whatsapp/command', json={'action': 'logout'}, headers=lead).status_code == 409
+    command = signed(poll, {'state': 'unpaired'})[0].get_json()['command']
+    assert command['action'] == 'pair'
+
+    events = '/api/hiring/wa/agent/events'
+    message = {'type': 'message', 'id': 'w1', 'chat': '77055551122@s.whatsapp.net', 'phone': '77055551122',
+               'from_me': False, 'ts': 1792047600, 'push_name': 'Кандидат', 'kind': 'text', 'text': 'Здравствуйте'}
+    accepted = signed(events, {'events': [message]})[0]
+    assert accepted.status_code == 200 and accepted.get_json()['outcomes'] == {'created': 1}
+    assert signed(events, {'events': []})[0].status_code == 400
+    card = client.get('/api/hiring/cards', query_string={'q': '7055551122'}, headers=lead).get_json()['items'][0]
+    shown = client.get('/api/hiring/cards/%s' % card['id'], headers=lead).get_json()
+    assert shown['whatsapp']['messages'] == 1
+    thread = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()
+    assert thread['messages'][0]['body'] == 'Здравствуйте'
+    # Удалённому рекрутеру карточка пула видна, а телефон и переписка — нет.
+    remote = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC2)).get_json()
+    assert remote['card']['phone'] is None and remote['whatsapp'] is None
+    assert client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=as_user(REC2)).status_code == 403

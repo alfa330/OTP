@@ -53283,6 +53283,11 @@ try:
         partner_journal=_hiring_partner_journal,
         rate_limiter=_HiringRateLimiter(30),
     ))
+    # Номер WhatsApp найма (владелец 06.11.2026): сервис на шлюзе (wa_bridge/) приносит сообщения
+    # по подписи моста — первое входящее чата становится откликом в пуле.
+    from hiring.routes import build_hiring_wa_agent_blueprint  # noqa: E402
+    app.register_blueprint(build_hiring_wa_agent_blueprint(
+        service=_HIRING['service'], build_cors_preflight_response=_build_cors_preflight_response))
     logging.info("Раздел «Воронка найма»: Blueprint подключён на /api/hiring")
 except Exception:
     logging.exception("Раздел «Воронка найма»: Blueprint НЕ подключён")
@@ -53330,6 +53335,8 @@ def _hiring_job(name):
             return service.sync_call_history()
         if name == 'shifts_sync':
             return service.sync_shifts()
+        if name == 'wa_watchdog':
+            return service.wa_watchdog()
     except Exception:
         logging.exception("Воронка найма: задача %s упала", name)
     return None
@@ -58965,6 +58972,8 @@ if __name__ == '__main__':
         ('calls_sync', CronTrigger(minute='6,16,26,36,46,56', timezone=ZoneInfo('Asia/Almaty'))),
         # Смены на линии — из статусов работы (daily_hours), руками не ведутся (владелец 30.10.2026).
         ('shifts_sync', CronTrigger(minute='12,42', timezone=ZoneInfo('Asia/Almaty'))),
+        # Номер WhatsApp найма: сервис на шлюзе замолчал или телефон давно не в сети — тревога.
+        ('wa_watchdog', CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty'))),
     ):
         scheduler.add_job(
             hiring_job,

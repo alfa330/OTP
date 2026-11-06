@@ -1134,3 +1134,182 @@ def recruiters_with_cards(cursor):
          ORDER BY u.name
     """)
     return _all(cursor)
+
+
+# ─── Номер WhatsApp найма (сервис на шлюзе, hiring/whatsapp.py) ───────────────
+
+_WA_CHAT_COLUMNS = "key, jid, phone, lid, push_name, card_id, first_at, last_at, last_inbound_at, messages"
+
+
+def wa_get_chat(cursor, key, lock=False):
+    cursor.execute("SELECT " + _WA_CHAT_COLUMNS + " FROM hiring_wa_chats WHERE key = %s"
+                   + (" FOR UPDATE" if lock else ""), (key,))
+    return _one(cursor)
+
+
+def wa_chat_by_lid(cursor, lid, lock=False):
+    """Чат «только LID» (номер скрыт) — к нему доклеивается номер, когда тот станет известен."""
+    cursor.execute("SELECT " + _WA_CHAT_COLUMNS + " FROM hiring_wa_chats WHERE key = %s"
+                   + (" FOR UPDATE" if lock else ""), ('lid:' + str(lid),))
+    return _one(cursor)
+
+
+def wa_insert_message(cursor, key, message, now):
+    """Сообщение один раз: повтор доставки (сервис шлёт заново после сбоя) — None."""
+    cursor.execute("""
+        INSERT INTO hiring_wa_messages (chat_key, wa_id, from_me, sent_at, kind, body, media, ad, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
+        ON CONFLICT (chat_key, wa_id) DO NOTHING
+        RETURNING id
+    """, (key, message['id'], message['from_me'], message['at'] or now, message['kind'], message.get('text'),
+          json.dumps(message['media'], ensure_ascii=False) if message.get('media') else None,
+          json.dumps(message['ad'], ensure_ascii=False) if message.get('ad') else None, now))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def wa_touch_chat(cursor, key, jid, phone, lid, push_name, at, inbound, now):
+    """Чат собеседника после нового сообщения: создать или освежить. Имя — только из входящих:
+    в исходящем «имя отправителя» — наше собственное."""
+    cursor.execute("""
+        INSERT INTO hiring_wa_chats (key, jid, phone, lid, push_name, first_at, last_at, last_inbound_at,
+                                     messages, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s)
+        ON CONFLICT (key) DO UPDATE SET
+            jid = EXCLUDED.jid,
+            phone = COALESCE(EXCLUDED.phone, hiring_wa_chats.phone),
+            lid = COALESCE(EXCLUDED.lid, hiring_wa_chats.lid),
+            push_name = COALESCE(EXCLUDED.push_name, hiring_wa_chats.push_name),
+            first_at = LEAST(hiring_wa_chats.first_at, EXCLUDED.first_at),
+            last_at = GREATEST(hiring_wa_chats.last_at, EXCLUDED.last_at),
+            last_inbound_at = GREATEST(hiring_wa_chats.last_inbound_at, EXCLUDED.last_inbound_at),
+            messages = hiring_wa_chats.messages + 1,
+            updated_at = EXCLUDED.updated_at
+        RETURNING """ + _WA_CHAT_COLUMNS,
+                   (key, jid, phone, lid, push_name if inbound else None, at, at, at if inbound else None, now, now))
+    return _one(cursor)
+
+
+def wa_move_chat(cursor, old_key, new_key, now):
+    """Чат «только LID» узнал номер: сообщения переезжают к ключу номера, строка LID уходит.
+    Дубль одного сообщения под обоими ключами остаётся один. Чат номера к этому моменту есть."""
+    cursor.execute("""
+        UPDATE hiring_wa_messages m SET chat_key = %s
+         WHERE m.chat_key = %s
+           AND NOT EXISTS (SELECT 1 FROM hiring_wa_messages d WHERE d.chat_key = %s AND d.wa_id = m.wa_id)
+    """, (new_key, old_key, new_key))
+    cursor.execute("DELETE FROM hiring_wa_messages WHERE chat_key = %s", (old_key,))
+    cursor.execute("""
+        UPDATE hiring_wa_chats n SET
+            first_at = LEAST(n.first_at, o.first_at),
+            last_at = GREATEST(n.last_at, o.last_at),
+            last_inbound_at = GREATEST(n.last_inbound_at, o.last_inbound_at),
+            push_name = COALESCE(n.push_name, o.push_name),
+            lid = COALESCE(n.lid, o.lid),
+            messages = (SELECT COUNT(*) FROM hiring_wa_messages WHERE chat_key = n.key),
+            updated_at = %s
+          FROM hiring_wa_chats o
+         WHERE n.key = %s AND o.key = %s
+    """, (now, new_key, old_key))
+    cursor.execute("DELETE FROM hiring_wa_chats WHERE key = %s", (old_key,))
+
+
+def wa_set_chat_card(cursor, key, card_id, now):
+    cursor.execute("UPDATE hiring_wa_chats SET card_id = %s, updated_at = %s WHERE key = %s", (card_id, now, key))
+
+
+def wa_edit_message(cursor, key, wa_id, body, now):
+    cursor.execute("""UPDATE hiring_wa_messages SET body = %s, edited_at = %s
+                       WHERE chat_key = %s AND wa_id = %s AND deleted_at IS NULL""", (body, now, key, wa_id))
+    return cursor.rowcount
+
+
+def wa_revoke_message(cursor, key, wa_id, now):
+    """Удалено у всех — текст гасится и в портале: собеседник убрал его и с телефона рекрутера."""
+    cursor.execute("""UPDATE hiring_wa_messages SET body = NULL, media = NULL, deleted_at = %s
+                       WHERE chat_key = %s AND wa_id = %s AND deleted_at IS NULL""", (now, key, wa_id))
+    return cursor.rowcount
+
+
+def wa_chats_for_phones(cursor, phones):
+    phones = [p for p in dict.fromkeys(phones or ()) if p]
+    if not phones:
+        return []
+    cursor.execute("SELECT " + _WA_CHAT_COLUMNS + " FROM hiring_wa_chats WHERE key = ANY(%s) ORDER BY last_at DESC",
+                   (phones,))
+    return _all(cursor)
+
+
+def wa_summary(cursor, phones):
+    """Сколько сообщений с номером найма у телефонов карточки и когда последнее — для вкладки."""
+    phones = [p for p in dict.fromkeys(phones or ()) if p]
+    if not phones:
+        return {'messages': 0, 'last_at': None}
+    cursor.execute("SELECT COALESCE(SUM(messages), 0), MAX(last_at) FROM hiring_wa_chats WHERE key = ANY(%s)", (phones,))
+    count, last_at = cursor.fetchone()
+    return {'messages': int(count or 0), 'last_at': last_at}
+
+
+def wa_messages(cursor, keys, limit=400):
+    """Последние сообщения чатов — по времени, старые сверху (как в ленте телефона)."""
+    if not keys:
+        return []
+    cursor.execute("""
+        SELECT id, chat_key, wa_id, from_me, sent_at, kind, body, media, ad, edited_at, deleted_at FROM (
+            SELECT * FROM hiring_wa_messages WHERE chat_key = ANY(%s) ORDER BY sent_at DESC, id DESC LIMIT %s
+        ) recent ORDER BY sent_at, id
+    """, (list(keys), int(limit)))
+    rows = _all(cursor)
+    for row in rows:
+        _parse_json_fields(row, 'media', 'ad')
+    return rows
+
+
+def wa_unmatched(cursor):
+    """Чаты с входящими, которые карточкой не стали: номер не казахстанский или скрыт (LID)."""
+    cursor.execute("""
+        SELECT COUNT(*) FILTER (WHERE key LIKE 'wa:%%'), COUNT(*) FILTER (WHERE key LIKE 'lid:%%')
+          FROM hiring_wa_chats WHERE last_inbound_at IS NOT NULL
+    """)
+    foreign, hidden = cursor.fetchone()
+    return {'foreign': int(foreign or 0), 'hidden': int(hidden or 0)}
+
+
+def wa_add_received(cursor, count, now):
+    if count:
+        cursor.execute("UPDATE hiring_integrations SET received_total = received_total + %s, updated_at = %s "
+                       "WHERE code = 'whatsapp'", (int(count), now))
+
+
+def wa_lock_integration(cursor, now):
+    """Строка интеграции под замком: опрос сервиса, сторож и кнопки людей меняют её по очереди."""
+    cursor.execute("""
+        INSERT INTO hiring_integrations (code, updated_at) VALUES ('whatsapp', %s) ON CONFLICT (code) DO NOTHING
+    """, (now,))
+    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, cursor, settings, received_total, updated_at "
+                   "FROM hiring_integrations WHERE code = 'whatsapp' FOR UPDATE")
+    return _parse_json_fields(_one(cursor), 'cursor', 'settings')
+
+
+def wa_set_command(cursor, command, now):
+    """Команда сервису: одна в очереди («Подключить», «Возобновить», «Отвязать»); None — снять."""
+    if command is None:
+        cursor.execute("UPDATE hiring_integrations SET settings = settings - 'command', updated_at = %s "
+                       "WHERE code = 'whatsapp'", (now,))
+    else:
+        cursor.execute("""UPDATE hiring_integrations SET settings = settings || jsonb_build_object('command', %s::jsonb),
+                                 updated_at = %s WHERE code = 'whatsapp'""",
+                       (json.dumps(command, ensure_ascii=False), now))
+
+
+def wa_save_state(cursor, state, detail, error, now, *, heartbeat=True, ok=False):
+    """Состояние от сервиса (или от сторожа — heartbeat=False: время опроса не трогаем)."""
+    cursor.execute("""
+        UPDATE hiring_integrations
+           SET state = %s, cursor = %s::jsonb, last_error = %s,
+               last_run_at = CASE WHEN %s THEN %s ELSE last_run_at END,
+               last_ok_at = CASE WHEN %s THEN %s ELSE last_ok_at END,
+               updated_at = %s
+         WHERE code = 'whatsapp'
+    """, (state, json.dumps(detail or {}, ensure_ascii=False, default=str), error,
+          bool(heartbeat), now, bool(ok), now, now))

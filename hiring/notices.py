@@ -9,9 +9,11 @@
     карточка возвращена в пул по сроку      рекрутер и руководитель рекрутинга
     выход на линию                          руководитель отдела, куда был найм
     начисление мотивации                    рекрутер
+    номер WhatsApp найма остановлен / не на связи / телефон давно не в сети — руководители рекрутинга
 
 В Telegram дублируются только нарушения сроков: возврат в пул по сроку и просроченные
-задачи (утренняя сводка). Остальное — колокол. Отправка живёт в bot_schedule2
+задачи (утренняя сводка), — и остановка номера WhatsApp найма: пока он стоит, отклики
+из рекламы в воронку не попадают. Остальное — колокол. Отправка живёт в bot_schedule2
 (`_send_telegram_text_message`) и приходит в сервис аргументом; здесь только тексты.
 """
 
@@ -26,6 +28,7 @@ KIND_RETURNED = 'returned_to_pool'
 KIND_ON_LINE = 'on_line'
 KIND_MOTIVATION = 'motivation'
 KIND_REASSIGNED = 'reassigned'
+KIND_WHATSAPP = 'whatsapp'
 
 
 def _esc(text):
@@ -132,6 +135,23 @@ def returned_html(card, link):
     text = ('⏰ <b>Карточка вернулась в пул</b>\n%s\nБез касаний %s дней — закрепление снято.'
             % (_esc(card_title(card)), rules.IDLE_RETURN_DAYS))
     return text + ('\n' + link if link else '')
+
+
+def whatsapp_alert(cursor, alert, now, tone='warning'):
+    """Тревога номера WhatsApp найма — руководителям рекрутинга, одна на ключ (hiring/whatsapp.alert_for).
+    Отдаёт тех, кому строка колокола создана впервые: им же уходит Telegram."""
+    key, title, body = alert
+    created = []
+    for user_id in queries.lead_user_ids(cursor):
+        if queries.push_notification(cursor, [user_id], KIND_WHATSAPP, title, body, None, now, tone=tone, dedupe_key=key):
+            created.append(user_id)
+    return created
+
+
+def whatsapp_alert_html(title, body, base_url):
+    base = str(base_url or '').strip().rstrip('/')
+    text = '⚠️ <b>%s</b>\n%s' % (_esc(title), _esc(body))
+    return text + ('\n%s/?view=hiring' % base if base else '')
 
 
 def overdue_digest_html(count, base_url):

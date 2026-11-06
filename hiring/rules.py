@@ -295,7 +295,7 @@ REASON_NO_SHOW_TRAINING = 'Не пришел на обучение'
 REASON_NO_CONTACT = 'Не выходит на связь'
 
 SOURCE_CONTACTS, SOURCE_RESPONSES = 'contacts', 'responses'
-# (code, name, kind, platform) — platform: откуда приходит само (hh, olx, webhook) или None.
+# (code, name, kind, platform) — platform: откуда приходит само (hh, olx, webhook, whatsapp) или None.
 SEED_SOURCES = (
     ('hh', 'HeadHunter', SOURCE_RESPONSES, 'hh'),
     ('kaspi', 'Kaspi', SOURCE_RESPONSES, 'webhook'),
@@ -306,6 +306,11 @@ SEED_SOURCES = (
     ('base_ex_drivers', 'База бывших водителей', SOURCE_CONTACTS, None),
     ('base_bought', 'Купленная база', SOURCE_CONTACTS, None),
     ('base_partners', 'База партнеров', SOURCE_CONTACTS, None),
+)
+# Появились после выкладки раздела — доливаются в заполненный справочник по коду (schema._seed).
+# WhatsApp — номер найма, куда ведёт таргет (владелец 06.11.2026, hiring/whatsapp.py).
+LATE_SOURCES = (
+    ('whatsapp', 'WhatsApp', SOURCE_RESPONSES, 'whatsapp'),
 )
 
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (

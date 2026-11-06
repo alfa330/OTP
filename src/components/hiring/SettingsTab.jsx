@@ -10,6 +10,7 @@ import {
 import {
     ConfirmDialog, DATE_TRIGGER, Empty, FIELD, Group, Label, Loading, MonthSwitch, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY,
 } from './hiringUi';
+import { WhatsAppIntegration } from './WhatsAppPanel';
 
 /*
  * Вкладка «Настройки» — руководитель рекрутинга (ТЗ 2: «настраивать справочники»):
@@ -19,7 +20,8 @@ import {
  *   причины     отказа и отсева по инициаторам (ТЗ 6.2, 6.3), не трогают закрытые карточки;
  *   группы      на обучение: дата старта, тренер (ТЗ 1.2);
  *   план        месячные задачи на найм в FTE (ТЗ 1.2, 3);
- *   интеграции  HeadHunter, OLX, вебхук площадок — состояние и запуск вручную.
+ *   интеграции  HeadHunter, OLX, вебхук площадок — состояние и запуск вручную; номер WhatsApp найма —
+ *               состояние сервиса на шлюзе, привязка по QR (WhatsAppPanel.jsx).
  *
  * Формы добавления — за кнопкой «Добавить» (окно), а не постоянной полосой полей над списком:
  * справочник читают чаще, чем пополняют. Подтверждения — окнами раздела, не системными.
@@ -34,6 +36,8 @@ const SECTIONS = [
     { value: 'plans', label: 'План найма' },
     { value: 'integrations', label: 'Интеграции' },
 ];
+
+const PLATFORM_LABELS = { webhook: 'вебхук', hh: 'API hh.ru', olx: 'робот OLX', whatsapp: 'номер WhatsApp' };
 
 const Row = ({ children, muted }) => (
     <li className={`flex items-center gap-3 px-4 py-2.5 ${muted ? 'opacity-50' : ''}`}>{children}</li>
@@ -324,7 +328,7 @@ const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
                             {items.filter((s) => s.kind === group).map((row) => (
                                 <Row key={row.id} muted={!row.is_active}>
                                     <div className="min-w-0 grow basis-0 text-[13.5px] text-slate-900">{row.name}</div>
-                                    {row.platform && <Pill>{row.platform === 'webhook' ? 'вебхук' : row.platform === 'hh' ? 'API hh.ru' : 'робот OLX'}</Pill>}
+                                    {row.platform && <Pill>{PLATFORM_LABELS[row.platform] || row.platform}</Pill>}
                                     <IosToggle checked={row.is_active} onChange={() => toggle(row)} />
                                 </Row>
                             ))}
@@ -689,7 +693,7 @@ const IntegrationsSection = ({ api, toast, boot }) => {
     return (
         <div className={`${iosCard} overflow-hidden`}>
             <ul className="divide-y divide-slate-100">
-                {items.map((row) => (
+                {items.map((row) => (row.code === 'whatsapp' ? <WhatsAppIntegration key={row.code} api={api} toast={toast} /> : (
                     <Row key={row.code}>
                         <div className="min-w-0 grow basis-0">
                             <div className="flex items-center gap-2 text-[13.5px] font-medium text-slate-900">
@@ -723,7 +727,7 @@ const IntegrationsSection = ({ api, toast, boot }) => {
                             </button>
                         )}
                     </Row>
-                ))}
+                )))}
             </ul>
         </div>
     );

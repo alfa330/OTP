@@ -353,6 +353,50 @@ _STATEMENTS = [
     "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS employee_user_id INTEGER",
     "ALTER TABLE hiring_shifts ADD COLUMN IF NOT EXISTS work_hours NUMERIC(6,2)",
     "ALTER TABLE hiring_shifts ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'manual'",
+
+    # Номер WhatsApp найма (владелец 06.11.2026): сервис на шлюзе присылает каждое сообщение
+    # личных чатов номера (hiring/whatsapp.py). Чат — собеседник: ключ — казахстанский номер, как
+    # у карточек, иначе цифры чужого номера или LID (скрытый идентификатор WhatsApp, номер доклеится,
+    # когда станет известен). card_id — карточка, в которую лёг чат: повторные сообщения открытой
+    # карточки новых откликов не плодят.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_wa_chats (
+        key              VARCHAR(48) PRIMARY KEY,
+        jid              VARCHAR(96) NOT NULL,
+        phone            VARCHAR(16),
+        lid              VARCHAR(32),
+        push_name        VARCHAR(200),
+        card_id          INTEGER,
+        first_at         TIMESTAMP NOT NULL,
+        last_at          TIMESTAMP NOT NULL,
+        last_inbound_at  TIMESTAMP,
+        messages         INTEGER NOT NULL DEFAULT 0,
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_phone ON hiring_wa_chats (phone) WHERE phone IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_lid ON hiring_wa_chats (lid) WHERE lid IS NOT NULL",
+    # Сообщения: id WhatsApp уникален в чате; правка меняет текст, удаление у всех гасит его.
+    # Медиа — только описание (тип, размер, длительность): само содержимое на этапе 1 не качается.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_wa_messages (
+        id               BIGSERIAL PRIMARY KEY,
+        chat_key         VARCHAR(48) NOT NULL,
+        wa_id            VARCHAR(128) NOT NULL,
+        from_me          BOOLEAN NOT NULL,
+        sent_at          TIMESTAMP NOT NULL,
+        kind             VARCHAR(16) NOT NULL,
+        body             TEXT,
+        media            JSONB,
+        ad               JSONB,
+        edited_at        TIMESTAMP,
+        deleted_at       TIMESTAMP,
+        created_at       TIMESTAMP NOT NULL,
+        UNIQUE (chat_key, wa_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_chat ON hiring_wa_messages (chat_key, sent_at)",
 ]
 
 
@@ -381,7 +425,15 @@ def _seed(cursor):
                     INSERT INTO hiring_reasons (kind, name, requires_comment, position, created_at)
                     VALUES (%s, %s, %s, %s, %s) ON CONFLICT (kind, name) DO NOTHING
                 """, (kind, name, name == rules.OTHER, position, now))
-    for code in ('hh', 'olx', 'webhook'):
+    # Источники, появившиеся после выкладки раздела: в уже заполненный справочник — по коду, один раз
+    # (переименование руководителем не трогаем).
+    for code, name, kind, platform in rules.LATE_SOURCES:
+        cursor.execute("""
+            INSERT INTO hiring_sources (code, name, kind, platform, position, created_at)
+            VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s)
+            ON CONFLICT (code) DO NOTHING
+        """, (code, name, kind, platform, now))
+    for code in ('hh', 'olx', 'webhook', 'whatsapp'):
         cursor.execute("""
             INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s)
             ON CONFLICT (code) DO NOTHING
