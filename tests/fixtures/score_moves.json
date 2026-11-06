@@ -1,0 +1,21 @@
+{
+  "_about": "Куда балл уводит задачу — одна таблица для фронта (scoreBoardMove, tests/backlog_order.test.mjs) и сервера (update_task_board_state, tests/test_task_score_moves_to_backlog.py). Разойдутся правила — краснеет одна из сторон. move: backlog — первый балл из «Новой», new — снятый балл из бэклога, null — задача остаётся на месте.",
+  "cases": [
+    {"name": "первый балл у задачи из «Новой»", "task": {}, "score": 2, "move": "backlog"},
+    {"name": "первый балл 1 и 5 — тоже", "task": {}, "score": 5, "move": "backlog"},
+    {"name": "повтор регламента — как обычная задача", "task": {"is_regulation": true, "regulation_parent_id": 5}, "score": 3, "move": "backlog"},
+    {"name": "шаблон регламента в «Новой» — на месте", "task": {"is_regulation": true, "regulation_parent_id": null}, "score": 1, "move": null},
+    {"name": "смена балла у оценённой в «Новой»", "task": {"priority_score": 3}, "score": 1, "move": null},
+    {"name": "снятие балла без балла", "task": {}, "score": null, "move": null},
+    {"name": "балл у задачи в работе", "task": {"status": "in_progress"}, "score": 2, "move": null},
+    {"name": "балл у возвращённой", "task": {"status": "returned"}, "score": 2, "move": null},
+    {"name": "балл у сданной", "task": {"status": "completed"}, "score": 2, "move": null},
+    {"name": "снятый балл в бэклоге — в «Новую»", "task": {"is_backlog": true, "priority_score": 2}, "score": null, "move": "new"},
+    {"name": "повтор регламента без балла — в «Новую»", "task": {"is_backlog": true, "priority_score": 4, "is_regulation": true, "regulation_parent_id": 5}, "score": null, "move": "new"},
+    {"name": "шаблон регламента в бэклоге — на паузе", "task": {"is_backlog": true, "priority_score": 2, "is_regulation": true, "regulation_parent_id": null}, "score": null, "move": null},
+    {"name": "смена балла в бэклоге", "task": {"is_backlog": true, "priority_score": 2}, "score": 4, "move": null},
+    {"name": "первый балл у задачи, положенной в бэклог руками", "task": {"is_backlog": true}, "score": 3, "move": null},
+    {"name": "снятый балл у задачи в работе", "task": {"status": "in_progress", "priority_score": 2}, "score": null, "move": null},
+    {"name": "снятый балл у оценённой в «Новой»", "task": {"priority_score": 2}, "score": null, "move": null}
+  ]
+}

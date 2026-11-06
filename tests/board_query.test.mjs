@@ -17,9 +17,10 @@ test('у каждой колонки свой срез — запросы не �
   assert.equal(new Set(signatures).size, columns.length);
 });
 
-test('колонки бьются по статусам, «В работе» — это два статуса', () => {
+test('колонки бьются по статусам, возвращённые — своей колонкой', () => {
   assert.equal(columnParams('todo').status, 'assigned');
-  assert.equal(columnParams('progress').status, 'in_progress,returned');
+  assert.equal(columnParams('progress').status, 'in_progress');
+  assert.equal(columnParams('returned').status, 'returned');
   assert.equal(columnParams('review').status, 'completed');
   assert.equal(columnParams('done').status, 'accepted');
   // Бэклог — не статус, а флаг: его колонка ходит своим фильтром.
@@ -28,7 +29,7 @@ test('колонки бьются по статусам, «В работе» —
 });
 
 test('бэклог исключён из всех колонок, кроме своей', () => {
-  ['todo', 'progress', 'review', 'done'].forEach((column) => {
+  ['todo', 'progress', 'returned', 'review', 'done'].forEach((column) => {
     assert.equal(columnParams(column).backlog, 'exclude');
   });
 });

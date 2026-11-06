@@ -213,6 +213,10 @@ export default function IosDatePicker({
         <div
             ref={panelRef}
             role="dialog"
+            /* Метка для окон, что закрываются щелчком снаружи (поповер «Оценка и
+               срок» на доске): панель живёт порталом в body, и без метки щелчок
+               по дню календаря считался бы щелчком мимо окна. */
+            data-picker-panel=""
             className="motion-safe:animate-popover-in"
             style={{
                 position: 'fixed',

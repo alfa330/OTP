@@ -51,13 +51,17 @@ DOWNLOAD_ROOT = os.path.join(tempfile.gettempdir(), 'otp_task_files')
 MAX_UPLOAD_FILES = 10
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
+# Колонки доски в порядке раздела (src/components/tasks/boardColumns.js).
 COLUMN_TITLES = [
+    ('todo', 'Новая'),
     ('backlog', 'Бэклог'),
-    ('todo', 'К выполнению'),
     ('progress', 'В работе'),
+    ('returned', 'Возвращено на доработку'),
     ('review', 'На проверке'),
     ('done', 'Готово'),
 ]
+# Временная колонка: печатается, только когда в ней есть задачи.
+TRANSIENT_COLUMNS = frozenset({'returned'})
 STATUS_ACTIONS = ('in_progress', 'completed', 'accepted', 'returned', 'reopened')
 
 # Файлы принимают только эти переходы (bot_schedule2.py: actions_with_files).
@@ -180,7 +184,12 @@ class TaskBoardClient:
         которой нет в загруженной выборке»). Тянуть весь список и искать в нём —
         и лишний трафик, и промах, когда список упрётся в limit.
         """
-        payload = self.list_tasks(task_id=int(task_id), summary='0')
+        # Ключ задачи проекта (HR-125, задача #401) ищет сервер: по нему же
+        # находится и задача, перенесённая в другой проект.
+        if not str(task_id).strip().isdigit():
+            payload = self.list_tasks(task_key=str(task_id).strip(), summary='0', limit=1)
+        else:
+            payload = self.list_tasks(task_id=int(task_id), summary='0')
         tasks = payload.get('tasks') or []
         return tasks[0] if tasks else None
 
@@ -284,8 +293,10 @@ def column_of(task):
     if task.get('is_backlog'):
         return 'backlog'
     status = task.get('status')
-    if status in ('in_progress', 'returned'):
+    if status == 'in_progress':
         return 'progress'
+    if status == 'returned':
+        return 'returned'
     if status == 'completed':
         return 'review'
     if status == 'accepted':
@@ -550,8 +561,10 @@ def is_task_assignee(task, person_id):
 
 
 def task_line(task, now=None):
+    # Ключ задачи проекта (HR-125) — рядом с номером: по нему задачу называют люди.
+    ident = f'#{task["id"]}' + (f' {task["key"]}' if task.get('key') else '')
     parts = [
-        f'#{task["id"]:<5}',
+        f'{ident:<16}',
         f'{(task.get("subject") or "")[:56]:<56}',
         f'{task_assignees_label(task)[:20]:<20}',
         f'{task.get("priority", "normal")[:8]:<8}',
@@ -817,6 +830,8 @@ def cmd_board(client, args):
     print(f'Доска задач · {client.user_name} (id {client.user_id}) · всего {len(tasks)}')
     for key, title in COLUMN_TITLES:
         items = buckets[key]
+        if key in TRANSIENT_COLUMNS and not items:
+            continue
         if key == 'backlog':
             items.sort(key=lambda t: (t.get('backlog_rank') is None, t.get('backlog_rank') or 0))
         if key == 'done':
@@ -839,7 +854,8 @@ def cmd_backlog(client, args):
     for index, task in enumerate(tasks, start=1):
         rank = task.get('backlog_rank')
         rank_label = f'{rank:g}' if isinstance(rank, (int, float)) else '—'
-        print(f'{index:>3}. rank {rank_label:<8} ' + task_line(task))
+        score = task.get('priority_score') or '—'
+        print(f'{index:>3}. балл {score!s:<2} rank {rank_label:<8} ' + task_line(task))
     missing = [t['id'] for t in tasks if not t.get('estimate_minutes')]
     if missing:
         print(f'\nБез оценки: {", ".join("#" + str(i) for i in missing)}')
@@ -973,12 +989,17 @@ def _print_production_brief(task, indent='  '):
 def cmd_show(client, args):
     task = client.get_task(args.task_id)
     if not task:
-        raise SystemExit(f'Задача #{args.task_id} не найдена (или недоступна этому пользователю)')
+        raise SystemExit(f'Задача {args.task_id} не найдена (или недоступна этому пользователю)')
     if args.json:
         print(json.dumps(task, ensure_ascii=False, indent=2))
         return
 
-    print(f'#{task["id"]} · {task.get("subject")}')
+    key = task.get('key')
+    print(f'{key} (#{task["id"]})' if key else f'#{task["id"]}', '·', task.get('subject'))
+    if task.get('project'):
+        print(f'  проект        {task["project"].get("name")} ({task["project"].get("code")})')
+    if task.get('section'):
+        print(f'  раздел        {task["section"].get("name")}')
     print(f'  колонка       {dict(COLUMN_TITLES)[column_of(task)]} '
           f'(status={task.get("status")}, is_backlog={task.get("is_backlog")})')
     print(f'  тип           {TAG_LABELS.get(task.get("tag"), task.get("tag") or "—")}')
@@ -991,6 +1012,7 @@ def cmd_show(client, args):
         print(f'  исполнитель   {_person_label(people[0] if people else None)}')
     print(f'  постановщик   {_person_label(task.get("creator"))}')
     print(f'  срочность     {PRIORITY_LABELS.get(task.get("priority"), task.get("priority") or "—")}')
+    print(f'  балл          {priority_score_label(task)}')
     origin = task.get('requested_by') or {}
     origin_label = origin.get('name') or (
         'своя инициатива'
@@ -1511,7 +1533,7 @@ def _apply_backlog_flag(client, args, is_backlog):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     item = (result.get('items') or [{}])[0]
-    target = 'бэклог' if is_backlog else 'доску (К выполнению)'
+    target = 'бэклог' if is_backlog else 'доску (колонка «Новая»)'
     if item.get('updated'):
         print(f'#{item.get("task_id")} «{item.get("subject")}» → {target}')
     else:
@@ -1526,6 +1548,40 @@ def cmd_promote(client, args):
 
 def cmd_park(client, args):
     _apply_backlog_flag(client, args, True)
+
+
+def priority_score_label(task):
+    """Балл приоритета 1–5 (1 — важнее всего) словами для `show`."""
+    score = task.get('priority_score')
+    if not score:
+        return '— (не оценена)'
+    if score == 1:
+        return '1 — важнее всего'
+    if score == 5:
+        return '5 — можно позже'
+    return str(score)
+
+
+def cmd_score(client, args):
+    """Балл приоритета. Ставят только суперадмины — иначе сервер ответит 403.
+
+    Первый балл у задачи из «Новой» сервер переводит в бэклог (конец своего балла),
+    снятый балл (`off`) возвращает задачу из бэклога в «Новую»: «Новая» — ещё не
+    разобранное на совещании, бэклог — очередь оценённых.
+    """
+    value = None if args.value == 'off' else int(args.value)
+    result = client.board_update([{'task_id': args.task_id, 'priority_score': value}])
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    item = (result.get('items') or [{}])[0]
+    label = f'балл {item.get("priority_score")}' if item.get('priority_score') else 'без балла'
+    moved = {
+        'to_backlog': ' · перешла из «Новой» в бэклог',
+        'to_new': ' · вернулась из бэклога в «Новую»',
+    }.get(item.get('score_move'), '')
+    suffix = '' if item.get('updated') else ' (уже так, изменений нет)'
+    print(f'#{item.get("task_id")} «{item.get("subject")}» → {label}{moved}{suffix}')
 
 
 def cmd_rank(client, args):
@@ -1691,7 +1747,7 @@ def build_parser():
     backlog.set_defaults(func=cmd_backlog)
 
     show = sub.add_parser('show', help='карточка задачи целиком')
-    show.add_argument('task_id', type=int)
+    show.add_argument('task_id', type=task_ref, help='номер задачи (401) или ключ задачи проекта (HR-125)')
     show.set_defaults(func=cmd_show)
 
     create = sub.add_parser('create', help='создать задачу (по умолчанию сразу на доску)')
@@ -1730,7 +1786,7 @@ def build_parser():
     log.set_defaults(func=cmd_log)
 
     deadline = sub.add_parser('deadline', help='дедлайн / оценка / плановый старт')
-    deadline.add_argument('task_id', type=int)
+    deadline.add_argument('task_id', type=task_ref)
     deadline.add_argument('--due', help='абсолютный дедлайн')
     deadline.add_argument('--in', dest='in_', help='дедлайн через: 3d4h')
     deadline.add_argument('--clear', action='store_true', help='снять дедлайн')
@@ -1740,15 +1796,21 @@ def build_parser():
     deadline.set_defaults(func=cmd_deadline)
 
     promote = sub.add_parser('promote', help='из бэклога на доску (уведомит исполнителя)')
-    promote.add_argument('task_id', type=int)
+    promote.add_argument('task_id', type=task_ref)
     promote.set_defaults(func=cmd_promote)
 
     park = sub.add_parser('park', help='вернуть не начатую задачу в бэклог')
-    park.add_argument('task_id', type=int)
+    park.add_argument('task_id', type=task_ref)
     park.set_defaults(func=cmd_park)
 
+    score = sub.add_parser('score', help='балл приоритета 1–5, только суперадмины: 1 — важнее всего; '
+                                           'первый балл переводит задачу из «Новой» в бэклог, off — обратно')
+    score.add_argument('task_id', type=task_ref)
+    score.add_argument('value', choices=['1', '2', '3', '4', '5', 'off'], help='1–5 или off — снять балл')
+    score.set_defaults(func=cmd_score)
+
     rank = sub.add_parser('rank', help='переставить задачу в бэклоге')
-    rank.add_argument('task_id', type=int)
+    rank.add_argument('task_id', type=task_ref)
     rank.add_argument('--top', action='store_true')
     rank.add_argument('--bottom', action='store_true')
     rank.add_argument('--after', type=int, help='поставить сразу после этой задачи')
@@ -1756,7 +1818,7 @@ def build_parser():
     rank.set_defaults(func=cmd_rank)
 
     status = sub.add_parser('status', help='сменить статус задачи')
-    status.add_argument('task_id', type=int)
+    status.add_argument('task_id', type=task_ref)
     status.add_argument('action', choices=STATUS_ACTIONS)
     status.add_argument('--comment', default='')
     status.add_argument('--report', default='', help='отчёт о проделанной работе (обязателен для completed)')
@@ -1767,14 +1829,14 @@ def build_parser():
     status.set_defaults(func=cmd_status)
 
     report = sub.add_parser('report', help='добавить отчёт о проделанной работе')
-    report.add_argument('task_id', type=int)
+    report.add_argument('task_id', type=task_ref)
     report.add_argument('body', help='что сделано')
     report.add_argument('--spent', help='затрачено времени: 3h, 90m, 1d2h')
     report.add_argument('--final', action='store_true', help='итоговый отчёт (иначе промежуточный)')
     report.set_defaults(func=cmd_report)
 
     clarify = sub.add_parser('clarify', help='дополнить постановку, запросить информацию или ответить')
-    clarify.add_argument('task_id', type=int)
+    clarify.add_argument('task_id', type=task_ref)
     clarify.add_argument('body', help='текст уточнения')
     clarify.add_argument('--ask', action='store_true',
                          help='запрос информации (может только исполнитель задачи)')
@@ -1784,7 +1846,7 @@ def build_parser():
     clarify.set_defaults(func=cmd_clarify)
 
     clarifications = sub.add_parser('clarifications', help='лента уточнений по задаче')
-    clarifications.add_argument('task_id', type=int)
+    clarifications.add_argument('task_id', type=task_ref)
     clarifications.set_defaults(func=cmd_clarifications)
 
     unask = sub.add_parser('unask', help='снять свой запрос информации')
@@ -1792,7 +1854,7 @@ def build_parser():
     unask.set_defaults(func=cmd_unask)
 
     reports = sub.add_parser('reports', help='журнал отчётов по задаче')
-    reports.add_argument('task_id', type=int)
+    reports.add_argument('task_id', type=task_ref)
     reports.set_defaults(func=cmd_reports)
 
     recipients = sub.add_parser('recipients', help='кому можно ставить задачи')
@@ -1800,7 +1862,7 @@ def build_parser():
 
     files = sub.add_parser('files', aliases=['attachments'],
                            help='вложения задачи: список, скачать, вынуть текст')
-    files.add_argument('task_id', type=int)
+    files.add_argument('task_id', type=task_ref)
     files.add_argument('--download', action='store_true', help='скачать файлы на диск')
     files.add_argument('--text', action='store_true', help='скачать и показать текст (docx/pdf/xlsx/pptx/csv/txt)')
     files.add_argument('--dir', help=f'куда сохранять (по умолчанию {DOWNLOAD_ROOT}/task_<id>)')
@@ -1812,15 +1874,15 @@ def build_parser():
     files.set_defaults(func=cmd_files)
 
     history = sub.add_parser('history', help='история статусов задачи с комментариями переходов')
-    history.add_argument('task_id', type=int)
+    history.add_argument('task_id', type=task_ref)
     history.set_defaults(func=cmd_history)
 
     checklist = sub.add_parser('checklist', help='чек-лист задачи')
-    checklist.add_argument('task_id', type=int)
+    checklist.add_argument('task_id', type=task_ref)
     checklist.set_defaults(func=cmd_checklist)
 
     check = sub.add_parser('check', help='отметить пункт чек-листа (уведомит участников в Telegram)')
-    check.add_argument('task_id', type=int)
+    check.add_argument('task_id', type=task_ref)
     check.add_argument('item_id', type=int, help='id пункта (см. checklist)')
     check.add_argument('--undone', action='store_true', help='снять отметку')
     check.add_argument('--note', help='результат по пункту (до 2000 символов)')
@@ -1830,7 +1892,7 @@ def build_parser():
     inbox.set_defaults(func=cmd_inbox)
 
     seen = sub.add_parser('seen', help='погасить уведомление по задаче (статус задачи не меняет)')
-    seen.add_argument('task_id', type=int)
+    seen.add_argument('task_id', type=task_ref)
     seen.add_argument('--kind', choices=tuple(ACTION_KIND_LABELS), help='какую именно причину гасим')
     seen.set_defaults(func=cmd_seen)
 
@@ -1888,10 +1950,32 @@ def build_parser():
     return parser
 
 
+def task_ref(value):
+    """Номер задачи (401) или ключ задачи проекта (HR-125, задача #401)."""
+    raw = str(value or '').strip()
+    if raw.isdigit():
+        return int(raw)
+    match = re.match(r'^#?([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,9})$', raw)
+    if not match or int(match.group(2)) <= 0:
+        raise argparse.ArgumentTypeError(f'нужен номер задачи или ключ вида HR-125, а не «{value}»')
+    return f'{match.group(1).upper()}-{int(match.group(2))}'
+
+
+def _resolve_task_ref(client, args):
+    """Ключ задачи проекта → её номер: команды API ходят по номеру."""
+    ref = getattr(args, 'task_id', None)
+    if isinstance(ref, str) and getattr(args, 'func', None) is not cmd_show:
+        task = client.get_task(ref)
+        if not task:
+            raise SystemExit(f'Задача {ref} не найдена (или недоступна этому пользователю)')
+        args.task_id = int(task['id'])
+
+
 def main(argv=None):
     _load_env(os.path.join(ROOT, '.env.codex.local'))
     args = build_parser().parse_args(argv)
     client = TaskBoardClient(args.base_url, args.login, args.password).authenticate()
+    _resolve_task_ref(client, args)
     args.func(client, args)
     return 0
 

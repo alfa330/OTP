@@ -17,6 +17,7 @@ from db.core import (  # noqa: F401
     SHIFT_AUCTION_SETTINGS_ROW_ID,
     SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES,
     task_production_schema,
+    task_projects,
     time,
 )
 
@@ -3215,6 +3216,13 @@ class SchemaMixin:
             """)
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS planned_start_at TIMESTAMP;")
             cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMP;")
+            # Балл приоритета 1–5 (1 — важнее всего): ставят только суперадмины, в основном
+            # на совещании по бэклогу; NULL — ещё не оценена. Бэклог идёт по баллу, внутри
+            # балла — ручной очередью backlog_rank.
+            cursor.execute("""
+                ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority_score SMALLINT
+                    CHECK (priority_score IS NULL OR priority_score BETWEEN 1 AND 5);
+            """)
             # Источник задачи: кто её поручил, если это не тот, кто создал карточку
             # (устная просьба руководителя, запрос клиента и т.п.).
             # Оба поля пустые = своя инициатива.
@@ -3237,6 +3245,11 @@ class SchemaMixin:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tasks_backlog_rank
                 ON tasks(is_backlog, backlog_rank NULLS LAST, created_at DESC);
+            """)
+            # Под порядок бэклога: балл, затем ручная очередь (get_tasks_for_requester).
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_backlog_score
+                ON tasks(is_backlog, priority_score NULLS LAST, backlog_rank NULLS LAST, created_at DESC);
             """)
             # Разовый бэкфилл фактического старта по истории статусов (идемпотентен).
             cursor.execute("""
@@ -3444,6 +3457,135 @@ class SchemaMixin:
                 WHERE t.assigned_to IS NOT NULL
                 ON CONFLICT (task_id, user_id) DO NOTHING;
             """)
+
+            # ──────────────────────────────────────────────────────────────
+            # ПРОЕКТЫ-ДОСКИ (задача #401): у отдела своя доска и свой ключ на
+            # латинице — HR-125, FIN-84. Номер в ключе — свой у проекта
+            # (tasks.project_number); глобальный tasks.id остаётся, на него
+            # ссылаются Telegram, коммиты, CLI и старые ссылки. Правила и
+            # стартовый список — task_projects.py.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_projects (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(10) NOT NULL UNIQUE CHECK (code ~ '^[A-Z][A-Z0-9]{1,9}$'),
+                    name VARCHAR(120) NOT NULL,
+                    -- Привязка к отделу подставляет доску по умолчанию, и только.
+                    -- Видимость решает состав, а не отдел.
+                    department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+                    -- Следующий номер задачи. Берётся UPDATE ... RETURNING в той же
+                    -- транзакции, что и вставка задачи: строка проекта блокируется,
+                    -- и две задачи, поставленные в одну секунду, номер не делят.
+                    next_number INTEGER NOT NULL DEFAULT 1 CHECK (next_number >= 1),
+                    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            # Состав доски. member — участник: видит все задачи проекта; board —
+            # доступ к доске: ставит задачи в проект, а видит свои и те, где он
+            # наблюдатель. Права на действия ни один уровень не даёт.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_project_members (
+                    project_id INTEGER NOT NULL REFERENCES task_projects(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    access_level VARCHAR(16) NOT NULL DEFAULT 'member'
+                        CHECK (access_level IN ('member', 'board')),
+                    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    added_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (project_id, user_id)
+                );
+            """)
+            # Охват списка задач спрашивает «в каких проектах я» по каждой строке.
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_project_members_user
+                ON task_project_members(user_id, project_id);
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES task_projects(id) ON DELETE SET NULL;")
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_number INTEGER;")
+            # Один номер — одна задача проекта. Индекс же держит и фильтр доски
+            # по проекту: project_id в нём первым.
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_project_number
+                ON tasks(project_id, project_number)
+                WHERE project_id IS NOT NULL;
+            """)
+            # Наблюдатели задачи. Видят её, только пока у них есть доступ к доске
+            # проекта: это условие стоит в самой выборке, а не только при
+            # добавлении, — сняли с доски, и задача пропала сама.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_watchers (
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    added_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    added_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (task_id, user_id)
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_watchers_user
+                ON task_watchers(user_id, task_id);
+            """)
+            # Прежние ключи задач, перенесённых в другой проект: ссылка HR-125,
+            # отправленная до переноса, должна открывать ту же задачу. Номер в
+            # проекте не переиспользуется (next_number только растёт), поэтому
+            # старый ключ ни с кем не столкнётся. Сюда же — прежние ключи всех задач
+            # доски, которой сменили ключ. project_id — чей это был ключ: свой прежний
+            # ключ доска вернуть себе может, чужой — нет (_rename_task_project_code_tx).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_key_aliases (
+                    code VARCHAR(10) NOT NULL,
+                    number INTEGER NOT NULL,
+                    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    project_id INTEGER REFERENCES task_projects(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
+                    PRIMARY KEY (code, number)
+                );
+            """)
+            # Таблица старше колонки (стенды #401): без владельца ключ считается чужим.
+            cursor.execute("""
+                ALTER TABLE task_key_aliases
+                ADD COLUMN IF NOT EXISTS project_id INTEGER REFERENCES task_projects(id) ON DELETE SET NULL;
+            """)
+            # Разделы доски («регулируемый набор разделов» из постановки #401):
+            # у каждой доски свои группы задач — «Подбор», «Адаптация» у HR.
+            # Колонки доски остаются статусами (на них держатся приёмка и
+            # уведомления); раздел — это «о чём задача», а не «на каком она шаге».
+            # Удалили раздел — его задачи остаются на доске, просто без раздела.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS task_project_sections (
+                    id SERIAL PRIMARY KEY,
+                    project_id INTEGER NOT NULL REFERENCES task_projects(id) ON DELETE CASCADE,
+                    name VARCHAR(80) NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                );
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_project_sections_project
+                ON task_project_sections(project_id, position);
+            """)
+            cursor.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS section_id INTEGER REFERENCES task_project_sections(id) ON DELETE SET NULL;")
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_section
+                ON tasks(section_id) WHERE section_id IS NOT NULL;
+            """)
+            # Стартовые проекты — только на пустой таблице: дальше список ведут
+            # в разделе, и переименованный или убранный в архив проект при
+            # следующем старте приложения не воскресает и не меняется.
+            seed_values = ", ".join(["(%s, %s, %s, %s)"] * len(task_projects.SEED_PROJECTS))
+            seed_params = []
+            for order, (seed_code, seed_name, seed_department) in enumerate(task_projects.SEED_PROJECTS):
+                seed_params.extend([seed_code, seed_name, seed_department, order])
+            cursor.execute(f"""
+                INSERT INTO task_projects (code, name, department_id)
+                SELECT seed.code, seed.name,
+                       (SELECT d.id FROM departments d WHERE d.code = seed.department_code ORDER BY d.id LIMIT 1)
+                  FROM (VALUES {seed_values}) AS seed(code, name, department_code, ord)
+                 WHERE NOT EXISTS (SELECT 1 FROM task_projects)
+                 ORDER BY seed.ord
+                ON CONFLICT (code) DO NOTHING;
+            """, tuple(seed_params))
 
             # Отметка «уведомление просмотрено»: гасит счётчик «ждут вас», но не задачу.
             # Ключ — пользователь+задача; kind и seen_at нужны, чтобы отметка сгорала,

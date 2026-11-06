@@ -323,10 +323,10 @@ html[data-otp-theme="dark"] .msv-weight-title {
    У раздела своя дизайн-система: переменные на .tv-root и 2600 строк CSS,
    которые он вставляет тегом <style>. Правила с хексами разбирает генератор
    (PALETTE_SOURCES), а переменные — здесь: их смысл из имени не выводится,
-   и «просто светлое сделать тёмным» для --accent дало бы чёрную кнопку на
-   чёрной карточке. В светлой теме кнопка почти чёрная на кремовом полотне,
-   значит в тёмной она обязана быть светлой на графите — роль сохраняется,
-   меняется сторона. */
+   и «просто светлое сделать тёмным» для --accent дало бы тёмную кнопку на
+   тёмной карточке. С 03.11.2026 раздел в дизайн-системе сайта: главная кнопка
+   синяя, — в тёмной теме она остаётся синей, только ярче, как системный синий
+   iOS в тёмном режиме; выбор — мягкий голубой, серые заливки — на графите. */
 html[data-otp-theme="dark"] .tv-root {
     --bg: #17191e;
     --surface: #1e2127;
@@ -336,8 +336,13 @@ html[data-otp-theme="dark"] .tv-root {
     --ink: #e8ecf2;
     --ink-2: #a8b1bf;
     --ink-3: #7d8695;
-    --accent: #e8ecf2;
-    --accent-fg: #17191e;
+    --accent: #3b82f6;
+    --accent-fg: #ffffff;
+    --select-bg: #222e45;
+    --select-border: #315682;
+    --select-ink: #8baaee;
+    --fill: #262a31;
+    --fill-strong: #2e333c;
     --amber: #fcd34d;
     --indigo: #a5b4fc;
     --emerald: #6ee7b7;
@@ -346,6 +351,13 @@ html[data-otp-theme="dark"] .tv-root {
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
     --shadow-md: 0 4px 16px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
     --shadow-lg: 0 20px 60px rgba(0, 0, 0, .7), 0 8px 24px rgba(0, 0, 0, .5);
+}
+
+/* Кольцо между аватарами в стопке на карточке доски — цвета самой карточки.
+   ring-white по всему сайту не трогаем: где-то белое кольцо лежит на тёмной
+   камере или видео и должно остаться белым. */
+html[data-otp-theme="dark"] .tb-face-ring {
+    --tw-ring-color: #1e2127 !important;
 }
 
 /* ── Раздел «4 You» ──
@@ -892,6 +904,7 @@ html[data-otp-theme="dark"] .focus-within\:bg-white:focus-within { background-co
 html[data-otp-theme="dark"] .focus-within\:border-slate-300:focus-within { border-color: #3a414b !important; }
 html[data-otp-theme="dark"] .focus-within\:ring-slate-300:focus-within { --tw-ring-color: #3a414b !important; }
 html[data-otp-theme="dark"] .focus\:bg-gray-100:focus { background-color: #22262d !important; }
+html[data-otp-theme="dark"] .focus\:bg-slate-100:focus { background-color: #22262d !important; }
 html[data-otp-theme="dark"] .focus\:bg-white:focus { background-color: #1e2127 !important; }
 html[data-otp-theme="dark"] .focus\:border-amber-300:focus { border-color: #9b6e21 !important; }
 html[data-otp-theme="dark"] .focus\:border-blue-300:focus { border-color: #355ea2 !important; }
@@ -1123,8 +1136,6 @@ html[data-otp-theme="dark"] .text-violet-700\/80 { color: rgba(196, 181, 253, 0.
 }
 
 /* ═══ Разделы со своей палитрой (см. PALETTE_SOURCES) ═════════════════ */
-html[data-otp-theme="dark"] .tv-root.is-board-mode { background: #242830 !important; }
-html[data-otp-theme="dark"] .tv-root.is-board-mode .tv-workspace-tabs { background: #2a2f37 !important; }
 html[data-otp-theme="dark"] .tv-inbox-btn.is-hot { background: #3d242b !important; }
 html[data-otp-theme="dark"] .tv-inbox-btn.is-hot { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-inbox-btn.is-hot:hover:not(:disabled) { background: #3d242b !important; }
@@ -1146,9 +1157,10 @@ html[data-otp-theme="dark"] .tv-clar-item .tv-clar-bubble.is-open { background: 
 html[data-otp-theme="dark"] .tv-clar-item .tv-clar-bubble.is-open { border-color: #3e3482 !important; }
 html[data-otp-theme="dark"] .tv-clar-bubble.is-open .tv-clar-kind { color: #b28eeb !important; }
 html[data-otp-theme="dark"] .tv-composer-context { background: #242830 !important; }
-html[data-otp-theme="dark"] .tv-composer-chip.is-active { background: #242830 !important; }
+html[data-otp-theme="dark"] .tv-composer-project.is-invalid .tv-person-select > button:not([aria-expanded="true"]) { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-composer-segmented { background: #2a2f37 !important; }
 html[data-otp-theme="dark"] .tv-stat-card.is-amber .tv-stat-value { color: #eeb68b !important; }
+html[data-otp-theme="dark"] .tv-search-input:focus { border-color: #315682 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-amber { background: #3d3a29 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-amber { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-amber { color: #eeb18b !important; }
@@ -1164,18 +1176,15 @@ html[data-otp-theme="dark"] .tv-chip.is-active-emerald { color: #8beed2 !importa
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { background: #272445 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { border-color: #3e3482 !important; }
 html[data-otp-theme="dark"] .tv-chip.is-active-violet { color: #b38feb !important; }
-html[data-otp-theme="dark"] .tv-btn-primary:hover:not(:disabled) { background: #2b3039 !important; }
 html[data-otp-theme="dark"] .tv-btn-amber { background: #3d3a29 !important; }
-html[data-otp-theme="dark"] .tv-btn-amber { border-color: #7a6e39 !important; }
+html[data-otp-theme="dark"] .tv-btn-amber { color: #eeb68b !important; }
 html[data-otp-theme="dark"] .tv-btn-amber:hover:not(:disabled) { background: #514a2b !important; }
 html[data-otp-theme="dark"] .tv-btn-indigo { background: #222b45 !important; }
-html[data-otp-theme="dark"] .tv-btn-indigo { border-color: #314382 !important; }
 html[data-otp-theme="dark"] .tv-btn-indigo:hover:not(:disabled) { background: #222b45 !important; }
 html[data-otp-theme="dark"] .tv-btn-emerald { background: #224037 !important; }
-html[data-otp-theme="dark"] .tv-btn-emerald { border-color: #317c61 !important; }
+html[data-otp-theme="dark"] .tv-btn-emerald { color: #8beed2 !important; }
 html[data-otp-theme="dark"] .tv-btn-emerald:hover:not(:disabled) { background: #245343 !important; }
 html[data-otp-theme="dark"] .tv-btn-rose { background: #3d242b !important; }
-html[data-otp-theme="dark"] .tv-btn-rose { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-btn-rose:hover:not(:disabled) { background: #3d242d !important; }
 html[data-otp-theme="dark"] .tv-task-row.is-urgent { border-color: #7a6c39 !important; }
 html[data-otp-theme="dark"] .tv-task-row.is-urgent { background: #3d3a29 !important; }
@@ -1199,28 +1208,20 @@ html[data-otp-theme="dark"] .tv-avatar-md { background: #2a2f37 !important; }
 html[data-otp-theme="dark"] .tv-person-row.is-active .tv-avatar-md { background: #222a45 !important; }
 html[data-otp-theme="dark"] .tv-person-row.is-active .tv-avatar-md { color: #9d99e1 !important; }
 html[data-otp-theme="dark"] .tv-alert-stat { color: #eeb68b !important; }
-html[data-otp-theme="dark"] .tv-badge-gray { background: #242830 !important; }
 html[data-otp-theme="dark"] .tv-badge-blue { background: #223045 !important; }
 html[data-otp-theme="dark"] .tv-badge-blue { color: #8ea4ec !important; }
-html[data-otp-theme="dark"] .tv-badge-blue { border-color: #315582 !important; }
 html[data-otp-theme="dark"] .tv-badge-amber { background: #3d3a29 !important; }
 html[data-otp-theme="dark"] .tv-badge-amber { color: #eeb18b !important; }
-html[data-otp-theme="dark"] .tv-badge-amber { border-color: #7a6e39 !important; }
 html[data-otp-theme="dark"] .tv-badge-indigo { background: #222b45 !important; }
 html[data-otp-theme="dark"] .tv-badge-indigo { color: #9d99e1 !important; }
-html[data-otp-theme="dark"] .tv-badge-indigo { border-color: #314382 !important; }
 html[data-otp-theme="dark"] .tv-badge-emerald { background: #224037 !important; }
 html[data-otp-theme="dark"] .tv-badge-emerald { color: #8beed2 !important; }
-html[data-otp-theme="dark"] .tv-badge-emerald { border-color: #317c61 !important; }
 html[data-otp-theme="dark"] .tv-badge-rose { background: #3d242b !important; }
 html[data-otp-theme="dark"] .tv-badge-rose { color: #ee8ba6 !important; }
-html[data-otp-theme="dark"] .tv-badge-rose { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-badge-teal { background: #22403f !important; }
 html[data-otp-theme="dark"] .tv-badge-teal { color: #8beee7 !important; }
-html[data-otp-theme="dark"] .tv-badge-teal { border-color: #317c74 !important; }
 html[data-otp-theme="dark"] .tv-badge-violet { background: #272445 !important; }
 html[data-otp-theme="dark"] .tv-badge-violet { color: #b38feb !important; }
-html[data-otp-theme="dark"] .tv-badge-violet { border-color: #3e3482 !important; }
 html[data-otp-theme="dark"] .tv-badge-fuchsia { background: #372445 !important; }
 html[data-otp-theme="dark"] .tv-badge-fuchsia { color: #e48eeb !important; }
 html[data-otp-theme="dark"] .tv-badge-fuchsia { border-color: #6c3482 !important; }
@@ -1259,7 +1260,16 @@ html[data-otp-theme="dark"] .tv-history-item-recipient .tv-history-bubble { back
 html[data-otp-theme="dark"] .tv-history-item-recipient .tv-history-bubble { border: 1px solid #317c61 !important; }
 html[data-otp-theme="dark"] .tv-history-item-neutral .tv-history-bubble { background: #242830 !important; }
 html[data-otp-theme="dark"] .tv-participant-avatar { background: #2a2f37 !important; }
+html[data-otp-theme="dark"] .tv-participant-add .tv-participant-avatar { border: 1.5px dashed #3a414b !important; }
+html[data-otp-theme="dark"] .tv-participant-add:hover .tv-participant-avatar { color: #8baaee !important; }
+html[data-otp-theme="dark"] .tv-participant-add .tv-participant-name { color: #8baaee !important; }
 html[data-otp-theme="dark"] .tv-modal-overlay { background: rgba(43, 48, 57, 0.35) !important; }
+html[data-otp-theme="dark"] .tv-input:focus { border-color: #315682 !important; }
+html[data-otp-theme="dark"] .tv-textarea:focus { border-color: #315682 !important; }
+html[data-otp-theme="dark"] .tv-select:focus { border-color: #315682 !important; }
+html[data-otp-theme="dark"] .tv-person-select > button[aria-expanded="true"] { border-color: #315682 !important; }
+html[data-otp-theme="dark"] .tv-person-select > button:focus { border-color: #315682 !important; }
+html[data-otp-theme="dark"] .tv-person-select > button:focus-visible { border-color: #315682 !important; }
 html[data-otp-theme="dark"] .tv-kbd { background: #242830 !important; }
 html[data-otp-theme="dark"] .tv-pin-header-btn-danger { color: #ee8ba1 !important; }
 html[data-otp-theme="dark"] .tv-pin-header-btn-danger:hover:not(:disabled) { background: #3d242b !important; }
@@ -1522,6 +1532,7 @@ html[data-otp-theme="dark"] .bg-\[\#f8fafc\] { background-color: #242830 !import
 html[data-otp-theme="dark"] .bg-\[\#faf7ef\] { background-color: #242830 !important; }
 html[data-otp-theme="dark"] .bg-\[\#fff\] { background-color: #1e2127 !important; }
 html[data-otp-theme="dark"] .border-\[\#e9e3d5\] { border-color: #2e333c !important; }
+html[data-otp-theme="dark"] .hover\:bg-\[\#eef4ff\]:hover { background-color: #222e45 !important; }
 html[data-otp-theme="dark"] .hover\:bg-\[\#f6f6f4\]:hover { background-color: #242830 !important; }
 html[data-otp-theme="dark"] .ring-\[\#bfd4fb\] { --tw-ring-color: #314d82 !important; }
 html[data-otp-theme="dark"] .text-\[\#0f172a\] { color: #e8ecf2 !important; }

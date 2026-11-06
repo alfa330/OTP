@@ -232,6 +232,14 @@ const compactPinnedTaskForStorage = (task) => {
                 name: person.name || '',
             }))
             : null,
+        // Доска и ключ задачи (#401): после перезагрузки «Новая задача» из
+        // закреплённой ставит связанную на ту же доску.
+        project: task.project ? {
+            id: task.project.id,
+            code: task.project.code || '',
+            name: task.project.name || '',
+        } : null,
+        key: task.key || null,
     };
 };
 
@@ -389,6 +397,8 @@ const SUPERVISOR_OPERATORS_SV_FILTER_KEY = 'supervisor_operators_sv_filter';
 const SUPERVISOR_OPERATORS_DIRECTION_FILTER_KEY = 'supervisor_operators_direction_filter';
 const APP_VIEW_QUERY_PARAM = 'view';
 const TASK_ID_QUERY_PARAM = 'task_id';
+// Ключ задачи проекта в адресе: ?view=tasks&task=HR-125 (задача #401).
+const TASK_KEY_QUERY_PARAM = 'task';
 const TICKET_ID_QUERY_PARAM = 'ticket_id';
 const COMPLAINT_ID_QUERY_PARAM = 'complaint_id';
 const AUTH_TRANSPORT_STORAGE_KEY = 'otp_auth_transport';
@@ -3269,6 +3279,21 @@ const readTaskIdFromUrl = (locationLike = null) => {
     }
 };
 
+/* Задача проекта по ключу: ?task=HR-125. Шаблон ключа — как в
+   components/tasks/taskProjects.js (латиница и цифры, дефис, номер). */
+const readTaskKeyFromUrl = (locationLike = null) => {
+    if (typeof window === 'undefined' && !locationLike) return '';
+    try {
+        const search = locationLike?.search ?? window.location.search;
+        const raw = String(new URLSearchParams(search || '').get(TASK_KEY_QUERY_PARAM) || '');
+        const match = /^\s*#?([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,9})\s*$/.exec(raw);
+        return match && Number(match[2]) > 0 ? `${match[1].toUpperCase()}-${Number(match[2])}` : '';
+    } catch (error) {
+        console.warn('Failed to read task key from URL', error);
+        return '';
+    }
+};
+
 /* Обращение, открытое прямой ссылкой: её ставит бот на слова «Обращение №N»
    в сообщении рабочей группы, чтобы из чата попадать сразу в карточку. */
 const readTicketIdFromUrl = (locationLike = null) => {
@@ -3335,6 +3360,7 @@ const buildAppViewUrl = (nextView) => {
         }
         if (nextView !== 'tasks') {
             url.searchParams.delete(TASK_ID_QUERY_PARAM);
+            url.searchParams.delete(TASK_KEY_QUERY_PARAM);
         }
         if (nextView !== 'wiki') {
             url.searchParams.delete(WIKI_ARTICLE_QUERY_PARAM);
@@ -3390,6 +3416,7 @@ const syncAppViewWithUrl = (nextView) => {
         }
         if (nextView !== 'tasks') {
             url.searchParams.delete(TASK_ID_QUERY_PARAM);
+            url.searchParams.delete(TASK_KEY_QUERY_PARAM);
         }
         /* Метку статьи ставит и снимает сама витрина вики (articleLink.js), но
            уход в другой раздел она уже не видит — снимаем здесь, иначе адрес
@@ -43954,6 +43981,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 () => readTaskIdFromUrl(location),
                 [location.search]
             );
+            const requestedTaskKeyFromLocation = useMemo(
+                () => readTaskKeyFromUrl(location),
+                [location.search]
+            );
             const requestedTicketIdFromLocation = useMemo(
                 () => readTicketIdFromUrl(location),
                 [location.search]
@@ -46812,6 +46843,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 body.append('recurrence_type', String(payload.recurrence_type || ''));
                 body.append('recurrence_interval', String(payload.recurrence_interval || '1'));
                 body.append('checklist_items', JSON.stringify(Array.isArray(payload.checklist_items) ? payload.checklist_items : []));
+                // Связанная задача уходит на доску закреплённой (задача #401).
+                if (Number(payload.project_id) > 0) body.append('project_id', String(payload.project_id));
             }, []);
 
             const createPinnedTask = useCallback(async (payload, files = []) => {
@@ -46830,7 +46863,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         }),
                     }
                 );
-                showToast(response?.data?.message || 'Задача создана', 'success');
+                // У задачи проекта в тосте — её ключ: по нему задачу и найдут.
+                showToast(response?.data?.key ? `Задача ${response.data.key} поставлена` : (response?.data?.message || 'Задача создана'), 'success');
                 if (response?.data?.warning) showToast(response.data.warning, 'error');
                 const createdTaskId = Number(response?.data?.task_id || 0);
                 const list = await refreshPinnedTaskPool();
@@ -47912,12 +47946,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
-                if (!user?.id || requestedViewFromLocation !== 'tasks' || !requestedTaskIdFromLocation) return;
+                if (!user?.id || requestedViewFromLocation !== 'tasks') return;
+                if (!requestedTaskIdFromLocation && !requestedTaskKeyFromLocation) return;
+                // Номер точнее ключа: по нему открываем, если пришли оба.
                 setTaskFocusRequest((prev) => ({
-                    taskId: requestedTaskIdFromLocation,
+                    taskId: requestedTaskIdFromLocation || 0,
+                    taskKey: requestedTaskIdFromLocation ? '' : requestedTaskKeyFromLocation,
                     requestId: Number(prev?.requestId || 0) + 1,
                 }));
-            }, [user?.id, requestedViewFromLocation, requestedTaskIdFromLocation]);
+            }, [user?.id, requestedViewFromLocation, requestedTaskIdFromLocation, requestedTaskKeyFromLocation]);
 
             /* Тем же механизмом, что у задач: ссылка из Telegram открывает не
                просто раздел, а конкретное обращение. */

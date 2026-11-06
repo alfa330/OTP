@@ -14,6 +14,7 @@ from db.core import (  # noqa: F401
     TASK_PERSONAL_SCOPE_ROLES,
     task_production,
     task_production_queries,
+    task_projects,
     TASK_TAG_CODES,
     timedelta,
     ZoneInfo,
@@ -86,6 +87,14 @@ class TasksMixin:
         )
         return [int(row[0]) for row in cursor.fetchall()]
 
+    def _task_watcher_ids_tx(self, cursor, task_id):
+        """Id наблюдателей задачи в порядке добавления."""
+        cursor.execute(
+            "SELECT user_id FROM task_watchers WHERE task_id = %s ORDER BY added_at, user_id",
+            (int(task_id),),
+        )
+        return [int(row[0]) for row in cursor.fetchall()]
+
     def _task_assignee_scope_tx(self, cursor, task_id):
         """Исполнители с ролью и СВ — всё, что нужно для проверки видимости."""
         cursor.execute("""
@@ -126,31 +135,40 @@ class TasksMixin:
 
     @staticmethod
     def _task_viewer_is_observer(requester_role, requester_id, creator_id, requested_by_id, assignees):
-        """Задача попала к СВ только потому, что её поставил коллега-СВ (задача #298).
+        """Задачу человек только смотрит: она пришла к нему не как к участнику.
 
-        По этому флагу фронт прячет действия — приёмку, чек-лист, перенос на
-        доске. Участник задачи (постановщик, поручитель, любой исполнитель)
-        наблюдателем не бывает.
+        Так бывает у СВ, когда задачу поставил коллега-СВ (задача #298), и у
+        любого, кто видит задачу как участник её проекта или наблюдатель
+        (задача #401). По этому флагу фронт прячет действия — приёмку,
+        чек-лист, перенос на доске. Участник задачи (постановщик, поручитель,
+        любой исполнитель) наблюдателем не бывает, админ раздела — тоже: он
+        видит всё и действует по своей роли.
         """
-        if normalize_role_value(requester_role) != 'sv':
+        if role_has_min(normalize_role_value(requester_role), 'admin'):
             return False
         requester_id = int(requester_id)
         if requester_id in (int(creator_id or 0), int(requested_by_id or 0)):
             return False
         return not any(int((person or {}).get('id') or 0) == requester_id for person in (assignees or []))
 
-    def _task_observable_by_colleague_tx(self, cursor, requester_role, requester_id, created_by):
-        """СВ читает задачу, поставленную коллегой-СВ своего отдела (задача #298).
+    def _task_observable_tx(self, cursor, requester_role, requester_id, task_id, created_by):
+        """Задачу можно ЧИТАТЬ, хотя участником её человек не является.
 
-        Только чтение. Отдельно от _task_visible_for_requester намеренно: тот
-        решает и действия — приёмку, чек-лист, отчёты, уточнения, — а коллега
-        задачу лишь смотрит, чтобы не поставить такую же второй раз.
+        Три пути, все только на чтение: СВ-коллега постановщика (задача #298) —
+        только у задач вне проектов, участник проекта задачи и наблюдатель с
+        доступом к доске (задача #401). Тот же набор, что в охвате списка
+        (_task_scope_filters), — иначе карточка открывалась бы, а её отчёты и
+        файлы отвечали бы 403. Один запрос на все три пути.
         """
-        if normalize_role_value(requester_role) != 'sv' or created_by is None:
-            return False
+        clauses = [self._TASK_PROJECT_MEMBER_SQL, self._TASK_WATCHER_SQL]
+        params = [int(task_id), int(requester_id), int(requester_id)]
+        if normalize_role_value(requester_role) == 'sv' and created_by is not None:
+            clauses.insert(0, f"(t.project_id IS NULL AND {self._TASK_COLLEAGUE_SV_SQL})")
+            params.insert(1, int(requester_id))
         cursor.execute(
-            "SELECT " + self._TASK_COLLEAGUE_SV_SQL.replace("t.created_by", "%s"),
-            (int(requester_id), int(created_by)),
+            "SELECT EXISTS (SELECT 1 FROM tasks t WHERE t.id = %s AND ("
+            + " OR ".join(clauses) + "))",
+            tuple(params),
         )
         row = cursor.fetchone()
         return bool(row and row[0])
@@ -336,6 +354,438 @@ class TasksMixin:
             }
             for row in rows
         ]
+
+    # ──────────────────────────────────────────────────────────────────
+    # ПРОЕКТЫ-ДОСКИ (задача #401). Правила и стартовый список — task_projects.py.
+
+    @staticmethod
+    def _task_projects_admin(requester_role):
+        """Проекты настраивает тот, кто в «Задачах» и так видит всё.
+
+        Это админ, не возглавляющий отдел, и супер-админ. Глава-админ идёт в
+        раздел под 'sv' (_effective_scoped_manager_role) и проектами не
+        управляет: вписав себя участником чужой доски, он обошёл бы границу
+        своего отдела.
+        """
+        return role_has_min(normalize_role_value(requester_role), 'admin')
+
+    def _require_task_section_tx(self, cursor, section_id, project_id):
+        """Раздел задачи — только с её доски: разделы у каждой доски свои."""
+        if section_id is None:
+            return
+        if project_id is None:
+            raise ValueError("SECTION_NOT_IN_PROJECT")
+        cursor.execute(
+            "SELECT 1 FROM task_project_sections WHERE id = %s AND project_id = %s",
+            (int(section_id), int(project_id)),
+        )
+        if not cursor.fetchone():
+            raise ValueError("SECTION_NOT_IN_PROJECT")
+
+    def _replace_task_project_sections_tx(self, cursor, project_id, sections):
+        """Разделы доски = ровно переданный список по порядку.
+
+        Уже существующие переименовываем и двигаем (у них id), новые заводим,
+        пропавшие удаляем — их задачи остаются на доске без раздела (ON DELETE
+        SET NULL). Чужой id в списке — ошибка, а не тихий перенос раздела.
+        """
+        ordered = task_projects.normalize_sections(sections)
+        cursor.execute("SELECT id FROM task_project_sections WHERE project_id = %s", (int(project_id),))
+        existing = {int(row[0]) for row in cursor.fetchall()}
+        keep_ids = [section_id for section_id, _name in ordered if section_id is not None]
+        if any(section_id not in existing for section_id in keep_ids):
+            raise ValueError("INVALID_PROJECT_SECTIONS")
+        cursor.execute(
+            "DELETE FROM task_project_sections WHERE project_id = %s AND NOT (id = ANY(%s))",
+            (int(project_id), keep_ids),
+        )
+        for position, (section_id, name) in enumerate(ordered):
+            if section_id is None:
+                cursor.execute(
+                    "INSERT INTO task_project_sections (project_id, name, position) VALUES (%s, %s, %s)",
+                    (int(project_id), name, position),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE task_project_sections SET name = %s, position = %s WHERE id = %s AND project_id = %s",
+                    (name, position, section_id, int(project_id)),
+                )
+        return ordered
+
+    def _require_task_project_tx(self, cursor, project_id, requester_id, requester_role):
+        """Поставить задачу в проект можно, если проект жив и у человека есть доступ к доске."""
+        cursor.execute("""
+            SELECT p.is_archived, pm.access_level
+              FROM task_projects p
+              LEFT JOIN task_project_members pm
+                     ON pm.project_id = p.id AND pm.user_id = %s
+             WHERE p.id = %s
+        """, (int(requester_id), int(project_id)))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("PROJECT_NOT_FOUND")
+        if row[0]:
+            raise ValueError("PROJECT_ARCHIVED")
+        if row[1] is None and not self._task_projects_admin(requester_role):
+            raise ValueError("PROJECT_FORBIDDEN")
+
+    def _take_task_project_number_tx(self, cursor, project_id):
+        """Следующий номер задачи в проекте.
+
+        UPDATE ... RETURNING блокирует строку проекта до конца транзакции:
+        две задачи, поставленные в одну секунду, получают разные номера, а
+        откат создания номер просто пропускает — дыра в нумерации честнее,
+        чем повтор.
+        """
+        cursor.execute("""
+            UPDATE task_projects
+               SET next_number = next_number + 1
+             WHERE id = %s
+         RETURNING next_number - 1, code
+        """, (int(project_id),))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError("PROJECT_NOT_FOUND")
+        return int(row[0]), row[1]
+
+    def _task_project_board_user_ids_tx(self, cursor, project_id, user_ids):
+        """Кто из перечисленных есть в составе доски проекта (любым уровнем)."""
+        if not user_ids:
+            return set()
+        cursor.execute("""
+            SELECT user_id FROM task_project_members
+             WHERE project_id = %s AND user_id = ANY(%s)
+        """, (int(project_id), [int(item) for item in user_ids]))
+        return {int(row[0]) for row in cursor.fetchall()}
+
+    def _require_task_watchers_tx(self, cursor, project_id, watcher_ids):
+        """Наблюдатель видит задачу только через доску, поэтому без доступа к ней его не добавить."""
+        if not watcher_ids:
+            return
+        if project_id is None:
+            raise ValueError("WATCHERS_NEED_PROJECT")
+        allowed = self._task_project_board_user_ids_tx(cursor, project_id, watcher_ids)
+        if any(int(person_id) not in allowed for person_id in watcher_ids):
+            raise ValueError("WATCHER_NO_PROJECT_ACCESS")
+
+    def _sync_task_watchers_tx(self, cursor, task_id, watcher_ids, added_by=None):
+        """Наблюдатели задачи = ровно переданный список. Оставшимся added_at не трогаем."""
+        ordered = [int(item) for item in (watcher_ids or [])]
+        cursor.execute(
+            "DELETE FROM task_watchers WHERE task_id = %s AND NOT (user_id = ANY(%s))",
+            (int(task_id), ordered),
+        )
+        if ordered:
+            cursor.execute("""
+                INSERT INTO task_watchers (task_id, user_id, added_by)
+                SELECT %s, src.user_id, %s
+                  FROM unnest(%s::int[]) AS src(user_id)
+                ON CONFLICT (task_id, user_id) DO NOTHING
+            """, (int(task_id), added_by, ordered))
+        return ordered
+
+    def get_task_projects(self, requester_id, requester_role):
+        """Проекты для переключателя раздела, формы задачи и окна настройки.
+
+        Как в постановке #401: человек видит в списке только доски, к которым у
+        него есть доступ. Задача, поставленная ему на чужой доске, остаётся у
+        него на виду — в «Мои задачи» и во «Все проекты», — но сама доска в
+        переключателе не появляется. Админ раздела получает все проекты, включая
+        архив: ему их настраивать.
+
+        К каждой доске — состав (из него форма берёт наблюдателей, окно
+        настройки — весь список) и разделы со счётчиком видимых задач.
+        """
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        is_admin = self._task_projects_admin(role)
+        scope = self._task_scope_filters(requester_id, role)
+        if scope is None:
+            return {"projects": [], "unassigned_count": 0, "can_manage": False}
+        conditions, params, _person_board_id, _person_id_rest = scope
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        with self._get_cursor() as cursor:
+            cursor.execute(f"""
+                SELECT t.project_id, t.section_id, COUNT(*)::INT
+                FROM tasks t
+                {where_sql}
+                GROUP BY t.project_id, t.section_id
+            """, tuple(params))
+            counts = defaultdict(int)
+            section_counts = {}
+            for project_key, section_key, count in cursor.fetchall():
+                counts[project_key] += int(count or 0)
+                section_counts[(project_key, section_key)] = int(count or 0)
+
+            cursor.execute("""
+                SELECT p.id, p.code, p.name, p.department_id, d.name, p.is_archived,
+                       me.access_level
+                  FROM task_projects p
+                  LEFT JOIN departments d ON d.id = p.department_id
+                  LEFT JOIN task_project_members me
+                         ON me.project_id = p.id AND me.user_id = %s
+                 ORDER BY p.name ASC, p.id ASC
+            """, (requester_id,))
+            project_rows = []
+            for row in cursor.fetchall():
+                access = 'admin' if is_admin else row[6]
+                if access is None:
+                    continue
+                project_rows.append((row, access))
+
+            sections_by_project = defaultdict(list)
+            project_ids = [row[0] for row, _access in project_rows]
+            if project_ids:
+                cursor.execute("""
+                    SELECT s.project_id, s.id, s.name
+                      FROM task_project_sections s
+                     WHERE s.project_id = ANY(%s)
+                     ORDER BY s.project_id, s.position, s.id
+                """, (project_ids,))
+                for project_key, section_id, name in cursor.fetchall():
+                    sections_by_project[project_key].append({
+                        "id": section_id,
+                        "name": name,
+                        "task_count": section_counts.get((project_key, section_id), 0),
+                    })
+
+            members_by_project = defaultdict(list)
+            member_project_ids = [row[0] for row, access in project_rows if access]
+            if member_project_ids:
+                cursor.execute("""
+                    SELECT pm.project_id, u.id, u.name, u.role, pm.access_level, d.name,
+                           u.avatar_bucket, u.avatar_blob_path
+                      FROM task_project_members pm
+                      JOIN users u ON u.id = pm.user_id
+                      LEFT JOIN departments d ON d.id = u.department_id
+                     WHERE pm.project_id = ANY(%s)
+                       AND COALESCE(u.status, 'working') <> 'fired'
+                     ORDER BY pm.project_id,
+                              CASE pm.access_level WHEN 'member' THEN 0 ELSE 1 END,
+                              u.name, u.id
+                """, (member_project_ids,))
+                for row in cursor.fetchall():
+                    members_by_project[row[0]].append({
+                        "id": row[1],
+                        "name": row[2],
+                        "role": row[3],
+                        "access_level": row[4],
+                        "department": row[5],
+                        "avatar_bucket": row[6],
+                        "avatar_blob_path": row[7],
+                    })
+
+            # Кого админ может поставить на доску: всех, кто ходит в «Задачи», — и
+            # тех, кому задачи не поручают (тренер), и глав отделов любой роли.
+            # Список получателей задач для этого узок, и отдела в нём нет.
+            candidates = []
+            if is_admin:
+                cursor.execute(f"""
+                    SELECT u.id, u.name, u.role, d.name, u.department_id
+                      FROM users u
+                      LEFT JOIN departments d ON d.id = u.department_id
+                     WHERE COALESCE(u.status, 'working') <> 'fired'
+                       AND (u.role IN ({_TASK_RECIPIENT_ROLES_SQL}, 'trainer')
+                            OR EXISTS (SELECT 1 FROM departments hd
+                                        WHERE hd.head_user_id = u.id AND hd.is_active))
+                     ORDER BY u.name, u.id
+                """)
+                candidates = [
+                    {"id": row[0], "name": row[1], "role": row[2], "department": row[3],
+                     "department_id": row[4]}
+                    for row in cursor.fetchall()
+                ]
+
+        projects = []
+        for row, access in project_rows:
+            project = {
+                "id": row[0],
+                "code": row[1],
+                "name": row[2],
+                "department_id": row[3],
+                "department_name": row[4],
+                "is_archived": bool(row[5]),
+                # admin — настраивает и ставит задачи в любой проект; member и
+                # board — уровень в составе; None — видит здесь только свои задачи.
+                "access": access,
+                "can_create": bool(access) and not row[5],
+                "task_count": counts.get(row[0], 0),
+                "members": members_by_project.get(row[0], []),
+                "sections": sections_by_project.get(row[0], []),
+                # Задачи доски без раздела — чтобы фильтр «Без раздела» появлялся,
+                # только когда в нём что-то есть.
+                "unsectioned_count": section_counts.get((row[0], None), 0),
+            }
+            projects.append(project)
+        return {
+            "projects": projects,
+            "unassigned_count": counts.get(None, 0),
+            "can_manage": is_admin,
+            "candidates": candidates,
+        }
+
+    def _replace_task_project_members_tx(self, cursor, project_id, members, added_by):
+        """Состав доски = ровно переданный список; оставшимся added_at не трогаем."""
+        ordered = task_projects.normalize_members(members)
+        user_ids = [person_id for person_id, _level in ordered]
+        if user_ids:
+            cursor.execute("SELECT id FROM users WHERE id = ANY(%s)", (user_ids,))
+            if len({int(row[0]) for row in cursor.fetchall()}) != len(user_ids):
+                raise ValueError("INVALID_PROJECT_MEMBERS")
+        cursor.execute(
+            "DELETE FROM task_project_members WHERE project_id = %s AND NOT (user_id = ANY(%s))",
+            (int(project_id), user_ids),
+        )
+        # Сняли человека с доски — снимаем и его наблюдение за задачами этой
+        # доски: видеть их он больше не может, а строка осталась бы мусором,
+        # который всплывает в форме правки.
+        cursor.execute("""
+            DELETE FROM task_watchers tw
+             USING tasks t
+             WHERE tw.task_id = t.id AND t.project_id = %s
+               AND NOT (tw.user_id = ANY(%s))
+        """, (int(project_id), user_ids))
+        if user_ids:
+            cursor.execute("""
+                INSERT INTO task_project_members (project_id, user_id, access_level, added_by)
+                SELECT %s, src.user_id, src.access_level, %s
+                  FROM unnest(%s::int[], %s::text[]) AS src(user_id, access_level)
+                ON CONFLICT (project_id, user_id) DO UPDATE
+                    SET access_level = EXCLUDED.access_level
+            """, (int(project_id), added_by, user_ids, [level for _person_id, level in ordered]))
+        return ordered
+
+    def create_task_project(self, requester_id, requester_role, code, name,
+                            department_id=None, members=None, sections=None):
+        """Новый проект. Ключ потом можно сменить — см. _rename_task_project_code_tx."""
+        if not self._task_projects_admin(requester_role):
+            raise PermissionError("PROJECT_MANAGE_FORBIDDEN")
+        code_norm = task_projects.normalize_code(code)
+        name_norm = task_projects.normalize_name(name)
+        with self._get_cursor() as cursor:
+            # Ключи досок раздаём по одному (см. _rename_task_project_code_tx).
+            cursor.execute("SELECT pg_advisory_xact_lock(hashtext('tasks:project_code'))")
+            # Ключ, которым раньше звались задачи (доску переименовали или задачу
+            # перенесли), новой доске не отдаём: её HR-1 и старая ссылка HR-1 вели бы
+            # к разным задачам.
+            cursor.execute("SELECT 1 FROM task_key_aliases WHERE code = %s LIMIT 1", (code_norm,))
+            if cursor.fetchone():
+                raise ValueError("PROJECT_CODE_USED_BEFORE")
+            department_id_norm = self._normalize_task_project_department_tx(cursor, department_id)
+            cursor.execute("""
+                INSERT INTO task_projects (code, name, department_id, created_by)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (code) DO NOTHING
+                RETURNING id
+            """, (code_norm, name_norm, department_id_norm, int(requester_id)))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("PROJECT_CODE_TAKEN")
+            project_id = int(row[0])
+            if members:
+                self._replace_task_project_members_tx(cursor, project_id, members, int(requester_id))
+            if sections:
+                self._replace_task_project_sections_tx(cursor, project_id, sections)
+        return {"id": project_id, "code": code_norm, "name": name_norm}
+
+    def update_task_project(self, project_id, requester_id, requester_role, name=_UNSET,
+                            department_id=_UNSET, is_archived=_UNSET, members=_UNSET,
+                            sections=_UNSET, code=_UNSET):
+        """Название, ключ, отдел, архив, состав и разделы доски."""
+        if not self._task_projects_admin(requester_role):
+            raise PermissionError("PROJECT_MANAGE_FORBIDDEN")
+        project_id = int(project_id)
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT id, code FROM task_projects WHERE id = %s FOR UPDATE", (project_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("PROJECT_NOT_FOUND")
+            current_code = row[1]
+            sets = []
+            values = []
+            code_new = current_code
+            if code is not _UNSET:
+                code_new = task_projects.normalize_code(code)
+                if code_new != current_code:
+                    self._rename_task_project_code_tx(cursor, project_id, current_code, code_new)
+                    sets.append("code = %s")
+                    values.append(code_new)
+            if name is not _UNSET:
+                sets.append("name = %s")
+                values.append(task_projects.normalize_name(name))
+            if department_id is not _UNSET:
+                sets.append("department_id = %s")
+                values.append(self._normalize_task_project_department_tx(cursor, department_id))
+            if is_archived is not _UNSET:
+                sets.append("is_archived = %s")
+                values.append(bool(is_archived))
+            if members is not _UNSET:
+                self._replace_task_project_members_tx(cursor, project_id, members, int(requester_id))
+            if sections is not _UNSET:
+                self._replace_task_project_sections_tx(cursor, project_id, sections)
+            if sets or members is not _UNSET or sections is not _UNSET:
+                sets.append("updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')")
+                cursor.execute(
+                    f"UPDATE task_projects SET {', '.join(sets)} WHERE id = %s",
+                    tuple(values + [project_id]),
+                )
+        return {"id": project_id, "updated": True, "code": code_new, "previous_code": current_code}
+
+    def _rename_task_project_code_tx(self, cursor, project_id, old_code, new_code):
+        """Смена ключа доски (владелец 06.11.2026): HR-125 станет HRD-125.
+
+        Номера задач остаются, меняется только ключ перед ними. Прежние ключи
+        задач доски уходят в task_key_aliases — ссылки из Telegram, переписка и
+        CLI по-прежнему открывают те же задачи (_TASK_KEY_MATCH_SQL ищет и там).
+        Чужой нынешний ключ занять нельзя, а бывший — только свой (доске вернули
+        прежний ключ): иначе старая ссылка HR-5 и новая HR-5 вели бы к разным
+        задачам. Свой прежний ключ безопасен: номер в доске не переиспользуется,
+        и HR-5 перенесённой задачи ни с одной нынешней HR-5 не совпадёт.
+
+        Смены ключей и создание досок идут по одной (замок на транзакцию): два админа,
+        взявшие один ключ в одну секунду, иначе получили бы 500 от UNIQUE, а обмен
+        ключами «крест-накрест» прошёл бы мимо ещё не записанных псевдонимов соседа.
+        """
+        cursor.execute("SELECT pg_advisory_xact_lock(hashtext('tasks:project_code'))")
+        cursor.execute(
+            "SELECT 1 FROM task_projects WHERE code = %s AND id <> %s LIMIT 1",
+            (new_code, int(project_id)),
+        )
+        if cursor.fetchone():
+            raise ValueError("PROJECT_CODE_TAKEN")
+        cursor.execute("""
+            SELECT 1
+              FROM task_key_aliases a
+             WHERE a.code = %s
+               AND a.project_id IS DISTINCT FROM %s
+             LIMIT 1
+        """, (new_code, int(project_id)))
+        if cursor.fetchone():
+            raise ValueError("PROJECT_CODE_USED_BEFORE")
+        # Номер в доске не переиспользуется (next_number только растёт), поэтому
+        # прежний ключ задачи доски ни с чьим другим не совпадёт; ON CONFLICT —
+        # для ключей, уже записанных раньше (доску переименовывали туда и обратно).
+        cursor.execute("""
+            INSERT INTO task_key_aliases (code, number, task_id, project_id)
+            SELECT %s, t.project_number, t.id, %s
+              FROM tasks t
+             WHERE t.project_id = %s
+               AND t.project_number IS NOT NULL
+            ON CONFLICT (code, number) DO NOTHING
+        """, (old_code, int(project_id), int(project_id)))
+
+    def get_task_key(self, task_id):
+        """Ключ задачи (HR-125) или None — для ссылок в Telegram."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT p.code, t.project_number
+                  FROM tasks t
+                  JOIN task_projects p ON p.id = t.project_id
+                 WHERE t.id = %s
+            """, (int(task_id),))
+            row = cursor.fetchone()
+        return task_projects.format_task_key(row[0], row[1]) if row else None
 
     def _task_now(self):
         return datetime.now()
@@ -566,7 +1016,11 @@ class TasksMixin:
             requested_by_name=None,
             reminder_minutes_before=None,
             assignee_ids=None,
-            production_brief=None
+            production_brief=None,
+            project_id=None,
+            watcher_ids=None,
+            requester_role=None,
+            section_id=None
     ):
         subject_norm = (subject or '').strip()
         description_norm = (description or '').strip() or None
@@ -611,10 +1065,22 @@ class TasksMixin:
         production_brief_norm = self._normalize_task_production_brief(
             tag_norm, production_brief, description_norm
         )
+        # Проект-доска (задача #401). Без проекта задача остаётся как раньше —
+        # так её ставят CLI и любой клиент, не знающий о проектах.
+        project_id_norm = self._normalize_task_project_id(project_id)
+        watcher_ids_norm = self._normalize_task_watchers(watcher_ids) or []
+        section_id_norm = self._normalize_task_section_id(section_id)
 
         with self._get_cursor() as cursor:
             if production_brief_norm is not None:
                 self._require_task_production_assignee_tx(cursor, assignee_ids_norm)
+            project_number = None
+            project_code = None
+            if project_id_norm is not None:
+                self._require_task_project_tx(cursor, project_id_norm, created_by_id or 0, requester_role)
+                project_number, project_code = self._take_task_project_number_tx(cursor, project_id_norm)
+            self._require_task_watchers_tx(cursor, project_id_norm, watcher_ids_norm)
+            self._require_task_section_tx(cursor, section_id_norm, project_id_norm)
             # Новые элементы бэклога встают в конец очереди приоритезации.
             backlog_rank = None
             if is_backlog_norm:
@@ -628,9 +1094,9 @@ class TasksMixin:
                     recurrence_interval, recurrence_next_at, regulation_iteration,
                     is_backlog, backlog_rank, estimate_minutes, planned_start_at,
                     requested_by_id, requested_by_name, reminder_minutes_before,
-                    production_brief, created_at, updated_at
+                    production_brief, project_id, project_number, section_id, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, 'assigned', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, created_at, updated_at
             """, (
                 subject_norm,
@@ -653,12 +1119,17 @@ class TasksMixin:
                 requested_by_name_norm,
                 reminder_minutes_norm if due_at else None,
                 Json(production_brief_norm) if production_brief_norm is not None else None,
+                project_id_norm,
+                project_number,
+                section_id_norm,
                 now,
                 now
             ))
             task_id, created_at, updated_at = cursor.fetchone()
 
             self._sync_task_assignees_tx(cursor, task_id, assignee_ids_norm, added_by=created_by_id)
+            if watcher_ids_norm:
+                self._sync_task_watchers_tx(cursor, task_id, watcher_ids_norm, added_by=created_by_id)
 
             cursor.execute("""
                 INSERT INTO task_status_history (task_id, status_code, changed_by)
@@ -705,7 +1176,12 @@ class TasksMixin:
             "reminder_minutes_before": reminder_minutes_norm if due_at else None,
             "production_brief": production_brief_norm,
             # Кого фактически записали: по этому списку роут рассылает Telegram.
-            "assignee_ids": list(assignee_ids_norm)
+            "assignee_ids": list(assignee_ids_norm),
+            "project_id": project_id_norm,
+            "project_number": project_number,
+            "key": task_projects.format_task_key(project_code, project_number),
+            "watcher_ids": list(watcher_ids_norm),
+            "section_id": section_id_norm
         }
 
     def edit_task(
@@ -730,7 +1206,10 @@ class TasksMixin:
             requested_by_name=_UNSET,
             reminder_minutes_before=_UNSET,
             assignee_ids=_UNSET,
-            production_brief=_UNSET
+            production_brief=_UNSET,
+            project_id=_UNSET,
+            watcher_ids=_UNSET,
+            section_id=_UNSET
     ):
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -758,13 +1237,17 @@ class TasksMixin:
         # Ключа нет — бриф не трогаем (так шлёт вкладка, открытая до выхода
         # «Продакшна»); None — убрать бриф; словарь — заменить целиком.
         has_production_brief = production_brief is not _UNSET
+        # Проект и наблюдатели (задача #401): ключа нет — не трогаем.
+        has_project = project_id is not _UNSET
+        has_watchers = watcher_ids is not _UNSET
+        has_section = section_id is not _UNSET
 
         if not any([
             has_subject, has_description, has_tag, has_assigned_to,
             has_priority, has_deadline, has_due_at, has_is_regulation,
             has_recurrence_type, has_recurrence_interval, has_checklist,
             has_estimate, has_planned_start, has_origin, has_reminder,
-            has_production_brief
+            has_production_brief, has_project, has_watchers, has_section
         ]):
             raise ValueError("NOTHING_TO_UPDATE")
 
@@ -780,7 +1263,10 @@ class TasksMixin:
                     -- Автор открытого запроса информации: по нему решается,
                     -- снимать ли запрос при смене состава исполнителей.
                     (SELECT m.author_id FROM task_messages m WHERE m.id = t.info_request_id),
-                    t.production_brief
+                    t.production_brief,
+                    t.project_id, t.project_number,
+                    (SELECT p.code FROM task_projects p WHERE p.id = t.project_id),
+                    t.section_id
                 FROM tasks t
                 WHERE t.id = %s
             """, (task_id,))
@@ -817,6 +1303,59 @@ class TasksMixin:
 
             if created_by is None or int(created_by) != requester_id:
                 raise PermissionError("ONLY_CREATOR_CAN_EDIT")
+
+            # Проект и наблюдатели. Перенос в другой проект — это новый номер в
+            # нём; прежний ключ остаётся в task_key_aliases и открывает задачу.
+            current_project_id = row[21]
+            current_project_number = row[22]
+            current_project_code = row[23]
+            # Пустой проект в правке — «не менять»: убрать задачу из проекта нельзя,
+            # только перенести в другой. Так старая вкладка или форма, не знающая
+            # о проекте (быстрая правка закреплённой задачи), не вынет задачу с
+            # доски и не сожжёт её номер.
+            project_id_requested = self._normalize_task_project_id(project_id) if has_project else None
+            project_id_new = project_id_requested if project_id_requested is not None else current_project_id
+            project_changed = project_id_new != current_project_id
+            if project_changed and project_id_new is not None:
+                self._require_task_project_tx(cursor, project_id_new, requester_id, role)
+            current_watcher_ids = self._task_watcher_ids_tx(cursor, task_id)
+            if has_watchers:
+                watcher_ids_new = self._normalize_task_watchers(watcher_ids) or []
+            elif project_changed:
+                # Проект сменили, а список не прислали: остаются те, кто видит
+                # новую доску. Остальные задачу и так перестали бы видеть.
+                allowed = (
+                    self._task_project_board_user_ids_tx(cursor, project_id_new, current_watcher_ids)
+                    if project_id_new is not None else set()
+                )
+                watcher_ids_new = [pid for pid in current_watcher_ids if pid in allowed]
+            else:
+                watcher_ids_new = list(current_watcher_ids)
+            if project_changed:
+                # Новая доска — у всех наблюдателей должен быть доступ к ней.
+                self._require_task_watchers_tx(cursor, project_id_new, watcher_ids_new)
+            elif has_watchers:
+                # Сверяем с доской только добавленных: тех, кто уже был, правкой
+                # темы не проверяем — иначе один снятый с доски наблюдатель
+                # запирал бы задачу от любой правки.
+                self._require_task_watchers_tx(
+                    cursor, project_id_new,
+                    [pid for pid in watcher_ids_new if pid not in set(current_watcher_ids)],
+                )
+            watchers_changed = set(watcher_ids_new) != set(current_watcher_ids)
+
+            # Раздел — свой у каждой доски: перенесли задачу, а раздел не выбрали —
+            # она встаёт на новую доску без раздела. «Без раздела» — законный выбор.
+            current_section_id = row[24]
+            if has_section:
+                section_id_new = self._normalize_task_section_id(section_id)
+            elif project_changed:
+                section_id_new = None
+            else:
+                section_id_new = current_section_id
+            if section_id_new is not None and (has_section or project_changed):
+                self._require_task_section_tx(cursor, section_id_new, project_id_new)
+            section_changed = section_id_new != current_section_id
 
             if has_assigned_to:
                 assignee_ids_new = self._normalize_task_assignees(
@@ -947,6 +1486,12 @@ class TasksMixin:
                 changed_fields.append("requested_by")
             if reminder_new != current_reminder:
                 changed_fields.append("reminder")
+            if project_changed:
+                changed_fields.append("project")
+            if watchers_changed:
+                changed_fields.append("watchers")
+            if section_changed:
+                changed_fields.append("section")
 
             if not changed_fields:
                 return {
@@ -1041,6 +1586,28 @@ class TasksMixin:
 
             self._sync_task_assignees_tx(cursor, task_id, assignee_ids_new, added_by=requester_id)
 
+            project_key_new = task_projects.format_task_key(current_project_code, current_project_number)
+            if project_changed:
+                project_number_new = None
+                project_code_new = None
+                if project_id_new is not None:
+                    project_number_new, project_code_new = self._take_task_project_number_tx(cursor, project_id_new)
+                if current_project_code and current_project_number:
+                    cursor.execute("""
+                        INSERT INTO task_key_aliases (code, number, task_id, project_id)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (code, number) DO NOTHING
+                    """, (current_project_code, int(current_project_number), task_id, current_project_id))
+                cursor.execute(
+                    "UPDATE tasks SET project_id = %s, project_number = %s WHERE id = %s",
+                    (project_id_new, project_number_new, task_id),
+                )
+                project_key_new = task_projects.format_task_key(project_code_new, project_number_new)
+            if watchers_changed:
+                self._sync_task_watchers_tx(cursor, task_id, watcher_ids_new, added_by=requester_id)
+            if section_changed:
+                cursor.execute("UPDATE tasks SET section_id = %s WHERE id = %s", (section_id_new, task_id))
+
             # Съехал срок или интервал — напоминание должно сработать заново у
             # ВСЕХ исполнителей, а не только обнулиться на самой задаче.
             if 'deadline' in changed_fields or 'reminder' in changed_fields:
@@ -1079,7 +1646,11 @@ class TasksMixin:
                 "estimate_minutes": estimate_minutes_new,
                 "planned_start_at": self._task_dt_to_iso(planned_start_at_new),
                 "reminder_minutes_before": reminder_new,
-                "production_brief": production_brief_new
+                "production_brief": production_brief_new,
+                "project_id": project_id_new,
+                "key": project_key_new,
+                "watcher_ids": list(watcher_ids_new),
+                "section_id": section_id_new
             }
 
     def _serialize_task_report(self, row):
@@ -1114,7 +1685,7 @@ class TasksMixin:
         created_by, requested_by = row[1], row[2]
         assignee_scope = self._task_assignee_scope_tx(cursor, int(task_id))
         if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, requested_by):
-            if not (allow_observer and self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by)):
+            if not (allow_observer and self._task_observable_tx(cursor, role, requester_id, task_id, created_by)):
                 raise PermissionError("TASK_FORBIDDEN")
         return created_by, [person_id for person_id, _role, _supervisor in assignee_scope]
 
@@ -1339,7 +1910,7 @@ class TasksMixin:
         assignee_scope = self._task_assignee_scope_tx(cursor, int(row[0]))
         if not self._task_visible_for_requester(role, requester_id, row[1], assignee_scope, row[3]):
             # Ленту уточнений СВ-коллега читает (allow_observer), но не пишет в неё.
-            if not (allow_observer and self._task_observable_by_colleague_tx(cursor, role, requester_id, row[1])):
+            if not (allow_observer and self._task_observable_tx(cursor, role, requester_id, row[0], row[1])):
                 raise PermissionError("TASK_FORBIDDEN")
         return {
             "id": row[0],
@@ -1553,13 +2124,15 @@ class TasksMixin:
             estimate_minutes=_UNSET,
             planned_start_at=_UNSET,
             due_at=_UNSET,
-            reminder_minutes_before=_UNSET
+            reminder_minutes_before=_UNSET,
+            priority_score=_UNSET
     ):
         """
         Планирующие правки с доски: бэклог ↔ доска, порядок приоритезации, оценка, сроки.
 
         Отличается от edit_task правами: двигать карточку и ставить оценку может
         и исполнитель (это его работа), а сроки — только постановщик или админ.
+        Балл приоритета (1–5) ставят только суперадмины — по итогам совещания по бэклогу.
         """
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -1571,8 +2144,10 @@ class TasksMixin:
         has_planned_start = planned_start_at is not _UNSET
         has_due_at = due_at is not _UNSET
         has_reminder = reminder_minutes_before is not _UNSET
+        has_priority_score = priority_score is not _UNSET
 
-        if not any([has_is_backlog, has_backlog_rank, has_estimate, has_planned_start, has_due_at, has_reminder]):
+        if not any([has_is_backlog, has_backlog_rank, has_estimate, has_planned_start, has_due_at, has_reminder,
+                    has_priority_score]):
             raise ValueError("NOTHING_TO_UPDATE")
 
         with self._get_cursor() as cursor:
@@ -1581,9 +2156,14 @@ class TasksMixin:
                     t.id, t.created_by, t.assigned_to, t.status, t.created_at,
                     t.is_backlog, t.backlog_rank, t.estimate_minutes, t.planned_start_at,
                     t.due_at, t.deadline_duration_minutes, t.subject,
-                    t.reminder_minutes_before, t.requested_by_id
+                    t.reminder_minutes_before, t.requested_by_id, t.priority_score,
+                    t.is_regulation, t.regulation_parent_id
                 FROM tasks t
                 WHERE t.id = %s
+                -- Под замком строки, как у смены статуса: строка ниже переписывается
+                -- целиком из этого чтения, и балл, поставленный в ту секунду, когда
+                -- исполнитель взял задачу в работу, иначе вернул бы её в бэклог.
+                FOR UPDATE OF t
             """, (task_id,))
             row = cursor.fetchone()
             if not row:
@@ -1602,6 +2182,10 @@ class TasksMixin:
             subject = row[11]
             current_reminder = row[12]
             requested_by = row[13]
+            current_priority_score = row[14]
+            # Шаблон регламента: в бэклоге он на паузе — materialize_due_regulation_tasks
+            # берёт только шаблоны вне бэклога.
+            is_regulation_template = bool(row[15]) and row[16] is None
             assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
             assignee_ids = [person_id for person_id, _role, _supervisor in assignee_scope]
 
@@ -1617,8 +2201,36 @@ class TasksMixin:
                 raise PermissionError("TASK_FORBIDDEN")
             if (has_due_at or has_planned_start) and not (is_creator or is_admin):
                 raise PermissionError("ONLY_CREATOR_CAN_PLAN")
+            # Балл — решение совещания по бэклогу, его ставят только суперадмины.
+            if has_priority_score and not role_has_min(role, 'super_admin'):
+                raise PermissionError("ONLY_SUPER_ADMIN_SCORE")
 
             is_backlog_new = bool(is_backlog) if has_is_backlog else current_is_backlog
+            # Первый балл переводит задачу из «Новой» в бэклог: «Новая» — то, что ещё не
+            # разобрали на совещании, бэклог — очередь уже оценённых (решение владельца
+            # 06.11.2026). Смена балла у оценённой и снятие балла задачу не двигают.
+            # Шаблон регламента остаётся на месте: в бэклоге он перестал бы рождать
+            # повторы, а балл шаблона на сами повторы не переходит.
+            priority_score_new = (
+                self._normalize_task_priority_score(priority_score) if has_priority_score else current_priority_score
+            )
+            moved_by_score = bool(
+                has_priority_score and not has_is_backlog and priority_score_new is not None
+                and current_priority_score is None and current_status == 'assigned'
+                and not current_is_backlog and not is_regulation_template
+            )
+            if moved_by_score:
+                is_backlog_new = True
+            # Снятый балл возвращает задачу из бэклога в «Новую» — снова к разбору
+            # (владелец 06.11.2026). Снимают его в карточке задачи. Шаблон регламента —
+            # нет: вне бэклога он ожил бы и сразу догнал пропущенные повторы.
+            unscored_to_new = bool(
+                has_priority_score and not has_is_backlog and priority_score_new is None
+                and current_priority_score is not None and current_is_backlog
+                and current_status == 'assigned' and not is_regulation_template
+            )
+            if unscored_to_new:
+                is_backlog_new = False
             # В бэклог возвращаем только ещё не начатую задачу — иначе доска врала бы про прогресс.
             # Проверяем именно переход: правки сроков уже лежащей в бэклоге задачи блокировать не за что.
             if is_backlog_new and not current_is_backlog and current_status != 'assigned':
@@ -1632,7 +2244,11 @@ class TasksMixin:
                         backlog_rank_new = float(backlog_rank)
                     except Exception:
                         raise ValueError("INVALID_BACKLOG_RANK")
-            elif is_backlog_new and current_backlog_rank is None:
+            elif is_backlog_new and (current_backlog_rank is None or moved_by_score or (
+                    has_priority_score and current_priority_score is None and priority_score_new is not None)):
+                # Только что оценённая встаёт в конец своего балла: старый ранг остался
+                # от прежнего захода в бэклог и к сегодняшней очереди не относится. То же —
+                # у задачи, которую положили в бэклог без балла руками и оценили там.
                 cursor.execute("SELECT COALESCE(MAX(backlog_rank), 0) + 1 FROM tasks WHERE is_backlog = TRUE")
                 backlog_rank_new = float((cursor.fetchone() or [1])[0] or 1)
             else:
@@ -1677,6 +2293,8 @@ class TasksMixin:
                 changed_fields.append("deadline")
             if reminder_new != current_reminder:
                 changed_fields.append("reminder")
+            if priority_score_new != current_priority_score:
+                changed_fields.append("priority_score")
 
             if changed_fields:
                 # Съехал срок или интервал — напоминание должно сработать заново у всего
@@ -1697,6 +2315,7 @@ class TasksMixin:
                         due_at = %s,
                         deadline_duration_minutes = %s,
                         reminder_minutes_before = %s,
+                        priority_score = %s,
                         {'reminder_sent_at = NULL,' if reset_sent else ''}
                         updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                     WHERE id = %s
@@ -1708,6 +2327,7 @@ class TasksMixin:
                     due_at_new,
                     deadline_minutes_new,
                     reminder_new,
+                    priority_score_new,
                     task_id
                 ))
 
@@ -1720,12 +2340,16 @@ class TasksMixin:
                 "status": current_status,
                 "is_backlog": is_backlog_new,
                 "was_backlog": current_is_backlog,
+                # Куда задачу увёл балл: 'to_backlog' — первый балл, 'to_new' — снятый.
+                # Ручка доски по нему не шлёт «вынесли в работу» на возврат в «Новую».
+                "score_move": 'to_backlog' if moved_by_score else ('to_new' if unscored_to_new else None),
                 "backlog_rank": backlog_rank_new,
                 "estimate_minutes": estimate_new,
                 "planned_start_at": self._task_dt_to_iso(planned_start_new),
                 "due_at": self._task_dt_to_iso(due_at_new),
                 "deadline_duration_minutes": deadline_minutes_new,
-                "reminder_minutes_before": reminder_new
+                "reminder_minutes_before": reminder_new,
+                "priority_score": priority_score_new
             }
 
     def delete_task(self, task_id, requester_id, requester_role):
@@ -2006,7 +2630,8 @@ class TasksMixin:
                 SELECT
                     t.id, t.subject, t.description, t.tag, t.priority, t.assigned_to, t.created_by,
                     t.deadline_duration_minutes, t.recurrence_type, t.recurrence_interval,
-                    t.recurrence_next_at, t.estimate_minutes, t.production_brief
+                    t.recurrence_next_at, t.estimate_minutes, t.production_brief, t.project_id,
+                    t.section_id
                 FROM tasks t
                 WHERE t.is_regulation = TRUE
                   AND t.regulation_parent_id IS NULL
@@ -2024,7 +2649,8 @@ class TasksMixin:
                 (
                     root_id, subject, description, tag, priority, assigned_to, created_by,
                     deadline_minutes, recurrence_type, recurrence_interval, next_at,
-                    template_estimate_minutes, template_production_brief
+                    template_estimate_minutes, template_production_brief, template_project_id,
+                    template_section_id
                 ) = template
                 # Бриф продакшна копируется в итерацию как есть, вместе с типом:
                 # иначе регламентный продакшн каждый раз рождался бы без ТЗ.
@@ -2046,6 +2672,9 @@ class TasksMixin:
                     # Шаблон старше состава (или бэкфилл не дошёл) — берём
                     # скалярного исполнителя, задача без исполнителя не бывает.
                     template_assignee_ids = [int(assigned_to)]
+                # Итерация живёт на доске шаблона и со своими наблюдателями
+                # (задача #401) — номер в проекте у каждой свой.
+                template_watcher_ids = self._task_watcher_ids_tx(cursor, root_id)
 
                 occurrence_count = 0
                 latest_next_at = next_at
@@ -2062,6 +2691,11 @@ class TasksMixin:
                     """, (root_id,))
                     iteration_row = cursor.fetchone()
                     next_iteration = int(iteration_row[0] or 0) + 1
+                    iteration_project_number = None
+                    if template_project_id is not None:
+                        iteration_project_number, _iteration_code = self._take_task_project_number_tx(
+                            cursor, template_project_id
+                        )
 
                     cursor.execute("""
                         INSERT INTO tasks (
@@ -2069,14 +2703,15 @@ class TasksMixin:
                             deadline_duration_minutes, due_at, is_regulation,
                             recurrence_type, recurrence_interval, recurrence_next_at,
                             regulation_parent_id, regulation_iteration, estimate_minutes,
-                            production_brief, created_at, updated_at
+                            production_brief, project_id, project_number, section_id,
+                            created_at, updated_at
                         )
                         VALUES (
                             %s, %s, %s, %s, 'assigned', %s, %s,
                             %s, %s, TRUE,
                             NULL, NULL, NULL,
                             %s, %s, %s,
-                            %s,
+                            %s, %s, %s, %s,
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'),
                             (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
                         )
@@ -2093,7 +2728,10 @@ class TasksMixin:
                         root_id,
                         next_iteration,
                         template_estimate_minutes,
-                        Json(template_production_brief) if template_production_brief is not None else None
+                        Json(template_production_brief) if template_production_brief is not None else None,
+                        template_project_id,
+                        iteration_project_number,
+                        template_section_id
                     ))
                     created_id = cursor.fetchone()[0]
                     created_task_ids.append(created_id)
@@ -2101,6 +2739,10 @@ class TasksMixin:
                     if template_assignee_ids:
                         self._sync_task_assignees_tx(
                             cursor, created_id, template_assignee_ids, added_by=created_by
+                        )
+                    if template_watcher_ids:
+                        self._sync_task_watchers_tx(
+                            cursor, created_id, template_watcher_ids, added_by=created_by
                         )
 
                     cursor.execute("""
@@ -2278,7 +2920,8 @@ class TasksMixin:
         ), [department_filter]
 
     def _task_scope_filters(self, requester_id, role, only_my=False, mine=None,
-                            person_id=None, person_scope=None, department_id=None):
+                            person_id=None, person_scope=None, department_id=None,
+                            project_id=None, section_id=None):
         """Кого пускаем к задачам и чья это доска — общая часть списка и выгрузки.
 
         Вынесено из get_tasks_for_requester, чтобы Excel-выгрузка отбирала ровно
@@ -2304,6 +2947,8 @@ class TasksMixin:
             raise ValueError("INVALID_TASK_PERSON_SCOPE_FILTER")
 
         department_filter = self._normalize_task_department_filter(department_id)
+        project_filter = self._normalize_task_project_filter(project_id)
+        section_filter = self._normalize_task_section_filter(section_id)
 
         if person_id is None or str(person_id).strip() == '':
             person_id_norm = None
@@ -2320,15 +2965,24 @@ class TasksMixin:
             # Поручитель видит задачи, которые поручил, — иначе он не сможет принять итог.
             participant_sql = f"(t.created_by = %s OR t.requested_by_id = %s OR {self._TASK_ASSIGNEE_EXISTS_SQL})"
             participant_params = [requester_id, requester_id, requester_id, requester_id]
+            # Доска проекта (задача #401): участник видит все её задачи,
+            # наблюдатель с доступом к доске — свою. Тоже только на просмотр.
+            project_sql = f"{self._TASK_PROJECT_MEMBER_SQL} OR {self._TASK_WATCHER_SQL}"
+            project_params = [requester_id, requester_id]
             if role == 'sv':
                 # СВ видит и задачи, поставленные коллегами-СВ своего отдела, — на
                 # просмотр (задача #298). Действия над чужой задачей по-прежнему
                 # решает _task_visible_for_requester, а не этот охват.
-                conditions.append(f"({participant_sql} OR {self._TASK_COLLEAGUE_SV_SQL})")
-                params.extend(participant_params + [requester_id])
+                # Задачи проекта путь коллеги не открывает: там видимость решает
+                # состав доски (задача #401) — иначе конфиденциальная задача HR,
+                # поставленная СВ, была бы видна всем СВ его отдела.
+                conditions.append(
+                    f"({participant_sql} OR (t.project_id IS NULL AND {self._TASK_COLLEAGUE_SV_SQL}) OR {project_sql})"
+                )
+                params.extend(participant_params + [requester_id] + project_params)
             else:
-                conditions.append(participant_sql)
-                params.extend(participant_params)
+                conditions.append(f"({participant_sql} OR {project_sql})")
+                params.extend(participant_params + project_params)
         else:
             return None
 
@@ -2339,6 +2993,20 @@ class TasksMixin:
         if department_sql:
             conditions.append(department_sql)
             params.extend(department_params)
+
+        # Проект — туда же, в базовый охват, по той же причине: сводка и бэклог
+        # шапки доски обязаны считаться по выбранной доске.
+        if project_filter == 'none':
+            conditions.append("t.project_id IS NULL")
+        elif project_filter is not None:
+            conditions.append("t.project_id = %s")
+            params.append(project_filter)
+        # Раздел доски — тем же базовым охватом: счётчики шапки — по разделу.
+        if section_filter == 'none':
+            conditions.append("t.section_id IS NULL")
+        elif section_filter is not None:
+            conditions.append("t.section_id = %s")
+            params.append(section_filter)
 
         if only_my_flag:
             conditions.append(
@@ -2387,7 +3055,10 @@ class TasksMixin:
             task_id=None,
             sort=None,
             department_id=None,
-            include_summary=True
+            include_summary=True,
+            project_id=None,
+            task_key=None,
+            section_id=None
     ):
         requester_id = int(requester_id)
         role = normalize_role_value(requester_role)
@@ -2446,7 +3117,7 @@ class TasksMixin:
         scope = self._task_scope_filters(
             requester_id, role,
             only_my=only_my_flag, mine=mine, person_id=person_id, person_scope=person_scope,
-            department_id=department_id
+            department_id=department_id, project_id=project_id, section_id=section_id
         )
         if scope is None:
             return {
@@ -2472,11 +3143,23 @@ class TasksMixin:
             filtered_conditions.append("t.id = %s")
             filtered_params.append(task_id_norm)
 
+        # Ссылка по ключу (?task=HR-125): текущему или прежнему, если задачу
+        # переносили в другой проект (задача #401).
+        if task_key is not None and str(task_key).strip() != '':
+            parsed_key = task_projects.parse_task_key(task_key)
+            if not parsed_key:
+                raise ValueError("INVALID_TASK_KEY_FILTER")
+            filtered_conditions.append(self._TASK_KEY_MATCH_SQL)
+            filtered_params.extend([parsed_key[0], parsed_key[1], parsed_key[0], parsed_key[1]])
+
         if search_text:
             like_pattern = f"%{search_text}%"
+            # Строка поиска, похожая на ключ задачи (HR-125), ищет и по ключу.
+            search_key = task_projects.parse_task_key(search_text)
+            key_sql = f"OR {self._TASK_KEY_MATCH_SQL}" if search_key else ""
             # Ищем по ЛЮБОМУ исполнителю, но через EXISTS: джойн на состав
             # вернул бы задачу с тремя исполнителями трижды.
-            filtered_conditions.append("""
+            filtered_conditions.append(f"""
                 (
                     t.subject ILIKE %s
                     OR COALESCE(t.description, '') ILIKE %s
@@ -2486,9 +3169,12 @@ class TasksMixin:
                         WHERE ta_s.task_id = t.id AND COALESCE(au.name, '') ILIKE %s
                     )
                     OR COALESCE(creator.name, '') ILIKE %s
+                    {key_sql}
                 )
             """)
             filtered_params.extend([like_pattern, like_pattern, like_pattern, like_pattern])
+            if search_key:
+                filtered_params.extend([search_key[0], search_key[1], search_key[0], search_key[1]])
 
         if len(status_values) == 1:
             filtered_conditions.append("t.status = %s")
@@ -2606,8 +3292,13 @@ class TasksMixin:
                 "CASE t.priority WHEN 'critical' THEN 0 WHEN 'urgent' THEN 1 ELSE 2 END ASC, "
             )
             if backlog_norm == 'only':
-                # Бэклог — ручная очередь приоритезации, её порядок важнее сортировки.
-                order_by_sql = "t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"
+                # Бэклог — очередь приоритезации, её порядок важнее сортировки: сперва
+                # балл суперадминов (1 — важнее, без балла — в конце), внутри балла —
+                # ручная очередь. Тот же порядок — compareBacklogTasks во фронте.
+                order_by_sql = (
+                    "t.priority_score ASC NULLS LAST, t.backlog_rank ASC NULLS LAST, "
+                    "t.created_at DESC, t.id DESC"
+                )
             elif sort_norm == 'importance':
                 order_by_sql = f"{importance_sql}t.created_at DESC, t.id DESC"
             else:
@@ -2628,12 +3319,17 @@ class TasksMixin:
                     t.requested_by_id, COALESCE(origin_user.name, t.requested_by_name),
                     t.reminder_minutes_before, t.reminder_sent_at,
                     action_read.kind, action_read.seen_at,
-                    t.info_request_id, t.production_brief
+                    t.info_request_id, t.production_brief,
+                    t.project_id, t.project_number, project.code, project.name,
+                    section.id, section.name,
+                    t.priority_score
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users completed_user ON completed_user.id = t.completed_by
                 LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
+                LEFT JOIN task_projects project ON project.id = t.project_id
+                LEFT JOIN task_project_sections section ON section.id = t.section_id
                 LEFT JOIN task_action_reads action_read
                        ON action_read.task_id = t.id AND action_read.user_id = %s
                 {filtered_where_sql}
@@ -2657,8 +3353,24 @@ class TasksMixin:
             report_rows = []
             message_rows = []
             assignee_rows = []
+            watcher_rows = []
             if task_rows:
                 task_ids = [row[0] for row in task_rows]
+
+                # Наблюдатели (задача #401) — тем же пакетным запросом на страницу.
+                # Только те, у кого ещё есть доступ к доске: остальные задачу уже не
+                # видят, и значиться в карточке наблюдателем им незачем.
+                cursor.execute("""
+                    SELECT tw.task_id, u.id, u.name, u.role, u.avatar_bucket, u.avatar_blob_path
+                    FROM task_watchers tw
+                    JOIN tasks tw_task ON tw_task.id = tw.task_id
+                    JOIN task_project_members tw_board
+                      ON tw_board.project_id = tw_task.project_id AND tw_board.user_id = tw.user_id
+                    JOIN users u ON u.id = tw.user_id
+                    WHERE tw.task_id = ANY(%s)
+                    ORDER BY tw.task_id ASC, tw.added_at ASC, tw.user_id ASC
+                """, (task_ids,))
+                watcher_rows = cursor.fetchall()
 
                 # Состав исполнителей — отдельным пакетным запросом, как история
                 # и чеклист. Джойном его тянуть нельзя: главный запрос обязан
@@ -2780,6 +3492,16 @@ class TasksMixin:
                 "avatar_blob_path": row[6]
             })
 
+        watcher_map = defaultdict(list)
+        for row in watcher_rows:
+            watcher_map[row[0]].append({
+                "id": row[1],
+                "name": row[2],
+                "role": row[3],
+                "avatar_bucket": row[4],
+                "avatar_blob_path": row[5]
+            })
+
         # Уточнения: файлы к ним раскладываются из уже выбранных вложений задачи,
         # пятый запрос ради того же самого был бы лишним.
         message_map = defaultdict(list)
@@ -2850,6 +3572,8 @@ class TasksMixin:
                 } if row[26] else None,
                 "is_backlog": bool(row[31]),
                 "backlog_rank": float(row[32]) if row[32] is not None else None,
+                # Балл приоритета 1–5 от суперадминов; None — ещё не оценена.
+                "priority_score": row[50],
                 "estimate_minutes": row[33],
                 "planned_start_at": self._task_dt_to_iso(row[34]),
                 "started_at": self._task_dt_to_iso(row[35]),
@@ -2877,7 +3601,17 @@ class TasksMixin:
                 "messages": message_map.get(task_id, []),
                 "info_request": message_by_id.get(row[42]) if row[42] else None,
                 # Бриф продакшна (задача #354): коды вариантов, подписи — во фронте.
-                "production_brief": task_production.stored_brief(row[43])
+                "production_brief": task_production.stored_brief(row[43]),
+                # Проект-доска и ключ задачи (задача #401): HR-125 = код + номер в проекте.
+                "project": ({
+                    "id": row[44],
+                    "code": row[46],
+                    "name": row[47]
+                } if row[44] else None),
+                "project_number": row[45] if row[44] else None,
+                "key": task_projects.format_task_key(row[46], row[45]) if row[44] else None,
+                "section": {"id": row[48], "name": row[49]} if row[48] else None,
+                "watchers": watcher_map.get(task_id, [])
             })
 
         return {
@@ -2888,7 +3622,8 @@ class TasksMixin:
         }
 
     def get_tasks_for_export(self, requester_id, requester_role, mine=None,
-                             person_id=None, person_scope=None, department_id=None):
+                             person_id=None, person_scope=None, department_id=None,
+                             project_id=None, section_id=None):
         """Плоский срез задач для выгрузки в Excel — тот же охват, что у доски.
 
         Отдельный запрос, а не get_tasks_for_requester: выгрузке не нужны
@@ -2902,7 +3637,7 @@ class TasksMixin:
         role = normalize_role_value(requester_role)
         scope = self._task_scope_filters(
             requester_id, role, mine=mine, person_id=person_id, person_scope=person_scope,
-            department_id=department_id
+            department_id=department_id, project_id=project_id, section_id=section_id
         )
         if scope is None:
             return []
@@ -2939,10 +3674,13 @@ class TasksMixin:
                       WHERE ta_x.task_id = t.id),
                     creator.name,
                     COALESCE(origin_user.name, t.requested_by_name, creator.name),
-                    t.production_brief
+                    t.production_brief,
+                    project.code, t.project_number,
+                    t.priority_score
                 FROM tasks t
                 LEFT JOIN users creator ON creator.id = t.created_by
                 LEFT JOIN users origin_user ON origin_user.id = t.requested_by_id
+                LEFT JOIN task_projects project ON project.id = t.project_id
                 LEFT JOIN LATERAL (
                     SELECT SUM(r.spent_minutes)::INT AS total
                     FROM task_reports r
@@ -2951,6 +3689,8 @@ class TasksMixin:
                 {where_sql}
                 ORDER BY
                     t.is_backlog DESC,
+                    -- Лист «Бэклог» — в том же порядке, что на экране: балл, затем очередь.
+                    CASE WHEN t.is_backlog THEN t.priority_score END ASC NULLS LAST,
                     CASE WHEN t.is_backlog THEN t.backlog_rank END ASC NULLS LAST,
                     t.created_at DESC, t.id DESC
                 LIMIT %s
@@ -2981,6 +3721,9 @@ class TasksMixin:
             # клетка тут читалась бы как «спросить не у кого».
             "requested_by_name": row[17],
             "production_brief": task_production.stored_brief(row[18]),
+            # Ключ задачи проекта (HR-125) — в колонку «№» вместо глобального id.
+            "key": task_projects.format_task_key(row[19], row[20]),
+            "priority_score": row[21],
         } for row in rows]
 
     def update_task_status(self, task_id, requester_id, requester_role, action, comment=None, completion_summary=None,
@@ -3307,8 +4050,9 @@ class TasksMixin:
             assignee_scope = self._task_assignee_scope_tx(cursor, int(row[9]))
 
             if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[12]):
-                # Файлы задачи коллеги-СВ открываются так же, как её карточка, — на чтение.
-                if not self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by):
+                # Файлы задачи, которую человек только смотрит (коллега-СВ, участник
+                # проекта, наблюдатель), открываются так же, как её карточка, — на чтение.
+                if not self._task_observable_tx(cursor, role, requester_id, row[9], created_by):
                     raise PermissionError("TASK_FORBIDDEN")
 
             storage_type = row[6] or 'db'
@@ -3357,7 +4101,7 @@ class TasksMixin:
             created_by = row[0]
             assignee_scope = self._task_assignee_scope_tx(cursor, task_id)
             if not self._task_visible_for_requester(role, requester_id, created_by, assignee_scope, row[1]):
-                if not self._task_observable_by_colleague_tx(cursor, role, requester_id, created_by):
+                if not self._task_observable_tx(cursor, role, requester_id, task_id, created_by):
                     raise PermissionError("TASK_FORBIDDEN")
 
             # Тип сравнивается без параметров («image/png; charset=binary»): так

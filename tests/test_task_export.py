@@ -203,7 +203,7 @@ class TaskExcelExportTests(unittest.TestCase):
             _task(id=1, status='assigned', tag='production', production_brief=brief),
             _task(id=2, status='in_progress'),
         ])
-        todo = book['К выполнению']
+        todo = book['Новая']
         headers = self._headers(todo)
         self.assertEqual(headers.index('Бриф') + 1, headers.index('Описание'))
         self.assertEqual(todo.cell(row=1 + 1, column=headers.index('Тип') + 1).value, 'Продакшн')
@@ -222,17 +222,46 @@ class TaskExcelExportTests(unittest.TestCase):
             _task(id=3, is_backlog=True),
             _task(id=4, status='completed'),
             _task(id=5, status='assigned'),
-            # returned живёт в той же колонке, что и in_progress.
+            # Возвращённые — своей колонкой, между работой и проверкой.
             _task(id=6, status='returned'),
         ])
         self.assertEqual(
             book.sheetnames,
-            ['Бэклог', 'К выполнению', 'В работе', 'На проверке', 'Готово'],
+            ['Новая', 'Бэклог', 'В работе', 'Возвращено на доработку', 'На проверке', 'Готово'],
         )
         self.assertEqual(
             [row[0] for row in book['В работе'].iter_rows(min_row=2, max_col=1, values_only=True)],
-            [2, 6],
+            [2],
         )
+        self.assertEqual(
+            [row[0] for row in book['Возвращено на доработку'].iter_rows(min_row=2, max_col=1, values_only=True)],
+            [6],
+        )
+
+    def test_score_column_only_where_scores_are_set(self):
+        """Балл приоритета 1–5 (суперадмины) — числом рядом со срочностью; лист, где
+        баллов нет вовсе, колонки не получает."""
+        _db, _sent, book = self._export([
+            _task(id=1, is_backlog=True, priority_score=1),
+            _task(id=2, is_backlog=True, priority_score=None),
+            _task(id=3, status='in_progress'),
+        ])
+        backlog = self._headers(book['Бэклог'])
+        self.assertEqual(backlog.index('Балл'), backlog.index('Срочность') + 1)
+        column = backlog.index('Балл') + 1
+        self.assertEqual(
+            [book['Бэклог'].cell(row=row, column=column).value for row in (2, 3)],
+            [1, None],
+        )
+        self.assertNotIn('Балл', self._headers(book['В работе']))
+
+    def test_returned_sheet_is_temporary_like_its_column(self):
+        """Колонка возврата на доске временная — и лист без возвратов не заводится."""
+        _db, _sent, book = self._export([
+            _task(id=1, status='in_progress'),
+            _task(id=2, status='completed'),
+        ])
+        self.assertEqual(book.sheetnames, ['В работе', 'На проверке'])
 
     def test_backlog_flag_wins_over_status(self):
         """Бэклог на доске — это backlog=only поверх любого статуса."""
@@ -316,7 +345,7 @@ class TaskExcelExportTests(unittest.TestCase):
         _db, _sent, book = self._export([
             _task(id=1, status='assigned', tag='problem', priority='critical'),
         ])
-        sheet = book['К выполнению']
+        sheet = book['Новая']
         values = [cell.value for cell in sheet[2]]
         self.assertIn('Проблема', values)
         self.assertIn('Критичная', values)
@@ -427,10 +456,10 @@ class TaskExportApiTests(unittest.TestCase):
 
 class TaskExportFrontendTests(unittest.TestCase):
     def test_scope_is_described_once_for_board_and_export(self):
-        self.assertIn("export const scopeQueryParams = (scope, departmentId = null)", BOARD_QUERY_SOURCE)
+        self.assertIn("export const scopeQueryParams = (scope, projectId = null, sectionId = null)", BOARD_QUERY_SOURCE)
         board_params = BOARD_QUERY_SOURCE[BOARD_QUERY_SOURCE.index("export const boardQueryParams"):]
-        self.assertIn("scopeQueryParams(scope, departmentId)", board_params)
-        self.assertIn("scopeQueryParams(scope, departmentId)", TASKS_VIEW_SOURCE)
+        self.assertIn("scopeQueryParams(scope, projectId, sectionId)", board_params)
+        self.assertIn("scopeQueryParams(scope, projectId, sectionId)", TASKS_VIEW_SOURCE)
 
     def test_download_goes_through_axios_with_headers(self):
         # Ссылка <a href> не несёт bearer-токен и упёрлась бы в 401.
@@ -445,7 +474,7 @@ class TaskExportFrontendTests(unittest.TestCase):
     def test_button_exports_the_selected_scope(self):
         handler = WORKSPACE_SOURCE[WORKSPACE_SOURCE.index("const handleExport"):]
         handler = handler[:handler.index("}, [onExport")]
-        self.assertIn("onExport({ scope, departmentId })", handler)
+        self.assertIn("onExport({ scope, projectId, sectionId })", handler)
         self.assertIn("setIsExporting(true)", handler)
         self.assertIn("Выгрузка", WORKSPACE_SOURCE)
         self.assertIn("disabled={isExporting}", WORKSPACE_SOURCE)

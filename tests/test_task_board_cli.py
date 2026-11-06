@@ -9,6 +9,7 @@
 местах, и молча разъехаться им нельзя.
 """
 
+import contextlib
 import io
 import os
 import re
@@ -511,3 +512,100 @@ class ServerContractTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class BoardColumnsTests(unittest.TestCase):
+    """Колонки `board` — те же и в том же порядке, что на доске раздела."""
+
+    def test_columns_follow_the_section_board(self):
+        src = (ROOT / 'src' / 'components' / 'tasks' / 'boardColumns.js').read_text(encoding='utf-8')
+        block = src[src.index('export const BOARD_COLUMNS = ['):]
+        block = block[:block.index('];')]
+        frontend = re.findall(r"\{ id: '([a-z]+)',\s+title: '([^']+)'", block)
+        self.assertEqual(len(frontend), 6)
+        self.assertEqual(list(cli.COLUMN_TITLES), frontend)
+
+    def test_task_lands_in_its_column(self):
+        cases = {
+            ('assigned', False): 'todo',
+            ('assigned', True): 'backlog',
+            ('in_progress', False): 'progress',
+            ('returned', False): 'returned',
+            ('completed', False): 'review',
+            ('accepted', False): 'done',
+        }
+        for (status, backlog), column in cases.items():
+            self.assertEqual(cli.column_of({'status': status, 'is_backlog': backlog}), column, status)
+
+    @staticmethod
+    def _board_output(tasks):
+        class FakeClient:
+            user_name = 'Проверка'
+            user_id = 1
+
+            def list_tasks(self, **_kwargs):
+                return {'tasks': tasks}
+
+        args = type('Args', (), {'mine': False, 'assignee': None, 'json': False})()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.cmd_board(FakeClient(), args)
+        return out.getvalue()
+
+    def test_returned_column_is_temporary(self):
+        quiet = self._board_output([{'id': 1, 'status': 'in_progress', 'subject': 'Работа'}])
+        self.assertNotIn('Возвращено на доработку', quiet)
+        self.assertIn('── В работе (1)', quiet)
+        # Постоянные колонки печатаются и пустыми.
+        self.assertIn('── Новая (0)', quiet)
+
+        loud = self._board_output([{'id': 2, 'status': 'returned', 'subject': 'Вернули'}])
+        self.assertIn('── Возвращено на доработку (1)', loud)
+        positions = [loud.index(f'── {title} (') for _key, title in cli.COLUMN_TITLES]
+        self.assertEqual(positions, sorted(positions))
+
+
+class PriorityScoreCliTests(unittest.TestCase):
+    """`score <id> 1..5|off` — балл приоритета суперадмина тем же батчем доски."""
+
+    @staticmethod
+    def _run(value, item):
+        sent = []
+
+        class FakeClient:
+            def board_update(self, items):
+                sent.append(items)
+                return {'items': [item]}
+
+        args = type('Args', (), {'task_id': 412, 'value': value, 'json': False})()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.cmd_score(FakeClient(), args)
+        return sent, out.getvalue()
+
+    def test_sets_and_clears_score(self):
+        sent, printed = self._run('2', {'task_id': 412, 'subject': 'Тема', 'priority_score': 2, 'updated': True})
+        self.assertEqual(sent, [[{'task_id': 412, 'priority_score': 2}]])
+        self.assertIn('→ балл 2', printed)
+        sent, printed = self._run('off', {'task_id': 412, 'subject': 'Тема', 'priority_score': None, 'updated': True})
+        self.assertEqual(sent, [[{'task_id': 412, 'priority_score': None}]])
+        self.assertIn('→ без балла', printed)
+
+    def test_says_where_the_score_moved_the_task(self):
+        _sent, printed = self._run('1', {'task_id': 412, 'subject': 'Тема', 'priority_score': 1, 'updated': True,
+                                        'is_backlog': True, 'was_backlog': False, 'score_move': 'to_backlog'})
+        self.assertIn('→ балл 1 · перешла из «Новой» в бэклог', printed)
+        _sent, printed = self._run('off', {'task_id': 412, 'subject': 'Тема', 'priority_score': None,
+                                          'updated': True, 'is_backlog': False, 'was_backlog': True,
+                                          'score_move': 'to_new'})
+        self.assertIn('→ без балла · вернулась из бэклога в «Новую»', printed)
+        _sent, printed = self._run('3', {'task_id': 412, 'subject': 'Тема', 'priority_score': 3, 'updated': True,
+                                        'is_backlog': True, 'was_backlog': True, 'score_move': None})
+        self.assertNotIn('перешла', printed)
+        self.assertNotIn('вернулась', printed)
+
+    def test_show_names_the_scale_on_its_edges(self):
+        self.assertEqual(cli.priority_score_label({'priority_score': 1}), '1 — важнее всего')
+        self.assertEqual(cli.priority_score_label({'priority_score': 3}), '3')
+        self.assertEqual(cli.priority_score_label({'priority_score': 5}), '5 — можно позже')
+        self.assertEqual(cli.priority_score_label({}), '— (не оценена)')

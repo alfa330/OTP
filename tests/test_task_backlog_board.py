@@ -18,7 +18,8 @@ TASKS_VIEW_PATH = ROOT / "src" / "components" / "tasks" / "TasksView.jsx"
 CUSTOM_SELECT_PATH = ROOT / "src" / "components" / "ui" / "CustomSelect.jsx"
 APP_JSX_PATH = ROOT / "src" / "App.jsx"
 BOARD_QUERY_PATH = ROOT / "src" / "components" / "tasks" / "boardQuery.js"
-DEPARTMENT_FILTER_PATH = ROOT / "src" / "components" / "tasks" / "departmentFilter.js"
+BOARD_COLUMNS_PATH = ROOT / "src" / "components" / "tasks" / "boardColumns.js"
+PROJECTS_MODULE_PATH = ROOT / "src" / "components" / "tasks" / "taskProjects.js"
 CLI_PATH = ROOT / "scripts" / "task_board.py"
 SKILL_PATH = ROOT / ".claude" / "skills" / "task-board" / "SKILL.md"
 
@@ -109,8 +110,10 @@ class TaskDbLayerTests(unittest.TestCase):
         self.assertIn('"estimate_minutes": row[33],', self.src)
         self.assertIn('"started_at": self._task_dt_to_iso(row[35]),', self.src)
 
-    def test_backlog_sorted_by_rank(self):
-        self.assertIn('"t.backlog_rank ASC NULLS LAST, t.created_at DESC, t.id DESC"', self.src)
+    def test_backlog_sorted_by_score_then_rank(self):
+        # Сперва балл суперадминов, внутри балла — ручная очередь.
+        self.assertIn('"t.priority_score ASC NULLS LAST, t.backlog_rank ASC NULLS LAST, "', self.src)
+        self.assertIn('"t.created_at DESC, t.id DESC"', self.src)
 
     def test_global_admin_task_visibility_is_not_limited_to_own_tasks(self):
         # Охват общий у списка раздела и у Excel-выгрузки — правило живёт в одном месте.
@@ -170,27 +173,53 @@ class TaskApiTests(unittest.TestCase):
 class WorkspaceFrontendTests(unittest.TestCase):
     def setUp(self):
         self.src = _read(WORKSPACE_PATH)
+        # Модель колонок и правила переноса живут отдельным модулем
+        # (поведение гоняет tests/board_columns.test.mjs).
+        self.columns_src = _read(BOARD_COLUMNS_PATH)
 
-    def test_five_board_columns(self):
-        start = self.src.index("export const BOARD_COLUMNS = [")
-        block = self.src[start:self.src.index("];", start)]
+    def test_board_columns_in_owner_order(self):
+        start = self.columns_src.index("export const BOARD_COLUMNS = [")
+        block = self.columns_src[start:self.columns_src.index("];", start)]
         ids = re.findall(r"id: '([a-z]+)'", block)
-        self.assertEqual(ids, ["backlog", "todo", "progress", "review", "done"])
+        self.assertEqual(ids, ["todo", "backlog", "progress", "returned", "review", "done"])
+        # Временная колонка ровно одна — возврат на доработку.
+        self.assertEqual(block.count("transient: true"), 1)
+        self.assertIn("{ id: 'returned', title: 'Возвращено на доработку'", block)
+        # Доска берёт модель из модуля, а не держит свою копию.
+        self.assertIn("from './boardColumns';", self.src)
+        self.assertNotIn("export const BOARD_COLUMNS = [", self.src)
 
     def test_column_mapping_matches_status_model(self):
-        start = self.src.index("export const columnOfTask = (task) => {")
-        block = self.src[start:self.src.index("};", start)]
+        start = self.columns_src.index("export const columnOfTask = (task) => {")
+        block = self.columns_src[start:self.columns_src.index("};", start)]
         self.assertIn("if (task?.is_backlog) return 'backlog';", block)
-        self.assertIn("case 'returned':", block)
-        self.assertIn("return 'progress';", block)
+        self.assertIn("case 'in_progress':\n      return 'progress';", block)
+        self.assertIn("case 'returned':\n      return 'returned';", block)
         self.assertIn("case 'completed':", block)
         self.assertIn("return 'review';", block)
         self.assertIn("case 'accepted':", block)
         self.assertIn("return 'done';", block)
 
+    def test_transient_column_shown_only_with_tasks(self):
+        self.assertIn("const columns = useMemo(() => visibleBoardColumns(", self.src)
+        self.assertIn("columns.map((column) => renderColumn(column))", self.src)
+        self.assertIn("{columns.map((column) => {", self.src)
+        # Метка «Возврат» на карточке повторяла бы название колонки.
+        self.assertNotIn(">\n            Возврат\n", self.src)
+        # Полная загрузка ждёт ответа по временной колонке, иначе она «доезжала»
+        # бы позже и сдвигала соседей вбок; перезагрузка после действия — нет.
+        self.assertIn("{ tasks: [], total: 0, loading: true, fetched: false }", self.src)
+        self.assertIn("        fetched: true,\n", self.src)
+        self.assertIn("isColumnsLoading && (!boardRows.length || !isTransientKnown)", self.src)
+        # На телефоне выбор с опустевшей временной колонки снимается.
+        self.assertIn(
+            "if (mobileColumnId && !columns.some((column) => column.id === mobileColumnId)) setMobileColumnId(null);",
+            self.src,
+        )
+
     def test_drop_resolution_respects_permissions(self):
-        start = self.src.index("export const resolveBoardDrop =")
-        block = self.src[start:self.src.index("export const rankForPosition", start)]
+        start = self.columns_src.index("export const resolveBoardDrop =")
+        block = self.columns_src[start:]
         # Взять в работу — только исполнитель; принять/вернуть — проверяющий.
         self.assertIn("Взять задачу в работу может только исполнитель", block)
         self.assertIn("Отметить выполненной может только исполнитель", block)
@@ -243,15 +272,25 @@ class WorkspaceFrontendTests(unittest.TestCase):
         start = self.src.index("const tasksByColumn = useMemo(() => {")
         block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
         self.assertIn("compareBoardTasks(left.task, right.task, boardSort)", block)
-        self.assertIn("BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));", block)
+        # Кроме бэклога: с баллом (03.11.2026) он очередь — балл, затем ручной порядок,
+        # как у сервера и во вкладке «Бэклог».
+        self.assertIn("const compareQueue = (left, right) => compareBacklogTasks(left.task, right.task);", block)
+        self.assertIn(
+            "BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(column.id === 'backlog' ? compareQueue : compareEntries));",
+            block,
+        )
 
     def test_manual_backlog_order_remains_separate(self):
         start = self.src.index("const backlogTasks = useMemo(")
         # Границу берём по следующему объявлению, а не по тексту комментария рядом:
         # комментарий уже один раз протух и увёл тест за собой.
         block = self.src[start:self.src.index("const tasksByColumn = useMemo(", start)]
-        self.assertIn("a?.backlog_rank", block)
-        self.assertIn("return aRank - bRank;", block)
+        # Бэклог — своя очередь (балл, затем ручной ранг), а не сортировка доски.
+        self.assertIn(".sort(compareBacklogTasks)", block)
+        order = _read(ROOT / "src" / "components" / "tasks" / "backlogOrder.js")
+        start = order.index("export const compareBacklogTasks = ")
+        compare = order[start:order.index("};", start)]
+        self.assertLess(compare.index("scoreKey(left) - scoreKey(right)"), compare.index("rankOf(left)"))
 
 
 class TasksViewIntegrationTests(unittest.TestCase):
@@ -340,7 +379,8 @@ class CliTests(unittest.TestCase):
         column_of = self.module.column_of
         self.assertEqual(column_of({"is_backlog": True, "status": "assigned"}), "backlog")
         self.assertEqual(column_of({"status": "assigned"}), "todo")
-        self.assertEqual(column_of({"status": "returned"}), "progress")
+        # Возвращённые — своей временной колонкой, как на доске.
+        self.assertEqual(column_of({"status": "returned"}), "returned")
         self.assertEqual(column_of({"status": "in_progress"}), "progress")
         self.assertEqual(column_of({"status": "completed"}), "review")
         self.assertEqual(column_of({"status": "accepted"}), "done")
@@ -535,7 +575,7 @@ class TaskComposerTests(unittest.TestCase):
         ids = re.findall(r"id: '([a-z]+)'", block)
         self.assertEqual(
             ids,
-            ['priority', 'tag', 'deadline', 'estimate', 'origin', 'checklist', 'recurrence', 'files'],
+            ['priority', 'tag', 'deadline', 'estimate', 'origin', 'checklist', 'recurrence', 'watchers', 'files'],
         )
         # У каждой секции есть признак заполненности — от него зависит авто-раскрытие при правке.
         self.assertEqual(len(re.findall(r"hasValue:", block)), len(ids))
@@ -922,7 +962,7 @@ class ReviewAuthorityTests(unittest.TestCase):
         self.assertIn("if (isAssignee) return false;", block)
         self.assertIn("const canReview  = canReviewTask(task, currentUserId, currentUserRole);", view)
 
-        board = _read(WORKSPACE_PATH)
+        board = _read(BOARD_COLUMNS_PATH)
         self.assertIn("const authorityId = requesterId || creatorId;", board)
         self.assertIn("Итог принимает тот, кто поручил задачу", board)
 
@@ -1282,14 +1322,15 @@ class BoardPaginationTests(unittest.TestCase):
         block = src[src.index("export const boardQueryParams = ("):]
         self.assertIn("if (mode === 'backlog') params.backlog = 'only';", block)
         self.assertIn("const params = { limit, offset };", block)
-        # Охват («Мои»/«На мне»/доска сотрудника плюс отдел) описан один раз:
+        # Охват («Мои»/«На мне»/доска сотрудника плюс проект) описан один раз:
         # им пользуются и доска, и выгрузка в Excel.
-        self.assertIn("scopeQueryParams(scope, departmentId)", block)
+        self.assertIn("scopeQueryParams(scope, projectId, sectionId)", block)
         scope_block = src[src.index("export const scopeQueryParams = ("):src.index("export const boardQueryParams = (")]
         self.assertIn("if (scope === 'my') return { ...params, mine: 'any' };", scope_block)
         self.assertIn("if (scope === 'assigned') return { ...params, mine: 'assignee' };", scope_block)
         self.assertIn("person_scope: 'any',", scope_block)
-        self.assertIn("const params = departmentQueryParams(departmentId);", scope_block)
+        # Проект и его раздел (#401) — одним правилом на доску и выгрузку.
+        self.assertIn("const params = { ...projectQueryParams(projectId), ...sectionQueryParams(sectionId) };", scope_block)
 
     def test_chunk_sizes_are_a_closed_list(self):
         # Поведение проверяется в tests/board_query.test.mjs, здесь — что модуль на месте.
@@ -1342,7 +1383,9 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("setTasksSummary(data?.summary || null);", src)
         # Диплинк на задачу вне выборки догружается точечно — одной строкой и без
         # сводки (summary=0), иначе запрос за одной задачей тянет агрегаты по базе.
-        self.assertIn("params: { task_id: plan.taskId, limit: 1, summary: 0 }", src)
+        self.assertIn("? { task_id: plan.taskId, limit: 1, summary: 0 }", src)
+        # Ссылка по ключу (?task=HR-125, #401) ищет задачу тем же точечным запросом.
+        self.assertIn(": { task_key: plan.taskKey, limit: 1, summary: 0 },", src)
 
     def test_importance_sort_is_applied_across_the_whole_board(self):
         db_src = _read(DATABASE_PATH)
@@ -1370,7 +1413,8 @@ class BoardPaginationTests(unittest.TestCase):
         query_src = _read(BOARD_QUERY_PATH)
         start = query_src.index("export const BOARD_COLUMN_QUERY = {")
         block = query_src[start:query_src.index("export const BOARD_CHUNK_SIZES", start)]
-        self.assertIn("progress: { status: 'in_progress,returned', backlog: 'exclude' }", block)
+        self.assertIn("progress: { status: 'in_progress', backlog: 'exclude' }", block)
+        self.assertIn("returned: { status: 'returned', backlog: 'exclude' }", block)
         self.assertIn("backlog:  { backlog: 'only' }", block)
 
         src = _read(WORKSPACE_PATH)
@@ -1396,7 +1440,7 @@ class BoardPaginationTests(unittest.TestCase):
         self.assertIn("setColumnsResetToken((prev) => prev + 1);", src)
         self.assertIn(
             "const boardReloadKey = "
-            "`${scope}|${departmentId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;",
+            "`${scope}|${projectId}|${sectionId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;",
             src,
         )
         # На первом рендере сброс не нужен — колонки и так грузятся с нуля.
@@ -1482,7 +1526,7 @@ class TaskQueryBuilderTests(unittest.TestCase):
         # Без column все пять запросов были одинаковыми, а колонки показывали одно и то же.
         self.assertIn("column", block.split(')')[0])
         self.assertIn(
-            "boardQueryParams({ scope, departmentId, mode, sort, column, limit, offset, withSummary })",
+            "boardQueryParams({ scope, projectId, sectionId, mode, sort, column, limit, offset, withSummary })",
             block,
         )
 
@@ -1676,8 +1720,11 @@ class ColumnBrowserTests(unittest.TestCase):
         self.assertIn("new IntersectionObserver(", self.block)
         self.assertIn("loadPage(tasks.length)", self.block)
         self.assertIn("const hasMore = tasks.length < total;", self.block)
-        # Догрузка склеивает страницы по id и не стреляет параллельно сама в себя.
-        self.assertIn("if (loadingRef.current) return;", self.block)
+        # Догрузка склеивает страницы по id и не стреляет параллельно сама в себя;
+        # мимо идёт только освежение уже загруженного после перечитки доски (force).
+        self.assertIn("if (loadingRef.current && !force) return;", self.block)
+        self.assertIn("loadPage(0, { limit: Math.max(COLUMN_BROWSER_PAGE, loadedCountRef.current), force: true });",
+                      self.block)
         self.assertIn("new Map([...prev, ...incoming].map((task) => [task.id, task]))", self.block)
 
 
@@ -1741,7 +1788,10 @@ class SkillTests(unittest.TestCase):
 
 class DepartmentSwitcherTests(unittest.TestCase):
     """
-    Переключатель отделов в разделе «Задачи».
+    Фильтр задач по отделу на сервере (параметр department_id API и выгрузки).
+
+    В разделе его сменил переключатель проектов (задача #401, ProjectSwitcherTests),
+    но параметр живёт: им пользуются CLI и прямые запросы.
 
     Своей колонки «отдел» у задачи нет: принадлежность выводим из членства того,
     кто задачу поставил. Значит, единственное место, где это правило живёт, —
@@ -1754,7 +1804,6 @@ class DepartmentSwitcherTests(unittest.TestCase):
         self.api_src = _read(APP_PATH)
         self.view_src = _read(TASKS_VIEW_PATH)
         self.workspace_src = _read(WORKSPACE_PATH)
-        self.filter_src = _read(DEPARTMENT_FILTER_PATH)
 
     def test_department_is_read_from_the_task_author(self):
         start = self.db_src.index("    def _task_department_condition(")
@@ -1814,47 +1863,85 @@ class DepartmentSwitcherTests(unittest.TestCase):
         self.assertIn("default_department_id = None", block)
         self.assertIn("item.get('id') == default_department_id", block)
 
+
+class ProjectSwitcherTests(unittest.TestCase):
+    """
+    Переключатель проектов-досок в разделе «Задачи» (задача #401).
+
+    Проект сужает каждый запрос раздела — список, колонки доски, окно статуса и
+    выгрузку, — кроме «Моих задач»: те кормят счётчик уведомлений, и сузь их
+    доской — колокол погас бы на задачах из другого проекта, которые ждут человека.
+    """
+
+    def setUp(self):
+        self.db_src = _read(DATABASE_PATH)
+        self.api_src = _read(APP_PATH)
+        self.view_src = _read(TASKS_VIEW_PATH)
+        self.workspace_src = _read(WORKSPACE_PATH)
+        self.projects_src = _read(PROJECTS_MODULE_PATH)
+
     def test_switcher_is_a_searchable_shared_select(self):
         self.assertIn("import CustomSelect from '../ui/CustomSelect';", self.view_src)
-        start = self.view_src.index('ariaLabel="Отдел задач"')
+        start = self.view_src.index('ariaLabel="Проект"')
         block = self.view_src[start - 400:start + 400]
         self.assertIn('variant="ios"', block)
         self.assertIn("searchable", block)
-        self.assertIn('searchPlaceholder="Найти отдел…"', block)
-        self.assertIn("onChange={changeDepartmentFilter}", block)
+        self.assertIn('searchPlaceholder="Найти проект…"', block)
+        self.assertIn("onChange={changeProjectFilter}", block)
+        # Без единой доски переключатель не рисуем: кнопка с одним «Все проекты» — шум.
+        self.assertIn("{showProjectSwitcher && (", self.view_src)
 
-    def test_department_reaches_every_task_query_of_the_section(self):
+    def test_project_reaches_every_task_query_of_the_section(self):
         # Список «Все задачи».
-        self.assertIn("...departmentQueryParams(departmentFilter)", self.view_src)
-        self.assertIn("departmentId={departmentFilter}", self.view_src)
+        self.assertIn("...projectQueryParams(projectFilter)", self.view_src)
+        self.assertIn("projectId={projectFilter}", self.view_src)
         # Доска: колонки, страница, окно статуса и выгрузка.
-        self.assertIn("await onExport({ scope, departmentId })", self.workspace_src)
-        self.assertIn("departmentId={departmentId}", self.workspace_src)
-        self.assertEqual(self.workspace_src.count("departmentId,\n        mode: 'board'"), 2)
-        self.assertIn("loadTasks({ scope, departmentId, mode,", self.workspace_src)
+        self.assertIn("await onExport({ scope, projectId, sectionId })", self.workspace_src)
+        self.assertIn("projectId={projectId}", self.workspace_src)
+        # Раздел доски (#401) идёт следом за проектом во все те же запросы.
+        self.assertIn("sectionId={sectionId}", self.workspace_src)
+        self.assertEqual(self.workspace_src.count("projectId,\n        sectionId,\n        mode: 'board'"), 2)
+        self.assertIn("loadTasks({ scope, projectId, sectionId, mode,", self.workspace_src)
+        self.assertIn("...sectionQueryParams(effectiveSectionFilter)", self.view_src)
+        self.assertIn("sectionId={effectiveSectionFilter}", self.view_src)
+        self.assertNotIn("departmentId", self.workspace_src)
 
-    def test_my_tasks_and_notifications_are_not_narrowed_by_department(self):
-        # «Мои задачи» кормят счётчик уведомлений и закреплённую задачу: сузь их
-        # отделом — и колокол погас бы на чужих задачах, которые ждут человека.
+    def test_my_tasks_and_notifications_are_not_narrowed_by_project(self):
         start = self.view_src.index("  const fetchTasks = useCallback(")
         block = self.view_src[start:self.view_src.index("  const loadBoardTasks", start)]
         self.assertIn("params: { only_my: 1 }", block)
-        self.assertNotIn("department", block)
+        self.assertNotIn("project", block)
 
-    def test_section_waits_for_the_department_before_loading(self):
-        # Иначе первый экран показал бы все отделы и тут же перерисовался на свой.
-        self.assertIn("const isDepartmentResolved = departmentFilter !== null;", self.view_src)
-        self.assertIn("if (!user || !canAccessTasks || !isDepartmentResolved) return;", self.view_src)
-        self.assertIn("{workspaceTab !== 'overview' && isDepartmentResolved && (", self.view_src)
+    def test_section_waits_for_the_project_before_loading(self):
+        # Иначе первый экран показал бы все проекты и тут же перерисовался на свой.
+        self.assertIn("const isProjectResolved = projectFilter !== null;", self.view_src)
+        self.assertIn("if (!user || !canAccessTasks || !isProjectResolved) return;", self.view_src)
+        self.assertIn("{workspaceTab !== 'overview' && isProjectResolved && (", self.view_src)
 
-    def test_stale_or_unknown_department_falls_back_instead_of_showing_nothing(self):
-        self.assertIn("export const resolveInitialDepartment =", self.filter_src)
-        start = self.filter_src.index("export const resolveInitialDepartment =")
-        block = self.filter_src[start:start + 900]
+    def test_stale_or_unknown_project_falls_back_instead_of_showing_nothing(self):
+        start = self.projects_src.index("export const resolveInitialProject =")
+        block = self.projects_src[start:start + 900]
         self.assertIn("if (stored && available.has(stored)) return stored;", block)
-        self.assertIn("return available.has(fallback) ? fallback : TASK_DEPARTMENT_ALL;", block)
-        # «Все отделы» — это отсутствие параметра, а не значение для сервера.
-        self.assertIn("return value === TASK_DEPARTMENT_ALL ? {} : { department_id: value };", self.filter_src)
+        self.assertIn("return available.has(fallback) ? fallback : TASK_PROJECT_ALL;", block)
+        # «Все проекты» — это отсутствие параметра, а не значение для сервера.
+        self.assertIn("return value === TASK_PROJECT_ALL ? {} : { project_id: value };", self.projects_src)
+
+    def test_project_narrows_the_base_scope_so_the_summary_matches(self):
+        start = self.db_src.index("    def _task_scope_filters(")
+        block = self.db_src[start:self.db_src.index("    def get_tasks_for_requester(", start)]
+        self.assertIn("project_id=None", block)
+        self.assertIn('conditions.append("t.project_id = %s")', block)
+        self.assertIn('conditions.append("t.project_id IS NULL")', block)
+        self.assertIn("Неверный проект в фильтре", self.api_src)
+
+    def test_list_and_export_share_the_project(self):
+        for method in ("    def get_tasks_for_requester(", "    def get_tasks_for_export("):
+            start = self.db_src.index(method)
+            signature = self.db_src[start:self.db_src.index("):", start)]
+            self.assertIn("project_id", signature, method)
+        export_start = self.api_src.index("def export_tasks_excel():")
+        export_block = self.api_src[export_start:export_start + 1400]
+        self.assertIn("project_id=(request.args.get('project_id') or '').strip() or None", export_block)
 
 
 class TaskClarificationSchemaTests(unittest.TestCase):
@@ -2106,6 +2193,224 @@ class TaskClarificationCliTests(unittest.TestCase):
         block = self.src[start:self.src.index("def cmd_history(", start)]
         self.assertIn("_print_messages(task)", block)
         self.assertIn("← ЖДЁТ ОТВЕТА", self.src)
+
+
+
+def _select_columns(sql_block):
+    """Столбцы SELECT по верхнеуровневым запятым — чтобы сверить номер row[N]."""
+    body = sql_block[sql_block.index('SELECT') + len('SELECT'):sql_block.index('FROM tasks t')]
+    # Комментарии SQL («-- …, …») запятыми не считаются.
+    body = '\n'.join(line.split('--', 1)[0] for line in body.splitlines())
+    depth, current, columns = 0, '', []
+    for char in body:
+        depth += (char == '(') - (char == ')')
+        if char == ',' and depth == 0:
+            columns.append(current.strip())
+            current = ''
+        else:
+            current += char
+    columns.append(current.strip())
+    return columns
+
+
+class PriorityScoreTests(unittest.TestCase):
+    """Балл приоритета 1–5 от суперадминов (1 — важнее всего), в основном в бэклоге."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.db = _read(DATABASE_PATH)
+        cls.app = _read(APP_PATH)
+        cls.view = _read(TASKS_VIEW_PATH)
+        cls.board = _read(WORKSPACE_PATH)
+        cls.control = _read(ROOT / "src" / "components" / "tasks" / "PriorityScoreControl.jsx")
+
+    def _method(self, name):
+        start = self.db.index(f"    def {name}(")
+        return self.db[start:self.db.index("\n    def ", start + 10)]
+
+    def test_schema_keeps_score_in_range(self):
+        self.assertIn("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority_score SMALLINT", self.db)
+        self.assertIn("CHECK (priority_score IS NULL OR priority_score BETWEEN 1 AND 5)", self.db)
+        self.assertIn(
+            "ON tasks(is_backlog, priority_score NULLS LAST, backlog_rank NULLS LAST, created_at DESC);",
+            self.db,
+        )
+
+    def test_normalizer_accepts_only_one_to_five(self):
+        import ast
+        tree = ast.parse(self.db)
+        database = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Database')
+        wanted = [node for node in database.body
+                  if (isinstance(node, ast.FunctionDef) and node.name == '_normalize_task_priority_score')
+                  or (isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'TASK_PRIORITY_SCORES'
+                                                           for t in node.targets))]
+        self.assertEqual(len(wanted), 2)
+        namespace = {'_UNSET': object()}
+        source = 'class Fake:\n' + ''.join(
+            '    ' + ast.get_source_segment(self.db, node).replace('\n', '\n    ') + '\n' for node in wanted
+        )
+        exec(source, namespace)
+        normalize = namespace['Fake']()._normalize_task_priority_score
+        for value, expected in ((1, 1), (5, 5), ('3', 3), (2.0, 2), (None, None), ('', None), ('  ', None)):
+            self.assertEqual(normalize(value), expected, repr(value))
+        for bad in (0, 6, -1, 2.5, '2.5', 'один', True, [1]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                normalize(bad)
+
+    def test_only_super_admin_sets_score(self):
+        block = self._method("update_task_board_state")
+        self.assertIn("priority_score=_UNSET", block)
+        self.assertIn("if has_priority_score and not role_has_min(role, 'super_admin'):", block)
+        self.assertIn('raise PermissionError("ONLY_SUPER_ADMIN_SCORE")', block)
+        self.assertIn("priority_score = %s,", block)
+        self.assertIn('changed_fields.append("priority_score")', block)
+        # Ответ несёт балл: фронт сверяет по нему оптимистичную правку.
+        self.assertIn('"priority_score": priority_score_new', block)
+
+    def test_api_passes_score_and_explains_refusals(self):
+        start = self.app.index("def handle_tasks_board():")
+        # Граница — следующая ручка: в склейке монолита (tests/source_cache) константы
+        # раздела стоят выше ручек, а не сразу за этой функцией.
+        block = self.app[start:self.app.index("\n@app.route(", start)]
+        self.assertIn("kwargs[\"priority_score\"] = raw_item.get('priority_score')", block)
+        self.assertIn("'ONLY_SUPER_ADMIN_SCORE': (\"Балл ставят только суперадмины\", 403)", block)
+        self.assertIn("'INVALID_PRIORITY_SCORE': (\"Балл — число от 1 до 5\", 400)", block)
+
+    def test_backlog_list_goes_by_score_then_queue(self):
+        block = self._method("get_tasks_for_requester")
+        self.assertIn('"t.priority_score ASC NULLS LAST, t.backlog_rank ASC NULLS LAST, "', block)
+        query = block[block.index('task_query = f"""'):]
+        columns = _select_columns(query)
+        index = columns.index('t.priority_score')
+        self.assertIn(f'"priority_score": row[{index}],', block)
+
+    def test_export_carries_score_in_screen_order(self):
+        block = self._method("get_tasks_for_export")
+        columns = _select_columns(block[block.index('cursor.execute(f"""'):])
+        self.assertIn(f'"priority_score": row[{columns.index("t.priority_score")}],', block)
+        self.assertLess(
+            block.index("CASE WHEN t.is_backlog THEN t.priority_score END ASC NULLS LAST"),
+            block.index("CASE WHEN t.is_backlog THEN t.backlog_rank END ASC NULLS LAST"),
+        )
+
+    def test_control_is_colored_segments_and_unset_by_second_tap(self):
+        # Сегменты на сером треке, как переключатели iOS, но у каждой цифры свой цвет.
+        self.assertIn('role="radiogroup"', self.control)
+        self.assertIn("onClick={() => { if (!disabled) onChange?.(active ? null : score); }}", self.control)
+        self.assertIn("onClick={(event) => event.stopPropagation()}", self.control)
+        tones = self.control[self.control.index("export const PRIORITY_SCORE_TONES = {"):]
+        tones = tones[:tones.index("\n};")]
+        self.assertEqual(re.findall(r"^  ([1-5]): \{", tones, flags=re.M), ['1', '2', '3', '4', '5'])
+        # От красного (важнее всего) к серому (можно позже).
+        self.assertLess(tones.index("bg-rose-500"), tones.index("bg-slate-400"))
+
+    def test_only_super_admin_sees_controls(self):
+        self.assertIn("canScore={normalizeRole(currentUserRole) === 'super_admin'}", self.view)
+        self.assertIn(
+            "const canScore        = typeof onSetPriorityScore === 'function' && normalizeRole(currentUserRole) === 'super_admin';",
+            self.view,
+        )
+        self.assertIn("onSetPriorityScore={setTaskPriorityScore}", self.view)
+        # Остальным балл виден, только если он есть.
+        self.assertIn("{(canScore || priorityScore !== null) && (", self.view)
+
+    def test_score_is_changed_only_in_the_task_card(self):
+        # Владелец 06.11.2026: в строке бэклога и на карточке доски балл — только
+        # цифрой; поменять или снять его — в карточке задачи. Сегменты на доске
+        # остались одни — на «Новой», для первого балла.
+        start = self.board.index("const BacklogRow = ({")
+        row = self.board[start:self.board.index("const SCORE_HINT_EDITOR", start)]
+        self.assertNotIn("PriorityScoreControl", row)
+        self.assertNotIn("onSetScore", row)
+        self.assertIn("<PriorityScoreBadge score={priorityScoreOf(task)} />", row)
+        start = self.board.index("const BacklogView = ({")
+        view = self.board[start:self.board.index("/* ─────────────── Окно статуса", start)]
+        self.assertNotIn("onSetScore", view)
+        self.assertEqual(self.board.count("<PriorityScoreControl"), 1)
+        self.assertIn("Поменять или снять балл — в карточке задачи; без балла задача вернётся в «Новую».",
+                      self.board)
+
+    def test_backlog_groups_and_drag_follow_the_score(self):
+        self.assertIn("scopedTasks.filter((task) => task?.is_backlog).sort(compareBacklogTasks)", self.board)
+        self.assertIn("? groupBacklogByScore(tasks)", self.board)
+        self.assertIn("const decision = resolveBacklogDrop(tasks, draggedId, after ? index + 1 : index);", self.board)
+        self.assertIn("event.dataTransfer.dropEffect = decision.type === 'blocked' ? 'none' : 'move';", self.board)
+        self.assertIn("return applyBoardPatch(task, { priority_score: score }, optimistic);", self.board)
+
+    def test_card_shows_score_as_a_number_in_the_bottom_right_corner(self):
+        # Владелец 06.11.2026: не «Балл 4», а только цифра — в правом нижнем углу, без нажатия.
+        badge = self.control[self.control.index("export const PriorityScoreBadge"):]
+        badge = badge[:badge.index("\n);\n") + 4]
+        self.assertIn("{score}", badge)
+        self.assertNotIn("Балл {score}", badge)
+        self.assertNotIn("onClick", badge)
+        self.assertIn("PRIORITY_SCORE_TONES[score].chip", badge)
+        # Плашка — скруглённый прямоугольник, как соседние метки карточки, а не кружок.
+        self.assertIn("rounded-md", badge)
+        self.assertNotIn("rounded-full", badge)
+        self.assertIn('role="img"', badge)
+        self.assertNotIn("PriorityScoreChip", self.control + self.board)
+        start = self.board.index("const BoardCard = ({")
+        card = self.board[start:self.board.index("{planOpen && (", start)]
+        # Последним в нижнем ряду карточки — то есть в правом нижнем углу.
+        meta_end = card.index("{/* Совещание суперадминов разбирает «Новую»")
+        last_row = card[:meta_end].rstrip()
+        self.assertTrue(last_row.endswith(
+            '<PriorityScoreBadge score={priorityScoreOf(task)} className="ml-auto self-end" />\n      </div>'
+        ), last_row[-200:])
+
+    def test_card_reverts_score_if_server_refuses(self):
+        start = self.view.index("  const setTaskPriorityScore = useCallback(")
+        block = self.view[start:self.view.index("}, [patchTaskEverywhere, updateBoardItems, notify]);", start)]
+        self.assertLess(block.index("priority_score: score,"), block.index("await updateBoardItems("))
+        self.assertIn(
+            "patchTaskEverywhere(taskId, (current) => ({ ...current, priority_score: previous, is_backlog: wasBacklog }), { board: false });",
+            block,
+        )
+        # Тост — по тому, что сервер сделал на деле (score_move), а не по догадке фронта.
+        self.assertIn("if (item?.score_move === 'to_new') notify('Балл снят — задача вернулась в «Новую»');", block)
+        self.assertIn("if (item?.score_move === 'to_backlog') notify('Балл поставлен — задача перешла в бэклог');", block)
+        # Доску карточка задачи не трогает: та переставит карточку сама, один раз.
+        self.assertEqual(block.count("{ board: false }"), 2)
+        self.assertIn("disabled={actionLoadingKey === `board:${task.id}`}", self.view)
+        self.assertIn("clearTitleSuffix={unscoreMovesToNew(task, null) ? ' — задача вернётся в «Новую»' : ''}",
+                      self.view)
+
+    def test_first_score_moves_new_task_to_backlog(self):
+        # Сервер: правило и пауза шаблонов регламента; поведение — tests/test_task_score_moves_to_backlog.py.
+        block = self._method("update_task_board_state")
+        self.assertIn("is_regulation_template = bool(row[15]) and row[16] is None", block)
+        select = block[block.index("SELECT"):block.index("WHERE t.id = %s")]
+        columns = _select_columns(select)
+        self.assertEqual(columns.index('t.is_regulation'), 15)
+        self.assertEqual(columns.index('t.regulation_parent_id'), 16)
+        self.assertLess(block.index("if moved_by_score:\n                is_backlog_new = True"),
+                        block.index('raise ValueError("BACKLOG_ONLY_FOR_ASSIGNED")'))
+        self.assertIn("elif is_backlog_new and (current_backlog_rank is None or moved_by_score or (", block)
+        self.assertIn("FOR UPDATE OF t", block)
+        # Снятый балл — обратно в «Новую», тоже до проверки «в бэклог только assigned».
+        self.assertLess(block.index("if unscored_to_new:\n                is_backlog_new = False"),
+                        block.index('raise ValueError("BACKLOG_ONLY_FOR_ASSIGNED")'))
+        # Доска и карточка задачи переносят сразу, по тому же правилу, что и сервер.
+        self.assertIn("const move = scoreBoardMove(task, score);", self.board)
+        self.assertIn("? { priority_score: score, is_backlog: move === 'backlog' }", self.board)
+        self.assertIn("const move = scoreBoardMove(task, score);", self.view)
+        # Правку доски сверяют с ответом сервера — иначе она залипает, если тот не перенёс.
+        self.assertIn("overrideFromServer(prev[task.id], item)", self.board)
+        self.assertIn("}, [boardRows, overrides]);", self.board)
+        self.assertIn("return Array.isArray(res?.data?.items) ? res.data.items : [];", self.view)
+
+    def test_new_column_cards_carry_score_for_super_admins(self):
+        self.assertIn(
+            "{canScore && typeof onSetScore === 'function' && awaitsPriorityScore(task) && (",
+            self.board,
+        )
+        self.assertIn('titleSuffix=" — задача уйдёт в бэклог"', self.board)
+        # И в окне «Посмотреть ещё»: оценённая уходит из списка «Новой» сразу, а при
+        # отказе сервера возвращается на своё место здесь же.
+        self.assertIn("onSetScore={handleSetScore}", self.board)
+        self.assertIn("[...prev.slice(0, Math.max(0, position)), task, ...prev.slice(Math.max(0, position))]", self.board)
+        self.assertIn("reloadToken={reloadToken}", self.board)
 
 
 if __name__ == "__main__":

@@ -367,6 +367,7 @@ export function IosTimePicker({
         <div
             ref={panelRef}
             role="dialog"
+            data-picker-panel=""  /* см. IosDatePicker: панель в портале, окна вокруг её узнают по метке */
             aria-label={ariaLabel || 'Выбор времени'}
             style={{ position: 'fixed', left: coords.left, top: coords.top, bottom: coords.bottom, zIndex: 99999 }}
             className="w-[160px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70"

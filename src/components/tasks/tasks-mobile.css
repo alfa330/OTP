@@ -101,9 +101,17 @@ body.mobile-shell .tv-root .tv-topbar-title {
     letter-spacing: -0.02em;
 }
 
-body.mobile-shell .tv-root .tv-dept-select {
+body.mobile-shell .tv-root .tv-project-select {
     grid-column: 1 / -1;
     grid-row: 2;
+    width: 100%;
+    min-width: 0;
+}
+
+/* Разделы открытой доски — строкой под переключателем проектов. */
+body.mobile-shell .tv-root .tv-section-select {
+    grid-column: 1 / -1;
+    grid-row: 3;
     width: 100%;
     min-width: 0;
 }
@@ -1041,9 +1049,11 @@ body.mobile-shell .tv-root .tb-column-tab {
     cursor: pointer;
 }
 
+/* Выбранная колонка — мягкий голубой, как выбор везде на сайте. */
 body.mobile-shell .tv-root .tb-column-tab.is-active {
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--select-bg);
+    color: var(--select-ink);
+    box-shadow: inset 0 0 0 1px var(--select-border);
 }
 
 body.mobile-shell .tv-root .tb-column-tab-count {

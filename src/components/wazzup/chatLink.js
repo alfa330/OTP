@@ -162,7 +162,8 @@ export const pickWazzupChatByPhone = (items, phone) => matchWazzupChatsByPhone(i
    собирают поверх текущего адреса: человек, зашедший в портал по ссылке бота
    ?view=crm_tickets&ticket_id=812, унёс бы этот номер обращения в ссылку на
    чат и отправил его в рабочую группу. */
-const FOREIGN_QUERY_PARAMS = ['task_id', 'ticket_id', 'article'];
+// task — ключ задачи проекта (?task=HR-125, задача #401), та же метка «Задач».
+const FOREIGN_QUERY_PARAMS = ['task_id', 'task', 'ticket_id', 'article'];
 
 /** Ссылка на чат, которую можно скопировать и отправить. '' — если пара битая. */
 export const buildWazzupChatLink = (chat, account = WAZZUP_DEFAULT_ACCOUNT) => {

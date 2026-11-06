@@ -204,12 +204,19 @@ class TaskColleagueObserverTests(unittest.TestCase):
         cls.database = _read(source_cache.database_flat_path())
         cls.view = _read("src/components/tasks/TasksView.jsx")
         cls.board = _read("src/components/tasks/TaskBoardWorkspace.jsx")
+        # Правила переноса карточек — отдельным модулем рядом с доской.
+        cls.board_columns = _read("src/components/tasks/boardColumns.js")
 
     def test_list_scope_adds_department_colleagues_only_for_sv(self):
         scope = _between(self.database, "    def _task_scope_filters(", "    def get_tasks_for_requester(")
         self.assertIn("elif role in TASK_PERSONAL_SCOPE_ROLES:", scope)
         self.assertIn("if role == 'sv':", scope)
-        self.assertIn('conditions.append(f"({participant_sql} OR {self._TASK_COLLEAGUE_SV_SQL})")', scope)
+        # Рядом — доски проектов (#401): участник и наблюдатель тоже только смотрят,
+        # а путь коллеги задачи проектов не открывает — там видимость решает доска.
+        self.assertIn(
+            'f"({participant_sql} OR (t.project_id IS NULL AND {self._TASK_COLLEAGUE_SV_SQL}) OR {project_sql})"',
+            scope,
+        )
         colleague = _between(self.database, "    _TASK_COLLEAGUE_SV_SQL = (", "\n    )")
         self.assertIn("task_sv_creator.role = 'sv'", colleague)
         self.assertIn("task_sv_viewer.department_id IS NOT NULL", colleague)
@@ -219,11 +226,16 @@ class TaskColleagueObserverTests(unittest.TestCase):
     def test_colleague_gets_reading_not_actions(self):
         # Чтение открыто в четырёх местах: журнал отчётов, лента уточнений, файлы
         # и плитки фотографий карточки (те же файлы, только адресами для <img>).
-        self.assertEqual(self.database.count("self._task_observable_by_colleague_tx("), 4)
+        # Все четыре идут через общее правило «только смотрит» (#401), а оно —
+        # первым делом через коллегу-СВ.
+        self.assertEqual(self.database.count("self._task_observable_tx("), 4)
         self.assertIn(
-            "self._task_observable_by_colleague_tx(",
+            "self._task_observable_tx(",
             _between(self.database, "    def list_task_photo_attachments_for_requester(", "\n# Initialize database"),
         )
+        observable = _between(self.database, "    def _task_observable_tx(", "\n    def ")
+        self.assertIn('f"(t.project_id IS NULL AND {self._TASK_COLLEAGUE_SV_SQL})"', observable)
+        self.assertIn("if normalize_role_value(requester_role) == 'sv' and created_by is not None:", observable)
         self.assertEqual(self.database.count("allow_observer=True"), 2)
         self.assertIn("allow_observer=True", _between(self.database, "    def get_task_reports(", "\n    def "))
         self.assertIn("allow_observer=True", _between(self.database, "    def get_task_messages(", "\n    def "))
@@ -241,7 +253,15 @@ class TaskColleagueObserverTests(unittest.TestCase):
             node for node in database_class.body
             if isinstance(node, ast.FunctionDef) and node.name == "_task_viewer_is_observer"
         )
-        namespace = {"normalize_role_value": lambda role: str(role or "").strip().lower()}
+        from typing import List, Optional
+
+        # Аннотации вытащенных функций ссылаются на typing.
+        namespace = {"Optional": Optional, "List": List}
+        for node in tree.body:
+            names = ([node.name] if isinstance(node, ast.FunctionDef)
+                     else [t.id for t in getattr(node, "targets", []) if isinstance(t, ast.Name)])
+            if set(names) & {"normalize_role_value", "role_has_min", "ROLE_ALIASES", "ROLE_HIERARCHY"}:
+                exec(ast.get_source_segment(self.database, node), namespace)
         exec(textwrap.dedent(ast.get_source_segment(self.database, method)), namespace)
         observer = namespace["_task_viewer_is_observer"]
 
@@ -250,7 +270,9 @@ class TaskColleagueObserverTests(unittest.TestCase):
         self.assertFalse(observer("sv", 477, 202, 477, []))             # поручитель
         self.assertFalse(observer("sv", 477, 202, None, [{"id": 477}]))  # среди исполнителей
         self.assertFalse(observer("admin", 1, 202, None, []))           # админ действует как раньше
-        self.assertFalse(observer("trainer", 5, 202, None, []))
+        # Чужую задачу не-СВ видит только через доску проекта (#401) — и тоже лишь смотрит.
+        self.assertTrue(observer("trainer", 5, 202, None, []))
+        self.assertFalse(observer("trainer", 5, 5, None, []))
 
     def test_list_payload_carries_the_flag(self):
         listing = _between(self.database, "    def get_tasks_for_requester(", "\n    def ")
@@ -260,12 +282,12 @@ class TaskColleagueObserverTests(unittest.TestCase):
         self.assertIn("if (task?.viewer_is_observer) return false;", self.view)
         self.assertIn("if (task?.viewer_is_observer) return [];", self.view)
         self.assertEqual(self.view.count("|| !!task?.viewer_is_observer}"), 2)
-        self.assertIn("if (task?.viewer_is_observer) return { type: 'blocked'", self.board)
+        self.assertIn("if (task?.viewer_is_observer) return { type: 'blocked'", self.board_columns)
         self.assertIn("draggable={!task?.viewer_is_observer}", self.board)
         self.assertIn("onDragStart={entry.task?.viewer_is_observer ? undefined :", self.board)
         self.assertIn("{!task?.viewer_is_observer && (", self.board)
         # Пустой ряд действий объясняет, почему кнопок нет, а не намекает на статус.
-        self.assertIn("'Задача коллеги — только просмотр.'", self.view)
+        self.assertIn("'Задача открыта вам только на просмотр.'", self.view)
 
 
 if __name__ == "__main__":

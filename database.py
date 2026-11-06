@@ -1163,6 +1163,35 @@ class Database(CoreMixin, SchemaMixin, ShiftAuctionMixin, ShiftSwapsMixin, Break
         " AND task_sv_creator.department_id = task_sv_viewer.department_id)"
     )
 
+    # Проекты-доски (задача #401). Участник проекта видит все его задачи, а
+    # наблюдатель — свою, но только пока у него есть доступ к доске проекта:
+    # условие на состав доски стоит в самой выборке, поэтому сняли человека с
+    # доски — и задача пропала у него сама, без чистки списков наблюдателей.
+    # По одному плейсхолдеру — id смотрящего. Оба — только на чтение, как и
+    # коллега-СВ: действия решает _task_visible_for_requester.
+    _TASK_PROJECT_MEMBER_SQL = (
+        "EXISTS (SELECT 1 FROM task_project_members task_pm_me"
+        " WHERE task_pm_me.project_id = t.project_id"
+        " AND task_pm_me.user_id = %s AND task_pm_me.access_level = 'member')"
+    )
+    _TASK_WATCHER_SQL = (
+        "EXISTS (SELECT 1 FROM task_watchers task_w_me"
+        " JOIN task_project_members task_pm_w"
+        " ON task_pm_w.project_id = t.project_id AND task_pm_w.user_id = task_w_me.user_id"
+        " WHERE task_w_me.task_id = t.id AND task_w_me.user_id = %s)"
+    )
+    # Задача по ключу HR-125: текущему (код проекта + номер в нём) или прежнему,
+    # если её переносили в другой проект. Четыре плейсхолдера: код, номер, код, номер.
+    _TASK_KEY_MATCH_SQL = (
+        "((EXISTS (SELECT 1 FROM task_projects task_key_p"
+        " WHERE task_key_p.id = t.project_id AND task_key_p.code = %s) AND t.project_number = %s)"
+        " OR EXISTS (SELECT 1 FROM task_key_aliases task_key_a"
+        " WHERE task_key_a.task_id = t.id AND task_key_a.code = %s AND task_key_a.number = %s))"
+    )
+
+    # Балл приоритета: 1 — важнее всего, 5 — можно позже (тот же список — PRIORITY_SCORES во фронте).
+    TASK_PRIORITY_SCORES = (1, 2, 3, 4, 5)
+
     # «Максимум за день до» — жёсткий предел, дальше напоминание теряет смысл.
     TASK_REMINDER_MAX_MINUTES = 24 * 60
     TASK_REMINDER_DEFAULT_MINUTES = 24 * 60

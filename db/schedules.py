@@ -34,6 +34,7 @@ from db.core import (  # noqa: F401
     SCHEDULE_STATUS_TO_USER_STATUS,
     SHIFT_BREAK_PLANNING_BUFFER_MINUTES,
     task_production,
+    task_projects,
     timedelta,
     WORK_SHIFT_CHANGE_SOURCES,
     ZoneInfo,
@@ -3302,6 +3303,94 @@ class SchedulesMixin:
             raise ValueError("TOO_MANY_ASSIGNEES")
         return ordered
 
+    @staticmethod
+    def _normalize_task_project_id(value):
+        """None — задача без проекта; иначе положительный id."""
+        if value is None or value is _UNSET:
+            return None
+        raw = str(value).strip().lower()
+        if raw in ('', 'none', 'null', '0'):
+            return None
+        try:
+            project_id = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("INVALID_PROJECT")
+        if project_id <= 0:
+            raise ValueError("INVALID_PROJECT")
+        return project_id
+
+    @staticmethod
+    def _normalize_task_project_filter(value):
+        """'' / None / 'all' → без фильтра, 'none' → задачи без проекта, иначе id."""
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw in ('', 'all'):
+            return None
+        if raw in ('none', 'null'):
+            return 'none'
+        try:
+            project_id = int(raw)
+        except Exception:
+            raise ValueError("INVALID_TASK_PROJECT_FILTER")
+        if project_id <= 0:
+            raise ValueError("INVALID_TASK_PROJECT_FILTER")
+        return project_id
+
+    @staticmethod
+    def _normalize_task_section_id(value):
+        """None — без раздела; иначе положительный id раздела доски."""
+        if value is None or value is _UNSET:
+            return None
+        raw = str(value).strip().lower()
+        if raw in ('', 'none', 'null', '0'):
+            return None
+        try:
+            section_id = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("INVALID_SECTION")
+        if section_id <= 0:
+            raise ValueError("INVALID_SECTION")
+        return section_id
+
+    @staticmethod
+    def _normalize_task_section_filter(value):
+        """'' / None / 'all' → без фильтра, 'none' → задачи без раздела, иначе id."""
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw in ('', 'all'):
+            return None
+        if raw in ('none', 'null'):
+            return 'none'
+        try:
+            section_id = int(raw)
+        except Exception:
+            raise ValueError("INVALID_TASK_SECTION_FILTER")
+        if section_id <= 0:
+            raise ValueError("INVALID_TASK_SECTION_FILTER")
+        return section_id
+
+    def _normalize_task_watchers(self, watcher_ids):
+        """Наблюдатели из того, что прислал клиент. _UNSET/None — «не меняем»."""
+        if watcher_ids is None or watcher_ids is _UNSET:
+            return None
+        return task_projects.normalize_user_ids(
+            watcher_ids, task_projects.MAX_WATCHERS, "INVALID_WATCHERS", "TOO_MANY_WATCHERS"
+        )
+
+    def _normalize_task_project_department_tx(self, cursor, department_id):
+        if department_id is None or str(department_id).strip().lower() in ('', 'none', 'null', '0'):
+            return None
+        try:
+            department_id = int(department_id)
+        except (TypeError, ValueError):
+            raise ValueError("INVALID_DEPARTMENT")
+        cursor.execute("SELECT 1 FROM departments WHERE id = %s", (department_id,))
+        if not cursor.fetchone():
+            raise ValueError("INVALID_DEPARTMENT")
+        return department_id
+
     def _normalize_task_priority(self, priority):
         priority_norm = (priority or 'normal').strip().lower() or 'normal'
         if priority_norm not in ('normal', 'urgent', 'critical'):
@@ -3334,6 +3423,27 @@ class SchedulesMixin:
         if minutes < 0 or minutes > 10 * 365 * 24 * 60:
             raise ValueError("INVALID_ESTIMATE")
         return minutes or None
+
+    def _normalize_task_priority_score(self, priority_score):
+        """Балл приоритета 1–5. None или пустая строка — снять балл."""
+        if priority_score is None or priority_score is _UNSET:
+            return None
+        # True — тоже int, но баллом не является.
+        if isinstance(priority_score, bool):
+            raise ValueError("INVALID_PRIORITY_SCORE")
+        if isinstance(priority_score, str):
+            if not priority_score.strip():
+                return None
+            if not priority_score.strip().isdigit():
+                raise ValueError("INVALID_PRIORITY_SCORE")
+            priority_score = int(priority_score.strip())
+        if isinstance(priority_score, float):
+            if not priority_score.is_integer():
+                raise ValueError("INVALID_PRIORITY_SCORE")
+            priority_score = int(priority_score)
+        if not isinstance(priority_score, int) or priority_score not in self.TASK_PRIORITY_SCORES:
+            raise ValueError("INVALID_PRIORITY_SCORE")
+        return priority_score
 
     def _normalize_task_reminder_minutes(self, reminder_minutes_before):
         """За сколько минут до дедлайна напомнить. Пусто/0 = напоминание выключено."""

@@ -450,7 +450,9 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_card_shows_a_stack_and_the_picker_is_shared(self):
         self.assertIn("<AssigneeStack people={assigneePeople} />", self.VIEW)
-        self.assertIn("maxSelected={TASK_MAX_ASSIGNEES}", self.VIEW)
+        # Потолок поля — исполнительский по умолчанию; у наблюдателей свой (#401).
+        self.assertIn("maxSelected = TASK_MAX_ASSIGNEES,", self.VIEW)
+        self.assertIn("maxSelected={maxSelected}", self.VIEW)
 
     def test_cli_understands_a_repeated_flag(self):
         cli = _read(CLI_PATH)

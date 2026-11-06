@@ -167,7 +167,7 @@
   border: 0; background: transparent; color: var(--ink-3);
   cursor: pointer; transition: background .15s, color .15s;
 }
-.tv-root .tv-brief-remove:hover:not(:disabled) { background: #f0efeb; color: var(--ink); }
+.tv-root .tv-brief-remove:hover:not(:disabled) { background: #f1f5f9; color: var(--ink); }
 .tv-root .tv-brief-add {
   align-self: flex-start;
   display: inline-flex; align-items: center; gap: 5px;
@@ -209,7 +209,7 @@
   border: 0; background: transparent; color: var(--ink-3);
   cursor: pointer; transition: background-color .15s, color .15s;
 }
-.tv-root .tv-brief-swatch-remove:hover:not(:disabled) { background: #f1f0ed; color: var(--ink); }
+.tv-root .tv-brief-swatch-remove:hover:not(:disabled) { background: #f1f5f9; color: var(--ink); }
 .tv-root .tv-brief-add-color { padding: 6px 12px; border-radius: 99px; }
 .tv-root .tv-brief-add-color.is-open { border-style: solid; border-color: #60a5fa; color: #1d4ed8; background: #f5f9ff; }
 .tv-root .tv-brief-palette-count {
@@ -262,7 +262,7 @@
 .tv-root .tv-brief-view-chip {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 3px 9px; border-radius: 8px;
-  background: #f1f0ed; border: 1px solid var(--border);
+  background: #f1f5f9; border: 1px solid var(--border);
   font-size: 12.5px; color: var(--ink-2);
 }
 .tv-root .tv-brief-view-chip b { color: var(--ink); font-weight: 600; }

@@ -15,7 +15,6 @@ from openpyxl.styles import Alignment
 from openpyxl.styles import Font
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
-from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 import collections
 import html
@@ -23,6 +22,7 @@ import json
 import logging
 import os
 import requests
+import task_projects
 import threading
 import time
 import uuid
@@ -218,11 +218,21 @@ def _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths):
         except Exception:
             pass
 
+def _task_project_error_response(code):
+    message = task_projects.error_message(code) or code
+    status = 403 if code in ('PROJECT_FORBIDDEN', 'PROJECT_MANAGE_FORBIDDEN') else (
+        404 if code == 'PROJECT_NOT_FOUND' else 400
+    )
+    return jsonify({"error": message, "code": code}), status
+
 TASK_EXPORT_COLUMNS = {
     'id':          ('№', 7),
     'subject':     ('Тема', 52),
     'tag':         ('Тип', 14),
     'priority':    ('Срочность', 13),
+    # Балл приоритета 1–5 от суперадминов (1 — важнее всего). Не оценена — пусто,
+    # а колонка, пустая во всём листе, не выводится вовсе.
+    'score':       ('Балл', 7),
     'assignee':    ('Исполнители', 34),
     'requester':   ('Поручил', 26),
     'created':     ('Создана', 17),
@@ -256,8 +266,10 @@ def _task_export_column_of(task):
     if task.get('is_backlog'):
         return 'backlog'
     status = (task.get('status') or '').strip().lower()
-    if status in ('in_progress', 'returned'):
+    if status == 'in_progress':
         return 'progress'
+    if status == 'returned':
+        return 'returned'
     if status == 'completed':
         return 'review'
     if status == 'accepted':
@@ -302,7 +314,6 @@ def _task_report_error_response(error):
 
 def build_tasks_blueprint(
     *,
-    ALLOWED_ORIGINS,
     API_TOKEN,
     AVATAR_SIGNED_URL_CACHE,
     AVATAR_SIGNED_URL_CACHE_LOCK,
@@ -311,21 +322,17 @@ def build_tasks_blueprint(
     AVATAR_SIGNED_URL_TTL_SECONDS,
     TASK_PRIORITY_LABELS,
     TASK_TELEGRAM_TIMEOUT_SECONDS,
-    TASK_WEB_APP_BASE_URL,
     TELEGRAM_MAX_CAPTION_CHARS,
     TELEGRAM_MAX_MESSAGE_CHARS,
     _TASK_EXPORT_BASE,
     _build_avatar_signed_url,
     _build_current_task_deep_link,
-    _build_task_deep_link,
     _build_task_notification_reply_markup,
     _department_scope_id_for_requester,
     _escape_telegram_html,
     _format_task_due_for_notification,
     _format_task_spent_for_notification,
     _get_telegram_error_text,
-    _is_allowed_origin,
-    _normalize_origin,
     _normalize_user_role,
     _send_telegram_text_message,
     _task_route_guard,
@@ -393,10 +400,13 @@ def build_tasks_blueprint(
             task_ctx.get('subject') or f"Задача #{task_ctx.get('id')}",
             220
         )
+        # Ключ задачи проекта (HR-125) — перед темой и вне ссылки: его переписывают
+        # в чат как имя задачи, а ссылка остаётся на теме.
+        key_prefix = f"{_escape_telegram_html(task_ctx['key'], 20)} · " if task_ctx.get('key') else ''
         if not task_link:
-            return subject_safe
+            return f"{key_prefix}{subject_safe}"
         return (
-            f'<a href="{_escape_telegram_html(task_link, 500)}">'
+            f'{key_prefix}<a href="{_escape_telegram_html(task_link, 500)}">'
             f'{subject_safe}'
             '</a>'
         )
@@ -410,11 +420,13 @@ def build_tasks_blueprint(
                 t.assigned_to, assignee.telegram_id, assignee.name,
                 t.requested_by_id, requester.telegram_id,
                 COALESCE(requester.name, t.requested_by_name),
-                t.production_brief
+                t.production_brief,
+                project.code, t.project_number
             FROM tasks t
             LEFT JOIN users creator ON creator.id = t.created_by
             LEFT JOIN users assignee ON assignee.id = t.assigned_to
             LEFT JOIN users requester ON requester.id = t.requested_by_id
+            LEFT JOIN task_projects project ON project.id = t.project_id
             WHERE t.id = %s
             LIMIT 1
         """, (int(task_id),))
@@ -455,7 +467,9 @@ def build_tasks_blueprint(
             "requester_telegram_id": row[12],
             "requester_name": row[13],
             # Бриф продакшна (#354): из него — строка «Что:» в сообщениях.
-            "production_brief": row[14]
+            "production_brief": row[14],
+            # Ключ задачи проекта (#401): HR-125 перед темой — так задачу и называют.
+            "key": task_projects.format_task_key(row[15], row[16])
         }
 
     def _build_task_status_notification_html(
@@ -590,7 +604,10 @@ def build_tasks_blueprint(
                 'backlog_rank': 'приоритет в бэклоге',
                 'requested_by': 'кто поручил',
                 'reminder': 'напоминание',
-                'production_brief': 'бриф'
+                'production_brief': 'бриф',
+                'project': 'проект',
+                'watchers': 'наблюдатели',
+                'section': 'раздел'
             }
             changed_items = []
             for item in (changed_fields or []):
@@ -874,12 +891,23 @@ def build_tasks_blueprint(
 
         return attachments, uploaded_blob_paths, gcs_bucket
 
+    def _task_project_payload(project):
+        """Проект для ответа: аватары состава подписываем, сырые пути не отдаём."""
+        for person in project.get('members') or []:
+            person['avatar_url'] = _build_avatar_signed_url(
+                person.pop('avatar_bucket', None),
+                person.pop('avatar_blob_path', None)
+            )
+        return project
+
     TASK_EXPORT_SHEETS = (
+        ('todo',     'Новая',
+         _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'brief', 'description')),
         ('backlog',  'Бэклог',
          _TASK_EXPORT_BASE + ('due', 'estimate', 'brief', 'description')),
-        ('todo',     'К выполнению',
-         _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'brief', 'description')),
         ('progress', 'В работе',
+         _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'brief', 'description')),
+        ('returned', 'Возвращено на доработку',
          _TASK_EXPORT_BASE + ('planned', 'due', 'estimate', 'started', 'spent', 'brief', 'description')),
         ('review',   'На проверке',
          _TASK_EXPORT_BASE + ('due', 'estimate', 'started', 'spent', 'completed', 'summary', 'brief', 'description')),
@@ -890,13 +918,16 @@ def build_tasks_blueprint(
     def _task_export_value(key, task):
         import task_production
         if key == 'id':
-            return task.get('id')
+            # У задачи проекта номер — её ключ (HR-125), у остальных — прежний №.
+            return task.get('key') or task.get('id')
         if key == 'subject':
             return task.get('subject') or ''
         if key == 'tag':
             return TASK_TAG_LABELS.get((task.get('tag') or 'task').strip().lower(), 'Задача')
         if key == 'priority':
             return TASK_PRIORITY_LABELS.get((task.get('priority') or 'normal').strip().lower(), 'Обычная')
+        if key == 'score':
+            return task.get('priority_score')
         if key == 'assignee':
             return task.get('assignee_name') or ''
         if key == 'requester':
@@ -967,7 +998,7 @@ def build_tasks_blueprint(
             if not task_ctx:
                 return warnings
             actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-            task_link = _build_current_task_deep_link(task_ctx.get('id'))
+            task_link = _build_current_task_deep_link(task_ctx.get('id'), task_key=task_ctx.get('key'))
             message_html = _build_task_message_notification_html(
                 task_ctx=task_ctx,
                 actor_name=actor_name,
@@ -1101,6 +1132,111 @@ def build_tasks_blueprint(
             }), 200
         except Exception as e:
             logging.error(f"Error in get_task_departments: {e}")
+            return jsonify({"error": "Internal server error"}), 500
+
+    @bp.route('/tasks/projects', methods=['GET', 'POST', 'OPTIONS'])
+    @require_api_key
+    def handle_task_projects():
+        """Проекты-доски (задача #401): список для раздела и создание нового.
+
+    GET — проекты, которые человек видит, и право их настраивать. Доска своего
+    отдела (department_project_id) — та, что привязана к отделу человека, если
+    такая одна и у него к ней есть доступ: у IT досок три, и угадывать между
+    ними сервер не берётся. Её форма подставляет в новую задачу.
+
+    Переключателю раздела (default_project_id) её отдаём не всем: рядовому
+    бэк-офиса доска по умолчанию не выбирается — по той же причине, что и отдел
+    раньше (get_task_departments): сузить его раздел своей доской значит
+    спрятать задачу, которую ему поручили из другого отдела.
+    """
+        try:
+            requester_id, requester, guard_response, guard_status = _task_route_guard()
+            if guard_response is not None:
+                return guard_response, guard_status
+            requester_role = getattr(g, 'effective_task_role', requester[3])
+
+            if request.method == 'POST':
+                data = request.get_json(silent=True) or {}
+                try:
+                    created = db.create_task_project(
+                        requester_id, requester_role,
+                        code=data.get('code'),
+                        name=data.get('name'),
+                        department_id=data.get('department_id'),
+                        members=data.get('members') or None,
+                        sections=data.get('sections') or None,
+                    )
+                except (ValueError, PermissionError) as project_error:
+                    return _task_project_error_response(str(project_error))
+                return jsonify({"status": "success", "project": created}), 201
+
+            payload = db.get_task_projects(requester_id, requester_role)
+            projects = [_task_project_payload(project) for project in payload.get('projects') or []]
+            department_id = _department_scope_id_for_requester(requester_id)
+            linked = [
+                project for project in projects
+                if project.get('can_create') and department_id is not None
+                and project.get('department_id') == department_id
+            ]
+            department_project_id = linked[0]['id'] if len(linked) == 1 else None
+            return jsonify({
+                "status": "success",
+                "projects": projects,
+                "unassigned_count": int(payload.get('unassigned_count') or 0),
+                "can_manage": bool(payload.get('can_manage')),
+                # Кого можно поставить на доску — только тому, кто проекты настраивает.
+                "candidates": payload.get('candidates') or [],
+                "department_project_id": department_project_id,
+                "default_project_id": (
+                    None if getattr(g, 'task_scope_is_personal', False) else department_project_id
+                ),
+            }), 200
+        except Exception as e:
+            logging.error(f"Error in handle_task_projects: {e}", exc_info=True)
+            return jsonify({"error": "Internal server error"}), 500
+
+    @bp.route('/tasks/projects/<int:project_id>', methods=['PATCH', 'OPTIONS'])
+    @require_api_key
+    def handle_task_project(project_id):
+        """Название, ключ, отдел, архив, состав и разделы доски.
+
+        Смена ключа: номера задач остаются, прежние ключи продолжают открывать
+        задачи (task_key_aliases) — см. Database._rename_task_project_code_tx.
+        """
+        try:
+            requester_id, requester, guard_response, guard_status = _task_route_guard()
+            if guard_response is not None:
+                return guard_response, guard_status
+            requester_role = getattr(g, 'effective_task_role', requester[3])
+            data = request.get_json(silent=True) or {}
+            fields = {}
+            for key in ('name', 'department_id', 'code'):
+                if key in data:
+                    fields[key] = data.get(key)
+            if 'is_archived' in data:
+                # Строго: bool('false') — True, и строка из формы отправила бы проект в архив.
+                if not isinstance(data.get('is_archived'), bool):
+                    return jsonify({"error": "Признак архива — true или false", "code": "INVALID_ARCHIVED"}), 400
+                fields['is_archived'] = data['is_archived']
+            if 'members' in data:
+                # Состав — только списком: null очистил бы всю доску одним опечатанным запросом.
+                if not isinstance(data.get('members'), list):
+                    return _task_project_error_response('INVALID_PROJECT_MEMBERS')
+                fields['members'] = data['members']
+            if 'sections' in data:
+                # Разделы — тоже только списком, по той же причине.
+                if not isinstance(data.get('sections'), list):
+                    return _task_project_error_response('INVALID_PROJECT_SECTIONS')
+                fields['sections'] = data['sections']
+            if not fields:
+                return jsonify({"error": "Нет изменений для сохранения"}), 400
+            try:
+                result = db.update_task_project(project_id, requester_id, requester_role, **fields)
+            except (ValueError, PermissionError) as project_error:
+                return _task_project_error_response(str(project_error))
+            return jsonify({"status": "success", "project": result}), 200
+        except Exception as e:
+            logging.error(f"Error in handle_task_project: {e}", exc_info=True)
             return jsonify({"error": "Internal server error"}), 500
 
     @bp.route('/tasks/action_required', methods=['GET', 'OPTIONS'])
@@ -1315,6 +1451,8 @@ def build_tasks_blueprint(
                 person_id=request.args.get('person_id'),
                 person_scope=(request.args.get('person_scope') or '').strip() or None,
                 department_id=(request.args.get('department_id') or '').strip() or None,
+                project_id=(request.args.get('project_id') or '').strip() or None,
+                section_id=(request.args.get('section_id') or '').strip() or None,
             )
         except ValueError:
             return jsonify({"error": "Invalid export filter"}), 400
@@ -1338,8 +1476,11 @@ def build_tasks_blueprint(
                 workbook.create_sheet(sheet_title), columns, by_column[column_id], now
             )
         if not workbook.sheetnames:
+            # Шапка как у новых задач. По ключу, а не по номеру листа: порядок листов
+            # повторяет колонки доски и меняется вместе с ними.
+            new_columns = next(columns for column_id, _, columns in TASK_EXPORT_SHEETS if column_id == 'todo')
             _task_export_fill_sheet(
-                workbook.create_sheet('Задачи'), TASK_EXPORT_SHEETS[1][2], [], now
+                workbook.create_sheet('Задачи'), new_columns, [], now
             )
 
         stream = BytesIO()
@@ -1380,7 +1521,7 @@ def build_tasks_blueprint(
                               if task_ctx.get('assignee_telegram_id') else [])
                         if not assignee_chat_ids:
                             continue
-                        task_link = _build_current_task_deep_link(created_task_id)
+                        task_link = _build_current_task_deep_link(created_task_id, task_key=task_ctx.get('key'))
                         tag_label = TASK_TAG_LABELS.get((task_ctx.get('tag') or 'task').strip().lower(), 'Задача')
                         priority_label = TASK_PRIORITY_LABELS.get((task_ctx.get('priority') or 'normal').strip().lower(), 'Обычная')
                         due_label = _format_task_due_for_notification(task_ctx.get('due_at'))
@@ -1422,6 +1563,12 @@ def build_tasks_blueprint(
                 sort_order = (request.args.get('sort') or '').strip().lower() or None
                 # Отдел задачи = отдел её постановщика; 'none' — постановщики без отдела.
                 department_filter = (request.args.get('department_id') or '').strip().lower() or None
+                # Проект-доска (задача #401); 'none' — задачи без проекта.
+                project_filter = (request.args.get('project_id') or '').strip().lower() or None
+                # Ссылка по ключу задачи: ?task=HR-125 приходит сюда как task_key.
+                task_key_filter = (request.args.get('task_key') or '').strip() or None
+                # Раздел доски; 'none' — задачи доски без раздела.
+                section_filter = (request.args.get('section_id') or '').strip().lower() or None
                 # summary=0 — не считать сводку: колонки доски просят её один раз на загрузку.
                 include_summary = (request.args.get('summary') or '').strip().lower() not in {'0', 'false', 'no'}
                 person_id_raw = request.args.get('person_id')
@@ -1471,7 +1618,10 @@ def build_tasks_blueprint(
                         task_id=task_id_filter,
                         sort=sort_order,
                         department_id=department_filter,
-                        include_summary=include_summary
+                        include_summary=include_summary,
+                        project_id=project_filter,
+                        task_key=task_key_filter,
+                        section_id=section_filter
                     )
                 except ValueError as e:
                     error_code = str(e)
@@ -1499,6 +1649,12 @@ def build_tasks_blueprint(
                         return jsonify({"error": "Invalid sort (use freshness|importance)"}), 400
                     if error_code == 'INVALID_TASK_DEPARTMENT_FILTER':
                         return jsonify({"error": "Invalid department_id filter"}), 400
+                    if error_code == 'INVALID_TASK_PROJECT_FILTER':
+                        return jsonify({"error": "Неверный проект в фильтре"}), 400
+                    if error_code == 'INVALID_TASK_KEY_FILTER':
+                        return jsonify({"error": "Неверный ключ задачи — нужен вид HR-125"}), 400
+                    if error_code == 'INVALID_TASK_SECTION_FILTER':
+                        return jsonify({"error": "Неверный раздел в фильтре"}), 400
                     raise
 
                 tasks = payload.get("tasks") or []
@@ -1517,6 +1673,15 @@ def build_tasks_blueprint(
                             )
                             person.pop("avatar_bucket", None)
                             person.pop("avatar_blob_path", None)
+
+                    # Наблюдатели (задача #401) — те же подписанные аватары.
+                    for person in (task.get("watchers") or []):
+                        if not isinstance(person, dict):
+                            continue
+                        person["avatar_url"] = _build_avatar_signed_url(
+                            person.pop("avatar_bucket", None),
+                            person.pop("avatar_blob_path", None)
+                        )
 
                     assignee = task.get("assignee")
                     if isinstance(assignee, dict):
@@ -1568,7 +1733,9 @@ def build_tasks_blueprint(
                         "backlog": backlog_filter,
                         "mine": mine_filter,
                         "sort": sort_order,
-                        "department_id": department_filter
+                        "department_id": department_filter,
+                        "project_id": project_filter,
+                        "section_id": section_filter
                     }
                 }), 200
 
@@ -1599,6 +1766,10 @@ def build_tasks_blueprint(
             # Состав приезжает строкой «12,15,7»: multipart-поле одно, а порядок в
             # нём значим — первый становится tasks.assigned_to.
             assignee_ids_raw = (request.form.get('assignee_ids') or '').strip()
+            # Проект-доска и наблюдатели (задача #401): наблюдатели — строкой «12,15».
+            project_id_raw = (request.form.get('project_id') or '').strip() or None
+            watcher_ids_raw = (request.form.get('watcher_ids') or '').strip() or None
+            section_id_raw = (request.form.get('section_id') or '').strip() or None
 
             if not subject:
                 return jsonify({"error": "subject is required"}), 400
@@ -1654,7 +1825,11 @@ def build_tasks_blueprint(
                     requested_by_id=requested_by_id_raw,
                     requested_by_name=requested_by_name_raw,
                     reminder_minutes_before=reminder_raw,
-                    production_brief=production_brief_raw
+                    production_brief=production_brief_raw,
+                    project_id=project_id_raw,
+                    watcher_ids=watcher_ids_raw,
+                    requester_role=requester_role,
+                    section_id=section_id_raw
                 )
             except ValueError as create_error:
                 _cleanup_task_uploaded_blobs(gcs_bucket, uploaded_blob_paths)
@@ -1662,6 +1837,9 @@ def build_tasks_blueprint(
                 production_error = task_production.error_message(code)
                 if production_error:
                     return jsonify({"error": production_error, "code": code}), 400
+                project_error = task_projects.error_message(code)
+                if project_error:
+                    return jsonify({"error": project_error, "code": code}), 403 if code == 'PROJECT_FORBIDDEN' else 400
                 error_map = {
                     "SUBJECT_REQUIRED": "subject is required",
                     "INVALID_TAG": "Invalid tag",
@@ -1690,18 +1868,15 @@ def build_tasks_blueprint(
                 assignee_chat_ids = _task_assignee_chat_ids(created.get('assignee_ids') or assignee_ids)
                 # Карточка в бэклоге ещё не обязательство исполнителя — уведомляем только при выносе на доску.
                 if assignee_chat_ids and not is_backlog:
-                    task_link = _build_current_task_deep_link(created.get("id"))
+                    task_link = _build_current_task_deep_link(created.get("id"), task_key=created.get("key"))
                     tag_label = TASK_TAG_LABELS.get(tag, 'Задача')
                     priority_label = TASK_PRIORITY_LABELS.get(priority, 'Обычная')
                     due_label = _format_task_due_for_notification(created.get('due_at'))
                     requester_name = requester[2] if requester else 'Система'
-                    task_subject_html = _escape_telegram_html(subject, 220)
-                    if task_link:
-                        task_subject_html = (
-                            f'<a href="{_escape_telegram_html(task_link, 500)}">'
-                            f'{task_subject_html}'
-                            '</a>'
-                        )
+                    task_subject_html = _build_task_subject_notification_html(
+                        {"id": created.get("id"), "subject": subject, "key": created.get("key")},
+                        task_link,
+                    )
                     message_lines = [
                         "<b>🆕 Новая задача</b>",
                         "",
@@ -1744,6 +1919,7 @@ def build_tasks_blueprint(
                 "status": "success",
                 "message": "Задача добавлена в бэклог" if is_backlog else "Task created successfully",
                 "task_id": created.get("id"),
+                "key": created.get("key"),
                 "is_backlog": bool(is_backlog),
                 "due_at": created.get("due_at")
             }
@@ -1786,13 +1962,16 @@ def build_tasks_blueprint(
                 has_origin = 'requested_by_id' in data or 'requested_by_name' in data
                 has_reminder = 'reminder_minutes_before' in data
                 has_production_brief = 'production_brief' in data
+                has_project = 'project_id' in data
+                has_watchers = 'watcher_ids' in data
+                has_section = 'section_id' in data
 
                 if not any([
                     has_subject, has_description, has_tag, has_assigned_to,
                     has_priority, has_deadline, has_due_at, has_is_regulation,
                     has_recurrence_type, has_recurrence_interval, has_checklist,
                     has_estimate, has_planned_start, has_origin, has_reminder,
-                    has_production_brief
+                    has_production_brief, has_project, has_watchers, has_section
                 ]):
                     return jsonify({"error": "No fields to update"}), 400
 
@@ -1871,6 +2050,12 @@ def build_tasks_blueprint(
                         edit_kwargs["reminder_minutes_before"] = data.get('reminder_minutes_before')
                     if has_production_brief:
                         edit_kwargs["production_brief"] = data.get('production_brief')
+                    if has_project:
+                        edit_kwargs["project_id"] = data.get('project_id')
+                    if has_watchers:
+                        edit_kwargs["watcher_ids"] = data.get('watcher_ids') or []
+                    if has_section:
+                        edit_kwargs["section_id"] = data.get('section_id')
 
                     result = db.edit_task(**edit_kwargs)
                 except ValueError as value_error:
@@ -1878,6 +2063,9 @@ def build_tasks_blueprint(
                     production_error = task_production.error_message(code)
                     if production_error:
                         return jsonify({"error": production_error, "code": code}), 400
+                    project_error = task_projects.error_message(code)
+                    if project_error:
+                        return jsonify({"error": project_error, "code": code}), 403 if code == 'PROJECT_FORBIDDEN' else 400
                     if code == 'TASK_NOT_FOUND':
                         return jsonify({"error": "Task not found"}), 404
                     if code == 'NOTHING_TO_UPDATE':
@@ -1922,12 +2110,15 @@ def build_tasks_blueprint(
                     return jsonify({"error": code}), 403
 
                 telegram_warnings = []
+                # Кого задача видит, исполнителя не касается: правка одних наблюдателей
+                # (задача #401) — не повод писать ему в Telegram.
+                notify_fields = [field for field in (result.get('changed_fields') or []) if field != 'watchers']
                 try:
-                    if result.get('updated'):
+                    if result.get('updated') and notify_fields:
                         task_ctx = _fetch_task_notification_context(task_id)
                         if task_ctx:
                             actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                            task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                            task_link = _build_current_task_deep_link(task_ctx.get('id'), task_key=task_ctx.get('key'))
                             reply_markup = _build_task_notification_reply_markup(task_link)
                             recipients = _collect_task_assignee_recipients(task_ctx, requester_id)
                             for recipient in recipients:
@@ -1935,7 +2126,7 @@ def build_tasks_blueprint(
                                     event='edited',
                                     task_ctx=task_ctx,
                                     actor_name=actor_name,
-                                    changed_fields=result.get('changed_fields') or [],
+                                    changed_fields=notify_fields,
                                     task_link=task_link
                                 )
                                 response = _send_telegram_text_message(
@@ -2035,8 +2226,10 @@ def build_tasks_blueprint(
     оценка длительности и сроки. Батч — чтобы drag&drop переставлял соседей одним запросом.
 
     Тело: {"items": [{"task_id": 12, "is_backlog": false, "backlog_rank": 2.5,
-                      "estimate_minutes": 120, "planned_start_at": "...", "due_at": "..."}]}
-    Допускается и одиночный объект без обёртки items.
+                      "estimate_minutes": 120, "planned_start_at": "...", "due_at": "...",
+                      "priority_score": 2}]}
+    Допускается и одиночный объект без обёртки items. priority_score (1–5, null —
+    снять) ставят только суперадмины.
     """
         try:
             requester_id, requester, guard_response, guard_status = _task_route_guard()
@@ -2063,7 +2256,9 @@ def build_tasks_blueprint(
                 'INVALID_REMINDER': ("Напоминание можно поставить максимум за сутки до дедлайна", 400),
                 'BACKLOG_ONLY_FOR_ASSIGNED': ("Только не начатую задачу можно вернуть в бэклог", 409),
                 'TASK_FORBIDDEN': ("You do not have access to this task", 403),
-                'ONLY_CREATOR_CAN_PLAN': ("Сроки задачи меняет постановщик или админ", 403)
+                'ONLY_CREATOR_CAN_PLAN': ("Сроки задачи меняет постановщик или админ", 403),
+                'INVALID_PRIORITY_SCORE': ("Балл — число от 1 до 5", 400),
+                'ONLY_SUPER_ADMIN_SCORE': ("Балл ставят только суперадмины", 403)
             }
 
             results = []
@@ -2096,6 +2291,8 @@ def build_tasks_blueprint(
                     kwargs["due_at"] = raw_item.get('due_at')
                 if 'reminder_minutes_before' in raw_item:
                     kwargs["reminder_minutes_before"] = raw_item.get('reminder_minutes_before')
+                if 'priority_score' in raw_item:
+                    kwargs["priority_score"] = raw_item.get('priority_score')
 
                 try:
                     result = db.update_task_board_state(**kwargs)
@@ -2107,7 +2304,10 @@ def build_tasks_blueprint(
                     return jsonify({"error": message, "task_id": item_task_id}), code
 
                 results.append(result)
-                if result.get('updated') and result.get('was_backlog') and not result.get('is_backlog'):
+                # «Вынесли в работу» — только настоящий вынос из бэклога. Снятый балл
+                # возвращает задачу в «Новую» к разбору — исполнителю об этом не пишем.
+                if (result.get('updated') and result.get('was_backlog') and not result.get('is_backlog')
+                        and result.get('score_move') != 'to_new'):
                     promoted.append(result)
 
             warnings = []
@@ -2117,7 +2317,7 @@ def build_tasks_blueprint(
                     task_ctx = _fetch_task_notification_context(result.get('task_id'))
                     if not task_ctx:
                         continue
-                    task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                    task_link = _build_current_task_deep_link(task_ctx.get('id'), task_key=task_ctx.get('key'))
                     reply_markup = _build_task_notification_reply_markup(task_link)
                     for recipient in _collect_task_assignee_recipients(task_ctx, requester_id):
                         response = _send_telegram_text_message(
@@ -2198,7 +2398,7 @@ def build_tasks_blueprint(
                 task_ctx = _fetch_task_notification_context(task_id)
                 if task_ctx:
                     actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                    task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                    task_link = _build_current_task_deep_link(task_ctx.get('id'), task_key=task_ctx.get('key'))
                     for recipient in _collect_task_notification_recipients(task_ctx, requester_id):
                         response = _send_telegram_text_message(
                             recipient.get('chat_id'),
@@ -2461,7 +2661,7 @@ def build_tasks_blueprint(
                     if task_ctx:
                         actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
                         task_subject = (task_ctx.get('subject') or f"Задача #{task_id}").strip()
-                        task_link = _build_current_task_deep_link(task_ctx.get('id'))
+                        task_link = _build_current_task_deep_link(task_ctx.get('id'), task_key=task_ctx.get('key'))
                         reply_markup = _build_task_notification_reply_markup(task_link)
                         recipients = _collect_task_notification_recipients(task_ctx, requester_id)
 
@@ -2568,7 +2768,7 @@ def build_tasks_blueprint(
                 task_ctx = _fetch_task_notification_context(task_id)
                 if task_ctx:
                     actor_name = requester[2] if requester and len(requester) > 2 else 'Сотрудник'
-                    task_link = _build_current_task_deep_link(task_id)
+                    task_link = _build_current_task_deep_link(task_id, task_key=task_ctx.get('key'))
                     reply_markup = _build_task_notification_reply_markup(task_link)
                     recipients = _collect_task_notification_recipients(task_ctx, requester_id)
                     for recipient in recipients:

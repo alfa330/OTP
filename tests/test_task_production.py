@@ -503,7 +503,7 @@ class DatabaseWiringTests(unittest.TestCase):
         self.assertIn("production_brief=None", source)
         self.assertIn("self._normalize_task_production_brief(", source)
         self.assertIn("self._require_task_production_assignee_tx(cursor, assignee_ids_norm)", source)
-        self.assertIn("production_brief, created_at, updated_at", source)
+        self.assertIn("production_brief, project_id, project_number, section_id, created_at, updated_at", source)
         self.assertIn("Json(production_brief_norm)", source)
         self.assertEqual(*_insert_placeholders_and_params("create_task"))
 

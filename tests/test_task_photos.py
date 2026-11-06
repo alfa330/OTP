@@ -716,7 +716,8 @@ class PhotoQueryTest(unittest.TestCase):
         fake._get_cursor = lambda: _Ctx(cursor)
         fake._task_assignee_scope_tx = lambda _cur, _task_id: []
         fake._task_visible_for_requester = lambda *args: visible
-        fake._task_observable_by_colleague_tx = lambda *args: colleague
+        # Чтение без участия: коллега-СВ (#298), участник проекта и наблюдатель (#401).
+        fake._task_observable_tx = lambda *args: colleague
         result = self.method(fake, 5, 20, 'sv', task_photos.PREVIEW_TYPES)
         return result, cursor
 

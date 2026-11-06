@@ -163,8 +163,9 @@ class AddressTests(unittest.TestCase):
         """replaceState ложился на запись ПОД экраном карточки, и после пары
         жестов «назад» раздел читал task_id как переход по ссылке и заново
         открывал закрытую карточку (трасса истории на стенде 14.09.2026)."""
-        self.assertIn('syncTaskDeepLink(isMobileShell ? null : (drawerTask?.id || null));', VIEW)
-        self.assertIn('}, [drawerTask?.id, isMobileShell]);', VIEW)
+        self.assertIn('syncTaskDeepLink(isMobileShell ? null : (drawerTask?.id ? drawerTask : null));', VIEW)
+        # Ключ задачи (HR-125) тоже в адресе: перенос в другой проект меняет его.
+        self.assertIn('}, [drawerTask?.id, drawerTask?.key, isMobileShell]);', VIEW)
 
     def test_shell_flag_is_declared_before_the_address_effect(self):
         """Иначе список зависимостей эффекта читает константу до объявления."""
@@ -195,13 +196,16 @@ class BoardTests(unittest.TestCase):
     VIEW_BLOCK = block(BOARD, 'const BoardView = ({', '/* ─────────────── Таймлайн')
 
     def test_phone_shows_one_column_with_a_switch(self):
-        """Пять колонок по 268 px — полторы видимых и лента вбок; перетаскивать
+        """Колонки по 268 px — полторы видимых и лента вбок; перетаскивать
         пальцем между ними нельзя вовсе."""
         self.assertIn('if (isMobileShell) {', self.VIEW_BLOCK)
         self.assertIn('className="tb-column-switch"', self.VIEW_BLOCK)
         self.assertIn('renderColumn(activeColumn, true)', self.VIEW_BLOCK)
+        # Переключатель и лента — из тех же видимых колонок: временная колонка
+        # возврата есть и там, и там, только пока в ней есть задачи.
+        self.assertIn('{columns.map((column) => {', self.VIEW_BLOCK)
         # Компьютер — прежняя лента колонок.
-        self.assertIn('BOARD_COLUMNS.map((column) => renderColumn(column))', self.VIEW_BLOCK)
+        self.assertIn('columns.map((column) => renderColumn(column))', self.VIEW_BLOCK)
 
     def test_mouse_only_hints_and_controls_are_hidden(self):
         selectors, body = rule_with(CSS, '.tb-drag-hint')
@@ -220,3 +224,35 @@ class BoardTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NoSystemPickersTests(unittest.TestCase):
+    """Раскрытые системные списки и календарь рисует браузер — в разделе их нет,
+    вместо них пикеры сайта: CustomSelect, IosDatePicker/IosTimePicker, сегменты."""
+
+    TASK_SOURCES = sorted((ROOT / "src" / "components" / "tasks").glob("*.jsx"))
+
+    def test_no_native_selects_or_date_inputs(self):
+        offenders = []
+        for path in self.TASK_SOURCES:
+            text = path.read_text(encoding="utf-8")
+            for pattern in (r"<select\b", r'type="(date|time|datetime-local|month|week)"'):
+                if re.search(pattern, text):
+                    offenders.append(f"{path.name}: {pattern}")
+        self.assertEqual(offenders, [])
+
+    def test_due_field_keeps_the_native_string_format(self):
+        field = (ROOT / "src" / "components" / "tasks" / "TaskDateTimeField.jsx").read_text(encoding="utf-8")
+        self.assertIn("import IosDatePicker from '../ui/DatePicker';", field)
+        self.assertIn("import { IosTimePicker } from '../ui/TimePicker';", field)
+        self.assertIn("onChange?.(joinLocalDateTime(nextDate, time))", field)
+        self.assertIn("onChange?.(joinLocalDateTime(date, nextTime))", field)
+        # Время без дня не задать: срока без даты нет.
+        self.assertIn("disabled={disabled || !date}", field)
+
+    def test_plan_popover_survives_clicks_inside_picker_panels(self):
+        self.assertIn("if (event.target?.closest?.('[data-picker-panel]')) return;", BOARD)
+        self.assertIn("if (event.key === 'Escape' && !document.querySelector('[data-picker-panel]')) onClose();", BOARD)
+        for name in ("DatePicker.jsx", "TimePicker.jsx", "CustomSelect.jsx"):
+            source = (ROOT / "src" / "components" / "ui" / name).read_text(encoding="utf-8")
+            self.assertIn('data-picker-panel=""', source, name)

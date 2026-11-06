@@ -40,6 +40,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import supervisor_hours
 from supervisor_hours import SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES
 import task_production
+import task_projects
 from task_production import queries as task_production_queries
 from task_production import schema as task_production_schema
 

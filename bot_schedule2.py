@@ -48,6 +48,8 @@ from trainings import reports as training_reports
 # раздела «Графики работы»). Тот же случай, что и у тренингов: чистая логика
 # без базы и без сети, обычный импорт.
 from work_schedules import change_digest as schedule_change_digest
+# Проекты-доски «Задач» (задача #401): ключи и тексты ошибок, только stdlib.
+import task_projects
 from yataxi import reg_contest
 from yataxi import front_office_calls
 from database import (
@@ -3293,13 +3295,20 @@ def _format_task_due_for_notification(value):
         return str(value)
 
 
-def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
+def _build_task_deep_link(task_id, referer_url=None, origin_url=None, task_key=None):
     try:
         normalized_task_id = int(task_id)
     except Exception:
         return ''
     if normalized_task_id <= 0:
         return ''
+    # У задачи проекта в ссылке — её ключ (?task=HR-125, задача #401): по адресу
+    # сразу видно, чья это задача. Без проекта — прежний ?task_id=N.
+    parsed_key = task_projects.parse_task_key(task_key) if task_key else None
+    task_query = (
+        f"task={task_projects.format_task_key(*parsed_key)}" if parsed_key
+        else f"task_id={normalized_task_id}"
+    )
 
     def _parse_candidate(raw_url, is_configured_url=False):
         candidate = str(raw_url or '').strip()
@@ -3334,27 +3343,45 @@ def _build_task_deep_link(task_id, referer_url=None, origin_url=None):
     ):
         return (
             f"{configured_candidate['origin']}{configured_candidate['path']}"
-            f"?view=tasks&task_id={normalized_task_id}"
+            f"?view=tasks&{task_query}"
         )
 
     for candidate in request_candidates:
         if not candidate:
             continue
-        return f"{candidate['origin']}{candidate['path']}?view=tasks&task_id={normalized_task_id}"
+        return f"{candidate['origin']}{candidate['path']}?view=tasks&{task_query}"
 
     if configured_candidate:
         return (
             f"{configured_candidate['origin']}{configured_candidate['path']}"
-            f"?view=tasks&task_id={normalized_task_id}"
+            f"?view=tasks&{task_query}"
         )
     return ''
 
 
-def _build_current_task_deep_link(task_id):
+# «Ключ не передали — сходить за ним»: None означает «у задачи ключа нет».
+_TASK_KEY_LOOKUP = object()
+
+
+def _build_current_task_deep_link(task_id, task_key=_TASK_KEY_LOOKUP):
+    # Заголовки — первыми: вне запроса (планировщик напоминаний) здесь, как и
+    # раньше, исключение, и лишний поход в базу за ключом ему ни к чему.
+    referer_url = request.headers.get('Referer')
+    origin_url = request.headers.get('Origin')
+    if task_key is _TASK_KEY_LOOKUP:
+        # Ключ обычно уже под рукой (task_ctx, ответ создания) — сюда попадают
+        # только места, где его нет.
+        try:
+            task_key = db.get_task_key(task_id)
+        except Exception:
+            # Ключ — украшение ссылки: не достали его — ведём по номеру, но ведём.
+            logging.warning("tasks: не удалось прочитать ключ задачи %s для ссылки", task_id)
+            task_key = None
     return _build_task_deep_link(
         task_id,
-        referer_url=request.headers.get('Referer'),
-        origin_url=request.headers.get('Origin')
+        referer_url=referer_url,
+        origin_url=origin_url,
+        task_key=task_key
     )
 
 
@@ -18559,14 +18586,21 @@ app.register_blueprint(build_surveys_blueprint(
 
 
 
+
+
+
+
+
+
+
+
 # Колонки выгрузки задач: ключ -> (заголовок, ширина). Набор у каждого листа
 # свой — «Завершена» в листе «В работе» или «Итог» в бэклоге были бы колонкой,
 # пустой в каждой строке.
-_TASK_EXPORT_BASE = ('id', 'subject', 'tag', 'priority', 'assignee', 'requester', 'created')
+_TASK_EXPORT_BASE = ('id', 'subject', 'tag', 'priority', 'score', 'assignee', 'requester', 'created')
 # Раздел «tasks»: ручки вынесены в tasks/routes.py (вынесено из bot_schedule2.py).
 from tasks.routes import build_tasks_blueprint  # noqa: E402
 app.register_blueprint(build_tasks_blueprint(
-        ALLOWED_ORIGINS=ALLOWED_ORIGINS,
         API_TOKEN=API_TOKEN,
         AVATAR_SIGNED_URL_CACHE=AVATAR_SIGNED_URL_CACHE,
         AVATAR_SIGNED_URL_CACHE_LOCK=AVATAR_SIGNED_URL_CACHE_LOCK,
@@ -18575,21 +18609,17 @@ app.register_blueprint(build_tasks_blueprint(
         AVATAR_SIGNED_URL_TTL_SECONDS=AVATAR_SIGNED_URL_TTL_SECONDS,
         TASK_PRIORITY_LABELS=TASK_PRIORITY_LABELS,
         TASK_TELEGRAM_TIMEOUT_SECONDS=TASK_TELEGRAM_TIMEOUT_SECONDS,
-        TASK_WEB_APP_BASE_URL=TASK_WEB_APP_BASE_URL,
         TELEGRAM_MAX_CAPTION_CHARS=TELEGRAM_MAX_CAPTION_CHARS,
         TELEGRAM_MAX_MESSAGE_CHARS=TELEGRAM_MAX_MESSAGE_CHARS,
         _TASK_EXPORT_BASE=_TASK_EXPORT_BASE,
         _build_avatar_signed_url=_build_avatar_signed_url,
         _build_current_task_deep_link=_build_current_task_deep_link,
-        _build_task_deep_link=_build_task_deep_link,
         _build_task_notification_reply_markup=_build_task_notification_reply_markup,
         _department_scope_id_for_requester=_department_scope_id_for_requester,
         _escape_telegram_html=_escape_telegram_html,
         _format_task_due_for_notification=_format_task_due_for_notification,
         _format_task_spent_for_notification=_format_task_spent_for_notification,
         _get_telegram_error_text=_get_telegram_error_text,
-        _is_allowed_origin=_is_allowed_origin,
-        _normalize_origin=_normalize_origin,
         _normalize_user_role=_normalize_user_role,
         _send_telegram_text_message=_send_telegram_text_message,
         _task_route_guard=_task_route_guard,
@@ -18598,7 +18628,9 @@ app.register_blueprint(build_tasks_blueprint(
         get_gcs_client=get_gcs_client,
         require_api_key=require_api_key,
 ))
-# Лист на колонку доски, в том же порядке, что колонки в разделе.
+# Лист на колонку доски, в том же порядке, что колонки в разделе
+# (src/components/tasks/boardColumns.js). Пустой лист не выводится — так и
+# временная колонка «Возвращено на доработку» появляется, только когда есть возвраты.
 # Задача закрыта — просрочка по ней уже ничего не значит. Тот же список статусов,
 # по которому раздел считает «просрочено» в сводке.
 

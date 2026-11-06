@@ -1,16 +1,33 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Download, Maximize2, Minimize2 } from 'lucide-react';
 import { APPLE_FONT } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import FullscreenSheet from '../common/FullscreenSheet';
+import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { ACTION_NEED_META } from './taskActionNeeds';
 import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
+import { BOARD_COLUMNS, columnOfTask, overrideFromServer, resolveBoardDrop, transientColumnsKnown, visibleBoardColumns } from './boardColumns';
+import {
+  PRIORITY_SCORE_HINT,
+  awaitsPriorityScore,
+  compareBacklogTasks,
+  groupBacklogByScore,
+  priorityScoreOf,
+  resolveBacklogDrop,
+  scoreBoardMove,
+  scoreMovesToBacklog,
+} from './backlogOrder';
+import PriorityScoreControl, { PriorityScoreBadge, PriorityScoreDot } from './PriorityScoreControl';
+import TaskDateTimeField from './TaskDateTimeField';
 import { groupTasksByDay } from './boardGrouping';
 import { taskAssignees, taskAssigneesLabel } from './taskAssignees';
+import { taskKeyOf } from './taskProjects';
 
 export { BOARD_COLUMN_QUERY, BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, boardQueryParams, normalizeBoardChunk } from './boardQuery';
+export { BOARD_COLUMNS, columnOfTask, resolveBoardDrop, transientColumnsKnown, visibleBoardColumns } from './boardColumns';
+export { compareBacklogTasks, rankForPosition, resolveBacklogDrop } from './backlogOrder';
 
 /*
  * Бэклог + канбан + таймлайн раздела «Задачи».
@@ -25,13 +42,17 @@ export { BOARD_COLUMN_QUERY, BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, boardQueryP
 
 /* ─────────────── Константы ─────────────── */
 
-export const BOARD_COLUMNS = [
-  { id: 'backlog',  title: 'Бэклог',       caption: 'Ждут очереди' },
-  { id: 'todo',     title: 'К выполнению', caption: 'Назначены' },
-  { id: 'progress', title: 'В работе',     caption: 'Идут сейчас' },
-  { id: 'review',   title: 'На проверке',  caption: 'Ждут приёмки' },
-  { id: 'done',     title: 'Готово',       caption: 'Приняты' },
-];
+/* Цвет колонки — цвет её статуса, тот же, что у меток в списке и в карточке
+   задачи: «Выставлен» индиго, «В работе» янтарь, «Возвращён» роза, «Выполнен»
+   фиолетовый, «Принят» зелёный. Бэклог — очередь, а не статус: серый. */
+const COLUMN_DOT = {
+  todo: 'bg-indigo-500',
+  backlog: 'bg-slate-400',
+  progress: 'bg-amber-500',
+  returned: 'bg-rose-500',
+  review: 'bg-violet-500',
+  done: 'bg-emerald-500',
+};
 
 const PRIORITY_DOT = {
   critical: { color: '#e11d48', label: 'Критичная' },
@@ -61,21 +82,6 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /* ─────────────── Утилиты ─────────────── */
-
-export const columnOfTask = (task) => {
-  if (task?.is_backlog) return 'backlog';
-  switch (task?.status) {
-    case 'in_progress':
-    case 'returned':
-      return 'progress';
-    case 'completed':
-      return 'review';
-    case 'accepted':
-      return 'done';
-    default:
-      return 'todo';
-  }
-};
 
 const parseDate = (value) => {
   if (!value) return null;
@@ -220,81 +226,6 @@ const actualEndOf = (task) => {
   return null;
 };
 
-/**
- * Разрешение drag&drop: какая операция стоит за переносом карточки между колонками.
- * Возвращает {type:'status'|'board'|'blocked'|'noop'}.
- */
-export const resolveBoardDrop = (task, toColumn, ctx) => {
-  const from = columnOfTask(task);
-  if (from === toColumn) return { type: 'noop' };
-  // Задача коллеги-СВ открыта только на просмотр (задача #298).
-  if (task?.viewer_is_observer) return { type: 'blocked', reason: 'Это задача коллеги — её можно только посмотреть' };
-
-  const creatorId = Number(task?.creator?.id || 0);
-  const requesterId = Number(task?.requested_by?.id || 0);
-  // Принять в работу и сдать может любой исполнитель — они равноправны.
-  const isAssignee = taskAssignees(task).some((person) => Number(person.id) === ctx.currentUserId);
-  const isCreator = creatorId === ctx.currentUserId;
-  const canPlan = isCreator || ctx.isAdmin;
-  // Приёмка за поручителем (или постановщиком). Свою работу себе не принимают —
-  // кроме своей инициативы, где принимать больше некому.
-  const authorityId = requesterId || creatorId;
-  const canReview = (authorityId && authorityId === ctx.currentUserId)
-    || (!isAssignee && (ctx.isAdmin || isCreator || ctx.isSupervisor));
-
-  if (toColumn === 'backlog') {
-    if (task?.status !== 'assigned') return { type: 'blocked', reason: 'В бэклог можно вернуть только не начатую задачу' };
-    if (!canPlan) return { type: 'blocked', reason: 'Двигать в бэклог может постановщик или админ' };
-    return { type: 'board', patch: { is_backlog: true } };
-  }
-
-  if (toColumn === 'todo') {
-    if (from !== 'backlog') return { type: 'blocked', reason: 'Вернуть задачу в «К выполнению» нельзя — используйте возврат на доработку' };
-    if (!(canPlan || isAssignee)) return { type: 'blocked', reason: 'Нет прав выносить задачу из бэклога' };
-    return { type: 'board', patch: { is_backlog: false } };
-  }
-
-  if (toColumn === 'progress') {
-    if (from === 'review') {
-      if (!canReview) return { type: 'blocked', reason: 'Вернуть на доработку может тот, кто поручил задачу' };
-      return { type: 'status', action: 'returned' };
-    }
-    if (from === 'done') {
-      if (!canReview) return { type: 'blocked', reason: 'Возобновить задачу может тот, кто поручил её' };
-      return { type: 'status', action: 'reopened' };
-    }
-    if (!isAssignee) return { type: 'blocked', reason: 'Взять задачу в работу может только исполнитель' };
-    return { type: 'status', action: 'in_progress' };
-  }
-
-  if (toColumn === 'review') {
-    if (from !== 'progress') return { type: 'blocked', reason: 'На проверку задача уходит из работы' };
-    if (!isAssignee) return { type: 'blocked', reason: 'Отметить выполненной может только исполнитель' };
-    return { type: 'status', action: 'completed' };
-  }
-
-  if (toColumn === 'done') {
-    if (from !== 'review') return { type: 'blocked', reason: 'Принять можно только задачу на проверке' };
-    if (!canReview) return { type: 'blocked', reason: 'Итог принимает тот, кто поручил задачу — свою работу себе не принимают' };
-    return { type: 'status', action: 'accepted' };
-  }
-
-  return { type: 'blocked', reason: 'Недоступный перенос' };
-};
-
-/** Новый ранг для позиции index в уже отфильтрованном списке (без перетаскиваемой карточки). */
-export const rankForPosition = (listWithoutDragged, index) => {
-  const prev = listWithoutDragged[index - 1]?.backlog_rank;
-  const next = listWithoutDragged[index]?.backlog_rank;
-  const prevNum = Number.isFinite(prev) ? prev : null;
-  const nextNum = Number.isFinite(next) ? next : null;
-  if (prevNum === null && nextNum === null) return index + 1;
-  if (prevNum === null) return nextNum - 1;
-  if (nextNum === null) return prevNum + 1;
-  if (nextNum - prevNum < 1e-6) return prevNum + 1e-6;
-  return (prevNum + nextNum) / 2;
-};
-
 /* ─────────────── Атомы ─────────────── */
 
 const SegmentedControl = ({ value, options, onChange, className = '' }) => (
@@ -355,13 +286,13 @@ const AssigneeFaces = ({ people, size = 20, max = 3 }) => {
   return (
     <span className="flex shrink-0 items-center">
       {shown.map((person, index) => (
-        <span key={person?.id ?? index} className={index ? '-ml-1.5 rounded-full ring-2 ring-white' : 'rounded-full ring-2 ring-white'}>
+        <span key={person?.id ?? index} className={index ? 'tb-face-ring -ml-1.5 rounded-full ring-2 ring-white' : 'tb-face-ring rounded-full ring-2 ring-white'}>
           <Avatar person={person} size={size} />
         </span>
       ))}
       {rest > 0 && (
         <span
-          className="-ml-1.5 inline-grid shrink-0 place-items-center rounded-full bg-slate-300 font-semibold text-slate-600 ring-2 ring-white tabular-nums"
+          className="tb-face-ring -ml-1.5 inline-grid shrink-0 place-items-center rounded-full bg-slate-300 font-semibold text-slate-600 ring-2 ring-white tabular-nums"
           style={{ width: size, height: size, fontSize: Math.max(8.5, Math.round(size * 0.34 * 10) / 10) }}
         >
           +{rest}
@@ -559,6 +490,18 @@ const BoardPager = ({ from, to, total, page, totalPages, isLoading, onPageChange
   );
 };
 
+/* Подпись карточки: ключ задачи проекта и раздел доски («HR-12 · Подбор»). Раздел —
+   только когда доска не сужена до раздела: иначе на каждой карточке стояло бы одно
+   и то же слово. Серым и без рамки — это имя задачи, а не её состояние. */
+const CardSectionContext = React.createContext(true);
+
+const TaskKeyLabel = ({ task, className = '' }) => {
+  const showSection = useContext(CardSectionContext);
+  const parts = [taskKeyOf(task), showSection ? task?.section?.name : ''].filter(Boolean);
+  if (!parts.length) return null;
+  return <span className={className}>{parts.join(' · ')}</span>;
+};
+
 const EmptyState = ({ title, hint }) => (
   <div className="grid place-items-center rounded-2xl border border-dashed border-slate-200 px-6 py-12 text-center">
     <p className="text-[13.5px] font-medium text-slate-600">{title}</p>
@@ -593,10 +536,15 @@ const PlanPopover = ({ task, canPlan, anchorRef, onApply, onClose }) => {
   }, [anchorRef, canPlan]);
 
   useEffect(() => {
+    // Календарь и список времени срока живут порталом в body: щелчок по ним — не
+    // «мимо поповера», а Escape сперва закрывает раскрытую панель пикера.
     const onDocMouseDown = (event) => {
+      if (event.target?.closest?.('[data-picker-panel]')) return;
       if (ref.current && !ref.current.contains(event.target)) onClose();
     };
-    const onKey = (event) => { if (event.key === 'Escape') onClose(); };
+    const onKey = (event) => {
+      if (event.key === 'Escape' && !document.querySelector('[data-picker-panel]')) onClose();
+    };
     document.addEventListener('mousedown', onDocMouseDown);
     document.addEventListener('keydown', onKey);
     return () => {
@@ -646,9 +594,9 @@ const PlanPopover = ({ task, canPlan, anchorRef, onApply, onClose }) => {
             key={preset.minutes}
             type="button"
             onClick={() => setEstimate(String(preset.minutes))}
-            className={`rounded-lg px-2 py-1 text-[11.5px] font-medium transition ${
+            className={`rounded-lg px-2 py-1 text-[11.5px] font-medium transition active:scale-[0.97] ${
               Number(estimate) === preset.minutes
-                ? 'bg-slate-900 text-white'
+                ? 'bg-[#eef4ff] text-[#1d4ed8] ring-1 ring-[#bfd4fb]'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
             }`}
           >
@@ -673,12 +621,7 @@ const PlanPopover = ({ task, canPlan, anchorRef, onApply, onClose }) => {
             <button type="button" onClick={() => quickDue(3)} className="rounded-lg bg-slate-100 px-2 py-1 text-[11.5px] font-medium text-slate-600 transition hover:bg-slate-200">+3 дня</button>
             <button type="button" onClick={() => quickDue(7)} className="rounded-lg bg-slate-100 px-2 py-1 text-[11.5px] font-medium text-slate-600 transition hover:bg-slate-200">+неделя</button>
           </div>
-          <input
-            type="datetime-local"
-            value={due}
-            onChange={(event) => setDue(event.target.value)}
-            className="mt-1.5 w-full rounded-xl bg-slate-100 px-2.5 py-1.5 text-[12.5px] text-slate-900 outline-none transition focus:bg-white focus:ring-2 focus:ring-blue-500/60"
-          />
+          <TaskDateTimeField size="sm" className="mt-1.5" value={due} onChange={setDue} ariaLabel="Дедлайн" />
         </>
       )}
 
@@ -748,6 +691,7 @@ const BacklogRow = ({
       <span className="min-w-0 flex-1">
         <span className="tb-backlog-subject block truncate text-[13.5px] font-medium text-slate-800">{task?.subject}</span>
         <span className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-slate-400">
+          <TaskKeyLabel task={task} className="shrink-0 font-medium tabular-nums after:content-['_·']" />
           <span className="truncate">{TAG_LABEL[task?.tag] || 'Задача'}</span>
           {taskAssignees(task).length > 0 && <span className="truncate">· {taskAssigneesLabel(task)}</span>}
         </span>
@@ -767,6 +711,11 @@ const BacklogRow = ({
           </MetaChip>
         )}
       </span>
+
+      {/* Балл в строке — только цифрой, как на карточке доски: поменять или снять его
+          можно в карточке задачи (владелец 06.11.2026). После меток, перед кнопками —
+          так цифры стоят ровным столбцом во всех строках. */}
+      <PriorityScoreBadge score={priorityScoreOf(task)} />
 
       <span className="relative flex shrink-0 items-center gap-1">
         <button
@@ -801,7 +750,19 @@ const BacklogRow = ({
   );
 };
 
-const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder, onCreate }) => {
+const SCORE_HINT_EDITOR = `Балл ставят суперадмины на совещании: ${PRIORITY_SCORE_HINT} Новые задачи оценивают в колонке «Новая» на доске — с первым баллом задача переходит сюда. Поменять или снять балл — в карточке задачи; без балла задача вернётся в «Новую». Бэклог идёт по баллу, а внутри балла очередь меняют перетаскиванием.`;
+const SCORE_HINT_VIEWER = `Балл ставят суперадмины на совещании: ${PRIORITY_SCORE_HINT} Оценённая задача переходит из «Новой» сюда, а без балла возвращается обратно. Бэклог идёт по баллу.`;
+
+const BacklogView = ({
+  tasks,
+  canPlan,
+  canScore = false,
+  onOpen,
+  onPromote,
+  onApplyPlan,
+  onReorder,
+  onCreate,
+}) => {
   const [draggedId, setDraggedId] = useState(null);
   const [dropIndex, setDropIndex] = useState(null);
 
@@ -813,6 +774,20 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
     () => tasks.filter((task) => !Number(task?.estimate_minutes)).length,
     [tasks]
   );
+  const unscored = useMemo(
+    () => tasks.filter((task) => priorityScoreOf(task) === null).length,
+    [tasks]
+  );
+  // Группы по баллу — только когда баллы уже ставят: один заголовок «Без балла»
+  // над всем списком ничего бы не сообщал.
+  const isScored = unscored < tasks.length;
+  const groups = useMemo(() => (
+    isScored
+      ? groupBacklogByScore(tasks)
+      : [{ score: null, title: '', items: tasks.map((task, index) => ({ task, index })) }]
+  ), [isScored, tasks]);
+  const draggedTask = draggedId === null ? null : tasks.find((task) => task.id === draggedId) || null;
+  const sameScore = (task) => Boolean(draggedTask) && priorityScoreOf(task) === priorityScoreOf(draggedTask);
 
   const handleDragStart = (event, task) => {
     setDraggedId(task.id);
@@ -823,25 +798,34 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
   const handleDragOver = (event, index) => {
     if (draggedId === null) return;
     event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
     const bounds = event.currentTarget.getBoundingClientRect();
     const after = event.clientY > bounds.top + bounds.height / 2;
-    setDropIndex(after ? index + 1 : index);
+    const decision = resolveBacklogDrop(tasks, draggedId, after ? index + 1 : index);
+    // Между баллами не переставляют — порядок там задаёт сам балл: курсор «нельзя»
+    // и без линии вставки.
+    event.dataTransfer.dropEffect = decision.type === 'blocked' ? 'none' : 'move';
+    setDropIndex(decision.type === 'move' ? (after ? index + 1 : index) : null);
   };
 
   const handleDrop = (event) => {
     event.preventDefault();
-    const targetIndex = dropIndex;
-    const dragged = tasks.find((task) => task.id === draggedId);
+    const decision = resolveBacklogDrop(tasks, draggedId, dropIndex);
+    const dragged = draggedTask;
     setDraggedId(null);
     setDropIndex(null);
-    if (!dragged || targetIndex === null) return;
+    if (!dragged || decision.type !== 'move') return;
+    onReorder(dragged, decision.rank, decision.insertAt);
+  };
 
-    const without = tasks.filter((task) => task.id !== dragged.id);
-    const currentIndex = tasks.findIndex((task) => task.id === dragged.id);
-    const insertAt = targetIndex > currentIndex ? targetIndex - 1 : targetIndex;
-    if (insertAt === currentIndex) return;
-    onReorder(dragged, rankForPosition(without, insertAt), insertAt);
+  /* Линия вставки — у соседа из того же балла: на стыке двух баллов она иначе
+     встала бы в чужую группу. */
+  const dropLineOf = (index) => {
+    if (dropIndex === null || !draggedTask) return null;
+    if (index === dropIndex && sameScore(tasks[index])) return 'before';
+    if (index === dropIndex - 1 && sameScore(tasks[index]) && !(tasks[dropIndex] && sameScore(tasks[dropIndex]))) {
+      return 'after';
+    }
+    return null;
   };
 
   const handleDragEnd = () => {
@@ -862,6 +846,13 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
           {unestimated > 0 && (
             <span className="text-[12px] text-slate-400">{unestimated} без оценки</span>
           )}
+          {/* «i» держится за свой счётчик: на узком экране они переносятся вместе. */}
+          {(canScore || isScored) && (
+            <span className="inline-flex items-center gap-1.5 self-center text-[12px] text-slate-400">
+              {canScore && unscored > 0 && <span>{unscored} без балла</span>}
+              <InfoHint side="left" text={canScore ? SCORE_HINT_EDITOR : SCORE_HINT_VIEWER} />
+            </span>
+          )}
         </div>
         <button
           type="button"
@@ -878,28 +869,44 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
           hint="Сюда складывают задачи, которые взяты в план, но ещё не запущены. Исполнитель уведомление не получает, пока карточка не уйдёт на доску."
         />
       ) : (
-        <div
-          className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70"
-          onDragOver={(event) => { if (draggedId !== null) event.preventDefault(); }}
-          onDrop={handleDrop}
-        >
-          {tasks.map((task, index) => (
-            <BacklogRow
-              key={task.id}
-              task={task}
-              index={index}
-              canPlan={canPlan}
-              isDragging={draggedId === task.id}
-              isDropBefore={dropIndex === index && draggedId !== null && draggedId !== task.id}
-              isDropAfter={dropIndex === tasks.length && index === tasks.length - 1 && draggedId !== null && draggedId !== task.id}
-              onOpen={onOpen}
-              onPromote={onPromote}
-              onApplyPlan={onApplyPlan}
-              onDragStart={handleDragStart}
-              onDragOver={handleDragOver}
-              onDrop={handleDrop}
-              onDragEnd={handleDragEnd}
-            />
+        /* Группы по баллу — как разделы списка в iOS: подпись над скруглённой группой. */
+        <div className="space-y-4">
+          {groups.map((group) => (
+            <section key={group.score ?? 'none'}>
+              {group.title && (
+                <h3 className="flex items-center justify-between px-3 pb-1.5 text-[12px] font-semibold text-slate-500">
+                  <span className="inline-flex items-center gap-2">
+                    <PriorityScoreDot score={group.score} />
+                    {group.title}
+                  </span>
+                  <span className="text-[11.5px] font-normal tabular-nums text-slate-400">{group.items.length}</span>
+                </h3>
+              )}
+              <div
+                className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70"
+                onDragOver={(event) => { if (draggedId !== null) event.preventDefault(); }}
+                onDrop={handleDrop}
+              >
+                {group.items.map(({ task, index }) => (
+                  <BacklogRow
+                    key={task.id}
+                    task={task}
+                    index={index}
+                    canPlan={canPlan}
+                    isDragging={draggedId === task.id}
+                    isDropBefore={dropLineOf(index) === 'before'}
+                    isDropAfter={dropLineOf(index) === 'after'}
+                    onOpen={onOpen}
+                    onPromote={onPromote}
+                    onApplyPlan={onApplyPlan}
+                    onDragStart={handleDragStart}
+                    onDragOver={handleDragOver}
+                    onDrop={handleDrop}
+                    onDragEnd={handleDragEnd}
+                  />
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       )}
@@ -908,7 +915,9 @@ const BacklogView = ({ tasks, canPlan, onOpen, onPromote, onApplyPlan, onReorder
         Порядок сверху вниз — это приоритет.
         {/* Перетаскивание здесь мышиное: пальцем карточку не утащить, и на
             телефоне подсказка обещала бы то, чего нет. */}
-        <span className="tb-drag-hint"> Перетащите карточку, чтобы изменить очередь.</span>
+        <span className="tb-drag-hint">
+          {isScored ? ' Перетаскивание меняет очередь внутри балла.' : ' Перетащите карточку, чтобы изменить очередь.'}
+        </span>
       </p>
     </div>
   );
@@ -933,14 +942,18 @@ const COLUMN_BROWSER_OFFSET_LEFT = 'var(--app-sidebar-offset, 0px)';
 const ColumnBrowser = ({
   column,
   scope,
-  departmentId,
+  projectId,
+  sectionId,
   sort,
+  reloadToken = 0,
   loadTasks,
   actionNeedOf,
   canPlan,
+  canScore = false,
   isTaskOpen = false,
   isMobileShell = false,
   onApplyPlan,
+  onSetScore,
   onOpenTask,
   onClose,
 }) => {
@@ -959,8 +972,10 @@ const ColumnBrowser = ({
      (COLUMN_BROWSER_Z < .tv-drawer), поэтому закрывать его не нужно — закрыл
      задачу и остался там же, где смотрел. */
 
-  const loadPage = useCallback(async (offset) => {
-    if (loadingRef.current) return;
+  // force — освежить уже загруженное поверх идущей догрузки: ответ догрузки тогда
+  // отбросится по requestId, а пришедшее заменит список целиком.
+  const loadPage = useCallback(async (offset, { limit = COLUMN_BROWSER_PAGE, force = false } = {}) => {
+    if (loadingRef.current && !force) return;
     loadingRef.current = true;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
@@ -969,11 +984,12 @@ const ColumnBrowser = ({
     try {
       result = await loadTasks({
         scope,
-        departmentId,
+        projectId,
+        sectionId,
         mode: 'board',
         sort,
         column: column.id,
-        limit: COLUMN_BROWSER_PAGE,
+        limit,
         offset,
         withSummary: false,
       });
@@ -992,9 +1008,41 @@ const ColumnBrowser = ({
       ? incoming
       // Страницы могли сдвинуться, пока листали, — склеиваем по id.
       : [...new Map([...prev, ...incoming].map((task) => [task.id, task])).values()]));
-  }, [loadTasks, scope, departmentId, sort, column.id]);
+  }, [loadTasks, scope, projectId, sectionId, sort, column.id]);
 
   useEffect(() => { loadPage(0); }, [loadPage]);
+
+  /* Доска перечитала колонки — правка была здесь же или в карточке задачи, открытой
+     поверх окна. Освежаем ровно то, что уже загружено, одним запросом: список не
+     сбрасывается к первой странице, и прокрутка остаётся на месте. */
+  const seenReloadRef = useRef(reloadToken);
+  const loadedCountRef = useRef(0);
+  loadedCountRef.current = tasks.length;
+  useEffect(() => {
+    if (seenReloadRef.current === reloadToken) return;
+    seenReloadRef.current = reloadToken;
+    loadPage(0, { limit: Math.max(COLUMN_BROWSER_PAGE, loadedCountRef.current), force: true });
+  }, [reloadToken, loadPage]);
+
+  /* Балл на карточке «Новой» уводит её в бэклог — из списка колонки она уходит
+     сразу. Сервер отказал — возвращаем её на прежнее место здесь же: перечитка
+     в это время могла упереться в идущую догрузку. */
+  const handleSetScore = useCallback(async (task, score) => {
+    if (!scoreMovesToBacklog(task, score)) {
+      onSetScore?.(task, score);
+      return;
+    }
+    const position = tasks.findIndex((item) => item.id === task.id);
+    setTasks((prev) => prev.filter((item) => item.id !== task.id));
+    setTotal((prev) => Math.max(0, prev - 1));
+    const ok = await onSetScore?.(task, score);
+    if (ok === false) {
+      setTasks((prev) => (prev.some((item) => item.id === task.id)
+        ? prev
+        : [...prev.slice(0, Math.max(0, position)), task, ...prev.slice(Math.max(0, position))]));
+      setTotal((prev) => prev + 1);
+    }
+  }, [onSetScore, tasks]);
 
   // Догрузка по прокрутке: следим за маячком в конце списка, а не за скроллом
   // конкретного контейнера — окно рисуется в общей полноэкранной обёртке.
@@ -1043,9 +1091,11 @@ const ColumnBrowser = ({
                   <BoardCard
                     task={task}
                     canPlan={canPlan}
+                    canScore={canScore}
                     actionNeedOf={actionNeedOf}
                     onOpen={onOpenTask}
                     onApplyPlan={onApplyPlan}
+                    onSetScore={handleSetScore}
                   />
                 </div>
               ))}
@@ -1083,12 +1133,14 @@ const ColumnBrowser = ({
 const BoardCard = ({
   task,
   canPlan,
+  canScore = false,
   focusPersonId = 0,
   isFocused = false,
   isDragging,
   actionNeedOf,
   onOpen,
   onApplyPlan,
+  onSetScore,
   onDragStart,
   onDragEnd,
 }) => {
@@ -1122,7 +1174,9 @@ const BoardCard = ({
       } ${isFocused ? 'tb-card-focus' : ''}`}
     >
       <div className="tb-card-head flex items-start gap-1.5">
-        <span className="mt-[6px]"><PriorityDot priority={task?.priority} /></span>
+        {/* flex: без строки текста вокруг точки — иначе она садится на базовую линию
+            строки в 24 px и съезжает на полстроки ниже первой строки темы. */}
+        <span className="mt-[6px] flex shrink-0"><PriorityDot priority={task?.priority} /></span>
         <p className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-slate-800 line-clamp-2">
           {task?.subject}
         </p>
@@ -1140,6 +1194,8 @@ const BoardCard = ({
       <div className="mt-2 flex items-center gap-1.5">
         <CardFaces task={task} focusPersonId={focusPersonId} />
         <span className="flex flex-1 flex-wrap items-center gap-1">
+          {/* Ключ задачи проекта (HR-125): по нему задачу называют в переписке. */}
+          <TaskKeyLabel task={task} className="tb-task-key text-[11px] font-medium tabular-nums text-slate-400" />
           {task?.due_at && (
             <MetaChip tone={tone} title={`Дедлайн: ${formatDateTimeLabel(task.due_at)}`}>
               <FlagIcon />
@@ -1163,11 +1219,8 @@ const BoardCard = ({
             </span>
           )}
         </span>
-        {task?.status === 'returned' && (
-          <span className="rounded-md bg-rose-50 px-1.5 py-[2px] text-[10.5px] font-semibold text-rose-600">
-            Возврат
-          </span>
-        )}
+        {/* Метки «Возврат» нет: возвращённая задача и так стоит в колонке
+            «Возвращено на доработку» — второй раз то же самое не пишем. */}
         {/* По задаче задали вопрос и ждут ответа — до него работа не двигается.
             Фиолетовый — цвет причины «Просят информацию» в «Ждут вас», а не ещё
             один статус: амбер уже занят колонкой «В работе» и срочностью. */}
@@ -1180,7 +1233,23 @@ const BoardCard = ({
           </span>
         )}
         {actionNeed && !actionNeed.seen && <ActionAtMarker kind={actionNeed.kind} />}
+        {/* Балл с совещания остаётся при задаче и после бэклога — цифрой в правом нижнем
+            углу, без слова «Балл» и без нажатия (владелец 06.11.2026). */}
+        <PriorityScoreBadge score={priorityScoreOf(task)} className="ml-auto self-end" />
       </div>
+
+      {/* Совещание суперадминов разбирает «Новую»: балл ставят прямо на карточке,
+          и с первым баллом она уходит в бэклог — в очередь уже оценённых. */}
+      {canScore && typeof onSetScore === 'function' && awaitsPriorityScore(task) && (
+        <div className="tb-card-score mt-2 flex items-center justify-between gap-2 border-t border-slate-100 pt-2">
+          <span className="text-[11px] font-medium text-slate-400">Балл</span>
+          <PriorityScoreControl
+            value={null}
+            titleSuffix=" — задача уйдёт в бэклог"
+            onChange={(score) => onSetScore(task, score)}
+          />
+        </div>
+      )}
 
       {planOpen && (
         <PlanPopover
@@ -1198,6 +1267,7 @@ const BoardCard = ({
 const BoardView = ({
   tasksByColumn,
   canPlan,
+  canScore = false,
   focusPersonId = 0,
   focusTaskId = 0,
   actionNeedOf,
@@ -1207,22 +1277,29 @@ const BoardView = ({
   onWipLimitChange,
   onOpen,
   onApplyPlan,
+  onSetScore,
   onDrop,
   isMobileShell = false,
 }) => {
   const [dragged, setDragged] = useState(null);
   const [hoverColumn, setHoverColumn] = useState(null);
 
+  // Временная колонка возврата стоит на доске, только пока в ней есть задачи.
+  const columns = useMemo(() => visibleBoardColumns((columnId) => Math.max(
+    Number(columnMeta[columnId]?.total || 0),
+    (tasksByColumn[columnId] || []).length,
+  )), [columnMeta, tasksByColumn]);
+
   const allowedColumns = useMemo(() => {
     if (!dragged) return null;
     const allowed = new Set();
-    BOARD_COLUMNS.forEach((column) => {
+    columns.forEach((column) => {
       if (dragged.resolve(column.id).type === 'board' || dragged.resolve(column.id).type === 'status') {
         allowed.add(column.id);
       }
     });
     return allowed;
-  }, [dragged]);
+  }, [dragged, columns]);
 
   const handleDragStart = (event, task, resolve) => {
     setDragged({ task, resolve });
@@ -1238,7 +1315,7 @@ const BoardView = ({
   const inProgressCount = Number(columnMeta.progress?.total ?? (tasksByColumn.progress?.length || 0));
   const wipExceeded = Number(wipLimit) > 0 && inProgressCount > Number(wipLimit);
 
-  /* Телефон: одна колонка во всю ширину и переключатель над ней. Пять колонок
+  /* Телефон: одна колонка во всю ширину и переключатель над ней. Колонки
      по 268 px на экране в 390 px — это полторы видимых колонки и лента вбок, в
      которой не видно, что лежит в соседних. Перетаскивать пальцем между
      колонками нельзя вовсе (drag and drop браузера — мышиный), поэтому статус
@@ -1246,19 +1323,25 @@ const BoardView = ({
      первую непустую из рабочих. */
   const [mobileColumnId, setMobileColumnId] = useState(null);
   const defaultMobileColumnId = useMemo(() => {
-    const busy = BOARD_COLUMNS.find((column) => column.id !== 'backlog'
+    const busy = columns.find((column) => column.id !== 'backlog'
       && Number(columnMeta[column.id]?.total || (tasksByColumn[column.id] || []).length) > 0);
     return busy?.id || 'todo';
-  }, [columnMeta, tasksByColumn]);
+  }, [columns, columnMeta, tasksByColumn]);
   const activeMobileColumnId = mobileColumnId || defaultMobileColumnId;
 
   // Переход из уведомления: карточка могла лежать в другой колонке — открываем её.
   useEffect(() => {
     if (!isMobileShell || !focusTaskId) return;
-    const holder = BOARD_COLUMNS.find((column) => (tasksByColumn[column.id] || [])
+    const holder = columns.find((column) => (tasksByColumn[column.id] || [])
       .some((entry) => entry.task.id === focusTaskId));
     if (holder) setMobileColumnId(holder.id);
-  }, [isMobileShell, focusTaskId, tasksByColumn]);
+  }, [isMobileShell, focusTaskId, columns, tasksByColumn]);
+
+  // Опустевшая временная колонка уходит с доски — снимаем с неё выбор, иначе экран
+  // сам перескочил бы на неё, как только появится следующий возврат.
+  useEffect(() => {
+    if (mobileColumnId && !columns.some((column) => column.id === mobileColumnId)) setMobileColumnId(null);
+  }, [columns, mobileColumnId]);
 
   const renderColumn = (column, single = false) => {
     const items = tasksByColumn[column.id] || [];
@@ -1295,7 +1378,8 @@ const BoardView = ({
             а лимит WIP кнопками в 20 px пальцем не настроить. */}
         {!single && (
           <header className="flex items-center justify-between gap-2 px-1.5 pb-2 pt-1">
-            <span className="flex items-baseline gap-1.5">
+            <span className="flex items-center gap-1.5">
+              <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[column.id] || 'bg-slate-300'}`} />
               <span className="text-[12.5px] font-semibold text-slate-700">{column.title}</span>
               <span
                 className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}
@@ -1343,12 +1427,14 @@ const BoardView = ({
                 key={entry.task.id}
                 task={entry.task}
                 canPlan={canPlan}
+                canScore={canScore}
                 focusPersonId={focusPersonId}
                 isFocused={focusTaskId === entry.task.id}
                 actionNeedOf={actionNeedOf}
                 isDragging={dragged?.task?.id === entry.task.id}
                 onOpen={onOpen}
                 onApplyPlan={onApplyPlan}
+                onSetScore={onSetScore}
                 onDragStart={entry.task?.viewer_is_observer ? undefined : (event, task) => handleDragStart(event, task, entry.resolve)}
                 onDragEnd={handleDragEnd}
               />
@@ -1370,11 +1456,14 @@ const BoardView = ({
   };
 
   if (isMobileShell) {
-    const activeColumn = BOARD_COLUMNS.find((column) => column.id === activeMobileColumnId) || BOARD_COLUMNS[0];
+    // Выбранная колонка могла исчезнуть (временная опустела) — тогда та, что по умолчанию.
+    const activeColumn = columns.find((column) => column.id === activeMobileColumnId)
+      || columns.find((column) => column.id === defaultMobileColumnId)
+      || columns[0];
     return (
       <div className="space-y-2.5">
         <div className="tb-column-switch" role="tablist" aria-label="Колонки доски">
-          {BOARD_COLUMNS.map((column) => {
+          {columns.map((column) => {
             const active = column.id === activeColumn.id;
             const count = Number(columnMeta[column.id]?.total || (tasksByColumn[column.id] || []).length);
             return (
@@ -1386,6 +1475,7 @@ const BoardView = ({
                 onClick={() => setMobileColumnId(column.id)}
                 className={`tb-column-tab ${active ? 'is-active' : ''}`}
               >
+                <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[column.id] || 'bg-slate-300'}`} />
                 {column.title}
                 {count > 0 && <span className="tb-column-tab-count">{count}</span>}
               </button>
@@ -1400,7 +1490,7 @@ const BoardView = ({
   return (
     <div className="-mx-1 overflow-x-auto px-1 pb-1">
       <div className="flex min-w-max gap-2.5">
-        {BOARD_COLUMNS.map((column) => renderColumn(column))}
+        {columns.map((column) => renderColumn(column))}
       </div>
     </div>
   );
@@ -1650,7 +1740,7 @@ const TimelineView = ({ tasks, onOpen }) => {
                     {actual && (
                       <span
                         className={`absolute top-[21px] h-[8px] rounded-full ${
-                          isDone ? 'bg-emerald-400' : overdue ? 'bg-rose-400' : 'bg-slate-700'
+                          isDone ? 'bg-emerald-400' : overdue ? 'bg-rose-400' : 'bg-blue-500'
                         }`}
                         style={actual}
                         title={`Факт: ${formatDateTimeLabel(span.actualStart)} → ${
@@ -1680,7 +1770,7 @@ const TimelineView = ({ tasks, onOpen }) => {
 
       <div className="flex flex-wrap items-center gap-4 px-1 text-[11.5px] text-slate-400">
         <span className="flex items-center gap-1.5"><span className="h-[6px] w-6 rounded-full bg-slate-200" /> план</span>
-        <span className="flex items-center gap-1.5"><span className="h-[8px] w-6 rounded-full bg-slate-700" /> факт</span>
+        <span className="flex items-center gap-1.5"><span className="h-[8px] w-6 rounded-full bg-blue-500" /> факт</span>
         <span className="flex items-center gap-1.5"><span className="h-[8px] w-6 rounded-full bg-rose-400" /> просрочка</span>
         <span className="flex items-center gap-1.5"><span className="h-[8px] w-6 rounded-full bg-emerald-400" /> принято</span>
       </div>
@@ -1714,8 +1804,9 @@ const TimelineView = ({ tasks, onOpen }) => {
 const WIP_STORAGE_KEY = 'otp.tasks.board.wipLimit';
 const CHUNK_STORAGE_KEY = 'otp.tasks.board.chunkSize';
 
+// fetched — ответ по колонке уже был после сброса (см. transientColumnsKnown).
 const emptyColumnState = () => Object.fromEntries(
-  BOARD_COLUMNS.map((column) => [column.id, { tasks: [], total: 0, loading: true }])
+  BOARD_COLUMNS.map((column) => [column.id, { tasks: [], total: 0, loading: true, fetched: false }])
 );
 
 const TaskBoardWorkspace = ({
@@ -1723,13 +1814,16 @@ const TaskBoardWorkspace = ({
   people = [],
   /* Отдел выбран на уровне раздела и уходит в каждый запрос доски: колонки,
      страницу, окно статуса и выгрузку. */
-  departmentId = null,
+  projectId = null,
+  sectionId = null,
   loadTasks,
   reloadToken = 0,
   taskPatches = null,
   currentUserId,
   isAdmin,
   isSupervisor,
+  // Балл приоритета (1–5) ставят только суперадмины; сервер держит то же правило.
+  canScore = false,
   focusRequest = null,
   actionNeedOf,
   isTaskOpen = false,
@@ -1782,7 +1876,8 @@ const TaskBoardWorkspace = ({
     try {
       result = await loadTasks({
         scope,
-        departmentId,
+        projectId,
+        sectionId,
         mode: 'board',
         sort: boardSort,
         column: columnId,
@@ -1808,12 +1903,13 @@ const TaskBoardWorkspace = ({
         tasks: Array.isArray(result.tasks) ? result.tasks : [],
         total: Number(result.total || 0),
         loading: false,
+        fetched: true,
       },
     }));
     if (columnId === BOARD_COLUMNS[0].id) setBoardSummary(result.summary || null);
-  }, [loadTasks, scope, departmentId, boardSort]);
+  }, [loadTasks, scope, projectId, sectionId, boardSort]);
 
-  const boardReloadKey = `${scope}|${departmentId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
+  const boardReloadKey = `${scope}|${projectId}|${sectionId}|${boardSort}|${reloadToken}|${chunkSize}|${columnsResetToken}`;
   useEffect(() => {
     if (!isBoardMode) return;
     // В колонке всегда ровно одна порция: остальное смотрят в окне статуса.
@@ -1837,7 +1933,7 @@ const TaskBoardWorkspace = ({
     pageRequestIdRef.current = requestId;
     let cancelled = false;
     setIsPageLoading(true);
-    loadTasks({ scope, departmentId, mode, sort: boardSort, limit: chunkSize, offset: (page - 1) * chunkSize })
+    loadTasks({ scope, projectId, sectionId, mode, sort: boardSort, limit: chunkSize, offset: (page - 1) * chunkSize })
       .then((result) => {
         if (cancelled || pageRequestIdRef.current !== requestId) return;
         setPageTasks(Array.isArray(result?.tasks) ? result.tasks : []);
@@ -1848,7 +1944,7 @@ const TaskBoardWorkspace = ({
         if (!cancelled && pageRequestIdRef.current === requestId) setIsPageLoading(false);
       });
     return () => { cancelled = true; };
-  }, [isBoardMode, loadTasks, scope, departmentId, mode, boardSort, page, chunkSize, reloadToken]);
+  }, [isBoardMode, loadTasks, scope, projectId, sectionId, mode, boardSort, page, chunkSize, reloadToken]);
 
   // Смена вкладки (бэклог/доска/таймлайн) меняет выборку — начинаем сначала.
   // На первом рендере не сбрасываем: колонки и так грузятся с нуля.
@@ -1860,15 +1956,16 @@ const TaskBoardWorkspace = ({
     resetColumns();
   }, [mode, resetColumns]);
 
-  /* Смена отдела меняет всю выборку. Колонки перезагрузятся сами (отдел входит в
-     boardReloadKey), а вот страницу надо вернуть в начало: третья страница
-     прежнего отдела в новом почти наверняка за концом списка. */
-  const previousDepartmentRef = useRef(departmentId);
+  /* Смена доски проекта или её раздела меняет всю выборку. Колонки перезагрузятся
+     сами (оба входят в boardReloadKey), а вот страницу надо вернуть в начало:
+     третья страница прежней доски в новой почти наверняка за концом списка. */
+  const boardFilterKey = `${projectId}|${sectionId}`;
+  const previousProjectRef = useRef(boardFilterKey);
   useEffect(() => {
-    if (previousDepartmentRef.current === departmentId) return;
-    previousDepartmentRef.current = departmentId;
+    if (previousProjectRef.current === boardFilterKey) return;
+    previousProjectRef.current = boardFilterKey;
     setPage(1);
-  }, [departmentId]);
+  }, [boardFilterKey]);
 
   // Повторный выбор того же значения — не работа: ничего не сбрасываем и не грузим.
   const changeScope = useCallback((next) => {
@@ -1928,6 +2025,7 @@ const TaskBoardWorkspace = ({
     () => BOARD_COLUMNS.some((column) => columnState[column.id]?.loading),
     [columnState]
   );
+  const isTransientKnown = useMemo(() => transientColumnsKnown(columnState), [columnState]);
 
   // Оптимистичные правки живут ровно до тех пор, пока сервер не подтвердит те же значения.
   useEffect(() => {
@@ -1944,7 +2042,9 @@ const TaskBoardWorkspace = ({
       });
       return Object.keys(next).length === keys.length ? prev : next;
     });
-  }, [boardRows]);
+    // И после сверки с ответом сервера: колонки могли перечитаться раньше ответа, и
+    // тогда правка, уже совпавшая со строкой, висела бы и прятала её следующие перемены.
+  }, [boardRows, overrides]);
 
   const handleWipLimitChange = useCallback((value) => {
     const normalized = Math.max(0, Math.min(99, Number(value) || 0));
@@ -2011,7 +2111,8 @@ const TaskBoardWorkspace = ({
     const accepted = Number(boardSummary.accepted || 0);
     return {
       open: Math.max(0, total - accepted),
-      inProgress: Number(boardSummary.in_progress || 0) + Number(boardSummary.returned || 0),
+      // Возвращённые стоят своей колонкой — «В работе» в шапке совпадает с колонкой.
+      inProgress: Number(boardSummary.in_progress || 0),
       overdue: Number(boardSummary.overdue || 0),
       delegated: Number(boardSummary.delegated || 0),
     };
@@ -2027,15 +2128,9 @@ const TaskBoardWorkspace = ({
     [isAdmin, currentUserId]
   );
 
+  // Тот же порядок, что отдаёт сервер: балл, затем ручная очередь.
   const backlogTasks = useMemo(
-    () => scopedTasks
-      .filter((task) => task?.is_backlog)
-      .sort((a, b) => {
-        const aRank = Number.isFinite(a?.backlog_rank) ? a.backlog_rank : Number.POSITIVE_INFINITY;
-        const bRank = Number.isFinite(b?.backlog_rank) ? b.backlog_rank : Number.POSITIVE_INFINITY;
-        if (aRank !== bRank) return aRank - bRank;
-        return new Date(b?.created_at || 0) - new Date(a?.created_at || 0);
-      }),
+    () => scopedTasks.filter((task) => task?.is_backlog).sort(compareBacklogTasks),
     [scopedTasks]
   );
 
@@ -2049,7 +2144,11 @@ const TaskBoardWorkspace = ({
       buckets[columnId].push({ task, resolve: (toColumn) => resolveBoardDrop(task, toColumn, dropContext) });
     });
     const compareEntries = (left, right) => compareBoardTasks(left.task, right.task, boardSort);
-    BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(compareEntries));
+    // Бэклог — очередь, а не список: балл (1 — сверху), затем ручной порядок — как его
+    // отдаёт сервер и как во вкладке «Бэклог». Иначе только что оценённая «баллом 1»
+    // встала бы под «балл 3» по свежести. Сортировка доски переставляет остальные колонки.
+    const compareQueue = (left, right) => compareBacklogTasks(left.task, right.task);
+    BOARD_COLUMNS.forEach((column) => buckets[column.id].sort(column.id === 'backlog' ? compareQueue : compareEntries));
     return buckets;
   }, [scopedTasks, dropContext, boardSort]);
 
@@ -2078,16 +2177,25 @@ const TaskBoardWorkspace = ({
   }, [focusTaskId]);
 
   const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
-    if (!patch || !Object.keys(patch).length) return;
+    if (!patch || !Object.keys(patch).length) return false;
     if (optimistic) setOverrides((prev) => ({ ...prev, [task.id]: { ...(prev[task.id] || {}), ...optimistic } }));
-    const ok = await onBoardUpdate([{ task_id: task.id, ...patch }]);
-    if (!ok && optimistic) {
-      setOverrides((prev) => {
-        const next = { ...prev };
-        delete next[task.id];
-        return next;
-      });
+    const result = await onBoardUpdate([{ task_id: task.id, ...patch }]);
+    if (!result) {
+      if (optimistic) {
+        setOverrides((prev) => {
+          const next = { ...prev };
+          delete next[task.id];
+          return next;
+        });
+      }
+      return false;
     }
+    // Правку держим по ответу сервера, а не по догадке: см. overrideFromServer.
+    const item = Array.isArray(result) ? result.find((entry) => Number(entry?.task_id) === Number(task.id)) : null;
+    if (optimistic && item) {
+      setOverrides((prev) => (prev[task.id] ? { ...prev, [task.id]: overrideFromServer(prev[task.id], item) } : prev));
+    }
+    return true;
   }, [onBoardUpdate]);
 
   const handleDrop = useCallback((task, toColumn) => {
@@ -2108,6 +2216,17 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, { backlog_rank: rank }, { backlog_rank: rank });
   }, [applyBoardPatch]);
 
+  // Балл — число или null, сервер вернёт ровно его: правку видно сразу, без ожидания.
+  // Первый балл уводит задачу из «Новой» в бэклог, снятый — обратно; карточка
+  // переезжает сразу, по тому же правилу, что у сервера (update_task_board_state).
+  const handleSetScore = useCallback((task, score) => {
+    const move = scoreBoardMove(task, score);
+    const optimistic = move
+      ? { priority_score: score, is_backlog: move === 'backlog' }
+      : { priority_score: score };
+    return applyBoardPatch(task, { priority_score: score }, optimistic);
+  }, [applyBoardPatch]);
+
   const handlePromote = useCallback((task) => {
     handleDrop(task, 'todo');
   }, [handleDrop]);
@@ -2119,20 +2238,23 @@ const TaskBoardWorkspace = ({
     applyBoardPatch(task, patch);
   }, [applyBoardPatch]);
 
-  // Выгружаем ровно тот охват, что выбран рядом в «Мои/На мне/Все» и в отделе
+  // Выгружаем ровно тот охват, что выбран рядом в «Мои/На мне/Все» и в проекте
   // раздела: файл собирает сервер по всем колонкам сразу, поэтому вкладка на
   // состав не влияет.
   const handleExport = useCallback(async () => {
     if (typeof onExport !== 'function' || isExporting) return;
     setIsExporting(true);
     try {
-      await onExport({ scope, departmentId });
+      await onExport({ scope, projectId, sectionId });
     } finally {
       setIsExporting(false);
     }
-  }, [onExport, isExporting, scope, departmentId]);
+  }, [onExport, isExporting, scope, projectId, sectionId]);
 
-  if (isBoardMode ? (isColumnsLoading && !boardRows.length) : (isPageLoading && !pageTasks.length)) {
+  /* Доска после полной загрузки ждёт и первую непустую колонку, и ответ по
+     временной: без него колонка возврата вставала бы позже и сдвигала соседей.
+     Перезагрузка после действия скелетон не показывает — fetched у колонок остаётся. */
+  if (isBoardMode ? (isColumnsLoading && (!boardRows.length || !isTransientKnown)) : (isPageLoading && !pageTasks.length)) {
     return (
       <div className="space-y-2">
         {[0, 1, 2].map((index) => (
@@ -2154,6 +2276,7 @@ const TaskBoardWorkspace = ({
   const totalPages = Math.max(1, Math.ceil(pageTotal / chunkSize));
 
   return (
+    <CardSectionContext.Provider value={!sectionId || sectionId === 'all'}>
     <div className="tb-scope space-y-3" style={{ fontFamily: APPLE_FONT }}>
       <div className="tb-toolbar flex flex-wrap items-center justify-between gap-2">
         <div className="tb-toolbar-main flex flex-1 flex-wrap items-center gap-2">
@@ -2220,6 +2343,7 @@ const TaskBoardWorkspace = ({
         <BacklogView
           tasks={backlogTasks}
           canPlan={canPlan}
+          canScore={canScore}
           onOpen={onOpenTask}
           onPromote={handlePromote}
           onApplyPlan={handleApplyPlan}
@@ -2232,6 +2356,7 @@ const TaskBoardWorkspace = ({
         <BoardView
           tasksByColumn={tasksByColumn}
           canPlan={canPlan}
+          canScore={canScore}
           focusPersonId={focusPersonId}
           focusTaskId={focusTaskId}
           actionNeedOf={actionNeedOf}
@@ -2242,6 +2367,7 @@ const TaskBoardWorkspace = ({
           isMobileShell={isMobileShell}
           onOpen={onOpenTask}
           onApplyPlan={handleApplyPlan}
+          onSetScore={handleSetScore}
           onDrop={handleDrop}
         />
       )}
@@ -2254,14 +2380,18 @@ const TaskBoardWorkspace = ({
         <ColumnBrowser
           column={browsedColumn}
           scope={scope}
-          departmentId={departmentId}
+          projectId={projectId}
+          sectionId={sectionId}
           sort={boardSort}
+          reloadToken={reloadToken}
           loadTasks={loadTasks}
           actionNeedOf={actionNeedOf}
           canPlan={canPlan}
+          canScore={canScore}
           isTaskOpen={isTaskOpen}
           isMobileShell={isMobileShell}
           onApplyPlan={handleApplyPlan}
+          onSetScore={handleSetScore}
           onOpenTask={onOpenTask}
           onClose={() => setBrowsedColumn(null)}
         />
@@ -2279,6 +2409,7 @@ const TaskBoardWorkspace = ({
         />
       )}
     </div>
+    </CardSectionContext.Provider>
   );
 };
 

@@ -21,6 +21,7 @@ import {
   Pin,
   PinOff,
   RefreshCw,
+  Settings,
   SlidersHorizontal,
   StickyNote,
 } from 'lucide-react';
@@ -33,7 +34,11 @@ import FullscreenSheet from '../common/FullscreenSheet';
 import MobileActionSheet from '../common/MobileActionSheet';
 import useOverlayDismiss from '../common/useOverlayDismiss';
 import CustomSelect from '../ui/CustomSelect';
+import InfoHint from '../common/InfoHint';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
+import PriorityScoreControl, { PriorityScoreDot } from './PriorityScoreControl';
+import TaskDateTimeField from './TaskDateTimeField';
+import { PRIORITY_SCORE_HINT, awaitsPriorityScore, priorityScoreOf, priorityScoreTitle, scoreBoardMove, unscoreMovesToNew } from './backlogOrder';
 import { BriefIssueNav, ProductionBriefFields, ProductionBriefView, useBriefIssueNav } from './ProductionBriefUi';
 import {
   PRODUCTION_TAG,
@@ -57,13 +62,30 @@ import {
 } from './taskAssignees';
 import { stripTechnicalQueryParams } from '../../utils/urlHygiene';
 import {
-  TASK_DEPARTMENT_ALL,
-  buildDepartmentOptions,
-  departmentQueryParams,
-  departmentStorageKey,
-  mergeSelectedDepartment,
-  resolveInitialDepartment,
-} from './departmentFilter';
+  TASK_PROJECT_ALL,
+  TASK_SECTION_ALL,
+  buildProjectOptions,
+  buildSectionOptions,
+  composerProjectStorageKey,
+  creatableProjects,
+  findProject,
+  hasProjectBoards,
+  keepWatchersForProject,
+  mergeSelectedProject,
+  normalizeTaskKey,
+  projectLabel,
+  projectQueryParams,
+  projectStorageKey,
+  resolveComposerProject,
+  resolveInitialProject,
+  resolveSectionFilter,
+  sectionQueryParams,
+  sectionsOf,
+  taskKeyOf,
+  watcherCandidates,
+} from './taskProjects';
+import TaskProjectsSheet from './TaskProjectsSheet';
+import TaskWatchersSheet from './TaskWatchersSheet';
 import {
   ACTION_NEED_META,
   actionNeedSeenKey,
@@ -76,16 +98,17 @@ import {
 import { IosLightbox } from '../ui/ios';
 import { isPreviewablePhoto, splitTaskFiles } from './taskPhotos';
 import useTaskPhotoPreviews from './useTaskPhotoPreviews';
-import { ensureSectionFonts } from '../common/sectionFonts';
 
-/* ─── Google Fonts ─── (общие с «Курсами», см. common/sectionFonts.js) */
-ensureSectionFonts();
+/* Шрифты Google разделу больше не нужны: он набран системным шрифтом Apple, как
+   весь сайт. Syne и DM Sans подключают только «Курсы» (common/sectionFonts.js). */
 
 /* ─── Styles ─── */
 const styleTag = document.createElement('style');
 styleTag.textContent = `
-  .tv-root * { font-family: 'DM Sans', sans-serif; box-sizing: border-box; }
-  .tv-root h1, .tv-root h2, .tv-root h3, .tv-root .heading { font-family: 'Syne', sans-serif; }
+  /* Раздел живёт в дизайн-системе сайта: системный шрифт Apple (SF Pro), серое
+     полотно macOS, синяя главная кнопка, цвет — только там, где он что-то значит. */
+  .tv-root * { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; box-sizing: border-box; }
+  .tv-root h1, .tv-root h2, .tv-root h3, .tv-root .heading { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif; }
 
   /* Бэклог/доска/таймлайн живут в дизайн-системе сайта (SF Pro), а не в editorial-типографике раздела. */
   .tv-root .tb-scope, .tv-root .tb-scope * {
@@ -93,16 +116,22 @@ styleTag.textContent = `
   }
 
   .tv-root {
-    --bg: #f4f3f0;
+    --bg: #f5f5f7;
     --surface: #ffffff;
-    --surface-2: #fafaf8;
-    --border: #e8e5df;
-    --border-strong: #ccc9c0;
-    --ink: #1a1916;
-    --ink-2: #5c5852;
-    --ink-3: #9e9a93;
-    --accent: #1a1916;
+    --surface-2: #f8fafc;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --ink: #0f172a;
+    --ink-2: #475569;
+    --ink-3: #94a3b8;
+    --accent: #2563eb;
     --accent-fg: #ffffff;
+    /* Выбор — мягкий голубой, как везде на сайте; серая заливка — вторичные кнопки и капсулы. */
+    --select-bg: #eef4ff;
+    --select-border: #bfd4fb;
+    --select-ink: #1d4ed8;
+    --fill: #f1f5f9;
+    --fill-strong: #e2e8f0;
     --amber: #d97706;
     --indigo: #4338ca;
     --emerald: #059669;
@@ -111,16 +140,14 @@ styleTag.textContent = `
     --shadow-sm: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
     --shadow-md: 0 4px 16px rgba(0,0,0,.08), 0 2px 6px rgba(0,0,0,.05);
     --shadow-lg: 0 20px 60px rgba(0,0,0,.14), 0 8px 24px rgba(0,0,0,.08);
-    --radius: 14px;
-    --radius-sm: 9px;
+    --radius: 16px;
+    --radius-sm: 12px;
     --radius-xs: 6px;
     background: var(--bg);
     min-height: 100vh;
     padding: 28px 24px;
   }
-  /* На вкладках доски раздел переходит на нейтральную macOS-подложку. */
-  .tv-root.is-board-mode { background: #f5f5f7; }
-  .tv-root.is-board-mode .tv-workspace-tabs { background: #e8e8ed; }
+  /* Полотно раздела — нейтральная подложка macOS на всех вкладках, и на доске тоже. */
 
   /* ── Top bar ── */
   .tv-topbar {
@@ -132,22 +159,32 @@ styleTag.textContent = `
     flex-wrap: wrap;
   }
   .tv-topbar-title {
-    font-family: 'Syne', sans-serif;
-    font-size: 22px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+    font-size: 24px;
     font-weight: 700;
+    letter-spacing: -0.02em;
     color: var(--ink);
     margin: 0;
   }
   .tv-topbar-lead { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .tv-topbar-actions { display: flex; align-items: center; gap: 8px; }
 
-  /* Переключатель отделов — элемент дизайн-системы сайта, а не editorial-шрифт раздела.
-     Ширина под самое длинное название («СЗоВ — Служба заботы о водителях»): текущий
-     охват раздела нельзя показывать многоточием. */
-  .tv-dept-select { width: 264px; }
-  .tv-dept-select, .tv-dept-select * {
+  /* Переключатель проектов — элемент дизайн-системы сайта, а не editorial-шрифт раздела.
+     Ширина под самое длинное название («SZOV · СЗоВ — служба заботы о водителях»):
+     текущий охват раздела нельзя показывать многоточием. */
+  .tv-project-select { width: 312px; }
+  /* Фильтр разделов открытой доски — уже переключателя: названия разделов короткие. */
+  .tv-section-select { width: 220px; }
+  .tv-project-select, .tv-project-select *, .tv-section-select, .tv-section-select * {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
   }
+  /* Ключ задачи проекта (HR-125): имя задачи, а не её состояние — серым, без рамки. */
+  .tv-task-key {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 11.5px; font-weight: 600; color: var(--ink-3, #94a3b8);
+    font-variant-numeric: tabular-nums; letter-spacing: 0.01em; white-space: nowrap;
+  }
+  .tv-drawer-key { display: block; margin-bottom: 2px; }
 
   /* ── Уведомления «задача ждёт вас» ── */
   .tv-inbox { position: relative; display: inline-flex; }
@@ -229,7 +266,7 @@ styleTag.textContent = `
     font-size: 12px; font-weight: 500; color: var(--ink-3);
     transition: all .13s ease;
   }
-  .tv-inbox-mark-all:hover { color: var(--ink); background: #ecebe7; }
+  .tv-inbox-mark-all:hover { color: var(--ink); background: #e8e8ed; }
   .tv-inbox-empty {
     padding: 26px 18px 30px;
     text-align: center;
@@ -277,7 +314,7 @@ styleTag.textContent = `
     padding: 3px;
     margin-bottom: 22px;
     border-radius: 11px;
-    background: #ecebe7;
+    background: #e8e8ed;
   }
   .tv-workspace-tab {
     display: inline-flex;
@@ -334,7 +371,7 @@ styleTag.textContent = `
   .tv-report-card.is-final .tv-report-kind { color: var(--indigo); }
   .tv-report-spent {
     padding: 1px 7px; border-radius: 99px;
-    background: #ecebe7; color: var(--ink-2); font-weight: 500;
+    background: #e8e8ed; color: var(--ink-2); font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
   .tv-report-actions { display: flex; gap: 8px; margin-left: auto; }
@@ -424,7 +461,7 @@ styleTag.textContent = `
   .tv-composer-title {
     width: 100%; border: 0; background: none; outline: none;
     padding: 0 2px; font-size: 19px; font-weight: 600;
-    color: var(--ink); font-family: 'Syne', sans-serif;
+    color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   }
   .tv-composer-title::placeholder { color: var(--ink-3); font-weight: 500; }
   .tv-composer-description {
@@ -443,6 +480,16 @@ styleTag.textContent = `
     white-space: nowrap;
   }
   .tv-composer-assignee .tv-select, .tv-composer-assignee .tv-person-select { flex: 1; }
+  /* Подписи «Проект» и «Исполнитель» одной ширины — поля под ними встают в колонку. */
+  .tv-composer-assignee > label { min-width: 74px; }
+  /* Строка проекта стоит над исполнителем: разделитель у неё, а не дважды подряд. */
+  .tv-composer-project + .tv-composer-assignee { margin-top: 10px; padding-top: 0; border-top: 0; }
+  .tv-composer-project-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .tv-composer-project-body .tv-person-select { width: 100%; }
+  .tv-composer-project.is-invalid .tv-person-select > button:not([aria-expanded="true"]) {
+    border-color: #fda4af; box-shadow: 0 0 0 2px #ffe4e6;
+  }
+  .tv-composer-row-label { display: inline-flex; align-items: center; gap: 5px; }
   /* Выбранные исполнители в кнопке селектора: стопка лиц + имя первого. */
   .tv-assignee-value { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
   .tv-assignee-value-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -462,24 +509,26 @@ styleTag.textContent = `
     display: flex; flex-wrap: wrap; gap: 5px;
     margin-top: 12px;
   }
+  /* «+ Срочность», «+ Тип»… — серые капсулы без рамки; раскрытое поле — мягкий голубой. */
   .tv-composer-chip {
     display: inline-flex; align-items: center; gap: 5px;
-    padding: 5px 10px; border-radius: 99px;
-    border: 1px solid var(--border);
-    background: var(--surface);
+    padding: 5px 11px; border-radius: 99px;
+    border: 1px solid transparent;
+    background: var(--fill);
     font-size: 12px; font-weight: 500; color: var(--ink-2);
     cursor: pointer; transition: all .15s; white-space: nowrap;
   }
-  .tv-composer-chip:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
+  .tv-composer-chip:hover:not(:disabled) { background: var(--fill-strong); color: var(--ink); }
+  .tv-composer-chip:active:not(:disabled) { transform: scale(.97); }
   .tv-composer-chip:disabled { opacity: .5; cursor: not-allowed; }
   .tv-composer-chip.is-active {
-    background: #f0efeb; border-color: var(--border-strong); color: var(--ink);
+    background: var(--select-bg); border-color: var(--select-border); color: var(--select-ink);
   }
   .tv-composer-chip-sign {
     font-size: 13px; line-height: 1; color: var(--ink-3);
     font-weight: 400;
   }
-  .tv-composer-chip.is-active .tv-composer-chip-sign { color: var(--ink-2); }
+  .tv-composer-chip.is-active .tv-composer-chip-sign { color: var(--select-ink); }
   .tv-composer-chip-value {
     padding-left: 5px; margin-left: 1px;
     border-left: 1px solid var(--border-strong);
@@ -507,7 +556,7 @@ styleTag.textContent = `
 
   .tv-composer-segmented {
     display: inline-flex; gap: 2px; padding: 2px;
-    border-radius: 9px; background: #ecebe7;
+    border-radius: 9px; background: #e8e8ed;
   }
   /* В колонке строки (под сегментами — поле или строка ошибки) элемент по
      умолчанию тянется на всю ширину, и серая подложка уходила далеко за
@@ -525,6 +574,14 @@ styleTag.textContent = `
     background: var(--surface); color: var(--ink);
     box-shadow: 0 1px 3px rgba(0,0,0,.10);
   }
+  .tv-composer-segmented button:disabled { opacity: .55; cursor: not-allowed; }
+  /* Сегменты во всю ширину поля — в узких формах (детали заметки, закреплённая задача),
+     где выбор из трёх стоит вместо системного списка. */
+  .tv-composer-segmented.is-stretch { display: flex; width: 100%; }
+  .tv-composer-segmented.is-stretch button {
+    flex: 1 1 0; min-width: 0; padding-left: 6px; padding-right: 6px;
+    overflow: hidden; text-overflow: ellipsis;
+  }
   .tv-composer-presets { display: flex; flex-wrap: wrap; gap: 5px; }
   .tv-composer-presets button {
     border: 1px solid var(--border); background: var(--surface);
@@ -534,13 +591,14 @@ styleTag.textContent = `
   }
   .tv-composer-presets button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--ink); }
   .tv-composer-presets button.is-active {
-    background: var(--ink); border-color: var(--ink); color: #fff;
+    background: var(--select-bg); border-color: var(--select-border); color: var(--select-ink);
   }
   .tv-composer-presets button:disabled { opacity: .5; cursor: not-allowed; }
   .tv-stat-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    box-shadow: 0 0 0 1px rgba(15,23,42,.06), 0 1px 2px rgba(15,23,42,.04);
+    border-radius: var(--radius);
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
@@ -559,9 +617,11 @@ styleTag.textContent = `
     color: var(--ink-3);
   }
   .tv-stat-value {
-    font-family: 'Syne', sans-serif;
-    font-size: 26px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+    font-size: 28px;
     font-weight: 700;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
     color: var(--ink);
     line-height: 1;
   }
@@ -576,7 +636,7 @@ styleTag.textContent = `
     margin-bottom: 14px; gap: 12px;
   }
   .tv-section-title {
-    font-family: 'Syne', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     font-size: 13px; font-weight: 600;
     letter-spacing: .08em; text-transform: uppercase;
     color: var(--ink-3);
@@ -613,11 +673,11 @@ styleTag.textContent = `
     background: var(--surface);
     outline: none;
     transition: border .15s, box-shadow .15s;
-    font-family: 'DM Sans', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   }
   .tv-search-input:focus {
-    border-color: var(--ink-3);
-    box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+    border-color: #93c5fd;
+    box-shadow: 0 0 0 3px rgba(37,99,235,.15);
   }
   .tv-search-input::placeholder { color: var(--ink-3); }
   .tv-filter-chips {
@@ -642,10 +702,12 @@ styleTag.textContent = `
     white-space: nowrap;
   }
   .tv-chip:hover { border-color: var(--border-strong); color: var(--ink); }
+  .tv-chip:active { transform: scale(.97); }
+  /* Выбранный фильтр — мягкий голубой, как выбор везде на сайте (не чёрная заливка). */
   .tv-chip.is-active {
-    background: var(--ink);
-    border-color: var(--ink);
-    color: #fff;
+    background: var(--select-bg);
+    border-color: var(--select-border);
+    color: var(--select-ink);
   }
   .tv-chip.is-active-amber  { background: #fef3c7; border-color: #fde68a; color: #92400e; }
   .tv-chip.is-active-rose   { background: #ffe4e6; border-color: #fecdd3; color: #9f1239; }
@@ -657,29 +719,37 @@ styleTag.textContent = `
   .tv-btn {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 8px 14px; border-radius: var(--radius-sm);
-    font-size: 13px; font-weight: 500;
+    font-size: 13px; font-weight: 600;
     border: 1px solid transparent;
     cursor: pointer; transition: all .15s ease;
     white-space: nowrap; background: none;
   }
   .tv-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .tv-btn:active:not(:disabled) { transform: scale(.98); }
+  /* Вторичная кнопка — серая заливка без рамки, как iosBtnSecondary на сайте. */
   .tv-btn-ghost {
-    background: transparent;
-    border-color: var(--border-strong);
+    background: var(--fill);
+    border-color: transparent;
     color: var(--ink-2);
   }
   .tv-btn-ghost:hover:not(:disabled) {
-    background: var(--surface); color: var(--ink); border-color: var(--ink-3);
+    background: var(--fill-strong); color: var(--ink);
   }
+  /* В шапке раздела кнопки лежат на сером полотне — там они белые, с тонкой каймой. */
+  .tv-topbar-actions .tv-btn-ghost:not(.is-hot) {
+    background: var(--surface);
+    box-shadow: 0 0 0 1px rgba(15,23,42,.07), 0 1px 2px rgba(15,23,42,.04);
+  }
+  .tv-topbar-actions .tv-btn-ghost:not(.is-hot):hover:not(:disabled) { background: var(--surface-2); }
   .tv-btn-primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-  .tv-btn-primary:hover:not(:disabled) { background: #333; }
-  .tv-btn-amber   { background: #fef3c7; color: var(--amber); border-color: #fde68a; }
+  .tv-btn-primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; }
+  .tv-btn-amber   { background: #fef3c7; color: #b45309; border-color: transparent; }
   .tv-btn-amber:hover:not(:disabled)   { background: #fde68a; }
-  .tv-btn-indigo  { background: #eef2ff; color: var(--indigo); border-color: #c7d2fe; }
+  .tv-btn-indigo  { background: #eef2ff; color: var(--indigo); border-color: transparent; }
   .tv-btn-indigo:hover:not(:disabled)  { background: #e0e7ff; }
-  .tv-btn-emerald { background: #d1fae5; color: var(--emerald); border-color: #a7f3d0; }
+  .tv-btn-emerald { background: #d1fae5; color: #047857; border-color: transparent; }
   .tv-btn-emerald:hover:not(:disabled) { background: #a7f3d0; }
-  .tv-btn-rose    { background: #ffe4e6; color: var(--rose); border-color: #fecdd3; }
+  .tv-btn-rose    { background: #ffe4e6; color: var(--rose); border-color: transparent; }
   .tv-btn-rose:hover:not(:disabled)    { background: #fecdd3; }
 
   /* ── Task Row ── */
@@ -796,7 +866,7 @@ styleTag.textContent = `
   }
   .tv-avatar-xs {
     width: 20px; height: 20px; border-radius: 50%;
-    background: #e8e5df;
+    background: #e2e8f0;
     display: inline-flex; align-items: center; justify-content: center;
     font-size: 9px; font-weight: 700;
     color: var(--ink-2);
@@ -866,7 +936,7 @@ styleTag.textContent = `
     padding: 3px;
     border: 1px solid var(--border);
     border-radius: 11px;
-    background: #f1f0ed;
+    background: #f1f5f9;
   }
   .tv-tab-btn {
     border: 0;
@@ -913,7 +983,7 @@ styleTag.textContent = `
   }
   .tv-avatar-md {
     width: 34px; height: 34px; border-radius: 50%;
-    background: #e8e5df;
+    background: #e2e8f0;
     display: flex; align-items: center; justify-content: center;
     font-size: 13px; font-weight: 700;
     color: var(--ink-2);
@@ -983,21 +1053,22 @@ styleTag.textContent = `
   .tv-person-tasks-back:hover { text-decoration: underline; }
 
   /* ── Badges ── */
+  /* Метки — цветные капсулы без обводки, как теги в iOS. */
   .tv-badge {
     display: inline-flex; align-items: center;
-    padding: 1px 7px; border-radius: 99px;
-    font-size: 11px; font-weight: 500;
+    padding: 2px 8px; border-radius: 99px;
+    font-size: 11px; font-weight: 600;
     border: 1px solid transparent;
     white-space: nowrap; line-height: 1.25;
   }
-  .tv-badge-gray    { background: #f1f0ed; color: var(--ink-2);  border-color: var(--border); }
-  .tv-badge-blue    { background: #dbeafe; color: #1e40af;       border-color: #bfdbfe; }
-  .tv-badge-amber   { background: #fef3c7; color: #92400e;       border-color: #fde68a; }
-  .tv-badge-indigo  { background: #eef2ff; color: #3730a3;       border-color: #c7d2fe; }
-  .tv-badge-emerald { background: #d1fae5; color: #065f46;       border-color: #a7f3d0; }
-  .tv-badge-rose    { background: #ffe4e6; color: #9f1239;       border-color: #fecdd3; }
-  .tv-badge-teal    { background: #ccfbf1; color: #0f766e;       border-color: #99f6e4; }
-  .tv-badge-violet  { background: #ede9fe; color: #5b21b6;       border-color: #ddd6fe; }
+  .tv-badge-gray    { background: var(--fill); color: var(--ink-2); border-color: transparent; }
+  .tv-badge-blue    { background: #dbeafe; color: #1e40af;       border-color: transparent; }
+  .tv-badge-amber   { background: #fef3c7; color: #92400e;       border-color: transparent; }
+  .tv-badge-indigo  { background: #e0e7ff; color: #3730a3;       border-color: transparent; }
+  .tv-badge-emerald { background: #d1fae5; color: #065f46;       border-color: transparent; }
+  .tv-badge-rose    { background: #ffe4e6; color: #9f1239;       border-color: transparent; }
+  .tv-badge-teal    { background: #ccfbf1; color: #0f766e;       border-color: transparent; }
+  .tv-badge-violet  { background: #ede9fe; color: #5b21b6;       border-color: transparent; }
   /* Продакшн (задача #354). Без предка .tv-root, как у остальных бейджей: окно
      закреплённой задачи живёт вне раздела, и бейдж там остался бы бесцветным. */
   .tv-badge-fuchsia { background: #fae8ff; color: #86198f;       border-color: #f5d0fe; }
@@ -1073,7 +1144,7 @@ styleTag.textContent = `
   }
   .tv-drawer-header-text { flex: 1; min-width: 0; }
   .tv-drawer-title {
-    font-family: 'Syne', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     font-size: 16px; font-weight: 600; color: var(--ink);
     margin: 0 0 8px; word-break: break-word; line-height: 1.35;
   }
@@ -1119,10 +1190,11 @@ styleTag.textContent = `
     flex: 1; overflow-y: auto; padding: 20px;
     display: flex; flex-direction: column; gap: 18px;
   }
+  /* Подвалы окон — белые, как само окно: серые кнопки на сером подвале терялись. */
   .tv-drawer-footer {
     padding: 14px 20px; border-top: 1px solid var(--border);
     display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end;
-    flex-shrink: 0; background: var(--bg);
+    flex-shrink: 0; background: var(--surface);
   }
 
   /* ── Detail blocks ── */
@@ -1133,6 +1205,11 @@ styleTag.textContent = `
     color: var(--ink-3); margin-bottom: 3px;
   }
   .tv-info-item span { font-size: 13px; color: var(--ink); }
+  /* Балл в карточке: подпись с «i» в строку, а сегменты живут своими размерами
+     и цветами — правило выше перекрасило бы их цифры в одинаково тёмные. */
+  .tv-info-item .tv-info-label-row { display: flex; align-items: center; gap: 4px; }
+  .tv-info-item .tv-score-control span { font-size: inherit; color: inherit; }
+  .tv-info-item .tv-score-value { display: inline-flex; align-items: center; gap: 6px; }
   .tv-divider { height: 1px; background: var(--border); margin: 0; }
   .tv-description {
     font-size: 13.5px; color: var(--ink-2); line-height: 1.65;
@@ -1146,7 +1223,7 @@ styleTag.textContent = `
   .tv-file-btn {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 6px 11px; border-radius: var(--radius-sm);
-    background: #f1f0ed; border: 1px solid var(--border);
+    background: #f1f5f9; border: 1px solid var(--border);
     color: var(--ink-2); font-size: 12px;
     cursor: pointer; transition: all .12s;
     max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1441,7 +1518,7 @@ styleTag.textContent = `
     background: var(--bg);
   }
   .tv-note-topic-btn:hover { transform: translateY(-1px); }
-  .tv-note-topic-btn.is-active { box-shadow: 0 0 0 3px rgba(26,25,22,.06); }
+  .tv-note-topic-btn.is-active { box-shadow: 0 0 0 3px rgba(37,99,235,.12); }
   .tv-note-topic-btn.is-done {
     border-color: #a7f3d0;
     background: #ecfdf5;
@@ -1530,6 +1607,8 @@ styleTag.textContent = `
     grid-template-columns: minmax(0, 1fr) minmax(130px, .5fr);
     gap: 8px;
   }
+  /* Сегменты приоритета — на всю ширину: в левой колонке «Критичная» не помещалась. */
+  .tv-note-controls-grid > .is-wide { grid-column: 1 / -1; }
   .tv-note-advanced-toggle {
     width: 100%;
     border: 1px solid var(--border);
@@ -1710,7 +1789,7 @@ styleTag.textContent = `
     justify-content: center;
   }
   .tv-history-item-neutral .tv-history-bubble {
-    background: #f4f3f0;
+    background: #f5f5f7;
     border: 1px solid var(--border);
     border-radius: 12px;
     text-align: center;
@@ -1734,12 +1813,22 @@ styleTag.textContent = `
   }
   .tv-participant-avatar {
     width: 32px; height: 32px; border-radius: 50%;
-    background: #e8e5df;
+    background: #e2e8f0;
     display: flex; align-items: center; justify-content: center;
     font-size: 12px; font-weight: 700; color: var(--ink-2);
     flex-shrink: 0; text-transform: uppercase;
   }
-  .tv-participant-info { min-width: 0; }
+  .tv-participant-info { min-width: 0; display: flex; flex-direction: column; }
+  .tv-participant-add {
+    border: 0; background: none; padding: 0; margin: 0; cursor: pointer; text-align: left;
+    font: inherit; color: inherit; border-radius: 12px; transition: transform .12s ease;
+  }
+  .tv-participant-add:active { transform: scale(.97); }
+  .tv-participant-add .tv-participant-avatar {
+    background: transparent; border: 1.5px dashed #c9c5bd; color: var(--ink-3);
+  }
+  .tv-participant-add:hover .tv-participant-avatar { border-color: #2563eb; color: #2563eb; }
+  .tv-participant-add .tv-participant-name { color: #2563eb; }
   .tv-participant-role { font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
   .tv-participant-name { font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -1763,7 +1852,7 @@ styleTag.textContent = `
     flex-shrink: 0; background: var(--surface-2);
   }
   .tv-modal-title {
-    font-family: 'Syne', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     font-size: 15px; font-weight: 600; color: var(--ink); margin: 0;
   }
   .tv-modal-body { padding: 20px 22px; overflow-y: auto; flex: 1; }
@@ -1779,7 +1868,7 @@ styleTag.textContent = `
   .tv-modal-footer {
     padding: 13px 22px; border-top: 1px solid var(--border);
     display: flex; justify-content: flex-end; gap: 8px;
-    background: var(--bg); flex-shrink: 0;
+    background: var(--surface); flex-shrink: 0;
   }
   /* Окна, в которые пишут задачу («Новая задача» и правка), на компьютере
      шире и выше остальных: в общих 560 пикселях описание вставало узкой
@@ -1807,10 +1896,19 @@ styleTag.textContent = `
     border: 1px solid var(--border); border-radius: var(--radius-sm);
     font-size: 13px; color: var(--ink); background: var(--bg);
     outline: none; transition: border .15s, box-shadow .15s;
-    font-family: 'DM Sans', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   }
   .tv-input:focus, .tv-textarea:focus, .tv-select:focus {
-    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+    border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(37,99,235,.15); background: var(--surface);
+  }
+  /* Закрытый список — с тем же шевроном, что у списков сайта, а не стрелкой ОС. */
+  .tv-select {
+    appearance: none; -webkit-appearance: none;
+    padding-right: 32px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    cursor: pointer;
   }
   .tv-input:disabled, .tv-textarea:disabled, .tv-select:disabled { opacity: .55; cursor: not-allowed; }
   .tv-textarea { resize: vertical; min-height: 86px; line-height: 1.5; }
@@ -1826,21 +1924,21 @@ styleTag.textContent = `
     border-radius: var(--radius-sm);
     background: var(--bg);
     box-shadow: none;
-    font-family: 'DM Sans', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     font-size: 13px; font-weight: 400; color: var(--ink);
     transition: border .15s, box-shadow .15s, transform .12s;
   }
   .tv-person-select > button:hover:not(:disabled) { border-color: var(--border-strong); }
   .tv-person-select > button[aria-expanded="true"] {
-    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+    border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(37,99,235,.15);
   }
-  /* Синюю системную обводку убираем: после выбора список возвращает фокус на
-     кнопку, и в тёплой палитре раздела она читалась бы как ошибка. Фокус
-     показываем так же, как у остальных полей. */
+  /* Системную обводку браузера убираем: после выбора список возвращает фокус на
+     кнопку. Фокус показываем так же, как у остальных полей раздела, — мягким
+     синим кольцом, как в iOS. */
   .tv-person-select > button:focus,
   .tv-person-select > button:focus-visible {
     outline: none;
-    border-color: var(--ink-3); box-shadow: 0 0 0 3px rgba(26,25,22,.06);
+    border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(37,99,235,.15);
   }
   .tv-person-select > button:disabled { opacity: .55; }
 
@@ -1867,7 +1965,7 @@ styleTag.textContent = `
   .tv-kbd {
     display: inline-flex; align-items: center; justify-content: center;
     padding: 1px 5px; border-radius: 4px;
-    background: #f1f0ed; border: 1px solid var(--border);
+    background: #f1f5f9; border: 1px solid var(--border);
     font-size: 10px; color: var(--ink-3);
     font-family: monospace;
     line-height: 1.5;
@@ -1875,16 +1973,22 @@ styleTag.textContent = `
 
   /* ── Pinned task widget ── */
   .tv-pin-widget {
-    --bg: #f4f3f0;
+    --bg: #f5f5f7;
     --surface: #ffffff;
-    --surface-2: #fafaf8;
-    --border: #e8e5df;
-    --border-strong: #ccc9c0;
-    --ink: #1a1916;
-    --ink-2: #5c5852;
-    --ink-3: #9e9a93;
-    --accent: #1a1916;
+    --surface-2: #f8fafc;
+    --border: #e2e8f0;
+    --border-strong: #cbd5e1;
+    --ink: #0f172a;
+    --ink-2: #475569;
+    --ink-3: #94a3b8;
+    --accent: #2563eb;
     --accent-fg: #ffffff;
+    /* Выбор — мягкий голубой, как везде на сайте; серая заливка — вторичные кнопки и капсулы. */
+    --select-bg: #eef4ff;
+    --select-border: #bfd4fb;
+    --select-ink: #1d4ed8;
+    --fill: #f1f5f9;
+    --fill-strong: #e2e8f0;
     --amber: #d97706;
     --indigo: #4338ca;
     --emerald: #059669;
@@ -1900,7 +2004,7 @@ styleTag.textContent = `
     box-shadow: var(--shadow-lg);
     overflow: hidden;
     color: var(--ink);
-    font-family: 'DM Sans', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
     user-select: none;
   }
   .tv-pin-widget.is-detached {
@@ -1958,7 +2062,7 @@ styleTag.textContent = `
   }
   .tv-pin-title {
     margin: 0;
-    font-family: 'Syne', sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
     font-size: 14px;
     line-height: 1.35;
     font-weight: 700;
@@ -1990,9 +2094,9 @@ styleTag.textContent = `
     border-color: var(--border-strong);
   }
   .tv-pin-header-btn.is-active {
-    background: var(--accent);
-    color: var(--accent-fg);
-    border-color: var(--accent);
+    background: var(--select-bg);
+    color: var(--select-ink);
+    border-color: var(--select-border);
   }
   .tv-pin-header-btn-danger {
     color: #e11d48;
@@ -2738,41 +2842,58 @@ styleTag.textContent = `
     .tv-stat-value { font-size: 22px; }
     .tv-topbar-title { font-size: 18px; }
     .tv-topbar-lead { width: 100%; }
-    .tv-dept-select { flex: 1; width: auto; min-width: 0; }
+    .tv-project-select, .tv-section-select { flex: 1; width: auto; min-width: 0; }
   }
 `;
 document.head.appendChild(styleTag);
 
 const TASK_VIEW_QUERY_PARAM = 'view';
 const TASK_ID_QUERY_PARAM = 'task_id';
+// Ключ задачи проекта в адресе (?task=HR-125, задача #401): по ссылке сразу видно,
+// чья это задача. У задач без проекта — прежний ?task_id=N.
+const TASK_KEY_QUERY_PARAM = 'task';
 
-const buildTaskDeepLink = (taskId) => {
+/* В адрес — ключ задачи проекта или её номер; второй параметр снимаем, чтобы в
+   ссылке не жили два разных указателя на задачу. */
+const setTaskInUrl = (url, task) => {
+  const key = taskKeyOf(task);
+  const taskId = Number(task?.id || 0);
+  url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
+  if (key) {
+    url.searchParams.set(TASK_KEY_QUERY_PARAM, key);
+    url.searchParams.delete(TASK_ID_QUERY_PARAM);
+  } else {
+    url.searchParams.set(TASK_ID_QUERY_PARAM, String(taskId));
+    url.searchParams.delete(TASK_KEY_QUERY_PARAM);
+  }
+};
+
+const buildTaskDeepLink = (task) => {
   if (typeof window === 'undefined') return '';
-  const normalizedTaskId = Number(taskId || 0);
+  const normalizedTaskId = Number(task?.id || 0);
   if (!Number.isInteger(normalizedTaskId) || normalizedTaskId <= 0) return '';
   try {
     const url = new URL(window.location.href);
     /* Ссылку копируют и отправляют людям: метки перезагрузки (?v=, ?auth_reload=)
        в ней не нужны — см. utils/urlHygiene.js. */
     stripTechnicalQueryParams(url);
-    url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
-    url.searchParams.set(TASK_ID_QUERY_PARAM, String(normalizedTaskId));
+    setTaskInUrl(url, task);
     return url.toString();
   } catch (error) {
     return '';
   }
 };
 
-const syncTaskDeepLink = (taskId) => {
+const syncTaskDeepLink = (task) => {
   if (typeof window === 'undefined') return;
   try {
     const url = new URL(window.location.href);
     stripTechnicalQueryParams(url);
-    if (taskId) {
-      url.searchParams.set(TASK_VIEW_QUERY_PARAM, 'tasks');
-      url.searchParams.set(TASK_ID_QUERY_PARAM, String(taskId));
+    if (task?.id) {
+      setTaskInUrl(url, task);
     } else {
       url.searchParams.delete(TASK_ID_QUERY_PARAM);
+      url.searchParams.delete(TASK_KEY_QUERY_PARAM);
     }
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   } catch (error) {
@@ -2822,15 +2943,15 @@ const PIN_PALETTES = [
     id: 'paper',
     label: 'Светлая',
     vars: {
-      '--bg': '#f4f3f0',
+      '--bg': '#f5f5f7',
       '--surface': '#ffffff',
-      '--surface-2': '#fafaf8',
-      '--border': '#e8e5df',
-      '--border-strong': '#ccc9c0',
-      '--ink': '#1a1916',
-      '--ink-2': '#5c5852',
-      '--ink-3': '#9e9a93',
-      '--accent': '#1a1916',
+      '--surface-2': '#f8fafc',
+      '--border': '#e2e8f0',
+      '--border-strong': '#cbd5e1',
+      '--ink': '#0f172a',
+      '--ink-2': '#475569',
+      '--ink-3': '#94a3b8',
+      '--accent': '#0f172a',
       '--accent-fg': '#ffffff',
     }
   },
@@ -2910,9 +3031,14 @@ const HISTORY_LABELS = {
 /* Подпись рядом с именем в списке исполнителей. Фолбэк печатает СЫРОЕ значение
    из базы, поэтому карту дополняем вместе с каждой ролью, попадающей в
    получатели: без строк бэк-офиса в выпадашке стояло бы «Иванова (hr_manager)». */
+// Наблюдателей у задачи не больше двадцати — тот же потолок, что в task_projects.py.
+const TASK_MAX_WATCHERS = 20;
+
 const ROLE_LABELS = {
+  super_admin: 'Супер-админ',
   admin: 'Админ',
   sv: 'СВ',
+  trainer: 'Тренер',
   hr_manager: 'HR',
   accounting_manager: 'Бухгалтерия',
   marketing_manager: 'Маркетинг',
@@ -2951,12 +3077,12 @@ const REPORT_KIND_LABEL = { progress: 'Промежуточный', completion: 
 /* Выбранный отдел переживает перезагрузку: это рабочий контекст человека, а не
    разовый фильтр. Ключ привязан к пользователю — на общем компьютере чужой
    выбор не должен подменять свой. */
-const readStoredDepartment = (userId) => {
-  try { return window.localStorage.getItem(departmentStorageKey(userId)) || ''; }
+const readStoredValue = (key) => {
+  try { return window.localStorage.getItem(key) || ''; }
   catch (error) { return ''; }
 };
-const writeStoredDepartment = (userId, value) => {
-  try { window.localStorage.setItem(departmentStorageKey(userId), String(value || '')); }
+const writeStoredValue = (key, value) => {
+  try { window.localStorage.setItem(key, String(value || '')); }
   catch (error) { /* private mode */ }
 };
 
@@ -2974,7 +3100,7 @@ const WORKSPACE_TABS = [
  * иначе задача навсегда осталась бы на проверке. Те же правила проверяет API.
  */
 export const canReviewTask = (task, currentUserId, currentUserRole) => {
-  // Задача коллеги-СВ открыта только на просмотр (задача #298).
+  // Задача коллеги-СВ (#298), участника проекта или наблюдателя (#401) — только на просмотр.
   if (task?.viewer_is_observer) return false;
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);
@@ -2988,7 +3114,8 @@ export const canReviewTask = (task, currentUserId, currentUserRole) => {
 };
 
 const buildTaskActionButtons = (task, currentUserId, currentUserRole) => {
-  // Задача коллеги-СВ: смотреть можно, действовать — нет (задача #298).
+  // Задача коллеги-СВ (#298) или задача проекта, которую человек только видит (#401):
+  // смотреть можно, действовать — нет.
   if (task?.viewer_is_observer) return [];
   const creatorId  = Number(task?.creator?.id  || 0);
   // Принять в работу и сдать может любой исполнитель — они равноправны.
@@ -3113,6 +3240,13 @@ const REMINDER_OPTIONS = [
   { value: 360,  label: 'За 6 часов' },
   { value: 1440, label: 'За день' },
 ];
+/* Те же варианты для списка сайта (CustomSelect сверяет значения строками). В форме
+   задачи подпись полная — поле там одно, без отдельной метки «Напомнить». */
+const REMINDER_SELECT_OPTIONS = REMINDER_OPTIONS.map((option) => ({ value: String(option.value), label: option.label }));
+const COMPOSER_REMINDER_OPTIONS = REMINDER_OPTIONS.map((option) => ({
+  value: String(option.value),
+  label: option.value ? `Напомнить в Telegram: ${option.label.toLowerCase()}` : 'Без напоминания',
+}));
 const REMINDER_DEFAULT_MINUTES = 1440;
 
 const normalizeReminderMinutes = (value) => {
@@ -3310,6 +3444,13 @@ const EMPTY_TASK_FORM = {
   requestedById: '',
   requestedByName: '',
   reminderMinutes: '',
+  // Проект-доска и наблюдатели (задача #401). projectAuto — проект подставила
+  // сама форма, а не человек: такой при следующем открытии можно заменить.
+  projectId: '',
+  projectAuto: false,
+  watcherIds: [],
+  // Раздел доски («регулируемый набор разделов»): '' — без раздела.
+  sectionId: '',
 };
 
 export { TASK_MAX_ASSIGNEES, isTaskAssignee, taskAssignees } from './taskAssignees';
@@ -3352,7 +3493,21 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     requestedByName: task?.requested_by?.id ? '' : (task?.requested_by?.name || ''),
     reminderMinutes: task?.reminder_minutes_before ? String(task.reminder_minutes_before) : '',
     productionBrief: briefFromTask(task?.production_brief),
+    projectId: task?.project?.id ? String(task.project.id) : '',
+    watcherIds: (Array.isArray(task?.watchers) ? task.watchers : []).map((person) => String(person.id)),
+    // С чем задача пришла в правку: проект и наблюдатели уходят на сервер,
+    // только если их поменяли (buildTaskJsonPayload).
+    initialProjectId: task?.project?.id ? String(task.project.id) : '',
+    initialWatcherIds: (Array.isArray(task?.watchers) ? task.watchers : []).map((person) => String(person.id)),
+    sectionId: task?.section?.id ? String(task.section.id) : '',
+    initialSectionId: task?.section?.id ? String(task.section.id) : '',
   });
+};
+
+const sameIdSet = (left, right) => {
+  const a = new Set((left || []).map(String));
+  const b = new Set((right || []).map(String));
+  return a.size === b.size && [...a].every((id) => b.has(id));
 };
 
 const formChecklistItems = (items) => normalizeChecklistItems(items);
@@ -3387,6 +3542,19 @@ const buildTaskJsonPayload = (values) => ({
     : 0,
   // null у задачи другого типа — сервер уберёт бриф, если тип сменили с продакшна.
   production_brief: values.tag === PRODUCTION_TAG ? briefToPayload(values.productionBrief) : null,
+  /* Проект и наблюдатели уходят, только когда их правда меняли. Быстрая правка
+     закреплённой задачи собирает форму из слепка без проекта: отправь она
+     project_id всегда — правка одной темы вынимала бы задачу с доски. */
+  ...(String(values.projectId || '') !== String(values.initialProjectId || '') && Number(values.projectId) > 0
+    ? { project_id: Number(values.projectId) }
+    : {}),
+  ...(Number(values.projectId) > 0 && !sameIdSet(values.watcherIds, values.initialWatcherIds)
+    ? { watcher_ids: (values.watcherIds || []).map(Number).filter((id) => id > 0) }
+    : {}),
+  // Раздел — по тому же правилу; «Без раздела» в правке — законный выбор (null).
+  ...(String(values.sectionId || '') !== String(values.initialSectionId || '')
+    ? { section_id: Number(values.sectionId) > 0 ? Number(values.sectionId) : null }
+    : {}),
 });
 
 const appendTaskFormData = (body, values) => {
@@ -3411,6 +3579,9 @@ const appendTaskFormData = (body, values) => {
   body.append('reminder_minutes_before', String(payload.reminder_minutes_before));
   // Форма multipart, вложенный объект в ней иначе не передать — JSON-строкой.
   if (payload.production_brief) body.append('production_brief', JSON.stringify(payload.production_brief));
+  if (payload.project_id) body.append('project_id', String(payload.project_id));
+  if (payload.watcher_ids?.length) body.append('watcher_ids', payload.watcher_ids.join(','));
+  if (payload.section_id) body.append('section_id', String(payload.section_id));
 };
 
 const filesFromList = (files) => Array.from(files || []).filter(Boolean);
@@ -3731,6 +3902,7 @@ const AssigneeField = ({
   isLoading = false,
   ariaLabel = 'Исполнители',
   placeholder = 'Выберите сотрудника',
+  maxSelected = TASK_MAX_ASSIGNEES,
 }) => {
   const byId = useMemo(() => {
     const map = new Map();
@@ -3779,7 +3951,7 @@ const AssigneeField = ({
       variant="ios"
       ariaLabel={ariaLabel}
       multiple
-      maxSelected={TASK_MAX_ASSIGNEES}
+      maxSelected={maxSelected}
       value={value}
       options={options}
       onChange={(next) => onChange(Array.isArray(next) ? next : [])}
@@ -4316,15 +4488,16 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
           {noteDetailsOpen && (
             <div className="tv-note-advanced-panel">
               <div className="tv-note-controls-grid">
-            <label className="tv-form-field">
-              <span>Дедлайн</span>
-              <input
-                className="tv-input"
-                type="datetime-local"
+            {/* Срок, напоминание и приоритет — пикерами сайта и сегментами, а не
+                системными полями: их раскрытые списки и календарь рисует браузер. */}
+            <div className="tv-form-field">
+              <label>Дедлайн</label>
+              <TaskDateTimeField
                 value={draftDueValue}
                 disabled={isSaving}
-                onChange={(event) => {
-                  const nextDue = event.target.value || null;
+                ariaLabel="Дедлайн заметки"
+                onChange={(next) => {
+                  const nextDue = next || null;
                   updateDraft({
                     due_at: nextDue,
                     // Поставили срок — сразу предлагаем напомнить за день; сняли — напоминание не нужно.
@@ -4334,36 +4507,36 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
                   });
                 }}
               />
-            </label>
-            <label className="tv-form-field">
-              <span>Напомнить в Telegram</span>
-              <select
-                className="tv-select"
+            </div>
+            <div className="tv-form-field" title={normalizedDraft.due_at ? '' : 'Сначала поставьте дедлайн'}>
+              <label>Напомнить в Telegram</label>
+              <CustomSelect
+                className="tv-person-select"
+                variant="ios"
+                ariaLabel="Напомнить в Telegram"
                 value={String(normalizedDraft.reminder_minutes_before || 0)}
+                options={REMINDER_SELECT_OPTIONS}
                 disabled={isSaving || !normalizedDraft.due_at}
-                title={normalizedDraft.due_at ? '' : 'Сначала поставьте дедлайн'}
-                onChange={(event) => updateDraft({
-                  reminder_minutes_before: normalizeReminderMinutes(event.target.value),
-                })}
-              >
-                {REMINDER_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value}>{item.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="tv-form-field">
-              <span>Приоритет</span>
-              <select
-                className="tv-select"
-                value={normalizedDraft.priority || 'normal'}
-                disabled={isSaving}
-                onChange={(event) => updateDraft({ priority: event.target.value })}
-              >
+                onChange={(next) => updateDraft({ reminder_minutes_before: normalizeReminderMinutes(next) })}
+              />
+            </div>
+            <div className="tv-form-field is-wide">
+              <label>Приоритет</label>
+              <div className="tv-composer-segmented is-stretch" role="group" aria-label="Приоритет заметки">
                 {PRIORITY_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value}>{item.label}</option>
+                  <button
+                    key={item.value}
+                    type="button"
+                    aria-pressed={(normalizedDraft.priority || 'normal') === item.value}
+                    className={(normalizedDraft.priority || 'normal') === item.value ? 'is-active' : ''}
+                    disabled={isSaving}
+                    onClick={() => updateDraft({ priority: item.value })}
+                  >
+                    {item.label}
+                  </button>
                 ))}
-              </select>
-            </label>
+              </div>
+            </div>
           </div>
           <div className="tv-note-switches">
             <label className="tv-form-switch">
@@ -4551,6 +4724,18 @@ const COMPOSER_SECTIONS = [
     open: () => ({ isRegulation: true, recurrenceType: 'daily' }),
   },
   {
+    // Наблюдатели (задача #401): видят задачу на доске проекта, но не работают с ней.
+    id: 'watchers',
+    label: 'Наблюдатели',
+    requiresWatchers: true,
+    hasValue: (v) => (v.watcherIds || []).length > 0,
+    summary: (v) => {
+      const count = (v.watcherIds || []).length;
+      return count ? String(count) : '';
+    },
+    clear: () => ({ watcherIds: [] }),
+  },
+  {
     id: 'files',
     label: 'Файлы',
     requiresFiles: true,
@@ -4576,8 +4761,62 @@ const TaskComposerForm = ({
   currentUserId = 0,
   // Чего не хватает в брифе продакшна: ключ поля → текст под полем ('' — всё в порядке).
   issueFor = NO_COMPOSER_ISSUE,
+  // Проекты-доски (задача #401): куда человек вправе ставить задачи.
+  projects = [],
 }) => {
   const assigneeIds = Array.isArray(values.assigneeIds) ? values.assigneeIds : [];
+  const watcherIds = Array.isArray(values.watcherIds) ? values.watcherIds : [];
+  /* Проект — в списке те, куда можно ставить, плюс текущий проект задачи: в
+     правке он мог уйти в архив, и пустое поле читалось бы как «проекта нет». */
+  const projectOptions = useMemo(() => {
+    const list = creatableProjects(projects);
+    const current = findProject(projects, values.projectId);
+    if (current && !list.some((project) => String(project.id) === String(current.id))) list.push(current);
+    return list.map((project) => ({ value: String(project.id), label: projectLabel(project) }));
+  }, [projects, values.projectId]);
+  const selectedProject = findProject(projects, values.projectId);
+  // Наблюдателей зовут из тех, у кого доступ «доска»: исполнители и сам
+  // постановщик видят задачу по своей роли, участники проекта — по составу.
+  const watcherPeople = useMemo(() => {
+    const candidates = watcherCandidates(selectedProject, [...assigneeIds, String(currentUserId || '')]);
+    const chosen = new Set(watcherIds.map(String));
+    // Уже выбранные остаются в списке, даже если их только что сделали исполнителями.
+    (Array.isArray(selectedProject?.members) ? selectedProject.members : []).forEach((person) => {
+      if (chosen.has(String(person.id)) && !candidates.some((item) => String(item.id) === String(person.id))) {
+        candidates.push(person);
+      }
+    });
+    return candidates;
+  }, [selectedProject, assigneeIds, watcherIds, currentUserId]);
+  const watcherOptions = useMemo(
+    () => watcherPeople.map((person) => ({ value: String(person.id), label: person.name })),
+    [watcherPeople]
+  );
+  const supportsWatchers = Boolean(selectedProject) && (watcherOptions.length > 0 || watcherIds.length > 0);
+  const projectIssue = issueFor('project');
+  const projectSelectId = useId();
+  const sectionSelectId = useId();
+  // Разделы выбранной доски: «Без раздела» — первым, задача может быть и вне их.
+  const sectionChoices = useMemo(() => {
+    const list = sectionsOf(selectedProject);
+    return list.length
+      ? [{ value: '', label: 'Без раздела' }, ...list.map((section) => ({ value: String(section.id), label: section.name }))]
+      : [];
+  }, [selectedProject]);
+  const pickProject = (next) => {
+    const projectId = String(next ?? '');
+    // Сменили доску — остаются наблюдатели, у кого есть доступ к новой, а раздел
+    // сбрасывается: разделы у каждой доски свои. Выбор человека форма больше не
+    // подменяет своей подсказкой.
+    onChange({
+      projectId,
+      projectAuto: false,
+      sectionId: projectId === String(values.projectId || '') ? values.sectionId : '',
+      watcherIds: keepWatchersForProject(watcherIds, findProject(projects, projectId)),
+    });
+  };
+  // Раздел, выбранный человеком, — тоже его решение о месте задачи.
+  const pickSection = (next) => onChange({ sectionId: String(next ?? ''), projectAuto: false });
   /* Продакшн (задача #354) виден в «Типе» всегда, а исполнители у него — только
      сотрудники маркетинга (уточнение владельца 16.10.2026): при этом типе в
      выборе исполнителя остаются одни маркетологи. */
@@ -4585,8 +4824,10 @@ const TaskComposerForm = ({
   const marketingIds = useMemo(() => productionPersonIds(recipients), [recipients]);
   const supportsFiles = typeof onFilesChange === 'function';
   const sections = useMemo(
-    () => COMPOSER_SECTIONS.filter((section) => !section.requiresFiles || supportsFiles),
-    [supportsFiles]
+    () => COMPOSER_SECTIONS.filter((section) => (
+      (!section.requiresFiles || supportsFiles) && (!section.requiresWatchers || supportsWatchers)
+    )),
+    [supportsFiles, supportsWatchers]
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
@@ -4677,6 +4918,55 @@ const TaskComposerForm = ({
           placeholder="Описание, контекст, ссылки — необязательно"
           onChange={(event) => onChange({ description: event.target.value })}
         />
+      )}
+
+      {/* Проект — доска, на которую попадёт задача (задача #401). Строка есть,
+          только когда выбирать есть из чего: без доступа к доскам задача
+          ставится как раньше, без проекта. */}
+      {projectOptions.length > 0 && (
+        <div
+          className={`tv-composer-assignee tv-composer-project${projectIssue ? ' is-invalid' : ''}`}
+          data-issue-anchor="project"
+        >
+          <label htmlFor={projectSelectId}>Проект</label>
+          <div className="tv-composer-project-body">
+            <CustomSelect
+              id={projectSelectId}
+              className="tv-person-select"
+              variant="ios"
+              ariaLabel="Проект задачи"
+              value={values.projectId || ''}
+              options={projectOptions}
+              onChange={pickProject}
+              disabled={disabled}
+              placeholder="Выберите проект"
+              searchable={projectOptions.length > 6}
+              searchPlaceholder="Найти проект…"
+            />
+            {projectIssue && <p className="tv-brief-issue">{projectIssue}</p>}
+          </div>
+        </div>
+      )}
+
+      {/* Раздел доски — только у досок, где разделы заведены. */}
+      {sectionChoices.length > 0 && (
+        <div className="tv-composer-assignee tv-composer-project tv-composer-section">
+          <label htmlFor={sectionSelectId}>Раздел</label>
+          <div className="tv-composer-project-body">
+            <CustomSelect
+              id={sectionSelectId}
+              className="tv-person-select"
+              variant="ios"
+              ariaLabel="Раздел доски"
+              value={values.sectionId || ''}
+              options={sectionChoices}
+              onChange={pickSection}
+              disabled={disabled}
+              searchable={sectionChoices.length > 8}
+              searchPlaceholder="Найти раздел…"
+            />
+          </div>
+        </div>
       )}
 
       <div className="tv-composer-assignee">
@@ -4840,19 +5130,17 @@ const TaskComposerForm = ({
                     value={values.deadlineMinutes} disabled={disabled}
                     onChange={(event) => onChange({ deadlineMinutes: event.target.value })} />
                 </div>
-                <select
-                  className="tv-select"
-                  value={String(normalizeReminderMinutes(values.reminderMinutes) || 0)}
-                  disabled={disabled || deadlineMinutesOfForm(values) <= 0}
-                  title={deadlineMinutesOfForm(values) > 0 ? '' : 'Сначала задайте дедлайн'}
-                  onChange={(event) => onChange({ reminderMinutes: event.target.value })}
-                >
-                  {REMINDER_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.value ? `Напомнить в Telegram: ${option.label.toLowerCase()}` : 'Без напоминания'}
-                    </option>
-                  ))}
-                </select>
+                <div title={deadlineMinutesOfForm(values) > 0 ? '' : 'Сначала задайте дедлайн'}>
+                  <CustomSelect
+                    className="tv-person-select"
+                    variant="ios"
+                    ariaLabel="Напомнить в Telegram"
+                    value={String(normalizeReminderMinutes(values.reminderMinutes) || 0)}
+                    options={COMPOSER_REMINDER_OPTIONS}
+                    disabled={disabled || deadlineMinutesOfForm(values) <= 0}
+                    onChange={(next) => onChange({ reminderMinutes: String(next) })}
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -4934,16 +5222,20 @@ const TaskComposerForm = ({
             <div className="tv-composer-row">
               <span className="tv-composer-row-label">Повтор</span>
               <div className="tv-composer-row-body tv-composer-row-inline">
-                <select
-                  className="tv-select"
-                  value={values.recurrenceType || 'daily'}
-                  disabled={disabled}
-                  onChange={(event) => onChange({ isRegulation: true, recurrenceType: event.target.value })}
-                >
+                <div className="tv-composer-segmented" role="group" aria-label="Как часто повторять">
                   {RECURRENCE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={(values.recurrenceType || 'daily') === option.value}
+                      className={(values.recurrenceType || 'daily') === option.value ? 'is-active' : ''}
+                      disabled={disabled}
+                      onClick={() => onChange({ isRegulation: true, recurrenceType: option.value })}
+                    >
+                      {option.label}
+                    </button>
                   ))}
-                </select>
+                </div>
                 <input className="tv-input" type="number" min="1" max="365" title="Каждые N периодов"
                   value={values.recurrenceInterval} disabled={disabled}
                   onChange={(event) => onChange({ recurrenceInterval: event.target.value })} />
@@ -4959,6 +5251,30 @@ const TaskComposerForm = ({
                 disabled={disabled}
                 onChange={(next) => onChange({ checklistItems: next })}
               />
+            </div>
+          )}
+
+          {supportsWatchers && isOpen('watchers') && (
+            <div className="tv-composer-row">
+              <span className="tv-composer-row-label">
+                Наблюдатели
+                <InfoHint
+                  side="left"
+                  text="Видят задачу на доске проекта, но не работают с ней. Позвать можно тех, у кого есть доступ к доске; участники проекта и так видят все его задачи."
+                />
+              </span>
+              <div className="tv-composer-row-body">
+                <AssigneeField
+                  value={watcherIds}
+                  options={watcherOptions}
+                  people={watcherPeople}
+                  onChange={(next) => onChange({ watcherIds: next })}
+                  disabled={disabled}
+                  ariaLabel="Наблюдатели"
+                  placeholder="Кому показать задачу"
+                  maxSelected={TASK_MAX_WATCHERS}
+                />
+              </div>
             </div>
           )}
 
@@ -5015,10 +5331,13 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
      съедали ширину, и от темы оставалось «Обновить и…». Цвет — только там, где
      он что-то значит: точка статуса, срочность, просрочка, вопрос без ответа.
      «Задача» — тип по умолчанию и не пишется; кто кому поручил, видно по лицам. */
+  const taskKey = taskKeyOf(task);
   if (compact) {
     const facts = [
       <span key="status" className="tv-task-row-status"><i style={{ background: sm.dot }} />{sm.label}</span>,
     ];
+    // Ключ задачи проекта — первым: по нему задачу называют в переписке.
+    if (taskKey) facts.unshift(<span key="key" className="tv-task-key">{taskKey}</span>);
     if (task.priority === 'urgent' || task.priority === 'critical') {
       facts.push(<span key="priority" className={`tv-task-row-priority is-${task.priority}`}>{pm.label}</span>);
     }
@@ -5056,6 +5375,7 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
       <span className="tv-task-row-main">
         <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
         <span className="tv-task-row-flow">
+          {taskKey && <span className="tv-task-key">{taskKey}</span>}
           <span className="tv-task-row-flow-name">{creatorName}</span>
           <span className="tv-task-row-flow-arrow">→</span>
           <span className="tv-task-row-flow-name">{assigneeName}</span>
@@ -5457,12 +5777,24 @@ const TaskClarificationsBlock = ({
   );
 };
 
+/* Подсказка «i» у строки «Балл» — по тому, что с этой задачей сделает балл: переезд
+   обещаем только там, где он будет (не у начатой и не у шаблона регламента). */
+const scoreHintOf = (task) => {
+  const base = `Балл ставят суперадмины на совещании: ${PRIORITY_SCORE_HINT}`;
+  if (awaitsPriorityScore(task)) return `${base} С первым баллом задача из «Новой» перейдёт в бэклог.`;
+  if (unscoreMovesToNew(task, null)) {
+    return `${base} Снять балл — нажать на выбранную цифру ещё раз: задача вернётся в «Новую».`;
+  }
+  return `${base} Снять балл — нажать на выбранную цифру ещё раз.`;
+};
+
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
   getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
   onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false, loadTaskPhotos, onOpenProduction = null,
+  projects = [], onSaveWatchers = null, onSetPriorityScore = null,
 }) => {
   const sm = STATUS_META[task.status] || { label: task.status, badge: 'tv-badge-gray' };
   const tm = TAG_META[task.tag]       || { label: task.tag || '—', badge: 'tv-badge-gray' };
@@ -5488,6 +5820,8 @@ const TaskDrawer = React.memo(({
   );
   const creatorId       = Number(task?.creator?.id || 0);
   const reports         = Array.isArray(task.reports) ? task.reports : [];
+  const priorityScore   = priorityScoreOf(task);
+  const canScore        = typeof onSetPriorityScore === 'function' && normalizeRole(currentUserRole) === 'super_admin';
   // Задача, поставленная самому себе без указания источника, — своя инициатива.
   const originLabel     = (creatorId && assigneeIdSet.has(creatorId) && !task?.requested_by)
     ? 'Своя инициатива'
@@ -5540,8 +5874,28 @@ const TaskDrawer = React.memo(({
 
   /* Тема и метки. На компьютере — в шапке рядом с действиями; на телефоне шапка
      экрана — это «Назад» и «⋯», а тема открывает содержимое крупным заголовком. */
+  const taskKey = taskKeyOf(task);
+  const watchers = Array.isArray(task?.watchers) ? task.watchers : [];
+  /* Наблюдателей постановщик зовёт прямо отсюда: человек не из проекта видит
+     задачу, только если у него есть доступ к доске И он наблюдатель (#401). */
+  const [watchersOpen, setWatchersOpen] = useState(false);
+  const taskProject = findProject(projects, task?.project?.id);
+  const watcherPool = useMemo(() => {
+    const list = watcherCandidates(taskProject, [...assigneePeople.map((person) => person.id), creatorId]);
+    // Уже выбранные — в списке всегда, даже если их уровень с тех пор сменился.
+    watchers.forEach((person) => {
+      if (!list.some((item) => String(item.id) === String(person.id))) list.push(person);
+    });
+    return list;
+  }, [taskProject, assigneePeople, creatorId, watchers]);
+  const canManageWatchers = typeof onSaveWatchers === 'function'
+    && Boolean(task?.project?.id) && creatorId === currentUserId && !task?.viewer_is_observer
+    && watcherPool.length > 0;
   const titleBlock = (
     <div className="tv-drawer-header-text">
+      {/* Ключ задачи проекта (HR-125) над темой — как в трекерах: по нему задачу
+          и находят, и называют. Название проекта — в сведениях ниже. */}
+      {taskKey && <span className="tv-task-key tv-drawer-key">{taskKey}</span>}
       <h2 className="tv-drawer-title">{task.subject || 'Без темы'}</h2>
       <div className="tv-drawer-badges">
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
@@ -5698,14 +6052,81 @@ const TaskDrawer = React.memo(({
                 <div className="tv-participant-name">{task?.creator?.name || '—'}</div>
               </div>
             </div>
+            {/* Наблюдатели (задача #401) видят задачу на доске проекта, но не работают с ней. */}
+            {watchers.map((person) => (
+              <div className="tv-participant" key={`watcher-${person.id}`}>
+                <AvatarCircle
+                  className="tv-participant-avatar"
+                  name={person?.name || '—'}
+                  avatarUrl={person?.avatar_url || ''}
+                />
+                <div className="tv-participant-info">
+                  <div className="tv-participant-role">Наблюдатель</div>
+                  <div className="tv-participant-name">{person?.name || '—'}</div>
+                </div>
+              </div>
+            ))}
+            {canManageWatchers && (
+              <button
+                type="button"
+                className="tv-participant tv-participant-add"
+                onClick={() => setWatchersOpen(true)}
+              >
+                <span className="tv-participant-avatar" aria-hidden="true"><PlusIcon /></span>
+                <span className="tv-participant-info">
+                  <span className="tv-participant-role">Наблюдатели</span>
+                  <span className="tv-participant-name">{watchers.length ? 'Изменить' : 'Добавить'}</span>
+                </span>
+              </button>
+            )}
           </div>
+          {canManageWatchers && (
+            <TaskWatchersSheet
+              open={watchersOpen}
+              onClose={() => setWatchersOpen(false)}
+              taskKey={taskKey}
+              projectName={task?.project?.name || ''}
+              candidates={watcherPool}
+              selectedIds={watchers.map((person) => person.id)}
+              onSave={(ids) => onSaveWatchers(task, ids)}
+            />
+          )}
 
           <div className="tv-info-grid">
+            {task?.project?.name && (
+              <div className="tv-info-item"><label>Проект</label><span>{task.project.name}</span></div>
+            )}
+            {task?.section?.name && (
+              <div className="tv-info-item"><label>Раздел</label><span>{task.section.name}</span></div>
+            )}
             <div className="tv-info-item"><label>Создано</label><span>{fmt(task.created_at)}</span></div>
             {task?.requested_by?.name && (
               <div className="tv-info-item"><label>Поручил</label><span>{task.requested_by.name}</span></div>
             )}
             <div className="tv-info-item"><label>Статус</label><span>{sm.label}</span></div>
+            {/* Балл приоритета 1–5: ставят суперадмины, остальным он виден, только если есть. */}
+            {(canScore || priorityScore !== null) && (
+              <div className="tv-info-item">
+                <label className="tv-info-label-row">
+                  Балл
+                  <InfoHint side="left" text={scoreHintOf(task)} />
+                </label>
+                {canScore ? (
+                  <PriorityScoreControl
+                    value={priorityScore}
+                    titleSuffix={awaitsPriorityScore(task) ? ' — задача уйдёт в бэклог' : ''}
+                    clearTitleSuffix={unscoreMovesToNew(task, null) ? ' — задача вернётся в «Новую»' : ''}
+                    disabled={actionLoadingKey === `board:${task.id}`}
+                    onChange={(score) => onSetPriorityScore(task, score)}
+                  />
+                ) : (
+                  <span className="tv-score-value">
+                    <PriorityScoreDot score={priorityScore} />
+                    {priorityScoreTitle(priorityScore).replace(/^Балл /, '')}
+                  </span>
+                )}
+              </div>
+            )}
             {deadlineLabel && (
               <div className="tv-info-item"><label>Дедлайн</label><span className={isTaskOverdue(task) ? 'tv-deadline-chip is-overdue' : ''}>{deadlineLabel}</span></div>
             )}
@@ -6205,13 +6626,16 @@ export const PinnedTaskWidget = React.memo(({
 
   useEffect(() => {
     if (!pipWindow) return;
-    pipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
+    pipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f5f5f7';
   }, [pipWindow, activePalette]);
 
   const openQuickCreate = useCallback(() => {
     setQuickForm(buildEmptyTaskForm({
       assigneeIds: formAssigneeIds(task, currentUserId),
       priority: task?.priority || 'normal',
+      // Связанная задача — на ту же доску (задача #401). Нет доступа — сервер
+      // откажет понятным текстом, и задачу поставят из раздела.
+      projectId: task?.project?.id ? String(task.project.id) : '',
     }));
     setQuickFormFiles([]);
     setQuickFormError('');
@@ -6354,7 +6778,7 @@ export const PinnedTaskWidget = React.memo(({
       nextPipWindow.document.title = 'Закрепленная задача';
       cloneDocumentStyles(nextPipWindow);
       nextPipWindow.document.body.style.margin = '0';
-      nextPipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f4f3f0';
+      nextPipWindow.document.body.style.background = activePalette.vars['--bg'] || '#f5f5f7';
       nextPipWindow.document.body.style.minHeight = '100vh';
       const root = nextPipWindow.document.createElement('div');
       nextPipWindow.document.body.appendChild(root);
@@ -6412,32 +6836,42 @@ export const PinnedTaskWidget = React.memo(({
           onChange={(event) => updateQuickFormField('description', event.target.value)}
         />
       </div>
-      <div className="tv-pin-task-form-grid">
-        <div className="tv-form-field">
-          <label>Тип</label>
-          <select
-            className="tv-select"
-            value={quickForm.tag}
-            disabled={quickFormLoading}
-            onChange={(event) => updateQuickFormField('tag', event.target.value)}
-          >
-            {/* Брифа в быстрой форме нет, поэтому продакшн здесь не ставится — только
-                показывается, если закреплённая задача уже этого типа. */}
-            {(quickForm.tag === PRODUCTION_TAG ? TAG_OPTIONS : BASIC_TAG_OPTIONS).map((item) => (
-              <option key={item.value} value={item.value}>{item.label}</option>
-            ))}
-          </select>
+      {/* Тип и срочность — сегментами во всю ширину, как в форме задачи: в узком
+          окне две колонки с сегментами не помещались бы. */}
+      <div className="tv-form-field">
+        <label>Тип</label>
+        <div className="tv-composer-segmented is-stretch" role="group" aria-label="Тип задачи">
+          {/* Брифа в быстрой форме нет, поэтому продакшн здесь не ставится — только
+              показывается, если закреплённая задача уже этого типа. */}
+          {(quickForm.tag === PRODUCTION_TAG ? TAG_OPTIONS : BASIC_TAG_OPTIONS).map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              aria-pressed={quickForm.tag === item.value}
+              className={quickForm.tag === item.value ? 'is-active' : ''}
+              disabled={quickFormLoading}
+              onClick={() => updateQuickFormField('tag', item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
-        <div className="tv-form-field">
-          <label>Срочность</label>
-          <select
-            className="tv-select"
-            value={quickForm.priority}
-            disabled={quickFormLoading}
-            onChange={(event) => updateQuickFormField('priority', event.target.value)}
-          >
-            {PRIORITY_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
+      </div>
+      <div className="tv-form-field">
+        <label>Срочность</label>
+        <div className="tv-composer-segmented is-stretch" role="group" aria-label="Срочность">
+          {PRIORITY_OPTIONS.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              aria-pressed={quickForm.priority === item.value}
+              className={quickForm.priority === item.value ? 'is-active' : ''}
+              disabled={quickFormLoading}
+              onClick={() => updateQuickFormField('priority', item.value)}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
       </div>
       <div className="tv-form-field">
@@ -6481,16 +6915,22 @@ export const PinnedTaskWidget = React.memo(({
         </label>
         {quickForm.isRegulation && (
           <div className="tv-pin-task-form-grid" style={{ marginTop: 8 }}>
-            <div className="tv-form-field">
+            <div className="tv-form-field" style={{ gridColumn: '1 / -1' }}>
               <label>Период</label>
-              <select
-                className="tv-select"
-                value={quickForm.recurrenceType || 'daily'}
-                disabled={quickFormLoading}
-                onChange={(event) => updateQuickFormField('recurrenceType', event.target.value)}
-              >
-                {RECURRENCE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </select>
+              <div className="tv-composer-segmented is-stretch" role="group" aria-label="Период повтора">
+                {RECURRENCE_OPTIONS.map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    aria-pressed={(quickForm.recurrenceType || 'daily') === item.value}
+                    className={(quickForm.recurrenceType || 'daily') === item.value ? 'is-active' : ''}
+                    disabled={quickFormLoading}
+                    onClick={() => updateQuickFormField('recurrenceType', item.value)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
             <div className="tv-form-field">
               <label>Интервал</label>
@@ -6949,7 +7389,7 @@ export const PinnedTaskWidget = React.memo(({
                 );
               })}
               {!(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
-                <span className="tv-pin-empty-actions">{task?.viewer_is_observer ? 'Задача коллеги — только просмотр.' : 'Для текущего статуса быстрых действий нет.'}</span>
+                <span className="tv-pin-empty-actions">{task?.viewer_is_observer ? 'Задача открыта вам только на просмотр.' : 'Для текущего статуса быстрых действий нет.'}</span>
               )}
             </div>
 
@@ -7191,12 +7631,17 @@ const TasksView = ({
   const [pagedTasks,          setPagedTasks]          = useState([]);
   const [recipients,          setRecipients]          = useState([]);
   const [boardPeople,         setBoardPeople]         = useState([]);
-  /* Отдел раздела. Принадлежность задачи выводится из членства постановщика,
-     поэтому отдельного поля у задачи нет — см. departmentFilter.js.
+  /* Доска проекта раздела (задача #401) — см. taskProjects.js.
      null означает «ещё не знаем»: до ответа сервера ни один список не грузим,
-     иначе первый экран показал бы все отделы и тут же перерисовался на свой. */
-  const [departments,         setDepartments]         = useState([]);
-  const [departmentFilter,    setDepartmentFilter]    = useState(null);
+     иначе первый экран показал бы все проекты и тут же перерисовался на свой. */
+  const [projects,            setProjects]            = useState([]);
+  const [projectsMeta,        setProjectsMeta]        = useState({
+    unassignedCount: 0, canManage: false, defaultProjectId: null, departmentProjectId: null, candidates: [],
+  });
+  const [projectFilter,       setProjectFilter]       = useState(null);
+  // Раздел открытой доски. При смене доски — снова «Все разделы».
+  const [sectionFilter,       setSectionFilter]       = useState(TASK_SECTION_ALL);
+  const [projectsSheetOpen,   setProjectsSheetOpen]   = useState(false);
   const [isTasksLoading,      setIsTasksLoading]      = useState(false);
   // Стартуем в «гружусь»: до ответа сервера пустой список читался бы как «задач нет».
   const [isPagedTasksLoading, setIsPagedTasksLoading] = useState(true);
@@ -7236,8 +7681,6 @@ const TasksView = ({
   const [outgoingPersonKey, setOutgoingPersonKey] = useState(null);
 
   const fileInputRef           = useRef(null);
-  const completionFileInputRef = useRef(null);
-  const statusFileInputRef     = useRef(null);
   const searchRef              = useRef(null);
   const pagedRequestIdRef      = useRef(0);
   const personTasksRequestIdRef = useRef(0);
@@ -7277,20 +7720,55 @@ const TasksView = ({
     try { window.localStorage.setItem(WORKSPACE_TAB_STORAGE_KEY, tabId); } catch (error) { /* private mode */ }
   }, []);
 
-  const isDepartmentResolved = departmentFilter !== null;
-  const departmentOptions = useMemo(() => buildDepartmentOptions(departments), [departments]);
-  /* Обновление списка отделов не должно зависеть от выбранного значения: попади
-     оно в зависимости fetchDepartments — смена отдела перезапускала бы всю
-     загрузку раздела. Поэтому текущий выбор читаем через ref. */
-  const departmentFilterRef = useRef(null);
-  useEffect(() => { departmentFilterRef.current = departmentFilter; }, [departmentFilter]);
+  const isProjectResolved = projectFilter !== null;
+  /* Обновление списка проектов не должно зависеть от выбранной доски: попади она
+     в зависимости fetchProjects — смена доски перезапускала бы загрузку раздела.
+     Поэтому текущий выбор читаем через ref. */
+  const projectFilterRef = useRef(null);
+  useEffect(() => { projectFilterRef.current = projectFilter; }, [projectFilter]);
+  const projectOptions = useMemo(
+    () => buildProjectOptions(projects, projectsMeta.unassignedCount, projectFilter ?? TASK_PROJECT_ALL),
+    [projects, projectsMeta.unassignedCount, projectFilter]
+  );
+  // Переключатель — только когда есть хоть одна доска: иначе это кнопка с одним «Все проекты».
+  const showProjectSwitcher = hasProjectBoards(projects) || (projectFilter ?? TASK_PROJECT_ALL) !== TASK_PROJECT_ALL;
+  /* Фильтр разделов — у открытой доски, где разделы заведены. Раздел, которого
+     уже нет (удалили), сам возвращается на «Все разделы». */
+  const currentProject = useMemo(() => findProject(projects, projectFilter), [projects, projectFilter]);
+  const effectiveSectionFilter = currentProject ? resolveSectionFilter(currentProject, sectionFilter) : TASK_SECTION_ALL;
+  const sectionOptions = useMemo(
+    () => buildSectionOptions(currentProject, effectiveSectionFilter),
+    [currentProject, effectiveSectionFilter]
+  );
+  const showSectionSwitcher = sectionsOf(currentProject).length > 0;
 
-  const changeDepartmentFilter = useCallback((next) => {
-    const value = String(next || TASK_DEPARTMENT_ALL);
-    setDepartmentFilter((prev) => (prev === value ? prev : value));
+  const changeProjectFilter = useCallback((next) => {
+    const value = String(next || TASK_PROJECT_ALL);
+    setProjectFilter((prev) => (prev === value ? prev : value));
+    setSectionFilter(TASK_SECTION_ALL);
     setAllTasksPage(1);
-    writeStoredDepartment(user?.id, value);
+    writeStoredValue(projectStorageKey(user?.id), value);
   }, [user?.id]);
+
+  const changeSectionFilter = useCallback((next) => {
+    setSectionFilter(String(next || TASK_SECTION_ALL));
+    setAllTasksPage(1);
+  }, []);
+
+  /* Проект, который форма подставит сама: открытая доска → последний, куда
+     ставили → доска своего отдела. Доску отдела форма берёт и у рядового
+     бэк-офиса, хотя переключатель ему её не выбирает: там сужение прятало бы
+     чужие поручения, а здесь это просто подсказка, куда поставить. */
+  const composerDefaultProject = useMemo(() => resolveComposerProject(projects, {
+    boardValue: projectFilter,
+    lastUsed: readStoredValue(composerProjectStorageKey(user?.id)),
+    defaultProjectId: projectsMeta.departmentProjectId,
+  }), [projects, projectFilter, projectsMeta.departmentProjectId, user?.id]);
+  // Открыт раздел этой же доски — новая задача встанет в него.
+  const composerDefaultSection = (
+    composerDefaultProject && composerDefaultProject === String(projectFilter ?? '')
+    && Number(effectiveSectionFilter) > 0
+  ) ? String(effectiveSectionFilter) : '';
 
   useEffect(() => {
     const timer = setInterval(() => setActionNeedsNow(Date.now()), 60000);
@@ -7305,7 +7783,7 @@ const TasksView = ({
   }, []);
 
   const copyTaskLink = useCallback(async (task) => {
-    const taskLink = buildTaskDeepLink(task?.id);
+    const taskLink = buildTaskDeepLink(task);
     if (!taskLink) {
       notify('Не удалось собрать ссылку на задачу', 'error');
       return;
@@ -7341,26 +7819,36 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders]);
 
-  /* Отделы для переключателя: сервер отдаёт только те, где есть видимые задачи,
-     и подсказывает отдел по умолчанию — у главы отдела это возглавляемый отдел,
-     а не строка в его профиле, так что вычислить это на клиенте нельзя.
-     Если запрос не удался, остаёмся на «Все отделы»: сузить выборку по отделу,
-     списка которого нет, значит показать пустой раздел без объяснения. */
-  const fetchDepartments = useCallback(async () => {
+  /* Проекты: доски, к которым у человека есть доступ, и те, где лежат видимые
+     ему задачи. Сервер подсказывает доску по умолчанию — ту, что привязана к
+     отделу человека (у главы — к возглавляемому), если такая одна.
+     Не удалось загрузить — остаёмся на «Все проекты»: сузить выборку по доске,
+     списка которых нет, значит показать пустой раздел без объяснения. */
+  const fetchProjects = useCallback(async () => {
     let list = [];
-    let serverDefault = null;
+    let meta = {
+      unassignedCount: 0, canManage: false, defaultProjectId: null, departmentProjectId: null, candidates: [],
+    };
     try {
-      const res = await axios.get(`${apiBaseUrl}/api/tasks/departments`, { headers: buildHeaders() });
-      list = Array.isArray(res?.data?.departments) ? res.data.departments : [];
-      serverDefault = res?.data?.default_department_id ?? null;
+      const res = await axios.get(`${apiBaseUrl}/api/tasks/projects`, { headers: buildHeaders() });
+      list = Array.isArray(res?.data?.projects) ? res.data.projects : [];
+      meta = {
+        unassignedCount: Number(res?.data?.unassigned_count || 0),
+        canManage: Boolean(res?.data?.can_manage),
+        defaultProjectId: res?.data?.default_project_id ?? null,
+        departmentProjectId: res?.data?.department_project_id ?? null,
+        candidates: Array.isArray(res?.data?.candidates) ? res.data.candidates : [],
+      };
     } catch (e) {
       list = [];
-      serverDefault = null;
     }
-    setDepartments((prev) => mergeSelectedDepartment(list, prev, departmentFilterRef.current));
-    setDepartmentFilter((prev) => (prev !== null
+    setProjects((prev) => mergeSelectedProject(list, prev, projectFilterRef.current));
+    setProjectsMeta(meta);
+    setProjectFilter((prev) => (prev !== null
       ? prev
-      : resolveInitialDepartment(list, serverDefault, readStoredDepartment(user?.id))));
+      : resolveInitialProject(
+        list, meta.defaultProjectId, readStoredValue(projectStorageKey(user?.id)), meta.unassignedCount
+      )));
   }, [apiBaseUrl, buildHeaders, user?.id]);
 
   const fetchRecipients = useCallback(async () => {
@@ -7395,11 +7883,11 @@ const TasksView = ({
   /* Загрузчик страницы доски: доска сотрудника — только его задачи, общая —
      страница по количеству. Сводка нужна шапке доски, чтобы её счётчики
      считались по всей доске, а не по видимой странице. */
-  const loadBoardTasks = useCallback(async ({ scope, departmentId, mode, sort, column, limit, offset, withSummary }) => {
+  const loadBoardTasks = useCallback(async ({ scope, projectId, sectionId, mode, sort, column, limit, offset, withSummary }) => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/tasks`, {
         headers: buildHeaders(),
-        params: boardQueryParams({ scope, departmentId, mode, sort, column, limit, offset, withSummary })
+        params: boardQueryParams({ scope, projectId, sectionId, mode, sort, column, limit, offset, withSummary })
       });
       const data = res?.data || {};
       return {
@@ -7415,11 +7903,11 @@ const TasksView = ({
 
   /* Выгрузка идёт blob'ом через axios: простая ссылка <a href> не несёт токен и
      упирается в 401, потому что авторизация здесь bearer, а не кука. */
-  const exportBoardTasks = useCallback(async ({ scope, departmentId }) => {
+  const exportBoardTasks = useCallback(async ({ scope, projectId, sectionId }) => {
     try {
       const res = await axios.get(`${apiBaseUrl}/api/tasks/export`, {
         headers: buildHeaders(),
-        params: scopeQueryParams(scope, departmentId),
+        params: scopeQueryParams(scope, projectId, sectionId),
         responseType: 'blob',
       });
       const url = window.URL.createObjectURL(new Blob([res.data]));
@@ -7452,8 +7940,9 @@ const TasksView = ({
       hasSyncedDrawerUrlRef.current = true;
       if (!drawerTask?.id && typeof window !== 'undefined') {
         try {
-          const currentTaskId = Number(new URL(window.location.href).searchParams.get(TASK_ID_QUERY_PARAM) || 0);
-          if (currentTaskId > 0) return;
+          const params = new URL(window.location.href).searchParams;
+          const currentTaskId = Number(params.get(TASK_ID_QUERY_PARAM) || 0);
+          if (currentTaskId > 0 || normalizeTaskKey(params.get(TASK_KEY_QUERY_PARAM))) return;
         } catch (error) {
           // Fall through to the regular sync path.
         }
@@ -7465,8 +7954,8 @@ const TasksView = ({
        неё: раздел читал task_id как переход по ссылке и заново открывал уже
        закрытую карточку. Адресной строки на телефоне не видно, а ссылку на
        задачу собирает buildTaskDeepLink. */
-    syncTaskDeepLink(isMobileShell ? null : (drawerTask?.id || null));
-  }, [drawerTask?.id, isMobileShell]);
+    syncTaskDeepLink(isMobileShell ? null : (drawerTask?.id ? drawerTask : null));
+  }, [drawerTask?.id, drawerTask?.key, isMobileShell]);
 
   const fetchPagedTasks = useCallback(async () => {
     const requestId = ++pagedRequestIdRef.current;
@@ -7475,7 +7964,8 @@ const TasksView = ({
       const params = {
         limit: TASKS_PAGE_SIZE,
         offset: (allTasksPage - 1) * TASKS_PAGE_SIZE,
-        ...departmentQueryParams(departmentFilter)
+        ...projectQueryParams(projectFilter),
+        ...sectionQueryParams(effectiveSectionFilter)
       };
       if (debouncedSearchQuery) params.q = debouncedSearchQuery;
       if (filterStatus) params.status = filterStatus;
@@ -7512,7 +8002,8 @@ const TasksView = ({
     notify,
     allTasksPage,
     debouncedSearchQuery,
-    departmentFilter,
+    projectFilter,
+    effectiveSectionFilter,
     filterStatus,
     filterTag,
     filterPriority,
@@ -7522,9 +8013,9 @@ const TasksView = ({
     if (!user || !canAccessTasks) return;
     fetchRecipients();
     fetchBoardPeople();
-    fetchDepartments();
+    fetchProjects();
     fetchTasks();
-  }, [user, canAccessTasks, fetchRecipients, fetchBoardPeople, fetchDepartments, fetchTasks]);
+  }, [user, canAccessTasks, fetchRecipients, fetchBoardPeople, fetchProjects, fetchTasks]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -7534,9 +8025,9 @@ const TasksView = ({
   }, [searchQuery]);
 
   useEffect(() => {
-    if (!user || !canAccessTasks || !isDepartmentResolved) return;
+    if (!user || !canAccessTasks || !isProjectResolved) return;
     fetchPagedTasks();
-  }, [user, canAccessTasks, isDepartmentResolved, fetchPagedTasks]);
+  }, [user, canAccessTasks, isProjectResolved, fetchPagedTasks]);
 
   // Keyboard: Ctrl/Cmd+K → focus search
   useEffect(() => {
@@ -7686,15 +8177,18 @@ const TasksView = ({
   ]);
 
   const refreshTasksData = useCallback(async () => {
-    // Список отделов живёт от задач: закрыли последнюю — отдел уходит из списка.
-    const jobs = [fetchTasks(), fetchPagedTasks(), fetchDepartments()];
+    // Счётчики проектов живут от задач: поставили задачу — число у доски выросло.
+    const jobs = [fetchTasks(), fetchPagedTasks(), fetchProjects()];
     if (isPersonDrilldown) jobs.push(fetchPersonTasks());
     setBoardReloadToken((prev) => prev + 1);
     await Promise.all(jobs);
     setTaskPatches({});
-  }, [fetchTasks, fetchPagedTasks, fetchDepartments, fetchPersonTasks, isPersonDrilldown]);
+  }, [fetchTasks, fetchPagedTasks, fetchProjects, fetchPersonTasks, isPersonDrilldown]);
 
-  const patchTaskEverywhere = useCallback((taskId, updater) => {
+  /* board: false — доску не трогаем: она перечитает колонки сама и переставит
+     карточку один раз. Общие патчи гаснут, как только пришли списки, а колонки
+     доски грузятся отдельно, — и карточка прыгала бы туда-обратно-туда. */
+  const patchTaskEverywhere = useCallback((taskId, updater, { board = true } = {}) => {
     const normalizedTaskId = Number(taskId || 0);
     if (!normalizedTaskId || typeof updater !== 'function') return;
     const current = [drawerTask, ...tasks, ...pagedTasks, ...personTasks]
@@ -7707,7 +8201,7 @@ const TasksView = ({
     setPagedTasks(prev => prev.map(replace));
     setPersonTasks(prev => prev.map(replace));
     setDrawerTask(prev => (Number(prev?.id || 0) === normalizedTaskId ? nextTask : prev));
-    setTaskPatches(prev => ({ ...prev, [normalizedTaskId]: nextTask }));
+    if (board) setTaskPatches(prev => ({ ...prev, [normalizedTaskId]: nextTask }));
     if (Number(pinnedTaskId || 0) === normalizedTaskId) onPinnedTaskSync?.(nextTask);
   }, [drawerTask, tasks, pagedTasks, personTasks, pinnedTaskId, onPinnedTaskSync]);
 
@@ -7827,11 +8321,14 @@ const TasksView = ({
     fetchedFocusRequestRef.current = plan.requestId;
     axios.get(`${apiBaseUrl}/api/tasks`, {
       headers: buildHeaders(),
-      params: { task_id: plan.taskId, limit: 1, summary: 0 },
+      // По ключу сервер найдёт и задачу, перенесённую из проекта: старый ключ живёт в псевдонимах.
+      params: plan.taskId
+        ? { task_id: plan.taskId, limit: 1, summary: 0 }
+        : { task_key: plan.taskKey, limit: 1, summary: 0 },
     })
       .then((res) => {
         const found = (Array.isArray(res?.data?.tasks) ? res.data.tasks : [])
-          .find((task) => Number(task?.id || 0) === plan.taskId);
+          .find((task) => (plan.taskId ? Number(task?.id || 0) === plan.taskId : Boolean(task?.id)));
         if (!shouldOpenFetchedTask({
           task: found,
           requestId: plan.requestId,
@@ -7886,7 +8383,15 @@ const TasksView = ({
       })
       : []
   ), [recipients]);
-  const createIssues = useMemo(() => formIssues(form), [formIssues, form]);
+  /* Проект обязателен, когда выбирать есть из чего: задача без доски у
+     человека с досками — это задача, которую никто из отдела не увидит. */
+  const composerProjects = useMemo(() => creatableProjects(projects), [projects]);
+  const createIssues = useMemo(() => [
+    ...(composerProjects.length && !form.projectId
+      ? [{ key: 'project', text: 'Выберите проект — задача попадёт на его доску' }]
+      : []),
+    ...formIssues(form),
+  ], [composerProjects, formIssues, form]);
   const editIssues = useMemo(() => formIssues(editForm, editModal), [formIssues, editForm, editModal]);
   const createIssueNav = useBriefIssueNav(createBodyRef, createIssues.map((issue) => issue.key));
   const editIssueNav = useBriefIssueNav(editBodyRef, editIssues.map((issue) => issue.key));
@@ -7899,6 +8404,23 @@ const TasksView = ({
     [editIssuesShown, editIssues]
   );
   useEffect(() => { if (!createOpen) setCreateIssuesShown(false); }, [createOpen]);
+  /* Открыли форму — подставляем доску, если человек её не выбирал сам. Проект,
+     подставленный прошлым открытием, тоже меняем: человек закрыл форму на доске
+     HR, перешёл на FIN — новая задача должна пойти в FIN, а не «прилипнуть». */
+  useEffect(() => {
+    if (!createOpen || !composerDefaultProject) return;
+    setForm((prev) => {
+      if (prev.projectId && !prev.projectAuto) return prev;
+      if (prev.projectId === composerDefaultProject && (prev.sectionId || '') === composerDefaultSection) return prev;
+      return {
+        ...prev,
+        projectId: composerDefaultProject,
+        projectAuto: true,
+        sectionId: composerDefaultSection,
+        watcherIds: keepWatchersForProject(prev.watcherIds, findProject(projects, composerDefaultProject)),
+      };
+    });
+  }, [createOpen, composerDefaultProject, composerDefaultSection, projects]);
   useEffect(() => { if (!editModal.open) setEditIssuesShown(false); }, [editModal.open]);
 
   /* ── Create ── */
@@ -7919,8 +8441,14 @@ const TasksView = ({
     setIsCreateLoading(true);
     try {
       const res = await axios.post(`${apiBaseUrl}/api/tasks`, body, { headers: buildHeaders() });
-      notify(res?.data?.message || 'Задача создана');
+      const createdKey = res?.data?.key;
+      if (createdKey) {
+        notify(form.isBacklog ? `Задача ${createdKey} добавлена в бэклог` : `Задача ${createdKey} поставлена`);
+      } else {
+        notify(res?.data?.message || 'Задача создана');
+      }
       if (res?.data?.warning) notify(res.data.warning, 'error');
+      if (form.projectId) writeStoredValue(composerProjectStorageKey(user?.id), form.projectId);
       setForm(buildEmptyTaskForm());
       setSelectedFiles([]);
       setCreateOpen(false);
@@ -7981,6 +8509,26 @@ const TasksView = ({
       setActionLoadingKey('');
     }
   }, [editModal, editForm, editIssues, editIssueNav, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
+
+  /* Наблюдатели из карточки — одним PATCH, только этим полем: остальное в задаче
+     не трогаем (правит её тот же постановщик, сервер сверит доступ к доске). */
+  const saveTaskWatchers = useCallback(async (task, watcherIds) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return false;
+    try {
+      await axios.patch(
+        `${apiBaseUrl}/api/tasks/${taskId}`,
+        { watcher_ids: (watcherIds || []).map(Number).filter((id) => id > 0) },
+        { headers: buildHeaders() }
+      );
+      notify('Наблюдатели сохранены');
+      await refreshTasksData();
+      return true;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось сохранить наблюдателей', 'error');
+      return false;
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
 
   const openDeleteModal = useCallback((task) => {
     if (!task?.id) return;
@@ -8065,7 +8613,9 @@ const TasksView = ({
       );
       if (res?.data?.warning) notify(res.data.warning, 'error');
       await refreshTasksData();
-      return true;
+      // Что сервер записал на деле — по каждой задаче (непустой список и есть «да»):
+      // доска и карточка задачи сверяют с ним свои оптимистичные правки.
+      return Array.isArray(res?.data?.items) ? res.data.items : [];
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось обновить доску', 'error');
       return false;
@@ -8213,7 +8763,6 @@ const TasksView = ({
     setCompletionSummary(task?.completion_summary || '');
     setCompletionSpent('');
     setCompletionFiles([]);
-    if (completionFileInputRef.current) completionFileInputRef.current.value = '';
     setCompleteModal({
       open: true,
       taskId: task.id,
@@ -8227,7 +8776,6 @@ const TasksView = ({
     setCompletionSummary('');
     setCompletionSpent('');
     setCompletionFiles([]);
-    if (completionFileInputRef.current) completionFileInputRef.current.value = '';
   }, []);
 
   const openStatusModal = useCallback((task, action) => {
@@ -8235,7 +8783,6 @@ const TasksView = ({
     if (action !== 'returned' && action !== 'reopened') return;
     setStatusComment('');
     setStatusFiles([]);
-    if (statusFileInputRef.current) statusFileInputRef.current.value = '';
     setStatusModal({ open: true, taskId: task.id, action, taskSubject: task.subject || '' });
   }, []);
 
@@ -8243,7 +8790,6 @@ const TasksView = ({
     setStatusModal({ open: false, taskId: null, action: '', taskSubject: '' });
     setStatusComment('');
     setStatusFiles([]);
-    if (statusFileInputRef.current) statusFileInputRef.current.value = '';
   }, []);
 
   const submitComplete = useCallback(async (e) => {
@@ -8335,6 +8881,39 @@ const TasksView = ({
     const ok = await updateBoardItems([{ task_id: taskId, is_backlog: true }]);
     if (ok) notify('Задача убрана в бэклог');
   }, [updateBoardItems, notify]);
+
+  /* Балл приоритета (1–5) — только суперадмины, тем же пакетным вызовом доски.
+     В карточке он меняется сразу, а если сервер откажет — возвращается прежний.
+     Первый балл у задачи из «Новой» переводит её в бэклог, снятый балл — обратно в
+     «Новую» (то же правило у сервера). Об этом говорим: в открытой карточке
+     переезда не видно. */
+  const setTaskPriorityScore = useCallback(async (task, score) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return;
+    const previous = priorityScoreOf(task);
+    const wasBacklog = Boolean(task?.is_backlog);
+    const move = scoreBoardMove(task, score);
+    patchTaskEverywhere(taskId, (current) => ({
+      ...current,
+      priority_score: score,
+      ...(move ? { is_backlog: move === 'backlog' } : {}),
+    }), { board: false });
+    const items = await updateBoardItems([{ task_id: taskId, priority_score: score }]);
+    if (!items) {
+      patchTaskEverywhere(taskId, (current) => ({ ...current, priority_score: previous, is_backlog: wasBacklog }), { board: false });
+      return;
+    }
+    // Карточке задачи и тосту — то, что сервер сделал на деле: задачу могли в ту же
+    // секунду взять в работу, и тогда балл записан, а переезда не было.
+    const item = items.find((entry) => Number(entry?.task_id) === taskId) || null;
+    if (item) {
+      setDrawerTask((prev) => (Number(prev?.id || 0) === taskId
+        ? { ...prev, priority_score: item.priority_score ?? null, is_backlog: Boolean(item.is_backlog) }
+        : prev));
+    }
+    if (item?.score_move === 'to_backlog') notify('Балл поставлен — задача перешла в бэклог');
+    if (item?.score_move === 'to_new') notify('Балл снят — задача вернулась в «Новую»');
+  }, [patchTaskEverywhere, updateBoardItems, notify]);
 
   const openBacklogCreate = useCallback(() => {
     setForm(buildEmptyTaskForm({ isBacklog: true }));
@@ -8513,19 +9092,47 @@ const TasksView = ({
       <div className="tv-topbar">
         <div className="tv-topbar-lead">
           <h1 className="tv-topbar-title">Задачи</h1>
-          {/* Отдел задачи = отдел того, кто её поставил. «Мои задачи» этот
-              переключатель не сужает: там задачи и так всегда ваши. */}
-          <CustomSelect
-            className="tv-dept-select"
-            variant="ios"
-            ariaLabel="Отдел задач"
-            value={departmentFilter ?? TASK_DEPARTMENT_ALL}
-            options={departmentOptions}
-            onChange={changeDepartmentFilter}
-            disabled={!isDepartmentResolved}
-            searchable
-            searchPlaceholder="Найти отдел…"
-          />
+          {/* Доска проекта (задача #401). «Мои задачи» переключатель не сужает:
+              там задачи и так всегда ваши. */}
+          {showProjectSwitcher && (
+            <CustomSelect
+              className="tv-project-select"
+              variant="ios"
+              ariaLabel="Проект"
+              value={projectFilter ?? TASK_PROJECT_ALL}
+              options={projectOptions}
+              onChange={changeProjectFilter}
+              disabled={!isProjectResolved}
+              searchable
+              searchPlaceholder="Найти проект…"
+            />
+          )}
+          {/* Разделы открытой доски — только у досок, где они заведены. */}
+          {showSectionSwitcher && (
+            <CustomSelect
+              className="tv-section-select"
+              variant="ios"
+              ariaLabel="Раздел доски"
+              value={effectiveSectionFilter}
+              options={sectionOptions}
+              onChange={changeSectionFilter}
+              searchable={sectionOptions.length > 8}
+              searchPlaceholder="Найти раздел…"
+            />
+          )}
+          {/* Состав досок настраивает тот, кто в разделе и так видит всё. На
+              телефоне не показываем: это работа за компьютером, а шапке там тесно. */}
+          {projectsMeta.canManage && !isMobileShell && (
+            <button
+              type="button"
+              className="tv-icon-btn"
+              title="Настроить проекты"
+              aria-label="Настроить проекты"
+              onClick={() => setProjectsSheetOpen(true)}
+            >
+              <Settings size={15} strokeWidth={2} />
+            </button>
+          )}
         </div>
         <div className="tv-topbar-actions">
           <TaskInbox
@@ -8580,6 +9187,25 @@ const TasksView = ({
         </div>
       </div>
 
+      {projectsMeta.canManage && (
+        <TaskProjectsSheet
+          open={projectsSheetOpen}
+          onClose={() => setProjectsSheetOpen(false)}
+          projects={projects}
+          people={projectsMeta.candidates.length ? projectsMeta.candidates : recipients}
+          roleLabels={ROLE_LABELS}
+          apiBaseUrl={apiBaseUrl}
+          buildHeaders={buildHeaders}
+          notify={notify}
+          // Сменили ключ доски — у загруженных карточек ключи старые (HR-125 → HRD-125):
+          // перечитываем и задачи, а не только список досок.
+          onSaved={async ({ codeChanged } = {}) => {
+            await fetchProjects();
+            if (codeChanged) await refreshTasksData();
+          }}
+        />
+      )}
+
       {/* Заметки — отдельное широкое окно, а не блок, вклеенный в страницу. */}
       <FullscreenSheet
         open={notesOpen}
@@ -8611,10 +9237,10 @@ const TasksView = ({
         ))}
       </div>
 
-      {workspaceTab !== 'overview' && !isDepartmentResolved && (
+      {workspaceTab !== 'overview' && !isProjectResolved && (
         <div className="tv-section">
-          {/* Доску не монтируем, пока не знаем отдел: иначе она успела бы
-              сходить за всеми задачами и тут же перезагрузиться на свой отдел. */}
+          {/* Доску не монтируем, пока не знаем проект: иначе она успела бы
+              сходить за всеми задачами и тут же перезагрузиться на свою доску. */}
           <div className="space-y-2">
             {[0, 1, 2].map((index) => (
               <div key={index} className="h-14 animate-pulse rounded-2xl bg-slate-100" />
@@ -8623,18 +9249,20 @@ const TasksView = ({
         </div>
       )}
 
-      {workspaceTab !== 'overview' && isDepartmentResolved && (
+      {workspaceTab !== 'overview' && isProjectResolved && (
         <div className="tv-section">
           <TaskBoardWorkspace
             mode={workspaceTab}
             people={boardPeople}
-            departmentId={departmentFilter}
+            projectId={projectFilter}
+            sectionId={effectiveSectionFilter}
             loadTasks={loadBoardTasks}
             reloadToken={boardReloadToken}
             taskPatches={taskPatches}
             currentUserId={currentUserId}
             isAdmin={isAdminLikeRole(currentUserRole)}
             isSupervisor={isSupervisorRole(currentUserRole)}
+            canScore={normalizeRole(currentUserRole) === 'super_admin'}
             focusRequest={boardFocus}
             actionNeedOf={actionNeedOf}
             isTaskOpen={Boolean(drawerTask)}
@@ -8851,6 +9479,9 @@ const TasksView = ({
           downloadAttachment={downloadAttachment}
           loadTaskPhotos={loadTaskPhotos}
           onOpenProduction={onOpenProduction}
+          projects={projects}
+          onSaveWatchers={saveTaskWatchers}
+          onSetPriorityScore={setTaskPriorityScore}
           onEditTask={openEditModal}
           onDeleteTask={openDeleteModal}
           onCopyTaskLink={copyTaskLink}
@@ -8896,6 +9527,7 @@ const TasksView = ({
                   showBacklogToggle
                   currentUserId={currentUserId}
                   issueFor={createIssueFor}
+                  projects={projects}
                 />
               </div>
               <div className="tv-modal-footer">
@@ -8933,6 +9565,7 @@ const TasksView = ({
                   disabled={!!actionLoadingKey}
                   currentUserId={currentUserId}
                   issueFor={editIssueFor}
+                  projects={projects}
                 />
               </div>
               <div className="tv-modal-footer">
@@ -9065,16 +9698,16 @@ const TasksView = ({
                       })()}
                     </p>
                   </div>
+                  {/* Та же панель файлов, что в форме задачи: системное поле выбора
+                      файла выглядело деталью из другой программы. */}
                   <div className="tv-form-field">
                     <label>Итоговые файлы</label>
-                    <input ref={completionFileInputRef} type="file" multiple className="tv-input"
+                    <TaskFileDropzone
+                      files={completionFiles}
                       disabled={!!actionLoadingKey}
-                      onChange={e => setCompletionFiles(Array.from(e.target.files || []))} />
-                    {completionFiles.length > 0 && (
-                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
-                        Прикреплено файлов: {completionFiles.length}
-                      </p>
-                    )}
+                      onChange={setCompletionFiles}
+                      title="Итоговые файлы"
+                    />
                   </div>
                 </div>
               </div>
@@ -9123,14 +9756,12 @@ const TasksView = ({
                   </div>
                   <div className="tv-form-field">
                     <label>Прикрепить файлы</label>
-                    <input ref={statusFileInputRef} type="file" multiple className="tv-input"
+                    <TaskFileDropzone
+                      files={statusFiles}
                       disabled={!!actionLoadingKey}
-                      onChange={e => setStatusFiles(Array.from(e.target.files || []))} />
-                    {statusFiles.length > 0 && (
-                      <p style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 4 }}>
-                        Прикреплено файлов: {statusFiles.length}
-                      </p>
-                    )}
+                      onChange={setStatusFiles}
+                      title="Файлы к комментарию"
+                    />
                   </div>
                 </div>
               </div>

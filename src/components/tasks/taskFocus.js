@@ -18,14 +18,23 @@
  */
 
 const normalizeId = (value) => Number(value || 0);
+/* Ключ задачи проекта (?task=HR-125, задача #401) — тот же шаблон, что в
+   taskProjects.js; продублирован, чтобы модуль оставался листом для node --test. */
+const normalizeKey = (value) => {
+  const match = /^\s*#?([A-Za-z][A-Za-z0-9]{1,9})-(\d{1,9})\s*$/.exec(String(value ?? ''));
+  return match && Number(match[2]) > 0 ? `${match[1].toUpperCase()}-${Number(match[2])}` : '';
+};
 
 /** Задача из любого загруженного набора раздела: наборы приезжают вразнобой. */
-export const findFocusTask = (taskId, pools = []) => {
+export const findFocusTask = (taskId, pools = [], taskKey = '') => {
   const normalizedTaskId = normalizeId(taskId);
-  if (!normalizedTaskId) return null;
+  const normalizedKey = normalizeKey(taskKey);
+  if (!normalizedTaskId && !normalizedKey) return null;
   for (const pool of pools) {
     if (!Array.isArray(pool)) continue;
-    const found = pool.find((task) => normalizeId(task?.id) === normalizedTaskId);
+    const found = pool.find((task) => (normalizedTaskId
+      ? normalizeId(task?.id) === normalizedTaskId
+      : normalizeKey(task?.key) === normalizedKey));
     if (found) return found;
   }
   return null;
@@ -43,15 +52,18 @@ export const planTaskFocus = ({
 } = {}) => {
   const requestId = normalizeId(request?.requestId);
   const taskId = normalizeId(request?.taskId);
-  const idle = { kind: 'idle', requestId, taskId, task: null };
-  if (!requestId || !taskId) return idle;
+  // Ссылка по ключу: номер задачи неизвестен, пока её не нашли. Ключ из набора
+  // раздела — не точный «старый» ключ перенесённой задачи, такую найдёт сервер.
+  const taskKey = taskId ? '' : normalizeKey(request?.taskKey);
+  const idle = { kind: 'idle', requestId, taskId, taskKey, task: null };
+  if (!requestId || (!taskId && !taskKey)) return idle;
   if (normalizeId(handledRequestId) === requestId) return idle;
 
-  const task = findFocusTask(taskId, pools);
-  if (task) return { kind: 'open', requestId, taskId, task };
+  const task = findFocusTask(taskId, pools, taskKey);
+  if (task) return { kind: 'open', requestId, taskId: normalizeId(task.id), taskKey, task };
 
   if (normalizeId(fetchedRequestId) === requestId) return idle;
-  return { kind: 'fetch', requestId, taskId, task: null };
+  return { kind: 'fetch', requestId, taskId, taskKey, task: null };
 };
 
 /**

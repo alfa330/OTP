@@ -8,13 +8,14 @@
 
 // Расширение в пути обязательно: этот модуль гоняется тестами через node --test,
 // а там ESM не достраивает '.js' сам, в отличие от сборки Vite.
-import { departmentQueryParams } from './departmentFilter.js';
+import { projectQueryParams, sectionQueryParams } from './taskProjects.js';
 
 /** Колонка доски = свой срез статусов. Порядок ключей совпадает с BOARD_COLUMNS. */
 export const BOARD_COLUMN_QUERY = {
-  backlog:  { backlog: 'only' },
   todo:     { status: 'assigned', backlog: 'exclude' },
-  progress: { status: 'in_progress,returned', backlog: 'exclude' },
+  backlog:  { backlog: 'only' },
+  progress: { status: 'in_progress', backlog: 'exclude' },
+  returned: { status: 'returned', backlog: 'exclude' },
   review:   { status: 'completed', backlog: 'exclude' },
   done:     { status: 'accepted', backlog: 'exclude' },
 };
@@ -32,13 +33,13 @@ export const normalizeBoardChunk = (value) => {
 };
 
 /**
- * Чьи задачи просим: «Мои» / «На мне» / доска сотрудника («Все» — без фильтра)
- * и в каком отделе.
+ * Чьи задачи просим: «Мои» / «На мне» / доска сотрудника («Все» — без фильтра),
+ * на какой доске проекта и в каком её разделе (задача #401).
  * Общее у доски и выгрузки: в Excel должен уехать ровно тот же охват, что виден
  * на экране, поэтому охват описан один раз.
  */
-export const scopeQueryParams = (scope, departmentId = null) => {
-  const params = departmentQueryParams(departmentId);
+export const scopeQueryParams = (scope, projectId = null, sectionId = null) => {
+  const params = { ...projectQueryParams(projectId), ...sectionQueryParams(sectionId) };
   if (scope === 'my') return { ...params, mine: 'any' };
   if (scope === 'assigned') return { ...params, mine: 'assignee' };
   if (String(scope || '').startsWith('person:')) {
@@ -51,7 +52,9 @@ export const scopeQueryParams = (scope, departmentId = null) => {
   return params;
 };
 
-export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, departmentId = null, withSummary = true }) => {
+export const boardQueryParams = ({
+  scope, mode, sort, column, limit, offset, projectId = null, sectionId = null, withSummary = true,
+}) => {
   const params = { limit, offset };
   // Сводка стоит семи агрегатов по всей базе — просим её один раз на загрузку доски.
   if (!withSummary) params.summary = 0;
@@ -60,5 +63,5 @@ export const boardQueryParams = ({ scope, mode, sort, column, limit, offset, dep
   if (sort === 'importance') params.sort = 'importance';
   if (column && BOARD_COLUMN_QUERY[column]) Object.assign(params, BOARD_COLUMN_QUERY[column]);
   else if (mode === 'backlog') params.backlog = 'only';
-  return Object.assign(params, scopeQueryParams(scope, departmentId));
+  return Object.assign(params, scopeQueryParams(scope, projectId, sectionId));
 };

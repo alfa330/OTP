@@ -384,6 +384,8 @@ export default function CustomSelect({
       {open && coords && createPortal(
         <div
           ref={popRef}
+          // Панель в портале: окна, что закрываются щелчком снаружи, узнают её по метке.
+          data-picker-panel=""
           style={{
             position: 'fixed',
             left: coords.left,
