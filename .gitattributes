@@ -34,3 +34,6 @@ Caddyfile text eol=lf
 *.wav binary
 *.ogg binary
 *.m4a binary
+
+# Веса нейросети вырезания фона (доска почёта) — двоичный файл, не текст.
+*.onnx binary

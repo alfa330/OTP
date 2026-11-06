@@ -1069,7 +1069,6 @@ html[data-otp-theme="dark"] .placeholder\:text-slate-400::placeholder { color: #
 html[data-otp-theme="dark"] .placeholder\:text-slate-500::placeholder { color: #939cab !important; }
 html[data-otp-theme="dark"] .ring-amber-200\/70 { --tw-ring-color: rgba(130, 96, 39, 0.7) !important; }
 html[data-otp-theme="dark"] .ring-amber-200\/80 { --tw-ring-color: rgba(130, 96, 39, 0.8) !important; }
-html[data-otp-theme="dark"] .ring-amber-300\/70 { --tw-ring-color: rgba(155, 110, 33, 0.7) !important; }
 html[data-otp-theme="dark"] .ring-amber-300\/80 { --tw-ring-color: rgba(155, 110, 33, 0.8) !important; }
 html[data-otp-theme="dark"] .ring-blue-200\/70 { --tw-ring-color: rgba(51, 84, 138, 0.7) !important; }
 html[data-otp-theme="dark"] .ring-blue-200\/80 { --tw-ring-color: rgba(51, 84, 138, 0.8) !important; }

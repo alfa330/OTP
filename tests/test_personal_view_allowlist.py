@@ -229,9 +229,10 @@ class BellTests(unittest.TestCase):
 
     def test_sources_that_only_lead_to_hidden_sections_are_silent(self):
         hidden = sources.sources_outside_views(('baiga',))
+        # «Доска почёта» живёт вкладкой «Ивентов»: нет ленты в меню — нет и доски.
         self.assertEqual(set(hidden), {
             'wiki_ack', 'tasks', 'wiki_questions', 'checkpoints', 'shift_requests', 'leave_requests',
-            'lms', 'surveys', 'events', 'four_you'})
+            'lms', 'surveys', 'events', 'honor_board', 'four_you'})
         # «Обращения» и «Жалобы» — разделы со своим кругом доступа: набор их в
         # меню не прячет, значит, и колокол о них не молчит.
         self.assertNotIn('crm', hidden)

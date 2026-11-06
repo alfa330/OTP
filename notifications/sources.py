@@ -42,7 +42,7 @@ from leave_requests import access as leave_access
 # «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
 SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'hiring', 'wiki_questions', 'checkpoints', 'shift_requests',
            'leave_requests', 'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events',
-           'four_you', 'birthdays')
+           'honor_board', 'four_you', 'birthdays')
 
 # В какие разделы ведут строки источника — все значения поля 'view' его
 # элементов. None — строка никуда не ведёт: день рождения и свой назначенный
@@ -68,6 +68,8 @@ SOURCE_VIEWS = {
     'lms': ('lms',),
     'surveys': ('surveys',),
     'events': ('events',),
+    # «Доска почёта» живёт вкладкой «Ивентов»: строка открывает её с нужным месяцем.
+    'honor_board': ('events',),
     'four_you': ('four_you',),
     'birthdays': (None,),
 }
@@ -304,6 +306,39 @@ def events(cursor, viewer, limit):
         'target': row[0],
         'tone': 'default',
     } for row in rows]
+
+
+# ── Доска почёта ─────────────────────────────────────────────────────────────
+def honor_board(cursor, viewer, limit):
+    """Вышедшие доски почёта, которых зритель ещё не видел: строка на месяц.
+
+    Доска одна для всех сотрудников (ТЗ #318: «видна всем без ограничений»),
+    поэтому периметра здесь нет — только водяной знак honor_board_reads.
+    Повод — первая публикация доски (first_published_at): «Опубликовать
+    правки» второй раз не звонит. Направления одного месяца — одной строкой:
+    тренер выкладывает ОП, СЗоВ и Фронт-офис по очереди, и три строки
+    «итоги октября» подряд были бы шумом.
+    """
+    from honor_board import catalog as honor_catalog
+    from honor_board import queries as honor_queries
+
+    total, periods = honor_queries.unseen_periods(cursor, viewer['user_id'], limit)
+    items = []
+    for period, keys, published_at in periods:
+        labels = [item['label'] for item in honor_catalog.DEPARTMENTS if item['key'] in keys]
+        items.append({
+            'source': 'honor_board',
+            'id': period.year * 100 + period.month,
+            'title': f'Доска почёта: итоги {honor_catalog.period_genitive(period)}',
+            'body': ', '.join(labels),
+            'at': _iso(published_at),
+            'view': 'events',
+            # Вкладку «Доска почёта», месяц и вышедшие направления открывает сам
+            # раздел (EventsView): «honor:2026-10:op,szov».
+            'target': f'honor:{honor_catalog.period_key(period)}:{",".join(keys)}',
+            'tone': 'default',
+        })
+    return total, items
 
 
 # ── 4 You ────────────────────────────────────────────────────────────────────
@@ -1267,6 +1302,7 @@ _HANDLERS = {
     'lms': lms,
     'surveys': surveys,
     'events': events,
+    'honor_board': honor_board,
     'four_you': four_you,
     'birthdays': birthdays,
 }
@@ -1468,6 +1504,10 @@ def mark_seen(cursor, user_id, source):
             """,
             (user_id,),
         )
+        return True
+    if source == 'honor_board':
+        from honor_board import queries as honor_queries
+        honor_queries.mark_seen(cursor, user_id)
         return True
     if source == 'four_you':
         cursor.execute(

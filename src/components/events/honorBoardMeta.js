@@ -3,39 +3,46 @@
  *
  * Тот же справочник — на сервере, honor_board/catalog.py; tests/test_honor_board.py
  * сверяет их буквально: доска не должна назвать номинацию иначе, чем её принял
- * сервер. Здесь нет React — только данные и чистые функции (tests/honor_board.test.mjs).
+ * сервер. Здесь нет React — только данные и чистые функции (tests/honor_board_meta.test.mjs).
  */
 
 export const MAIN_NOMINATION = 'best_employee';
 export const CUSTOM_NOMINATION = 'custom';
 
-// «2–4 профильные номинации, включая ключевую» — потолок Фронт-офиса вместе с ключевой.
-export const CUSTOM_MAX_NOMINATIONS = 4;
+// Номинаций на доске вместе с ключевой — у всех трёх направлений.
+export const MAX_NOMINATIONS = 8;
 export const NAME_MAX = 80;
 export const TITLE_MAX = 60;
 export const DESCRIPTION_MAX = 600;
 
-const MAIN = {
-    key: MAIN_NOMINATION,
-    title: 'Лучший сотрудник отдела',
-    reason: 'по итогам месяца, за лучшие показатели по всем ключевым метрикам',
-};
+export const MAIN_TITLE = 'Лучший сотрудник отдела';
+export const MAIN_REASON = 'по итогам месяца, за лучшие показатели по всем ключевым метрикам';
+// Корона — только у ключевой номинации (ТЗ: «специальная плашка/корона»).
+export const MAIN_ICON = 'Crown';
+export const DEFAULT_ICON = 'Award';
 
-/* icon — имя значка lucide для бейджа номинации (компоненты подставляет доска:
-   модуль остаётся без React и читается тестом). genitive — для строки
-   «победителей отдела продаж»; серверу не нужен. */
+/* Значки своих номинаций — имена значков lucide (компоненты подставляет
+   honorUi.jsx: модуль остаётся без React и читается тестом). Список закрытый,
+   тот же, что у сервера. */
+export const HONOR_ICONS = [
+    'Award', 'Star', 'Trophy', 'Medal', 'Rocket', 'Target', 'Zap', 'TrendingUp',
+    'Flame', 'Gem', 'Sparkles', 'HeartHandshake', 'MessageCircleHeart', 'Headphones', 'BadgeCheck', 'Car',
+];
+
+/* presets — номинации ТЗ, которыми открывается первая доска направления
+   (дальше каждый месяц берёт названия своего прошлого): code — прежний ключ,
+   которым хранились доски до 06.11.2026. genitive — для строки «победителей
+   отдела продаж»; серверу не нужен. */
 export const HONOR_DEPARTMENTS = [
     {
         key: 'op',
         label: 'ОП',
         title: 'Отдел продаж',
         genitive: 'отдела продаж',
-        custom: false,
-        nominations: [
-            { ...MAIN, icon: 'Crown' },
-            { key: 'guru_sales', title: 'Гуру продаж', reason: 'за высокие результаты и профессионализм в продажах', icon: 'TrendingUp' },
-            { key: 'master_yr', title: 'Мастер ЯР', reason: 'за лучшие показатели в группе Яндекс Регистрации', icon: 'Car' },
-            { key: 'best_verifier', title: 'Лучший верификатор', reason: 'за наибольшее количество регистраций за месяц', icon: 'BadgeCheck' },
+        presets: [
+            { code: 'guru_sales', title: 'Гуру продаж', icon: 'TrendingUp', reason: 'за высокие результаты и профессионализм в продажах' },
+            { code: 'master_yr', title: 'Мастер ЯР', icon: 'Car', reason: 'за лучшие показатели в группе Яндекс Регистрации' },
+            { code: 'best_verifier', title: 'Лучший верификатор', icon: 'BadgeCheck', reason: 'за наибольшее количество регистраций за месяц' },
         ],
     },
     {
@@ -43,12 +50,10 @@ export const HONOR_DEPARTMENTS = [
         label: 'СЗоВ',
         title: 'Служба заботы о водителях',
         genitive: 'службы заботы о водителях',
-        custom: false,
-        nominations: [
-            { ...MAIN, icon: 'Crown' },
-            { key: 'productivity_champion', title: 'Чемпион по продуктивности', reason: 'за высокие результаты и стабильную работу', icon: 'Zap' },
-            { key: 'first_class_manager', title: 'Первоклассный менеджер', reason: 'за качество обслуживания и вовлечённость', icon: 'HeartHandshake' },
-            { key: 'chat_star', title: 'Звезда чат-направления', reason: 'за эффективность и внимательность в переписке с водителями', icon: 'MessageCircleHeart' },
+        presets: [
+            { code: 'productivity_champion', title: 'Чемпион по продуктивности', icon: 'Zap', reason: 'за высокие результаты и стабильную работу' },
+            { code: 'first_class_manager', title: 'Первоклассный менеджер', icon: 'HeartHandshake', reason: 'за качество обслуживания и вовлечённость' },
+            { code: 'chat_star', title: 'Звезда чат-направления', icon: 'MessageCircleHeart', reason: 'за эффективность и внимательность в переписке с водителями' },
         ],
     },
     {
@@ -56,29 +61,29 @@ export const HONOR_DEPARTMENTS = [
         label: 'Фронт-офис',
         title: 'Фронт-офис',
         genitive: 'фронт-офиса',
-        custom: true,
-        nominations: [
-            { ...MAIN, icon: 'Crown' },
-        ],
+        presets: [],
     },
 ];
 
-// Своя номинация Фронт-офиса: названия справочник не знает, значок общий.
-export const CUSTOM_ICON = 'Award';
-
 export const honorDepartment = (key) => HONOR_DEPARTMENTS.find((item) => item.key === key) || null;
 
-/* Справка о номинации карточки: название из записи (так её объявили), за что
-   и значок — из справочника. Незнакомая номинация (её убрали из списка после
-   публикации) показывается своим названием и общим значком. */
-export const nominationMeta = (departmentKey, nomination, storedTitle = '') => {
-    const item = honorDepartment(departmentKey);
-    const known = item?.nominations.find((entry) => entry.key === nomination);
+export const iconOrDefault = (icon, fallback = DEFAULT_ICON) => (HONOR_ICONS.includes(icon) ? icon : fallback);
+
+/* Справка о номинации карточки: название из записи (так её объявили), значок —
+   из записи; «за что» — у ключевой из ТЗ, у своей — только если её название
+   совпадает с номинацией ТЗ этого направления (переименованную тренер
+   описывает сам, в описании заслуг). */
+export const nominationMeta = (departmentKey, nomination, storedTitle = '', storedIcon = '') => {
+    const main = nomination === MAIN_NOMINATION;
+    if (main) {
+        return { title: storedTitle || MAIN_TITLE, reason: MAIN_REASON, icon: MAIN_ICON, main: true };
+    }
+    const preset = honorDepartment(departmentKey)?.presets.find((item) => item.title === storedTitle);
     return {
-        title: storedTitle || known?.title || '',
-        reason: known?.reason || '',
-        icon: known?.icon || CUSTOM_ICON,
-        main: nomination === MAIN_NOMINATION,
+        title: storedTitle || '',
+        reason: preset?.reason || '',
+        icon: iconOrDefault(storedIcon),
+        main: false,
     };
 };
 
@@ -100,6 +105,18 @@ export const managesHonorBoard = (user) => {
     return codes.some((code) => HONOR_HEAD_MANAGED_CODES.includes(code));
 };
 
+/* Какое направление показать после захода или зова колокола.
+   wanted — направления, о которых звал колокол (вышли и не просмотрены):
+   выбранное (своё) — если оно среди них, иначе первое из них с доской.
+   Без зова — выбранное, если у него есть доска за месяц, иначе первое с доской. */
+export const pickDepartment = (current, boards, wanted = []) => {
+    const has = (key) => Boolean(boards?.[key]);
+    const called = (wanted || []).filter(has);
+    if (called.length) return called.includes(current) ? current : called[0];
+    if (has(current)) return current;
+    return HONOR_DEPARTMENTS.find((item) => has(item.key))?.key || current;
+};
+
 /* Направление, которое доска открывает первым: своё, если человек из ОП, СЗоВ
    или Фронт-офиса, иначе — первое по списку. */
 export const defaultDepartmentKey = (user) => {
@@ -119,6 +136,8 @@ const parsePeriod = (key) => {
     const month = Number(match[2]);
     return month >= 1 && month <= 12 ? { year: Number(match[1]), month } : null;
 };
+
+export const isPeriodKey = (key) => parsePeriod(key) !== null;
 
 /** '2026-10' → «Октябрь 2026». */
 export const periodLabel = (key) => {
@@ -174,7 +193,15 @@ export const initialsOf = (name) => {
 
 // ── Строки доски в окне тренера ────────────────────────────────────────
 
-export const blankEntry = (nomination, title = '') => ({ nomination, title, user_id: null, name: '', description: '' });
+export const blankEntry = (nomination, title = '', icon = null) => ({
+    nomination,
+    title,
+    icon: icon || (nomination === MAIN_NOMINATION ? MAIN_ICON : DEFAULT_ICON),
+    user_id: null,
+    name: '',
+    description: '',
+    photo_id: null,
+});
 
 /* Строка, в которой тренер что-то начал; название своей номинации само по
    себе не в счёт (оно остаётся с прошлого месяца) — как на сервере. */
@@ -201,23 +228,24 @@ export const publishIssues = (entries) => {
     return issues;
 };
 
-/** Сколько своих номинаций ещё можно добавить Фронт-офису. */
-export const customSlotsLeft = (departmentKey, entries) => {
-    const item = honorDepartment(departmentKey);
-    if (!item?.custom) return 0;
-    return Math.max(0, CUSTOM_MAX_NOMINATIONS - (entries || []).length);
-};
+/** Сколько своих номинаций ещё можно добавить. */
+export const nominationSlotsLeft = (entries) => Math.max(0, MAX_NOMINATIONS - (entries || []).length);
 
-/* Что уходит на сервер: только поля записи. Пустые строки — тоже: у ОП и СЗоВ
-   строка номинации есть всегда, а у Фронт-офиса пустая своя номинация — место,
-   которое тренер только что добавил. */
-export const serializeEntries = (entries) => (entries || []).map((entry) => ({
-    nomination: entry.nomination,
-    title: entry.nomination === CUSTOM_NOMINATION ? String(entry.title || '') : '',
-    user_id: entry.user_id || null,
-    name: String(entry.name || ''),
-    description: String(entry.description || ''),
-}));
+/* Что уходит на сервер: только поля записи. Пустые строки — тоже: пустая своя
+   номинация — место, которое тренер только что добавил, или название с
+   прошлого месяца, которое ждёт победителя. */
+export const serializeEntries = (entries) => (entries || []).map((entry) => {
+    const main = entry.nomination === MAIN_NOMINATION;
+    return {
+        nomination: entry.nomination,
+        title: main ? '' : String(entry.title || ''),
+        icon: main ? MAIN_ICON : iconOrDefault(entry.icon),
+        user_id: entry.user_id || null,
+        name: String(entry.name || ''),
+        description: String(entry.description || ''),
+        photo_id: entry.user_id ? (entry.photo_id || null) : null,
+    };
+});
 
 // ── Доска для сотрудников ──────────────────────────────────────────────
 
@@ -227,6 +255,116 @@ export const splitBoard = (board) => {
     const entries = Array.isArray(board?.entries) ? board.entries : [];
     const main = entries.find((entry) => entry.nomination === MAIN_NOMINATION) || null;
     return { main, others: entries.filter((entry) => entry !== main) };
+};
+
+/* Пастельные плитки доски — «немного цветов», как на образце: у каждой
+   карточки свой оттенок по её месту на доске, у ключевой — золотой. Утилиты
+   Tailwind, а не свои цвета: тёмный слой портала (theme-dark.css) перекрашивает
+   их сам. */
+export const HONOR_TONES = [
+    { key: 'green', tile: 'bg-emerald-100', ink: 'text-emerald-700' },
+    { key: 'blue', tile: 'bg-sky-100', ink: 'text-sky-700' },
+    { key: 'peach', tile: 'bg-orange-100', ink: 'text-orange-700' },
+    { key: 'lilac', tile: 'bg-fuchsia-100', ink: 'text-fuchsia-700' },
+    { key: 'teal', tile: 'bg-teal-100', ink: 'text-teal-700' },
+    { key: 'rose', tile: 'bg-rose-100', ink: 'text-rose-700' },
+    { key: 'violet', tile: 'bg-violet-100', ink: 'text-violet-700' },
+];
+export const MAIN_TONE = { key: 'gold', tile: 'bg-amber-100', ink: 'text-amber-700' };
+
+/** Оттенок карточки: ключевая — золото, остальные — по кругу по месту на доске. */
+export const toneOf = (entry, index) => (entry?.nomination === MAIN_NOMINATION
+    ? MAIN_TONE : HONOR_TONES[Math.max(0, Number(index) || 0) % HONOR_TONES.length]);
+
+/* Место строки черновика среди плиток доски: на доску выходят только
+   заполненные номинации, поэтому окно тренера красит строку тем же цветом,
+   что получит её плитка, — считая только заполненные строки перед ней. */
+export const boardPlace = (entries, index) => (entries || []).slice(0, Math.max(0, index))
+    .filter((entry) => entry?.nomination !== MAIN_NOMINATION && entryHasContent(entry)).length;
+
+/* Раскладка плиток по фактической ширине доски (а не по ширине экрана: сайдбар
+   бывает раскрыт и свёрнут). Просьбы владельца 06.11.2026: «чтобы всё
+   отображалось симметрично» и «пусть не будет таких длинных плит, минимум две
+   плиты на одной строке»:
+     * колонок — сколько влезает плиток не уже MIN_TILE, но не меньше двух
+       (и на телефоне) и не больше четырёх; одна плитка — в половину ряда;
+     * ряды выравниваются: 5 номинаций — 3 + 2, а не 4 + 1; 3 номинации — три
+       колонки на всю ширину, а не три из четырёх по центру;
+     * рост плитки — от её ширины: узкая — выше своей ширины (портрет, как на
+       образце), широкая — ниже; в пределах 240–380;
+       золотая карточка — того же роста, её фото — шириной в одну плитку.
+   width — ширина доски в px, count — сколько плиток (без ключевой). */
+export const TILE_GAP = 20;
+// На узкой доске (телефон) промежуток меньше: две плитки в ряд — по ~180 px.
+const NARROW_GAP = 12;
+const NARROW_BOARD = 600;
+const MIN_TILE = 260;
+const MIN_COLUMNS = 2;
+const MAX_COLUMNS = 4;
+// Плитка уже этого — компактная подпись (меньше шрифт и поля).
+export const DENSE_TILE = 240;
+
+const gapFor = (room) => (room < NARROW_BOARD ? NARROW_GAP : TILE_GAP);
+const fitColumns = (room, gap) => Math.max(MIN_COLUMNS, Math.min(MAX_COLUMNS, Math.floor((room + gap) / (MIN_TILE + gap))));
+const tileHeight = (tileWidth) => Math.round(Math.min(380, Math.max(240, 170 + tileWidth * 0.45)));
+
+export const tileLayout = (width, count) => {
+    const total = Math.max(1, Number(count) || 0);
+    const room = Number(width) || 0;
+    if (room <= 0) return { columns: Math.min(Math.max(total, MIN_COLUMNS), 3), tileWidth: 0, height: 320, gap: TILE_GAP };
+    const gap = gapFor(room);
+    const fit = fitColumns(room, gap);
+    const rows = Math.ceil(total / fit);
+    const columns = Math.max(MIN_COLUMNS, Math.min(fit, Math.ceil(total / rows)));
+    const tileWidth = (room - gap * (columns - 1)) / columns;
+    return { columns, tileWidth, height: tileHeight(tileWidth), gap };
+};
+
+/* Раскладка всей доски: золотая карточка и плитки.
+     inline  — одна-две свои номинации, если влезают: золотая карточка (две
+               колонки: фото и текст) и плитки встают ОДНИМ рядом равных колонок.
+     иначе   — золотая карточка во всю ширину, плитки рядами под ней (tileLayout);
+               фото карточки — шириной в одну плитку ряда, на узкой доске — над текстом.
+   mainPhotoWidth — ширина фото в золотой карточке (0 — фото над текстом). */
+export const boardLayout = (width, count) => {
+    const total = Math.max(0, Number(count) || 0);
+    const room = Number(width) || 0;
+    if (room <= 0) {
+        return { inline: false, columns: Math.min(Math.max(total, MIN_COLUMNS), 3), tileWidth: 0, mainWidth: 0,
+            mainPhotoWidth: 0, height: 320, gap: TILE_GAP };
+    }
+    const gap = gapFor(room);
+    const fit = fitColumns(room, gap);
+    if (total >= 1 && total + 2 <= fit) {
+        const columns = total + 2;
+        const cell = (room - gap * (columns - 1)) / columns;
+        return { inline: true, columns, tileWidth: cell, mainWidth: cell * 2 + gap, mainPhotoWidth: cell,
+            height: tileHeight(cell), gap };
+    }
+    const tiles = tileLayout(room, total || 3);
+    // Рядом с фото тексту нужно место: на узкой доске фото — над текстом.
+    const mainPhotoWidth = room >= 640 ? tiles.tileWidth : 0;
+    return { inline: false, columns: tiles.columns, tileWidth: tiles.tileWidth, mainWidth: room, mainPhotoWidth,
+        height: tiles.height, gap };
+};
+
+/* Какое фото у карточки:
+     'cutout'   — фото для доски без фона: фигура стоит на цветной плитке;
+     'photo'    — фото для доски с фоном: портретная рамка в пропорциях снимка;
+     'avatar'   — фото из профиля: кружок;
+     'initials' — ничего нет.
+   honorPhotos — {id: {url, cutout}} из ответа, avatars — {user_id: url}. */
+export const entryPhoto = (entry, honorPhotos = {}, avatars = {}) => {
+    const honor = entry?.photo_id ? honorPhotos?.[String(entry.photo_id)] : null;
+    if (honor?.url) {
+        // Пропорции снимка — фото с фоном встаёт рамкой своей формы, а не
+        // полосой во всю плитку, где от лица остаётся макушка.
+        const ratio = Number(honor.width) > 0 && Number(honor.height) > 0 ? Number(honor.width) / Number(honor.height) : 0;
+        return { kind: honor.cutout ? 'cutout' : 'photo', url: honor.url, ratio };
+    }
+    const avatar = entry?.user_id ? avatars?.[String(entry.user_id)] : null;
+    if (avatar) return { kind: 'avatar', url: avatar };
+    return { kind: 'initials', url: '' };
 };
 
 /* Отметка месяца в окне тренера (состояние доски направления). */

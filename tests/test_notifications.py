@@ -1164,7 +1164,10 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'twofa_requests',
                            # Тумблер «уведомления о запросах»: включили — колокол сразу
                            # показывает ждущие запросы, выключили — гасит.
-                           'twofa_notify_optin')
+                           'twofa_notify_optin',
+                           # «Доска почёта» (#318): первая публикация доски будит всех,
+                           # водяной знак «видел» — самого человека.
+                           'honor_boards', 'honor_board_reads')
 
     def test_every_source_table_has_a_trigger(self):
         """Таблица без триггера = источник без реалтайма, молча."""
@@ -1209,7 +1212,7 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
 
     def test_watermark_updates_wake_only_the_same_user(self):
         block = self._trigger_block()
-        self.assertIn("TG_TABLE_NAME IN ('event_reads', 'four_you_reads')", block)
+        self.assertIn("TG_TABLE_NAME IN ('event_reads', 'four_you_reads', 'honor_board_reads')", block)
         self.assertIn("targets := ARRAY[NEW.user_id]", block)
 
     def test_survey_and_wiki_progress_updates_are_filtered(self):

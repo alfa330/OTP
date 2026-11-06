@@ -1198,7 +1198,8 @@ class RemoteCcBellTests(unittest.TestCase):
     def test_operator_hears_only_about_his_three_sections(self):
         hidden = set(self._viewer(700, 'operator', {700: 'remote_cc'})['hidden_sources'])
 
-        self.assertEqual(hidden, {'tasks', 'checkpoints', 'lms', 'surveys', 'events', 'four_you'})
+        # «Доска почёта» — вкладка «Ивентов», которых в его наборе нет: молчит вместе с ними.
+        self.assertEqual(hidden, {'tasks', 'checkpoints', 'lms', 'surveys', 'events', 'honor_board', 'four_you'})
         # Вики и заявки на смену — его разделы: о них колокол не молчит.
         for name in ('wiki_ack', 'wiki_questions', 'shift_requests'):
             self.assertNotIn(name, hidden)

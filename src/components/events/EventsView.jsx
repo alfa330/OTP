@@ -518,7 +518,9 @@ const CommentItem = ({ comment, onDelete }) => (
     </div>
 );
 
-const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessTokenHeader, onSeen }) => {
+/* focusRequest — {tab: 'honor', period, nonce}: колокол позвал на доску почёта
+   конкретного месяца (notifications/sources.py: honor_board). */
+const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessTokenHeader, onSeen, focusRequest = null }) => {
     const [events, setEvents] = useState([]);
     /* Закреплённые держим отдельным списком, а не флагом внутри events:
        лента листается курсором по id, и всплывший наверх пост ломал бы
@@ -541,14 +543,30 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
     const [composerOpen, setComposerOpen] = useState(false);
     const [detailEvent, setDetailEvent] = useState(null);
     const [likeBusy, setLikeBusy] = useState(() => new Set());
-    const [tab, setTab] = useState('feed');
+    // Зов колокола (focusRequest) открывает раздел сразу на доске почёта: без
+    // кадра ленты и без того, чтобы рамка раздела расширялась на глазах.
+    const bellFocus = focusRequest?.tab === 'honor' && Number(focusRequest?.nonce) > 0 ? focusRequest : null;
+    const [tab, setTab] = useState(() => (bellFocus ? 'honor' : 'feed'));
     // Доска монтируется при первом заходе и дальше живёт, как и лента: возврат
     // на вкладку не перезагружает ни то, ни другое.
-    const [honorMounted, setHonorMounted] = useState(false);
+    const [honorMounted, setHonorMounted] = useState(() => Boolean(bellFocus));
     const switchTab = useCallback((next) => {
         setTab(next);
         if (next === 'honor') setHonorMounted(true);
     }, []);
+    // Месяц из уведомления. Тот же nonce повторно не открывает — иначе возврат
+    // на ленту и обратно снова уводил бы на доску.
+    const [honorFocus, setHonorFocus] = useState(() => (bellFocus ? {
+        period: bellFocus.period || '', departments: bellFocus.departments || [], nonce: Number(bellFocus.nonce),
+    } : null));
+    const focusNonce = bellFocus ? Number(bellFocus.nonce) : 0;
+    const handledFocus = useRef(focusNonce);
+    useEffect(() => {
+        if (!focusNonce || focusNonce === handledFocus.current) return;
+        handledFocus.current = focusNonce;
+        setHonorFocus({ period: focusRequest?.period || '', departments: focusRequest?.departments || [], nonce: focusNonce });
+        switchTab('honor');
+    }, [focusNonce, focusRequest?.period, focusRequest?.departments, switchTab]);
 
     const showToastRef = useRef(showToast);
     useEffect(() => { showToastRef.current = showToast; }, [showToast]);
@@ -768,7 +786,12 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
     );
 
     return (
-        <div className="space-y-4 max-w-5xl mx-auto">
+        /* Доска почёта — на всю ширину экрана («использовать всё пространство»,
+           06.11.2026): плитки встают по четыре в ряд. Шапка раздела и вкладки —
+           той же ширины на обеих вкладках: меняйся рамка при переключении, они
+           уезжали бы из-под курсора. Ленте хватает прежней колонки — узкой
+           делается только она сама. */
+        <div className="mx-auto max-w-[1680px] space-y-4">
             {/* Шапка раздела */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
                 <div className="px-4 sm:px-6 py-4 flex items-center justify-between gap-3 flex-wrap">
@@ -802,12 +825,12 @@ const EventsView = ({ user, departments = [], showToast, apiBaseUrl, withAccessT
 
             {honorMounted && (
                 <div hidden={tab !== 'honor'}>
-                    <HonorBoard user={user} apiRoot={apiRoot} authHeaders={authHeaders} notify={notify} />
+                    <HonorBoard user={user} apiRoot={apiRoot} authHeaders={authHeaders} notify={notify} focus={honorFocus} />
                 </div>
             )}
 
             {/* Лента */}
-            <div className="space-y-4" hidden={tab !== 'feed'}>
+            <div className="mx-auto w-full max-w-5xl space-y-4" hidden={tab !== 'feed'}>
             {isLoading ? (
                 <div className={layout === 'grid'
                     ? 'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3'

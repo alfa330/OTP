@@ -5937,13 +5937,15 @@ class SchemaMixin:
             DECLARE
                 targets INTEGER[] := ARRAY[]::INTEGER[];
             BEGIN
-                IF TG_TABLE_NAME IN ('events', 'four_you_images', 'news_posts') THEN
+                IF TG_TABLE_NAME IN ('events', 'four_you_images', 'news_posts', 'honor_boards') THEN
                     -- Новость широковещательная по той же причине, что ивенты:
                     -- круг адресатов задан правилами (отдел, направление,
                     -- группа, должность), и разворачивать их в PL/pgSQL значило
                     -- бы продублировать news/access.py на втором языке. Дешевле
                     -- разбудить всех — каждый клиент спросит своё /pending, и
                     -- сервер отфильтрует по тем же правилам, что и всегда.
+                    -- Доска почёта (#318) видна всем сотрудникам — её выход
+                    -- будит всех буквально.
                     PERFORM pg_notify('bell_events', '{"b":1}');
                     RETURN NULL;
                 ELSIF TG_TABLE_NAME = 'lms_notifications' THEN
@@ -5990,7 +5992,7 @@ class SchemaMixin:
                     IF TG_OP = 'UPDATE' THEN
                         targets := targets || ARRAY[OLD.user_id];
                     END IF;
-                ELSIF TG_TABLE_NAME IN ('event_reads', 'four_you_reads') THEN
+                ELSIF TG_TABLE_NAME IN ('event_reads', 'four_you_reads', 'honor_board_reads') THEN
                     -- Водяной знак гасит бейдж. Адресная тычка синхронизирует
                     -- остальные вкладки того же пользователя без массовой
                     -- перечитки у всех подключённых клиентов.
@@ -6400,6 +6402,22 @@ class SchemaMixin:
             ('trg_bell_task_reads', 'task_action_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_event_reads', 'event_reads', 'AFTER INSERT OR UPDATE', ''),
             ('trg_bell_four_you_reads', 'four_you_reads', 'AFTER INSERT OR UPDATE', ''),
+            # «Доска почёта» (#318): колокол зовёт всех, когда доска месяца
+            # вышла ВПЕРВЫЕ, и убирает строку, когда её сняли с публикации.
+            # WHEN обязателен: окно тренера сохраняет черновик само, по ходу
+            # ввода (draft_entries, revision), и без него каждое нажатие в окне
+            # будило бы весь портал. «Опубликовать правки» (published_at
+            # меняется, но доска остаётся выложенной) тоже мимо.
+            (
+                'trg_bell_honor_boards',
+                'honor_boards',
+                'AFTER UPDATE OF first_published_at, published_at',
+                """WHEN (
+                    OLD.first_published_at IS DISTINCT FROM NEW.first_published_at
+                    OR (OLD.published_at IS NULL) IS DISTINCT FROM (NEW.published_at IS NULL)
+                )""",
+            ),
+            ('trg_bell_honor_board_reads', 'honor_board_reads', 'AFTER INSERT OR UPDATE', ''),
             # UPDATE обязателен: отметка «сегодняшних именинников видел»
             # перезаписывается по дате, а не вставляется заново, — на одном
             # INSERT тычок ушёл бы только в первый день жизни строки.

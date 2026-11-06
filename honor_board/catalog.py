@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 """Справочник «Доски почёта» (задача #318) и правила её карточек.
 
-Три направления по ТЗ — ОП, СЗоВ и Фронт-офис. У ОП и СЗоВ номинации заданы
-списком ТЗ. У Фронт-офиса ТЗ оставило их тренеру: «2–4 профильные номинации,
-включая ключевую — «Лучший сотрудник отдела»». Поэтому там закреплена одна
-ключевая номинация, а остальные (до трёх) тренер называет сам.
+Три направления по ТЗ — ОП, СЗоВ и Фронт-офис. У каждого закреплена одна
+ключевая номинация — «Лучший сотрудник отдела»: доска ставит её первой и
+выделяет. Остальные номинации тренер называет сам (вместе с ключевой — до
+MAX_NOMINATIONS): сначала так было только у Фронт-офиса, с 06.11.2026 — у всех
+трёх («менять названия номинаций ОП и СЗоВ как у фронт-офиса и добавлять ещё,
+если нужно побольше»). Номинации ОП и СЗоВ из ТЗ остались заготовкой
+(presets): ими открывается первая доска направления, дальше каждый месяц
+берёт названия своего прошлого месяца.
 
-Карточка победителя на доске — по одной на номинацию: кто (сотрудник отдела,
-его фото из профиля), имя и фамилия так, как их напишет тренер, и описание
-заслуг. «Лучший сотрудник отдела» — главная номинация: доска ставит её первой
-и выделяет.
+Карточка победителя на доске — по одной на номинацию: кто (сотрудник отдела),
+имя и фамилия так, как их напишет тренер, описание заслуг, значок номинации и
+фото для доски (photo_id — снимок, который загрузил тренер; без него карточка
+берёт фото из профиля).
+
+Доски, заполненные до 06.11.2026, хранят номинации ОП и СЗоВ своими кодами
+(guru_sales, …) — LEGACY_NOMINATIONS читает их как свои номинации с тем же
+названием и значком, ничего в базе не переписывая.
 
 Тот же справочник — во фронте (src/components/events/honorBoardMeta.js);
 tests/test_honor_board.py сверяет их буквально, чтобы доска не назвала
@@ -21,54 +29,67 @@ import re
 from datetime import date
 
 MAIN_NOMINATION = 'best_employee'
-# Номинация, которую тренер Фронт-офиса называет сам: ключ один на все такие,
-# название живёт в самой записи.
+# Номинация, которую тренер называет сам: ключ один на все такие, название и
+# значок живут в самой записи.
 CUSTOM_NOMINATION = 'custom'
 
 MAIN_TITLE = 'Лучший сотрудник отдела'
 MAIN_REASON = 'по итогам месяца, за лучшие показатели по всем ключевым метрикам'
+# Корона — только у ключевой номинации (ТЗ: «специальная плашка/корона»).
+MAIN_ICON = 'Crown'
+DEFAULT_ICON = 'Award'
+
+# Значки своих номинаций — имена значков lucide, фронт подставляет компоненты.
+# Список закрытый: в запись не попадёт произвольная строка.
+ICONS = (
+    'Award', 'Star', 'Trophy', 'Medal', 'Rocket', 'Target', 'Zap', 'TrendingUp',
+    'Flame', 'Gem', 'Sparkles', 'HeartHandshake', 'MessageCircleHeart', 'Headphones', 'BadgeCheck', 'Car',
+)
 
 # key — department_key в honor_boards; code — departments.code: из этого отдела
-# окно тренера предлагает победителей. Номинации — (ключ, название, за что) в
-# порядке доски: главная первой.
+# окно тренера предлагает победителей. presets — номинации ТЗ, которыми
+# открывается первая доска направления: (прежний код, название, значок, за что).
 DEPARTMENTS = (
     {
         'key': 'op', 'code': 'op', 'label': 'ОП', 'title': 'Отдел продаж',
-        'custom': False,
-        'nominations': (
-            (MAIN_NOMINATION, MAIN_TITLE, MAIN_REASON),
-            ('guru_sales', 'Гуру продаж', 'за высокие результаты и профессионализм в продажах'),
-            ('master_yr', 'Мастер ЯР', 'за лучшие показатели в группе Яндекс Регистрации'),
-            ('best_verifier', 'Лучший верификатор', 'за наибольшее количество регистраций за месяц'),
+        'presets': (
+            ('guru_sales', 'Гуру продаж', 'TrendingUp', 'за высокие результаты и профессионализм в продажах'),
+            ('master_yr', 'Мастер ЯР', 'Car', 'за лучшие показатели в группе Яндекс Регистрации'),
+            ('best_verifier', 'Лучший верификатор', 'BadgeCheck', 'за наибольшее количество регистраций за месяц'),
         ),
     },
     {
         'key': 'szov', 'code': 'szov', 'label': 'СЗоВ', 'title': 'Служба заботы о водителях',
-        'custom': False,
-        'nominations': (
-            (MAIN_NOMINATION, MAIN_TITLE, MAIN_REASON),
-            ('productivity_champion', 'Чемпион по продуктивности',
+        'presets': (
+            ('productivity_champion', 'Чемпион по продуктивности', 'Zap',
              'за высокие результаты и стабильную работу'),
-            ('first_class_manager', 'Первоклассный менеджер',
+            ('first_class_manager', 'Первоклассный менеджер', 'HeartHandshake',
              'за качество обслуживания и вовлечённость'),
-            ('chat_star', 'Звезда чат-направления',
+            ('chat_star', 'Звезда чат-направления', 'MessageCircleHeart',
              'за эффективность и внимательность в переписке с водителями'),
         ),
     },
     {
         'key': 'front_office', 'code': 'front_office', 'label': 'Фронт-офис', 'title': 'Фронт-офис',
-        'custom': True,
-        'nominations': (
-            (MAIN_NOMINATION, MAIN_TITLE, MAIN_REASON),
-        ),
+        'presets': (),
     },
 )
 
 DEPARTMENT_KEYS = tuple(item['key'] for item in DEPARTMENTS)
 _BY_KEY = {item['key']: item for item in DEPARTMENTS}
 
-# «2–4 профильные номинации, включая ключевую» — потолок вместе с ключевой.
-CUSTOM_MAX_NOMINATIONS = 4
+# Коды номинаций ОП и СЗоВ, которыми хранились доски до 06.11.2026:
+# код -> (название, значок).
+LEGACY_NOMINATIONS = {
+    code: (title, icon)
+    for item in DEPARTMENTS
+    for code, title, icon, _reason in item['presets']
+}
+
+# Номинаций на доске вместе с ключевой. ТЗ просило у Фронт-офиса «2–4»; у ОП
+# и СЗоВ их было ровно четыре, и попросили «добавлять ещё, если нужно
+# побольше» — восемь карточек доска показывает двумя рядами.
+MAX_NOMINATIONS = 8
 
 # Пределы полей. Имя и фамилия — строка карточки; название своей номинации —
 # подпись бейджа; описание — «краткое описание заслуг» (по ТЗ — хоть стихами):
@@ -78,7 +99,7 @@ NAME_MAX = 80
 TITLE_MAX = 60
 DESCRIPTION_MAX = 600
 # Записей у доски не бывает больше номинаций; запрос с сотней строк — ошибка.
-ENTRIES_MAX = 8
+ENTRIES_MAX = MAX_NOMINATIONS
 
 # С какого месяца можно подводить итоги и сколько месяцев назад предлагает окно.
 FIRST_PERIOD = date(2025, 1, 1)
@@ -87,6 +108,11 @@ SELECTABLE_MONTHS = 24
 MONTHS_NOMINATIVE = (
     'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
     'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь',
+)
+# «Доска почёта: итоги октября» — строка колокола.
+MONTHS_GENITIVE = (
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
 )
 
 _PERIOD_RE = re.compile(r'^(\d{4})-(\d{2})$')
@@ -99,8 +125,23 @@ def department(key):
     return _BY_KEY.get(str(key or '').strip())
 
 
-def nominations(key):
-    return department(key)['nominations'] if department(key) else ()
+def presets(key):
+    """Номинации ТЗ направления: [(название, значок)] — заготовка первой доски."""
+    item = department(key)
+    return [(title, icon) for _code, title, icon, _reason in item['presets']] if item else []
+
+
+def nomination_reason(department_key, nomination, title):
+    """«За что» дают номинацию — для подсказки у бейджа. У ключевой — из ТЗ,
+    у своей — только если её название совпадает с номинацией ТЗ этого
+    направления: переименованную номинацию тренер описывает сам."""
+    if nomination == MAIN_NOMINATION:
+        return MAIN_REASON
+    item = department(department_key)
+    for _code, preset_title, _icon, reason in (item['presets'] if item else ()):
+        if preset_title == title:
+            return reason
+    return ''
 
 
 # ── Период ──────────────────────────────────────────────────────────────
@@ -120,6 +161,11 @@ def period_key(month):
 
 def period_label(month):
     return f'{MONTHS_NOMINATIVE[month.month - 1]} {month.year}'
+
+
+def period_genitive(month):
+    """date(2026, 10, 1) -> «октября»: «Доска почёта: итоги октября»."""
+    return MONTHS_GENITIVE[month.month - 1]
 
 
 def parse_period(raw, today):
@@ -190,14 +236,14 @@ def clean_text(value):
     return '\n'.join(kept).strip('\n').strip()
 
 
-def _user_id(value):
+def _positive_id(value, message):
     if value in (None, ''):
         return None
     if isinstance(value, bool):
-        raise EntriesError('Сотрудник указан неверно')
+        raise EntriesError(message)
     text = str(value).strip()
     if not (text.isascii() and text.isdigit()) or len(text) > 9 or int(text) <= 0:
-        raise EntriesError('Сотрудник указан неверно')
+        raise EntriesError(message)
     return int(text)
 
 
@@ -212,7 +258,16 @@ def text_field(raw, key):
     return value
 
 
-def _entry(nomination, title, raw):
+def clean_icon(value, fallback=DEFAULT_ICON):
+    """Значок своей номинации: из списка ICONS, иначе — fallback.
+
+    Не ошибка: значок — оформление, и окно старой сборки (без выбора значка)
+    не должно получать отказ на каждое сохранение черновика."""
+    text = str(value or '').strip() if isinstance(value, str) else ''
+    return text if text in ICONS else fallback
+
+
+def _entry(nomination, title, icon, raw):
     raw = raw if isinstance(raw, dict) else {}
     name = clean_line(text_field(raw, 'name'))
     description = clean_text(text_field(raw, 'description'))
@@ -222,121 +277,156 @@ def _entry(nomination, title, raw):
         raise EntriesError(f'Описание заслуг — не длиннее {DESCRIPTION_MAX} знаков')
     if len(title) > TITLE_MAX:
         raise EntriesError(f'Название номинации — не длиннее {TITLE_MAX} знаков')
+    user_id = _positive_id(raw.get('user_id'), 'Сотрудник указан неверно')
+    photo_id = _positive_id(raw.get('photo_id'), 'Фото указано неверно')
     return {
         'nomination': nomination,
         'title': title,
-        'user_id': _user_id(raw.get('user_id')),
+        'icon': icon,
+        'user_id': user_id,
         'name': name,
         'description': description,
+        # Фото для доски — снимок конкретного человека: без него строки фото нет.
+        'photo_id': photo_id if user_id else None,
     }
 
 
-def blank_entry(nomination, title=''):
-    return {'nomination': nomination, 'title': title, 'user_id': None, 'name': '', 'description': ''}
+def blank_entry(nomination, title='', icon=None):
+    if icon is None:
+        icon = MAIN_ICON if nomination == MAIN_NOMINATION else DEFAULT_ICON
+    return {'nomination': nomination, 'title': title, 'icon': icon, 'user_id': None, 'name': '',
+            'description': '', 'photo_id': None}
 
 
-def blank_slots(department_key, custom_titles=()):
-    """Пустая доска: по строке на каждую номинацию списка. У Фронт-офиса —
-    ключевая и свои номинации прошлого месяца без победителей, чтобы тренер не
-    набирал их каждый месяц заново; прошлого раза нет — одна пустая своя:
-    «2–4 номинации» начинаются с двух."""
-    item = department(department_key)
-    if not item:
+def _main_entry(raw):
+    return _entry(MAIN_NOMINATION, MAIN_TITLE, MAIN_ICON, raw)
+
+
+def _custom_entry(raw):
+    """Своя номинация из записи. Прежний код ОП/СЗоВ (guru_sales, …) — та же
+    своя номинация: название из записи, а нет его — из ТЗ; значок — из ТЗ,
+    если в записи своего нет."""
+    code = str(raw.get('nomination') or '').strip()
+    legacy_title, legacy_icon = LEGACY_NOMINATIONS.get(code, ('', DEFAULT_ICON))
+    title = clean_line(text_field(raw, 'title')) or legacy_title
+    return _entry(CUSTOM_NOMINATION, title, clean_icon(raw.get('icon'), legacy_icon), raw)
+
+
+def _is_custom_code(code):
+    return code == CUSTOM_NOMINATION or code in LEGACY_NOMINATIONS
+
+
+def blank_slots(department_key, previous=()):
+    """Пустая доска: ключевая и свои номинации без победителей.
+
+    previous — [(название, значок)] своих номинаций прошлого месяца: тренер не
+    набирает их каждый месяц заново. Прошлого раза нет — номинации ТЗ
+    направления, а у Фронт-офиса (в ТЗ их нет) — одна пустая своя: «2–4
+    номинации» начинаются с двух."""
+    if not department(department_key):
         return []
-    slots = [blank_entry(code, title) for code, title, _reason in item['nominations']]
-    if item['custom']:
-        titles = [clean_line(title)[:TITLE_MAX] for title in custom_titles or ()]
-        titles = [title for title in titles if title][:CUSTOM_MAX_NOMINATIONS - len(slots)]
-        slots.extend(blank_entry(CUSTOM_NOMINATION, title) for title in (titles or ['']))
-    return slots
+    slots = [blank_entry(MAIN_NOMINATION, MAIN_TITLE)]
+    named = []
+    for item in previous or ():
+        title, icon = (item, DEFAULT_ICON) if isinstance(item, str) else (tuple(item) + (DEFAULT_ICON,))[:2]
+        title = clean_line(title)[:TITLE_MAX]
+        if title:
+            named.append(blank_entry(CUSTOM_NOMINATION, title, clean_icon(icon)))
+    if not named:
+        named = [blank_entry(CUSTOM_NOMINATION, title, icon) for title, icon in presets(department_key)]
+    if not named:
+        named = [blank_entry(CUSTOM_NOMINATION)]
+    return slots + named[:MAX_NOMINATIONS - len(slots)]
 
 
 def normalize_entries(department_key, raw_entries):
-    """Записи из запроса -> строки доски в порядке номинаций.
+    """Записи из запроса -> строки доски: ключевая первой, за ней свои в
+    порядке тренера.
 
-    У ОП и СЗоВ строк ровно столько, сколько номинаций в списке (пустая —
-    номинация без победителя); у Фронт-офиса — ключевая первой, за ней свои
-    в порядке тренера. Незаполненная строка — не ошибка: черновик сохраняется
-    по ходу ввода, а полноту проверяет публикация (publish_issues).
+    Незаполненная строка — не ошибка: черновик сохраняется по ходу ввода, а
+    полноту проверяет публикация (publish_issues).
     """
-    item = department(department_key)
-    if not item:
+    if not department(department_key):
         raise EntriesError('Неизвестное направление доски')
     if not isinstance(raw_entries, list):
         raise EntriesError('Записи доски переданы неверно')
     if len(raw_entries) > ENTRIES_MAX:
         raise EntriesError('Слишком много записей')
-    fixed = {code: title for code, title, _reason in item['nominations']}
-    by_code = {}
+    main = None
     custom = []
     for raw in raw_entries:
         if not isinstance(raw, dict):
             raise EntriesError('Записи доски переданы неверно')
         code = str(raw.get('nomination') or '').strip()
-        if code in fixed:
-            if code in by_code:
+        if code == MAIN_NOMINATION:
+            if main is not None:
                 raise EntriesError('Номинация повторяется')
-            by_code[code] = _entry(code, fixed[code], raw)
-        elif code == CUSTOM_NOMINATION and item['custom']:
-            custom.append(_entry(code, clean_line(text_field(raw, 'title')), raw))
+            main = _main_entry(raw)
+        elif _is_custom_code(code):
+            custom.append(_custom_entry(raw))
         else:
             raise EntriesError('Неизвестная номинация')
-    if item['custom'] and len(fixed) + len(custom) > CUSTOM_MAX_NOMINATIONS:
-        raise EntriesError(f'Номинаций — не больше {CUSTOM_MAX_NOMINATIONS}, вместе с ключевой')
-    slots = [by_code.get(code) or blank_entry(code, title) for code, title, _reason in item['nominations']]
-    return slots + custom
+    if 1 + len(custom) > MAX_NOMINATIONS:
+        raise EntriesError(f'Номинаций — не больше {MAX_NOMINATIONS}, вместе с ключевой')
+    return [main or blank_entry(MAIN_NOMINATION, MAIN_TITLE)] + custom
 
 
 def restore_slots(department_key, stored):
     """Сохранённые записи -> строки доски по нынешнему справочнику.
 
-    Мягче normalize_entries: запись, которую справочник уже не знает (номинацию
-    убрали из списка) или которая не проходит нынешние пределы, пропускается,
-    а не роняет окно тренера.
+    Мягче normalize_entries: запись, которую справочник не знает, или которая
+    не проходит нынешние пределы, пропускается, а не роняет окно тренера.
+    Ничего не сохранено (None) — пустая доска с номинациями ТЗ.
     """
-    item = department(department_key)
-    if not item:
+    if not department(department_key):
         return []
-    fixed = {code: title for code, title, _reason in item['nominations']}
-    by_code = {}
+    if stored is None:
+        return blank_slots(department_key)
+    main = None
     custom = []
     for raw in stored if isinstance(stored, list) else []:
         if not isinstance(raw, dict):
             continue
         code = str(raw.get('nomination') or '').strip()
         try:
-            if code in fixed and code not in by_code:
-                by_code[code] = _entry(code, fixed[code], raw)
-            elif (code == CUSTOM_NOMINATION and item['custom']
-                  and len(fixed) + len(custom) < CUSTOM_MAX_NOMINATIONS):
-                custom.append(_entry(code, clean_line(text_field(raw, 'title')), raw))
+            if code == MAIN_NOMINATION and main is None:
+                main = _main_entry(raw)
+            elif _is_custom_code(code) and 1 + len(custom) < MAX_NOMINATIONS:
+                custom.append(_custom_entry(raw))
         except EntriesError:
             continue
-    slots = [by_code.get(code) or blank_entry(code, title) for code, title, _reason in item['nominations']]
-    return slots + custom
+    return [main or blank_entry(MAIN_NOMINATION, MAIN_TITLE)] + custom
 
 
 def revert_slots(department_key, published, draft):
     """«Отменить правки»: черновик снова равен опубликованному.
 
     Опубликованный снимок хранит только заполненные строки, а своя номинация
-    Фронт-офиса без победителя живёт лишь в черновике — откат по одному снимку
-    молча стёр бы её название. Такие строки возвращаются пустыми, на доску они
+    без победителя живёт лишь в черновике — откат по одному снимку молча стёр
+    бы её название. Такие строки возвращаются пустыми, на доску они
     по-прежнему не выходят.
     """
-    slots = restore_slots(department_key, published)
-    item = department(department_key)
-    if not item or not item['custom']:
+    slots = restore_slots(department_key, published or [])
+    if not slots:
         return slots
     present = {entry['title'] for entry in slots if entry['nomination'] == CUSTOM_NOMINATION}
-    for entry in restore_slots(department_key, draft):
-        if len(slots) >= CUSTOM_MAX_NOMINATIONS:
+    for entry in restore_slots(department_key, draft or []):
+        if len(slots) >= MAX_NOMINATIONS:
             break
         if (entry['nomination'] == CUSTOM_NOMINATION and entry['title']
                 and not entry_has_content(entry) and entry['title'] not in present):
-            slots.append(blank_entry(CUSTOM_NOMINATION, entry['title']))
+            slots.append(blank_entry(CUSTOM_NOMINATION, entry['title'], entry['icon']))
             present.add(entry['title'])
     return slots
+
+
+def custom_nominations(entries):
+    """Свои номинации доски: [(название, значок)] — заготовка следующего месяца."""
+    return [
+        (entry['title'], entry['icon'])
+        for entry in entries
+        if entry['nomination'] == CUSTOM_NOMINATION and entry['title']
+    ]
 
 
 def entry_has_content(entry):
@@ -371,16 +461,9 @@ def publish_issues(entries):
     return issues
 
 
+SNAPSHOT_FIELDS = ('nomination', 'title', 'icon', 'user_id', 'name', 'description', 'photo_id')
+
+
 def published_snapshot(entries):
     """То, что увидят сотрудники: заполненные строки в порядке доски."""
-    return [
-        {
-            'nomination': entry['nomination'],
-            'title': entry['title'],
-            'user_id': entry['user_id'],
-            'name': entry['name'],
-            'description': entry['description'],
-        }
-        for entry in entries
-        if entry_has_content(entry)
-    ]
+    return [{key: entry[key] for key in SNAPSHOT_FIELDS} for entry in entries if entry_has_content(entry)]

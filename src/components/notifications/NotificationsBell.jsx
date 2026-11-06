@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, UserPlus, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, Trophy, UserPlus, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { bellResumeHeaders, parseBellFrame } from './bellStream.js';
@@ -53,6 +53,8 @@ const SOURCE_META = {
     lms: { label: 'Обучение', icon: GraduationCap, tint: 'text-indigo-600 bg-indigo-50' },
     surveys: { label: 'Опросы', icon: ClipboardList, tint: 'text-sky-600 bg-sky-50' },
     events: { label: 'Ивенты', icon: CalendarDays, tint: 'text-rose-600 bg-rose-50' },
+    // «Доска почёта» (#318): вышли итоги месяца — строка открывает доску этого месяца.
+    honor_board: { label: 'Доска почёта', icon: Trophy, tint: 'text-amber-600 bg-amber-50' },
     four_you: { label: '4 You', icon: Image, tint: 'text-violet-600 bg-violet-50' },
     birthdays: { label: 'Дни рождения', icon: Cake, tint: 'text-pink-600 bg-pink-50' },
 };
@@ -61,7 +63,7 @@ const SOURCE_META = {
 // снимаются действием — см. notifications/sources.py::mark_seen.
 // «Дни рождения» гасятся на календарный день: назавтра список другой, и
 // вчерашняя отметка его не прячет.
-const CLEARABLE = ['events', 'four_you', 'lms', 'birthdays'];
+const CLEARABLE = ['events', 'honor_board', 'four_you', 'lms', 'birthdays'];
 
 /* Отпечаток состава сводки по источникам: {source: 'id:at,id:at'}.
    Раздел сравнивает свой отпечаток с предыдущим и перечитывает данные только

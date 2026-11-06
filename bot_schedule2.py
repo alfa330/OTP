@@ -53902,8 +53902,18 @@ except Exception:
 # ── «Доска почёта» во вкладке «Ивентов» (задача #318) ────────────────────────
 # Лучшие сотрудники месяца по ОП, СЗоВ и Фронт-офису. Видят все сотрудники;
 # итоги ведут тренер и супер-админ, Фронт-офис — ещё и глава этого отдела
-# (honor_board/routes.py: managed_departments). Фото победителя — из профиля,
-# той же подписанной ссылкой, что у аватарок.
+# (honor_board/routes.py: managed_departments). Фото победителя — то, что
+# загрузил тренер (обычно с вырезанным фоном), иначе из профиля; оба — той же
+# подписанной ссылкой, что у аватарок, и в том же бакете.
+def _honor_board_photo_bucket():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_AVATARS')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET')
+        or ''
+    ).strip()
+
+
 try:
     from honor_board.routes import build_honor_board_blueprint  # noqa: E402
 
@@ -53915,6 +53925,7 @@ try:
         normalize_role=_normalize_user_role,
         avatar_url=_build_avatar_signed_url,
         headed_department_codes=_headed_department_codes,
+        photo_storage={'bucket_name': _honor_board_photo_bucket, 'client': get_gcs_client},
     ))
     logging.info("«Доска почёта»: Blueprint подключён на /api/events/honor_board")
 except Exception:

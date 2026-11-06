@@ -1,13 +1,13 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { Pencil, Trophy } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import { IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import lazyWithRetry from '../../utils/lazyWithRetry';
-import { HonorPhoto, NominationBadge } from './honorUi';
+import { HonorMainCard, HonorTile } from './honorUi';
 import {
-    HONOR_DEPARTMENTS, defaultDepartmentKey, honorDepartment, managesHonorBoard, nominationMeta, periodLabel, periodPhrase,
-    splitBoard,
+    DENSE_TILE, HONOR_DEPARTMENTS, defaultDepartmentKey, entryPhoto, honorDepartment, managesHonorBoard, nominationMeta,
+    boardLayout, periodLabel, periodPhrase, pickDepartment, splitBoard, tileLayout, toneOf,
 } from './honorBoardMeta';
 
 /*
@@ -18,12 +18,16 @@ import {
  * в нём только те месяцы, за которые итоги опубликованы, пустых месяцев
  * человек не листает. Доска одна для всех сотрудников.
  *
- * Ключевая номинация «Лучший сотрудник отдела» стоит первой отдельной
- * карточкой: крупнее, в золотой рамке со свечением и с короной на бейдже.
+ * Вид — по образцу к доработке 06.11.2026 («немного добавить цветов и
+ * использовать всё пространство»): ключевая номинация «Лучший сотрудник
+ * отдела» — широкой золотой карточкой со свечением и короной, остальные —
+ * цветными плитками, где человек (лучше всего — на фото без фона, которое
+ * загрузил тренер) стоит на нижнем крае. Плитки встают рядами по центру:
+ * две номинации не жмутся к левому краю пустой сетки.
  *
- * Итоги ведёт тренер (сервер решает can_manage): кнопка «Изменить» открывает
- * окно ввода. Окно грузится отдельным чанком — остальным сотрудникам его код
- * не нужен.
+ * Итоги ведёт тренер (сервер решает can_manage): кнопка «Заполнить итоги»
+ * открывает окно ввода. Окно грузится отдельным чанком — остальным
+ * сотрудникам его код не нужен.
  */
 
 const HonorBoardEditor = lazyWithRetry(() => import('./HonorBoardEditor'));
@@ -58,124 +62,123 @@ const writeShell = (userId, shell) => {
 
 const DEPARTMENT_OPTIONS = HONOR_DEPARTMENTS.map((item) => ({ value: item.key, label: item.label }));
 
-const MainCard = ({ entry, departmentKey, photoUrl }) => {
-    const meta = nominationMeta(departmentKey, entry.nomination, entry.title);
-    return (
-        <article
-            data-honor-card="main"
-            className="rounded-3xl bg-white px-5 py-7 ring-1 ring-amber-300/70 shadow-[0_24px_56px_-30px_rgba(217,119,6,0.65)] sm:px-8"
-        >
-            <div className="flex flex-col items-center gap-5 text-center sm:flex-row sm:gap-8 sm:text-left">
-                {/* Золотое кольцо — заливкой акцента, а не градиентом: тёмная
-                    тема портала акценты не перекрашивает, и кольцо остаётся
-                    золотым в обеих темах. */}
-                <span className="shrink-0 rounded-full bg-amber-400 p-[3px] shadow-[0_10px_28px_-12px_rgba(217,119,6,0.8)]">
-                    <span className="block rounded-full bg-white p-[3px]">
-                        <HonorPhoto name={entry.name} url={photoUrl} size={124} />
-                    </span>
-                </span>
-                <div className="min-w-0 flex-1">
-                    <NominationBadge meta={meta} />
-                    <h3 className="mt-3 break-words text-[24px] font-semibold leading-tight tracking-tight text-slate-900 sm:text-[27px]">
-                        {entry.name}
-                    </h3>
-                    {entry.description && (
-                        <p className="mt-3 whitespace-pre-line break-words text-[15px] leading-relaxed text-slate-700 sm:text-[16px]">
-                            {entry.description}
-                        </p>
-                    )}
-                </div>
-            </div>
-        </article>
-    );
-};
+/* Ширина плитки — доля ряда (tileLayout в honorBoardMeta.js): ряд идёт ровно
+   по краям золотой карточки, неполный последний ряд — по центру (flex-wrap). */
+const tileStyle = (layout) => ({
+    width: layout.columns > 1 ? `calc((100% - ${layout.gap * (layout.columns - 1)}px) / ${layout.columns})` : '100%',
+});
 
-const HonorCard = ({ entry, departmentKey, photoUrl }) => {
-    const meta = nominationMeta(departmentKey, entry.nomination, entry.title);
-    return (
-        <article data-honor-card="" className={`${iosCard} flex flex-col items-center px-5 pb-6 pt-7 text-center`}>
-            <HonorPhoto name={entry.name} url={photoUrl} size={92} />
-            <NominationBadge meta={meta} className="mt-4" />
-            <h3 className="mt-2.5 break-words text-[18px] font-semibold leading-snug text-slate-900">{entry.name}</h3>
-            {entry.description && (
-                <p className="mt-2.5 whitespace-pre-line break-words text-[14.5px] leading-relaxed text-slate-600">
-                    {entry.description}
-                </p>
-            )}
-        </article>
-    );
-};
-
-/* Сетка подстраивается под число карточек: две — в два столбца, одна — по
-   центру. Три колонки при двух карточках оставляли бы справа пустую дыру. */
-const gridClass = (count) => {
-    if (count >= 3) return 'grid gap-4 sm:grid-cols-2 lg:grid-cols-3';
-    if (count === 2) return 'grid gap-4 sm:grid-cols-2';
-    return 'grid gap-4 sm:mx-auto sm:w-full sm:max-w-md';
+/* Ширина доски в px: колонки считаются от неё, а не от ширины экрана — сайдбар
+   бывает раскрыт и свёрнут. До отрисовки (useLayoutEffect), чтобы первый кадр
+   не встал в чужую сетку и не перестроился. Скрытая вкладка даёт 0 — его не
+   берём: вернутся на доску — будет прежняя ширина, а следом настоящая. */
+const useWidth = () => {
+    const ref = useRef(null);
+    const [width, setWidth] = useState(0);
+    useLayoutEffect(() => {
+        const node = ref.current;
+        if (!node) return undefined;
+        const update = () => {
+            const next = node.clientWidth;
+            if (next > 0) setWidth((prev) => (Math.abs(prev - next) >= 1 ? next : prev));
+        };
+        update();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        const observer = new ResizeObserver(update);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+    return [ref, width];
 };
 
 const Bone = ({ className = '' }) => <span className={`block animate-pulse rounded-full bg-slate-200/70 ${className}`} />;
 
 /* Заготовка — те же карточки и в тот же рост, что у настоящей доски: вкладка
    не прыгает, когда приходит ответ. */
-const BoardSkeleton = () => (
-    <div className="space-y-4" aria-busy="true" aria-label="Загрузка">
-        <div className="rounded-3xl bg-white px-5 py-7 ring-1 ring-slate-200/70 sm:px-8">
-            <div className="flex flex-col items-center gap-5 sm:flex-row sm:gap-8">
-                <span className="block h-[136px] w-[136px] shrink-0 animate-pulse rounded-full bg-slate-200/70" />
-                <div className="flex w-full flex-1 flex-col items-center gap-3 sm:items-start">
-                    <Bone className="h-6 w-48" />
-                    <Bone className="h-7 w-64 max-w-full" />
-                    <Bone className="h-4 w-full max-w-md" />
-                    <Bone className="h-4 w-3/4 max-w-sm" />
+const BoardSkeleton = ({ layout }) => (
+    <div className="space-y-5" aria-busy="true" aria-label="Загрузка">
+        <div className="overflow-hidden rounded-[32px] bg-white ring-1 ring-slate-200/70">
+            <div className="grid" style={mainGridStyle(layout)}>
+                <span className="block animate-pulse bg-slate-200/60" style={{ minHeight: layout.height }} />
+                <div className="flex flex-col justify-center gap-4 px-6 py-7 sm:px-10 sm:py-10">
+                    <Bone className="h-7 w-56" />
+                    <Bone className="h-9 w-72 max-w-full" />
+                    <Bone className="h-4 w-full max-w-lg" />
+                    <Bone className="h-4 w-3/4 max-w-md" />
                 </div>
             </div>
         </div>
-        <div className={gridClass(3)}>
-            {[0, 1, 2].map((index) => (
-                <div key={index} className={`${iosCard} flex flex-col items-center gap-3 px-5 pb-6 pt-7`}>
-                    <span className="block h-[92px] w-[92px] animate-pulse rounded-full bg-slate-200/70" />
-                    <Bone className="mt-1 h-6 w-36" />
-                    <Bone className="h-5 w-44" />
-                    <Bone className="h-4 w-full" />
-                    <Bone className="h-4 w-2/3" />
+        <div className="flex flex-wrap justify-center" style={{ gap: layout.gap }}>
+            {Array.from({ length: layout.columns }).map((_, index) => (
+                <div key={index} className="overflow-hidden rounded-[28px] bg-white ring-1 ring-slate-200/70" style={tileStyle(layout)}>
+                    <span className="block animate-pulse bg-slate-200/60" style={{ height: layout.height }} />
+                    <div className="space-y-2.5 px-5 pb-5 pt-4">
+                        <Bone className="h-4 w-full" />
+                        <Bone className="h-4 w-2/3" />
+                    </div>
                 </div>
             ))}
         </div>
     </div>
 );
 
+/* Золотая карточка: фото шириной в одну плитку ряда, текст — справа.
+   Узкая доска — фото над текстом. */
+const mainGridStyle = (layout) => (layout.mainPhotoWidth
+    ? { gridTemplateColumns: `${Math.round(layout.mainPhotoWidth)}px minmax(0, 1fr)` }
+    : { gridTemplateColumns: 'minmax(0, 1fr)' });
+
 const EmptyCard = ({ title, text, action = null }) => (
-    <div className={`${iosCard} flex flex-col items-center px-6 py-12 text-center`}>
-        <span className="grid h-14 w-14 place-items-center rounded-2xl bg-amber-50 text-amber-500">
-            <Trophy size={26} strokeWidth={2} aria-hidden="true" />
+    <div className={`${iosCard} flex flex-col items-center px-6 py-14 text-center`}>
+        <span className="grid h-16 w-16 place-items-center rounded-[20px] bg-amber-100 text-amber-600">
+            <Trophy size={30} strokeWidth={2} aria-hidden="true" />
         </span>
-        <h3 className="mt-4 text-[17px] font-semibold text-slate-900">{title}</h3>
-        <p className="mt-1.5 max-w-md text-[14px] leading-relaxed text-slate-500">{text}</p>
+        <h3 className="mt-4 text-[18px] font-semibold text-slate-900">{title}</h3>
+        <p className="mt-1.5 max-w-md text-[14.5px] leading-relaxed text-slate-500">{text}</p>
         {action}
     </div>
 );
 
-export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
+/* focus — {period, nonce}: колокол позвал на доску конкретного месяца. */
+export default function HonorBoard({ user, apiRoot, authHeaders, notify, focus = null }) {
     const userId = user?.id;
-    const [data, setData] = useState(() => memory.get(memoryKey(userId, '')) || null);
-    const [loading, setLoading] = useState(() => !memory.has(memoryKey(userId, '')));
+    // Первый кадр — сразу тот месяц и то направление, куда звал колокол (из
+    // памяти страницы, если месяц уже открывали): без мелькания прошлого.
+    const initialPeriod = focus?.period || '';
+    const [data, setData] = useState(() => memory.get(memoryKey(userId, initialPeriod)) || null);
+    const [loading, setLoading] = useState(() => !memory.has(memoryKey(userId, initialPeriod)));
     const [error, setError] = useState('');
-    const [departmentKey, setDepartmentKey] = useState(() => defaultDepartmentKey(user));
+    const [departmentKey, setDepartmentKey] = useState(() => {
+        const own = defaultDepartmentKey(user);
+        const cached = memory.get(memoryKey(userId, initialPeriod));
+        return cached ? pickDepartment(own, cached.boards, focus?.departments) : own;
+    });
     const [editorOpen, setEditorOpen] = useState(false);
     // Что окно редактирует. Не сбрасывается при закрытии: окно уходит анимацией
     // и до конца ухода показывает ту же доску.
     const [editorTarget, setEditorTarget] = useState(null);
     const [shell] = useState(() => readShell(userId));
+    const [boardRef, boardWidth] = useWidth();
     const ticket = useRef(0);
 
-    const load = useCallback(async (period = '') => {
+    /* Вышедшие доски видны — колокол больше не зовёт сюда. Только когда сервер
+       сказал, что гасить есть что: заход во вкладку не пишет в базу зря. */
+    const markSeen = useCallback(() => {
+        axios.post(`${apiRoot}/api/events/honor_board/seen`, {}, { headers: authHeaders() }).catch(() => {});
+    }, [apiRoot, authHeaders]);
+
+    /* pick — заход во вкладку и зов колокола: показываем направление, о котором
+       звал колокол (своё, если оно среди вышедших), а если у выбранного
+       направления доски за месяц нет, а у другого есть, — то, где есть, а не
+       пустую заглушку. Направление, выбранное руками, не трогаем. */
+    const load = useCallback(async (period = '', { pick = false, wanted = [] } = {}) => {
         const mine = ticket.current + 1;
         ticket.current = mine;
         const cached = memory.get(memoryKey(userId, period));
         if (cached) {
             setData(cached);
             setError('');
+            if (pick) setDepartmentKey((current) => pickDepartment(current, cached.boards, wanted));
         }
         setLoading(true);
         try {
@@ -185,14 +188,19 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
             });
             if (mine !== ticket.current) return;
             const next = response?.data || {};
-            memory.set(memoryKey(userId, period), next);
-            if (next.period) memory.set(memoryKey(userId, next.period), next);
+            if (next.unseen) markSeen();
+            const remembered = { ...next, unseen: false };
+            memory.set(memoryKey(userId, period), remembered);
+            if (next.period) memory.set(memoryKey(userId, next.period), remembered);
             writeShell(userId, {
                 months: Array.isArray(next.periods) && next.periods.length > 0,
                 manage: Array.isArray(next.manage_departments) && next.manage_departments.length > 0,
             });
-            setData(next);
+            setData(remembered);
             setError('');
+            if (pick) {
+                setDepartmentKey((current) => pickDepartment(current, next.boards, wanted));
+            }
         } catch (requestError) {
             if (mine !== ticket.current) return;
             if (cached) notify?.('Не удалось обновить доску почёта', 'error');
@@ -200,13 +208,17 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
         } finally {
             if (mine === ticket.current) setLoading(false);
         }
-    }, [apiRoot, authHeaders, notify, userId]);
+    }, [apiRoot, authHeaders, markSeen, notify, userId]);
 
     const loadRef = useRef(load);
     loadRef.current = load;
+    const focusNonce = focus?.nonce || 0;
+    const focusRef = useRef(focus);
+    focusRef.current = focus;
     useEffect(() => {
-        loadRef.current('');
-    }, []);
+        // Первый заход и каждый новый зов колокола: месяц из уведомления.
+        loadRef.current(focusRef.current?.period || '', { pick: true, wanted: focusRef.current?.departments || [] });
+    }, [focusNonce]);
 
     const period = data?.period || '';
     const periods = useMemo(() => (Array.isArray(data?.periods) ? data.periods : []), [data]);
@@ -217,7 +229,8 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
     const department = honorDepartment(departmentKey) || HONOR_DEPARTMENTS[0];
     const board = data?.boards?.[department.key] || null;
     const { main, others } = useMemo(() => splitBoard(board), [board]);
-    const photos = data?.photos || {};
+    const avatars = data?.photos || {};
+    const honorPhotos = data?.honor_photos || {};
 
     const openEditor = useCallback(() => {
         // Направление на экране, если человек его ведёт, иначе первое своё.
@@ -240,9 +253,12 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
         loadRef.current(changedPeriod || '');
     }, []);
 
+    // Без ключевой — только ряды плиток; с ней — раскладка всей доски.
+    const layout = main ? boardLayout(boardWidth, others.length) : { ...tileLayout(boardWidth, others.length), inline: false };
+
     let content;
     if (!data && loading) {
-        content = <BoardSkeleton />;
+        content = <BoardSkeleton layout={boardLayout(boardWidth, 3)} />;
     } else if (!data && error) {
         content = (
             <EmptyCard
@@ -268,21 +284,40 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
             />
         );
     } else {
-        content = (
-            <div className="space-y-4">
-                {main && <MainCard entry={main} departmentKey={department.key} photoUrl={photos[main.user_id]} />}
-                {others.length > 0 && (
-                    <div className={gridClass(others.length)}>
-                        {others.map((entry, index) => (
-                            <HonorCard
-                                key={`${entry.nomination}-${index}`}
-                                entry={entry}
-                                departmentKey={department.key}
-                                photoUrl={photos[entry.user_id]}
-                            />
-                        ))}
-                    </div>
-                )}
+        const mainCard = main && (
+            <HonorMainCard
+                entry={main}
+                meta={nominationMeta(department.key, main.nomination, main.title, main.icon)}
+                tone={toneOf(main, 0)}
+                photo={entryPhoto(main, honorPhotos, avatars)}
+                gridStyle={mainGridStyle(layout)}
+                height={layout.height}
+                className={layout.inline ? 'h-full' : ''}
+            />
+        );
+        const tiles = others.map((entry, index) => (
+            <HonorTile
+                key={`${entry.nomination}-${entry.title}-${index}`}
+                style={layout.inline ? { width: layout.tileWidth } : tileStyle(layout)}
+                className={layout.inline ? 'shrink-0' : ''}
+                height={layout.height}
+                dense={layout.tileWidth > 0 && layout.tileWidth < DENSE_TILE}
+                entry={entry}
+                meta={nominationMeta(department.key, entry.nomination, entry.title, entry.icon)}
+                tone={toneOf(entry, index)}
+                photo={entryPhoto(entry, honorPhotos, avatars)}
+            />
+        ));
+        content = layout.inline ? (
+            // Одна-две свои номинации: золотая карточка и плитки — одним рядом.
+            <div className="flex items-stretch" style={{ gap: layout.gap }} data-honor-layout="row">
+                <div className="min-w-0" style={{ width: layout.mainWidth }}>{mainCard}</div>
+                {tiles}
+            </div>
+        ) : (
+            <div className="flex flex-col" style={{ gap: layout.gap }} data-honor-layout="stack">
+                {mainCard}
+                {others.length > 0 && <div className="flex flex-wrap justify-center" style={{ gap: layout.gap }}>{tiles}</div>}
             </div>
         );
     }
@@ -290,7 +325,7 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
     /* Столбик — на gap, а не space-y: окно тренера лежит в нём же, и отступ
        space-y сдвинул бы его затемнение на 16 px ниже края экрана. */
     return (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-5">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <IosSegmented
                     value={department.key}
@@ -334,6 +369,7 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify }) {
             </div>
 
             <div
+                ref={boardRef}
                 aria-busy={loading || undefined}
                 className={`transition-opacity duration-200 ${data && loading ? 'opacity-60' : ''}`}
             >

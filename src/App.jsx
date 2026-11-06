@@ -44330,6 +44330,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
             // «Воронка найма»: карточка по номеру из колокола (target — id карточки).
             const [hiringFocusRequest, setHiringFocusRequest] = useState(null);
+            // «Ивенты»: колокол позвал на доску почёта месяца (target — «honor:ГГГГ-ММ»).
+            const [eventsFocusRequest, setEventsFocusRequest] = useState(null);
             // «Дисциплина»: переход из колокола — запись или особый контроль.
             const [disciplineFocusRequest, setDisciplineFocusRequest] = useState(null);
             // «Продакшн»: какую карточку открыть при входе (переход из «Задач»).
@@ -54441,6 +54443,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view !== 'tasks') setTaskFocusRequest(null);
                 if (view !== 'payments') setPaymentsFocusRequest(null);
                 if (view !== 'hiring') setHiringFocusRequest(null);
+                if (view !== 'events') setEventsFocusRequest(null);
                 if (view !== 'production') setProductionFocusRequest(null);
                 if (view !== 'discipline') setDisciplineFocusRequest(null);
             }, [view]);
@@ -54697,6 +54700,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (nextView === 'payments' && Number(target)) {
                     setPaymentsFocusRequest((prev) => ({
                         requestId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
+                // «Доска почёта»: target — «honor:ГГГГ-ММ:op,szov» — месяц и вышедшие
+                // направления (notifications/sources.py: honor_board). Вкладку, месяц и
+                // направление открывает сам раздел «Ивенты».
+                const honorTarget = nextView === 'events'
+                    && /^honor:(\d{4}-\d{2})(?::([a-z_,]+))?$/.exec(String(target || ''));
+                if (honorTarget) {
+                    setEventsFocusRequest((prev) => ({
+                        tab: 'honor',
+                        period: honorTarget[1],
+                        departments: (honorTarget[2] || '').split(',').filter(Boolean),
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }
@@ -59445,6 +59461,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             onSeen={() => setEventsUnreadCount(0)}
+                                            focusRequest={eventsFocusRequest}
                                         />
                                     </Suspense>
                                 ))}
@@ -60487,6 +60504,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             onSeen={() => setEventsUnreadCount(0)}
+                                            focusRequest={eventsFocusRequest}
                                         />
                                     </Suspense>
                                 ))}
@@ -60553,6 +60571,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             apiBaseUrl={API_BASE_URL}
                                             withAccessTokenHeader={withAccessTokenHeader}
                                             onSeen={() => setEventsUnreadCount(0)}
+                                            focusRequest={eventsFocusRequest}
                                         />
                                     </Suspense>
                                 ))}

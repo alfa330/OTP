@@ -1,17 +1,19 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Check, ChevronDown, ChevronRight, ChevronUp, EyeOff, Loader2, Plus, RotateCcw, Search, Trash2, UserRound,
+    Check, ChevronDown, ChevronRight, ChevronUp, EyeOff, ImagePlus, Loader2, Plus, RotateCcw, Search, Trash2, UserRound,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosCard, iosInput, prefersReducedMotion } from '../ui/ios';
+import {
+    IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, prefersReducedMotion,
+} from '../ui/ios';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
-import { HonorPhoto, NominationIcon } from './honorUi';
+import { HonorMainPhoto, HonorPhoto, HonorPortrait, HonorTile, IconPicker, NominationIcon } from './honorUi';
 import {
-    BOARD_STATE_LABELS, CUSTOM_NOMINATION, DESCRIPTION_MAX, HONOR_DEPARTMENTS, NAME_MAX, ROLE_LABELS, TITLE_MAX,
-    blankEntry, customSlotsLeft, entryHasContent, filterPeople, formatMoment, honorDepartment, honorDisplayName,
-    nominationMeta, periodLabel, publishIssues, serializeEntries, sortPeople,
+    BOARD_STATE_LABELS, CUSTOM_NOMINATION, DESCRIPTION_MAX, HONOR_DEPARTMENTS, NAME_MAX, ROLE_LABELS,
+    TITLE_MAX, blankEntry, boardPlace, entryHasContent, entryPhoto, filterPeople, formatMoment, honorDepartment,
+    honorDisplayName, nominationMeta, nominationSlotsLeft, periodLabel, publishIssues, serializeEntries, sortPeople, toneOf,
 } from './honorBoardMeta';
 
 /*
@@ -25,8 +27,16 @@ import {
  * два окна (или два тренера) не затрут друг друга молча — опоздавшее получит
  * свежую версию.
  *
- * ВЫБОР СОТРУДНИКА — второй уровень этого же окна, как в «Настройках» iOS: окно
- * поверх окна клало бы второе затемнение на первое.
+ * НОМИНАЦИИ — у всех трёх направлений одинаково (с 06.11.2026): ключевая
+ * «Лучший сотрудник отдела» закреплена, остальные тренер называет сам, меняет
+ * им значок, убирает и добавляет — вместе с ключевой до восьми.
+ *
+ * ФОТО НА ДОСКЕ — своё у карточки: тренер фотографирует сотрудника и загружает
+ * снимок, фон убирает нейросеть прямо в браузере (cutout/). Без своего фото
+ * карточка берёт фото из профиля.
+ *
+ * ВЫБОР СОТРУДНИКА И ФОТО — второй уровень этого же окна, как в «Настройках»
+ * iOS: окно поверх окна клало бы второе затемнение на первое.
  */
 
 const AUTOSAVE_MS = 800;
@@ -39,6 +49,15 @@ const INVALID = 'ring-2 ring-rose-300';
 const DEPARTMENT_OPTIONS = HONOR_DEPARTMENTS.map((item) => ({ value: item.key, label: item.label }));
 const DRAFT_HINT = 'Черновик сохраняется сам, по ходу ввода. Сотрудники видят доску только после «Опубликовать»: '
     + 'правки опубликованной доски тоже выходят к ним следующей публикацией.';
+const PHOTO_HINT = 'Фото на карточке доски. Сфотографируйте сотрудника и загрузите снимок — фон уберётся сам, '
+    + 'прямо в браузере. Без своего фото карточка берёт фото из профиля. Загруженное фото окно подставит '
+    + 'этому сотруднику и в следующие месяцы.';
+const CUTOUT_HINT = 'Фон убирает нейросеть прямо в браузере, фото уходит на сервер только по «Сохранить фото». '
+    + 'Если края вышли неаккуратно (тёмный фон, человек в полный рост) — сохраните фото с фоном.';
+const PHOTO_MODES = [
+    { value: 'cutout', label: 'Без фона' },
+    { value: 'photo', label: 'С фоном' },
+];
 const ISSUE_FIELD_OF = { user_id: 'user', name: 'name', description: 'description', title: 'title' };
 const ISSUE_ORDER = ['title', 'user', 'name', 'description'];
 
@@ -66,7 +85,7 @@ const sortIssues = (list) => [...list].sort((a, b) => {
    в поле, и у самого поля не было бы имени для читалки. */
 const FieldLabel = ({ children, hint = '', htmlFor }) => (
     <span className="flex min-h-5 items-center px-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-        <label htmlFor={htmlFor}>{children}</label>
+        {htmlFor ? <label htmlFor={htmlFor}>{children}</label> : <span>{children}</span>}
         {hint && <InfoHint text={hint} side="left" className="ml-1.5 align-middle" />}
     </span>
 );
@@ -88,9 +107,59 @@ const AutoTextarea = ({ value, className, ...rest }) => {
     return <textarea ref={ref} rows={4} value={value} className={className} {...rest} />;
 };
 
-const SlotCard = ({ entry, index, departmentKey, person, issueFor, onEdit, onBlur, onPick, onRemove, titleRef }) => {
+const PHOTO_CAPTIONS = {
+    cutout: 'Своё фото без фона',
+    photo: 'Своё фото с фоном',
+    avatar: 'Фото из профиля',
+    initials: 'Фото нет — на карточке инициалы',
+};
+
+/* «Фото на доске»: как карточка выглядит сейчас (маленькая плитка), загрузить
+   своё и вернуть фото профиля. Кнопки — под подписью, а не справа от неё: на
+   телефоне ряд «плитка · подпись · две кнопки» сжимал подпись в столбик слов. */
+const PhotoField = ({ entry, person, tone, photo, onUpload, onReset }) => {
+    const own = Boolean(entry.photo_id);
+    return (
+        <div className="space-y-1.5">
+            <FieldLabel hint={PHOTO_HINT}>Фото на доске</FieldLabel>
+            <div className="flex items-center gap-3 rounded-xl bg-slate-50 p-2.5 ring-1 ring-slate-200/70">
+                <span
+                    data-honor-photo-preview={photo.kind}
+                    className={`relative h-[84px] w-[68px] shrink-0 overflow-hidden rounded-[14px] ${tone.tile}`}
+                >
+                    <HonorPortrait photo={photo} name={entry.name || person?.name} ink={tone.ink} figure={0.94} circle={50} inset={4} />
+                </span>
+                <span className="min-w-0 grow basis-0">
+                    <span className="block text-[14px] font-medium text-slate-900">{PHOTO_CAPTIONS[photo.kind]}</span>
+                    <span className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-1.5">
+                        <button type="button" onClick={onUpload} className={iosBtnSecondary}>
+                            <ImagePlus size={15} aria-hidden="true" />
+                            {own ? 'Заменить' : 'Загрузить фото'}
+                        </button>
+                        {own && (
+                            <button
+                                type="button"
+                                onClick={onReset}
+                                className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-700 active:scale-95"
+                                title="Карточка возьмёт фото из профиля"
+                            >
+                                Убрать
+                            </button>
+                        )}
+                    </span>
+                </span>
+            </div>
+        </div>
+    );
+};
+
+const SlotCard = ({
+    entry, index, place, departmentKey, person, photo, issueFor, onEdit, onBlur, onPick, onRemove, onUpload, onResetPhoto,
+    titleRef,
+}) => {
     const ids = useId();
-    const meta = nominationMeta(departmentKey, entry.nomination, entry.title);
+    const meta = nominationMeta(departmentKey, entry.nomination, entry.title, entry.icon);
+    const tone = toneOf(entry, place);
     const custom = entry.nomination === CUSTOM_NOMINATION;
     const issue = (field) => issueFor(index, field);
     const hint = [
@@ -101,13 +170,11 @@ const SlotCard = ({ entry, index, departmentKey, person, issueFor, onEdit, onBlu
     return (
         <section className="space-y-2">
             <header className="flex min-h-8 items-center gap-2.5 px-1">
-                <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-[9px] ${
-                    meta.main ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-blue-600'
-                }`}>
+                <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-[9px] ${tone.tile} ${tone.ink}`}>
                     <NominationIcon name={meta.icon} size={15} strokeWidth={2.2} />
                 </span>
                 <span className="min-w-0 flex-1 text-[14.5px] font-semibold text-slate-800">
-                    <span className="break-words">{custom ? (entry.title.trim() || 'Своя номинация') : meta.title}</span>
+                    <span className="break-words">{custom ? (entry.title.trim() || 'Новая номинация') : meta.title}</span>
                     {hint && <InfoHint text={hint} side="left" className="ml-1.5 align-middle" />}
                 </span>
                 {custom && (
@@ -125,18 +192,23 @@ const SlotCard = ({ entry, index, departmentKey, person, issueFor, onEdit, onBlu
             <div className={`${iosCard} space-y-3.5 p-3.5 sm:p-4`}>
                 {custom && (
                     <div className="space-y-1.5">
-                        <FieldLabel htmlFor={`${ids}-title`}>Номинация</FieldLabel>
-                        <input
-                            id={`${ids}-title`}
-                            ref={titleRef}
-                            value={entry.title}
-                            maxLength={TITLE_MAX}
-                            onChange={(event) => onEdit({ title: event.target.value })}
-                            onBlur={onBlur}
-                            placeholder="Например, «Лучший администратор»"
-                            data-honor-issue={`${index}:title`}
-                            className={`${iosInput}${issue('title') ? ` ${INVALID}` : ''}`}
-                        />
+                        <FieldLabel htmlFor={`${ids}-title`} hint="Название и значок номинации на доске. Значок — по кнопке слева.">
+                            Номинация
+                        </FieldLabel>
+                        <div className="flex items-center gap-2">
+                            <IconPicker value={meta.icon} tone={tone} onChange={(icon) => onEdit({ icon })} />
+                            <input
+                                id={`${ids}-title`}
+                                ref={titleRef}
+                                value={entry.title}
+                                maxLength={TITLE_MAX}
+                                onChange={(event) => onEdit({ title: event.target.value })}
+                                onBlur={onBlur}
+                                placeholder="Например, «Лучший администратор»"
+                                data-honor-issue={`${index}:title`}
+                                className={`${iosInput} min-w-0 flex-1${issue('title') ? ` ${INVALID}` : ''}`}
+                            />
+                        </div>
                         <IssueText text={issue('title')} />
                     </div>
                 )}
@@ -176,6 +248,16 @@ const SlotCard = ({ entry, index, departmentKey, person, issueFor, onEdit, onBlu
                     </button>
                     <IssueText text={issue('user')} />
                 </div>
+                {entry.user_id && (
+                    <PhotoField
+                        entry={entry}
+                        person={person}
+                        tone={tone}
+                        photo={photo}
+                        onUpload={onUpload}
+                        onReset={onResetPhoto}
+                    />
+                )}
                 <div className="space-y-1.5">
                     <FieldLabel
                         htmlFor={`${ids}-name`}
@@ -306,7 +388,7 @@ const PeoplePicker = ({ state, query, onQuery, selectedId, onPick, onClear, onRe
                                     selected ? 'bg-blue-50 hover:bg-blue-50' : 'hover:bg-slate-50'
                                 }`}
                             >
-                                <HonorPhoto name={person.name} url={person.photo_url} size={40} />
+                                <HonorPhoto name={person.name} url={person.photo_url || person.honor_photo?.url} size={40} />
                                 <span className="min-w-0 flex-1">
                                     <span className={`block truncate text-[14.5px] font-medium ${selected ? 'text-blue-700' : 'text-slate-900'}`}>
                                         {person.name}
@@ -352,6 +434,79 @@ const PeoplePicker = ({ state, query, onQuery, selectedId, onPick, onClear, onRe
     );
 };
 
+/* Строка состояния обработки фото: загрузка модели (один раз), вырезание, ошибка. */
+const cutoutStatus = (task) => {
+    if (!task) return '';
+    if (task.cut.state === 'model') {
+        const { loaded = 0, total = 0 } = task.cut;
+        const percent = total ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+        return percent ? `Загружаю нейросеть для фона… ${percent}%` : 'Загружаю нейросеть для фона…';
+    }
+    if (task.cut.state === 'run' || task.cut.state === 'decode') return 'Убираю фон…';
+    if (task.cut.state === 'error') return task.cut.error;
+    return '';
+};
+
+/* Второй уровень окна — «Фото для доски»: снимок на плитке так, как его
+   увидят, и выбор «без фона / с фоном». */
+const PhotoScreen = ({ task, entry, departmentKey, place, onMode }) => {
+    const meta = nominationMeta(departmentKey, entry.nomination, entry.title, entry.icon);
+    const tone = toneOf(entry, place);
+    const variant = task.mode === 'cutout' ? task.cut : task.asIs;
+    const busy = variant.state !== 'ready' && variant.state !== 'error';
+    const status = task.mode === 'cutout' ? cutoutStatus(task) : (task.asIs.state === 'error' ? task.asIs.error : '');
+    const photo = variant.state === 'ready'
+        ? { kind: task.mode === 'cutout' ? 'cutout' : 'photo', url: variant.url, ratio: variant.ratio || 0 }
+        : { kind: 'initials', url: '' };
+    return (
+        <div className="space-y-4">
+            <div className="mx-auto w-full max-w-[340px]">
+                <div className="relative">
+                    {/* Превью — та карточка, на которой фото выйдет: у ключевой
+                        номинации золотая колонка главной карточки, у остальных — плитка. */}
+                    {meta.main ? (
+                        <div className="overflow-hidden rounded-[28px] ring-2 ring-amber-300">
+                            <HonorMainPhoto entry={entry} tone={tone} photo={photo} className="h-[400px]" />
+                        </div>
+                    ) : (
+                        <HonorTile
+                            entry={{ ...entry, description: '' }}
+                            meta={meta}
+                            tone={tone}
+                            photo={photo}
+                            height={380}
+                        />
+                    )}
+                    {busy && (
+                        <span className="absolute inset-0 grid place-items-center rounded-[28px] bg-slate-50/60">
+                            <Loader2 size={30} className="animate-spin text-slate-500" aria-hidden="true" />
+                        </span>
+                    )}
+                </div>
+            </div>
+            <div className="flex flex-col items-center gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                    <IosSegmented
+                        value={task.mode}
+                        options={PHOTO_MODES}
+                        onChange={onMode}
+                        ariaLabel="Фон на фото"
+                    />
+                    <InfoHint text={CUTOUT_HINT} side="left" />
+                </span>
+                <p
+                    aria-live="polite"
+                    className={`min-h-5 text-center text-[13px] ${
+                        variant.state === 'error' ? 'text-rose-600' : 'text-slate-500'
+                    }`}
+                >
+                    {status}
+                </p>
+            </div>
+        </div>
+    );
+};
+
 /* «Не заполнено: N ⌃ ⌄» — когда полей больше одного, стрелки ведут от поля к
    полю; одно поле — к нему уже подвели. */
 const IssueNav = ({ count, onStep }) => {
@@ -374,6 +529,15 @@ const IssueNav = ({ count, onStep }) => {
     );
 };
 
+const blankVariant = () => ({ state: 'idle', blob: null, url: '', error: '', loaded: 0, total: 0 });
+
+const fileNameFor = (blob) => {
+    const type = String(blob?.type || '');
+    if (type === 'image/webp') return 'honor.webp';
+    if (type === 'image/png') return 'honor.png';
+    return 'honor.jpg';
+};
+
 /* departments — направления, которые человек ведёт (с сервера, manage_departments). */
 export default function HonorBoardEditor({ open, target, departments, apiRoot, authHeaders, notify, onClose, onBoardChanged }) {
     const isMobileShell = useIsMobileShell();
@@ -382,6 +546,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
     const [board, setBoard] = useState(null);
     const [entries, setEntries] = useState([]);
     const [people, setPeople] = useState({});
+    const [photos, setPhotos] = useState({});
     const [months, setMonths] = useState([]);
     const [loadState, setLoadState] = useState('loading');
     const [loadError, setLoadError] = useState('');
@@ -393,9 +558,13 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
     const [candidates, setCandidates] = useState({});
     const [pendingTarget, setPendingTarget] = useState(null);
     const [session, setSession] = useState(null);
+    // Второй уровень «Фото для доски»: {key (строка доски), file, mode, asIs, cut, saving}.
+    const [photoTask, setPhotoTask] = useState(null);
 
     const entriesRef = useRef(entries);
     entriesRef.current = entries;
+    const photosRef = useRef(photos);
+    photosRef.current = photos;
     const targetRef = useRef({ period: target.period, department: target.department });
     const revisionRef = useRef(0);
     const dirtyRef = useRef(false);
@@ -413,6 +582,13 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
     const issueCursor = useRef(-1);
     const focusTitleOf = useRef(null);
     const titleRefs = useRef({});
+    const fileInputRef = useRef(null);
+    // Для какой строки доски выбирают файл (ключ строки, а не номер: номера
+    // сдвигаются, когда номинацию убирают).
+    const uploadKeyRef = useRef(null);
+    const photoTicketRef = useRef(0);
+    const photoTaskRef = useRef(photoTask);
+    photoTaskRef.current = photoTask;
 
     /* Новое открытие окна — состояние строится при отрисовке, а не эффектом:
        иначе первый кадр стоял бы с доской прошлого открытия. */
@@ -427,6 +603,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         setSaveState('idle');
         setIssues([]);
         setPicker(null);
+        setPhotoTask(null);
         setQuery('');
         setCandidates({});
         setPendingTarget(null);
@@ -443,18 +620,24 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
             : month)));
     }, []);
 
+    const mergeResponse = useCallback((data) => {
+        if (data?.people) setPeople((prev) => ({ ...prev, ...data.people }));
+        if (data?.photos) setPhotos((prev) => ({ ...prev, ...data.photos }));
+    }, []);
+
     /* Доска с сервера целиком заменяет местную: открытие, смена месяца,
        ответ «уже изменили в другом окне», отмена правок. */
-    const applyBoard = useCallback((view, viewPeople) => {
+    const applyBoard = useCallback((data) => {
+        const view = data?.board;
         revisionRef.current = Number(view?.revision) || 0;
         dirtyRef.current = false;
         setBoard(view);
         setEntries(withKeys(view?.entries));
-        setPeople((prev) => ({ ...prev, ...(viewPeople || {}) }));
+        mergeResponse(data);
         setIssues([]);
         setSaveState('idle');
         updateMonth(view);
-    }, [updateMonth]);
+    }, [mergeResponse, updateMonth]);
 
     const loadCandidates = useCallback(async (department, { retry = false } = {}) => {
         const known = candidatesRef.current[department];
@@ -485,7 +668,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
             if (mine !== ticketRef.current) return;
             const data = response?.data || {};
             if (Array.isArray(data.months)) setMonths(data.months);
-            applyBoard(data.board, data.people);
+            applyBoard(data);
             setLoadState('ready');
             // Список людей нужен почти всегда — берём его сразу, пока тренер читает доску.
             loadCandidates(nextDepartment);
@@ -539,14 +722,28 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
                         revisionRef.current = Number(view.revision) || 0;
                         setBoard(view);
                         updateMonth(view);
-                        setPeople((prev) => ({ ...prev, ...(response?.data?.people || {}) }));
+                        mergeResponse(response?.data);
                     }
                 } catch (requestError) {
                     const data = requestError?.response?.data;
                     if (requestError?.response?.status === 409 && data?.board) {
                         replacedRef.current += 1;
-                        if (sameTarget(data.board, targetRef.current)) applyBoard(data.board, data.people);
+                        if (sameTarget(data.board, targetRef.current)) applyBoard(data);
                         notify?.(data.error || 'Итоги изменили в другом окне — показываю свежую версию', 'error');
+                    } else if (data?.code === 'HONOR_BAD_PHOTO') {
+                        // Фото строки сервер не нашёл у выбранного в ней сотрудника.
+                        // Снимаем своё фото только там, где оно не сходится и у нас
+                        // (нет такого фото или оно другого человека); не нашли таких —
+                        // со всех строк: иначе черновик не сохранится никогда.
+                        const known = photosRef.current;
+                        const wrong = (entry) => entry.photo_id
+                            && (!known[String(entry.photo_id)] || known[String(entry.photo_id)].user_id !== entry.user_id);
+                        const strip = sent.some(wrong) ? wrong : (entry) => Boolean(entry.photo_id);
+                        const fix = (list) => list.map((entry) => (strip(entry) ? { ...entry, photo_id: null } : entry));
+                        entriesRef.current = fix(entriesRef.current);
+                        setEntries((prev) => fix(prev));
+                        dirtyRef.current = true;
+                        notify?.(data.error, 'error');
                     } else {
                         dirtyRef.current = true;
                         failed = true;
@@ -563,7 +760,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         if (replacedRef.current !== replacedBefore) return 'replaced';
         if (!dirtyRef.current) setSaveState((prev) => (prev === 'saving' ? 'saved' : prev));
         return 'saved';
-    }, [apiRoot, applyBoard, authHeaders, notify, updateMonth]);
+    }, [apiRoot, applyBoard, authHeaders, mergeResponse, notify, updateMonth]);
 
     const flushRef = useRef(flush);
     flushRef.current = flush;
@@ -624,6 +821,146 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         setQuery('');
     }, []);
 
+    /* Фото: снимок разобран один раз, варианты «с фоном» и «без фона» готовятся
+       параллельно; выбор между ними — мгновенный. Ссылки на превью освобождаем,
+       когда второй уровень закрыт или выбран другой файл. */
+    const releaseTask = useCallback((task) => {
+        if (!task) return;
+        for (const variant of [task.asIs, task.cut]) if (variant?.url) URL.revokeObjectURL(variant.url);
+    }, []);
+
+    const closePhoto = useCallback(() => {
+        photoTicketRef.current += 1;
+        releaseTask(photoTaskRef.current);
+        setPhotoTask(null);
+    }, [releaseTask]);
+
+    useEffect(() => () => {
+        photoTicketRef.current += 1;
+        releaseTask(photoTaskRef.current);
+    }, [releaseTask]);
+
+    /* Доску подменили (ответ «изменили в другом окне», отмена правок): строки
+       получили новые ключи, и фото больше не к чему приложить — закрываем
+       второй уровень и говорим почему, а не оставляем пустой экран. */
+    const photoLost = Boolean(photoTask && !photoTask.saving
+        && !entries.some((entry) => entry._key === photoTask.key));
+    useEffect(() => {
+        if (!photoLost) return;
+        closePhoto();
+        notify?.('Доску изменили в другом окне — выберите фото заново', 'error');
+    }, [closePhoto, notify, photoLost]);
+
+    /* Окно закрыли — нейросеть вырезания фона выгружаем: модель и её память
+       WebAssembly не должны жить в вкладке до перезагрузки портала (телефон).
+       Следующий раз модель придёт из кэша браузера. */
+    const pipelineRef = useRef(null);
+    useEffect(() => {
+        if (open) return undefined;
+        pipelineRef.current?.releaseCutout?.();
+        return undefined;
+    }, [open]);
+    useEffect(() => () => pipelineRef.current?.releaseCutout?.(), []);
+
+    const startPhoto = useCallback(async (key, file) => {
+        photoTicketRef.current += 1;
+        const mine = photoTicketRef.current;
+        releaseTask(photoTaskRef.current);
+        setPhotoTask({
+            key, mode: 'cutout', saving: false,
+            asIs: { ...blankVariant(), state: 'decode' }, cut: { ...blankVariant(), state: 'decode' },
+        });
+        const patch = (variant, value) => {
+            if (mine !== photoTicketRef.current) {
+                if (value?.url) URL.revokeObjectURL(value.url);
+                return;
+            }
+            setPhotoTask((prev) => (prev ? { ...prev, [variant]: { ...prev[variant], ...value } } : prev));
+        };
+        let pipeline;
+        let canvas;
+        try {
+            // Модуль с нейросетью — отдельным чанком: окну он нужен только здесь.
+            pipeline = await import('./cutout/honorPhotoPipeline');
+            pipelineRef.current = pipeline;
+            canvas = await pipeline.decodePhoto(file);
+        } catch (error) {
+            const message = error?.message || 'Не удалось открыть фото';
+            patch('asIs', { state: 'error', error: message });
+            patch('cut', { state: 'error', error: message });
+            return;
+        }
+        pipeline.photoAsIs(canvas)
+            .then((result) => patch('asIs', {
+                state: 'ready', blob: result.blob, url: URL.createObjectURL(result.blob), ratio: result.width / result.height,
+            }))
+            .catch((error) => patch('asIs', { state: 'error', error: error?.message || 'Не удалось подготовить фото' }));
+        try {
+            const result = await pipeline.photoWithoutBackground(canvas, {
+                onProgress: (progress) => patch('cut', progress.stage === 'model'
+                    ? { state: 'model', loaded: progress.loaded, total: progress.total }
+                    : { state: 'run' }),
+            });
+            patch('cut', { state: 'ready', blob: result.blob, url: URL.createObjectURL(result.blob) });
+        } catch (error) {
+            patch('cut', { state: 'error', error: error?.message || 'Не удалось убрать фон' });
+            // Без фона не вышло — сразу показываем вариант с фоном.
+            if (mine === photoTicketRef.current) setPhotoTask((prev) => (prev ? { ...prev, mode: 'photo' } : prev));
+        }
+    }, [releaseTask]);
+
+    const openUpload = useCallback((key) => {
+        uploadKeyRef.current = key;
+        fileInputRef.current?.click();
+    }, []);
+
+    const onFileChosen = useCallback((event) => {
+        const file = event.target.files?.[0];
+        // Сбрасываем выбор: тот же файл второй раз тоже должен срабатывать.
+        event.target.value = '';
+        const key = uploadKeyRef.current;
+        if (!file || !key) return;
+        setPicker(null);
+        startPhoto(key, file);
+    }, [startPhoto]);
+
+    const savePhoto = useCallback(async () => {
+        const task = photoTaskRef.current;
+        if (!task || task.saving) return;
+        const variant = task.mode === 'cutout' ? task.cut : task.asIs;
+        const index = entriesRef.current.findIndex((entry) => entry._key === task.key);
+        const entry = index >= 0 ? entriesRef.current[index] : null;
+        if (!variant?.blob || !entry?.user_id) return;
+        setPhotoTask((prev) => (prev ? { ...prev, saving: true } : prev));
+        try {
+            const form = new FormData();
+            form.append('user_id', String(entry.user_id));
+            form.append('cutout', task.mode === 'cutout' ? '1' : '0');
+            form.append('photo', variant.blob, fileNameFor(variant.blob));
+            const response = await axios.post(`${apiRoot}/api/events/honor_board/photos`, form, { headers: authHeaders() });
+            const photo = response?.data?.photo;
+            if (!photo?.id) throw new Error('no photo');
+            setPhotos((prev) => ({ ...prev, [String(photo.id)]: photo }));
+            setPeople((prev) => {
+                const person = prev[String(entry.user_id)];
+                return person ? { ...prev, [String(entry.user_id)]: { ...person, honor_photo: photo } } : prev;
+            });
+            // Новое фото — и в списке людей: выбранный заново в другой номинации
+            // этот человек придёт уже с ним.
+            setCandidates((prev) => Object.fromEntries(Object.entries(prev).map(([key, value]) => [key, {
+                ...value,
+                items: (value.items || []).map((person) => (person.id === entry.user_id ? { ...person, honor_photo: photo } : person)),
+            }])));
+            const current = entriesRef.current.findIndex((item) => item._key === task.key);
+            if (current >= 0 && entriesRef.current[current].user_id === entry.user_id) edit(current, { photo_id: photo.id });
+            closePhoto();
+            notify?.('Фото сохранено — так сотрудник будет на доске', 'success');
+        } catch (requestError) {
+            setPhotoTask((prev) => (prev ? { ...prev, saving: false } : prev));
+            notify?.(requestError?.response?.data?.error || 'Не удалось загрузить фото — попробуйте ещё раз', 'error');
+        }
+    }, [apiRoot, authHeaders, closePhoto, edit, notify]);
+
     const closeAfterSave = useCallback(async () => {
         const outcome = await flushRef.current();
         if (outcome === 'replaced') return;
@@ -633,22 +970,27 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
 
     /* Закрытие — синхронно: на телефоне сюда приходит системный «назад», и стек
        жестов понимает только ответ false — «остаюсь» (обещание он принял бы за
-       «закрылся» и потерял бы запись жеста). Со второго уровня («Сотрудник»)
-       жест ведёт на уровень назад, как шеврон в шапке. Несохранённое — сперва
-       досохраняем, окно закроется само. */
+       «закрылся» и потерял бы запись жеста). Со второго уровня («Сотрудник»,
+       «Фото для доски») жест ведёт на уровень назад, как шеврон в шапке.
+       Несохранённое — сперва досохраняем, окно закроется само. */
     const handleClose = useCallback(() => {
+        if (isMobileShell && photoTask !== null) {
+            if (!photoTask.saving) closePhoto();
+            return false;
+        }
         if (picker !== null && isMobileShell) {
             closePicker();
             return false;
         }
-        if (busy) return false;
+        if (busy || photoTask?.saving) return false;
+        if (photoTask) closePhoto();
         if (dirtyRef.current || savingRef.current) {
             closeAfterSave();
             return false;
         }
         onClose?.();
         return undefined;
-    }, [busy, closeAfterSave, closePicker, isMobileShell, onClose, picker]);
+    }, [busy, closeAfterSave, closePhoto, closePicker, isMobileShell, onClose, photoTask, picker]);
 
     /* Подвести к полю: прокрутка тела окна к нему. Фокус — только если нажали
        клавиатурой: после щелчка мышью синее кольцо фокуса перекрыло бы красную
@@ -718,7 +1060,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
                 showIssues(data.issues, byKeyboard);
             } else if (requestError?.response?.status === 409 && data?.board) {
                 replacedRef.current += 1;
-                if (sameTarget(data.board, targetRef.current)) applyBoard(data.board, data.people);
+                if (sameTarget(data.board, targetRef.current)) applyBoard(data);
                 notify?.(data.error, 'error');
             } else {
                 notify?.(data?.error || 'Не удалось опубликовать итоги', 'error');
@@ -745,7 +1087,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
                 department: destination.department,
                 revision: revisionRef.current,
             }, { headers: authHeaders() });
-            if (sameTarget(response?.data?.board, targetRef.current)) applyBoard(response.data.board, response.data.people);
+            if (sameTarget(response?.data?.board, targetRef.current)) applyBoard(response.data);
             if (action === 'unpublish') {
                 notify?.('Итоги сняты с доски', 'success');
                 onBoardChanged?.(destination);
@@ -756,7 +1098,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
             const data = requestError?.response?.data;
             if (requestError?.response?.status === 409 && data?.board) {
                 replacedRef.current += 1;
-                if (sameTarget(data.board, targetRef.current)) applyBoard(data.board, data.people);
+                if (sameTarget(data.board, targetRef.current)) applyBoard(data);
             }
             notify?.(data?.error || 'Не удалось выполнить действие', 'error');
         } finally {
@@ -802,8 +1144,13 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         if (index === null) return;
         const current = entriesRef.current[index];
         setPeople((prev) => ({ ...prev, [String(person.id)]: person }));
+        if (person.honor_photo?.id) setPhotos((prev) => ({ ...prev, [String(person.honor_photo.id)]: person.honor_photo }));
         if (current?.user_id !== person.id) {
-            edit(index, { user_id: person.id, name: honorDisplayName(person.name) });
+            // Фото для доски, которое этому человеку уже загружали, — сразу на карточку.
+            edit(index, { user_id: person.id, name: honorDisplayName(person.name), photo_id: person.honor_photo?.id || null });
+        } else if (!current?.photo_id && person.honor_photo?.id) {
+            // Тот же человек ещё раз — так возвращают его фото после «Убрать».
+            edit(index, { photo_id: person.honor_photo.id });
         }
         setPicker(null);
         setQuery('');
@@ -816,7 +1163,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         const person = people[String(current?.user_id)];
         // Имя, подставленное из профиля, уходит вместе с человеком; набранное тренером — остаётся.
         const autoName = person ? honorDisplayName(person.name) : '';
-        edit(index, { user_id: null, ...(current?.name === autoName ? { name: '' } : {}) });
+        edit(index, { user_id: null, photo_id: null, ...(current?.name === autoName ? { name: '' } : {}) });
         setPicker(null);
         setQuery('');
     }, [edit, people, picker]);
@@ -845,7 +1192,9 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         }));
     }, [months, shownDepartment, shownPeriod]);
     const boardIssue = issues.find((item) => item.index === null)?.message || '';
-    const slotsLeft = customSlotsLeft(departmentKey, entries);
+    const slotsLeft = nominationSlotsLeft(entries);
+    const avatars = useMemo(() => Object.fromEntries(Object.entries(people)
+        .filter(([, person]) => person?.photo_url).map(([id, person]) => [id, person.photo_url])), [people]);
 
     // В подвале — только состояние доски; как работает черновик — под «i» рядом.
     let status = '';
@@ -867,51 +1216,115 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
         },
     ] : [];
 
-    const footer = picker === null ? (
-        <>
-            <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[12.5px] text-slate-500 max-sm:w-full">
-                {pending && <Loader2 size={13} className="shrink-0 animate-spin" aria-hidden="true" />}
-                {status && <span className="truncate" aria-live="polite">{status}</span>}
-                {saveState === 'error' && (
-                    <button type="button" onClick={() => flushRef.current()} className="shrink-0 font-medium text-blue-600">
-                        Повторить
-                    </button>
-                )}
-                {ready && <InfoHint text={DRAFT_HINT} side="left" />}
-            </span>
-            <IssueNav count={sortedIssues.length} onStep={stepIssue} />
-            <IosMenu items={menuItems} label="Ещё действия" />
-            <button
-                type="button"
-                className={iosBtnPrimary}
-                onClick={publish}
-                disabled={!ready || Boolean(busy) || alreadyPublished}
-            >
-                {busy === 'publish' ? <Loader2 size={15} className="animate-spin" aria-hidden="true" />
-                    : alreadyPublished ? <Check size={15} aria-hidden="true" /> : null}
-                {alreadyPublished ? 'Опубликовано' : editingPublished ? 'Опубликовать правки' : 'Опубликовать'}
-            </button>
-        </>
-    ) : null;
+    const photoIndex = photoTask ? entries.findIndex((entry) => entry._key === photoTask.key) : -1;
+    const photoEntry = photoIndex >= 0 ? entries[photoIndex] : null;
+    // Второй уровень «Фото» открыт, только пока жива его строка доски.
+    const photoOpen = Boolean(photoTask && photoEntry);
+    const photoVariant = photoOpen ? (photoTask.mode === 'cutout' ? photoTask.cut : photoTask.asIs) : null;
+
+    let footer = null;
+    if (photoOpen) {
+        footer = (
+            <>
+                <button
+                    type="button"
+                    className={`${iosBtnSecondary} mr-auto`}
+                    onClick={() => openUpload(photoTask.key)}
+                    disabled={photoTask.saving}
+                >
+                    <ImagePlus size={15} aria-hidden="true" />
+                    Другое фото
+                </button>
+                <button
+                    type="button"
+                    className={iosBtnPrimary}
+                    onClick={savePhoto}
+                    disabled={photoTask.saving || photoVariant?.state !== 'ready' || !photoEntry?.user_id}
+                >
+                    {photoTask.saving && <Loader2 size={15} className="animate-spin" aria-hidden="true" />}
+                    Сохранить фото
+                </button>
+            </>
+        );
+    } else if (picker === null) {
+        footer = (
+            <>
+                <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[12.5px] text-slate-500 max-sm:w-full">
+                    {pending && <Loader2 size={13} className="shrink-0 animate-spin" aria-hidden="true" />}
+                    {status && <span className="truncate" aria-live="polite">{status}</span>}
+                    {saveState === 'error' && (
+                        <button type="button" onClick={() => flushRef.current()} className="shrink-0 font-medium text-blue-600">
+                            Повторить
+                        </button>
+                    )}
+                    {ready && <InfoHint text={DRAFT_HINT} side="left" />}
+                </span>
+                <IssueNav count={sortedIssues.length} onStep={stepIssue} />
+                <IosMenu items={menuItems} label="Ещё действия" />
+                <button
+                    type="button"
+                    className={iosBtnPrimary}
+                    onClick={publish}
+                    disabled={!ready || Boolean(busy) || alreadyPublished}
+                >
+                    {busy === 'publish' ? <Loader2 size={15} className="animate-spin" aria-hidden="true" />
+                        : alreadyPublished ? <Check size={15} aria-hidden="true" /> : null}
+                    {alreadyPublished ? 'Опубликовано' : editingPublished ? 'Опубликовать правки' : 'Опубликовать'}
+                </button>
+            </>
+        );
+    }
 
     const pickerEntry = picker !== null ? entries[picker] : null;
-    const pickerMeta = pickerEntry ? nominationMeta(departmentKey, pickerEntry.nomination, pickerEntry.title) : null;
+    const pickerMeta = pickerEntry ? nominationMeta(departmentKey, pickerEntry.nomination, pickerEntry.title, pickerEntry.icon) : null;
+    const photoMeta = photoEntry ? nominationMeta(departmentKey, photoEntry.nomination, photoEntry.title, photoEntry.icon) : null;
+
+    let title = 'Доска почёта';
+    let subtitle = `${periodLabel(period)} · ${department.title}`;
+    let onBack = null;
+    let screen = 'board';
+    if (photoOpen) {
+        title = 'Фото для доски';
+        subtitle = [photoEntry?.name || people[String(photoEntry?.user_id)]?.name, photoMeta?.title].filter(Boolean).join(' · ');
+        onBack = photoTask.saving ? null : closePhoto;
+        screen = 'photo';
+    } else if (picker !== null) {
+        title = 'Сотрудник';
+        subtitle = [pickerMeta?.title || 'Новая номинация', department.label].join(' · ');
+        onBack = closePicker;
+        screen = 'picker';
+    }
 
     return (
         <IosModal
             open={open}
             onClose={handleClose}
-            onBack={picker !== null ? closePicker : null}
-            title={picker !== null ? 'Сотрудник' : 'Доска почёта'}
-            subtitle={picker !== null
-                ? [pickerMeta?.title || 'Своя номинация', department.label].join(' · ')
-                : `${periodLabel(period)} · ${department.title}`}
+            onBack={onBack}
+            title={title}
+            subtitle={subtitle}
             maxWidth="max-w-2xl"
             footer={footer}
-            sizeKey={`${picker !== null ? 'picker' : 'board'}-${ready ? 'ready' : 'loading'}-${departmentKey}-${entries.length}`}
+            sizeKey={`${screen}-${ready ? 'ready' : 'loading'}-${departmentKey}-${entries.length}`}
         >
             <div ref={bodyRef}>
-                {picker !== null ? (
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={onFileChosen}
+                    tabIndex={-1}
+                    aria-hidden="true"
+                />
+                {photoOpen ? (
+                    <PhotoScreen
+                        task={photoTask}
+                        entry={photoEntry}
+                        departmentKey={departmentKey}
+                        place={boardPlace(entries, photoIndex)}
+                        onMode={(mode) => setPhotoTask((prev) => (prev ? { ...prev, mode } : prev))}
+                    />
+                ) : picker !== null ? (
                     <PeoplePicker
                         state={candidates[departmentKey]}
                         query={query}
@@ -959,7 +1372,7 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
                                 </button>
                             </div>
                         ) : !ready ? (
-                            <SlotsSkeleton count={department.custom ? 2 : department.nominations.length} />
+                            <SlotsSkeleton count={1 + Math.max(1, department.presets.length)} />
                         ) : (
                             <div className="space-y-5 motion-safe:animate-fade-in-soft">
                                 {boardIssue && (
@@ -975,13 +1388,17 @@ export default function HonorBoardEditor({ open, target, departments, apiRoot, a
                                         key={entry._key}
                                         entry={entry}
                                         index={index}
+                                        place={boardPlace(entries, index)}
                                         departmentKey={departmentKey}
                                         person={people[String(entry.user_id)]}
+                                        photo={entryPhoto(entry, photos, avatars)}
                                         issueFor={issueFor}
                                         onEdit={(patch) => edit(index, patch)}
                                         onBlur={saveOnBlur}
                                         onPick={() => openPicker(index)}
                                         onRemove={() => removeNomination(index)}
+                                        onUpload={() => openUpload(entry._key)}
+                                        onResetPhoto={() => edit(index, { photo_id: null })}
                                         titleRef={(node) => { titleRefs.current[entry._key] = node; }}
                                     />
                                 ))}
