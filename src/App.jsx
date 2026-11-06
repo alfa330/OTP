@@ -148,9 +148,9 @@ import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal'
 import HoursReportDialog from './components/hours/HoursReportDialog';
 import { buildHoursReportOptions } from './components/hours/hoursReportOptions';
 import FrontOfficeTimesheetFilters from './components/hours/FrontOfficeTimesheetFilters';
-import FrontOfficeTimesheetPage from './components/hours/FrontOfficeTimesheetPage';
-import { TIMESHEET_SCOPE, canExportFrontOfficeTimesheet, emptyTimesheetFilters, showsOnlyFrontOfficeTimesheet } from './components/hours/frontOfficeTimesheet';
-import { downloadTimesheet } from './components/hours/frontOfficeTimesheetApi';
+import FrontOfficeTimesheetView from './components/hours/FrontOfficeTimesheetView';
+import { TIMESHEET_SCOPE, canExportFrontOfficeTimesheet, emptyTimesheetFilters, timesheetAvailable } from './components/hours/frontOfficeTimesheet';
+import { downloadTimesheet, fetchTimesheetScope } from './components/hours/frontOfficeTimesheetApi';
 import { getHoursGroupLeave } from './components/hours/hoursGroupLeave';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
@@ -4604,6 +4604,43 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const selectedHoursGroup = selectedGroupId
             ? (groupsList || []).find(group => String(group?.id) === String(selectedGroupId))
             : null;
+        // Табель фронт-офисов на экране (просьба владельца 06.11.2026): выбрана группа
+        // отдела фронт-офисов — вместо таблицы часов табель в стилистике раздела,
+        // остальные показатели остаются сегментами рядом. У главы фронт-офисов раздел
+        // и есть её отдел, поэтому табель доступен ей и без выбранной группы. Какой
+        // отдел — фронт-офисы, знает сервер (/scope); остальным он ответит 403.
+        const [timesheetDepartmentId, setTimesheetDepartmentId] = useState(null);
+        const [hoursTimesheetMode, setHoursTimesheetMode] = useState(true);
+        const [timesheetReloadKey, setTimesheetReloadKey] = useState(0);
+        useEffect(() => {
+            if (!canExportTimesheet || !user?.id) {
+                setTimesheetDepartmentId(null);
+                return undefined;
+            }
+            const controller = new AbortController();
+            fetchTimesheetScope({
+                apiBaseUrl: API_BASE_URL,
+                headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) }),
+                signal: controller.signal,
+            })
+                .then((payload) => setTimesheetDepartmentId(payload?.department_id ?? null))
+                .catch(() => {});
+            return () => controller.abort();
+        }, [canExportTimesheet, user?.id]);
+        const isTimesheetContext = timesheetAvailable({
+            canExport: canExportTimesheet,
+            departmentId: timesheetDepartmentId,
+            selectedGroup: selectedHoursGroup,
+            selectedGroupId,
+            headedDepartmentId: hoursDepartmentScopeId,
+        });
+        // Перешли на «Регионы» — сразу табель, и в окне отчёта выбрана его плитка.
+        useEffect(() => {
+            if (!isTimesheetContext) return;
+            setHoursTimesheetMode(true);
+            setReportScope(TIMESHEET_SCOPE);
+        }, [isTimesheetContext, selectedGroupId]);
+        const showTimesheetView = isTimesheetContext && hoursTimesheetMode;
         const selectedGroupHasSupervisorHours = !selectedHoursGroup
             || supervisorHoursDeptIds.includes(Number(selectedHoursGroup?.department_id ?? selectedHoursGroup?.departmentId));
         const showSupervisorHoursTabs = selectedGroupHasSupervisorHours && (
@@ -8514,6 +8551,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             companyWide: isGlobalAdminUser(user) || reportDepartmentId == null,
             withSupervisorRows: isGlobalAdminUser(user) || headsSupervisorHoursDepartment(user),
             timesheet: canExportTimesheet,
+            // Глава фронт-офисов: в окне только табель — «По СВ» и «Общий» про часы и
+            // звонки линии, фронт-офисам они не нужны (владелец, 06.11.2026).
+            timesheetOnly: isHoursDepartmentHead && timesheetDepartmentId != null
+                && Number(hoursDepartmentScopeId) === Number(timesheetDepartmentId),
         });
         // Закрыть окно во время «Формируется…» — значит отказаться от файла: выгрузка
         // прерывается, файл не скачивается.
@@ -9156,7 +9197,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     <RateChangeReportToggle user={user} showToast={showToast} />
                     <button
                         type="button"
-                        onClick={fetchDailyHoursAndTrainings}
+                        onClick={() => {
+                            fetchDailyHoursAndTrainings();
+                            setTimesheetReloadKey((key) => key + 1);
+                        }}
                         title="Обновить"
                         aria-label="Обновить"
                         className="grid h-[34px] w-[34px] place-items-center rounded-xl bg-slate-100 text-slate-500 transition-all hover:bg-slate-200 hover:text-slate-700 active:scale-[0.98]"
@@ -9208,7 +9252,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     />
                     )}
 
-                    {showSupervisorHoursTabs && (
+                    {showSupervisorHoursTabs && !showTimesheetView && (
                     <IosSegmented
                         ariaLabel="Сотрудники"
                         value={hoursPeopleKind}
@@ -9217,6 +9261,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     />
                     )}
 
+                    {!showTimesheetView && (
                     <IosSegmented
                         ariaLabel="Операторы"
                         value={shownOperatorsTab}
@@ -9227,7 +9272,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             { value: 'fired', label: 'Уволенные', count: firedCount },
                         ]}
                     />
+                    )}
 
+                    {!showTimesheetView && (
                     <div
                         data-hours-menu="directions"
                         onMouseEnter={() => handleMenuMouseEnter(DIRECTIONS_MENU_ID)}
@@ -9301,6 +9348,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             </div>
                         </div>
                     </div>
+                    )}
                 </div>
 
                 {/* === Показатель: группы вкладок сегментами, вкладки — в меню группы ===
@@ -9308,10 +9356,29 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     видно, что сейчас на экране, не открывая меню. */}
                 <div className="relative">
                     <div className="inline-flex flex-wrap items-center rounded-[11px] bg-slate-100 p-[3px]" role="group" aria-label="Показатель">
+                        {/* «Табель» — только при группе фронт-офисов: тогда он открыт сразу,
+                            а показатели часов остаются соседними сегментами. */}
+                        {isTimesheetContext && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setHoursTimesheetMode(true);
+                                    closeMenus();
+                                }}
+                                aria-pressed={showTimesheetView}
+                                className={`flex items-center gap-1.5 whitespace-nowrap rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium transition-all active:scale-[0.98] ${
+                                    showTimesheetView
+                                        ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                        : 'text-slate-500 hover:text-slate-800'
+                                }`}
+                            >
+                                Табель
+                            </button>
+                        )}
                         {WORKHOURS_METRIC_GROUPS.map(group => {
                             const isIndicatorsGroup = group.label === 'Показатели';
                             const groupHasCalls = Array.isArray(group.tabs) && group.tabs.some(t => t && t.key === 'calls');
-                            const activeInGroup = group.tabs.some(tab => tab.key === selectedTab);
+                            const activeInGroup = !showTimesheetView && group.tabs.some(tab => tab.key === selectedTab);
                             const activeTabLabel = activeInGroup ? group.tabs.find(t => t.key === selectedTab)?.label : '';
                             const validSurgeCount = cloneChatMetricsSurgeWindows(chatMetricsSurgeWindows).filter(w => w.start && w.end).length;
                             const isOpen = openMenu === group.label;
@@ -9349,7 +9416,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     <div className={`tab-dropdown ${isOpen ? `open${openMenuAlignEnd ? ' tab-dropdown--end' : ''}` : ''}`} role="menu">
                                         <div className="flex min-w-[220px] flex-col">
                                             {group.tabs.map(tab => {
-                                                const isSelected = selectedTab === tab.key;
+                                                const isSelected = !showTimesheetView && selectedTab === tab.key;
                                                 return (
                                                     <button
                                                         key={tab.key}
@@ -9358,6 +9425,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         aria-checked={isSelected}
                                                         onClick={() => {
                                                             setSelectedTab(tab.key);
+                                                            setHoursTimesheetMode(false);
                                                             closeMenus();
                                                         }}
                                                         className={hoursMenuRowClass(isSelected)}
@@ -10242,6 +10310,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 всегда на экране — раньше до неё приходилось листать страницу в
                 самый низ. isolate: липкие шапка и столбец держат свои z-index
                 внутри таблицы — иначе шапка дней накрывала подсказку «i». */}
+            {showTimesheetView ? (
+                <FrontOfficeTimesheetView
+                    month={month}
+                    apiBaseUrl={API_BASE_URL}
+                    authHeaders={() => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? '') })}
+                    reloadKey={timesheetReloadKey}
+                />
+            ) : (
             <div className="hours-scroll hours-table-scroll isolate min-h-[240px] overflow-auto rounded-b-2xl border-t border-slate-200/70">
                 <div className="min-w-max tabular-nums">
                 {/* Header row */}
@@ -10893,6 +10969,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </div>
                 </div>
             </div>
+            )}
 
             {/* Upload modal (file selector -> preview) */}
             {selectedDayUpload && previewOperators.length === 0 && (
@@ -59342,9 +59419,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         withAccessTokenHeader={withAccessTokenHeader}
                                     />
                                 ))}
-                                {( view === "sv_hours" && (showsOnlyFrontOfficeTimesheet(user)
-                                    ? <FrontOfficeTimesheetPage user={user} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} showToast={showToast} />
-                                    : <HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
@@ -60378,9 +60453,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         />
                                     </Suspense>
                                 ))}
-                                {( view === "sv_hours" && (showsOnlyFrontOfficeTimesheet(user)
-                                    ? <FrontOfficeTimesheetPage user={user} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} showToast={showToast} />
-                                    : <HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView

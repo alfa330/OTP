@@ -66,6 +66,14 @@ def front_office_department(cursor):
     return (int(row[0]), row[1]) if row else None
 
 
+def scope(db):
+    """Отдел фронт-офисов для экрана «Учета часов»: по его группам страница
+    понимает, что выбраны «Регионы» и пора показывать табель."""
+    with db._get_cursor() as cursor:
+        department = front_office_department(cursor)
+    return {'department_id': department[0] if department else None}
+
+
 def _roster_candidates(cursor, department_id, start, end):
     """Кто мог быть в отделе в этом месяце: числится в отделе сейчас или состоял в
     его группе хоть день месяца. Перевёрнутые членства (конец раньше начала —

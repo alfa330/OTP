@@ -39,7 +39,10 @@ export function hoursReportTitle(month) {
  *   withSupervisorRows — в общий отчёт сервер добавит строки СВ;
  *   timesheet — третья плитка «Табель фронт-офисов» (ТЗ «выгрузка табеля»,
  *       06.11.2026): только суперадмину и главе фронт-офисов, остальным варианты
- *       окна прежние.
+ *       окна прежние;
+ *   timesheetOnly — в окне один табель, без «По СВ» и «Общего». Так у главы
+ *       фронт-офисов (владелец 06.11.2026: «зачем ей выгрузка по СВ и по
+ *       общему»): это отчёты часов и звонков линии, фронт-офисам они не нужны.
  */
 export function buildHoursReportOptions({
     group = null,
@@ -47,6 +50,7 @@ export function buildHoursReportOptions({
     companyWide = false,
     withSupervisorRows = false,
     timesheet = false,
+    timesheetOnly = false,
 } = {}) {
     const groupName = String(group?.name || '').trim();
     const supervisorName = String(supervisor?.name || '').trim();
@@ -73,7 +77,7 @@ export function buildHoursReportOptions({
     const everyone = companyWide ? 'Все операторы компании' : 'Все операторы отдела';
     const allDescription = `${everyone} с колонкой «Супервайзер».`
         + (withSupervisorRows ? ' Супервайзеры с часами по Clockster — отдельными строками.' : '');
-    const options = [
+    const options = (timesheet && timesheetOnly) ? [] : [
         { value: 'by_sv', label: 'По СВ', ...bySv },
         { value: 'all', label: 'Общий', description: allDescription, disabled: false },
     ];

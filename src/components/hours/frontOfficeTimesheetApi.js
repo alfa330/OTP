@@ -19,6 +19,28 @@ async function errorText(response) {
     }
 }
 
+export async function fetchTimesheetScope({ apiBaseUrl, headers, signal }) {
+    const response = await fetch(`${apiBaseUrl}${API_PATH}/scope`, {
+        method: 'GET',
+        credentials: 'include',
+        signal,
+        headers,
+    });
+    if (!response.ok) throw new Error(await errorText(response));
+    return response.json();
+}
+
+export async function fetchTimesheetData({ apiBaseUrl, headers, month, filters, signal }) {
+    const response = await fetch(`${apiBaseUrl}${API_PATH}/data?${timesheetQuery(month, filters)}`, {
+        method: 'GET',
+        credentials: 'include',
+        signal,
+        headers,
+    });
+    if (!response.ok) throw new Error(await errorText(response));
+    return response.json();
+}
+
 export async function fetchTimesheetOptions({ apiBaseUrl, headers, month, signal }) {
     const query = new URLSearchParams({ month: String(month || '') }).toString();
     const response = await fetch(`${apiBaseUrl}${API_PATH}/options?${query}`, {

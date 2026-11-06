@@ -341,15 +341,22 @@ def build_model(inputs, filters=None):
             if not membership_allows(envelope, day):
                 cells.append({'code': '', 'late': 0, 'early': 0, 'incomplete': False})
                 continue
-            cells.append(day_cell(
+            fact = inputs.get('facts', {}).get((user_id, day))
+            cell = day_cell(
                 day,
                 fact_until=fact_until,
-                fact=inputs.get('facts', {}).get((user_id, day)),
+                fact=fact,
                 span=inputs.get('spans', {}).get((user_id, day)),
                 period=period_on(periods, day),
                 day_off=(user_id, day) in inputs.get('days_off', ()),
                 has_card=user_id in inputs.get('has_card', ()),
-            ))
+            )
+            if cell['code'] == CODE_WORK and fact:
+                # Для подсказки ячейки на экране; в файл время не идёт. Уход —
+                # только подтверждённый: «уход» на обед уходом дня не был.
+                cell['arrive'] = _hhmm(fact.get('fact_in'))
+                cell['leave'] = _hhmm(fact.get('fact_out')) if exit_confirmed(fact) else None
+            cells.append(cell)
         shift_days = inputs.get('shift_days', {}).get(user_id, set())
         label_end = inputs.get('label_end') or end
         hired = person.get('hire_date')
@@ -363,6 +370,7 @@ def build_model(inputs, filters=None):
         rows.append({
             'user_id': user_id,
             'name': person['name'],
+            'active': bool(person.get('active', True)),
             'city': city_of(person),
             'job_title': job_title_of(person),
             'schedule': label,
@@ -392,3 +400,40 @@ def month_title(month):
     if not bounds:
         return str(month or '')
     return f'{MONTHS_NOMINATIVE[bounds[0].month - 1]} {bounds[0].year}'
+
+
+def _hhmm(value):
+    return value.astimezone(TZ).strftime('%H:%M') if value else None
+
+
+def model_payload(model):
+    """Модель листа → JSON для экрана «Учета часов»: те же люди, дни и итоги, что
+    в файле, плюс признаки дня для шапки (выходной, праздник, ещё не наступил)."""
+    holidays = set(model.get('holidays') or ())
+    fact_until = model['fact_until']
+    return {
+        'month': model['month'],
+        'title': month_title(model['month']),
+        'fact_until': fact_until.isoformat(),
+        'days': [{
+            'date': day.isoformat(),
+            'day': day.day,
+            'weekday': WEEKDAY_SHORT[day.weekday()],
+            'weekend': day.weekday() >= 5,
+            'holiday': day in holidays,
+            'future': day > fact_until,
+        } for day in model['days']],
+        'cities': [{
+            'city': city['city'],
+            'people': [{
+                'user_id': person['user_id'],
+                'name': person['name'],
+                'active': person.get('active', True),
+                'job_title': person['job_title'],
+                'schedule': person['schedule'],
+                'plan': person['plan'],
+                'cells': person['cells'],
+                'totals': person['totals'],
+            } for person in city['people']],
+        } for city in model['cities']],
+    }

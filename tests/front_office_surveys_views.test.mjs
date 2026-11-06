@@ -49,8 +49,8 @@ const employee = (role = 'operator') => ({
 test('глава фронт-офисов: «Опросы» и «Учет часов» (табель) добавлены, остальной набор прежний', () => {
     const user = head();
     assert.equal(departmentRestrictsViews(user), true);
-    // «Учет часов» — 06.11.2026 ради табеля фронт-офисов: у главы в разделе одна
-    // страница табеля, часы, бонусы и штрафы ей не открывали.
+    // «Учет часов» — 06.11.2026: раздел целиком в границах своего отдела (их держит
+    // сервер раздела), с табелем фронт-офисов.
     assert.deepEqual(
         DEPARTMENT_VIEW_ALLOWLIST.front_office.head,
         ['manage_operators', 'groups', 'work_schedules', 'tasks', 'qr_access', 'surveys', 'sv_hours'],

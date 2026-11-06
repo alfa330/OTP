@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """HTTP-эндпоинты табеля фронт-офисов (Flask Blueprint /api/front_office_timesheet).
 
+    GET /scope     id отдела фронт-офисов — по нему «Учет часов» узнаёт группу «Регионов»
     GET /options   отборы окна выгрузки за месяц (?month=YYYY-MM): города, люди, должности
+    GET /data      тот же табель для экрана «Учета часов», JSON (?month=…, отборы как у export)
     GET /export    файл Excel (?month=YYYY-MM&city=…&user_id=…&job_title=…, отборы повторяются)
 
 Кому: глава отдела «Фронт офисы» и суперадмины — решение владельца 06.11.2026.
@@ -44,7 +46,7 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
     """can_export(requester_id, requester) -> bool."""
     bp = Blueprint('front_office_timesheet', __name__, url_prefix='/api/front_office_timesheet')
 
-    def route(rule):
+    def route(rule, needs_month=True):
         def decorator(handler):
             @bp.route(rule, methods=['GET', 'OPTIONS'], endpoint=handler.__name__)
             @require_api_key
@@ -59,6 +61,8 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
                         return jsonify({"error": message}), status
                     if not can_export(requester_id, requester):
                         return jsonify({"error": FORBIDDEN_MESSAGE, "code": "TIMESHEET_FORBIDDEN"}), 403
+                    if not needs_month:
+                        return handler(*args, **kwargs)
                     month = str(request.args.get('month') or '').strip()
                     if not rules.parse_month(month):
                         return jsonify({"error": "Месяц нужен в виде ГГГГ-ММ",
@@ -72,16 +76,11 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
             return wrapper
         return decorator
 
-    @route('/options')
-    def timesheet_options(*, month, today):
-        inputs = data.collect(db, month, today, with_facts=False)
-        return jsonify(data.options_payload(inputs)), 200
-
-    @route('/export')
-    def timesheet_export(*, month, today):
+    def _model(month, today):
+        """Табель месяца с отборами запроса — один для экрана и для файла."""
         inputs = data.collect(db, month, today, with_facts=True)
         if inputs['pending_days']:
-            # Дни, которые «Отметки» не смогли собрать из Workpace: в файле они
+            # Дни, которые «Отметки» не смогли собрать из Workpace: в табеле они
             # выглядели бы неявками. Лучше честный отказ, чем табель с дырами.
             raise data.TimesheetError(
                 'Отметки Workpace за %d дн. ещё не собраны — повторите через минуту' % len(inputs['pending_days']),
@@ -91,7 +90,27 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
             user_ids=request.args.getlist('user_id'),
             job_titles=request.args.getlist('job_title'),
         )
-        model = rules.build_model(inputs, filters)
+        return inputs, rules.build_model(inputs, filters)
+
+    @route('/scope', needs_month=False)
+    def timesheet_scope():
+        return jsonify(data.scope(db)), 200
+
+    @route('/options')
+    def timesheet_options(*, month, today):
+        inputs = data.collect(db, month, today, with_facts=False)
+        return jsonify(data.options_payload(inputs)), 200
+
+    @route('/data')
+    def timesheet_data(*, month, today):
+        inputs, model = _model(month, today)
+        payload = rules.model_payload(model)
+        payload['without_card'] = inputs['without_card']
+        return jsonify(payload), 200
+
+    @route('/export')
+    def timesheet_export(*, month, today):
+        _inputs, model = _model(month, today)
         if not model['cities']:
             raise data.TimesheetError('Под выбранный отбор никто не попал', status=404,
                                       code='TIMESHEET_EMPTY')

@@ -97,6 +97,40 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual(payload['job_titles'], ['менеджер', 'техперсонал'])
         self.assertEqual(payload['without_card'], ['Бета Болат'])
 
+    def test_scope_needs_no_month_and_is_closed_to_outsiders(self):
+        with mock.patch.object(data, 'scope', return_value={'department_id': 909}):
+            response = self.client().get('/api/front_office_timesheet/scope')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {'department_id': 909})
+        with mock.patch.object(data, 'scope') as scope:
+            denied = self.client(allowed=False).get('/api/front_office_timesheet/scope')
+        self.assertEqual(denied.status_code, 403)
+        scope.assert_not_called()
+
+    def test_data_is_the_same_timesheet_for_the_screen(self):
+        with mock.patch.object(data, 'collect', return_value=_inputs()) as collect:
+            response = self.client().get('/api/front_office_timesheet/data?month=2026-10&city=Астана')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(collect.call_args.kwargs, {'with_facts': True})
+        payload = response.get_json()
+        self.assertEqual((payload['month'], payload['title'], payload['fact_until']),
+                         ('2026-10', 'октябрь 2026', '2026-10-31'))
+        self.assertEqual(len(payload['days']), 31)
+        self.assertEqual(payload['days'][0], {'date': '2026-10-01', 'day': 1, 'weekday': 'чт', 'weekend': False,
+                                              'holiday': False, 'future': False})
+        self.assertTrue(payload['days'][2]['weekend'])
+        self.assertEqual([city['city'] for city in payload['cities']], ['Астана'])
+        person = payload['cities'][0]['people'][0]
+        self.assertEqual((person['name'], person['active'], person['job_title']), ('Альфа Анна', True, 'менеджер'))
+        self.assertEqual(person['cells'][0]['code'], 'н')
+        self.assertEqual(person['totals'], {'worked': 0, 'missed': 1, 'late': 0, 'early': 0})
+        self.assertEqual(payload['without_card'], ['Бета Болат'])
+
+    def test_data_refuses_days_the_attendance_section_did_not_collect(self):
+        with mock.patch.object(data, 'collect', return_value=_inputs(pending=['2026-10-30'])):
+            response = self.client().get('/api/front_office_timesheet/data?month=2026-10')
+        self.assertEqual(response.status_code, 503)
+
     def test_unexpected_failure_is_a_500_without_details(self):
         with mock.patch.object(data, 'collect', side_effect=RuntimeError('секрет')):
             response = self.client().get('/api/front_office_timesheet/export?month=2026-10')
@@ -118,6 +152,24 @@ class WiringTests(unittest.TestCase):
         self.assertNotIn('_is_global_admin_requester', body)
         self.assertIn('build_front_office_timesheet_blueprint(', bot)
         self.assertIn('can_export=_front_office_timesheet_allowed,', bot)
+
+
+class FrontendWiringTests(unittest.TestCase):
+    """«Учет часов»: при группе фронт-офисов вместо таблицы часов — табель (06.11.2026)."""
+
+    def test_hours_page_swaps_the_table_for_the_timesheet(self):
+        app = source_cache.read(source_cache.ROOT / 'src' / 'App.jsx')
+        self.assertIn('{showTimesheetView ? (', app)
+        self.assertIn('<FrontOfficeTimesheetView', app)
+        # Главе фронт-офисов — весь раздел, отдельной страницы табеля больше нет.
+        self.assertEqual(app.count('{( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}'), 2)
+        self.assertNotIn('FrontOfficeTimesheetPage', app)
+        # Сегмент «Табель» гасит подсветку показателей, выбор показателя выключает табель.
+        self.assertIn('const activeInGroup = !showTimesheetView && group.tabs.some(', app)
+        self.assertIn('setHoursTimesheetMode(false);', app)
+        self.assertIn('headedDepartmentId: hoursDepartmentScopeId,', app)
+        # Главе фронт-офисов в окне отчёта — только табель.
+        self.assertIn('timesheetOnly: isHoursDepartmentHead && timesheetDepartmentId != null', app)
 
 
 if __name__ == '__main__':

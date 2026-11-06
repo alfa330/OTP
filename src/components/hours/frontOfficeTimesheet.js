@@ -35,11 +35,95 @@ export const canExportFrontOfficeTimesheet = (user) => (
     isSuperAdminUser(user) || headsFrontOfficeDepartment(user)
 );
 
-/* Главе фронт-офисов «Учет часов» открыт ради табеля: часы, бонусы и штрафы
-   её людей ей не открывали, поэтому раздел у неё — одна страница табеля. */
-export const showsOnlyFrontOfficeTimesheet = (user) => (
-    headsFrontOfficeDepartment(user) && !isSuperAdminUser(user)
-);
+/* Табель на экране «Учета часов» (просьба владельца 06.11.2026: «при выборе группы
+   регионов выводилось на сайте тоже, в стилистике сайта»). Режим доступен, когда
+   выбрана группа отдела фронт-офисов, а у главы фронт-офисов — и без группы: её
+   раздел и есть этот отдел (сервер «Учета часов» режет главу её отделом).
+   departmentId — id отдела фронт-офисов с сервера (/api/front_office_timesheet/scope). */
+export function timesheetAvailable({ canExport, departmentId, selectedGroup, selectedGroupId, headedDepartmentId }) {
+    if (!canExport || departmentId == null) return false;
+    const target = Number(departmentId);
+    if (selectedGroupId) {
+        const groupDepartment = selectedGroup?.department_id ?? selectedGroup?.departmentId;
+        return groupDepartment != null && Number(groupDepartment) === target;
+    }
+    return headedDepartmentId != null && Number(headedDepartmentId) === target;
+}
+
+const MONTHS_GENITIVE = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
+    'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+
+/* Как показать ячейку дня. tone — смысл для цвета: рабочий день нейтральный
+   (его большинство, красить нечего), выходной приглушён, отсутствия — мягкими
+   плашками. */
+export function timesheetCellView(cell) {
+    const code = String(cell?.code || '');
+    const tone = {
+        'р': 'work', 'в': 'off', 'Б/С': 'bs', 'О': 'vacation', 'Б': 'sick', 'н': 'absent',
+    }[code] || 'empty';
+    return {
+        label: code,
+        tone,
+        incomplete: Boolean(cell?.incomplete) && code === 'р',
+        late: Number(cell?.late || 0),
+        early: Number(cell?.early || 0),
+    };
+}
+
+const CODE_TITLES = {
+    'р': 'рабочий день',
+    'в': 'выходной',
+    'Б/С': 'без содержания',
+    'О': 'отпуск',
+    'Б': 'больничный',
+    'н': 'смена без отметок',
+};
+
+/* Подсказка ячейки: дата, что за день и откуда числа. */
+export function timesheetCellTitle(day, cell) {
+    const parts = [];
+    const date = String(day?.date || '');
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+    parts.push(match ? `${Number(match[3])} ${MONTHS_GENITIVE[Number(match[2]) - 1]}, ${day?.weekday || ''}`.trim() : date);
+    const code = String(cell?.code || '');
+    if (code) parts.push(CODE_TITLES[code] || code);
+    else if (day?.future) parts.push('ещё не наступил');
+    if (code === 'р') {
+        const span = [cell?.arrive, cell?.leave].map((value) => value || '—').join('–');
+        parts.push(`отметки ${span}`);
+        if (cell?.incomplete) parts.push(cell?.arrive ? 'нет отметки ухода' : 'нет отметки прихода');
+    }
+    if (Number(cell?.late) > 0) parts.push(`опоздание ${cell.late} мин`);
+    if (Number(cell?.early) > 0) parts.push(`ранний уход ${cell.early} мин`);
+    if (day?.holiday) parts.push('праздник');
+    return parts.join(' · ');
+}
+
+/* Итоги под таблицей: сколько человек отработали каждый день и суммы колонок. */
+export function timesheetColumnTotals(payload) {
+    const days = Array.isArray(payload?.days) ? payload.days : [];
+    const perDay = days.map(() => 0);
+    const sums = { worked: 0, missed: 0, late: 0, early: 0, people: 0 };
+    for (const city of payload?.cities || []) {
+        for (const person of city?.people || []) {
+            sums.people += 1;
+            (person?.cells || []).forEach((cell, index) => {
+                if (cell?.code === 'р' && index < perDay.length) perDay[index] += 1;
+            });
+            for (const key of ['worked', 'missed', 'late', 'early']) {
+                sums[key] += Number(person?.totals?.[key] || 0);
+            }
+        }
+    }
+    return { perDay, ...sums };
+}
+
+export const TIMESHEET_LEGEND = [
+    'р — рабочий день по отметкам «Отметок»; точка — нет отметки прихода или ухода.',
+    'в — выходной, Б/С — без содержания, О — отпуск, Б — больничный, н — смена без отметок.',
+    'Красное число — опоздание, мин; оранжевое — ранний уход, мин. Уход, после которого человек снова вошёл, ранним уходом не считается.',
+    'Файл — «Сформировать отчёт» → «Табель фронт-офисов».',
+];
 
 export const emptyTimesheetFilters = () => ({ cities: [], userIds: [], jobTitles: [] });
 

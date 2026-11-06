@@ -287,6 +287,23 @@ class BuildModelTests(unittest.TestCase):
         label = rules.schedule_label(week, date(2026, 10, 19), date(2026, 10, 25), {date(2026, 10, 25)})
         self.assertEqual(label, '5.2')
 
+    def test_screen_payload_carries_day_flags_and_mark_times(self):
+        day = date(2026, 10, 14)
+        facts = {(1, day): fact(day, (9, 12), (13, 0), extra_marks=[((14, 0), 'in')]),
+                 (2, day): fact(day, (9, 0), (18, 30))}
+        model = rules.build_model(self.inputs(facts=facts, holidays={date(2026, 10, 26)},
+                                              fact_until=date(2026, 10, 20)))
+        payload = rules.model_payload(model)
+        self.assertEqual(payload['title'], 'октябрь 2026')
+        self.assertEqual(payload['days'][25], {'date': '2026-10-26', 'day': 26, 'weekday': 'пн', 'weekend': False,
+                                               'holiday': True, 'future': True})
+        people = {p['name']: p for city in payload['cities'] for p in city['people']}
+        anna = people['Альфа Анна']['cells'][13]
+        self.assertEqual((anna['arrive'], anna['leave'], anna['incomplete']), ('09:12', None, True))
+        bolat = people['Бета Болат']['cells'][13]
+        self.assertEqual((bolat['arrive'], bolat['leave'], bolat['early']), ('09:00', '18:30', 30))
+        self.assertFalse(people['Гамма Гуля']['active'])
+
     def test_filters_reach_the_model(self):
         model = rules.build_model(self.inputs(), rules.clean_filters(cities=['Астана']))
         self.assertEqual([city['city'] for city in model['cities']], ['Астана'])
