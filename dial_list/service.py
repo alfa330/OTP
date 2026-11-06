@@ -247,6 +247,23 @@ RING_TIMER_MIN_VERSION = (3, 22, 35)
 # линии в кабинете Binotel — и телефон сам переходит на TLS. Умеет TLS телефон 3.22.38 и новее;
 # старому — UDP, как было.
 TLS_MIN_VERSION = (3, 22, 38)
+# Прямой звонок автообзвона Тез (владелец 06.11.2026: «просто звонок, а не безномерная связь как у
+# удалённого КЦ, чтобы не ждать разных подключений от АТС»): «Позвонить» не просит АТС соединить линию
+# с водителем по API, а отдаёт телефону номер — он набирает его сам со своей линии. Исход попытки —
+# то, что видит телефон: ответ водителя (CONFIRMED), код отбоя SIP; вебхук Binotel по этому звонку
+# только дописывает generalCallID (запись разговора) и уточняет длительность. Умеет — iCORE Phone
+# 3.22.46 и новее: старому номер не отдаём, он звонит через АТС, как раньше.
+DIRECT_DIAL_MIN_VERSION = (3, 22, 46)
+# Срок автосброса у прямого звонка — от первых гудков (180/183), без поправки на сообщение АТС.
+DIRECT_RING_LEAD_IN_SEC = 0
+# Код SIP конца прямого звонка → исход, как у Binotel (map_disposition): занято, не ответил, прочее —
+# «не дозвонились». 0 — звонок не начался вовсе (телефон не смог набрать).
+DIRECT_SIP_BUSY = (486, 600, 603)
+DIRECT_SIP_NO_ANSWER = (408, 480, 487)
+# Вебхук Binotel о прямом звонке ищет попытку по линии, номеру и времени: звонок начался не раньше
+# заявки (запас — разница часов) и не позже стольких секунд после неё.
+DIRECT_WEBHOOK_EARLY_SEC = 30
+DIRECT_WEBHOOK_LATE_SEC = 180
 # Флаги линий берутся из settings/list-of-employees и живут столько секунд: ручку
 # /api/operator/sip_settings телефон зовёт при входе и раз в 10 минут, а флаг меняют руками.
 LINE_TLS_TTL_SECONDS = 120
@@ -1061,6 +1078,36 @@ def phone_has_tls(value):
     молча превращал в UDP, и шифрованная линия у него просто не зарегистрировалась бы."""
     version = parse_phone_version(value)
     return version is not None and version >= TLS_MIN_VERSION
+
+
+def phone_dials_direct(value):
+    """Телефон сам набирает номер водителя (прямой звонок автообзвона Тез) — версия в заголовке не ниже
+    DIRECT_DIAL_MIN_VERSION (3.22.46). Заголовка нет или он неразборчив — нет: старый телефон номер
+    не покажет и не наберёт, а ждёт плечо от АТС."""
+    version = parse_phone_version(value)
+    return version is not None and version >= DIRECT_DIAL_MIN_VERSION
+
+
+def phone_display(phone_norm):
+    """Номер водителя для показа оператору: 77001234567 → «+7 700 123 45 67»; другой длины — как есть."""
+    digits = "".join(ch for ch in str(phone_norm or "") if ch.isdigit())
+    if len(digits) == 11 and digits[0] == "7":
+        return f"+7 {digits[1:4]} {digits[4:7]} {digits[7:9]} {digits[9:11]}"
+    return digits
+
+
+def direct_disposition(talk, sip_code):
+    """Исход прямого звонка по тому, что видел телефон: разговор — ANSWER; иначе по коду отбоя SIP —
+    BUSY (занято, отклонил), NOANSWER (не взял трубку, гудки кончились), прочее — FAILED (номер не
+    существует, сеть, АТС)."""
+    if talk:
+        return "ANSWER"
+    code = _to_int(sip_code, 0)
+    if code in DIRECT_SIP_BUSY:
+        return "BUSY"
+    if code in DIRECT_SIP_NO_ANSWER:
+        return "NOANSWER"
+    return "FAILED"
 
 
 def call_error_kind(error, text=None):
@@ -2498,8 +2545,9 @@ class DialListService:
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
             # Телефон в этом режиме прячет номера везде: история, окно звонка,
             # журнал. Флаг отдельный, чтобы при разборе инцидента его можно было
-            # временно снять одному оператору.
-            "hide_numbers": True,
+            # временно снять одному оператору. Автообзвону Тез номер нужен (владелец 06.11.2026:
+            # «в автообзвоне добавить номер телефона», вкладка «Телефон» с набором) — не прячем.
+            "hide_numbers": not is_tez(dept),
             # Профиль отдела и автоцикл (15.10.2026): телефону нужны на старте — какие вкладки
             # строить (у Тез нет «Рейтинга») и включён ли автообзвон в «Активном».
             "profile": dept.get("profile") or PROFILE_REMOTE_CC,
@@ -4566,17 +4614,19 @@ class DialListService:
                    l.month_first_order_at, l.last_order_before_at, l.trip_checked_at, l.driver_id,
                    l.city, l.account_registered_at, l.account_checked_at"""
 
-    def _portion_items(self, cur, portion_id, today=None, tez=False):
+    def _portion_items(self, cur, portion_id, today=None, tez=False, with_phone=False):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
         # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS, r[22] — текст
         # отказа АТС у последней попытки (наружу — только его вид, last_error_kind); у Тез —
-        # ещё _PORTION_TEZ_COLUMNS.
+        # ещё _PORTION_TEZ_COLUMNS, а с прямым звонком (with_phone, только Тез) — номер r[34].
+        with_phone = bool(with_phone and tez)
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
                    t.id, t.state, t.disposition, t.requested_at, t.general_call_id,
                    o.name, o.color, t.cancelled, t.operator_hangup_at, a.lead_id,
                    os.name, t.auto_hangup, """ + self._LAST_COMMENT_COLUMNS + """, t.api_error"""
-                    + (self._PORTION_TEZ_COLUMNS if tez else "") + """
+                    + (self._PORTION_TEZ_COLUMNS if tez else "") + (self._PORTION_PHONE_COLUMN if with_phone else "")
+                    + """
             FROM dial_list_assignments a
             JOIN dial_list_leads l ON l.id = a.lead_id
             LEFT JOIN LATERAL (
@@ -4626,8 +4676,21 @@ class DialListService:
                 **(self._tez_lead_block(bool(r[23]), r[24], r[25], r[26], r[27], r[28], r[29], r[30],
                                         r[31], r[32], r[33])
                    if tez else {}),
+                # Прямой звонок Тез (06.11.2026): номер водителя для показа в списке.
+                **({"phone": phone_display(r[34])} if with_phone else {}),
             })
         return items
+
+    # Номер водителя в строке пачки — только автообзвону Тез с прямым звонком (with_phone). Отдельно от
+    # _PORTION_TEZ_COLUMNS: старому телефону и удалённому КЦ номер не уходит.
+    _PORTION_PHONE_COLUMN = ", l.phone_norm"
+
+    @staticmethod
+    def _lead_phone_display(cur, lead_id):
+        """Номер водителя для показа телефону с прямым звонком (идущий звонок), в транзакции вызывающего."""
+        cur.execute("SELECT phone_norm FROM dial_list_leads WHERE id = %s", (str(lead_id),))
+        row = cur.fetchone()
+        return phone_display(row[0]) if row else ""
 
     @staticmethod
     def _tez_lead_block(own, due_kind, owner_call_at, promised_online_at, month_first_order_at,
@@ -4695,11 +4758,12 @@ class DialListService:
                 "general_call_id": r[3], "requested_at": _iso(r[4]), "full_name": r[5] or "",
                 "lead_id": _sid(r[6])}
 
-    def _ring_timeout_sec(self, department_id):
+    def _ring_timeout_sec(self, department_id, lead_in=RING_LEAD_IN_SEC):
         """Сколько секунд плечо обзвона ждёт ответа водителя, прежде чем телефон спросит, класть
         ли его; 0 — не класть (у отдела 0 гудков). Отсчёт у телефона — от принятия плеча, а
         водителя Binotel начинает набирать только после своего сообщения оператору, и первый
         гудок звучит на 8–10-й секунде плеча: поэтому RING_LEAD_IN_SEC сверху — 5 гудков — 34 с.
+        Прямой звонок Тез считает срок сам от первых гудков — ему lead_in DIRECT_RING_LEAD_IN_SEC.
 
         Отдельной короткой транзакцией: колонки ring_timeout_rings может ещё не быть (её
         заводит схема «Настроек SIP»), а упавший запрос оборвал бы транзакцию состояния.
@@ -4715,25 +4779,27 @@ class DialListService:
         except Exception as exc:
             log.debug("dial_list: гудки до сброса у отдела %s не прочитаны (%s) — по умолчанию %d",
                       department_id, exc, RING_TIMEOUT_RINGS_DEFAULT)
-        return RING_LEAD_IN_SEC + rings * RING_SECONDS_PER_RING if rings > 0 else 0
+        return lead_in + rings * RING_SECONDS_PER_RING if rings > 0 else 0
 
     def get_state(self, user_id, phone_version=None):
         """Состояние обзвона для телефона. phone_version — заголовок X-ICore-Phone-Version
         запроса: автосброс на гудках (ring_timeout_sec) получает только телефон с простым
         таймером (phone_has_ring_timer, 3.22.35 и новее); остальным — 0, «не класть».
         Выпущенному 3.22.33 (заголовка нет) — ещё и active_attempt в прежнем смысле, с
-        кончившимся плечом (_active_attempt)."""
+        кончившимся плечом (_active_attempt). Автообзвону Тез с телефоном 3.22.46+ — прямой
+        звонок (direct_dial): номер водителя в строках пачки и у идущего звонка (phone)."""
         ctx = self.operator_context(user_id)
         self.reconcile(ctx)
         settings = ctx["settings"]
         today = _today()
         guarded = phone_guards_speech(phone_version)
         tez = is_tez(settings)
+        direct = tez and phone_dials_direct(phone_version)
         with self.db._get_cursor() as cur:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
             # экране с итогами, пока оператор не возьмёт следующую («Ещё»).
             portion = self._last_portion(cur, user_id)
-            items = self._portion_items(cur, portion["id"], today, tez=tez) if portion else []
+            items = self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct) if portion else []
             active = self._active_attempt(cur, user_id, include_ended=not guarded)
             if active:
                 # Что оператор записал по этому водителю раньше — в карточку звонка.
@@ -4741,6 +4807,8 @@ class DialListService:
                 # Автообзвон Тез: что известно о водителе звонка и зачем звоним по сроку.
                 if tez and active.get("lead_id"):
                     active.update(self._tez_lead_fields(cur, active["lead_id"], user_id))
+                    if direct:
+                        active["phone"] = self._lead_phone_display(cur, active["lead_id"])
             offers = self._offer_rows(cur, ctx["department_id"], active_only=True) if tez else []
             cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
                 ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"]))
@@ -4757,7 +4825,10 @@ class DialListService:
         # Автосброс — только телефону с простым таймером (3.22.35+): 3.22.33 и 3.22.34 ждут ответа
         # на вопрос «класть ли плечо» всего пять секунд, а молчание и ошибку понимают как «класть» —
         # так рвались разговоры (12.10.2026). Настройку отдела для них даже не читаем.
-        ring_timeout_sec = self._ring_timeout_sec(ctx["department_id"]) if phone_has_ring_timer(phone_version) else 0
+        # Прямой звонок считает срок сам от первых гудков — без поправки на сообщение АТС.
+        ring_timeout_sec = (self._ring_timeout_sec(ctx["department_id"],
+                                                   lead_in=DIRECT_RING_LEAD_IN_SEC if direct else RING_LEAD_IN_SEC)
+                            if phone_has_ring_timer(phone_version) else 0)
         state = {
             "enabled": True,
             # Профиль отдела и часы сервера (15.10.2026): по профилю телефон включает автообзвон
@@ -4802,6 +4873,9 @@ class DialListService:
                              "wrapup_sec": int(settings.get("wrapup_sec") or 0)}
             state["offers"] = [{"id": o["id"], "title": o["title"], "description": o["description"]} for o in offers]
             state["whatsapp"] = self._wa_phone_block(settings, ctx["name"])
+            # Прямой звонок (06.11.2026): «Позвонить» отдаст номер, телефон наберёт его сам — плечо от
+            # АТС не ждать. Старому телефону ключа нет: он звонит через АТС, как раньше.
+            state["direct_dial"] = direct
         return state
 
     # ------------------------------------------------------------ скрипт разговора
@@ -5743,8 +5817,12 @@ class DialListService:
                      summary["elapsed_sec"])
         return summary
 
-    def start_call(self, user_id, assignment_id, auto=False, operator_status=None):
+    def start_call(self, user_id, assignment_id, auto=False, operator_status=None, phone_version=None):
         """Клик «Позвонить»: попытка + звонок через Binotel. Возвращает попытку.
+
+        Прямой звонок (06.11.2026): у автообзвона Тез телефон 3.22.46+ (phone_version) набирает номер
+        сам — Binotel не просим, попытка помечена direct, в ответе dial.number (номер для набора) и
+        phone (для показа). Исход такой попытки — по событиям телефона (phone_event, sip_code).
 
         Подписавшему (и «на проверке у Яндекса» — водитель уже подписал) не звоним
         (владелец, 11.10.2026): строка снимается со списка, оператору — 409. Проверка
@@ -5760,6 +5838,7 @@ class DialListService:
         settings = ctx["settings"]
         assignment_id = str(assignment_id)
         tez = is_tez(settings)
+        direct = tez and phone_dials_direct(phone_version)
         operator_status = clean_operator_status(operator_status)
         if tez and operator_status is not None and operator_status not in OPERATOR_CALL_STATUSES:
             raise DialListError(CALL_STATUS_REFUSED, 409, kind=CALL_ERROR_STATUS)
@@ -5811,10 +5890,11 @@ class DialListService:
             else:
                 phone_norm, full_name, lead_id = row[3], row[4] or "", str(row[5])
                 cur.execute("""
-                    INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number, auto, operator_status)
-                    VALUES (%s, %s, %s, %s, %s) RETURNING id, requested_at
+                    INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number, auto, operator_status,
+                                                    direct)
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id, requested_at
                 """, (assignment_id, ctx["user_id"], ctx["internal_number"], bool(auto) and tez,
-                      (operator_status or "") if tez else ""))
+                      (operator_status or "") if tez else "", direct))
                 attempt_id, requested_at = cur.fetchone()
                 attempt_id = str(attempt_id)
                 cur.execute("UPDATE dial_list_assignments SET attempts = attempts + 1 WHERE id = %s",
@@ -5826,6 +5906,23 @@ class DialListService:
             log.info("dial_list: оператор %s → строка %s: водитель уже %s, строка снята со списка",
                      ctx["user_id"], assignment_id, "вышел на линию" if tez else "подписал")
             raise DialListError(GOAL_ROW_CLOSED_TEZ if tez else SIGNED_ROW_CLOSED, 409, kind=CALL_ERROR_GOAL)
+
+        if direct:
+            # Прямой звонок: номер — телефону, он набирает сам со своей линии. АТС не ждём ничего.
+            log.info("dial_list: оператор %s → строка %s: прямой звонок, попытка %s", ctx["user_id"],
+                     assignment_id, attempt_id)
+            return {
+                "attempt_id": attempt_id,
+                "assignment_id": assignment_id,
+                "lead_id": lead_id,
+                "general_call_id": None,
+                "full_name": full_name,
+                "requested_at": _iso(requested_at),
+                "direct": True,
+                "dial": {"number": phone_norm},
+                "phone": phone_display(phone_norm),
+                **last_comment,
+            }
 
         # Что линия оператора увидит во From. Без подмены Binotel ставит туда номер
         # водителя — и он виден в SIP-пакете (Wireshark), что и было главным
@@ -5924,9 +6021,15 @@ class DialListService:
     # ------------------------------------------------------------ исходы
     def phone_event(self, user_id, attempt_id, event, at=None, by_operator=False, leg_sec=0,
                     ring_timeout=False, ring_sec=0, auto_hangup="", talk_detected=None, phone_version=None,
-                    announcement_suspected=None, announcement_by=None):
+                    announcement_suspected=None, announcement_by=None, sip_code=None):
         """Подсказка телефона: плечо пришло / принято / разговор кончился / плеча не было /
         оператор сам нажал «Завершить» / гудки до сброса кончились (ring_timeout).
+
+        Прямой звонок Тез (попытка direct, 06.11.2026): события — о звонке самого телефона на номер
+        водителя. answered — ответил водитель; ended закрывает попытку сразу (_finish_direct): разговор
+        (talk_detected) — ANSWER с длительностью leg_sec, иначе исход по sip_code (direct_disposition);
+        sip_code 0 — звонок не начался, попытка не в счёт. Отбой оператора до ответа — отмена, как у
+        плеча; сброс на гудках (auto_hangup ring_timeout) — недозвон.
 
         В ответе телефон получает решение по итогу: `outcome_required` — true (открывать
         окно итога), false (итог не нужен: попытка отменена или разговора не было),
@@ -6002,7 +6105,7 @@ class DialListService:
             # поздней отмены не бывает у разговора, который телефон слышал, при любом их порядке.
             cur.execute("""
                 SELECT state, general_call_id, assignment_id, cancelled, disposition, ring_timeout_at,
-                       talk_detected, auto_hangup
+                       talk_detected, auto_hangup, direct
                 FROM dial_list_attempts
                 WHERE id = %s AND operator_id = %s FOR UPDATE
             """, (attempt_id, ctx["user_id"]))
@@ -6013,6 +6116,7 @@ class DialListService:
             ring_marked = row[5] is not None
             stored_talk = row[6] if len(row) > 6 else None
             stored_auto = (row[7] if len(row) > 7 else "") or ""
+            direct = bool(row[8]) if len(row) > 8 else False
             # Binotel уже закрыл попытку ответом — раньше, чем телефон сообщил конец плеча.
             closed_answered = state == "finished" and map_disposition(row[4]) == "answered"
             if suspected is not None or decided_by:
@@ -6093,6 +6197,11 @@ class DialListService:
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = %s
             """, (new_state, event, ended_wall, event, attempt_id))
+            if direct and event == "answered":
+                # Прямой звонок: «answered» — это ответ самого водителя, разговор начался.
+                cur.execute("UPDATE dial_list_attempts SET talk_detected = TRUE WHERE id = %s", (attempt_id,))
+        if direct and ended:
+            return self._finish_direct(ctx, attempt_id, str(row[2]), talk is True, leg_sec, sip_code)
         result = {"attempt_id": attempt_id, "state": new_state, "final": False}
         # Плечо кончилось или не пришло — что знает Binotel, смотрим в общем кэше компании
         # (при надобности одно обновление на всех, ждём его не дольше CALLS_WAIT_SEC). Финал «не
@@ -6109,6 +6218,30 @@ class DialListService:
             cancelled, required = self._outcome_decision(cur, attempt_id)
         result.update({"cancelled": cancelled, "outcome_required": required})
         return result
+
+    def _finish_direct(self, ctx, attempt_id, assignment_id, talk, leg_sec, sip_code):
+        """Конец прямого звонка Тез: исход — то, что видел телефон (вебхук Binotel потом только
+        допишет generalCallID и уточнит длительность). sip_code 0 без разговора — звонок не начался
+        (статус телефона, звук, линия): попытка failed и не в счёт ни строке, ни водителю. Иначе —
+        _finish_attempt с ANSWER (разговор, billsec = leg_sec) или с исходом по коду SIP; отбой
+        оператора до ответа там же становится отменой. Ответ — решение по итогу, как у phone_event."""
+        code = _to_int(sip_code, -1)
+        with self.db._get_cursor() as cur:
+            cur.execute("UPDATE dial_list_attempts SET sip_code = %s WHERE id = %s",
+                        (code if 0 <= code <= 32767 else None, attempt_id))
+        if code == 0 and not talk:
+            self._fail_attempt(attempt_id, assignment_id, None, "Телефон не начал звонок", 0,
+                               ctx["settings"]["max_attempts"], count_for_lead=False)
+            log.info("dial_list: прямой звонок оператора %s не начался (попытка %s)", ctx["user_id"], attempt_id)
+        else:
+            disposition = direct_disposition(talk, code)
+            self._finish_attempt(attempt_id, disposition, leg_sec if talk else 0, 0, "phone")
+        with self.db._get_cursor() as cur:
+            cur.execute("SELECT state, disposition FROM dial_list_attempts WHERE id = %s", (attempt_id,))
+            state, disposition = cur.fetchone() or ("", "")
+            cancelled, required = self._outcome_decision(cur, attempt_id)
+        return {"attempt_id": attempt_id, "state": state, "final": True, "disposition": disposition or "",
+                "cancelled": cancelled, "outcome_required": required}
 
     def _ring_timeout_unguarded(self, user_id, attempt_id, ring_sec=0, phone_version=None, why=""):
         """Вопрос «класть ли плечо на гудках», на который ответ — сразу и всегда «не класть», без
@@ -6801,6 +6934,39 @@ class DialListService:
         return False, None
 
     # ------------------------------------------------------------ вебхук
+    @staticmethod
+    def _direct_attempt_for_webhook(cur, data, general_call_id):
+        """Вебхук Binotel о прямом звонке Тез (06.11.2026): у такой попытки generalCallID нет — номер
+        набрал сам телефон. Ищем её по линии оператора, номеру водителя и времени начала звонка
+        (startTime, unix): заявка не раньше DIRECT_WEBHOOK_LATE_SEC до звонка и не позже
+        DIRECT_WEBHOOK_EARLY_SEC после (разница часов). Нашли — дописываем generalCallID: по нему
+        запись разговора в журнале. Возвращает строку как у поиска по generalCallID или None."""
+        internal = str(webhook_value(data, "internalNumber") or "").strip()
+        external = normalize_kz_phone(webhook_value(data, "externalNumber"))
+        start = _to_int(webhook_value(data, "startTime"), 0)
+        if not internal or not external or start <= 0:
+            return None
+        cur.execute("""
+            SELECT t.id, t.state, COALESCE(NULLIF(TRIM(s.binotel_company), ''), %(default)s)
+            FROM dial_list_attempts t
+            JOIN dial_list_assignments a ON a.id = t.assignment_id
+            JOIN dial_list_leads l ON l.id = a.lead_id
+            LEFT JOIN dial_list_department_settings s ON s.department_id = l.department_id
+            WHERE t.direct AND COALESCE(t.general_call_id, '') = ''
+              AND t.internal_number = %(internal)s AND l.phone_norm = %(external)s
+              AND t.requested_at BETWEEN to_timestamp(%(start)s) - make_interval(secs => %(late)s)
+                                     AND to_timestamp(%(start)s) + make_interval(secs => %(early)s)
+            ORDER BY abs(extract(epoch FROM t.requested_at) - %(start)s)
+            LIMIT 1
+            FOR UPDATE OF t
+        """, {"default": DEFAULT_BINOTEL_COMPANY, "internal": internal, "external": external, "start": start,
+              "late": DIRECT_WEBHOOK_LATE_SEC, "early": DIRECT_WEBHOOK_EARLY_SEC})
+        row = cur.fetchone()
+        if row:
+            cur.execute("UPDATE dial_list_attempts SET general_call_id = %s, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE id = %s", (general_call_id, row[0]))
+        return row
+
     def webhook_verdict(self, token, remote_addr):
         """(принять ли вебхук, почему нет). Принимаем только с правильным токеном из
         окружения сервера (DIAL_LIST_WEBHOOK_TOKEN, не короче 16 символов, сравнение
@@ -6854,6 +7020,9 @@ class DialListService:
                     WHERE t.general_call_id = %s
                 """, (DEFAULT_BINOTEL_COMPANY, general_call_id))
                 row = cur.fetchone()
+                if not row:
+                    # Прямой звонок Тез: generalCallID попытке ещё не известен — его приносит этот вебхук.
+                    row = self._direct_attempt_for_webhook(cur, data, general_call_id)
             if row:
                 matched = True
                 if map_disposition(disposition):

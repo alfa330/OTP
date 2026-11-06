@@ -437,6 +437,12 @@ DDL = [
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS auto BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS operator_status VARCHAR(16) NOT NULL DEFAULT ''",
     "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS wrapup_expired_at TIMESTAMP WITH TIME ZONE",
+    # Прямой звонок автообзвона Тез (владелец 06.11.2026: «просто звонок, а не безномерная связь»):
+    # номер набрал сам телефон оператора, Binotel по API не просили; исход — по событиям телефона,
+    # sip_code — последний код SIP его исходящего (486 — занято, 480/408/487 — не ответил, 0 — звонок
+    # не начался). generalCallID такой попытке дописывает вебхук Binotel — по нему запись разговора.
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS direct BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE dial_list_attempts ADD COLUMN IF NOT EXISTS sip_code SMALLINT",
     # Акции и офферы отдела: оператор отмечает в итоге, какие предложил. Не удаляются, а
     # выключаются — история попыток на них ссылается (как итоги и их типы).
     """

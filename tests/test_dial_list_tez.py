@@ -411,6 +411,20 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(dial_service.wa_params(['{first_name}', '{operator}', 'бонус'], 'Иванов Иван Иванович',
                                                 'Айгерим'), ['Иван', 'Айгерим', 'бонус'])
 
+    def test_direct_call_rules(self):
+        """Прямой звонок Тез (06.11.2026): с какой версии телефон набирает сам, номер для показа, исход
+        по коду SIP."""
+        dials = dial_service.phone_dials_direct
+        self.assertEqual([dials(v) for v in (None, '', '3.22.45', '3.22.46', '3.22.46.0', '3.23', 'мусор')],
+                         [False, False, False, True, True, True, False])
+        show = dial_service.phone_display
+        self.assertEqual(show('77010000002'), '+7 701 000 00 02')
+        self.assertEqual(show('8701'), '8701')
+        disp = dial_service.direct_disposition
+        self.assertEqual([disp(True, 0), disp(False, 486), disp(False, 603), disp(False, 480), disp(False, 487),
+                          disp(False, 404), disp(False, None)],
+                         ['ANSWER', 'BUSY', 'BUSY', 'NOANSWER', 'NOANSWER', 'FAILED', 'FAILED'])
+
     def test_whatsapp_file_type_is_read_from_the_bytes(self):
         kind = dial_service.wa_media_type
         self.assertEqual(kind(b'\xff\xd8\xff\xdb' + b'0' * 8), 'image/jpeg')

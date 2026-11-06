@@ -482,6 +482,10 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         extra = {}
         if 'auto' in payload or 'status' in payload:
             extra = {"auto": payload.get('auto') is True, "operator_status": payload.get('status')}
+        # Прямой звонок Тез (06.11.2026) — только телефону, который умеет набирать сам (версия в заголовке).
+        version = _phone_version()
+        if version:
+            extra["phone_version"] = version
         return jsonify({"status": "success", "attempt": svc.start_call(user_id, assignment_id, **extra)}), 200
 
     @bp.route('/api/operator/dial_list/auto/next', methods=['POST', 'OPTIONS'])
@@ -547,7 +551,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                                  auto_hangup=payload.get('auto_hangup'), talk_detected=payload.get('talk_detected'),
                                  phone_version=_phone_version(),
                                  announcement_suspected=payload.get('announcement_suspected'),
-                                 announcement_by=payload.get('announcement_by'))
+                                 announcement_by=payload.get('announcement_by'),
+                                 # Прямой звонок Тез (06.11.2026): последний код SIP исходящего телефона.
+                                 **({"sip_code": payload.get('sip_code')} if 'sip_code' in payload else {}))
         return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/outcome', methods=['POST', 'OPTIONS'])

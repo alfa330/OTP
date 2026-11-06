@@ -735,6 +735,119 @@ def test_refusal_after_an_unanswered_final_keeps_the_retry_pause(env, settle_now
     assert env.svc.auto_next(OTHER, status='active', phone_version=GUARDED)["reason"] == 'empty'
 
 
+DIRECT = '3.22.46'
+
+
+def test_direct_call_tez_phone_dials_itself_and_closes_by_what_it_saw(env, settle_now):
+    """Владелец 06.11.2026: у автообзвона Тез «просто звонок, а не безномерная связь как у удалённого КЦ» и
+    номер в автообзвоне. Телефон 3.22.46+ получает номер и набирает сам; исход — по тому, что он видел
+    (ответ водителя, код SIP). Старый телефон звонит через АТС, как раньше, и номера не видит."""
+    env.enroll()
+    leads = env.leads(6)
+    # Старый телефон: ни номера, ни прямого звонка.
+    old = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)
+    assert old["direct_dial"] is False and '77010000001' not in json.dumps(old, ensure_ascii=False)
+    rows = {i["lead_id"]: i for i in old["portion"]["items"]}
+    asg = {p: rows[lid]["assignment_id"] for p, lid in leads.items()}
+    legacy = env.svc.start_call(OPERATOR, asg['77010000001'], operator_status='outbound', phone_version=GUARDED)
+    assert legacy["general_call_id"] and "dial" not in legacy and env.binotel.originated == [('601', '77010000001')]
+    env.finish(legacy, 'NOANSWER')
+    # Новый телефон: номер в списке, «Позвонить» — без АТС, номер для набора в ответе.
+    state = env.svc.get_state(OPERATOR, phone_version=DIRECT)
+    assert state["direct_dial"] is True
+    phones = {i["lead_id"]: i["phone"] for i in state["portion"]["items"]}
+    assert phones[leads['77010000002']] == '+7 701 000 00 02'
+    assert state["ring_timeout_sec"] == 5 * dial_service.RING_SECONDS_PER_RING   # от гудков, без поправки АТС
+
+    def call(phone):
+        a = env.svc.start_call(OPERATOR, asg[phone], operator_status='outbound', phone_version=DIRECT)
+        assert (a["direct"], a["dial"], a["general_call_id"]) == (True, {"number": phone}, None)
+        return a["attempt_id"]
+
+    def ended(attempt, **keys):
+        return env.svc.phone_event(OPERATOR, attempt, 'ended', phone_version=DIRECT, **keys)
+
+    def row(attempt):
+        return env.one("SELECT state, disposition, billsec, cancelled, direct, sip_code, talk_detected "
+                       "FROM dial_list_attempts WHERE id = %s", (attempt,))
+
+    # Разговор: ответ водителя — от телефона, итог нужен сразу, длительность — его.
+    talk = call('77010000002')
+    assert env.binotel.originated == [('601', '77010000001')]
+    active = env.svc.get_state(OPERATOR, phone_version=DIRECT)["active_attempt"]
+    assert (active["attempt_id"], active["phone"]) == (talk, '+7 701 000 00 02')
+    env.svc.phone_event(OPERATOR, talk, 'ringing', phone_version=DIRECT)
+    env.svc.phone_event(OPERATOR, talk, 'answered', phone_version=DIRECT)
+    # «answered» прямого звонка — ответ самого водителя: разговор отмечен сразу (телефон может и не
+    # дожить до «ended» — попытку тогда закроет reconcile, но разговор в ней уже есть).
+    assert row(talk)[0] == 'leg_answered' and row(talk)[6] is True
+    res = ended(talk, by_operator=True, leg_sec=42, talk_detected=True, sip_code=200)
+    assert (res["final"], res["cancelled"], res["outcome_required"]) == (True, False, True)
+    assert row(talk) == ('finished', 'ANSWER', 42, False, True, 200, True)
+    env.svc.set_attempt_outcome(OPERATOR, talk, env.outcome('Отказ'))
+    # Занято (486) — недозвон, итог не нужен.
+    busy = call('77010000003')
+    res = ended(busy, by_operator=False, leg_sec=0, talk_detected=False, sip_code=486)
+    assert (res["outcome_required"], row(busy)[:4]) == (False, ('finished', 'BUSY', 0, False))
+    # Оператор положил трубку до ответа — отмена, попытка не в счёт.
+    cancelled = call('77010000004')
+    env.svc.phone_event(OPERATOR, cancelled, 'operator_hangup', phone_version=DIRECT)
+    res = ended(cancelled, by_operator=True, leg_sec=0, talk_detected=False, sip_code=487)
+    assert (res["cancelled"], row(cancelled)[3]) == (True, True)
+    # Гудки кончились — трубку положил телефон: «не поднял трубку», не отмена.
+    rung = env.svc.start_call(OPERATOR, asg['77010000004'], operator_status='outbound', phone_version=DIRECT)
+    res = ended(rung["attempt_id"], by_operator=False, leg_sec=0, talk_detected=False, sip_code=487,
+                ring_timeout=True, auto_hangup='ring_timeout')
+    assert (res["cancelled"], row(rung["attempt_id"])[:4]) == (False, ('finished', 'NOANSWER', 0, False))
+    # Звонок не начался (статус, звук) — попытка failed и не в счёт строке.
+    attempts_before = env.one("SELECT attempts FROM dial_list_assignments WHERE id = %s", (asg['77010000005'],))[0]
+    failed = call('77010000005')
+    res = ended(failed, by_operator=False, leg_sec=0, talk_detected=False, sip_code=0)
+    assert (res["state"], res["outcome_required"]) == ('failed', False)
+    assert env.one("SELECT attempts, state FROM dial_list_assignments WHERE id = %s",
+                   (asg['77010000005'],)) == (attempts_before, 'issued')
+    # Вебхук Binotel о прямом звонке: попытку находит по линии, номеру и времени, дописывает
+    # generalCallID (запись разговора) и уточняет длительность разговора.
+    from werkzeug.datastructures import ImmutableMultiDict
+    start = int(env.one("SELECT extract(epoch FROM requested_at) FROM dial_list_attempts WHERE id = %s", (talk,))[0])
+    form = ImmutableMultiDict({
+        'requestType': 'apiCallCompleted', 'callDetails[generalCallID]': '777000555',
+        'callDetails[internalNumber]': '601', 'callDetails[externalNumber]': '77010000002',
+        'callDetails[startTime]': str(start + 2), 'callDetails[disposition]': 'ANSWER',
+        'callDetails[billsec]': '44', 'callDetails[waitsec]': '6'})
+    assert env.svc.handle_webhook(form, '194.88.218.116')["matched"] is True
+    assert env.one("SELECT general_call_id, disposition, billsec FROM dial_list_attempts WHERE id = %s",
+                   (talk,)) == ('777000555', 'ANSWER', 44)
+    card = env.svc.lead_card(leads['77010000002'])
+    assert [a["recording_available"] for a in card["attempts"] if a["id"] == talk] == [True]
+    # Чужой звонок той же линии на другой номер — не попытка.
+    other = ImmutableMultiDict(dict(form, **{'callDetails[generalCallID]': '777000556',
+                                            'callDetails[externalNumber]': '77070000000'}))
+    assert env.svc.handle_webhook(other, '194.88.218.116')["matched"] is False
+
+
+def test_direct_call_is_only_for_tez(env):
+    """Удалённый КЦ и с новым телефоном звонит через АТС: номер его операторам не уходит."""
+    svc = env.svc
+    # Блок dial_list для телефона: номера прячет только удалённый КЦ, у Тез они видны.
+    env.enroll()
+    operator = {"department_id": TEZ, "department_provider": "binotel"}
+    assert svc.phone_settings(OPERATOR, operator=dict(operator), member=None)["hide_numbers"] is False
+    assert svc.phone_settings(OPERATOR, operator=dict(operator, department_id=RCC),
+                              member=None)["hide_numbers"] is True
+    svc.operator_context = lambda uid: {
+        "user_id": int(uid), "name": 'Айгерим', "department_id": RCC, "internal_number": '601',
+        "settings": svc.department_settings(RCC)}
+    env.q("INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin, period) "
+          "VALUES (%s, '77019999998', 'Водитель РКЦ', '900101300001', %s)",
+          (RCC, svc.department_settings(RCC)["_period"]))
+    state = svc.issue_next_portion(OPERATOR, phone_version=DIRECT)
+    assert "direct_dial" not in state and '7701999999' not in json.dumps(state, ensure_ascii=False)
+    item = state["portion"]["items"][0]
+    attempt = svc.start_call(OPERATOR, item["assignment_id"], phone_version=DIRECT)
+    assert "dial" not in attempt and attempt["general_call_id"]
+
+
 def test_webhook_of_a_non_dial_call_keeps_no_number(env):
     # У компании Тез вебхук «API Call Completed» приходит по всем звонкам линии: чужой звонок
     # обзвон не трогает, а в журнал вебхука его номер не попадает.
