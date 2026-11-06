@@ -319,6 +319,20 @@ export const tripLabel = (trip, now = new Date()) => {
     return 'Заказов не было';
 };
 
+/**
+ * Аккаунт водителя в TEZ APP (владелец 06.11.2026: «зарегистрирован или нет» в карточке). Сервер
+ * присылает подпись готовой (trip.registration_label); без ключа — по тем же правилам:
+ * «Зарегистрирован DD.MM.YYYY» / «Не зарегистрирован» (TEZ APP ответил: аккаунта нет); не
+ * спрашивали — ''.
+ */
+export const registrationLabel = (trip) => {
+    if (!trip) return '';
+    if (typeof trip.registration_label === 'string') return trip.registration_label.trim();
+    const registered = toDate(trip.registered_at);
+    if (registered) return `Зарегистрирован ${dayMonthYear(registered)}`;
+    return trip.account_checked_at ? 'Не зарегистрирован' : '';
+};
+
 /** Срок, выбранный с итогом попытки: «выйдет на линию …» / «перезвонить …». */
 export const attemptDueText = (attempt, now = new Date()) => {
     const due = toDate(attempt?.due_at);

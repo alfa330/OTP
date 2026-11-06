@@ -763,10 +763,27 @@ def driver_profile_url(driver_id):
     return template.replace("{driver_id}", quote(driver_id, safe=""))
 
 
-def driver_block(month_first_order_at, last_order_before_at, checked_at, driver_id, now=None):
-    """Блок driver для телефона: метка поездок и ссылка в админку. Номера нет."""
+def registration_label(registered_at, account_checked_at):
+    """Аккаунт водителя в TEZ APP для карточки (владелец 06.11.2026: «зарегистрирован или нет»):
+    «Зарегистрирован 31.01.2026» / «Не зарегистрирован» (TEZ APP ответил: аккаунта нет или он удалён);
+    TEZ APP об аккаунте ещё не спрашивали — пусто."""
+    if isinstance(registered_at, datetime):
+        return f"Зарегистрирован {registered_at.astimezone(PERIOD_TZ):%d.%m.%Y}"
+    if account_checked_at is not None:
+        return "Не зарегистрирован"
+    return ""
+
+
+def driver_block(month_first_order_at, last_order_before_at, checked_at, driver_id, now=None,
+                 city="", registered_at=None, account_checked_at=None):
+    """Блок driver для телефона: метка поездок, ссылка в админку, город из файла базы и аккаунт в
+    TEZ APP (registered — true / false / null: не спрашивали). Номера нет."""
     return {"label": driver_label(month_first_order_at, last_order_before_at, checked_at, now),
-            "profile_url": driver_profile_url(driver_id)}
+            "profile_url": driver_profile_url(driver_id),
+            "city": (city or "").strip(),
+            "registered": (True if isinstance(registered_at, datetime)
+                           else False if account_checked_at is not None else None),
+            "registration_label": registration_label(registered_at, account_checked_at)}
 
 
 def first_name_of(full_name):
@@ -3488,7 +3505,7 @@ class DialListService:
                             l.last_attempt_at + make_interval(hours => %(retry_hours)s)) AS next_retry_at,
                    l.due_kind, l.owner_call_at, l.promised_online_at, l.owner_operator_id,
                    owu.name AS owner_operator_name, l.month_first_order_at, l.last_order_before_at,
-                   l.trip_checked_at, l.driver_id
+                   l.trip_checked_at, l.driver_id, l.city, l.account_registered_at, l.account_checked_at
             FROM dial_list_leads l
             LEFT JOIN users owu ON owu.id = l.owner_operator_id
             LEFT JOIN dial_list_lead_batches fb ON fb.id = l.first_batch_id
@@ -3536,7 +3553,8 @@ class DialListService:
                success_operator_id, success_operator_name, success_resolved_at,
                last_auto_hangup, last_talk_detected,
                due_kind, owner_call_at, promised_online_at, owner_operator_id, owner_operator_name,
-               month_first_order_at, last_order_before_at, trip_checked_at, driver_id"""
+               month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
+               city, account_registered_at, account_checked_at"""
     # Сколько колонок у строки журнала: сразу за ними идёт total (индекс не
     # зашит числом — иначе новая колонка молча сдвигала бы «всего» на rn).
     _JOURNAL_COLUMN_COUNT = len([c for c in _JOURNAL_COLUMNS.split(",") if c.strip()])
@@ -3635,6 +3653,8 @@ class DialListService:
             "iin_masked": mask_iin(r[39]),
             "has_iin": bool(r[39]),
             "sign": self._sign_block(r[39], r[40], r[41], r[42], r[43], r[44], r[45], r[46], r[47]),
+            # Город — колонка «город» файла базы (или «Города по ИИН»); '' — не указан.
+            "city": (r[59] or "").strip(),
         }
         if tez:
             # Автообзвон Тез (15.10.2026): этапы со своими подписями («Вышел на линию»), срок
@@ -3645,7 +3665,10 @@ class DialListService:
             row["promised_online_at"] = _iso(r[52])
             row["owner_operator"] = {"id": int(r[53]), "name": r[54] or ""} if r[53] is not None else None
             row["trip"] = {"month_first_order_at": _iso(r[55]), "last_order_before_at": _iso(r[56]),
-                           "checked_at": _iso(r[57]), "label": driver_label(r[55], r[56], r[57])}
+                           "checked_at": _iso(r[57]), "label": driver_label(r[55], r[56], r[57]),
+                           # Аккаунт в TEZ APP (владелец 06.11.2026): когда создан и когда спрашивали.
+                           "registered_at": _iso(r[60]), "account_checked_at": _iso(r[61]),
+                           "registration_label": registration_label(r[60], r[61])}
             row["profile_url"] = driver_profile_url(r[58])
         return row
 
@@ -4496,11 +4519,12 @@ class DialListService:
         r = r or (None, None, None)
         return self._last_comment_fields(r[0], r[1], r[2], today or _today())
 
-    # Строка пачки автообзвона Тез (15.10.2026): свой срок оператора и поездки водителя
-    # (_tez_lead_block) — r[23:31]; у удалённого КЦ их в запросе нет вовсе.
+    # Строка пачки автообзвона Тез (15.10.2026): свой срок оператора, поездки водителя, город и аккаунт
+    # в TEZ APP (_tez_lead_block) — r[23:34]; у удалённого КЦ их в запросе нет вовсе.
     _PORTION_TEZ_COLUMNS = """,
                    (l.owner_operator_id = a.operator_id), l.due_kind, l.owner_call_at, l.promised_online_at,
-                   l.month_first_order_at, l.last_order_before_at, l.trip_checked_at, l.driver_id"""
+                   l.month_first_order_at, l.last_order_before_at, l.trip_checked_at, l.driver_id,
+                   l.city, l.account_registered_at, l.account_checked_at"""
 
     def _portion_items(self, cur, portion_id, today=None, tez=False):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
@@ -4559,36 +4583,40 @@ class DialListService:
                 # АТС — позвоните ещё раз» вместо «Ошибка АТС». Сам текст отказа телефону не уходит.
                 **({"last_error_kind": call_error_kind(None, r[22] or "")} if r[8] == "failed" else {}),
                 # Автообзвон Тез: свой срок этого оператора и что известно о водителе по TEZ APP.
-                **(self._tez_lead_block(bool(r[23]), r[24], r[25], r[26], r[27], r[28], r[29], r[30])
+                **(self._tez_lead_block(bool(r[23]), r[24], r[25], r[26], r[27], r[28], r[29], r[30],
+                                        r[31], r[32], r[33])
                    if tez else {}),
             })
         return items
 
     @staticmethod
     def _tez_lead_block(own, due_kind, owner_call_at, promised_online_at, month_first_order_at,
-                        last_order_before_at, trip_checked_at, driver_id):
+                        last_order_before_at, trip_checked_at, driver_id, city="", registered_at=None,
+                        account_checked_at=None):
         """Поля водителя для телефона у отдела Тез (строка пачки, идущий звонок, вкладки итогов):
         due_kind / due_at / due_label — только когда лид ждёт СВОЕГО срока этого оператора
-        (перезвон, дожим), driver — метка по TEZ APP и ссылка в админку. Номера нет."""
+        (перезвон, дожим), driver — метка по TEZ APP, ссылка в админку, город и аккаунт."""
         kind = (due_kind or "") if own else ""
         return {
             "due_kind": kind,
             "due_at": _iso(owner_call_at) if kind else None,
             "due_label": due_label(kind, owner_call_at, promised_online_at) if kind else "",
-            "driver": driver_block(month_first_order_at, last_order_before_at, trip_checked_at, driver_id),
+            "driver": driver_block(month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
+                                   city=city, registered_at=registered_at, account_checked_at=account_checked_at),
         }
 
     def _tez_lead_fields(self, cur, lead_id, operator_id):
         """То же для одного водителя (идущий звонок), в транзакции вызывающего."""
         cur.execute("""
             SELECT (owner_operator_id = %s), due_kind, owner_call_at, promised_online_at,
-                   month_first_order_at, last_order_before_at, trip_checked_at, driver_id
+                   month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
+                   city, account_registered_at, account_checked_at
             FROM dial_list_leads WHERE id = %s
         """, (int(operator_id), str(lead_id)))
         r = cur.fetchone()
         if not r:
             return {}
-        return self._tez_lead_block(bool(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7])
+        return self._tez_lead_block(bool(r[0]), r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10])
 
     def _active_attempt(self, cur, user_id, include_ended=False):
         """Идущий звонок оператора: плечо по телефону ещё идёт (LEG_UP_STATES) и попытка моложе

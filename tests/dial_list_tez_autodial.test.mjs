@@ -11,8 +11,8 @@ import test from 'node:test';
 import {
     LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, attemptDueText, attemptModeText, departmentsOfProfile, formatMinutes,
     leadDue, mirrorSummary,
-    normalizeProfile, previewTemplate, retryPlanText, scheduleFromInputs, serializeOffers, templateBlockReason,
-    tezSettingsPayload, tripLabel, validateOffers, validateTezSettings, validateWaAllowed,
+    normalizeProfile, previewTemplate, registrationLabel, retryPlanText, scheduleFromInputs, serializeOffers,
+    templateBlockReason, tezSettingsPayload, tripLabel, validateOffers, validateTezSettings, validateWaAllowed,
 } from '../src/components/dial_list/tezAutodial.js';
 import { outcomesSnapshot, serializeOutcomes } from '../src/components/dial_list/outcomeFormat.js';
 import {
@@ -65,6 +65,16 @@ test('сроки строки журнала и метка поездок', () =
     assert.equal(tripLabel({ checked_at: past, last_order_before_at: new Date(2026, 7, 1).toISOString() }, now),
         'Отток · последний заказ 01.08.2026');
     assert.equal(tripLabel({}), '');
+});
+
+test('аккаунт в TEZ APP в карточке водителя: подпись сервера, без неё — те же правила', () => {
+    assert.equal(registrationLabel({ registration_label: 'Зарегистрирован 01.02.2026' }), 'Зарегистрирован 01.02.2026');
+    // Пустая подпись сервера — «не спрашивали», а не повод считать самим.
+    assert.equal(registrationLabel({ registration_label: '', account_checked_at: '2026-11-06T10:00:00Z' }), '');
+    assert.equal(registrationLabel({ registered_at: new Date(2026, 1, 1, 0, 50).toISOString() }), 'Зарегистрирован 01.02.2026');
+    assert.equal(registrationLabel({ registered_at: null, account_checked_at: '2026-11-06T10:00:00Z' }), 'Не зарегистрирован');
+    assert.equal(registrationLabel({ checked_at: '2026-11-06T10:00:00Z' }), '');
+    assert.equal(registrationLabel(null), '');
 });
 
 test('звонок в карточке водителя: срок словами итога и кто начал звонок', () => {

@@ -302,6 +302,51 @@ def test_base_without_iin_and_trip_check_takes_drivers_already_online_out(env):
     assert '77010000002' not in json.dumps(state, ensure_ascii=False)
 
 
+def test_driver_card_shows_city_from_the_file_and_tez_app_account(env):
+    """Владелец 06.11.2026: город из файла базы и «зарегистрирован или нет» по TEZ APP — в карточке
+    водителя у оператора (строка пачки, идущий звонок) и в журнале руководителя."""
+    env.enroll()
+    rows = [(1, 'Иванов Иван', '87010000001', '77010000001', '', 'Алматы'),
+            (2, 'Петров Пётр', '87010000002', '77010000002', '', ''),
+            (3, 'Сидоров Сидр', '87010000003', '77010000003', '', ' Шымкент ')]
+    env.svc.import_leads(TEZ, 1, 'tez.xlsx', rows, require_iin=False)
+    ids = {p: str(env.one("SELECT id FROM dial_list_leads WHERE phone_norm = %s", (p,))[0])
+           for p in ('77010000001', '77010000002', '77010000003')}
+    registered = datetime(2026, 1, 31, 19, 50, tzinfo=timezone.utc)   # 01.02.2026 00:50 по Алматы
+    env.tez.answers['77010000001'] = {'month': None, 'last_before': None, 'registered': registered,
+                                      'account_known': True}
+    env.tez.answers['77010000002'] = {'month': None, 'last_before': None, 'registered': None,
+                                      'account_known': True}
+    # Третьего TEZ APP не вернул — про аккаунт ничего не известно.
+    env.svc.trip_checker.run(reason='тест')
+    drivers = {i["lead_id"]: i["driver"]
+               for i in env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)["portion"]["items"]}
+    assert (drivers[ids['77010000001']]["city"], drivers[ids['77010000001']]["registered"],
+            drivers[ids['77010000001']]["registration_label"]) == ('Алматы', True, 'Зарегистрирован 01.02.2026')
+    assert (drivers[ids['77010000002']]["city"], drivers[ids['77010000002']]["registered"],
+            drivers[ids['77010000002']]["registration_label"]) == ('', False, 'Не зарегистрирован')
+    assert (drivers[ids['77010000003']]["city"], drivers[ids['77010000003']]["registered"],
+            drivers[ids['77010000003']]["registration_label"]) == ('Шымкент', None, '')
+    # Пропажа поля из ответа (account_known нет) прежнее не стирает; новый ответ — переписывает.
+    env.q("UPDATE dial_list_leads SET trip_checked_at = NULL")
+    env.tez.answers['77010000001'] = {'month': None, 'last_before': None, 'registered': None}
+    env.tez.answers['77010000002'] = {'month': None, 'last_before': None, 'registered': registered,
+                                      'account_known': True}
+    env.svc.trip_checker.run(reason='тест')
+    card = env.svc.lead_card(ids['77010000001'])
+    assert (card["city"], card["trip"]["registration_label"], card["trip"]["registered_at"] is not None) == (
+        'Алматы', 'Зарегистрирован 01.02.2026', True)
+    card = env.svc.lead_card(ids['77010000002'])
+    assert (card["city"], card["trip"]["registration_label"]) == ('', 'Зарегистрирован 01.02.2026')
+    card = env.svc.lead_card(ids['77010000003'])
+    assert (card["trip"]["registration_label"], card["trip"]["account_checked_at"]) == ('', None)
+    # Идущий звонок несёт те же поля.
+    asg = env.one("SELECT id FROM dial_list_assignments WHERE lead_id = %s", (ids['77010000001'],))[0]
+    env.svc.start_call(OPERATOR, asg, operator_status='outbound')
+    active = env.svc.get_state(OPERATOR, phone_version=GUARDED)["active_attempt"]
+    assert (active["driver"]["city"], active["driver"]["registration_label"]) == ('Алматы', 'Зарегистрирован 01.02.2026')
+
+
 # ── автоцикл ─────────────────────────────────────────────────────────────────
 
 def test_auto_loop_calls_in_order_waits_for_retries_and_reports_empty(env, settle_now, monkeypatch):

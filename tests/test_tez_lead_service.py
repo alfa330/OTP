@@ -600,6 +600,18 @@ class FirstOrdersContractTests(unittest.TestCase):
         self.assertEqual((row['registered'].month, row['registered'].day, row['registered'].hour), (1, 31, 23))
         self.assertEqual((row['last_order'].month, row['last_order'].day), (11, 5))
         self.assertEqual((res['77000000107']['registered'], res['77000000107']['last_order']), (None, None))
+        # Поле пришло (null — тоже ответ: аккаунта нет) — карточка водителя ему верит.
+        self.assertEqual((row['account_known'], res['77000000107']['account_known']), (True, True))
+
+    def test_account_is_unknown_without_the_field_or_the_driver(self):
+        """Карточка водителя (06.11.2026): «Не зарегистрирован» — только когда TEZ APP прислал
+        registered_at: null. Нет поля в строке или нет строки вовсе — аккаунт неизвестен."""
+        payload = {'drivers': [{'phone': '+77000000101', 'month_first_order_at': None,
+                                'last_order_before_at': None}]}
+        client, _ = self._client_with_capture(payload)
+        res = client.fetch_first_orders(['77000000101', '77000000102'], month='2026-11')
+        self.assertIs(res['77000000101']['account_known'], False)
+        self.assertNotIn('account_known', res['77000000102'])
 
     def test_lost_funnel_fields_are_logged(self):
         """Без registered_at и last_order_at воронка молча покажет нули — пропажу видно в журнале."""

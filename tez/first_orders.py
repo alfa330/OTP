@@ -255,7 +255,8 @@ class TezFirstOrdersClient:
 
         Возвращает dict phone_norm -> {'month': datetime|None,
         'prev': datetime|None, 'last_before': datetime|None,
-        'registered': datetime|None, 'last_order': datetime|None}.
+        'registered': datetime|None, 'last_order': datetime|None,
+        'account_known': bool — поле registered_at было в ответе (только у номеров из ответа)}.
         Невалидные номера в результат не попадают — их отдаёт свойство
         `.last_invalid`.
         """
@@ -312,6 +313,10 @@ class TezFirstOrdersClient:
                         "last_before": parse_first_order_at(row.get("last_order_before_at")),
                         "registered": parse_first_order_at(row.get("registered_at")),
                         "last_order": parse_first_order_at(row.get("last_order_at")),
+                        # Поле было в ответе: registered None значит «аккаунта нет», а не «не
+                        # знаем» (карточка водителя автообзвона, trips_check). У номера, которого
+                        # в ответе нет, ключа нет вовсе.
+                        "account_known": "registered_at" in row,
                     }
             # Номера, которых почему-то не оказалось в ответе, тоже помечаем
             # проверенными — иначе они будут переспрашиваться каждую ночь.

@@ -418,6 +418,13 @@ DDL = [
     # у Тез КЦ база автообзвона пуста, а у удалённого КЦ поездки не проверяются.
     "ALTER TABLE dial_list_leads DROP COLUMN IF EXISTS registered_at",
     "ALTER TABLE dial_list_leads DROP COLUMN IF EXISTS last_order_at",
+    # Аккаунт водителя в TEZ APP для карточки водителя (владелец 06.11.2026: «зарегистрирован или нет» —
+    # в карточке оператора и журнала). Пишет проверка поездок тем же ответом (trips_check.py), запросов не
+    # прибавилось. Имена свои, не registered_at: строкой выше та колонка удаляется на каждом старте.
+    #   account_registered_at  создание аккаунта (registered_at TEZ APP); NULL — аккаунта нет или не спрашивали
+    #   account_checked_at     когда TEZ APP последний раз ответил про аккаунт; NULL — не спрашивали
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS account_registered_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS account_checked_at TIMESTAMP WITH TIME ZONE",
     # Итог с датой: 'callback' — «Перезвонить» (дата и время перезвона обязательны), 'online' —
     # «Согласен выйти на линию» (когда выйдет — обязательно). Такой итог всегда «перезвонить».
     "ALTER TABLE dial_list_outcomes ADD COLUMN IF NOT EXISTS due_kind VARCHAR(16) NOT NULL DEFAULT ''",

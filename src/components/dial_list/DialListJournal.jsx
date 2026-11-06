@@ -17,7 +17,7 @@ import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
 import { operatorsForFilter } from './linePicker';
 import {
     PROFILE_TEZ, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, leadDue, normalizeProfile,
-    tezStageLabel, tezSuccessText, tripLabel,
+    registrationLabel, tezStageLabel, tezSuccessText, tripLabel,
 } from './tezAutodial';
 
 /*
@@ -890,11 +890,12 @@ const TripSection = ({ lead }) => {
     const sign = lead.sign || {};
     const online = lead.stage === 'signed';
     const label = tripLabel(trip);
+    const registration = registrationLabel(trip);
     return (
         <section className="space-y-1.5">
             <div className="flex items-center gap-1.5">
                 <span className={iosGroupLabel}>Поездки в TEZ APP</span>
-                <IosHint text="Сервер спрашивает TEZ APP по номеру раз в час и перед звонком: был ли у водителя завершённый заказ в месяце базы. Вышел на линию — водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до первого заказа. «Нет аккаунта» от «не ездил» TEZ APP не отличает." />
+                <IosHint text="Сервер спрашивает TEZ APP по номеру раз в час и перед звонком: был ли у водителя завершённый заказ в месяце базы и есть ли у него аккаунт. Вышел на линию — водитель уходит из обзвона; успешка — оператору, который последним поговорил с ним не меньше 10 секунд до первого заказа. «Зарегистрирован» — когда создан аккаунт в TEZ APP; «Не зарегистрирован» — аккаунта нет или он удалён." />
             </div>
             <div className={`${iosCard} overflow-hidden`}>
                 <div className="ml-4 divide-y divide-slate-100">
@@ -911,6 +912,9 @@ const TripSection = ({ lead }) => {
                             {label || <span className="text-slate-400">ещё не проверяли</span>}
                         </InfoRow>
                     )}
+                    <InfoRow label="Регистрация">
+                        {registration || <span className="text-slate-400">ещё не проверяли</span>}
+                    </InfoRow>
                     {lead.promised_online_at && (
                         <InfoRow label="Обещал выйти">{fmtWhen(lead.promised_online_at)}</InfoRow>
                     )}
@@ -1143,6 +1147,7 @@ const LeadSheet = ({
                                     >
                                         {monthLabel(lead.period) || '—'}
                                     </InfoRow>
+                                    {lead.city && <InfoRow label="Город">{lead.city}</InfoRow>}
                                     {tez && leadDue(lead) && (
                                         <InfoRow label="Срок" sub={lead.owner_operator?.name ? `ждёт оператора ${lead.owner_operator.name}` : ''}>
                                             <span className={leadDue(lead).overdue ? 'text-amber-600' : ''}>{leadDue(lead).text}</span>
