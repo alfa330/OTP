@@ -53005,6 +53005,34 @@ except Exception:
     logging.exception("Заявки на отпуск и Б/С: Blueprint НЕ подключён")
 
 
+# ── Табель фронт-офисов в «Учете часов» ──────────────────────────────────────
+# ТЗ «выгрузка табеля» (06.11.2026): табель за месяц по образцу, только отдел
+# «Фронт офисы». Выгружают глава этого отдела и суперадмины — решение владельца;
+# главы и СВ других отделов и админы без отдела табеля не получают.
+def _front_office_timesheet_allowed(requester_id, requester):
+    if _is_super_admin_role(requester[3]):
+        return True
+    department_id = db.get_front_office_department_id()
+    if not department_id:
+        return False
+    return int(department_id) in {int(d) for d in _headed_department_ids(requester_id)}
+
+
+try:
+    from front_office_timesheet.routes import build_front_office_timesheet_blueprint  # noqa: E402
+
+    app.register_blueprint(build_front_office_timesheet_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        can_export=_front_office_timesheet_allowed,
+    ))
+    logging.info("Табель фронт-офисов: Blueprint подключён на /api/front_office_timesheet")
+except Exception:
+    logging.exception("Табель фронт-офисов: Blueprint НЕ подключён")
+
+
 # ── «Учет сотрудников» по страницам ─────────────────────────────────────────
 # Пять списков раздела берут с сервера одну страницу: фильтр, порядок и
 # LIMIT/OFFSET — в SQL (employees/page.py). Границы видимости — те же, что у

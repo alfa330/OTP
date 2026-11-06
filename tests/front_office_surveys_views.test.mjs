@@ -46,21 +46,23 @@ const employee = (role = 'operator') => ({
     id: 3, role, department_code: 'front_office', department_id: FRONT_OFFICE_ID,
 });
 
-test('глава фронт-офисов: «Опросы» добавлены, остальной набор прежний', () => {
+test('глава фронт-офисов: «Опросы» и «Учет часов» (табель) добавлены, остальной набор прежний', () => {
     const user = head();
     assert.equal(departmentRestrictsViews(user), true);
+    // «Учет часов» — 06.11.2026 ради табеля фронт-офисов: у главы в разделе одна
+    // страница табеля, часы, бонусы и штрафы ей не открывали.
     assert.deepEqual(
         DEPARTMENT_VIEW_ALLOWLIST.front_office.head,
-        ['manage_operators', 'groups', 'work_schedules', 'tasks', 'qr_access', 'surveys'],
+        ['manage_operators', 'groups', 'work_schedules', 'tasks', 'qr_access', 'surveys', 'sv_hours'],
     );
     for (const allowed of [
         'surveys', 'manage_operators', 'manage_users', 'sv_list', 'groups',
-        'work_schedules', 'tasks', 'qr_access', 'events',
+        'work_schedules', 'tasks', 'qr_access', 'events', 'sv_hours',
     ]) {
         assert.equal(departmentAllowsView(user, allowed), true, allowed);
     }
     for (const denied of [
-        'salary', 'sv_hours', 'call_evaluation', 'call_division', 'monitoring_scale', 'ai_qa',
+        'salary', 'call_evaluation', 'call_division', 'monitoring_scale', 'ai_qa',
         'trainings', 'technical_issues', 'lms', 'hours', 'profile', 'evaluation',
         'shift_auction', 'contests', 'departments', 'manage_admins',
     ]) {

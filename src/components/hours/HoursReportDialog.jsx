@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { Check, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { IosModal, iosBtnPrimary, iosBtnSecondary } from '../ui/ios';
 import useEscapeClose from '../trainings/useEscapeClose';
-import { hoursReportTitle, pickHoursReportScope } from './hoursReportOptions';
+import HoursFold from './HoursFold';
+import { HOURS_REPORT_SUBTITLE, hoursReportTitle, pickHoursReportScope } from './hoursReportOptions';
 
 /*
  * Окно «Сформировать отчёт» в «Учете часов» — общее для компьютера и телефона
@@ -17,7 +18,15 @@ import { hoursReportTitle, pickHoursReportScope } from './hoursReportOptions';
  *
  * С клавиатуры: при открытии фокус встаёт на выбранную плитку (общий IosModal
  * фокус не переносит, и Tab шёл по странице под затемнением), Esc закрывает.
+ *
+ * extra — { value, node }: блок под плитками, который раскрывается по высоте,
+ * когда выбрана плитка value (отборы табеля фронт-офисов). Esc в раскрытом
+ * списке такого блока закрывает только список, а не всё окно с выгрузкой.
+ * Был ли список раскрыт, смотрим в фазе перехвата: к обработчику окна React
+ * уже успевает убрать список (CustomSelect закрывает его на document).
  */
+const hasOpenListbox = () => typeof document !== 'undefined' && Boolean(document.querySelector('[role="listbox"]'));
+
 export default function HoursReportDialog({
     open,
     onClose,
@@ -27,10 +36,25 @@ export default function HoursReportDialog({
     onChange,
     onDownload,
     isDownloading = false,
+    extra = null,
 }) {
     const selected = pickHoursReportScope(options, value);
+    const selectedOption = options.find((option) => option.value === selected) || null;
     const selectedRef = useRef(null);
-    useEscapeClose(open, onClose);
+    const escapeFromListRef = useRef(false);
+    useEffect(() => {
+        if (!open) return undefined;
+        const remember = (event) => {
+            if (event.key === 'Escape') escapeFromListRef.current = hasOpenListbox();
+        };
+        window.addEventListener('keydown', remember, true);
+        return () => window.removeEventListener('keydown', remember, true);
+    }, [open]);
+    const closeOnEscape = useCallback(() => {
+        if (escapeFromListRef.current || hasOpenListbox()) return;
+        onClose?.();
+    }, [onClose]);
+    useEscapeClose(open, closeOnEscape);
     useEffect(() => {
         if (open) selectedRef.current?.focus({ preventScroll: true });
     }, [open]);
@@ -39,7 +63,7 @@ export default function HoursReportDialog({
             open={open}
             onClose={onClose}
             title={hoursReportTitle(month)}
-            subtitle="Excel, по листу на каждый показатель"
+            subtitle={selectedOption?.subtitle || HOURS_REPORT_SUBTITLE}
             maxWidth="max-w-md"
             footer={(
                 <>
@@ -95,6 +119,11 @@ export default function HoursReportDialog({
                     );
                 })}
             </div>
+            {extra ? (
+                <HoursFold open={selected === extra.value}>
+                    <div className="pt-4">{extra.node}</div>
+                </HoursFold>
+            ) : null}
         </IosModal>
     );
 }

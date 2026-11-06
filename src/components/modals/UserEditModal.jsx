@@ -4,7 +4,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { headedDepartmentsOf, isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
@@ -386,8 +386,12 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);
     // «Должность» — у бэк-офиса взамен направления и группы: там людей
     // различают именно ею. Свободный ввод, а не справочник: перечня
-    // должностей в системе нет и заводить его владелец не просил.
-    const showEmployeeJobTitle = departmentCodeUsesEmployeeJobTitle(effectiveDeptCode);
+    // должностей в системе нет и заводить его владелец не просил. У
+    // фронт-офисов поле есть ради колонки «Должность» табеля (06.11.2026).
+    const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);
+    const employeeJobTitlePlaceholder = String(effectiveDeptCode || '').toLowerCase() === 'front_office'
+        ? 'Например, менеджер'
+        : 'Например, бухгалтер по расчётам';
     const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
     // Группа, направление и SIP-номер — поля человека НА ЛИНИИ. У бэк-офиса
     // (Бухгалтерия, HR) ни групп, ни направлений, ни телефонии нет: выпадашки
@@ -1646,7 +1650,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         type="text"
                         value={editedUser?.job_title || ""}
                         onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
-                        placeholder="Например, бухгалтер по расчётам"
+                        placeholder={employeeJobTitlePlaceholder}
                         className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                         disabled={fieldsLocked}
                         />
@@ -2362,7 +2366,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             type="text"
                             value={editedUser?.job_title || ""}
                             onChange={(e) => setEditedUser({ ...editedUser, job_title: e.target.value })}
-                            placeholder="Например, бухгалтер по расчётам"
+                            placeholder={employeeJobTitlePlaceholder}
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={fieldsLocked}
                             />

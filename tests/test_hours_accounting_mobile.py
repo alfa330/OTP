@@ -205,7 +205,13 @@ class PhoneScreenTests(unittest.TestCase):
         """Общий IosModal фокус не переносит и Esc не ловит: Tab шёл по странице под
         затемнением (до плиток — двести нажатий), Esc окно не закрывал."""
         dialog = (HOURS / 'HoursReportDialog.jsx').read_text(encoding='utf-8')
-        self.assertIn("useEscapeClose(open, onClose);", dialog)
+        # Esc закрывает окно, но не тогда, когда раскрыт список отбора табеля:
+        # тогда он закрывает только список (CustomSelect слушает document, окно — window).
+        self.assertIn("useEscapeClose(open, closeOnEscape);", dialog)
+        # Раскрыт ли список, запоминаем в фазе перехвата: к обработчику окна React
+        # список уже убрал.
+        self.assertIn("window.addEventListener('keydown', remember, true);", dialog)
+        self.assertIn("if (escapeFromListRef.current || hasOpenListbox()) return;", dialog)
         self.assertIn("ref={checked ? selectedRef : undefined}", dialog)
         self.assertIn("if (open) selectedRef.current?.focus({ preventScroll: true });", dialog)
 

@@ -147,6 +147,10 @@ import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
 import HoursReportDialog from './components/hours/HoursReportDialog';
 import { buildHoursReportOptions } from './components/hours/hoursReportOptions';
+import FrontOfficeTimesheetFilters from './components/hours/FrontOfficeTimesheetFilters';
+import FrontOfficeTimesheetPage from './components/hours/FrontOfficeTimesheetPage';
+import { TIMESHEET_SCOPE, canExportFrontOfficeTimesheet, emptyTimesheetFilters, showsOnlyFrontOfficeTimesheet } from './components/hours/frontOfficeTimesheet';
+import { downloadTimesheet } from './components/hours/frontOfficeTimesheetApi';
 import { getHoursGroupLeave } from './components/hours/hoursGroupLeave';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
 import { calculateWeightedChatAverage, getChatScoreContribution } from './utils/chatScore';
@@ -604,7 +608,9 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     op_funnel: ['op'],
     // Смены, часы, ресурсы
     work_schedules: ['szov', 'op', 'tez', 'front_office'],
-    sv_hours: ['szov', 'op', 'tez'],
+    // «Фронт офисы» — ради табеля фронт-офисов (06.11.2026): суперадмин берёт его
+    // плиткой окна «Сформировать отчёт», и при выбранном отделе пункт нужен на месте.
+    sv_hours: ['szov', 'op', 'tez', 'front_office'],
     resource_fte: ['szov'],
     shift_auction: ['szov'],
     technical_issues: ['szov', 'op'],
@@ -4572,6 +4578,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const [reportScope, setReportScope] = useState('by_sv'); // 'by_sv' or 'all' — последний выбор в окне отчёта
         const [isReportDialogOpen, setIsReportDialogOpen] = useState(false);
         const reportAbortRef = useRef(null); // выгрузка из окна отчёта — «Отмена» её прерывает
+        // Табель фронт-офисов — третья плитка окна отчёта: только суперадмину и
+        // главе фронт-офисов (решение владельца 06.11.2026); отбор — город,
+        // сотрудник, должность за месяц страницы.
+        const canExportTimesheet = canExportFrontOfficeTimesheet(user);
+        const [timesheetFilters, setTimesheetFilters] = useState(emptyTimesheetFilters);
         const [isLoading, setIsLoading] = useState(false);
 
         // NEW: filter active/fired + counters
@@ -8444,6 +8455,37 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }
         }
 
+        // Табель фронт-офисов за месяц страницы с отбором окна. true — файл скачан.
+        async function downloadFrontOfficeTimesheet(signal = undefined) {
+            if (!user) {
+            fallbackToast('Пользователь не авторизован', 'error');
+            return false;
+            }
+            if (!month) {
+            fallbackToast('Выберите месяц', 'error');
+            return false;
+            }
+            setIsDownloadingReport(true);
+            try {
+            await downloadTimesheet({
+                apiBaseUrl: API_BASE_URL,
+                headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) }),
+                month,
+                filters: timesheetFilters,
+                signal,
+            });
+            fallbackToast('Табель загружен', 'success');
+            return true;
+            } catch (err) {
+            if (err?.name === 'AbortError') return false;
+            console.error('downloadFrontOfficeTimesheet error', err);
+            fallbackToast(err?.message || 'Не удалось скачать табель', 'error');
+            return false;
+            } finally {
+            setIsDownloadingReport(false);
+            }
+        }
+
         // Окно «Сформировать отчёт» — одно на компьютер и телефон. «По СВ» с группой
         // строится по ней, даже если её нет в списке групп (архивная или группа
         // чужого отдела, куда перешли щелчком по чужому дню). Без группы — по
@@ -8471,6 +8513,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 : null,
             companyWide: isGlobalAdminUser(user) || reportDepartmentId == null,
             withSupervisorRows: isGlobalAdminUser(user) || headsSupervisorHoursDepartment(user),
+            timesheet: canExportTimesheet,
         });
         // Закрыть окно во время «Формируется…» — значит отказаться от файла: выгрузка
         // прерывается, файл не скачивается.
@@ -8491,10 +8534,24 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 onDownload={async (scope) => {
                     const controller = new AbortController();
                     reportAbortRef.current = controller;
-                    const downloaded = await downloadMonthlyReport(scope, controller.signal);
+                    const downloaded = scope === TIMESHEET_SCOPE
+                        ? await downloadFrontOfficeTimesheet(controller.signal)
+                        : await downloadMonthlyReport(scope, controller.signal);
                     if (reportAbortRef.current === controller) reportAbortRef.current = null;
                     if (downloaded) setIsReportDialogOpen(false);
                 }}
+                extra={canExportTimesheet ? {
+                    value: TIMESHEET_SCOPE,
+                    node: (
+                        <FrontOfficeTimesheetFilters
+                            month={month}
+                            apiBaseUrl={API_BASE_URL}
+                            authHeaders={() => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? '') })}
+                            value={timesheetFilters}
+                            onChange={setTimesheetFilters}
+                        />
+                    ),
+                } : null}
             />
         );
 
@@ -59285,7 +59342,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         withAccessTokenHeader={withAccessTokenHeader}
                                     />
                                 ))}
-                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (showsOnlyFrontOfficeTimesheet(user)
+                                    ? <FrontOfficeTimesheetPage user={user} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} showToast={showToast} />
+                                    : <HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView
@@ -60319,7 +60378,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         />
                                     </Suspense>
                                 ))}
-                                {( view === "sv_hours" && (<HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
+                                {( view === "sv_hours" && (showsOnlyFrontOfficeTimesheet(user)
+                                    ? <FrontOfficeTimesheetPage user={user} apiBaseUrl={API_BASE_URL} withAccessTokenHeader={withAccessTokenHeader} showToast={showToast} />
+                                    : <HoursAccountingView user={user} svList={svList} showToast={showToast} />))}
                                 {( view === "resource_fte" && canAccessResourceFteSection && (
                                     <Suspense fallback={<div className="p-6 text-sm text-slate-500">Загрузка раздела...</div>}>
                                         <ResourceFteView

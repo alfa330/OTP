@@ -470,9 +470,13 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
         )
         self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
 
+        # Форма спрашивает должность ещё и у фронт-офисов (колонка табеля,
+        # 06.11.2026) — отдельным признаком, списки по-прежнему на наборе выше.
+        self.assertIn("export const departmentCodeAsksEmployeeJobTitle = (code) => {", views)
+        self.assertIn("const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = new Set(['front_office']);", views)
         modal = _read(MODAL_PATH)
         self.assertIn(
-            "const showEmployeeJobTitle = departmentCodeUsesEmployeeJobTitle(effectiveDeptCode);",
+            "const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);",
             modal,
         )
         # Поле в обоих режимах модалки.

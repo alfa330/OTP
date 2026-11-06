@@ -36,13 +36,17 @@ export function hoursReportTitle(month) {
  *       или null (не выбран — тогда «По СВ» недоступен);
  *   companyWide — общий отчёт по всей компании (глобальный админ или человек без
  *       отдела), иначе по отделу;
- *   withSupervisorRows — в общий отчёт сервер добавит строки СВ.
+ *   withSupervisorRows — в общий отчёт сервер добавит строки СВ;
+ *   timesheet — третья плитка «Табель фронт-офисов» (ТЗ «выгрузка табеля»,
+ *       06.11.2026): только суперадмину и главе фронт-офисов, остальным варианты
+ *       окна прежние.
  */
 export function buildHoursReportOptions({
     group = null,
     supervisor = null,
     companyWide = false,
     withSupervisorRows = false,
+    timesheet = false,
 } = {}) {
     const groupName = String(group?.name || '').trim();
     const supervisorName = String(supervisor?.name || '').trim();
@@ -69,11 +73,27 @@ export function buildHoursReportOptions({
     const everyone = companyWide ? 'Все операторы компании' : 'Все операторы отдела';
     const allDescription = `${everyone} с колонкой «Супервайзер».`
         + (withSupervisorRows ? ' Супервайзеры с часами по Clockster — отдельными строками.' : '');
-    return [
+    const options = [
         { value: 'by_sv', label: 'По СВ', ...bySv },
         { value: 'all', label: 'Общий', description: allDescription, disabled: false },
     ];
+    if (timesheet) {
+        options.push({
+            value: TIMESHEET_OPTION_VALUE,
+            label: 'Табель фронт-офисов',
+            description: 'По образцу из ТЗ: города, график, статус каждого дня, опоздания и ранний уход по «Отметкам».',
+            subtitle: 'Excel, лист «табель»',
+            disabled: false,
+        });
+    }
+    return options;
 }
+
+// То же значение, что TIMESHEET_SCOPE в frontOfficeTimesheet.js: модуль окна
+// держим без импортов, его проверяют тестом отдельно.
+export const TIMESHEET_OPTION_VALUE = 'front_office_timesheet';
+
+export const HOURS_REPORT_SUBTITLE = 'Excel, по листу на каждый показатель';
 
 /* Выбранный вариант окна: прошлый выбор, если он сейчас доступен, иначе первый
    доступный. Без группы и СВ «По СВ» строить не по чему — остаётся «Общий». */

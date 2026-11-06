@@ -65,7 +65,12 @@ const FRONT_OFFICE_MANAGER_VIEWS = ['manage_operators', 'groups', 'work_schedule
 // фронт-офисов сам назначает опросы своим сотрудникам). Права эта строка не
 // выдаёт: сервер главу любого отдела пускает в раздел супервайзером в границах
 // его отдела (_surveys_route_guard в bot_schedule2.py) — закрыт был пункт меню.
-const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys'];
+// «Учет часов» — ради табеля фронт-офисов (ТЗ «выгрузка табеля», решение
+// владельца 06.11.2026: выгружают глава фронт-офисов и суперадмины). Раздел у
+// главы — одна страница табеля (showsOnlyFrontOfficeTimesheet в
+// src/components/hours/frontOfficeTimesheet.js): часы, бонусы и штрафы её людей
+// ей не открывали. Строка в конце набора: firstAllowedView берёт первый раздел.
+const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys', 'sv_hours'];
 
 // Бэк-офис (Бухгалтерия, HR): отделы без телефонии, направлений, графиков и
 // оценок. Им оставлены только «Учёт сотрудников» и «Вики».
@@ -492,6 +497,21 @@ export const departmentCodeUsesEmployeeJobTitle = (code) => {
 };
 
 export const departmentUsesEmployeeJobTitle = (user) => departmentCodeUsesEmployeeJobTitle(departmentCodeOf(user));
+
+// Поле «Должность» в ФОРМЕ карточки. Фронт-офисам — ради табеля (ТЗ «выгрузка
+// табеля», 06.11.2026): в табеле есть колонка «Должность» (менеджер,
+// техперсонал…), пустая идёт как «менеджер». Только форма: в EMPLOYEE_JOB_TITLE_DEPARTMENTS
+// фронт-офисы не вписаны намеренно — тот набор ещё и меняет списки (подпись
+// строки, дни рождения, колонка «Должность») на должность вместо направления, а
+// у фронт-офисов людей различают направлением.
+const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = new Set(['front_office']);
+
+export const departmentCodeAsksEmployeeJobTitle = (code) => {
+    const normalized = normalizeDepartmentCodeValue(code);
+    return Boolean(normalized) && (
+        EMPLOYEE_JOB_TITLE_DEPARTMENTS.has(normalized) || EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS.has(normalized)
+    );
+};
 
 // Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
 // сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна, а

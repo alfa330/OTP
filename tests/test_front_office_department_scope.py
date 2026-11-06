@@ -63,11 +63,13 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         # открывают «Вики» только по подтверждению, а супервайзеров в отделе нет —
         # подтверждает глава, и без строки в allowlist пункта меню у него не будет.
         # «Опросы» — 06.10.2026: глава назначает опросы своим сотрудникам.
+        # «Учет часов» — 06.11.2026: ради табеля фронт-офисов, у главы в нём
+        # одна страница табеля (showsOnlyFrontOfficeTimesheet).
         source = _read(DEPARTMENT_VIEWS_PATH)
 
         self.assertIn(
             "const FRONT_OFFICE_HEAD_VIEWS = "
-            "[...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys'];", source
+            "[...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_access', 'surveys', 'sv_hours'];", source
         )
         # У СВ набор прежний: разделы главы не должны приехать вместе с ним.
         manager_line = next(
@@ -77,6 +79,7 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         self.assertNotIn("'tasks'", manager_line)
         self.assertNotIn("'qr_access'", manager_line)
         self.assertNotIn("'surveys'", manager_line)
+        self.assertNotIn("'sv_hours'", manager_line)
 
         app = _read(APP_PATH)
         self.assertIn("{departmentAllowsView(user, 'tasks') && (", app)
@@ -489,12 +492,15 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             " departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship,"
             " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
-            " departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle,"
+            " departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle,"
             " managesEmployeeAccounting }"
             " from '../../utils/departmentViews';",
             modal,
         )
         self.assertIn("const showEmployeeCity = departmentCodeUsesEmployeeCity(effectiveDeptCode);", modal)
+        # «Должность» у фронт-офиса — в форме, ради колонки табеля (06.11.2026).
+        self.assertIn("const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);", modal)
+        self.assertEqual(modal.count("{showEmployeeJobTitle && ("), 2)
         self.assertIn(
             "const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);",
             modal,
