@@ -8,8 +8,9 @@ import useStableCallback from '../wiki/useStableCallback';
 import { TEZ_STATUS_STYLE } from '../monitoring/tezWallboardShared';
 import {
     OFFERS_MAX, OFFER_DESCRIPTION_MAX, OFFER_TITLE_MAX, WA_PARAM_MAX, WA_SUBSTITUTIONS, WA_TEMPLATES_MAX,
-    liveStatusMeta, offersSnapshot, previewTemplate, serializeOffers, serializeWaAllowed, templateBlockReason,
-    templateVariableCount, validateOffers, validateWaAllowed, waSnapshot,
+    formatFileSize, liveStatusMeta, mediaFileProblem, offersSnapshot, previewTemplate, serializeOffers,
+    serializeWaAllowed, templateBlockReason, templateFileReason, templateMedia, templateVariableCount,
+    validateOffers, validateWaAllowed, waSnapshot,
 } from './tezAutodial';
 
 /*
@@ -348,13 +349,52 @@ const TemplateParams = ({ template, count, onChange, canEdit }) => {
     );
 };
 
+/* Файл шаблона с вложением: миниатюра картинки (тянется с сервера с авторизацией — ссылка
+   blob:, отпускается при смене файла) или значок видео/PDF; имя и размер — рядом. */
+const MediaThumb = ({ apiBaseUrl, authHeaders, departmentId, templateId, media }) => {
+    const [src, setSrc] = useState('');
+    const image = String(media?.content_type || '').startsWith('image/');
+    const stamp = media?.uploaded_at || '';
+    useEffect(() => {
+        if (!image) return undefined;
+        let url = '';
+        let alive = true;
+        fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/whatsapp/media/${encodeURIComponent(templateId)}`,
+            { credentials: 'include', headers: authHeaders() })
+            .then((resp) => (resp.ok ? resp.blob() : null))
+            .then((blob) => {
+                if (!alive || !blob) return;
+                url = URL.createObjectURL(blob);
+                setSrc(url);
+            })
+            .catch(() => {});
+        return () => {
+            alive = false;
+            if (url) URL.revokeObjectURL(url);
+        };
+    }, [apiBaseUrl, authHeaders, departmentId, templateId, image, stamp]);
+    const icon = image ? 'fas fa-image' : String(media?.content_type || '').startsWith('video/') ? 'fas fa-film' : 'fas fa-file-pdf';
+    return (
+        <div className="flex min-w-0 items-center gap-2.5">
+            <div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-lg bg-slate-100 text-slate-400 ring-1 ring-slate-200">
+                {image && src ? <img src={src} alt="" className="h-full w-full object-cover" /> : <FaIcon className={icon} />}
+            </div>
+            <div className="min-w-0">
+                <div className="truncate text-[12.5px] font-medium text-slate-700">{media?.file_name}</div>
+                <div className="text-[11.5px] text-slate-500">{formatFileSize(media?.size)}</div>
+            </div>
+        </div>
+    );
+};
+
 /**
  * «WhatsApp» отдела (GET/PUT …/whatsapp, контракт §3.7 и §5): лицензия ChatApp и
  * шаблоны, которые оператор может отправить водителю из карточки звонка. Список
- * шаблонов — из ChatApp (сервер держит его 10 минут); разрешить можно только
- * утверждённые текстовые. У каждого разрешённого — параметры {{1}}, {{2}}… с
- * подстановками {name}, {first_name}, {operator}. Номер водителя не уходит ни в
- * телефон, ни на сайт: сообщение отправляет сервер.
+ * шаблонов — из ChatApp (сервер держит его 10 минут); разрешить можно утверждённые
+ * текстовые и с картинкой, видео или PDF — файл к ним руководитель загружает здесь же
+ * (владелец 06.11.2026), он уходит в ChatApp вместе с шаблоном. У каждого разрешённого —
+ * параметры {{1}}, {{2}}… с подстановками {name}, {first_name}, {operator}. Номер
+ * водителя не уходит ни в телефон, ни на сайт: сообщение отправляет сервер.
  */
 export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = true, showToast }) => {
     const toast = useStableCallback((msg, kind = 'success') => showToast?.(msg, kind));
@@ -364,12 +404,16 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
     const [saved, setSaved] = useState(null);
     const [loadError, setLoadError] = useState('');
     const [saving, setSaving] = useState(false);
+    const [uploadingId, setUploadingId] = useState('');
     const seq = useRef(0);
+    const fileRef = useRef(null);
+    const fileFor = useRef(null);
 
     const accept = (body) => {
         const lic = body?.license_id === null || body?.license_id === undefined ? LICENSE_OFF : String(body.license_id);
         const list = (Array.isArray(body?.allowed) ? body.allowed : []).map((t) => ({
             id: String(t.id ?? ''), title: t.title || '', text: t.text || '', params: Array.isArray(t.params) ? t.params : [],
+            type: t.type || '',
         }));
         setData(body || {});
         setLicenseId(lic);
@@ -413,6 +457,7 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
         if (next === savedLicense) {
             setAllowed((Array.isArray(data?.allowed) ? data.allowed : []).map((t) => ({
                 id: String(t.id ?? ''), title: t.title || '', text: t.text || '', params: Array.isArray(t.params) ? t.params : [],
+                type: t.type || '',
             })));
         } else if (next !== LICENSE_OFF) {
             setAllowed([]);
@@ -433,9 +478,51 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
         const id = String(t.id);
         if (!on) return list.filter((x) => x.id !== id);
         if (list.some((x) => x.id === id) || list.length >= WA_TEMPLATES_MAX) return list;
-        return [...list, { id, title: t.title || '', text: t.text || '', params: Array.from({ length: paramsCount(t) }, () => '') }];
+        return [...list, {
+            id, title: t.title || '', text: t.text || '', params: Array.from({ length: paramsCount(t) }, () => ''),
+            type: String(t.type || '').toUpperCase(),
+        }];
     });
     const setParams = (id, params) => setAllowed((list) => list.map((x) => (x.id === id ? { ...x, params } : x)));
+
+    // Файл шаблона с вложением: одно скрытое поле на всю панель, шаблон — в fileFor. Ответ сервера
+    // правит только этот шаблон в списке — несохранённые переключатели не сбрасываются.
+    const pickFile = (t) => {
+        const media = templateMedia(t);
+        if (!media || !fileRef.current) return;
+        fileFor.current = t;
+        fileRef.current.accept = media.accept;
+        fileRef.current.value = '';
+        fileRef.current.click();
+    };
+    const uploadFile = async (file) => {
+        const t = fileFor.current;
+        if (!t || !file) return;
+        const problem = mediaFileProblem(t, file);
+        if (problem) { toast(problem, 'error'); return; }
+        const id = String(t.id);
+        setUploadingId(id);
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            const resp = await fetch(
+                `${apiBaseUrl}/api/dial_list/departments/${departmentId}/whatsapp/media/${encodeURIComponent(id)}`,
+                { method: 'PUT', credentials: 'include', headers: authHeaders(), body: form },
+            );
+            if (!resp.ok) throw new Error(await readError(resp));
+            const body = await resp.json().catch(() => ({}));
+            setData((prev) => (prev ? {
+                ...prev,
+                templates: (Array.isArray(prev.templates) ? prev.templates : [])
+                    .map((x) => (String(x.id) === id ? { ...x, media: body.media || null } : x)),
+            } : prev));
+            toast(templateMedia(t).done, 'success');
+        } catch (e) {
+            toast(e.message || 'Не удалось загрузить файл', 'error');
+        } finally {
+            setUploadingId('');
+        }
+    };
 
     const save = async () => {
         // Параметров ровно столько, сколько переменных у шаблона: лишние ChatApp не примет.
@@ -506,8 +593,14 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
                         )}
                         <div className="flex items-center gap-1.5 border-t border-slate-100 px-4 pb-1 pt-3">
                             <span className="text-[12px] font-medium text-slate-500">Шаблоны</span>
-                            <IosHint text={`Разрешить можно только утверждённые текстовые шаблоны. В параметрах {{1}}, {{2}}… можно подставить: ${substitutions}. Под параметрами — текст, каким его получит водитель (подстановки — образцом).`} />
+                            <IosHint text={`Разрешить можно утверждённые в WhatsApp шаблоны: текстовые и с вложением. К шаблону с вложением загрузите файл — картинку (JPEG или PNG до 5 МБ), видео (MP4 до 16 МБ) или PDF (до 16 МБ): водитель получит его вместе с текстом, без файла шаблон не включается. В параметрах {{1}}, {{2}}… можно подставить: ${substitutions}. Под параметрами — текст, каким его получит водитель (подстановки — образцом).`} />
                         </div>
+                        <input
+                            ref={fileRef}
+                            type="file"
+                            className="hidden"
+                            onChange={(e) => uploadFile(e.target.files?.[0])}
+                        />
                         <ul className="divide-y divide-slate-100">
                             {licenseSwitched && (
                                 <li className="px-4 py-5 text-center text-[13px] text-slate-500">
@@ -524,8 +617,11 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
                             {!licenseSwitched && templates.map((t) => {
                                 const id = String(t.id);
                                 const blocked = templateBlockReason(t);
+                                const media = blocked ? null : templateMedia(t);
+                                const needsFile = Boolean(templateFileReason(t));
                                 const on = isAllowed(id);
                                 const entry = allowed.find((x) => x.id === id);
+                                const uploading = uploadingId === id;
                                 return (
                                     <li key={id} className={`space-y-2 px-4 py-3 ${blocked && !on ? 'opacity-60' : ''}`}>
                                         <div className="flex items-start gap-3">
@@ -539,10 +635,25 @@ export const TezWhatsAppPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdi
                                             </div>
                                             <IosToggle
                                                 checked={on}
-                                                disabled={!canEdit || (!on && (Boolean(blocked) || allowed.length >= WA_TEMPLATES_MAX))}
+                                                disabled={!canEdit || (!on && (Boolean(blocked) || needsFile || allowed.length >= WA_TEMPLATES_MAX))}
                                                 onChange={(v) => toggle(t, v)}
                                             />
                                         </div>
+                                        {media && (t.media || canEdit) && (
+                                            <div className="flex items-center justify-between gap-3">
+                                                {t.media ? (
+                                                    <MediaThumb apiBaseUrl={apiBaseUrl} authHeaders={authHeaders} departmentId={departmentId}
+                                                        templateId={id} media={t.media} />
+                                                ) : <span />}
+                                                {canEdit && (
+                                                    <button type="button" onClick={() => pickFile(t)} disabled={Boolean(uploadingId)}
+                                                        className={`${iosBtnGhost} shrink-0 px-2 py-1 text-[12.5px] text-blue-600`}>
+                                                        <FaIcon className={uploading ? 'fas fa-spinner fa-spin' : 'fas fa-paperclip'} />
+                                                        {t.media ? 'Заменить' : media.upload}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
                                         {on && entry && (
                                             <TemplateParams template={entry} count={paramsCount(entry)} canEdit={canEdit} onChange={(params) => setParams(id, params)} />
                                         )}

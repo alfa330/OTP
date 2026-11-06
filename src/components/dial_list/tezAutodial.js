@@ -474,13 +474,58 @@ export const unknownSubstitutions = (value) => [...String(value ?? '').matchAll(
     .map((m) => `{${m[1]}}`)
     .filter((key) => !WA_SUBSTITUTIONS.some((s) => s.key === key));
 
-/** Почему шаблон нельзя разрешить; '' — можно. Отправлять можно только утверждённые текстовые. */
+/* Шаблоны с вложением (владелец 06.11.2026): файл к ним загружает руководитель, ChatApp получает его
+   вместе с шаблоном. Типы и пределы — как у сервера (WA_MEDIA в dial_list/service.py): форматы — те,
+   что принимает ChatApp; размер — предел WhatsApp для картинки и наш потолок для видео и PDF. */
+export const WA_MEDIA = {
+    IMAGE: { kind: 'image', need: 'нужна картинка', upload: 'Загрузить картинку', done: 'Картинка загружена',
+        accept: '.jpg,.jpeg,.png,image/jpeg,image/png', types: ['image/jpeg', 'image/png'], maxMb: 5 },
+    VIDEO: { kind: 'video', need: 'нужно видео', upload: 'Загрузить видео', done: 'Видео загружено',
+        accept: '.mp4,video/mp4', types: ['video/mp4'], maxMb: 16 },
+    DOCUMENT: { kind: 'document', need: 'нужен PDF', upload: 'Загрузить PDF', done: 'PDF загружен',
+        accept: '.pdf,application/pdf', types: ['application/pdf'], maxMb: 16 },
+};
+
+/** Вложение шаблона по его типу ChatApp (IMAGE | VIDEO | DOCUMENT); у текстового — null. */
+export const templateMedia = (template) => WA_MEDIA[String(template?.type ?? '').toUpperCase()] || null;
+
+/** Почему шаблон нельзя разрешить; '' — можно. Отправлять можно утверждённые текстовые и шаблоны с
+ *  картинкой, видео или PDF (файл к ним — templateFileReason). */
 export const templateBlockReason = (template) => {
     if (!template) return 'нет в ChatApp';
     if (template.supported === true) return '';
     if (String(template.status ?? '').toUpperCase() !== 'APPROVED') return 'не утверждён в WhatsApp';
-    if (String(template.type ?? '').toUpperCase() !== 'TEXT') return 'не текстовый';
+    const type = String(template.type ?? '').toUpperCase();
+    if (type !== 'TEXT' && !WA_MEDIA[type]) return 'не поддерживается';
     return template.supported === false ? 'не поддерживается' : '';
+};
+
+/** Шаблон с вложением, файла к которому ещё нет: «нужна картинка»; иначе ''. */
+export const templateFileReason = (template) => {
+    const media = templateMedia(template);
+    return media && !template?.media ? media.need : '';
+};
+
+/** Файл, выбранный для шаблона, до отправки на сервер: '' — подходит, иначе почему нет. */
+export const mediaFileProblem = (template, file) => {
+    const media = templateMedia(template);
+    if (!media) return 'Этому шаблону файл не нужен';
+    if (!file) return 'Файл не выбран';
+    const name = String(file.name || '').toLowerCase();
+    const extOk = media.accept.split(',').some((a) => a.startsWith('.') && name.endsWith(a));
+    if (!media.types.includes(String(file.type || '').toLowerCase()) && !extOk) {
+        return `Нужен файл ${media.accept.split(',').filter((a) => a.startsWith('.')).join(', ')}`;
+    }
+    if (!(file.size > 0)) return 'Файл пустой';
+    if (file.size > media.maxMb * 1024 * 1024) return `Файл больше ${media.maxMb} МБ`;
+    return '';
+};
+
+/** Размер файла словами: «820 КБ», «3,4 МБ». */
+export const formatFileSize = (bytes) => {
+    const n = Number(bytes) || 0;
+    if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} КБ`;
+    return `${(n / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`;
 };
 
 /** Подстановки образцом — для предпросмотра на сайте. */
@@ -496,12 +541,14 @@ export const previewTemplate = (text, params = [], sample = WA_SAMPLE) => String
         return value ? fillSubstitutions(value, sample) : all;
     });
 
-/** Разрешённые шаблоны для PUT …/whatsapp. */
+/** Разрешённые шаблоны для PUT …/whatsapp. type — тип шаблона ChatApp (TEXT | IMAGE | …): по нему
+ *  сервер решает, слать ли файл, если ChatApp при сохранении не ответил. */
 export const serializeWaAllowed = (allowed) => (Array.isArray(allowed) ? allowed : []).map((t) => ({
     id: String(t.id ?? ''),
     title: String(t.title ?? '').trim().slice(0, 120),
     text: String(t.text ?? ''),
     params: (Array.isArray(t.params) ? t.params : []).map((p) => String(p ?? '').trim()),
+    type: String(t.type ?? '').trim().toUpperCase(),
 }));
 
 export const waSnapshot = (licenseId, allowed) => JSON.stringify({

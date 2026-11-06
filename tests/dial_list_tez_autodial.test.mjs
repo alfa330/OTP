@@ -9,10 +9,11 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, attemptDueText, attemptModeText, departmentsOfProfile, formatMinutes,
-    leadDue, mirrorSummary,
+    LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, WA_MEDIA, attemptDueText, attemptModeText, departmentsOfProfile,
+    formatFileSize, formatMinutes, leadDue, mediaFileProblem, mirrorSummary,
     normalizeProfile, previewTemplate, registrationLabel, retryPlanText, scheduleFromInputs, serializeOffers,
-    templateBlockReason, tezSettingsPayload, tripLabel, validateOffers, validateTezSettings, validateWaAllowed,
+    serializeWaAllowed, templateBlockReason, templateFileReason, templateMedia, tezSettingsPayload, tripLabel,
+    validateOffers, validateTezSettings, validateWaAllowed,
 } from '../src/components/dial_list/tezAutodial.js';
 import { outcomesSnapshot, serializeOutcomes } from '../src/components/dial_list/outcomeFormat.js';
 import {
@@ -106,6 +107,32 @@ test('офферы и шаблоны WhatsApp проверяются до зап
     assert.equal(mirrorSummary({ error: 'нет связи' }).text, 'Во вкладку «Успешки» не попало: нет связи');
     assert.equal(mirrorSummary({ rows_new: 2, rows_duplicate: 1 }).text, 'Во вкладке «Успешки»: новых 2, повторов 1');
     assert.equal(mirrorSummary(null), null);
+});
+
+test('шаблоны с вложением: картинка, видео и PDF разрешаются с файлом, прочие — серые', () => {
+    const image = { status: 'APPROVED', type: 'IMAGE' };
+    assert.equal(templateBlockReason(image), '');
+    assert.equal(templateBlockReason({ status: 'APPROVED', type: 'location' }), 'не поддерживается');
+    assert.equal(templateBlockReason({ status: 'REJECTED', type: 'IMAGE' }), 'не утверждён в WhatsApp');
+    assert.equal(templateMedia({ type: 'text' }), null);
+    assert.equal(templateMedia({ type: 'document' }), WA_MEDIA.DOCUMENT);
+    // Без файла не включается; файл есть — можно.
+    assert.equal(templateFileReason(image), 'нужна картинка');
+    assert.equal(templateFileReason({ ...image, media: { file_name: 'a.jpg', size: 10 } }), '');
+    assert.equal(templateFileReason({ status: 'APPROVED', type: 'TEXT' }), '');
+    // Файл до отправки: формат по типу или расширению, размер — предел типа.
+    const file = (name, type, size) => ({ name, type, size });
+    assert.equal(mediaFileProblem(image, file('promo.JPG', '', 1000)), '');
+    assert.equal(mediaFileProblem(image, file('promo', 'image/png', 1000)), '');
+    assert.match(mediaFileProblem(image, file('promo.gif', 'image/gif', 1000)), /\.jpg, \.jpeg, \.png/);
+    assert.equal(mediaFileProblem(image, file('big.png', 'image/png', 5 * 1024 * 1024 + 1)), 'Файл больше 5 МБ');
+    assert.equal(mediaFileProblem(image, file('empty.png', 'image/png', 0)), 'Файл пустой');
+    assert.equal(mediaFileProblem({ type: 'VIDEO' }, file('clip.mp4', 'video/mp4', 16 * 1024 * 1024)), '');
+    assert.equal(mediaFileProblem({ type: 'TEXT' }, file('a.png', 'image/png', 10)), 'Этому шаблону файл не нужен');
+    assert.deepEqual([500, 820 * 1024, 3.44 * 1024 * 1024].map(formatFileSize), ['1 КБ', '820 КБ', '3,4 МБ']);
+    // Тип уходит на сервер вместе с разрешёнными (по нему шлётся файл, если ChatApp не ответил).
+    assert.equal(serializeWaAllowed([{ id: 't', title: 'Акция', text: 'Бонус', params: [], type: 'image' }])[0].type, 'IMAGE');
+    assert.equal(serializeWaAllowed([{ id: 't', title: 'Акция', text: 'Бонус' }])[0].type, '');
 });
 
 test('итоги: дата уходит только у Тез, у удалённого КЦ запрос прежний', () => {

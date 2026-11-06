@@ -103,18 +103,20 @@ class _TezApp:
 
 class _ChatApp:
     def __init__(self):
-        self.sent = []
+        self.sent, self.files = [], []
+        self.templates = [{"id": "tpl-bonus", "elementName": "bonus", "data": "Здравствуйте, {{1}}! Бонус за выход",
+                           "languageCode": "ru", "status": "APPROVED", "templateType": "TEXT"}]
 
     def active_messenger_licenses(self, only_license_ids=None):
         return [(70651, 'caWhatsApp', 'Отдел продаж', '77000000000'), (70652, 'telegram', 'Бот', None)]
 
     def list_templates(self, license_id, messenger_type='caWhatsApp'):
-        return [{"id": "tpl-bonus", "elementName": "bonus", "data": "Здравствуйте, {{1}}! Бонус за выход",
-                 "languageCode": "ru", "status": "APPROVED", "templateType": "TEXT"}]
+        return [dict(t) for t in self.templates]
 
     def send_template(self, license_id, phone, template_id, params=None, tracking=None,
-                      messenger_type='caWhatsApp'):
+                      messenger_type='caWhatsApp', file=None):
         self.sent.append((license_id, phone, template_id, list(params or [])))
+        self.files.append(file)
         return 'wa-%d' % len(self.sent)
 
 
@@ -567,6 +569,68 @@ def test_whatsapp_template_goes_to_own_driver_once_a_day(env):
     assert env.refused(env.svc.send_whatsapp, OPERATOR, lead, 'tpl-bonus')[1] == 409
     assert len(env.chatapp.sent) == 1
     assert env.svc.analytics(TEZ)["whatsapp"] == {"sent": 1, "failed": 0}
+
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 64
+JPEG = b'\xff\xd8\xff\xe0' + b'\x00' * 64
+
+
+def test_whatsapp_template_with_a_picture_needs_a_file_and_sends_it(env):
+    """Владелец 06.11.2026: к шаблону с картинкой (видео, PDF) руководитель загружает файл, оператор
+    отправляет шаблон вместе с ним. Без файла шаблон не разрешается и не уходит; файл проверяется
+    по байтам, а не по имени; у каждой лицензии — свои файлы."""
+    env.enroll()
+    lead = env.leads(1)['77010000001']
+    env.chatapp.templates += [
+        {"id": "tpl-promo", "elementName": "promo", "data": "Акция недели", "languageCode": "ru",
+         "status": "APPROVED", "templateType": "IMAGE"},
+        {"id": "tpl-where", "elementName": "where", "data": "Мы здесь", "languageCode": "ru",
+         "status": "APPROVED", "templateType": "LOCATION"},
+        {"id": "tpl-wait", "elementName": "wait", "data": "Ещё на проверке", "languageCode": "ru",
+         "status": "PENDING", "templateType": "IMAGE"}]
+    promo = {"id": "tpl-promo", "title": "promo", "text": "Акция недели", "params": [], "type": "IMAGE"}
+    env.svc.save_whatsapp(TEZ, {"license_id": 70651, "allowed": []}, changed_by=1)
+    rows = {t["id"]: t for t in env.svc.whatsapp_settings(TEZ)["templates"]}
+    assert {k: (t["supported"], t["media"]) for k, t in rows.items()} == {
+        'tpl-bonus': (True, None), 'tpl-promo': (True, None), 'tpl-where': (False, None), 'tpl-wait': (False, None)}
+    # Без файла — не разрешается.
+    message, status, _kind = env.refused(env.svc.save_whatsapp, TEZ, {"license_id": 70651, "allowed": [promo]},
+                                         changed_by=1)
+    assert (message, status) == ('Шаблон «promo»: сначала загрузите картинку', 400)
+    # Файл: тип — по байтам и по типу шаблона, размер — предел картинки, текстовому файл не нужен.
+    assert env.refused(env.svc.save_wa_media, TEZ, 'tpl-promo', b'GIF89a' + b'\x00' * 20, 'promo.png')[0] == \
+        'Нужен файл JPEG или PNG'
+    assert env.refused(env.svc.save_wa_media, TEZ, 'tpl-promo', b'', 'promo.png')[0] == 'Файл пустой'
+    assert env.refused(env.svc.save_wa_media, TEZ, 'tpl-promo', PNG + b'\x00' * (5 * 1024 * 1024), 'big.png')[0] == \
+        'Файл больше 5 МБ'
+    assert env.refused(env.svc.save_wa_media, TEZ, 'tpl-bonus', PNG, 'a.png')[:2] == ('Этому шаблону файл не нужен', 409)
+    assert env.refused(env.svc.save_wa_media, TEZ, 'нет-такого', PNG, 'a.png')[1] == 404
+    saved = env.svc.save_wa_media(TEZ, 'tpl-promo', JPEG, r'C:\Users\Анель\Desktop\акция.jpeg', uploaded_by=1)
+    assert (saved["media"]["file_name"], saved["media"]["content_type"], saved["media"]["size"]) == (
+        'акция.jpg', 'image/jpeg', len(JPEG))
+    # Замена — тем же ключом.
+    saved = env.svc.save_wa_media(TEZ, 'tpl-promo', PNG, 'promo.png', uploaded_by=1)
+    assert saved["media"]["content_type"] == 'image/png'
+    assert env.one("SELECT COUNT(*) FROM dial_list_wa_media")[0] == 1
+    assert env.svc.wa_media(TEZ, 'tpl-promo') == (PNG, 'image/png', 'promo.png')
+    # Теперь разрешается; тип — из ответа ChatApp, даже если сайт его не прислал.
+    settings = env.svc.save_whatsapp(TEZ, {"license_id": 70651, "allowed": [dict(promo, type='')]}, changed_by=1)
+    assert [(t["id"], t["type"]) for t in settings["allowed"]] == [('tpl-promo', 'IMAGE')]
+    assert {t["id"]: t["media"] and t["media"]["file_name"] for t in settings["templates"]}['tpl-promo'] == 'promo.png'
+    # Оператору — текст с пометкой о картинке; ChatApp — шаблон вместе с файлом.
+    state = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)
+    assert state["whatsapp"]["templates"] == [{"id": "tpl-promo", "title": "promo",
+                                               "text": "Акция недели\n\n(с картинкой)"}]
+    env.svc.send_whatsapp(OPERATOR, lead, 'tpl-promo')
+    assert env.chatapp.sent == [(70651, '77010000001', 'tpl-promo', [])]
+    assert env.chatapp.files == [('promo.png', PNG, 'image/png')]
+    # Файл исчез (другая лицензия у отдела теперь) — отказ до попытки отправки.
+    env.q("DELETE FROM dial_list_wa_media")
+    env.q("DELETE FROM dial_list_wa_messages")
+    message, status, _kind = env.refused(env.svc.send_whatsapp, OPERATOR, lead, 'tpl-promo')
+    assert status == 409 and message.startswith('У шаблона «promo» нет файла')
+    assert env.one("SELECT COUNT(*) FROM dial_list_wa_messages")[0] == 0
+    assert len(env.chatapp.sent) == 1
 
 
 def test_requeue_takes_off_the_own_deadline(env, settle_now):

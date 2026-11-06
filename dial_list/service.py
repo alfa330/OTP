@@ -615,9 +615,24 @@ WA_TEMPLATES_CACHE_SEC = 600
 # Одному водителю — не больше одной отправки (отправляется или отправлено) за столько часов.
 WA_RESEND_HOURS = 24
 WA_RESENT_TODAY = "Сообщение этому водителю уже отправляли сегодня"
-# Отдать ChatApp можно только одобренный текстовый шаблон (без картинок и документов).
+# Отдать ChatApp можно одобренный шаблон: текстовый или с вложением, файл к которому загрузил
+# руководитель (владелец 06.11.2026). Форматы — те, что принимает ChatApp (v1.messages.send.template,
+# поле file); предел картинки — как у WhatsApp, видео и PDF — наш потолок (файл лежит в базе).
 WA_SUPPORTED_STATUS = "APPROVED"
 WA_SUPPORTED_TYPE = "TEXT"
+WA_MEDIA = {
+    "IMAGE": {"types": ("image/jpeg", "image/png"), "max_bytes": 5 * 1024 * 1024, "noun": "картинку",
+              "formats": "JPEG или PNG", "phone": "с картинкой"},
+    "VIDEO": {"types": ("video/mp4",), "max_bytes": 16 * 1024 * 1024, "noun": "видео",
+              "formats": "MP4", "phone": "с видео"},
+    "DOCUMENT": {"types": ("application/pdf",), "max_bytes": 16 * 1024 * 1024, "noun": "PDF",
+                 "formats": "PDF", "phone": "с PDF"},
+}
+WA_SUPPORTED_TYPES = (WA_SUPPORTED_TYPE,) + tuple(WA_MEDIA)
+WA_MEDIA_NAME_MAX = 200
+WA_MEDIA_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "video/mp4": ".mp4", "application/pdf": ".pdf"}
+_WA_MP4_BRANDS = {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"M4V ", b"dash",
+                  b"mmp4", b"MSNV"}
 # Живой статус оператора в сводке «Операторы» (ключ последнего события телефона за 16 ч).
 LIVE_STATUS_MAP = {
     "готов": "active", "автодозвон": "active",
@@ -823,6 +838,31 @@ def wa_preview(text, params, operator_name):
 def wa_variables_count(text):
     """Сколько разных переменных {{n}} в тексте шаблона ChatApp."""
     return len({m.group(1) for m in _WA_VARIABLE_RE.finditer(str(text or ""))})
+
+
+def wa_media_type(data):
+    """Настоящий тип файла шаблона по первым байтам (тип из браузера не проверяем — его задаёт имя
+    файла): image/jpeg | image/png | video/mp4 | application/pdf; другое — ''."""
+    head = bytes(data[:16]) if data else b""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    # MP4 — контейнер ISO с брендом MP4 (у HEIC-фото и QuickTime тот же «ftyp», но другой бренд).
+    if len(head) >= 12 and head[4:8] == b"ftyp" and head[8:12] in _WA_MP4_BRANDS:
+        return "video/mp4"
+    return ""
+
+
+def wa_media_file_name(name, content_type):
+    """Имя файла для ChatApp и руководителя: без пути и управляющих символов, с расширением по типу."""
+    base = re.split(r"[\\/]", str(name or ""))[-1]
+    base = "".join(ch for ch in base if ch.isprintable()).strip() or "file"
+    ext = WA_MEDIA_EXTENSIONS.get(content_type, "")
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    return (stem[:WA_MEDIA_NAME_MAX - len(ext)] or "file") + ext
 
 
 def live_status_of(status_key):
@@ -7796,14 +7836,88 @@ class DialListService:
 
     @staticmethod
     def _wa_template_row(raw):
-        """Шаблон ChatApp → строка для руководителя. Отправлять можно только одобренный текстовый."""
+        """Шаблон ChatApp → строка для руководителя. Отправлять можно одобренный текстовый или с
+        картинкой, видео, PDF (файл к нему — dial_list_wa_media)."""
         text = str(raw.get("data") or "")
         status = str(raw.get("status") or "").strip().upper()
         kind = str(raw.get("templateType") or "").strip().upper()
         return {"id": str(raw.get("id") or ""), "title": str(raw.get("elementName") or raw.get("id") or ""),
                 "text": text, "language": str(raw.get("languageCode") or ""), "status": status, "type": kind,
                 "params_count": wa_variables_count(text),
-                "supported": status == WA_SUPPORTED_STATUS and kind == WA_SUPPORTED_TYPE}
+                "supported": status == WA_SUPPORTED_STATUS and kind in WA_SUPPORTED_TYPES}
+
+    @staticmethod
+    def _wa_media_rows(cur, department_id, license_id):
+        """Файлы шаблонов лицензии отдела без самих байтов: {template_id: {file_name, content_type, size,
+        uploaded_at}}."""
+        cur.execute("""
+            SELECT template_id, file_name, content_type, size_bytes, uploaded_at
+            FROM dial_list_wa_media WHERE department_id = %s AND license_id = %s
+        """, (int(department_id), int(license_id)))
+        return {r[0]: {"file_name": r[1] or "", "content_type": r[2] or "", "size": int(r[3] or 0),
+                       "uploaded_at": _iso(r[4])} for r in cur.fetchall()}
+
+    def save_wa_media(self, department_id, template_id, data, file_name="", uploaded_by=None):
+        """Файл шаблона с вложением (владелец 06.11.2026): шаблон — сохранённой лицензии отдела, тип
+        шаблона ChatApp решает, какой файл нужен (WA_MEDIA), настоящий тип файла — по его байтам.
+        Повторная загрузка заменяет файл. Возвращает {template_id, media}."""
+        department_id = int(department_id)
+        template_id = str(template_id or "").strip()[:WA_TEMPLATE_ID_MAX]
+        settings = self.department_settings(department_id)
+        license_id = settings.get("wa_license_id")
+        if not license_id:
+            raise DialListError("Сначала выберите и сохраните лицензию ChatApp", 409)
+        if self._wa_client_factory is None:
+            raise DialListError("WhatsApp не настроен на сервере", 503)
+        template = next((t for t in self._wa_templates(license_id) if t["id"] == template_id), None)
+        if not template:
+            raise DialListError("Такого шаблона у лицензии нет — обновите страницу", 404)
+        media = WA_MEDIA.get(template["type"])
+        if not media:
+            raise DialListError("Этому шаблону файл не нужен", 409)
+        data = bytes(data or b"")
+        if not data:
+            raise DialListError("Файл пустой")
+        if len(data) > media["max_bytes"]:
+            raise DialListError(f"Файл больше {media['max_bytes'] // (1024 * 1024)} МБ")
+        content_type = wa_media_type(data)
+        if content_type not in media["types"]:
+            raise DialListError(f"Нужен файл {media['formats']}")
+        name = wa_media_file_name(file_name, content_type)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO dial_list_wa_media (department_id, license_id, template_id, content_type, file_name,
+                                                size_bytes, data, uploaded_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (department_id, license_id, template_id) DO UPDATE
+                SET content_type = EXCLUDED.content_type, file_name = EXCLUDED.file_name,
+                    size_bytes = EXCLUDED.size_bytes, data = EXCLUDED.data, uploaded_by = EXCLUDED.uploaded_by,
+                    uploaded_at = CURRENT_TIMESTAMP
+                RETURNING uploaded_at
+            """, (department_id, int(license_id), template_id, content_type, name, len(data),
+                  psycopg2.Binary(data), uploaded_by))
+            uploaded_at = cur.fetchone()[0]
+        log.info("dial_list: файл шаблона WhatsApp %s отдела %s загружен (%s, %d байт, пользователь %s)",
+                 template_id, department_id, content_type, len(data), uploaded_by)
+        return {"template_id": template_id,
+                "media": {"file_name": name, "content_type": content_type, "size": len(data),
+                          "uploaded_at": _iso(uploaded_at)}}
+
+    def wa_media(self, department_id, template_id):
+        """Файл шаблона сохранённой лицензии отдела: (байты, тип, имя); нет — DialListError 404."""
+        settings = self.department_settings(department_id)
+        license_id = settings.get("wa_license_id")
+        row = None
+        if license_id:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    SELECT data, content_type, file_name FROM dial_list_wa_media
+                    WHERE department_id = %s AND license_id = %s AND template_id = %s
+                """, (int(department_id), int(license_id), str(template_id or "").strip()[:WA_TEMPLATE_ID_MAX]))
+                row = cur.fetchone()
+        if not row:
+            raise DialListError("Файла у шаблона нет", 404)
+        return bytes(row[0]), row[1], row[2]
 
     def _wa_templates(self, license_id, force=False):
         """Шаблоны лицензии из ChatApp с кэшем на WA_TEMPLATES_CACHE_SEC (руководитель листает
@@ -7828,20 +7942,26 @@ class DialListService:
 
     def _wa_phone_block(self, settings, operator_name):
         """Блок whatsapp для телефона: включён ли и разрешённые шаблоны с текстом для подтверждения
-        (переменные — параметрами руководителя, водитель — словами, номера нет)."""
+        (переменные — параметрами руководителя, водитель — словами, номера нет). У шаблона с вложением
+        в конце текста — «(с картинкой)»: файл уйдёт вместе с ним."""
         templates = [t for t in (settings.get("wa_templates") or []) if isinstance(t, dict) and t.get("id")]
         enabled = bool(settings.get("wa_license_id")) and bool(templates) and self._wa_client_factory is not None
         if not enabled:
             return {"enabled": False, "templates": []}
+
+        def text_of(t):
+            text = wa_preview(t.get("text"), t.get("params"), operator_name)
+            media = WA_MEDIA.get(str(t.get("type") or "").upper())
+            return f"{text}\n\n({media['phone']})" if media else text
         return {"enabled": True,
                 "templates": [{"id": str(t.get("id")), "title": str(t.get("title") or t.get("id")),
-                               "text": wa_preview(t.get("text"), t.get("params"), operator_name)}
+                               "text": text_of(t)}
                               for t in templates]}
 
     def whatsapp_settings(self, department_id, refresh=False):
         """Настройки WhatsApp отдела для руководителя: лицензия, лицензии ChatApp, шаблоны
-        выбранной лицензии и разрешённые. ChatApp не настроен или лежит — шаблонов нет, error
-        текстом, разрешённые — из базы."""
+        выбранной лицензии (у каждого media — загруженный файл или null) и разрешённые. ChatApp не
+        настроен или лежит — шаблонов нет, error текстом, разрешённые — из базы."""
         settings = self.department_settings(department_id)
         result = {"department_id": int(department_id), "license_id": settings.get("wa_license_id"),
                   "licenses": [], "templates": [], "allowed": settings.get("wa_templates") or [],
@@ -7860,15 +7980,23 @@ class DialListService:
         except Exception as exc:
             log.warning("dial_list: ChatApp недоступен для настроек отдела %s: %s", department_id, str(exc)[:300])
             result["error"] = "ChatApp не ответил — попробуйте позже"
+        if result["templates"]:
+            # Копии строк: список шаблонов — общий кэш на 10 минут, файлы у каждого отдела свои.
+            with self.db._get_cursor() as cur:
+                media = self._wa_media_rows(cur, department_id, result["license_id"])
+            result["templates"] = [dict(t, media=media.get(t["id"])) for t in result["templates"]]
         return result
 
     def save_whatsapp(self, department_id, payload, changed_by=None):
-        """Лицензия и разрешённые шаблоны: {license_id: int|null, allowed: [{id, title, text, params}]}.
+        """Лицензия и разрешённые шаблоны: {license_id: int|null, allowed: [{id, title, text, params,
+        type}]}.
 
         license_id null — WhatsApp выключен; разрешённые шаблоны при этом сохраняются (кнопки у
         операторов нет — _wa_phone_block), чтобы включить его снова без повторной настройки.
         Шаблоны — только той лицензии, с которой отправлять (у каждой лицензии ChatApp свои):
-        ChatApp ответил — чужие id отклоняются; не ответил — сохраняем без этой сверки."""
+        ChatApp ответил — чужие id отклоняются; не ответил — сохраняем без этой сверки.
+        type — тип шаблона ChatApp: его берём из ответа ChatApp, не ответил — из запроса. Шаблон
+        с вложением (WA_MEDIA) без загруженного файла не разрешается."""
         payload = payload or {}
         license_id = self._clean_license_id(payload.get("license_id"))
         allowed_raw = payload.get("allowed") or []
@@ -7887,16 +8015,18 @@ class DialListService:
             params = raw.get("params") or []
             if not isinstance(params, list) or len(params) > WA_PARAMS_MAX:
                 raise DialListError(f"Параметров шаблона не больше {WA_PARAMS_MAX}")
+            kind = str(raw.get("type") or "").strip().upper()
             allowed.append({"id": template_id,
                             "title": str(raw.get("title") or template_id).strip()[:WA_TEMPLATE_TITLE_MAX],
                             "text": str(raw.get("text") or "")[:WA_TEMPLATE_TEXT_MAX],
-                            "params": [str(p if p is not None else "")[:WA_PARAM_MAX] for p in params]})
+                            "params": [str(p if p is not None else "")[:WA_PARAM_MAX] for p in params],
+                            "type": kind if kind in WA_SUPPORTED_TYPES else ""})
         current = self.department_settings(department_id)
         if not current.get("configured"):
             raise DialListError("Отдел не подключён к разделу", 404)
         if license_id and allowed and self._wa_client_factory is not None:
             try:
-                known = {t["id"] for t in self._wa_templates(license_id)}
+                known = {t["id"]: t for t in self._wa_templates(license_id)}
             except DialListError as exc:
                 known = None
                 log.warning("dial_list: шаблоны лицензии %s не сверены при сохранении (отдел %s): %s", license_id,
@@ -7905,6 +8035,16 @@ class DialListService:
             if foreign:
                 raise DialListError(f"Шаблона «{foreign[0]['title']}» нет у выбранной лицензии — сохраните лицензию "
                                     "и выберите шаблоны из её списка")
+            if known is not None:
+                for t in allowed:
+                    t["type"] = known[t["id"]].get("type") or t["type"]
+        if license_id and any(t["type"] in WA_MEDIA for t in allowed):
+            with self.db._get_cursor() as cur:
+                media = self._wa_media_rows(cur, department_id, license_id)
+            missing = [t for t in allowed if t["type"] in WA_MEDIA and t["id"] not in media]
+            if missing:
+                need = WA_MEDIA[missing[0]["type"]]["noun"]
+                raise DialListError(f"Шаблон «{missing[0]['title']}»: сначала загрузите {need}")
         with self.db._get_cursor() as cur:
             cur.execute("""
                 UPDATE dial_list_department_settings
@@ -7937,6 +8077,21 @@ class DialListService:
             lead_id = str(uuid.UUID(str(lead_id)))
         except (ValueError, AttributeError, TypeError):
             raise DialListError("Водитель не найден", 404)
+        # Шаблон с вложением (06.11.2026): файл, который загрузил руководитель, уходит вместе с ним.
+        # Его нет — отказ до строки outbox: попытки отправки не было.
+        media_file = None
+        media = WA_MEDIA.get(str(template.get("type") or "").upper())
+        if media:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    SELECT file_name, data, content_type FROM dial_list_wa_media
+                    WHERE department_id = %s AND license_id = %s AND template_id = %s
+                """, (ctx["department_id"], int(license_id), str(template.get("id"))))
+                found = cur.fetchone()
+            if not found:
+                raise DialListError(f"У шаблона «{template.get('title') or template.get('id')}» нет файла — "
+                                    f"руководителю нужно загрузить {media['noun']} в настройках WhatsApp", 409)
+            media_file = (found[0], bytes(found[1]), found[2])
         attempt_ref = None
         if attempt_id:
             try:
@@ -7979,7 +8134,8 @@ class DialListService:
         title = str(template.get("title") or template.get("id"))
         try:
             provider_id = self._wa_client().send_template(int(license_id), phone, str(template.get("id")), params,
-                                                          tracking=message_id)
+                                                          tracking=message_id,
+                                                          **({"file": media_file} if media_file else {}))
         except Exception as exc:
             error = scrub_digits(str(exc))[:500]
             with self.db._get_cursor() as cur:

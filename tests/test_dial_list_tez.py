@@ -99,6 +99,14 @@ class _Svc:
         self.calls.append(('wa_save', department_id, payload))
         return {"license_id": payload.get('license_id')}
 
+    def save_wa_media(self, department_id, template_id, data, file_name="", uploaded_by=None):
+        self.calls.append(('wa_media_save', department_id, template_id, len(data), file_name, uploaded_by))
+        return {"template_id": template_id, "media": {"file_name": file_name}}
+
+    def wa_media(self, department_id, template_id):
+        self.calls.append(('wa_media', department_id, template_id))
+        return b'\x89PNG\r\n\x1a\nxx', 'image/png', 'promo.png'
+
     def import_leads(self, department_id, uploaded_by, file_name, rows, period=None, require_iin=True):
         self.calls.append(('import', department_id, file_name, len(rows), require_iin, period))
         return {"rows_total": len(rows), "rows_new": len(rows), "rows_duplicate": 0, "rows_invalid": 0,
@@ -279,6 +287,22 @@ class ManagerRoutesTests(unittest.TestCase):
         self.assertIn(('wa_save', 560, {"license_id": 70651, "allowed": []}), svc.calls)
         self.assertIn(('trip_check', 'руководитель'), svc.calls)
 
+    def test_whatsapp_template_file_upload_and_preview(self):
+        svc = _Svc()
+        client = _client(svc, role='admin', user_id=9)
+        resp = client.put('/api/dial_list/departments/560/whatsapp/media/tpl-promo',
+                          data={"file": (io.BytesIO(b'\x89PNG\r\n\x1a\n' + b'0' * 10), 'promo.png')},
+                          content_type='multipart/form-data')
+        self.assertEqual((resp.status_code, resp.get_json()["media"]), (200, {"file_name": 'promo.png'}))
+        self.assertIn(('wa_media_save', 560, 'tpl-promo', 18, 'promo.png', 9), svc.calls)
+        resp = client.get('/api/dial_list/departments/560/whatsapp/media/tpl-promo')
+        self.assertEqual((resp.status_code, resp.mimetype, resp.headers.get('Cache-Control')),
+                         (200, 'image/png', 'no-store'))
+        self.assertEqual(resp.data, b'\x89PNG\r\n\x1a\nxx')
+        # Без файла — 400; у отдела удалённого КЦ таких настроек нет.
+        self.assertEqual(client.put('/api/dial_list/departments/560/whatsapp/media/tpl-promo').status_code, 400)
+        self.assertEqual(client.get('/api/dial_list/departments/1954/whatsapp/media/tpl-promo').status_code, 409)
+
     def test_tez_supervisor_scope_gets_its_id(self):
         svc = _Svc(scope=[TEZ])
         _client(svc, role='sv', supervisor_code='tez', user_id=3).get('/api/dial_list/departments?profile=tez')
@@ -386,6 +410,22 @@ class RulesTests(unittest.TestCase):
     def test_whatsapp_params(self):
         self.assertEqual(dial_service.wa_params(['{first_name}', '{operator}', 'бонус'], 'Иванов Иван Иванович',
                                                 'Айгерим'), ['Иван', 'Айгерим', 'бонус'])
+
+    def test_whatsapp_file_type_is_read_from_the_bytes(self):
+        kind = dial_service.wa_media_type
+        self.assertEqual(kind(b'\xff\xd8\xff\xdb' + b'0' * 8), 'image/jpeg')
+        self.assertEqual(kind(b'\x89PNG\r\n\x1a\n' + b'0' * 8), 'image/png')
+        self.assertEqual(kind(b'%PDF-1.7\n'), 'application/pdf')
+        self.assertEqual(kind(b'\x00\x00\x00\x20ftypisom\x00\x00\x02\x00'), 'video/mp4')
+        # Тот же контейнер у фото iPhone (HEIC) и QuickTime — это не MP4; GIF и пустое — не файл шаблона.
+        for other in (b'\x00\x00\x00\x18ftypheic\x00\x00\x00\x00', b'\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00',
+                      b'GIF89a\x01\x00', b'', None):
+            self.assertEqual(kind(other), '', other)
+        name = dial_service.wa_media_file_name
+        self.assertEqual(name(r'C:\Users\Анель\акция.jpeg', 'image/jpeg'), 'акция.jpg')
+        self.assertEqual(name('/tmp/promo', 'image/png'), 'promo.png')
+        self.assertEqual(name('', 'application/pdf'), 'file.pdf')
+        self.assertEqual(len(name('я' * 500 + '.mp4', 'video/mp4')), dial_service.WA_MEDIA_NAME_MAX)
 
 
 class NumberNeverReachesOperatorTezTests(unittest.TestCase):

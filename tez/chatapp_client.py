@@ -241,8 +241,12 @@ class ChatAppClient:
         return [item for item in (items or []) if isinstance(item, dict)]
 
     def send_template(self, license_id, phone, template_id, params=None, tracking=None,
-                      messenger_type='caWhatsApp'):
+                      messenger_type='caWhatsApp', file=None):
         """Отправить шаблон на номер (цифры без «+»). Возвращает id сообщения ChatApp.
+
+        file — (имя, байты, тип) для шаблона с картинкой, видео или PDF (06.11.2026): тогда запрос —
+        формой (multipart): template[id], template[params][n], fileName и сам файл полем file, как в
+        примере ChatApp wabaSendTemplateFile; без файла — JSON, как раньше.
 
         Повторов при сбое НЕТ (в отличие от _get): сообщение могло уйти, а ответ — потеряться, и
         повтор прислал бы водителю второе. Неоднозначный ответ — ChatAppError: вызывающий пишет
@@ -251,16 +255,30 @@ class ChatAppClient:
         digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
         if not digits:
             raise ChatAppError('ChatApp: пустой номер')
-        payload = {'template': {'id': str(template_id), 'params': [str(p) for p in (params or [])]}}
+        params = [str(p) for p in (params or [])]
+        payload = {'template': {'id': str(template_id), 'params': params}}
         if tracking:
             payload['tracking'] = str(tracking)[:200]
+        form = None
+        if file:
+            file_name, data, content_type = file
+            form = [('template[id]', str(template_id))]
+            form += [(f'template[params][{i}]', p) for i, p in enumerate(params)]
+            form.append(('fileName', str(file_name)))
+            if tracking:
+                form.append(('tracking', str(tracking)[:200]))
         path = (f'/v1/licenses/{int(license_id)}/messengers/{messenger_type}'
                 f'/chats/{digits}/messages/template')
         token = self.access_token()
         for retry_auth in (True, False):
             try:
-                r = self.session.post(f'{self.api_url}{path}', json=payload,
-                                      headers={'Authorization': token, 'Lang': 'ru'}, timeout=HTTP_TIMEOUT)
+                if form is not None:
+                    r = self.session.post(f'{self.api_url}{path}', data=form,
+                                          files={'file': (str(file_name), data, content_type)},
+                                          headers={'Authorization': token, 'Lang': 'ru'}, timeout=HTTP_TIMEOUT)
+                else:
+                    r = self.session.post(f'{self.api_url}{path}', json=payload,
+                                          headers={'Authorization': token, 'Lang': 'ru'}, timeout=HTTP_TIMEOUT)
             except requests.RequestException as exc:
                 raise ChatAppError(f'ChatApp: нет ответа ({exc.__class__.__name__})')
             body = _json_or_raise(r)

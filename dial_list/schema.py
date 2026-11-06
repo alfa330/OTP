@@ -41,6 +41,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_attempt_offers       какие офферы оператор отметил в итоге звонка.
     dial_list_wa_messages          журнал и outbox отправок шаблона WhatsApp
                                    (ChatApp) водителю: строка пишется до запроса.
+    dial_list_wa_media             файл шаблона с вложением (картинка, видео, PDF):
+                                   загружает руководитель, уходит в ChatApp с шаблоном.
     dial_list_sign_report_chats    в какие Telegram-группы отдел шлёт картинку
                                    «Подписание водителей по городам» (10:00 и 19:00)
                                    и чем кончилась последняя отправка.
@@ -474,6 +476,25 @@ DDL = [
         error TEXT NOT NULL DEFAULT '',
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
         sent_at TIMESTAMP WITH TIME ZONE
+    )
+    """,
+    # Файл шаблона WhatsApp с вложением (владелец 06.11.2026): картинку, видео или PDF к шаблону типа
+    # IMAGE / VIDEO / DOCUMENT загружает руководитель, при отправке он уходит в ChatApp вместе с шаблоном
+    # (поле file). Ключ — лицензия и шаблон: у каждой лицензии ChatApp свои шаблоны. Файлов единицы
+    # (разрешённых шаблонов не больше 10) и они небольшие (картинка — до 5 МБ, видео и PDF — до 16 МБ),
+    # поэтому лежат здесь же, а не в бакете.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_wa_media (
+        department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+        license_id INTEGER NOT NULL,
+        template_id VARCHAR(64) NOT NULL,
+        content_type VARCHAR(64) NOT NULL,
+        file_name VARCHAR(200) NOT NULL DEFAULT '',
+        size_bytes INTEGER NOT NULL,
+        data BYTEA NOT NULL,
+        uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (department_id, license_id, template_id)
     )
     """,
     # Город водителя (владелец, 19.10.2026: отчёт «Подписание водителей по городам»): из колонки

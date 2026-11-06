@@ -143,6 +143,8 @@
                                                              меняет только админ)
     GET/PUT /api/dial_list/departments/<id>/offers           офферы автообзвона Тез {items: [...]}
     GET/PUT /api/dial_list/departments/<id>/whatsapp         лицензия и разрешённые шаблоны WhatsApp (Тез)
+    GET/PUT /api/dial_list/departments/<id>/whatsapp/media/<template_id>  файл шаблона с картинкой, видео
+                                                             или PDF: PUT multipart file, GET — сам файл (Тез)
     POST    /api/dial_list/departments/<id>/trips/check      внеочередная проверка поездок в TEZ APP (Тез)
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
     GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
@@ -247,12 +249,14 @@ from io import BytesIO
 from flask import Blueprint, jsonify, request, send_file
 
 from . import calls_export as calls_export_report
-from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
+from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT, WA_MEDIA,
                       DialListError, DialListService, parse_period, pilot_allows, webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
 LEADS_MAX_FILE_SIZE_MB = 10
+# Самый большой файл шаблона WhatsApp (видео и PDF) — дальше загрузку не читаем.
+WA_MEDIA_MAX_BYTES = max(m["max_bytes"] for m in WA_MEDIA.values())
 LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -958,6 +962,29 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                             **svc.save_whatsapp(department_id, payload, changed_by=requester_id)}), 200
         refresh = (request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
         return jsonify({"status": "success", **svc.whatsapp_settings(department_id, refresh=refresh)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/whatsapp/media/<template_id>',
+              methods=['GET', 'PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def whatsapp_media(department_id, template_id):
+        """Файл шаблона с картинкой, видео или PDF (06.11.2026): PUT multipart file — загрузить или
+        заменить (ответ {template_id, media}), GET — сам файл (миниатюра у руководителя). Шаблон —
+        сохранённой лицензии отдела, нужный тип файла — по типу шаблона ChatApp."""
+        requester_id, _scope = _tez_department(department_id)
+        if request.method == 'PUT':
+            file_storage = request.files.get('file')
+            if not file_storage:
+                raise DialListError("Файл не передан")
+            # Предел самого большого вида вложения: дальше читать незачем — сервис всё равно откажет.
+            raw = file_storage.read(WA_MEDIA_MAX_BYTES + 1) or b''
+            return jsonify({"status": "success",
+                            **svc.save_wa_media(department_id, template_id, raw, file_storage.filename or '',
+                                                uploaded_by=requester_id)}), 200
+        data, content_type, file_name = svc.wa_media(department_id, template_id)
+        response = send_file(BytesIO(data), mimetype=content_type, as_attachment=False, download_name=file_name)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
 
     @bp.route('/api/dial_list/departments/<int:department_id>/trips/check', methods=['POST', 'OPTIONS'])
     @require_api_key

@@ -34,8 +34,9 @@ class _Session:
             raise item
         return item
 
-    def post(self, url, json=None, headers=None, timeout=None, data=None):
+    def post(self, url, json=None, headers=None, timeout=None, data=None, files=None):
         self.sent.append(('POST', url, json, dict(headers or {})))
+        self.forms = getattr(self, 'forms', []) + [(data, files)]
         return self._next(self.posts)
 
     def get(self, url, params=None, headers=None, timeout=None):
@@ -73,6 +74,23 @@ class ChatAppTemplatesTests(unittest.TestCase):
                                                  '/chats/77010000001/messages/template'))
         self.assertEqual(payload, {"template": {"id": "tpl-bonus", "params": ["Иван"]}, "tracking": "out-1"})
         self.assertEqual(headers["Authorization"], 'tok-1')
+
+    def test_template_with_a_file_goes_as_a_form(self):
+        """Шаблон с картинкой (06.11.2026): формой, как в примере ChatApp wabaSendTemplateFile —
+        template[id], template[params][n], fileName, tracking и сам файл полем file; JSON не уходит."""
+        session = _Session(posts=[_Resp({"success": True, "data": {"id": "msg-88"}})])
+        client, _store = _client(session)
+        png = b'\x89PNG\r\n\x1a\n' + b'0' * 10
+        self.assertEqual(client.send_template(70651, '77010000001', 'tpl-promo', ['Иван'], tracking='out-2',
+                                              file=('promo.png', png, 'image/png')), 'msg-88')
+        _method, url, payload, headers = session.sent[0]
+        self.assertTrue(url.endswith('/chats/77010000001/messages/template'))
+        self.assertIsNone(payload)
+        data, files = session.forms[0]
+        self.assertEqual(data, [('template[id]', 'tpl-promo'), ('template[params][0]', 'Иван'),
+                                ('fileName', 'promo.png'), ('tracking', 'out-2')])
+        self.assertEqual(files, {'file': ('promo.png', png, 'image/png')})
+        self.assertEqual(headers['Authorization'], 'tok-1')
 
     def test_network_failure_is_not_retried(self):
         session = _Session(posts=[requests.ConnectionError('reset'), _Resp({"success": True, "data": {"id": "x"}})])
