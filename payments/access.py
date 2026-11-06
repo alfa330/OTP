@@ -25,9 +25,9 @@
 2. **Что человек видит и делает внутри** — по ролям процесса (ТЗ «Закуп и
    оплата», п. 3). Роли раздаются в самом разделе, вкладка «Участники», и
    хранятся в payment_role_members: «Утвердитель», «Бухгалтерия», «Финансовый
-   отдел», «Ответственный за учёт имущества» и с 04.11.2026 «Helpdesk IT»
-   (проверяет IT-закупы после руководителя — просьба владельца). Инициатор и
-   руководитель — люди конкретной заявки. Главное правило ТЗ (п. 16): каждый
+   отдел» и «Helpdesk IT и учёт имущества» — ответственный за учёт имущества; с
+   04.11.2026 он же проверяет IT-закупы после руководителя (владелец 06.11.2026:
+   это один человек — одна роль). Инициатор и руководитель — люди конкретной заявки. Главное правило ТЗ (п. 16): каждый
    видит только те задачи, по которым от него требуется действие.
 """
 
@@ -47,7 +47,6 @@ ROLE_APPROVER = 'approver'
 ROLE_ACCOUNTING = 'accounting'
 ROLE_FINANCE = 'finance'
 ROLE_ASSET_KEEPER = 'asset_keeper'
-ROLE_HELPDESK = 'helpdesk'
 
 # Роль, которой нужен реестр целиком, одна — бухгалтерия: она проверяет «историю
 # предыдущих оплат» (п. 8) и ведёт закрывающие документы по всем заявкам, а
@@ -162,16 +161,16 @@ def boards_for(ctx, roles=(), is_manager=False):
     """Доски, которые человеку показываются (пп. 7–9).
 
     «Согласование» — утверждающим и тем, у кого есть заявки подчинённых на
-    согласовании (`is_manager`); «Helpdesk IT», «Бухгалтерия» и «Финансовый отдел» —
-    участникам этих ролей. Администратор раздела видит все. Порядок — по ходу заявки:
-    руководитель, Helpdesk IT, оплата.
+    согласовании (`is_manager`); «Helpdesk IT» — роли «Helpdesk IT и учёт имущества»;
+    «Бухгалтерия» и «Финансовый отдел» — участникам этих ролей. Администратор раздела
+    видит все. Порядок — по ходу заявки: руководитель, Helpdesk IT, оплата.
     """
     owned = _roles(roles)
     admin = is_section_admin(ctx)
     boards = []
     if admin or ROLE_APPROVER in owned or is_manager:
         boards.append(BOARD_APPROVAL)
-    if admin or ROLE_HELPDESK in owned:
+    if admin or ROLE_ASSET_KEEPER in owned:
         boards.append(BOARD_HELPDESK)
     if admin or ROLE_ACCOUNTING in owned:
         boards.append(BOARD_ACCOUNTING)
@@ -365,9 +364,10 @@ def can_manage_assets(ctx, roles=()):
 
 def can_check_stock(ctx, roles=()):
     """Что лежит на складе (имущество «На складе»): Helpdesk IT проверяет по нему, нет ли
-    нужного в наличии (просьба владельца 04.11.2026). Реестр целиком им не открывается —
-    только наличие; ведущие реестр видят его и так."""
-    return can_view_assets(ctx, roles) or ROLE_HELPDESK in _roles(roles)
+    нужного в наличии (просьба владельца 04.11.2026). Helpdesk IT — тот же ответственный за
+    учёт имущества (06.11.2026), реестр он видит и так; этап, переданный человеку вне роли,
+    открывает склад через `?request=` (routes.stock)."""
+    return can_view_assets(ctx, roles)
 
 
 def sees_initiator_assets(ctx, request, roles=(), participant=False):
@@ -383,7 +383,7 @@ def sees_initiator_assets(ctx, request, roles=(), participant=False):
         return False
     if participant:
         return True
-    if is_section_admin(ctx) or _roles(roles) & {ROLE_HELPDESK, ROLE_APPROVER, ROLE_ASSET_KEEPER, ROLE_ACCOUNTING}:
+    if is_section_admin(ctx) or _roles(roles) & {ROLE_APPROVER, ROLE_ASSET_KEEPER, ROLE_ACCOUNTING}:
         return True
     me = user_id(ctx)
     return me is not None and me in (_int(request.get('initiator_id')), _int(request.get('manager_id')))

@@ -40,17 +40,17 @@ ROLE_APPROVER = 'approver'
 ROLE_ACCOUNTING = 'accounting'
 ROLE_FINANCE = 'finance'
 ROLE_ASSET_KEEPER = 'asset_keeper'
-ROLE_HELPDESK = 'helpdesk'
 
-# Подписи — дословно из п. 3 ТЗ. «Helpdesk IT» — сверх ТЗ, просьба владельца 04.11.2026.
+# Подписи — дословно из п. 3 ТЗ. Ответственный за учёт имущества с 06.11.2026 — «Helpdesk IT и
+# учёт имущества»: IT-закупы проверяет он же, это один человек (владелец), и выбирать его в
+# «Участниках» дважды незачем.
 ROLE_LABELS = {
     ROLE_INITIATOR: 'Инициатор',
     ROLE_MANAGER: 'Непосредственный руководитель',
     ROLE_APPROVER: 'Утвердитель',
     ROLE_ACCOUNTING: 'Бухгалтерия',
     ROLE_FINANCE: 'Финансовый отдел',
-    ROLE_ASSET_KEEPER: 'Ответственный за учёт имущества',
-    ROLE_HELPDESK: 'Helpdesk IT',
+    ROLE_ASSET_KEEPER: 'Helpdesk IT и учёт имущества',
 }
 
 # ─── Этапы (п. 2, п. 20) ─────────────────────────────────────────────────────
@@ -196,14 +196,18 @@ SUBTASKS = (
     # Просьба владельца 04.11.2026: IT-закуп (категория с отметкой «Helpdesk IT») после
     # руководителя уходит в Helpdesk IT. Они проверяют, нет ли такого в наличии и что уже
     # числится за сотрудником, и либо выдают из наличия — заявка закрывается без закупа, —
-    # либо прикладывают варианты поставщиков и ставят цены позиций по рекомендуемому. Сумма
-    # заявки после этого настоящая, и утверждающего матрица (п. 6) выбирает уже по ней.
-    # Ступень «Согласование»: это ещё решение, покупать ли и у кого.
+    # либо прикладывают варианты поставщиков, ставят цены позиций по рекомендуемому и
+    # выбирают товар или услугу, категорию учёта и способ оплаты (06.11.2026: инициатор
+    # пишет только что, сколько и пожелания). Сумма заявки после этого настоящая, и
+    # утверждающего матрица (п. 6) выбирает уже по ней. Ступень «Согласование»: это ещё
+    # решение, покупать ли и у кого. Выполняет роль «Helpdesk IT и учёт имущества» — с
+    # 06.11.2026 это одна роль (владелец: один человек).
     {
-        'kind': KIND_IT, 'position': 12, 'stage': STAGE_APPROVAL, 'role': ROLE_HELPDESK,
+        'kind': KIND_IT, 'position': 12, 'stage': STAGE_APPROVAL, 'role': ROLE_ASSET_KEEPER,
         'title': 'Проверка Helpdesk IT', 'board': BOARD_HELPDESK, 'statuses': ('new', 'in_progress'),
         'brief': 'Проверьте, нет ли такого в наличии и что уже числится за сотрудником. Нет в наличии — '
-                 'приложите варианты поставщиков и поставьте цены позиций по рекомендуемому.',
+                 'приложите варианты поставщиков, поставьте цены позиций по рекомендуемому и выберите '
+                 'способ оплаты.',
     },
     # Просьба владельца 15.10.2026: компанию в новом закупе инициатор указывает, если знает.
     # Не знает — оставляет поле пустым, и компанию указывает бухгалтерия. С 03.11.2026 (тоже
@@ -350,7 +354,7 @@ BOARDS = (
     },
     {
         'code': BOARD_HELPDESK, 'title': 'Helpdesk IT / Проверка IT-закупов', 'short': 'Helpdesk IT',
-        'kinds': (KIND_IT,), 'roles': (ROLE_HELPDESK,),
+        'kinds': (KIND_IT,), 'roles': (ROLE_ASSET_KEEPER,),
         'columns': (
             ('new', 'Новые'),
             ('in_progress', 'В работе'),
@@ -1219,8 +1223,9 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     обязательными не называет — их заполняют, когда они есть. Компания у нового
     закупа — исключение (просьба владельца 15.10.2026): не знает её инициатор —
     её укажет бухгалтерия после руководителя (needs_entity_step). У IT-закупа
-    (владелец 04.11.2026) инициатор пишет, что и сколько нужно, а поставщиков и
-    цены приносит Helpdesk IT — их при отправке не требуем (suppliers_by_helpdesk).
+    (владелец 04.11.2026, 06.11.2026) инициатор пишет, что и сколько нужно, срок и
+    пожелания, а поставщиков, цены, товар или услугу, категорию учёта и способ
+    оплаты выбирает Helpdesk IT — при отправке их не требуем (suppliers_by_helpdesk).
 
     `attachments` — вложения заявки (list of {'kind'}); `card_number_ok` — номер
     карты введён и годится (сам номер сюда не передаётся). `invoice_required` —
@@ -1280,47 +1285,62 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
     # ── Новый закуп (п. 4.1) ──
     if not request.get('category_id'):
         missing.append('Выберите категорию закупа')
-    if not str(request.get('justification') or '').strip():
+    if not helpdesk and not str(request.get('justification') or '').strip():
+        # У IT-закупа это «Пожелания» — их пишут, если есть (владелец 06.11.2026).
         missing.append('Опишите закуп и обоснуйте, зачем он нужен')
     if not request.get('due_on'):
         missing.append('Укажите желаемый срок')
-    if request.get('object_type') not in OBJECT_TYPE_LABELS:
-        missing.append('Выберите тип объекта: товар или услуга')
-    elif request.get('object_type') == OBJECT_GOODS and request.get('accounting_category') not in ACCOUNTING_CATEGORY_LABELS:
-        # П. 10: у товара «Категория учёта приобретения» обязательна.
-        missing.append('Выберите категорию учёта: расходный материал или имущество, подлежащее учёту')
+    if helpdesk:
+        # IT-закуп (владелец 06.11.2026): «мне нужна мышка», пожелания — комментарием. Товар
+        # или услугу, категорию учёта, поставщиков, цены и способ оплаты выбирает Helpdesk IT
+        # (missing_for_action, действие `it_offers`).
+        return missing
+    missing += object_missing(request)
     if method not in PAYMENT_METHOD_LABELS:
-        missing.append('Выберите способ оплаты: оплата счёта или пополнение карты')
+        missing.append(PAYMENT_METHOD_MISSING)
 
-    # ── Поставщики (пп. 4.2–4.3) — у IT-закупа их приложит Helpdesk IT ──
-    if not helpdesk:
-        missing += offers_missing(request, offers, settings)
+    # ── Поставщики (пп. 4.2–4.3) ──
+    missing += offers_missing(request, offers, settings)
 
     # ── Оплата (п. 5) ──
-    if method == METHOD_CARD and helpdesk and request.get('card_recipient') == CARD_SUPPLIER \
-            and not request.get('counterparty_id'):
-        # IT-закуп: поставщика ещё выберет Helpdesk IT — чью карту пополнять, пока неизвестно.
-        missing.append(IT_SUPPLIER_CARD)
-    elif method == METHOD_CARD:
-        if request.get('card_recipient') not in CARD_RECIPIENT_LABELS:
-            missing.append('Выберите, чью карту пополнить: сотрудника или поставщика')
-        if not str(request.get('card_holder_name') or '').strip():
-            missing.append('Укажите ФИО сотрудника' if request.get('card_recipient') == CARD_EMPLOYEE
-                           else 'Укажите ФИО владельца карты')
-        if not card_number_ok:
-            missing.append('Укажите полный номер карты')
-        if not str(request.get('payment_purpose') or '').strip():
-            missing.append('Укажите назначение перевода')
-    elif method == METHOD_INVOICE and ('invoice' in kinds or request.get('invoice_number') or request.get('invoice_date')):
+    missing += card_missing(request, card_number_ok=card_number_ok)
+    if method == METHOD_INVOICE and ('invoice' in kinds or request.get('invoice_number') or request.get('invoice_date')):
         # Счёт у нового закупа обычно появляется после согласования; но если его
         # уже приложили — номер и дата нужны сразу: по ним ищется дубль (п. 8).
         missing += _invoice_missing(request, kinds)
     return missing
 
 
-# Карту поставщика у IT-закупа указать не из чего: поставщика выберет Helpdesk IT.
-IT_SUPPLIER_CARD = ('Карту поставщика у IT-закупа не указать: поставщика выберет Helpdesk IT. '
-                    'Выберите карту сотрудника или оплату счёта')
+PAYMENT_METHOD_MISSING = 'Выберите способ оплаты: оплата счёта или пополнение карты'
+
+
+def object_missing(data):
+    """Тип объекта и категория учёта (п. 10). `data` — поля заявки у инициатора либо то,
+    что выбрал Helpdesk IT у IT-закупа (06.11.2026): правила одни."""
+    if data.get('object_type') not in OBJECT_TYPE_LABELS:
+        return ['Выберите тип объекта: товар или услуга']
+    if data.get('object_type') == OBJECT_GOODS and data.get('accounting_category') not in ACCOUNTING_CATEGORY_LABELS:
+        # П. 10: у товара «Категория учёта приобретения» обязательна.
+        return ['Выберите категорию учёта: расходный материал или имущество, подлежащее учёту']
+    return []
+
+
+def card_missing(data, *, card_number_ok=True):
+    """Данные пополнения карты (пп. 5.2–5.4), когда способ оплаты — карта. `card_number_ok` —
+    номер карты введён и годится (сам номер сюда не передаётся)."""
+    if data.get('payment_method') != METHOD_CARD:
+        return []
+    missing = []
+    if data.get('card_recipient') not in CARD_RECIPIENT_LABELS:
+        missing.append('Выберите, чью карту пополнить: сотрудника или поставщика')
+    if not str(data.get('card_holder_name') or '').strip():
+        missing.append('Укажите ФИО сотрудника' if data.get('card_recipient') == CARD_EMPLOYEE
+                       else 'Укажите ФИО владельца карты')
+    if not card_number_ok:
+        missing.append('Укажите полный номер карты')
+    if not str(data.get('payment_purpose') or '').strip():
+        missing.append('Укажите назначение перевода')
+    return missing
 
 
 def _invoice_missing(request, kinds):
@@ -1526,6 +1546,13 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
         if total > 0 and price > 0 and total != price:
             missing.append('Сумма позиций — %s, а у рекомендуемого поставщика — %s: поставьте цены позиций '
                            'по нему' % (fmt_money(total), fmt_money(price)))
+        # Товар или услугу, категорию учёта и способ оплаты выбирает тоже Helpdesk IT — вместе с
+        # поставщиком (владелец 06.11.2026). `payment` — что он прислал; чего не прислал — как в заявке.
+        chosen = {**request, **(fields.get('payment') or {})}
+        missing += object_missing(chosen)
+        if chosen.get('payment_method') not in PAYMENT_METHOD_LABELS:
+            missing.append(PAYMENT_METHOD_MISSING)
+        missing += card_missing(chosen, card_number_ok=fields.get('card_number_ok', True))
     if action == 'it_stock' and not fields.get('stock_assets') and not comment:
         missing.append('Выберите, что выдаёте из наличия, или напишите об этом в комментарии')
     if action == 'docs_close' and CLOSING_DOC_ORDER.get(request.get('closing_docs_status'), 0) < CLOSING_DOC_ORDER[DOCS_SCAN]:

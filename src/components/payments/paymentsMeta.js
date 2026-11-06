@@ -137,8 +137,7 @@ export const ROLE_LABELS = {
     approver: 'Утвердитель',
     accounting: 'Бухгалтерия',
     finance: 'Финансовый отдел',
-    asset_keeper: 'Ответственный за учёт имущества',
-    helpdesk: 'Helpdesk IT',
+    asset_keeper: 'Helpdesk IT и учёт имущества',
 };
 
 /* Роли, у которых есть список участников (вкладка «Участники»). Инициатор и
@@ -152,10 +151,15 @@ export const MEMBER_ROLES = [
         hint: 'Проверяет и оплачивает счета, принимает закрывающие документы. Задача назначается отделу — её видит каждый из списка.' },
     { code: 'finance', label: 'Финансовый отдел',
         hint: 'Выполняет согласованные пополнения карт и видит полные номера карт. В согласовании закупа не участвует.' },
-    { code: 'asset_keeper', label: 'Ответственный за учёт имущества',
-        hint: 'Ставит купленное имущество на учёт: инвентарный номер, город, подразделение, ответственный. Ведёт реестр имущества.' },
-    { code: 'helpdesk', label: 'Helpdesk IT',
-        hint: 'Проверяет IT-закупы после руководителя: нет ли нужного в наличии и что уже числится за сотрудником. Есть — выдаёт из наличия, нет — подбирает поставщиков и ставит цены. IT-закуп — заявка с категорией, у которой отметка «Helpdesk IT». Задачу видит каждый из списка.' },
+    /* Helpdesk IT и учёт имущества — один человек (владелец 06.11.2026): одна роль, выбирать дважды незачем. */
+    { code: 'asset_keeper', label: 'Helpdesk IT и учёт имущества',
+        hint: {
+            intro: 'Проверяет IT-закупы после руководителя и ведёт реестр имущества.',
+            options: [
+                ['IT-закуп', 'нет ли нужного в наличии и что уже числится за сотрудником; есть — выдаёт из наличия, нет — подбирает поставщика, цены и способ оплаты. IT-закуп — заявка с категорией, у которой отметка «Helpdesk IT»'],
+                ['Имущество', 'ставит купленное на учёт: инвентарный номер, город, подразделение, ответственный'],
+            ],
+        } },
 ];
 
 export const ATTACHMENT_LABELS = {
@@ -368,18 +372,22 @@ export const HINTS = {
         outro: 'Отметка — только у категории верхнего уровня; её подкатегории идут тем же порядком.',
     },
     helpdeskSuppliers: {
-        intro: 'Это IT-закуп: после руководителя заявку получит Helpdesk IT.',
-        outro: 'Они проверят, нет ли такого в наличии и что уже числится за вами, подберут поставщиков и поставят цены — по этой сумме раздел выберет утверждающего.',
+        intro: 'Это IT-закуп: поставщиков, цены и способ оплаты выбирает Helpdesk IT.',
+        outro: 'Здесь они только для просмотра — по этой сумме раздел выбрал утверждающего.',
     },
     itemsHelpdesk: {
-        intro: 'Каждая строка — что нужно и сколько.',
-        outro: 'Цену можно не указывать: это IT-закуп — поставщиков и цены подберёт Helpdesk IT, а сумма заявки сложится уже из них.',
+        intro: 'Каждая строка — что нужно и сколько: «Мышка беспроводная — 1 шт.».',
+        outro: 'Цену можно не указывать: это IT-закуп — после руководителя Helpdesk IT проверит, нет ли такого в наличии, и подберёт поставщика, цены и способ оплаты.',
+    },
+    wishes: {
+        intro: 'Модель, характеристики, ссылка на товар — если важно.',
+        outro: 'Можно не писать: Helpdesk IT подберёт сам.',
     },
     itStock: {
         intro: 'Есть ли нужное у вас в наличии — среди имущества «На складе».',
         options: [
-            ['Нет', 'приложите варианты поставщиков и поставьте цены — заявка уйдёт на утверждение'],
-            ['Есть', 'выдайте из наличия — заявка закроется без закупа и оплаты'],
+            ['Нет', 'подходящего нет: приложите варианты поставщиков, цены и способ оплаты — заявка уйдёт на утверждение'],
+            ['Есть', 'отметьте вещь на складе (или опишите в комментарии) и выдайте — заявка закроется без закупа и оплаты'],
         ],
     },
     itAssets: { intro: 'Что сейчас числится за сотрудником по реестру имущества: может быть, нужное у него уже есть.' },
@@ -936,10 +944,13 @@ export const stageStatusOptions = (meta, kind) => {
    колонок доски (workflow.SUBTASKS.statuses). Итоговое действие этапа («Согласовать»,
    «Оплачено», «Пополнено», «Поставить на учёт») с полями формы появляется на последней
    ступени, когда шагать кнопками больше некуда. Назад кнопок нет: вернуть карточку на
-   прежнюю ступень можно на доске. */
+   прежнюю ступень можно на доске.
+
+   Helpdesk IT — без ступени (владелец 06.11.2026, со снимком «Новых»: «в данном окне я не могу
+   ничего выбрать»): склад, «Есть в наличии?» и решение — сразу, а «В работе» на доске карточка
+   встаёт сама, по первому выбору (PaymentStageForm, HelpdeskStage). */
 export const STAGE_STEPS = {
     manager_approval: { new: { to: 'review', label: 'Взять на рассмотрение' } },
-    it_review: { new: { to: 'in_progress', label: 'Взять в работу' } },
     approval: { new: { to: 'review', label: 'Взять на рассмотрение' } },
     invoice_payment: {
         new: { to: 'checking', label: 'Взять в проверку' },
@@ -1540,19 +1551,51 @@ export const offerIssues = (draft, { minSuppliers = 3 } = {}) => {
     return issues;
 };
 
-/* `helpdesk` — IT-закуп (категория с отметкой «Helpdesk IT», владелец 04.11.2026): что и
-   сколько пишет инициатор, а поставщиков и цены подберёт Helpdesk IT — их здесь не требуем. */
-export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {}, helpdesk = false,
-    supplierKnown = false } = {}) => {
+/* Тип объекта и категория учёта (п. 10) — у инициатора в форме заявки и у Helpdesk IT на его
+   этапе (IT-закуп, владелец 06.11.2026); сервер: workflow.object_missing. */
+export const objectIssues = (draft, { staffed = {} } = {}) => {
+    if (!draft.object_type) return [issueOf('object_type', 'выберите: товар или услуга')];
+    if (draft.object_type === 'goods' && !draft.accounting_category) return [issueOf('accounting_category', 'выберите категорию учёта')];
+    if (draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed.asset_keeper === false) {
+        return [issueOf('accounting_category', UNSTAFFED.asset_keeper)];
+    }
+    return [];
+};
+
+/* Пополнение карты (пп. 5.2–5.4): получатель, владелец, номер, назначение — те же правила в форме
+   заявки и на этапе Helpdesk IT (сервер: workflow.card_missing). `hasCard` — номер уже лежит в
+   заявке и годится для этого получателя. */
+export const cardIssues = (draft, { hasCard = false, staffed = {} } = {}) => {
+    if (draft.payment_method !== 'card') return [];
+    const issues = [];
+    const add = (key, text) => issues.push(issueOf(key, text));
+    if (staffed.finance === false) add('payment_method', UNSTAFFED.finance);
+    if (!draft.card_recipient) add('card_recipient', 'выберите, чью карту пополнить');
+    // У каждого получателя своё поле: сотрудник выбирается из списка, владельца
+    // карты поставщика вписывают — заполненное «чужое» поле не считается.
+    else if (draft.card_recipient === 'employee' && !draft.card_holder_user_id) add('card_holder_user_id', 'укажите сотрудника');
+    else if (draft.card_recipient === 'supplier' && !String(draft.card_holder_name || '').trim()) {
+        add('card_holder_name', 'укажите ФИО владельца карты');
+    }
+    if (!hasCard && !draft.card_id && cardProblem(draft.card_number)) add('card_number', 'укажите полный номер карты');
+    if (!String(draft.payment_purpose || '').trim()) add('payment_purpose', 'укажите назначение перевода');
+    return issues;
+};
+
+/* `helpdesk` — IT-закуп (категория с отметкой «Helpdesk IT», владелец 04.11.2026): инициатор
+   пишет, что и сколько нужно, срок и пожелания (06.11.2026), а поставщиков, цены, товар или
+   услугу, категорию учёта и способ оплаты выберет Helpdesk IT — их здесь не требуем. Название
+   закупа у него складывается из позиций (itemsTitle), отдельного поля нет. */
+export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {}, helpdesk = false } = {}) => {
     const issues = [];
     const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
     // Компании здесь нет намеренно (просьба владельца 15.10.2026): не знает её инициатор —
     // её укажет бухгалтерия после отправки (workflow.needs_entity_step).
     if (!draft.department_id) add('department_id', 'укажите подразделение');
-    if (!String(draft.expense_name || '').trim()) add('expense_name', 'назовите закуп');
     if (!draft.category_id) add('category_id', 'выберите категорию закупа');
-    else if (helpdesk && staffed.helpdesk === false) add('category_id', UNSTAFFED.helpdesk);
-    if (!String(draft.justification || '').trim()) add('justification', 'опишите и обоснуйте закуп');
+    else if (helpdesk && staffed.asset_keeper === false) add('category_id', UNSTAFFED.it_review);
+    if (!helpdesk && !String(draft.expense_name || '').trim()) add('expense_name', 'назовите закуп');
+    if (!helpdesk && !String(draft.justification || '').trim()) add('justification', 'опишите и обоснуйте закуп');
     const filled = (draft.items || []).filter((item) => !isBlankItem(item));
     if (!filled.length) add('items', 'добавьте хотя бы одну позицию', { part: 'empty' });
     else {
@@ -1565,28 +1608,14 @@ export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCar
         }
     }
     if (!draft.due_on) add('due_on', 'укажите желаемый срок');
-    if (!draft.object_type) add('object_type', 'выберите: товар или услуга');
-    else if (draft.object_type === 'goods' && !draft.accounting_category) add('accounting_category', 'выберите категорию учёта');
-    else if (draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed.asset_keeper === false) {
-        add('accounting_category', UNSTAFFED.asset_keeper);
-    }
+    if (helpdesk) return issues;
+    issues.push(...objectIssues(draft, { staffed }));
     if (!draft.payment_method) add('payment_method', 'выберите способ оплаты');
 
-    if (!helpdesk) issues.push(...offerIssues(draft, { minSuppliers }));
+    issues.push(...offerIssues(draft, { minSuppliers }));
 
-    if (draft.payment_method === 'card' && supplierCardBlocked(draft, { helpdesk, supplierKnown })) {
-        add('card_recipient', IT_SUPPLIER_CARD);
-    } else if (draft.payment_method === 'card') {
-        if (staffed.finance === false) add('payment_method', UNSTAFFED.finance);
-        if (!draft.card_recipient) add('card_recipient', 'выберите, чью карту пополнить');
-        // У каждого получателя своё поле: сотрудник выбирается из списка, владельца
-        // карты поставщика вписывают — заполненное «чужое» поле не считается.
-        else if (draft.card_recipient === 'employee' && !draft.card_holder_user_id) add('card_holder_user_id', 'укажите сотрудника');
-        else if (draft.card_recipient === 'supplier' && !String(draft.card_holder_name || '').trim()) {
-            add('card_holder_name', 'укажите ФИО владельца карты');
-        }
-        if (!hasCard && !draft.card_id && cardProblem(draft.card_number)) add('card_number', 'укажите полный номер карты');
-        if (!String(draft.payment_purpose || '').trim()) add('payment_purpose', 'укажите назначение перевода');
+    if (draft.payment_method === 'card') {
+        issues.push(...cardIssues(draft, { hasCard, staffed }));
     } else if (draft.payment_method === 'invoice') {
         // Счёт у нового закупа обычно появляется после согласования; но если его
         // уже прикладывают — номер и дата нужны сразу.
@@ -1596,13 +1625,16 @@ export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCar
     return issues;
 };
 
-export const purchaseProblems = (draft, options) => issueTexts(purchaseIssues(draft, options));
+/* Название IT-закупа — из позиций (владелец 06.11.2026: инициатор пишет «мне нужна мышка», а
+   не заполняет наименование): «Мышка», «Мышка и ещё 2». Длина — как у поля наименования. */
+export const itemsTitle = (items = []) => {
+    const names = (items || []).filter((item) => !isBlankItem(item)).map((item) => String(item.name || '').trim()).filter(Boolean);
+    if (!names.length) return '';
+    const title = names.length > 1 ? `${names[0]} и ещё ${names.length - 1}` : names[0];
+    return title.length > 300 ? `${title.slice(0, 299)}…` : title;
+};
 
-/* Карта поставщика у IT-закупа, пока поставщика не выбрал Helpdesk IT: чью карту пополнять, ещё
-   неизвестно (сервер: workflow.IT_SUPPLIER_CARD). */
-export const IT_SUPPLIER_CARD = 'у IT-закупа поставщика выберет Helpdesk IT, и его карту сейчас не указать — выберите карту сотрудника или оплату счёта';
-export const supplierCardBlocked = (draft, { helpdesk = false, supplierKnown = false } = {}) => (
-    Boolean(helpdesk) && draft?.payment_method === 'card' && draft?.card_recipient === 'supplier' && !supplierKnown);
+export const purchaseProblems = (draft, options) => issueTexts(purchaseIssues(draft, options));
 
 /* Рекомендуемый вариант поставщика: при «альтернатив нет» — единственный (первый). */
 export const recommendedOffer = (draft) => {
@@ -1615,8 +1647,10 @@ export const recommendedOffer = (draft) => {
    у сервера (workflow.missing_for_action: it_offers, it_stock). `inStock` — что отмечено в
    «Есть в наличии?»: null — ещё ничего (тогда дальше выбора форма не идёт). В наличии нет —
    поставщики по правилам инициатора и цены позиций по рекомендуемому: сумма позиций должна
-   совпасть с его стоимостью — по ней выберут утверждающего и её же оплатят. */
-export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null } = {}) => {
+   совпасть с его стоимостью — по ней выберут утверждающего и её же оплатят. С 06.11.2026 —
+   и товар или услуга, категория учёта и способ оплаты: инициатор IT-закупа их не выбирает.
+   `hasCard` — номер карты уже лежит в заявке и годится для этого получателя. */
+export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null, hasCard = false, staffed = {} } = {}) => {
     const issues = [];
     const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
     if (inStock === null) {
@@ -1631,15 +1665,13 @@ export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null } = {})
     }
     issues.push(...offerIssues(draft, { minSuppliers }));
     const filled = (draft.items || []).filter((item) => !isBlankItem(item));
-    if (!filled.length) {
-        add('items', 'добавьте хотя бы одну позицию', { part: 'empty' });
-        return issues;
-    }
-    const broken = filled.find((item) => itemIssue(item));
     const rows = filled.map((item) => item.key);
+    const broken = filled.find((item) => itemIssue(item));
     const total = itemsTotal(filled);
     const price = parseAmount(recommendedOffer(draft)?.amount);
-    if (broken) {
+    if (!filled.length) {
+        add('items', 'добавьте хотя бы одну позицию', { part: 'empty' });
+    } else if (broken) {
         const { field, text } = itemIssue(broken);
         add('items', text, { part: 'row', rows: [broken.key], field });
     } else if (!(total > 0)) {
@@ -1648,6 +1680,9 @@ export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null } = {})
         add('items', `сумма позиций — ${fmtMoney(total)}, а у рекомендуемого поставщика — ${fmtMoney(price)}: поставьте цены по нему`,
             { part: 'price', rows });
     }
+    issues.push(...objectIssues(draft, { staffed }));
+    if (!draft.payment_method) add('payment_method', 'выберите способ оплаты');
+    else issues.push(...cardIssues(draft, { hasCard, staffed }));
     return issues;
 };
 
@@ -1677,8 +1712,8 @@ export const pricedByOffer = (items, amount) => {
 /* Способ оплаты или категория учёта, для которых в «Участниках» нет исполнителя. */
 export const UNSTAFFED = {
     finance: 'пополнение карты пока некому выполнить: финансовый отдел не назначен — сообщите администратору раздела',
-    asset_keeper: 'имущество пока некому поставить на учёт: ответственный не назначен — сообщите администратору раздела',
-    helpdesk: 'IT-закуп пока некому проверить: Helpdesk IT не назначен — сообщите администратору раздела',
+    asset_keeper: 'имущество пока некому поставить на учёт: в роли «Helpdesk IT и учёт имущества» никого — сообщите администратору раздела',
+    it_review: 'IT-закуп пока некому проверить: в роли «Helpdesk IT и учёт имущества» никого — сообщите администратору раздела',
 };
 
 /* Регулярный платёж: `template` — строка справочника. Поставщика, компанию и

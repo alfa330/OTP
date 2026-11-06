@@ -66,9 +66,11 @@ class RouteTests(unittest.TestCase):
         route = wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)
         self.assertEqual(kinds(route)[:4], ['initiation', 'manager_approval', 'it_review', 'approval'])
         step = next(entry for entry in route if entry['kind'] == wf.KIND_IT)
-        # Задача списку «Helpdesk IT», как бухгалтерии: исполнителя-человека у неё нет.
+        # Задача списку «Helpdesk IT и учёт имущества», как бухгалтерии: исполнителя-человека у неё нет.
+        # Отдельной роли Helpdesk IT с 06.11.2026 нет — это тот же человек, что ставит имущество на учёт.
         self.assertEqual((step['role_code'], step['assignee_id'], step['state'], step['stage']),
-                         ('helpdesk', None, 'pending', 'approval'))
+                         ('asset_keeper', None, 'pending', 'approval'))
+        self.assertEqual(wf.ROLE_LABELS['asset_keeper'], 'Helpdesk IT и учёт имущества')
 
     def test_order_is_manager_helpdesk_company_approver(self):
         """Владелец: «сначала руководитель… и хелпдеск уже делает свою работу»; компанию без
@@ -110,19 +112,22 @@ class ManagerAndCardTests(unittest.TestCase):
         self.assertEqual(wf.manager_step_needed(skip, purchase(it_purchase=False, category_helpdesk=False))[0], False)
         self.assertEqual(wf.manager_step_needed(skip, purchase(request_kind='regular'))[0], False)
 
-    def test_supplier_card_waits_for_the_supplier(self):
-        row = purchase(submitted_at=None, payment_method='card', card_recipient='supplier', card_holder_name='',
-                       payment_purpose='')
-        missing = wf.missing_for_submit(row, items=items('0'), offers=[], attachments=[], settings={})
-        self.assertEqual(missing, [wf.IT_SUPPLIER_CARD])
-        # Поставщика Helpdesk уже выбрал (заявка вернулась на доработку) — карта как у любого закупа.
-        chosen = dict(row, counterparty_id=100)
-        missing = wf.missing_for_submit(chosen, items=items('0'), offers=[], attachments=[], settings={}, card_number_ok=False)
-        self.assertIn('Укажите полный номер карты', missing)
-        self.assertNotIn(wf.IT_SUPPLIER_CARD, missing)
-        # Обычный закуп с картой поставщика — по-старому.
-        plain = dict(row, it_purchase=False, category_helpdesk=False)
-        self.assertNotIn(wf.IT_SUPPLIER_CARD, wf.missing_for_submit(plain, items=items('1'), offers=[], attachments=[], settings={}))
+    def test_initiator_of_it_purchase_writes_only_what_and_how_many(self):
+        """Владелец 06.11.2026: «мне нужна мышка», пожелания — комментарием. Обоснование, товар или
+        услугу, категорию учёта и способ оплаты инициатор IT-закупа не выбирает — их выберет Helpdesk IT."""
+        bare = purchase(submitted_at=None, justification='', object_type=None, accounting_category=None,
+                        payment_method=None, card_recipient='supplier')
+        self.assertEqual(wf.missing_for_submit(bare, items=items('0'), offers=[], attachments=[], settings={}), [])
+        # Тот же черновик в обычной категории — всё это обязательно, как и было.
+        plain = wf.missing_for_submit(dict(bare, it_purchase=False, category_helpdesk=False), items=items('1'),
+                                      offers=[], attachments=[], settings={})
+        for text in ('Опишите закуп и обоснуйте, зачем он нужен', 'Выберите тип объекта: товар или услуга',
+                     wf.PAYMENT_METHOD_MISSING):
+            self.assertIn(text, plain)
+        # Срок и категория — по-прежнему от инициатора.
+        self.assertEqual(wf.missing_for_submit(dict(bare, due_on=None, category_id=None), items=items('0'), offers=[],
+                                               attachments=[], settings={}),
+                         ['Выберите категорию закупа', 'Укажите желаемый срок'])
 
 
 class SubmitTests(unittest.TestCase):
@@ -180,6 +185,29 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(self.missing('it_offers', **dict(fields, no_alternatives_reason=None)),
                          ['Выберите причину отсутствия альтернатив'])
 
+    def test_helpdesk_chooses_object_and_payment(self):
+        """Владелец 06.11.2026: товар или услугу, категорию учёта и способ оплаты выбирает Helpdesk IT
+        вместе с поставщиком — по тем же правилам, что у инициатора обычного закупа."""
+        bare = purchase(object_type=None, accounting_category=None, payment_method=None)
+        fields = dict(items=items('450000'), offers=offers('450000', '470000', '455000'), supplier_choice_reason='Дешевле',
+                      counterparty_id=100)
+
+        def missing(**extra):
+            return wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=dict(fields, **extra), settings={})
+
+        self.assertEqual(missing(), ['Выберите тип объекта: товар или услуга', wf.PAYMENT_METHOD_MISSING])
+        self.assertEqual(missing(payment={'object_type': 'goods', 'payment_method': 'invoice'}),
+                         ['Выберите категорию учёта: расходный материал или имущество, подлежащее учёту'])
+        self.assertEqual(missing(payment={'object_type': 'service', 'payment_method': 'invoice'}), [])
+        card = {'object_type': 'goods', 'accounting_category': 'consumable', 'payment_method': 'card'}
+        self.assertEqual(missing(payment=card), ['Выберите, чью карту пополнить: сотрудника или поставщика',
+                                                 'Укажите ФИО владельца карты', 'Укажите назначение перевода'])
+        card.update(card_recipient='supplier', card_holder_name='ИП Алсер', payment_purpose='Ноутбук')
+        self.assertEqual(missing(payment=card, card_number_ok=False), ['Укажите полный номер карты'])
+        self.assertEqual(missing(payment=card, card_number_ok=True), [])
+        # Что Helpdesk не прислал — берётся из заявки: на втором проходе выбор уже лежит в ней.
+        self.assertEqual(wf.missing_for_action(wf.KIND_IT, 'it_offers', request=purchase(), fields=fields, settings={}), [])
+
     def test_issue_from_stock_needs_what_or_a_word(self):
         self.assertEqual(self.missing('it_stock'), ['Выберите, что выдаёте из наличия, или напишите об этом в комментарии'])
         self.assertEqual(self.missing('it_stock', comment='Выдал ноутбук со склада'), [])
@@ -205,7 +233,7 @@ class BoardTests(unittest.TestCase):
 
     def test_the_board_belongs_to_the_role(self):
         board = wf.board(wf.BOARD_HELPDESK)
-        self.assertEqual((board['kinds'], board['roles'], board['work']), ((wf.KIND_IT,), ('helpdesk',), ('new', 'in_progress')))
+        self.assertEqual((board['kinds'], board['roles'], board['work']), ((wf.KIND_IT,), ('asset_keeper',), ('new', 'in_progress')))
         self.assertEqual(wf.subtask(wf.KIND_IT)['board'], wf.BOARD_HELPDESK)
 
 
@@ -237,23 +265,25 @@ class AccessTests(unittest.TestCase):
         return {'user_id': user_id}
 
     def test_board_and_scope(self):
-        self.assertEqual(access.boards_for(self.ctx(HELPDESK['id']), {'helpdesk'}), ['helpdesk'])
-        self.assertEqual(access.board_scope(self.ctx(HELPDESK['id']), 'helpdesk', {'helpdesk'}), 'all')
+        # Доска Helpdesk IT — роли «Helpdesk IT и учёт имущества» (06.11.2026: одна роль).
+        self.assertEqual(access.boards_for(self.ctx(HELPDESK['id']), {'asset_keeper'}), ['helpdesk'])
+        self.assertEqual(access.board_scope(self.ctx(HELPDESK['id']), 'helpdesk', {'asset_keeper'}), 'all')
+        self.assertEqual(access.boards_for(self.ctx(HELPDESK['id']), {'helpdesk'}), [], 'прежней роли больше нет')
 
     def test_any_member_acts_on_the_stage(self):
-        step = {'kind': wf.KIND_IT, 'role_code': 'helpdesk', 'assignee_id': None, 'state': 'open'}
-        members = {'helpdesk': {HELPDESK['id'], 10}}
+        step = {'kind': wf.KIND_IT, 'role_code': 'asset_keeper', 'assignee_id': None, 'state': 'open'}
+        members = {'asset_keeper': {HELPDESK['id'], 10}}
         self.assertTrue(access.can_act_on_subtask(self.ctx(HELPDESK['id']), step, members, purchase()))
         self.assertTrue(access.can_act_on_subtask(self.ctx(10), step, members, purchase()))
         self.assertFalse(access.can_act_on_subtask(self.ctx(MANAGER['id']), step, members, purchase()))
         # Свою IT-заявку участник Helpdesk проверяет сам: это не согласование, а подбор.
-        self.assertTrue(access.can_act_on_subtask(self.ctx(INITIATOR['id']), step, {'helpdesk': {INITIATOR['id']}},
+        self.assertTrue(access.can_act_on_subtask(self.ctx(INITIATOR['id']), step, {'asset_keeper': {INITIATOR['id']}},
                                                   purchase()))
 
-    def test_stock_is_open_to_helpdesk_but_not_the_registry(self):
-        self.assertTrue(access.can_check_stock(self.ctx(HELPDESK['id']), {'helpdesk'}))
-        self.assertFalse(access.can_view_assets(self.ctx(HELPDESK['id']), {'helpdesk'}))
-        self.assertTrue(access.can_check_stock(self.ctx(5), {'asset_keeper'}))
+    def test_stock_is_open_to_the_role(self):
+        # Helpdesk IT — тот же ответственный за учёт имущества: склад ему открыт вместе с реестром.
+        self.assertTrue(access.can_check_stock(self.ctx(HELPDESK['id']), {'asset_keeper'}))
+        self.assertFalse(access.can_check_stock(self.ctx(HELPDESK['id']), {'helpdesk'}), 'прежней роли больше нет')
         self.assertFalse(access.can_check_stock(self.ctx(INITIATOR['id']), set()))
         self.assertTrue(access.can_check_stock(self.ctx(ADMIN), set()))
 
@@ -265,7 +295,7 @@ class AccessTests(unittest.TestCase):
 
     def test_who_sees_the_employees_assets(self):
         request = purchase()
-        for user_id, roles in ((HELPDESK['id'], {'helpdesk'}), (30, {'approver'}), (5, {'asset_keeper'}),
+        for user_id, roles in ((HELPDESK['id'], {'asset_keeper'}), (30, {'approver'}), (5, {'asset_keeper'}),
                                (6, {'accounting'}), (INITIATOR['id'], set()), (MANAGER['id'], set()), (ADMIN, set())):
             self.assertTrue(access.sees_initiator_assets(self.ctx(user_id), request, roles), user_id)
         for user_id, roles in ((40, {'finance'}), (41, set())):
@@ -331,8 +361,7 @@ class _FlowBase(unittest.TestCase):
         queries.list_subtasks.side_effect = lambda cursor, request_id: [dict(item) for item in self.steps]
         queries.list_attachments.return_value = []
         queries.list_events.return_value = [{'id': 1, 'kind': 'submitted', 'payload': {}}]
-        queries.role_member_ids.return_value = {'approver': {30, 31}, 'accounting': {6}, 'asset_keeper': {5},
-                                                'helpdesk': {HELPDESK['id']}}
+        queries.role_member_ids.return_value = {'approver': {30, 31}, 'accounting': {6}, 'asset_keeper': {HELPDESK['id'], 5}}
         queries.user_brief.side_effect = lambda cursor, user_id: {'id': user_id, 'name': 'Утвердова Ульяна', 'fired': False}
         queries.today_almaty.return_value = date(2026, 11, 4)
         directory = mock.MagicMock()
@@ -411,22 +440,30 @@ class OffersFlowTests(_FlowBase):
         self.queries.write_route.assert_not_called()
 
     def test_empty_helpdesk_role_is_named(self):
-        gaps = flow.route_gaps([{'kind': wf.KIND_IT, 'role_code': 'helpdesk', 'state': 'pending'}], {}, INITIATOR['id'])
-        self.assertEqual(gaps, ['Проверить IT-закуп некому: в роли «Helpdesk IT» нет участников'])
+        it_step = {'kind': wf.KIND_IT, 'role_code': 'asset_keeper', 'state': 'pending'}
+        gaps = flow.route_gaps([it_step], {}, INITIATOR['id'])
+        self.assertEqual(gaps, ['Проверить IT-закуп некому: в роли «Helpdesk IT и учёт имущества» нет участников'])
+        # Пустая роль называется один раз — тем её этапом, что встретится первым.
+        assets_step = {'kind': wf.KIND_ASSETS, 'role_code': 'asset_keeper', 'state': 'pending'}
+        self.assertEqual(flow.route_gaps([it_step, assets_step], {}, INITIATOR['id']), gaps)
+        self.assertEqual(flow.route_gaps([assets_step], {}, INITIATOR['id']),
+                         ['Поставить имущество на учёт некому: в роли «Helpdesk IT и учёт имущества» нет участников'])
         # Этап, который пересборка не трогает (пройден или выполняется сейчас), опустевшая роль не держит.
-        self.assertEqual(flow.route_gaps([{'kind': wf.KIND_IT, 'role_code': 'helpdesk', 'state': 'pending'}], {},
-                                         INITIATOR['id'], settled=(wf.KIND_IT,)), [])
+        self.assertEqual(flow.route_gaps([it_step], {}, INITIATOR['id'], settled=(wf.KIND_IT,)), [])
 
     def test_helpdesk_role_emptied_meanwhile_does_not_block_the_pass(self):
         """Администратор лично передал этап человеку не из роли, а роль опустела: «Передать на
         утверждение» всё равно проходит — этап Helpdesk уже не держит маршрут (разбор 04.11.2026)."""
-        self.queries.role_member_ids.return_value = {'approver': {30, 31}, 'accounting': {6}, 'asset_keeper': {5}}
+        self.queries.role_member_ids.return_value = {'approver': {30, 31}, 'accounting': {6}}
+        # Расходный материал — этапа постановки на учёт нет: опустевшая роль ничего больше не держит.
+        self.row.update(accounting_category='consumable')
         self.steps[1].update(assignee_id=41, assignee_name='Лично назначенный')
         self.assertEqual(self.act('it_offers', **self.fields())['next'], wf.KIND_APPROVAL)
 
     def test_new_supplier_drops_the_supplier_card(self):
         self.queries.role_member_ids.return_value = dict(self.queries.role_member_ids.return_value, finance={9})
-        self.row.update(payment_method='card', card_recipient='supplier', counterparty_id=55, card_id=12)
+        self.row.update(payment_method='card', card_recipient='supplier', counterparty_id=55, card_id=12,
+                        card_holder_name='ИП Прежний', payment_purpose='Ноутбук')
         self.act('it_offers', **self.fields())
         self.queries.set_card_number.assert_called_once_with(mock.ANY, REQUEST_ID, '')
         self.assertIsNone(self.row['card_id'])
@@ -436,6 +473,64 @@ class OffersFlowTests(_FlowBase):
         self.act('it_offers', **self.fields())
         self.queries.set_card_number.assert_not_called()
         self.assertEqual(self.row['card_id'], 12)
+
+
+class HelpdeskPaymentFlowTests(_FlowBase):
+    """Владелец 06.11.2026: товар или услугу, категорию учёта и способ оплаты выбирает Helpdesk IT —
+    они ложатся в заявку, а маршрут встаёт по ним: оплата счёта или пополнение карты, постановка на учёт."""
+
+    def setUp(self):
+        super().setUp()
+        self.row.update(object_type=None, accounting_category=None, payment_method=None)
+        self.queries.role_member_ids.return_value = dict(self.queries.role_member_ids.return_value, finance={9})
+
+    def fields(self, **extra):
+        rows = offers('450000', '470000', '455000')
+        return dict(items=items('450000'), offers=rows, supplier_choice_reason='Дешевле',
+                    counterparty_id=rows[0]['counterparty_id'], **extra)
+
+    def route_kinds(self):
+        return kinds(self.queries.write_route.call_args.args[2])
+
+    def test_invoice_and_asset(self):
+        self.act('it_offers', **self.fields(payment={'object_type': 'goods', 'accounting_category': 'asset',
+                                                     'payment_method': 'invoice'}))
+        self.assertEqual((self.row['object_type'], self.row['accounting_category'], self.row['payment_method']),
+                         ('goods', 'asset', 'invoice'))
+        route = self.route_kinds()
+        self.assertIn(wf.KIND_INVOICE, route)
+        self.assertIn(wf.KIND_ASSETS, route, 'имущество — на учёт у той же роли')
+        self.assertNotIn(wf.KIND_CARD, route)
+        self.queries.set_card_number.assert_not_called()
+
+    def test_employee_card_with_a_new_number(self):
+        payment = {'object_type': 'goods', 'accounting_category': 'consumable', 'payment_method': 'card',
+                   'card_recipient': 'employee', 'card_holder_user_id': INITIATOR['id'],
+                   'card_holder_name': INITIATOR['name'], 'payment_purpose': 'Мышка'}
+        self.act('it_offers', **self.fields(payment=payment, card={'number': '4400430212345678'}, card_number_ok=True))
+        self.queries.set_card_number.assert_called_once_with(mock.ANY, REQUEST_ID, '4400430212345678')
+        self.assertEqual((self.row['card_recipient'], self.row['card_holder_user_id']), ('employee', INITIATOR['id']))
+        route = self.route_kinds()
+        self.assertEqual([kind for kind in route if kind in (wf.KIND_CARD, wf.KIND_RECEIPT, wf.KIND_INVOICE)],
+                         [wf.KIND_CARD, wf.KIND_RECEIPT], 'карта сотрудника — с чеком')
+        self.assertNotIn(wf.KIND_ASSETS, route, 'расходный материал на учёт не ставят')
+        # Снимок условий — уже с выбором Helpdesk: ответ инициатора на возврат не сочтёт его «сменой условий».
+        snapshot = self.queries.touch_snapshot.call_args.args[2]
+        self.assertEqual((snapshot['payment_method'], snapshot['card_recipient']), ('card', 'employee'))
+
+    def test_card_from_the_directory(self):
+        payment = {'object_type': 'service', 'payment_method': 'card', 'card_recipient': 'supplier',
+                   'card_holder_name': 'ИП Алсер', 'card_id': 15, 'payment_purpose': 'Настройка'}
+        self.act('it_offers', **self.fields(payment=payment, card={'card_id': 15}, card_number_ok=True))
+        self.queries.copy_card_from_directory.assert_called_once_with(mock.ANY, REQUEST_ID, 15)
+        self.queries.set_card_number.assert_not_called()
+
+    def test_without_payment_nothing_changes(self):
+        with self.assertRaises(flow.FlowError) as caught:
+            self.act('it_offers', **self.fields())
+        self.assertEqual(caught.exception.code, 'PAYMENT_ACTION_INCOMPLETE')
+        self.queries.save_offers.assert_not_called()
+        self.queries.write_route.assert_not_called()
 
 
 class StockFlowTests(_FlowBase):
@@ -481,7 +576,7 @@ class WiringTests(unittest.TestCase):
         return app.test_client()
 
     def test_stock_answers_helpdesk_only(self):
-        client = self.client(user_id=HELPDESK['id'], roles={'helpdesk'})
+        client = self.client(user_id=HELPDESK['id'], roles={'asset_keeper'})
         with mock.patch.object(access, 'SECTION_ALLOWED_USER_IDS', (HELPDESK['id'], 41)):
             self.assets_sql.list_assets.return_value = (1, [{'id': 5, 'name': 'Ноутбук HP', 'inventory_number': 'IT-1',
                                                              'cost': Decimal('1'), 'responsible_name': 'Склад'}])
@@ -499,7 +594,7 @@ class WiringTests(unittest.TestCase):
             self.assertEqual(other.get('/api/payments/stock').status_code, 403)
             # Проверку этой заявки администратор передал ему лично — склад открыт, но только по ней.
             self.queries.role_member_ids.return_value = {}
-            self.queries.read_subtask.return_value = {'kind': wf.KIND_IT, 'role_code': 'helpdesk', 'assignee_id': 41,
+            self.queries.read_subtask.return_value = {'kind': wf.KIND_IT, 'role_code': 'asset_keeper', 'assignee_id': 41,
                                                       'state': 'open'}
             self.assets_sql.list_assets.return_value = (0, [])
             self.assets_sql.issued_from_stock.return_value = {}
@@ -507,6 +602,21 @@ class WiringTests(unittest.TestCase):
             self.queries.read_subtask.assert_called_with(mock.ANY, REQUEST_ID, wf.KIND_IT)
             self.queries.read_subtask.return_value = dict(self.queries.read_subtask.return_value, state='done')
             self.assertEqual(other.get('/api/payments/stock?request=%s' % REQUEST_ID).status_code, 403)
+
+    def test_it_request_without_positions_says_so(self):
+        """У IT-закупа нет поля наименования — оно складывается из позиций (06.11.2026). Без позиций
+        названия нет, и отказ говорит о позициях, а не о поле, которого человек не видит."""
+        client = self.client()
+        self.queries.role_member_ids.return_value = {'approver': {30}, 'accounting': {6}}
+        self.directory.department_brief.return_value = {'id': 1, 'name': 'СЗоВ'}
+        body = {'request_kind': 'purchase', 'category_id': 2, 'department_id': 1, 'items': []}
+        self.directory.category_helpdesk.return_value = True
+        response = client.post('/api/payments/requests', json=body)
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()['error'], 'Добавьте хотя бы одну позицию: что нужно и сколько')
+        self.directory.category_helpdesk.assert_called_with(mock.ANY, 2)
+        self.directory.category_helpdesk.return_value = False
+        self.assertEqual(client.post('/api/payments/requests', json=body).get_json()['error'], 'Укажите наименование закупа')
 
     def test_category_editor_passes_the_helpdesk_flag(self):
         """Справочник «Категории закупа»: отметку «Helpdesk IT» прислали — записываем; не прислали
@@ -596,6 +706,67 @@ class WiringTests(unittest.TestCase):
             self.addCleanup(patcher.stop)
         return client
 
+    def paying(self, row):
+        """Этап Helpdesk IT по заявке `row` — для разбора товара, учёта и способа оплаты (06.11.2026)."""
+        client = self.client()
+        self.card_answers(row)
+        self.queries.role_member_ids.return_value = {}
+        self.acted = []
+        step = dict(_FlowBase.step(wf.KIND_IT, None), state='open')
+        self.directory.read_counterparty.side_effect = lambda cursor, cid: {'id': cid, 'name': 'Поставщик %s' % cid}
+        for patcher in (mock.patch.object(flow, 'load_for_action', return_value=(row, step)),
+                        mock.patch.object(flow, 'act', side_effect=lambda *a, **k: self.acted.append(k['fields']) or
+                                          {'next': None, 'offer_ids': []}),
+                        mock.patch.object(flow, 'submit_problems', return_value=[])):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return client
+
+    PAY = {'kind': 'it_review', 'action': 'it_offers', 'no_alternatives': True, 'no_alternatives_reason': 'single_supplier',
+           'items': [{'name': 'Ноутбук', 'quantity': 1, 'unit_price': 450000}],
+           'offers': [{'counterparty_id': 100, 'amount': 450000, 'is_recommended': True}]}
+
+    def test_helpdesk_payment_passes_the_handler(self):
+        """Товар, категория учёта и способ оплаты с картой — разбором формы заявки, только по этим полям."""
+        bare = purchase(object_type=None, accounting_category=None, payment_method=None)
+        client = self.paying(bare)
+        payload = dict(self.PAY, object_type='goods', accounting_category='asset', payment_method='card',
+                       card_recipient='supplier', card_holder_name='ИП Алсер', card_number='4111 1111 1111 1111',
+                       payment_purpose='Ноутбук', expense_name='Чужое поле', legal_entity_id=9)
+        response = self.act_request(client, payload)
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        fields = self.acted[0]
+        self.assertEqual(fields['payment'], {'object_type': 'goods', 'accounting_category': 'asset', 'payment_method': 'card',
+                                             'card_recipient': 'supplier', 'card_holder_name': 'ИП Алсер',
+                                             'payment_purpose': 'Ноутбук', 'card_id': None},
+                         'только поля Helpdesk IT; новый номер снимает карту из справочника')
+        self.assertEqual((fields['card']['number'], fields['card_number_ok']), ('4111111111111111', True))
+        # Без способа оплаты этап не закрыть — сервер скажет, чего не хватает.
+        self.acted.clear()
+        response = self.act_request(client, dict(self.PAY))
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['missing'], ['Выберите тип объекта: товар или услуга', wf.PAYMENT_METHOD_MISSING])
+        self.assertEqual(self.acted, [])
+
+    def test_supplier_card_of_the_old_supplier_does_not_count(self):
+        """Карта поставщика уже лежит в заявке, а Helpdesk рекомендует другого — номер вводится заново."""
+        row = purchase(payment_method='card', card_recipient='supplier', card_holder_name='ИП Прежний',
+                       payment_purpose='Ноутбук', counterparty_id=55, has_card=True)
+        client = self.paying(row)
+        card = {'payment_method': 'card', 'card_recipient': 'supplier', 'card_holder_name': 'ИП Новый', 'payment_purpose': 'Ноутбук'}
+        response = self.act_request(client, dict(self.PAY, **card))
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()['missing'], ['Укажите полный номер карты'])
+        # Тот же поставщик — прежний номер годится.
+        offers_same = [{'counterparty_id': 55, 'amount': 450000, 'is_recommended': True}]
+        response = self.act_request(client, dict(self.PAY, offers=offers_same, **card))
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertTrue(self.acted[-1]['card_number_ok'])
+        # Короткий номер — отказ разбора, как в форме заявки.
+        response = self.act_request(client, dict(self.PAY, card_number='1234', **card))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Номер карты: от', response.get_json()['error'])
+
     def test_stock_already_issued_by_another_request_is_refused(self):
         client = self.acting()
         self.assets_sql.read_asset.side_effect = lambda cursor, asset_id, lock=False: {
@@ -638,11 +809,11 @@ class WiringTests(unittest.TestCase):
         self.assertIn('Обоснуйте выбор рекомендуемого поставщика', response.get_json()['missing'])
 
     def test_card_shows_the_employees_assets_to_helpdesk(self):
-        client = self.client(user_id=HELPDESK['id'], roles={'helpdesk'})
+        client = self.client(user_id=HELPDESK['id'], roles={'asset_keeper'})
         with mock.patch.object(access, 'SECTION_ALLOWED_USER_IDS', (HELPDESK['id'],)):
             self.card_answers(purchase())
             self.queries.participates.return_value = True
-            self.queries.role_member_ids.return_value = {'helpdesk': {HELPDESK['id']}}
+            self.queries.role_member_ids.return_value = {'asset_keeper': {HELPDESK['id']}}
             self.assets_sql.of_user.return_value = [{'id': 1, 'name': 'Монитор Dell', 'inventory_number': 'IT-7',
                                                      'cost': Decimal('90000'), 'status': 'in_use'}]
             with mock.patch.object(flow, 'submit_problems', return_value=[]):

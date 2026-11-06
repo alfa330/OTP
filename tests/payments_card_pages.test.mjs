@@ -169,7 +169,10 @@ test('slide: контейнер держит плашку выбора, а до 
 /* ── ступени задачи кнопками (14.10.2026) ────────────────────────────────── */
 
 test('ступени задачи идут по рабочим статусам этапа в порядке колонок доски и кончаются итоговым действием', () => {
-    for (const kind of STAGE_STATUS_KINDS) {
+    // Helpdesk IT — без ступени (владелец 06.11.2026): решение сразу, «В работе» — по первому выбору.
+    assert.equal(STAGE_STEPS.it_review, undefined);
+    assert.equal(stageAtFinal('it_review', 'new'), true);
+    for (const kind of STAGE_STATUS_KINDS.filter((item) => item !== 'it_review')) {
         const statuses = META.subtasks.find((item) => item.kind === kind).statuses;
         // От первого статуса кнопки ведут по всем статусам по порядку — ни одного не пропуская.
         const walked = [statuses[0]];
@@ -183,9 +186,9 @@ test('ступени задачи идут по рабочим статусам 
         assert.equal(stageAtFinal(kind, statuses[statuses.length - 1]), true, kind);
         assert.deepEqual(Object.keys(STAGE_STEPS[kind]), statuses.slice(0, -1), kind);
     }
-    assert.deepEqual(Object.keys(STAGE_STEPS).sort(), [...STAGE_STATUS_KINDS].sort());
+    assert.deepEqual(Object.keys(STAGE_STEPS).sort(), STAGE_STATUS_KINDS.filter((item) => item !== 'it_review').sort());
     assert.deepEqual(Object.values(STAGE_STEPS).flatMap((steps) => Object.values(steps).map((item) => item.label)),
-        ['Взять на рассмотрение', 'Взять в работу', 'Взять на рассмотрение', 'Взять в проверку', 'Счёт проверен', 'Начать оплату',
+        ['Взять на рассмотрение', 'Взять на рассмотрение', 'Взять в проверку', 'Счёт проверен', 'Начать оплату',
             'Взять в работу', 'Готово к пополнению', 'Взять в работу']);
 });
 
@@ -326,6 +329,9 @@ test('заявку вернули — кто и зачем: одна плашк�
 test('статус задачи — кнопкой следующей ступени на странице задачи; переключателя нет ни в форме, ни в панели', () => {
     const form = source('src/components/payments/PaymentStageForm.jsx');
     assert.doesNotMatch(form, /IosSegmented|statusSwitch|onMove|LOCAL_STATUS_LABELS/);
+    // Исключение одно и без переключателя: этап Helpdesk IT сам встаёт «В работе» по первому выбору
+    // (владелец 06.11.2026: ступени «Взять в работу» у него нет).
+    assert.equal((form.match(/onTake\?\.\(\)/g) || []).length, 1);
     const ui = source('src/components/payments/paymentsUi.jsx');
     assert.doesNotMatch(ui, /StageStatusSwitch|data-stage-status/);
     const card = source('src/components/payments/PaymentRequestCard.jsx');

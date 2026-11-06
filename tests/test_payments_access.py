@@ -213,11 +213,12 @@ class BoardTests(WiderPerimeter):
     def test_everyone_sees_only_their_board(self):
         # Порядок — по ходу заявки: руководитель, Helpdesk IT (04.11.2026), оплата.
         self.assertEqual(access.boards_for(ctx(ADMIN)), ['approval', 'helpdesk', 'accounting', 'finance'])
-        self.assertEqual(access.boards_for(ctx(INITIATOR), {'helpdesk'}), ['helpdesk'])
+        # Доска Helpdesk IT — роли «Helpdesk IT и учёт имущества» (06.11.2026: один человек — одна роль).
+        self.assertEqual(access.boards_for(ctx(INITIATOR), {'helpdesk'}), [], 'прежней роли больше нет')
         self.assertEqual(access.boards_for(ctx(APPROVER), {'approver'}), ['approval'])
         self.assertEqual(access.boards_for(ctx(ACCOUNTANT), {'accounting'}), ['accounting'])
         self.assertEqual(access.boards_for(ctx(FINANCIER), {'finance'}), ['finance'])
-        self.assertEqual(access.boards_for(ctx(KEEPER), {'asset_keeper'}), [])
+        self.assertEqual(access.boards_for(ctx(KEEPER), {'asset_keeper'}), ['helpdesk'])
         self.assertEqual(access.boards_for(ctx(INITIATOR)), [])
         # Руководитель согласует закупы подчинённых — ему нужна доска согласования.
         self.assertEqual(access.boards_for(ctx(MANAGER), is_manager=True), ['approval'])

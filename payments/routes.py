@@ -53,6 +53,9 @@ OWN_ON_DESK = 5
 PHOTO_RETRY_SECONDS = 120
 # Сколько вещей из наличия показывать Helpdesk IT за один поиск (/stock).
 STOCK_PAGE_MAX = 30
+# Что Helpdesk IT выбирает вместе с поставщиком (владелец 06.11.2026) — поля формы заявки.
+HELPDESK_PAYMENT_KEYS = ('object_type', 'accounting_category', 'payment_method', 'card_recipient',
+                         'card_holder_user_id', 'card_holder_name', 'card_id', 'card_number', 'payment_purpose')
 
 _LINK_RE = re.compile(r'^https?://', re.IGNORECASE)
 
@@ -639,13 +642,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
     def _apply_card(cursor, request_id, card, *, was_submitted):
         """Записывает номер карты заявки. Смена номера после отправки делает
         снимок существенных условий устаревшим — заявка согласуется заново."""
-        changed = False
-        if card.get('card_id'):
-            changed = queries.copy_card_from_directory(cursor, request_id, card['card_id'])
-        elif card.get('number'):
-            changed = queries.set_card_number(cursor, request_id, card['number'])
-        elif card.get('clear'):
-            changed = queries.set_card_number(cursor, request_id, '')
+        changed = flow.apply_card(cursor, request_id, card)
         if changed and was_submitted:
             queries.mark_snapshot_stale(cursor, request_id)
         return changed
@@ -832,10 +829,15 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # есть ли они, проверяет отправка — по маршруту заявки (flow.route_gaps).
             fields, items, offers, card = _request_fields(cursor, data, ctx, creating=True)
             if not fields.get('expense_name'):
-                # Название у регулярного платежа подставляет справочник, у закупа его вводят.
-                raise ApiError('Выберите регулярный платёж из справочника'
-                               if fields['request_kind'] == workflow.KIND_REGULAR else 'Укажите наименование закупа',
-                               code='PAYMENT_INCOMPLETE')
+                # Название у регулярного платежа подставляет справочник, у закупа его вводят, а у
+                # IT-закупа оно складывается из позиций (владелец 06.11.2026) — значит, их ещё нет.
+                if fields['request_kind'] == workflow.KIND_REGULAR:
+                    message = 'Выберите регулярный платёж из справочника'
+                elif directory.category_helpdesk(cursor, fields.get('category_id')):
+                    message = 'Добавьте хотя бы одну позицию: что нужно и сколько'
+                else:
+                    message = 'Укажите наименование закупа'
+                raise ApiError(message, code='PAYMENT_INCOMPLETE')
             initiator = {'id': ctx['user_id'], 'name': ctx.get('name')}
             request_id = queries.create_request(cursor, fields=fields, items=items or [], actor=actor,
                                                 initiator=initiator)
@@ -1014,6 +1016,28 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             fields['supplier_choice_reason'] = as_text(data.get('supplier_choice_reason'), 'supplier_choice_reason')
         return fields
 
+    def _helpdesk_payment(cursor, data, ctx, request_row, fields):
+        """Товар или услуга, категория учёта и способ оплаты от Helpdesk IT (владелец 06.11.2026:
+        инициатор IT-закупа их не выбирает). Разбор — тот же `_request_fields`, что у формы
+        заявки, только по этим полям: типы, карта из справочника у того, кому платят, номер
+        карты по контрольной цифре. Поставщик — тот, кого Helpdesk рекомендует сейчас."""
+        sent = {key: data[key] for key in HELPDESK_PAYMENT_KEYS if key in data}
+        supplier = fields.get('counterparty_id')
+        payment, _items, _offers, card = _request_fields(
+            cursor, sent, ctx, creating=False, current=dict(request_row, counterparty_id=supplier))
+        fields['payment'] = payment
+        fields['card'] = card
+        method = payment.get('payment_method', request_row.get('payment_method'))
+        recipient = payment.get('card_recipient', request_row.get('card_recipient'))
+        if method != workflow.METHOD_CARD or card.get('number') or card.get('card_id'):
+            fields['card_number_ok'] = True
+        else:
+            # Номер, что уже лежит в заявке, годится, пока получатель прежний: карту поставщика
+            # прежнего поставщика новому не пополняют (flow._it_offers её стирает).
+            fields['card_number_ok'] = bool(
+                request_row.get('has_card') and not card.get('clear')
+                and not (recipient == workflow.CARD_SUPPLIER and supplier != request_row.get('counterparty_id')))
+
     def _stock_assets(cursor, raw_ids, request_id):
         """Что Helpdesk IT выдаёт из наличия: номера карточек имущества → [{id, name,
         inventory_number}]. Выдать можно только то, что числится на складе и ещё не выдано
@@ -1088,6 +1112,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                     raise ApiError('; '.join(errors), code='PAYMENT_REQUEST_INVALID', extra={'errors': errors})
                 recommended = next((offer for offer in fields['offers'] if offer['is_recommended']), None)
                 fields['counterparty_id'] = (recommended or {}).get('counterparty_id')
+                _helpdesk_payment(cursor, data, ctx, request_row, fields)
             if action == 'it_stock':
                 fields['stock_assets'] = _stock_assets(cursor, data.get('stock_asset_ids'), request_id)
             # Проверка до загрузки файлов: считаем уже лежащие файлы подзадачи и присланные.

@@ -315,7 +315,8 @@ test('форма регулярного платежа: в «Дополните�
 test('форма: разница считается от наблюдателей при открытии — и у закупа, и у регулярного платежа', () => {
     const source = readFileSync(new URL('../src/components/payments/PaymentRequestForm.jsx', import.meta.url), 'utf8');
     assert.ok(source.includes('const observersPayload = () => observersPatch(draft.observer_ids, observersAtOpen.current);'));
-    assert.equal((source.match(/\.\.\.observersPayload\(\),/g) || []).length, 2, 'и у закупа, и у регулярного платежа');
+    // Закуп, IT-закуп (своя короткая отправка, 06.11.2026) и регулярный платёж.
+    assert.equal((source.match(/\.\.\.observersPayload\(\),/g) || []).length, 3, 'у закупа, IT-закупа и регулярного платежа');
     // Точка отсчёта ставится там же, где форма заполняется при открытии, — для новой заявки пустая.
     const fill = source.slice(source.indexOf('if (fillKey !== filledFor) {'), source.indexOf('const set = useCallback'));
     assert.ok(fill.includes('observersAtOpen.current = next.observer_ids;'));

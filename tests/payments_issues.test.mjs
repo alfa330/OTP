@@ -458,7 +458,8 @@ test('форма заявки: «Отправить» нажимается, се
         'accounting_category', 'payment_method', 'no_alternatives_reason', 'no_alternatives_comment', 'offers', 'supplier_choice_reason',
         'card_recipient', 'card_holder_user_id', 'card_holder_name', 'card_number', 'payment_purpose', 'invoice_file', 'invoice_number',
         'invoice_date', 'fixed_template_id', 'payment_period', 'amount']) {
-        assert.ok(form.includes(`anchor="${key}" issue={issueOf('${key}')}`), key);
+        // Поля карты — общим блоком формы заявки и этапа Helpdesk IT (PaymentCardFields, 06.11.2026).
+        assert.ok(`${form}${source('src/components/payments/PaymentCardFields.jsx')}`.includes(`anchor="${key}" issue={issueOf('${key}')}`), key);
     }
 });
 

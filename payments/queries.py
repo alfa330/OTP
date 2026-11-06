@@ -813,6 +813,16 @@ def reopen_initiation(cursor, request_id, *, status, reason, comment, actor, ask
     return item
 
 
+def drop_unstarted(cursor, request_id, kinds):
+    """Этапы этих видов, которые так и не начинались и пересборкой маршрута стали не нужны, —
+    убрать совсем, а не держать в «Ходе заявки» пропущенными. У IT-закупа способ оплаты выбирает
+    Helpdesk IT (владелец 06.11.2026): оплата, поставленная при отправке, была лишь местом под неё."""
+    cursor.execute(
+        "DELETE FROM payment_subtasks WHERE request_id = %s AND kind = ANY(%s) AND state = 'skipped' "
+        "AND opened_at IS NULL AND done_at IS NULL",
+        (int(request_id), list(kinds)))
+
+
 def skip_pending(cursor, request_id, comment):
     """Этапы, до которых заявка не дошла, больше не нужны (Helpdesk IT выдал из наличия):
     в «Ходе заявки» они стоят пропущенными с причиной, а не «ещё впереди»."""

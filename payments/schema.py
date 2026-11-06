@@ -57,9 +57,10 @@ _NOW = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 # Инициатор и его руководитель — конкретные люди заявки, а не роли со списком,
 # поэтому их здесь нет. Исполнитель этапа оплаты — подразделение, а не человек
 # (п. 2, п. 9): «Бухгалтерия» и «Финансовый отдел» — это списки, и задачу видит
-# каждый из списка. «Helpdesk IT» (просьба владельца 04.11.2026) — тоже список:
-# IT-закуп после руководителя проверяет и подбирает любой из них.
-MEMBER_ROLES = ('approver', 'accounting', 'finance', 'asset_keeper', 'helpdesk')
+# каждый из списка. «Helpdesk IT и учёт имущества» (asset_keeper) с 04.11.2026 ещё и
+# проверяет IT-закупы после руководителя; отдельной роли Helpdesk IT с 06.11.2026 нет —
+# это один человек (владелец), участники прежней роли перенесены в неё (см. ниже).
+MEMBER_ROLES = ('approver', 'accounting', 'finance', 'asset_keeper')
 
 # До ТЗ «Закуп и оплата» согласующих было двое с разными правами: Учредитель и
 # Директор по развитию (по Приказу). Теперь это одна роль «Утвердитель», а кому
@@ -1012,6 +1013,23 @@ _STATEMENTS = [
     # заявка идёт, — маршрут в пути от этого не перестраивается.
     "ALTER TABLE payment_categories ADD COLUMN IF NOT EXISTS via_helpdesk BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS it_purchase BOOLEAN NOT NULL DEFAULT FALSE",
+
+    # ── Helpdesk IT и учёт имущества — одна роль (владелец 06.11.2026) ─────
+    #
+    # «Хелпдеск и учёт имущества — один человек»: выбирать его в «Участниках» дважды
+    # незачем. Проверку IT-закупа выполняет роль asset_keeper; кто успел попасть в
+    # прежнюю роль `helpdesk`, переносится в неё, этапы и заявки — тоже. Повторный
+    # запуск ничего не меняет: строк с `helpdesk` больше нет.
+    """
+    INSERT INTO payment_role_members (role_code, user_id, added_by, added_at)
+    SELECT 'asset_keeper', user_id, added_by, added_at
+      FROM payment_role_members
+     WHERE role_code = 'helpdesk'
+    ON CONFLICT (role_code, user_id) DO NOTHING
+    """,
+    "DELETE FROM payment_role_members WHERE role_code = 'helpdesk'",
+    "UPDATE payment_subtasks SET role_code = 'asset_keeper' WHERE role_code = 'helpdesk'",
+    "UPDATE payment_requests SET current_role_code = 'asset_keeper' WHERE current_role_code = 'helpdesk'",
 
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #

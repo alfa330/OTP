@@ -4,12 +4,13 @@ import { ArrowRight, FileText, Loader2, Paperclip, Plus, RefreshCcw, ShoppingCar
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSection } from '../ui/ios';
 import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
+import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CARD_RECIPIENT_OPTIONS, CONTRACT_THRESHOLD, HINTS, MAX_OBSERVERS,
-    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, UNSTAFFED, approvalSummary, cardDigits, cardLuhnOk,
-    cardNumberLabel, cardProblem, fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
-    issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, legacyIssues, observersClosedLine, observersPatch,
-    parseAmount, priceTrend, purchaseIssues, regularIssues, supplierCardBlocked, trendLabel, IT_SUPPLIER_CARD,
+    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CONTRACT_THRESHOLD, HINTS, MAX_OBSERVERS,
+    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, UNSTAFFED, approvalSummary, cardDigits,
+    fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
+    issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTitle, itemsTotal, legacyIssues, observersClosedLine, observersPatch,
+    parseAmount, priceTrend, purchaseIssues, regularIssues, trendLabel,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, Choice, ErrorBox, Field, FieldHint, FilePicker, FormDate, FormInput, FormSelect, FormText,
@@ -36,9 +37,11 @@ import {
  * Чего в форме нет намеренно: выбора руководителя и согласующего. Маршрут
  * определяет система (п. 6) — форма только показывает, кому заявка уйдёт.
  *
- * IT-закуп (владелец 04.11.2026) — категория с отметкой «Helpdesk IT»: человек пишет,
- * что и сколько нужно, цену — если знает. Поставщиков в форме нет: после руководителя
- * Helpdesk IT проверит наличие, подберёт варианты и поставит цены.
+ * IT-закуп (владелец 04.11.2026, 06.11.2026) — категория с отметкой «Helpdesk IT»: человек
+ * пишет, что и сколько нужно («мне нужна мышка»), срок и пожелания, цену — если знает.
+ * Названия, поставщиков, товара или услуги, категории учёта и способа оплаты в форме нет:
+ * после руководителя Helpdesk IT проверит наличие и выберет всё это сам. Название
+ * складывается из позиций (itemsTitle). Поэтому категория в форме — первой.
  *
  * ЧЕГО НЕ ХВАТАЕТ — КРАСНЫМ У САМОГО ПОЛЯ (просьба владельца 14.10.2026). Кнопка
  * отправки нажимается всегда; не хватает обязательного — заявка не уходит, а
@@ -57,7 +60,6 @@ const LEGACY_METHOD_ISSUE = 'выберите способ оплаты: для 
 const TEMPLATE_ENTITY_ISSUE = 'в справочнике у платежа не указана компания — попросите администратора дополнить';
 const ENTITY_UNKNOWN = 'Не знаю — уточнит бухгалтерия';
 const PREVIEW_DEBOUNCE_MS = 350;
-const NEW_CARD = '__new__';
 
 const EXTRA_FIELDS = [
     { key: 'project_id', label: 'Проект' },
@@ -69,6 +71,9 @@ const EXTRA_FIELDS = [
 /* У регулярного платежа комментарий стоит открытым в «Оплате», остального нет вовсе —
    под чипом только наблюдатели. */
 const REGULAR_EXTRA_FIELDS = EXTRA_FIELDS.filter((field) => field.key === 'observer_ids');
+/* У IT-закупа комментарий — это «Пожелания» в «Что закупаем» (владелец 06.11.2026): второго поля
+   под то же самое нет. Заполненный раньше комментарий своё поле сохраняет (чип раскрыт). */
+const IT_EXTRA_FIELDS = EXTRA_FIELDS.filter((field) => field.key !== 'notes');
 // Поле заполнено — его чип раскрыт: пустой список наблюдателей — то же, что пустое поле.
 const hasValue = (value) => (Array.isArray(value) ? value.length > 0 : Boolean(value));
 
@@ -213,7 +218,6 @@ const PaymentRequestForm = ({
     const [error, setError] = useState('');
     const [history, setHistory] = useState([]);
     const [preview, setPreview] = useState(null);
-    const [cardOptions, setCardOptions] = useState([]);
     const [cardEditing, setCardEditing] = useState(false);
     const [confirmClose, setConfirmClose] = useState(false);
     /* Переход «выбор типа → форма» — как второй уровень внутри окна на сайте
@@ -371,7 +375,6 @@ const PaymentRequestForm = ({
         else {
             list = purchaseIssues({ ...draft, offers }, {
                 minSuppliers: settings?.min_suppliers ?? 3, fileKinds, hasCard: cardKept, staffed, helpdesk,
-                supplierKnown: Boolean(supplierId),
             });
         }
         const placed = [];
@@ -388,7 +391,7 @@ const PaymentRequestForm = ({
             placed.push(item);
         });
         return placed;
-    }, [kind, legacy, regular, draft, offers, fileKinds, settings, cardKept, template, staffed, helpdesk, supplierId]);
+    }, [kind, legacy, regular, draft, offers, fileKinds, settings, cardKept, template, staffed, helpdesk]);
     const byKey = useMemo(() => issuesByKey(issues), [issues]);
     const keys = useMemo(() => issueKeys(issues), [issues]);
     const nav = useIssueNav(formRef, keys);
@@ -417,7 +420,7 @@ const PaymentRequestForm = ({
     // ── Справка «История оплат»: похожие ранее оплаченные заявки ──
     useEffect(() => {
         if (!open || !kind) return undefined;
-        if (!supplierId && !draft.category_id && (draft.expense_name || '').trim().length < 3) {
+        if (helpdesk || (!supplierId && !draft.category_id && (draft.expense_name || '').trim().length < 3)) {
             setHistory([]);
             return undefined;
         }
@@ -435,7 +438,7 @@ const PaymentRequestForm = ({
                 .catch(() => { if (!cancelled) setHistory([]); });
         }, HISTORY_DEBOUNCE_MS);
         return () => { cancelled = true; clearTimeout(timer); };
-    }, [open, kind, apiBaseUrl, headers, supplierId, draft.category_id, draft.subcategory_id, draft.expense_name, request?.id]);
+    }, [open, kind, helpdesk, apiBaseUrl, headers, supplierId, draft.category_id, draft.subcategory_id, draft.expense_name, request?.id]);
 
     // ── Кому уйдёт заявка: маршрут определяет система (п. 6) ──
     useEffect(() => {
@@ -464,22 +467,10 @@ const PaymentRequestForm = ({
         draft.project_id, draft.payment_method, draft.fixed_template_id, request?.initiator_id, apiBaseUrl, headers]);
 
     // ── Сохранённые карты получателя (справочник карт, только маски) ──
-    const cardOwnerUser = draft.card_recipient === 'employee' ? draft.card_holder_user_id : null;
-    const cardOwnerSupplier = draft.card_recipient === 'supplier' ? supplierId : null;
-    useEffect(() => {
-        if (!open || draft.payment_method !== 'card' || !(cardOwnerUser || cardOwnerSupplier)) {
-            setCardOptions([]);
-            return undefined;
-        }
-        let cancelled = false;
-        const params = new URLSearchParams({ owner_kind: draft.card_recipient });
-        if (cardOwnerUser) params.set('user_id', cardOwnerUser);
-        if (cardOwnerSupplier) params.set('counterparty_id', cardOwnerSupplier);
-        axios.get(`${apiBaseUrl}/api/payments/cards/options?${params}`, { headers: headers() })
-            .then((response) => { if (!cancelled) setCardOptions(response.data?.items || []); })
-            .catch(() => { if (!cancelled) setCardOptions([]); });
-        return () => { cancelled = true; };
-    }, [open, draft.payment_method, draft.card_recipient, cardOwnerUser, cardOwnerSupplier, apiBaseUrl, headers]);
+    const cardOptions = useSavedCards({
+        enabled: open && draft.payment_method === 'card', apiBaseUrl, headers, recipient: draft.card_recipient,
+        userId: draft.card_holder_user_id, counterpartyId: supplierId,
+    });
 
     const addExtra = (key) => setExtras((prev) => (prev.includes(key) ? prev : [...prev, key]));
     const removeExtra = (key) => {
@@ -523,6 +514,26 @@ const PaymentRequestForm = ({
                 ...observersPayload(),
             };
         }
+        const items = draft.items.filter((item) => !isBlankItem(item)).map((item) => ({
+            name: item.name.trim(), quantity: itemQuantity(item), unit: item.unit || null,
+            unit_price: parseAmount(item.unit_price),
+        }));
+        if (helpdesk) {
+            /* IT-закуп (владелец 06.11.2026): что, сколько, срок и пожелания. Название — из позиций; без
+               позиций его нет, и поле не шлётся (пустое стёрло бы прежнее). Поставщиков, товар или услугу,
+               категорию учёта, способ оплаты и карту выбирает Helpdesk IT — форма их не шлёт вовсе,
+               иначе сохранение на доработке стёрло бы то, что он выбрал. */
+            const title = itemsTitle(draft.items);
+            return {
+                request_kind: 'purchase',
+                department_id: draft.department_id, project_id: draft.project_id, branch: draft.branch.trim(),
+                ...(title ? { expense_name: title } : {}), justification: draft.justification.trim(),
+                category_id: draft.category_id, subcategory_id: draft.subcategory_id, due_on: draft.due_on || null,
+                items, notes: draft.notes.trim(),
+                ...observersPayload(),
+                submit,
+            };
+        }
         const sent = offers.filter((offer) => !isBlankOffer(offer));
         const card = draft.payment_method === 'card' && !cardKept
             ? (draft.card_id ? { card_id: draft.card_id } : { card_number: cardDigits(draft.card_number) })
@@ -535,22 +546,15 @@ const PaymentRequestForm = ({
             object_type: draft.object_type, accounting_category: draft.accounting_category,
             payment_method: draft.payment_method,
             // Те же строки, что посчитаны в сумме на экране: пустые не уходят.
-            items: draft.items.filter((item) => !isBlankItem(item)).map((item) => ({
-                name: item.name.trim(), quantity: itemQuantity(item), unit: item.unit || null,
-                unit_price: parseAmount(item.unit_price),
+            items,
+            offers: sent.map((offer, index) => ({
+                ...offerPayload(offer),
+                is_recommended: draft.no_alternatives ? index === 0 : Boolean(offer.is_recommended),
             })),
-            // IT-закуп: поставщиков ведёт Helpdesk IT — форма их не шлёт вовсе, иначе сохранение
-            // на доработке стёрло бы варианты, которые он подобрал.
-            ...(helpdesk ? {} : {
-                offers: sent.map((offer, index) => ({
-                    ...offerPayload(offer),
-                    is_recommended: draft.no_alternatives ? index === 0 : Boolean(offer.is_recommended),
-                })),
-                no_alternatives: Boolean(draft.no_alternatives),
-                no_alternatives_reason: draft.no_alternatives ? draft.no_alternatives_reason : null,
-                no_alternatives_comment: draft.no_alternatives ? draft.no_alternatives_comment.trim() : '',
-                supplier_choice_reason: draft.supplier_choice_reason.trim(),
-            }),
+            no_alternatives: Boolean(draft.no_alternatives),
+            no_alternatives_reason: draft.no_alternatives ? draft.no_alternatives_reason : null,
+            no_alternatives_comment: draft.no_alternatives ? draft.no_alternatives_comment.trim() : '',
+            supplier_choice_reason: draft.supplier_choice_reason.trim(),
             contract_id: contractId, counterparty_account_id: accountId,
             invoice_number: draft.invoice_number.trim(), invoice_date: draft.invoice_date || null,
             replace_invoice: Boolean(invoiceFile),
@@ -626,8 +630,6 @@ const PaymentRequestForm = ({
     const entityStep = entityOptional && Boolean(preview?.entity_step);
     // IT-закуп: после руководителя — Helpdesk IT, согласующего выберут по сумме его поставщика.
     const itStep = helpdesk && (Boolean(preview?.it_step) || sentSameCategory);
-    // Карта поставщика у IT-закупа, которому Helpdesk IT ещё не выбрал поставщика, — её не указать.
-    const supplierCardOff = supplierCardBlocked(draft, { helpdesk, supplierKnown: Boolean(supplierId) });
     const routeManager = preview?.manager?.name || '';
     const initiatorName = (editing ? request.initiator_name : me?.name) || '';
     // Руководитель: у своей новой заявки — из справочного набора, у чужой на доработке — записанный в заявке.
@@ -636,9 +638,6 @@ const PaymentRequestForm = ({
     const managerSource = !editing && dictionaries?.manager?.source === 'supervisor' ? 'из карточки сотрудника'
         : !editing && dictionaries?.manager?.source === 'department_head' ? 'глава отдела' : 'определён автоматически';
     const busy = Boolean(saving);
-    const lunaWarn = !draft.card_id && cardDigits(draft.card_number).length >= 13 && !cardProblem(draft.card_number, meta?.card_digits)
-        && !cardLuhnOk(draft.card_number);
-    const cardSelect = cardOptions.length > 0;
 
     /* «Дополнительно»: необязательное спрятано под чипы «+ …» и раскрывается полем по
        нажатию. У нового закупа — проект, филиал, комментарий, вложения и наблюдатели; у
@@ -863,9 +862,9 @@ const PaymentRequestForm = ({
                 {kind === 'purchase' && (
                     <>
                         <IosSection title="Что закупаем">
-                            <Field label="Наименование закупа" required hint="Коротко и конкретно: «Бумага А4 для офиса», а не «хоз. товары». Подробности — в позициях ниже." anchor="expense_name" issue={issueOf('expense_name')}>
-                                <FormInput value={draft.expense_name} onChange={(event) => set('expense_name', event.target.value)} placeholder="Например: Бумага А4 и канцелярия для офиса" maxLength={300} />
-                            </Field>
+                            {/* Категория — первой: от неё зависит форма. У IT-категории (отметка «Helpdesk IT») человек
+                                пишет только что, сколько, срок и пожелания — названия, товара или услуги, категории учёта,
+                                поставщиков и способа оплаты у него нет: их выберет Helpdesk IT (владелец 06.11.2026). */}
                             <div className="grid gap-3 sm:grid-cols-2">
                                 <Field label="Категория закупа" required hint={HINTS.category} anchor="category_id" issue={issueOf('category_id')}>
                                     <FormSelect
@@ -885,12 +884,26 @@ const PaymentRequestForm = ({
                                     </Field>
                                 )}
                             </div>
-                            <Field label="Описание и обоснование" required hint={HINTS.justification} anchor="justification" issue={issueOf('justification')}>
-                                <FormText className="min-h-[72px]" value={draft.justification} onChange={(event) => set('justification', event.target.value)} maxLength={4000} placeholder="Что покупаем и почему это нужно сейчас" />
-                            </Field>
+                            {!helpdesk && (
+                                <Field label="Наименование закупа" required hint="Коротко и конкретно: «Бумага А4 для офиса», а не «хоз. товары». Подробности — в позициях ниже." anchor="expense_name" issue={issueOf('expense_name')}>
+                                    <FormInput value={draft.expense_name} onChange={(event) => set('expense_name', event.target.value)} placeholder="Например: Бумага А4 и канцелярия для офиса" maxLength={300} />
+                                </Field>
+                            )}
+                            {!helpdesk && (
+                                <Field label="Описание и обоснование" required hint={HINTS.justification} anchor="justification" issue={issueOf('justification')}>
+                                    <FormText className="min-h-[72px]" value={draft.justification} onChange={(event) => set('justification', event.target.value)} maxLength={4000} placeholder="Что покупаем и почему это нужно сейчас" />
+                                </Field>
+                            )}
                             <Field as="div" label="Позиции и количество" required optionalMark={false} hint={helpdesk ? HINTS.itemsHelpdesk : HINTS.items} anchor="items" issue={issueOf('items')} issueFirst>
                                 <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} issue={reveal ? byKey.items?.[0] || null : null} />
                             </Field>
+                            {/* IT-закуп: пожелания — комментарием, если есть («мышка беспроводная»), владелец 06.11.2026. */}
+                            {helpdesk && (
+                                <Field label="Пожелания" hint={HINTS.wishes} anchor="justification">
+                                    <FormText className="min-h-[56px]" value={draft.justification} onChange={(event) => set('justification', event.target.value)} maxLength={4000} placeholder="Модель, характеристики, ссылка на товар — если важно" />
+                                </Field>
+                            )}
+                            {!helpdesk && (<>
                             <div className="flex flex-wrap gap-x-6 gap-y-3">
                                 <Field as="div" label="Тип объекта" required optionalMark={false} hint={HINTS.objectType} anchor="object_type" issue={issueOf('object_type')}>
                                     <Choice value={draft.object_type} options={OBJECT_TYPE_OPTIONS} onChange={(value) => setDraft((prev) => ({ ...prev, object_type: value, accounting_category: value === 'goods' ? prev.accounting_category : null }))} ariaLabel="Тип объекта" />
@@ -904,6 +917,7 @@ const PaymentRequestForm = ({
                             {draft.object_type === 'goods' && draft.accounting_category === 'asset' && staffed?.asset_keeper === false && !reveal && (
                                 <NoticeBox text={`Сейчас так отправить нельзя: ${UNSTAFFED.asset_keeper}.`} />
                             )}
+                            </>)}
                             <div className="grid gap-3 sm:grid-cols-2">
                                 <Field label="Желаемый срок" required hint={HINTS.dueOn} anchor="due_on" issue={issueOf('due_on')}>
                                     <FormDate value={draft.due_on} onChange={(value) => set('due_on', value || '')} placeholder="Выберите дату" ariaLabel="Желаемый срок" />
@@ -911,8 +925,12 @@ const PaymentRequestForm = ({
                             </div>
                         </IosSection>
 
+                        {/* IT-закуп: компанию уточнит бухгалтерия, руководителя видно в маршруте под формой —
+                            раздел нужен, только если подразделение не подставилось само. */}
+                        {(!helpdesk || !draft.department_id) && (
                         <IosSection title="Для кого">
                             <div className="grid gap-3 sm:grid-cols-2">
+                                {!helpdesk && (
                                 <Field label="Компания" required={!entityOptional} hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
                                     <FormSelect
                                         value={draft.legal_entity_id}
@@ -923,12 +941,14 @@ const PaymentRequestForm = ({
                                         ariaLabel="Компания"
                                     />
                                 </Field>
+                                )}
                                 <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
                                     <FormSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Подразделение" ariaLabel="Подразделение" />
                                 </Field>
                             </div>
                             {/* Инициатор и руководитель — поля заявки (п. 4.1), но не поля ввода:
                                 инициатор — тот, кто заводит заявку, руководителя определяет раздел. */}
+                            {!helpdesk && (<>
                             <div className="rounded-xl bg-slate-50 px-3 py-1.5">
                                 <Row label="Инициатор">{initiatorName}</Row>
                                 <Row label="Руководитель">
@@ -937,8 +957,11 @@ const PaymentRequestForm = ({
                                 </Row>
                             </div>
                             <RequisitesBox entity={legalEntity} />
+                            </>)}
                         </IosSection>
+                        )}
 
+                        {(!helpdesk || offers.some((offer) => !isBlankOffer(offer))) && (
                         <IosSection title="Поставщики">
                             {helpdesk ? (
                                 /* IT-закуп: варианты поставщиков и цены — работа Helpdesk IT. Уже подобранные им
@@ -946,7 +969,7 @@ const PaymentRequestForm = ({
                                 <div data-form-helpdesk className="space-y-2">
                                     {/* Одна строка, подробности — под «i»: пояснение нужно один раз, а не всё время. */}
                                     <div className="flex items-center gap-1.5 px-1 text-[13px] text-slate-600">
-                                        <span>Поставщиков и цены подберёт <span className="whitespace-nowrap">Helpdesk IT <FieldHint hint={HINTS.helpdeskSuppliers} /></span></span>
+                                        <span>Подобрал <span className="whitespace-nowrap">Helpdesk IT <FieldHint hint={HINTS.helpdeskSuppliers} /></span></span>
                                     </div>
                                     {offers.filter((offer) => !isBlankOffer(offer)).length > 0 && (
                                         <div className="divide-y divide-slate-100 overflow-hidden rounded-xl ring-1 ring-slate-200/70">
@@ -1012,7 +1035,10 @@ const PaymentRequestForm = ({
                                 </NoticeBox>
                             )}
                         </IosSection>
+                        )}
 
+                        {/* IT-закуп: способ оплаты выберет Helpdesk IT вместе с поставщиком (владелец 06.11.2026). */}
+                        {!helpdesk && (
                         <IosSection title="Способ оплаты">
                             <Field as="div" label="Как платим" required optionalMark={false} hint={HINTS.paymentMethod} anchor="payment_method" issue={issueOf('payment_method')}>
                                 <Choice value={draft.payment_method} options={PAYMENT_METHOD_OPTIONS} onChange={(value) => set('payment_method', value)} ariaLabel="Способ оплаты" />
@@ -1065,66 +1091,21 @@ const PaymentRequestForm = ({
                             )}
 
                             {draft.payment_method === 'card' && (
-                                <>
-                                    <Field as="div" label="Получатель" required optionalMark={false} hint={HINTS.cardRecipient} anchor="card_recipient" issue={issueOf('card_recipient')}>
-                                        <Choice value={draft.card_recipient} options={CARD_RECIPIENT_OPTIONS} onChange={(value) => setDraft((prev) => ({ ...prev, card_recipient: value, card_id: null }))} ariaLabel="Чью карту пополнить" />
-                                    </Field>
-                                    {supplierCardOff && !reveal && <NoticeBox text={`Сейчас так отправить нельзя: ${IT_SUPPLIER_CARD}.`} />}
-                                    {draft.card_recipient === 'employee' && (
-                                        <Field label="Сотрудник" required anchor="card_holder_user_id" issue={issueOf('card_holder_user_id')}>
-                                            <UserSelect users={users} value={draft.card_holder_user_id} onChange={(value) => setDraft((prev) => ({ ...prev, card_holder_user_id: value, card_id: null }))} placeholder="Чья карта" />
-                                        </Field>
-                                    )}
-                                    {draft.card_recipient === 'supplier' && !supplierCardOff && (
-                                        <Field label="ФИО владельца карты" required anchor="card_holder_name" issue={issueOf('card_holder_name')}>
-                                            <FormInput value={draft.card_holder_name} onChange={(event) => set('card_holder_name', event.target.value)} maxLength={200} placeholder="Как на карте" />
-                                        </Field>
-                                    )}
-                                    {draft.card_recipient && !supplierCardOff && (cardKept ? (
-                                        <Field as="div" label="Номер карты" required optionalMark={false} hint={HINTS.cardNumber}>
-                                            <div className="flex flex-wrap items-center gap-2 text-[14px] tabular-nums text-slate-900">
-                                                {request.card_mask}
-                                                <button type="button" className="text-[12.5px] font-medium text-blue-600 hover:underline" onClick={() => setCardEditing(true)}>Изменить</button>
-                                            </div>
-                                        </Field>
-                                    ) : (
-                                        <div className="grid gap-3 sm:grid-cols-2">
-                                            {cardSelect && (
-                                                <Field label="Карта" required hint="Сохранённые карты получателя из справочника. Показаны последние четыре цифры.">
-                                                    <FormSelect
-                                                        value={draft.card_id ?? NEW_CARD}
-                                                        onChange={(value) => set('card_id', value === NEW_CARD ? null : value)}
-                                                        options={[...cardOptions.map((item) => ({ value: item.id, label: `${item.mask} · ${item.holder_name}` })), { value: NEW_CARD, label: 'Другая карта — ввести номер' }]}
-                                                        ariaLabel="Карта получателя"
-                                                    />
-                                                </Field>
-                                            )}
-                                            {!draft.card_id && (
-                                                <Field label="Номер карты" required hint={HINTS.cardNumber} anchor="card_number" issue={issueOf('card_number')}>
-                                                    <FormInput
-                                                        className={`tabular-nums ${lunaWarn ? 'ring-2 ring-amber-300' : ''}`}
-                                                        inputMode="numeric"
-                                                        autoComplete="off"
-                                                        value={cardNumberLabel(draft.card_number)}
-                                                        onChange={(event) => set('card_number', cardDigits(event.target.value).slice(0, 19))}
-                                                        placeholder="0000 0000 0000 0000"
-                                                        aria-label="Номер карты"
-                                                    />
-                                                </Field>
-                                            )}
-                                        </div>
-                                    ))}
-                                    {lunaWarn && (
-                                        <div className="px-1 text-[12.5px] text-amber-700">Проверьте номер: контрольная цифра не сходится — возможно, опечатка.</div>
-                                    )}
-                                    <Field label="Назначение перевода" required hint={HINTS.paymentPurpose} anchor="payment_purpose" issue={issueOf('payment_purpose')}>
-                                        <FormInput value={draft.payment_purpose} onChange={(event) => set('payment_purpose', event.target.value)} maxLength={2000} placeholder="На что пойдут деньги" />
-                                    </Field>
-                                </>
+                                <PaymentCardFields
+                                    draft={draft}
+                                    onPatch={(patch) => setDraft((prev) => ({ ...prev, ...patch }))}
+                                    issueOf={issueOf}
+                                    users={users}
+                                    keptMask={cardKept ? request.card_mask : null}
+                                    onEditKept={() => setCardEditing(true)}
+                                    cardOptions={cardOptions}
+                                    digitsRange={meta?.card_digits}
+                                />
                             )}
                         </IosSection>
+                        )}
 
-                        {extrasSection(EXTRA_FIELDS)}
+                        {extrasSection(helpdesk && !String(draft.notes || '').trim() ? IT_EXTRA_FIELDS : EXTRA_FIELDS)}
                     </>
                 )}
 
@@ -1155,7 +1136,7 @@ const PaymentRequestForm = ({
                                 матрица выберет по сумме его поставщика, поэтому заранее его не называем. */}
                             {itStep && (
                                 <>
-                                    <span>Helpdesk IT <span className="text-slate-500">· подберёт поставщиков</span></span>
+                                    <span>Helpdesk IT <span className="text-slate-500">· проверит наличие, подберёт поставщика</span></span>
                                     <ArrowRight size={13} className="text-slate-400" />
                                 </>
                             )}

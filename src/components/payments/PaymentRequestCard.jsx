@@ -327,6 +327,7 @@ const PaymentRequestCard = ({
        матрица выберет уже по ним. Проверку прошли — что она решила (поставщики или выдача из наличия). */
     const itStep = subtaskByKind.it_review || null;
     const itPending = ['pending', 'open', 'waiting'].includes(itStep?.state);
+    const itRequest = request?.request_kind === 'purchase' && Boolean(request?.it_purchase || request?.category_helpdesk);
     const approverPending = (entityPending || itPending) && !approvalReassigned;
     const approverPendingText = itPending ? 'после Helpdesk IT' : 'после выбора компании';
     const stockIssued = useMemo(() => {
@@ -717,7 +718,8 @@ const PaymentRequestCard = ({
                                 <section className="space-y-1.5">
                                     <SectionTitle>Заявка</SectionTitle>
                                     <div className={`${iosCard} px-4 py-2`}>
-                                        <Row label="Описание и обоснование" wide>{request.justification}</Row>
+                                        {/* IT-закуп: инициатор пишет пожелания, а не обоснование (владелец 06.11.2026). */}
+                                        <Row label={itRequest ? 'Пожелания' : 'Описание и обоснование'} wide>{request.justification}</Row>
                                         <Row label="Позиции" wide>
                                             <div className="space-y-0.5">
                                                 {(data.items || []).map((item) => (
@@ -735,7 +737,10 @@ const PaymentRequestCard = ({
                                                 ))}
                                             </div>
                                         </Row>
-                                        <Row label="Тип объекта" wide>{[OBJECT_TYPE_LABELS[request.object_type], ACCOUNTING_CATEGORY_LABELS[request.accounting_category]].filter(Boolean).join(' · ')}</Row>
+                                        <Row label="Тип объекта" wide>
+                                            {[OBJECT_TYPE_LABELS[request.object_type], ACCOUNTING_CATEGORY_LABELS[request.accounting_category]].filter(Boolean).join(' · ')
+                                                || (itPending ? <span className="text-slate-500">выберет Helpdesk IT</span> : null)}
+                                        </Row>
                                         <Row label="Категория закупа" wide>{[request.category_name, request.subcategory_name].filter(Boolean).join(' → ')}</Row>
                                         <Row label="Компания" wide>
                                             {request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}
@@ -827,7 +832,9 @@ const PaymentRequestCard = ({
                                 <section className="space-y-1.5">
                                     <SectionTitle>Оплата и согласование</SectionTitle>
                                     <div className={`${iosCard} px-4 py-2`}>
-                                        <Row label="Способ оплаты" wide>{PAYMENT_METHOD_LABELS[request.payment_method]}</Row>
+                                        <Row label="Способ оплаты" wide>
+                                            {PAYMENT_METHOD_LABELS[request.payment_method] || (itPending ? <span className="text-slate-500">выберет Helpdesk IT</span> : null)}
+                                        </Row>
                                         {request.payment_method === 'card' ? (
                                             <>
                                                 <Row label="Получатель" wide>{[CARD_RECIPIENT_LABELS[request.card_recipient], request.card_holder_name].filter(Boolean).join(' · ')}</Row>
@@ -1057,6 +1064,7 @@ const PaymentRequestCard = ({
                                             showToast={showToast}
                                             permissions={permissions}
                                             onAct={act}
+                                            onTake={() => move('in_progress')}
                                             onEdit={(options) => onEdit?.(data, options)}
                                             onReply={reply}
                                             onAttach={attach}

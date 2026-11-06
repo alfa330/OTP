@@ -184,13 +184,13 @@ _ROLE_WITHOUT_PEOPLE = {
     workflow.ROLE_APPROVER: 'Утвердить заявку некому: в роли «Утвердитель» нет никого, кроме вас',
     workflow.ROLE_ACCOUNTING: 'Оплатить счёт некому: в роли «Бухгалтерия» нет участников',
     workflow.ROLE_FINANCE: 'Пополнить карту некому: в роли «Финансовый отдел» нет участников',
-    workflow.ROLE_ASSET_KEEPER: 'Поставить имущество на учёт некому: не назначен ответственный за учёт имущества',
-    workflow.ROLE_HELPDESK: 'Проверить IT-закуп некому: в роли «Helpdesk IT» нет участников',
+    workflow.ROLE_ASSET_KEEPER: 'Поставить имущество на учёт некому: в роли «Helpdesk IT и учёт имущества» нет участников',
 }
 # Этапы, которые роль выполняет помимо главного дела: уточнить компанию — тоже бухгалтерии,
 # но «оплатить счёт некому» сказало бы о другом.
 _KIND_WITHOUT_PEOPLE = {
     workflow.KIND_ENTITY: 'Уточнить компанию некому: в роли «Бухгалтерия» нет участников',
+    workflow.KIND_IT: 'Проверить IT-закуп некому: в роли «Helpdesk IT и учёт имущества» нет участников',
 }
 
 
@@ -600,9 +600,12 @@ def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=N
 
 def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None, base_url=None):
     """Helpdesk IT: нужного в наличии нет — варианты поставщиков и цены позиций по
-    рекомендуемому (просьба владельца 04.11.2026). Сумма и поставщик — условия матрицы
-    согласования (п. 6), поэтому маршрут после этапа строится заново, как после уточнения
-    компании: утверждающего выбирают уже по настоящей сумме у выбранного поставщика.
+    рекомендуемому (просьба владельца 04.11.2026), а с 06.11.2026 и товар или услуга,
+    категория учёта и способ оплаты (`fields['payment']`, номер карты — `fields['card']`).
+    Сумма, поставщик и способ оплаты — условия матрицы согласования (п. 6), поэтому маршрут
+    после этапа строится заново, как после уточнения компании: утверждающего выбирают уже
+    по настоящей сумме у выбранного поставщика, а оплата и постановка на учёт встают по
+    выбору Helpdesk IT.
 
     Возвращает {'next', 'offer_ids'}: к вариантам приложены коммерческие предложения — их
     файлы ручка сохраняет следом, с номерами вариантов."""
@@ -620,19 +623,28 @@ def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None,
         'no_alternatives_comment': fields.get('no_alternatives_comment') if alone else None,
         'supplier_choice_reason': None if alone else fields.get('supplier_choice_reason'),
     }
+    card = dict(fields.get('card') or {})
     if changes['counterparty_id'] != request.get('counterparty_id'):
         # Сменился поставщик — договор и реквизиты прежнего к новому не относятся. Карта
         # поставщика — тоже: пополнили бы карту прежнего (как и в форме, routes._request_fields).
         changes.update(contract_id=None, counterparty_account_id=None)
         if (request.get('payment_method') == workflow.METHOD_CARD
-                and request.get('card_recipient') == workflow.CARD_SUPPLIER):
+                and request.get('card_recipient') == workflow.CARD_SUPPLIER
+                and not (card.get('number') or card.get('card_id'))):
             changes['card_id'] = None
-            queries.set_card_number(cursor, request_id, '')
+            card['clear'] = True
+    # Товар или услуга, категория учёта и способ оплаты с картой — тоже выбор Helpdesk IT
+    # (владелец 06.11.2026): инициатор IT-закупа их не указывает.
+    changes.update(fields.get('payment') or {})
     queries.update_request_fields(cursor, request_id, changes)
+    apply_card(cursor, request_id, card)
     refreshed, basis, route, passed = _replan(cursor, request_id, workflow.KIND_IT)
     notices.clear_subtask(cursor, subtask['id'])
     queries.complete_subtask(cursor, subtask['id'], actor, outcome=workflow.IT_OUTCOME_OFFERS, comment=comment)
     _rewrite(cursor, refreshed, basis, route, keep=(workflow.KIND_IT,) + passed)
+    # Оплата при отправке стояла местом под выбор Helpdesk IT: выбрал карту — «Оплаты счёта» в ходе
+    # заявки нет вовсе, а не «пропущена» (и наоборот).
+    queries.drop_unstarted(cursor, request_id, (workflow.KIND_INVOICE, workflow.KIND_CARD, workflow.KIND_RECEIPT))
     queries.log_event(cursor, request_id, 'it_offers', actor, comment=comment, payload={
         'kind': subtask['kind'], 'offers': len(offers), 'recommended': recommended.get('supplier_name'),
         'amount': amount, 'amount_before': amount_before,
@@ -640,6 +652,20 @@ def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None,
     # Инициатор видит, у кого и за сколько предлагают купить, — дальше заявка у утверждающего.
     _notify_initiator(cursor, refreshed, notify.it_offers(refreshed), outbox=outbox, base_url=base_url, actor=actor)
     return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url), 'offer_ids': offer_ids}
+
+
+def apply_card(cursor, request_id, card):
+    """Номер карты заявки: из справочника карт (`card_id`), новый (`number`) или стереть
+    (`clear`). Возвращает, изменился ли он. Снимок условий здесь не трогается: форма заявки
+    помечает его сама (routes._apply_card), а этап Helpdesk IT пишет снимок заново (_rewrite)."""
+    card = card or {}
+    if card.get('card_id'):
+        return queries.copy_card_from_directory(cursor, request_id, card['card_id'])
+    if card.get('number'):
+        return queries.set_card_number(cursor, request_id, card['number'])
+    if card.get('clear'):
+        return queries.set_card_number(cursor, request_id, '')
+    return False
 
 
 def _it_stock(cursor, request, subtask, actor, issued, comment, *, outbox=None, base_url=None):

@@ -113,8 +113,9 @@ def person(cur, user_id):
 
 def seed(cur):
     """Участники ролей, IT-категория, компания, поставщики и лимит «до 500 000 ₸ — Утвердова»."""
+    # Helpdesk IT и учёт имущества — одна роль (06.11.2026): в ней и «Хелпов», и «Складов».
     for role, user_id in (('approver', APPROVER), ('approver', BIG_APPROVER), ('accounting', ACCOUNTANT),
-                          ('helpdesk', HELPDESK), ('asset_keeper', KEEPER)):
+                          ('asset_keeper', HELPDESK), ('asset_keeper', KEEPER)):
         queries.add_role_member(cur, role, user_id, None)
     it_category = directory.upsert_category(cur, name='Оргтехника', via_helpdesk=True)
     plain_category = directory.upsert_category(cur, name='Канцелярия')
@@ -181,11 +182,11 @@ def test_it_purchase_goes_manager_helpdesk_approver(db):
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         assert state(cur, rid)['it_review'] == 'open'
         # Задача — каждому из Helpdesk IT: на столе и на их доске, в «Новых».
-        assert (rid, 'it_review') in queries.desk_pairs(cur, HELPDESK, {'helpdesk'})
-        assert board(cur, 'helpdesk', HELPDESK, {'helpdesk'}) == {rid: 'new'}
-        assert queries.read_request(cur, rid)['current_role_code'] == 'helpdesk'
+        assert (rid, 'it_review') in queries.desk_pairs(cur, HELPDESK, {'asset_keeper'})
+        assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'new'}
+        assert queries.read_request(cur, rid)['current_role_code'] == 'asset_keeper'
         flow.move(cur, rid, workflow.KIND_IT, 'in_progress', person(cur, HELPDESK))
-        assert board(cur, 'helpdesk', HELPDESK, {'helpdesk'}) == {rid: 'in_progress'}
+        assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'in_progress'}
 
         fields = dict(offers_fields(ids, '450000', '470000', '455000'), comment='Модель — ThinkPad E14',
                       items=[{'name': 'Ноутбук Lenovo ThinkPad E14', 'quantity': Decimal('1'), 'unit': 'шт',
@@ -209,13 +210,94 @@ def test_it_purchase_goes_manager_helpdesk_approver(db):
         assert (steps['approval']['state'], steps['approval']['assignee_id']) == ('open', APPROVER)
         assert request['route_basis']['source'] == 'limit'
         assert request['submitted_snapshot']['amount'] == '450000.00'
-        assert board(cur, 'helpdesk', HELPDESK, {'helpdesk'}) == {rid: 'offers'}
+        assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'offers'}
         assert board(cur, 'approval', APPROVER, {'approver'}) == {rid: 'new'}
         events = [event['kind'] for event in queries.list_events(cur, rid)]
         assert events[-1] == 'it_offers'
         cur.execute("SELECT kind FROM payment_notifications WHERE user_id = %s AND request_id = %s ORDER BY id",
                     (INITIATOR, rid))
         assert 'it_offers' in [row[0] for row in cur.fetchall()], 'инициатор узнаёт, у кого предлагают купить'
+
+
+def bare_it_request(cur, ids):
+    """IT-закуп так, как его заводит форма с 06.11.2026: «мне нужна мышка» — что, сколько, срок и
+    пожелания; ни обоснования, ни товара или услуги, ни категории учёта, ни способа оплаты."""
+    fields = {'request_kind': 'purchase', 'expense_name': 'Мышка', 'department_id': 1, 'category_id': ids['it'],
+              'justification': None, 'due_on': '2026-11-20', 'no_alternatives': False}
+    items = [{'name': 'Мышка', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('0')}]
+    return queries.create_request(cur, fields=fields, items=items, actor=person(cur, INITIATOR),
+                                  initiator=person(cur, INITIATOR))
+
+
+def test_bare_it_request_gets_its_payment_from_helpdesk(db, monkeypatch):
+    """Инициатор: «мне нужна мышка». Helpdesk IT: поставщик, цена, товар, имущество, карта сотрудника —
+    маршрут встаёт по его выбору: пополнение карты с чеком и постановка на учёт (владелец 06.11.2026)."""
+    monkeypatch.setenv('JWT_SECRET', 'test-secret')
+    monkeypatch.delenv('PAYMENTS_CARD_KEY', raising=False)
+    with db.cursor() as cur:
+        ids = seed(cur)
+        queries.add_role_member(cur, 'finance', ACCOUNTANT, None)
+        rid = bare_it_request(cur, ids)
+        assert flow.submit_problems(cur, queries.read_request(cur, rid)) == []
+        flow.submit(cur, rid, person(cur, INITIATOR), outbox=[], base_url=None)
+        request = queries.read_request(cur, rid)
+        assert (request['payment_method'], request['object_type'], request['legal_entity_id']) == (None, None, None)
+        # Пока способа оплаты нет — после утверждения стоит оплата счёта; Helpdesk её поменяет.
+        assert list(state(cur, rid)) == ['initiation', 'manager_approval', 'it_review', 'entity_clarify', 'approval',
+                                         'invoice_payment', 'receiving', 'closing_docs']
+        act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
+        # Без товара, учёта и способа оплаты Helpdesk этап не закроет.
+        bare_offer = dict(offers_fields(ids, '9000', '9500', '9900'),
+                          items=[{'name': 'Мышка Logitech', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('9000')}])
+        with pytest.raises(flow.FlowError) as caught:
+            act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK, **bare_offer)
+        assert caught.value.missing == ['Выберите тип объекта: товар или услуга', workflow.PAYMENT_METHOD_MISSING]
+        payment = {'object_type': 'goods', 'accounting_category': 'asset', 'payment_method': 'card',
+                   'card_recipient': 'employee', 'card_holder_user_id': INITIATOR, 'card_holder_name': 'Инициаторова Ирина',
+                   'payment_purpose': 'Мышка для работы'}
+        act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK, payment=payment, card={'number': '4111111111111111'},
+            card_number_ok=True, **bare_offer)
+        request = queries.read_request(cur, rid)
+        assert (request['object_type'], request['accounting_category'], request['payment_method'],
+                request['card_recipient'], request['card_holder_user_id']) == ('goods', 'asset', 'card', 'employee', INITIATOR)
+        assert (request['has_card'], request['card_last4']) == (True, '1111')
+        assert queries.card_number(cur, rid) == '4111111111111111', 'номер — зашифрованным, как из формы'
+        route = list(state(cur, rid))
+        assert 'invoice_payment' not in route
+        assert route[route.index('approval'):] == ['approval', 'card_topup', 'receipt_confirm', 'receiving',
+                                                   'asset_registration', 'closing_docs']
+        steps = {item['kind']: item for item in queries.list_subtasks(cur, rid)}
+        assert steps['asset_registration']['role_code'] == 'asset_keeper', 'на учёт ставит та же роль'
+        assert (steps['it_review']['state'], steps['entity_clarify']['state']) == ('done', 'open')
+        # Снимок условий — уже с выбором Helpdesk: ответ инициатора на будущий возврат его не перестроит.
+        snapshot = request['submitted_snapshot']
+        assert (snapshot['payment_method'], snapshot['object_type'], snapshot['card_last4']) == ('card', 'goods', '1111')
+        assert not workflow.essentials_changed(snapshot, request)
+
+
+def test_helpdesk_role_rows_move_to_the_asset_keeper(db):
+    """Миграция 06.11.2026: участники прежней роли «Helpdesk IT» — в «Helpdesk IT и учёт имущества»,
+    без дублей; этапы и заявки — тоже. Второй запуск ничего не меняет."""
+    with db.cursor() as cur:
+        ids = seed(cur)
+        cur.execute("DELETE FROM payment_role_members WHERE role_code = 'asset_keeper' AND user_id = %s", (HELPDESK,))
+        cur.execute("INSERT INTO payment_role_members (role_code, user_id) VALUES ('helpdesk', %s), ('helpdesk', %s)",
+                    (HELPDESK, KEEPER))
+        rid = it_request(cur, ids)
+        flow.submit(cur, rid, person(cur, INITIATOR), outbox=[], base_url=None)
+        act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
+        cur.execute("UPDATE payment_subtasks SET role_code = 'helpdesk' WHERE request_id = %s AND kind = 'it_review'", (rid,))
+        cur.execute("UPDATE payment_requests SET current_role_code = 'helpdesk' WHERE id = %s", (rid,))
+        for _run in range(2):
+            for sql in schema.statements():
+                cur.execute(sql)
+            cur.execute("SELECT role_code, user_id FROM payment_role_members WHERE role_code IN ('helpdesk', 'asset_keeper') "
+                        "ORDER BY role_code, user_id")
+            assert cur.fetchall() == [('asset_keeper', HELPDESK), ('asset_keeper', KEEPER)]
+            assert queries.read_subtask(cur, rid, workflow.KIND_IT)['role_code'] == 'asset_keeper'
+            assert queries.read_request(cur, rid)['current_role_code'] == 'asset_keeper'
+        # После переноса этап — у роли: «Хелпов» видит его на столе и на доске.
+        assert (rid, 'it_review') in queries.desk_pairs(cur, HELPDESK, {'asset_keeper'})
 
 
 def test_company_clarified_after_helpdesk_keeps_its_check(db):
@@ -254,8 +336,9 @@ def test_helpdesk_role_emptied_after_the_check_blocks_nothing(db):
         act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK,
             items=[{'name': 'Ноутбук', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('450000')}],
             **offers_fields(ids, '450000', '470000', '455000'))
-        assert queries.role_backlog(cur, 'helpdesk') == 0, 'по пройденному этапу роль убрать можно'
-        queries.remove_role_member(cur, 'helpdesk', HELPDESK)
+        assert queries.role_backlog(cur, 'asset_keeper') == 0, 'по пройденному этапу роль убрать можно'
+        queries.remove_role_member(cur, 'asset_keeper', HELPDESK)
+        queries.remove_role_member(cur, 'asset_keeper', KEEPER)
         act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=ids['entity'])
         assert state(cur, rid)['approval'] == 'open'
 
@@ -268,13 +351,14 @@ def test_step_given_to_someone_outside_the_emptied_role(db):
         rid = it_request(cur, ids)
         flow.submit(cur, rid, person(cur, INITIATOR), outbox=[], base_url=None)
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
-        queries.set_subtask_assignee(cur, rid, workflow.KIND_IT, person(cur, KEEPER), person(cur, ACCOUNTANT))
-        queries.remove_role_member(cur, 'helpdesk', HELPDESK)
-        act(cur, rid, workflow.KIND_IT, 'it_offers', KEEPER,
+        queries.set_subtask_assignee(cur, rid, workflow.KIND_IT, person(cur, ACCOUNTANT), person(cur, ACCOUNTANT))
+        queries.remove_role_member(cur, 'asset_keeper', HELPDESK)
+        queries.remove_role_member(cur, 'asset_keeper', KEEPER)
+        act(cur, rid, workflow.KIND_IT, 'it_offers', ACCOUNTANT,
             items=[{'name': 'Ноутбук', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('450000')}],
             **offers_fields(ids, '450000', '470000', '455000'))
         steps = {item['kind']: item for item in queries.list_subtasks(cur, rid)}
-        assert (steps['it_review']['state'], steps['it_review']['done_by']) == ('done', KEEPER)
+        assert (steps['it_review']['state'], steps['it_review']['done_by']) == ('done', ACCOUNTANT)
         assert steps['approval']['state'] == 'open'
 
 
@@ -330,8 +414,8 @@ def test_issued_from_stock_closes_without_purchase(db):
         assert workflow.closing_conditions(request, list(steps.values())) == [{'label': 'Выдано из наличия', 'ok': True}]
         event = next(item for item in queries.list_events(cur, rid) if item['kind'] == 'it_stock')
         assert event['payload']['assets'] == issued
-        assert board(cur, 'helpdesk', HELPDESK, {'helpdesk'}) == {rid: 'stock'}
-        assert queries.desk_pairs(cur, HELPDESK, {'helpdesk'}) == []
+        assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'stock'}
+        assert queries.desk_pairs(cur, HELPDESK, {'asset_keeper'}) == []
         cur.execute("SELECT count(*) FROM payment_notifications WHERE request_id = %s AND actionable AND read_at IS NULL",
                     (rid,))
         assert cur.fetchone()[0] == 0, 'по закрытой заявке ни от кого ничего не ждут'
@@ -345,7 +429,7 @@ def test_return_from_helpdesk_comes_back_to_helpdesk(db):
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         act(cur, rid, workflow.KIND_IT, 'return', HELPDESK, comment='Какой нужен объём SSD?')
         assert (state(cur, rid)['it_review'], state(cur, rid)['initiation']) == ('waiting', 'open')
-        assert board(cur, 'helpdesk', HELPDESK, {'helpdesk'}) == {rid: 'clarification'}
+        assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'clarification'}
         # Ответ без смены условий — снова к Helpdesk IT, руководитель второй раз не согласует.
         result = flow.submit(cur, rid, person(cur, INITIATOR), comment='512 ГБ', outbox=[], base_url=None)
         assert result == {'rerouted': False, 'next': 'it_review', 'changed': []}

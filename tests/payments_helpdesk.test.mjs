@@ -22,9 +22,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-    CURRENT_KIND_LABELS, HELPDESK_OPTIONS, HINTS, IT_SUPPLIER_CARD, MEMBER_ROLES, STOCK_OPTIONS, UNSTAFFED, amountLabel,
-    describeEvent, fmtMoney, helpdeskIssues, issuedFromStock, itPriceMissing, itemsTotal, pricedByOffer, purchaseIssues,
-    recommendedOffer, routeSummary, supplierCardBlocked,
+    CURRENT_KIND_LABELS, HELPDESK_OPTIONS, HINTS, MEMBER_ROLES, ROLE_LABELS, STOCK_OPTIONS, UNSTAFFED, amountLabel,
+    cardIssues, describeEvent, fmtMoney, helpdeskIssues, issuedFromStock, itPriceMissing, itemsTitle, itemsTotal,
+    objectIssues, pricedByOffer, purchaseIssues, recommendedOffer, routeSummary,
 } from '../src/components/payments/paymentsMeta.js';
 import { PAYMENTS_BOARD_CODES } from '../src/components/payments/paymentsLink.js';
 
@@ -77,8 +77,11 @@ test('«Есть в наличии»: что выдают — строкой с�
     assert.deepEqual(helpdeskIssues({ comment: 'Выдал ноутбук HP' }, { inStock: true }), []);
 });
 
+// Товар или услуга, категория учёта и способ оплаты — тоже Helpdesk IT (владелец 06.11.2026).
+const PAID = { object_type: 'goods', accounting_category: 'asset', payment_method: 'invoice' };
+
 test('«Нет в наличии»: поставщики по правилам инициатора, цены — по рекомендуемому', () => {
-    const draft = { offers: THREE, items: [item('x', 'Ноутбук', 1, 0)], supplier_choice_reason: 'Дешевле' };
+    const draft = { ...PAID, offers: THREE, items: [item('x', 'Ноутбук', 1, 0)], supplier_choice_reason: 'Дешевле' };
     assert.deepEqual(helpdeskIssues(draft, { inStock: false }).map((issue) => [issue.key, issue.part]), [['items', 'price']]);
     const wrong = helpdeskIssues({ ...draft, items: [item('x', 'Ноутбук', 1, 300000)] }, { inStock: false });
     assert.equal(wrong.length, 1);
@@ -88,7 +91,7 @@ test('«Нет в наличии»: поставщики по правилам �
     const few = helpdeskIssues({ ...draft, offers: THREE.slice(0, 1), items: [item('x', 'Ноутбук', 1, 450000)] }, { inStock: false });
     assert.deepEqual(few.map((issue) => [issue.key, issue.part]), [['offers', 'count']]);
     // «Альтернатив нет»: один поставщик, причина обязательна, рекомендуемый — он сам.
-    const alone = { offers: [offer('a', 'Microsoft', 120000)], no_alternatives: true, items: [item('x', 'Лицензия', 1, 120000)] };
+    const alone = { ...PAID, offers: [offer('a', 'Microsoft', 120000)], no_alternatives: true, items: [item('x', 'Лицензия', 1, 120000)] };
     assert.deepEqual(helpdeskIssues(alone, { inStock: false }).map((issue) => issue.key), ['no_alternatives_reason']);
     assert.deepEqual(helpdeskIssues({ ...alone, no_alternatives_reason: 'license_renewal' }, { inStock: false }), []);
     assert.equal(recommendedOffer(alone).supplier_name, 'Microsoft');
@@ -117,26 +120,47 @@ const DRAFT = {
     payment_method: 'invoice', offers: [], no_alternatives: false,
 };
 
-test('IT-закуп: карту поставщика до выбора поставщика не указать — пункт у «Получателя»', () => {
-    const draft = { ...DRAFT, payment_method: 'card', card_recipient: 'supplier' };
-    assert.equal(supplierCardBlocked(draft, { helpdesk: true }), true);
-    assert.equal(supplierCardBlocked(draft, { helpdesk: true, supplierKnown: true }), false, 'Helpdesk уже выбрал поставщика');
-    assert.equal(supplierCardBlocked(draft, { helpdesk: false }), false);
-    assert.equal(supplierCardBlocked({ ...draft, card_recipient: 'employee' }, { helpdesk: true }), false);
-    assert.deepEqual(purchaseIssues(draft, { helpdesk: true }).map((issue) => [issue.key, issue.text]), [['card_recipient', IT_SUPPLIER_CARD]]);
-    // Карта сотрудника у IT-закупа — как обычно: владелец, номер и назначение.
-    const employee = purchaseIssues({ ...draft, card_recipient: 'employee' }, { helpdesk: true }).map((issue) => issue.key);
-    assert.ok(employee.includes('card_holder_user_id') && employee.includes('payment_purpose'), employee.join(','));
+test('«Нет в наличии»: товар или услугу, категорию учёта и способ оплаты выбирает Helpdesk IT', () => {
+    const base = { offers: THREE, items: [item('x', 'Ноутбук', 1, 450000)], supplier_choice_reason: 'Дешевле' };
+    assert.deepEqual(helpdeskIssues(base, { inStock: false }).map((issue) => issue.key), ['object_type', 'payment_method']);
+    assert.deepEqual(helpdeskIssues({ ...base, object_type: 'goods', payment_method: 'invoice' }, { inStock: false })
+        .map((issue) => issue.key), ['accounting_category']);
+    assert.deepEqual(helpdeskIssues({ ...base, object_type: 'service', payment_method: 'invoice' }, { inStock: false }), []);
+    // Карта — как у инициатора: получатель, владелец, номер, назначение.
+    const card = { ...base, ...PAID, payment_method: 'card' };
+    assert.deepEqual(helpdeskIssues(card, { inStock: false }).map((issue) => issue.key), ['card_recipient', 'card_number', 'payment_purpose']);
+    const supplier = { ...card, card_recipient: 'supplier', card_holder_name: 'ИП Алсер', card_number: '4400430212345678', payment_purpose: 'Ноутбук' };
+    assert.deepEqual(helpdeskIssues(supplier, { inStock: false }), []);
+    // Номер, что уже лежит в заявке, годится (hasCard), — вводить его заново не нужно.
+    assert.deepEqual(helpdeskIssues({ ...supplier, card_number: '' }, { inStock: false, hasCard: true }), []);
+    assert.deepEqual(helpdeskIssues({ ...supplier, card_number: '' }, { inStock: false }).map((issue) => issue.key), ['card_number']);
+    // Те же правила — общими функциями формы заявки и этапа.
+    assert.deepEqual(objectIssues({ object_type: 'goods', accounting_category: 'asset' }, { staffed: { asset_keeper: false } })
+        .map((issue) => [issue.key, issue.text]), [['accounting_category', UNSTAFFED.asset_keeper]]);
+    assert.deepEqual(cardIssues({ payment_method: 'invoice' }), []);
 });
 
-test('IT-закуп: инициатор не указывает ни поставщиков, ни цену', () => {
-    assert.deepEqual(purchaseIssues(DRAFT, { helpdesk: true }), []);
-    const plain = purchaseIssues(DRAFT, { helpdesk: false }).map((issue) => issue.key);
-    assert.ok(plain.includes('items') && plain.includes('offers'), plain.join(','));
-    // Helpdesk IT не назначен — сказать сразу, у категории: иначе сервер откажет при отправке.
-    assert.deepEqual(purchaseIssues(DRAFT, { helpdesk: true, staffed: { helpdesk: false } }).map((issue) => [issue.key, issue.text]),
-        [['category_id', UNSTAFFED.helpdesk]]);
-    assert.deepEqual(purchaseIssues(DRAFT, { helpdesk: false, staffed: { helpdesk: false } }).filter((issue) => issue.key === 'category_id'), []);
+/* ── Форма заявки: инициатор IT-закупа ───────────────────────────────────────── */
+
+test('IT-закуп: инициатор пишет что, сколько, срок — без названия, обоснования, поставщиков, цены и оплаты', () => {
+    const minimal = { department_id: 3, category_id: 5, due_on: '2026-11-20', items: [item('x', 'Мышка', 1, 0)] };
+    assert.deepEqual(purchaseIssues(minimal, { helpdesk: true }), []);
+    // Обычный закуп с тем же — не хватает всего остального.
+    const plain = purchaseIssues(minimal, { helpdesk: false }).map((issue) => issue.key);
+    for (const key of ['expense_name', 'justification', 'items', 'object_type', 'payment_method', 'offers']) assert.ok(plain.includes(key), key);
+    // Чего не хватает и IT-закупу: категория, позиция, срок, подразделение.
+    assert.deepEqual(purchaseIssues({ items: [] }, { helpdesk: true }).map((issue) => issue.key), ['department_id', 'category_id', 'items', 'due_on']);
+    // Роль «Helpdesk IT и учёт имущества» пуста — сказать сразу, у категории: иначе сервер откажет при отправке.
+    assert.deepEqual(purchaseIssues(minimal, { helpdesk: true, staffed: { asset_keeper: false } }).map((issue) => [issue.key, issue.text]),
+        [['category_id', UNSTAFFED.it_review]]);
+    assert.deepEqual(purchaseIssues(minimal, { helpdesk: false, staffed: { asset_keeper: false } }).filter((issue) => issue.key === 'category_id'), []);
+});
+
+test('название IT-закупа — из позиций: «Мышка», «Мышка и ещё 2»', () => {
+    assert.equal(itemsTitle([item('x', 'Мышка', 1, 0)]), 'Мышка');
+    assert.equal(itemsTitle([item('x', ' Мышка ', 1, 0), item('b', '', 1, 0), item('y', 'Коврик', 1, 0), item('z', 'Клавиатура', 1, 0)]), 'Мышка и ещё 2');
+    assert.equal(itemsTitle([]), '');
+    assert.equal(itemsTitle([item('x', 'М'.repeat(400), 1, 0)]).length, 300, 'длина — как у поля наименования');
 });
 
 /* ── Подписи ─────────────────────────────────────────────────────────────────── */
@@ -151,9 +175,13 @@ test('выборы с «i»: подсказка называет ровно ва
 });
 
 test('роль, доска, этап и история называются словами', () => {
-    const role = MEMBER_ROLES.find((item) => item.code === 'helpdesk');
-    assert.equal(role.label, 'Helpdesk IT');
-    assert.ok(!role.required, 'нужна только IT-закупам');
+    // Helpdesk IT и учёт имущества — один человек (владелец 06.11.2026): одна роль, отдельной нет.
+    assert.equal(MEMBER_ROLES.find((item) => item.code === 'helpdesk'), undefined);
+    const role = MEMBER_ROLES.find((item) => item.code === 'asset_keeper');
+    assert.equal(role.label, 'Helpdesk IT и учёт имущества');
+    assert.equal(ROLE_LABELS.asset_keeper, 'Helpdesk IT и учёт имущества');
+    assert.ok(!role.required, 'нужна только IT-закупам и имуществу');
+    assert.deepEqual(role.hint.options.map(([name]) => name), ['IT-закуп', 'Имущество']);
     assert.ok(PAYMENTS_BOARD_CODES.includes('helpdesk'));
     assert.equal(CURRENT_KIND_LABELS.it_review, 'Проверка Helpdesk IT');
     assert.equal(describeEvent({ kind: 'it_offers', payload: { recommended: 'Sulpak', amount: 450000 } }),
@@ -197,12 +225,25 @@ const helpdeskHtml = async (status, extra = {}) => {
     }));
 };
 
-test('ступень «Новые»: под рукой имущество сотрудника и склад, решения ещё нет', async () => {
+test('«Новые»: имущество сотрудника, склад и решение — сразу, без «Взять в работу»', async () => {
+    // Владелец 06.11.2026 со снимком «Новых»: «в данном окне я не могу ничего выбрать».
     const html = await helpdeskHtml('new');
     assert.match(html, /Проверьте, нет ли такого в наличии/);
     assert.match(html, /Имущество сотрудника[\s\S]*Монитор Dell[\s\S]*инв\. IT-0007/);
     assert.match(html, /aria-label="Поиск по складу"/);
-    assert.doesNotMatch(html, /Есть в наличии\?|Передать на утверждение|Выдать из наличия|Вернуть на доработку/);
+    assert.match(html, /Есть в наличии\?[\s\S]*role="tablist" aria-label="Есть ли нужное в наличии"/);
+    assert.match(html, /Вернуть на доработку/);
+});
+
+test('после выбора: строки склада нажимаются сразу, первый выбор ставит карточку в «В работе»', () => {
+    const stage = source('src/components/payments/PaymentStageForm.jsx');
+    assert.ok(stage.includes("const take = () => { if (subtask.status === 'new') onTake?.(); };"));
+    assert.ok(stage.includes('const pickable = !item.issued_request_id;'), 'строка склада — сразу, без «Есть»');
+    const toggle = stage.slice(stage.indexOf('const toggle = (item) => {'), stage.indexOf('const counterpartyOptions'));
+    assert.ok(toggle.includes('if (!on && inStock !== true) { setInStock(true);') && toggle.includes('if (!on) take();'));
+    const pick = stage.slice(stage.indexOf('const pick = (value) => {'), stage.indexOf('const toggle = (item) => {'));
+    assert.ok(pick.includes('if (value === false) setChosen([]);') && pick.includes('take();'));
+    assert.ok(source('src/components/payments/PaymentRequestCard.jsx').includes("onTake={() => move('in_progress')}"));
 });
 
 test('ступень «В работе»: выбор «Есть в наличии?» и возврат на доработку; итог — после выбора', async () => {
@@ -218,15 +259,26 @@ test('ступень «В работе»: выбор «Есть в наличи�
 
 /* ── Проводка (по исходнику) ─────────────────────────────────────────────────── */
 
-test('форма заявки IT-закупа не шлёт поставщиков: на доработке они подобраны Helpdesk IT', () => {
+test('форма заявки IT-закупа: что, сколько, срок и пожелания — остальное не шлёт', () => {
     const form = source('src/components/payments/PaymentRequestForm.jsx');
-    assert.ok(form.includes('...(helpdesk ? {} : {'));
+    const payload = form.slice(form.indexOf('        if (helpdesk) {'), form.indexOf('        const sent = offers.filter((offer) => !isBlankOffer(offer));'));
+    assert.ok(payload.includes('const title = itemsTitle(draft.items);') && payload.includes('...(title ? { expense_name: title } : {})'));
+    for (const key of ['offers', 'payment_method', 'object_type', 'accounting_category', 'card_recipient', 'card_number', 'legal_entity_id',
+        'contract_id', 'invoice_number']) {
+        assert.ok(!payload.includes(`${key}:`), `IT-закуп не шлёт ${key}: его выбирает Helpdesk IT`);
+    }
     assert.ok(form.includes("if (!regular && !helpdesk) {"), 'КП к вариантам — тоже нет');
     // Как у сервера: отправленная заявка с прежней категорией — по запомненному it_purchase.
     assert.ok(form.includes("const helpdesk = kind === 'purchase' && !legacy && (sentSameCategory ? Boolean(request?.it_purchase)"));
     assert.ok(form.includes(': Boolean(categories.find((item) => item.id === draft.category_id)?.via_helpdesk));'));
-    assert.ok(form.includes('supplierKnown: Boolean(supplierId),'));
     assert.ok(form.includes('if (!open || !kind || !(total > 0 || helpdesk))'), 'маршрут виден и без цены');
+    // На экране: категория — первой; у IT-закупа нет названия, обоснования, типа объекта, способа оплаты.
+    const what = form.slice(form.indexOf('<IosSection title="Что закупаем">'), form.indexOf('<IosSection title="Для кого">'));
+    assert.ok(what.indexOf('label="Категория закупа"') < what.indexOf('label="Наименование закупа"'));
+    assert.ok(what.includes('{!helpdesk && (\n                                <Field label="Наименование закупа"'));
+    assert.ok(what.includes('<Field label="Пожелания" hint={HINTS.wishes} anchor="justification">'));
+    assert.ok(form.includes('{!helpdesk && (\n                        <IosSection title="Способ оплаты">'));
+    assert.ok(form.includes('{(!helpdesk || !draft.department_id) && ('), '«Для кого» у IT — только без подразделения');
 });
 
 test('этап, справочник, стол и окно заявки знают про Helpdesk IT', () => {
@@ -237,8 +289,20 @@ test('этап, справочник, стол и окно заявки знаю
     assert.ok(stage.includes("files: sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean)"));
     // Проверка видит то же, что уйдёт: при «альтернатив нет» — один вариант (разбор 04.11.2026).
     assert.ok(stage.includes('helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },'));
+    // Товар или услуга, учёт и способ оплаты — на этапе Helpdesk IT (06.11.2026); карта — общим блоком с формой заявки.
+    for (const anchor of ['object_type', 'accounting_category', 'payment_method']) {
+        assert.ok(stage.includes(`anchor="${anchor}" issue={issueOf('${anchor}')}`), anchor);
+    }
+    assert.ok(stage.includes('<PaymentCardFields') && source('src/components/payments/PaymentRequestForm.jsx').includes('<PaymentCardFields'));
+    assert.ok(stage.includes("...(cardKept ? {} : (draft.card_id ? { card_id: draft.card_id } : { card_number: cardDigits(draft.card_number) })),"));
+    // «Передать на утверждение» шлёт выбор Helpdesk: товар или услуга, категория учёта (только у товара), способ оплаты.
+    const pass = stage.slice(stage.indexOf('const passOffers = () => {'), stage.indexOf('const issueStock = async () => {'));
+    for (const line of ['object_type: draft.object_type,', "accounting_category: draft.object_type === 'goods' ? draft.accounting_category : null,",
+        'payment_method: draft.payment_method,']) {
+        assert.ok(pass.includes(line), line);
+    }
     // Уже выданную по другой заявке вещь не выбрать; не вышла выдача — склад перечитан, выбор снят.
-    assert.ok(stage.includes('const pickable = selectable && !item.issued_request_id;'));
+    assert.ok(stage.includes('const pickable = !item.issued_request_id;'));
     assert.ok(stage.includes('if (ok === false) { setChosen([]); setReload((value) => value + 1); }'));
     const dictionaries = source('src/components/payments/PaymentsDictionaries.jsx');
     assert.ok(dictionaries.includes("via_helpdesk: Boolean(row.via_helpdesk)"));
@@ -249,4 +313,7 @@ test('этап, справочник, стол и окно заявки знаю
     const card = source('src/components/payments/PaymentRequestCard.jsx');
     assert.ok(card.includes("it_offers: 'Передано на утверждение', it_stock: 'Выдано из наличия — заявка закрыта',"));
     assert.ok(card.includes('data-card-helpdesk'));
+    // До решения Helpdesk тип объекта и способ оплаты — «выберет Helpdesk IT»; у IT-закупа — «Пожелания».
+    assert.equal((card.match(/itPending \? <span className="text-slate-500">выберет Helpdesk IT<\/span> : null/g) || []).length, 2);
+    assert.ok(card.includes("<Row label={itRequest ? 'Пожелания' : 'Описание и обоснование'} wide>{request.justification}</Row>"));
 });

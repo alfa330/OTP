@@ -70,13 +70,14 @@ class SpecificationListsTests(unittest.TestCase):
         self.assertEqual(wf.subtask_title('asset_registration'), 'Постановка имущества на учёт')             # п. 10.2
 
     def test_roles_are_the_six_from_clause_3(self):
-        # Шесть ролей п. 3 и седьмая сверх ТЗ — Helpdesk IT (просьба владельца 04.11.2026).
+        # Шесть ролей п. 3. Ответственный за учёт имущества с 06.11.2026 — «Helpdesk IT и учёт
+        # имущества»: IT-закупы проверяет он же, это один человек (владелец).
         self.assertEqual(wf.ROLE_LABELS, {
             'initiator': 'Инициатор', 'manager': 'Непосредственный руководитель', 'approver': 'Утвердитель',
             'accounting': 'Бухгалтерия', 'finance': 'Финансовый отдел',
-            'asset_keeper': 'Ответственный за учёт имущества', 'helpdesk': 'Helpdesk IT'})
-        # Список участников ведут пяти ролям; инициатор и руководитель — люди заявки.
-        self.assertEqual(schema.MEMBER_ROLES, ('approver', 'accounting', 'finance', 'asset_keeper', 'helpdesk'))
+            'asset_keeper': 'Helpdesk IT и учёт имущества'})
+        # Список участников ведут четырём ролям; инициатор и руководитель — люди заявки.
+        self.assertEqual(schema.MEMBER_ROLES, ('approver', 'accounting', 'finance', 'asset_keeper'))
 
     def test_only_two_payment_methods_exist(self):
         self.assertEqual(set(wf.PAYMENT_METHOD_LABELS), {'invoice', 'card'})

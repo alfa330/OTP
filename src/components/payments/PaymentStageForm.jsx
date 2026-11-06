@@ -6,10 +6,12 @@ import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput } from '../ui/ios
 import PaymentAssetsEditor, { assetIssues, assetPayload, assetsFromRequest } from './PaymentAssetsEditor';
 import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
+import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
-    ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS, STOCK_OPTIONS, fileKindOptions,
-    fmtDate, fmtMoney, helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity,
-    itemsTotal, parseAmount, pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO,
+    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS,
+    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney, helpdeskIssues,
+    isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount, pricedByOffer,
+    quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO,
 } from './paymentsMeta';
 import {
     AmountInput, CardNumber, Choice, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING,
@@ -161,19 +163,24 @@ const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
 
 /* ── Helpdesk IT: проверка IT-закупа (просьба владельца 04.11.2026) ─────────────────────────
    После руководителя сюда приходит IT-закуп — заявка с категорией, у которой отметка «Helpdesk
-   IT». Нужное для решения — под рукой с первой ступени: что уже числится за сотрудником и что
-   лежит на складе. На ступени «В работе» — выбор «Есть в наличии?»:
+   IT». Нужное для решения — под рукой сразу: что уже числится за сотрудником и что лежит на
+   складе, и сразу же — выбор «Есть в наличии?» (06.11.2026, владелец: «в данном окне я не могу
+   ничего выбрать» — ступени «Взять в работу» у этапа нет, «В работе» на доске карточка встаёт
+   сама, по первому выбору). Строка склада выбирается нажатием — это и есть «Есть»:
      «Есть» — отметить вещь из найденного на складе (или описать в комментарии) и выдать:
               заявка закроется «Выдано из наличия», без закупа и оплаты (выбор владельца);
      «Нет»  — варианты поставщиков по тем же правилам, что у инициатора, и цены позиций по
               рекомендуемому: сумма позиций должна совпасть с его стоимостью — по ней раздел
-              выберет утверждающего (тоже выбор владельца: цены ставит Helpdesk IT).
+              выберет утверждающего (тоже выбор владельца: цены ставит Helpdesk IT). С 06.11.2026
+              здесь же товар или услуга, категория учёта и способ оплаты: инициатор IT-закупа
+              пишет только что, сколько и пожелания.
    «Вернуть на доработку» — когда из заявки не понять, что именно нужно. */
 
 const STOCK_SEARCH_MS = 300;
 // Порядок полей сверху вниз — по нему стрелки «Не хватает» ходят от поля к полю.
 const HELPDESK_FIELDS = ['in_stock', 'stock_ids', 'no_alternatives_reason', 'no_alternatives_comment', 'offers',
-    'supplier_choice_reason', 'items'];
+    'supplier_choice_reason', 'items', 'object_type', 'accounting_category', 'payment_method', 'card_recipient',
+    'card_holder_user_id', 'card_holder_name', 'card_number', 'payment_purpose'];
 
 // Позиции заявки — строками редактора, как в форме заявки: количество так, как его набирают.
 const itemRows = (items) => {
@@ -188,7 +195,7 @@ const itemRows = (items) => {
     return rows.length ? rows : [newItem()];
 };
 
-const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers, busy, permissions, onAct, issueSlot }) => {
+const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, headers, busy, permissions, onAct, onTake, issueSlot }) => {
     const request = data.request;
     const minSuppliers = Number(dictionaries?.settings?.min_suppliers) || 3;
     const [inStock, setInStock] = useState(null);
@@ -202,6 +209,16 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
             no_alternatives_comment: request.no_alternatives_comment || '',
             supplier_choice_reason: request.supplier_choice_reason || '',
             items: itemRows(data.items),
+            // Товар или услуга, категория учёта и способ оплаты — тоже его (06.11.2026); второй проход — с прежним выбором.
+            object_type: request.object_type ?? null,
+            accounting_category: request.accounting_category ?? null,
+            payment_method: request.payment_method ?? null,
+            card_recipient: request.card_recipient ?? null,
+            card_holder_user_id: request.card_holder_user_id ?? null,
+            card_holder_name: request.card_holder_name || '',
+            card_id: null,
+            card_number: '',
+            payment_purpose: request.payment_purpose || '',
             comment: '',
         };
     });
@@ -211,7 +228,6 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
     const [mode, setMode] = useState(null);                 // 'return'
     const [reveal, setReveal] = useState(false);
     const formRef = useRef(null);
-    const final = stageAtFinal(subtask.kind, subtask.status);
 
     // ── Склад: имущество «На складе», поиском ──
     const [query, setQuery] = useState('');
@@ -238,9 +254,21 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
 
     const offersShown = draft.no_alternatives ? draft.offers.slice(0, 1) : draft.offers;
     const recommended = recommendedOffer(draft);
+    // Номер карты, что уже лежит в заявке, годится, пока получатель прежний: для поставщика — тот же,
+    // что рекомендуемый сейчас (как в форме заявки и на сервере, routes._helpdesk_payment).
+    const [cardEditing, setCardEditing] = useState(false);
+    const cardKept = Boolean(request.has_card && !cardEditing && draft.payment_method === 'card'
+        && draft.card_recipient === (request.card_recipient ?? null)
+        && (draft.card_recipient === 'employee'
+            ? draft.card_holder_user_id === (request.card_holder_user_id ?? null)
+            : (recommended?.counterparty_id ?? null) === (request.counterparty_id ?? null)));
+    const cardOptions = useSavedCards({
+        enabled: inStock === false && draft.payment_method === 'card', apiBaseUrl, headers,
+        recipient: draft.card_recipient, userId: draft.card_holder_user_id, counterpartyId: recommended?.counterparty_id,
+    });
     // Проверка видит то же, что на экране и уйдёт на сервер: при «альтернатив нет» — один вариант.
-    const issues = final ? helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },
-        { minSuppliers, inStock }) : [];
+    const issues = helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },
+        { minSuppliers, inStock, hasCard: cardKept });
     const byKey = issuesByKey(issues);
     const keys = issueKeys(issues, HELPDESK_FIELDS);
     const nav = useIssueNav(formRef, keys);
@@ -250,9 +278,20 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
         if (issues.length) { setMode(null); setReveal(true); nav.first({ focus: fromKeyboard(event) }); return; }
         run();
     };
-    const pick = (value) => { setInStock(value); setReveal(false); setMode(null); };
-    const toggle = (item) => setChosen((prev) => (prev.some((other) => other.id === item.id)
-        ? prev.filter((other) => other.id !== item.id) : [...prev, item]));
+    // Первый выбор — и карточка на доске Helpdesk IT встаёт в «В работе»: отдельной кнопки нет.
+    const take = () => { if (subtask.status === 'new') onTake?.(); };
+    const pick = (value) => {
+        setInStock(value); setReveal(false); setMode(null);
+        if (value === false) setChosen([]);
+        take();
+    };
+    // Нажали строку склада — это и есть «Есть в наличии»: выбор переключается сам.
+    const toggle = (item) => {
+        const on = chosen.some((other) => other.id === item.id);
+        setChosen((prev) => (on ? prev.filter((other) => other.id !== item.id) : [...prev, item]));
+        if (!on && inStock !== true) { setInStock(true); setReveal(false); setMode(null); }
+        if (!on) take();
+    };
 
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || [])
         .map((item) => ({ value: item.id, label: item.bin ? `${item.name} · БИН ${item.bin}` : item.name })), [dictionaries]);
@@ -288,6 +327,17 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
                 no_alternatives_reason: draft.no_alternatives ? draft.no_alternatives_reason : null,
                 no_alternatives_comment: draft.no_alternatives ? draft.no_alternatives_comment.trim() : '',
                 supplier_choice_reason: draft.no_alternatives ? '' : draft.supplier_choice_reason.trim(),
+                // Товар или услуга, категория учёта и способ оплаты — выбор Helpdesk IT (владелец 06.11.2026).
+                object_type: draft.object_type,
+                accounting_category: draft.object_type === 'goods' ? draft.accounting_category : null,
+                payment_method: draft.payment_method,
+                ...(draft.payment_method === 'card' ? {
+                    card_recipient: draft.card_recipient,
+                    card_holder_user_id: draft.card_recipient === 'employee' ? draft.card_holder_user_id : null,
+                    card_holder_name: draft.card_recipient === 'supplier' ? draft.card_holder_name.trim() : '',
+                    payment_purpose: draft.payment_purpose.trim(),
+                    ...(cardKept ? {} : (draft.card_id ? { card_id: draft.card_id } : { card_number: cardDigits(draft.card_number) })),
+                } : {}),
             },
             // Коммерческие предложения — к своим вариантам: номер варианта среди отправленных.
             files: sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean),
@@ -306,7 +356,6 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
         : null;
 
     const assets = data.initiator_assets;
-    const selectable = final && inStock === true;
     const stockEmpty = stock.error || (query.trim() ? 'Ничего не нашлось — уточните поиск' : 'На складе сейчас ничего нет');
 
     return (
@@ -346,13 +395,13 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
                 </Field>
             )}
 
-            {/* Склад: есть ли нужное в наличии. На ступени «В работе», если отмечено «Есть», строки выбираются. */}
+            {/* Склад: есть ли нужное в наличии. Строка выбирается нажатием — и это «Есть в наличии». */}
             <Field as="div" label="Склад" optionalMark={false} hint="Имущество со статусом «На складе». Ищите по названию, инвентарному или серийному номеру." anchor="stock_ids" issue={issueOf('stock_ids')}>
                 <div className="relative">
                     <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
                     <input className={`${iosInput} !pl-8`} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Найти на складе" aria-label="Поиск по складу" maxLength={120} />
                 </div>
-                {selectable && chosen.length > 0 && (
+                {chosen.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 px-0.5" data-stock-chosen>
                         {chosen.map((item) => (
                             <button key={item.id} type="button" onClick={() => toggle(item)} className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-[12.5px] text-blue-700 ring-1 ring-blue-200 transition active:scale-[0.97]" title="Убрать из выдачи">
@@ -366,7 +415,7 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
                     {stock.items.map((item) => {
                         const on = chosen.some((other) => other.id === item.id);
                         // Уже выдана по другой заявке — выбрать её нельзя (сервер такую выдачу тоже не примет).
-                        const pickable = selectable && !item.issued_request_id;
+                        const pickable = !item.issued_request_id;
                         const body = (
                             <>
                                 <div className="min-w-0 grow basis-0">
@@ -406,88 +455,115 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
                 )}
             </Field>
 
-            {/* Решение — когда задачу взяли в работу (кнопка внизу окна). */}
-            {final && (
-                <>
-                    <Field as="div" label="Есть в наличии?" required optionalMark={false} hint={HINTS.itStock} anchor="in_stock" issue={issueOf('in_stock')}>
-                        <Choice value={inStock} options={STOCK_OPTIONS} onChange={pick} ariaLabel="Есть ли нужное в наличии" />
-                    </Field>
+            {/* Решение — сразу, без ступени «Взять в работу» (06.11.2026). */}
+            <>
+                <Field as="div" label="Есть в наличии?" required optionalMark={false} hint={HINTS.itStock} anchor="in_stock" issue={issueOf('in_stock')}>
+                    <Choice value={inStock} options={STOCK_OPTIONS} onChange={pick} ariaLabel="Есть ли нужное в наличии" />
+                </Field>
 
-                    {inStock === false && (
-                        <>
-                            <Field as="div" label="Альтернативные предложения" required optionalMark={false} hint={HINTS.alternatives}>
-                                <Choice value={Boolean(draft.no_alternatives)} options={ALTERNATIVES_OPTIONS} onChange={(value) => set('no_alternatives', value)} ariaLabel="Альтернативные предложения" />
+                {inStock === false && (
+                    <>
+                        <Field as="div" label="Альтернативные предложения" required optionalMark={false} hint={HINTS.alternatives}>
+                            <Choice value={Boolean(draft.no_alternatives)} options={ALTERNATIVES_OPTIONS} onChange={(value) => set('no_alternatives', value)} ariaLabel="Альтернативные предложения" />
+                        </Field>
+                        {draft.no_alternatives && (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                <Field label="Причина отсутствия альтернатив" required anchor="no_alternatives_reason" issue={issueOf('no_alternatives_reason')}>
+                                    <FormSelect value={draft.no_alternatives_reason} onChange={(value) => set('no_alternatives_reason', value)} options={reasonOptions} placeholder="Выберите причину" ariaLabel="Причина отсутствия альтернатив" />
+                                </Field>
+                                <Field label="Пояснение" required={draft.no_alternatives_reason === 'other'} anchor="no_alternatives_comment" issue={issueOf('no_alternatives_comment')}>
+                                    <FormInput value={draft.no_alternatives_comment} onChange={(event) => set('no_alternatives_comment', event.target.value)} maxLength={2000} />
+                                </Field>
+                            </div>
+                        )}
+                        <Field as="div" label={draft.no_alternatives ? 'Поставщик' : 'Варианты поставщиков'} required optionalMark={false} hint={draft.no_alternatives ? null : { ...HINTS.offers, intro: `${HINTS.offers.intro} Нужно не меньше ${minSuppliers}.` }} anchor="offers" issue={issueOf('offers')} issueFirst>
+                            <PaymentOffersEditor
+                                offers={draft.offers}
+                                onChange={(next) => set('offers', next)}
+                                counterpartyOptions={counterpartyOptions}
+                                savedFilesByOffer={savedFilesByOffer}
+                                single={Boolean(draft.no_alternatives)}
+                                issues={reveal ? byKey.offers || [] : []}
+                            />
+                        </Field>
+                        {!draft.no_alternatives && (
+                            <Field label="Обоснование выбора поставщика" required hint={HINTS.choiceReason} anchor="supplier_choice_reason" issue={issueOf('supplier_choice_reason')}>
+                                <FormText className="min-h-[56px]" value={draft.supplier_choice_reason} onChange={(event) => set('supplier_choice_reason', event.target.value)} maxLength={2000} />
                             </Field>
-                            {draft.no_alternatives && (
-                                <div className="grid gap-3 sm:grid-cols-2">
-                                    <Field label="Причина отсутствия альтернатив" required anchor="no_alternatives_reason" issue={issueOf('no_alternatives_reason')}>
-                                        <FormSelect value={draft.no_alternatives_reason} onChange={(value) => set('no_alternatives_reason', value)} options={reasonOptions} placeholder="Выберите причину" ariaLabel="Причина отсутствия альтернатив" />
-                                    </Field>
-                                    <Field label="Пояснение" required={draft.no_alternatives_reason === 'other'} anchor="no_alternatives_comment" issue={issueOf('no_alternatives_comment')}>
-                                        <FormInput value={draft.no_alternatives_comment} onChange={(event) => set('no_alternatives_comment', event.target.value)} maxLength={2000} />
-                                    </Field>
-                                </div>
+                        )}
+                        <Field as="div" label="Позиции и цены" required optionalMark={false} hint={HINTS.itItems} anchor="items" issue={issueOf('items')} issueFirst>
+                            <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} issue={reveal ? byKey.items?.[0] || null : null} />
+                            {priced && (
+                                <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => set('items', priced)} data-price-by-offer>
+                                    Поставить цену поставщика · {fmtMoney(price)}
+                                </button>
                             )}
-                            <Field as="div" label={draft.no_alternatives ? 'Поставщик' : 'Варианты поставщиков'} required optionalMark={false} hint={draft.no_alternatives ? null : { ...HINTS.offers, intro: `${HINTS.offers.intro} Нужно не меньше ${minSuppliers}.` }} anchor="offers" issue={issueOf('offers')} issueFirst>
-                                <PaymentOffersEditor
-                                    offers={draft.offers}
-                                    onChange={(next) => set('offers', next)}
-                                    counterpartyOptions={counterpartyOptions}
-                                    savedFilesByOffer={savedFilesByOffer}
-                                    single={Boolean(draft.no_alternatives)}
-                                    issues={reveal ? byKey.offers || [] : []}
-                                />
+                        </Field>
+                        {/* Товар или услуга и категория учёта — Helpdesk IT ставит имущество на учёт, ему и решать (06.11.2026). */}
+                        <div className="flex flex-wrap gap-x-6 gap-y-3">
+                            <Field as="div" label="Тип объекта" required optionalMark={false} hint={HINTS.objectType} anchor="object_type" issue={issueOf('object_type')}>
+                                <Choice value={draft.object_type} options={OBJECT_TYPE_OPTIONS} onChange={(value) => setDraft((prev) => ({ ...prev, object_type: value, accounting_category: value === 'goods' ? prev.accounting_category : null }))} ariaLabel="Тип объекта" />
                             </Field>
-                            {!draft.no_alternatives && (
-                                <Field label="Обоснование выбора поставщика" required hint={HINTS.choiceReason} anchor="supplier_choice_reason" issue={issueOf('supplier_choice_reason')}>
-                                    <FormText className="min-h-[56px]" value={draft.supplier_choice_reason} onChange={(event) => set('supplier_choice_reason', event.target.value)} maxLength={2000} />
+                            {draft.object_type === 'goods' && (
+                                <Field as="div" label="Категория учёта" required optionalMark={false} hint={HINTS.accountingCategory} anchor="accounting_category" issue={issueOf('accounting_category')}>
+                                    <Choice value={draft.accounting_category} options={ACCOUNTING_CATEGORY_OPTIONS} onChange={(value) => set('accounting_category', value)} ariaLabel="Категория учёта приобретения" />
                                 </Field>
                             )}
-                            <Field as="div" label="Позиции и цены" required optionalMark={false} hint={HINTS.itItems} anchor="items" issue={issueOf('items')} issueFirst>
-                                <PaymentItemsEditor items={draft.items} onChange={(items) => set('items', items)} issue={reveal ? byKey.items?.[0] || null : null} />
-                                {priced && (
-                                    <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => set('items', priced)} data-price-by-offer>
-                                        Поставить цену поставщика · {fmtMoney(price)}
-                                    </button>
-                                )}
-                            </Field>
-                        </>
-                    )}
+                        </div>
+                        <Field as="div" label="Как платим" required optionalMark={false} hint={HINTS.paymentMethod} anchor="payment_method" issue={issueOf('payment_method')}>
+                            <Choice value={draft.payment_method} options={PAYMENT_METHOD_OPTIONS} onChange={(value) => set('payment_method', value)} ariaLabel="Способ оплаты" />
+                        </Field>
+                        {draft.payment_method === 'invoice' && (
+                            <div className="px-1 text-[12.5px] text-slate-500">Счёт приложат после утверждения — раздел попросит его перед оплатой.</div>
+                        )}
+                        {draft.payment_method === 'card' && (
+                            <PaymentCardFields
+                                draft={draft}
+                                onPatch={(patch) => setDraft((prev) => ({ ...prev, ...patch }))}
+                                issueOf={issueOf}
+                                users={users}
+                                keptMask={cardKept ? request.card_mask : null}
+                                onEditKept={() => setCardEditing(true)}
+                                cardOptions={cardOptions}
+                                digitsRange={meta?.card_digits}
+                            />
+                        )}
+                    </>
+                )}
 
-                    {inStock !== null && (
-                        <Comment
-                            value={draft.comment}
-                            onChange={(value) => set('comment', value)}
-                            // Выдают из наличия — без отмеченной вещи на складе словами о выдаче не обойтись.
-                            optional={!inStock}
-                            placeholder={inStock ? 'Что выдаёте и где сотрудник может забрать' : 'Что важно знать утверждающему (необязательно)'}
-                        />
-                    )}
-                    <div className="flex flex-wrap items-center gap-2">
-                        {inStock === true && (
-                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(issueStock)}>
-                                {busy && <Loader2 size={14} className="animate-spin" />} Выдать из наличия
-                            </button>
-                        )}
-                        {inStock === false && (
-                            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(passOffers)}>
-                                {busy && <Loader2 size={14} className="animate-spin" />} Передать на утверждение
-                            </button>
-                        )}
-                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => { setMode((prev) => (prev === 'return' ? null : 'return')); setReveal(false); }}>
-                            Вернуть на доработку
+                {inStock !== null && (
+                    <Comment
+                        value={draft.comment}
+                        onChange={(value) => set('comment', value)}
+                        // Выдают из наличия — без отмеченной вещи на складе словами о выдаче не обойтись.
+                        optional={!inStock}
+                        placeholder={inStock ? 'Что выдаёте и где сотрудник может забрать' : 'Что важно знать утверждающему (необязательно)'}
+                    />
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                    {inStock === true && (
+                        <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(issueStock)}>
+                            {busy && <Loader2 size={14} className="animate-spin" />} Выдать из наличия
                         </button>
-                    </div>
-                    {mode && (
-                        <ReasonPanel
-                            mode={mode}
-                            busy={busy}
-                            onCancel={() => setMode(null)}
-                            onSubmit={({ reason, comment }) => onAct({ action: mode, fields: { reason, comment }, files: [] })}
-                        />
                     )}
-                </>
-            )}
+                    {inStock === false && (
+                        <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(passOffers)}>
+                            {busy && <Loader2 size={14} className="animate-spin" />} Передать на утверждение
+                        </button>
+                    )}
+                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => { setMode((prev) => (prev === 'return' ? null : 'return')); setReveal(false); }}>
+                        Вернуть на доработку
+                    </button>
+                </div>
+                {mode && (
+                    <ReasonPanel
+                        mode={mode}
+                        busy={busy}
+                        onCancel={() => setMode(null)}
+                        onSubmit={({ reason, comment }) => onAct({ action: mode, fields: { reason, comment }, files: [] })}
+                    />
+                )}
+            </>
             {navigator}
         </div>
     );
@@ -497,7 +573,7 @@ const HelpdeskStage = ({ data, subtask, dictionaries, meta, apiBaseUrl, headers,
    внизу формы, а после нажатия человек уже наверху, у первого пустого поля. */
 const PaymentStageForm = ({
     data, subtask, dictionaries, users, meta, apiBaseUrl, headers, busy, showToast, permissions,
-    onAct, onEdit, onReply, onAttach, loadCard, issueSlot = null,
+    onAct, onTake, onEdit, onReply, onAttach, loadCard, issueSlot = null,
 }) => {
     const request = data.request;
     const kind = subtask.kind;
@@ -610,8 +686,8 @@ const PaymentStageForm = ({
     // ── Helpdesk IT: IT-закуп после руководителя (просьба владельца 04.11.2026) ──
     if (kind === 'it_review') {
         return (
-            <HelpdeskStage data={data} subtask={subtask} dictionaries={dictionaries} meta={meta} apiBaseUrl={apiBaseUrl}
-                headers={headers} busy={busy} permissions={permissions} onAct={onAct} issueSlot={issueSlot} />
+            <HelpdeskStage data={data} subtask={subtask} dictionaries={dictionaries} users={users} meta={meta} apiBaseUrl={apiBaseUrl}
+                headers={headers} busy={busy} permissions={permissions} onAct={onAct} onTake={onTake} issueSlot={issueSlot} />
         );
     }
 
