@@ -71,7 +71,10 @@ class AnalyticsViewsTests(unittest.TestCase):
 
 class UploadAndRouteTests(unittest.TestCase):
     def test_tez_upload_hint_mentions_the_city_column(self):
-        self.assertIn("Колонка «город» необязательна: по ней «Воронка ОП» во вкладке «Аналитика»", SETTINGS)
+        # С 06.11.2026 колонка названа прямо в окне загрузки, а подсказка «i» говорит, где виден город.
+        self.assertIn("с колонками <b>fio</b>, <b>phone</b> и, если есть, <b>город</b>", SETTINGS)
+        self.assertIn("Колонка «город» необязательна: город виден в карточке водителя у оператора и в журнале, "
+                      "по нему «Воронка ОП» во вкладке «Аналитика» разбивается по городам", SETTINGS)
 
     def test_funnel_route_is_declared_and_listed(self):
         self.assertIn("'/api/dial_list/departments/<int:department_id>/funnel'", ROUTES)
