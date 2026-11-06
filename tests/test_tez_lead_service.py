@@ -42,6 +42,18 @@ class ParseLeadsFileTests(unittest.TestCase):
         rows = tez_lead_service.parse_leads_file(raw.encode("utf-8"), ".csv")
         self.assertEqual(rows[0][3], "77012345678")
 
+    def test_city_column_for_the_funnel(self):
+        """Загрузка из «Базы водителей» раздела везёт город в базу успешек («Воронка ОП», 06.11.2026):
+        строка — (номер строки, ФИО, телефон, phone_norm, город); без колонки — пустой город."""
+        raw = "ФИО;Телефон;Город\nТестбаев Сабиржан;77000000107; Тараз \n"
+        rows = tez_lead_service.parse_leads_file(raw.encode("utf-8"), ".csv", with_city=True)
+        self.assertEqual([r[1:] for r in rows], [("Тестбаев Сабиржан", "77000000107", "77000000107", "Тараз")])
+        rows = tez_lead_service.parse_leads_file("fio;phone\nИванов Иван;77000000107\n".encode("utf-8"), ".csv",
+                                                 with_city=True)
+        self.assertEqual(rows[0][4], "")
+        # Без with_city — прежние четыре поля: на них стоит загрузка в «Успешки».
+        self.assertEqual(len(tez_lead_service.parse_leads_file(raw.encode("utf-8"), ".csv")[0]), 4)
+
     def test_csv_without_header(self):
         """Шапки может не быть — тогда первая колонка ФИО, вторая телефон."""
         raw = "Тестбаев Сабиржан;77000000107\n"

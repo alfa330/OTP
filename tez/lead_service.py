@@ -66,9 +66,16 @@ from common.leads_file import (  # noqa: E402,F401
 from common.leads_file import parse_leads_file as _parse_leads_file  # noqa: E402
 
 
-def parse_leads_file(raw_bytes, file_ext):
+def parse_leads_file(raw_bytes, file_ext, with_city=False):
     """Разбор файла базы лидов; потолок строк — MAX_LEAD_ROWS ЭТОГО модуля
-    (его подменяют тесты), поэтому обёртка, а не прямой реэкспорт."""
+    (его подменяют тесты), поэтому обёртка, а не прямой реэкспорт.
+
+    with_city — строки (row_number, ФИО, сырой телефон, phone_norm, город) с городом
+    из необязательной колонки «город» ('' — нет): по нему «Воронка ОП» Тез
+    раскладывает базу по городам."""
+    if with_city:
+        rows = _parse_leads_file(raw_bytes, file_ext, max_rows=MAX_LEAD_ROWS, with_city=True)
+        return [(row[0], row[1], row[2], row[3], row[5]) for row in rows]
     return _parse_leads_file(raw_bytes, file_ext, max_rows=MAX_LEAD_ROWS)
 
 # Ночная джоба и кнопка «Сверка» делают одно и то же и ходят в одни и те же

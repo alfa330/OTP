@@ -9,8 +9,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    CITY_NONE, batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps, reasonLabel,
-    refusalSetupNotice, uncheckedNotice,
+    CITY_NONE, batchOptions, callWindowText, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps,
+    monthOptions, periodHint, reasonLabel, refusalSetupNotice, uncheckedNotice,
 } from '../src/components/dial_list/tezFunnel.js';
 
 const NF = new Intl.NumberFormat('ru-RU');
@@ -64,6 +64,30 @@ test('TEZ APP ответил не обо всех — предупреждени
     const notice = uncheckedNotice({ ...SAMPLE, tez_unchecked: 1200 });
     assert.match(notice, new RegExp(`по ${NF.format(1200)} из ${NF.format(7195)} водителей`));
     assert.match(notice, /регистрации и поездки в воронке пока не учтены/);
+    // Что с этим делать — тоже сказано.
+    assert.match(notice, /«Сверить сейчас» во вкладке «Успешки»/);
+});
+
+test('месяц базы — из базы успешек: свежие сверху, с числом водителей', () => {
+    const data = { options: { months: [
+        { period: '2026-11-01', base: 0 }, { period: '2026-10-01', base: 11168 }, { period: '2026-09-01', base: 4195 },
+    ] } };
+    assert.deepEqual(monthOptions(data), [
+        { value: '2026-11-01', label: 'Ноябрь 2026', meta: '0' },
+        { value: '2026-10-01', label: 'Октябрь 2026', meta: NF.format(11168) },
+        { value: '2026-09-01', label: 'Сентябрь 2026', meta: NF.format(4195) },
+    ]);
+    assert.deepEqual(monthOptions(null), []);
+});
+
+test('дни звонков: без выбора — окно месяца базы, как у «Дозвонились»', () => {
+    const data = { call_window: { from: '2026-09-24', to: '2026-10-31' } };
+    assert.equal(callWindowText(data), '24.09–31.10');
+    assert.match(periodHint(data), /окно месяца базы 24\.09–31\.10, как у «Дозвонились»/);
+    assert.match(periodHint(data), /«Уже зарегистрированы» от дней не зависят/);
+    // Сервер без окна — подсказка без дат, но не «undefined».
+    assert.equal(callWindowText({}), '');
+    assert.doesNotMatch(periodHint({}), /undefined/);
 });
 
 test('выбор города и файла: «все» первыми, «не указан» словами, у файла — дата загрузки', () => {

@@ -1,22 +1,24 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, TriangleAlert } from 'lucide-react';
-import { iosCard, iosGroupLabel, IosHint } from '../ui/ios';
+import { Loader2, RefreshCw, TriangleAlert } from 'lucide-react';
+import { iosBtnGhost, iosCard, iosGroupLabel, IosHint } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import {
-    batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps, reasonLabel,
-    refusalSetupNotice, uncheckedNotice,
+    batchOptions, cityLabel, cityOptions, funnelConversions, funnelQuery, funnelSteps, monthOptions, periodHint,
+    reasonLabel, refusalSetupNotice, uncheckedNotice,
 } from './tezFunnel';
 
 /*
  * «Воронка ОП» — первый разрез вкладки «Аналитика» раздела «Воронка ОП Tez» (задача #407 Алчинбаевой
  * Анель, 03.11.2026; владелец: «эту воронку можно положить в Аналитику»).
  *
- * Фильтры — база (месяц выбирается над разрезами, файл загрузки — здесь), период звонков и город;
- * город и период действуют и на воронку, и на отчёт о причинах отказа. Плитки — пять шагов и две
- * конверсии, под ними — те же шаги по городам и причины отказа. Если TEZ APP ещё не ответил по части
- * водителей, над плитками — предупреждение: их регистрации и поездки пока не учтены.
+ * Считается по базе успешек — той же, что во вкладке «Успешки» (владелец 06.11.2026). Поэтому месяц
+ * базы выбирается здесь, из месяцев этой базы (по умолчанию — текущий, как в «Успешках»), а не над
+ * разрезами: там месяцы базы автообзвона. Фильтры — месяц, файл загрузки, дни звонков и город; дни и
+ * город действуют и на воронку, и на отчёт о причинах отказа. Плитки — пять шагов и две конверсии,
+ * под ними — те же шаги по городам и причины отказа. Если TEZ APP ещё не ответил по части водителей,
+ * над плитками — предупреждение: их регистрации и поездки пока не учтены.
  *
  * Считает сервер (GET …/funnel, dial_list/analytics.tez_funnel); подписи и запрос — tezFunnel.js.
  * Ответ, пришедший после смены фильтров, не ложится на новые: у запроса свой счётчик.
@@ -52,15 +54,18 @@ const Notice = ({ children }) => (
     </div>
 );
 
-const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', reloadKey = 0 }) => {
+const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId }) => {
+    // Месяц базы: '' — какой выберет сервер (текущий).
+    const [month, setMonth] = useState('');
     // Файлы и города у каждого месяца базы свои: выбранный в прошлом месяце здесь ничего бы не нашёл.
     // Выбор помнит свой месяц — другой месяц сразу начинается с «все», без запроса со старым выбором.
-    const scope = `${departmentId}|${period}`;
+    const scope = `${departmentId}|${month}`;
     const [picked, setPicked] = useState({ scope: '', batchId: '', city: '' });
     const batchId = picked.scope === scope ? picked.batchId : '';
     const city = picked.scope === scope ? picked.city : '';
     const pick = (patch) => setPicked({ scope, batchId, city, ...patch });
     const [range, setRange] = useState({ from: '', to: '' });
+    const [reload, setReload] = useState(0);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -71,7 +76,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
         setLoading(true);
         setError('');
         try {
-            const qs = funnelQuery({ period, batchId, dateFrom: range.from, dateTo: range.to, city });
+            const qs = funnelQuery({ period: month, batchId, dateFrom: range.from, dateTo: range.to, city });
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/funnel${qs}`, {
                 credentials: 'include', headers: authHeaders(),
             });
@@ -83,10 +88,11 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
         } finally {
             if (my === seq.current) setLoading(false);
         }
-    }, [apiBaseUrl, authHeaders, departmentId, period, batchId, range.from, range.to, city]);
+    }, [apiBaseUrl, authHeaders, departmentId, month, batchId, range.from, range.to, city]);
 
-    useEffect(() => { load(); }, [load, reloadKey]);
+    useEffect(() => { load(); }, [load, reload]);
 
+    const months = useMemo(() => monthOptions(data), [data]);
     const steps = useMemo(() => funnelSteps(data), [data]);
     const conversions = useMemo(() => funnelConversions(data), [data]);
     const cities = useMemo(() => cityOptions(data), [data]);
@@ -99,18 +105,43 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
 
     return (
         <div className="space-y-4">
-            {/* Фильтры воронки: файл базы, дни звонков, город. Подпись каждого поля — блок одной высоты. */}
-            <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-3`}>
+            {/* Фильтры воронки: месяц и файл базы, дни звонков, город. Подпись каждого поля — блок одной высоты. */}
+            <div className={`${iosCard} grid gap-3 p-3.5 sm:grid-cols-2 lg:grid-cols-4`}>
+                {/* div, а не label: рядом с выбором — кнопка «Обновить», label отдавал бы щелчок ей. */}
+                <div className="space-y-1.5">
+                    <span className={FIELD_HEAD}>Месяц базы</span>
+                    <div className="flex items-center gap-2">
+                        <CustomSelect
+                            value={month || data?.period || ''}
+                            onChange={(v) => setMonth(String(v))}
+                            options={months}
+                            variant="ios"
+                            className="min-w-0 flex-1"
+                            ariaLabel="Месяц базы"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => setReload((n) => n + 1)}
+                            disabled={loading}
+                            className={`${iosBtnGhost} shrink-0`}
+                            aria-label="Обновить"
+                            title="Обновить"
+                        >
+                            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                        </button>
+                    </div>
+                </div>
                 <label className="block space-y-1.5">
                     <span className={FIELD_HEAD}>Файл базы</span>
                     <CustomSelect value={batchId} onChange={(v) => pick({ batchId: String(v) })} options={batches} variant="ios" ariaLabel="Файл базы" />
                 </label>
                 {/* div, а не label: календарь раскрывается внутри, и label отдавал бы щелчок кнопке. */}
                 <div className="space-y-1.5">
-                    <span className={`${FIELD_HEAD} gap-1.5`}>
-                        Период звонков
-                        <IosHint text="Дни, когда состоялся диалог (по Алматы). Регистрация и выход к заказам — после первого диалога водителя в эти дни. Причины отказа — по отказам этих дней. База и «Уже зарегистрированы» от периода не зависят." label="Что значит «Период звонков»" />
-                    </span>
+                    {/* «i» — рядом с подписью, а не внутри: внутри пузырёк наследовал её прописные буквы. */}
+                    <div className="flex h-5 items-center gap-1.5">
+                        <span className={iosGroupLabel}>Период звонков</span>
+                        <IosHint text={periodHint(data)} label="Что значит «Период звонков»" />
+                    </div>
                     <IosDateRangePicker
                         from={range.from}
                         to={range.to}
@@ -161,7 +192,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
 
                     <PagedTable
                         title="По городам"
-                        help="Те же шаги и конверсии по городам. Город — из колонки «город» в файле базы (вкладка «База водителей»); водители без города — строкой «Город не указан»."
+                        help="Те же шаги и конверсии по городам. Город — из колонки «город» в файле базы (загрузка во вкладке «База водителей»); у баз, загруженных без этой колонки, — строка «Город не указан»."
                         rows={byCity}
                         perPage={10}
                         empty="В выбранной базе водителей нет."
@@ -195,7 +226,7 @@ const TezFunnelPanel = ({ apiBaseUrl, authHeaders, departmentId, period = '', re
                         {setupNotice && <Notice>{setupNotice}</Notice>}
                         <PagedTable
                             title="Причины отказа"
-                            help="Отказ — итог «Отказ», который оператор ставит в карточке водителя в iCORE Phone; причина — его тип, при необходимости с комментарием. Каждый водитель считается один раз — с последней причиной отказа в выбранный период. Доля — от всех отказов."
+                            help="Отказ — итог «Отказ», который оператор ставит в карточке водителя в iCORE Phone при обзвоне через раздел (у звонков Binotel мимо обзвона итога нет); причина — его тип, при необходимости с комментарием. Каждый водитель считается один раз — с последней причиной отказа в выбранный период. Доля — от всех отказов."
                             rows={reasons}
                             perPage={10}
                             empty="Отказов за выбранный период нет."

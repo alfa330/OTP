@@ -53971,10 +53971,11 @@ def _dial_list_wa_client_factory():
 def _dial_list_tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period):
     """Файл базы автообзвона Тез КЦ — ещё и в «Базу лидов ОП TEZ» того же месяца: там считаются
     успешки и зарплата ОП (одна загрузка на обе базы, владелец 15.10.2026). Файл, который её
-    разбор не принял, — {"error"}: загрузку в раздел это не отменяет. Номеров в ответе нет."""
+    разбор не принял, — {"error"}: загрузку в раздел это не отменяет. Номеров в ответе нет. Город из
+    колонки «город» файла едет туда же: по нему «Воронка ОП» раздела раскладывает базу успешек."""
     from tez import lead_service as tez_lead_service
     try:
-        rows = tez_lead_service.parse_leads_file(raw_bytes, file_ext)
+        rows = tez_lead_service.parse_leads_file(raw_bytes, file_ext, with_city=True)
     except ValueError as exc:
         return {"error": str(exc)}
     result = _tez_leads_import_rows(requester_id, int(department_id), period.year, period.month, file_name, rows)

@@ -5391,6 +5391,16 @@ class SchemaMixin:
                 -- свежий вычисленный результат и делает порядок откатов A/B
                 -- детерминированным.
                 ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS archive_state_event_seq BIGINT;
+                -- «Воронка ОП» Тез (#407): ответ TEZ APP о водителе (поля с 04.11.2026) —
+                -- создание аккаунта и начало последней завершённой поездки за всё время, от
+                -- месяца не зависят. account_checked_at — когда TEZ APP о них ответил: NULL —
+                -- ещё не спрашивали, сверка спросит такого лида один раз, даже если поездка в
+                -- месяце уже найдена. city — колонка «город» файла базы (загрузка через «Базу
+                -- водителей» раздела «Воронка ОП Tez»); '' — не указан.
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS registered_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS last_order_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS account_checked_at TIMESTAMP WITH TIME ZONE;
+                ALTER TABLE tez_leads ADD COLUMN IF NOT EXISTS city VARCHAR(64) NOT NULL DEFAULT '';
 
                 CREATE INDEX IF NOT EXISTS idx_tez_leads_pending_order_check
                     ON tez_leads(year, month) WHERE month_first_order_at IS NULL;
@@ -5553,6 +5563,10 @@ class SchemaMixin:
                     restored_lead_id UUID
                 );
                 ALTER TABLE tez_lead_archived_leads ADD COLUMN IF NOT EXISTS restored_lead_id UUID;
+                -- Город лида (06.11.2026) переживает удаление и возврат загрузки. Ответ TEZ APP
+                -- об аккаунте не архивируется: у вернувшегося лида account_checked_at пуст, и
+                -- сверка спросит его заново.
+                ALTER TABLE tez_lead_archived_leads ADD COLUMN IF NOT EXISTS city VARCHAR(64) NOT NULL DEFAULT '';
 
                 CREATE TABLE IF NOT EXISTS tez_lead_archived_successes (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

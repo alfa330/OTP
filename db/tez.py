@@ -482,8 +482,10 @@ class TezMixin:
     def import_tez_lead_rows(self, batch_id, year, month, rows):
         """Записывает строки загрузки и накатывает их на помесячную базу лидов.
 
-        rows — список кортежей (row_number, raw_full_name, raw_phone, phone_norm),
-        где phone_norm=None означает невалидный номер.
+        rows — список кортежей (row_number, raw_full_name, raw_phone, phone_norm[, город]),
+        где phone_norm=None означает невалидный номер. Город (колонка «город» файла,
+        загрузка через «Базу водителей» раздела «Воронка ОП Tez») пустым не затирает
+        уже известный.
 
         База помесячная: один и тот же номер в июньской и июльской базе — это два
         разных лида. Повторная загрузка того же номера в тот же месяц не создаёт
@@ -514,7 +516,9 @@ class TezMixin:
             if batch[2] is not None:
                 raise ValueError('Cannot import rows into a deleted TEZ lead batch')
 
-            for row_number, raw_name, raw_phone, phone_norm in rows or []:
+            for row in rows or []:
+                row_number, raw_name, raw_phone, phone_norm = row[:4]
+                city = str(row[4] if len(row) > 4 else '').strip()[:64]
                 counts['rows_total'] += 1
                 clean_name = str(raw_name or '').strip()[:255]
 
@@ -539,8 +543,8 @@ class TezMixin:
                 cursor.execute(
                     """
                     INSERT INTO tez_leads
-                        (year, month, phone_norm, full_name, first_batch_id, last_batch_id, upload_count)
-                    VALUES (%s, %s, %s, %s, %s, %s, 1)
+                        (year, month, phone_norm, full_name, first_batch_id, last_batch_id, upload_count, city)
+                    VALUES (%s, %s, %s, %s, %s, %s, 1, %s)
                     ON CONFLICT (year, month, phone_norm) DO UPDATE SET
                         upload_count = tez_leads.upload_count + 1,
                         last_batch_id = EXCLUDED.last_batch_id,
@@ -548,10 +552,11 @@ class TezMixin:
                             WHEN tez_leads.full_name = '' THEN EXCLUDED.full_name
                             ELSE tez_leads.full_name
                         END,
+                        city = CASE WHEN EXCLUDED.city <> '' THEN EXCLUDED.city ELSE tez_leads.city END,
                         updated_at = CURRENT_TIMESTAMP
                     RETURNING id, (xmax = 0) AS inserted
                     """,
-                    (batch_year, batch_month, phone_norm, clean_name, batch_id, batch_id)
+                    (batch_year, batch_month, phone_norm, clean_name, batch_id, batch_id, city)
                 )
                 lead_id, inserted = cursor.fetchone()
                 if inserted:
@@ -916,12 +921,12 @@ class TezMixin:
                          first_batch_id, last_batch_id, upload_count, status, status_rule,
                          month_first_order_at, prev_month_first_order_at,
                          first_order_checked_at, calls_synced_at,
-                         lead_created_at, lead_updated_at)
+                         lead_created_at, lead_updated_at, city)
                     SELECT %s, l.id, l.year, l.month, l.phone_norm, l.full_name,
                            l.first_batch_id, l.last_batch_id, l.upload_count,
                            l.status, l.status_rule, l.month_first_order_at,
                            l.prev_month_first_order_at, l.first_order_checked_at,
-                           l.calls_synced_at, l.created_at, l.updated_at
+                           l.calls_synced_at, l.created_at, l.updated_at, l.city
                     FROM tez_leads l
                     WHERE l.id = ANY(%s::uuid[])
                     ON CONFLICT DO NOTHING
@@ -1082,7 +1087,7 @@ class TezMixin:
                      status, status_rule, month_first_order_at,
                      prev_month_first_order_at, first_order_checked_at,
                      calls_synced_at, archive_state_event_seq,
-                     created_at, updated_at)
+                     created_at, updated_at, city)
                 SELECT x.lead_id, x.year, x.month, x.phone_norm, x.full_name,
                        CASE WHEN fb.id IS NOT NULL THEN x.first_batch_id END,
                        CASE WHEN lb.id IS NOT NULL THEN x.last_batch_id END,
@@ -1091,7 +1096,7 @@ class TezMixin:
                        x.first_order_checked_at, x.calls_synced_at,
                        x.snapshot_event_seq,
                        COALESCE(x.lead_created_at, CURRENT_TIMESTAMP),
-                       CURRENT_TIMESTAMP
+                       CURRENT_TIMESTAMP, x.city
                 FROM latest x
                 LEFT JOIN tez_lead_batches fb ON fb.id = x.first_batch_id
                 LEFT JOIN tez_lead_batches lb ON lb.id = x.last_batch_id
@@ -1157,6 +1162,7 @@ class TezMixin:
                     first_order_checked_at =
                         GREATEST(l.first_order_checked_at, x.first_order_checked_at),
                     calls_synced_at = GREATEST(l.calls_synced_at, x.calls_synced_at),
+                    city = CASE WHEN BTRIM(l.city) = '' THEN x.city ELSE l.city END,
                     updated_at = CURRENT_TIMESTAMP
                 FROM latest x
                 WHERE l.year = x.year
@@ -1544,12 +1550,17 @@ class TezMixin:
 
         Именно они идут в TEZ APP. Как только дата в месяце найдена, номер
         выпадает отсюда: первый заказ внутри месяца больше не изменится.
+
+        Плюс один раз — те, о ком TEZ APP ещё не отвечал про аккаунт
+        (account_checked_at): регистрация и последняя поездка для «Воронки ОП»
+        нужны и у выехавших, а до 04.11.2026 их в ответе не было.
         """
         params = [int(year), int(month)]
         sql = """
             SELECT DISTINCT l.phone_norm
             FROM tez_leads l
-            WHERE l.year = %s AND l.month = %s AND l.month_first_order_at IS NULL
+            WHERE l.year = %s AND l.month = %s
+              AND (l.month_first_order_at IS NULL OR l.account_checked_at IS NULL)
         """
         if batch_id:
             sql += " AND (l.first_batch_id = %s OR l.last_batch_id = %s)"
@@ -1565,9 +1576,14 @@ class TezMixin:
     def save_tez_first_orders(self, year, month, first_orders):
         """Сохраняет оконные ответы TEZ APP на лидах отчётного месяца.
 
-        first_orders — dict phone_norm -> {'month': datetime|None, 'prev': datetime|None}.
-        Проверенные, но ещё не выехавшие номера тоже помечаются (checked_at), иначе
-        их не отличить от никогда не проверявшихся.
+        first_orders — dict phone_norm -> {'month', 'prev', 'last_before', 'registered',
+        'last_order': datetime|None}. Проверенные, но ещё не выехавшие номера тоже
+        помечаются (checked_at), иначе их не отличить от никогда не проверявшихся.
+
+        registered и last_order (поля TEZ APP с 04.11.2026, «Воронка ОП») от месяца не
+        зависят: регистрация — свежая из ответа, а если TEZ APP её не прислал, остаётся
+        прежняя; последняя поездка только растёт (GREATEST) — пропажа поля из ответа не
+        обнулит сохранённое, как в августе было с prev.
 
         Пишем одним запросом: ответ TEZ APP приходит сразу по тысячам номеров
         (3 259 за август, вдвое больше при обработке лидов прошлого месяца), и
@@ -1581,7 +1597,8 @@ class TezMixin:
             month_at = (dates or {}).get('month')
             prev_at = (dates or {}).get('prev')
             last_before = (dates or {}).get('last_before')
-            rows.append((phone_norm, int(year), int(month), month_at, prev_at, last_before))
+            rows.append((phone_norm, int(year), int(month), month_at, prev_at, last_before,
+                         (dates or {}).get('registered'), (dates or {}).get('last_order')))
             if month_at is not None:
                 found += 1
         if not rows:
@@ -1604,15 +1621,20 @@ class TezMixin:
                     month_first_order_at = COALESCE(l.month_first_order_at, v.month_at),
                     prev_month_first_order_at = COALESCE(l.prev_month_first_order_at, v.prev_at),
                     last_order_before_at = COALESCE(l.last_order_before_at, v.last_before),
+                    registered_at = COALESCE(v.registered, l.registered_at),
+                    last_order_at = GREATEST(l.last_order_at, v.last_order),
+                    account_checked_at = CURRENT_TIMESTAMP,
                     first_order_checked_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, prev_at, last_before)
+                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, prev_at, last_before,
+                                      registered, last_order)
                 WHERE l.year = v.lead_year
                   AND l.month = v.lead_month
                   AND l.phone_norm = v.phone_norm
                 """,
                 rows,
-                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz, %s::timestamptz)",
+                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz, %s::timestamptz,"
+                         " %s::timestamptz, %s::timestamptz)",
                 page_size=500,
             )
         return found
@@ -1649,6 +1671,9 @@ class TezMixin:
         year/month — целевой месяц (тот, за который спрашивали). Пишем в
         carry_* колонки лидов предыдущего месяца: их собственные даты описывают
         их собственный месяц, и подмена сломала бы воронку месяца базы.
+        Регистрация и последняя поездка от месяца не зависят — их пишем в общие
+        колонки, как save_tez_first_orders: так месяц доработки освежает их у
+        лидов прошлой базы.
         """
         year, month = int(year), int(month)
         prev_year, prev_month = (year - 1, 12) if month == 1 else (year, month - 1)
@@ -1659,7 +1684,8 @@ class TezMixin:
                 continue
             month_at = (dates or {}).get('month')
             last_before = (dates or {}).get('last_before')
-            rows.append((phone_norm, prev_year, prev_month, month_at, last_before))
+            rows.append((phone_norm, prev_year, prev_month, month_at, last_before,
+                         (dates or {}).get('registered'), (dates or {}).get('last_order')))
             if month_at is not None:
                 found += 1
         if not rows:
@@ -1674,15 +1700,20 @@ class TezMixin:
                     carry_first_order_at = COALESCE(l.carry_first_order_at, v.month_at),
                     carry_last_order_before_at = COALESCE(l.carry_last_order_before_at, v.last_before),
                     carry_checked_at = CURRENT_TIMESTAMP,
+                    registered_at = COALESCE(v.registered, l.registered_at),
+                    last_order_at = GREATEST(l.last_order_at, v.last_order),
+                    account_checked_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
-                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, last_before)
+                FROM (VALUES %s) AS v(phone_norm, lead_year, lead_month, month_at, last_before,
+                                      registered, last_order)
                 WHERE l.year = v.lead_year
                   AND l.month = v.lead_month
                   AND l.phone_norm = v.phone_norm
                   AND l.status <> 'success'
                 """,
                 rows,
-                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz)",
+                template="(%s, %s::int, %s::int, %s::timestamptz, %s::timestamptz, %s::timestamptz,"
+                         " %s::timestamptz)",
                 page_size=500,
             )
         return found

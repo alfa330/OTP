@@ -8,6 +8,7 @@ tests/dial_list_tez_funnel.test.mjs; здесь — проводка экран�
   * дашборд автообзвона не грузится, пока открыт разрез воронки (лишний запрос);
   * панель воронки ходит в /funnel и сбрасывает файл и город при смене месяца базы;
   * регистрация от TEZ APP (с 04.11.2026) — в плитках и по городам, пробелы в данных — предупреждением;
+  * воронка считается по базе успешек и выбирает месяц у себя (06.11.2026);
   * загрузка базы Тез принимает город, подсказка у загрузки говорит об этом;
   * ручка /funnel объявлена и описана в списке ручек раздела.
 """
@@ -42,7 +43,7 @@ class AnalyticsViewsTests(unittest.TestCase):
     def test_panel_asks_the_funnel_route_and_resets_month_bound_filters(self):
         self.assertIn("/api/dial_list/departments/${departmentId}/funnel${qs}", PANEL)
         # Файл и город помнят свой месяц: другой месяц — сразу «все», без запроса со старым выбором.
-        self.assertIn("const scope = `${departmentId}|${period}`;", PANEL)
+        self.assertIn("const scope = `${departmentId}|${month}`;", PANEL)
         self.assertIn("const batchId = picked.scope === scope ? picked.batchId : '';", PANEL)
         self.assertIn("const city = picked.scope === scope ? picked.city : '';", PANEL)
         self.assertIn("if (my === seq.current) setData(body);", PANEL)
@@ -54,6 +55,18 @@ class AnalyticsViewsTests(unittest.TestCase):
         # По кому TEZ APP ещё не ответил — предупреждение над плитками, а не молчаливый ноль.
         self.assertIn("{tezNotice && <Notice>{tezNotice}</Notice>}", PANEL)
         self.assertNotIn("ждём данные TEZ APP", PANEL + FUNNEL_LOGIC)
+
+    def test_funnel_picks_months_of_the_successes_base_itself(self):
+        # Воронка — по базе успешек (06.11.2026): месяц выбирается в самой панели из месяцев этой базы.
+        self.assertIn('ariaLabel="Месяц базы"', PANEL)
+        self.assertIn("const months = useMemo(() => monthOptions(data), [data]);", PANEL)
+        self.assertIn("funnelQuery({ period: month,", PANEL)
+        # Выбор над разрезами — месяцы базы автообзвона: он только у «Автообзвона», в воронку не уходит.
+        self.assertIsNotNone(re.search(r"\{dial && \(\s*<div className=\"flex items-center gap-2\">\s*<CustomSelect",
+                                       ANALYTICS))
+        panel_call = ANALYTICS[ANALYTICS.index("<TezFunnelPanel"):]
+        panel_call = panel_call[:panel_call.index("/>")]
+        self.assertNotIn("period=", panel_call)
 
 
 class UploadAndRouteTests(unittest.TestCase):

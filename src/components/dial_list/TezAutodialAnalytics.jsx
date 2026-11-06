@@ -414,7 +414,8 @@ export const TezAnalyticsBody = ({ data, onOpenJournal }) => {
 };
 
 /* Разрезы вкладки (03.11.2026): «Воронка ОП» Анель — первой, это главный отчёт раздела; показатели
-   самого автообзвона — вторым. Месяц базы общий: выбор над разрезами. */
+   самого автообзвона — вторым. Воронка считается по базе успешек и выбирает месяц у себя (06.11.2026);
+   выбор над разрезом — месяцы базы автообзвона, он только у «Автообзвона». */
 const VIEWS = [
     { value: 'funnel', label: 'Воронка ОП' },
     { value: 'dial', label: 'Автообзвон' },
@@ -424,7 +425,6 @@ const TezAutodialAnalytics = ({
     apiBaseUrl, authHeaders, departmentId, periods = [], activePeriod = '', period = '', onPeriodChange, onOpenJournal,
 }) => {
     const [view, setView] = useState('funnel');
-    const [funnelReload, setFunnelReload] = useState(0);
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -470,34 +470,34 @@ const TezAutodialAnalytics = ({
             <div className="-mx-1 overflow-x-auto px-1" style={{ scrollbarWidth: 'none' }}>
                 <IosSegmented value={view} onChange={setView} options={VIEWS} className="min-w-max" ariaLabel="Разрез аналитики" />
             </div>
-            <div className="flex items-center gap-2">
-                <CustomSelect
-                    value={shownPeriod || (dial ? data?.period : '') || activePeriod}
-                    onChange={(v) => onPeriodChange?.(v)}
-                    options={periodOptions}
-                    variant="ios"
-                    className="min-w-0 flex-1 sm:w-64 sm:flex-none"
-                    ariaLabel="Месяц базы"
-                />
-                <button
-                    type="button"
-                    onClick={() => (dial ? load() : setFunnelReload((n) => n + 1))}
-                    disabled={dial && loading}
-                    className={`${iosBtnGhost} shrink-0`}
-                    aria-label="Обновить"
-                    title="Обновить"
-                >
-                    <RefreshCw size={15} className={dial && loading ? 'animate-spin' : ''} />
-                </button>
-            </div>
+            {dial && (
+                <div className="flex items-center gap-2">
+                    <CustomSelect
+                        value={shownPeriod || data?.period || activePeriod}
+                        onChange={(v) => onPeriodChange?.(v)}
+                        options={periodOptions}
+                        variant="ios"
+                        className="min-w-0 flex-1 sm:w-64 sm:flex-none"
+                        ariaLabel="Месяц базы"
+                    />
+                    <button
+                        type="button"
+                        onClick={load}
+                        disabled={loading}
+                        className={`${iosBtnGhost} shrink-0`}
+                        aria-label="Обновить"
+                        title="Обновить"
+                    >
+                        <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+                    </button>
+                </div>
+            )}
 
             {!dial && (
                 <TezFunnelPanel
                     apiBaseUrl={apiBaseUrl}
                     authHeaders={authHeaders}
                     departmentId={departmentId}
-                    period={shownPeriod}
-                    reloadKey={funnelReload}
                 />
             )}
 

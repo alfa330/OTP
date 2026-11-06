@@ -91,8 +91,7 @@ class _Binotel:
 
 
 class _TezApp:
-    """TEZ APP /drivers/first-orders без сети: answers — номер → {'month', 'prev', 'last_before',
-    'registered', 'last_order'}."""
+    """TEZ APP /drivers/first-orders без сети: answers — номер → {'month', 'prev', 'last_before'}."""
 
     def __init__(self):
         self.answers, self.asked = {}, []
@@ -280,24 +279,10 @@ def test_base_without_iin_and_trip_check_takes_drivers_already_online_out(env):
     assert (counts["rows_new"], counts["rows_invalid"], counts["rows_bad_iin"]) == (2, 1, 0)
     assert env.q("SELECT iin FROM dial_list_leads WHERE department_id = %s", (TEZ,)) == [('',), ('',)]
     went = _now() - timedelta(hours=2)
-    env.tez.answers['77010000001'] = {'month': went, 'prev': None, 'last_before': went - timedelta(days=60),
-                                      'registered': went - timedelta(days=400), 'last_order': went}
-    env.tez.answers['77010000002'] = {'month': None, 'prev': None, 'last_before': went - timedelta(days=3),
-                                      'registered': None, 'last_order': went - timedelta(days=3)}
+    env.tez.answers['77010000001'] = {'month': went, 'prev': None, 'last_before': went - timedelta(days=60)}
+    env.tez.answers['77010000002'] = {'month': None, 'prev': None, 'last_before': went - timedelta(days=3)}
     summary = env.svc.trip_checker.run(reason='тест')
     assert (summary["checked"], summary["online"], summary["errors"]) == (2, 1, 0)
-    # Регистрация и начало последней поездки (поля TEZ APP с 04.11.2026) — тем же прогоном, для «Воронки ОП».
-    dates = "SELECT phone_norm, registered_at, last_order_at FROM dial_list_leads WHERE department_id = %s ORDER BY 1"
-    assert env.q(dates, (TEZ,)) == [('77010000001', went - timedelta(days=400), went),
-                                    ('77010000002', None, went - timedelta(days=3))]
-    # Следующий прогон обновляет не вышедшего (аккаунт появился), а вышедшего больше не спрашивает.
-    env.tez.answers['77010000002'] = {'month': None, 'prev': None, 'last_before': went - timedelta(days=3),
-                                      'registered': went, 'last_order': went - timedelta(days=3)}
-    env.tez.answers['77010000001'] = {'month': went, 'prev': None, 'last_before': None, 'registered': None,
-                                      'last_order': None}
-    assert env.svc.trip_checker.run(reason='тест', now=_now() + timedelta(hours=2))["checked"] == 1
-    assert env.q(dates, (TEZ,)) == [('77010000001', went - timedelta(days=400), went),
-                                    ('77010000002', went, went - timedelta(days=3))]
     # Месяц запроса — месяц базы, и только номера отдела Тез (чужой удалённого КЦ не спрошен).
     phones, month, _timeout = env.tez.asked[0]
     assert phones == ['77010000001', '77010000002']

@@ -7107,8 +7107,10 @@ class DialListService:
     def funnel(self, department_id, period=None, batch_id=None, date_from=None, date_to=None, city=None):
         """«Воронка ОП» во вкладке «Аналитика» Тез (задача #407, 03.11.2026): база → уже
         зарегистрированы → диалог → зарегистрировались после контакта → вышли к заказам по городам и
-        причины отказа (analytics.tez_funnel). Фильтры: файл загрузки, дни звонков (date,
-        включительно), город. У удалённого КЦ воронки нет — цель там подпись."""
+        причины отказа (analytics.tez_funnel). Считается по базе успешек (вкладка «Успешки»), не по
+        базе автообзвона (владелец 06.11.2026). Месяц базы по умолчанию — текущий, как во вкладке
+        «Успешки». Фильтры: файл загрузки, дни звонков (date, включительно), город. У удалённого КЦ
+        воронки нет — цель там подпись."""
         from . import analytics as dial_analytics
         department_id = int(department_id)
         settings = self.department_settings(department_id)
@@ -7116,13 +7118,12 @@ class DialListService:
             raise DialListError("Воронка ОП — только у отделов Тез")
         if date_from and date_to and date_from > date_to:
             raise DialListError("Период: начало позже конца")
-        period = period or settings["_period"]
+        period = period or current_period()
         with self.db._get_cursor() as cur:
             data = dial_analytics.tez_funnel(cur, department_id, period, batch_id=batch_id, date_from=date_from,
                                              date_to=date_to, city=city)
         data.update({"department_id": department_id, "period": period.isoformat(),
-                     "period_label": period_label(period), "active_period": settings["period"],
-                     "is_active_period": period == settings["_period"]})
+                     "period_label": period_label(period)})
         return data
 
     # ------------------------------------------------------------ отчёт о подписании в Telegram

@@ -477,38 +477,45 @@ def tez_department_analytics(cur, department_id, period, today=None):
 
 # ── Воронка ОП Тез (задача #407 Алчинбаевой Анель, 03.11.2026) ─────────────────────────────────
 # База → уже зарегистрированы → состоялся диалог → зарегистрировались после контакта → вышли к
-# заказам, по городам; выбор базы (месяц и файл загрузки), периода звонков и города; отдельно —
+# заказам, по городам; выбор месяца базы, файла загрузки, периода звонков и города; отдельно —
 # причины отказа. Каждый водитель — один раз в каждом показателе.
 #
-#   уже зарегистрированы  аккаунт в TEZ APP создан раньше ПЕРВОГО звонка водителю («до начала
-#                   обзвона» в ТЗ; недозвон — тоже звонок, а отменённый оператором и не ушедший в
-#                   Binotel — нет); кому ещё не звонили — у кого аккаунт уже есть. Это свойство
-#                   базы: от периода звонков не зависит;
-#   диалог          разговор не короче 10 с в выбранный период (тот же «поговорили», что в дашборде
-#                   и в успешке): недозвон, сброс, сообщение сети и автоответчик — не диалог;
-#   зарегистрировались после контакта — аккаунт создан позже ПЕРВОГО диалога водителя в периоде;
-#   вышли к заказам начало последней завершённой поездки (last_order_at) или первый заказ месяца
-#                   базы (signed_at) позже первого диалога водителя в периоде: поездка до контакта
-#                   в результат не идёт, и ранее работавшие, и новые. last_order_at — за всё время,
-#                   поэтому звонок в конце месяца и поездка в начале следующего не теряются, пока
-#                   базу проверяют (до 7-го числа). Вышедшего на линию проверка больше не спрашивает
-#                   — его last_order_at застывает, и решает signed_at;
+# Считается по БАЗЕ УСПЕШЕК (tez_leads — вкладка «Успешки», бывшая «База лидов и успешки» «Учёта
+# часов»), а не по базе автообзвона: ОП Тез работает её обычными звонками Binotel, а база
+# автообзвона у Тез КЦ пустая (владелец 06.11.2026). Звонки — зеркало Binotel tez_lead_calls по
+# правилам «Обзвонено» и «Дозвонились» вкладки «Успешки» (db.get_tez_lead_funnel): исходящие
+# операторов ОП, окно месяца базы — последние 7 дней прошлого месяца и весь месяц
+# (tez.op_leads.call_window_for_period). Файл, загруженный в «Базу водителей» раздела, зеркало
+# кладёт и в базу успешек — воронка видит и его.
+#
+#   уже зарегистрированы  аккаунт в TEZ APP создан раньше ПЕРВОГО звонка оператора ОП водителю с
+#                   начала окна («до начала обзвона» в ТЗ; недозвон — тоже звонок); кому ещё не
+#                   звонили — у кого аккаунт уже есть. Свойство базы: от периода звонков не зависит;
+#   диалог          исходящий звонок оператора ОП не короче 10 с (is_qualifying) в выбранные дни;
+#                   без дней — в окне месяца базы, и тогда число совпадает с «Дозвонились»;
+#   зарегистрировались после контакта — аккаунт создан позже ПЕРВОГО диалога водителя;
+#   вышли к заказам первый заказ месяца базы, заказ месяца доработки (перенос) или начало последней
+#                   завершённой поездки позже первого диалога: поездка до контакта в результат не
+#                   идёт, и ранее работавшие, и новые;
 #   конверсии       зарегистрировались после (вышли к заказам) ÷ диалог × 100; нет диалогов — 0, а
 #                   не ошибка деления.
 #
-# Даты регистрации и поездок — ответ TEZ APP (поля с 04.11.2026), их пишет проверка поездок
-# (trips_check.py). Водитель, о котором TEZ APP ещё не ответил, не учтён ни в регистрации, ни в
-# поездках; сколько таких — tez_unchecked: сайт предупреждает, а не показывает молча ноль.
+# Регистрация и последняя поездка — ответ TEZ APP (поля с 04.11.2026); их сохраняет сверка успешек
+# (db.save_tez_first_orders — ночью и кнопкой «Сверить сейчас»). Водитель, о котором TEZ APP ещё не
+# ответил (account_checked_at), не учтён ни в регистрации, ни в поездках после диалога; сколько
+# таких — tez_unchecked: сайт предупреждает, а не показывает молча ноль.
 #
-# Отказ — итог, название которого начинается с «Отказ»; причина — его тип: если у итога заведены
-# типы, телефон без типа итог не примет (set_attempt_outcome). Отказ водителя в отчёте — его
-# последний итог-отказ в периоде: водитель считается один раз, со своей последней причиной.
-# Город — колонка «город» файла базы (решение владельца 03.11.2026); без неё — «не указан».
+# Отказ — итог, название которого начинается с «Отказ»; причина — его тип. Итог ставят в карточке
+# водителя iCORE Phone при обзвоне через раздел, у звонков Binotel мимо обзвона итога нет: отказ
+# водителя базы — его последний итог-отказ в выбранные дни среди попыток автообзвона отдела (по
+# номеру), водитель считается один раз. Город — колонка «город» файла базы; без неё — «не указан».
 
 FUNNEL_CITY_NONE = "__none__"  # город фильтра «не указан»
 # Итог-отказ узнаём в Python, а не LIKE в SQL: lower() и ILIKE по кириллице зависят от локали
 # кластера (в C-локали «Отказ» не опускается) — правило не должно от неё зависеть.
 REFUSAL_NAME_PREFIX = "отказ"
+# Выбор месяца базы: столько последних месяцев.
+FUNNEL_MONTHS_LIMIT = 24
 
 
 def is_refusal_outcome(name):
@@ -516,42 +523,46 @@ def is_refusal_outcome(name):
     return str(name or "").strip().lower().startswith(REFUSAL_NAME_PREFIX)
 
 
+_TEZ_LEAD_NOT_TEST_SQL = test_keys.sql_not_test("l.phone_norm", digits=True)
+
 _FUNNEL_LEADS_CTE = """
     leads AS (
-        SELECT l.id, l.signed_at, l.registered_at, l.last_order_at, l.trip_checked_at,
-               l.city, lower(btrim(l.city)) AS city_key
-        FROM dial_list_leads l
-        WHERE l.department_id = %(department_id)s AND l.period = %(period)s
-          AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+        SELECT l.id, l.phone_norm, l.city, lower(btrim(l.city)) AS city_key, l.registered_at,
+               l.last_order_at, l.month_first_order_at, l.carry_first_order_at, l.account_checked_at
+        FROM tez_leads l
+        WHERE l.year = %(year)s AND l.month = %(month)s
+          AND """ + _TEZ_LEAD_NOT_TEST_SQL + """
           {lead_filters}
     )
 """
 
+# Попытка ОП — как «Обзвонено» вкладки «Успешки»: исходящий, оператор отдела продаж определён
+# (звонки ТП и линии на тот же номер работой ОП не считаются).
+_OP_CALL_SQL = "c.call_type = 1 AND c.operator_id IS NOT NULL"
+
 _FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
     calls AS (
-        SELECT a.lead_id, MIN(t.requested_at) AS first_at
+        SELECT l.id AS lead_id, MIN(c.started_at) AS first_at
         FROM leads l
-        JOIN dial_list_assignments a ON a.lead_id = l.id
-        JOIN dial_list_attempts t ON t.assignment_id = a.id
-        WHERE NOT t.cancelled AND t.state <> 'failed'
-        GROUP BY a.lead_id
+        JOIN tez_lead_calls c ON c.phone_norm = l.phone_norm
+        WHERE """ + _OP_CALL_SQL + """ AND c.started_at >= %(window_from)s
+        GROUP BY l.id
     ),
     dialogs AS (
-        SELECT a.lead_id, MIN(t.requested_at) AS first_at
+        SELECT l.id AS lead_id, MIN(c.started_at) AS first_at
         FROM leads l
-        JOIN dial_list_assignments a ON a.lead_id = l.id
-        JOIN dial_list_attempts t ON t.assignment_id = a.id
-        WHERE t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
-          AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s
-          {call_filters}
-        GROUP BY a.lead_id
+        JOIN tez_lead_calls c ON c.phone_norm = l.phone_norm
+        WHERE """ + _OP_CALL_SQL + """ AND c.is_qualifying
+          AND c.started_at >= %(dialog_from)s AND c.started_at < %(dialog_to)s
+        GROUP BY l.id
     )
     SELECT l.city_key, MAX(l.city), COUNT(*),
            COUNT(*) FILTER (WHERE l.registered_at < COALESCE(c.first_at, 'infinity'::timestamptz)),
            COUNT(d.lead_id),
            COUNT(*) FILTER (WHERE l.registered_at > d.first_at),
-           COUNT(*) FILTER (WHERE GREATEST(l.signed_at, l.last_order_at) > d.first_at),
-           COUNT(*) FILTER (WHERE l.trip_checked_at IS NULL)
+           COUNT(*) FILTER (WHERE GREATEST(l.month_first_order_at, l.carry_first_order_at, l.last_order_at)
+                                  > d.first_at),
+           COUNT(*) FILTER (WHERE l.account_checked_at IS NULL)
     FROM leads l
     LEFT JOIN calls c ON c.lead_id = l.id
     LEFT JOIN dialogs d ON d.lead_id = l.id
@@ -560,13 +571,14 @@ _FUNNEL_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
 
 _REFUSALS_SQL = "WITH " + _FUNNEL_LEADS_CTE + """,
     refusals AS (
-        SELECT DISTINCT ON (a.lead_id) a.lead_id, t.outcome_subtype_id
+        SELECT DISTINCT ON (l.id) l.id AS lead_id, t.outcome_subtype_id
         FROM leads l
-        JOIN dial_list_assignments a ON a.lead_id = l.id
+        JOIN dial_list_leads dl ON dl.department_id = %(department_id)s AND dl.phone_norm = l.phone_norm
+        JOIN dial_list_assignments a ON a.lead_id = dl.id
         JOIN dial_list_attempts t ON t.assignment_id = a.id
         WHERE t.outcome_id = ANY(%(refusal_ids)s::uuid[])
-          {call_filters}
-        ORDER BY a.lead_id, t.requested_at DESC, t.id DESC
+          AND t.requested_at >= %(dialog_from)s AND t.requested_at < %(dialog_to)s
+        ORDER BY l.id, t.requested_at DESC, t.id DESC
     )
     SELECT r.outcome_subtype_id, s.name, COUNT(*)
     FROM refusals r
@@ -585,21 +597,30 @@ _OUTCOMES_REASONS_SQL = """
     ORDER BY o.position
 """
 
-# Выбор фильтров: города базы (с учётом файла, но не города) и загрузки месяца.
+# Выбор фильтров: города базы (с учётом файла, но не города), живые загрузки месяца, месяцы базы.
 _FUNNEL_CITIES_SQL = """
     SELECT lower(btrim(l.city)), MAX(l.city), COUNT(*)
-    FROM dial_list_leads l
-    WHERE l.department_id = %(department_id)s AND l.period = %(period)s
-      AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+    FROM tez_leads l
+    WHERE l.year = %(year)s AND l.month = %(month)s
+      AND """ + _TEZ_LEAD_NOT_TEST_SQL + """
       {batch_filter}
     GROUP BY 1
 """
 
 _FUNNEL_BATCHES_SQL = """
     SELECT id, file_name, created_at, rows_total
-    FROM dial_list_lead_batches
-    WHERE department_id = %(department_id)s AND period = %(period)s
+    FROM tez_lead_batches
+    WHERE year = %(year)s AND month = %(month)s AND deleted_at IS NULL
     ORDER BY created_at DESC
+"""
+
+_FUNNEL_MONTHS_SQL = """
+    SELECT l.year, l.month, COUNT(*)
+    FROM tez_leads l
+    WHERE """ + _TEZ_LEAD_NOT_TEST_SQL + """
+    GROUP BY l.year, l.month
+    ORDER BY l.year DESC, l.month DESC
+    LIMIT %(months_limit)s
 """
 
 _BATCH_FILTER = "AND (l.first_batch_id = %(batch_id)s::uuid OR l.last_batch_id = %(batch_id)s::uuid)"
@@ -621,12 +642,20 @@ def _city_order(row):
 
 
 def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_to=None, city=None):
-    """Воронка ОП базы месяца `period` (date первого дня). batch_id — файл загрузки (uuid строкой),
-    date_from/date_to — дни звонков (date, по Алматы, включительно), city — ключ города (lower) или
-    FUNNEL_CITY_NONE. Номеров и ФИО нет — только числа, города и названия причин."""
-    params = {"department_id": int(department_id), "period": period, "answered": ANSWERED_SQL,
-              "min_sec": signing.SUCCESS_MIN_BILLSEC}
-    batch_filter, lead_filters, call_filters = "", [], []
+    """Воронка ОП базы успешек месяца `period` (date первого дня). department_id — отдел раздела
+    (по нему — итоги-отказы автообзвона), batch_id — файл загрузки базы (uuid строкой),
+    date_from/date_to — дни звонков (date, по Алматы, включительно; не заданы — окно месяца базы),
+    city — ключ города (lower) или FUNNEL_CITY_NONE. Номеров и ФИО нет — только числа, города и
+    названия причин."""
+    from tez.op_leads import DEFAULT_MIN_BILLSEC, call_window_for_period
+    window_start, window_end = call_window_for_period(period.year, period.month)
+    window_from, window_to = _day_start(window_start), _day_start(window_end + timedelta(days=1))
+    params = {"department_id": int(department_id), "year": period.year, "month": period.month,
+              "window_from": window_from,
+              "dialog_from": _day_start(date_from) if date_from else window_from,
+              "dialog_to": _day_start(date_to + timedelta(days=1)) if date_to else window_to,
+              "months_limit": FUNNEL_MONTHS_LIMIT}
+    batch_filter, lead_filters = "", []
     if batch_id:
         params["batch_id"] = str(batch_id)
         batch_filter = _BATCH_FILTER
@@ -638,13 +667,7 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
         # опускать его ещё и в Python нельзя — в C-локали кластера кириллица ниже не опускается.
         params["city"] = str(city)
         lead_filters.append("AND lower(btrim(l.city)) = %(city)s")
-    if date_from:
-        params["call_from"] = _day_start(date_from)
-        call_filters.append("AND t.requested_at >= %(call_from)s")
-    if date_to:
-        params["call_to"] = _day_start(date_to + timedelta(days=1))
-        call_filters.append("AND t.requested_at < %(call_to)s")
-    fmt = {"lead_filters": "\n          ".join(lead_filters), "call_filters": "\n          ".join(call_filters)}
+    fmt = {"lead_filters": "\n          ".join(lead_filters)}
 
     cur.execute(_FUNNEL_SQL.format(**fmt), params)
     by_city, unchecked = [], 0
@@ -684,6 +707,12 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
     batches = [{"id": str(bid), "file_name": file_name or "", "rows_total": int(rows_total or 0),
                 "created_at": created_at.isoformat() if created_at else None}
                for bid, file_name, created_at, rows_total in cur.fetchall()]
+    cur.execute(_FUNNEL_MONTHS_SQL, params)
+    months = [{"period": date(int(y), int(m), 1).isoformat(), "base": int(count or 0)} for y, m, count in cur.fetchall()]
+    # Выбранный месяц есть в выборе, даже если базы за него ещё нет (текущий месяц до загрузки).
+    if not any(m["period"] == period.isoformat() for m in months):
+        months.append({"period": period.isoformat(), "base": 0})
+        months.sort(key=lambda m: m["period"], reverse=True)
 
     return {
         "profile": "tez",
@@ -693,9 +722,10 @@ def tez_funnel(cur, department_id, period, batch_id=None, date_from=None, date_t
         "tez_unchecked": unchecked,
         "by_city": by_city,
         "refusals": {"total": refusals_total, "reasons": reasons, "outcomes": refusal_outcomes},
-        "options": {"cities": cities, "batches": batches},
+        "options": {"months": months, "cities": cities, "batches": batches},
         "filters": {"batch_id": str(batch_id) if batch_id else "", "city": city or "",
                     "date_from": date_from.isoformat() if date_from else "",
                     "date_to": date_to.isoformat() if date_to else ""},
-        "min_billsec": signing.SUCCESS_MIN_BILLSEC,
+        "call_window": {"from": window_start.isoformat(), "to": window_end.isoformat()},
+        "min_billsec": DEFAULT_MIN_BILLSEC,
     }
