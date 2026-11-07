@@ -254,6 +254,9 @@ TLS_MIN_VERSION = (3, 22, 38)
 # только дописывает generalCallID (запись разговора) и уточняет длительность. Умеет — iCORE Phone
 # 3.22.46 и новее: старому номер не отдаём, он звонит через АТС, как раньше.
 DIRECT_DIAL_MIN_VERSION = (3, 22, 46)
+# Телефон, который на 403 qr_locked рисует QR своей сессии (замок Тез до QR, владелец 06.11.2026). Отказ
+# получают все версии — старой сервер лишь пишет «обновите телефон»: показать QR ей нечем.
+QR_LOCK_MIN_VERSION = (3, 22, 47)
 # Срок автосброса у прямого звонка — от первых гудков (180/183), без поправки на сообщение АТС.
 DIRECT_RING_LEAD_IN_SEC = 0
 # Код SIP конца прямого звонка → исход, как у Binotel (map_disposition): занято, не ответил, прочее —
@@ -1088,6 +1091,13 @@ def phone_dials_direct(value):
     return version is not None and version >= DIRECT_DIAL_MIN_VERSION
 
 
+def phone_shows_qr_lock(value):
+    """Телефон рисует QR своей сессии на 403 qr_locked — версия в заголовке не ниже QR_LOCK_MIN_VERSION
+    (3.22.47). Заголовка нет или он неразборчив — нет: такому телефону отказ с просьбой обновиться."""
+    version = parse_phone_version(value)
+    return version is not None and version >= QR_LOCK_MIN_VERSION
+
+
 def phone_display(phone_norm):
     """Номер водителя для показа оператору: 77001234567 → «+7 700 123 45 67»; другой длины — как есть."""
     digits = "".join(ch for ch in str(phone_norm or "") if ch.isdigit())
@@ -1862,6 +1872,16 @@ class DialListService:
         return dict(operator, department_id=member["department_id"],
                     department_provider=member["provider"],
                     sip_number=member["internal_number"], line_member=True)
+
+    def operator_profile(self, user_id):
+        """Профиль отдела, в котором сотрудник работает с телефона (сидящий на линии другого отдела —
+        профиль отдела линии, dial_operator): 'tez' | 'remote_cc'; не на Binotel или не найден — None.
+        По нему ручки телефона решают, закрыт ли он до QR (routes._operator_data)."""
+        operator = self.dial_operator(user_id) or {}
+        department_id = operator.get("department_id")
+        if department_id is None or (operator.get("department_provider") or "") != "binotel":
+            return None
+        return self.department_profile(department_id)
 
     def _department_provider(self, department_id):
         with self.db._get_cursor() as cur:

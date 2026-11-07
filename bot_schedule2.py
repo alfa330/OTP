@@ -54079,6 +54079,20 @@ except Exception:
     _informer_service = None
     logging.exception("Автоинформатор: НЕ подключён")
 
+def _dial_list_qr_locked(user_id):
+    """Телефон закрыт до QR (владелец 06.11.2026, автообзвон Тез): роль требует QR, как у вики и
+    обращений (SENSITIVE_QR_GATED_ROLES), а сессия запроса — сессия самого телефона — не подтверждена
+    сканом руководителя. Сбой проверки — закрыт: это данные водителей."""
+    try:
+        user = db.get_user(id=int(user_id))
+        if not user or _normalize_user_role(user[3]) not in SENSITIVE_QR_GATED_ROLES:
+            return False
+        return not _sensitive_access_granted_for_user(int(user_id))
+    except Exception:
+        logging.exception("dial_list: замок QR для %s не проверен — телефон закрыт", user_id)
+        return True
+
+
 try:
     from dial_list.routes import build_dial_list_blueprint  # noqa: E402
     from dial_list.service import DialListService  # noqa: E402
@@ -54105,6 +54119,9 @@ try:
                                 trips_configured=_dial_list_trips_configured,
                                 wa_client_factory=_dial_list_wa_client_factory()),
         tez_leads_mirror=_dial_list_tez_leads_mirror,
+        # Телефон автообзвона Тез закрыт до QR (владелец 06.11.2026): номера и база водителей — только
+        # сессии телефона, которую подтвердил руководитель сканом в «QR доступ».
+        qr_locked=_dial_list_qr_locked,
         # Перевод отдела между разделами (профиль) — только администратору компании: у глав
         # отделов роль админская, но зона — свой отдел (_is_global_admin_requester).
         is_global_admin=lambda requester_id, role: _is_global_admin_requester(role, requester_id),

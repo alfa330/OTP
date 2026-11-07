@@ -125,6 +125,11 @@
                                                              телефон перевёл оператора в «Офлайн»
     POST /api/operator/dial_list/leads/<lead_id>/whatsapp    {template_id, attempt_id?} — шаблон WhatsApp своему
                                                              водителю (ChatApp); не чаще раза в сутки водителю
+Телефон Тез закрыт до QR (владелец 06.11.2026): роли, которой нужен QR (как у вики и обращений), пока
+сессию телефона не подтвердил руководитель сканом в «QR доступ», ручки с данными и звонком (состояние,
+progress, rating, worked, script, live, next, call, auto/next, whatsapp, recall, sign_check) — 403
+error_kind qr_locked; телефону 3.22.47+ текст «покажите QR» (код он рисует сам), старому — «обновите».
+phone_event, outcome и mode — без замка: идущий разговор доводится.
 
 Ручки руководителя. Круг свой, не от «Настроек SIP»: админ, глава и СВ СЗоВ видят
 все отделы раздела, глава отдела — свои отделы, если они в периметре (Binotel,
@@ -242,6 +247,7 @@ Binotel (без авторизации, токен в адресе И, по ум
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import date, datetime
 from io import BytesIO
@@ -250,13 +256,23 @@ from flask import Blueprint, jsonify, request, send_file
 
 from . import calls_export as calls_export_report
 from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT, WA_MEDIA,
-                      DialListError, DialListService, parse_period, pilot_allows, webhook_remote_addr)
+                      DialListError, DialListService, parse_period, phone_shows_qr_lock, pilot_allows,
+                      webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
 LEADS_MAX_FILE_SIZE_MB = 10
 # Самый большой файл шаблона WhatsApp (видео и PDF) — дальше загрузку не читаем.
 WA_MEDIA_MAX_BYTES = max(m["max_bytes"] for m in WA_MEDIA.values())
+# Замок телефона автообзвона Тез до QR (владелец 06.11.2026): вид ошибки — по нему телефон 3.22.47+
+# показывает экран с QR своей сессии вместо списка.
+QR_LOCKED_KIND = "qr_locked"
+TEZ_QR_LOCKED = ("Телефон закрыт: покажите QR на экране телефона руководителю — он отсканирует его "
+                 "в разделе «QR доступ»")
+# Телефону до 3.22.47: QR он не нарисует — пусть обновится (раз в 4 часа сам, пунктом меню — сразу).
+TEZ_QR_LOCKED_UPDATE = ("Телефон закрыт до QR руководителя, а эта версия QR не показывает: обновите "
+                        "iCORE Phone — меню → «Проверить обновления»")
+TEZ_PROFILE_CACHE_SEC = 60
 LEADS_MAX_FILE_SIZE_BYTES = LEADS_MAX_FILE_SIZE_MB * 1024 * 1024
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -265,7 +281,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                               resolve_requester, is_admin_role, headed_department_ids,
                               is_super_admin_role=None, is_supervisor_role=None,
                               department_code_of=None, service=None, tez_leads_mirror=None,
-                              is_global_admin=None, excel_text_warning=None, informer_service=None):
+                              is_global_admin=None, excel_text_warning=None, informer_service=None,
+                              qr_locked=None):
     """resolve_requester() -> (requester_id, requester_row, error|None);
     is_admin_role(role) -> bool; headed_department_ids(requester_id) -> iterable[int];
     is_global_admin(requester_id, role) -> bool — администратор всей компании, а не глава отдела
@@ -283,10 +300,15 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     автоинформатора зелёный уголок «Число сохранено как текст» (функция монолита; не передана —
     файл с уголком);
     informer_service — informer.service.InformerService: вкладка «Автоинформатор» (не передан —
-    её ручки отвечают 503)."""
+    её ручки отвечают 503);
+    qr_locked(user_id) -> bool — сессия запроса не подтверждена QR, а роль его требует (как у вики
+    и обращений): телефон автообзвона Тез тогда закрыт (_operator_data); не передан — замка нет."""
     bp = Blueprint('dial_list', __name__)
     svc = service or DialListService(db)
     bp.service = svc  # для тестов и для /api/operator/sip_settings
+    # Профиль отдела оператора для замка Тез — на минуту: телефон спрашивает раздел часто, а отдел у
+    # человека меняется раз в месяцы.
+    tez_cache = {}
 
     # ── вспомогательное ─────────────────────────────────────────────────────
     def _preflight():
@@ -300,6 +322,27 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             message, status = error
             raise DialListError(message, status)
         return int(requester_id), requester
+
+    def _operator_is_tez(user_id):
+        now = time.monotonic()
+        cached = tez_cache.get(user_id)
+        if cached and now - cached[0] < TEZ_PROFILE_CACHE_SEC:
+            return cached[1]
+        is_tez = svc.operator_profile(user_id) == PROFILE_TEZ
+        tez_cache[user_id] = (now, is_tez)
+        return is_tez
+
+    def _operator_data():
+        """Оператор для ручек, которые отдают данные обзвона (база, номера, скрипт, прогресс) или
+        начинают звонок. Телефон автообзвона Тез закрыт до QR (владелец 06.11.2026: «там уже много
+        данных, которые можно получить и вне внутренней сети»): сессия телефона не подтверждена сканом
+        руководителя — 403 qr_locked, ничего не отдаём. События звонка и итог — через _operator: идущий
+        разговор замок не обрывает."""
+        user_id, requester = _operator()
+        if qr_locked is not None and qr_locked(user_id) and _operator_is_tez(user_id):
+            message = TEZ_QR_LOCKED if phone_shows_qr_lock(_phone_version()) else TEZ_QR_LOCKED_UPDATE
+            raise DialListError(message, 403, kind=QR_LOCKED_KIND)
+        return user_id, requester
 
     def _supervisor_department_code(requester_id, role):
         """Код отдела, где числится запросивший, — только у супервайзера (правило —
@@ -402,7 +445,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_state():
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.get_state(user_id, phone_version=_phone_version())}), 200
 
     @bp.route('/api/operator/dial_list/mode', methods=['POST', 'OPTIONS'])
@@ -423,7 +466,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_progress():
         """«Мой прогресс» на телефоне: счётчики оператора за месяц и за сегодня, без ФИО и номеров;
         salary — оплата по конверсии за базу месяца и из чего она сложилась."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.operator_progress(user_id)}), 200
 
     @bp.route('/api/operator/dial_list/rating', methods=['GET', 'OPTIONS'])
@@ -433,7 +476,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """«Рейтинг» на телефоне (владелец, 14.10.2026): места операторов отдела за день по
         заработку — с 21:00 до 10:00 по Алматы, до того отсчёт и только свои числа. Суммы
         коллег сервер не отдаёт. Параметров нет: день выбирает сервер по своим часам."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.operator_rating(user_id)}), 200
 
     @bp.route('/api/operator/dial_list/worked', methods=['GET', 'OPTIONS'])
@@ -442,7 +485,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_worked():
         """Вкладки итогов на телефоне: отработанные за месяц водители по итогам оператора;
         ?q= — поиск по ФИО во всех вкладках сразу."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.operator_worked(user_id, q=request.args.get('q', ''))}), 200
 
     @bp.route('/api/operator/dial_list/script', methods=['GET', 'OPTIONS'])
@@ -450,7 +493,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_script():
         """Скрипт разговора отдела для телефона: текст и включённые вопросы с ответами."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.operator_script(user_id)}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/live', methods=['GET', 'OPTIONS'])
@@ -458,7 +501,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_attempt_live(attempt_id):
         """Живое состояние попытки для карточки звонка: набираем / разговор / финал (по Binotel)."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.attempt_live(user_id, attempt_id)}), 200
 
     @bp.route('/api/operator/dial_list/next', methods=['POST', 'OPTIONS'])
@@ -466,7 +509,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @_guard
     def operator_next():
         # Ответ — то же состояние, что у GET: версия телефона нужна и здесь (ring_timeout_sec).
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success",
                         **svc.issue_next_portion(user_id, phone_version=_phone_version())}), 200
 
@@ -474,7 +517,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def operator_call(assignment_id):
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         payload = request.get_json(silent=True) or {}
         # Автообзвон Тез (15.10.2026): auto — звонок поставил автоцикл телефона, status — статус
         # оператора в телефоне (active | outbound | other). Телефон удалённого КЦ тела не шлёт —
@@ -495,7 +538,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """Автоцикл Тез: кому звонить следующим ({status} — статус оператора в телефоне). Ответ —
         состояние, как у GET, и next {assignment_id, lead_id, full_name, kind} либо next: null с
         reason wait | empty и retry_after_sec — когда спросить снова."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         payload = request.get_json(silent=True) or {}
         return jsonify({"status": "success", **svc.auto_next(user_id, status=payload.get('status'),
                                                              phone_version=_phone_version())}), 200
@@ -506,7 +549,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_whatsapp(lead_id):
         """Шаблон WhatsApp своему водителю из карточки звонка ({template_id, attempt_id?}). Номер
         водителя телефону не уходит и тут: его знает только сервер, который и шлёт сообщение."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         payload = request.get_json(silent=True) or {}
         return jsonify({"status": "success", **svc.send_whatsapp(user_id, lead_id, payload.get('template_id'),
                                                                  attempt_id=payload.get('attempt_id'))}), 200
@@ -517,7 +560,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     def operator_recall(lead_id):
         """«Позвонить ещё раз»: свой водитель (последним ему звонил этот оператор) снова в
         списке оператора; в ответе — состояние и assignment_id строки, по которой телефон звонит."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success",
                         **svc.recall_lead(user_id, lead_id, phone_version=_phone_version())}), 200
 
@@ -528,7 +571,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """«Проверить на подписание» — и посреди разговора: статус подписания водителя без ИИН,
         номера и документов; подписал — его строка у оператора снимается со списка. Ручка
         руководителя (lead_sign_check) отдаёт карточку — телефону она не годится."""
-        user_id, _ = _operator()
+        user_id, _ = _operator_data()
         return jsonify({"status": "success", **svc.operator_sign_check(user_id, lead_id)}), 200
 
     @bp.route('/api/operator/dial_list/attempts/<attempt_id>/phone_event', methods=['POST', 'OPTIONS'])

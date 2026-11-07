@@ -17,7 +17,8 @@ from dial_list import service as dial_service  # noqa: E402
 TEZ, RCC = 560, 1954
 
 
-def _client(svc, role='operator', heads=(), supervisor_code=None, mirror=None, user_id=7, global_admin=None):
+def _client(svc, role='operator', heads=(), supervisor_code=None, mirror=None, user_id=7, global_admin=None,
+            qr_locked=None):
     import flask
     requester = (user_id, 'Сотрудник', 'x', role, None, None, None, f'user{user_id}')
     bp = dial_routes.build_dial_list_blueprint(
@@ -26,7 +27,8 @@ def _client(svc, role='operator', heads=(), supervisor_code=None, mirror=None, u
         headed_department_ids=lambda rid: list(heads),
         is_supervisor_role=lambda r: r == 'sv', department_code_of=lambda uid: supervisor_code,
         service=svc, tez_leads_mirror=mirror,
-        is_global_admin=(lambda rid, r: global_admin) if global_admin is not None else None)
+        is_global_admin=(lambda rid, r: global_admin) if global_admin is not None else None,
+        qr_locked=qr_locked)
     app = flask.Flask(f'dial_list_tez_{id(svc)}')
     app.register_blueprint(bp)
     return app.test_client()
@@ -47,7 +49,16 @@ class _Svc:
     def department_profile(self, department_id):
         return self.profiles.get(int(department_id), 'remote_cc')
 
+    # Оператор 7 — из Тез КЦ, 8 — из удалённого КЦ (замок телефона до QR — только у Тез).
+    def operator_profile(self, user_id):
+        self.calls.append(('profile', user_id))
+        return {7: 'tez', 8: 'remote_cc'}.get(int(user_id))
+
     # телефон
+    def get_state(self, user_id, phone_version=None):
+        self.calls.append(('state', user_id))
+        return {"enabled": True, "portion": None}
+
     def start_call(self, user_id, assignment_id, **extra):
         self.calls.append(('call', assignment_id, extra))
         return {"attempt_id": "att-1"}
@@ -170,6 +181,56 @@ class FunnelRouteTests(unittest.TestCase):
 
 
 class OperatorRoutesTests(unittest.TestCase):
+    def test_tez_phone_is_closed_until_qr(self):
+        """Владелец 06.11.2026: телефон Тез закрыт до сканирования QR — ручки с данными обзвона и звонок
+        отвечают 403 qr_locked, пока сессия телефона не подтверждена; итог разговора не держится."""
+        locked = {"value": True}
+        svc = _Svc()
+        client = _client(svc, user_id=7, qr_locked=lambda uid: locked["value"])
+        resp = client.get('/api/operator/dial_list', headers={'X-ICore-Phone-Version': '3.22.47'})
+        body = resp.get_json()
+        self.assertEqual((resp.status_code, body["error_kind"]), (403, 'qr_locked'))
+        self.assertEqual(body["error"], dial_routes.TEZ_QR_LOCKED)
+        # Телефон до 3.22.47 QR не нарисует: тот же отказ, но с просьбой обновиться.
+        for headers in ({'X-ICore-Phone-Version': '3.22.46'}, {}):
+            resp = client.get('/api/operator/dial_list', headers=headers)
+            self.assertEqual((resp.status_code, resp.get_json()["error_kind"]), (403, 'qr_locked'), headers)
+            self.assertIn('обновите', resp.get_json()["error"], headers)
+        for method, url in (('post', '/api/operator/dial_list/items/asg-1/call'),
+                            ('post', '/api/operator/dial_list/auto/next'),
+                            ('post', '/api/operator/dial_list/leads/lead-1/whatsapp')):
+            self.assertEqual(getattr(client, method)(url, json={}).status_code, 403, url)
+        self.assertNotIn('state', [c[0] for c in svc.calls])
+        self.assertNotIn('call', [c[0] for c in svc.calls])
+        # Итог разговора — без замка: идущий звонок замок не обрывает.
+        self.assertEqual(client.post('/api/operator/dial_list/attempts/att-1/outcome',
+                                     json={"outcome_id": "o1"}).status_code, 200)
+        # Подтвердили — всё открыто; профиль отдела не спрашиваем (замка нет).
+        locked["value"] = False
+        calls_before = len([c for c in svc.calls if c[0] == 'profile'])
+        self.assertEqual(client.get('/api/operator/dial_list').status_code, 200)
+        self.assertEqual(len([c for c in svc.calls if c[0] == 'profile']), calls_before)
+        # Удалённый КЦ без подтверждения — как раньше: замок только у Тез.
+        svc = _Svc()
+        client = _client(svc, user_id=8, qr_locked=lambda uid: True)
+        self.assertEqual(client.get('/api/operator/dial_list').status_code, 200)
+        # Профиль отдела — из кэша: второй запрос его не спрашивает.
+        client.get('/api/operator/dial_list')
+        self.assertEqual(len([c for c in svc.calls if c[0] == 'profile']), 1)
+
+    def test_qr_lock_helper_is_defined_before_the_blueprint_is_built(self):
+        """bot_schedule2 строит блюпринт раздела на уровне модуля: функция замка, определённая ниже, —
+        NameError, и раздел обзвона не подключился бы вовсе."""
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bot_schedule2.py'),
+                   encoding='utf-8').read()
+        self.assertLess(src.index('def _dial_list_qr_locked(user_id):'),
+                        src.index('_dial_list_bp = build_dial_list_blueprint('))
+        self.assertIn('qr_locked=_dial_list_qr_locked,', src)
+        lock = src[src.index('def _dial_list_qr_locked(user_id):'):src.index('def _dial_list_qr_locked(user_id):') + 900]
+        self.assertIn('not in SENSITIVE_QR_GATED_ROLES', lock)
+        self.assertIn('return not _sensitive_access_granted_for_user(', lock)
+        self.assertIn('return True', lock)   # сбой проверки — закрыт
+
     def test_call_passes_auto_and_status_only_when_the_phone_sent_them(self):
         svc = _Svc()
         client = _client(svc)
