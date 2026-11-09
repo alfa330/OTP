@@ -1225,10 +1225,81 @@ def wa_edit_message(cursor, key, wa_id, body, now):
 
 
 def wa_revoke_message(cursor, key, wa_id, now):
-    """Удалено у всех — текст гасится и в портале: собеседник убрал его и с телефона рекрутера."""
-    cursor.execute("""UPDATE hiring_wa_messages SET body = NULL, media = NULL, deleted_at = %s
-                       WHERE chat_key = %s AND wa_id = %s AND deleted_at IS NULL""", (now, key, wa_id))
+    """Удалено у всех — текст и файл гасятся и в портале: собеседник убрал их и с телефона рекрутера.
+    Возвращает (сколько строк, пути файлов в бакете — удалить после транзакции)."""
+    cursor.execute("""
+        WITH old AS (
+            SELECT id, media->>'object' AS object FROM hiring_wa_messages
+             WHERE chat_key = %s AND wa_id = %s AND deleted_at IS NULL FOR UPDATE
+        )
+        UPDATE hiring_wa_messages m SET body = NULL, media = NULL, deleted_at = %s
+          FROM old WHERE m.id = old.id
+        RETURNING old.object
+    """, (key, wa_id, now))
+    rows = cursor.fetchall()
+    return len(rows), [row[0] for row in rows if row[0]]
+
+
+def wa_messages_by_id(cursor, wa_id):
+    """Сообщения с этим id WhatsApp (на деле одно) — для файла от шлюза."""
+    cursor.execute("""SELECT id, chat_key, kind, media, from_me, sent_at, deleted_at
+                        FROM hiring_wa_messages WHERE wa_id = %s ORDER BY id""", (wa_id,))
+    rows = _all(cursor)
+    for row in rows:
+        _parse_json_fields(row, 'media')
+    return rows
+
+
+def wa_media_stored(cursor, message_id, stored):
+    """Файл лёг в бакет: путь и тип — в описание файла сообщения. Повтор (файл уже есть) — False."""
+    cursor.execute("""
+        UPDATE hiring_wa_messages SET media = COALESCE(media, '{}'::jsonb) || %s::jsonb
+         WHERE id = %s AND deleted_at IS NULL AND COALESCE(media->>'object', '') = ''
+        RETURNING id
+    """, (json.dumps(stored, ensure_ascii=False), int(message_id)))
+    return cursor.fetchone() is not None
+
+
+def wa_media_failed(cursor, wa_id, reason, now):
+    """Шлюз сообщил, что файл не сохранится (у WhatsApp его нет, больше предела, попытки кончились)."""
+    cursor.execute("""
+        UPDATE hiring_wa_messages SET media = COALESCE(media, '{}'::jsonb) || jsonb_build_object('failed', %s, 'failed_at', %s)
+         WHERE wa_id = %s AND deleted_at IS NULL AND COALESCE(media->>'object', '') = ''
+    """, (reason, now.isoformat(timespec='seconds'), wa_id))
     return cursor.rowcount
+
+
+def wa_claim_transcript(cursor, message_id, now_iso, stale_iso):
+    """Взять голосовое в расшифровку: ждёт своей очереди или прежний захват устарел (процесс умер на
+    выкладке). Два процесса выкладки одно и то же не берут — за распознавание платим один раз."""
+    cursor.execute("""
+        UPDATE hiring_wa_messages
+           SET media = jsonb_set(media, '{transcript}', COALESCE(media->'transcript', '{}'::jsonb)
+                                 || jsonb_build_object('status', 'working', 'claimed_at', %s::text))
+         WHERE id = %s AND deleted_at IS NULL AND COALESCE(media->>'object', '') <> ''
+           AND ((media->'transcript'->>'status' = 'pending' AND COALESCE(media->'transcript'->>'next_at', '') <= %s)
+                OR (media->'transcript'->>'status' = 'working' AND COALESCE(media->'transcript'->>'claimed_at', '') < %s))
+        RETURNING id, kind, media
+    """, (now_iso, int(message_id), now_iso, stale_iso))
+    return _parse_json_fields(_one(cursor), 'media')
+
+
+def wa_save_transcript(cursor, message_id, transcript):
+    cursor.execute("""UPDATE hiring_wa_messages SET media = jsonb_set(media, '{transcript}', %s::jsonb)
+                       WHERE id = %s AND media IS NOT NULL""",
+                   (json.dumps(transcript, ensure_ascii=False), int(message_id)))
+
+
+def wa_transcripts_due(cursor, now_iso, stale_iso, limit=3):
+    """Голосовые, чья расшифровка ждёт повтора или зависла (сторож раз в минуту)."""
+    cursor.execute("""
+        SELECT id FROM hiring_wa_messages
+         WHERE kind IN ('voice', 'audio') AND deleted_at IS NULL AND media ? 'transcript'
+           AND ((media->'transcript'->>'status' = 'pending' AND COALESCE(media->'transcript'->>'next_at', '') <= %s)
+                OR (media->'transcript'->>'status' = 'working' AND COALESCE(media->'transcript'->>'claimed_at', '') < %s))
+         ORDER BY id LIMIT %s
+    """, (now_iso, stale_iso, int(limit)))
+    return [int(row[0]) for row in cursor.fetchall()]
 
 
 def wa_chats_for_phones(cursor, phones):

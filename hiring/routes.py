@@ -963,8 +963,9 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
     Ed25519 — тем же протоколом и ключами, что мост «Касаний» и автоинформатор (cdr/agent_auth.py,
     открытые ключи — CDR_AGENT_KEYS).
 
-        POST /api/hiring/wa/agent/poll    {state, detail, ack} → {command, next_poll_sec}
-        POST /api/hiring/wa/agent/events  {events: [...]}      → {accepted, outcomes}
+        POST /api/hiring/wa/agent/poll          {state, detail, ack} → {command, next_poll_sec}
+        POST /api/hiring/wa/agent/events        {events: [...]}      → {accepted, outcomes}
+        POST /api/hiring/wa/agent/media/<id>    файл сообщения телом → {stored}; 404 — сообщение ещё не дошло
     """
     from cdr import agent_auth
     from cdr import config as cdr_config
@@ -1013,6 +1014,22 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
     @agent_route('/events')
     def events(payload):
         return service.wa_events(payload)
+
+    # Файл сообщения: id — в пути (путь входит в подпись), файл — телом (sha256 тела тоже в подписи).
+    @bp.route('/media/<wa_id>', methods=['POST', 'OPTIONS'], endpoint='hiring_wa_agent_media')
+    def media(wa_id):
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        refusal = _authenticate()
+        if refusal is not None:
+            return refusal
+        try:
+            return jsonify(service.wa_media(wa_id, request.get_data(cache=True)))
+        except HiringError as exc:
+            return _bad(exc.message, exc.code, exc.status)
+        except Exception:  # noqa: BLE001
+            log.exception('WhatsApp найма: файл сообщения не сохранён')
+            return _bad('Внутренняя ошибка', 'HIRING_WA_INTERNAL', 500)
 
     return bp
 

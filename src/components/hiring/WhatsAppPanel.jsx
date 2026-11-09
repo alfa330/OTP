@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { FileText, Image as ImageIcon, MapPin, Mic, Music, Smile, UserRound, Video } from 'lucide-react';
+import { Download, FileText, Image as ImageIcon, MapPin, Mic, Music, Smile, UserRound, Video } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
-import { IosHint } from '../ui/ios';
+import { IosHint, IosLightbox } from '../ui/ios';
+import { startFileDownload } from '../../utils/fileDownload';
 import { errorOf, plural, prettyPhone, shortTime } from './hiringMeta';
 import { ConfirmDialog, Empty, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
@@ -13,7 +14,8 @@ import { ConfirmDialog, Empty, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY }
  *   WhatsAppThread       вкладка карточки: переписка с номером найма, старые сообщения сверху.
  *
  * Сервис сам ничего не отправляет (этап 1): рекрутеры отвечают с телефона, ответы приходят эхом; первый
- * ответ берёт карточку в работу к тому, кто выбран «Отвечает с телефона».
+ * ответ берёт карточку в работу к тому, кто выбран «Отвечает с телефона». Файлы (с 09.11.2026) шлюз качает
+ * следом за сообщением: фото и видео — в ленте, голосовое — плеером с расшифровкой, документ — скачать.
  */
 
 const HOW_IT_WORKS = 'Сервис на шлюзе подключён к номеру найма как связанное устройство (как WhatsApp Web). '
@@ -184,6 +186,12 @@ const duration = (seconds) => (seconds ? ` ${Math.floor(seconds / 60)}:${String(
 
 const dayOf = (iso) => String(iso || '').slice(0, 10);
 
+const fileSize = (bytes) => {
+    if (!bytes) return '';
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+    return `${(bytes / 1024 / 1024).toFixed(1).replace('.', ',')} МБ`;
+};
+
 const MediaChip = ({ message }) => {
     const Icon = KIND_ICONS[message.kind] || FileText;
     const media = message.media || {};
@@ -196,10 +204,72 @@ const MediaChip = ({ message }) => {
     );
 };
 
+// Почему файла нет в ленте — одной строкой рядом с плашкой; у старых сообщений (до 09.11.2026) — ничего.
+const MEDIA_NOTES = { loading: 'загружается…', too_large: 'больше 25 МБ — откройте на телефоне' };
+
+const Transcript = ({ transcript }) => {
+    if (!transcript) return null;
+    if (transcript.status === 'ready' && transcript.text) {
+        return <div className="whitespace-pre-wrap break-words text-[13px] leading-snug text-slate-700">{transcript.text}</div>;
+    }
+    if (transcript.status === 'pending' || transcript.status === 'working') {
+        return <div className="text-[11.5px] text-slate-400">Расшифровка…</div>;
+    }
+    if (transcript.status === 'no_speech') return <div className="text-[11.5px] text-slate-400">Речи не слышно</div>;
+    return null;
+};
+
+const MediaBlock = ({ message, onZoom, onLoad }) => {
+    const media = message.media || {};
+    if (media.url && media.inline && message.kind === 'image') {
+        return (
+            <img src={media.url} alt="" loading="lazy" onClick={() => onZoom(media.url)} onLoad={onLoad}
+                 className="max-h-64 w-auto max-w-full cursor-zoom-in rounded-xl" />
+        );
+    }
+    if (media.url && media.inline && message.kind === 'video') {
+        return <video controls preload="metadata" src={media.url} onLoadedMetadata={onLoad} className="max-h-72 w-auto max-w-full rounded-xl" />;
+    }
+    if (media.url && media.inline && (message.kind === 'voice' || message.kind === 'audio')) {
+        return (
+            <div className="space-y-1">
+                <audio controls preload="metadata" src={media.url} className="h-9 w-64 max-w-full" />
+                <Transcript transcript={media.transcript} />
+            </div>
+        );
+    }
+    if (media.url) {
+        return (
+            <button type="button" onClick={() => startFileDownload(media.url)}
+                    className="flex max-w-full items-center gap-2 rounded-xl bg-slate-900/[0.04] px-3 py-2 text-left text-[13px] text-slate-700 transition hover:bg-slate-900/[0.07]">
+                <FileText size={16} className="shrink-0 text-slate-500" />
+                <span className="min-w-0 truncate">{media.file_name || KIND_LABELS[message.kind] || 'Файл'}</span>
+                {media.size ? <span className="shrink-0 text-[12px] tabular-nums text-slate-400">{fileSize(media.size)}</span> : null}
+                <Download size={14} className="shrink-0 text-slate-400" />
+            </button>
+        );
+    }
+    const note = media.state === 'failed' ? `не сохранился (${media.reason || 'ошибка'}) — откройте на телефоне` : MEDIA_NOTES[media.state];
+    return (
+        <div className="flex flex-wrap items-center gap-1.5">
+            <MediaChip message={message} />
+            {note && <span className="text-[11.5px] text-slate-400">{note}</span>}
+        </div>
+    );
+};
+
 export const WhatsAppThread = ({ api, cardId }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
+    const [zoom, setZoom] = useState(null);
     const listRef = useRef(null);
+    // Внизу ли лента: фото и видео догружаются после прокрутки и сдвигают последние сообщения вверх —
+    // ленту, которую человек не листал, держим у последнего сообщения.
+    const atBottom = useRef(true);
+    const keepBottom = useCallback(() => {
+        const node = listRef.current;
+        if (node && atBottom.current) node.scrollTop = node.scrollHeight;
+    }, []);
 
     useEffect(() => {
         let alive = true;
@@ -227,7 +297,11 @@ export const WhatsAppThread = ({ api, cardId }) => {
     let lastDay = '';
     return (
         <div className="space-y-2">
-            <div ref={listRef} className="max-h-[60vh] space-y-1.5 overflow-y-auto rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
+            <div ref={listRef} className="max-h-[60vh] space-y-1.5 overflow-y-auto rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-200/70"
+                 onScroll={(event) => {
+                     const node = event.currentTarget;
+                     atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+                 }}>
                 {data.messages.map((message) => {
                     const day = dayOf(message.sent_at);
                     const separator = day !== lastDay ? day : '';
@@ -242,13 +316,13 @@ export const WhatsAppThread = ({ api, cardId }) => {
                                 <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.04)] ring-1 ${
                                     mine ? 'rounded-br-md bg-blue-50 ring-blue-100' : 'rounded-bl-md bg-white ring-slate-200/70'}`}>
                                     {message.ad_label && !mine && (
-                                        <div className="mb-1 text-[11.5px] font-medium text-blue-700">{message.ad_label}</div>
+                                        <div className="mb-1 truncate text-[11.5px] font-medium text-blue-700" title={message.ad_label}>{message.ad_label}</div>
                                     )}
                                     {message.deleted_at ? (
                                         <span className="italic text-slate-400">Сообщение удалено</span>
                                     ) : (
                                         <>
-                                            {message.kind !== 'text' && <div className={message.body ? 'mb-1' : ''}><MediaChip message={message} /></div>}
+                                            {message.kind !== 'text' && <div className={message.body ? 'mb-1' : ''}><MediaBlock message={message} onZoom={setZoom} onLoad={keepBottom} /></div>}
                                             {message.body && <div className="whitespace-pre-wrap break-words text-slate-900">{message.body}</div>}
                                         </>
                                     )}
@@ -261,7 +335,8 @@ export const WhatsAppThread = ({ api, cardId }) => {
                     );
                 })}
             </div>
-            <div className="text-[12px] text-slate-400">Отвечайте с телефона — ответы появятся здесь. Файлы и голосовые — на телефоне.</div>
+            <div className="text-[12px] text-slate-400">Отвечайте с телефона — ответы появятся здесь.</div>
+            <IosLightbox url={zoom} alt="Фото из WhatsApp" onClose={() => setZoom(null)} />
         </div>
     );
 };

@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
@@ -144,6 +145,12 @@ func run(ctx context.Context, cfg config, log waLog.Logger) error {
 	b.start()
 	go sp.flush(ctx, b.sendEvents, log.Warnf)
 	go b.pollLoop()
+	files := &mediaWorker{spool: sp, log: log, upload: p.upload,
+		ready: func() bool { return b.currentState() == stateConnected },
+		download: func(ctx context.Context, part whatsmeow.DownloadableMessage) ([]byte, error) {
+			return b.client().Download(ctx, part)
+		}}
+	go files.run(ctx)
 
 	<-ctx.Done()
 	log.Infof("остановка по сигналу: закрываю соединение")

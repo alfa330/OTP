@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 import psycopg2
 
-from . import access, calls, hh, notices, queries, rules, upload, whatsapp
+from . import access, calls, hh, notices, queries, rules, upload, wa_media, whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -72,17 +72,27 @@ def _text(value, limit):
     return text[:limit] if text else None
 
 
+def _spawn_thread(target, *args):
+    """Фоновая работа своим потоком, а не в общем пуле бота (4 места на всё; распознавание — до минуты)."""
+    threading.Thread(target=target, args=args, name='hiring-wa-media', daemon=True).start()
+
+
 class HiringService:
     def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None, hh_transport=None,
-                 dial_list=None):
+                 dial_list=None, storage=None, transcriber=None, spawn=None):
         """dial_list — () -> сервис «Удаленного КЦ» или None: клиент Binotel отдела для истории звонков
-        линии рекрутера и ссылки на запись разговора."""
+        линии рекрутера и ссылки на запись разговора. storage — бакет файлов WhatsApp найма
+        (wa_media.Storage), transcriber — (байты, тип) -> расшифровка голосового, spawn — запуск фоновой
+        работы (по умолчанию свой поток; тесты делают её сразу)."""
         self._cursor = cursor_factory
         self._send_telegram = send_telegram
         self._base_url = web_app_base_url
         self._now = now or rules.now_almaty
         self._hh_transport = hh_transport
         self._dial_list = dial_list
+        self._storage = storage
+        self._transcriber = transcriber
+        self._spawn = spawn or _spawn_thread
         self._pull_lock = threading.Lock()
         self._calls_lock = threading.Lock()
 
@@ -1068,20 +1078,29 @@ class HiringService:
         if not isinstance(events, list) or not events or len(events) > whatsapp.EVENTS_MAX:
             raise HiringError('HIRING_WA_BAD_EVENTS', 'Ожидается список событий (1–%d)' % whatsapp.EVENTS_MAX)
         messages = [message for message in (whatsapp.parse_message(item) for item in events) if message]
+        failures = [failure for failure in (whatsapp.parse_media_failure(item) for item in events) if failure]
         now = self._now()
         outcomes = {}
+        trash = []
         with self._cursor() as cursor:
             source = queries.source_by_code(cursor, whatsapp.SOURCE_CODE)
             for message in messages:
-                outcome = self._wa_message(cursor, message, source, now)
+                outcome = self._wa_message(cursor, message, source, now, trash)
                 outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            for failure in failures:
+                if queries.wa_media_failed(cursor, failure['id'], failure['reason'], now):
+                    outcomes['media_failed'] = outcomes.get('media_failed', 0) + 1
             queries.wa_add_received(cursor, outcomes.get('created', 0), now)
+        self._wa_drop_files(trash)
         return {'accepted': len(events), 'outcomes': outcomes}
 
-    def _wa_message(self, cursor, message, source, now):
+    def _wa_message(self, cursor, message, source, now, trash=None):
         key = message['key']
         if message['revoke_of']:
-            return 'revoked' if queries.wa_revoke_message(cursor, key, message['revoke_of'], now) else 'missing'
+            count, objects = queries.wa_revoke_message(cursor, key, message['revoke_of'], now)
+            if trash is not None:
+                trash.extend(objects)
+            return 'revoked' if count else 'missing'
         if message['edit_of']:
             return 'edited' if queries.wa_edit_message(cursor, key, message['edit_of'], message['text'], now) else 'missing'
         if queries.wa_insert_message(cursor, key, message, now) is None:
@@ -1224,10 +1243,113 @@ class HiringService:
                 raise HiringError('HIRING_PHONE_HIDDEN', 'Переписка откроется, когда возьмёте карточку в работу', 403)
             chats = queries.wa_chats_for_phones(cursor, [card.get('phone'), card.get('whatsapp')])
             messages = queries.wa_messages(cursor, [chat['key'] for chat in chats])
+        sign = self._storage.sign if self._storage is not None else None
         for message in messages:
             if message.get('ad'):
                 message['ad_label'] = whatsapp.campaign_of(message['ad'])
+            if message['kind'] != 'text' and not message.get('deleted_at'):
+                message['media'] = wa_media.public_view(message['kind'], message.get('media'), sign)
         return {'chats': chats, 'messages': messages}
+
+    # ─── Файлы сообщений и расшифровка голосовых (владелец 09.11.2026) ───────
+
+    def wa_media(self, wa_id, data):
+        """Файл сообщения от шлюза: в бакет, путь — в сообщение; голосовое и аудио — в расшифровку.
+        Сообщение ещё не дошло событием — 404, шлюз повторит. Повтор файла безопасен. Бакет — без открытой
+        транзакции: долгая загрузка не держит соединение с базой (выкладка ждала бы её на DDL)."""
+        wa_id = whatsapp.clean_message_id(wa_id)
+        if not wa_id:
+            raise HiringError('HIRING_WA_BAD_MEDIA', 'Неверный id сообщения')
+        if not data:
+            raise HiringError('HIRING_WA_BAD_MEDIA', 'Пустой файл')
+        if len(data) > wa_media.MAX_BYTES:
+            raise HiringError('HIRING_WA_MEDIA_TOO_LARGE', 'Файл больше 25 МБ', 413)
+        if self._storage is None or not self._storage.available():
+            raise HiringError('HIRING_WA_NO_STORAGE', 'Хранилище файлов не настроено', 503)
+        with self._cursor() as cursor:
+            rows = queries.wa_messages_by_id(cursor, wa_id)
+        if not rows:
+            raise HiringError('HIRING_WA_MEDIA_UNKNOWN', 'Сообщение ещё не пришло', 404)
+        targets = [row for row in rows if row['kind'] in wa_media.DOWNLOADABLE and not row.get('deleted_at')
+                   and not (row.get('media') or {}).get('object')]
+        if not targets:
+            return {'stored': False, 'reason': 'already' if any((r.get('media') or {}).get('object') for r in rows) else 'skipped'}
+        now = self._now()
+        first = targets[0]
+        media = first.get('media') or {}
+        ctype = wa_media.content_type(media.get('mime'))
+        path = wa_media.object_path(first['id'], ctype, media.get('file_name'), now)
+        self._storage.upload(path, data, ctype)
+        stored = {'object': path, 'stored_type': ctype, 'stored_size': len(data), 'stored_at': now.isoformat(timespec='seconds')}
+        transcribe = first['kind'] in wa_media.TRANSCRIBED and self._transcriber is not None
+        if transcribe:
+            stored['transcript'] = {'status': 'pending', 'attempts': 0}
+        saved = []
+        with self._cursor() as cursor:
+            for target in targets:
+                if queries.wa_media_stored(cursor, target['id'], stored):
+                    saved.append(target['id'])
+        if not saved:
+            # Пока файл ехал в бакет, его положил другой запрос или сообщение удалили — копия лишняя.
+            self._wa_drop_files([path])
+            return {'stored': False, 'reason': 'already'}
+        if transcribe:
+            for message_id in saved:
+                self._spawn(self._wa_transcribe, message_id)
+        return {'stored': True}
+
+    def _wa_drop_files(self, paths):
+        for path in paths or ():
+            try:
+                self._storage.delete(path)
+            except Exception:  # noqa: BLE001
+                log.warning('WhatsApp найма: файл не удалён из бакета', exc_info=True)
+
+    TRANSCRIPT_ATTEMPTS = 3
+    TRANSCRIPT_RETRY = timedelta(minutes=2)
+    TRANSCRIPT_STALE = timedelta(minutes=15)
+
+    def _wa_transcribe(self, message_id):
+        """Расшифровка голосового — своим потоком. Захват строки в базе: два процесса выкладки одно и то же
+        не распознают. Файл и запрос к модели — без открытой транзакции."""
+        now = self._now()
+        stamp = now.isoformat(timespec='seconds')
+        try:
+            with self._cursor() as cursor:
+                row = queries.wa_claim_transcript(cursor, message_id, stamp,
+                                                  (now - self.TRANSCRIPT_STALE).isoformat(timespec='seconds'))
+        except Exception:  # noqa: BLE001
+            log.exception('WhatsApp найма: голосовое %s не взято в расшифровку', message_id)
+            return None
+        if not row:
+            return None
+        media = row.get('media') or {}
+        attempts = int((media.get('transcript') or {}).get('attempts') or 0) + 1
+        try:
+            raw = self._storage.download(media['object'])
+            record = wa_media.transcript_record(
+                self._transcriber(raw, media.get('stored_type') or media.get('mime') or ''), self._now())
+        except Exception as exc:  # noqa: BLE001 — VoiceError и сбои бакета: повтор, пока есть попытки
+            retry = getattr(exc, 'kind', 'retry') == 'retry' and attempts < self.TRANSCRIPT_ATTEMPTS
+            record = {'status': 'pending' if retry else 'failed', 'error': str(exc)[:200], 'attempts': attempts,
+                      'next_at': (self._now() + self.TRANSCRIPT_RETRY).isoformat(timespec='seconds')}
+            if not retry:
+                log.warning('WhatsApp найма: голосовое %s не расшифровано: %s', message_id, str(exc)[:200])
+        record['attempts'] = attempts
+        with self._cursor() as cursor:
+            queries.wa_save_transcript(cursor, message_id, record)
+        return record['status']
+
+    def _wa_sweep_transcripts(self, now):
+        """Сторож: голосовые, чья расшифровка ждёт повтора или зависла на упавшем процессе."""
+        if self._transcriber is None or self._storage is None:
+            return 0
+        with self._cursor() as cursor:
+            due = queries.wa_transcripts_due(cursor, now.isoformat(timespec='seconds'),
+                                             (now - self.TRANSCRIPT_STALE).isoformat(timespec='seconds'))
+        for message_id in due:
+            self._spawn(self._wa_transcribe, message_id)
+        return len(due)
 
     def wa_watchdog(self):
         """Сторож (раз в минуту): сервис замолчал — «не на связи» и тревога; телефон с номером давно не
@@ -1254,6 +1376,10 @@ class HiringService:
                     chats = queries.telegram_chats(cursor, notices.whatsapp_alert(cursor, alert, now))
         for chat_id in chats.values():
             self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
+        try:
+            self._wa_sweep_transcripts(now)
+        except Exception:  # noqa: BLE001 — сторож состояния важнее повтора расшифровки
+            log.exception('WhatsApp найма: повтор расшифровок не запустился')
         return alert[0] if alert else None
 
     def _telegram(self, chat_id, html_text, reply_markup):

@@ -15,6 +15,7 @@
 остановки, кнопки «Подключить / Возобновить / Отвязать» и тревоги руководителю рекрутинга.
 """
 
+import re
 from datetime import datetime, timedelta
 
 from . import rules
@@ -180,6 +181,8 @@ def parse_message(raw):
             'size': _int(source.get('size')),
             'seconds': _int(source.get('seconds')),
             'file_name': _text(source.get('file_name'), 200),
+            # Шлюз поставил файл в очередь скачивания — во вкладке «загружается…», пока он не придёт.
+            'fetch': True if source.get('fetch') is True else None,
         }.items() if v is not None} or None
     ad = None
     if isinstance(raw.get('ad'), dict):
@@ -209,6 +212,24 @@ APP_LABELS = {'instagram': 'Instagram', 'facebook': 'Facebook', 'whatsapp': 'Wha
 ENTRY_LABELS = {'ctwa_ad': 'Реклама', 'phone_number_hyperlink': 'Ссылка на номер',
                 'message_short_link': 'Короткая ссылка WhatsApp'}
 CONVERSION_LABELS = {'FB_Ads': 'Реклама без номера объявления', 'FB_Post': 'Пост в Facebook или Instagram'}
+
+
+_MESSAGE_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+
+
+def clean_message_id(value):
+    """id сообщения WhatsApp из пути запроса шлюза (файл сообщения) или None."""
+    text = str(value or '').strip()
+    return text if _MESSAGE_ID_RE.match(text) else None
+
+
+def parse_media_failure(raw):
+    """Событие «файл не сохранится» от шлюза ({type: media_failed, id, reason}) или None."""
+    if not isinstance(raw, dict) or raw.get('type') != 'media_failed':
+        return None
+    message_id = clean_message_id(raw.get('id'))
+    reason = str(raw.get('reason') or '').strip()[:32] or 'retries'
+    return {'id': message_id, 'reason': reason} if message_id else None
 
 
 def campaign_of(ad):

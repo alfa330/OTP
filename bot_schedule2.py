@@ -53281,7 +53281,21 @@ except Exception:
 # ключу партнёра (область «Отклики в воронку найма»). Планировщик ниже: дата следующего
 # контакта (колокол), возврат в пул без касаний месяц и утренняя сводка просрочек в Telegram.
 _HIRING = {'service': None}
+
+
+def _hiring_bucket_name():
+    """Бакет файлов номера WhatsApp найма (фото, голосовые, документы кандидатов). Каскад env тот же,
+    что у посылок: свой -> общий tasks -> общий; пока своя переменная не задана, файлы лежат в общем
+    бакете под префиксом hiring/whatsapp/."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_HIRING') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
 try:
+    from hiring import wa_media as _hiring_wa_media  # noqa: E402
     from hiring.routes import build_hiring_blueprint, build_hiring_external_blueprint  # noqa: E402
     from hiring.service import HiringService as _HiringService  # noqa: E402
     from partner_keys import auth as _hiring_partner_auth  # noqa: E402
@@ -53296,6 +53310,10 @@ try:
         # Клиент Binotel отдела линии (история звонков рекрутера, ссылка на запись) — из сервиса
         # «Удаленного КЦ», который появляется ниже по файлу: берётся по требованию.
         dial_list=lambda: _dial_list_service,
+        # Файлы сообщений номера WhatsApp найма — в бакет, голосовые — в расшифровку (Gemini на Vertex,
+        # как голосовые «Чатов ОП»; без ключа сервисного аккаунта — плеер без текста).
+        storage=_hiring_wa_media.Storage(get_gcs_client, _hiring_bucket_name),
+        transcriber=_hiring_wa_media.transcribe if _hiring_wa_media.transcription_available() else None,
     )
     app.register_blueprint(build_hiring_blueprint(
         db=db,

@@ -205,7 +205,8 @@ def client():
         partner_journal=journal, rate_limiter=RateLimiter(100)))
     app.register_blueprint(routes.build_hiring_wa_agent_blueprint(service=service, build_cors_preflight_response=lambda: ('', 204)))
     test_client = app.test_client()
-    test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db, 'dial_list': dial_list}
+    test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db, 'dial_list': dial_list,
+                         'service': service}
     try:
         yield test_client
     finally:
@@ -522,3 +523,26 @@ def test_whatsapp_bridge_is_signed_and_buttons_are_lead_only(client, monkeypatch
     assert saved.status_code == 200 and saved.get_json()['applied'] == 1 and saved.get_json()['phone_recruiter_id'] == REC1
     taken = client.get('/api/hiring/cards/%s' % card['id'], headers=lead).get_json()['card']
     assert taken['stage'] == 'in_work' and taken['recruiter_id'] == REC1
+
+    # Файл сообщения: id в пути, файл телом — всё под подписью; без подписи и с подменой — отказ.
+    stored = {}
+    client.world['service']._storage = SimpleNamespace(
+        available=lambda: True, upload=lambda path, data, ctype: stored.update({path: (data, ctype)}),
+        sign=lambda path, ctype, disposition: 'https://storage.test/' + path, delete=lambda path: None)
+    photo = dict(message, id='w3', kind='image', text='', ts=1792047600 + 700,
+                 media={'mime': 'image/jpeg', 'size': 5, 'fetch': True})
+    assert signed(events, {'events': [photo]})[0].status_code == 200
+    media_path = '/api/hiring/wa/agent/media/w3'
+    raw = b'\xff\xd8\xff\xe0JPEG'
+    assert client.post(media_path, data=raw, content_type='application/octet-stream').status_code == 401
+    upload_headers = signer.headers('POST', media_path, raw)
+    assert client.post(media_path, data=raw + b'!', content_type='application/octet-stream',
+                       headers=upload_headers).status_code == 401
+    uploaded = client.post(media_path, data=raw, content_type='application/octet-stream', headers=signer.headers('POST', media_path, raw))
+    assert uploaded.status_code == 200 and uploaded.get_json() == {'stored': True}
+    assert list(stored.values()) == [(raw, 'image/jpeg')]
+    unknown = '/api/hiring/wa/agent/media/missing'
+    assert client.post(unknown, data=raw, content_type='application/octet-stream',
+                       headers=signer.headers('POST', unknown, raw)).status_code == 404
+    shown = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()['messages']
+    assert [m['media']['state'] for m in shown if m['wa_id'] == 'w3'] == ['stored']

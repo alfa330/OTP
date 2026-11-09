@@ -18,8 +18,18 @@ const (
 )
 
 type spool struct {
-	db   *sql.DB
-	wake chan struct{}
+	db        *sql.DB
+	wake      chan struct{}
+	mediaWake chan struct{}
+}
+
+// mediaJob — файл сообщения в очереди: часть protobuf с ключами (по ней whatsmeow качает файл) и попытки.
+type mediaJob struct {
+	ID       int64
+	WAID     string
+	Kind     string
+	Part     []byte
+	Attempts int
 }
 
 func openSpool(path string) (*spool, error) {
@@ -28,12 +38,67 @@ func openSpool(path string) (*spool, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS events (
-		id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, created_at INTEGER NOT NULL)`); err != nil {
-		db.Close()
+	for _, ddl := range []string{
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+		// Файлы ждут своей очереди: событие о сообщении уходит сразу, файл — когда скачался.
+		`CREATE TABLE IF NOT EXISTS media (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, wa_id TEXT NOT NULL, kind TEXT NOT NULL, part BLOB NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	return &spool{db: db, wake: make(chan struct{}, 1), mediaWake: make(chan struct{}, 1)}, nil
+}
+
+// pushMedia — файл в очередь; первая попытка — чуть позже события, чтобы сообщение успело дойти до портала.
+func (s *spool) pushMedia(job mediaJob, at time.Time) error {
+	if _, err := s.db.Exec("INSERT INTO media (wa_id, kind, part, next_at, created_at) VALUES (?, ?, ?, ?, ?)",
+		job.WAID, job.Kind, job.Part, at.Unix(), time.Now().Unix()); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec("DELETE FROM media WHERE id <= (SELECT MAX(id) FROM media) - ?", spoolLimit)
+	select {
+	case s.mediaWake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// nextMedia — старейший файл, чья очередь подошла, или nil.
+func (s *spool) nextMedia(now time.Time) (*mediaJob, error) {
+	job := &mediaJob{}
+	err := s.db.QueryRow("SELECT id, wa_id, kind, part, attempts FROM media WHERE next_at <= ? ORDER BY id LIMIT 1",
+		now.Unix()).Scan(&job.ID, &job.WAID, &job.Kind, &job.Part, &job.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return &spool{db: db, wake: make(chan struct{}, 1)}, nil
+	return job, nil
+}
+
+// nextMediaAt — когда подойдёт ближайший файл (false — очередь пуста).
+func (s *spool) nextMediaAt() (time.Time, bool) {
+	var at sql.NullInt64
+	if err := s.db.QueryRow("SELECT MIN(next_at) FROM media").Scan(&at); err != nil || !at.Valid {
+		return time.Time{}, false
+	}
+	return time.Unix(at.Int64, 0), true
+}
+
+func (s *spool) delayMedia(id int64, attempts int, at time.Time) error {
+	_, err := s.db.Exec("UPDATE media SET attempts = ?, next_at = ? WHERE id = ?", attempts, at.Unix(), id)
+	return err
+}
+
+func (s *spool) dropMedia(id int64) error {
+	_, err := s.db.Exec("DELETE FROM media WHERE id = ?", id)
+	return err
 }
 
 func (s *spool) push(event map[string]any) error {

@@ -22,11 +22,14 @@ import (
 const (
 	pollPath   = "/api/hiring/wa/agent/poll"
 	eventsPath = "/api/hiring/wa/agent/events"
+	// Файл сообщения: id сообщения — в пути (путь подписан), сам файл — телом.
+	mediaPathPrefix = "/api/hiring/wa/agent/media/"
 )
 
 type portal struct {
 	base   string
 	http   *http.Client
+	files  *http.Client // файл до 25 МБ через прокси шлюза идёт дольше 30 секунд опроса
 	signer *signer
 }
 
@@ -68,7 +71,8 @@ func newPortal(base, proxy, caBundle string, s *signer) (*portal, error) {
 		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return &portal{base: base, http: &http.Client{Transport: transport, Timeout: 30 * time.Second}, signer: s}, nil
+	return &portal{base: base, http: &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		files: &http.Client{Transport: transport, Timeout: 5 * time.Minute}, signer: s}, nil
 }
 
 func (p *portal) post(ctx context.Context, path string, payload any, out any) error {
@@ -76,16 +80,25 @@ func (p *portal) post(ctx context.Context, path string, payload any, out any) er
 	if err != nil {
 		return err
 	}
+	return p.send(ctx, p.http, path, body, "application/json", out)
+}
+
+// upload — файл сообщения порталу. 404 — сообщение туда ещё не дошло (повторить позже).
+func (p *portal) upload(ctx context.Context, path string, data []byte) error {
+	return p.send(ctx, p.files, path, data, "application/octet-stream", nil)
+}
+
+func (p *portal) send(ctx context.Context, client *http.Client, path string, body []byte, contentType string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", "otp-wa-bridge/"+bridgeVersion)
 	for name, value := range p.signer.headers(http.MethodPost, path, body, time.Now(), randomNonce()) {
 		req.Header.Set(name, value)
 	}
-	resp, err := p.http.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

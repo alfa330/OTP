@@ -9,7 +9,8 @@ package main
 //   * обрывы установленного соединения чаще 12 в час — тоже остановка: шторм переподключений —
 //     сигнал для антиспама; при недоступной сети пауза между попытками растёт до 5 минут;
 //   * сразу после подключения — статус «не в сети»: так телефон рекрутера получает уведомления;
-//   * отметки «прочитано» и «печатает» не ставятся, сообщения не отправляются — кода отправки нет.
+//   * отметки «прочитано» и «печатает» не ставятся, сообщения не отправляются — кода отправки нет;
+//   * файлы сообщений качаются по одному, с паузой, как в WhatsApp Web (media.go).
 
 import (
 	"context"
@@ -26,7 +27,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-const bridgeVersion = "1.0.0"
+const bridgeVersion = "1.1.0"
 
 const (
 	stateUnpaired   = "unpaired"
@@ -300,6 +301,13 @@ func (b *bridge) handle(raw any) {
 			_ = b.guard.phoneSeen(now) // ответ отправлен с самого телефона
 		}
 		if event := convertMessage(b.ctx, evt, b.resolvePN); event != nil {
+			if job := mediaJobOf(evt); job != nil {
+				if err := b.spool.pushMedia(*job, now.Add(mediaFirstDelay)); err != nil {
+					b.log.Errorf("файл не записан в очередь: %v", err)
+				} else {
+					markFetch(event)
+				}
+			}
 			if err := b.spool.push(event); err != nil {
 				b.log.Errorf("сообщение не записано в очередь: %v", err)
 			}

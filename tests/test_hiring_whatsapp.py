@@ -7,7 +7,7 @@
 
 from datetime import datetime, timedelta
 
-from hiring import whatsapp
+from hiring import wa_media, whatsapp
 
 NOW = datetime(2026, 11, 6, 15, 0)
 
@@ -144,3 +144,60 @@ def test_alerts_once_per_transition():
     assert whatsapp.alert_for('parked', 'parked', detail) is None
     assert whatsapp.alert_for('parked', 'connected', {'connected_since': '2026-11-06T16:00:00'})[0] == 'wa:back:2026-11-06T16:00:00'
     assert whatsapp.alert_for('connecting', 'connected', {}) is None
+
+
+def test_media_events_from_bridge():
+    """Файлы (09.11.2026): шлюз помечает сообщение, чей файл поставил в очередь, и сообщает, если файл не
+    сохранится; id сообщения приходит в пути запроса — только безопасные символы."""
+    voice = whatsapp.parse_message(event(kind='voice', text='', media={'mime': 'audio/ogg; codecs=opus', 'size': 4096,
+                                                                       'seconds': 7, 'fetch': True}))
+    assert voice['media'] == {'mime': 'audio/ogg; codecs=opus', 'size': 4096, 'seconds': 7, 'fetch': True}
+    assert 'fetch' not in whatsapp.parse_message(event(kind='image', media={'size': 10, 'fetch': 'yes'}))['media']
+    assert whatsapp.parse_media_failure({'type': 'media_failed', 'id': '3EB0AA', 'reason': 'gone'}) == {'id': '3EB0AA', 'reason': 'gone'}
+    assert whatsapp.parse_media_failure({'type': 'media_failed', 'id': '../x'}) is None
+    assert whatsapp.parse_media_failure(event()) is None
+    assert whatsapp.clean_message_id('AC853968D50DDD8CD1CFECC8713D35F8') == 'AC853968D50DDD8CD1CFECC8713D35F8'
+    assert whatsapp.clean_message_id('a/b') is None and whatsapp.clean_message_id('x' * 129) is None
+
+
+def test_media_storage_rules():
+    assert wa_media.content_type('audio/ogg; codecs=opus') == 'audio/ogg'
+    assert wa_media.content_type('image/svg+xml') == 'application/octet-stream'
+    assert wa_media.content_type('text/html') == 'application/octet-stream'
+    assert wa_media.content_type('') == 'application/octet-stream'
+    assert wa_media.content_type('application/pdf') == 'application/pdf'
+    path = wa_media.object_path(42, 'audio/ogg', None, NOW)
+    assert path.startswith('hiring/whatsapp/2026/11/42-') and path.endswith('.ogg')
+    # Имя файла кандидата в путь не идёт — только расширение, если тип незнакомый.
+    odd = wa_media.object_path(7, 'application/x-odd', 'Резюме Иванова.RTF', NOW)
+    assert odd.endswith('.rtf') and 'Иванов' not in odd
+    assert wa_media.disposition('voice', 'audio/ogg', None) == 'inline'
+    assert wa_media.disposition('image', 'image/jpeg', None) == 'inline'
+    document = wa_media.disposition('document', 'application/pdf', 'Резюме "Иванова".pdf')
+    assert document.startswith('attachment; filename="') and "filename*=UTF-8''" in document and '"Иванова"' not in document
+    assert wa_media.disposition('image', 'image/tiff', 'scan.tiff').startswith('attachment')
+    assert 'Правила:' in wa_media.system_prompt(type('Asr', (), {'SYSTEM': 'Вступление такси.\n\nПравила:\n1. Дословно.'}))
+    assert 'такси' not in wa_media.system_prompt(type('Asr', (), {'SYSTEM': 'Вступление такси.\n\nПравила:\n1. Дословно.'}))
+
+
+def test_media_view_states():
+    signed = []
+
+    def sign(path, ctype, disposition):
+        signed.append((path, ctype, disposition))
+        return 'https://storage.test/' + path
+
+    stored = wa_media.public_view('voice', {'mime': 'audio/ogg; codecs=opus', 'seconds': 7, 'object': 'hiring/whatsapp/1.ogg',
+                                            'stored_type': 'audio/ogg', 'stored_size': 5000, 'bucket': 'secret',
+                                            'transcript': {'status': 'ready', 'text': 'Здравствуйте', 'cost': 0.001}}, sign)
+    assert stored == {'mime': 'audio/ogg; codecs=opus', 'seconds': 7, 'size': 5000, 'state': 'stored', 'inline': True,
+                      'url': 'https://storage.test/hiring/whatsapp/1.ogg',
+                      'transcript': {'status': 'ready', 'text': 'Здравствуйте'}}
+    assert signed == [('hiring/whatsapp/1.ogg', 'audio/ogg', 'inline')]
+    assert wa_media.public_view('image', {'size': 10, 'fetch': True})['state'] == 'loading'
+    assert wa_media.public_view('video', {'size': wa_media.MAX_BYTES + 1})['state'] == 'too_large'
+    failed = wa_media.public_view('document', {'failed': 'gone', 'fetch': True})
+    assert failed['state'] == 'failed' and failed['reason'] == 'файла у WhatsApp уже нет'
+    assert wa_media.public_view('image', {'size': 10})['state'] == 'none'         # до 09.11.2026 файлы не качались
+    assert wa_media.public_view('sticker', None) == {'state': 'none'}
+    assert wa_media.public_view('image', {'object': 'x.jpg', 'stored_type': 'image/jpeg'}, lambda *a: None)['state'] == 'failed'

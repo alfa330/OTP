@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from hiring import notices, queries, reports, rules, schema
+from hiring import notices, queries, reports, rules, schema, wa_media
 from hiring.service import HiringError, HiringService
 
 PORT = os.environ.get('HIRING_TEST_PORT')
@@ -1039,6 +1039,126 @@ def test_whatsapp_phone_reply_takes_card_into_work(world):
     service.wa_events({'events': [wa_event('d1', phone='77055557788')]})
     assert service.wa_events({'events': [wa_event('d2', phone='77055557788', from_me=True, ts=WA_TS + 60)]})['outcomes'] \
         == {'stored': 1}
+
+
+class FakeStorage:
+    def __init__(self):
+        self.files, self.deleted, self.signed = {}, [], []
+
+    def available(self):
+        return True
+
+    def upload(self, path, data, ctype):
+        self.files[path] = (data, ctype)
+
+    def download(self, path):
+        return self.files[path][0]
+
+    def delete(self, path):
+        self.deleted.append(path)
+        self.files.pop(path, None)
+
+    def sign(self, path, ctype, disposition):
+        self.signed.append((path, ctype, disposition))
+        return 'https://storage.test/' + path
+
+
+class VoiceRetry(Exception):
+    kind = 'retry'
+
+
+def media_world(world, results):
+    """Сервис с бакетом и распознаванием-подделками; фоновая работа — сразу, в том же потоке."""
+    storage, heard = FakeStorage(), []
+
+    def transcriber(raw, ctype):
+        heard.append((raw, ctype))
+        result = results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    service = HiringService(cursor_factory=world['db']._get_cursor, now=world['clock'], storage=storage,
+                            transcriber=transcriber, spawn=lambda target, *args: target(*args))
+    return service, storage, heard
+
+
+def test_whatsapp_media_files_and_transcripts(world):
+    """Владелец 09.11.2026: файлы и голосовые кандидатов видны в карточке. Шлюз качает файл следом за
+    сообщением: в бакет, голосовое — в расшифровку; удалённое у всех — стирается и из бакета."""
+    ready = {'status': 'ready', 'text': 'Здравствуйте, я по вакансии', 'language': 'ru', 'model': 'gemini-3.8-flash',
+             'cost': 0.0012, 'usage': {'big': 'blob'}, 'error': None}
+    service, storage, heard = media_world(world, [ready])
+    voice = {'mime': 'audio/ogg; codecs=opus', 'size': 4096, 'seconds': 7, 'fetch': True}
+    service.wa_events({'events': [wa_event('v1', kind='voice', text='', media=voice)]})
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77055552233')
+    lead = ctx_of(world, HR_HEAD)
+    assert service.card_whatsapp(lead, card['id'])['messages'][0]['media']['state'] == 'loading'
+    # Файл пришёл: лёг в бакет, голосовое расшифровано (поток — сразу), в ленте — ссылка и текст.
+    assert service.wa_media('v1', b'OggS-voice') == {'stored': True}
+    (path, (data, ctype)), = storage.files.items()
+    assert path.startswith('hiring/whatsapp/2026/10/') and path.endswith('.ogg') and data == b'OggS-voice' and ctype == 'audio/ogg'
+    assert heard == [(b'OggS-voice', 'audio/ogg')]
+    media = service.card_whatsapp(lead, card['id'])['messages'][0]['media']
+    assert media['state'] == 'stored' and media['url'] == 'https://storage.test/' + path and media['inline'] is True
+    assert media['transcript'] == {'status': 'ready', 'text': 'Здравствуйте, я по вакансии'} and 'object' not in media
+    with world['db']._get_cursor() as cur:
+        stored = queries.wa_messages_by_id(cur, 'v1')[0]['media']
+    assert stored['transcript']['model'] == 'gemini-3.8-flash' and 'usage' not in stored['transcript']
+    # Повтор файла — второй копии нет; чужой id, пустой и слишком большой файл — отказ.
+    assert service.wa_media('v1', b'OggS-voice') == {'stored': False, 'reason': 'already'} and len(storage.files) == 1
+    for wa_id, data, status in (('nope', b'x', 404), ('../x', b'x', 400), ('v1', b'', 400),
+                                ('v1', b'x' * (wa_media.MAX_BYTES + 1), 413)):
+        with pytest.raises(HiringError) as refused:
+            service.wa_media(wa_id, data)
+        assert refused.value.status == status
+    with pytest.raises(HiringError) as no_storage:
+        world['service'].wa_media('v1', b'x')
+    assert no_storage.value.status == 503
+    # Документ — скачиванием со своим именем; файл, которого у WhatsApp нет, — «не сохранился».
+    service.wa_events({'events': [
+        wa_event('d1', kind='document', text='резюме', ts=WA_TS + 60,
+                 media={'mime': 'application/pdf', 'size': 2048, 'file_name': 'Резюме.pdf', 'fetch': True}),
+        wa_event('p1', kind='image', text='', ts=WA_TS + 120, media={'mime': 'image/jpeg', 'size': 900, 'fetch': True}),
+        wa_event('big', kind='video', text='', ts=WA_TS + 180, media={'mime': 'video/mp4', 'size': wa_media.MAX_BYTES + 5}),
+        wa_event('old', kind='image', text='', ts=WA_TS + 240, media={'mime': 'image/jpeg', 'size': 900}),
+    ]})
+    assert service.wa_media('d1', b'%PDF-1.7') == {'stored': True}
+    assert service.wa_events({'events': [{'type': 'media_failed', 'id': 'p1', 'reason': 'gone'}]})['outcomes'] == {'media_failed': 1}
+    thread = {m['wa_id']: m['media'] for m in service.card_whatsapp(lead, card['id'])['messages']}
+    assert thread['d1']['state'] == 'stored' and thread['d1']['file_name'] == 'Резюме.pdf' and thread['d1']['inline'] is False
+    assert any(sign[1] == 'application/pdf' and sign[2].startswith('attachment; filename="') for sign in storage.signed)
+    assert thread['p1'] == {'mime': 'image/jpeg', 'size': 900, 'state': 'failed', 'reason': 'файла у WhatsApp уже нет'}
+    assert thread['big']['state'] == 'too_large' and thread['old']['state'] == 'none'
+    # Кандидат удалил голосовое у всех — исчезает и из бакета; файл, пришедший после удаления, не кладётся.
+    assert service.wa_events({'events': [wa_event('v2', revoke_of='v1')]})['outcomes'] == {'revoked': 1}
+    assert storage.deleted == [path] and path not in storage.files
+    assert service.wa_media('v1', b'OggS-voice') == {'stored': False, 'reason': 'skipped'}
+
+
+def test_whatsapp_transcript_retries_then_gives_up(world):
+    service, storage, heard = media_world(world, [VoiceRetry('Vertex не ответил за 50 с'), VoiceRetry('ещё раз'),
+                                                  VoiceRetry('и ещё')])
+    clock = world['clock']
+    service.wa_events({'events': [wa_event('w1', kind='voice', text='', media={'mime': 'audio/ogg', 'size': 10, 'fetch': True})]})
+    assert service.wa_media('w1', b'OggS') == {'stored': True}
+    with world['db']._get_cursor() as cur:
+        transcript = queries.wa_messages_by_id(cur, 'w1')[0]['media']['transcript']
+    assert transcript['status'] == 'pending' and transcript['attempts'] == 1 and 'не ответил' in transcript['error']
+    # Сторож раз в минуту берёт голосовые, чья пауза прошла; после трёх попыток — «failed», без повторов.
+    service.wa_watchdog()
+    assert len(heard) == 1
+    clock.now = NOW + timedelta(minutes=3)
+    service.wa_watchdog()
+    clock.now = NOW + timedelta(minutes=6)
+    service.wa_watchdog()
+    with world['db']._get_cursor() as cur:
+        transcript = queries.wa_messages_by_id(cur, 'w1')[0]['media']['transcript']
+    assert len(heard) == 3 and transcript['status'] == 'failed' and transcript['attempts'] == 3
+    clock.now = NOW + timedelta(minutes=30)
+    service.wa_watchdog()
+    assert len(heard) == 3
 
 
 def test_whatsapp_repeat_closed_and_employee(world):

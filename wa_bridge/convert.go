@@ -1,12 +1,13 @@
 package main
 
 // Сообщение whatsmeow → событие для портала (hiring/whatsapp.parse_message). Только личные чаты:
-// группы, рассылки, статусы и каналы номеру найма не нужны. Содержимое файлов не качается —
-// только вид, подпись и размер (этап 1).
+// группы, рассылки, статусы и каналы номеру найма не нужны. В событии — вид, подпись и размер
+// файла; сам файл качается следом из своей очереди (media.go).
 
 import (
 	"context"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -170,6 +171,32 @@ func classify(msg *waE2E.Message) (kind, text string, media map[string]any) {
 		return "text", text, nil
 	}
 	return "other", "", nil
+}
+
+// mediaPart — файл сообщения, который можно скачать: вид (как у classify), часть protobuf с ключами
+// и размер. Стикеры не качаются — плашки хватает.
+func mediaPart(msg *waE2E.Message) (kind string, part whatsmeow.DownloadableMessage, size uint64) {
+	switch {
+	case msg.GetImageMessage() != nil:
+		m := msg.GetImageMessage()
+		return "image", m, m.GetFileLength()
+	case msg.GetVideoMessage() != nil:
+		m := msg.GetVideoMessage()
+		return "video", m, m.GetFileLength()
+	case msg.GetAudioMessage() != nil:
+		m := msg.GetAudioMessage()
+		if m.GetPTT() {
+			return "voice", m, m.GetFileLength()
+		}
+		return "audio", m, m.GetFileLength()
+	case msg.GetDocumentWithCaptionMessage().GetMessage().GetDocumentMessage() != nil:
+		m := msg.GetDocumentWithCaptionMessage().GetMessage().GetDocumentMessage()
+		return "document", m, m.GetFileLength()
+	case msg.GetDocumentMessage() != nil:
+		m := msg.GetDocumentMessage()
+		return "document", m, m.GetFileLength()
+	}
+	return "", nil, 0
 }
 
 func firstNonEmpty(values ...string) string {

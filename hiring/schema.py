@@ -378,7 +378,7 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_phone ON hiring_wa_chats (phone) WHERE phone IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_lid ON hiring_wa_chats (lid) WHERE lid IS NOT NULL",
     # Сообщения: id WhatsApp уникален в чате; правка меняет текст, удаление у всех гасит его.
-    # Медиа — только описание (тип, размер, длительность): само содержимое на этапе 1 не качается.
+    # Медиа — описание (тип, размер, длительность), с 09.11.2026 и путь файла в бакете (wa_media.py).
     """
     CREATE TABLE IF NOT EXISTS hiring_wa_messages (
         id               BIGSERIAL PRIMARY KEY,
@@ -397,6 +397,9 @@ _STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_chat ON hiring_wa_messages (chat_key, sent_at)",
+    # Файл сообщения от шлюза приходит по id сообщения (владелец 09.11.2026: файлы и голосовые в карточке):
+    # путь в бакете, тип и расшифровка — в media; сам файл — в бакете, как фото задач.
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_wa_id ON hiring_wa_messages (wa_id)",
 ]
 
 
