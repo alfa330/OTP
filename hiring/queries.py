@@ -250,6 +250,37 @@ def update_reason(cursor, reason_id, **fields):
     _update('hiring_reasons', reason_id, fields, allowed=('name', 'requires_comment', 'is_active', 'position'), cursor=cursor)
 
 
+def list_channels(cursor, active_only=False):
+    """Каналы — метки откликов с цветом (владелец 09.11.2026), в порядке справочника."""
+    cursor.execute("SELECT id, name, color, is_active, position FROM hiring_channels"
+                   + (" WHERE is_active" if active_only else "") + " ORDER BY position, id")
+    return _all(cursor)
+
+
+def get_channel(cursor, channel_id):
+    cursor.execute("SELECT id, name, color, is_active FROM hiring_channels WHERE id = %s", (int(channel_id),))
+    return _one(cursor)
+
+
+def channel_by_name(cursor, name):
+    """Канал с таким именем без учёта регистра — имя в справочнике уникально так же (индекс по lower)."""
+    cursor.execute("SELECT id, name, color, is_active FROM hiring_channels WHERE lower(name) = lower(%s)", (name,))
+    return _one(cursor)
+
+
+def create_channel(cursor, name, color, by, now):
+    cursor.execute("""
+        INSERT INTO hiring_channels (name, color, position, created_by, created_at, updated_at)
+        VALUES (%s, %s, COALESCE((SELECT MAX(position) + 1 FROM hiring_channels), 0), %s, %s, %s) RETURNING id
+    """, (name, color, by, now, now))
+    return int(cursor.fetchone()[0])
+
+
+def update_channel(cursor, channel_id, now, **fields):
+    fields['updated_at'] = now
+    return _update('hiring_channels', channel_id, fields, allowed=('name', 'color', 'is_active', 'updated_at'), cursor=cursor)
+
+
 def list_groups(cursor, active_only=False, trainer_id=None):
     where = ["TRUE"]
     params = []
@@ -401,7 +432,8 @@ _CARD_COLUMNS = """
     c.employee_user_id, e.name AS employee_name,
     v.name AS vacancy_name, COALESCE(v.department_id, g.department_id) AS department_id,
     s.name AS source_name, s.code AS source_code, r.name AS recruiter_name, g.name AS group_name,
-    g.start_date AS group_start_date, g.trainer_id AS trainer_id, b.file_name AS batch_file
+    g.start_date AS group_start_date, g.trainer_id AS trainer_id, b.file_name AS batch_file,
+    c.channel_id, ch.name AS channel_name, ch.color AS channel_color
 """
 _CARD_FROM = """
     FROM hiring_cards c
@@ -411,6 +443,7 @@ _CARD_FROM = """
     LEFT JOIN users r ON r.id = c.recruiter_id
     LEFT JOIN hiring_batches b ON b.id = c.batch_id
     LEFT JOIN users e ON e.id = c.employee_user_id
+    LEFT JOIN hiring_channels ch ON ch.id = c.channel_id
 """
 
 
@@ -463,7 +496,7 @@ def update_card(cursor, card_id, **fields):
                'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_started_at',
                'line_started_at', 'shifts_done', 'hired_at', 'hired_by', 'close_initiator', 'close_reason_id',
                'close_reason_text', 'close_stage', 'close_day', 'close_comment', 'is_closed', 'closed_at',
-               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id')
+               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id', 'channel_id')
     return _update('hiring_cards', card_id, fields, allowed=allowed, cursor=cursor)
 
 

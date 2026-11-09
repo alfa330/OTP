@@ -317,6 +317,14 @@ LATE_SOURCES = (
     ('whatsapp', 'WhatsApp', SOURCE_RESPONSES, 'whatsapp'),
 )
 
+# Каналы — метки откликов с цветом (владелец 09.11.2026): откуда кандидат узнал о вакансии. Отклики
+# с номера WhatsApp приходят одним источником, а канал — таргет, hh, Kaspi — рекрутер знает из
+# разговора и ставит меткой. Справочник ведёт руководитель в «Настройках»; цвет — из палитры (как у
+# списков «Напоминаний»), коды те же, что в hiringMeta.js. Стартовые метки — словами владельца.
+CHANNEL_COLORS = ('red', 'orange', 'yellow', 'green', 'teal', 'blue', 'violet', 'pink', 'gray')
+SEED_CHANNELS = (('Таргет', 'blue'), ('hh', 'red'), ('Каспи', 'pink'))
+CHANNEL_NAME_MAX = 40
+
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (
     'pending', 'counted', 'paid', 'cancelled')
 MOTIVATION_LABELS = {MOTIVATION_PENDING: 'Ожидает подтверждения', MOTIVATION_COUNTED: 'Засчитано',

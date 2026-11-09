@@ -7,7 +7,7 @@ import {
     errorOf, fullDate, openICorePhoneCall, percent, plural, shortTime,
 } from './hiringMeta';
 import {
-    Empty, FiltersRow, FiltersToggle, Group, GroupHeading, HOVER_REVEAL, ICON_BTN, Loading, MonthSwitch, Pill, Stat,
+    ChannelPill, Empty, FiltersRow, FiltersToggle, Group, GroupHeading, HOVER_REVEAL, ICON_BTN, Loading, MonthSwitch, Pill, Stat,
 } from './hiringUi';
 
 /*
@@ -44,6 +44,7 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
                         {[card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') || STAGE_LABELS[card.stage]}
                     </div>
                 </div>
+                {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} />}
                 {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
                 {when && <span className="shrink-0 text-[12px] tabular-nums text-slate-500">{shortTime(when)}</span>}
             </button>

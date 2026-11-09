@@ -4,9 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES, SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays,
-    buildICorePhoneUrl, daysSince, joinDateTime, longTime, matchesQuery, monthLabel, openICorePhoneCall, percent, plural,
-    prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime,
+    CHANNEL_COLORS, CHANNEL_COLOR_CODES, ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES, SUBSTAGE_LABELS,
+    TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, joinDateTime, longTime, matchesQuery,
+    monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -83,6 +83,18 @@ test('client-side search matches name, phone and candidate number', () => {
     assert.ok(matchesQuery(card, ''));
     assert.ok(!matchesQuery(card, 'Астана'));
     assert.ok(!matchesQuery(card, '99'));
+});
+
+test('channel labels: palette from the owner (blue, red, pink) with whole Tailwind classes', () => {
+    // Владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый; свои каналы — цветом из палитры.
+    assert.deepEqual(CHANNEL_COLOR_CODES, ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'violet', 'pink', 'gray']);
+    assert.equal(CHANNEL_COLORS.blue.dot, 'bg-blue-500');
+    assert.equal(CHANNEL_COLORS.red.dot, 'bg-red-500');
+    assert.equal(CHANNEL_COLORS.pink.dot, 'bg-pink-500');
+    for (const code of CHANNEL_COLOR_CODES) {
+        assert.ok(CHANNEL_COLORS[code].label && /^bg-\S+ text-\S+ ring-1 ring-\S+$/.test(CHANNEL_COLORS[code].pill), code);
+    }
+    assert.equal(channelTone('unknown'), CHANNEL_COLORS.gray);       // цвет из будущего — серый, не падение
 });
 
 test('status «Недозвон / не ответил» covers WhatsApp, the call outcome stays «Недозвон»', () => {

@@ -525,7 +525,8 @@ class HiringService:
             return queries.get_card(cursor, card_id)
 
     def edit_card(self, ctx, card_id, payload):
-        """Поля карточки: ФИО, WhatsApp, город, вакансия, «кто привёл», комментарий, дата следующего контакта."""
+        """Поля карточки: ФИО, WhatsApp, город, вакансия, «кто привёл», комментарий, дата следующего контакта,
+        метка-канал."""
         payload = payload or {}
         now = self._now()
         with self._cursor() as cursor:
@@ -560,8 +561,83 @@ class HiringService:
                     raise HiringError('HIRING_NEED_OFFICE_DATE', 'Укажите дату и время визита')
                 fields['office_visit_at'] = moment
                 fields['substage'] = 'expected'
+            if 'channel_id' in payload:
+                fields['channel_id'] = self._card_channel(cursor, card, payload.get('channel_id'))
             queries.update_card(cursor, card_id, **fields)
             return queries.get_card(cursor, card_id)
+
+    @staticmethod
+    def _card_channel(cursor, card, raw):
+        """Метка-канал карточки (владелец 09.11.2026): канал из справочника или None — снять метку.
+        Выключенный канал новым карточкам не ставится, а уже стоящий остаётся, пока его не сменят."""
+        if raw in (None, ''):
+            return None
+        channel_id = _int(raw)
+        if channel_id and channel_id == card.get('channel_id'):
+            return channel_id
+        channel = queries.get_channel(cursor, channel_id) if channel_id else None
+        if not channel or not channel['is_active']:
+            raise HiringError('HIRING_BAD_CHANNEL', 'Такого канала нет в справочнике')
+        return channel_id
+
+    # ─── Каналы — метки откликов (владелец 09.11.2026) ──────────────────────
+
+    @staticmethod
+    def _channel_fields(payload, *, partial):
+        """Имя и цвет канала из запроса: имя — до CHANNEL_NAME_MAX знаков, цвет — из палитры."""
+        fields = {}
+        if not partial or 'name' in payload:
+            name = ' '.join(str(payload.get('name') or '').split())
+            if not name:
+                raise HiringError('HIRING_BAD_CHANNEL', 'Название канала пустое')
+            if len(name) > rules.CHANNEL_NAME_MAX:
+                raise HiringError('HIRING_BAD_CHANNEL', 'Название канала — не длиннее %d знаков' % rules.CHANNEL_NAME_MAX)
+            fields['name'] = name
+        if not partial or 'color' in payload:
+            color = str(payload.get('color') or '').strip()
+            if color not in rules.CHANNEL_COLORS:
+                raise HiringError('HIRING_BAD_CHANNEL', 'Цвет канала — один из палитры')
+            fields['color'] = color
+        if partial and 'is_active' in payload:
+            fields['is_active'] = bool(payload.get('is_active'))
+        return fields
+
+    def add_channel(self, ctx, payload):
+        """Новый канал. Имя выключенного канала включает его заново (с новым цветом) — второй строкой
+        с тем же именем он не заводится."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Справочники ведёт руководитель рекрутинга')
+        fields = self._channel_fields(payload or {}, partial=False)
+        now = self._now()
+        with self._cursor() as cursor:
+            cursor.execute("LOCK TABLE hiring_channels IN SHARE ROW EXCLUSIVE MODE")
+            same = queries.channel_by_name(cursor, fields['name'])
+            if same and same['is_active']:
+                raise HiringError('HIRING_DUPLICATE', 'Канал «%s» уже есть' % same['name'], 409)
+            if same:
+                queries.update_channel(cursor, same['id'], now, name=fields['name'], color=fields['color'], is_active=True)
+            else:
+                queries.create_channel(cursor, fields['name'], fields['color'], ctx['user_id'], now)
+            return queries.list_channels(cursor)
+
+    def edit_channel(self, ctx, channel_id, payload):
+        """Имя, цвет или «выключен». Карточки с меткой видят новое имя и цвет сразу — метка ссылкой."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Справочники ведёт руководитель рекрутинга')
+        fields = self._channel_fields(payload or {}, partial=True)
+        now = self._now()
+        with self._cursor() as cursor:
+            cursor.execute("LOCK TABLE hiring_channels IN SHARE ROW EXCLUSIVE MODE")
+            channel = queries.get_channel(cursor, channel_id)
+            if not channel:
+                raise HiringError('HIRING_NOT_FOUND', 'Канал не найден', 404)
+            if 'name' in fields:
+                same = queries.channel_by_name(cursor, fields['name'])
+                if same and int(same['id']) != int(channel_id):
+                    raise HiringError('HIRING_DUPLICATE', 'Канал «%s» уже есть' % same['name'], 409)
+            if fields:
+                queries.update_channel(cursor, channel_id, now, **fields)
+            return queries.list_channels(cursor)
 
     def move(self, ctx, card_id, target, payload):
         """Переход по этапам (ТЗ 4.2) со всеми следствиями."""

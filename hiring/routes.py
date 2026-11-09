@@ -27,6 +27,7 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/cards?key=               список карточек за цифрой дашборда
     GET    /reports/motivation[/export]      начисления месяца
     …/people, /sources, /vacancies, /reasons, /groups, /plans, /integrations — настройки
+    POST   /channels, PATCH /channels/<id>   каналы — метки откликов с цветом; ставятся PATCH /cards/<id> {channel_id}
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
     PUT    /whatsapp/settings                кто отвечает с телефона (его первый ответ берёт карточку в работу)
     GET    /cards/<id>/whatsapp              переписка карточки с номером найма
@@ -156,6 +157,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             'sources': _json(queries.list_sources(cursor, active_only=not caps['manage'])),
             'vacancies': _json(queries.list_vacancies(cursor, active_only=not caps['manage'])),
             'reasons': _json(queries.list_reasons(cursor, active_only=not caps['manage'])),
+            'channels': _json(queries.list_channels(cursor, active_only=not caps['manage'])),
             'groups': _json(queries.list_groups(cursor, active_only=not caps['manage'])),
             'recruiters': _json(queries.recruiters_with_cards(cursor)),
             'cities': queries.distinct_cities(cursor),
@@ -744,6 +746,15 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             queries.update_reason(cursor, reason_id, **fields)
             rows = queries.list_reasons(cursor)
         return jsonify({'items': _json(rows)})
+
+    @hiring_route('/channels', methods=('POST',))
+    def hiring_channel_add(ctx):
+        """Канал — метка откликов с цветом (владелец 09.11.2026): имя и цвет из палитры."""
+        return jsonify({'items': _json(service.add_channel(ctx, _body()))}), 201
+
+    @hiring_route('/channels/<int:channel_id>', methods=('PATCH',))
+    def hiring_channel_edit(channel_id, ctx):
+        return jsonify({'items': _json(service.edit_channel(ctx, channel_id, _body()))})
 
     @hiring_route('/groups')
     def hiring_groups(ctx):

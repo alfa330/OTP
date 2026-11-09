@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, CircleAlert, Loader2, SlidersHorizontal } from 'lucide-react';
 import { IosHint, IosModal, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
-import { monthLabel, shiftMonth } from './hiringMeta';
+import { channelTone, monthLabel, shiftMonth } from './hiringMeta';
 
 /*
  * Общие детали интерфейса раздела «Воронка найма» — одни на все вкладки.
@@ -48,6 +48,17 @@ const PILL_TONES = {
 
 export const Pill = ({ tone = 'slate', children, className = '', title }) => (
     <span title={title} className={`inline-flex max-w-full items-center gap-1 truncate rounded-full px-2 py-0.5 text-[12px] font-medium ${PILL_TONES[tone] || PILL_TONES.slate} ${className}`}>
+        {children}
+    </span>
+);
+
+/* Метка-канал отклика (владелец 09.11.2026): цветная точка и название — цвет из справочника «Каналы».
+   children — хвост внутри плашки (стрелка меню у того, кто может сменить метку). */
+export const ChannelPill = ({ name, color, className = '', children }) => (
+    <span title={`Канал: ${name}`}
+          className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${channelTone(color).pill} ${className}`}>
+        <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${channelTone(color).dot}`} />
+        <span className="truncate">{name}</span>
         {children}
     </span>
 );

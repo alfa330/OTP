@@ -364,6 +364,39 @@ def test_upload_reports_and_settings(client):
     assert client.post('/api/hiring/integrations/nope/run', headers=lead).status_code == 404
 
 
+def test_channels_through_routes(client):
+    """Каналы — метки откликов с цветом (владелец 09.11.2026): справочник руководителя и метка карточки ручками."""
+    lead, rec = as_user(HR_HEAD), as_user(REC1)
+    boot = client.get('/api/hiring', headers=rec).get_json()
+    assert [(c['name'], c['color']) for c in boot['dictionaries']['channels']] == [('Таргет', 'blue'), ('hh', 'red'), ('Каспи', 'pink')]
+    added = client.post('/api/hiring/channels', json={'name': 'OLX', 'color': 'green'}, headers=lead)
+    assert added.status_code == 201 and added.get_json()['items'][-1]['name'] == 'OLX'
+    olx = added.get_json()['items'][-1]
+    assert client.post('/api/hiring/channels', json={'name': 'olx', 'color': 'green'}, headers=lead).status_code == 409
+    assert client.post('/api/hiring/channels', json={'name': 'X', 'color': 'black'}, headers=lead).get_json()['code'] == 'HIRING_BAD_CHANNEL'
+    assert client.post('/api/hiring/channels', json={'name': 'X', 'color': 'red'}, headers=rec).status_code == 403
+    assert client.patch('/api/hiring/channels/%s' % olx['id'], json={'color': 'teal'}, headers=rec).status_code == 403
+    off = client.patch('/api/hiring/channels/%s' % olx['id'], json={'is_active': False}, headers=lead).get_json()['items']
+    assert [c['is_active'] for c in off if c['id'] == olx['id']] == [False]
+    # Рекрутер видит в выборе только включённые; руководитель — все (выключенные нужны настройкам).
+    assert 'OLX' not in [c['name'] for c in client.get('/api/hiring', headers=rec).get_json()['dictionaries']['channels']]
+    assert 'OLX' in [c['name'] for c in client.get('/api/hiring', headers=lead).get_json()['dictionaries']['channels']]
+
+    manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
+    card = client.post('/api/hiring/cards', json={'phone': '8 705 321 00 01', 'source_id': manual['id']}, headers=rec).get_json()['card']
+    assert card['channel_id'] is None and client.post('/api/hiring/cards/%s/take' % card['id'], headers=rec).status_code == 200
+    target = boot['dictionaries']['channels'][0]
+    labeled = client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': target['id']}, headers=rec)
+    assert labeled.status_code == 200
+    assert (labeled.get_json()['card']['channel_name'], labeled.get_json()['card']['channel_color']) == ('Таргет', 'blue')
+    refused = client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': olx['id']}, headers=rec)
+    assert refused.status_code == 400 and refused.get_json()['code'] == 'HIRING_BAD_CHANNEL'
+    in_work = next(column for column in client.get('/api/hiring/board', headers=rec).get_json()['columns'] if column['stage'] == 'in_work')
+    assert [(c['channel_name'], c['channel_color']) for c in in_work['cards']] == [('Таргет', 'blue')]
+    assert client.get('/api/hiring/cards/%s' % card['id'], headers=rec).get_json()['card']['channel_name'] == 'Таргет'
+    assert client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': None}, headers=rec).get_json()['card']['channel_id'] is None
+
+
 def test_external_responses(client):
     body = {'source': 'kaspi', 'items': [{'phone': '8 705 777 00 01', 'name': 'Kaspi Один', 'city': 'Алматы', 'vacancy': 'Водитель'},
                                         {'phone': 'мусор'}]}

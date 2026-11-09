@@ -1,19 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    ArrowRight, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming, PhoneMissed,
-    PhoneOutgoing, Play, RefreshCw, Repeat, UserCog, X,
+    ArrowRight, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
+    PhoneMissed, PhoneOutgoing, Play, Plus, RefreshCw, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
-import { IosHint, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
+import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
-    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES, MOTIVATION_LABELS,
-    MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays,
-    codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime, openICorePhoneCall, reasonKindFor, shortTime,
-    splitDateTime, todayIso,
+    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, CHANNEL_COLOR_CODES, FINAL_STAGES,
+    MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS,
+    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime,
+    openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
 } from './hiringMeta';
-import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { ChannelPill, DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 import { WhatsAppThread } from './WhatsAppPanel';
 
 /*
@@ -54,8 +54,41 @@ const DateTimeField = ({ date, time, onDate, onTime }) => (
     </div>
 );
 
+/* Метка-канал отклика (владелец 09.11.2026): откуда кандидат узнал о вакансии — таргет, hh, Kaspi.
+   Меню из справочника «Настройки → Каналы» ставит закреплённый рекрутер или руководитель; остальным
+   метка видна плашкой. Контактам из баз метка ни к чему — у них пункта нет, пока метку не поставили. */
+const CHANNEL_DOT_ICONS = Object.fromEntries(CHANNEL_COLOR_CODES.map((code) => [code, () => (
+    <span aria-hidden="true" className={`mx-[3px] h-2.5 w-2.5 shrink-0 rounded-full ${channelTone(code).dot}`} />
+)]));
+
+const ChannelPicker = ({ card, channels, canEdit, onChange }) => {
+    const current = card.channel_id ? <ChannelPill name={card.channel_name} color={card.channel_color} /> : null;
+    const offered = channels.filter((channel) => channel.is_active !== false);
+    if (!canEdit || (!card.channel_id && (card.kind !== 'response' || offered.length === 0))) return current;
+    const items = [
+        ...offered.map((channel) => ({
+            key: `channel-${channel.id}`, label: channel.name, icon: CHANNEL_DOT_ICONS[channel.color] || CHANNEL_DOT_ICONS.gray,
+            checked: channel.id === card.channel_id, onSelect: () => onChange(channel.id),
+        })),
+        card.channel_id ? { key: 'channel-none', label: 'Без метки', separatorBefore: offered.length > 0, onSelect: () => onChange(null) } : null,
+    ];
+    return (
+        <IosMenu label="Канал отклика" align="left" items={items}
+                 trigger={{
+                     className: 'inline-flex rounded-full transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70',
+                     text: card.channel_id
+                         ? <ChannelPill name={card.channel_name} color={card.channel_color}><ChevronDown size={12} className="-mr-0.5 shrink-0 opacity-60" /></ChannelPill>
+                         : (
+                             <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[12px] font-medium text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-700">
+                                 <Plus size={12} /> Канал
+                             </span>
+                         ),
+                 }} />
+    );
+};
+
 /* Переход с его обязательными полями (ТЗ 4.1, 4.2). */
-const MoveDialog = ({ open, onClose, card, target, boot, caps, api, toast, onDone }) => {
+const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone }) => {
     const [form, setForm] = useState({});
     const [saving, setSaving] = useState(false);
     useEffect(() => {
@@ -666,6 +699,14 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             toast(errorOf(requestError, 'Подстатус не изменён'), 'error');
         }
     };
+    const setChannel = async (channelId) => {
+        try {
+            await api.patch(`/cards/${card.id}`, { channel_id: channelId });
+            changed();
+        } catch (requestError) {
+            toast(errorOf(requestError, 'Метка не изменена'), 'error');
+        }
+    };
     const take = async () => {
         try {
             await api.post(`/cards/${card.id}/take`);
@@ -732,6 +773,7 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
                         <div className="flex flex-wrap items-center gap-2">
                             <Pill tone={STAGE_TONES[card.stage]} className="text-[13px]">{STAGE_LABELS[card.stage]}</Pill>
                             {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
+                            <ChannelPicker card={card} channels={boot.dictionaries?.channels || []} canEdit={isOwnerOrLead} onChange={setChannel} />
                             {card.repeat_of_card_id && <Pill tone="blue"><Repeat size={11} /> повторное обращение</Pill>}
                             {card.no_answer_suggest && <Pill tone="amber">3 недозвона подряд — предложить «Отказ: не выходит на связь»</Pill>}
                             <div className="ml-auto flex flex-wrap items-center gap-2">

@@ -6,7 +6,7 @@ import {
     POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, codeOf, daysSince, errorOf, initials, openICorePhoneCall,
     shortTime,
 } from './hiringMeta';
-import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
+import { ChannelPill, FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
 /*
  * Вкладка «Воронка» (ТЗ 4): канбан из десяти колонок ТЗ 4.1 в его порядке. Карточка идёт
@@ -67,6 +67,7 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
                 )}
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} />}
                 {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
                 {card.source_name && <Pill>{card.source_name}</Pill>}
                 {card.repeat_of_card_id && <Pill tone="blue" title="Повторное обращение"><Repeat size={11} /> повторно</Pill>}

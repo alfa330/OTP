@@ -763,6 +763,99 @@ def test_dashboard_counts_no_answer_status(world):
     assert dict(rules.CALL_RESULTS)['no_answer'] == 'Недозвон'
 
 
+# ─── Каналы — метки откликов (владелец 09.11.2026) ─────────────────────────────
+
+def test_channels_directory_and_card_label(world):
+    """Владелец 09.11.2026: каждому отклику — метка-канал с цветом (Таргет — синий, hh — красный, Каспи —
+    розовый); справочник в «Настройках», где руководитель сам добавляет канал и ставит ему цвет."""
+    service = world['service']
+    lead, me, other = ctx_of(world, LEAD_GRANT), ctx_of(world, REC1), ctx_of(world, REC2)
+    with world['db']._get_cursor() as cur:
+        seeded = queries.list_channels(cur)
+    # Засев один раз: фикстура разворачивает схему дважды, как перезапуск прода.
+    assert [(c['name'], c['color'], c['is_active'], c['position']) for c in seeded] \
+        == [('Таргет', 'blue', True, 0), ('hh', 'red', True, 1), ('Каспи', 'pink', True, 2)]
+    target, hh_channel = seeded[0], seeded[1]
+
+    # Справочник ведёт руководитель: имя без лишних пробелов, цвет из палитры, без дублей по регистру.
+    with pytest.raises(HiringError) as caught:
+        service.add_channel(me, {'name': 'OLX', 'color': 'green'})
+    assert caught.value.status == 403
+    for bad in ({'name': '  ', 'color': 'green'}, {'name': 'OLX', 'color': '#00ff00'}, {'name': 'x' * 41, 'color': 'green'},
+                {'name': 'OLX'}):
+        with pytest.raises(HiringError) as caught:
+            service.add_channel(lead, bad)
+        assert caught.value.code == 'HIRING_BAD_CHANNEL'
+    with pytest.raises(HiringError) as caught:
+        service.add_channel(lead, {'name': 'HH', 'color': 'green'})
+    assert caught.value.code == 'HIRING_DUPLICATE' and caught.value.status == 409
+    items = service.add_channel(lead, {'name': '  OLX   объявления ', 'color': 'green'})
+    olx = items[-1]
+    assert (olx['name'], olx['color'], olx['position'], olx['is_active']) == ('OLX объявления', 'green', 3, True)
+    items = service.edit_channel(lead, olx['id'], {'name': 'OLX', 'color': 'orange'})
+    assert [(c['name'], c['color']) for c in items if c['id'] == olx['id']] == [('OLX', 'orange')]
+    with pytest.raises(HiringError) as caught:
+        service.edit_channel(lead, olx['id'], {'name': 'hh'})
+    assert caught.value.code == 'HIRING_DUPLICATE'
+    with pytest.raises(HiringError) as caught:
+        service.edit_channel(lead, olx['id'], {'color': 'black'})
+    assert caught.value.code == 'HIRING_BAD_CHANNEL'
+    with pytest.raises(HiringError) as caught:
+        service.edit_channel(lead, 999999, {'color': 'red'})
+    assert caught.value.status == 404
+    with pytest.raises(HiringError) as caught:
+        service.edit_channel(me, olx['id'], {'is_active': False})
+    assert caught.value.status == 403
+
+    # Метку ставит закреплённый рекрутер или руководитель; карточка отдаёт имя и цвет канала.
+    _outcome, card = add_response(world, REC1, '8 705 300 00 01')
+    with pytest.raises(HiringError) as caught:            # в пуле карточку правит только руководитель
+        service.edit_card(me, card['id'], {'channel_id': target['id']})
+    assert caught.value.status == 403
+    assert service.edit_card(lead, card['id'], {'channel_id': target['id']})['channel_name'] == 'Таргет'
+    card = service.take(me, card['id'])
+    assert (card['channel_id'], card['channel_name'], card['channel_color']) == (target['id'], 'Таргет', 'blue')
+    card = service.edit_card(me, card['id'], {'channel_id': str(hh_channel['id'])})
+    assert (card['channel_name'], card['channel_color']) == ('hh', 'red')
+    with pytest.raises(HiringError) as caught:
+        service.edit_card(other, card['id'], {'channel_id': target['id']})
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+    for bad in ('abc', 999999, True):
+        with pytest.raises(HiringError) as caught:
+            service.edit_card(me, card['id'], {'channel_id': bad})
+        assert caught.value.code == 'HIRING_BAD_CHANNEL'
+
+    # Выключенный канал новым карточкам не ставится, а у помеченных остаётся — и с новым цветом.
+    service.edit_channel(lead, hh_channel['id'], {'is_active': False, 'color': 'violet'})
+    with world['db']._get_cursor() as cur:
+        assert [c['name'] for c in queries.list_channels(cur, active_only=True)] == ['Таргет', 'Каспи', 'OLX']
+        kept = queries.get_card(cur, card['id'])
+        assert (kept['channel_name'], kept['channel_color']) == ('hh', 'violet')
+    assert service.edit_card(me, card['id'], {'channel_id': hh_channel['id'], 'city': 'Астана'})['channel_id'] == hh_channel['id']
+    _outcome, fresh = add_response(world, REC1, '8 705 300 00 02')
+    fresh = service.take(me, fresh['id'])
+    with pytest.raises(HiringError) as caught:
+        service.edit_card(me, fresh['id'], {'channel_id': hh_channel['id']})
+    assert caught.value.code == 'HIRING_BAD_CHANNEL'
+    # Имя выключенного канала включает его заново, а не заводит второй с тем же именем.
+    items = service.add_channel(lead, {'name': 'HH', 'color': 'red'})
+    assert len(items) == 4
+    assert [(c['name'], c['color'], c['is_active']) for c in items if c['id'] == hh_channel['id']] == [('HH', 'red', True)]
+    # Снять метку — None или пустое значение.
+    assert service.edit_card(me, card['id'], {'channel_id': None})['channel_id'] is None
+    assert service.edit_card(me, fresh['id'], {'channel_id': target['id']})['channel_id'] == target['id']
+    assert service.edit_card(me, fresh['id'], {'channel_id': ''})['channel_name'] is None
+
+    # Доска и рабочий стол отдают метку вместе с карточкой.
+    service.edit_card(me, fresh['id'], {'channel_id': target['id'], 'next_contact_at': NOW.isoformat()})
+    with world['db']._get_cursor() as cur:
+        columns, counts = queries.board(cur, {'lead': True}, LEAD_GRANT, {})
+        assert counts['in_work'] == 2
+        assert [(c['channel_name'], c['channel_color']) for c in columns['in_work'] if c['id'] == fresh['id']] == [('Таргет', 'blue')]
+        tasks = queries.desk_tasks(cur, REC1, datetime(2026, 10, 15), datetime(2026, 10, 16))
+        assert [(c['id'], c['channel_name']) for c in tasks] == [(fresh['id'], 'Таргет')]
+
+
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
 
 def _webhook(general_call_id, phone, *, disposition='ANSWER', billsec=120, call_type='1', line='8501', start=1792000000):

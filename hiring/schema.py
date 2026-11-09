@@ -400,6 +400,24 @@ _STATEMENTS = [
     # Файл сообщения от шлюза приходит по id сообщения (владелец 09.11.2026: файлы и голосовые в карточке):
     # путь в бакете, тип и расшифровка — в media; сам файл — в бакете, как фото задач.
     "CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_wa_id ON hiring_wa_messages (wa_id)",
+
+    # Каналы — метки откликов с цветом (владелец 09.11.2026): откуда кандидат узнал о вакансии (таргет,
+    # hh, Kaspi). Справочник ведёт руководитель, выключенный канал карточки помнят; у карточки — одна
+    # метка или ни одной. Имя уникально без учёта регистра: «Таргет» и «таргет» — один канал.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_channels (
+        id               SERIAL PRIMARY KEY,
+        name             VARCHAR(40) NOT NULL,
+        color            VARCHAR(16) NOT NULL,
+        is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+        position         INTEGER NOT NULL DEFAULT 0,
+        created_by       INTEGER,
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_channels_name ON hiring_channels (lower(name))",
+    "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS channel_id INTEGER",
 ]
 
 
@@ -436,6 +454,15 @@ def _seed(cursor):
             VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s)
             ON CONFLICT (code) DO NOTHING
         """, (code, name, kind, platform, now))
+    # Каналы — один раз, в пустой справочник: дальше его ведёт руководитель (удалять нельзя, только
+    # выключать — поэтому пустым после засева он не станет и метки не вернутся сами).
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_channels)")
+    if not cursor.fetchone()[0]:
+        for position, (name, color) in enumerate(rules.SEED_CHANNELS):
+            cursor.execute("""
+                INSERT INTO hiring_channels (name, color, position, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (name, color, position, now, now))
     for code in ('hh', 'olx', 'webhook', 'whatsapp'):
         cursor.execute("""
             INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s)

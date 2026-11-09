@@ -37,6 +37,25 @@ export const SUBSTAGE_LABELS = {
 };
 export const TOUCH_RESULT_LABELS = { dial: 'Дозвон', no_answer: 'Недозвон' };
 
+/* Каналы — метки откликов (владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый; справочник
+   с цветом — в «Настройках → Каналы»). Цвет — из палитры, как у списков «Напоминаний»: коды те же, что
+   rules.CHANNEL_COLORS на сервере. Метка — светлая плашка с цветной точкой: оттенок различим и у близких
+   цветов (красный и розовый), а плашка не кричит рядом с подстатусом. Классы — целыми строками, иначе
+   сборка Tailwind их не увидит. */
+export const CHANNEL_COLORS = {
+    red: { label: 'Красный', pill: 'bg-red-50 text-red-700 ring-1 ring-red-200/80', dot: 'bg-red-500' },
+    orange: { label: 'Оранжевый', pill: 'bg-orange-50 text-orange-700 ring-1 ring-orange-200/80', dot: 'bg-orange-500' },
+    yellow: { label: 'Жёлтый', pill: 'bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200/80', dot: 'bg-yellow-400' },
+    green: { label: 'Зелёный', pill: 'bg-green-50 text-green-700 ring-1 ring-green-200/80', dot: 'bg-green-500' },
+    teal: { label: 'Бирюзовый', pill: 'bg-teal-50 text-teal-700 ring-1 ring-teal-200/80', dot: 'bg-teal-500' },
+    blue: { label: 'Синий', pill: 'bg-blue-50 text-blue-700 ring-1 ring-blue-200/80', dot: 'bg-blue-500' },
+    violet: { label: 'Фиолетовый', pill: 'bg-violet-50 text-violet-700 ring-1 ring-violet-200/80', dot: 'bg-violet-500' },
+    pink: { label: 'Розовый', pill: 'bg-pink-50 text-pink-700 ring-1 ring-pink-200/80', dot: 'bg-pink-500' },
+    gray: { label: 'Серый', pill: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200/80', dot: 'bg-slate-400' },
+};
+export const CHANNEL_COLOR_CODES = Object.keys(CHANNEL_COLORS);
+export const channelTone = (color) => CHANNEL_COLORS[color] || CHANNEL_COLORS.gray;
+
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),
    просрочка — янтарный. Рабочие этапы не красятся. */
 export const STAGE_TONES = { refused: 'red', dropped: 'red', hired: 'green' };
