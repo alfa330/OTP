@@ -262,7 +262,9 @@ class MediaAnnotationTests(unittest.TestCase):
     def test_video_request_carries_its_own_prompt_and_limit(self):
         with mock.patch.object(config, "CLAUDE_MODEL_VISION", "glm-5.3-flash"):
             body = media.video_request_body("QUJD", "video/mp4")
-        self.assertEqual(body["payload"]["max_tokens"], config.VIDEO_MAX_TOKENS)
+        # Лимит ролика — бюджет ответа; запас на рассуждения GLM прибавляет адаптер.
+        self.assertEqual(body["payload"]["max_tokens"],
+                         config.VIDEO_MAX_TOKENS + config.ZAI_REASONING_TOKENS)
         system = body["payload"]["messages"][0]["content"]
         # промпт обязан называть поля: схему Z.ai не соблюдает, и держит контракт
         # только текст. Первая версия была написана прозой — модель вернула рассказ,

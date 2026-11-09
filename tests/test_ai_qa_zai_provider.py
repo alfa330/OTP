@@ -114,6 +114,22 @@ class BodyTests(unittest.TestCase):
         self.assertNotIn("_cache_ttl_s", body)
         self.assertNotIn("cache_control", json.dumps(body["payload"]))
 
+    def test_max_tokens_is_answer_budget_plus_reasoning_reserve(self):
+        """Рассуждения GLM списываются из max_tokens, а лимиты вызывающих писались под
+        Claude без мышления. Оценке давали 8 000 на всё — на длинных разговорах
+        рассуждения их съедали, и за неделю 60 оценок оборвались посреди JSON
+        (звонку 14722 не хватило 43 токенов). Лимит вызывающего — бюджет ответа."""
+        payload = self._body(max_tokens=8000)["payload"]
+        self.assertEqual(payload["max_tokens"], 8000 + config.ZAI_REASONING_TOKENS)
+        self.assertGreaterEqual(config.ZAI_REASONING_TOKENS, 8000)
+
+    def test_timeout_covers_the_whole_evaluation_limit(self):
+        """Без потока ответ приходит целиком в конце, так что таймаут — потолок времени
+        генерации. Полный лимит оценки на самой медленной замеренной скорости (43 ток/с,
+        p10 за 03–09.11.2026) обязан в него помещаться: иначе длинный, но успешный
+        ответ превратится в обрыв соединения, а запас — в пустой звук."""
+        self.assertGreaterEqual(config.ZAI_TIMEOUT, (8000 + config.ZAI_REASONING_TOKENS) / 43)
+
 class UsageTests(unittest.TestCase):
     def test_reasoning_already_inside_completion_tokens(self):
         """Замер: completion_tokens 49, из них reasoning_tokens 27. Прибавить их к
@@ -185,6 +201,24 @@ class PostBodyTests(unittest.TestCase):
         with patch, self.assertRaises(providers.ZaiError) as ctx:
             llm.post_body(self._body())
         self.assertIn("не JSON", str(ctx.exception))
+
+    def test_answer_cut_by_the_limit_is_named_so(self):
+        """Ответ, оборванный лимитом, приходит с HTTP 200 и finish_reason=length. Раньше
+        в журнале это читалось как «ответ не JSON (Unterminated string …)» — и искали
+        сбой формата, а не съеденный рассуждениями запас."""
+        response = self._response(content='{"per_criterion": [{"idx": 0, "evidence_quote": "Сәлем',
+                                  finish="length")
+        response.json.return_value["usage"] = {
+            "prompt_tokens": 10, "completion_tokens": 24000,
+            "completion_tokens_details": {"reasoning_tokens": 21000}}
+        patch, client = self._post(response)
+        with patch, self.assertRaises(providers.ZaiError) as ctx:
+            llm.post_body(self._body())
+        message = str(ctx.exception)
+        self.assertIn("оборван лимитом", message)
+        self.assertIn(f"max_tokens={client.post.call_args.kwargs['json']['max_tokens']}", message)
+        self.assertIn("рассуждения 21000 из 24000", message)
+        self.assertNotIn("не JSON", message)
 
     def test_caller_timeout_is_a_floor_not_a_ceiling(self):
         """Интерактивная оценка зашивает 120 с (evaluator.py:230) — они калибровались

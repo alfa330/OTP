@@ -427,6 +427,14 @@ def _vertex_post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
 # Токены «мышления» уже включены в completion_tokens (замер: 49 всего, из них 27
 # reasoning), поэтому в выход они попадают сами — прибавлять их отдельно нельзя,
 # иначе счёт удвоится.
+#
+# 5. И по той же причине рассуждения СПИСЫВАЮТСЯ ИЗ max_tokens. Лимиты вызывающих
+#    (оценка — 8 000) писались под Claude, где мышления нет, и на длинных разговорах
+#    рассуждения их съедали: ответ обрывался посреди JSON с finish_reason=length и
+#    HTTP 200 (09.11.2026: 60 упавших оценок за неделю, «внутренняя ошибка
+#    ИИ-оценки» в карточке). Поэтому max_tokens вызывающего здесь — бюджет ОТВЕТА,
+#    как у остальных провайдеров, а запас на рассуждения прибавляет адаптер
+#    (ZAI_REASONING_TOKENS).
 
 _ZAI_LOCK = threading.Lock()
 _ZAI_CLIENT: httpx.Client | None = None
@@ -457,6 +465,7 @@ def _zai_build_body(*, model, system, user, schema, max_tokens=8000, cache_syste
     `schema` в запрос НЕ уходит (см. факт 2 выше) — она уже описана в системном
     промпте оценщика. `cache_system` и `cache_ttl` игнорируются: кеш автоматический.
     `thinking` здесь означает уровень рассуждений, а не бюджет токенов, как у Vertex.
+    `max_tokens` — бюджет ответа; запас на рассуждения прибавляется (факт 5 выше).
 
     `user` — строка либо список content-блоков в форме Anthropic (её собирает
     call_qa/media.py). Блоки переводятся в форму Z.ai; см. _zai_content.
@@ -468,7 +477,7 @@ def _zai_build_body(*, model, system, user, schema, max_tokens=8000, cache_syste
             "model": model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": _zai_content(user)}],
-            "max_tokens": int(max_tokens),
+            "max_tokens": int(max_tokens) + config.ZAI_REASONING_TOKENS,
             "temperature": config.ZAI_TEMPERATURE,
             "reasoning_effort": _zai_effort(thinking if thinking is not None else effort),
             "response_format": {"type": "json_object"},
@@ -591,6 +600,14 @@ def _zai_post_body(body: dict, *, timeout=120.0, include_meta=False) -> dict:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
+        if finish == "length":
+            # Модель не «написала не JSON» — лимит кончился посреди ответа (факт 5).
+            # Так и называем: иначе разбор ищет сбой формата там, где рассуждения
+            # съели запас ZAI_REASONING_TOKENS.
+            usage = _zai_usage(answer)
+            raise ZaiError(200, f"ответ оборван лимитом max_tokens={payload.get('max_tokens')}: "
+                                f"рассуждения {usage['thoughts_tokens']} из "
+                                f"{usage['output_tokens']} токенов") from exc
         raise ZaiError(200, f"ответ не JSON ({exc}): {text[:200]}") from exc
     if include_meta:
         parsed["_llm_meta"] = {
