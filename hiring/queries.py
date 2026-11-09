@@ -1380,6 +1380,28 @@ def wa_last_inbound(cursor, key, at):
     return cursor.fetchone()[0]
 
 
+def wa_our_message(cursor, phones, since, auto_gap):
+    """Есть ли наше сообщение человеку с номера WhatsApp найма не раньше since (владелец 09.11.2026:
+    переписку мы видим сами — сообщение с нашей стороны засчитывается за связь с кандидатом, нажимать
+    «Написать в WhatsApp» не обязательно). Чат — по номерам карточки, как во вкладке «WhatsApp»: так
+    видно и переписку, которую рекрутер начал сам. Автоответ WhatsApp Business (быстрее auto_gap после
+    сообщения кандидата) и удалённое у всех — не в счёт."""
+    phones = [p for p in dict.fromkeys(phones or ()) if p]
+    if not phones:
+        return False
+    cursor.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM hiring_wa_messages m
+             WHERE m.chat_key = ANY(%s) AND m.from_me AND m.deleted_at IS NULL
+               AND (%s::timestamp IS NULL OR m.sent_at >= %s)
+               AND NOT EXISTS (SELECT 1 FROM hiring_wa_messages i
+                                WHERE i.chat_key = m.chat_key AND NOT i.from_me
+                                  AND i.sent_at <= m.sent_at AND i.sent_at > m.sent_at - %s)
+        )
+    """, (phones, since, since, auto_gap))
+    return bool(cursor.fetchone()[0])
+
+
 def wa_phone_touched(cursor, card_id, day_start, day_end):
     """Касание «ответ с телефона» за эти сутки уже есть: переписка — одно касание в день."""
     cursor.execute("""

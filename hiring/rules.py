@@ -88,6 +88,8 @@ TOUCH_CALL, TOUCH_WHATSAPP, TOUCH_COMMENT, TOUCH_REPEAT, TOUCH_SYSTEM = (
 TOUCH_KINDS = (TOUCH_CALL, TOUCH_WHATSAPP, TOUCH_COMMENT, TOUCH_REPEAT, TOUCH_SYSTEM)
 # Касания, которые делает сам рекрутер: ими считается «есть хотя бы одно касание» (ТЗ 4.2)
 # и срок без касаний (ТЗ 7.1). Повторный отклик приходит сам, системные записи — тем более.
+# Для перехода из «В работе» связью считается и наше сообщение с номера WhatsApp найма — переписку
+# портал видит сам (владелец 09.11.2026, service.move → queries.wa_our_message).
 HUMAN_TOUCHES = (TOUCH_CALL, TOUCH_WHATSAPP, TOUCH_COMMENT)
 CALL_RESULTS = (('dial', 'Дозвон'), ('no_answer', 'Недозвон'))
 CALL_RESULT_CODES = tuple(code for code, _ in CALL_RESULTS)
@@ -175,7 +177,7 @@ def check_transition(card, target, kinds, *, has_touch, payload):
     if rule.get('take') and card.get('recruiter_id'):
         raise TransitionError('HIRING_ALREADY_TAKEN', 'Уже в работе')
     if rule.get('needs_touch') and not has_touch:
-        raise TransitionError('HIRING_NO_TOUCH', 'Сначала зафиксируйте хотя бы одно касание: звонок, WhatsApp или комментарий')
+        raise TransitionError('HIRING_NO_TOUCH', 'Сначала свяжитесь с кандидатом: звонок, сообщение с номера WhatsApp найма или комментарий')
     if rule.get('substage_in') and card.get('substage') not in rule['substage_in']:
         raise TransitionError('HIRING_NOT_CAME', 'Переход только при отметке «Пришел»; не пришёл — назначьте новую дату или оформите отказ')
     for need in rule.get('needs', ()):

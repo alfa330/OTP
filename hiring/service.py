@@ -137,6 +137,16 @@ class HiringService:
         return card
 
     @staticmethod
+    def _wa_contact_since(card):
+        """С какого момента наше сообщение в WhatsApp засчитывается связью с кандидатом этой карточки:
+        с поступления — ответ с телефона, пока карточка ждала в пуле, тоже связь (так рекрутер и
+        работает); переписка до отклика — нет, как и при взятии в работу ответом с телефона. После
+        повторной активации — только новая, как и остальные касания (они считаются от taken_at)."""
+        if int(card.get('reactivations') or 0) > 0:
+            return card.get('taken_at')
+        return card.get('received_at')
+
+    @staticmethod
     def _is_owner_or_lead(ctx, card):
         caps = access.capabilities(ctx)
         return caps['lead'] or (caps['recruiter'] and card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']))
@@ -571,7 +581,9 @@ class HiringService:
         with self._cursor() as cursor:
             card = self._load_visible(cursor, ctx, card_id, lock=True)
             kinds = rules.actor_kinds(caps, card, ctx['user_id'], ctx.get('trainer_group_ids') or ())
-            has_touch = queries.has_human_touch(cursor, card_id, since=card.get('taken_at'))
+            has_touch = (queries.has_human_touch(cursor, card_id, since=card.get('taken_at'))
+                         or queries.wa_our_message(cursor, [card.get('phone'), card.get('whatsapp')],
+                                                   self._wa_contact_since(card), whatsapp.AUTO_REPLY_GAP))
             check = dict(payload)
             check['shifts_done'] = queries.count_shifts(cursor, card_id)
             try:

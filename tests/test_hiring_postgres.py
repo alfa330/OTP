@@ -1041,6 +1041,71 @@ def test_whatsapp_phone_reply_takes_card_into_work(world):
         == {'stored': 1}
 
 
+def test_whatsapp_our_message_lets_card_leave_in_work(world):
+    """Владелец 09.11.2026: переписку WhatsApp мы видим сами — если с нашей стороны есть хотя бы одно
+    сообщение человеку, переход из «В работе» не требует «Позвонить» или «Написать в WhatsApp».
+    Автоответ WhatsApp Business, удалённое у всех и переписка до отклика — не в счёт; после повторной
+    активации — только новое сообщение, как и остальные касания."""
+    service, clock = world['service'], world['clock']
+    me, lead = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT)
+    office = {'office_visit_at': '2026-10-16T10:00'}
+    # Карточка не из WhatsApp, чат рекрутер начинает сам: чат к карточке не привязан, касаний не пишет.
+    service.wa_events({'events': [wa_event('s0', phone='77057778899', from_me=True, ts=WA_TS - 3600, text='Помните нас?')]})
+    _outcome, card = add_response(world, REC1, '8 705 777 88 99')
+    card = service.take(me, card['id'])
+    with pytest.raises(HiringError) as caught:          # сообщение раньше отклика — не связь по этой карточке
+        service.move(me, card['id'], 'invited_office', office)
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+    service.wa_events({'events': [wa_event('s1', phone='77057778899', from_me=True, ts=WA_TS + 600, text='Здравствуйте! По вакансии')]})
+    card = service.move(me, card['id'], 'invited_office', office)
+    assert card['stage'] == 'invited_office'
+    with world['db']._get_cursor() as cur:
+        assert [t['kind'] for t in queries.card_touches(cur, card['id'])] == []
+
+    # Отклик WhatsApp: рекрутер ответил с телефона, пока карточка ждала в пуле («Отвечает с телефона» не
+    # выбран), в работу взял позже — ответ всё равно засчитан. У соседа был только автоответ — нет.
+    service.wa_events({'events': [wa_event('t1', phone='77057770011', text='Хочу работать'),
+                                  wa_event('t2', phone='77057770011', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!'),
+                                  wa_event('t3', phone='77057770011', from_me=True, ts=WA_TS + 300, text='Добрый день! Удобно созвониться?'),
+                                  wa_event('u1', phone='77057770022', text='Хочу работать'),
+                                  wa_event('u2', phone='77057770022', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!')]})
+    clock.now = NOW + timedelta(hours=1)
+    with world['db']._get_cursor() as cur:
+        answered = queries.open_card_by_phone(cur, '+77057770011')
+        silent = queries.open_card_by_phone(cur, '+77057770022')
+    service.take(me, answered['id'])
+    service.take(me, silent['id'])
+    with world['db']._get_cursor() as cur:
+        assert queries.card_touches(cur, answered['id']) == []
+    assert service.move(me, answered['id'], 'invited_office', office)['stage'] == 'invited_office'
+    with pytest.raises(HiringError) as caught:
+        service.move(me, silent['id'], 'invited_office', office)
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+    # Сообщение, удалённое у всех, — как не отправленное.
+    _outcome, gone = add_response(world, REC1, '8 705 777 00 44')
+    service.take(me, gone['id'])
+    service.wa_events({'events': [wa_event('w1', phone='77057770044', from_me=True, ts=WA_TS + 7200, text='Ошиблась чатом'),
+                                  wa_event('w2', phone='77057770044', from_me=True, ts=WA_TS + 7210, revoke_of='w1')]})
+    with pytest.raises(HiringError) as caught:
+        service.move(me, gone['id'], 'invited_office', office)
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+
+    # Повторная активация: прежняя переписка не в счёт, нужна новая связь.
+    with world['db']._get_cursor() as cur:
+        no_contact = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_CONTACT)
+    _outcome, back = add_response(world, REC1, '8 705 777 00 33')
+    service.wa_events({'events': [wa_event('v1', phone='77057770033', from_me=True, ts=WA_TS + 3700, text='Здравствуйте!')]})
+    service.take(me, back['id'])
+    service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    clock.now = NOW + timedelta(days=1)
+    back = service.move(lead, back['id'], 'in_work', {'reactivate': True, 'recruiter_id': REC1})
+    with pytest.raises(HiringError) as caught:
+        service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+    service.wa_events({'events': [wa_event('v2', phone='77057770033', from_me=True, ts=WA_TS + 86400 + 600, text='Вы ещё ищете работу?')]})
+    assert service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})['stage'] == 'refused'
+
+
 class FakeStorage:
     def __init__(self):
         self.files, self.deleted, self.signed = {}, [], []
