@@ -306,8 +306,10 @@ test('имущество: по пункту на пустое поле кажд�
     assert.equal(assetIssueKey({ key: 'y' }, 'city'), 'asset:y:city');
     const twins = assetIssues([full, { ...full, key: 'z', inventory_number: ' inv-1 ' }]);
     assert.deepEqual(keysOf(twins), ['asset:x:inventory_number', 'asset:z:inventory_number']);
-    // Все двенадцать полей п. 10.2, кроме стоимости (ноль — законная цена подарка), обязательны.
-    assert.equal(assetIssues([{ key: 'e' }]).length, 11);
+    // Все двенадцать полей п. 10.2 обязательны — и стоимость: «0 ₸» не значение, а пропуск
+    // (решение владельца 09.11.2026; прежде ноль пропускался как «цена подарка»).
+    assert.equal(assetIssues([{ key: 'e' }]).length, 12);
+    assert.deepEqual(keysOf(assetIssues([{ ...full, key: 'g', cost: 0 }])), ['asset:g:cost']);
 });
 
 /* ── поле с пунктом на экране ──────────────────────────────────────────────── */

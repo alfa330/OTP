@@ -52,22 +52,25 @@ export const assetPayload = (asset) => ({
 
 const REQUIRED = [
     ['name', 'наименование'], ['category_id', 'категория'], ['serial_number', 'серийный номер'],
-    ['inventory_number', 'инвентарный номер'], ['received_on', 'дата получения'],
+    ['inventory_number', 'инвентарный номер'], ['received_on', 'дата получения'], ['cost', 'стоимость'],
     ['legal_entity_id', 'компания-владелец'], ['city', 'город'], ['department_id', 'подразделение'],
     ['responsible_user_id', 'ответственный'], ['location', 'место эксплуатации'], ['status', 'статус'],
 ];
 
 const isEmpty = (value) => value === null || value === undefined || String(value).trim() === '';
+/* Стоимость — обязательное поле учёта (п. 10.2): «0 ₸» не значение, а пропуск. Так же
+   считает сервер (workflow.asset_missing). */
+const isMissing = (asset, key) => (key === 'cost' ? !(parseAmount(asset.cost) > 0) : isEmpty(asset[key]));
 
 /* Чего не хватает карточке — словами; пустой список — карточка полная. */
-export const assetGaps = (asset) => REQUIRED.filter(([key]) => isEmpty(asset[key])).map(([, label]) => label);
+export const assetGaps = (asset) => REQUIRED.filter(([key]) => isMissing(asset, key)).map(([, label]) => label);
 
 /* То же пунктами с ключом поля — по полю на пункт: у каждой карточки свои поля, и
    стрелки «Не хватает» ведут к каждому пустому по очереди. Повторяющийся
    инвентарный номер краснеет у всех карточек, где он повторяется. */
 const ISSUE_TEXTS = {
     name: 'укажите наименование', category_id: 'выберите категорию', serial_number: 'укажите серийный номер',
-    inventory_number: 'укажите инвентарный номер', received_on: 'укажите дату получения',
+    inventory_number: 'укажите инвентарный номер', received_on: 'укажите дату получения', cost: 'укажите стоимость',
     legal_entity_id: 'выберите компанию-владельца', city: 'выберите город', department_id: 'выберите подразделение',
     responsible_user_id: 'выберите ответственного сотрудника', location: 'укажите место эксплуатации', status: 'выберите статус',
 };
@@ -76,7 +79,7 @@ export const assetIssues = (assets) => {
     const issues = [];
     (assets || []).forEach((asset) => {
         REQUIRED.forEach(([field]) => {
-            if (isEmpty(asset[field])) issues.push({ key: assetIssueKey(asset, field), text: ISSUE_TEXTS[field] });
+            if (isMissing(asset, field)) issues.push({ key: assetIssueKey(asset, field), text: ISSUE_TEXTS[field] });
         });
     });
     const byNumber = new Map();
@@ -138,7 +141,7 @@ const PaymentAssetsEditor = ({ assets, onChange, users, dictionaries, issueOf = 
                         <Field label="Дата получения" required optionalMark={false} {...at(asset, 'received_on')}>
                             <FormDate value={asset.received_on} onChange={(value) => update(asset.key, { received_on: value || '' })} triggerClassName="!bg-white" ariaLabel="Дата получения" />
                         </Field>
-                        <Field label="Стоимость, ₸" required optionalMark={false}>
+                        <Field label="Стоимость, ₸" required optionalMark={false} {...at(asset, 'cost')}>
                             <AmountInput className="bg-white" value={asset.cost} onChange={(value) => update(asset.key, { cost: value })} ariaLabel="Стоимость" />
                         </Field>
                         <Field label="Компания-владелец" required optionalMark={false} {...at(asset, 'legal_entity_id')}>

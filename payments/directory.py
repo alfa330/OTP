@@ -270,12 +270,25 @@ def find_counterparty_by_name(cursor, name):
 
 
 def find_or_create_counterparty(cursor, name, actor_id=None):
+    """Поставщик по названию — тот, что уже есть, либо новый. У нового НДС не указан
+    (п. 8, решение владельца 09.11.2026): «без НДС» значило бы, что это проверили, а
+    вписал его инициатор одним названием. Указывает НДС бухгалтер при оплате
+    (set_counterparty_vat) или администратор в справочнике."""
     found = find_counterparty_by_name(cursor, name)
     if found:
         return found['id'], False
-    created = upsert_counterparty(cursor, fields={'name': name, 'vat_payer': False, 'is_active': True},
+    created = upsert_counterparty(cursor, fields={'name': name, 'vat_payer': None, 'is_active': True},
                                   actor_id=actor_id)
     return created, True
+
+
+def set_counterparty_vat(cursor, counterparty_id, vat_payer):
+    """Бухгалтер указал НДС поставщика в окне «Оплата счёта» (п. 8). Только если он
+    ещё не указан: указанный правят в справочнике. Возвращает, записан ли он."""
+    cursor.execute(
+        "UPDATE payment_counterparties SET vat_payer = %s WHERE id = %s AND vat_payer IS NULL",
+        (bool(vat_payer), int(counterparty_id)))
+    return cursor.rowcount == 1
 
 
 # ─── Почта поставщиков (решение владельца 21.10.2026) ────────────────────────
@@ -795,7 +808,7 @@ _TEMPLATE_SQL = """
            acc.iik, acc.bank_name, acc.bik, acc.kbe,
            (SELECT COUNT(*) FROM payment_requests r WHERE r.fixed_template_id = t.id),
            (SELECT r.id FROM payment_requests r WHERE r.fixed_template_id = t.id AND r.status = 'active'
-             ORDER BY r.id DESC LIMIT 1)
+               AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1)
       FROM payment_fixed_templates t
       LEFT JOIN users u ON u.id = t.responsible_user_id
       LEFT JOIN payment_projects p ON p.id = t.project_id

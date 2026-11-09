@@ -124,6 +124,7 @@
       "can_act": false,
       "card_holder_name": null,
       "card_mask": "•••• 4242",
+      "card_number": null,
       "card_recipient": null,
       "category_helpdesk": false,
       "clarify_by_name": null,

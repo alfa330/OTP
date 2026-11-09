@@ -40,9 +40,12 @@ const statusPill = (asset) => {
 /* Что изменилось в перемещении — словами «было → стало». */
 const moveLines = (move) => {
     if (move.kind === 'registered') {
+        // Первая компания-владелец — тоже в истории владельцев (п. 12); у строк старше 09.11.2026 её нет.
         return [[move.to_responsible_name, move.to_department_name].filter(Boolean).join(', '),
-            [move.to_city, move.to_location].filter(Boolean).join(', ')].filter(Boolean);
+            [move.to_city, move.to_location].filter(Boolean).join(', '), move.to_legal_entity_name || ''].filter(Boolean);
     }
+    // Смена компании-владельца (п. 12) — своей строкой `owner`: заголовок уже назвал, что сменилось.
+    if (move.kind === 'owner') return [`${move.from_legal_entity_name || '—'} → ${move.to_legal_entity_name || '—'}`];
     const lines = [];
     const pair = (label, from, to) => { if ((from || '') !== (to || '')) lines.push(`${label}: ${from || '—'} → ${to || '—'}`); };
     pair('Ответственный', move.from_responsible_name, move.to_responsible_name);
@@ -53,7 +56,7 @@ const moveLines = (move) => {
     return lines;
 };
 
-const MOVE_TITLES = { registered: 'Поставлено на учёт', moved: 'Перемещение', status: 'Смена статуса' };
+const MOVE_TITLES = { registered: 'Поставлено на учёт', moved: 'Перемещение', status: 'Смена статуса', owner: 'Смена компании-владельца' };
 
 /* Чем содержимое окна появляется: карточка после загрузки проявляется, второй
    уровень («Переместить», «Изменить описание») приезжает справа, возврат — слева,
@@ -94,6 +97,7 @@ export const AssetCard = ({ assetId, preview = null, apiBaseUrl, headers, dictio
     const view = asset ? (mode || 'view') : recordView({ data: asset, error });
     const leaveMode = () => { setLevelMotion(LEVEL_BACK); setMode(null); };
     const canManage = Boolean(data?.can_manage);
+    const canOpenDeleted = Boolean(data?.can_open_deleted);
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
 
     const categoryOptions = useMemo(() => (dictionaries?.asset_categories || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
@@ -193,9 +197,15 @@ export const AssetCard = ({ assetId, preview = null, apiBaseUrl, headers, dictio
                             <Row label="Дата получения">{asset.received_on ? fmtDate(asset.received_on) : ''}</Row>
                             <Row label="Стоимость">{asset.cost !== null && asset.cost !== undefined ? fmtMoney(asset.cost) : ''}</Row>
                             <Row label="Заявка">
-                                {asset.request_id && (
-                                    <button type="button" className="text-blue-600 hover:underline" onClick={() => onOpenRequest?.(asset.request_id)}>№{asset.request_id}</button>
-                                )}
+                                {/* Заявка в архиве «Удалённые» (п. 18) открывается только администратору раздела —
+                                    остальным номер без ссылки: имущество живёт дальше и без неё. */}
+                                {asset.request_id && (asset.request_deleted && !canOpenDeleted
+                                    ? <span className="text-slate-600">№{asset.request_id} · удалена</span>
+                                    : (
+                                        <button type="button" className="text-blue-600 hover:underline" onClick={() => onOpenRequest?.(asset.request_id)}>
+                                            №{asset.request_id}{asset.request_deleted ? ' · удалена' : ''}
+                                        </button>
+                                    ))}
                             </Row>
                             <Row label="Примечание">{asset.note}</Row>
                         </div>
@@ -281,7 +291,7 @@ export const AssetCard = ({ assetId, preview = null, apiBaseUrl, headers, dictio
                             </Field>
                         </div>
                         <Field label="Примечание"><input className={iosInput} value={draft.note} onChange={(event) => set('note', event.target.value)} maxLength={2000} /></Field>
-                        <NoticeBox tone="slate" text="Ответственного, подразделение, город, место и статус меняет «Переместить» — так прежние значения остаются в истории." />
+                        <NoticeBox tone="slate" text="Ответственного, подразделение, город, место и статус меняет «Переместить». Смена компании-владельца здесь тоже остаётся в истории." />
                     </div>
                 )}
             </div>

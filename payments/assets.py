@@ -25,11 +25,14 @@ _ASSET_FIELDS = ('id', 'request_id', 'name', 'category_id', 'serial_number', 'in
 _ASSET_WRITE = ('name', 'category_id', 'serial_number', 'inventory_number', 'received_on', 'cost',
                 'legal_entity_id', 'city', 'department_id', 'department_name', 'responsible_user_id',
                 'responsible_name', 'location', 'status', 'note')
+# `request_deleted` — заявка, из которой имущество появилось, в архиве «Удалённые» (п. 18):
+# имущество живёт дальше, а ссылка на заявку открывается только администратору раздела.
 _ASSET_SQL = """
-    SELECT %s, cat.name, le.name
+    SELECT %s, cat.name, le.name, (rq.deleted_at IS NOT NULL)
       FROM payment_assets a
       LEFT JOIN payment_asset_categories cat ON cat.id = a.category_id
       LEFT JOIN payment_legal_entities le ON le.id = a.legal_entity_id
+      LEFT JOIN payment_requests rq ON rq.id = a.request_id
 """ % columns('a', _ASSET_FIELDS)
 
 
@@ -37,6 +40,7 @@ def _asset_row(row):
     item = row_map(_ASSET_FIELDS, row[:len(_ASSET_FIELDS)])
     item['category_name'] = row[len(_ASSET_FIELDS)]
     item['legal_entity_name'] = row[len(_ASSET_FIELDS) + 1]
+    item['request_deleted'] = bool(row[len(_ASSET_FIELDS) + 2])
     item['status_label'] = workflow.ASSET_STATUS_LABELS.get(item['status'], item['status'])
     return item
 
@@ -121,7 +125,9 @@ def issued_from_stock(cursor, asset_ids):
     Чтобы её не выдали второй раз, склад показывает, по какой заявке её уже отдали, а выдача
     такой вещи по другой заявке не проходит (routes._stock_assets). Отметка гаснет, когда вещь
     передали: в истории после выдачи есть перемещение со сменой ответственного или статуса.
-    Правка описания и перенос места внутри склада её не снимают — вещь от этого не выдана."""
+    Правка описания и перенос места внутри склада её не снимают — вещь от этого не выдана.
+    Выдача по заявке из архива «Удалённые» (п. 18) вещь не держит — как раньше, когда удаление
+    стирало заявку вместе с её историей: иначе склад ссылался бы на заявку, которой не видно."""
     ids = sorted({int(value) for value in asset_ids or () if value})
     if not ids:
         return {}
@@ -129,6 +135,7 @@ def issued_from_stock(cursor, asset_ids):
         """
         SELECT DISTINCT ON (x.asset_id) x.asset_id, e.request_id, e.created_at
           FROM payment_events e
+          JOIN payment_requests er ON er.id = e.request_id AND er.deleted_at IS NULL
          CROSS JOIN LATERAL (
                SELECT (item->>'id')::int AS asset_id
                  FROM jsonb_array_elements(COALESCE(e.payload->'assets', '[]'::jsonb)) item) x
@@ -167,15 +174,29 @@ def create_asset(cursor, *, request_id, fields, actor):
         % (', '.join(_ASSET_WRITE), ', '.join(['%s'] * len(_ASSET_WRITE))),
         [request_id] + values + [(actor or {}).get('id')])
     asset_id = cursor.fetchone()[0]
-    _log_move(cursor, asset_id, 'registered', actor, before={}, after=fields,
+    _log_move(cursor, asset_id, 'registered', actor, before={},
+              after=dict(fields, legal_entity_name=_entity_name(cursor, fields.get('legal_entity_id'))),
               comment='Поставлено на учёт')
     return asset_id
 
 
-def update_details(cursor, asset_id, fields):
+def _entity_name(cursor, legal_entity_id):
+    """Название компании — снимком в строку истории (п. 12)."""
+    if not legal_entity_id:
+        return None
+    cursor.execute("SELECT name FROM payment_legal_entities WHERE id = %s", (int(legal_entity_id),))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def update_details(cursor, asset_id, fields, *, actor=None, current=None):
     """Правит описательные поля карточки (название, категория, серийный и
     инвентарный номер, стоимость, дата получения, компания, примечание).
-    Владельца, место и статус меняет только `move` — с записью в историю."""
+    Ответственного, место и статус меняет только `move` — с записью в историю.
+
+    Компания-владелец — тоже владелец (п. 12: «история владельцев … должна
+    сохраняться, а не перезаписываться»): её смена ложится строкой истории
+    `owner` с «было» и «стало». `current` — карточка до правки."""
     cols = [col for col in ('name', 'category_id', 'serial_number', 'inventory_number', 'received_on',
                             'cost', 'legal_entity_id', 'note') if col in fields]
     if not cols:
@@ -184,6 +205,20 @@ def update_details(cursor, asset_id, fields):
         "UPDATE payment_assets SET %s, updated_at = %s WHERE id = %%s"
         % (', '.join('%s = %%s' % col for col in cols), NOW_SQL),
         [fields[col] for col in cols] + [int(asset_id)])
+    if current is not None and 'legal_entity_id' in fields \
+            and fields['legal_entity_id'] != current.get('legal_entity_id'):
+        after = dict(current, legal_entity_id=fields['legal_entity_id'],
+                     legal_entity_name=_entity_name(cursor, fields['legal_entity_id']))
+        _log_move(cursor, asset_id, 'owner', actor, before=current, after=after)
+
+
+def attachment_in_history(cursor, attachment_id):
+    """Файл — акт из истории имущества: на него ссылается строка перемещения. Такой акт
+    открывает каждый, кто видит имущество (routes.attachment_download)."""
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM payment_asset_moves WHERE attachment_id = %s)",
+                   (int(attachment_id),))
+    row = cursor.fetchone()
+    return bool(row and row[0])
 
 
 MOVE_KEYS = ('responsible_user_id', 'responsible_name', 'department_id', 'department_name', 'city',
@@ -205,8 +240,9 @@ def move(cursor, asset_id, *, fields, actor, comment=None, attachment_id=None):
         % (', '.join('%s = %%s' % key for key in MOVE_KEYS), NOW_SQL),
         [after[key] for key in MOVE_KEYS] + [int(asset_id)])
     only_status = all(after[key] == current.get(key) for key in MOVE_KEYS if key != 'status')
-    _log_move(cursor, asset_id, 'status' if only_status else 'moved', actor, before=current, after=after,
-              comment=comment, attachment_id=attachment_id)
+    # Компания при перемещении не меняется — в строке истории она стоит и «было», и «стало».
+    _log_move(cursor, asset_id, 'status' if only_status else 'moved', actor, before=current,
+              after=dict(current, **after), comment=comment, attachment_id=attachment_id)
     return True
 
 
@@ -215,22 +251,25 @@ def _log_move(cursor, asset_id, kind, actor, *, before, after, comment=None, att
         """
         INSERT INTO payment_asset_moves (asset_id, kind, moved_by, moved_by_name,
             from_responsible_user_id, from_responsible_name, from_department_name, from_city,
-            from_location, from_status,
+            from_location, from_status, from_legal_entity_id, from_legal_entity_name,
             to_responsible_user_id, to_responsible_name, to_department_name, to_city, to_location,
-            to_status, comment, attachment_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            to_status, to_legal_entity_id, to_legal_entity_name, comment, attachment_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (int(asset_id), kind, (actor or {}).get('id'), (actor or {}).get('name'),
          before.get('responsible_user_id'), before.get('responsible_name'), before.get('department_name'),
          before.get('city'), before.get('location'), before.get('status'),
+         before.get('legal_entity_id'), before.get('legal_entity_name'),
          after.get('responsible_user_id'), after.get('responsible_name'), after.get('department_name'),
-         after.get('city'), after.get('location'), after.get('status'), comment, attachment_id))
+         after.get('city'), after.get('location'), after.get('status'),
+         after.get('legal_entity_id'), after.get('legal_entity_name'), comment, attachment_id))
 
 
 _MOVE_FIELDS = ('id', 'asset_id', 'kind', 'moved_at', 'moved_by', 'moved_by_name',
                 'from_responsible_user_id', 'from_responsible_name', 'from_department_name', 'from_city',
                 'from_location', 'from_status', 'to_responsible_user_id', 'to_responsible_name',
-                'to_department_name', 'to_city', 'to_location', 'to_status', 'comment', 'attachment_id')
+                'to_department_name', 'to_city', 'to_location', 'to_status', 'comment', 'attachment_id',
+                'from_legal_entity_id', 'from_legal_entity_name', 'to_legal_entity_id', 'to_legal_entity_name')
 
 
 def list_moves(cursor, asset_id):

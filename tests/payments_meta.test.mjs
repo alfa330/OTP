@@ -136,8 +136,9 @@ test('состояние берётся с сервера, а без него �
 });
 
 test('легенда реестра и фильтр «Статус» досок покрывают все состояния', () => {
+  // «Удалённые» — архив администратора раздела (п. 18, 09.11.2026): последней плиткой.
   assert.deepEqual(STATE_FILTERS.map((item) => item.key),
-    ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
+    ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled', 'deleted']);
   // «Наблюдаю» — срез по смотрящему, как «Ждут меня», а не состояние: без кружка, счётчик — свой.
   const watching = STATE_FILTERS.find((item) => item.key === 'watching');
   assert.deepEqual(watching, { key: 'watching', label: 'Наблюдаю', counter: 'watching', tone: null });

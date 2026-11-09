@@ -196,7 +196,12 @@ def test_deleting_request_or_account_takes_the_rows(db):
         cur.execute("DELETE FROM users WHERE id = %s", (INITIATOR,))
         cur.execute("SELECT added_by FROM payment_request_observers WHERE request_id = %s", (rid,))
         assert cur.fetchall() == [(None,)], 'удалили того, кто добавил, — строка остаётся без автора'
-        queries.delete_request(cur, rid)
+        # Удаление в разделе (09.11.2026) — архив «Удалённые», п. 18: строка заявки и всё при ней целы.
+        assert queries.mark_deleted(cur, rid, {'id': None, 'name': 'iCore'})
+        cur.execute("SELECT count(*) FROM payment_request_observers")
+        assert cur.fetchone()[0] == 1
+        # Уборка прямым SQL (тестовые данные) по-прежнему уносит строки заявки каскадом.
+        cur.execute("DELETE FROM payment_requests WHERE id = %s", (rid,))
         cur.execute("SELECT count(*) FROM payment_request_observers")
         assert cur.fetchone()[0] == 0
 

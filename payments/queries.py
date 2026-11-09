@@ -8,8 +8,10 @@ notices.py; общие мелочи (время, plain, разбор строк�
 дальше запросы двигают состояние по ним, а не пересчитывают. Решения «что
 дальше» принимает flow.py по правилам workflow.py; здесь только запись.
 
-Номер карты наружу отсюда не выходит: в полях заявки только последние четыре
-цифры, полный номер читает `card_number()` — её зовёт одна ручка.
+Номер карты наружу отсюда не выходит сам: в полях заявки только последние
+четыре цифры. Полный номер читают `card_number()` (кнопка «Показать», окно заявки
+у финансового отдела) и `card_numbers()` (доска финансового отдела, п. 9) — каждый
+раз с проверкой прав у вызывающего и записью в журнал доступа.
 """
 
 from psycopg2.extras import Json
@@ -143,7 +145,7 @@ def role_backlog(cursor, role_code):
     cursor.execute(
         "SELECT COUNT(DISTINCT s.request_id) FROM payment_subtasks s "
         "JOIN payment_requests r ON r.id = s.request_id "
-        "WHERE r.status = 'active' AND r.submitted_at IS NOT NULL AND s.role_code = %s "
+        "WHERE r.status = 'active' AND r.deleted_at IS NULL AND r.submitted_at IS NOT NULL AND s.role_code = %s "
         "AND s.assignee_id IS NULL AND s.state IN ('pending', 'open', 'waiting')",
         (role_code,))
     return int(cursor.fetchone()[0] or 0)
@@ -245,6 +247,7 @@ _REQUEST_FIELDS = (
     'current_assignee_name', 'approver_user_id', 'approval_order_id', 'route_basis',
     'submitted_at', 'submitted_snapshot', 'approved_at', 'approved_by', 'approved_by_name',
     'amount_approved', 'step_changed_at', 'closed_at', 'rejected_reason', 'legacy_step', 'it_purchase',
+    'deleted_at', 'deleted_by', 'deleted_by_name', 'deleted_comment',
 )
 _REQUEST_EXTRA = ('project_name', 'category_name', 'subcategory_name', 'counterparty_name',
                   'counterparty_bin', 'counterparty_vat', 'legal_entity_name', 'contract_number',
@@ -299,6 +302,8 @@ def _request_row(row):
     item['it_purchase'] = bool(item.get('it_purchase'))
     item['category_helpdesk'] = bool(item.get('category_helpdesk'))
     item['issued_from_stock'] = bool(item.get('issued_from_stock'))
+    # Архив «Удалённые» (п. 18): заявка не стёрта, а убрана из работы.
+    item['deleted'] = item.get('deleted_at') is not None
     item['card_mask'] = cards.mask(item.get('card_last4'))
     # В SQL колонка current_role_code: CURRENT_ROLE — зарезервированное слово Postgres.
     # Наружу ключ остаётся current_role, как его читают фронт и Telegram.
@@ -320,6 +325,50 @@ def card_number(cursor, request_id):
     cursor.execute("SELECT card_number_enc FROM payment_requests WHERE id = %s", (int(request_id),))
     row = cursor.fetchone()
     return cards.decrypt(row[0]) if row and row[0] else None
+
+
+def card_numbers(cursor, request_ids):
+    """Полные номера карт заявок {id: «1234 5678 …»} — доске финансового отдела (п. 9:
+    «карточка должна содержать … полный номер карты»). Права проверяет вызывающий."""
+    ids = sorted({int(x) for x in request_ids or () if x})
+    if not ids:
+        return {}
+    cursor.execute("SELECT id, card_number_enc FROM payment_requests "
+                   "WHERE id = ANY(%s) AND card_number_enc IS NOT NULL", (ids,))
+    result = {}
+    for request_id, encrypted in cursor.fetchall():
+        number = cards.decrypt(encrypted)
+        if number:
+            result[request_id] = cards.pretty(number)
+    return result
+
+
+def log_card_shown(cursor, request_ids, actor):
+    """Полный номер карты показан человеку сам — на доске финансового отдела или в окне
+    заявки. В журнал доступа (скрытое событие, его видит администратор раздела) — один
+    раз на человека, заявку и НОМЕР (последние четыре цифры): иначе каждое обновление доски
+    писало бы по строке, а номер, заменённый на уточнении, показывался бы без записи.
+    Две вкладки разом вторую строку не пишут — её не пускает уникальный индекс
+    ux_payment_events_card_shown (ON CONFLICT DO NOTHING)."""
+    ids = sorted({int(x) for x in request_ids or () if x})
+    actor_id = (actor or {}).get('id')
+    if not ids or actor_id is None:
+        return 0
+    cursor.execute(
+        """
+        INSERT INTO payment_events (request_id, kind, actor_id, actor_name, payload)
+        SELECT r.id, 'card_revealed', %(actor_id)s, %(actor_name)s,
+               jsonb_build_object('shown', TRUE, 'last4', r.card_last4)
+          FROM payment_requests r
+         WHERE r.id = ANY(%(ids)s)
+           AND NOT EXISTS (SELECT 1 FROM payment_events e
+                            WHERE e.request_id = r.id AND e.kind = 'card_revealed'
+                              AND e.actor_id = %(actor_id)s AND e.payload ? 'shown'
+                              AND e.payload->>'last4' IS NOT DISTINCT FROM r.card_last4)
+        ON CONFLICT DO NOTHING
+        """,
+        {'ids': ids, 'actor_id': int(actor_id), 'actor_name': (actor or {}).get('name')})
+    return cursor.rowcount
 
 
 def set_card_number(cursor, request_id, number):
@@ -374,7 +423,13 @@ _VISIBLE_SQL = (
 _FILTER_KEYS = ('query', 'state', 'legal_entity_id', 'department_id', 'initiator_id', 'assignee_id',
                 'assignee_roles', 'approver_id', 'counterparty_id', 'request_kind', 'payment_method',
                 'amount_from', 'amount_to', 'date_from', 'date_to', 'overdue', 'mine',
-                'viewer_id', 'viewer_roles', 'viewer_approves_own', 'visible_to', 'visible_roles')
+                'viewer_id', 'viewer_roles', 'viewer_approves_own', 'visible_to', 'visible_roles',
+                'deleted_visible')
+
+# Заявка в работе — не в архиве «Удалённые» (п. 18). Отдельной строкой: этим условием
+# удалённая заявка уходит отовсюду, где раздел ищет работу, — доски, стол, напоминания,
+# справки о прошлых оплатах и дубле счёта.
+_LIVE_SQL = "r.deleted_at IS NULL"
 
 # Заявка ждёт смотрящего: она у него лично либо у его роли. Своя заявка на
 # согласовании у роли целиком ждёт не его, а остальных утверждающих
@@ -398,13 +453,18 @@ def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, depa
                    counterparty_id=None, request_kind=None, payment_method=None,
                    amount_from=None, amount_to=None, date_from=None, date_to=None,
                    overdue=False, mine=False, viewer_id=None, viewer_roles=(), viewer_approves_own=False,
-                   visible_to=None, visible_roles=()):
+                   visible_to=None, visible_roles=(), deleted_visible=False, include_deleted=False):
     """Условия отбора заявок. Набор фильтров — п. 19 ТЗ: компания, отдел,
     инициатор, исполнитель, согласующий, поставщик, тип заявки, способ оплаты,
     статус, сумма, дата, «просрочено», «только мои».
 
     `visible_to` — ограничение видимости: человек без полного реестра видит
     заявки, где он инициатор, руководитель или исполнитель (лично либо ролью).
+
+    Удалённых заявок (архив, п. 18) в отборе нет. Срез `state='deleted'` — только
+    они, и только тому, кому архив открыт (`deleted_visible` — администратор
+    раздела); остальным этот срез пуст. `include_deleted` — без условия вовсе:
+    счётчики полосы считают архив сами (state_counters).
     """
     clauses = []
     params['today'] = today_almaty()
@@ -415,6 +475,10 @@ def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, depa
     overdue_sql = ("r.status = 'active' AND r.due_on IS NOT NULL AND r.due_on < %(today)s "
                    "AND r.paid_on IS NULL")
     clarify_sql = "r.status = 'active' AND r.stage = 'initiation' AND r.submitted_at IS NOT NULL"
+    if state == 'deleted':
+        clauses.append('r.deleted_at IS NOT NULL' if deleted_visible else 'FALSE')
+    elif not include_deleted:
+        clauses.append(_LIVE_SQL)
     if query:
         params.update({'like': like_pattern(query.strip()), 'q': query.strip().lstrip('№#')})
         clauses.append(_SEARCH_SQL)
@@ -501,35 +565,44 @@ def list_requests(cursor, *, limit=50, offset=0, **filters):
 
 
 def state_counters(cursor, **filters):
-    """Счётчики полосы-легенды по ТЕКУЩИМ фильтрам без учёта состояния."""
+    """Счётчики полосы-легенды по ТЕКУЩИМ фильтрам без учёта состояния.
+
+    Удалённые заявки (архив, п. 18) не входят ни в один счётчик, кроме своего —
+    `deleted`; его считают только тому, кому архив открыт (`deleted_visible`)."""
     params = {}
     filters = filters_only(filters)
     filters.pop('state', None)
     filters.pop('mine', None)
-    where = _filter_clause(params, **filters)
+    deleted_visible = bool(filters.get('deleted_visible'))
+    where = _filter_clause(params, include_deleted=deleted_visible, **filters)
+    live = _LIVE_SQL + ' AND '
     cursor.execute(
         """
-        SELECT COUNT(*) AS all_count,
-               COUNT(*) FILTER (WHERE r.status = 'active') AS open_count,
-               COUNT(*) FILTER (WHERE """ + _MINE_SQL + """) AS mine,
-               COUNT(*) FILTER (WHERE r.status = 'active' AND r.stage = 'initiation'
+        SELECT COUNT(*) FILTER (WHERE """ + _LIVE_SQL + """) AS all_count,
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'active') AS open_count,
+               COUNT(*) FILTER (WHERE """ + live + _MINE_SQL + """) AS mine,
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'active' AND r.stage = 'initiation'
                         AND r.submitted_at IS NOT NULL) AS clarification,
-               COUNT(*) FILTER (WHERE r.status = 'active' AND r.due_on IS NOT NULL AND r.due_on < %(today)s
-                        AND r.paid_on IS NULL
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'active' AND r.due_on IS NOT NULL
+                        AND r.due_on < %(today)s AND r.paid_on IS NULL
                         AND NOT (r.stage = 'initiation' AND r.submitted_at IS NOT NULL)) AS overdue,
-               COUNT(*) FILTER (WHERE r.status = 'done') AS done,
-               COUNT(*) FILTER (WHERE r.status = 'rejected') AS rejected,
-               COUNT(*) FILTER (WHERE r.status = 'cancelled') AS cancelled,
-               COUNT(*) FILTER (WHERE """ + _WATCHING_SQL + """) AS watching
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'done') AS done,
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'rejected') AS rejected,
+               COUNT(*) FILTER (WHERE """ + live + """r.status = 'cancelled') AS cancelled,
+               COUNT(*) FILTER (WHERE """ + live + _WATCHING_SQL + """) AS watching,
+               COUNT(*) FILTER (WHERE r.deleted_at IS NOT NULL) AS deleted
           FROM payment_requests r
           LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
         """ + where,
         params,
     )
-    row = cursor.fetchone() or (0,) * 9
-    return {'all': int(row[0] or 0), 'open': int(row[1] or 0), 'mine': int(row[2] or 0),
-            'clarification': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
-            'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0), 'watching': int(row[8] or 0)}
+    row = cursor.fetchone() or (0,) * 10
+    counters = {'all': int(row[0] or 0), 'open': int(row[1] or 0), 'mine': int(row[2] or 0),
+                'clarification': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
+                'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0), 'watching': int(row[8] or 0)}
+    if deleted_visible:
+        counters['deleted'] = int(row[9] or 0)
+    return counters
 
 
 def requests_by_ids(cursor, request_ids):
@@ -999,11 +1072,14 @@ def close_request(cursor, request_id, status, actor, comment=None):
     log_event(cursor, request_id, 'closed' if status == 'done' else status, actor, comment=comment)
 
 
-def delete_request(cursor, request_id):
-    cursor.execute("SELECT bucket, blob_path FROM payment_attachments WHERE request_id = %s", (int(request_id),))
-    refs = [(row[0], row[1]) for row in cursor.fetchall()]
-    cursor.execute("DELETE FROM payment_requests WHERE id = %s", (int(request_id),))
-    return refs
+def mark_deleted(cursor, request_id, actor, comment=None):
+    """Заявка уходит в архив «Удалённые» (п. 18): строка, история и файлы остаются.
+    Возвращает, удалена ли она этим вызовом (повторное удаление ничего не меняет)."""
+    cursor.execute(
+        "UPDATE payment_requests SET deleted_at = %s, deleted_by = %%s, deleted_by_name = %%s, "
+        "deleted_comment = %%s, updated_at = %s WHERE id = %%s AND deleted_at IS NULL" % (_NOW, _NOW),
+        ((actor or {}).get('id'), (actor or {}).get('name'), comment, int(request_id)))
+    return cursor.rowcount == 1
 
 
 # ── Вложения ─────────────────────────────────────────────────────────────────
@@ -1097,6 +1173,7 @@ def find_duplicates(cursor, request, *, visible_to=None, visible_roles=()):
           FROM payment_requests r
          WHERE r.id <> %(id)s AND r.counterparty_id = %(cp)s AND lower(btrim(r.invoice_number)) = lower(%(number)s)
            AND r.invoice_date = %(date)s AND r.amount = %(amount)s AND r.status IN ('active', 'done')
+           AND r.deleted_at IS NULL
         """ + scope + " ORDER BY r.id DESC LIMIT 10",
         params)
     return [{'id': row[0], 'expense_name': row[1], 'status': row[2], 'stage': row[3],
@@ -1117,7 +1194,7 @@ def duplicate_request_ids(cursor, request_ids):
             ON b.id <> a.id AND b.counterparty_id = a.counterparty_id
            AND lower(btrim(b.invoice_number)) = lower(btrim(a.invoice_number))
            AND b.invoice_date = a.invoice_date AND b.amount = a.amount
-           AND b.status IN ('active', 'done')
+           AND b.status IN ('active', 'done') AND b.deleted_at IS NULL
          WHERE a.id = ANY(%s) AND a.invoice_number IS NOT NULL AND btrim(a.invoice_number) <> ''
            AND a.invoice_date IS NOT NULL AND a.counterparty_id IS NOT NULL
         """,
@@ -1172,7 +1249,7 @@ def board_requests(cursor, board_code, *, own_user_id=None, own_roles=(), **filt
 # те задачи, по которым от него требуется действие»); `approves_own` — исключение
 # для администратора раздела, который на пилоте проходит маршрут за все роли.
 _WAITS_FOR_ME_SQL = (
-    "r.status = 'active' AND s.state = 'open' AND (s.assignee_id = %(user_id)s "
+    "r.status = 'active' AND r.deleted_at IS NULL AND s.state = 'open' AND (s.assignee_id = %(user_id)s "
     "OR (s.assignee_id IS NULL AND s.role_code = ANY(%(roles)s) "
     "AND (%(approves_own)s OR s.kind <> ALL(%(approval_kinds)s) "
     "OR r.initiator_id IS DISTINCT FROM %(user_id)s)))")
@@ -1230,7 +1307,8 @@ def desk_count(cursor, user_id, roles, approves_own=False):
                  WHERE """ + _WAITS_FOR_ME_SQL + """)
              + (SELECT COUNT(*) FROM payment_requests r
                   JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %(closing)s AND s.state = 'open'
-                 WHERE r.status = 'active' AND r.initiator_id = %(user_id)s AND r.closing_docs_status = 'none')
+                 WHERE r.status = 'active' AND r.deleted_at IS NULL AND r.initiator_id = %(user_id)s
+                   AND r.closing_docs_status = 'none')
         """,
         _desk_params(user_id, roles, approves_own))
     return int(cursor.fetchone()[0] or 0)
@@ -1244,7 +1322,7 @@ def desk_count(cursor, user_id, roles, approves_own=False):
 #     тем же условием, что и они (_WAITS_FOR_ME_SQL, docs_wanted_ids), и второй раз на том
 #     же экране её не повторяем.
 _OWN_SQL = (
-    "r.initiator_id = %(user_id)s AND r.status = 'active' AND r.submitted_at IS NOT NULL "
+    "r.initiator_id = %(user_id)s AND r.status = 'active' AND r.deleted_at IS NULL AND r.submitted_at IS NOT NULL "
     "AND NOT EXISTS (SELECT 1 FROM payment_subtasks s WHERE s.request_id = r.id AND " + _WAITS_FOR_ME_SQL + ") "
     "AND NOT (r.closing_docs_status = 'none' AND EXISTS (SELECT 1 FROM payment_subtasks c "
     "WHERE c.request_id = r.id AND c.kind = %(closing)s AND c.state = 'open'))")
@@ -1277,7 +1355,8 @@ def docs_wanted_ids(cursor, user_id):
         """
         SELECT r.id FROM payment_requests r
           JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %s AND s.state = 'open'
-         WHERE r.status = 'active' AND r.initiator_id = %s AND r.closing_docs_status = 'none'
+         WHERE r.status = 'active' AND r.deleted_at IS NULL AND r.initiator_id = %s
+           AND r.closing_docs_status = 'none'
          ORDER BY r.id
         """,
         (workflow.KIND_CLOSING, int(user_id)))
@@ -1394,11 +1473,37 @@ def users_brief(cursor, user_ids):
 def due_requests(cursor, today, soon_days):
     """Неоплаченные живые заявки со сроком: (заявка, 'soon' | 'overdue')."""
     cursor.execute(
-        "SELECT id, due_on FROM payment_requests WHERE status = 'active' AND paid_on IS NULL "
+        "SELECT id, due_on FROM payment_requests WHERE status = 'active' AND deleted_at IS NULL "
+        "AND paid_on IS NULL "
         "AND due_on IS NOT NULL AND due_on <= %s::date + make_interval(days => %s)",
         (today, int(soon_days)))
     marks = {row[0]: ('overdue' if row[1] < today else 'soon') for row in cursor.fetchall()}
     return [(item, marks[item['id']]) for item in requests_by_ids(cursor, list(marks))]
+
+
+def stage_deadline_rows(cursor):
+    """Открытые этапы со своим сроком (п. 17, решение владельца 09.11.2026): чек после
+    пополнения карты и закрывающие документы после подтверждения получения.
+
+    [(заявка, этап {kind, role_code, assignee_id, opened_at}, когда подтвердили получение)] —
+    срок и пора ли напоминать, решает workflow (stage_due_on, deadline_mark), кому — flow."""
+    cursor.execute(
+        """
+        SELECT s.request_id, s.kind, s.opened_at, rc.done_at, s.role_code, s.assignee_id
+          FROM payment_subtasks s
+          JOIN payment_requests r ON r.id = s.request_id
+          LEFT JOIN payment_subtasks rc ON rc.request_id = s.request_id AND rc.kind = %(receiving)s
+         WHERE r.status = 'active' AND r.deleted_at IS NULL
+           AND s.state = 'open' AND s.kind = ANY(%(kinds)s)
+         ORDER BY s.request_id, s.kind
+        """,
+        {'receiving': workflow.KIND_RECEIVING, 'kinds': sorted(workflow.STAGE_DEADLINE_SETTINGS)})
+    found = cursor.fetchall()
+    if not found:
+        return []
+    requests = {item['id']: item for item in requests_by_ids(cursor, [row[0] for row in found])}
+    return [(requests[row[0]], {'kind': row[1], 'opened_at': row[2], 'role_code': row[4], 'assignee_id': row[5]},
+             row[3]) for row in found if row[0] in requests]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1450,7 +1555,7 @@ def payment_history(cursor, *, counterparty_id=None, category_id=None, subcatego
                  ORDER BY i.position, i.id LIMIT 1)
           FROM payment_requests r
           LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
-         WHERE r.paid_on IS NOT NULL AND r.status IN ('active', 'done')
+         WHERE r.paid_on IS NOT NULL AND r.status IN ('active', 'done') AND r.deleted_at IS NULL
         """ + where + " ORDER BY r.paid_on DESC, r.id DESC LIMIT %(limit)s",
         params)
     rows = cursor.fetchall()

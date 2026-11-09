@@ -406,6 +406,8 @@ def load_for_action(cursor, request_id, kind):
     request = queries.read_request(cursor, request_id, lock=True)
     if not request:
         raise FlowError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
+    if access.is_deleted(request):
+        raise FlowError('Заявка удалена — действия по ней недоступны', code='PAYMENT_REQUEST_DELETED', status=409)
     if request['status'] != 'active':
         raise FlowError('Заявка уже закрыта', code='PAYMENT_REQUEST_CLOSED', status=409)
     subtask = queries.read_subtask(cursor, request_id, kind)
@@ -494,6 +496,8 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
                               comment=comment, status='clarification', event_kind='clarification', **done)
 
     if action in ('pay', 'top_up'):
+        if action == 'pay' and workflow.supplier_vat_unknown(request):
+            _settle_supplier_vat(cursor, request, actor, fields['supplier_vat'], kind)
         paid_on = fields.get('paid_on')
         paid_amount = workflow.to_decimal(fields.get('paid_amount'))
         changes = queries.update_request_fields(cursor, request_id, {
@@ -515,6 +519,8 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
     # ── Чек и получение ──
     if action == 'provide':
         notices.clear_subtask(cursor, subtask['id'])
+        for reminder in STAGE_REMINDER_KINDS[workflow.KIND_RECEIPT]:
+            notices.clear_kind(cursor, request_id, reminder)
         queries.complete_subtask(cursor, subtask['id'], actor, outcome='provided', comment=comment)
         queries.log_event(cursor, request_id, 'receipt_provided', actor, comment=comment, payload={'kind': kind})
         _docs_received(cursor, request_id, actor)
@@ -560,10 +566,31 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
         _set_docs(cursor, request, workflow.DOCS_CLOSED, actor, comment)
         notices.clear_subtask(cursor, subtask['id'])
         notices.clear_kind(cursor, request_id, 'docs_needed')
+        for reminder in STAGE_REMINDER_KINDS[workflow.KIND_CLOSING]:
+            notices.clear_kind(cursor, request_id, reminder)
         queries.complete_subtask(cursor, subtask['id'], actor, outcome='closed', comment=comment)
         return {'next': advance(cursor, request_id, actor, **done)}
 
     raise FlowError('Действие не поддерживается', code='PAYMENT_ACTION_UNKNOWN', status=400)
+
+
+def _settle_supplier_vat(cursor, request, actor, vat_payer, kind):
+    """НДС поставщика, которого инициатор вписал названием (п. 8, решение владельца 09.11.2026):
+    бухгалтер выбрал его в окне оплаты, и выбор ложится в карточку поставщика вместе с
+    «Оплачено» — следующую заявку о нём уже не спросят. Пока «Оплачено» не нажато, выбор
+    можно поменять. Указанный НДС здесь не перезаписывается: его правят в справочнике.
+    Другой бухгалтер успел указать иной НДС, пока окно было открыто, — отказ: оплата шла бы
+    по одному НДС, а в карточке стоял бы другой."""
+    counterparty_id = request['counterparty_id']
+    if not directory.set_counterparty_vat(cursor, counterparty_id, vat_payer):
+        settled = (directory.read_counterparty(cursor, counterparty_id) or {}).get('vat_payer')
+        if settled is not None and bool(settled) != bool(vat_payer):
+            raise FlowError('НДС поставщика уже указан: %s. Проверьте счёт и нажмите «Оплачено» снова'
+                            % ('с НДС' if settled else 'без НДС'), code='PAYMENT_VAT_CHANGED', status=409)
+        return
+    queries.log_event(cursor, request['id'], 'supplier_vat', actor, payload={
+        'kind': kind, 'counterparty_id': counterparty_id, 'counterparty_name': request.get('counterparty_name'),
+        'vat_payer': bool(vat_payer)})
 
 
 def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=None, base_url=None):
@@ -832,6 +859,25 @@ def cancel(cursor, request_id, actor, comment=None, *, base_url=None):
             base_url=base_url, exclude=[(actor or {}).get('id')])
 
 
+def delete(cursor, request_id, actor, comment=None):
+    """Убрать заявку в архив «Удалённые» (п. 18, решение владельца 09.11.2026).
+
+    «По каждой основной заявке должна храниться полная неизменяемая история
+    действий»: строку не стираем. Заявка уходит с досок, из реестра, задач и
+    напоминаний (queries: условие `deleted_at IS NULL`), её колокол гаснет; история,
+    файлы и имущество остаются, а в историю ложится само удаление — кто и почему.
+    Статус не меняется: в архиве видно, на каком этапе заявку убрали."""
+    request = queries.read_request(cursor, request_id, lock=True)
+    if not request:
+        raise FlowError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
+    if access.is_deleted(request):
+        raise FlowError('Заявка уже удалена', code='PAYMENT_REQUEST_DELETED', status=409)
+    queries.mark_deleted(cursor, request_id, actor, comment)
+    notices.clear_all(cursor, request_id)
+    queries.log_event(cursor, request_id, 'deleted', actor, comment=comment,
+                      payload={'status': request.get('status'), 'stage': request.get('stage')})
+
+
 # ─── Наблюдатели (просьба владельца 15.10.2026) ──────────────────────────────
 
 def change_observers(cursor, request, actor, *, add=(), remove=()):
@@ -919,6 +965,47 @@ def remind_deadlines(cursor, *, today=None, outbox=None, base_url=None):
             cursor, user_ids=recipients, request_id=request['id'], kind=event['kind'], title=event['title'],
             body=event.get('body'), tone=event.get('tone', 'default'),
             dedupe_key='%s:%s:%s' % (event['kind'], request['id'], due_on.isoformat()))
+    created += _remind_stage_deadlines(cursor, today, members)
     if created:
         logging.info('Оплата счетов: напоминаний о сроках — %s', created)
+    return created
+
+
+# Виды напоминаний о сроке этапа после оплаты: (срок близко, срок прошёл).
+STAGE_REMINDER_KINDS = {
+    workflow.KIND_RECEIPT: ('receipt_due_soon', 'receipt_overdue'),
+    workflow.KIND_CLOSING: ('docs_due_soon', 'docs_overdue'),
+}
+
+
+def _remind_stage_deadlines(cursor, today, members):
+    """Срок чека и закрывающих документов (п. 17, решение владельца 09.11.2026).
+
+    Получают, как у срока оплаты, тот, у кого этап сейчас (человек этапа либо всё
+    подразделение: чек — инициатор или тот, кому администратор его передал; документы —
+    бухгалтерия), инициатор и наблюдатели. Каждое напоминание — один раз на срок
+    (`dedupe_key`)."""
+    settings = directory.get_settings(cursor)
+    rows = queries.stage_deadline_rows(cursor)
+    if not rows:
+        return 0
+    watchers = queries.observers_by_request(cursor, [request['id'] for request, *_rest in rows])
+    created = 0
+    for request, stage, received_at in rows:
+        kind, opened_at = stage['kind'], stage.get('opened_at')
+        due_on = workflow.stage_due_on(
+            kind, workflow.stage_deadline_start(kind, opened_at=opened_at, received_at=received_at), settings)
+        mark = workflow.deadline_mark(due_on, today, opened_on=opened_at)
+        if not mark:
+            continue
+        holder = subtask_user_ids(stage, members) | {request.get('initiator_id')}
+        recipients = open_to(holder | watchers.get(request['id'], set()))
+        if not recipients:
+            continue
+        event = (notify.stage_overdue(request, kind, due_on, (today - due_on).days) if mark == 'overdue'
+                 else notify.stage_due_soon(request, kind, due_on, (due_on - today).days))
+        created += notices.push(
+            cursor, user_ids=recipients, request_id=request['id'], kind=event['kind'], title=event['title'],
+            body=event.get('body'), tone=event.get('tone', 'default'),
+            dedupe_key='%s:%s:%s' % (event['kind'], request['id'], due_on.isoformat()))
     return created

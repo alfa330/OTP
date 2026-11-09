@@ -9,11 +9,11 @@ import PaymentsFilters from './PaymentsFilters';
 import {
     BOARD_CHUNK_SIZES, BOARD_CHUNK_STORAGE_KEY, BOARD_COLUMN_GAP, CARD_RECIPIENT_SHORT, COLUMN_SHEET_PAGE, DOCS_STATUS_META,
     EMPTY_FILTERS, REQUEST_FORMS, activeFilterCount, boardColumnsWithPhotos, boardHidden, boardLayout, boardPageStep,
-    amountLabel, boardScrollFor, boardThumb, canDropTo, cardFaces, edgeFade, filtersToParams, fmtDateShort,
+    amountLabel, boardFaces, boardScrollFor, boardThumb, canDropTo, edgeFade, filtersToParams, fmtDateShort,
     normalizeBoardChunk, plural, requestType,
 } from './paymentsMeta';
 import {
-    CardFaces, CardNumber, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
+    CardNumber, CardPeople, DueChip, FormSelect, MetaChip, NoticeBox, TypePill, errorText, requestCardFrame,
 } from './paymentsUi';
 
 /*
@@ -115,13 +115,13 @@ const BoardCard = ({ card, board, draggable = false, dragging = false, soonDays,
                         <span className="min-w-0 grow basis-0 truncate text-[12px] text-slate-600">{card.card_holder_name || 'Получатель не указан'}</span>
                         {CARD_RECIPIENT_SHORT[card.card_recipient] && <MetaChip title="Чья карта">{CARD_RECIPIENT_SHORT[card.card_recipient]}</MetaChip>}
                     </div>
-                    {/* Полный номер — по кнопке и только здесь: доску финансового отдела
-                        открывают те, кому номер положен (п. 5.2), а показ пишется в журнал
-                        заявки. Рост строки — по значкам показанного номера: карточка не
-                        дёргается, когда номер раскрывают. */}
+                    {/* П. 9: «карточка должна содержать … полный номер карты» — финансовому
+                        отделу переводить, и номер стоит сразу (сервер отдаёт его только тем, кому
+                        он положен, п. 5.2, и пишет показ в журнал заявки). Не прочитался — маска и
+                        «показать», как раньше. Рост строки — по значкам показанного номера. */}
                     <div className="flex min-h-[24px] items-center text-[12px]" onClick={(event) => event.stopPropagation()} role="presentation">
-                        {card.card_mask
-                            ? <CardNumber compact mask={card.card_mask} canReveal load={() => loadCardNumber(card.id)} showToast={showToast} />
+                        {card.card_mask || card.card_number
+                            ? <CardNumber compact mask={card.card_mask} number={card.card_number || ''} canReveal load={() => loadCardNumber(card.id)} showToast={showToast} />
                             : <span className="text-slate-400">Номер карты не указан</span>}
                     </div>
                     {card.payment_purpose && (
@@ -148,14 +148,16 @@ const BoardCard = ({ card, board, draggable = false, dragging = false, soonDays,
                 </p>
             )}
             {clarify && <p className="mt-1.5 text-[11.5px] leading-snug text-amber-700 line-clamp-2" title={clarify}>{clarify}</p>}
+            {/* Пп. 7 и 9: инициатор и у кого этап — именами, не одними кружками. На доске
+                подразделения «→ Бухгалтерия» у каждой карточки собственной же доски ничего не
+                говорит — там остаётся инициатор (и тот, кто этап уже выполнил). */}
+            <CardPeople faces={boardFaces(card, board.code)} />
 
             {/* Низом карточки: в сетке окна колонки соседние карточки одной высоты, и
                 сумма у всех стоит на одной линии. Колонка доски бывает уже обычной
                 (доска делит между колонками ширину экрана) — тогда семизначная сумма
-                не встаёт рядом с кружками и сроком и уходит строкой ниже, а не
-                наезжает на срок. */}
+                не встаёт рядом со сроком и уходит строкой ниже, а не наезжает на срок. */}
             <div className="mt-auto flex flex-wrap items-center gap-x-1.5 gap-y-1 pt-2">
-                <CardFaces faces={cardFaces(card)} />
                 <DueChip request={card} soonDays={soonDays} />
                 <span className="ml-auto shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{amountLabel(card, card.amount)}</span>
             </div>

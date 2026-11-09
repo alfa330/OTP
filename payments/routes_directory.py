@@ -207,6 +207,19 @@ def register(api):
             'letters_provider': letters[1] if letters[0] else None,
         }, actor_id=ctx['user_id'])
 
+    def _counterparty_vat(cursor, data, row_id):
+        """НДС поставщика — три состояния (п. 8, 09.11.2026): с НДС, без НДС и «не указан»
+        (пусто) — у поставщика, вписанного в заявку названием, его никто не проверял. Окно,
+        открытое до выкладки (без метки `vat_tristate`), «не указан» не знает: у него «без
+        НДС» стояло выбранным и тогда, когда никто ничего не выбирал, — такой false не
+        затирает «не указан» у уже заведённого поставщика."""
+        vat = None if data.get('vat_payer') in (None, '') else as_bool(data.get('vat_payer'))
+        if row_id and vat is False and not as_bool(data.get('vat_tristate')):
+            current = directory.read_counterparty(cursor, row_id)
+            if current and current.get('vat_payer') is None:
+                return None
+        return vat
+
     def _save_counterparty(cursor, data, row_id, ctx):
         category_id = as_int(data.get('category_id'), 'category_id')
         # Окно, открытое до появления поля «Почта» (старая вкладка браузера), почту не
@@ -217,7 +230,7 @@ def register(api):
             'legal_name': as_text(data.get('legal_name'), 'Юридическое наименование', limit=300),
             'bin': digits(data.get('bin')) or None,
             'kind': party_kind(data.get('kind')),
-            'vat_payer': as_bool(data.get('vat_payer')),
+            'vat_payer': _counterparty_vat(cursor, data, row_id),
             'requisites': as_text(data.get('requisites'), 'Прочие реквизиты', limit=4000),
             'contact': as_text(data.get('contact'), 'Контакт', limit=1000),
             'category_id': category_id,

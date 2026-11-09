@@ -112,7 +112,10 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                # наблюдатели заявки: кого добавили и кого сняли одним действием
                'observers',
                # Helpdesk IT (04.11.2026): подобрал поставщиков либо выдал из наличия
-               'it_offers', 'it_stock')
+               'it_offers', 'it_stock',
+               # 09.11.2026: заявка ушла в архив «Удалённые» (п. 18); бухгалтер указал НДС
+               # поставщика, вписанного инициатором названием (п. 8)
+               'deleted', 'supplier_vat')
 
 _STATEMENTS = [
 
@@ -1031,13 +1034,76 @@ _STATEMENTS = [
     "UPDATE payment_subtasks SET role_code = 'asset_keeper' WHERE role_code = 'helpdesk'",
     "UPDATE payment_requests SET current_role_code = 'asset_keeper' WHERE current_role_code = 'helpdesk'",
 
+    # ── Архив «Удалённые» (п. 18, решение владельца 09.11.2026) ────────────
+    #
+    # «По каждой основной заявке должна храниться полная неизменяемая история
+    # действий» — поэтому удалить заявку значит убрать её из работы, а не стереть.
+    # Удалённая заявка пропадает с досок, из реестра, задач, напоминаний и справок
+    # (прошлые оплаты, дубль счёта), но строка, история, файлы и имущество остаются;
+    # администратор раздела видит её в реестре срезом «Удалённые». Статус не
+    # меняется (CHECK на status не трогаем): в архиве видно, на каком этапе её убрали.
+    # `deleted_by` — без внешнего ключа на users, как номера людей в истории имущества: имя
+    # снимком рядом, а ссылка на users в первом старте брала бы блокировку таблицы users
+    # (вход, правка профиля) — и выкладка падала бы с 55P03.
+    """
+    ALTER TABLE payment_requests
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP,
+        ADD COLUMN IF NOT EXISTS deleted_by INTEGER,
+        ADD COLUMN IF NOT EXISTS deleted_by_name VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS deleted_comment TEXT
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payment_requests_deleted ON payment_requests (deleted_at) "
+    "WHERE deleted_at IS NOT NULL",
+
+    # Журнал показа номера карты (п. 9, 09.11.2026): одна строка на человека, заявку и номер
+    # (последние четыре цифры). Индекс не пускает вторую строку из второй вкладки доски,
+    # открытой в ту же секунду (queries.log_card_shown, ON CONFLICT DO NOTHING). Показы по
+    # кнопке «Показать номер» (payload без 'shown') пишутся каждый — их индекс не касается.
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_events_card_shown "
+    "ON payment_events (request_id, actor_id, (payload->>'last4')) "
+    "WHERE kind = 'card_revealed' AND payload ? 'shown'",
+
+    # ── НДС поставщика «не указан» (п. 8, решение владельца 09.11.2026) ────
+    #
+    # Поставщик, которого инициатор вписал в заявку названием, раньше заводился
+    # «без НДС» — хотя этого никто не проверял, а бухгалтер видел это как факт.
+    # Теперь у такого поставщика НДС не указан (NULL), и указывает его бухгалтер в
+    # окне «Оплата счёта» либо администратор в справочнике. Блок ничего не делает,
+    # если колонка уже допускает NULL: без него ALTER брал бы блокировку таблицы на
+    # каждом старте.
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'payment_counterparties'
+                      AND column_name = 'vat_payer' AND is_nullable = 'NO') THEN
+            ALTER TABLE payment_counterparties ALTER COLUMN vat_payer DROP NOT NULL;
+            ALTER TABLE payment_counterparties ALTER COLUMN vat_payer DROP DEFAULT;
+        END IF;
+    END $$
+    """,
+
+    # ── Компания-владелец в истории имущества (п. 12, 09.11.2026) ──────────
+    #
+    # «История владельцев … должна сохраняться, а не перезаписываться»: смена
+    # компании-владельца — тоже строка истории с «было» и «стало». Названия —
+    # снимком, как имя ответственного: компанию могут переименовать или убрать.
+    """
+    ALTER TABLE payment_asset_moves
+        ADD COLUMN IF NOT EXISTS from_legal_entity_id INTEGER,
+        ADD COLUMN IF NOT EXISTS from_legal_entity_name VARCHAR(200),
+        ADD COLUMN IF NOT EXISTS to_legal_entity_id INTEGER,
+        ADD COLUMN IF NOT EXISTS to_legal_entity_name VARCHAR(200)
+    """,
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
     # приложения. Исключение одно: действия самих внешних ключей (удаление
-    # заявки администратором уносит её историю каскадом, удаление учётки
-    # обнуляет ссылку на автора). Они идут изнутри системного триггера, поэтому
-    # глубина вложенности у них больше единицы.
+    # учётки обнуляет ссылку на автора; заявку с 09.11.2026 не стирают вовсе —
+    # она уходит в архив «Удалённые», — но каскад от строки заявки остаётся
+    # разрешённым для уборки тестовых данных прямым SQL). Они идут изнутри
+    # системного триггера, поэтому глубина вложенности у них больше единицы.
     """
     CREATE OR REPLACE FUNCTION payment_events_immutable()
     RETURNS TRIGGER

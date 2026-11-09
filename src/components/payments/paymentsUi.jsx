@@ -13,8 +13,8 @@ import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
     ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
-    issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText, stateMeta,
-    toneEdge, tonePill, toneRow,
+    issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText,
+    shortPersonName, stateMeta, toneEdge, tonePill, toneRow,
 } from './paymentsMeta';
 
 /*
@@ -368,16 +368,27 @@ const FlowArrow = () => (
     </svg>
 );
 
-/* «Инициатор → у кого этап». Имена — в подсказках (и для читалки — в aria-label). */
-export const CardFaces = ({ faces }) => {
+/* «Инициатор → у кого этап» на карточке доски — кружком и именем (п. 7: карточка
+   показывает инициатора и текущего согласующего; п. 9 — инициатора). Одни кружки с
+   именем в подсказке не годились: на телефоне подсказки при наведении нет. Имя — «Фамилия
+   И.». Пара не помещается в узкую колонку — второй человек переносится строкой ниже целиком,
+   а не режутся оба («Ерсул… → Финансовы…» не читалось); обрезается только имя длиннее
+   всей колонки. Полностью, с ролью («Согласует: …»), — в подсказке и в подписи для читалки. */
+export const CardPeople = ({ faces }) => {
     if (!faces?.from && !faces?.to) return null;
     const label = [faces.from?.title, faces.to?.title].filter(Boolean).join(' → ');
-    return (
-        <span className="flex shrink-0 items-center gap-0.5" title={label} aria-label={label}>
-            {faces.from && <Face person={faces.from} />}
-            {faces.from && faces.to && <FlowArrow />}
-            {faces.to && <Face person={faces.to} />}
+    const person = (face, arrow = false) => (
+        <span className="flex min-w-0 max-w-full items-center gap-1" title={face.title}>
+            {arrow && <FlowArrow />}
+            <Face person={face} size={18} />
+            <span className="min-w-0 truncate">{shortPersonName(face.name, face.role)}</span>
         </span>
+    );
+    return (
+        <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-1 text-[11.5px] text-slate-600" aria-label={label} data-card-people>
+            {faces.from && person(faces.from)}
+            {faces.to && person(faces.to, Boolean(faces.from))}
+        </div>
     );
 };
 
@@ -960,10 +971,12 @@ export const RequisitesBox = ({ entity, title = 'Реквизиты компан
 /* Номер карты: маска «•••• 1234» и, для тех, кому положено, — «показать»
    (ТЗ, п. 5.2: полный номер доступен по правам). Полный номер раздел запрашивает
    отдельно и держит только в этом компоненте: закрыл карточку — номера нет.
+   `number` — полный номер, уже пришедший с сервера: финансовому отделу его не
+   показывают по кнопке, а ставят сразу (п. 9 — ему переводить); рядом — «Скопировать».
    `compact` — для карточки доски: показанный номер занимает строку почти целиком,
    поэтому «Скрыть» и «Скопировать» там стоят значками, а не словами (слова
    переносились на вторую строку). */
-export const CardNumber = ({ mask, canReveal = false, load, showToast, compact = false }) => {
+export const CardNumber = ({ mask, number = '', canReveal = false, load, showToast, compact = false }) => {
     const [full, setFull] = useState('');
     const [busy, setBusy] = useState(false);
     useEffect(() => { setFull(''); }, [mask]);
@@ -979,12 +992,14 @@ export const CardNumber = ({ mask, canReveal = false, load, showToast, compact =
             setBusy(false);
         }
     };
-    if (!mask) return null;
-    const icons = compact && Boolean(full);
+    const given = String(number || '').trim();
+    const shown = given || full;
+    if (!mask && !given) return null;
+    const icons = compact && Boolean(shown);
     return (
-        <span className={`inline-flex items-center gap-y-1 ${icons ? 'gap-x-1' : 'flex-wrap gap-x-2'}`}>
-            <span className={`tabular-nums text-slate-900 ${icons ? 'mr-1' : ''}`}>{full || mask}</span>
-            {canReveal && (
+        <span className={`inline-flex items-center gap-y-1 ${icons ? 'gap-x-1' : 'flex-wrap gap-x-2'}`} data-card-number={given ? 'full' : 'mask'}>
+            <span className={`tabular-nums text-slate-900 ${icons ? 'mr-1' : ''}`}>{shown || mask}</span>
+            {canReveal && !given && (
                 <button
                     type="button"
                     onClick={(event) => { event.stopPropagation(); reveal(); }}
@@ -999,7 +1014,7 @@ export const CardNumber = ({ mask, canReveal = false, load, showToast, compact =
                     {!icons && (full ? 'Скрыть' : 'Показать номер')}
                 </button>
             )}
-            {full && <CopyButton text={full.replace(/\s/g, '')} label={compact ? 'Скопировать номер' : 'Скопировать'} iconOnly={compact} />}
+            {shown && <CopyButton text={shown.replace(/\s/g, '')} label={compact ? 'Скопировать номер' : 'Скопировать'} iconOnly={compact} />}
         </span>
     );
 };

@@ -28,11 +28,15 @@ export const STATE_META = {
     done: { label: 'Закрыта', tone: 'done' },
     rejected: { label: 'Отклонена', tone: 'rejected' },
     cancelled: { label: 'Отменена', tone: 'rejected' },
+    // Архив «Удалённые» (п. 18): заявка убрана из работы, история и файлы целы.
+    deleted: { label: 'Удалена', tone: 'rejected' },
 };
 
 /* Полоса-легенда, она же фильтр. «Ждут меня» — не состояние заявки, а срез по
    исполнителю, поэтому стоит сразу за «Все» и не имеет кружка. «Наблюдаю» — такой
-   же срез: заявки в работе, где смотрящий в наблюдателях (плитка есть, только когда они есть). */
+   же срез: заявки в работе, где смотрящий в наблюдателях (плитка есть, только когда они есть).
+   «Удалённые» — архив администратора раздела (п. 18): плитка есть, только когда сервер
+   прислал её счётчик (он считает его только администратору) и в архиве что-то лежит. */
 export const STATE_FILTERS = [
     { key: 'all', label: 'Все', counter: 'all', tone: null },
     { key: 'mine', label: 'Ждут меня', counter: 'mine', tone: null },
@@ -43,6 +47,7 @@ export const STATE_FILTERS = [
     { key: 'done', label: 'Закрыты', counter: 'done', tone: 'done' },
     { key: 'rejected', label: 'Отклонены', counter: 'rejected', tone: 'rejected' },
     { key: 'cancelled', label: 'Отменены', counter: 'cancelled', tone: 'rejected' },
+    { key: 'deleted', label: 'Удалённые', counter: 'deleted', tone: 'rejected' },
 ];
 
 /* Фильтр «Статус» на досках (ТЗ, п. 19). У реестра его роль играет
@@ -416,6 +421,14 @@ export const HINTS = {
             ['С НДС', 'плательщик НДС'],
         ],
     },
+    // П. 8: в окне «Оплата счёта» — у поставщика, которого инициатор вписал названием (09.11.2026).
+    supplierVat: {
+        intro: 'Поставщика вписали в заявку названием — НДС у него не указан. Проверьте по счёту и выберите: выбор сохранится в карточке поставщика вместе с «Оплачено», и в следующей заявке его не спросят.',
+        options: [
+            ['Без НДС', 'поставщик работает без НДС'],
+            ['С НДС', 'поставщик — плательщик НДС'],
+        ],
+    },
     partyKind: {
         intro: 'Организационная форма.',
         options: [
@@ -493,6 +506,8 @@ export const HINTS = {
     templateLimit: { intro: 'До какой суммы заявка по этому платежу уходит его согласующему. Больше — идёт по общим лимитам и маршрутам.' },
     minSuppliers: { intro: 'Сколько вариантов поставщиков нужно в новом закупе, чтобы заявка ушла на согласование. Не действует, когда альтернативные предложения отсутствуют.' },
     dueSoonDays: { intro: 'За сколько дней до срока оплаты исполнителю и инициатору приходит напоминание.' },
+    receiptDays: { intro: 'Сколько дней у инициатора на чек после пополнения карты. За день до срока и когда он прошёл, инициатору и наблюдателям приходит напоминание.' },
+    closingDocsDays: { intro: 'Сколько дней на закрывающие документы после подтверждения получения. За день до срока и когда он прошёл, напоминание приходит бухгалтерии, инициатору (пока оригиналы не сданы) и наблюдателям.' },
     cardOwner: {
         intro: 'Чья это карта.',
         options: [
@@ -588,14 +603,46 @@ export const toneEdge = (tone) => (tone && TONE_EDGE[tone]) || '';
 
 /** С этой ли строки реестра начинаются завершённые заявки. Сервер отдаёт сначала заявки в
  *  работе, потом закрытые, отклонённые и отменённые — на стыке список получает подпись.
- *  Страница, которая целиком из завершённых (или целиком из рабочих), подписи не имеет. */
+ *  Страница, которая целиком из завершённых (или целиком из рабочих), подписи не имеет.
+ *  В архиве «Удалённые» (п. 18) подписи нет: там удалена каждая строка, что бы ни стояло в статусе. */
 export const closedGroupStart = (items, index) => Boolean(items?.[index])
+    && !items[index].deleted
     && items[index].status !== 'active'
     && items[index - 1]?.status === 'active';
 export const tonePill = (tone) => TONE_PILL[tone] || TONE_PILL.neutral;
 export const toneText = (tone) => TONE_TEXT[tone] || TONE_TEXT.neutral;
 
-export const isClosed = (request) => ['done', 'rejected', 'cancelled'].includes(request?.status);
+export const isClosed = (request) => Boolean(request?.deleted)
+    || ['done', 'rejected', 'cancelled'].includes(request?.status);
+
+/* «09.11.2026 10:15 · кто» — когда и кем заявка убрана в архив «Удалённые» (п. 18). Само
+   слово «Удалена» стоит рядом меткой состояния — здесь его не повторяем. */
+export const deletedLine = (request) => (request?.deleted
+    ? [fmtDateTime(request.deleted_at), request.deleted_by_name].filter(Boolean).join(' · ')
+    : '');
+
+/* НДС поставщика (п. 8): три состояния. «Не указан» — не «без НДС»: у поставщика, которого
+   инициатор вписал названием, НДС никто не проверял (решение владельца 09.11.2026). */
+export const vatLabel = (value) => {
+    if (value === true) return 'с НДС';
+    if (value === false) return 'без НДС';
+    return 'НДС не указан';
+};
+
+/* Срок этапа после оплаты (п. 17, решение владельца 09.11.2026): чек — после пополнения
+   карты, закрывающие документы — после подтверждения получения. `deadline` — с сервера
+   ({ kind, due_on, days_left }); пустая строка — срока нет. */
+export const stageDeadlineLabel = (deadline) => {
+    if (!deadline?.due_on) return '';
+    const what = deadline.kind === 'receipt_confirm' ? 'Чек' : 'Документы';
+    const days = Number(deadline.days_left);
+    if (Number.isFinite(days) && days < 0) {
+        return `${what} — просрочено на ${pluralDays(days)}, срок был ${fmtDate(deadline.due_on)}`;
+    }
+    if (days === 0) return `${what} — срок сегодня`;
+    if (days === 1) return `${what} — срок завтра`;
+    return `${what} — до ${fmtDate(deadline.due_on)}`;
+};
 export const isPaid = (request) => Boolean(request?.paid_on);
 /* Каким словом назвать день, когда ушли деньги. Перевод на карту — «пополнено», а
    не «оплачено»: у карты сотрудника оплату подтверждает только чек (п. 5.3). */
@@ -811,7 +858,8 @@ export const isOverdue = (request, today = todayISO()) => {
    У оплаченной вместо срока — галочка и день оплаты. null — показывать нечего:
    срока нет либо заявка закрыта без оплаты. */
 export const dueChip = (request, { soonDays = 3, today = todayISO() } = {}) => {
-    if (!request) return null;
+    // Заявка в архиве «Удалённые» (п. 18) срока уже не держит — ни флажка, ни красного.
+    if (!request || request.deleted) return null;
     if (request.paid_on) {
         return { tone: 'done', icon: 'check', label: fmtDateShort(request.paid_on), title: `${paidWord(request)} ${fmtDate(request.paid_on)}` };
     }
@@ -986,6 +1034,11 @@ export const issuedFromStock = (subtasks = []) => (subtasks || [])
 /** У кого заявка сейчас — одной строкой для свёрнутого «Хода заявки». */
 export const routeSummary = (request, subtasks = []) => {
     const status = request?.status || 'active';
+    // Архив «Удалённые» (п. 18): этап, на котором заявку убрали, — уже не «сейчас».
+    if (request?.deleted) {
+        const stopped = (subtasks || []).find((item) => item.state === 'open' || item.state === 'waiting');
+        return stopped?.title ? `Удалена на этапе «${stopped.title}»` : 'Удалена';
+    }
     if (status === 'done') return issuedFromStock(subtasks) ? 'Выдано из наличия' : 'Все этапы пройдены';
     if (status === 'rejected') return 'Отклонена';
     if (status === 'cancelled') return 'Отменена';
@@ -1179,6 +1232,14 @@ export const requestType = (request) => {
 export const initialsOf = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2)
     .map((part) => part[0]).join('').toUpperCase() || '?';
 
+/* Имя на карточке доски — «Фамилия И.» (п. 7): полное ФИО в узкой колонке обрезалось бы
+   посередине. Подразделение («Бухгалтерия», «Финансовый отдел») — как есть. */
+export const shortPersonName = (name, role = false) => {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (role || parts.length < 2) return parts.join(' ');
+    return `${parts[0]} ${parts[1][0].toUpperCase()}.`;
+};
+
 const DONE_VERB = {
     manager_approval: 'Согласовал',
     it_review: 'Проверил',
@@ -1236,6 +1297,16 @@ export const cardFaces = (card) => {
     return { from, to };
 };
 
+/* Лица на карточке ДОСКИ. На доске согласования — «инициатор → кто согласует» (п. 7). На
+   доске подразделения (бухгалтерия, финотдел, Helpdesk IT) исполнитель — само это
+   подразделение, и «→ Бухгалтерия» у каждой карточки бухгалтерии — шум: там остаётся
+   инициатор (п. 9), а в итоговых колонках — сотрудник, который этап выполнил. */
+export const boardFaces = (card, boardCode) => {
+    const faces = cardFaces(card);
+    if (boardCode !== 'approval' && faces.to?.role) return { ...faces, to: null };
+    return faces;
+};
+
 /* Задача рабочего стола «вернули мне»: заявку отправили инициатору на доработку
    или с вопросом. Только такие строки стола отмечены цветом — по ним ждут ответа
    человека, а не его очередного шага. */
@@ -1257,7 +1328,8 @@ export const deskTaskAbout = (task) => [
    печатается, только если она что-то добавляет: у задачи подразделения имя и
    есть роль («Бухгалтерия» дважды — шум). */
 export const responsibleLines = (request) => {
-    if (!request || request.status !== 'active') return { name: '—', sub: '' };
+    // Заявка в архиве «Удалённые» (п. 18) ни у кого не в работе.
+    if (!request || request.status !== 'active' || request.deleted) return { name: '—', sub: '' };
     const role = ROLE_LABELS[request.current_role] || '';
     const name = request.current_assignee_name || role || '—';
     return { name, sub: name === role ? '' : role };
@@ -1266,6 +1338,7 @@ export const responsibleLines = (request) => {
 /* Где заявка сейчас — одной строкой: этап, а у заявки на уточнении — причина. */
 export const stageLine = (request) => {
     if (!request) return '';
+    if (request.deleted) return 'Удалена';
     if (request.status === 'done') return 'Закрыта';
     if (request.status === 'rejected') return 'Отклонена';
     if (request.status === 'cancelled') return 'Отменена';
@@ -1283,9 +1356,10 @@ export const stageLine = (request) => {
 export const CURRENT_KIND_LABELS = { entity_clarify: 'Уточнение компании', it_review: 'Проверка Helpdesk IT' };
 
 export const registryWhere = (request) => {
-    const special = request?.status === 'active' ? CURRENT_KIND_LABELS[request.current_kind] : '';
+    const live = request?.status === 'active' && !request?.deleted;
+    const special = live ? CURRENT_KIND_LABELS[request.current_kind] : '';
     const stage = special || stageLine(request);
-    if (!request || request.status !== 'active') return stage;
+    if (!live) return stage;
     const who = responsibleLines(request).name;
     return [stage, who].filter((part, index, list) => part && part !== '—' && list.indexOf(part) === index).join(' · ');
 };
@@ -1905,6 +1979,10 @@ export const describeEvent = (event, titleOf = () => '') => {
             : `Запрошена информация${of}`;
         case 'rejected': return 'Заявка отклонена';
         case 'cancelled': return 'Заявка отменена';
+        // Архив «Удалённые» (п. 18): удаление — тоже строка истории, причина — в комментарии.
+        case 'deleted': return 'Заявка удалена — в архиве «Удалённые»';
+        // П. 8: НДС поставщика, вписанного инициатором названием, указал бухгалтер при оплате.
+        case 'supplier_vat': return `НДС поставщика${payload.counterparty_name ? ` «${payload.counterparty_name}»` : ''}: ${vatLabel(payload.vat_payer)}`;
         case 'paid': return `Счёт оплачен${payload.paid_amount ? `: ${fmtMoney(payload.paid_amount)}` : ''}`;
         case 'topped_up': return `Карта пополнена${payload.paid_amount ? `: ${fmtMoney(payload.paid_amount)}` : ''}`;
         case 'receipt_provided': return 'Приложен чек';
@@ -1921,7 +1999,7 @@ export const describeEvent = (event, titleOf = () => '') => {
             : `Исполнитель${stage ? ` «${stage}»` : ''} возвращён подразделению`;
         case 'attachment_added': return `Файл добавлен: ${payload.file_name || ''}`.trim();
         case 'attachment_removed': return `Файл снят: ${payload.file_name || ''}`.trim();
-        case 'card_revealed': return 'Посмотрел полный номер карты';
+        case 'card_revealed': return payload.shown ? 'Видел полный номер карты' : 'Посмотрел полный номер карты';
         case 'refund': return payload.refund_amount
             ? `Отмечен возврат ${fmtMoney(payload.refund_amount)}`
             : 'Возврат снят';

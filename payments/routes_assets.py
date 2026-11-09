@@ -124,8 +124,11 @@ def register(api):
             if not item:
                 raise ApiError('Имущество не найдено', status=404)
             moves = assets_sql.list_moves(cursor, asset_id)
+        # Заявку в архиве «Удалённые» (п. 18) открывает только администратор раздела — карточка
+        # имущества знает это заранее и остальным показывает её номер без ссылки.
         return jsonify({'asset': item, 'moves': moves,
-                        'can_manage': access.can_manage_assets(ctx, ctx['roles'])})
+                        'can_manage': access.can_manage_assets(ctx, ctx['roles']),
+                        'can_open_deleted': access.is_section_admin(ctx)})
 
     @route('/assets/<int:asset_id>', methods=('PATCH',))
     def asset_edit(ctx, asset_id):
@@ -164,9 +167,12 @@ def register(api):
             if missing:
                 raise ApiError('Не заполнено: ' + ', '.join(missing), code='PAYMENT_ASSET_INCOMPLETE',
                                extra={'missing': missing})
-            assets_sql.update_details(cursor, asset_id, fields)
+            # Смена компании-владельца пишется в историю (п. 12) — нужны «было» и кто правил.
+            assets_sql.update_details(cursor, asset_id, fields, actor=_actor(ctx), current=current)
             item = assets_sql.read_asset(cursor, asset_id)
-        return jsonify({'status': 'success', 'asset': item})
+            # История — в ответе: окно карточки показывает новую строку сразу, не открываясь заново.
+            moves = assets_sql.list_moves(cursor, asset_id)
+        return jsonify({'status': 'success', 'asset': item, 'moves': moves})
 
     @route('/assets/<int:asset_id>/move', methods=('POST',))
     def asset_move(ctx, asset_id):

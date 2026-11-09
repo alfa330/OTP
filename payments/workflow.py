@@ -29,7 +29,7 @@
 владельца). Где постановка молчит, выбор назван в докстроке.
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 # ─── Роли ────────────────────────────────────────────────────────────────────
@@ -149,8 +149,16 @@ ASSET_STATUS_LABELS = dict(ASSET_STATUSES)
 # в ТЗ числа нет («приближении срока», п. 17).
 SETTING_MIN_SUPPLIERS = 'min_suppliers'
 SETTING_DUE_SOON_DAYS = 'due_soon_days'
-SETTINGS_DEFAULTS = {SETTING_MIN_SUPPLIERS: 3, SETTING_DUE_SOON_DAYS: 2}
-SETTINGS_LIMITS = {SETTING_MIN_SUPPLIERS: (1, 10), SETTING_DUE_SOON_DAYS: (0, 30)}
+# Свой срок у этапов после оплаты (п. 17, решение владельца 09.11.2026): сроку оплаты
+# после оплаты напоминать не о чем, а чек и закрывающие документы — тоже работа со сроком.
+# Чек — столько дней после пополнения карты, закрывающие документы — после подтверждения
+# получения. Числа меняет администратор в «Настройках».
+SETTING_RECEIPT_DAYS = 'receipt_days'
+SETTING_CLOSING_DOCS_DAYS = 'closing_docs_days'
+SETTINGS_DEFAULTS = {SETTING_MIN_SUPPLIERS: 3, SETTING_DUE_SOON_DAYS: 2,
+                     SETTING_RECEIPT_DAYS: 3, SETTING_CLOSING_DOCS_DAYS: 10}
+SETTINGS_LIMITS = {SETTING_MIN_SUPPLIERS: (1, 10), SETTING_DUE_SOON_DAYS: (0, 30),
+                   SETTING_RECEIPT_DAYS: (1, 30), SETTING_CLOSING_DOCS_DAYS: (1, 90)}
 
 # Порог, с которого счёт требует действующего договора: «для счетов на сумму
 # более 300 000 тг» — строго больше (дополнение Колкомбаевой к задаче #179).
@@ -1213,6 +1221,70 @@ def setting(settings, key):
     return value if low <= value <= high else default
 
 
+# ─── Сроки этапов после оплаты (п. 17, решение владельца 09.11.2026) ─────────
+#
+# «Уведомления отправляются при … приближении срока; просрочке». Срок оплаты
+# напоминает о себе до оплаты; после неё срок есть у двух этапов: чек — столько-то
+# дней после пополнения карты (этап открывается пополнением), закрывающие
+# документы — после подтверждения получения. Напоминают за день до срока и один
+# раз — когда срок прошёл.
+
+STAGE_DEADLINE_SETTINGS = {KIND_RECEIPT: SETTING_RECEIPT_DAYS, KIND_CLOSING: SETTING_CLOSING_DOCS_DAYS}
+
+
+def stage_deadline_start(kind, *, opened_at=None, received_at=None):
+    """С какого дня считается срок этапа: чек — с пополнения (открытие этапа),
+    документы — с подтверждения получения; не знаем, когда получили, — с открытия."""
+    if kind == KIND_CLOSING:
+        return _as_date(received_at) or _as_date(opened_at)
+    if kind == KIND_RECEIPT:
+        return _as_date(opened_at)
+    return None
+
+
+def stage_due_on(kind, start, settings=None):
+    """Срок этапа: день начала + дни из настроек. None — у этапа своего срока нет."""
+    key = STAGE_DEADLINE_SETTINGS.get(kind)
+    start = _as_date(start)
+    if not key or start is None:
+        return None
+    return start + timedelta(days=setting(settings, key))
+
+
+def deadline_mark(due_on, today, *, opened_on=None):
+    """'overdue' — срок прошёл; 'soon' — срок завтра или сегодня; None — напоминать рано.
+
+    Этап, открытый сегодня, о близком сроке не напоминает: человек только что
+    получил саму задачу, и «срок завтра» в тот же час — шум."""
+    due_on = _as_date(due_on)
+    if due_on is None or today is None:
+        return None
+    if due_on < today:
+        return 'overdue'
+    opened_on = _as_date(opened_on)
+    if (due_on - today).days <= 1 and (opened_on is None or opened_on < today):
+        return 'soon'
+    return None
+
+
+def stage_deadline(subtasks, settings=None, today=None):
+    """Срок открытого этапа «чек» или «закрывающие документы» для карточки заявки:
+    {'kind', 'due_on', 'days_left'} либо None."""
+    by_kind = {item.get('kind'): item for item in subtasks or []}
+    for kind in (KIND_RECEIPT, KIND_CLOSING):
+        item = by_kind.get(kind)
+        if not item or item.get('state') != 'open':
+            continue
+        start = stage_deadline_start(kind, opened_at=item.get('opened_at'),
+                                     received_at=(by_kind.get(KIND_RECEIVING) or {}).get('done_at'))
+        due_on = stage_due_on(kind, start, settings)
+        if due_on is None:
+            return None
+        return {'kind': kind, 'due_on': due_on,
+                'days_left': (due_on - today).days if today is not None else None}
+    return None
+
+
 def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings=None, card_number_ok=True,
                        invoice_required=True):
     """Чего не хватает заявке, чтобы уйти на согласование. Пустой список — можно.
@@ -1464,7 +1536,8 @@ def asset_missing(asset):
     for key, label in ASSET_REQUIRED_FIELDS:
         value = (asset or {}).get(key)
         if key == 'cost':
-            if value in (None, '') or to_decimal(value, None) is None or to_decimal(value) < 0:
+            # Стоимость — обязательное поле учёта (п. 10.2): «0 ₸» не значение, а пропуск.
+            if value in (None, '') or to_decimal(value, None) is None or to_decimal(value) <= 0:
                 missing.append(label)
         elif key == 'status':
             if value not in ASSET_STATUS_LABELS:
@@ -1472,6 +1545,11 @@ def asset_missing(asset):
         elif value in (None, '') or (isinstance(value, str) and not value.strip()):
             missing.append(label)
     return missing
+
+
+def supplier_vat_unknown(request):
+    """У поставщика заявки НДС не указан: в справочнике ни «с НДС», ни «без НДС»."""
+    return bool(request and request.get('counterparty_id') and request.get('counterparty_vat') is None)
 
 
 def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), assets=(), settings=None):
@@ -1509,6 +1587,11 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
         if proof not in kinds:
             missing.append('Приложите платёжное поручение' if action == 'pay'
                            else 'Приложите подтверждение перевода')
+    if action == 'pay' and supplier_vat_unknown(request) and fields.get('supplier_vat') is None:
+        # П. 8: бухгалтер проверяет «НДС/без НДС». У поставщика, которого инициатор вписал
+        # названием, НДС не указан — бухгалтер выбирает его в окне оплаты, и выбор уходит вместе
+        # с «Оплачено» (владелец 09.11.2026). Окно, открытое до выкладки, поля не знает.
+        missing.append('Укажите НДС поставщика (поле «НДС» в окне оплаты; если его нет — обновите страницу)')
     if action == 'provide' and 'receipt' not in kinds:
         missing.append('Приложите чек или другое подтверждение расхода')
     if action == 'confirm':
@@ -1637,8 +1720,11 @@ def request_state(request, today=None):
     Порядок важен: закрытая заявка не бывает просроченной; заявка, которую
     вернули инициатору, сначала ждёт его ответа — это важнее просрочки. Срок
     считается до оплаты: оплаченная заявка не «просрочена», даже если документы
-    ещё собирают.
+    ещё собирают. Заявка в архиве «Удалённые» (п. 18) — `deleted`, что бы ни
+    стояло в её статусе: в работе её уже нет.
     """
+    if request.get('deleted_at'):
+        return 'deleted'
     status = request.get('status') or 'active'
     if status in ('done', 'rejected', 'cancelled'):
         return status
@@ -1673,6 +1759,9 @@ def fmt_date(value):
 def _as_date(value):
     if value is None or value == '':
         return None
+    # Время этапа (opened_at, done_at) — момент, а срок считается днями: от момента берём день.
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     try:

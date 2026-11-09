@@ -14,7 +14,7 @@ import {
     CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HELPDESK_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
     DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, addressLetterState, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel,
-    fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails,
+    fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails, vatLabel,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormInput, FormSelect,
@@ -110,7 +110,8 @@ const toDraft = (name, row = {}) => {
         case 'counterparties':
             return {
                 ...base, legal_name: row.legal_name || '', bin: row.bin || '', kind: row.kind || null,
-                vat_payer: Boolean(row.vat_payer), requisites: row.requisites || '', contact: row.contact || '',
+                // НДС поставщика — три состояния (п. 8): null — «не указан», а не «без НДС».
+                vat_payer: row.vat_payer ?? null, requisites: row.requisites || '', contact: row.contact || '',
                 emails: (row.emails || []).join(', '),
                 category_id: row.category_id ?? null, responsible_user_id: row.responsible_user_id ?? null,
                 approver_user_id: row.approver_user_id ?? null, approval_limit: orBlank(row.approval_limit),
@@ -174,6 +175,9 @@ const toPayload = (name, draft) => {
         if (key in payload && !payload[key]) payload[key] = null;
     });
     if (name === 'cards' && !payload.card_number) delete payload.card_number;
+    // НДС поставщика в трёх состояниях (п. 8): по метке сервер знает, что «не указан» здесь —
+    // это выбор окна, а не прежнее окно, где ничего не выбрано значило «без НДС».
+    if (name === 'counterparties') payload.vat_tristate = true;
     return payload;
 };
 
@@ -222,7 +226,7 @@ const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
    (dictionaryTableMin) — в поле уже него записи идут карточками. Справочники из одного
    названия (категории, проекты) колонок не имеют — у них null, они стоят списком.
    `tools` — то, что нужно ячейкам с действиями: чтение номера карты и тост. */
-const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС'].filter(Boolean).join(' · ');
+const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, vatLabel(row.vat_payer)].filter(Boolean).join(' · ');
 export const dictionaryColumns = (name, { loadCardNumber, showToast, mailWide = false } = {}) => {
     switch (name) {
         case 'counterparties':
@@ -384,7 +388,10 @@ const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
         <div className={`${iosCard} space-y-4 p-4`}>
             <ErrorBox text={error} />
             {numberField('min_suppliers', 'Минимум поставщиков в новом закупе', HINTS.minSuppliers.intro, 'вариантов')}
-            {numberField('due_soon_days', 'Напоминать о сроке за', HINTS.dueSoonDays.intro, 'дней')}
+            {numberField('due_soon_days', 'Напоминать о сроке оплаты за', HINTS.dueSoonDays.intro, 'дней')}
+            {/* П. 17 (решение владельца 09.11.2026): свои сроки у этапов после оплаты. */}
+            {numberField('receipt_days', 'Срок чека после пополнения карты', HINTS.receiptDays.intro, 'дней')}
+            {numberField('closing_docs_days', 'Срок закрывающих документов после получения', HINTS.closingDocsDays.intro, 'дней')}
             <div>
                 <button type="button" className={iosBtnPrimary} onClick={save} disabled={saving}>
                     {saving && <Loader2 size={14} className="animate-spin" />} Сохранить
@@ -647,7 +654,7 @@ const PaymentsDictionaries = ({
             case 'counterparties':
                 return {
                     title: row.name,
-                    sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, row.vat_payer ? 'с НДС' : 'без НДС', emailsShort(row.emails), row.category_name,
+                    sub: [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, vatLabel(row.vat_payer), emailsShort(row.emails), row.category_name,
                         row.active_contracts ? `действующих договоров: ${row.active_contracts}` : 'без действующего договора',
                         row.approver_name && `согласует ${row.approver_name}${row.approval_limit ? ` до ${fmtMoney(row.approval_limit)}` : ''}`].filter(Boolean).join(' · '),
                     side: <Hidden active={row.is_active} />,
@@ -762,7 +769,9 @@ const PaymentsDictionaries = ({
                     <Choice value={draft.kind} options={PARTY_KIND_OPTIONS} onChange={(v) => set('kind', v)} ariaLabel="Форма" />
                 </Field>
                 <Field as="div" label="НДС" optionalMark={false} hint={HINTS.vatPayer}>
-                    <Choice value={Boolean(draft.vat_payer)} options={VAT_OPTIONS} onChange={(v) => set('vat_payer', v)} ariaLabel="НДС" />
+                    {/* У поставщика НДС бывает «не указан» (п. 8): ни один сегмент не подсвечен. У нашей
+                        компании он известен всегда. */}
+                    <Choice value={name === 'counterparties' ? (draft.vat_payer ?? null) : Boolean(draft.vat_payer)} options={VAT_OPTIONS} onChange={(v) => set('vat_payer', v)} ariaLabel="НДС" />
                 </Field>
             </div>
             <Field label="БИН / ИИН" hint="12 цифр.">

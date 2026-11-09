@@ -233,7 +233,9 @@ class OwnSqlTests(unittest.TestCase):
         cursor = _Cursor()
         self.assertEqual(real_queries.own_requests(cursor, INITIATOR, {'approver'}, True, limit=5), (0, []))
         sql, params = cursor.calls[0]
-        self.assertIn("r.initiator_id = %(user_id)s AND r.status = 'active' AND r.submitted_at IS NOT NULL", sql)
+        # Заявки из архива «Удалённые» (п. 18) на столе нет.
+        self.assertIn("r.initiator_id = %(user_id)s AND r.status = 'active' AND r.deleted_at IS NULL "
+                      "AND r.submitted_at IS NOT NULL", sql)
         # Ждёт ли заявка самого человека — тем же условием, что задачи стола и «приложите документы».
         self.assertIn('NOT EXISTS (SELECT 1 FROM payment_subtasks s WHERE s.request_id = r.id AND '
                       + ' '.join(real_queries._WAITS_FOR_ME_SQL.split()) + ')', sql)

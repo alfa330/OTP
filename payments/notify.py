@@ -344,6 +344,37 @@ def overdue(request, days_late):
     }
 
 
+# Сроки этапов после оплаты (п. 17, решение владельца 09.11.2026): чек и закрывающие
+# документы. Только колокол — как напоминания о сроке оплаты: Telegram — канал о новой задаче.
+_STAGE_DEADLINE_WORDS = {
+    workflow.KIND_RECEIPT: ('receipt', 'Чек', 'Чек просрочен'),
+    workflow.KIND_CLOSING: ('docs', 'Закрывающие документы', 'Закрывающие документы просрочены'),
+}
+
+
+def stage_due_soon(request, kind, due_on, days_left):
+    """Срок чека или закрывающих документов — завтра либо сегодня."""
+    code, subject, _late = _STAGE_DEADLINE_WORDS[kind]
+    when = 'сегодня' if days_left <= 0 else 'завтра'
+    return {
+        'kind': '%s_due_soon' % code,
+        'title': '%s — срок %s, %s' % (subject, when, workflow.fmt_date(due_on)),
+        'body': brief(request),
+        'tone': 'default',
+    }
+
+
+def stage_overdue(request, kind, due_on, days_late):
+    """Срок чека или закрывающих документов прошёл."""
+    code, _subject, late = _STAGE_DEADLINE_WORDS[kind]
+    return {
+        'kind': '%s_overdue' % code,
+        'title': '%s на %s дн. — срок был %s' % (late, max(1, int(days_late)), workflow.fmt_date(due_on)),
+        'body': brief(request),
+        'tone': 'warning',
+    }
+
+
 def generated(request, template_name):
     """Заявку по регулярному платежу создал календарь — сообщение ответственному."""
     lines = ['Платёж: %s' % _esc(template_name, MAX_TITLE)]

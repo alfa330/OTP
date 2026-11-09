@@ -53,6 +53,8 @@ OWN_ON_DESK = 5
 PHOTO_RETRY_SECONDS = 120
 # Сколько вещей из наличия показывать Helpdesk IT за один поиск (/stock).
 STOCK_PAGE_MAX = 30
+# Сколько прошлых оплат поставщику показывать бухгалтеру в окне оплаты счёта (п. 8).
+SUPPLIER_HISTORY_LIMIT = 3
 # Что Helpdesk IT выбирает вместе с поставщиком (владелец 06.11.2026) — поля формы заявки.
 HELPDESK_PAYMENT_KEYS = ('object_type', 'accounting_category', 'payment_method', 'card_recipient',
                          'card_holder_user_id', 'card_holder_name', 'card_id', 'card_number', 'payment_purpose')
@@ -269,13 +271,18 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'acting_as_admin': bool(can_act and not directly),
             'can_edit': access.can_edit_request(ctx, request_row),
             'can_cancel': access.can_cancel_request(ctx, request_row),
-            'can_reassign': bool(access.is_section_admin(ctx) and active),
-            'can_delete': access.can_delete_request(ctx),
+            'can_reassign': bool(access.is_section_admin(ctx) and active and not access.is_deleted(request_row)),
+            'can_delete': access.can_delete_request(ctx, request_row),
             'can_refund': access.can_refund(ctx, request_row, ctx['roles']),
             'can_attach': access.can_attach(ctx, request_row, ctx['roles'], can_act),
             'can_view_card': bool(request_row.get('has_card')
                                   and access.can_view_card_number(ctx, request_row, ctx['roles'])),
             'can_manage_observers': access.can_manage_observers(ctx, request_row),
+            # П. 8: НДС поставщика, вписанного инициатором названием, выбирает бухгалтер в окне
+            # оплаты счёта и отправляет вместе с «Оплачено» (владелец 09.11.2026) — тот, кто вправе
+            # провести эту оплату.
+            'can_set_vat': bool(can_act and current['kind'] == workflow.KIND_INVOICE
+                                and workflow.supplier_vat_unknown(request_row)),
             'current_kind': current['kind'] if current else None,
             'actions': list(workflow.ACTIONS.get(current['kind'], ())) if can_act else [],
         }
@@ -310,8 +317,13 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # Наблюдателю вне периметра раздела заявка не откроется — инициатор узнаёт
             # об этом из списка, а не из «мне ничего не приходит» (как в «Участниках»).
             person['section_open'] = access.can_open_section({'user_id': person['user_id']})
+        # Свой срок у открытого этапа «чек» или «закрывающие документы» (п. 17, 09.11.2026).
+        deadline = (workflow.stage_deadline(subtasks, directory.get_settings(cursor), queries.today_almaty())
+                    if any(item['kind'] in workflow.STAGE_DEADLINE_SETTINGS and item['state'] == 'open'
+                           for item in subtasks) else None)
         full = {
             'request': request_row,
+            'stage_deadline': deadline,
             'items': queries.list_items(cursor, request_id),
             'offers': queries.list_offers(cursor, request_id),
             'subtasks': subtasks,
@@ -323,6 +335,12 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 category_id=request_row.get('category_id'), subcategory_id=request_row.get('subcategory_id'),
                 expense_name=request_row.get('expense_name'), exclude_request_id=request_id,
                 **_history_scope(ctx)),
+            # «Прошлые оплаты» бухгалтера (п. 8: «историю предыдущих оплат») — этому же
+            # поставщику, своей выборкой: в общей справке выше их вытесняли оплаты той же
+            # категории другим поставщикам, и окно писало «ещё не платили».
+            'supplier_history': queries.payment_history(
+                cursor, counterparty_id=request_row.get('counterparty_id'), exclude_request_id=request_id,
+                limit=SUPPLIER_HISTORY_LIMIT, **_history_scope(ctx)) if request_row.get('counterparty_id') else [],
             # Возможный дубль счёта (п. 8): бухгалтерии — по всем заявкам, остальным —
             # только среди тех, что они видят и в реестре.
             'duplicates': queries.find_duplicates(cursor, request_row, **_history_scope(ctx)),
@@ -348,6 +366,15 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         }
         g.payments_photo_refs = (queries.avatar_refs(cursor, [person['user_id'] for person in observers])
                                  if observers and avatar_url else {})
+        # П. 9 и п. 5.2: финансовому отделу полный номер карты стоит в окне заявки сразу — ему
+        # переводить; администратору раздела — так же, как на доске финотдела, где он его уже
+        # видит. Инициатор (номер вводил он) открывает его кнопкой. Показ пишется в журнал
+        # доступа один раз на человека, заявку и номер.
+        if request_row.get('has_card') and (access.ROLE_FINANCE in ctx['roles'] or access.is_section_admin(ctx)):
+            number = queries.card_number(cursor, request_id)
+            if number:
+                full['card_number'] = cards.pretty(number)
+                queries.log_card_shown(cursor, [request_id], _actor(ctx))
         # П. 9: кто именно в бухгалтерии или финансовом отделе выполнил платёж,
         # знают само подразделение и администратор; остальным — название подразделения.
         if not access.sees_department_people(ctx, ctx['roles']):
@@ -782,6 +809,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         if not access.sees_all_requests(ctx, ctx['roles']):
             filters['visible_to'] = ctx['user_id']
             filters['visible_roles'] = ctx['roles']
+        # Архив «Удалённые» (п. 18) — срез реестра администратора раздела.
+        filters['deleted_visible'] = access.is_section_admin(ctx)
         return filters
 
     @payments_route('/requests')
@@ -979,13 +1008,13 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
     @payments_route('/requests/<int:request_id>', methods=('DELETE',), admin=True)
     def request_delete(ctx, request_id):
+        """Удалить заявку — убрать в архив «Удалённые» (п. 18, решение владельца 09.11.2026):
+        с досок, из реестра и задач она уходит, а история, файлы и имущество остаются.
+        Файлы из хранилища не стираются — на них ссылается история."""
+        data = _payload()
         with db._get_cursor() as cursor:
-            if not queries.read_request(cursor, request_id):
-                raise ApiError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
-            refs = queries.delete_request(cursor, request_id)
-        if gcs.get('client'):
-            files.drop(gcs, refs)
-        return jsonify({'status': 'success'})
+            flow.delete(cursor, request_id, _actor(ctx), as_text(data.get('comment'), 'comment'))
+        return jsonify({'status': 'success', 'deleted': True})
 
     # ── Действия подзадач ───────────────────────────────────────────────────
 
@@ -1014,6 +1043,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                                         'no_alternatives_comment') if alone else None
         if 'supplier_choice_reason' in data:
             fields['supplier_choice_reason'] = as_text(data.get('supplier_choice_reason'), 'supplier_choice_reason')
+        if 'supplier_vat' in data:
+            # П. 8: НДС поставщика, которого бухгалтер указывает вместе с «Оплачено» (09.11.2026).
+            fields['supplier_vat'] = None if data.get('supplier_vat') in (None, '') else as_bool(data.get('supplier_vat'))
         return fields
 
     def _helpdesk_payment(cursor, data, ctx, request_row, fields):
@@ -1072,7 +1104,14 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         """Заявка под блокировкой и открытая подзадача, на которую у человека есть право."""
         if kind not in workflow.SUBTASK_BY_KIND or kind == workflow.KIND_INITIATION:
             raise ApiError('Нет такого этапа', code='PAYMENT_ACTION_UNKNOWN')
-        request_row, subtask = flow.load_for_action(cursor, request_id, kind)
+        try:
+            request_row, subtask = flow.load_for_action(cursor, request_id, kind)
+        except flow.FlowError as exc:
+            # Заявка в архиве «Удалённые» (п. 18) для всех, кроме администратора раздела, —
+            # как несуществующая: отказ «удалена» подтверждал бы, что такой номер был.
+            if exc.code == 'PAYMENT_REQUEST_DELETED' and not access.is_section_admin(ctx):
+                raise ApiError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
+            raise
         members = queries.role_member_ids(cursor)
         if not access.can_act_on_subtask(ctx, subtask, members, request_row):
             # Чужую заявку не подтверждаем и отказом: тот же ответ, что у несуществующей.
@@ -1211,7 +1250,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         outbox = []
         with db._get_cursor() as cursor:
             current = queries.read_request(cursor, request_id, lock=True)
-            if not current or current['status'] != 'active':
+            if not current or current['status'] != 'active' or access.is_deleted(current):
                 raise ApiError('Заявка не найдена или закрыта', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
             subtask = queries.read_subtask(cursor, request_id, kind)
             if not subtask or subtask['state'] in ('done', 'skipped') or kind == workflow.KIND_INITIATION:
@@ -1306,6 +1345,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             if not item or item['request_id'] != request_id:
                 raise ApiError('Файл не найден', status=404)
             current = _load_visible(cursor, ctx, request_id, lock=True)
+            if access.is_deleted(current):
+                raise ApiError('Заявка удалена — её файлы остаются как были', code='PAYMENT_REQUEST_DELETED',
+                               status=409)
             # Снять можно свой файл, пока этап, к которому он приложен, не пройден:
             # документ пройденного этапа — основание уже принятого решения.
             subtask = queries.read_subtask(cursor, request_id, item['subtask_kind']) if item.get('subtask_kind') else None
@@ -1335,7 +1377,12 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             item = queries.read_attachment(cursor, attachment_id)
             if not item:
                 raise ApiError('Файл не найден', status=404)
-            _load_visible(cursor, ctx, item['request_id'])
+            # Акт приёма-передачи из истории имущества открывает и тот, кто видит имущество,
+            # даже если саму заявку ему не видно (п. 11): у заявки в архиве «Удалённые»
+            # имущество живёт дальше, и его передают с актом как обычно.
+            if not (access.can_view_assets(ctx, ctx['roles'])
+                    and assets_sql.attachment_in_history(cursor, attachment_id)):
+                _load_visible(cursor, ctx, item['request_id'])
         if not gcs.get('client'):
             raise ApiError('Хранилище файлов не настроено', code='PAYMENT_STORAGE_OFF', status=503)
         data = files.download(gcs, item['bucket'], item['blob_path'])
@@ -1404,8 +1451,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             card['subtask']['done_by_photo'] = faces['done_by']
         return card
 
-    def _card(request_row, focus, column, ctx, members, *, duplicate=False):
-        """Карточка доски. Набор полей — пп. 7 и 9 ТЗ; номер карты — только маской."""
+    def _card(request_row, focus, column, ctx, members, *, duplicate=False, card_number=None):
+        """Карточка доски. Набор полей — пп. 7 и 9 ТЗ. Номер карты — маской; полный
+        (`card_number`) — только на доске финансового отдела тому, кому он положен."""
         return {
             'id': request_row['id'],
             'column': column,
@@ -1436,6 +1484,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'card_recipient': request_row.get('card_recipient'),
             'card_holder_name': request_row.get('card_holder_name'),
             'card_mask': request_row.get('card_mask'),
+            'card_number': card_number,
             'payment_purpose': request_row.get('payment_purpose'),
             'created_at': request_row.get('created_at'),
             'duplicate': bool(duplicate),
@@ -1479,6 +1528,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # задачи подразделения) — реестровое ограничение здесь лишнее.
             filters.pop('visible_to', None)
             filters.pop('visible_roles', None)
+            # Доска — текущая работа: архива «Удалённые» (п. 18) на ней нет и по метке в адресе.
+            filters['deleted_visible'] = False
             pairs = queries.board_requests(
                 cursor, code, own_user_id=ctx['user_id'] if scope == 'own' else None,
                 own_roles=ctx['roles'], **filters)
@@ -1499,6 +1550,14 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             shown = {key: placed[key][offset:offset + limit] for key in keys if not only or key == only}
             duplicates = (queries.duplicate_request_ids(cursor, [row['id'] for items in shown.values() for row, _f in items])
                           if code == workflow.BOARD_ACCOUNTING else set())
+            # П. 9: на карточке доски финансового отдела — полный номер карты, ему переводить.
+            # Только тем, кому номер положен (финансовый отдел, администратор раздела), и
+            # только для карточек, которые уйдут на экран; показ — в журнал доступа заявки.
+            card_numbers = {}
+            if code == workflow.BOARD_FINANCE and access.can_view_card_number(ctx, None, ctx['roles']):
+                card_numbers = queries.card_numbers(
+                    cursor, [row['id'] for items in shown.values() for row, _f in items if row.get('has_card')])
+                queries.log_card_shown(cursor, list(card_numbers), _actor(ctx))
             # Лица на карточках: фото читаются одной выборкой на всё, что уйдёт на экран.
             avatar_refs = queries.avatar_refs(cursor, {
                 user_id for items in shown.values() for row, focus in items
@@ -1515,7 +1574,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'columns': [{
                 'key': key, 'label': label, 'caption': workflow.column_caption(code, key),
                 'count': len(placed[key]),
-                'cards': [_with_faces(_card(row, focus, key, ctx, members, duplicate=row['id'] in duplicates),
+                'cards': [_with_faces(_card(row, focus, key, ctx, members, duplicate=row['id'] in duplicates,
+                                            card_number=card_numbers.get(row['id'])),
                                       row, focus, photos, hide_people)
                           for row, focus in shown[key]],
             } for key, label in board['columns'] if key in shown],

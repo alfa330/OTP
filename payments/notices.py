@@ -80,6 +80,12 @@ def clear_request(cursor, request_id):
     return _mark_read(cursor, "request_id = %s AND (actionable OR subtask_id IS NOT NULL)", (int(request_id),))
 
 
+def clear_all(cursor, request_id):
+    """Заявка ушла в архив «Удалённые» (п. 18): по ссылке из колокола её откроет только
+    администратор раздела — гаснет всё по ней, и «ждут вас», и сведения о ходе."""
+    return _mark_read(cursor, "request_id = %s", (int(request_id),))
+
+
 def mark_seen(cursor, user_id, request_id):
     """Человек открыл заявку — его уведомления «к сведению» по ней прочитаны."""
     return _mark_read(cursor, "NOT actionable AND user_id = %s AND request_id = %s",

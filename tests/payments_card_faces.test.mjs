@@ -20,7 +20,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { boardColumnsWithPhotos, cardFaces } from '../src/components/payments/paymentsMeta.js';
+import { boardColumnsWithPhotos, boardFaces, cardFaces } from '../src/components/payments/paymentsMeta.js';
 
 const require = createRequire(import.meta.url);
 const React = require('react');
@@ -189,9 +189,9 @@ test('кружок: фото из профиля, без фото — иници
     assert.doesNotMatch(group, /<img/);
 });
 
-test('пара лиц на карточке: фото слева и справа, имена — в подписи для читалки', async () => {
-    const { CardFaces } = await ui();
-    const html = renderToStaticMarkup(h(CardFaces, { faces: cardFaces({
+test('пара лиц на карточке: кружок и имя каждого — п. 7, имена видны без наведения', async () => {
+    const { CardPeople } = await ui();
+    const html = renderToStaticMarkup(h(CardPeople, { faces: cardFaces({
         initiator_name: 'Иванова Айгерим', initiator_avatar_url: PHOTO_A,
         subtask: { kind: 'approval', state: 'open', assignee_name: 'Петров Данияр', role_label: 'Утвердитель' },
     }) }));
@@ -199,6 +199,41 @@ test('пара лиц на карточке: фото слева и справа
     assert.equal((html.match(/data-face="photo"/g) || []).length, 1);
     assert.equal((html.match(/data-face="initials"/g) || []).length, 1);
     assert.match(html, /data-face="initials"[^>]*>ПД<\/span>/);
+    // Сами имена — текстом на карточке, «Фамилия И.»; полностью и с ролью — в подсказке.
+    assert.match(html, />Иванова А\.<\/span>/);
+    assert.match(html, />Петров Д\.<\/span>/);
+    assert.match(html, /title="Согласует: Петров Данияр"/);
+    // Подразделение — значком и названием целиком.
+    const department = renderToStaticMarkup(h(CardPeople, { faces: cardFaces({
+        initiator_name: 'Иванова Айгерим',
+        subtask: { kind: 'invoice_payment', state: 'open', assignee_name: 'Бухгалтерия', role_label: 'Бухгалтерия' },
+    }) }));
+    assert.match(department, /data-face="group"/);
+    assert.match(department, />Бухгалтерия<\/span>/);
+    assert.equal(renderToStaticMarkup(h(CardPeople, { faces: { from: null, to: null } })), '');
+});
+
+test('карточка доски рисует людей строкой с именами, а не одними кружками', () => {
+    const board = source('src/components/payments/PaymentsBoard.jsx');
+    assert.ok(board.includes('<CardPeople faces={boardFaces(card, board.code)} />'));
+    assert.doesNotMatch(board, /<CardFaces /, 'кружков без имён на карточке больше нет');
+});
+
+test('на доске подразделения «→ Бухгалтерия» у каждой карточки не пишется — только инициатор', () => {
+    const atAccounting = {
+        initiator_name: 'Иванова Айгерим',
+        subtask: { kind: 'invoice_payment', state: 'open', assignee_name: 'Бухгалтерия', role_label: 'Бухгалтерия' },
+    };
+    assert.equal(boardFaces(atAccounting, 'accounting').to, null);
+    assert.equal(boardFaces(atAccounting, 'accounting').from.name, 'Иванова Айгерим');
+    // Этап уже выполнил конкретный сотрудник (его видят само подразделение и администратор) — он остаётся.
+    const paidByPerson = { ...atAccounting, column: 'paid',
+        subtask: { kind: 'invoice_payment', state: 'done', done_by_name: 'Счётова Сауле', role_label: 'Бухгалтерия' } };
+    assert.equal(boardFaces(paidByPerson, 'accounting').to.name, 'Счётова Сауле');
+    // На доске согласования — «кто согласует» (п. 7), даже если это роль целиком.
+    const toRole = { initiator_name: 'Иванова Айгерим',
+        subtask: { kind: 'approval', state: 'open', assignee_name: 'Утвердитель', role_label: 'Утвердитель' } };
+    assert.equal(boardFaces(toRole, 'approval').to.name, 'Утвердитель');
 });
 
 test('фото не загрузилось — встают инициалы; карточку тащат за любое место', () => {

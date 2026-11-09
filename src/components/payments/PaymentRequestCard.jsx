@@ -7,10 +7,10 @@ import useIsMobileShell from '../common/useIsMobileShell';
 import PaymentStageForm from './PaymentStageForm';
 import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, MAX_OBSERVERS,
-    OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, describeEvent,
-    amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty, historySummary, isClosed,
-    isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel, paidWord, parseAmount,
-    recordView, requestState, routeSummary, stageStatusLabel, stageStep, tonePill,
+    OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, deletedLine,
+    describeEvent, amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty,
+    historySummary, isClosed, isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel,
+    paidWord, parseAmount, recordView, requestState, routeSummary, stageDeadlineLabel, stageStatusLabel, stageStep, tonePill,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FilePicker, Fold,
@@ -193,9 +193,12 @@ const PaymentRequestCard = ({
     const request = data?.request;
     const subtasks = useMemo(() => data?.subtasks || [], [data]);
     const permissions = data?.permissions || {};
-    const active = request?.status === 'active';
+    // Заявка в архиве «Удалённые» (п. 18) не в работе, какой бы статус у неё ни стоял.
+    const active = request?.status === 'active' && !request?.deleted;
     const current = useMemo(() => (active ? subtasks.find((item) => item.state === 'open') : null), [subtasks, active]);
     const state = requestState(request);
+    // Срок открытого этапа «чек» или «закрывающие документы» (п. 17) — с сервера.
+    const stageDue = active ? (data?.stage_deadline || null) : null;
     const titleOf = useCallback((kind) => (meta?.subtasks || []).find((item) => item.kind === kind)?.title || '', [meta]);
 
     const apply = useCallback((response) => {
@@ -303,8 +306,10 @@ const PaymentRequestCard = ({
         `${base}/observers/${person.user_id}`, { headers: headers() },
     ), 'Наблюдатель снят');
 
+    /* Удалить — убрать в архив «Удалённые» (п. 18): история, файлы и имущество остаются,
+       причину (если написали) видно в архиве и в истории заявки. */
     const remove = async () => {
-        const ok = await run(() => axios.delete(base, { headers: headers() }), 'Заявка удалена');
+        const ok = await run(() => axios.delete(base, { data: { comment }, headers: headers() }), 'Заявка удалена');
         if (ok) { onChanged?.({ id: requestId, deleted: true }); onClose?.(); }
     };
 
@@ -494,8 +499,12 @@ const PaymentRequestCard = ({
     const renderSubtask = (item, isLast) => {
         const reassignOpen = mode === `reassign:${item.kind}`;
         const who = item.assignee_name || item.role_label;
+        // Заявка в архиве «Удалённые» (п. 18): этап, на котором её убрали, — не текущий, а точка остановки.
+        const stopped = Boolean(request?.deleted) && ['open', 'waiting'].includes(item.state);
+        const shownState = stopped ? 'pending' : item.state;
         let right = '';
-        if (item.state === 'done' && item.done_at) right = `${item.done_by_name || ''} · ${shortDateTime(item.done_at)}`;
+        if (stopped) right = 'удалена на этом этапе';
+        else if (item.state === 'done' && item.done_at) right = `${item.done_by_name || ''} · ${shortDateTime(item.done_at)}`;
         else if (item.state !== 'skipped') right = item.kind === 'approval' && approverPending ? approverPendingText : who;
         // Этапы бухгалтерии и финансового отдела выполняет подразделение целиком
         // (пп. 2 и 9 ТЗ) — сотрудника им не назначают.
@@ -504,12 +513,12 @@ const PaymentRequestCard = ({
         return (
             <li key={item.kind} className="group relative flex gap-3">
                 <div className="flex w-5 shrink-0 flex-col items-center pt-px">
-                    <StateDot state={item.state} />
+                    <StateDot state={shownState} />
                     {!isLast && <div className={`mt-1 w-px flex-1 ${item.state === 'done' ? 'bg-emerald-200' : 'bg-slate-200'}`} />}
                 </div>
                 <div className={`min-w-0 flex-1 ${isLast ? '' : 'pb-3'}`}>
                     <div className="flex items-baseline justify-between gap-3">
-                        <div className={`min-w-0 text-[13.5px] ${item.state === 'open' ? 'font-semibold text-slate-900' : (item.state === 'done' ? 'text-slate-800' : 'text-slate-500')}`}>
+                        <div className={`min-w-0 text-[13.5px] ${shownState === 'open' ? 'font-semibold text-slate-900' : (item.state === 'done' ? 'text-slate-800' : 'text-slate-500')}`}>
                             {item.title}
                         </div>
                         <div className="flex max-w-[58%] shrink-0 items-baseline gap-1.5">
@@ -529,7 +538,7 @@ const PaymentRequestCard = ({
                         </div>
                     </div>
                     {item.state === 'skipped' && <div className="text-[12.5px] text-slate-400">{item.comment || 'Этап не требуется'}</div>}
-                    {item.state === 'waiting' && (
+                    {item.state === 'waiting' && !stopped && (
                         <div className="text-[12.5px] text-amber-700">
                             Ждёт инициатора: {item.clarify_label || 'требуется уточнение'}{item.clarify_comment ? ` — ${item.clarify_comment}` : ''}
                         </div>
@@ -610,7 +619,7 @@ const PaymentRequestCard = ({
                             <div className="mt-3">
                                 <Lifecycle stages={data.lifecycle} stopped={!active && request.status !== 'done'} oneLine={phone} />
                             </div>
-                            {(state !== 'active' || request.due_on) && (
+                            {(state !== 'active' || request.due_on || stageDue) && (
                                 <div className="mt-2.5 flex flex-wrap items-center gap-2 text-[12.5px]">
                                     <StatePill request={request} />
                                     {request.due_on && !isClosed(request) && (
@@ -619,11 +628,23 @@ const PaymentRequestCard = ({
                                             Срок {fmtDate(request.due_on)} · {request.paid_on ? paidLabel(request) : dueLabel(request)}
                                         </span>
                                     )}
+                                    {/* П. 17: свой срок у чека и закрывающих документов (решение владельца 09.11.2026). */}
+                                    {stageDue && (
+                                        <span data-stage-deadline className={`rounded-full px-2 py-0.5 ${stageDue.days_left < 0 ? tonePill('overdue').fill : 'bg-slate-100 text-slate-600'}`}>
+                                            {stageDeadlineLabel(stageDue)}
+                                        </span>
+                                    )}
                                 </div>
                             )}
                             {['rejected', 'cancelled'].includes(request.status) && request.rejected_reason && (
                                 <div className="mt-3 text-[13px] text-slate-700">
                                     <span className="text-slate-500">{request.status === 'rejected' ? 'Причина отклонения:' : 'Почему отменена:'}</span> {request.rejected_reason}
+                                </div>
+                            )}
+                            {request.deleted && (
+                                <div className="mt-3 text-[13px] text-slate-700" data-deleted-note>
+                                    <span className="text-slate-500">{deletedLine(request)}</span>
+                                    {request.deleted_comment ? ` — ${request.deleted_comment}` : ''}
                                 </div>
                             )}
                         </div>
@@ -653,9 +674,10 @@ const PaymentRequestCard = ({
                                     )}
                                     {mode === 'delete' && (
                                         <div className="space-y-2 rounded-2xl bg-rose-50 p-3.5 ring-1 ring-rose-200 motion-safe:animate-reveal">
-                                            <div className="text-[13px] text-rose-800">Удалить заявку вместе с историей и файлами? Это не отменить. Обычно достаточно «Отменить заявку» — она останется в реестре.</div>
+                                            <div className="text-[13px] text-rose-800">Заявка пропадёт с досок, из реестра и задач и уйдёт в «Удалённые»: история, файлы и имущество останутся. Обычно достаточно «Отменить заявку» — она останется в реестре.</div>
+                                            <textarea className={`${iosInput} min-h-[56px] resize-y bg-white`} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Почему удаляем (необязательно)" maxLength={4000} />
                                             <div className="flex gap-2">
-                                                <button type="button" className={`${iosBtnPrimary} !bg-rose-600 hover:!bg-rose-700`} disabled={busy} onClick={remove}>Удалить навсегда</button>
+                                                <button type="button" className={`${iosBtnPrimary} !bg-rose-600 hover:!bg-rose-700`} disabled={busy} onClick={remove}>Удалить</button>
                                                 <button type="button" className={iosBtnSecondary} onClick={() => setMode(null)}>Назад</button>
                                             </div>
                                         </div>
@@ -839,7 +861,7 @@ const PaymentRequestCard = ({
                                             <>
                                                 <Row label="Получатель" wide>{[CARD_RECIPIENT_LABELS[request.card_recipient], request.card_holder_name].filter(Boolean).join(' · ')}</Row>
                                                 <Row label="Номер карты" wide>
-                                                    {request.card_mask ? <CardNumber mask={request.card_mask} canReveal={permissions.can_view_card} load={loadCard} showToast={showToast} /> : null}
+                                                    {request.card_mask ? <CardNumber mask={request.card_mask} number={data.card_number || ''} canReveal={permissions.can_view_card} load={loadCard} showToast={showToast} /> : null}
                                                 </Row>
                                                 <Row label="Назначение" wide>{request.payment_purpose}</Row>
                                             </>

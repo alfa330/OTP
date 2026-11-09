@@ -131,7 +131,8 @@ test('имущество: каждый ключ assetIssues — якорь св�
         legal_entity_id: null, city: null, department_id: null, responsible_user_id: null, location: '', status: null,
     };
     const issues = assetIssues([asset]);
-    assert.equal(issues.length, 11);
+    // Двенадцать полей п. 10.2 — со стоимостью: ноль у неё — пропуск (09.11.2026).
+    assert.equal(issues.length, 12);
     const texts = Object.fromEntries(issues.map((item) => [item.key, item.text]));
     const html = renderToStaticMarkup(h(PaymentAssetsEditor, {
         assets: [asset], onChange: noop, users: [], dictionaries: {}, issueOf: (key) => texts[key] || '',

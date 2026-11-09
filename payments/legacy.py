@@ -48,7 +48,8 @@ from .sqlutil import NOW_SQL
 SYSTEM = {'id': None, 'name': 'iCore'}
 
 
-_PENDING_SQL = ("SELECT r.id FROM payment_requests r WHERE NOT EXISTS "
+# Заявка в архиве «Удалённые» (п. 18) в работу не вернётся — переносить её незачем.
+_PENDING_SQL = ("SELECT r.id FROM payment_requests r WHERE r.deleted_at IS NULL AND NOT EXISTS "
                 "(SELECT 1 FROM payment_subtasks s WHERE s.request_id = r.id) ORDER BY r.id")
 
 

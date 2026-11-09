@@ -9,13 +9,13 @@ import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './Pay
 import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
     ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS,
-    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney, helpdeskIssues,
-    isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount, pricedByOffer,
-    quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO,
+    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, VAT_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney,
+    helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount,
+    pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO, vatLabel,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, Choice, Field, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText, INVALID_RING,
-    IssueNav, NoticeBox, ReturnNotice, Row, TonePill, errorText, fromKeyboard, useIssueNav,
+    AmountInput, CardNumber, Choice, Field, FieldHint, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText,
+    INVALID_RING, IssueNav, NoticeBox, ReturnNotice, Row, TonePill, errorText, fromKeyboard, useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -68,6 +68,11 @@ export const stageIssues = (kind, { request = {}, paid = {}, received = {}, asse
     if (kind === 'entity_clarify') {
         if (!entityId) add('legal_entity_id', 'выберите компанию');
     } else if (kind === 'invoice_payment') {
+        // П. 8: бухгалтер проверяет «НДС/без НДС» — у поставщика, вписанного названием, его выбирают здесь,
+        // и выбор уходит вместе с «Оплачено».
+        if (request.counterparty_id && request.counterparty_vat == null && paid.supplier_vat == null) {
+            add('vat', 'укажите НДС поставщика');
+        }
         if (!paid.paid_on) add('paid_on', 'укажите дату оплаты');
         if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите фактическую сумму');
         if (!kinds.has('payment_order')) add('files', 'приложите платёжное поручение');
@@ -581,7 +586,9 @@ const PaymentStageForm = ({
     const [comment, setComment] = useState('');
     const [files, setFiles] = useState([]);
     const [mode, setMode] = useState(null);                 // 'return' | 'reject' | 'request_info'
-    const [paid, setPaid] = useState({ paid_on: todayISO(), paid_amount: parseAmount(request.amount) });
+    // supplier_vat — НДС поставщика, который бухгалтер выбрал в окне оплаты (п. 8): до «Оплачено» его
+    // можно поменять, в карточку поставщика он ложится вместе с оплатой.
+    const [paid, setPaid] = useState({ paid_on: todayISO(), paid_amount: parseAmount(request.amount), supplier_vat: null });
     const [received, setReceived] = useState({
         received_on: todayISO(), received_quantity: request.object_type === 'goods' ? quantityText(data.items) : '',
     });
@@ -756,7 +763,10 @@ const PaymentStageForm = ({
         const amount = parseAmount(request.amount);
         const approved = parseAmount(request.amount_approved);
         const check = data.contract_check || {};
-        const lastPayments = (data.history || []).filter((row) => (row.matched || []).includes('counterparty')).slice(0, 3);
+        // Прошлые оплаты ЭТОМУ поставщику — своей выборкой сервера (п. 8): в общей справке их вытесняли
+        // оплаты той же категории другим поставщикам. Прежний сервер её не присылает — тогда как раньше.
+        const lastPayments = data.supplier_history
+            || (data.history || []).filter((row) => (row.matched || []).includes('counterparty')).slice(0, 3);
         return wrap(
             <>
                 {(data.duplicates || []).length > 0 && (
@@ -781,7 +791,22 @@ const PaymentStageForm = ({
                         {fmtMoney(amount)}
                         {approved > 0 && approved !== amount && <span className="ml-2 text-amber-700">согласовано {fmtMoney(approved)}</span>}
                     </Row>
-                    <Row label="НДС">{request.counterparty_vat === null || request.counterparty_vat === undefined ? '—' : (request.counterparty_vat ? 'поставщик с НДС' : 'поставщик без НДС')}</Row>
+                    {/* П. 8: «НДС/без НДС». Не указан (поставщика вписали названием) — его выбирает
+                        здесь же бухгалтер; выбор подсвечен и меняется, пока не нажато «Оплачено», а с
+                        оплатой ложится в карточку поставщика (09.11.2026). */}
+                    {permissions.can_set_vat ? (
+                        <Row label={<span className="inline-flex items-center gap-1">НДС <FieldHint hint={HINTS.supplierVat} /></span>}>
+                            <Field as="div" anchor="vat" issue={issueOf('vat')}>
+                                <Choice value={paid.supplier_vat} options={VAT_OPTIONS} onChange={(value) => setPaid((prev) => ({ ...prev, supplier_vat: value }))} ariaLabel="НДС поставщика" disabled={busy} />
+                            </Field>
+                        </Row>
+                    ) : (
+                        <Row label="НДС">
+                            {!request.counterparty_id ? '—' : (request.counterparty_vat == null
+                                ? <span className="text-amber-700">не указан в справочнике</span>
+                                : `поставщик ${vatLabel(request.counterparty_vat)}`)}
+                        </Row>
+                    )}
                     <Row label="Счёт">
                         {request.invoice_number ? `№${request.invoice_number}` : '—'}{request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}
                     </Row>
@@ -836,7 +861,8 @@ const PaymentStageForm = ({
             <>
                 <div className="rounded-xl bg-slate-50 px-3 py-1.5">
                     <Row label="Получатель">{[CARD_RECIPIENT_LABELS[request.card_recipient], request.card_holder_name].filter(Boolean).join(' · ')}</Row>
-                    <Row label="Номер карты"><CardNumber mask={request.card_mask} canReveal={permissions.can_view_card} load={loadCard} showToast={showToast} /></Row>
+                    {/* П. 9: финансовому отделу полный номер приходит сразу (`data.card_number`). */}
+                    <Row label="Номер карты"><CardNumber mask={request.card_mask} number={data.card_number || ''} canReveal={permissions.can_view_card} load={loadCard} showToast={showToast} /></Row>
                     <Row label="Сумма">{fmtMoney(request.amount)}</Row>
                     <Row label="Назначение">{request.payment_purpose}</Row>
                     <Row label="Компания">{request.legal_entity_name}</Row>

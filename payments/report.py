@@ -49,6 +49,8 @@ STATE_LABELS = {
     'done': 'Закрыта',
     'rejected': 'Отклонена',
     'cancelled': 'Отменена',
+    # Архив «Удалённые» (п. 18): его выгружает администратор раздела срезом реестра.
+    'deleted': 'Удалена',
 }
 
 # (заголовок, ключ, вид) — вид: 'text' | 'money' | 'date' | 'datetime' | 'plain'
@@ -161,9 +163,9 @@ def enrich(request, items, offers=()):
     row = dict(request)
     row['state_label'] = STATE_LABELS.get(request.get('state'), request.get('state'))
     row['kind_label'] = workflow.REQUEST_KIND_LABELS.get(request.get('request_kind'), '')
-    # Этап — у живой заявки; у закрытой он уже сказан состоянием.
+    # Этап — у живой заявки; у закрытой и удалённой он уже сказан состоянием.
     row['stage_text'] = (workflow.STAGE_LABELS.get(request.get('stage'), '')
-                         if request.get('status') == 'active' else '')
+                         if request.get('status') == 'active' and not request.get('deleted_at') else '')
     if row['stage_text'] and request.get('current_kind') == workflow.KIND_ENTITY:
         # Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
         row['stage_text'] += ' — уточнение компании'

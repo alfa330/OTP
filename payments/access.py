@@ -149,6 +149,10 @@ def can_see_request(ctx, request, roles=(), participant=False, observer=False):
     """
     if not request:
         return False
+    if is_deleted(request):
+        # Архив «Удалённые» (п. 18) — у администратора раздела: остальным удалённая
+        # заявка отвечает как несуществующая, и ни один путь к ней не ведёт.
+        return is_section_admin(ctx)
     if sees_all_requests(ctx, roles) or participant or observer:
         return True
     me = user_id(ctx)
@@ -221,7 +225,7 @@ def can_act_on_subtask(ctx, subtask, role_members, request=None):
     утверждает — она уходит остальным утверждающим (flow.submit).
     """
     me = user_id(ctx)
-    if me is None or not subtask or subtask.get('state') != 'open':
+    if me is None or not subtask or subtask.get('state') != 'open' or is_deleted(request):
         return False
     if can_act_for_anyone(ctx):
         return True
@@ -246,9 +250,16 @@ def acts_directly(ctx, subtask, role_members):
     return me in {int(x) for x in members}
 
 
+def is_deleted(request):
+    """Заявка в архиве «Удалённые» (п. 18): из работы убрана, история и файлы целы.
+    Всё, что меняет заявку, для неё закрыто — и администратору тоже."""
+    return bool(request and request.get('deleted_at'))
+
+
 def with_initiator(request):
     """Заявка сейчас у инициатора: черновик, доработка или уточнение."""
-    return bool(request and request.get('status') == 'active' and request.get('stage') == 'initiation')
+    return bool(request and request.get('status') == 'active' and request.get('stage') == 'initiation'
+                and not is_deleted(request))
 
 
 def can_edit_request(ctx, request):
@@ -278,7 +289,7 @@ def can_cancel_request(ctx, request):
     как только заявку вернули инициатору (уточнение), он снова вправе её отменить.
     Пока бухгалтерия только уточняет компанию, до оплаты далеко — отмена открыта.
     """
-    if not request or request.get('status') != 'active' or request.get('paid_on'):
+    if not request or request.get('status') != 'active' or request.get('paid_on') or is_deleted(request):
         return False
     if is_section_admin(ctx):
         return True
@@ -290,8 +301,10 @@ def can_cancel_request(ctx, request):
     return request.get('current_role_code') not in (ROLE_ACCOUNTING, ROLE_FINANCE)
 
 
-def can_delete_request(ctx):
-    return is_section_admin(ctx)
+def can_delete_request(ctx, request=None):
+    """Удалить заявку — убрать её в архив «Удалённые» (п. 18): администратор раздела.
+    Уже удалённую второй раз не удаляют."""
+    return is_section_admin(ctx) and not is_deleted(request)
 
 
 def can_manage_observers(ctx, request):
@@ -303,7 +316,7 @@ def can_manage_observers(ctx, request):
     нет). Администратор раздела — тоже: на пилоте он действует за любого. У
     закрытой заявки следить уже не за чем — список остаётся как был.
     """
-    if not request or request.get('status') != 'active':
+    if not request or request.get('status') != 'active' or is_deleted(request):
         return False
     if is_section_admin(ctx):
         return True
@@ -313,7 +326,7 @@ def can_manage_observers(ctx, request):
 
 def can_refund(ctx, request, roles=()):
     """Отметить возврат средств по оплаченной заявке — бухгалтерия."""
-    if not request or not request.get('paid_on'):
+    if not request or not request.get('paid_on') or is_deleted(request):
         return False
     return is_section_admin(ctx) or ROLE_ACCOUNTING in _roles(roles)
 
@@ -321,6 +334,8 @@ def can_refund(ctx, request, roles=()):
 def can_attach(ctx, request, roles=(), can_act=False):
     """Приложить файл к заявке: инициатор — пока заявка живая, исполнитель
     текущей подзадачи, бухгалтерия (закрывающие документы приходят и к ней)."""
+    if is_deleted(request):
+        return False
     if not request or request.get('status') != 'active':
         return is_section_admin(ctx)
     if is_section_admin(ctx) or can_act or ROLE_ACCOUNTING in _roles(roles):

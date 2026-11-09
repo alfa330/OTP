@@ -42,6 +42,8 @@ def purchase(**overrides):
         'amount': Decimal('106000'), 'category_id': 3, 'justification': 'Закончилась бумага',
         'due_on': date(2026, 10, 20), 'object_type': 'service', 'accounting_category': None,
         'payment_method': 'invoice', 'counterparty_id': 11, 'counterparty_name': 'ТОО «Канцлер»',
+        # НДС поставщика из справочника (cp.vat_payer в строке заявки): у этого — проверенный «без НДС».
+        'counterparty_vat': False,
         'no_alternatives': False, 'supplier_choice_reason': 'Дешевле остальных',
     }
     request.update(overrides)
@@ -686,6 +688,35 @@ class ActionRequirementsTests(unittest.TestCase):
         self.assertNotIn('invoice_missing', [item['code'] for item in wf.clarify_reasons_for('invoice_payment')])
         self.assertEqual(wf.clarify_label('rework'), 'Возврат на доработку')
 
+    def test_supplier_vat_is_checked_before_the_payment(self):
+        """П. 8, решение владельца 09.11.2026: поставщик, вписанный инициатором названием, —
+        с НДС «не указан», и «Оплачено» не проходит, пока бухгалтер его не укажет. Указанный
+        (любой) не мешает; без поставщика проверять нечего; у карты НДС не спрашивают."""
+        ready = {'paid_on': TODAY, 'paid_amount': 106000}
+        unknown = purchase(counterparty_vat=None)
+        missing = self.missing('invoice_payment', 'pay', request=unknown, fields=ready, file_kinds={'payment_order'})
+        self.assertEqual(len(missing), 1)
+        self.assertTrue(missing[0].startswith('Укажите НДС поставщика'))
+        # Выбор бухгалтера уходит вместе с «Оплачено» — с ним оплата проходит (разбор 09.11.2026).
+        for choice in (True, False):
+            with self.subTest(choice=choice):
+                self.assertEqual(self.missing('invoice_payment', 'pay', request=unknown,
+                                              fields=dict(ready, supplier_vat=choice), file_kinds={'payment_order'}), [])
+        for known in (True, False):
+            with self.subTest(vat=known):
+                self.assertEqual(self.missing('invoice_payment', 'pay', request=purchase(counterparty_vat=known),
+                                              fields=ready, file_kinds={'payment_order'}), [])
+        self.assertEqual(self.missing('invoice_payment', 'pay', request=purchase(counterparty_id=None, counterparty_vat=None),
+                                      fields=ready, file_kinds={'payment_order'}), [])
+        self.assertEqual(self.missing('card_topup', 'top_up', request=unknown, fields=ready,
+                                      file_kinds={'transfer_proof'}), [])
+        # «Запросить информацию» НДС не требует: бухгалтер спрашивает, а не платит.
+        self.assertEqual(self.missing('invoice_payment', 'request_info', request=unknown,
+                                      fields={'reason': 'other', 'comment': 'Нет БИН'}), [])
+        self.assertTrue(wf.supplier_vat_unknown(unknown))
+        self.assertFalse(wf.supplier_vat_unknown(purchase()))
+        self.assertFalse(wf.supplier_vat_unknown(None))
+
     def test_payment_records_date_amount_and_the_payment_order(self):
         texts = self.missing('invoice_payment', 'pay', fields={})
         self.assertEqual(len(texts), 3)
@@ -715,7 +746,11 @@ class ActionRequirementsTests(unittest.TestCase):
         for key, label in wf.ASSET_REQUIRED_FIELDS:
             with self.subTest(field=key):
                 self.assertEqual(wf.asset_missing(dict(asset, **{key: None})), [label])
-        self.assertEqual(wf.asset_missing(dict(asset, cost=0)), [], 'нулевая стоимость — это стоимость')
+        # П. 10.2, решение владельца 09.11.2026: «0 ₸» — не стоимость, а пропуск.
+        self.assertEqual(wf.asset_missing(dict(asset, cost=0)), ['стоимость'])
+        self.assertEqual(wf.asset_missing(dict(asset, cost='0.00')), ['стоимость'])
+        self.assertEqual(wf.asset_missing(dict(asset, cost=-5)), ['стоимость'])
+        self.assertEqual(wf.asset_missing(dict(asset, cost='0.01')), [], 'тиын — уже стоимость')
         self.assertEqual(wf.asset_missing(dict(asset, status='lost')), ['статус имущества'])
         request = purchase(object_type='goods', accounting_category='asset')
         self.assertTrue(self.missing('asset_registration', 'register', request=request, assets=[]))

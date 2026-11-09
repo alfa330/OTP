@@ -322,6 +322,8 @@ class ObserversHearProgressTests(WiderPerimeter):
         self.notices.push.return_value = 1
         due = [(request_row(id=1, due_on='2026-10-16'), 'soon'), (request_row(id=2, due_on='2026-10-14'), 'overdue')]
         self.queries.due_requests.return_value = due
+        # Сроков чека и закрывающих документов (09.11.2026) в этом случае нет.
+        self.queries.stage_deadline_rows.return_value = []
         self.queries.observers_by_request.return_value = {1: {WATCHER}, 2: {SECOND, OUTSIDER}}
         self.queries.role_member_ids.return_value = {}
         directory = mock.MagicMock()

@@ -177,7 +177,8 @@ test('«Заявки» помнят первую страницу без отб�
 });
 
 test('срезы реестра и имущества — те же, что были отбором', () => {
-    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled']);
+    // «Удалённые» (п. 18, 09.11.2026) — плитка администратора: только его ответ несёт её счётчик.
+    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled', 'deleted']);
     const view = source('src/components/payments/PaymentsView.jsx');
     // Состояние без заявок плиткой не рисуется, пока его не выбрали: пустая плитка — шум.
     assert.ok(view.includes(".filter((item) => ['all', 'mine', 'open'].includes(item.key) || counters[item.counter] || state === item.key)"));

@@ -12,7 +12,7 @@ import PaymentsDictionaries, { dictionarySections } from './PaymentsDictionaries
 import PaymentsRoles from './PaymentsRoles';
 import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
-    REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, dueLabel, expenseSubline,
+    REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, deletedLine, dueLabel, expenseSubline,
     CURRENT_KIND_LABELS, amountLabel, exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, normalizeRegistryColumns, pageRange,
     paidLabel, registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
     tonePill, toneText,
@@ -413,7 +413,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
 
     const renderCell = (key, request, text) => {
         const st = requestState(request);
-        const active = request.status === 'active';
+        // Заявка из архива «Удалённые» (п. 18) — не в работе: этап — пометкой «Удалена», без исполнителя и срока.
+        const active = request.status === 'active' && !request.deleted;
         const muted = (value) => <span className={text.meta}>{value}</span>;
         switch (key) {
             case 'number':
@@ -476,7 +477,15 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         {/* Бухгалтерия и Helpdesk IT на «Согласовании» — уточнение компании и проверка IT-закупа. */}
                         {CURRENT_KIND_LABELS[request.current_kind] && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{CURRENT_KIND_LABELS[request.current_kind].toLowerCase()}</div>}
                     </>
-                ) : <StatePill request={request} />;
+                ) : (
+                    <>
+                        <StatePill request={request} />
+                        {/* Архив «Удалённые» (п. 18): когда и кем удалена — строкой, причина — в подсказке. */}
+                        {request.deleted && (
+                            <div className={`mt-0.5 truncate text-[12px] leading-4 ${text.meta}`} title={request.deleted_comment || undefined}>{deletedLine(request)}</div>
+                        )}
+                    </>
+                );
             case 'responsible': {
                 if (!active) return muted('—');
                 const who = responsibleLines(request);
