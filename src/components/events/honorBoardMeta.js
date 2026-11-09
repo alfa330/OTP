@@ -282,70 +282,132 @@ export const toneOf = (entry, index) => (entry?.nomination === MAIN_NOMINATION
 export const boardPlace = (entries, index) => (entries || []).slice(0, Math.max(0, index))
     .filter((entry) => entry?.nomination !== MAIN_NOMINATION && entryHasContent(entry)).length;
 
-/* Раскладка плиток по фактической ширине доски (а не по ширине экрана: сайдбар
-   бывает раскрыт и свёрнут). Просьбы владельца 06.11.2026: «чтобы всё
-   отображалось симметрично» и «пусть не будет таких длинных плит, минимум две
-   плиты на одной строке»:
-     * колонок — сколько влезает плиток не уже MIN_TILE, но не меньше двух
-       (и на телефоне) и не больше четырёх; одна плитка — в половину ряда;
-     * ряды выравниваются: 5 номинаций — 3 + 2, а не 4 + 1; 3 номинации — три
-       колонки на всю ширину, а не три из четырёх по центру;
-     * рост плитки — от её ширины: узкая — выше своей ширины (портрет, как на
-       образце), широкая — ниже; в пределах 240–380;
-       золотая карточка — того же роста, её фото — шириной в одну плитку.
-   width — ширина доски в px, count — сколько плиток (без ключевой). */
+/* Раскладка доски по ширине места под неё и по высоте экрана устройства.
+   Просьбы владельца 06.11.2026:
+     «чтобы всё отображалось симметрично» — ряд плиток идёт ровно по краям
+       золотой карточки, ряды выровнены (5 номинаций — 3 + 2, а не 4 + 1);
+     «минимум две плиты на одной строке» — ни одна плитка не шире половины ряда;
+     «карточки слишком массивные, края не видны — адаптив для экрана
+       устройства» — на компьютере рост плиток такой, чтобы золотая карточка и
+       первый ряд плиток с описанием целиком уместились на экране, а плитка
+       не шире 1,4 своего роста; доска уже места под неё — по центру.
+   width — ширина места в px, count — сколько плиток (без ключевой),
+   screen — {viewport, top, caption, main}: высота экрана (окна браузера), где
+   на странице начинается доска, рост самого длинного описания под плитками
+   первого ряда и текста золотой карточки (замеры страницы). Чего нет — берётся
+   среднее; viewport 0 — рост только от ширины. */
 export const TILE_GAP = 20;
 // На узкой доске (телефон) промежуток меньше: две плитки в ряд — по ~180 px.
 const NARROW_GAP = 12;
 const NARROW_BOARD = 600;
 const MIN_TILE = 260;
+const MAX_TILE = 400;
+const TILE_RATIO = 1.4;
 const MIN_COLUMNS = 2;
 const MAX_COLUMNS = 4;
+// Рост цветной части плитки: ниже — фото негде встать.
+const MIN_HEIGHT = 200;
+const MAX_HEIGHT = 380;
+// Пока страница не замерена: сколько экрана над доской (шапка раздела,
+// вкладки, ряд «направление · месяц») и рост описания под плиткой.
+const CHROME_ABOVE = 240;
+const CAPTION = 110;
+// Поле между карточками и нижним краем экрана.
+const SCREEN_MARGIN = 16;
+// Доска уже этого — телефон: фото золотой карточки над текстом, а рост
+// плиток — от их ширины (экран всё равно листают).
+const WIDE_BOARD = 640;
 // Плитка уже этого — компактная подпись (меньше шрифт и поля).
 export const DENSE_TILE = 240;
 
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
 const gapFor = (room) => (room < NARROW_BOARD ? NARROW_GAP : TILE_GAP);
 const fitColumns = (room, gap) => Math.max(MIN_COLUMNS, Math.min(MAX_COLUMNS, Math.floor((room + gap) / (MIN_TILE + gap))));
-const tileHeight = (tileWidth) => Math.round(Math.min(380, Math.max(240, 170 + tileWidth * 0.45)));
+const rowWidth = (tileWidth, columns, gap) => tileWidth * columns + gap * (columns - 1);
+const viewportOf = (screen) => Number(screen?.viewport) || 0;
+const measured = (value, fallback) => (Number.isFinite(value) && value >= 0 ? value : fallback);
 
-export const tileLayout = (width, count) => {
-    const total = Math.max(1, Number(count) || 0);
-    const room = Number(width) || 0;
-    if (room <= 0) return { columns: Math.min(Math.max(total, MIN_COLUMNS), 3), tileWidth: 0, height: 320, gap: TILE_GAP };
+/* Рост цветной части плиток, при котором на экране целиком:
+     rows 2 — золотая карточка (не ниже своего текста), промежуток и первый
+              ряд плиток с описанием;
+     rows 1 — один ряд плиток с описанием (золотая карточка в том же ряду
+              или её нет). */
+const screenHeight = (screen, rows) => {
+    const viewport = viewportOf(screen);
+    if (!(viewport > 0)) return Infinity;
+    const top = Number(screen.top) > 0 ? Number(screen.top) : CHROME_ABOVE;
+    const room = viewport - top - SCREEN_MARGIN - measured(screen.caption, CAPTION);
+    if (rows < 2) return room;
+    const rest = room - TILE_GAP;
+    return Math.min(rest / 2, rest - measured(screen.main, 0));
+};
+
+/* Самая широкая плитка — не шире 1,4 своего роста: не «массивная» лента.
+   Считается без замеров текста: текст переносится по ширине, и если бы
+   ширина зависела от него, доска после замера перестраивалась бы снова. */
+const maxTileFor = (room, screen, rows) => {
+    const viewport = viewportOf(screen);
+    if (room < WIDE_BOARD || !(viewport > 0)) return MAX_TILE;
+    const height = clamp(screenHeight({ viewport, top: screen.top }, rows), MIN_HEIGHT, MAX_HEIGHT);
+    return clamp(Math.round(height * TILE_RATIO), MIN_TILE, MAX_TILE);
+};
+
+/* Рост: узкая плитка выше своей ширины (портрет), широкая ниже; на компьютере —
+   и не выше, чем позволяет экран. */
+const heightFor = (tileWidth, room, screen, rows) => {
+    const byWidth = 170 + tileWidth * 0.45;
+    if (room < WIDE_BOARD || !(viewportOf(screen) > 0)) return Math.round(clamp(byWidth, 220, MAX_HEIGHT));
+    return Math.round(clamp(Math.min(byWidth, screenHeight(screen, rows)), MIN_HEIGHT, MAX_HEIGHT));
+};
+
+const tileRows = (room, total, screen, rows) => {
     const gap = gapFor(room);
     const fit = fitColumns(room, gap);
-    const rows = Math.ceil(total / fit);
-    const columns = Math.max(MIN_COLUMNS, Math.min(fit, Math.ceil(total / rows)));
-    const tileWidth = (room - gap * (columns - 1)) / columns;
-    return { columns, tileWidth, height: tileHeight(tileWidth), gap };
+    const lines = Math.ceil(total / fit);
+    const columns = Math.max(MIN_COLUMNS, Math.min(fit, Math.ceil(total / lines)));
+    const tileWidth = Math.min((room - gap * (columns - 1)) / columns, maxTileFor(room, screen, rows));
+    return { columns, tileWidth, height: heightFor(tileWidth, room, screen, rows), gap,
+        boardWidth: rowWidth(tileWidth, columns, gap) };
+};
+
+/** Доска без ключевой номинации — только ряды плиток. */
+export const tileLayout = (width, count, screen = {}) => {
+    const total = Math.max(1, Number(count) || 0);
+    const room = Number(width) || 0;
+    if (room <= 0) {
+        return { columns: Math.min(Math.max(total, MIN_COLUMNS), 3), tileWidth: 0, height: 320, gap: TILE_GAP, boardWidth: 0 };
+    }
+    return tileRows(room, total, screen, 1);
 };
 
 /* Раскладка всей доски: золотая карточка и плитки.
      inline  — одна-две свои номинации, если влезают: золотая карточка (две
                колонки: фото и текст) и плитки встают ОДНИМ рядом равных колонок.
-     иначе   — золотая карточка во всю ширину, плитки рядами под ней (tileLayout);
-               фото карточки — шириной в одну плитку ряда, на узкой доске — над текстом.
+     иначе   — золотая карточка во всю ширину доски, плитки рядами под ней;
+               фото карточки — шириной в одну плитку ряда, на узкой доске — над
+               текстом.
+   boardWidth — ширина самой доски (≤ width): доска стоит по центру места.
    mainPhotoWidth — ширина фото в золотой карточке (0 — фото над текстом). */
-export const boardLayout = (width, count) => {
+export const boardLayout = (width, count, screen = {}) => {
     const total = Math.max(0, Number(count) || 0);
     const room = Number(width) || 0;
     if (room <= 0) {
         return { inline: false, columns: Math.min(Math.max(total, MIN_COLUMNS), 3), tileWidth: 0, mainWidth: 0,
-            mainPhotoWidth: 0, height: 320, gap: TILE_GAP };
+            mainPhotoWidth: 0, height: 320, gap: TILE_GAP, boardWidth: 0 };
     }
     const gap = gapFor(room);
     const fit = fitColumns(room, gap);
     if (total >= 1 && total + 2 <= fit) {
         const columns = total + 2;
-        const cell = (room - gap * (columns - 1)) / columns;
+        const cell = Math.min((room - gap * (columns - 1)) / columns, maxTileFor(room, screen, 1));
         return { inline: true, columns, tileWidth: cell, mainWidth: cell * 2 + gap, mainPhotoWidth: cell,
-            height: tileHeight(cell), gap };
+            height: heightFor(cell, room, screen, 1), gap, boardWidth: rowWidth(cell, columns, gap) };
     }
-    const tiles = tileLayout(room, total || 3);
+    const tiles = tileRows(room, total || 3, screen, 2);
     // Рядом с фото тексту нужно место: на узкой доске фото — над текстом.
-    const mainPhotoWidth = room >= 640 ? tiles.tileWidth : 0;
-    return { inline: false, columns: tiles.columns, tileWidth: tiles.tileWidth, mainWidth: room, mainPhotoWidth,
-        height: tiles.height, gap };
+    const mainPhotoWidth = room >= WIDE_BOARD ? tiles.tileWidth : 0;
+    return { inline: false, columns: tiles.columns, tileWidth: tiles.tileWidth, mainWidth: tiles.boardWidth,
+        mainPhotoWidth, height: tiles.height, gap, boardWidth: tiles.boardWidth };
 };
 
 /* Какое фото у карточки:

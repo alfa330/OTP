@@ -68,27 +68,91 @@ const tileStyle = (layout) => ({
     width: layout.columns > 1 ? `calc((100% - ${layout.gap * (layout.columns - 1)}px) / ${layout.columns})` : '100%',
 });
 
-/* Ширина доски в px: колонки считаются от неё, а не от ширины экрана — сайдбар
-   бывает раскрыт и свёрнут. До отрисовки (useLayoutEffect), чтобы первый кадр
-   не встал в чужую сетку и не перестроился. Скрытая вкладка даёт 0 — его не
-   берём: вернутся на доску — будет прежняя ширина, а следом настоящая. */
-const useWidth = () => {
+/* Место под доску: ширина в px (колонки считаются от неё, а не от ширины
+   экрана — сайдбар бывает раскрыт и свёрнут) и где доска начинается на
+   странице (сколько экрана над ней занято шапкой). До отрисовки
+   (useLayoutEffect), чтобы первый кадр не встал в чужую сетку и не
+   перестроился. Скрытая вкладка даёт 0 — его не берём. */
+const useBoardBox = () => {
     const ref = useRef(null);
-    const [width, setWidth] = useState(0);
+    const [box, setBox] = useState({ width: 0, top: 0 });
     useLayoutEffect(() => {
         const node = ref.current;
         if (!node) return undefined;
         const update = () => {
-            const next = node.clientWidth;
-            if (next > 0) setWidth((prev) => (Math.abs(prev - next) >= 1 ? next : prev));
+            const width = node.clientWidth;
+            if (!(width > 0)) return;
+            const top = Math.round(node.getBoundingClientRect().top + (window.scrollY || 0));
+            setBox((prev) => (Math.abs(prev.width - width) >= 1 || Math.abs(prev.top - top) >= 4 ? { width, top } : prev));
         };
         update();
-        if (typeof ResizeObserver !== 'function') return undefined;
+        window.addEventListener('resize', update);
+        if (typeof ResizeObserver !== 'function') return () => window.removeEventListener('resize', update);
         const observer = new ResizeObserver(update);
         observer.observe(node);
-        return () => observer.disconnect();
+        return () => {
+            observer.disconnect();
+            window.removeEventListener('resize', update);
+        };
     }, []);
-    return [ref, width];
+    return [ref, box];
+};
+
+/* Высота экрана устройства (окна браузера): по ней плитки не вырастают выше,
+   чем помещается на экране. Меняется с размером окна и поворотом телефона. */
+const useViewportHeight = () => {
+    const read = () => (typeof window === 'undefined' ? 0 : window.innerHeight || 0);
+    const [height, setHeight] = useState(read);
+    useEffect(() => {
+        const update = () => setHeight((prev) => {
+            const next = read();
+            return Math.abs(prev - next) >= 1 ? next : prev;
+        });
+        window.addEventListener('resize', update);
+        window.addEventListener('orientationchange', update);
+        return () => {
+            window.removeEventListener('resize', update);
+            window.removeEventListener('orientationchange', update);
+        };
+    }, []);
+    return height;
+};
+
+/* Естественная высота блока текста — без растяжки сеткой: поля, строки и
+   промежутки между ними. */
+const naturalHeight = (node) => {
+    const style = window.getComputedStyle(node);
+    const kids = [...node.children];
+    const gap = parseFloat(style.rowGap) || 0;
+    return kids.reduce((sum, kid) => sum + kid.getBoundingClientRect().height, 0)
+        + gap * Math.max(0, kids.length - 1)
+        + (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+};
+
+/* Замер текста, от которого зависит, уместится ли доска на экране: самое
+   длинное описание под плитками первого ряда и текст золотой карточки (она не
+   ниже своего текста). После каждой отрисовки, до показа кадра. Текст
+   переносится по ширине плиток, а ширину замер не меняет (honorBoardMeta.js:
+   maxTileFor) — после замера доска не перестраивается по кругу. */
+const useBoardText = (ref) => {
+    const [text, setText] = useState({ caption: null, main: null });
+    useLayoutEffect(() => {
+        const node = ref.current;
+        if (!node || !(node.clientWidth > 0)) return;
+        const tiles = [...node.querySelectorAll('[data-honor-card=""]')];
+        let caption = null;
+        if (tiles.length) {
+            const tops = tiles.map((tile) => tile.getBoundingClientRect().top);
+            const first = Math.min(...tops);
+            caption = Math.ceil(Math.max(0, ...tiles
+                .filter((_, index) => tops[index] - first < 2)
+                .map((tile) => tile.querySelector('[data-honor-caption]')?.getBoundingClientRect().height || 0)));
+        }
+        const mainText = node.querySelector('[data-honor-main-text]');
+        const main = mainText ? Math.ceil(naturalHeight(mainText)) : null;
+        setText((prev) => (prev.caption === caption && prev.main === main ? prev : { caption, main }));
+    });
+    return text;
 };
 
 const Bone = ({ className = '' }) => <span className={`block animate-pulse rounded-full bg-slate-200/70 ${className}`} />;
@@ -158,7 +222,9 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify, focus =
     // и до конца ухода показывает ту же доску.
     const [editorTarget, setEditorTarget] = useState(null);
     const [shell] = useState(() => readShell(userId));
-    const [boardRef, boardWidth] = useWidth();
+    const [boardRef, boardBox] = useBoardBox();
+    const viewportHeight = useViewportHeight();
+    const boardText = useBoardText(boardRef);
     const ticket = useRef(0);
 
     /* Вышедшие доски видны — колокол больше не зовёт сюда. Только когда сервер
@@ -254,11 +320,17 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify, focus =
     }, []);
 
     // Без ключевой — только ряды плиток; с ней — раскладка всей доски.
-    const layout = main ? boardLayout(boardWidth, others.length) : { ...tileLayout(boardWidth, others.length), inline: false };
+    const screen = { viewport: viewportHeight, top: boardBox.top, caption: boardText.caption, main: boardText.main };
+    const layout = main
+        ? boardLayout(boardBox.width, others.length, screen)
+        : { ...tileLayout(boardBox.width, others.length, screen), inline: false };
+    // Доска уже места под неё (плитки не шире maxTile) — стоит по центру.
+    const frame = (value) => (value.boardWidth > 0 ? { maxWidth: value.boardWidth, marginInline: 'auto' } : undefined);
 
     let content;
     if (!data && loading) {
-        content = <BoardSkeleton layout={boardLayout(boardWidth, 3)} />;
+        const skeleton = boardLayout(boardBox.width, 3, { viewport: viewportHeight, top: boardBox.top });
+        content = <div style={frame(skeleton)}><BoardSkeleton layout={skeleton} /></div>;
     } else if (!data && error) {
         content = (
             <EmptyCard
@@ -310,12 +382,12 @@ export default function HonorBoard({ user, apiRoot, authHeaders, notify, focus =
         ));
         content = layout.inline ? (
             // Одна-две свои номинации: золотая карточка и плитки — одним рядом.
-            <div className="flex items-stretch" style={{ gap: layout.gap }} data-honor-layout="row">
+            <div className="flex items-stretch" style={{ gap: layout.gap, ...frame(layout) }} data-honor-layout="row">
                 <div className="min-w-0" style={{ width: layout.mainWidth }}>{mainCard}</div>
                 {tiles}
             </div>
         ) : (
-            <div className="flex flex-col" style={{ gap: layout.gap }} data-honor-layout="stack">
+            <div className="flex flex-col" style={{ gap: layout.gap, ...frame(layout) }} data-honor-layout="stack">
                 {mainCard}
                 {others.length > 0 && <div className="flex flex-wrap justify-center" style={{ gap: layout.gap }}>{tiles}</div>}
             </div>

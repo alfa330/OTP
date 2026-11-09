@@ -203,64 +203,119 @@ test('направление после зова колокола: своё ср
     assert.equal(pickDepartment('op', null, null), 'op');
 });
 
-test('плитки во всю ширину доски: ряды ровные, не меньше двух в ряд, рост от плитки', () => {
+test('плитки: ряды ровные, не меньше двух в ряд, края ряда = края доски', () => {
     const cols = (width, count) => tileLayout(width, count).columns;
-    // Три номинации на широкой доске — три колонки во всю ширину, а не три из четырёх.
+    // Три номинации на широкой доске — три колонки, а не три из четырёх.
     assert.equal(cols(1240, 3), 3);
     assert.equal(cols(1680, 3), 3);
     // Ряды выравниваются: 5 — 3 + 2, 7 — 4 + 3, 8 — 4 + 4.
     assert.equal(cols(1240, 5), 3);
     assert.equal(cols(1240, 7), 4);
     assert.equal(cols(1240, 8), 4);
-    // «Минимум две плиты на одной строке» — и на узкой доске, и на телефоне, и у
-    // единственной номинации (она — в половину ряда).
+    // «Минимум две плиты на одной строке» — и на узкой доске, и на телефоне.
     assert.equal(cols(700, 3), 2);
     assert.equal(cols(358, 3), 2);
     assert.equal(cols(358, 1), 2);
-    assert.equal(cols(1240, 1), 2);
     for (const width of [320, 358, 390, 700, 1024, 1440, 2560]) {
         for (const count of [1, 2, 3, 5, 7]) {
-            const layout = tileLayout(width, count);
-            assert.ok(layout.tileWidth <= (width - layout.gap) / 2 + 0.001, `${width}/${count}`);
+            for (const viewport of [0, 700, 859, 1080]) {
+                const layout = tileLayout(width, count, { viewport });
+                assert.ok(layout.tileWidth <= (width - layout.gap) / 2 + 0.001, `${width}/${count}/${viewport}`);
+                // Доска — ровно ряд плиток с промежутками и не шире места под неё.
+                assert.ok(Math.abs(layout.boardWidth - (layout.tileWidth * layout.columns + layout.gap * (layout.columns - 1))) < 0.001);
+                assert.ok(layout.boardWidth <= width + 0.001);
+            }
         }
     }
-    // Ширина плитки — ровно доля ряда без промежутков: края ряда = края карточки.
-    const layout = tileLayout(1240, 3);
-    assert.equal(layout.tileWidth * 3 + 20 * 2, 1240);
-    // На телефоне промежуток меньше: две плитки по ~180 px.
-    const phone = tileLayout(390, 3);
-    assert.equal(phone.gap, 12);
-    assert.equal(phone.tileWidth, 189);
-    // Рост — от ширины: узкая выше своей ширины, широкая ниже; в пределах 240–380.
-    assert.equal(layout.height, 350);
+    // На телефоне промежуток меньше: две плитки по ~190 px во всю ширину.
+    const phone = tileLayout(390, 3, { viewport: 844 });
+    assert.deepEqual([phone.gap, phone.tileWidth, phone.boardWidth], [12, 189, 390]);
     assert.equal(phone.height, 255);
-    assert.equal(tileLayout(1680, 1).height, 380);
     // До замера (ширина 0) — заготовка, а не деление на ноль.
-    assert.deepEqual(tileLayout(0, 5), { columns: 3, tileWidth: 0, height: 320, gap: 20 });
+    assert.deepEqual(tileLayout(0, 5), { columns: 3, tileWidth: 0, height: 320, gap: 20, boardWidth: 0 });
+});
+
+test('плитки по экрану устройства: не массивные, карточка и первый ряд целиком на экране', () => {
+    // Ноутбук владельца: место 1440 px, окно 859 px по высоте, доска с 240 px от верха.
+    const laptop = boardLayout(1440, 3, { viewport: 859, top: 240 });
+    assert.equal(laptop.inline, false);
+    assert.equal(Math.round(laptop.tileWidth), 331);          // не 467: плитка не шире полутора ростов
+    assert.equal(Math.round(laptop.boardWidth), 1033);        // доска уже места — по центру, с полями
+    assert.equal(laptop.height, 237);
+    // Шапка, золотая карточка, промежуток, ряд плиток с описанием и поле — в высоту экрана.
+    assert.ok(240 + laptop.height + 20 + laptop.height + 110 + 16 <= 860);
+    assert.equal(laptop.mainWidth, laptop.boardWidth);
+    assert.equal(laptop.mainPhotoWidth, laptop.tileWidth);
+    // Доска ниже на странице (выше шапка) — плитки ниже ростом.
+    assert.ok(boardLayout(1440, 3, { viewport: 859, top: 320 }).height < laptop.height);
+    // Монитор 1080p и выше — плитки крупнее, но не больше 400 px и 380 px ростом.
+    const monitor = boardLayout(1680, 3, { viewport: 1300, top: 240 });
+    assert.deepEqual([monitor.tileWidth, monitor.boardWidth, monitor.height], [400, 1240, 350]);
+    // Низкое окно — рост не меньше 200.
+    assert.equal(boardLayout(1440, 3, { viewport: 600, top: 240 }).height, 200);
+    // Телефон: плитки по две во всю ширину, фото золотой карточки — над текстом.
+    const phone = boardLayout(390, 2, { viewport: 844 });
+    assert.deepEqual([phone.inline, phone.columns, phone.mainPhotoWidth, phone.boardWidth], [false, 2, 0, 390]);
+});
+
+test('рост плиток — по замеру текста: длинное описание и текст золотой карточки тоже на экране', () => {
+    const screen = { viewport: 859, top: 240 };
+    const base = boardLayout(1440, 3, screen);
+    // Описание в четыре строки (130 px) — плитки ниже, ряд с описанием на экране.
+    const long = boardLayout(1440, 3, { ...screen, caption: 130 });
+    assert.equal(long.height, 227);
+    assert.ok(240 + long.height + 20 + long.height + 130 + 16 <= 860);
+    // Описаний нет — плиткам больше роста.
+    assert.equal(boardLayout(1440, 3, { ...screen, caption: 0 }).height, 292);
+    // Текст золотой карточки выше плиток (260 px) — карточка растёт по тексту, плитки уступают.
+    const tall = boardLayout(1440, 3, { ...screen, main: 260 });
+    assert.equal(tall.height, 213);
+    assert.ok(240 + 260 + 20 + tall.height + 110 + 16 <= 860);
+    // Ширину замер не трогает: перенос текста по ширине не перестраивает доску по кругу.
+    for (const caption of [0, 60, 110, 200, 400]) {
+        for (const main of [0, 150, 300]) {
+            for (const count of [1, 2, 3, 5]) {
+                const measuredLayout = boardLayout(1440, count, { ...screen, caption, main });
+                const plain = boardLayout(1440, count, screen);
+                assert.deepEqual(
+                    [measuredLayout.columns, measuredLayout.tileWidth, measuredLayout.boardWidth, measuredLayout.inline],
+                    [plain.columns, plain.tileWidth, plain.boardWidth, plain.inline],
+                );
+                assert.ok(measuredLayout.height >= 200 && measuredLayout.height <= 380);
+            }
+        }
+    }
+    // Одним рядом (одна своя номинация) на экране — только ряд: плитки выше, чем под карточкой.
+    const row = boardLayout(1430, 1, { viewport: 864, top: 240 });
+    assert.deepEqual([row.inline, row.tileWidth, row.height], [true, 400, 350]);
+    const lowRow = boardLayout(1430, 1, { viewport: 700, top: 240 });
+    assert.equal(lowRow.height, 334);
+    assert.ok(240 + lowRow.height + 110 + 16 <= 700);
+    // Доска без ключевой — один ряд плиток на экране.
+    const tilesOnly = tileLayout(1440, 3, screen);
+    assert.deepEqual([tilesOnly.tileWidth, tilesOnly.height], [400, 350]);
 });
 
 test('одна-две свои номинации — одним рядом с золотой карточкой, больше — рядами под ней', () => {
-    // 1430 px: влезает 4 колонки; одна своя — ряд «фото · текст · плитка», равные колонки.
-    const one = boardLayout(1430, 1);
+    // Влезает 4 колонки: одна своя — ряд «фото · текст · плитка» из равных колонок.
+    const one = boardLayout(1430, 1, { viewport: 900 });
     assert.equal(one.inline, true);
     assert.equal(one.columns, 3);
-    assert.equal(one.mainWidth + 20 + one.tileWidth, 1430);
+    assert.ok(Math.abs(one.mainWidth + 20 + one.tileWidth - one.boardWidth) < 0.001);
     assert.equal(one.mainPhotoWidth, one.tileWidth);
+    assert.ok(one.boardWidth <= 1430);
     // Две — тоже рядом (4 колонки), три — уже рядами под карточкой.
-    assert.equal(boardLayout(1430, 2).inline, true);
-    assert.equal(boardLayout(1430, 2).columns, 4);
-    const three = boardLayout(1430, 3);
+    assert.equal(boardLayout(1430, 2, { viewport: 900 }).inline, true);
+    assert.equal(boardLayout(1430, 2, { viewport: 900 }).columns, 4);
+    const three = boardLayout(1430, 3, { viewport: 900 });
     assert.deepEqual([three.inline, three.columns], [false, 3]);
     assert.equal(three.mainPhotoWidth, three.tileWidth);
-    // Узкая доска (влезает 2 колонки): одна своя — под карточкой в половину ряда,
-    // фото карточки — шириной в эту половину.
-    const narrow = boardLayout(700, 1);
+    // Узкая доска (влезает 2 колонки): одна своя — под карточкой в половину ряда.
+    const narrow = boardLayout(700, 1, { viewport: 900 });
     assert.deepEqual([narrow.inline, narrow.columns], [false, 2]);
-    assert.equal(narrow.mainPhotoWidth, (700 - 20) / 2);
-    // Телефон: плитки по две в ряд, фото золотой карточки над текстом.
-    const phone = boardLayout(390, 2);
-    assert.deepEqual([phone.inline, phone.columns, phone.mainPhotoWidth], [false, 2, 0]);
-    // Только ключевая — карточка во всю ширину, фото — как плитка из ряда в три.
-    assert.equal(boardLayout(1240, 0).inline, false);
-    assert.equal(boardLayout(1240, 0).mainPhotoWidth, (1240 - 40) / 3);
+    assert.equal(narrow.mainPhotoWidth, narrow.tileWidth);
+    // Только ключевая — карточка шириной в ряд из трёх плиток.
+    const alone = boardLayout(1240, 0, { viewport: 900 });
+    assert.equal(alone.inline, false);
+    assert.ok(Math.abs(alone.boardWidth - (alone.tileWidth * 3 + 40)) < 0.001);
 });

@@ -674,6 +674,33 @@ class SafeAreaTests(unittest.TestCase):
         body_rule = re.search(r'\bbody\s*\{[^}]*padding-bottom', block)
         self.assertIsNone(body_rule, 'Нижний отступ повешен на body')
 
+    def test_desktop_app_keeps_section_paddings(self):
+        """На компьютере в этот блок попадают и установленный портал, и Chrome
+        «во весь экран» (display-mode: fullscreen), а безопасных зон там нет —
+        env() даёт 0. Правило на всём .main-content снимало с разделов их p-8:
+        шапки и карточки вставали вплотную к сайдбару и краю окна, рамки
+        уходили за край (доска почёта, 06.11.2026). Поля по зонам — только
+        разделам без своих полей (p-0)."""
+        block = self.css[self.css.index('@media (display-mode: standalone)'):]
+        block = block[:block.index('\n    }\n\n')]
+        self.assertNotRegex(block, r'(?m)^\s*\.main-content\s*\{',
+                            'Поля по безопасным зонам снова на всём .main-content')
+        rule = block[block.index('.main-content:where(.p-0) {'):]
+        rule = rule[:rule.index('}')]
+        for side in ('top', 'right', 'bottom', 'left'):
+            self.assertIn('padding-%s: env(safe-area-inset-%s);' % (side, side), rule)
+
+    def test_own_column_sections_have_no_shell_paddings(self):
+        """«Оплата счетов» и «Продакшн» держат края сами (SECTION_COLUMN,
+        28 px): с общими p-8 поля сложились бы в 60 px. Им — p-0, как
+        «Задачам», и края одни и те же в приложении и во вкладке."""
+        app = read(APP_JSX)
+        start = app.index('className={`main-content w-full ${')
+        branch = app[app.index("(view === 'payments' || view === 'production')", start):]
+        classes = re.search(r"\?\s*'([^']*)'", branch).group(1).split()
+        self.assertIn('p-0', classes)
+        self.assertNotIn('p-8', classes)
+
 
 if __name__ == '__main__':
     unittest.main()

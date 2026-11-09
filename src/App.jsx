@@ -57704,6 +57704,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
+                                    /* «Оплата счетов» и «Продакшн» держат края сами
+                                       (SECTION_COLUMN, как у «Задач»): общие p-8
+                                       сложились бы с ними в 60 px. */
+                                    : (view === 'payments' || view === 'production')
+                                        ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto'
                                     : view === 'ai_qa'
                                         ? 'px-3 pb-6 pt-20 md:p-8 bg-gray-50 min-h-screen overflow-y-auto'
                                         : `p-8 bg-gray-50 min-h-screen overflow-y-auto${view === 'sv_hours' ? ' hours-scroll' : ''}`

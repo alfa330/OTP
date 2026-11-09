@@ -1427,7 +1427,17 @@ html {
       .sidebar > div {
         padding-top: calc(1rem + env(safe-area-inset-top));
       }
-      .main-content {
+      /* Поля по безопасным зонам — только разделам без своих полей (p-0).
+         В этот блок попадает и компьютер: портал, установленный приложением,
+         и Chrome «во весь экран» (display-mode: fullscreen). Зон там нет, env()
+         даёт 0, и правило на всём .main-content снимало с разделов их p-8:
+         шапки и карточки вставали вплотную к сайдбару, к верху и к краю окна,
+         рамки карточек уходили за край (доска почёта, 06.11.2026). Поля p-8
+         (32 px) шире любой безопасной зоны планшета, а на телефоне поля
+         раздела ставит мобильная оболочка (mobile-shell.css) правилами
+         сильнее этого. :where не добавляет веса — разделам с p-0 всё как
+         прежде. */
+      .main-content:where(.p-0) {
         padding-top: env(safe-area-inset-top);
         padding-left: env(safe-area-inset-left);
         padding-right: env(safe-area-inset-right);

@@ -64,16 +64,44 @@ export const HonorPhoto = ({ name, url, size = 88 }) => {
     );
 };
 
+/* Кружок фото профиля — по месту под ним: рост плиток подбирает экран
+   (honorBoardMeta.js), и в низкой плитке кружок в полный размер срезался бы
+   снизу. Замер — до показа кадра, и заново, когда место меняется. */
+const CIRCLE_ROOM = 28;
+const MIN_CIRCLE = 56;
+const useFitCircle = (max, kind) => {
+    const ref = useRef(null);
+    const [size, setSize] = useState(max);
+    useLayoutEffect(() => {
+        const node = ref.current;
+        if (!node) return undefined;
+        const update = () => {
+            const { width, height } = node.getBoundingClientRect();
+            if (!(width > 0 && height > 0)) return;
+            const next = Math.round(Math.min(max, Math.max(MIN_CIRCLE, Math.min(width, height) - CIRCLE_ROOM)));
+            setSize((prev) => (prev === next ? prev : next));
+        };
+        update();
+        if (typeof ResizeObserver !== 'function') return undefined;
+        const observer = new ResizeObserver(update);
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, [max, kind]);
+    return [ref, size];
+};
+
 /* Фото в своей области цветной плитки (photo — из entryPhoto в honorBoardMeta.js):
      cutout   — человек без фона стоит на нижнем крае, ростом figure от области;
      photo    — фото с фоном рамкой, обрезка от верха (голова цела);
-     avatar   — фото профиля кружком в белом ободке;
+     avatar   — фото профиля кружком в белом ободке (не больше circle и не
+                больше места под ним);
      initials — инициалы в таком же кружке.
    Область — родитель с position: relative; подпись плитки стоит НАД ней, а не
    поверх: имя или номинация в две-три строки не наезжают на голову. */
 export const HonorPortrait = ({ photo, name, ink = 'text-slate-500', figure = 0.94, circle = 148, inset = 16 }) => {
     const [brokenUrl, setBrokenUrl] = useState('');
     const kind = photo?.url && photo.url === brokenUrl ? 'initials' : (photo?.kind || 'initials');
+    const [circleRef, circleSize] = useFitCircle(circle, kind);
     const onError = () => setBrokenUrl(photo?.url || '');
     if (kind === 'cutout') {
         return (
@@ -115,14 +143,14 @@ export const HonorPortrait = ({ photo, name, ink = 'text-slate-500', figure = 0.
         );
     }
     return (
-        <span data-honor-figure={kind} className="absolute inset-0 grid place-items-center">
+        <span ref={circleRef} data-honor-figure={kind} className="absolute inset-0 grid place-items-center">
             <span className="rounded-full bg-white/80 p-1.5 shadow-[0_14px_30px_-18px_rgba(15,23,42,0.45)]">
                 {kind === 'avatar' ? (
                     <img
                         src={photo.url}
                         alt=""
                         className="block select-none rounded-full object-cover"
-                        style={{ width: circle, height: circle }}
+                        style={{ width: circleSize, height: circleSize }}
                         loading="lazy"
                         decoding="async"
                         draggable={false}
@@ -131,7 +159,7 @@ export const HonorPortrait = ({ photo, name, ink = 'text-slate-500', figure = 0.
                 ) : (
                     <span
                         className={`grid place-items-center rounded-full bg-white font-semibold ${ink}`}
-                        style={{ width: circle, height: circle, fontSize: Math.round(circle * 0.3) }}
+                        style={{ width: circleSize, height: circleSize, fontSize: Math.round(circleSize * 0.3) }}
                     >
                         {initialsOf(name)}
                     </span>
@@ -208,7 +236,7 @@ export const HonorTile = ({ entry, meta, tone, photo, height = 320, compact = fa
                 </div>
             </div>
             {!compact && entry.description && (
-                <p className={`whitespace-pre-line break-words leading-relaxed text-slate-600 ${
+                <p data-honor-caption="" className={`whitespace-pre-line break-words leading-relaxed text-slate-600 ${
                     dense ? 'px-3 pb-3.5 pt-3 text-[13px]' : 'px-5 pb-5 pt-4 text-[14.5px]'}`}
                 >
                     {entry.description}
@@ -238,17 +266,19 @@ export const HonorMainCard = ({ entry, meta, tone, photo, gridStyle, height = 32
     >
         <div className="grid h-full" style={gridStyle}>
             <HonorMainPhoto entry={entry} tone={tone} photo={photo} style={{ minHeight: height }} />
-            <div className="flex min-w-0 flex-col justify-center gap-4 px-6 py-7 sm:px-10 sm:py-10">
+            {/* Текст — компактно: карточка не выше плиток ряда (рост задаёт экран;
+                доска замеряет текст по data-honor-main-text). */}
+            <div data-honor-main-text="" className="flex min-w-0 flex-col justify-center gap-3 px-6 py-5 sm:px-8 sm:py-6">
                 <NominationBadge meta={meta} className="self-start" />
                 <p
                     role="heading"
                     aria-level={3}
-                    className="break-words text-[28px] font-semibold leading-tight tracking-tight text-slate-900 sm:text-[32px]"
+                    className="break-words text-[24px] font-semibold leading-tight tracking-tight text-slate-900 sm:text-[28px]"
                 >
                     {entry.name}
                 </p>
                 {entry.description && (
-                    <p className="whitespace-pre-line break-words text-[16px] leading-relaxed text-slate-700 sm:text-[17px]">
+                    <p className="whitespace-pre-line break-words text-[15px] leading-relaxed text-slate-700 sm:text-[16px]">
                         {entry.description}
                     </p>
                 )}
