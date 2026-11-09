@@ -124,7 +124,17 @@ export const Stat = ({ label, value, unit = '', hint, tone, onClick, sub }) => {
     return (
         <Tag type={onClick ? 'button' : undefined} onClick={onClick}
              className={`flex min-w-0 flex-col rounded-2xl bg-white px-4 py-3 text-left ring-1 ring-slate-200/70 ${onClick ? 'transition hover:bg-slate-50 active:scale-[0.99]' : ''}`}>
-            <span className="flex items-center gap-1 truncate text-[12px] text-slate-500">{label}{hint && <IosHint text={hint} label="Как считается" />}</span>
+            {/* Подпись режется многоточием отдельно от «i»: пузырёк подсказки — absolute от «i», и обрезка
+                (overflow) на общей строке прятала его целиком. Клик по «i» показывает пояснение, а не
+                открывает список карточек за цифрой — до плитки-кнопки он не доходит. */}
+            <span className="flex min-w-0 items-center gap-1 text-[12px] text-slate-500">
+                <span className="min-w-0 truncate">{label}</span>
+                {hint && (
+                    <span className="inline-flex shrink-0" onClick={(event) => event.stopPropagation()}>
+                        <IosHint text={hint} label="Как считается" />
+                    </span>
+                )}
+            </span>
             <span className={`mt-0.5 text-[22px] font-semibold leading-tight tabular-nums ${toneClass}`}>
                 {value === null || value === undefined ? '—' : value}{unit}
             </span>

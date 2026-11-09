@@ -41,7 +41,7 @@ const TAB_META = {
     board: { label: 'Воронка', short: 'Воронка', subtitle: 'Канбан-доска: общий пул и карточки по этапам', hint: HOW_IT_WORKS },
     reports: { label: 'Отчёты', short: 'Отчёты', subtitle: 'Дашборд воронки, потери, рекрутеры, источники, мотивация' },
     upload: { label: 'Загрузки', short: 'Загрузки', subtitle: 'База контактов файлом и партии загрузок' },
-    settings: { label: 'Настройки', short: 'Настройки', subtitle: 'Рекрутеры, источники, вакансии, причины, группы, план и интеграции' },
+    settings: { label: 'Настройки', short: 'Настройки', subtitle: 'Рекрутеры, источники, каналы, вакансии, причины, группы, план и интеграции' },
 };
 
 const tabLabel = ({ label, short }) => (short === label ? label : (
@@ -210,6 +210,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                 api={api}
                 toast={toast}
                 boot={boot}
+                reloadBoot={reloadBoot}
                 caps={caps}
                 cardId={openCardId}
                 onClose={() => { setOpenCardId(null); setOpenMove(null); setOpenCall(false); }}

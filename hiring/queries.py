@@ -538,6 +538,16 @@ def add_assignment(cursor, card_id, recruiter_id, reason, by, by_name, now, comm
     return int(cursor.fetchone()[0])
 
 
+def last_cycle_restart(cursor, card_id):
+    """Когда карточка последний раз вернулась в пул (release, recruiter_off, auto_timeout) или была повторно
+    активирована (reactivate): с этого момента переписка с кандидатом — новый круг. None — круг один."""
+    cursor.execute("""
+        SELECT MAX(assigned_at) FROM hiring_assignments
+         WHERE card_id = %s AND reason IN ('release', 'recruiter_off', 'auto_timeout', 'reactivate')
+    """, (int(card_id),))
+    return cursor.fetchone()[0]
+
+
 def release_assignments(cursor, card_id, now):
     cursor.execute("UPDATE hiring_assignments SET released_at = %s WHERE card_id = %s AND released_at IS NULL", (now, int(card_id)))
 

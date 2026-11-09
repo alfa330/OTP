@@ -56,7 +56,7 @@ const DateTimeField = ({ date, time, onDate, onTime }) => (
 
 /* Метка-канал отклика (владелец 09.11.2026): откуда кандидат узнал о вакансии — таргет, hh, Kaspi.
    Меню из справочника «Настройки → Каналы» ставит закреплённый рекрутер или руководитель; остальным
-   метка видна плашкой. Контактам из баз метка ни к чему — у них пункта нет, пока метку не поставили. */
+   метка видна плашкой. Меню есть и у контактов из баз: человек из базы тоже может прийти по рекламе. */
 const CHANNEL_DOT_ICONS = Object.fromEntries(CHANNEL_COLOR_CODES.map((code) => [code, () => (
     <span aria-hidden="true" className={`mx-[3px] h-2.5 w-2.5 shrink-0 rounded-full ${channelTone(code).dot}`} />
 )]));
@@ -64,7 +64,7 @@ const CHANNEL_DOT_ICONS = Object.fromEntries(CHANNEL_COLOR_CODES.map((code) => [
 const ChannelPicker = ({ card, channels, canEdit, onChange }) => {
     const current = card.channel_id ? <ChannelPill name={card.channel_name} color={card.channel_color} /> : null;
     const offered = channels.filter((channel) => channel.is_active !== false);
-    if (!canEdit || (!card.channel_id && (card.kind !== 'response' || offered.length === 0))) return current;
+    if (!canEdit || (!card.channel_id && offered.length === 0)) return current;
     const items = [
         ...offered.map((channel) => ({
             key: `channel-${channel.id}`, label: channel.name, icon: CHANNEL_DOT_ICONS[channel.color] || CHANNEL_DOT_ICONS.gray,
@@ -559,7 +559,7 @@ const StageHistory = ({ stages, assignments }) => (
     </div>
 );
 
-const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
+const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('card');
@@ -705,6 +705,9 @@ const CardSheet = ({ api, toast, boot, caps, cardId, onClose, onChanged, initial
             changed();
         } catch (requestError) {
             toast(errorOf(requestError, 'Метка не изменена'), 'error');
+            // Справочник у открытой страницы мог устареть (руководитель выключил канал или добавил новый) —
+            // перечитываем, чтобы меню показало то, что есть сейчас.
+            if (codeOf(requestError) === 'HIRING_BAD_CHANNEL') reloadBoot?.();
         }
     };
     const take = async () => {

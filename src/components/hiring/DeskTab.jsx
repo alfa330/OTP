@@ -40,12 +40,16 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
                     <div className="truncate text-[13.5px] font-medium text-slate-900">
                         {card.full_name || 'Без имени'}{card.candidate_no ? <span className="ml-1.5 text-[12px] font-normal text-slate-400">№{card.candidate_no}</span> : null}
                     </div>
-                    <div className="truncate text-[12px] text-slate-500">
-                        {[card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') || STAGE_LABELS[card.stage]}
+                    {/* Метка канала и подстатус — второй строкой, под именем: справа на узкой строке они съедали
+                        ФИО целиком («Недозвон / не ответил» длиннее прежнего «Недозвон»). */}
+                    <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] text-slate-500">
+                        {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} className="shrink-0" />}
+                        {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]} className="shrink-0">{SUBSTAGE_LABELS[card.substage]}</Pill>}
+                        <span className="min-w-0 truncate">
+                            {[card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') || STAGE_LABELS[card.stage]}
+                        </span>
                     </div>
                 </div>
-                {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} />}
-                {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
                 {when && <span className="shrink-0 text-[12px] tabular-nums text-slate-500">{shortTime(when)}</span>}
             </button>
             {card.phone && (

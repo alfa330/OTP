@@ -137,14 +137,15 @@ class HiringService:
         return card
 
     @staticmethod
-    def _wa_contact_since(card):
-        """С какого момента наше сообщение в WhatsApp засчитывается связью с кандидатом этой карточки:
-        с поступления — ответ с телефона, пока карточка ждала в пуле, тоже связь (так рекрутер и
-        работает); переписка до отклика — нет, как и при взятии в работу ответом с телефона. После
-        повторной активации — только новая, как и остальные касания (они считаются от taken_at)."""
-        if int(card.get('reactivations') or 0) > 0:
-            return card.get('taken_at')
-        return card.get('received_at')
+    def _wa_contact_since(cursor, card):
+        """С какого момента наше сообщение в WhatsApp засчитывается связью с кандидатом: с начала нынешнего
+        круга карточки. Круг начинается с поступления — ответ с телефона, пока карточка ждала в пуле, тоже
+        связь (так рекрутер и работает), а переписка до отклика — нет, как и при взятии в работу ответом с
+        телефона. Заново круг начинается с возврата в пул и с повторной активации: переписка прошлого
+        закрепления новому рекрутеру не засчитывается, как и его звонки (касания считаются от taken_at)."""
+        restart = queries.last_cycle_restart(cursor, card['id'])
+        moments = [moment for moment in (card.get('received_at'), restart) if moment]
+        return max(moments) if moments else None
 
     @staticmethod
     def _is_owner_or_lead(ctx, card):
@@ -471,7 +472,9 @@ class HiringService:
                 if kind == rules.TOUCH_CALL and result:
                     fields['substage'] = 'dial' if result == 'dial' else 'no_answer'
                     fields['no_answer_streak'] = 0 if result == 'dial' else int(card['no_answer_streak'] or 0) + 1
-                elif kind == rules.TOUCH_WHATSAPP:
+                elif kind == rules.TOUCH_WHATSAPP and card.get('substage') != 'no_answer':
+                    # Наше сообщение — ещё не ответ (владелец 09.11.2026: «Недозвон / не ответил» — не ответил ни
+                    # на звонок, ни на WhatsApp): статус снимает ответ кандидата (_wa_candidate_answered).
                     fields['substage'] = 'whatsapp'
             queries.update_card(cursor, card_id, **fields)
             return queries.get_card(cursor, card_id)
@@ -576,8 +579,10 @@ class HiringService:
         if channel_id and channel_id == card.get('channel_id'):
             return channel_id
         channel = queries.get_channel(cursor, channel_id) if channel_id else None
-        if not channel or not channel['is_active']:
+        if not channel:
             raise HiringError('HIRING_BAD_CHANNEL', 'Такого канала нет в справочнике')
+        if not channel['is_active']:
+            raise HiringError('HIRING_BAD_CHANNEL', 'Канал «%s» выключен руководителем — выберите другой' % channel['name'])
         return channel_id
 
     # ─── Каналы — метки откликов (владелец 09.11.2026) ──────────────────────
@@ -657,9 +662,10 @@ class HiringService:
         with self._cursor() as cursor:
             card = self._load_visible(cursor, ctx, card_id, lock=True)
             kinds = rules.actor_kinds(caps, card, ctx['user_id'], ctx.get('trainer_group_ids') or ())
-            has_touch = (queries.has_human_touch(cursor, card_id, since=card.get('taken_at'))
-                         or queries.wa_our_message(cursor, [card.get('phone'), card.get('whatsapp')],
-                                                   self._wa_contact_since(card), whatsapp.AUTO_REPLY_GAP))
+            has_touch = queries.has_human_touch(cursor, card_id, since=card.get('taken_at'))
+            if not has_touch and rules.TRANSITIONS.get((card['stage'], target), {}).get('needs_touch'):
+                has_touch = queries.wa_our_message(cursor, [card.get('phone'), card.get('whatsapp')],
+                                                   self._wa_contact_since(cursor, card), whatsapp.AUTO_REPLY_GAP)
             check = dict(payload)
             check['shifts_done'] = queries.count_shifts(cursor, card_id)
             try:
@@ -1204,10 +1210,12 @@ class HiringService:
         if not inbound:
             return self._wa_phone_reply(cursor, chat, message, now) if chat.get('card_id') else 'stored'
         if not message['phone'] or not source or not source['is_active']:
+            self._wa_candidate_answered(cursor, chat.get('card_id'), message, now)
             return 'stored'
         if chat.get('card_id'):
             card = queries.get_card(cursor, chat['card_id'])
             if card and not card['is_closed']:
+                self._wa_candidate_answered(cursor, card['id'], message, now)
                 return 'stored'
         outcome, card_id = self._intake_one(
             cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=source, now=now, by_name='WhatsApp',
@@ -1216,7 +1224,24 @@ class HiringService:
             comment=whatsapp.first_message_comment(message))
         if card_id:
             queries.wa_set_chat_card(cursor, key, card_id, now)
+        if outcome == 'repeat':
+            self._wa_candidate_answered(cursor, card_id, message, now)
         return outcome
+
+    def _wa_candidate_answered(self, cursor, card_id, message, now):
+        """Кандидат написал на номер найма — «Недозвон / не ответил» к нему больше не относится (владелец
+        09.11.2026: статус — «не ответил ни на звонок, ни на сообщение в WhatsApp»): подстатус «Переписка в
+        WhatsApp», серия недозвонов — с нуля. Сообщение старше нашей последней попытки связаться (шлюз дослал
+        его после простоя) статус не снимает: на ту попытку кандидат ещё не ответил."""
+        if not card_id:
+            return
+        card = queries.get_card(cursor, card_id, lock=True)
+        if not card or card['is_closed'] or card['stage'] != rules.IN_WORK or card.get('substage') != 'no_answer':
+            return
+        at = message['at'] or now
+        if card.get('last_touch_at') and at < card['last_touch_at']:
+            return
+        queries.update_card(cursor, card['id'], substage='whatsapp', no_answer_streak=0, updated_at=now)
 
     def _wa_phone_reply(self, cursor, chat, message, now):
         """Ответ с телефона найма в чате карточки (владелец 09.11.2026: 58 из 59 откликов WhatsApp висели

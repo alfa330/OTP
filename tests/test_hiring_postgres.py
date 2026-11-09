@@ -300,6 +300,11 @@ def test_touches_set_substage_and_suggest_refusal(world):
     for _ in range(3):
         card = service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
     assert card['substage'] == 'no_answer' and card['no_answer_streak'] == 3
+    # Наше сообщение — ещё не ответ (владелец 09.11.2026: «Недозвон / не ответил» — не ответил ни на звонок, ни на
+    # WhatsApp): «Написать в WhatsApp» статус не снимает, снимает только ответ кандидата.
+    card = service.touch(me, card['id'], {'kind': 'whatsapp'})
+    assert card['substage'] == 'no_answer' and card['no_answer_streak'] == 3
+    card = service.set_substage(me, card['id'], 'dial')
     card = service.touch(me, card['id'], {'kind': 'whatsapp'})
     assert card['substage'] == 'whatsapp' and card['no_answer_streak'] == 3
     card = service.touch(me, card['id'], {'kind': 'call', 'result': 'dial', 'next_contact_at': '2026-10-16T10:00'})
@@ -1247,6 +1252,65 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
     assert caught.value.code == 'HIRING_NO_TOUCH'
     service.wa_events({'events': [wa_event('v2', phone='77057770033', from_me=True, ts=WA_TS + 86400 + 600, text='Вы ещё ищете работу?')]})
     assert service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})['stage'] == 'refused'
+
+
+def test_whatsapp_reply_clears_no_answer_and_pool_return_needs_new_contact(world):
+    """Владелец 09.11.2026: «Недозвон / не ответил» — кандидат не ответил ни на звонок, ни на сообщение в WhatsApp.
+    Ответ кандидата в WhatsApp статус снимает (и в плитке «Отчётов» его больше нет), наше сообщение — нет. После
+    возврата в пул переписка прошлого закрепления новому рекрутеру связью не засчитывается; второй номер WhatsApp
+    карточки — засчитывается."""
+    service, clock = world['service'], world['clock']
+    me, other, lead = ctx_of(world, REC1), ctx_of(world, REC2), ctx_of(world, LEAD_GRANT)
+    office = {'office_visit_at': '2026-10-20T10:00'}
+    filters = reports.parse_filters({'month': '2026-10'})
+
+    # Карточка не из WhatsApp: недозвон, потом кандидат пишет на номер найма (чат ещё не привязан — путь повторного отклика).
+    _outcome, card = add_response(world, REC1, '8 705 400 00 01')
+    service.take(me, card['id'])
+    clock.now = NOW + timedelta(minutes=5)
+    card = service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
+    assert (card['substage'], card['no_answer_streak']) == ('no_answer', 1)
+    # Сообщение, написанное ДО нашего звонка (шлюз дослал после простоя), — не ответ на звонок.
+    service.wa_events({'events': [wa_event('n1', phone='77054000001', ts=WA_TS + 60, text='Позвоните мне')]})
+    with world['db']._get_cursor() as cur:
+        assert queries.get_card(cur, card['id'])['substage'] == 'no_answer'
+        assert reports.card_ids_for(cur, filters, 'total:no_answer') == [card['id']]
+    service.wa_events({'events': [wa_event('n2', phone='77054000001', ts=WA_TS + 600, text='Я на работе, пишите сюда')]})
+    with world['db']._get_cursor() as cur:
+        fresh = queries.get_card(cur, card['id'])
+        assert (fresh['substage'], fresh['no_answer_streak']) == ('whatsapp', 0)
+        assert reports.card_ids_for(cur, filters, 'total:no_answer') == []
+    # Снова недозвон, и мы пишем сами с телефона найма — статус остаётся, пока кандидат молчит.
+    clock.now = NOW + timedelta(minutes=20)
+    service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
+    service.wa_events({'events': [wa_event('n3', phone='77054000001', from_me=True, ts=WA_TS + 1800, text='Перезвоните, пожалуйста')]})
+    with world['db']._get_cursor() as cur:
+        assert queries.get_card(cur, card['id'])['substage'] == 'no_answer'
+        assert reports.card_ids_for(cur, filters, 'total:no_answer') == [card['id']]
+
+    # Возврат в пул: переписка прошлого закрепления новому рекрутеру не засчитывается — как и чужие звонки.
+    _outcome, back = add_response(world, REC1, '8 705 400 00 02')
+    service.take(me, back['id'])
+    service.wa_events({'events': [wa_event('p1', phone='77054000002', from_me=True, ts=WA_TS + 3600, text='Здравствуйте!')]})
+    clock.now = NOW + timedelta(days=2)
+    service.reassign(lead, back['id'], None, 'Рекрутер в отпуске')
+    service.take(other, back['id'])
+    with pytest.raises(HiringError) as caught:
+        service.move(other, back['id'], 'invited_office', office)
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+    service.wa_events({'events': [wa_event('p2', phone='77054000002', from_me=True, ts=WA_TS + 2 * 86400 + 600,
+                                           text='Добрый день! Вы ещё ищете работу?')]})
+    assert service.move(other, back['id'], 'invited_office', office)['stage'] == 'invited_office'
+
+    # Второй номер WhatsApp карточки: наше сообщение только в его чате — тоже связь.
+    _outcome, twin = add_response(world, REC1, '8 705 400 00 03')
+    service.take(me, twin['id'])
+    service.edit_card(me, twin['id'], {'whatsapp': '8 705 400 00 04'})
+    with pytest.raises(HiringError) as caught:
+        service.move(me, twin['id'], 'invited_office', office)
+    assert caught.value.code == 'HIRING_NO_TOUCH'
+    service.wa_events({'events': [wa_event('t1', phone='77054000004', from_me=True, ts=WA_TS + 2 * 86400 + 900, text='Пишу сюда, как просили')]})
+    assert service.move(me, twin['id'], 'invited_office', office)['stage'] == 'invited_office'
 
 
 class FakeStorage:
