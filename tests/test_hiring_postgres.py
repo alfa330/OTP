@@ -880,35 +880,35 @@ def test_target_label_is_set_automatically(world):
             return queries.open_card_by_phone(cur, phone)['channel_name']
 
     # WhatsApp: по объявлению — «Таргет»; по ссылке на номер (так пишут с hh, сайта) и без рекламы — без метки.
-    service.wa_events({'events': [wa_event('g1', phone='77056000001', ad=TARGET_AD),
-                                  wa_event('g2', phone='77056000002', ad={'entry_point': 'phone_number_hyperlink'}),
-                                  wa_event('g3', phone='77056000003')]})
-    assert [label('+7705600000%d' % n) for n in (1, 2, 3)] == ['Таргет', None, None]
+    service.wa_events({'events': [wa_event('g1', phone='77055553001', ad=TARGET_AD),
+                                  wa_event('g2', phone='77055553002', ad={'entry_point': 'phone_number_hyperlink'}),
+                                  wa_event('g3', phone='77055553003')]})
+    assert [label('+7705555300%d' % n) for n in (1, 2, 3)] == ['Таргет', None, None]
     # Источник «Таргет» — вебхук партнёра и отклик вручную; Kaspi — без метки (её ставит рекрутер).
-    results = service.external_intake([{'phone': '8 705 600 00 04', 'name': 'Из рекламы'}], source_code='target',
+    results = service.external_intake([{'phone': '8 705 555 30 04', 'name': 'Из рекламы'}], source_code='target',
                                       actor_label='Партнёр: тест')
-    assert results[0]['status'] == 'created' and label('+77056000004') == 'Таргет'
-    service.external_intake([{'phone': '8 705 600 00 05'}], source_code='kaspi', actor_label='Партнёр: тест')
-    assert label('+77056000005') is None
-    add_response(world, REC1, '8 705 600 00 06', source_id=world['sources']['target']['id'])
-    assert label('+77056000006') == 'Таргет'
+    assert results[0]['status'] == 'created' and label('+77055553004') == 'Таргет'
+    service.external_intake([{'phone': '8 705 555 30 05'}], source_code='kaspi', actor_label='Партнёр: тест')
+    assert label('+77055553005') is None
+    add_response(world, REC1, '8 705 555 30 06', source_id=world['sources']['target']['id'])
+    assert label('+77055553006') == 'Таргет'
 
     # Повторный отклик по рекламе: карточке без метки — «Таргет», метку рекрутера не трогает.
-    _outcome, base = add_response(world, REC1, '8 705 600 00 07')
-    _outcome, chosen = add_response(world, REC1, '8 705 600 00 08')
+    _outcome, base = add_response(world, REC1, '8 705 555 30 07')
+    _outcome, chosen = add_response(world, REC1, '8 705 555 30 08')
     service.take(me, chosen['id'])
     service.edit_card(me, chosen['id'], {'channel_id': hh_channel['id']})
-    assert service.wa_events({'events': [wa_event('g7', phone='77056000007', ad=TARGET_AD),
-                                         wa_event('g8', phone='77056000008', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
-    assert (label('+77056000007'), label('+77056000008')) == ('Таргет', 'hh')
+    assert service.wa_events({'events': [wa_event('g7', phone='77055553007', ad=TARGET_AD),
+                                         wa_event('g8', phone='77055553008', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
+    assert (label('+77055553007'), label('+77055553008')) == ('Таргет', 'hh')
 
     # Переименование не ломает автометку (канал — по коду); выключенный канал сам не ставится.
     service.edit_channel(lead, target['id'], {'name': 'Реклама'})
-    service.wa_events({'events': [wa_event('g9', phone='77056000009', ad=TARGET_AD)]})
-    assert label('+77056000009') == 'Реклама'
+    service.wa_events({'events': [wa_event('g9', phone='77055553009', ad=TARGET_AD)]})
+    assert label('+77055553009') == 'Реклама'
     service.edit_channel(lead, target['id'], {'is_active': False})
-    service.wa_events({'events': [wa_event('g10', phone='77056000010', ad=TARGET_AD)]})
-    assert label('+77056000010') is None
+    service.wa_events({'events': [wa_event('g10', phone='77055553010', ad=TARGET_AD)]})
+    assert label('+77055553010') is None
 
 
 def test_target_backfill_runs_once_when_the_code_appears(world):
@@ -920,28 +920,28 @@ def test_target_backfill_runs_once_when_the_code_appears(world):
     with world['db']._get_cursor() as cur:
         cur.execute("UPDATE hiring_channels SET code = NULL")          # как засеяла выкладка 40037a92
         hh_id = next(c['id'] for c in queries.list_channels(cur) if c['name'] == 'hh')
-    service.wa_events({'events': [wa_event('h1', phone='77057000001', ad=TARGET_AD), wa_event('h2', phone='77057000002')]})
-    add_response(world, REC1, '8 705 700 00 03', source_id=world['sources']['target']['id'])
-    add_response(world, REC1, '8 705 700 00 04')
-    service.wa_events({'events': [wa_event('h4', phone='77057000004', ad=TARGET_AD)]})     # повторный отклик по рекламе
-    _outcome, chosen = add_response(world, REC1, '8 705 700 00 05', source_id=world['sources']['target']['id'])
+    service.wa_events({'events': [wa_event('h1', phone='77055554001', ad=TARGET_AD), wa_event('h2', phone='77055554002')]})
+    add_response(world, REC1, '8 705 555 40 03', source_id=world['sources']['target']['id'])
+    add_response(world, REC1, '8 705 555 40 04')
+    service.wa_events({'events': [wa_event('h4', phone='77055554004', ad=TARGET_AD)]})     # повторный отклик по рекламе
+    _outcome, chosen = add_response(world, REC1, '8 705 555 40 05', source_id=world['sources']['target']['id'])
     service.take(me, chosen['id'])
     service.edit_card(me, chosen['id'], {'channel_id': hh_id})                            # рекрутер решил сам
     with world['db']._get_cursor() as cur:
         def label(phone):
             return queries.open_card_by_phone(cur, phone)['channel_name']
 
-        assert [label('+7705700000%d' % n) for n in range(1, 6)] == [None, None, None, None, 'hh']
-        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77057000001'")
+        assert [label('+7705555400%d' % n) for n in range(1, 6)] == [None, None, None, None, 'hh']
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055554001'")
         updated_before = cur.fetchone()[0]
         schema.init_hiring_schema(cur)
         assert {c['name']: c['code'] for c in queries.list_channels(cur)} == {'Таргет': 'target', 'hh': 'hh', 'Каспи': 'kaspi'}
-        assert [label('+7705700000%d' % n) for n in range(1, 6)] == ['Таргет', None, 'Таргет', 'Таргет', 'hh']
-        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77057000001'")
+        assert [label('+7705555400%d' % n) for n in range(1, 6)] == ['Таргет', None, 'Таргет', 'Таргет', 'hh']
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055554001'")
         assert cur.fetchone()[0] == updated_before                                            # доска не перемешивается
-        cur.execute("UPDATE hiring_cards SET channel_id = NULL WHERE phone = '+77057000001'")
+        cur.execute("UPDATE hiring_cards SET channel_id = NULL WHERE phone = '+77055554001'")
         schema.init_hiring_schema(cur)
-        assert label('+77057000001') is None
+        assert label('+77055554001') is None
 
 
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
@@ -1281,13 +1281,13 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
     me, lead = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT)
     office = {'office_visit_at': '2026-10-16T10:00'}
     # Карточка не из WhatsApp, чат рекрутер начинает сам: чат к карточке не привязан, касаний не пишет.
-    service.wa_events({'events': [wa_event('s0', phone='77057778899', from_me=True, ts=WA_TS - 3600, text='Помните нас?')]})
-    _outcome, card = add_response(world, REC1, '8 705 777 88 99')
+    service.wa_events({'events': [wa_event('s0', phone='77055551899', from_me=True, ts=WA_TS - 3600, text='Помните нас?')]})
+    _outcome, card = add_response(world, REC1, '8 705 555 18 99')
     card = service.take(me, card['id'])
     with pytest.raises(HiringError) as caught:          # сообщение раньше отклика — не связь по этой карточке
         service.move(me, card['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
-    service.wa_events({'events': [wa_event('s1', phone='77057778899', from_me=True, ts=WA_TS + 600, text='Здравствуйте! По вакансии')]})
+    service.wa_events({'events': [wa_event('s1', phone='77055551899', from_me=True, ts=WA_TS + 600, text='Здравствуйте! По вакансии')]})
     card = service.move(me, card['id'], 'invited_office', office)
     assert card['stage'] == 'invited_office'
     with world['db']._get_cursor() as cur:
@@ -1295,15 +1295,15 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
 
     # Отклик WhatsApp: рекрутер ответил с телефона, пока карточка ждала в пуле («Отвечает с телефона» не
     # выбран), в работу взял позже — ответ всё равно засчитан. У соседа был только автоответ — нет.
-    service.wa_events({'events': [wa_event('t1', phone='77057770011', text='Хочу работать'),
-                                  wa_event('t2', phone='77057770011', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!'),
-                                  wa_event('t3', phone='77057770011', from_me=True, ts=WA_TS + 300, text='Добрый день! Удобно созвониться?'),
-                                  wa_event('u1', phone='77057770022', text='Хочу работать'),
-                                  wa_event('u2', phone='77057770022', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!')]})
+    service.wa_events({'events': [wa_event('t1', phone='77055551011', text='Хочу работать'),
+                                  wa_event('t2', phone='77055551011', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!'),
+                                  wa_event('t3', phone='77055551011', from_me=True, ts=WA_TS + 300, text='Добрый день! Удобно созвониться?'),
+                                  wa_event('u1', phone='77055551022', text='Хочу работать'),
+                                  wa_event('u2', phone='77055551022', from_me=True, ts=WA_TS + 5, text='Спасибо за обращение!')]})
     clock.now = NOW + timedelta(hours=1)
     with world['db']._get_cursor() as cur:
-        answered = queries.open_card_by_phone(cur, '+77057770011')
-        silent = queries.open_card_by_phone(cur, '+77057770022')
+        answered = queries.open_card_by_phone(cur, '+77055551011')
+        silent = queries.open_card_by_phone(cur, '+77055551022')
     service.take(me, answered['id'])
     service.take(me, silent['id'])
     with world['db']._get_cursor() as cur:
@@ -1313,10 +1313,10 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
         service.move(me, silent['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
     # Сообщение, удалённое у всех, — как не отправленное.
-    _outcome, gone = add_response(world, REC1, '8 705 777 00 44')
+    _outcome, gone = add_response(world, REC1, '8 705 555 10 44')
     service.take(me, gone['id'])
-    service.wa_events({'events': [wa_event('w1', phone='77057770044', from_me=True, ts=WA_TS + 7200, text='Ошиблась чатом'),
-                                  wa_event('w2', phone='77057770044', from_me=True, ts=WA_TS + 7210, revoke_of='w1')]})
+    service.wa_events({'events': [wa_event('w1', phone='77055551044', from_me=True, ts=WA_TS + 7200, text='Ошиблась чатом'),
+                                  wa_event('w2', phone='77055551044', from_me=True, ts=WA_TS + 7210, revoke_of='w1')]})
     with pytest.raises(HiringError) as caught:
         service.move(me, gone['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
@@ -1324,8 +1324,8 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
     # Повторная активация: прежняя переписка не в счёт, нужна новая связь.
     with world['db']._get_cursor() as cur:
         no_contact = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_CONTACT)
-    _outcome, back = add_response(world, REC1, '8 705 777 00 33')
-    service.wa_events({'events': [wa_event('v1', phone='77057770033', from_me=True, ts=WA_TS + 3700, text='Здравствуйте!')]})
+    _outcome, back = add_response(world, REC1, '8 705 555 10 33')
+    service.wa_events({'events': [wa_event('v1', phone='77055551033', from_me=True, ts=WA_TS + 3700, text='Здравствуйте!')]})
     service.take(me, back['id'])
     service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
     clock.now = NOW + timedelta(days=1)
@@ -1333,7 +1333,7 @@ def test_whatsapp_our_message_lets_card_leave_in_work(world):
     with pytest.raises(HiringError) as caught:
         service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
     assert caught.value.code == 'HIRING_NO_TOUCH'
-    service.wa_events({'events': [wa_event('v2', phone='77057770033', from_me=True, ts=WA_TS + 86400 + 600, text='Вы ещё ищете работу?')]})
+    service.wa_events({'events': [wa_event('v2', phone='77055551033', from_me=True, ts=WA_TS + 86400 + 600, text='Вы ещё ищете работу?')]})
     assert service.move(me, back['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})['stage'] == 'refused'
 
 
@@ -1348,17 +1348,17 @@ def test_whatsapp_reply_clears_no_answer_and_pool_return_needs_new_contact(world
     filters = reports.parse_filters({'month': '2026-10'})
 
     # Карточка не из WhatsApp: недозвон, потом кандидат пишет на номер найма (чат ещё не привязан — путь повторного отклика).
-    _outcome, card = add_response(world, REC1, '8 705 400 00 01')
+    _outcome, card = add_response(world, REC1, '8 705 555 20 01')
     service.take(me, card['id'])
     clock.now = NOW + timedelta(minutes=5)
     card = service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
     assert (card['substage'], card['no_answer_streak']) == ('no_answer', 1)
     # Сообщение, написанное ДО нашего звонка (шлюз дослал после простоя), — не ответ на звонок.
-    service.wa_events({'events': [wa_event('n1', phone='77054000001', ts=WA_TS + 60, text='Позвоните мне')]})
+    service.wa_events({'events': [wa_event('n1', phone='77055552001', ts=WA_TS + 60, text='Позвоните мне')]})
     with world['db']._get_cursor() as cur:
         assert queries.get_card(cur, card['id'])['substage'] == 'no_answer'
         assert reports.card_ids_for(cur, filters, 'total:no_answer') == [card['id']]
-    service.wa_events({'events': [wa_event('n2', phone='77054000001', ts=WA_TS + 600, text='Я на работе, пишите сюда')]})
+    service.wa_events({'events': [wa_event('n2', phone='77055552001', ts=WA_TS + 600, text='Я на работе, пишите сюда')]})
     with world['db']._get_cursor() as cur:
         fresh = queries.get_card(cur, card['id'])
         assert (fresh['substage'], fresh['no_answer_streak']) == ('whatsapp', 0)
@@ -1366,33 +1366,33 @@ def test_whatsapp_reply_clears_no_answer_and_pool_return_needs_new_contact(world
     # Снова недозвон, и мы пишем сами с телефона найма — статус остаётся, пока кандидат молчит.
     clock.now = NOW + timedelta(minutes=20)
     service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
-    service.wa_events({'events': [wa_event('n3', phone='77054000001', from_me=True, ts=WA_TS + 1800, text='Перезвоните, пожалуйста')]})
+    service.wa_events({'events': [wa_event('n3', phone='77055552001', from_me=True, ts=WA_TS + 1800, text='Перезвоните, пожалуйста')]})
     with world['db']._get_cursor() as cur:
         assert queries.get_card(cur, card['id'])['substage'] == 'no_answer'
         assert reports.card_ids_for(cur, filters, 'total:no_answer') == [card['id']]
 
     # Возврат в пул: переписка прошлого закрепления новому рекрутеру не засчитывается — как и чужие звонки.
-    _outcome, back = add_response(world, REC1, '8 705 400 00 02')
+    _outcome, back = add_response(world, REC1, '8 705 555 20 02')
     service.take(me, back['id'])
-    service.wa_events({'events': [wa_event('p1', phone='77054000002', from_me=True, ts=WA_TS + 3600, text='Здравствуйте!')]})
+    service.wa_events({'events': [wa_event('p1', phone='77055552002', from_me=True, ts=WA_TS + 3600, text='Здравствуйте!')]})
     clock.now = NOW + timedelta(days=2)
     service.reassign(lead, back['id'], None, 'Рекрутер в отпуске')
     service.take(other, back['id'])
     with pytest.raises(HiringError) as caught:
         service.move(other, back['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
-    service.wa_events({'events': [wa_event('p2', phone='77054000002', from_me=True, ts=WA_TS + 2 * 86400 + 600,
+    service.wa_events({'events': [wa_event('p2', phone='77055552002', from_me=True, ts=WA_TS + 2 * 86400 + 600,
                                            text='Добрый день! Вы ещё ищете работу?')]})
     assert service.move(other, back['id'], 'invited_office', office)['stage'] == 'invited_office'
 
     # Второй номер WhatsApp карточки: наше сообщение только в его чате — тоже связь.
-    _outcome, twin = add_response(world, REC1, '8 705 400 00 03')
+    _outcome, twin = add_response(world, REC1, '8 705 555 20 03')
     service.take(me, twin['id'])
-    service.edit_card(me, twin['id'], {'whatsapp': '8 705 400 00 04'})
+    service.edit_card(me, twin['id'], {'whatsapp': '8 705 555 20 04'})
     with pytest.raises(HiringError) as caught:
         service.move(me, twin['id'], 'invited_office', office)
     assert caught.value.code == 'HIRING_NO_TOUCH'
-    service.wa_events({'events': [wa_event('t1', phone='77054000004', from_me=True, ts=WA_TS + 2 * 86400 + 900, text='Пишу сюда, как просили')]})
+    service.wa_events({'events': [wa_event('t1', phone='77055552004', from_me=True, ts=WA_TS + 2 * 86400 + 900, text='Пишу сюда, как просили')]})
     assert service.move(me, twin['id'], 'invited_office', office)['stage'] == 'invited_office'
 
 
