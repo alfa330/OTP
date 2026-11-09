@@ -616,8 +616,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     olx_ads: ['op', 'marketing'],
     touches: ['op'],
     op_funnel: ['op'],
-    // Смены, часы, ресурсы
-    work_schedules: ['szov', 'op', 'tez', 'front_office'],
+    // Смены, часы, ресурсы. «Графиков работы» в карте нет: с 09.11.2026 график
+    // ведут всем отделам (решение владельца), и пункт нужен при любом выбранном.
     // «Фронт офисы» — ради табеля фронт-офисов (06.11.2026): суперадмин берёт его
     // плиткой окна «Сформировать отчёт», и при выбранном отделе пункт нужен на месте.
     sv_hours: ['szov', 'op', 'tez', 'front_office'],
@@ -16664,9 +16664,56 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const PLANNER_SUPERVISORS_DIRECTION_LABEL = 'Супервайзеры';
         const PLANNER_SUPERVISOR_NO_CARD = '__none__';
         const isPlannerSupervisorRow = (op) => isSupervisorRole(op?.role);
-        const plannerRowDirectionLabel = (op) => (
-            isPlannerSupervisorRow(op) ? PLANNER_SUPERVISORS_DIRECTION_LABEL : String(op?.direction || '').trim()
-        );
+        /* Строка линии — оператор (или старая строка без роли): у неё направление,
+           перерывы по правилам направления, статусы телефонии, штрафы и тренинги.
+           С 09.11.2026 в сетке ВСЕ сотрудники (владелец: «по всем нужно сделать
+           возможность вести графики»): остальных ведём как строки СВ из задачи #352 —
+           без операторских действий и с ручными перерывами. */
+        const isPlannerLineRow = (op) => {
+            const role = normalizeRole(op?.role);
+            return !role || role === 'operator';
+        };
+        // Подпись строки без направления и без группы — её должность в системе.
+        const PLANNER_ROLE_GROUP_LABELS = {
+            admin: 'Администраторы',
+            super_admin: 'Администраторы',
+            trainer: 'Тренеры',
+            trainee: 'Стажёры',
+            hr_manager: 'HR',
+            accounting_manager: 'Бухгалтерия',
+            marketing_manager: 'Маркетинг',
+        };
+        const PLANNER_GROUP_KEY_PREFIX = '__group__:';
+        const PLANNER_ROLE_KEY_PREFIX = '__role__:';
+        /* Ключ строки для фильтра «Направления» и сортировки: направление; у СВ —
+           служебное «Супервайзеры»; у строки без направления — её группа (у
+           отделов-проектов направлений нет, люди делятся группами), а без группы —
+           должность. Служебные ключи с префиксом в выгрузку направлением не уходят. */
+        const plannerRowGroupKey = (op) => {
+            if (isPlannerSupervisorRow(op)) return PLANNER_SUPERVISORS_DIRECTION;
+            const direction = String(op?.direction || '').trim();
+            if (direction) return direction;
+            const groupName = String(op?.group_name || '').trim();
+            if (groupName) return `${PLANNER_GROUP_KEY_PREFIX}${groupName}`;
+            const roleLabel = PLANNER_ROLE_GROUP_LABELS[normalizeRole(op?.role)];
+            return roleLabel ? `${PLANNER_ROLE_KEY_PREFIX}${roleLabel}` : '';
+        };
+        const plannerGroupKeyLabel = (key) => {
+            const value = String(key || '');
+            if (value === PLANNER_SUPERVISORS_DIRECTION) return PLANNER_SUPERVISORS_DIRECTION_LABEL;
+            if (value.startsWith(PLANNER_GROUP_KEY_PREFIX)) return value.slice(PLANNER_GROUP_KEY_PREFIX.length);
+            if (value.startsWith(PLANNER_ROLE_KEY_PREFIX)) return value.slice(PLANNER_ROLE_KEY_PREFIX.length);
+            return value;
+        };
+        // Настоящее направление, а не служебная группа строк сетки.
+        const isPlannerRealDirectionKey = (key) => {
+            const value = String(key || '');
+            return Boolean(value)
+                && value !== PLANNER_SUPERVISORS_DIRECTION
+                && !value.startsWith(PLANNER_GROUP_KEY_PREFIX)
+                && !value.startsWith(PLANNER_ROLE_KEY_PREFIX);
+        };
+        const plannerRowDirectionLabel = (op) => plannerGroupKeyLabel(plannerRowGroupKey(op));
 
         function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null }) {
             /* «Мы на телефоне» — только для шапки окна «Запроса на замену»: там
@@ -16828,6 +16875,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // тех. сбой) к СВ неприменимы — сервер штраф СВ не примет (задача #352).
             const plannerModalOperator = operators.find(o => String(o?.id) === String(modalState?.opId));
             const plannerModalIsSupervisorRow = isPlannerSupervisorRow(plannerModalOperator);
+            // То же для любой строки не с линии (руководители, бэк-офис, отделы-
+            // проекты): штраф сервер примет только у оператора, тренинги и тех. сбои
+            // — операторские статусы.
+            const plannerModalIsNonLineRow = Boolean(plannerModalOperator) && !isPlannerLineRow(plannerModalOperator);
             // Отдел открыт поимённо с правами СВ — а СВ из ЧС не убирает и штрафует
             // только своих подчинённых; сервер то же отклонит.
             const plannerModalInGrantedDepartment = plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));
@@ -18181,6 +18232,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 });
                 return Array.from(directionsMap.values()).sort((a, b) => a.localeCompare(b));
             }, [plannerDepartmentOperators]);
+            // Группы и должности строк без направления — тоже пункты фильтра: у
+            // отделов-проектов и бэк-офиса направлений нет, и без них фильтр был бы
+            // пуст. Правила перерывов по-прежнему читают только uniqueDirections.
+            const plannerExtraGroupKeys = useMemo(() => {
+                const keys = new Set();
+                plannerDepartmentOperators.forEach(op => {
+                    const key = plannerRowGroupKey(op);
+                    if (key && key !== PLANNER_SUPERVISORS_DIRECTION && !isPlannerRealDirectionKey(key)) keys.add(key);
+                });
+                return Array.from(keys).sort((a, b) => plannerGroupKeyLabel(a).localeCompare(plannerGroupKeyLabel(b)));
+            }, [plannerDepartmentOperators]);
 
             const plannerSupervisorOptions = useMemo(
                 () => uniqueSupervisors.map(sv => ({ value: String(sv.id), label: sv.name })),
@@ -18193,13 +18255,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const plannerDirectionOptions = useMemo(
                 () => [
                     ...uniqueDirections.map(dir => ({ value: dir, label: dir })),
+                    ...plannerExtraGroupKeys.map(key => ({ value: key, label: plannerGroupKeyLabel(key) })),
                     // СВ — своей строкой в конце: направления у них нет, а смотреть
                     // «кто из СВ на смене» РОП и сами СВ хотят отдельно (задача #352).
                     ...(plannerHasSupervisorRows
                         ? [{ value: PLANNER_SUPERVISORS_DIRECTION, label: PLANNER_SUPERVISORS_DIRECTION_LABEL }]
                         : []),
                 ],
-                [uniqueDirections, plannerHasSupervisorRows]
+                [uniqueDirections, plannerExtraGroupKeys, plannerHasSupervisorRows]
             );
 
             /* Варианты для поиска по людям. Уволенных в списке нет, пока их не
@@ -18640,11 +18703,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     filtered = filtered.filter(op => !plannerIsFiredStatus(op?.status));
                 }
 
-                // Фильтр по направлениям (строки СВ — служебное «Супервайзеры»)
+                // Фильтр по направлениям (строки СВ — служебное «Супервайзеры»,
+                // строки без направления — их группа или должность)
                 if (selectedDirections.length > 0) {
-                    filtered = filtered.filter(op => selectedDirections.includes(
-                        isPlannerSupervisorRow(op) ? PLANNER_SUPERVISORS_DIRECTION : op.direction
-                    ));
+                    filtered = filtered.filter(op => selectedDirections.includes(plannerRowGroupKey(op)));
                 }
 
                 // Точечный отбор людей поиском
@@ -18707,12 +18769,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             /* Сколько смен стоит на каждый день периода — по тем же отфильтрованным
                людям, что и строки сетки. Смена относится к дню своего начала: ночная
                20:00 — 02:00 считается один раз, как и в ячейках недели и месяца. */
-            // Покрытие линии — без СВ (они на линии не сидят), кроме случая, когда в
-            // фильтре явно выбраны «Супервайзеры»: тогда вопрос и есть «кто из СВ на смене».
+            // Покрытие линии — только строки линии (СВ, руководители и бэк-офис на
+            // линии не сидят), кроме тех, чья группа строк явно выбрана в фильтре:
+            // тогда вопрос и есть «кто из них на смене».
             const plannerCoverageOperators = useMemo(() => (
-                selectedDirections.includes(PLANNER_SUPERVISORS_DIRECTION)
-                    ? filteredOperators
-                    : filteredOperators.filter(op => !isPlannerSupervisorRow(op))
+                filteredOperators.filter(op => isPlannerLineRow(op) || selectedDirections.includes(plannerRowGroupKey(op)))
             ), [filteredOperators, selectedDirections]);
             const plannerShiftCountByDate = useMemo(() => {
                 const counts = new Map();
@@ -19862,14 +19923,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             };
 
-            // Строки СВ ведёт глава отдела (РОП). Рядовому СВ и тому, кому отдел
-            // открыт поимённо с правами СВ, — только смотреть: сервер запись отклонит.
-            const isPlannerSupervisorRowLocked = (op) => isPlannerSupervisorRow(op) && (
-                plannerViewerIsPlainSupervisor
-                || plannerGrantedDepartmentIds.has(String(op?.department_id ?? ''))
-            );
+            // Строки не с линии (СВ, руководители, бэк-офис) ведёт глава отдела.
+            // Рядовому СВ и тому, кому отдел открыт поимённо с правами СВ, — только
+            // смотреть: сервер запись отклонит. Строки админов глава отдела тоже
+            // только смотрит — их график ведёт глобальный админ; кадровику сервер
+            // правку людей не ограничивает (_requester_can_access_target_user).
+            const plannerViewerIsScopedHead = isDepartmentHead(user)
+                && normalizeRole(user?.role) !== 'super_admin'
+                && !managesEmployeeAccounting(user);
+            const isPlannerNonLineRowLocked = (op) => {
+                if (!op || isPlannerLineRow(op)) return false;
+                if (plannerViewerIsPlainSupervisor || plannerGrantedDepartmentIds.has(String(op?.department_id ?? ''))) return true;
+                return plannerViewerIsScopedHead && isAdminLikeRoleFn(op?.role);
+            };
             const isPlannerRowLocked = (opId) => (
-                isPlannerSupervisorRowLocked(operators.find(o => String(o?.id) === String(opId)))
+                isPlannerNonLineRowLocked(operators.find(o => String(o?.id) === String(opId)))
             );
 
             const openEditModal = (opId, date, editIndex = null) => {
@@ -20222,10 +20290,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
             }, [plannerOfflineActivityModalState?.open]);
 
-            // СВ в раскладку перерывов не входят (задача #352): их смене перерывы не
-            // ставятся, и соседями операторам по перерывам они не считаются.
+            // В раскладку перерывов входит только линия: у СВ (задача #352) и у
+            // остальных не-операторов перерывы ручные, и соседями операторам по
+            // перерывам они не считаются.
             const cloneOperatorsForBreakSimulation = (sourceOperators = []) => {
-                return (sourceOperators || []).filter(op => !isPlannerSupervisorRow(op)).map(op => ({
+                return (sourceOperators || []).filter(op => isPlannerLineRow(op)).map(op => ({
                     ...op,
                     shifts: Object.fromEntries(
                         Object.entries(op?.shifts || {}).map(([dateKey, segs]) => [
@@ -20443,11 +20512,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     return;
                 }
 
-                // СВ перерывов не получают и операторским пересчётом не считаются
-                // (задача #352); рядовому СВ сервер ответил бы 403 на весь пакет.
+                // Не-операторы (СВ — задача #352, руководители, бэк-офис) перерывов
+                // не получают и операторским пересчётом не считаются; рядовому СВ
+                // сервер ответил бы 403 на весь пакет.
                 const operatorIds = Array.from(new Set(
                     (Array.isArray(filteredOperators) ? filteredOperators : [])
-                        .filter(op => !isPlannerSupervisorRow(op))
+                        .filter(op => isPlannerLineRow(op))
                         .map(op => Number(op?.id))
                         .filter(id => Number.isFinite(id) && id > 0)
                         .map(id => Math.trunc(id))
@@ -20802,9 +20872,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     emitAppToast('По текущим фильтрам нет операторов для экспорта', 'warning');
                     return;
                 }
-                // Выгрузка — график операторов; строк СВ в ней нет (задача #352).
-                if (Array.isArray(filteredOperators) && !filteredOperators.some(op => !isPlannerSupervisorRow(op))) {
-                    emitAppToast('В Excel выгружается график операторов, а в выборке только супервайзеры', 'warning');
+                // Выгрузка — график операторов; строк не с линии в ней нет (задача #352).
+                if (Array.isArray(filteredOperators) && !filteredOperators.some(op => isPlannerLineRow(op))) {
+                    emitAppToast('В Excel выгружается график операторов, а в выборке операторов нет', 'warning');
                     return;
                 }
                 const sortedDates = [...visibleRange].sort();
@@ -20831,8 +20901,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     });
                     (selectedDirections || []).forEach(directionValue => {
                         const normalized = String(directionValue || '').trim();
-                        // «Супервайзеры» — фильтр экрана, а не направление: в выгрузку не шлём.
-                        if (normalized && normalized !== PLANNER_SUPERVISORS_DIRECTION) {
+                        // «Супервайзеры», группы и должности строк без направления —
+                        // фильтр экрана, а не направление: в выгрузку не шлём.
+                        if (isPlannerRealDirectionKey(normalized)) {
                             queryParams.append('direction', normalized);
                         }
                     });
@@ -20983,8 +21054,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                отдел, точечный выбор людей и «уволенных нет по умолчанию».
                Разъедься они, отчёт молча считал бы по другому составу. */
             const filterPlannerOperatorsForStatusMatchExport = (sourceOperators = []) => {
-                // Соответствие статусам — про линию; у СВ статусов нет (задача #352).
-                let filtered = (Array.isArray(sourceOperators) ? sourceOperators : []).filter(op => !isPlannerSupervisorRow(op));
+                // Соответствие статусам — про линию; у не-операторов статусов нет (задача #352).
+                let filtered = (Array.isArray(sourceOperators) ? sourceOperators : []).filter(op => isPlannerLineRow(op));
                 if (plannerDepartmentId) {
                     filtered = filtered.filter(op => String(op?.department_id ?? '') === plannerDepartmentId);
                 }
@@ -22752,7 +22823,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 const dayKey = String(todayDateStr(new Date(currentDate)) || '').trim();
                 const operatorIds = Array.from(new Set(
                     (operators || [])
-                        .filter(op => !isPlannerSupervisorRow(op))
+                        .filter(op => isPlannerLineRow(op))
                         .map(op => Number(op?.id))
                         .filter(id => Number.isFinite(id))
                 ));
@@ -23995,9 +24066,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         null
                       );
                     } catch (e) { /* ignore */ }
-                    // У смены СВ перерывы только ручные (задача #352): до ответа сервера
-                    // показываем ровно поставленные, а не операторский профиль 15/30/15.
-                    if (isPlannerSupervisorRow(op)) {
+                    // У смены не с линии перерывы только ручные (задача #352 — СВ, с
+                    // 09.11.2026 — все не-операторы): до ответа сервера показываем
+                    // ровно поставленные, а не операторский профиль 15/30/15.
+                    if (!isPlannerLineRow(op)) {
                       const sentBreaks = (breaksToSend || []).map(b => ({ start: b.start, end: b.end }));
                       op.shifts[date] = (op.shifts[date] || []).map(seg => {
                         const segStart = seg.__startMin ?? timeToMinutes(seg.start);
@@ -24192,8 +24264,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // СВ (задача #352): перерывы только ручные — без автоматики и правил
                 // направлений; прошедшие тоже правятся, потому что по ним считается
                 // вычет из часов СВ за день. Отдельный флаг svBreaksEdited отличает
-                // «убрал все перерывы» от «ещё не трогал».
-                if (isPlannerSupervisorRow(op)) {
+                // «убрал все перерывы» от «ещё не трогал». С 09.11.2026 так же у всех
+                // не-операторов: направлений и правил перерывов у них нет.
+                if (op && !isPlannerLineRow(op)) {
                     const manualBreaks = modalState.svBreaksEdited === plannerSvBreaksKey
                         ? (Array.isArray(modalState.breaks) ? modalState.breaks : [])
                         : (seg?.breaks ?? []);
@@ -33429,7 +33502,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <WsPhoneGroup
                                                 label="Перерывы"
                                                 hint={modalBreaksManualOnly
-                                                    ? 'Перерывы супервайзера ставятся вручную. Их сумма вычитается из часов за день; без них — общий перерыв СВ.'
+                                                    ? (plannerModalIsSupervisorRow
+                                                        ? 'Перерывы супервайзера ставятся вручную. Их сумма вычитается из часов за день; без них — общий перерыв СВ.'
+                                                        : 'Перерывы ставятся вручную: правил перерывов направления у этой строки нет.')
                                                     : (modalBreakConflictState.hasConflict
                                                         ? 'Есть пересечение с перерывами направления — время можно поправить вручную.'
                                                         : 'Предпросмотр до сохранения: время можно поправить вручную.')}
@@ -33804,7 +33879,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             ))}
                                         </WsPhoneGroup>
 
-                                        {!plannerReadOnly && !plannerModalIsSupervisorRow && plannerModalCanFine ? (
+                                        {!plannerReadOnly && !plannerModalIsNonLineRow && plannerModalCanFine ? (
                                             <button
                                                 type="button"
                                                 className={WS_PHONE_BUTTON.gray}
@@ -36155,7 +36230,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     </div>
                     )}
 
-                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && !plannerModalIsSupervisorRow && (
+                    {!isBulkSelectionModal && !modalState.multipleDates && modalTabControl && !plannerModalIsNonLineRow && (
                     <div className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50/60">
                         <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                             <h4 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
@@ -55780,17 +55855,16 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 deptAllowsInner('technical_issues'),
                                             )}
 
-                                            {/* Блок 6 — смены, часы и ресурсы линии. */}
-                                            <SidebarDeptScope section="work_schedules" activeCode={activeDeptCode}>
-                                                <li>
-                                                    <button
-                                                        onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
-                                                        className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
-                                                    >
-                                                        <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
-                                                    </button>
-                                                </li>
-                                            </SidebarDeptScope>
+                                            {/* Блок 6 — смены, часы и ресурсы линии. «Графики работы» — без
+                                               фильтра отдела: их ведут всем отделам. */}
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-calendar-alt" /> <span className="sidebar-text">Графики работы</span>
+                                                </button>
+                                            </li>
                                             <SidebarDeptScope section="sv_hours" activeCode={activeDeptCode}>
                                                 <li>
                                                     <button

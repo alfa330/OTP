@@ -46,9 +46,11 @@ for (const code of BACK_OFFICE_CODES) {
         // «Вики» (подтверждает админ, СВ или глава, а СВ в отделе нет).
         assert.equal(departmentAllowsView(user, 'qr_access'), true);
         assert.equal(departmentAllowsView(user, 'tasks'), true);
+        // «Графики работы» — с 09.11.2026: график ведут всем отделам.
+        assert.equal(departmentAllowsView(user, 'work_schedules'), true);
 
         for (const denied of [
-            'work_schedules', 'sv_hours', 'groups', 'salary', 'surveys',
+            'sv_hours', 'groups', 'salary', 'surveys',
             'call_evaluation', 'call_division', 'monitoring_scale', 'ai_qa',
             'trainings', 'technical_issues', 'shift_auction', 'contests',
             'resource_fte', 'departments', 'manage_admins',
@@ -96,7 +98,8 @@ for (const code of BACK_OFFICE_CODES) {
         assert.equal(departmentAllowsView(user, 'tasks'), true);
         assert.equal(departmentAllowsView(user, 'qr_access'), false);
         assert.equal(departmentAllowsView(user, 'groups'), false);
-        assert.equal(departmentAllowsView(user, 'work_schedules'), false);
+        // «Графики работы» — с 09.11.2026, как у главы: график ведут всем отделам.
+        assert.equal(departmentAllowsView(user, 'work_schedules'), true);
         // Псевдоним manage_users работает только у главы.
         assert.equal(departmentAllowsView(user, 'manage_users'), false);
         assert.equal(firstAllowedView(user, []), 'manage_operators');
@@ -193,7 +196,9 @@ test('бэк-офис не задел остальные отделы', () => {
         Object.keys(DEPARTMENT_VIEW_ALLOWLIST),
         // ООЗ — задача #359, свой тест: tests/request_processing_department_views.test.mjs.
         // Аренда авто — #391, тоже свой: tests/car_rental_department_views.test.mjs.
-        ['tez', 'op', 'front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental'],
+        // Отделы-проекты и АХО (09.11.2026) — tests/project_department_views.test.mjs.
+        ['tez', 'op', 'front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental',
+            'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho'],
     );
     // Упрощённый учёт — у бэк-офиса и фронт-офисов; у ОП и ТЭЗ выпадашка
     // со «Супервайзерами» и «Тренерами» остаётся.

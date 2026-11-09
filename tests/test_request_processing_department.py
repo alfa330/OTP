@@ -67,12 +67,12 @@ class RequestProcessingBackendTests(unittest.TestCase):
     def test_backend_set_mirrors_the_frontend(self):
         bot = _read(BOT_PATH)
         self.assertIn(
-            "EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department'})",
+            "EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development'})",
             bot,
         )
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);",
+            "const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development']);",
             views,
         )
 
@@ -89,7 +89,7 @@ class RequestProcessingBackendTests(unittest.TestCase):
 
         namespace = {'db': _Db()}
         exec("OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing'})", namespace)
-        exec("EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department'})", namespace)
+        exec("EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development'})", namespace)
         exec(_function_source(BOT_PATH, "_department_hides_employee_direction"), namespace)
         exec(_function_source(BOT_PATH, "_department_hides_operator_line_fields"), namespace)
         hides_direction = namespace["_department_hides_employee_direction"]

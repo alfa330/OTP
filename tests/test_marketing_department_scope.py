@@ -206,11 +206,11 @@ class EmployeeCardTests(unittest.TestCase):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = "
-            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);",
+            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);",
             views,
         )
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental', 'aho']);",
             views,
         )
 
@@ -218,7 +218,7 @@ class EmployeeCardTests(unittest.TestCase):
         # Разъезд здесь молчаливый: поле скрыто, а сервер всё равно требует
         # направление, и завести сотрудника становится нельзя.
         self.assertIn(
-            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental'})",
+            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental', 'aho'})",
             _read(BOT_PATH),
         )
 

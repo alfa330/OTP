@@ -458,12 +458,21 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(set(StubDatabase.GLB_PLAN_BLOCKING_STATUSES),
                          {"bs", "sick_leave", "annual_leave", "dismissal"})
 
-    def test_fired_operators_are_not_in_the_plan(self):
+    def test_fired_staff_are_not_in_the_plan(self):
         _, cursor = snapshot([staff_row(1, "Оспан Назым")], [])
         sql, _ = next(call for call in cursor.calls
                       if "FROM users" in call[0] and "department_id" in call[0])
         self.assertIn("<> 'fired'", sql)
-        self.assertIn("= 'operator'", sql)
+
+    def test_plan_takes_every_role_not_only_operators(self):
+        """09.11.2026: график в «Графиках работы» ведут всем ролям. Отдел
+        переключается на план iCore целиком, и условие «только операторы» оставляло
+        руководителя и бэк-офис отдела вовсе без плана."""
+        _, cursor = snapshot([staff_row(1, "Оспан Назым")], [])
+        sql, _ = next(call for call in cursor.calls
+                      if "FROM users" in call[0] and "department_id" in call[0])
+        self.assertNotIn("'operator'", sql)
+        self.assertNotIn("u.role", sql)
 
 
 # ──────────────────────────────────────────────────────────── связность правок

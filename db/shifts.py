@@ -28,6 +28,20 @@ from db.core import (  # noqa: F401
 
 
 class ShiftsMixin:
+    # Текущая группа человека для строки «Графиков работы». Подзапрос, а не JOIN:
+    # членств у человека бывает несколько подряд, и JOIN размножил бы строку.
+    # Пустое начало членства читается как «с давних пор», пустой конец — «по сей день».
+    _SCHEDULE_ROW_GROUP_NAME_SQL = """(
+                               SELECT g.name
+                               FROM group_operator_memberships gm
+                               JOIN groups g ON g.id = gm.group_id
+                               WHERE gm.operator_id = u.id
+                                 AND COALESCE(gm.start_date, DATE '1900-01-01') <= CURRENT_DATE
+                                 AND (gm.end_date IS NULL OR gm.end_date >= CURRENT_DATE)
+                               ORDER BY gm.start_date DESC NULLS LAST, gm.id DESC
+                               LIMIT 1
+                           )"""
+
     def _normalize_resource_saved_schedule_shifts(self, days, direction_name=None, direction_rules=None):
         rows = []
         for day_index, day in enumerate(days or []):
@@ -1130,16 +1144,21 @@ class ShiftsMixin:
         include_imported_statuses=False,
         include_technical_issues=False,
         include_offline_activities=False,
-        include_supervisors=False
+        include_all_staff=False
     ):
         """
         Получить всех операторов со сменами и выходными днями за период.
         Если direction_name задан — только операторы этого направления.
         Если department_id задан — только операторы этого отдела.
-        include_supervisors (задача #352) — плюс СВ отделов, где РОП ведёт их график
-        (SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES). Только для строк планировщика:
-        импорт и выгрузка Excel, симуляция и «смены коллег» зовут без флага, иначе
-        СВ сопоставлялись бы по ФИО и попадали в соседи по перерывам.
+        include_all_staff — строки планировщика «Графиков работы»: ВСЕ сотрудники,
+        а не только операторы. Сначала (задача #352) сюда добавили СВ отдела
+        продаж; решение владельца 09.11.2026 — «по всем нужно сделать возможность
+        вести графики»: бэк-офис, руководители, СВ, тренеры, новые отделы без линии.
+        Только для строк планировщика: импорт и выгрузка Excel, симуляция и «смены
+        коллег» зовут без флага — там людей ищут по ФИО и раскладывают перерывы
+        соседям по линии, и не-оператор подставился бы туда чужим графиком.
+        group_name — текущая группа человека: у отделов без направлений сетка
+        подписывает строки ей, а не пустым «Без направления».
         Возвращает список операторов с их сменами и выходными.
         """
         start_date_obj = self._normalize_schedule_date(start_date) if start_date else None
@@ -1160,7 +1179,8 @@ class ShiftsMixin:
                     operator_params.append(department_filter_id)
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate, u.department_id, u.role
+                           d.name as direction, u.status, u.rate, u.department_id, u.role,
+                           """ + self._SCHEDULE_ROW_GROUP_NAME_SQL + """ AS group_name
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
                     LEFT JOIN directions d ON u.direction_id = d.id
@@ -1168,24 +1188,21 @@ class ShiftsMixin:
                     ORDER BY u.name
                 """, operator_params)
             else:
-                operator_filters = ["u.role = 'operator'"]
+                # Без флага — только линия: операторы. С флагом — все роли, и
+                # условие по роли не ставится вовсе (см. include_all_staff выше).
+                operator_filters = [] if include_all_staff else ["u.role = 'operator'"]
                 operator_params = []
-                if include_supervisors:
-                    operator_filters = [
-                        "(u.role = 'operator' OR (" + self.SUPERVISOR_ROLES_SQL
-                        + " AND " + self.SUPERVISOR_CLOCKSTER_DEPARTMENT_SQL + "))"
-                    ]
-                    operator_params = [list(SUPERVISOR_CLOCKSTER_HOURS_DEPARTMENT_CODES)]
                 if department_filter_id is not None:
                     operator_filters.append("u.department_id = %s")
                     operator_params.append(department_filter_id)
+                where_sql = (" WHERE " + " AND ".join(operator_filters)) if operator_filters else ""
                 cursor.execute("""
                     SELECT u.id, u.name, u.supervisor_id, s.name as supervisor_name,
-                           d.name as direction, u.status, u.rate, u.department_id, u.role
+                           d.name as direction, u.status, u.rate, u.department_id, u.role,
+                           """ + self._SCHEDULE_ROW_GROUP_NAME_SQL + """ AS group_name
                     FROM users u
                     LEFT JOIN users s ON u.supervisor_id = s.id
-                    LEFT JOIN directions d ON u.direction_id = d.id
-                    WHERE """ + " AND ".join(operator_filters) + """
+                    LEFT JOIN directions d ON u.direction_id = d.id""" + where_sql + """
                     ORDER BY d.name, u.name
                 """, operator_params)
             operators = cursor.fetchall()
@@ -1196,7 +1213,8 @@ class ShiftsMixin:
             result_map = {}
             # department_id едет во фронт: в «Графиках работы» админ переключает
             # отдел, а состав операторов в ответе один на все отделы.
-            for op_id, name, supervisor_id, supervisor_name, direction, status, rate, department_id, role in operators:
+            for (op_id, name, supervisor_id, supervisor_name, direction, status, rate,
+                 department_id, role, group_name) in operators:
                 result_map[op_id] = {
                     'id': op_id,
                     'name': name,
@@ -1204,6 +1222,7 @@ class ShiftsMixin:
                     'supervisor_id': supervisor_id,
                     'supervisor_name': supervisor_name,
                     'direction': direction,
+                    'group_name': group_name,
                     'status': status,
                     'rate': float(rate) if rate else 1.0,
                     'department_id': department_id,

@@ -1673,10 +1673,19 @@ class SchedulesMixin:
         as_of_date_obj = self._normalize_schedule_date(as_of_date) if as_of_date else datetime.now().date()
 
         if operator_ids is None:
+            # Операторы — и все, кому период ставили в «Графиках работы»: с
+            # 09.11.2026 график ведут по любой роли, и отпуск бухгалтера иначе
+            # не вернулся бы в «работает» по окончании — общий проход его бы не
+            # видел. Людей без единого периода не трогаем: их статус ведёт
+            # карточка, а не график.
             cursor.execute("""
                 SELECT id
                 FROM users
                 WHERE role = 'operator'
+                UNION
+                SELECT DISTINCT operator_id
+                FROM operator_schedule_status_periods
+                WHERE operator_id IS NOT NULL
             """)
             target_operator_ids = [int(row[0]) for row in cursor.fetchall()]
         else:
@@ -1686,13 +1695,26 @@ class SchedulesMixin:
             return 0
 
         cursor.execute("""
-            SELECT id, status
+            SELECT id, status, role
             FROM users
             WHERE id = ANY(%s)
         """, (target_operator_ids,))
-        current_status_map = {int(row[0]): (row[1] or 'working') for row in cursor.fetchall()}
+        role_rows = cursor.fetchall()
+        current_status_map = {int(row[0]): (row[1] or 'working') for row in role_rows}
         if not current_status_map:
             return 0
+        # Кого общий проход (operator_ids=None) ведёт только по временным
+        # статусам: не-операторы. Увольнение и возврат из него у них — только при
+        # явном сохранении периода (операция над конкретным человеком), а не
+        # побочным эффектом прохода: на проде 09.11.2026 у действующей учётки СВ
+        # висел открытый период «Увольнение» с марта, и проход молча закрыл бы ей
+        # вход в портал.
+        temporary_only_ids = set()
+        if operator_ids is None:
+            temporary_only_ids = {
+                int(row[0]) for row in role_rows
+                if str(row[2] or '').strip().lower() != 'operator'
+            }
 
         cursor.execute("""
             SELECT DISTINCT ON (operator_id) operator_id, status_code
@@ -1726,6 +1748,11 @@ class SchedulesMixin:
                     desired_status = 'working'
                 elif current_status_norm == 'fired' and op_id in has_dismissal_history:
                     desired_status = 'working'
+
+            if op_id in temporary_only_ids and (
+                desired_status == 'fired' or current_status_norm in ('fired', 'dismissal')
+            ):
+                continue
 
             if not desired_status or desired_status == current_status_norm:
                 continue

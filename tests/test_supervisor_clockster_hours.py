@@ -377,11 +377,13 @@ class SupervisorClocksterWiringTests(unittest.TestCase):
         self.assertLess(body.index("raise ValueError('Карточка Clockster не найдена')"),
                         body.index('INSERT INTO glb_employee_links'))
 
-    def test_only_planner_rows_ask_for_supervisors(self):
-        # Импорт/выгрузка Excel, симуляция и «смены коллег» сопоставляли бы СВ по ФИО.
-        self.assertEqual(BOT.count('include_supervisors='), 1)
+    def test_only_planner_rows_ask_for_all_staff(self):
+        # Импорт/выгрузка Excel, симуляция и «смены коллег» сопоставляли бы СВ и
+        # остальных не-операторов по ФИО — строки всех ролей просит только сетка.
+        self.assertEqual(BOT.count('include_all_staff='), 1)
+        self.assertNotIn('include_supervisors=', BOT)
         route = function_source(BOT, 'get_operators_with_schedules')
-        self.assertIn("include_supervisors=_normalize_user_role(user_data[3]) != 'trainer'", route)
+        self.assertIn("include_all_staff=_normalize_user_role(user_data[3]) != 'trainer'", route)
 
     def test_supervisor_sees_only_own_hours_row(self):
         route = function_source(BOT, 'sv_daily_hours')
@@ -567,7 +569,8 @@ class SupervisorClocksterFrontendTests(unittest.TestCase):
         self.assertEqual(APP.count('<SupervisorDayMarksModal'), 2)
 
     def test_supervisor_breaks_are_manual_in_the_shift_editor(self):
-        start = APP.index('if (isPlannerSupervisorRow(op)) {\n                    const manualBreaks')
+        # С 09.11.2026 ручные перерывы — у любой строки не с линии, СВ среди них.
+        start = APP.index('if (op && !isPlannerLineRow(op)) {\n                    const manualBreaks')
         block = APP[start:start + 900]
         self.assertIn('suggestedBreaks: []', block)
         self.assertIn('manualOnly: true', block)
@@ -577,8 +580,9 @@ class SupervisorClocksterFrontendTests(unittest.TestCase):
         self.assertEqual(APP.count('onClick={() => removePlannerSupervisorBreak(i)}'), 2)
 
     def test_planner_break_simulation_leaves_supervisors_out(self):
+        # В раскладке только линия: СВ (и с 09.11.2026 все не-операторы) — вне её.
         start = APP.index('const cloneOperatorsForBreakSimulation = (sourceOperators = []) => {')
-        self.assertIn('.filter(op => !isPlannerSupervisorRow(op))', APP[start:start + 200])
+        self.assertIn('.filter(op => isPlannerLineRow(op))', APP[start:start + 200])
 
     def test_plain_supervisor_cannot_open_supervisor_rows_for_editing(self):
         for anchor in ('const openEditModal = (opId, date, editIndex = null) => {',

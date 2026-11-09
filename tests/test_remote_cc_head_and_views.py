@@ -700,7 +700,8 @@ class RemoteCcSipTests(unittest.TestCase):
                           source_cache.read(VIEWS_PATH))
         self.assertIsNotNone(front, 'набор пропал из departmentViews.js')
         self.assertEqual(server, set(re.findall(r"'([a-z_]+)'", front.group(1))))
-        self.assertEqual(server, {'request_processing_department', 'remote_cc'})
+        self.assertEqual(server, {'request_processing_department', 'remote_cc',
+                                  'tez_project', 'eazy_coffee', 'eazy_go', 'development'})
 
     def test_helper_runtime(self):
         class _Departments:
@@ -1082,14 +1083,17 @@ class RemoteCcViewsMirrorTests(unittest.TestCase):
                                  for code, by_role in server.items()})
         # Ровно то, что назвал владелец: профиль, мои смены и вики. Стажёру — без
         # вики: её запирает QR, а стажёру QR не выдают. Аренде авто (#391) —
-        # профиль: её раздел открывает свой флаг rental_access.
+        # профиль: её раздел открывает свой флаг rental_access. Отделам-проектам
+        # и АХО (09.11.2026) — профиль и свои смены: график им и заводили.
+        own_shifts = {'operator': ('profile', 'work_schedules'), 'trainee': ('profile', 'work_schedules')}
         self.assertEqual(front, {'remote_cc': {
             'operator': ('profile', 'work_schedules', 'wiki'),
             'trainee': ('profile', 'work_schedules'),
         }, 'car_rental': {
             'operator': ('profile',),
             'trainee': ('profile',),
-        }})
+        }, 'tez_project': own_shifts, 'eazy_coffee': own_shifts, 'eazy_go': own_shifts,
+            'development': own_shifts, 'aho': own_shifts})
 
     def test_profile_is_the_default_section(self):
         # firstAllowedView берёт allow[0]: сюда человек попадает после входа.

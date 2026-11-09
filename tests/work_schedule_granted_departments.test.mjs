@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { isSupervisorRole } from '../src/utils/roles.js';
+import { isAdminLikeRole, isSupervisorRole, normalizeRole } from '../src/utils/roles.js';
 
 const appSource = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
     .split('\r\n').join('\n');
@@ -50,6 +50,7 @@ const OOZ = { id: 2008, name: 'ООЗ - Отдел Обработки Запро
 const TEZ = { id: 560, name: 'Тез КЦ', code: 'tez' };
 
 const isPlannerSupervisorRow = evaluate('isPlannerSupervisorRow', { isSupervisorRole });
+const isPlannerLineRow = evaluate('isPlannerLineRow', { normalizeRole });
 
 test('варианты отдела пересчитываются, когда приходит допуск', () => {
     let deps = null;
@@ -139,12 +140,15 @@ test('телефон: до ответа шапка не пишет «Все от
     assert.equal(appSource.split("?.label || 'Все отделы'}").length - 1, 0);
 });
 
+const lockedFor = ({ plain = false, granted = ['560'], scopedHead = false } = {}) => evaluate('isPlannerNonLineRowLocked', {
+    isPlannerLineRow,
+    isAdminLikeRoleFn: isAdminLikeRole,
+    plannerViewerIsPlainSupervisor: plain,
+    plannerGrantedDepartmentIds: new Set(granted),
+    plannerViewerIsScopedHead: scopedHead,
+});
+
 test('строки СВ отдела допуска заперты, операторов — нет', () => {
-    const lockedFor = ({ plain = false, granted = ['560'] } = {}) => evaluate('isPlannerSupervisorRowLocked', {
-        isPlannerSupervisorRow,
-        plannerViewerIsPlainSupervisor: plain,
-        plannerGrantedDepartmentIds: new Set(granted),
-    });
     const locked = lockedFor();
     assert.equal(locked({ id: 3, role: 'sv', department_id: 560 }), true, 'СВ Тез КЦ');
     assert.equal(locked({ id: 1001, role: 'operator', department_id: 560 }), false, 'оператор Тез КЦ');
@@ -153,6 +157,28 @@ test('строки СВ отдела допуска заперты, операт
     // Рядовой СВ — прежнее правило: строки СВ только смотреть.
     assert.equal(lockedFor({ plain: true, granted: [] })({ id: 77, role: 'sv', department_id: 1 }), true);
     assert.equal(lockedFor({ plain: false, granted: [] })({ id: 3, role: 'sv', department_id: 560 }), false);
+});
+
+test('строки не с линии (09.11.2026) заперты так же, как строки СВ', () => {
+    // Рядовой СВ сервером пускается только к операторам: бэк-офис, тренер,
+    // админ его отдела — только смотреть.
+    const plain = lockedFor({ plain: true, granted: [] });
+    for (const role of ['hr_manager', 'accounting_manager', 'trainer', 'trainee', 'admin', 'super_admin']) {
+        assert.equal(plain({ id: 9, role, department_id: 1 }), true, role);
+    }
+    assert.equal(plain({ id: 9, role: 'operator', department_id: 1 }), false, 'оператора рядовой СВ правит');
+    assert.equal(plain({ id: 9, department_id: 1 }), false, 'строка без роли — старая операторская');
+    // Глава отдела правит своих людей любой должности, кроме админов: их график
+    // ведёт глобальный админ (_requester_can_access_target_user).
+    const head = lockedFor({ granted: [], scopedHead: true });
+    assert.equal(head({ id: 9, role: 'admin', department_id: 1 }), true, 'админ отдела');
+    assert.equal(head({ id: 9, role: 'super_admin', department_id: 1 }), true, 'супер-админ в отделе');
+    assert.equal(head({ id: 9, role: 'hr_manager', department_id: 1 }), false, 'бэк-офис своего отдела');
+    assert.equal(head({ id: 9, role: 'trainer', department_id: 1 }), false, 'тренер своего отдела');
+    assert.equal(head({ id: 9, role: 'sv', department_id: 1 }), false, 'СВ своего отдела');
+    // Глобальный админ — без запоров.
+    const admin = lockedFor({ granted: [] });
+    assert.equal(admin({ id: 9, role: 'admin', department_id: 1 }), false);
 });
 
 // Окно дня: оператор по opId окна → «из отдела допуска?» → флаги ЧС и штрафа.
@@ -188,11 +214,11 @@ test('«Убрать из ЧС» и штраф в отделе допуска н
 test('запирание и флаг ЧС подключены там, где решают показ', () => {
     assert.match(
         declarationOf('isPlannerRowLocked'),
-        /isPlannerSupervisorRowLocked\(operators\.find\(o => String\(o\?\.id\) === String\(opId\)\)\)/,
+        /isPlannerNonLineRowLocked\(operators\.find\(o => String\(o\?\.id\) === String\(opId\)\)\)/,
     );
     assert.ok(appSource.includes('modalActiveScheduleStatus?.isBlacklist && plannerModalCanRemoveBlacklist ? ('));
     // Штраф: кнопка на телефоне, кнопка на компьютере и сам обработчик.
-    assert.ok(appSource.includes('{!plannerReadOnly && !plannerModalIsSupervisorRow && plannerModalCanFine ? ('));
+    assert.ok(appSource.includes('{!plannerReadOnly && !plannerModalIsNonLineRow && plannerModalCanFine ? ('));
     const desktopFine = appSource.indexOf('{plannerModalCanFine && (');
     assert.ok(desktopFine >= 0 && appSource.indexOf('onClick={openPlannerFineModalForCurrentDay}', desktopFine) - desktopFine < 200);
     assert.match(declarationOf('openPlannerFineModalForCurrentDay'), /if \(plannerReadOnly \|\| !plannerModalCanFine\) return;/);

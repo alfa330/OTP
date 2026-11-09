@@ -315,18 +315,31 @@ class GroupLateMixin:
         # у СВ нет, и этот пересчёт при каждом сохранении смены затирал бы их нулём.
         # Роль — на дату: дни, покрытые операторским членством (СВ ещё работал на
         # линии), остаются за этим пересчётом.
-        clockster_supervisors = self._clockster_hours_supervisor_ids_tx(cursor, op_ids)
+        #
+        # То же — у всех, кто не на линии (09.11.2026 график в «Графиках работы»
+        # открыт всем ролям): у бухгалтера, кадровика, админа, тренера статусов
+        # телефонии нет, и пересчёт записал бы им в «Учёт часов» нулевые дни.
+        exempt_ids = self._clockster_hours_supervisor_ids_tx(cursor, op_ids)
+        cursor.execute(
+            """
+            SELECT id FROM users
+            WHERE id = ANY(%s)
+              AND lower(COALESCE(role, '')) NOT IN ('operator', 'trainee')
+            """,
+            (op_ids,),
+        )
+        exempt_ids = set(exempt_ids) | {int(row[0]) for row in cursor.fetchall()}
         supervisor_operator_days = set()
-        if clockster_supervisors:
+        if exempt_ids:
             supervisor_operator_days = self._operator_membership_days_tx(
-                cursor, clockster_supervisors,
+                cursor, exempt_ids,
                 self._normalize_schedule_date(start_date) - timedelta(days=1),
                 self._normalize_schedule_date(end_date) + timedelta(days=1),
             )
             still_operators = {user_id for user_id, _day in supervisor_operator_days}
             op_ids = [
                 op_id for op_id in op_ids
-                if op_id not in clockster_supervisors or op_id in still_operators
+                if op_id not in exempt_ids or op_id in still_operators
             ]
             if not op_ids:
                 return {'updated_days': 0, 'aggregated_months': 0}
@@ -489,10 +502,10 @@ class GroupLateMixin:
                 or item.get('technical_reason_status')
             ):
                 target_days.add(key)
-        if clockster_supervisors:
+        if exempt_ids:
             target_days = {
                 key for key in target_days
-                if key[0] not in clockster_supervisors or key in supervisor_operator_days
+                if key[0] not in exempt_ids or key in supervisor_operator_days
             }
 
         if not target_days:
@@ -2195,13 +2208,14 @@ class GroupLateMixin:
             if not department_ids:
                 return {'people': [], 'shifts': [], 'unlinked': [], 'departments': {}}
 
-            # Состав: действующие операторы отдела. Уволенных и руководителей в план
-            # не берём — у первых смен уже нет, вторые по графику не работают.
+            # Состав: действующие сотрудники отдела любой роли. Раньше — только
+            # операторы («руководители по графику не работают»), но с 09.11.2026
+            # график в «Графиках работы» ведут всем ролям, и человек без смен плана
+            # всё равно не получит. Уволенных не берём — смен у них уже нет.
             cursor.execute("""
                 SELECT u.id, btrim(u.name), btrim(COALESCE(u.city, '')), u.department_id
                 FROM users u
                 WHERE u.department_id = ANY(%s)
-                  AND lower(COALESCE(u.role, '')) = 'operator'
                   AND lower(COALESCE(u.status, '')) <> 'fired'
                   AND btrim(COALESCE(u.name, '')) <> ''
                 ORDER BY u.name, u.id

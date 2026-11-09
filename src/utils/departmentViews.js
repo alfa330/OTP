@@ -99,7 +99,9 @@ const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_acc
 // 'profile' обязан остаться ПЕРВЫМ: firstAllowedView берёт allow[0], и
 // раздел по умолчанию сменился бы вместе с порядком.
 const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];
-const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];
+// «Графики работы» — с 09.11.2026: график ведут всем отделам (владелец: «по всем
+// нужно сделать возможность вести графики»), и глава бэк-офиса ведёт его своим людям.
+const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks', 'work_schedules'];
 const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];
 
 // Маркетинг. Отдел устроен как бэк-офис (ни линии, ни направлений, ни групп),
@@ -151,7 +153,26 @@ const REQUEST_PROCESSING_EMPLOYEE_VIEWS = ['driver_mailings'];
 // выдаётся своим флагом (rental_access из rental/access.py), а не картой.
 // Рядовым портал показывает только «Профиль» — DEPARTMENT_ONLY_VIEWS ниже.
 // Главе — «Учет сотрудников» (заводит своих людей) и «Задачи».
-const CAR_RENTAL_HEAD_VIEWS = ['manage_operators', 'tasks'];
+// «Графики работы» главе — с 09.11.2026, как у всех отделов (см. PROJECT_HEAD_VIEWS).
+const CAR_RENTAL_HEAD_VIEWS = ['manage_operators', 'tasks', 'work_schedules'];
+
+/* Отделы-проекты без линии — решение владельца 09.11.2026: «Тез и всё, что
+   касается Тез, — отдельный проект, Eazy Coffee и Eazy Go тоже: создать проект,
+   потом внутри них группы», а разработчики iCORE, Backend и Taxi Pro — свой
+   отдел. Проект в iCore — это отдел, его подразделения — группы:
+     tez_project — «TEZ»: офис и разработчики TT (колл-центр — отдел tez);
+     eazy_coffee — «Eazy Coffee»; eazy_go — «Eazy Go»;
+     development — «Отдел разработки».
+   Устроены как ООЗ: человек — оператор в группе, направлений нет, нет ни SIP,
+   ни супервайзеров, ни полей колл-центра; есть «Должность». График ведётся в
+   «Графиках работы» — ради него отделы и заведены.
+   АХО (aho) — административно-хозяйственный отдел — как «Аренда авто»: ни
+   групп, ни направлений. Заведён, чтобы сотрудник АХО не попадал в HR: членство
+   в отделе кадров даёт права кадровика на всех людях (_is_employee_accounting_manager).
+   Главе — люди, группы, графики и задачи. Рядовым — только «Профиль» и «Мои
+   смены» (DEPARTMENT_ONLY_VIEWS ниже). */
+const PROJECT_HEAD_VIEWS = ['manage_operators', 'groups', 'work_schedules', 'tasks'];
+const AHO_HEAD_VIEWS = ['manage_operators', 'work_schedules', 'tasks'];
 
 /* Разделы СВЕРХ карты отдела — поимённо. Решение владельца 23.10.2026 про двух
    сотрудниц ООЗ: «открой доступ к разделам рассылки и к их графикам», «Мои
@@ -257,6 +278,13 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     car_rental: {
         head: CAR_RENTAL_HEAD_VIEWS,
     },
+    // Отделы-проекты (09.11.2026, см. PROJECT_HEAD_VIEWS): здесь только глава —
+    // рядовых ограничивает набор отдела (DEPARTMENT_ONLY_VIEWS).
+    tez_project: { head: PROJECT_HEAD_VIEWS },
+    eazy_coffee: { head: PROJECT_HEAD_VIEWS },
+    eazy_go: { head: PROJECT_HEAD_VIEWS },
+    development: { head: PROJECT_HEAD_VIEWS },
+    aho: { head: AHO_HEAD_VIEWS },
 };
 
 export const departmentCodeOf = (user) => {
@@ -336,6 +364,29 @@ const DEPARTMENT_ONLY_VIEWS = {
         operator: ['profile'],
         trainee: ['profile'],
     },
+    // Отделы-проекты и АХО (09.11.2026): «Профиль» и свои смены — график им и
+    // заводили. «Задач» у рядового нет: ручки раздела пускают оператора только
+    // из бэк-офиса (_can_access_tasks), и пункт открывал бы отказ.
+    tez_project: {
+        operator: ['profile', 'work_schedules'],
+        trainee: ['profile', 'work_schedules'],
+    },
+    eazy_coffee: {
+        operator: ['profile', 'work_schedules'],
+        trainee: ['profile', 'work_schedules'],
+    },
+    eazy_go: {
+        operator: ['profile', 'work_schedules'],
+        trainee: ['profile', 'work_schedules'],
+    },
+    development: {
+        operator: ['profile', 'work_schedules'],
+        trainee: ['profile', 'work_schedules'],
+    },
+    aho: {
+        operator: ['profile', 'work_schedules'],
+        trainee: ['profile', 'work_schedules'],
+    },
 };
 
 /* Разделы, которые открывает не карта, а собственный флаг в App.jsx: «Вики» —
@@ -412,7 +463,7 @@ export const headsSupervisorHoursDepartment = (user) => {
 // ООЗ — по решению владельца 23.10.2026: у отдела нет направлений, а обмен и
 // смены коллег строятся по направлению — кнопка «Обменять» показывала бы
 // ошибку «У вашего профиля не задано направление».
-const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office', 'request_processing_department']);
+const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = new Set(['front_office', 'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentHidesColleagueSchedules = (user) => {
     const code = departmentCodeOf(user);
@@ -424,7 +475,7 @@ export const departmentHidesColleagueSchedules = (user) => {
 // называются «Сотрудники», а не «Операторы». Бэк-офис здесь по той же причине,
 // что и фронт-офисы: ни супервайзеров, ни тренеров в этих отделах нет, и оба
 // пункта выпадашки открывали бы заведомо пустые списки.
-const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'car_rental']);
+const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentUsesSimpleEmployeeAccounting = (user) => {
     const code = departmentCodeOf(user);
@@ -490,7 +541,7 @@ export const departmentUsesEmployeeCity = (user) => departmentCodeUsesEmployeeCi
 // направлений нет, и должность («менеджер отдела обработки запросов»)
 // указывают при заведении. Аренда авто (#391) — по той же причине, что бэк-офис.
 // В базе колонка называется job_title: position — ключевое слово Postgres.
-const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);
+const EMPLOYEE_JOB_TITLE_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentCodeUsesEmployeeJobTitle = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -519,7 +570,7 @@ export const departmentCodeAsksEmployeeJobTitle = (code) => {
 // бухгалтерия, HR и ООЗ на линию не выходят вовсе — обучать их работе в офисе
 // продаж незачем (ООЗ — решение владельца 25.09.2026). Скрываем только ввод —
 // уже сохранённое значение сохраняется как есть.
-const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);
+const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentCodeHidesFrontOfficeTraining = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -540,7 +591,7 @@ export const departmentHidesFrontOfficeTraining = (user) => departmentCodeHidesF
 //
 // Уже сохранённые значения (сотрудника перевели из отдела с линией) остаются
 // как есть: поле не показываем, но и не затираем.
-const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);
+const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental', 'aho']);
 
 export const departmentCodeHidesOperatorFields = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -564,7 +615,7 @@ export const departmentHidesOperatorFields = (user) => departmentCodeHidesOperat
 // departmentCodeHidesOperatorFields), чтобы предикат отвечал верно сам по
 // себе: «есть ли в отделе супервайзеры» — вопрос об отделе, а не о том,
 // в каком порядке сложились гейты в карточке.
-const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental']);
+const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentCodeHidesEmployeeSupervisor = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -579,7 +630,7 @@ export const departmentHidesEmployeeSupervisor = (user) => departmentCodeHidesEm
 // (задача #159). Список тот же, что у супервайзеров, но набор ОТДЕЛЬНЫЙ: это
 // два независимых свойства отдела, и телефонию фронт-офисам могут завести, не
 // заводя супервайзеров. ООЗ телефонии тоже не имеет (владелец, 25.09.2026).
-const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);
+const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);
 
 export const departmentCodeHidesEmployeeSip = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -614,10 +665,10 @@ export const departmentHidesEmployeeSip = (user) => departmentCodeHidesEmployeeS
    учётки не получает, а линию в разделе показывает занятой.
    Зеркало набора «SIP номер» — EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES в
    bot_schedule2.py: сервер присланный номер при заведении не пишет. */
-const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
-const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'remote_cc']);
-const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
-const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department']);
+const EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development']);
+const EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'remote_cc', 'tez_project', 'eazy_coffee', 'eazy_go', 'development']);
+const EMPLOYEE_INTERNSHIP_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development']);
+const EMPLOYEE_TAXIPRO_ID_HIDDEN_DEPARTMENTS = new Set(['request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development']);
 
 /* Отделы, где направление сотруднику выбирать необязательно. Отдел аналитики —
    решение владельца 06.10.2026 («именно у отдела аналитики»): у отдела нет ни

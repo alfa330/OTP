@@ -95,7 +95,7 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         # ООЗ в наборе с 23.10.2026 (tests/test_request_processing_department.py).
         self.assertIn(
             "const COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'request_processing_department']);",
+            "new Set(['front_office', 'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);",
             source,
         )
         self.assertIn("export const departmentHidesColleagueSchedules = (user) =>", source)
@@ -108,7 +108,7 @@ class FrontOfficeViewAllowlistTests(unittest.TestCase):
         # ни супервайзеров, ни тренеров, см. test_back_office_department_scope.
         self.assertIn(
             "const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'car_rental']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", source
         )
         self.assertIn("export const departmentUsesSimpleEmployeeAccounting = (user) =>", source)
         self.assertIn("SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS.has(code)", source)
@@ -474,7 +474,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         # они на линию не выходят, см. test_back_office_department_scope.
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", source
         )
         self.assertIn("export const departmentCodeHidesFrontOfficeTraining = (code) => {", source)
         self.assertIn(
@@ -588,12 +588,12 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
         # НЕ сняты — иначе ушло бы и направление, которое у них есть.
         self.assertIn(
             "const EMPLOYEE_SUPERVISOR_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental']);", views)
+            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", views)
         self.assertIn(
             "const EMPLOYEE_SIP_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);", views)
+            "new Set(['front_office', 'accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", views)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental', 'aho']);",
             views)
 
         # Колонки: «Супервайзер» и «SIP» — своими гейтами, «Направление» и
@@ -667,7 +667,7 @@ class FrontOfficeBackendScopeTests(unittest.TestCase):
     def test_hidden_departments_helper(self):
         source = _read(BOT_PATH)
         self.assertIn(
-            "COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department'}",
+            "COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho'}",
             source,
         )
 

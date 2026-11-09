@@ -81,7 +81,7 @@ class BackOfficeAllowlistSourceTests(unittest.TestCase):
         # 'profile' первым — это раздел по умолчанию (firstAllowedView берёт
         # allow[0]); переставив элементы, мы молча сменили бы стартовый экран.
         self.assertIn("const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];", source)
-        self.assertIn("const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks'];", source)
+        self.assertIn("const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks', 'work_schedules'];", source)
         self.assertIn(
             "const BACK_OFFICE_HEAD_VIEWS = [...BACK_OFFICE_MANAGER_VIEWS, 'qr_access'];",
             source,
@@ -105,7 +105,7 @@ class BackOfficeAllowlistSourceTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const SIMPLE_EMPLOYEE_ACCOUNTING_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'car_rental']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", source
         )
 
     def test_back_office_stays_out_of_front_office_only_sets(self):
@@ -131,7 +131,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
     def test_operator_line_fields_helper(self):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental', 'aho']);",
             source,
         )
         self.assertIn("export const departmentCodeHidesOperatorFields = (code) => {", source)
@@ -145,7 +145,7 @@ class BackOfficeEmployeeCardTests(unittest.TestCase):
         source = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const FRONT_OFFICE_TRAINING_HIDDEN_DEPARTMENTS = "
-            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental']);", source
+            "new Set(['front_office', 'accounting', 'hr', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);", source
         )
 
     def test_modal_hides_group_direction_and_sip(self):
@@ -465,7 +465,7 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
             "const EMPLOYEE_JOB_TITLE_DEPARTMENTS = "
-            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental']);",
+            "new Set(['accounting', 'hr', 'marketing', 'request_processing_department', 'car_rental', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho']);",
             views,
         )
         self.assertIn("export const departmentCodeUsesEmployeeJobTitle = (code) => {", views)
@@ -612,12 +612,12 @@ class BackOfficeUserCreationBackendTests(unittest.TestCase):
     def test_helper_matches_the_frontend_set(self):
         source = _read(BOT_PATH)
         self.assertIn(
-            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental'})",
+            "OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental', 'aho'})",
             source,
         )
         views = _read(DEPARTMENT_VIEWS_PATH)
         self.assertIn(
-            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental']);",
+            "const OPERATOR_FIELDS_HIDDEN_DEPARTMENTS = new Set(['accounting', 'hr', 'marketing', 'car_rental', 'aho']);",
             views,
         )
 

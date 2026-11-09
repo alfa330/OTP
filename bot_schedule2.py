@@ -2655,11 +2655,12 @@ def _filter_operators_for_requester_role(requester, requester_id, operators):
     if _is_supervisor_role(requester_role):
         scope = _department_scope_id_for_requester(requester_id)
         if scope is None:
-            # СВ без отдела видит операторов, как раньше, но не СВ всей компании:
-            # из СВ — только себя.
+            # СВ без отдела видит операторов, как раньше, но не остальных
+            # сотрудников всей компании (в строках теперь все роли): из прочих —
+            # только себя.
             return [
                 it for it in items
-                if not _is_supervisor_role(_normalize_user_role((it or {}).get('role')))
+                if _normalize_user_role((it or {}).get('role')) == 'operator'
                 or _operator_item_id(it) == requester_id
             ]
         member_ids = db.get_department_member_ids(scope)
@@ -21124,16 +21125,19 @@ SIP_SETTINGS_SUPERVISOR_DEPARTMENT_CODES = frozenset({'szov', 'op'})
 # не сидят, направлений и групп у отдела нет, а вместо них человека определяет
 # «Должность» — ровно как в Бухгалтерии и HR.
 # «Аренда авто» (car_rental, ТЗ #391) — тоже: её сотрудники ведут наличие машин и
-# визиты клиентов, на линии не сидят.
+# визиты клиентов, на линии не сидят. АХО (aho, 09.11.2026) — так же: отдел
+# заведён, чтобы хозяйственник не попадал в HR с правами кадровика.
 # Зеркалит OPERATOR_FIELDS_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental'})
+OPERATOR_FIELDS_HIDDEN_DEPARTMENT_CODES = frozenset({'accounting', 'hr', 'marketing', 'car_rental', 'aho'})
 
 # Отделы, где у оператора нет направления, хотя группа есть. ООЗ (отдел
 # обработки запросов, задача #359): сотрудник зачисляется в группу, но на
 # линию не выходит, и направлений у отдела нет ни одного (прод, 25.09.2026) —
-# обязательный direction_id не давал завести в нём никого.
+# обязательный direction_id не давал завести в нём никого. Отделы-проекты
+# (09.11.2026: TEZ, Eazy Coffee, Eazy Go, «Отдел разработки») устроены так же —
+# внутри группы, направлений нет (PROJECT_HEAD_VIEWS в departmentViews.js).
 # Зеркалит EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department'})
+EMPLOYEE_DIRECTION_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development'})
 
 # Отделы, где направление оператору выбирать необязательно. Отдел аналитики —
 # решение владельца 06.10.2026 («именно у отдела аналитики»): направлений у
@@ -21153,7 +21157,7 @@ EMPLOYEE_DIRECTION_OPTIONAL_DEPARTMENT_CODES = frozenset({'analytik', 'it'})
 # учёткой линии (dial_list.service.assign_line) — решение владельца 08.10.2026:
 # при заведении сотрудника «без sip номера, если это удалённый КЦ».
 # Зеркалит EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
-EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'remote_cc'})
+EMPLOYEE_SIP_INPUT_HIDDEN_DEPARTMENT_CODES = frozenset({'request_processing_department', 'remote_cc', 'tez_project', 'eazy_coffee', 'eazy_go', 'development'})
 
 # Рядовой сотрудник отдела без линии заводится не оператором: 'operator' в этой
 # системе означает человека на линии — с направлением, группой, часами и
@@ -39377,7 +39381,7 @@ def _work_schedule_operator_requester():
 # Зеркалит COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENTS в src/utils/departmentViews.js.
 # ООЗ (с 23.10.2026): направлений у отдела нет, а обмен и смены коллег строятся
 # по направлению — кандидатов обмена всё равно не нашлось бы.
-COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department'}
+COLLEAGUE_SCHEDULES_HIDDEN_DEPARTMENT_CODES = {'front_office', 'request_processing_department', 'tez_project', 'eazy_coffee', 'eazy_go', 'development', 'aho'}
 
 
 def _operator_colleague_schedules_hidden(requester_id):
@@ -40184,9 +40188,11 @@ def get_operators_with_schedules():
             include_imported_statuses=include_imported_statuses,
             include_technical_issues=include_technical_issues,
             include_offline_activities=include_offline_activities,
-            # Строки СВ (задача #352): РОП ведёт их график, СВ смотрит график
-            # коллег. Тренеру график СВ не нужен — его просмотр про операторов.
-            include_supervisors=_normalize_user_role(user_data[3]) != 'trainer'
+            # Строки всех сотрудников, а не только линии (задача #352 начала со
+            # СВ отдела продаж; 09.11.2026 владелец: «по всем нужно сделать
+            # возможность вести графики»). Тренеру — по-прежнему операторы:
+            # его просмотр СЗоВ и ОП про линию.
+            include_all_staff=_normalize_user_role(user_data[3]) != 'trainer'
         )
         _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
         operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
@@ -54770,6 +54776,27 @@ DEPARTMENT_ONLY_VIEWS = {
     'car_rental': {
         'operator': ('profile',),
         'trainee': ('profile',),
+    },
+    # Отделы-проекты и АХО (09.11.2026): «Профиль» и свои смены.
+    'tez_project': {
+        'operator': ('profile', 'work_schedules'),
+        'trainee': ('profile', 'work_schedules'),
+    },
+    'eazy_coffee': {
+        'operator': ('profile', 'work_schedules'),
+        'trainee': ('profile', 'work_schedules'),
+    },
+    'eazy_go': {
+        'operator': ('profile', 'work_schedules'),
+        'trainee': ('profile', 'work_schedules'),
+    },
+    'development': {
+        'operator': ('profile', 'work_schedules'),
+        'trainee': ('profile', 'work_schedules'),
+    },
+    'aho': {
+        'operator': ('profile', 'work_schedules'),
+        'trainee': ('profile', 'work_schedules'),
     },
 }
 

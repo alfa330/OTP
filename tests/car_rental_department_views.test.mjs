@@ -44,13 +44,15 @@ for (const role of ['operator', 'trainee']) {
     });
 }
 
-test('аренда: глава ведёт сотрудников и задачи', () => {
+test('аренда: глава ведёт сотрудников, задачи и графики', () => {
     const user = head();
-    assert.deepEqual(DEPARTMENT_VIEW_ALLOWLIST[CODE], { head: ['manage_operators', 'tasks'] });
+    // «Графики работы» — с 09.11.2026: график ведут всем отделам.
+    assert.deepEqual(DEPARTMENT_VIEW_ALLOWLIST[CODE], { head: ['manage_operators', 'tasks', 'work_schedules'] });
     assert.equal(departmentRestrictsViews(user), true);
     assert.equal(departmentAllowsView(user, 'manage_operators'), true);
     assert.equal(departmentAllowsView(user, 'tasks'), true);
-    for (const denied of ['hours', 'work_schedules', 'evaluation', 'salary', 'call_evaluation']) {
+    assert.equal(departmentAllowsView(user, 'work_schedules'), true);
+    for (const denied of ['hours', 'evaluation', 'salary', 'call_evaluation']) {
         assert.equal(departmentAllowsView(user, denied), false, denied);
     }
     // Супервайзеров в отделе нет: «Учет сотрудников» — сразу список людей.
