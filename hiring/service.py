@@ -156,16 +156,20 @@ class HiringService:
 
     def _intake_one(self, cursor, *, phone, kind, source, now, by=None, by_name=None, full_name='', city=None,
                     vacancy_id=None, vacancy_text=None, platform_ref=None, campaign=None, referred_by=None,
-                    received_at=None, comment=None, batch_id=None, whatsapp=None, notify=True):
+                    received_at=None, comment=None, batch_id=None, whatsapp=None, notify=True, from_ads=False):
         """Одна запись из любого источника. Возвращает (исход, card_id):
         created — новая карточка в пуле; repeat — повторный отклик по открытой карточке;
-        employee — телефон действующего сотрудника, карточки нет (ТЗ 5.3)."""
+        employee — телефон действующего сотрудника, карточки нет (ТЗ 5.3).
+        from_ads — человек пришёл по рекламе (WhatsApp по объявлению): карточка получает метку «Таргет»."""
         employee = queries.employee_by_phone_key(cursor, phone[-10:])
         if employee and str(employee['status'] or '').lower() not in ('fired', 'dismissal'):
             return 'employee', None
+        auto_channel = self._auto_channel_id(cursor, source, from_ads)
         open_card = queries.open_card_by_phone(cursor, phone, lock=True)
         if open_card:
             self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
+            if auto_channel:
+                queries.set_card_channel_if_empty(cursor, open_card['id'], auto_channel)
             return 'repeat', open_card['id']
         closed = queries.last_closed_card_by_phone(cursor, phone)
         fields = {
@@ -176,6 +180,7 @@ class HiringService:
             'referred_by': _text(referred_by, 200), 'received_at': received_at or now,
             'stage': rules.pool_stage_for(kind), 'repeat_of_card_id': closed['id'] if closed else None,
             'comment': _text(comment, 4000), 'created_by': by, 'created_at': now, 'updated_at': now,
+            'channel_id': auto_channel,
         }
         cursor.execute("SAVEPOINT hiring_intake")
         try:
@@ -185,6 +190,8 @@ class HiringService:
             open_card = queries.open_card_by_phone(cursor, phone, lock=True)
             if open_card:
                 self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
+                if auto_channel:
+                    queries.set_card_channel_if_empty(cursor, open_card['id'], auto_channel)
                 return 'repeat', open_card['id']
             raise
         cursor.execute("RELEASE SAVEPOINT hiring_intake")
@@ -201,6 +208,16 @@ class HiringService:
             card = queries.get_card(cursor, card_id)
             notices.new_response(cursor, card, now)
         return 'created', card_id
+
+    @staticmethod
+    def _auto_channel_id(cursor, source, from_ads):
+        """Метка, которую отклик получает сам (владелец 09.11.2026: «те что пришли с таргета нужно автоматом
+        отмечать как Таргет»): «Таргет» — пришедшему по рекламе WhatsApp или с источником «Таргет». Канал
+        найден по постоянному коду, так что переименование его не ломает; выключен руководителем — метки нет."""
+        if not from_ads and (source or {}).get('code') != rules.SOURCE_TARGET:
+            return None
+        channel = queries.channel_by_code(cursor, rules.CHANNEL_TARGET)
+        return channel['id'] if channel and channel['is_active'] else None
 
     def _repeat(self, cursor, card, source, received_at, now, platform_ref=None, vacancy_text=None):
         body = 'Повторный отклик · %s' % (source.get('name') or '')
@@ -1221,7 +1238,7 @@ class HiringService:
             cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=source, now=now, by_name='WhatsApp',
             full_name=chat.get('push_name') or '', platform_ref='wa:%s' % message['id'],
             campaign=whatsapp.campaign_of(message['ad']), received_at=message['at'] or now,
-            comment=whatsapp.first_message_comment(message))
+            comment=whatsapp.first_message_comment(message), from_ads=whatsapp.from_ads(message['ad']))
         if card_id:
             queries.wa_set_chat_card(cursor, key, card_id, now)
         if outcome == 'repeat':

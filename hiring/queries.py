@@ -251,15 +251,28 @@ def update_reason(cursor, reason_id, **fields):
 
 
 def list_channels(cursor, active_only=False):
-    """Каналы — метки откликов с цветом (владелец 09.11.2026), в порядке справочника."""
-    cursor.execute("SELECT id, name, color, is_active, position FROM hiring_channels"
+    """Каналы — метки откликов с цветом (владелец 09.11.2026), в порядке справочника. code — у стартовых."""
+    cursor.execute("SELECT id, code, name, color, is_active, position FROM hiring_channels"
                    + (" WHERE is_active" if active_only else "") + " ORDER BY position, id")
     return _all(cursor)
 
 
 def get_channel(cursor, channel_id):
-    cursor.execute("SELECT id, name, color, is_active FROM hiring_channels WHERE id = %s", (int(channel_id),))
+    cursor.execute("SELECT id, code, name, color, is_active FROM hiring_channels WHERE id = %s", (int(channel_id),))
     return _one(cursor)
+
+
+def channel_by_code(cursor, code):
+    """Стартовый канал по постоянному коду (target, hh, kaspi) — им система ставит метку сама."""
+    cursor.execute("SELECT id, code, name, color, is_active FROM hiring_channels WHERE code = %s", (code,))
+    return _one(cursor)
+
+
+def set_card_channel_if_empty(cursor, card_id, channel_id):
+    """Метка, поставленная системой, — только карточке без метки: выбор рекрутера не перетирается."""
+    cursor.execute("UPDATE hiring_cards SET channel_id = %s WHERE id = %s AND channel_id IS NULL",
+                   (int(channel_id), int(card_id)))
+    return cursor.rowcount
 
 
 def channel_by_name(cursor, name):
@@ -483,7 +496,7 @@ def insert_card(cursor, fields):
     psycopg2.errors.UniqueViolation, вызывающий ловит её под SAVEPOINT."""
     columns = ('kind', 'full_name', 'phone', 'whatsapp', 'city', 'vacancy_id', 'vacancy_text', 'source_id', 'batch_id',
                'platform_ref', 'campaign', 'referred_by', 'received_at', 'stage', 'repeat_of_card_id', 'comment',
-               'created_by', 'created_at', 'updated_at')
+               'created_by', 'created_at', 'updated_at', 'channel_id')
     cursor.execute(
         "INSERT INTO hiring_cards (%s) VALUES (%s) RETURNING id" % (", ".join(columns), ", ".join(['%s'] * len(columns))),
         [fields.get(column) for column in columns])

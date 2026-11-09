@@ -86,6 +86,23 @@ def test_campaign_tells_ads_apart():
     assert whatsapp.campaign_of({'title': 'Оператор — Алматы'}) == 'Оператор — Алматы'
 
 
+def test_from_ads_marks_only_ad_clicks():
+    """Владелец 09.11.2026: «Те что пришли с таргета нужно автоматом отмечать как Таргет». Таргет — клик по
+    объявлению Click-to-WhatsApp; пост без рекламы и ссылки на номер (с hh, сайта) — нет."""
+    instagram = {'title': 'Напишите нам!', 'body': 'Требуются операторы', 'source_id': '120250535993810050',
+                 'source_app': 'instagram', 'conversion_source': 'FB_Ads', 'entry_point': 'ctwa_ad', 'ctwa_clid': 'x'}
+    assert whatsapp.from_ads(instagram)
+    for ad in ({'ctwa_clid': 'x'}, {'source_type': 'ad'}, {'source_type': 'AD', 'title': 'Оператор'},
+               {'conversion_source': 'FB_Ads'}, {'entry_point': 'ctwa_ad'}, {'source_id': '120208'},
+               {'source_id': '120251238264490050', 'source_app': 'facebook'},
+               {'source_id': '987', 'source_type': 'post', 'ctwa_clid': 'y'}):
+        assert whatsapp.from_ads(ad), ad
+    for ad in (None, {}, {'entry_point': 'phone_number_hyperlink'}, {'entry_point': 'message_short_link'},
+               {'conversion_source': 'FB_Post'}, {'source_id': '987', 'source_type': 'post'},
+               {'source_id': '987', 'conversion_source': 'FB_Post'}, {'title': 'Оператор — Алматы'}):
+        assert not whatsapp.from_ads(ad), ad
+
+
 def test_clean_detail_keeps_only_known_fields():
     detail = whatsapp.clean_detail({'paired': 1, 'number': '+7 705 555 22 33', 'qr': 'q' * 1000, 'evil': 'x',
                                     'park': {'reason': 'temp_ban', 'code': '101', 'until': '2026-11-07T10:00:00', 'x': 1},

@@ -256,6 +256,21 @@ def campaign_of(ad):
     return title[:200] if title else None
 
 
+def from_ads(ad):
+    """Человек пришёл с таргета — по рекламе Click-to-WhatsApp (владелец 09.11.2026: «те что пришли с таргета
+    нужно автоматом отмечать как Таргет»). Следы рекламного клика: ctwa_clid (идентификатор клика по
+    объявлению), тип источника «ad», конверсия FB_Ads, точка входа ctwa_ad, номер объявления (source_id —
+    им различаются объявления, campaign_of). Пост без рекламы (тип «post», FB_Post), ссылка на номер и короткая
+    ссылка wa.me — не таргет: так приходят и с hh, и с сайта."""
+    if not ad:
+        return False
+    source_type = str(ad.get('source_type') or '').strip().lower()
+    conversion = str(ad.get('conversion_source') or '').strip()
+    if ad.get('ctwa_clid') or source_type == 'ad' or conversion == 'FB_Ads' or ad.get('entry_point') == 'ctwa_ad':
+        return True
+    return bool(ad.get('source_id')) and source_type != 'post' and conversion != 'FB_Post'
+
+
 def phone_reply_text(message):
     """Текст касания «ответ с телефона»: что рекрутер написал (начало), файл — его видом."""
     text = ' '.join(str(message.get('text') or '').split())

@@ -85,8 +85,11 @@ class StageTests(unittest.TestCase):
 
     def test_channels_seed_and_palette_match_the_interface(self):
         # Владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый.
-        self.assertEqual(rules.SEED_CHANNELS, (('Таргет', 'blue'), ('hh', 'red'), ('Каспи', 'pink')))
-        self.assertTrue({color for _name, color in rules.SEED_CHANNELS} <= set(rules.CHANNEL_COLORS))
+        self.assertEqual(rules.SEED_CHANNELS, (('target', 'Таргет', 'blue'), ('hh', 'hh', 'red'), ('kaspi', 'Каспи', 'pink')))
+        self.assertTrue({color for _code, _name, color in rules.SEED_CHANNELS} <= set(rules.CHANNEL_COLORS))
+        # «Таргет» ставится сам по коду канала и коду источника (владелец 09.11.2026).
+        self.assertEqual((rules.CHANNEL_TARGET, rules.SOURCE_TARGET), ('target', 'target'))
+        self.assertIn(rules.SOURCE_TARGET, [code for code, *_ in rules.SEED_SOURCES])
         # Цвет проверяет сервер, рисует интерфейс — коды палитры одни и те же и в том же порядке.
         meta = (ROOT / 'src' / 'components' / 'hiring' / 'hiringMeta.js').read_text(encoding='utf-8')
         block = re.search(r'export const CHANNEL_COLORS = \{(.*?)\n\};', meta, re.S).group(1)

@@ -413,6 +413,8 @@ const ChannelsSection = ({ api, toast, boot, reloadBoot }) => {
                                             className="flex min-w-0 grow basis-0 items-center gap-2.5 text-left text-[13.5px] text-slate-900 transition hover:text-blue-700">
                                         <span aria-hidden="true" className={`h-3 w-3 shrink-0 rounded-full ${channelTone(row.color).dot}`} />
                                         <span className="truncate">{row.name}</span>
+                                        {/* Владелец 09.11.2026: пришедших с таргета отмечать сами — канал с кодом target. */}
+                                        {row.code === 'target' && <span className="shrink-0 text-[11.5px] text-slate-400">ставится сам откликам с рекламы</span>}
                                     </button>
                                     <IosToggle checked={row.is_active} onChange={() => toggle(row)} />
                                 </Row>

@@ -23,7 +23,12 @@ SAVEPOINT'ом, как у «Аренды авто»: не развернулас
   одному человеку, колокол читает её, триггер bell будит адресата.
 """
 
-from . import rules
+import json
+import logging
+
+from . import rules, whatsapp
+
+log = logging.getLogger(__name__)
 
 _STATEMENTS = [
 
@@ -418,6 +423,10 @@ _STATEMENTS = [
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_channels_name ON hiring_channels (lower(name))",
     "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS channel_id INTEGER",
+    # Код стартового канала (target, hh, kaspi): по нему система ставит метку сама — «Таргет» откликам с
+    # рекламы (владелец 09.11.2026). Имя и цвет руководитель правит, код остаётся; свои каналы — без кода.
+    "ALTER TABLE hiring_channels ADD COLUMN IF NOT EXISTS code VARCHAR(24)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_channels_code ON hiring_channels (code) WHERE code IS NOT NULL",
 ]
 
 
@@ -458,13 +467,53 @@ def _seed(cursor):
     # выключать — поэтому пустым после засева он не станет и метки не вернутся сами).
     cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_channels)")
     if not cursor.fetchone()[0]:
-        for position, (name, color) in enumerate(rules.SEED_CHANNELS):
+        for position, (code, name, color) in enumerate(rules.SEED_CHANNELS):
             cursor.execute("""
-                INSERT INTO hiring_channels (name, color, position, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-            """, (name, color, position, now, now))
+                INSERT INTO hiring_channels (code, name, color, position, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """, (code, name, color, position, now, now))
+    # Справочник засеян до кодов (выкладка 40037a92) — стартовым каналам код по имени засева, пока кода ни у кого
+    # нет. «Таргет» получает код один раз, и в этот момент размечаются уже пришедшие с таргета.
+    for code, name, _color in rules.SEED_CHANNELS:
+        cursor.execute("""
+            UPDATE hiring_channels SET code = %s
+             WHERE code IS NULL AND name = %s AND NOT EXISTS (SELECT 1 FROM hiring_channels WHERE code = %s)
+            RETURNING id
+        """, (code, name, code))
+        row = cursor.fetchone()
+        if row and code == rules.CHANNEL_TARGET:
+            labeled = _label_target_cards(cursor, row[0])
+            log.info('hiring: метка «Таргет» проставлена %d карточкам, пришедшим с таргета', labeled)
     for code in ('hh', 'olx', 'webhook', 'whatsapp'):
         cursor.execute("""
             INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s)
             ON CONFLICT (code) DO NOTHING
         """, (code, now))
+
+
+def _label_target_cards(cursor, channel_id):
+    """Разметка «Таргетом» уже пришедших с таргета — один раз, когда у канала появился код: первое сообщение
+    WhatsApp по рекламе (whatsapp.from_ads — то же правило, что у новых откликов), повторный отклик WhatsApp по
+    рекламе, источник «Таргет». Метки, поставленные руками, не трогаются; updated_at — тоже: доска не
+    перемешивается. Возвращает, скольким карточкам поставлена метка."""
+    cursor.execute("""
+        SELECT c.id, m.ad FROM hiring_cards c
+          JOIN hiring_wa_messages m ON m.wa_id = substr(c.platform_ref, 4) AND NOT m.from_me AND m.ad IS NOT NULL
+         WHERE c.channel_id IS NULL AND c.platform_ref LIKE %s
+        UNION ALL
+        SELECT t.card_id, m.ad FROM hiring_touches t
+          JOIN hiring_cards c ON c.id = t.card_id AND c.channel_id IS NULL
+          JOIN hiring_wa_messages m ON m.wa_id = substr(t.meta->>'platform_ref', 4) AND NOT m.from_me AND m.ad IS NOT NULL
+         WHERE t.kind = 'repeat_response' AND t.meta->>'platform_ref' LIKE %s
+    """, ('wa:%', 'wa:%'))
+    ids = {int(card_id) for card_id, ad in cursor.fetchall()
+           if whatsapp.from_ads(ad if isinstance(ad, dict) else json.loads(ad or 'null'))}
+    cursor.execute("""
+        SELECT c.id FROM hiring_cards c JOIN hiring_sources s ON s.id = c.source_id
+         WHERE c.channel_id IS NULL AND s.code = %s
+    """, (rules.SOURCE_TARGET,))
+    ids.update(int(row[0]) for row in cursor.fetchall())
+    if ids:
+        cursor.execute("UPDATE hiring_cards SET channel_id = %s WHERE id = ANY(%s) AND channel_id IS NULL",
+                       (int(channel_id), sorted(ids)))
+    return len(ids)

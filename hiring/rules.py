@@ -322,8 +322,14 @@ LATE_SOURCES = (
 # разговора и ставит меткой. Справочник ведёт руководитель в «Настройках»; цвет — из палитры (как у
 # списков «Напоминаний»), коды те же, что в hiringMeta.js. Стартовые метки — словами владельца.
 CHANNEL_COLORS = ('red', 'orange', 'yellow', 'green', 'teal', 'blue', 'violet', 'pink', 'gray')
-SEED_CHANNELS = (('Таргет', 'blue'), ('hh', 'red'), ('Каспи', 'pink'))
+# (код, имя, цвет). Код у стартовых каналов постоянный — по нему система ставит метку сама, имя и цвет
+# руководитель правит как хочет. Свои каналы руководителя — без кода.
+SEED_CHANNELS = (('target', 'Таргет', 'blue'), ('hh', 'hh', 'red'), ('kaspi', 'Каспи', 'pink'))
 CHANNEL_NAME_MAX = 40
+# «Таргет» ставится сам (владелец 09.11.2026: «те что пришли с таргета нужно автоматом отмечать как Таргет»):
+# отклику WhatsApp по рекламе (whatsapp.from_ads) и отклику с источником «Таргет».
+CHANNEL_TARGET = 'target'
+SOURCE_TARGET = 'target'
 
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (
     'pending', 'counted', 'paid', 'cancelled')

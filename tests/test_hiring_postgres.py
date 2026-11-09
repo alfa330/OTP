@@ -861,6 +861,89 @@ def test_channels_directory_and_card_label(world):
         assert [(c['id'], c['channel_name']) for c in tasks] == [(fresh['id'], 'Таргет')]
 
 
+TARGET_AD = {'title': 'Напишите нам!', 'body': 'Требуются операторы', 'source_id': '120250535993810050',
+             'source_app': 'instagram', 'conversion_source': 'FB_Ads', 'entry_point': 'ctwa_ad', 'ctwa_clid': 'x'}
+
+
+def test_target_label_is_set_automatically(world):
+    """Владелец 09.11.2026: «Те что пришли с таргета нужно автоматом отмечать как Таргет»: отклик WhatsApp по рекламе и
+    отклик с источником «Таргет» получают метку сами. Выбор рекрутера не перетирается; переименованный «Таргет»
+    ставится по-прежнему (по коду), выключенный — нет."""
+    service = world['service']
+    lead, me = ctx_of(world, LEAD_GRANT), ctx_of(world, REC1)
+    with world['db']._get_cursor() as cur:
+        target, hh_channel = queries.channel_by_code(cur, 'target'), queries.channel_by_code(cur, 'hh')
+    assert (target['name'], target['color'], hh_channel['name']) == ('Таргет', 'blue', 'hh')
+
+    def label(phone):
+        with world['db']._get_cursor() as cur:
+            return queries.open_card_by_phone(cur, phone)['channel_name']
+
+    # WhatsApp: по объявлению — «Таргет»; по ссылке на номер (так пишут с hh, сайта) и без рекламы — без метки.
+    service.wa_events({'events': [wa_event('g1', phone='77056000001', ad=TARGET_AD),
+                                  wa_event('g2', phone='77056000002', ad={'entry_point': 'phone_number_hyperlink'}),
+                                  wa_event('g3', phone='77056000003')]})
+    assert [label('+7705600000%d' % n) for n in (1, 2, 3)] == ['Таргет', None, None]
+    # Источник «Таргет» — вебхук партнёра и отклик вручную; Kaspi — без метки (её ставит рекрутер).
+    results = service.external_intake([{'phone': '8 705 600 00 04', 'name': 'Из рекламы'}], source_code='target',
+                                      actor_label='Партнёр: тест')
+    assert results[0]['status'] == 'created' and label('+77056000004') == 'Таргет'
+    service.external_intake([{'phone': '8 705 600 00 05'}], source_code='kaspi', actor_label='Партнёр: тест')
+    assert label('+77056000005') is None
+    add_response(world, REC1, '8 705 600 00 06', source_id=world['sources']['target']['id'])
+    assert label('+77056000006') == 'Таргет'
+
+    # Повторный отклик по рекламе: карточке без метки — «Таргет», метку рекрутера не трогает.
+    _outcome, base = add_response(world, REC1, '8 705 600 00 07')
+    _outcome, chosen = add_response(world, REC1, '8 705 600 00 08')
+    service.take(me, chosen['id'])
+    service.edit_card(me, chosen['id'], {'channel_id': hh_channel['id']})
+    assert service.wa_events({'events': [wa_event('g7', phone='77056000007', ad=TARGET_AD),
+                                         wa_event('g8', phone='77056000008', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
+    assert (label('+77056000007'), label('+77056000008')) == ('Таргет', 'hh')
+
+    # Переименование не ломает автометку (канал — по коду); выключенный канал сам не ставится.
+    service.edit_channel(lead, target['id'], {'name': 'Реклама'})
+    service.wa_events({'events': [wa_event('g9', phone='77056000009', ad=TARGET_AD)]})
+    assert label('+77056000009') == 'Реклама'
+    service.edit_channel(lead, target['id'], {'is_active': False})
+    service.wa_events({'events': [wa_event('g10', phone='77056000010', ad=TARGET_AD)]})
+    assert label('+77056000010') is None
+
+
+def test_target_backfill_runs_once_when_the_code_appears(world):
+    """Выкладка 09.11.2026: справочник засеян до кодов. На первом старте с кодами «Таргет» получает код, и уже
+    пришедшие с таргета (WhatsApp по рекламе, повторный отклик по рекламе, источник «Таргет») размечаются один раз:
+    метки рекрутера не трогаются, а снятая потом метка следующим стартом не возвращается."""
+    service = world['service']
+    me = ctx_of(world, REC1)
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_channels SET code = NULL")          # как засеяла выкладка 40037a92
+        hh_id = next(c['id'] for c in queries.list_channels(cur) if c['name'] == 'hh')
+    service.wa_events({'events': [wa_event('h1', phone='77057000001', ad=TARGET_AD), wa_event('h2', phone='77057000002')]})
+    add_response(world, REC1, '8 705 700 00 03', source_id=world['sources']['target']['id'])
+    add_response(world, REC1, '8 705 700 00 04')
+    service.wa_events({'events': [wa_event('h4', phone='77057000004', ad=TARGET_AD)]})     # повторный отклик по рекламе
+    _outcome, chosen = add_response(world, REC1, '8 705 700 00 05', source_id=world['sources']['target']['id'])
+    service.take(me, chosen['id'])
+    service.edit_card(me, chosen['id'], {'channel_id': hh_id})                            # рекрутер решил сам
+    with world['db']._get_cursor() as cur:
+        def label(phone):
+            return queries.open_card_by_phone(cur, phone)['channel_name']
+
+        assert [label('+7705700000%d' % n) for n in range(1, 6)] == [None, None, None, None, 'hh']
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77057000001'")
+        updated_before = cur.fetchone()[0]
+        schema.init_hiring_schema(cur)
+        assert {c['name']: c['code'] for c in queries.list_channels(cur)} == {'Таргет': 'target', 'hh': 'hh', 'Каспи': 'kaspi'}
+        assert [label('+7705700000%d' % n) for n in range(1, 6)] == ['Таргет', None, 'Таргет', 'Таргет', 'hh']
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77057000001'")
+        assert cur.fetchone()[0] == updated_before                                            # доска не перемешивается
+        cur.execute("UPDATE hiring_cards SET channel_id = NULL WHERE phone = '+77057000001'")
+        schema.init_hiring_schema(cur)
+        assert label('+77057000001') is None
+
+
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
 
 def _webhook(general_call_id, phone, *, disposition='ANSWER', billsec=120, call_type='1', line='8501', start=1792000000):
