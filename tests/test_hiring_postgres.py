@@ -713,6 +713,56 @@ def test_dashboard_cohort_and_click_through(world):
         assert [card['id'] for card in tasks] == [today_card['id']]
 
 
+def test_dashboard_counts_no_answer_status(world):
+    """Владелец 09.11.2026: в «Отчётах» — число «Недозвон / не ответил» (кандидат не ответил ни на звонок, ни на
+    сообщение в WhatsApp): кто из взятых в работу за период сейчас в этом статусе; клик — список карточек."""
+    from io import BytesIO
+    from openpyxl import load_workbook
+    service = world['service']
+    me, other = ctx_of(world, REC1), ctx_of(world, REC2)
+
+    def taken(user, phone):
+        _outcome, card = add_response(world, REC1, phone)
+        return service.take(user, card['id'])
+
+    by_call = taken(me, '8 705 200 00 01')                       # не взял трубку — статус ставит сам звонок
+    service.touch(me, by_call['id'], {'kind': 'call', 'result': 'no_answer'})
+    by_hand = taken(other, '8 705 200 00 02')                    # не ответил в WhatsApp — рекрутер ставит руками
+    service.touch(other, by_hand['id'], {'kind': 'whatsapp'})
+    service.set_substage(other, by_hand['id'], 'no_answer')
+    reached = taken(me, '8 705 200 00 03')                       # потом дозвонились — уже не «не ответил»
+    service.touch(me, reached['id'], {'kind': 'call', 'result': 'no_answer'})
+    service.touch(me, reached['id'], {'kind': 'call', 'result': 'dial'})
+    closed = taken(me, '8 705 200 00 04')                        # закрыт отказом — он в «Потерях»
+    service.touch(me, closed['id'], {'kind': 'call', 'result': 'no_answer'})
+    with world['db']._get_cursor() as cur:
+        no_contact = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_CONTACT)
+    service.move(me, closed['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    add_response(world, REC1, '8 705 200 00 05')                 # в пуле — не взят в работу
+    world['clock'].now = datetime(2026, 9, 10, 12, 0)            # сентябрьская когорта
+    september = taken(me, '8 705 200 00 06')
+    service.touch(me, september['id'], {'kind': 'call', 'result': 'no_answer'})
+    world['clock'].now = NOW
+
+    with world['db']._get_cursor() as cur:
+        filters = reports.parse_filters({'month': '2026-10'})
+        data = reports.dashboard(cur, filters)
+        labels = [tile['label'] for tile in data['totals']]
+        assert labels[labels.index('Взято в работу') + 1] == 'Недозвон / не ответил'
+        tile = data['totals'][labels.index('Недозвон / не ответил')]
+        assert tile['value'] == 2 and tile['key'] == 'total:no_answer' and 'WhatsApp' in tile['hint']
+        assert reports.card_ids_for(cur, filters, 'total:no_answer') == sorted([by_call['id'], by_hand['id']])
+        own = reports.dashboard(cur, reports.parse_filters({'month': '2026-10'}, forced_recruiter_id=REC2))
+        assert {t['label']: t['value'] for t in own['totals']}['Недозвон / не ответил'] == 1
+        assert {t['label']: t['value'] for t in reports.dashboard(cur, reports.parse_filters({'month': '2026-09'}))['totals']}[
+            'Недозвон / не ответил'] == 1
+        sheet = load_workbook(BytesIO(reports.export_dashboard(data, 'Воронка найма')))['Итоги']
+        assert ['Недозвон / не ответил', 2] in [[row[0], row[1]] for row in sheet.iter_rows(values_only=True)]
+    # Подпись статуса в карточке — та же; исход самого звонка остаётся «Недозвон».
+    assert rules.SUBSTAGE_LABELS['in_work']['no_answer'] == 'Недозвон / не ответил'
+    assert dict(rules.CALL_RESULTS)['no_answer'] == 'Недозвон'
+
+
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
 
 def _webhook(general_call_id, phone, *, disposition='ANSWER', billsec=120, call_type='1', line='8501', start=1792000000):

@@ -4,9 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES, addDays, buildICorePhoneUrl, daysSince, joinDateTime,
-    longTime, matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth,
-    shortTime, splitDateTime,
+    ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES, SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays,
+    buildICorePhoneUrl, daysSince, joinDateTime, longTime, matchesQuery, monthLabel, openICorePhoneCall, percent, plural,
+    prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -83,4 +83,11 @@ test('client-side search matches name, phone and candidate number', () => {
     assert.ok(matchesQuery(card, ''));
     assert.ok(!matchesQuery(card, 'Астана'));
     assert.ok(!matchesQuery(card, '99'));
+});
+
+test('status «Недозвон / не ответил» covers WhatsApp, the call outcome stays «Недозвон»', () => {
+    // Владелец 09.11.2026: статус — кандидат не ответил ни на звонок, ни на сообщение в WhatsApp.
+    assert.equal(SUBSTAGE_LABELS.no_answer, 'Недозвон / не ответил');
+    assert.equal(TOUCH_RESULT_LABELS.no_answer, 'Недозвон');
+    assert.equal(TOUCH_RESULT_LABELS.dial, 'Дозвон');
 });

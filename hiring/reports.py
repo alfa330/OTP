@@ -7,6 +7,7 @@
   их дальнейшее движение считается на дату просмотра;
 * карточка достигла этапа, если ХОТЬ РАЗ была в этой колонке (hiring_card_stages),
   а не только находится в ней сейчас; «Дозвон» — хотя бы один звонок с результатом «дозвон»;
+  «Недозвон / не ответил» — кто из когорты СЕЙЧАС в этом подстатусе «В работе» (как и потери);
 * конверсия этапа = достигли ÷ достигли предыдущего; сквозная = достигли ÷ взято в работу;
 * кандидаты — в головах; план месяца — в FTE: каждый «Отработал 7 дней» закрывает 1 FTE.
 
@@ -110,7 +111,7 @@ _COHORT_SQL = """
     )
     SELECT c.id, c.candidate_no, c.full_name, c.kind, c.recruiter_id, r.name AS recruiter_name, c.source_id,
            s.name AS source_name, c.batch_id, b.file_name AS batch_file, c.vacancy_id, v.name AS vacancy_name,
-           c.city, c.stage, c.is_closed, c.close_initiator, c.close_reason_text, c.close_stage, c.close_day,
+           c.city, c.stage, c.substage, c.is_closed, c.close_initiator, c.close_reason_text, c.close_stage, c.close_day,
            c.received_at, fw.taken_first, c.hired_at,
            (SELECT m.status FROM hiring_motivation m WHERE m.card_id = c.id) AS motivation_status
       FROM hiring_cards c
@@ -312,6 +313,11 @@ def dashboard(cursor, filters, *, with_ids=False):
     hired_ids = [card['id'] for card in cards if agg.hit(card, rules.HIRED)]
     motivation_ids = [card['id'] for card in cards if card.get('motivation_status') in (rules.MOTIVATION_COUNTED, rules.MOTIVATION_PAID)]
     agg._remember('total:motivation', motivation_ids)
+    # «Недозвон / не ответил» (владелец 09.11.2026): кандидат не ответил ни на звонок, ни на сообщение в
+    # WhatsApp — подстатус «В работе». Как и потери, это состояние на дату просмотра: кто из когорты сейчас
+    # в этом статусе (дозвонились, пригласили или закрыли карточку — уже не здесь).
+    no_answer_ids = [card['id'] for card in cards if card['stage'] == rules.IN_WORK and card.get('substage') == 'no_answer']
+    agg._remember('total:no_answer', no_answer_ids)
 
     plan_fte = 0.0
     if filters.get('month'):
@@ -334,6 +340,8 @@ def dashboard(cursor, filters, *, with_ids=False):
     totals = [
         {'key': 'received', 'label': 'Поступило', 'value': received_in_period, 'hint': 'в пул за период, вне когорты'},
         {'key': 'total:in_work', 'label': 'Взято в работу', 'value': counts[rules.IN_WORK]},
+        {'key': 'total:no_answer', 'label': rules.SUBSTAGE_LABELS[rules.IN_WORK]['no_answer'], 'value': len(no_answer_ids),
+         'hint': 'из взятых в работу — кто сейчас в этом статусе: не ответил ни на звонок, ни на сообщение в WhatsApp'},
         {'key': 'total:on_training', 'label': 'Вышли на обучение', 'value': counts[rules.ON_TRAINING]},
         {'key': 'total:on_line', 'label': 'Вышли на линию', 'value': counts[rules.ON_LINE]},
         {'key': 'total:hired', 'label': 'Отработали 7 дней', 'value': counts[rules.HIRED]},

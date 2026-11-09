@@ -9,7 +9,7 @@ import IosTimePicker from '../ui/TimePicker';
 import { IosHint, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
     ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES, MOTIVATION_LABELS,
-    MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, addDays,
+    MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays,
     codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime, openICorePhoneCall, reasonKindFor, shortTime,
     splitDateTime, todayIso,
 } from './hiringMeta';
@@ -242,7 +242,7 @@ const CallPanel = ({ touch, call, api, toast, card, onDone, onClose }) => {
                         {call.billsec > 0 && <span className="tabular-nums text-slate-500">{fmtDuration(call.billsec)}</span>}
                     </>
                 ) : (
-                    <Pill tone={touch.result === 'dial' ? 'green' : 'amber'}>{SUBSTAGE_LABELS[touch.result]}</Pill>
+                    <Pill tone={touch.result === 'dial' ? 'green' : 'amber'}>{TOUCH_RESULT_LABELS[touch.result]}</Pill>
                 )}
                 <button type="button" className={`${ICON_BTN} ml-auto`} aria-label="Закрыть" onClick={onClose}><X size={14} /></button>
             </div>
@@ -467,7 +467,7 @@ const Timeline = ({ touches, calls = [], api, canEdit, onSetResult }) => {
                             {call ? <CallRow item={item} call={call} api={api} /> : (
                                 <div className="text-[13px] text-slate-800">
                                     <span className="font-medium">{TOUCH_LABELS[item.kind] || item.kind}</span>
-                                    {item.kind === 'call' && item.result ? <Pill tone={item.result === 'dial' ? 'green' : 'amber'} className="ml-1.5">{SUBSTAGE_LABELS[item.result]}</Pill> : null}
+                                    {item.kind === 'call' && item.result ? <Pill tone={item.result === 'dial' ? 'green' : 'amber'} className="ml-1.5">{TOUCH_RESULT_LABELS[item.result]}</Pill> : null}
                                     {pending && <Pill className="ml-1.5">ждём исход из телефонии</Pill>}
                                     {item.author_name ? <span className="text-slate-400"> · {item.author_name}</span> : null}
                                     {item.body && <div className="whitespace-pre-wrap text-slate-600">{item.body}</div>}

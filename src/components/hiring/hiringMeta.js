@@ -28,11 +28,14 @@ export const FINAL_STAGES = ['refused', 'dropped', 'hired'];
 export const FUNNEL_STAGES = ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired'];
 export const FUNNEL_LABELS = { ...STAGE_LABELS, dialed: 'Дозвон' };
 
+/* «Недозвон / не ответил» — кандидат не ответил ни на звонок, ни на сообщение в WhatsApp (владелец
+   09.11.2026). Исход самого звонка в ленте — TOUCH_RESULT_LABELS: там «Недозвон» без WhatsApp. */
 export const SUBSTAGE_LABELS = {
-    dial: 'Дозвон', no_answer: 'Недозвон', whatsapp: 'Переписка в WhatsApp',
+    dial: 'Дозвон', no_answer: 'Недозвон / не ответил', whatsapp: 'Переписка в WhatsApp',
     expected: 'Ожидается', came: 'Пришел', no_show: 'Не пришел',
     ours: 'Наш отказ', candidate: 'Отказ кандидата', self: 'Сам', we: 'Мы',
 };
+export const TOUCH_RESULT_LABELS = { dial: 'Дозвон', no_answer: 'Недозвон' };
 
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),
    просрочка — янтарный. Рабочие этапы не красятся. */
