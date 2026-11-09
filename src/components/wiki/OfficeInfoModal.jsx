@@ -14,6 +14,15 @@ import {
 } from './officeDayStatus';
 import { breakLines, dayHoursOn, scheduleLines } from './officeSchedule';
 import { phoneSegments } from './officePhones';
+import { archivedLine } from './officeArchiveRules';
+
+/* Подсказки к кнопкам подвала (data-tip, common/HoverTips). */
+const TIPS = {
+    day: 'Отметить, что офис открыт или закрыт в этот день, или закрыть на срок',
+    edit: 'Изменить адрес, телефон, график работы и карту',
+    archive: 'Убрать офис в архив — вернуть его можно на вкладке «Архив»',
+    restore: 'Вернуть офис в справочник — он снова появится в списке и поиске',
+};
 
 /* Всё про один офис — по нажатию на его адрес.
  *
@@ -46,6 +55,10 @@ export default function OfficeInfoModal({
     const isPhone = useIsMobileShell();
     const status = officeDayStatus(office, dayISO);
     const absent = status.state === 'absent';
+    /* Архивный офис открывают с вкладки «Архив» — посмотреть, прежде чем
+       вернуть. Статуса у него нет: «Открыто до 19:00» по графику офиса, которого
+       больше нет в справочнике, было бы неправдой, и отмечать ему день незачем. */
+    const archived = office.status === 'archived';
 
     const week = useMemo(() => scheduleLines(office.schedule), [office.schedule]);
     const lunch = useMemo(() => breakLines(office.schedule), [office.schedule]);
@@ -74,25 +87,41 @@ export default function OfficeInfoModal({
                 <>
                     {canManage && (
                         <div className="wiki-m-office-actions mr-auto flex items-center gap-1">
-                            {!absent && (
+                            {!absent && !archived && (
                                 <button
                                     type="button"
                                     className={iosBtnGhost}
                                     onClick={() => onMarkDay(office)}
+                                    data-tip={TIPS.day}
                                 >
                                     <CalendarClock size={14} /> Статус на дату
                                 </button>
                             )}
-                            <button type="button" className={iosBtnGhost} onClick={() => onEdit(office)}>
+                            <button
+                                type="button"
+                                className={iosBtnGhost}
+                                onClick={() => onEdit(office)}
+                                data-tip={TIPS.edit}
+                            >
                                 <Pencil size={14} /> Изменить
                             </button>
-                            {office.status === 'active' ? (
-                                <button type="button" className={iosBtnGhost} onClick={() => onArchive(office)}>
-                                    <Archive size={14} /> В архив
+                            {archived ? (
+                                <button
+                                    type="button"
+                                    className={iosBtnGhost}
+                                    onClick={() => onRestore(office)}
+                                    data-tip={TIPS.restore}
+                                >
+                                    <ArchiveRestore size={14} /> Вернуть
                                 </button>
                             ) : (
-                                <button type="button" className={iosBtnGhost} onClick={() => onRestore(office)}>
-                                    <ArchiveRestore size={14} /> Вернуть
+                                <button
+                                    type="button"
+                                    className={iosBtnGhost}
+                                    onClick={() => onArchive(office)}
+                                    data-tip={TIPS.archive}
+                                >
+                                    <Archive size={14} /> В архив
                                 </button>
                             )}
                         </div>
@@ -112,6 +141,21 @@ export default function OfficeInfoModal({
                     оба сразу нельзя: «Открыт» над «сейчас закрыто» читается как
                     спор двух надписей, хотя это один и тот же факт с разной
                     точностью. */}
+                {archived ? (
+                    <Panel>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <IosBadge tone="amber">В архиве</IosBadge>
+                            {office.kind === 'partner' && (
+                                <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
+                            )}
+                        </div>
+                        {archivedLine(office) && (
+                            <p className="mt-2 text-[12.5px] tabular-nums text-slate-500">
+                                {archivedLine(office)}
+                            </p>
+                        )}
+                    </Panel>
+                ) : (
                 <Panel>
                     <div className="flex flex-wrap items-center gap-2">
                         <OfficeStatusBadge
@@ -121,7 +165,6 @@ export default function OfficeInfoModal({
                             dayISO={dayISO}
                             tick={tick}
                         />
-                        {office.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
                         {office.kind === 'partner' && (
                             <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
                         )}
@@ -152,6 +195,7 @@ export default function OfficeInfoModal({
                         </p>
                     )}
                 </Panel>
+                )}
 
                 {!absent && office.lat != null && office.lon != null && (
                     <OfficeMap
@@ -189,6 +233,7 @@ export default function OfficeInfoModal({
                                         type="button"
                                         className={iosBtnSecondary}
                                         onClick={() => onCopyAddress(office)}
+                                        data-tip="Скопировать адрес вместе с городом"
                                     >
                                         <Copy size={13} /> Скопировать
                                     </button>
@@ -199,6 +244,7 @@ export default function OfficeInfoModal({
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className={iosBtnSecondary}
+                                        data-tip="Открыть офис на карте 2ГИС в новой вкладке"
                                     >
                                         <ExternalLink size={13} /> Открыть в 2ГИС
                                     </a>
@@ -224,7 +270,7 @@ export default function OfficeInfoModal({
                                 <span className="min-w-0 break-words">
                                     {phoneParts.map((part, index) => (part.number ? (
                                         // eslint-disable-next-line react/no-array-index-key
-                                        <a key={index} href={`tel:${part.number}`} className="inline-block hover:text-blue-600">
+                                        <a key={index} href={`tel:${part.number}`} data-tip="Позвонить по этому номеру" className="inline-block hover:text-blue-600">
                                             {part.text}
                                         </a>
                                     ) : (
@@ -255,9 +301,12 @@ export default function OfficeInfoModal({
                     </Panel>
                 )}
 
-                {!absent && (hours || week.length > 0) && (
+                {/* У архивного — только неделя: часы «на 05.11» брались бы с
+                    даты вкладки «Офисы», которой на вкладке «Архив» нет, и
+                    читались бы как статус офиса, которого нет в справочнике. */}
+                {!absent && (archived ? week.length > 0 : (hours || week.length > 0)) && (
                     <Panel title="Часы работы">
-                        {hours ? (
+                        {!archived && (hours ? (
                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-slate-700">
                                 <span className="flex items-center gap-1.5 tabular-nums">
                                     <Clock size={13} className="text-slate-400" />
@@ -274,10 +323,10 @@ export default function OfficeInfoModal({
                             <div className="flex items-center gap-1.5 text-[13px] text-slate-400">
                                 <Clock size={13} /> {formatDay(dayISO)} выходной
                             </div>
-                        )}
+                        ))}
 
                         {week.length > 0 && (
-                            <div className="mt-2 border-t border-slate-100 pt-2">
+                            <div className={archived ? '' : 'mt-2 border-t border-slate-100 pt-2'}>
                                 <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12.5px] tabular-nums text-slate-600">
                                     {week.map((line) => (
                                         <span key={line.days} className={line.isDayOff ? 'text-slate-400' : ''}>

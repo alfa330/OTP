@@ -169,8 +169,20 @@ class OfficesTests(unittest.TestCase):
 
     def test_view_switch_is_hidden_on_the_phone(self):
         """Две из трёх кнопок переключателя вида («Две в ряд», «Таблица») на
-        телефоне не про что — ряд неработающих кнопок и есть визуальный шум."""
-        self.assertIn('{!isPhone && (', self.offices)
+        телефоне не про что — ряд неработающих кнопок и есть визуальный шум.
+        На вкладке «Архив» его нет и на компьютере: там список, а не вид."""
+        self.assertIn('{!isPhone && !archiveView && (', self.offices)
+
+    def test_archive_switch_and_search_have_their_own_phone_rules(self):
+        """Первым в ряду инструментов у управляющего стоит «Офисы | Архив», и
+        прежнее правило «первый ребёнок — поиск» растянуло бы на всю ширину его,
+        а поиск ужал бы. Оба выбираются по своим классам."""
+        css = (ROOT / 'src/components/wiki/wiki-mobile.css').read_text(encoding='utf-8')
+        self.assertIn('.wiki-m-office-tools > .wiki-m-office-search', css)
+        self.assertNotIn('.wiki-m-office-tools > div:first-child', css)
+        self.assertIn('.wiki-m-office-scope {', css)
+        self.assertIn('wiki-m-office-search relative', self.offices)
+        self.assertIn('wiki-m-office-scope flex', self.offices)
 
     def test_office_card_footer_drops_the_close_button_on_the_phone(self):
         """На телефоне окно — экран, и уходят с него шевроном в шапке (IosModal

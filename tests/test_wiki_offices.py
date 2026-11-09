@@ -853,5 +853,93 @@ class TelegramUsernamesTest(unittest.TestCase):
                             in item for item in statements))
 
 
+class _ListCursor:
+    """Курсор для list_offices: первый execute — сами офисы, второй — их парки."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = []
+
+    def execute(self, sql, params=None):
+        self.executed.append((' '.join(sql.split()), params))
+
+    def fetchall(self):
+        return self.rows if len(self.executed) == 1 else []
+
+    def fetchone(self):
+        return (3,)
+
+
+def _list_row(status='active', archived_at=None, archived_by=None, **over):
+    values = {key: None for key in _OFFICE_KEYS}
+    values.update({'id': 7, 'name': 'Сайран', 'city': 'Алматы', 'status': status})
+    values.update(over)
+    # За колонками офиса — статус дня (5) и кто/когда убрал в архив (2).
+    return tuple(values[key] for key in _OFFICE_KEYS) + (None,) * 5 + (archived_at, archived_by)
+
+
+class ArchiveListTest(unittest.TestCase):
+    """Вкладка «Архив»: одни архивные — и кто и когда их туда убрал.
+
+    До неё архив был тумблером в фильтре, и включённый он мешал архивные офисы с
+    живыми: те красились по графику («Открыт до 19:00») и шли в счётчики.
+    """
+
+    def test_statuses_of_each_view(self):
+        self.assertEqual(wiki_offices.office_statuses(), ['active'])
+        self.assertEqual(wiki_offices.office_statuses(include_archived=True), ['active', 'archived'])
+        # «Только архив» сильнее «вперемешку»: живые на вкладку архива не едут.
+        self.assertEqual(wiki_offices.office_statuses(True, True), ['archived'])
+
+    def test_only_archived_asks_for_archived_rows_and_the_journal(self):
+        cursor = _ListCursor([_list_row('archived', datetime(2026, 10, 12, 14, 5, 33), 'Иванов Иван')])
+        items = wiki_offices.list_offices(cursor, only_archived=True, space_id=11)
+        sql, params = cursor.executed[0]
+        self.assertEqual(params['statuses'], ['archived'])
+        self.assertIn('o.status = ANY(%(statuses)s)', sql)
+        # Кто и когда — последняя запись «office.archive» журнала этого офиса.
+        self.assertIn("a.action = 'office.archive'", sql)
+        self.assertIn("a.entity_type = 'office' AND a.entity_id = o.id", sql)
+        self.assertIn('ORDER BY a.id DESC LIMIT 1', sql)
+        self.assertEqual(items[0]['archived_at'], '2026-10-12T14:05:33')
+        self.assertEqual(items[0]['archived_by'], 'Иванов Иван')
+
+    def test_plain_list_does_not_touch_the_journal(self):
+        """Поиск и помощник вики зовут list_offices на каждый вопрос — журнал им
+        не нужен, и у действующих офисов полей архива в ответе нет."""
+        cursor = _ListCursor([_list_row('active')])
+        items = wiki_offices.list_offices(cursor, space_id=11)
+        sql, params = cursor.executed[0]
+        self.assertEqual(params['statuses'], ['active'])
+        self.assertNotIn('wiki_audit_log', sql)
+        self.assertNotIn('archived_at', items[0])
+        self.assertNotIn('archived_by', items[0])
+
+    def test_mixed_list_also_reads_the_journal_for_archived_rows(self):
+        """archived=1 (вперемешку) — тоже выборка с архивными: журнал нужен и ей,
+        иначе у них молча пропали бы «кто и когда»."""
+        cursor = _ListCursor([_list_row('archived', datetime(2026, 10, 12, 14, 5, 33), 'Иванов Иван')])
+        items = wiki_offices.list_offices(cursor, include_archived=True, space_id=11)
+        sql, params = cursor.executed[0]
+        self.assertEqual(params['statuses'], ['active', 'archived'])
+        self.assertIn('wiki_audit_log', sql)
+        self.assertIn('arch.created_at, arch.name', sql)
+        self.assertEqual(items[0]['archived_by'], 'Иванов Иван')
+
+    def test_archived_without_journal_entry_says_none_not_a_guess(self):
+        cursor = _ListCursor([_list_row('archived')])
+        items = wiki_offices.list_offices(cursor, include_archived=True, space_id=11)
+        self.assertIsNone(items[0]['archived_at'])
+        self.assertIsNone(items[0]['archived_by'])
+
+    def test_archived_count_is_scoped_to_space(self):
+        cursor = _ListCursor([])
+        self.assertEqual(wiki_offices.archived_count(cursor, space_id=11), 3)
+        sql, params = cursor.executed[0]
+        self.assertIn("status = 'archived'", sql)
+        self.assertIn('space_id = %s', sql)
+        self.assertEqual(params, (11,))
+
+
 if __name__ == '__main__':
     unittest.main()

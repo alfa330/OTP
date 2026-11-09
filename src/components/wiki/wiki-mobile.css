@@ -832,8 +832,24 @@ body.mobile-shell .wiki-scope .wiki-m-office-tools {
     gap: 8px;
 }
 
-body.mobile-shell .wiki-scope .wiki-m-office-tools > div:first-child {
+/* Поиск — по своему классу, а не «первый ребёнок»: первым в ряду у того, кто
+   правит справочник, стоит переключатель «Офисы | Архив». */
+body.mobile-shell .wiki-scope .wiki-m-office-tools > .wiki-m-office-search {
     flex: 1 0 100%;
+}
+
+/* «Офисы | Архив» — полосой во всю ширину над поиском, сегменты поровну: как
+   сегментный переключатель iOS над списком, а не кнопка, зажатая в углу. */
+body.mobile-shell .wiki-scope .wiki-m-office-scope {
+    flex: 1 0 100%;
+    border-radius: 12px;
+    background: var(--wiki-m-fill);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-scope > button {
+    flex: 1 1 0;
+    height: 34px;
+    font-size: 15px;
 }
 
 body.mobile-shell .wiki-scope .wiki-m-office-tools input {
@@ -889,6 +905,18 @@ body.mobile-shell .wiki-scope .wiki-m-office-legend > button[class~="bg-slate-90
 body.mobile-shell .wiki-scope .wiki-m-office-legend > span {
     flex: 0 0 auto;
     align-self: center;
+}
+
+/* Архив — та же белая группа строк, что и список офисов, без обводки-тени
+   карточки поверх серого полотна. Названия — основным кеглем iOS. */
+body.mobile-shell .wiki-scope .wiki-m-office-archive {
+    border-radius: 14px;
+    box-shadow: none;
+    background: var(--wiki-surface);
+}
+
+body.mobile-shell .wiki-scope .wiki-m-office-archive [class~="text-[14px]"] {
+    font-size: 17px;
 }
 
 /* Список — одна белая группа строк, а не стопка отдельных карточек: двадцать

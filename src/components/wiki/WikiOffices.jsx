@@ -9,15 +9,18 @@ import {
     IosBadge, IosModal,
 } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
+import HoverTips from '../common/HoverTips';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useStableCallback from './useStableCallback';
 import OfficeEditor from './OfficeEditor';
 import OfficeFilters, { DEFAULT_FILTERS, SORT_OPTIONS } from './OfficeFilters';
 import OfficeTable from './OfficeTable';
+import OfficeArchive from './OfficeArchive';
 import OfficeDayModal from './OfficeDayModal';
 import OfficeInfoModal from './OfficeInfoModal';
 import { OfficeStatusBadge } from './officeBadges';
 import { officeTodayISO } from './officeSchedule';
+import { archiveConfirmText, archiveOrder } from './officeArchiveRules';
 import {
     DAY_LEGEND, DAY_STATE_EDGE, closureCovers, formatDay, officeDayStatus,
 } from './officeDayStatus';
@@ -136,7 +139,6 @@ const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
                         <span className="text-[14.5px] font-semibold text-slate-900">
                             {office.name}
                         </span>
-                        {office.status === 'archived' && <IosBadge tone="amber">В архиве</IosBadge>}
                         {office.kind === 'partner' && (
                             <IosBadge tone="blue">{office.partner_label || 'Партнёрский'}</IosBadge>
                         )}
@@ -168,11 +170,29 @@ const OfficeCard = ({ office, onOpen, dayISO, isToday, showCity, tick }) => {
     );
 };
 
+/* tip — подсказка при наведении (HoverTips): подпись к значку называет вид,
+   подсказка — что в нём будет. */
 const VIEWS = [
-    { key: 'cards1', label: 'Одна в ряд', icon: Rows3 },
-    { key: 'cards2', label: 'Две в ряд', icon: Columns2 },
-    { key: 'table', label: 'Таблица', icon: Table2 },
+    { key: 'cards1', label: 'Одна в ряд', icon: Rows3, tip: 'Карточки в один столбец' },
+    { key: 'cards2', label: 'Две в ряд', icon: Columns2, tip: 'Карточки в два столбца' },
+    { key: 'table', label: 'Таблица', icon: Table2, tip: 'Таблица: статус всех офисов одним списком' },
 ];
+
+/* Действующие офисы и архив — две вкладки одного справочника, как «Разделы» и
+   «Архив» в структуре вики. Архив видит только тот, кто правит справочник.
+   Подсказка — только у «Архива»: «Офисы» в пояснении не нуждаются, а пузырь,
+   повторяющий подпись, — шум. */
+const SCOPES = [
+    { key: 'active', label: 'Офисы' },
+    { key: 'archive', label: 'Архив', tip: 'Офисы, убранные в архив. Отсюда их можно вернуть' },
+];
+
+/* Что показывает чип легенды и что сделает нажатие на него. */
+const LEGEND_TIPS = {
+    open: 'Показать только открытые офисы',
+    closed: 'Показать только закрытые офисы',
+    absent: 'Показать только города, где офиса нет',
+};
 
 const PREFS_KEY = 'wiki.offices.view';
 
@@ -250,6 +270,11 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
     );
 
     const [offices, setOffices] = useState([]);
+    /* Чей список лежит в offices — действующих или архива. Между нажатием на
+       вкладку и ответом сервера в состоянии ещё прежний список, и без этой
+       метки архив на один кадр показал бы живые офисы своими строками (а
+       обратно — архивные карточками со статусами). */
+    const [listScope, setListScope] = useState('active');
     const [cities, setCities] = useState([]);
     const [parks, setParks] = useState([]);
     const [serverCanManage, setServerCanManage] = useState(false);
@@ -260,6 +285,13 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
        Считается при отрисовке, а не в загрузке: так readOnly не попадает в
        зависимости загрузчика и не перезапрашивает список. */
     const canManage = !readOnly && serverCanManage;
+    /* Вкладка справочника: 'active' — действующие офисы, 'archive' — архив.
+       Не запоминается между заходами: архив открывают, чтобы вернуть офис, а
+       раздел каждое утро открывают ради статусов. Без права правки архива нет —
+       и вкладка сама остаётся на действующих. */
+    const [scope, setScope] = useState('active');
+    const archiveView = canManage && scope === 'archive';
+    const [archivedCount, setArchivedCount] = useState(0);
     const [loading, setLoading] = useState(true);
     /* Последняя загрузка не удалась: { message } — текст для человека. Раньше сбой
        оставлял список пустым, и раздел писал «Офисов пока нет / Справочник ещё не
@@ -309,6 +341,8 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
 
     useEffect(() => {
         if (!focusRequest) return;
+        // Просят открыть действующий офис — архив его не покажет.
+        setScope('active');
         setQuery('');
         setStateFilter('');
         pickDay(officeTodayISO());
@@ -359,21 +393,32 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
         if (!quiet) setLoading(true);
         const params = { date: dayISO };
         if (query.trim()) params.q = query.trim();
-        if (filters.city) params.city = filters.city;
-        if (filters.parkId) params.park_id = filters.parkId;
-        if (filters.showArchived) params.archived = 1;
+        /* В архиве ищут только по строке: город и парк — условия панели
+           «Фильтр», а её на вкладке архива нет, и невидимое условие молча
+           прятало бы архивные офисы. Парки там тоже не нужны — они только для
+           этой панели. */
+        if (archiveView) {
+            params.archived = 'only';
+        } else {
+            if (filters.city) params.city = filters.city;
+            if (filters.parkId) params.park_id = filters.parkId;
+        }
 
         Promise.all([
             axios.get(`${base}/offices`, { ...req, params: { ...req.params, ...params } }),
-            axios.get(`${base}/parks`, req),
+            archiveView ? null : axios.get(`${base}/parks`, req),
         ])
             .then(([officeResponse, parkResponse]) => {
                 // Запрос обогнали — его список уже не про то, что на экране.
                 if (seq !== loadSeq.current) return;
                 setOffices(officeResponse.data?.items || []);
+                setListScope(archiveView ? 'archive' : 'active');
                 setCities(officeResponse.data?.cities || []);
                 setServerCanManage(!!officeResponse.data?.can_manage);
-                setParks((parkResponse.data?.items || []).filter((p) => p.status === 'active'));
+                setArchivedCount(Number(officeResponse.data?.archived_count) || 0);
+                if (parkResponse) {
+                    setParks((parkResponse.data?.items || []).filter((p) => p.status === 'active'));
+                }
                 setLoadError(null);
                 setLoadedAt(Date.now());
                 reportLoad({ ok: true, quiet });
@@ -399,7 +444,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 setLoading(false);
                 setLoadedTick((n) => n + 1);
             });
-    }, [base, req, query, dayISO, filters.city, filters.parkId, filters.showArchived, toast, reportLoad]);
+    }, [base, req, query, dayISO, filters.city, filters.parkId, archiveView, toast, reportLoad]);
 
     /* Просьба хозяина обновить список (reloadKey). Заодно — переход на новые
        сутки: страница, открытая с вечера, наутро показывала бы вчерашний день
@@ -453,18 +498,25 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
             .finally(() => setBusy(false));
     };
 
+    /** Убрать в архив — после вопроса. Отдаёт, согласился ли человек. */
     const archive = (office) => {
+        // Тот же вопрос, что у разделов и статей вики: что пропадёт и где искать.
+        if (!window.confirm(archiveConfirmText(office))) return false;
         setBusy(true);
         axios.delete(`${base}/offices/${office.id}`, req)
-            .then(() => { toast('Офис убран в архив', 'success'); load(); })
-            .catch((e) => toast(errText(e, 'Не удалось'), 'error'))
+            .then(() => { toast(`Офис «${office.name}» убран в архив`, 'success'); load(); })
+            .catch((e) => toast(errText(e, 'Не удалось убрать в архив'), 'error'))
             .finally(() => setBusy(false));
+        return true;
     };
 
+    /* Возврат без вопроса: он ничего не прячет, а ошибку исправит «В архив».
+       Вкладку не переключаем — из архива часто возвращают несколько офисов
+       подряд. */
     const restore = (office) => {
         setBusy(true);
         axios.patch(`${base}/offices/${office.id}`, { status: 'active' }, req)
-            .then(() => { toast('Офис возвращён из архива', 'success'); load(); })
+            .then(() => { toast(`Офис «${office.name}» возвращён из архива`, 'success'); load(); })
             .catch((e) => toast(errText(e, 'Не удалось вернуть'), 'error'))
             .finally(() => setBusy(false));
     };
@@ -625,10 +677,24 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
         />
     );
 
-    // Что стоит на месте списка — одно из четырёх, см. officesScreen.
-    const screen = officesScreen({
-        loading, failed: !!loadError, total: offices.length, shown: visible.length,
-    });
+    // Архив — свежие сверху (officeArchiveRules.js); у него свой порядок, без групп.
+    const archived = useMemo(
+        () => (archiveView ? archiveOrder(offices, collator) : []),
+        [archiveView, offices, collator],
+    );
+
+    /* Что стоит на месте списка — одно из четырёх, см. officesScreen. Пока в
+       состоянии список другой вкладки, показывать его нельзя: это «загружаем»,
+       а если загрузка не удалась — карточка ошибки с повтором. */
+    const listMatches = listScope === (archiveView ? 'archive' : 'active');
+    const screen = listMatches
+        ? officesScreen({
+            loading,
+            failed: !!loadError,
+            total: offices.length,
+            shown: archiveView ? archived.length : visible.length,
+        })
+        : (loadError && !loading ? 'failed' : 'loading');
 
     /* Открытая карточка офиса читает запись из СВЕЖЕГО списка: фоновое обновление
        подменяет список под открытым окном, и окно со снимком на момент нажатия
@@ -646,25 +712,35 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 «название + подпись» и говорит, что таблицей управляет дата
                 справа, без чего календарь читается как фильтр по одному дню. */}
             <div className="wiki-m-office-head flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+                {/* На вкладке архива заголовок говорит, что это архив: «Статус на
+                    выбранную дату» над списком убранных офисов был бы неправдой —
+                    у них нет статуса, и дата на них не действует. */}
                 <div className="min-w-0">
                     <h2 className="text-[19px] font-semibold leading-tight tracking-tight text-slate-900">
-                        Статус офисов по городам
+                        {archiveView ? 'Архив офисов' : 'Статус офисов по городам'}
                     </h2>
                     <p className="mt-0.5 text-[12.5px] text-slate-500">
-                        Данные показаны на выбранную дату
+                        {archiveView
+                            ? 'Убраны из справочника — любой можно вернуть'
+                            : 'Данные показаны на выбранную дату'}
                     </p>
                 </div>
 
                 {/* Дата — «на какой день смотрим». Вперёд смотреть нечего:
                     статус будущего дня — это график, а не факт. Стрелки нужны
                     затем, что типовой вопрос — «а позавчера?», и открывать ради
-                    одного дня календарь незачем. */}
+                    одного дня календарь незачем.
+                    У «Сегодня» нет aria-label намеренно: телефонная раскладка
+                    (wiki-mobile.css) делает круглыми кнопки, у которых он есть, —
+                    это стрелки. Подсказка — атрибутом data-tip, он правилу не мешает. */}
+                {!archiveView && (
                 <div className="wiki-m-office-day flex shrink-0 items-center gap-1">
                     <button
                         type="button"
                         onClick={() => pickDay(shiftDay(dayISO, -1))}
                         className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
                         aria-label="Предыдущий день"
+                        data-tip="Статус офисов на предыдущий день"
                     >
                         <ChevronLeft size={16} />
                     </button>
@@ -673,6 +749,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                         max={today}
                         onChange={(iso) => pickDay(iso || today)}
                         ariaLabel="Дата, на которую показан статус"
+                        tip="Выбрать день, на который показать статус офисов"
                         triggerClassName={dateTrigger}
                     />
                     <button
@@ -681,6 +758,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                         disabled={isToday}
                         className="grid h-9 w-8 place-items-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30 disabled:hover:bg-transparent"
                         aria-label="Следующий день"
+                        data-tip="Статус офисов на следующий день"
                     >
                         <ChevronRight size={16} />
                     </button>
@@ -688,12 +766,14 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                         <button
                             type="button"
                             onClick={() => pickDay(today)}
+                            data-tip="Вернуться к статусу на сегодня"
                             className="rounded-xl bg-slate-100 px-2.5 py-2 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200"
                         >
                             Сегодня
                         </button>
                     )}
                 </div>
+                )}
             </div>
 
             {/* Поиск, условия и вид — второй строкой. В одной с заголовком и
@@ -701,36 +781,73 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 таблица и управляется, стояла в этом ряду наравне с кнопкой
                 «Офис». */}
             <div className="wiki-m-office-tools flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[200px] flex-1">
+                {/* «Офисы | Архив» — первым в ряду: он отвечает, ЧТО на экране,
+                    а остальное в ряду — как это искать. Раньше архив жил
+                    тумблером в панели «Фильтр», и найти его мог только тот, кто
+                    знал, что он там есть. Вид — как у переключателя вида справа:
+                    два сегмента одной высоты с соседями. */}
+                {canManage && (
+                    <div
+                        className="wiki-m-office-scope flex shrink-0 rounded-xl bg-slate-100 p-1"
+                        role="tablist"
+                        aria-label="Действующие офисы или архив"
+                    >
+                        {SCOPES.map(({ key, label, tip }) => (
+                            <button
+                                key={key}
+                                type="button"
+                                role="tab"
+                                aria-selected={scope === key}
+                                onClick={() => setScope(key)}
+                                data-tip={tip}
+                                className={`flex h-[34px] items-center justify-center gap-1.5 rounded-[9px] px-3 text-[13px] font-semibold transition-all ${
+                                    scope === key
+                                        ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.12)]'
+                                        : 'text-slate-500 hover:text-slate-700'
+                                }`}
+                            >
+                                {label}
+                                {key === 'archive' && archivedCount > 0 && (
+                                    <span className="text-[11.5px] font-medium tabular-nums text-slate-400">
+                                        {archivedCount}
+                                    </span>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
+                <div className="wiki-m-office-search relative min-w-[200px] flex-1">
                     <Search size={16} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                         className={`${iosInput} pl-10`}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Город, адрес или телефон"
+                        placeholder={archiveView ? 'Название, город или адрес' : 'Город, адрес или телефон'}
                     />
                 </div>
 
-                <OfficeFilters
-                    value={filters}
-                    onChange={setFilters}
-                    cities={cities}
-                    parks={parks}
-                    canManage={canManage}
-                />
+                {!archiveView && (
+                    <OfficeFilters
+                        value={filters}
+                        onChange={setFilters}
+                        cities={cities}
+                        parks={parks}
+                    />
+                )}
 
                 {/* Переключатель вида на телефоне не рисуем вовсе: две из трёх
                     его кнопок («Две в ряд», «Таблица») там не про что —
                     показать нечего, а ряд неработающих переключателей и есть
-                    тот самый визуальный шум. */}
-                {!isPhone && (
+                    тот самый визуальный шум. В архиве вида нет — там список. */}
+                {!isPhone && !archiveView && (
                 <div className="flex shrink-0 rounded-xl bg-slate-100 p-1">
-                    {VIEWS.map(({ key, label, icon: Icon }) => (
+                    {VIEWS.map(({ key, label, icon: Icon, tip }) => (
                         <button
                             key={key}
                             type="button"
                             onClick={() => setView(key)}
-                            title={label}
+                            data-tip={tip}
                             aria-label={label}
                             aria-pressed={view === key}
                             className={`grid h-[34px] w-[34px] place-items-center rounded-[9px] transition-all ${
@@ -745,8 +862,13 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 </div>
                 )}
 
-                {canManage && (
-                    <button type="button" className={iosBtnPrimary} onClick={() => setDraft(emptyDraft())}>
+                {canManage && !archiveView && (
+                    <button
+                        type="button"
+                        className={iosBtnPrimary}
+                        onClick={() => setDraft(emptyDraft())}
+                        data-tip="Добавить новый офис в справочник"
+                    >
                         <Plus size={15} /> Офис
                     </button>
                 )}
@@ -756,7 +878,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 выдаёт себя за свежий: статус «открыт» из утренней загрузки к
                 вечеру мог стать неправдой, и оператор должен видеть, на какое
                 время эти данные. */}
-            {!loading && loadError && offices.length > 0 && (
+            {!loading && loadError && listMatches && offices.length > 0 && (
                 <div className="flex items-center gap-2 rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] leading-snug text-amber-800">
                     <WifiOff size={14} className="shrink-0" aria-hidden="true" />
                     <span className="min-w-0 flex-1">
@@ -780,7 +902,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 Залитая полоса, как в макете: три подписи вразброс по белому
                 полю читались как случайные слова над таблицей, а не как ключ
                 к её цветам. */}
-            {!loading && offices.length > 0 && (
+            {!loading && !archiveView && listMatches && offices.length > 0 && (
                 <div className="wiki-m-office-legend flex flex-wrap items-center gap-1 rounded-xl bg-slate-100 px-2 py-1.5">
                     {DAY_LEGEND.map((item) => {
                         const count = counts[item.state] || 0;
@@ -791,6 +913,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                                 type="button"
                                 disabled={!count && !active}
                                 onClick={() => setStateFilter(active ? '' : item.state)}
+                                data-tip={active ? 'Снять отбор и показать все офисы' : LEGEND_TIPS[item.state]}
                                 className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12.5px] transition disabled:opacity-40 ${
                                     active
                                         ? 'bg-slate-900 font-medium text-white'
@@ -852,7 +975,19 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 </div>
             )}
 
-            {screen === 'empty' && (
+            {/* Архив — своим списком и своим «пусто»: «Офисов пока нет / добавьте
+                офис» на пустом архиве звало бы заводить офис не туда. */}
+            {archiveView && (screen === 'list' || screen === 'empty') && (
+                <OfficeArchive
+                    offices={archived}
+                    query={query.trim()}
+                    busy={busy}
+                    onOpen={setInfoTarget}
+                    onRestore={restore}
+                />
+            )}
+
+            {!archiveView && screen === 'empty' && (
                 <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
                     <div className="grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-slate-400">
                         <MapPin size={22} />
@@ -871,7 +1006,7 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                 </div>
             )}
 
-            {screen === 'list' && shownView === 'table' && (
+            {!archiveView && screen === 'list' && shownView === 'table' && (
                 <OfficeTable
                     offices={visible}
                     groups={groups}
@@ -883,12 +1018,11 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                     onOpen={setInfoTarget}
                     onEdit={(item) => setDraft(draftFrom(item))}
                     onArchive={archive}
-                    onRestore={restore}
                     onMarkDay={setDayTarget}
                 />
             )}
 
-            {screen === 'list' && shownView !== 'table' && (
+            {!archiveView && screen === 'list' && shownView !== 'table' && (
                 groups
                     /* Между городами воздуха больше, чем между карточками внутри
                        города: одинаковый отступ и делал список сплошным, а
@@ -985,7 +1119,9 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                         onCopyAddress={copyAddress}
                         onEdit={(item) => { setInfoTarget(null); setDraft(draftFrom(item)); }}
                         onMarkDay={(item) => { setInfoTarget(null); setDayTarget(item); }}
-                        onArchive={(item) => { setInfoTarget(null); archive(item); }}
+                        // Окно закрывается, только если человек подтвердил: «Нет» в
+                        // вопросе не должно уносить и открытую карточку.
+                        onArchive={(item) => { if (archive(item)) setInfoTarget(null); }}
                         onRestore={(item) => { setInfoTarget(null); restore(item); }}
                     />
                 )}
@@ -1000,6 +1136,10 @@ export default function WikiOffices({ base, headers, showToast, spaceId = null,
                         onClose={() => setDayTarget(null)}
                     />
                 )}
+
+                {/* Подсказки «что делает кнопка» (data-tip) — один хозяин на весь
+                    раздел, вместе с окнами и панелью фильтра. */}
+                <HoverTips />
             </div>
         </div>
     );

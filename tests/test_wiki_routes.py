@@ -1377,6 +1377,98 @@ class DirectoryRouteTest(_RouteHarness, unittest.TestCase):
         for url in ('/api/wiki/parks', '/api/wiki/offices'):
             self.assertTrue(client.get(url).get_json().get('can_manage'), url)
 
+    def test_archive_tab_is_for_the_one_who_edits(self):
+        """Вкладка «Архив» — тому, кто правит справочник, и больше никому.
+
+        Читатель, попросивший «только архив», получает пустой список, а не живые
+        офисы под видом архивных, и числа архивных ему тоже не приходит.
+        """
+        from unittest.mock import patch
+        from wiki import offices as wiki_offices
+
+        with patch.object(wiki_offices, 'list_offices', return_value=[]) as listed, \
+                patch.object(wiki_offices, 'archived_count', return_value=4):
+            client, cursor = self.build(make_context('operator'))
+            cursor.fetchall.return_value = []
+            body = client.get('/api/wiki/offices?archived=only').get_json()
+            self.assertEqual(body['items'], [])
+            self.assertNotIn('archived_count', body)
+            listed.assert_not_called()
+
+            client, cursor = self.build(make_context('sv'))
+            cursor.fetchall.return_value = []
+            body = client.get('/api/wiki/offices?archived=only').get_json()
+            self.assertEqual(body['archived_count'], 4)
+            kwargs = listed.call_args.kwargs
+            self.assertTrue(kwargs['only_archived'])
+            self.assertFalse(kwargs['include_archived'])
+
+            # Обычный список — действующие, но число архивных на вкладку едет и тут.
+            body = client.get('/api/wiki/offices').get_json()
+            self.assertEqual(body['archived_count'], 4)
+            self.assertFalse(listed.call_args.kwargs['only_archived'])
+
+    def test_mixed_archive_list_is_for_the_one_who_edits_too(self):
+        """archived=1 (вперемешку) клиент больше не шлёт, но это часть API — и
+        читателю справочника он архивных офисов не открывает."""
+        from unittest.mock import patch
+        from wiki import offices as wiki_offices
+
+        with patch.object(wiki_offices, 'list_offices', return_value=[]) as listed, \
+                patch.object(wiki_offices, 'archived_count', return_value=0):
+            client, cursor = self.build(make_context('operator'))
+            cursor.fetchall.return_value = []
+            client.get('/api/wiki/offices?archived=1')
+            self.assertFalse(listed.call_args.kwargs['include_archived'])
+            self.assertFalse(listed.call_args.kwargs['only_archived'])
+
+            client, cursor = self.build(make_context('sv'))
+            cursor.fetchall.return_value = []
+            client.get('/api/wiki/offices?archived=1')
+            self.assertTrue(listed.call_args.kwargs['include_archived'])
+
+    def _office_actions(self, method, url, office_status, body=None):
+        """Какие записи журнала оставил запрос к офису с данным статусом."""
+        from unittest.mock import patch
+        from wiki import offices as wiki_offices
+
+        with patch.object(wiki_offices, 'get_office',
+                          return_value={'id': 5, 'status': office_status}), \
+                patch.object(wiki_offices, 'update_office', return_value=True) as updated, \
+                patch.object(wiki_offices, 'set_office_parks'), \
+                patch.object(queries, 'log_action') as logged:
+            client, _cursor = self.build(make_context('sv'))
+            response = getattr(client, method)(url, json=body or {})
+            self.assertLess(response.status_code, 300, response.get_data(as_text=True))
+            return [c.kwargs['action'] for c in logged.call_args_list], updated.call_count
+
+    def test_archiving_goes_to_the_journal_once_as_archive(self):
+        """«Кто и когда убрал» вкладка «Архив» берёт из последней office.archive.
+
+        Значит: архивация правкой статуса тоже пишется как office.archive (иначе
+        там осталась бы прошлая архивация с её датой и автором), а повторное
+        «В архив» уже архивного офиса — второй руководитель в неосвежённой
+        таблице — не пишет ничего и автора не подменяет.
+        """
+        actions, _ = self._office_actions('delete', '/api/wiki/offices/5', 'active')
+        self.assertEqual(actions, ['office.archive'])
+
+        actions, updates = self._office_actions('delete', '/api/wiki/offices/5', 'archived')
+        self.assertEqual(actions, [])
+        self.assertEqual(updates, 0)
+
+        actions, _ = self._office_actions('patch', '/api/wiki/offices/5', 'active',
+                                          {'status': 'archived'})
+        self.assertEqual(actions, ['office.archive'])
+
+        # Возврат и обычная правка — по-прежнему office.update.
+        actions, _ = self._office_actions('patch', '/api/wiki/offices/5', 'archived',
+                                          {'status': 'active'})
+        self.assertEqual(actions, ['office.update'])
+        actions, _ = self._office_actions('patch', '/api/wiki/offices/5', 'archived',
+                                          {'status': 'archived', 'name': 'Сайран'})
+        self.assertEqual(actions, ['office.update'])
+
 
 if __name__ == '__main__':
     unittest.main()

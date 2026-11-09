@@ -25,6 +25,8 @@ import { IosDateRangeCalendar, isoDate } from './DateRangePicker';
  *   allowEmpty   — показывать ли кнопку «Очистить» (по умолчанию нет)
  *   placeholder  — что стоит в триггере, когда даты нет
  *   disabled, className, triggerClassName, ariaLabel, id
+ *   tip          — подсказка при наведении на кнопку (data-tip, см. common/HoverTips);
+ *                  не передана — атрибута нет
  */
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -60,6 +62,7 @@ export default function IosDatePicker({
     triggerClassName = '',
     ariaLabel,
     id,
+    tip,
 }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
@@ -197,6 +200,7 @@ export default function IosDatePicker({
             aria-label={ariaLabel}
             aria-haspopup="dialog"
             aria-expanded={open}
+            data-tip={tip || undefined}
             onClick={() => setOpen((v) => !v)}
             className={triggerClassName || `flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium tabular-nums transition
                 disabled:cursor-not-allowed disabled:opacity-40 ${

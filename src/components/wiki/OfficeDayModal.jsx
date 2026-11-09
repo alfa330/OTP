@@ -28,9 +28,9 @@ const STATES = [
 /* Три ответа на «насколько закрыт». «Только этот день» стоит первым, потому что
  * это прежнее поведение и самый частый случай — «сегодня не работаем». */
 const TERMS = [
-    { key: 'day', label: 'Только этот день' },
-    { key: 'until', label: 'До даты' },
-    { key: 'open', label: 'Срок не известен' },
+    { key: 'day', label: 'Только этот день', tip: 'Закрыт только в выбранный день, со следующего — по графику' },
+    { key: 'until', label: 'До даты', tip: 'Закрыт до дня открытия, который вы выберете' },
+    { key: 'open', label: 'Срок не известен', tip: 'Закрыт, пока отметку не снимут' },
 ];
 
 const Segmented = ({ value, options, onChange }) => (
@@ -39,6 +39,7 @@ const Segmented = ({ value, options, onChange }) => (
             <button
                 key={item.key}
                 type="button"
+                data-tip={item.tip}
                 onClick={() => onChange(item.key)}
                 className={`flex-1 rounded-[9px] px-3 py-1.5 text-[13px] font-semibold transition-all ${
                     value === item.key
@@ -108,6 +109,7 @@ export default function OfficeDayModal({ office, dayISO, busy, onSubmit, onClear
                             className={`${iosBtnSecondary} mr-auto`}
                             disabled={busy}
                             onClick={onClear}
+                            data-tip="Снять отметку и срок закрытия — статус снова считается по графику работы"
                         >
                             Считать по графику
                         </button>

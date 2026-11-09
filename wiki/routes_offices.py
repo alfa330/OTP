@@ -178,14 +178,22 @@ def register(bp, wiki_route, db, log_ip):
             # Алматы: у сервера в Render время UTC, и до трёх ночи его «сегодня»
             # ещё вчерашнее.
             day = wiki_offices.parse_day(request.args.get('date')) or wiki_offices.office_today()
-            # Архивные — по запросу, а не всегда. Управляющему они приезжали в
-            # общем списке и мешались среди живых офисов; теперь это тумблер в
-            # фильтре, и по умолчанию он выключен.
-            show_archived = can_manage and request.args.get('archived') in ('1', 'true')
-            return jsonify({
-                'items': wiki_offices.list_offices(
+            # Архивные — по запросу, а не всегда, и только тому, кто правит
+            # справочник. archived=only — вкладка «Архив»: одни архивные, с тем,
+            # кто и когда их туда убрал. archived=1 (вперемешку с живыми) раздел
+            # больше не просит — прежний тумблер фильтра заменён вкладкой, — но
+            # ответ на него оставлен как был.
+            archived = request.args.get('archived')
+            only_archived = archived == 'only'
+            show_archived = can_manage and archived in ('1', 'true')
+            body = {
+                # Архив чужому глазу не открывается: читатель справочника, попросив
+                # «только архив», получает пустой список, а не живые офисы под видом
+                # архивных.
+                'items': [] if only_archived and not can_manage else wiki_offices.list_offices(
                     cursor,
                     include_archived=show_archived,
+                    only_archived=only_archived,
                     query=request.args.get('q'),
                     park_id=_int_or_none(request.args.get('park_id')),
                     city=request.args.get('city'),
@@ -195,7 +203,12 @@ def register(bp, wiki_route, db, log_ip):
                 'cities': wiki_offices.cities(cursor, space_id=space_id),
                 'date': day.isoformat(),
                 'can_manage': can_manage,
-            })
+            }
+            # Число архивных — на переключатель «Офисы | Архив»: без него вкладка
+            # не отвечает, есть ли там что-нибудь, пока на неё не перейдёшь.
+            if can_manage:
+                body['archived_count'] = wiki_offices.archived_count(cursor, space_id=space_id)
+            return jsonify(body)
 
         if not _may_edit(ctx):
             return _forbidden()
@@ -241,9 +254,17 @@ def register(bp, wiki_route, db, log_ip):
             # физическое удаление снесло бы их каскадом без следа в журнале.
             # «Не найден» отвечаем и на чужой офис: он для этого пространства и
             # правда не существует, а «нет прав» подтвердило бы, что он есть.
-            if not wiki_offices.update_office(cursor, office_id, {'status': 'archived'},
-                                              space_id=space_id):
+            current = wiki_offices.get_office(cursor, office_id, space_id=space_id)
+            if not current:
                 return jsonify({"error": "Офис не найден"}), 404
+            # Уже в архиве — ответ тот же, но ни правки, ни записи в журнале:
+            # вкладка «Архив» берёт «кто и когда убрал» из ПОСЛЕДНЕЙ записи
+            # office.archive, и второй руководитель, нажавший «В архив» в
+            # неосвежённой таблице, подменил бы собой того, кто убрал офис на деле.
+            if current.get('status') == 'archived':
+                return jsonify({"status": "archived"})
+            wiki_offices.update_office(cursor, office_id, {'status': 'archived'},
+                                       space_id=space_id)
             queries.log_action(cursor, actor_id=ctx['user_id'], action='office.archive',
                                entity_type='office', entity_id=office_id, ip_address=log_ip())
             return jsonify({"status": "archived"})
@@ -262,7 +283,8 @@ def register(bp, wiki_route, db, log_ip):
         # Проверяем офис ДО правки связей: без этого чужой офис ответил бы
         # «Нечего обновлять» на пустых полях, а привязку парков успел бы
         # переписать — set_office_parks работает от office_id.
-        if not wiki_offices.get_office(cursor, office_id, space_id=space_id):
+        current = wiki_offices.get_office(cursor, office_id, space_id=space_id)
+        if not current:
             return jsonify({"error": "Офис не найден"}), 404
 
         changed = (wiki_offices.update_office(cursor, office_id, fields,
@@ -275,7 +297,14 @@ def register(bp, wiki_route, db, log_ip):
 
         if not changed:
             return jsonify({"error": "Нечего обновлять"}), 400
-        queries.log_action(cursor, actor_id=ctx['user_id'], action='office.update',
+        # Перевод в архив правкой статуса — тоже архивация, и в журнал он идёт
+        # как office.archive: из неё вкладка «Архив» берёт, кто и когда убрал
+        # офис. Записью office.update там осталась бы прошлая архивация с её
+        # датой и автором.
+        archived_now = (fields.get('status') == 'archived'
+                        and current.get('status') != 'archived')
+        queries.log_action(cursor, actor_id=ctx['user_id'],
+                           action='office.archive' if archived_now else 'office.update',
                            entity_type='office', entity_id=office_id,
                            details={'fields': sorted(fields.keys())}, ip_address=log_ip())
         return jsonify({"status": "ok"})

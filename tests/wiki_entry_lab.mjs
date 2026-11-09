@@ -141,8 +141,13 @@ const ENTRY = `
   export * as memory from ${JSON.stringify(path('src/components/wiki/entryMemory.js'))};
 `;
 
-/** Сборка раздела. lab: true — с прослойкой вместо react (кадры после первого). */
-export async function loadSection({ lab = false } = {}) {
+/** Сборка раздела. lab: true — с прослойкой вместо react (кадры после первого).
+ *  entry — свой набор экспортов вместо раздела целиком (вкладка «Офисы» в
+ *  tests/wiki_office_archive*.test.mjs живёт корнем сама по себе).
+ *  stubs — { 'регулярка пути': 'исходник' }: модуль подменяется пустышкой. Так
+ *  тест достаёт обработчики, которые корень отдаёт ребёнку пропсами (разметка
+ *  статическая, нажать на неё нельзя): пустышка складывает пропсы в globalThis. */
+export async function loadSection({ lab = false, entry = ENTRY, name = 'wiki-entry', stubs = {} } = {}) {
     /* Имена с номером процесса: два тестовых файла идут параллельно, а тесты из
        двух копий кода с общим node_modules (рабочая копия, снимок для проверки)
        иначе могли бы подхватить сборку друг друга. Всё временное убираем сразу:
@@ -151,19 +156,19 @@ export async function loadSection({ lab = false } = {}) {
     const own = `${lab ? 'lab' : 'frame'}-${process.pid}`;
     const axiosPath = join(OUT_DIR, `axios-stub-${own}.mjs`);
     const reactPath = join(OUT_DIR, `react-shim-${own}.mjs`);
-    const outPath = join(OUT_DIR, `wiki-entry-${own}.mjs`);
+    const outPath = join(OUT_DIR, `${name}-${own}.mjs`);
     writeFileSync(axiosPath, AXIOS_STUB);
     writeFileSync(reactPath, REACT_SHIM);
     try {
-        return await buildAndImport({ lab, axiosPath, reactPath, outPath });
+        return await buildAndImport({ lab, axiosPath, reactPath, outPath, entry, stubs });
     } finally {
         for (const file of [axiosPath, reactPath, outPath]) rmSync(file, { force: true });
     }
 }
 
-async function buildAndImport({ lab, axiosPath, reactPath, outPath }) {
+async function buildAndImport({ lab, axiosPath, reactPath, outPath, entry, stubs = {} }) {
     const result = await esbuild.build({
-        stdin: { contents: ENTRY, resolveDir: path('.'), loader: 'js' },
+        stdin: { contents: entry, resolveDir: path('.'), loader: 'js' },
         bundle: true,
         write: false,
         format: 'esm',
@@ -180,6 +185,9 @@ async function buildAndImport({ lab, axiosPath, reactPath, outPath }) {
             setup(build) {
                 build.onLoad({ filter: /[\\/]wiki[\\/]WikiSearch\.jsx$/ },
                     () => ({ contents: SEARCH_STUB, loader: 'jsx' }));
+                for (const [pattern, contents] of Object.entries(stubs)) {
+                    build.onLoad({ filter: new RegExp(pattern) }, () => ({ contents, loader: 'jsx' }));
+                }
             },
         }],
         logLevel: 'silent',

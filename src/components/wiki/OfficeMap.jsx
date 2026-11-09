@@ -153,6 +153,7 @@ export default function OfficeMap({ base, lat, lon, url, zoom = 16, height = 148
             style={{ height }}
             className={`${shell} transition hover:opacity-95 active:scale-[0.99]`}
             aria-label="Открыть офис в 2ГИС"
+            data-tip="Открыть офис на карте 2ГИС в новой вкладке"
         >
             {body}
         </a>

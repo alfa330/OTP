@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, RotateCcw, SlidersHorizontal } from 'lucide-react';
-import { APPLE_FONT, IosToggle, iosGroupLabel, iosInput } from '../ui/ios';
+import { APPLE_FONT, iosGroupLabel, iosInput } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import useIsMobileShell from '../common/useIsMobileShell';
 
@@ -27,14 +27,18 @@ export const SORT_OPTIONS = [
     { key: 'manual', label: 'Как в справочнике', grouped: true },
 ];
 
+/* Тумблера «Показывать архивные» здесь больше нет: архив — своя вкладка рядом с
+   «Офисами» (WikiOffices, SCOPES). Под тумблером в панели его находил только
+   тот, кто знал, что он там есть, а включённый он мешал архивные офисы с
+   живыми. */
 export const DEFAULT_FILTERS = {
-    sort: 'city_asc', city: '', parkId: '', showArchived: false,
+    sort: 'city_asc', city: '', parkId: '',
 };
 
 /** Сколько условий отличается от «показать всё». Сортировка условием не считается:
  *  она меняет порядок, а не состав, и число на кнопке врало бы. */
 export const activeFilterCount = (value) => (
-    (value.city ? 1 : 0) + (value.parkId ? 1 : 0) + (value.showArchived ? 1 : 0)
+    (value.city ? 1 : 0) + (value.parkId ? 1 : 0)
 );
 
 const PANEL_WIDTH = 268;
@@ -105,13 +109,6 @@ export const filterPanelBox = ({
 const isInsideOpenSelect = (target) => Array.from(document.querySelectorAll('[role="listbox"]'))
     .some((list) => list.parentElement?.contains(target));
 
-const Row = ({ label, children }) => (
-    <label className="flex items-center justify-between gap-3 py-1">
-        <span className="text-[13px] text-slate-700">{label}</span>
-        {children}
-    </label>
-);
-
 /* Список условия для ЛИСТА — системный <select>.
  *
  * У CustomSelect свой выпадающий список: портал в body с fixed-позицией и нижней
@@ -137,7 +134,7 @@ const SheetSelect = ({ value, onChange, options, ariaLabel }) => (
     </select>
 );
 
-export default function OfficeFilters({ value, onChange, cities = [], parks = [], canManage }) {
+export default function OfficeFilters({ value, onChange, cities = [], parks = [] }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const btnRef = useRef(null);
@@ -157,8 +154,8 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
         if (!el) return;
         const rect = el.getBoundingClientRect();
         /* На телефоне низ экрана занят баром разделов, и панель, посчитанная до
-           края окна, ложилась поверх него: нижние условия («Показывать
-           архивные») оказывались на месте иконок бара. Край — верх бара. */
+           края окна, ложилась поверх него: нижние условия оказывались на месте
+           иконок бара. Край — верх бара. */
         const bar = isPhone
             ? document.querySelector('.mobile-tabbar[data-side="bottom"]')?.getBoundingClientRect()
             : null;
@@ -193,7 +190,7 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
         /* Внешняя прокрутка закрывает, а не тащит панель за собой: кнопка
            уезжает, и «приклеенная» панель повисла бы над чужим содержимым.
            Прокрутка ВНУТРИ панели — не внешняя: панель выше экрана ноутбука
-           (на 1366×768 в неё не помещаются «Показывать архивные» и
+           (на 1366×768 в неё не помещались нижние условия и
            «Сбросить»), у неё своя полоса прокрутки, и раньше первый же щелчок
            колеса над ней гасил панель — до нижних условий было не добраться
            вовсе. Прокрутка внутри раскрытого списка — тоже: он лежит в своём
@@ -240,6 +237,7 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                 aria-label="Фильтр и сортировка"
                 aria-haspopup="dialog"
                 aria-expanded={open}
+                data-tip="Сортировка и отбор по городу и таксопарку"
                 onClick={() => setOpen((v) => !v)}
                 className={`inline-flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2.5 text-[13.5px] font-semibold transition-all active:scale-[0.98] ${
                     open || count
@@ -338,23 +336,13 @@ export default function OfficeFilters({ value, onChange, cities = [], parks = []
                                 />
                             )}
                         </div>
-
-                        {/* Архивные раньше приезжали управляющему всегда и молча
-                            мешались в списке живых офисов. Теперь это выбор. */}
-                        {canManage && (
-                            <Row label="Показывать архивные">
-                                <IosToggle
-                                    checked={value.showArchived}
-                                    onChange={(next) => patch({ showArchived: next })}
-                                />
-                            </Row>
-                        )}
                     </div>
 
                     {!isDefault && (
                         <button
                             type="button"
                             onClick={() => onChange({ ...DEFAULT_FILTERS })}
+                            data-tip="Сортировка по городу, без отбора по городу и таксопарку"
                             className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-xl bg-slate-100 py-2 text-[13px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]"
                         >
                             <RotateCcw size={13} /> Сбросить

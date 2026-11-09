@@ -1,6 +1,6 @@
 import React from 'react';
-import { Archive, ArchiveRestore, CalendarClock, Pencil } from 'lucide-react';
-import { iosCard, IosBadge } from '../ui/ios';
+import { Archive, CalendarClock, Pencil } from 'lucide-react';
+import { iosCard } from '../ui/ios';
 import { OfficeDayPill } from './officeBadges';
 import {
     DAY_SOURCE_LABELS, DAY_STATE_ROW, DAY_STATE_TEXT, formatStamp, formatStampTime,
@@ -50,8 +50,17 @@ const HEAD = 'h-[42px] border-b border-slate-300 bg-slate-100 px-4 text-[11px] '
 const BAND = 'border-t border-slate-300 bg-slate-200 px-4 py-2';
 
 /* Кнопки действий сидят в залитой строке, поэтому подсветка — белая плашка, а
-   не цветная: bg-blue-50 на зелёной строке читался бы третьим состоянием. */
+   не цветная: bg-blue-50 на зелёной строке читался бы третьим состоянием.
+   Подписи у значков нет — что делает каждый, говорит подсказка при наведении
+   (data-tip, common/HoverTips): без неё календарь, карандаш и коробка в ряд
+   оставались загадкой (замечание владельца 09.11.2026). */
 const ACTION = 'grid h-8 w-8 place-items-center rounded-full text-slate-500 transition hover:bg-white/80';
+
+const TIPS = {
+    day: 'Статус на дату: отметить, что офис открыт или закрыт, или закрыть на срок',
+    edit: 'Изменить: адрес, телефон, график работы, карта',
+    archive: 'Убрать в архив — офис пропадёт из списка, вернуть можно на вкладке «Архив»',
+};
 
 /* Пунктир под адресом — единственный намёк, что за строкой есть продолжение.
    Сплошного подчёркивания тут нельзя: адрес больше не ссылка в 2ГИС (она уехала
@@ -77,9 +86,11 @@ const CityBand = ({ city, count, span, first }) => (
     </tr>
 );
 
+/* Архивных строк здесь не бывает: архив — своя вкладка (OfficeArchive), и
+   таблица статусов показывает только действующие офисы. */
 export default function OfficeTable({
     offices, groups = null, officeCount = (n) => n, dayISO, isToday, tick, canManage,
-    onOpen, onEdit, onArchive, onRestore, onMarkDay,
+    onOpen, onEdit, onArchive, onMarkDay,
 }) {
     const span = 5 + (canManage ? 1 : 0);
     /* Плоский список остаётся плоским: при сортировке по названию или статусу
@@ -166,9 +177,6 @@ export default function OfficeTable({
                                             {groups
                                                 ? office.name
                                                 : (office.city || office.name || 'Без города')}
-                                            {office.status === 'archived' && (
-                                                <IosBadge tone="amber">В архиве</IosBadge>
-                                            )}
                                         </div>
                                         {!groups && office.city && office.name !== office.city && (
                                             <div className={`text-[11.5px] font-normal ${text.meta}`}>
@@ -190,7 +198,7 @@ export default function OfficeTable({
                                             <button
                                                 type="button"
                                                 onClick={() => onOpen(office)}
-                                                title="Подробнее об офисе"
+                                                data-tip="Открыть карточку офиса: карта, часы работы, телефоны парков"
                                                 className={ADDRESS_LINK}
                                             >
                                                 {office.address || '—'}
@@ -205,6 +213,7 @@ export default function OfficeTable({
                                         {office.phone ? (
                                             <a
                                                 href={`tel:${office.phone.replace(/[^\d+]/g, '')}`}
+                                                data-tip="Позвонить по этому номеру"
                                                 className="font-medium underline-offset-2 hover:underline"
                                             >
                                                 {office.phone}
@@ -237,9 +246,9 @@ export default function OfficeTable({
                                         для дежурного как раз и есть ответ. */}
                                     <td
                                         className={`${CELL} whitespace-nowrap font-medium tabular-nums ${text.meta}`}
-                                        title={status.updatedAt
-                                            ? `${formatStampTime(status.updatedAt)} · ${
-                                                DAY_SOURCE_LABELS[status.source] || ''}`
+                                        data-tip={status.updatedAt
+                                            ? [formatStampTime(status.updatedAt), DAY_SOURCE_LABELS[status.source]]
+                                                .filter(Boolean).join(' · ')
                                             : undefined}
                                     >
                                         {formatStamp(status.updatedAt)}
@@ -254,6 +263,7 @@ export default function OfficeTable({
                                                         onClick={() => onMarkDay(office)}
                                                         className={`${ACTION} hover:text-blue-600`}
                                                         aria-label="Отметить статус на дату"
+                                                        data-tip={TIPS.day}
                                                     >
                                                         <CalendarClock size={14} />
                                                     </button>
@@ -263,28 +273,19 @@ export default function OfficeTable({
                                                     onClick={() => onEdit(office)}
                                                     className={`${ACTION} hover:text-blue-600`}
                                                     aria-label="Изменить офис"
+                                                    data-tip={TIPS.edit}
                                                 >
                                                     <Pencil size={14} />
                                                 </button>
-                                                {office.status === 'active' ? (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => onArchive(office)}
-                                                        className={`${ACTION} hover:text-amber-600`}
-                                                        aria-label="Убрать в архив"
-                                                    >
-                                                        <Archive size={14} />
-                                                    </button>
-                                                ) : (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => onRestore(office)}
-                                                        className={`${ACTION} hover:text-emerald-700`}
-                                                        aria-label="Вернуть из архива"
-                                                    >
-                                                        <ArchiveRestore size={14} />
-                                                    </button>
-                                                )}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onArchive(office)}
+                                                    className={`${ACTION} hover:text-amber-600`}
+                                                    aria-label="Убрать в архив"
+                                                    data-tip={TIPS.archive}
+                                                >
+                                                    <Archive size={14} />
+                                                </button>
                                             </div>
                                         </td>
                                     )}

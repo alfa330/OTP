@@ -112,6 +112,7 @@ function ScheduleEditor({ schedule, onChange }) {
                     <button
                         key={preset.label}
                         type="button"
+                        data-tip="Заполнить всю неделю этим графиком"
                         onClick={() => onChange(buildSchedule({
                             ...preset,
                             breakFrom: breakOn ? DEFAULT_BREAK.from : null,
@@ -125,6 +126,7 @@ function ScheduleEditor({ schedule, onChange }) {
                 <button
                     type="button"
                     onClick={() => onChange({})}
+                    data-tip="Стереть график всех дней"
                     className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11.5px] font-medium text-slate-400 transition hover:border-rose-200 hover:text-rose-500"
                 >
                     Очистить
@@ -248,6 +250,7 @@ function MapField({ draft, setDraft, base, headers, showToast }) {
                     className={iosBtnSecondary}
                     disabled={checking || !(draft.map_url || '').trim()}
                     onClick={resolve}
+                    data-tip="Найти офис по ссылке 2ГИС и показать его на карте"
                 >
                     {checking ? <Loader2 size={14} className="animate-spin" /> : <MapPin size={14} />}
                     Проверить

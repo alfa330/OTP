@@ -898,8 +898,39 @@ def _office_row(row):
     return office
 
 
+def office_statuses(include_archived=False, only_archived=False):
+    """Какие записи справочника попадают в выборку: действующие, все или архив.
+
+    Архив — отдельная вкладка раздела, а не примесь к живым офисам: в общем
+    списке архивный офис красился бы по своему графику («Открыт до 19:00»),
+    как работающий, и попадал бы в счётчики легенды.
+    """
+    if only_archived:
+        return ['archived']
+    return ['active', 'archived'] if include_archived else ['active']
+
+
+# Кто и когда убрал офис в архив — последняя запись «office.archive» в журнале
+# вики. Отдельной колонки у офиса нет и не нужно: журнал пишется при каждой
+# архивации (routes_offices), а updated_at для этого не годится — его двигает и
+# любая правка уже архивной записи. Индекс idx_wiki_audit_entity держит поиск по
+# офису, а подключается подзапрос только к выборке, где архивные вообще есть:
+# поиск и помощник вики зовут list_offices на каждый вопрос.
+_ARCHIVE_META_JOIN = """
+          LEFT JOIN LATERAL (
+                SELECT a.created_at, u.name
+                  FROM wiki_audit_log a
+                  LEFT JOIN users u ON u.id = a.actor_id
+                 WHERE a.entity_type = 'office' AND a.entity_id = o.id
+                   AND a.action = 'office.archive'
+                 ORDER BY a.id DESC
+                 LIMIT 1
+          ) arch ON o.status = 'archived'
+"""
+
+
 def list_offices(cursor, include_archived=False, query=None, park_id=None, city=None,
-                 day=None, *, space_id):
+                 day=None, *, space_id, only_archived=False):
     """Офисы со списком парков и переопределениями. Только своего пространства.
 
     Парки приезжают одним запросом на всю выборку, а не запросом на карточку:
@@ -910,17 +941,24 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
     первичному ключу), поэтому «показать статус на 17 августа» не превращается в
     запрос на офис. Нет строки за день — приедет None, и клиент честно считает по
     графику.
+
+    only_archived — только архив (вкладка «Архив»): у каждой записи приезжают
+    archived_at и archived_by — когда и кто убрал её туда.
     """
+    statuses = office_statuses(include_archived, only_archived)
+    archive_meta = 'archived' in statuses
     # Склейка, а не %-форматирование: в тексте есть литеральные '%%' для ILIKE,
     # и любой %-формат поверх них пришлось бы удваивать ещё раз.
     cursor.execute(
         'SELECT ' + _OFFICE_COLUMNS + """,
-               d.state, d.note, d.source, d.day, d.recorded_at
+               d.state, d.note, d.source, d.day, d.recorded_at,
+               """ + ('arch.created_at, arch.name' if archive_meta else 'NULL, NULL') + """
           FROM wiki_offices o
           LEFT JOIN wiki_office_days d
                  ON d.office_id = o.id AND d.day = %(day)s::date
+        """ + (_ARCHIVE_META_JOIN if archive_meta else '') + """
          WHERE o.space_id = %(space)s
-           AND (%(archived)s OR o.status = 'active')
+           AND o.status = ANY(%(statuses)s)
            AND (%(city)s::text IS NULL OR o.city = %(city)s::text)
            AND (%(query)s::text IS NULL
                 OR o.name ILIKE '%%' || %(query)s::text || '%%'
@@ -933,16 +971,23 @@ def list_offices(cursor, include_archived=False, query=None, park_id=None, city=
                             WHERE op.office_id = o.id AND op.park_id = %(park)s::int))
          ORDER BY o.position, o.city NULLS LAST, o.name
         """,
-        {'archived': include_archived, 'query': query or None,
+        {'statuses': statuses, 'query': query or None,
          'park': park_id, 'city': city or None, 'day': day or None,
          'space': space_id},
     )
     offices = []
     for row in cursor.fetchall():
         office = _office_row(row)
-        state, note, source, recorded_on, recorded_at = row[len(_OFFICE_KEYS):]
+        (state, note, source, recorded_on, recorded_at,
+         archived_at, archived_by) = row[len(_OFFICE_KEYS):]
         office['day'] = _day_payload(state, note, source, recorded_on, recorded_at) \
             if state else None
+        if office['status'] == 'archived':
+            # Журнал мог и не знать об архивации (запись убрали в архив до того,
+            # как он появился, или прямой правкой статуса) — тогда None, и
+            # вкладка честно не пишет «когда», а не выдумывает его.
+            office['archived_at'] = archived_at.isoformat() if archived_at else None
+            office['archived_by'] = archived_by
         offices.append(office)
     if not offices:
         return []
@@ -983,6 +1028,18 @@ def get_office(cursor, office_id, *, space_id):
     )
     row = cursor.fetchone()
     return _office_row(row) if row else None
+
+
+def archived_count(cursor, *, space_id):
+    """Сколько офисов пространства лежит в архиве — число на переключателе
+    «Офисы | Архив». Без условий поиска: это ответ на «есть ли там что-нибудь»,
+    а не на «сколько там подходит под то, что я набрал»."""
+    cursor.execute(
+        "SELECT count(*) FROM wiki_offices WHERE space_id = %s AND status = 'archived'",
+        (space_id,),
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if row else 0
 
 
 def cities(cursor, *, space_id):
