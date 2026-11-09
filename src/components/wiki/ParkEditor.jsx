@@ -498,6 +498,9 @@ export default function ParkEditor({ draft, setDraft, offices, onUploadLogo }) {
     const issue = parkDraftIssue(draft);
     const numbers = draft.numbers || [];
     const headOffice = offices.find((office) => office.id === draft.head_office_id);
+    /* Ссылка есть, а офиса среди действующих нет — он в архиве (список офисов
+       формы приходит вместе с парками, так что «ещё не загрузился» тут не бывает). */
+    const archivedHead = !headOffice && draft.head_office_id != null;
 
     return (
         <div className="space-y-5">
@@ -593,9 +596,13 @@ export default function ParkEditor({ draft, setDraft, offices, onUploadLogo }) {
                     неизбежно разошёлся бы с первым. */}
                 <Field
                     label="Адрес"
+                    /* При офисе в архиве подсказки нет: строка под полем уже
+                        говорит, что делать, и вторая про ту же вкладку — шум. */
                     hint={headOffice
                         ? 'Адрес и карта берутся из карточки офиса — правятся на вкладке «Офисы»'
-                        : 'Главный офис парка из справочника. Нужного нет — заведите его на вкладке «Офисы»'}
+                        : archivedHead
+                            ? undefined
+                            : 'Главный офис парка из справочника. Нужного нет — заведите его на вкладке «Офисы»'}
                 >
                     <OfficeSelect
                         value={draft.head_office_id}
@@ -607,6 +614,14 @@ export default function ParkEditor({ draft, setDraft, offices, onUploadLogo }) {
                         <p className="mt-1 flex items-start gap-1.5 px-1 text-[11.5px] leading-relaxed text-slate-500">
                             <MapPin size={11} className="mt-0.5 shrink-0 text-slate-400" />
                             {headOffice.address || 'Адрес у этого офиса не заполнен'}
+                        </p>
+                    )}
+                    {/* Без этой строки поле молча писало бы «Офис не выбран», хотя
+                        у парка головной офис записан и вернётся вместе с офисом. */}
+                    {archivedHead && (
+                        <p className="mt-1 px-1 text-[11.5px] leading-relaxed text-amber-600">
+                            Головной офис парка убран в архив — адрес парка сейчас не показывается.
+                            Верните офис на вкладке «Офисы» или выберите другой.
                         </p>
                     )}
                     {/* Старый свободный адрес не выбрасываем молча: пока офис не

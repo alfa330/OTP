@@ -714,5 +714,85 @@ class NoRawSqlTest(unittest.TestCase):
                 self.assertNotEqual(node.attr, 'execute')
 
 
+class ArchivedHeadOfficeTest(unittest.TestCase):
+    """Головной офис парка — только действующий (решение владельца 09.11.2026).
+
+    Офис, убранный в архив на вкладке «Офисы», не должен и дальше называться
+    головным офисом парка: ни на странице парка, ни в карточке помощника, ни в
+    API партнёров. Ссылка head_office_id при этом остаётся — форма парка шлёт
+    её обратно, и вернутый из архива офис снова встаёт головным сам.
+    """
+
+    @staticmethod
+    def _sqls(call):
+        executed = []
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                executed.append(' '.join(sql.split()))
+
+            def fetchall(self):
+                return []
+
+            def fetchone(self):
+                return None
+
+        call(Cursor())
+        return executed
+
+    def test_parks_join_only_an_active_head_office(self):
+        from wiki import parks as wiki_parks
+        sqls = (self._sqls(lambda c: wiki_parks.list_parks(c, space_id=1))
+                + self._sqls(lambda c: wiki_parks.get_park(c, 'itaxi', space_id=1)))
+        self.assertEqual(len(sqls), 2)
+        for sql in sqls:
+            self.assertIn("AND ho.space_id = p.space_id AND ho.status = 'active'", sql)
+
+    def test_partner_park_card_joins_only_an_active_head_office(self):
+        from knowledge_api import search as knowledge_search
+        sqls = self._sqls(lambda c: knowledge_search.park_card(c, {'id': 3, 'space_id': 1, 'name': 'X'}))
+        self.assertIn("ho.status = 'active'", sqls[0])
+
+    def test_link_to_an_archived_office_is_kept_but_not_shown(self):
+        from wiki import parks as wiki_parks
+        values = {key: None for key in wiki_parks._PARK_KEYS}
+        values.update({'id': 1, 'name': 'iTaxi', 'head_office_id': 7})
+        row = tuple(values[key] for key in wiki_parks._PARK_KEYS)
+        # Джойн архивный офис не нашёл: название, город и адрес пустые.
+        archived = wiki_parks._park_row(row)
+        self.assertIsNone(archived['head_office'])
+        self.assertEqual(archived['head_office_id'], 7, 'ссылку на архивный офис стёрли')
+
+        values.update({'head_office_name': 'Офис Алматы №1', 'head_office_city': 'Алматы',
+                       'head_office_address': 'Жамбыла, 172В'})
+        shown = wiki_parks._park_row(tuple(values[key] for key in wiki_parks._PARK_KEYS))
+        self.assertEqual(shown['head_office'], {'id': 7, 'name': 'Офис Алматы №1',
+                                                'city': 'Алматы', 'address': 'Жамбыла, 172В'})
+
+    def test_assistant_card_does_not_name_an_archived_head_office(self):
+        hidden = dict(PARKS[0], head_office=None, head_office_id=HEAD['id'])
+        text = park_cards.card_text(hidden, on_date=DAY)
+        self.assertNotIn('Головной офис', text)
+        self.assertNotIn('Жамбыла', text)
+        self.assertIn('Головной офис парка iTaxi', park_cards.card_text(PARKS[0], on_date=DAY))
+
+    def test_saving_the_park_accepts_a_link_to_an_archived_office(self):
+        """Сервер принимает ссылку на свой офис независимо от статуса: проверка
+        own_office_ids — про пространство, а не про архив. Начни она отсекать
+        архивные — сохранение парка молча стёрло бы головной офис, который
+        вернётся из архива."""
+        from wiki import offices as wiki_offices
+        sqls = self._sqls(lambda c: wiki_offices.own_office_ids(c, [6], space_id=1))
+        self.assertIn('space_id', sqls[0])
+        self.assertNotIn('status', sqls[0])
+
+    def test_park_form_keeps_the_link_it_was_given(self):
+        """Форма берёт ссылку из head_office_id, а не из показанного офиса:
+        иначе сохранение парка с архивным головным офисом обнуляло бы её."""
+        source = (ROOT / 'src/components/wiki/WikiParks.jsx').read_text(encoding='utf-8')
+        self.assertIn('head_office_id: p.head_office_id ?? undefined', source)
+        self.assertNotIn('head_office_id: p.head_office?.id', source)
+
+
 if __name__ == '__main__':
     unittest.main()

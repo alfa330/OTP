@@ -22,6 +22,18 @@ _PARK_KEYS = ('id', 'slug', 'name', 'description', 'city', 'address',
 # который уже записан в справочнике офисов, и повторы расходятся — ровно та
 # болезнь, от которой ушла статья «Адреса офисов». Поэтому оба запроса ниже
 # джойнят wiki_offices как ho.
+#
+# Джойнят только ДЕЙСТВУЮЩИЙ офис (решение владельца 09.11.2026): убранный в
+# архив офис не должен и дальше называться головным офисом парка — ни на
+# странице парка, ни в карточке помощника (park_cards), ни в API партнёров
+# (knowledge_api/search.py:park_card). Сама ссылка head_office_id при этом
+# остаётся: форма парка отправляет её обратно нетронутой, и вернутый из архива
+# офис снова встаёт головным сам — указывать его заново не придётся.
+_HEAD_OFFICE_JOIN = """
+          LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
+                                   AND ho.space_id = p.space_id
+                                   AND ho.status = 'active'
+"""
 
 
 def _park_row(row):
@@ -41,9 +53,13 @@ def _park_row(row):
     name = park.pop('head_office_name', None)
     city = park.pop('head_office_city', None)
     address = park.pop('head_office_address', None)
+    # Офис нашёлся джойном — значит, он действующий и свой (название у офиса
+    # обязательно). Ссылка на архивный офис head_office не даёт вовсе, иначе
+    # пустой объект {'id': …, 'name': None} читался бы как «головной офис есть»;
+    # сама ссылка остаётся в head_office_id — её читает форма парка.
     park['head_office'] = ({'id': park['head_office_id'], 'name': name,
                             'city': city, 'address': address}
-                           if park['head_office_id'] else None)
+                           if park['head_office_id'] and name is not None else None)
     return park
 
 
@@ -60,8 +76,7 @@ def list_parks(cursor, include_archived=False, query=None, *, space_id):
           FROM wiki_taxi_parks p
           -- Адрес головного офиса — только свой: связь границу не пересекает,
           -- но условие тут стоит дешевле, чем доверие к тому, что не пересечёт.
-          LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
-                                   AND ho.space_id = p.space_id
+        """ + _HEAD_OFFICE_JOIN + """
          WHERE p.space_id = %(space)s
            AND (%(archived)s OR p.status = 'active')
            AND (%(query)s::text IS NULL
@@ -83,8 +98,7 @@ def get_park(cursor, slug, *, space_id):
                p.status, p.position, 0,
                p.head_office_id, ho.name, ho.city, ho.address
           FROM wiki_taxi_parks p
-          LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id
-                                   AND ho.space_id = p.space_id
+        """ + _HEAD_OFFICE_JOIN + """
          WHERE p.slug = %s AND p.space_id = %s
         """,
         (slug, space_id),

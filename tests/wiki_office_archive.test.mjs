@@ -66,6 +66,7 @@ const {
 const {
     tipPlacement, TIP_SHOW_DELAY_MS, TAB_FOCUS_WINDOW_MS, focusCameFromTab,
 } = await load('HoverTips', '../src/components/common/HoverTips.jsx');
+const { default: ParkEditor } = await load('ParkEditorArchive', '../src/components/wiki/ParkEditor.jsx');
 
 const render = (Component, props) => renderToStaticMarkup(React.createElement(Component, props));
 const noop = () => {};
@@ -224,6 +225,38 @@ test('карточка действующего офиса: подсказки �
     assert.match(html, /data-tip="Скопировать адрес вместе с городом"/);
     assert.match(html, /data-tip="Открыть офис на карте 2ГИС в новой вкладке"/);
     assert.doesNotMatch(html, /Вернуть/);
+});
+
+/* ── Головной офис парка в архиве ────────────────────────────────────────── */
+
+test('форма парка: головной офис в архиве — строка об этом, а не молчаливое «Офис не выбран»', () => {
+    // Список офисов формы — только действующие (WikiParks грузит их вместе с парками).
+    const offices = [office({ id: 5, address: 'ул. Абая, 1' })];
+    const draft = (headOfficeId) => ({
+        name: 'iTaxi', city: '', address: '', website: '', commission: '', description: '',
+        head_office_id: headOfficeId, logo_file_id: null, logo_url: null, logo_frame: null,
+        numbers: [{ office_id: null, phone: '7070000000', note: '' }],
+    });
+    const props = (headOfficeId) => ({
+        draft: draft(headOfficeId), setDraft: noop, offices, onUploadLogo: noop,
+    });
+
+    const archived = render(ParkEditor, props(7));
+    assert.match(archived, /Головной офис парка убран в архив/);
+    assert.match(archived, /Верните офис на вкладке «Офисы» или выберите другой/);
+    // Вторая строка про ту же вкладку под тем же полем — шум.
+    assert.doesNotMatch(archived, /Нужного нет — заведите его/);
+
+    const active = render(ParkEditor, props(5));
+    assert.doesNotMatch(active, /убран в архив/);
+    assert.match(active, /ул\. Абая, 1/);
+
+    // Новый парк и парк без головного офиса — без строки, с прежней подсказкой.
+    for (const empty of [undefined, null]) {
+        const html = render(ParkEditor, props(empty));
+        assert.doesNotMatch(html, /убран в архив/);
+        assert.match(html, /Нужного нет — заведите его на вкладке «Офисы»/);
+    }
 });
 
 /* ── Подсказка: где встать пузырю ────────────────────────────────────────── */

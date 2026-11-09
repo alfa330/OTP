@@ -347,7 +347,12 @@ export default function WikiParks({ base, headers, showToast, spaceId = null }) 
                                 onEdit={(p) => setDraft({
                                     id: p.id, name: p.name, city: p.city || '',
                                     address: p.address || '',
-                                    head_office_id: p.head_office?.id ?? undefined,
+                                    /* Ссылка — из head_office_id, а не из показанного
+                                       офиса: головной офис, убранный в архив, сервер
+                                       не показывает (head_office: null), но ссылку
+                                       хранит, и сохранение парка не должно её стирать —
+                                       вернут офис из архива, и он снова встанет головным. */
+                                    head_office_id: p.head_office_id ?? undefined,
                                     website: p.website || '', description: p.description || '',
                                     commission: p.commission ?? '',
                                     logo_file_id: p.logo_file_id || null,

@@ -118,7 +118,10 @@ def park_card(cursor, park):
         """
         SELECT p.commission, p.website, p.description, ho.name, ho.city, ho.address
           FROM wiki_taxi_parks p
+          -- Головной офис — только действующий: убранный в архив офис партнёру
+          -- головным не называем (то же правило, что в wiki/parks.py).
           LEFT JOIN wiki_offices ho ON ho.id = p.head_office_id AND ho.space_id = %(space)s
+                                   AND ho.status = 'active'
          WHERE p.id = %(park)s AND p.space_id = %(space)s
         """,
         params,
