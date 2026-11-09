@@ -17,6 +17,8 @@ import threading
 import time
 import uuid
 
+from .avatar_image import CONTENT_TYPE as AVATAR_CONTENT_TYPE, AvatarImageError, avatar_to_webp
+
 
 AVATAR_MAX_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_UPLOAD_BYTES', str(2 * 1024 * 1024)))
 
@@ -25,6 +27,10 @@ AVATAR_MAX_ORIGINAL_UPLOAD_BYTES = int(os.getenv('AVATAR_MAX_ORIGINAL_UPLOAD_BYT
 AVATAR_UPLOAD_FOLDER = (os.getenv('AVATAR_UPLOAD_FOLDER') or 'AvatarUploads/').strip()
 
 AVATAR_THUMBNAIL_SUFFIX = (os.getenv('AVATAR_THUMBNAIL_SUFFIX') or '128').strip() or '128'
+
+# Фото профиля после avatar_to_webp — всегда WebP, и расширение в бакете
+# берётся из него, а не из имени, которое прислал браузер.
+AVATAR_FILE_NAME = 'avatar.webp'
 
 def _sanitize_avatar_extension(source_filename, fallback='.webp'):
     safe_name = secure_filename(source_filename or "")
@@ -274,11 +280,18 @@ def build_user_profile_blueprint(
             content_type = (file_storage.mimetype or '').strip().lower()
             if not content_type.startswith('image/'):
                 return jsonify({"error": "Only image files are allowed"}), 400
+            # Подписи браузера не верим: Safari кладёт в «.webp» PNG. Фото
+            # профиля хранится только в WebP — см. user_profile/avatar_image.py.
+            try:
+                avatar_bytes = avatar_to_webp(avatar_bytes)
+            except AvatarImageError as error:
+                return jsonify({"error": str(error)}), 400
+            content_type = AVATAR_CONTENT_TYPE
 
             original_file_storage = request.files.get('avatar_original')
             original_bytes = avatar_bytes
             original_content_type = content_type
-            original_filename = file_storage.filename
+            original_filename = AVATAR_FILE_NAME
             if original_file_storage and original_file_storage.filename:
                 candidate_original_bytes = original_file_storage.read() or b''
                 if not candidate_original_bytes:
@@ -301,7 +314,7 @@ def build_user_profile_blueprint(
             if not bucket_name:
                 return jsonify({"error": "Avatar bucket is not configured"}), 500
 
-            avatar_blob_paths = _build_avatar_blob_paths(target_user_id, file_storage.filename, original_filename)
+            avatar_blob_paths = _build_avatar_blob_paths(target_user_id, AVATAR_FILE_NAME, original_filename)
             blob_path = avatar_blob_paths['thumbnail_path']
             original_blob_path = avatar_blob_paths['original_path']
             gcs_client = get_gcs_client()
