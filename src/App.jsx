@@ -16744,8 +16744,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
             const plannerViewerIsPlainSupervisor = isSupervisorRole(user?.role) && !isDepartmentHead(user);
+            // Отдел кадров ведёт графики ЛЮБОГО отдела — решение владельца 09.11.2026:
+            // «нужно дать права HR, чтобы они могли вести графики любого отдела».
+            // Вести — смены, выходные и статусы (отпуск, больничный, Б/С, увольнение)
+            // и выгрузка. Санкции, тренинги, тех. сбои, офлайн-активности, перерывы,
+            // импорт, агрегация и разбор заявок — работа руководителя линии: сервер
+            // их кадровику не откроет (_resolve_work_schedule_editor и
+            // allow_employee_accounting=False), и кнопок у него нет. Глобальному
+            // админу из отдела кадров флаг не мешает — у него раздел целиком.
+            const plannerViewerIsHrScheduler = managesEmployeeAccounting(user)
+                && normalizeRole(user?.role) !== 'super_admin'
+                && !(isAdminLikeRoleFn(user?.role) && !isDepartmentHead(user));
+            const plannerCanManageLine = !plannerReadOnly && !plannerViewerIsHrScheduler;
             // Убрать из ЧС может глава отдела, админ и супер-админ — то же правило
             // на сервере (_can_remove_dismissal_blacklist). Рядовой СВ ЧС только ставит.
+            // Кадровику-главе (роль admin) — как в «Учете сотрудников»: ЧС по людям
+            // всей компании он снимает и там (_requester_can_access_target_user).
             const plannerViewerCanRemoveBlacklist = isAdminLikeRoleFn(user?.role) || isDepartmentHead(user);
             const plannerOperatorIdKey = useCallback((value) => String(value ?? ''), []);
             function clonePlannerOperator(op, overrides = {}) {
@@ -16891,7 +16905,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // только своих подчинённых; сервер то же отклонит.
             const plannerModalInGrantedDepartment = plannerGrantedDepartmentIds.has(String(plannerModalOperator?.department_id ?? ''));
             const plannerModalCanRemoveBlacklist = plannerViewerCanRemoveBlacklist && !plannerModalInGrantedDepartment;
-            const plannerModalCanFine = !plannerModalInGrantedDepartment;
+            const plannerModalCanFine = !plannerModalInGrantedDepartment && !plannerViewerIsHrScheduler;
             const [selectedDays, setSelectedDays] = useState({ cells: [] });
             const [modalActiveTab, setModalActiveTab] = useState('shifts');
             const [showEditTimelineModal, setShowEditTimelineModal] = useState(false);
@@ -18639,11 +18653,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [departments, plannerGrantedDepartments, operators]);
             const plannerCanSwitchDepartment = plannerDepartmentOptions.length > 1;
             const plannerOwnDepartmentId = useMemo(() => {
+                // Кадровик ведёт графики всех отделов: его отдел — не рабочая
+                // область раздела, и стартует он со «Всех отделов».
+                if (plannerViewerIsHrScheduler) return '';
                 const headed = user?.headed_department_id ?? user?.headedDepartmentId;
                 if (headed !== null && headed !== undefined && headed !== '') return String(headed);
                 const own = user?.department_id ?? user?.departmentId;
                 return (own !== null && own !== undefined && own !== '') ? String(own) : '';
-            }, [user?.headed_department_id, user?.headedDepartmentId, user?.department_id, user?.departmentId]);
+            }, [plannerViewerIsHrScheduler, user?.headed_department_id, user?.headedDepartmentId, user?.department_id, user?.departmentId]);
             // Дефолт — свой отдел; ставится один раз, как только отделы приехали,
             // и уступает и восстановленному из localStorage выбору, и ручному.
             useEffect(() => {
@@ -18693,7 +18710,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const isTezPlanner = plannerScopeDepartmentCode === 'tez';
             // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
             // скрыты все кнопки синхронизаций и статусов Chat2Desk.
-            const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office';
+            // Кадровику — тоже: статусы телефонии нужны руководителю линии, сервер
+            // синхронизации пускает только админа и СВ.
+            const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office' || plannerViewerIsHrScheduler;
             /* Какие синхронизации показывать. Решает ОТДЕЛ, а не роль: у
                супер-админа своей телефонии нет, и раньше он видел разом кнопки
                всех отделов — Binotel в СЗоВ и Oktell в TEZ. Пустой код — это
@@ -18991,7 +19010,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // свой запрос по месяцу, очередь при его открытии не перечитывается.
             const [leaveReviewFilter, setLeaveReviewFilter] = useState('pending');
             const leaveReview = useLeaveReview({
-                enabled: !isOperatorSelfSchedules && !plannerReadOnly && !!user,
+                enabled: !isOperatorSelfSchedules && plannerCanManageLine && !!user,
                 api: leaveApi,
                 statusFilter: 'pending',
             });
@@ -20141,6 +20160,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 e.preventDefault();
                 e.stopPropagation();
                 if (viewMode !== 'day') return;
+                // Офлайн-активность — работа руководителя линии: тренеру и кадровику
+                // окно её не откроет, и протягивать выделение незачем.
+                if (!plannerCanManageLine) return;
                 const minute = extractPlannerTimelineMinuteFromPointer(e);
                 const operatorId = Number(opId);
                 const dayKey = String(date || '').trim();
@@ -22991,7 +23013,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const openPlannerOfflineActivityModal = ({ operatorId, date, startMin, endMin }) => {
-                if (plannerReadOnly) return;
+                if (!plannerCanManageLine) return;
                 if (isPlannerRowLocked(operatorId)) return;
                 const normalizedOperatorId = Number(operatorId);
                 const dayKey = String(date || '').trim();
@@ -23401,7 +23423,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             ]);
 
             const openPlannerTrainingModalForCurrentDay = (mode = 'add', preset = null) => {
-                if (plannerReadOnly) return;
+                if (!plannerCanManageLine) return;
                 const operatorId = Number(modalState?.opId);
                 const dayKey = String(modalState?.date || '').trim();
                 if (!Number.isFinite(operatorId) || !dayKey || isBulkSelectionModal) return;
@@ -24689,7 +24711,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const modalShowTabs = !isBulkSelectionModal && !modalState?.multipleDates;
             const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
             const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
-            const modalTabControl = !modalShowTabs || modalActiveTab === 'control';
+            // «Контроль» — автоотметки, тренинги, штраф: кадровику их не выдавали.
+            // Тренер вкладку по-прежнему видит — у него это просмотр.
+            const modalTabControl = !plannerViewerIsHrScheduler && (!modalShowTabs || modalActiveTab === 'control');
             // Вкладка «История» показывается только вместе с табами: в массовом
             // режиме дней несколько, и «история этого дня» теряет смысл.
             const modalTabHistory = modalShowTabs && modalActiveTab === 'history';
@@ -26963,7 +26987,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
             /* ─── Очередь «Запросы» у руководителя ──────────────────────────── */
             const loadReviewRequests = useCallback(async ({ silent = false } = {}) => {
-                if (isOperatorSelfSchedules || !user) return;
+                // Кадровику заявки не разбирать: это работа руководителя линии.
+                if (isOperatorSelfSchedules || plannerViewerIsHrScheduler || !user) return;
                 if (!silent) setReviewLoading(true);
                 try {
                     if (!silent) setReviewError('');
@@ -26984,7 +27009,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 } finally {
                     if (!silent) setReviewLoading(false);
                 }
-            }, [isOperatorSelfSchedules, user]);
+            }, [isOperatorSelfSchedules, plannerViewerIsHrScheduler, user]);
 
             useEffect(() => {
                 if (isOperatorSelfSchedules || !user) return;
@@ -33169,7 +33194,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                    замен на телефон не вынесены: это многоколоночные панели и
                    выбор файла, за которыми садятся за компьютер. */
                 const wsActionRows = [
-                    {
+                    // Заявки операторов разбирает руководитель линии, не кадровик.
+                    plannerViewerIsHrScheduler ? null : {
                         key: 'requests',
                         icon: 'fa-inbox',
                         tile: 'bg-amber-500',
@@ -33196,7 +33222,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             : 'За этот день перерывов нет',
                         onClick: () => setShowDayBreaksModal(true)
                     } : null,
-                    (wsIsDayMode && !plannerReadOnly) ? {
+                    (wsIsDayMode && plannerCanManageLine) ? {
                         key: 'aggregate',
                         icon: dayAggregateLoading ? 'fa-spinner fa-spin' : 'fa-calculator',
                         tile: 'bg-slate-500',
@@ -33473,9 +33499,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     items={[
                                         { value: 'shifts', label: 'Смены' },
                                         { value: 'status', label: 'Статус' },
-                                        { value: 'control', label: 'Контроль' },
+                                        plannerViewerIsHrScheduler ? null : { value: 'control', label: 'Контроль' },
                                         { value: 'history', label: 'История', count: modalHistoryCount }
-                                    ]}
+                                    ].filter(Boolean)}
                                 />
 
                                 {modalActiveTab === 'shifts' ? (
@@ -33827,7 +33853,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </>
                                 ) : null}
 
-                                {modalActiveTab === 'control' ? (
+                                {modalActiveTab === 'control' && !plannerViewerIsHrScheduler ? (
                                     <>
                                         <WsPhoneGroup
                                             label="Отметки автоконтроля"
@@ -34407,6 +34433,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <FaIcon className={`fas ${excelTransferState.exporting ? 'fa-spinner fa-spin' : 'fa-file-excel'} text-slate-400`}></FaIcon>
                                             {excelTransferState.exporting ? 'Экспорт...' : 'Экспорт в Excel'}
                                         </button>
+                                        {/* Кадровику — только выгрузка: импорт ищет людей по ФИО по
+                                            всей компании, и сервер пускает в него админа и СВ. */}
+                                        {plannerCanManageLine && (
                                         <button
                                             onClick={() => {
                                                 setShowPlannerTopActionsMenu(false);
@@ -34419,6 +34448,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <FaIcon className={`fas ${excelTransferState.importing ? 'fa-spinner fa-spin' : 'fa-file-import'} text-slate-400`}></FaIcon>
                                             {excelTransferState.importing ? 'Импорт...' : 'Импорт из Excel'}
                                         </button>
+                                        )}
 
                                         {plannerShowSyncGroup && (
                                             <div className={PLANNER_MENU_GROUP}>Синхронизация</div>
@@ -34480,6 +34510,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         </button>
                                         )}
 
+                                        {/* Перерывы, отчёты по статусам телефонии и журнал
+                                            замен — инструменты руководителя линии, кадровику
+                                            их не выдавали (сервер ответит отказом). */}
+                                        {plannerCanManageLine && (
+                                        <>
                                         <div className={PLANNER_MENU_GROUP}>Перерывы</div>
                                         <button
                                             onClick={openPlannerBreakRulesSettings}
@@ -34501,8 +34536,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <FaIcon className={`fas ${breakRecalculateState.loading ? 'fa-spinner fa-spin' : 'fa-sync-alt'} text-slate-400`}></FaIcon>
                                             {breakRecalculateState.loading ? 'Пересчет...' : 'Пересчитать перерывы'}
                                         </button>
+                                        </>
+                                        )}
 
-                                        <div className={PLANNER_MENU_GROUP}>Отчёты</div>
+                                        {(plannerCanManageLine || changeReport.canSubscribe) && (
+                                            <div className={PLANNER_MENU_GROUP}>Отчёты</div>
+                                        )}
+                                        {plannerCanManageLine && (
                                         <button
                                             onClick={() => {
                                                 setShowPlannerTopActionsMenu(false);
@@ -34515,6 +34555,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             <FaIcon className={`fas ${plannerStatusMatchExportLoading ? 'fa-spinner fa-spin' : 'fa-file-arrow-down'} text-slate-400`}></FaIcon>
                                             {plannerStatusMatchExportLoading ? 'Выгрузка...' : 'Отчёт соответствия'}
                                         </button>
+                                        )}
                                         {plannerStatusEffectiveAnalysis && (
                                             <button
                                                 onClick={() => {
@@ -34543,7 +34584,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 Почасовая группировка
                                             </button>
                                         )}
-                                        {(isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role)) && (
+                                        {plannerCanManageLine && (isAdminLikeRoleFn(user?.role) || isSupervisorRole(user?.role)) && (
                                             <button
                                                 onClick={() => {
                                                     setShowPlannerTopActionsMenu(false);
@@ -34584,7 +34625,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </button>
                                         )}
 
-                                        {viewMode === 'day' && (
+                                        {viewMode === 'day' && plannerCanManageLine && (
                                             <>
                                                 <div className={PLANNER_MENU_GROUP}>Спецрежим статусов</div>
                                                 <button
@@ -34737,7 +34778,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </span>
                                         )}
                                     </button>
-                                    {!plannerReadOnly && (
+                                    {plannerCanManageLine && (
                                     <button
                                         type="button"
                                         onClick={() => aggregateCurrentDayForAllOperators()}
@@ -34751,6 +34792,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     )}
                                     </>
                                     )}
+                                    {/* Заявки операторов разбирает руководитель линии, не кадровик. */}
+                                    {!plannerViewerIsHrScheduler && (
                                     <button
                                         type="button"
                                         onClick={() => {
@@ -34774,6 +34817,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </span>
                                         )}
                                     </button>
+                                    )}
                                     {viewMode === 'day' && (
                                     <div className="inline-flex items-center gap-1.5">
                                         <span className="text-[11.5px] text-slate-400">Сортировка</span>
@@ -34798,9 +34842,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         <FaIcon className="fas fa-info-circle mt-0.5 shrink-0 text-slate-400"></FaIcon>
                         <span>
                             <span className="font-semibold text-slate-600">Ctrl</span> (или <span className="font-semibold text-slate-600">Cmd</span>) + клик по дням — множественный выбор.
+                            {plannerCanManageLine && (
                             <span className="ml-2">
                                 Офлайн-активность: зажмите правую кнопку и протяните по таймлайну, затем отпустите.
                             </span>
+                            )}
                         </span>
                     </div>
                     )}
@@ -36044,9 +36090,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 {[
                                     { key: 'shifts', label: 'Смены', icon: 'fa-clock' },
                                     { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
-                                    { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' },
+                                    plannerViewerIsHrScheduler ? null : { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' },
                                     { key: 'history', label: 'История', icon: 'fa-clock-rotate-left', count: modalHistoryCount }
-                                ].map(tab => {
+                                ].filter(Boolean).map(tab => {
                                     const active = modalActiveTab === tab.key;
                                     return (
                                         <button
@@ -44541,7 +44587,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                        «Мои часы» тому, у кого этого пункта в меню нет. */
                     myHours: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
                         && departmentAllowsView(user, 'hours'),
+                    /* Кадровику раздел — не свои смены, а графики всех отделов
+                       (владелец 09.11.2026): кнопка «Графики» ниже, ежедневная. */
                     myShifts: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                        && !isEmployeeAccountingManager
                         && departmentAllowsView(user, 'work_schedules'),
                     myShiftAuction: isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
                         && departmentAllowsView(user, 'shift_auction'),
@@ -44572,7 +44621,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             ), [
                 user, wikiSectionEnabled, eventsSectionShown, canAccessLmsSection, canAccessGroupLateBotSection,
                 isAdminLikeRole, isDepartmentManager, isPlainTrainer, currentUserRole,
-                isScopedDepartmentHead, eventsUnreadCount, tasksActionRequiredCount,
+                isScopedDepartmentHead, isEmployeeAccountingManager, eventsUnreadCount, tasksActionRequiredCount,
                 pendingSurveysBadgeCount,
             ]);
             /* «Обращения». Бейдж — непрочитанные ответы из Telegram-групп.
@@ -56503,7 +56552,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             {departmentAllowsView(user, 'work_schedules') && (
                                             <li>
                                                 <button onClick={(e) => handleSidebarViewNavigation(e, 'work_schedules')} className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'work_schedules' ? 'bg-blue-700' : ''}`}>
-                                                    <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Мои смены</span>
+                                                    {/* Кадровик ведёт графики любого отдела (владелец 09.11.2026):
+                                                        у него это не свои смены, а раздел целиком. */}
+                                                    <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">{isEmployeeAccountingManager ? 'Графики работы' : 'Мои смены'}</span>
                                                 </button>
                                             </li>
                                             )}

@@ -176,10 +176,14 @@ test('гейты личных разделов повторяют ветку р�
         ['myShiftAuction', 'shift_auction'],
         ['myEvaluations', 'evaluation'],
     ]) {
+        /* Кадровику «Графики работы» — не личный раздел: он ведёт графики всех
+           отделов (владелец 09.11.2026). Пункт в ветке рядового у него тот же,
+           с подписью «Графики работы», а в баре — ежедневная кнопка «Графики». */
+        const hrExclusion = flag === 'myShifts' ? '&& !isEmployeeAccountingManager\\s+' : '';
         assert.match(
             memo,
             new RegExp(`${flag}: isRankAndFileRole\\(currentUserRole\\) && !isScopedDepartmentHead\\s+`
-                + `&& departmentAllowsView\\(user, '${viewKey}'\\)`),
+                + `${hrExclusion}&& departmentAllowsView\\(user, '${viewKey}'\\)`),
             `флаг ${flag} считается не так, как ветка рядового в сайдбаре`,
         );
         assert.ok(

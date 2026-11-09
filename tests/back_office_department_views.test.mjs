@@ -79,8 +79,14 @@ for (const code of BACK_OFFICE_CODES) {
             // берёт первый элемент набора, и порядок в нём — не косметика.
             assert.equal(firstAllowedView(user, []), 'profile');
 
+            // Кадровик ведёт графики любого отдела (владелец 09.11.2026) — только
+            // своей должностью: у оператора HR «Графики работы» были бы «Моими
+            // сменами», а бухгалтерии раздел не выдавали.
+            const keepsSchedules = code === 'hr' && role === 'hr_manager';
+            assert.equal(departmentAllowsView(user, 'work_schedules'), keepsSchedules, `${role}/work_schedules`);
+
             for (const denied of [
-                'hours', 'work_schedules', 'salary', 'evaluation', 'surveys',
+                'hours', 'salary', 'evaluation', 'surveys',
                 'manage_operators', 'manage_users', 'sv_list', 'qr_access',
             ]) {
                 assert.equal(departmentAllowsView(user, denied), false, `${role}/${denied}`);

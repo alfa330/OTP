@@ -94,8 +94,17 @@ class BackOfficeAllowlistSourceTests(unittest.TestCase):
             self.assertIn("trainee: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
             # Собственная роль отдела — тем же набором, что и остатки на
             # operator/trainee: набор один, разъехавшись, они дали бы одному
-            # человеку раздел, а его соседу с прежней ролью — нет.
-            self.assertIn(f"{own_role}: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
+            # человеку раздел, а его соседу с прежней ролью — нет. Исключение —
+            # кадровик (09.11.2026): он ведёт графики любого отдела, и
+            # «Графики работы» у него — раздел, а у оператора были бы «Мои смены».
+            if own_role == "hr_manager":
+                self.assertIn("hr_manager: HR_EMPLOYEE_VIEWS", entry)
+                self.assertIn(
+                    "const HR_EMPLOYEE_VIEWS = [...BACK_OFFICE_EMPLOYEE_VIEWS, 'work_schedules'];",
+                    source,
+                )
+            else:
+                self.assertIn(f"{own_role}: BACK_OFFICE_EMPLOYEE_VIEWS", entry)
             self.assertIn("head: BACK_OFFICE_HEAD_VIEWS", entry)
             self.assertIn("sv: BACK_OFFICE_MANAGER_VIEWS", entry)
 

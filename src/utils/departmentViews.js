@@ -99,6 +99,12 @@ const FRONT_OFFICE_HEAD_VIEWS = [...FRONT_OFFICE_MANAGER_VIEWS, 'tasks', 'qr_acc
 // 'profile' обязан остаться ПЕРВЫМ: firstAllowedView берёт allow[0], и
 // раздел по умолчанию сменился бы вместе с порядком.
 const BACK_OFFICE_EMPLOYEE_VIEWS = ['profile', 'tasks'];
+// Кадровик ведёт графики ЛЮБОГО отдела — решение владельца 09.11.2026: «нужно дать
+// права HR, чтобы они могли вести графики любого отдела». Свой набор, а не
+// BACK_OFFICE_EMPLOYEE_VIEWS: тот общий с Бухгалтерией. Только для hr_manager:
+// у оператора «Графики работы» — это «Мои смены», а вести чужие ему нечем.
+// Права дают сервер (_resolve_work_schedule_editor) и раздел (plannerViewerIsHrScheduler).
+const HR_EMPLOYEE_VIEWS = [...BACK_OFFICE_EMPLOYEE_VIEWS, 'work_schedules'];
 // «Графики работы» — с 09.11.2026: график ведут всем отделам (владелец: «по всем
 // нужно сделать возможность вести графики»), и глава бэк-офиса ведёт его своим людям.
 const BACK_OFFICE_MANAGER_VIEWS = ['manage_operators', 'tasks', 'work_schedules'];
@@ -254,7 +260,7 @@ export const DEPARTMENT_VIEW_ALLOWLIST = {
     hr: {
         operator: BACK_OFFICE_EMPLOYEE_VIEWS,
         trainee: BACK_OFFICE_EMPLOYEE_VIEWS,
-        hr_manager: BACK_OFFICE_EMPLOYEE_VIEWS,
+        hr_manager: HR_EMPLOYEE_VIEWS,
         head: BACK_OFFICE_HEAD_VIEWS,
         sv: BACK_OFFICE_MANAGER_VIEWS,
     },

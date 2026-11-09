@@ -205,8 +205,11 @@ class RouteTests(unittest.TestCase):
         self.assertNotIn('_resolve_management_requester', self.body)
 
     def test_a_foreign_operator_is_refused(self):
+        # schedule_keeping=True: отдел кадров ведёт графики любого отдела (09.11.2026)
+        # и видит день оператора целиком; остальным граница прежняя.
         self.assertIn(
-            "if not _filter_operators_for_requester_scope(viewer, viewer_id, [{'id': operator_id}]):",
+            "if not _filter_operators_for_requester_scope(\n"
+            "                viewer, viewer_id, [{'id': operator_id}], schedule_keeping=True):",
             self.body)
         self.assertIn('"Forbidden for this operator"}), 403', self.body)
 

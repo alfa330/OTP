@@ -337,7 +337,12 @@ class FrontOfficeHeadSidebarTests(unittest.TestCase):
         график открыт, — а роль на состав кнопок больше не влияет.
         """
         app = _read(APP_PATH)
-        self.assertIn("const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office';", app)
+        # Плюс кадровик (09.11.2026): он ведёт графики, а статусы телефонии нужны
+        # руководителю линии — сервер синхронизации пускает только админа и СВ.
+        self.assertIn(
+            "const plannerSyncActionsHidden = plannerScopeDepartmentCode === 'front_office' || plannerViewerIsHrScheduler;",
+            app,
+        )
         self.assertIn("const isTezPlanner = plannerScopeDepartmentCode === 'tez';", app)
         # Binotel — только TEZ (и «Все отделы», где показываем объединение).
         self.assertIn(

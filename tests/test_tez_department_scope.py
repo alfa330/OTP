@@ -251,7 +251,12 @@ class TezDepartmentBackendScopeTests(unittest.TestCase):
     def test_management_schedule_list_is_filtered_to_requester_scope(self):
         endpoint = _function_source(BOT_PATH, "get_operators_with_schedules")
 
-        self.assertIn("_filter_operators_for_requester_scope(user_data, user_id, operators)", endpoint)
+        # schedule_keeping=True — строки сетки: отдел кадров ведёт графики любого
+        # отдела (09.11.2026); остальным граница прежняя.
+        self.assertIn(
+            "_filter_operators_for_requester_scope(\n            user_data, user_id, operators, schedule_keeping=True)",
+            endpoint,
+        )
 
     def test_hours_and_technical_issue_targets_use_department_scope(self):
         daily_hours = _function_source(BOT_PATH, "sv_daily_hours")

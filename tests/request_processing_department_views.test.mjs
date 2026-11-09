@@ -178,12 +178,15 @@ test('ООЗ: добавка не едет за человеком в друго
     // Карта нового отдела без смен — «Мои смены» туда не переносятся.
     for (const [role, code] of [
         ['operator', 'accounting'], ['accounting_manager', 'accounting'],
-        ['operator', 'hr'], ['hr_manager', 'hr'], ['marketing_manager', 'marketing'],
+        ['operator', 'hr'], ['marketing_manager', 'marketing'],
     ]) {
         const user = named(619, { role, department_code: code });
         assert.equal(departmentRestrictsViews(user), true, `${role}@${code}`);
         assert.equal(departmentAllowsView(user, 'work_schedules'), false, `${role}@${code}`);
     }
+    // Кадровику «Графики работы» выдаёт сам отдел (с 09.11.2026 он ведёт графики
+    // любого отдела) — это карта HR, а не приехавшая добавка ООЗ.
+    assert.equal(departmentAllowsView(named(619, { role: 'hr_manager', department_code: 'hr' }), 'work_schedules'), true);
     // Отдел без карты (СЗоВ) или без отдела — ограничений нет, как раньше.
     for (const code of ['szov', null]) {
         assert.equal(departmentRestrictsViews(named(620, { department_code: code })), false, String(code));
@@ -297,7 +300,8 @@ test('бар телефона: названным — «Смены», остал
         assert.deepEqual(barOf(named(523), wiki), wiki ? ['wiki', 'events'] : ['events'], `523/${wiki}`);
     }
     // Мосты к App.jsx: флаги бара — ровно эти выражения, без хвоста.
-    assert.match(appSource, /\n\s*myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& departmentAllowsView\(user, 'work_schedules'\),\n/);
+    // Хвост — только исключение кадровика (09.11.2026): у него раздел не личный.
+    assert.match(appSource, /\n\s*myShifts: isRankAndFileRole\(currentUserRole\) && !isScopedDepartmentHead\s+&& !isEmployeeAccountingManager\s+&& departmentAllowsView\(user, 'work_schedules'\),\n/);
     assert.match(appSource, /\n\s*events: eventsSectionShown,\n/);
     assert.match(appSource, /\n\s*const eventsSectionShown = departmentAllowsView\(user, 'events'\);\n/);
     // Бар пересчитывается по самому человеку, а не только по роли: выход 523 и

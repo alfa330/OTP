@@ -2363,7 +2363,8 @@ def _requester_can_access_target_user(
     target_user,
     *,
     allow_self=False,
-    supervisor_target_roles=('operator', 'trainee')
+    supervisor_target_roles=('operator', 'trainee'),
+    include_employee_accounting=True
 ):
     requester_role = _normalize_user_role(requester[3])
     target_role = _normalize_user_role(target_user[3])
@@ -2380,7 +2381,11 @@ def _requester_can_access_target_user(
     # Через эту функцию ходят почти все пишущие ручки раздела — точечная и
     # массовая правка, смена логина и пароля, аватар, периоды статусов, история.
     # Поэтому правило живёт здесь одной строкой, а не переписывается в каждой.
-    if _is_employee_accounting_manager(requester_id):
+    #
+    # include_employee_accounting=False — действие руководителя линии (штраф,
+    # снять ЧС, перерывы, агрегация): кадровику его не выдавали, и граница
+    # считается по его роли, как у любого другого.
+    if include_employee_accounting and _is_employee_accounting_manager(requester_id):
         return True
 
     headed_dept_ids = _headed_department_ids(requester_id)
@@ -2477,7 +2482,8 @@ def _load_target_user_with_scope(
     allow_self=False,
     supervisor_target_roles=('operator', 'trainee'),
     not_found_message="User not found",
-    forbidden_message="Forbidden"
+    forbidden_message="Forbidden",
+    include_employee_accounting=True
 ):
     try:
         target_user_id_int = int(target_user_id)
@@ -2493,7 +2499,8 @@ def _load_target_user_with_scope(
         requester_id,
         target_user,
         allow_self=allow_self,
-        supervisor_target_roles=supervisor_target_roles
+        supervisor_target_roles=supervisor_target_roles,
+        include_employee_accounting=include_employee_accounting
     ):
         return None, (forbidden_message, 403)
     return target_user, None
@@ -2618,10 +2625,18 @@ def _work_schedule_granted_target(requester_id, target_user_id, target_roles):
     return result
 
 
-def _filter_operators_for_requester_scope(requester, requester_id, operators):
+def _filter_operators_for_requester_scope(requester, requester_id, operators, *, schedule_keeping=False):
     """Кого requester видит в «Графиках работы»: граница его роли + отделы
-    поимённого допуска (WORK_SCHEDULE_SUPERVISOR_GRANTS)."""
+    поимённого допуска (WORK_SCHEDULE_SUPERVISOR_GRANTS).
+
+    schedule_keeping=True — вопрос о самом графике: строки сетки, история правок,
+    статусы дня, выгрузка. Отдел кадров ведёт графики любого отдела (решение
+    владельца 09.11.2026) и здесь видит всех. Без флага — круг руководителя
+    линии (заявки на смены и отпуска, тренинги): его кадровику не отдавали.
+    """
     items = list(operators or [])
+    if schedule_keeping and _is_employee_accounting_manager(requester_id):
+        return items
     visible = _filter_operators_for_requester_role(requester, requester_id, items)
     granted_ids = _work_schedule_granted_member_ids(requester_id)
     if not granted_ids:
@@ -2751,6 +2766,7 @@ def _resolve_work_schedule_viewer():
     только по отделам СЗоВ и ОП (скоуп задаётся в
     _filter_operators_for_requester_scope). Мутационные эндпоинты графиков
     по-прежнему идут через _resolve_management_requester и тренеру недоступны.
+    И отдел кадров — он графики ведёт (_resolve_work_schedule_editor).
     """
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
@@ -2760,16 +2776,49 @@ def _resolve_work_schedule_viewer():
         or _is_supervisor_role(requester[3])
         or _headed_department_id(requester_id) is not None
         or _normalize_user_role(requester[3]) == 'trainer'
+        or _is_employee_accounting_manager(requester_id)
     ):
         return requester_id, requester, None
     return None, None, ("Forbidden", 403)
 
 
-def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id, *, allow_grant=True):
+def _resolve_work_schedule_editor():
+    """Кто ВЕДЁТ графики: правит смены, выходные и статусы, выгружает график.
+
+    Управленцы — те же, что у _resolve_management_requester, — и отдел кадров:
+    решение владельца 09.11.2026 «нужно дать права HR, чтобы они могли вести
+    графики любого отдела». Признак кадровика — членство в отделе
+    (_is_employee_accounting_manager): у рядового кадровика роль hr_manager.
+    Чьи графики — считает _resolve_scoped_operator_for_requester; кадровику по
+    людям граница не ставится (_requester_can_access_target_user).
+
+    Остальное в разделе — штрафы, снятие ЧС, тренинги, перерывы, агрегация,
+    импорт и разбор заявок — работа руководителя линии: там остаётся
+    _resolve_management_requester, и цели кадровику не расширяются
+    (allow_employee_accounting=False).
+    """
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
+    if (
+        _is_admin_role(requester[3])
+        or _is_supervisor_role(requester[3])
+        or _headed_department_id(requester_id) is not None
+        or _is_employee_accounting_manager(requester_id)
+    ):
+        return requester_id, requester, None
+    return None, None, ("Forbidden", 403)
+
+
+def _resolve_scoped_operator_for_requester(
+    requester, requester_id, operator_id, *, allow_grant=True, allow_employee_accounting=True
+):
     """Чей график requester правит в «Графиках работы».
 
     allow_grant=False — для действий, которых у СВ отдела нет (снять ЧС):
     поимённый допуск их не открывает.
+    allow_employee_accounting=False — для действий руководителя линии (штраф,
+    снять ЧС, перерывы, агрегация): отдел кадров ведёт графики, но не их.
     """
     target_user, scope_error = _load_target_user_with_scope(
         requester,
@@ -2778,7 +2827,8 @@ def _resolve_scoped_operator_for_requester(requester, requester_id, operator_id,
         allow_self=False,
         supervisor_target_roles=('operator',),
         not_found_message="Operator not found",
-        forbidden_message="Forbidden for this operator"
+        forbidden_message="Forbidden for this operator",
+        include_employee_accounting=allow_employee_accounting
     )
     if scope_error and scope_error[1] == 403 and allow_grant:
         granted_target = _work_schedule_granted_target(requester_id, operator_id, ('operator',))
@@ -23913,7 +23963,8 @@ def add_training_rejection():
         if start_min is None or end_min is None or end_min <= start_min:
             return jsonify({"error": "Invalid interval"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(
+            user_data, requester_id, operator_id, allow_employee_accounting=False)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -39522,7 +39573,8 @@ def get_work_schedule_status_track():
             allowed = _filter_operators_for_requester_scope(
                 viewer,
                 viewer_id,
-                [{'id': op_id} for op_id in (db.get_live_status_track_operator_ids() or [])]
+                [{'id': op_id} for op_id in (db.get_live_status_track_operator_ids() or [])],
+                schedule_keeping=True
             )
             operator_ids = [_operator_item_id(item) for item in allowed]
             operator_ids = [op_id for op_id in operator_ids if op_id is not None]
@@ -39573,7 +39625,8 @@ def get_work_schedule_training_news():
         except ValueError:
             return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
 
-        if not _filter_operators_for_requester_scope(viewer, viewer_id, [{'id': operator_id}]):
+        if not _filter_operators_for_requester_scope(
+                viewer, viewer_id, [{'id': operator_id}], schedule_keeping=True):
             return jsonify({"error": "Forbidden for this operator"}), 403
 
         from work_schedules import training_news as schedule_training_news
@@ -40119,7 +40172,8 @@ def get_work_schedule_history():
         allowed = _filter_operators_for_requester_scope(
             user_data,
             requester_id,
-            [{'id': operator_id} for operator_id in candidate_ids]
+            [{'id': operator_id} for operator_id in candidate_ids],
+            schedule_keeping=True
         )
         allowed_ids = [_operator_item_id(item) for item in allowed]
         allowed_ids = [operator_id for operator_id in allowed_ids if operator_id is not None]
@@ -40233,7 +40287,8 @@ def get_operators_with_schedules():
             include_all_staff=_normalize_user_role(user_data[3]) != 'trainer'
         )
         _record_elapsed_server_timing("work-schedules-db", schedule_started_at)
-        operators = _filter_operators_for_requester_scope(user_data, user_id, operators)
+        operators = _filter_operators_for_requester_scope(
+            user_data, user_id, operators, schedule_keeping=True)
         # Отделы поимённого допуска: справочник отделов главе режется до
         # своего, и без этого списка выбор отдела в шапке их не предложит; по
         # нему же интерфейс запирает в них строки СВ, «Убрать из ЧС» и штраф.
@@ -40420,13 +40475,21 @@ def get_work_schedule_break_rules():
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
         role = _normalize_user_role(user_data[3])
-        if not (_is_admin_role(role) or _is_supervisor_role(role) or _headed_department_id(requester_id) is not None):
+        # Отдел кадров ведёт графики любого отдела (владелец 09.11.2026): без
+        # правил перерывов смена оператора, поставленная кадровиком, легла бы без
+        # перерывов — раздел раскладывает их по правилам направления. Читать —
+        # всё; менять правила (POST ниже) — по-прежнему руководителю линии.
+        keeps_all_schedules = _is_employee_accounting_manager(requester_id)
+        if not (
+            _is_admin_role(role) or _is_supervisor_role(role)
+            or _headed_department_id(requester_id) is not None or keeps_all_schedules
+        ):
             return jsonify({"error": "Forbidden"}), 403
 
         # Изоляция отделов: глобальный админ видит правила перерывов всех
         # направлений; глава отдела (в т.ч. с базовой admin-ролью) и
         # супервайзер — только направлений своего отдела.
-        if _is_global_admin_requester(role, requester_id):
+        if _is_global_admin_requester(role, requester_id) or keeps_all_schedules:
             scope_dept = None
         else:
             scope_dept = _headed_department_id(requester_id) or db.get_user_department_id(requester_id)
@@ -40562,7 +40625,8 @@ def recalculate_work_schedule_breaks():
                 target_operator, scope_error = _resolve_scoped_operator_for_requester(
                     user_data,
                     requester_id,
-                    raw_operator_id
+                    raw_operator_id,
+                    allow_employee_accounting=False
                 )
                 if scope_error:
                     message, status_code = scope_error
@@ -40609,7 +40673,7 @@ def save_work_shift():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_management_requester()
+        user_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -40666,7 +40730,7 @@ def delete_work_shift():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_management_requester()
+        user_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -40712,7 +40776,7 @@ def toggle_work_day_off():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_management_requester()
+        user_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -40761,7 +40825,7 @@ def save_work_schedule_status_period():
     }
     """
     try:
-        requester_id, user_data, auth_error = _resolve_management_requester()
+        requester_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -40827,7 +40891,7 @@ def delete_work_schedule_status_period():
     }
     """
     try:
-        requester_id, user_data, auth_error = _resolve_management_requester()
+        requester_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -40969,7 +41033,7 @@ def save_shifts_bulk():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_management_requester()
+        user_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41017,7 +41081,7 @@ def apply_work_schedule_bulk_actions():
     }
     """
     try:
-        requester_id, user_data, auth_error = _resolve_management_requester()
+        requester_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41100,7 +41164,8 @@ def aggregate_work_schedule_metrics():
 
         scoped_operator_ids = []
         for raw_operator_id in operator_ids:
-            target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, raw_operator_id)
+            target_operator, scope_error = _resolve_scoped_operator_for_requester(
+                user_data, requester_id, raw_operator_id, allow_employee_accounting=False)
             if scope_error:
                 message, status_code = scope_error
                 return jsonify({"error": message}), status_code
@@ -41167,7 +41232,8 @@ def resolve_work_schedule_auto_flag():
         if not operator_id or not day or not flag_type or not action:
             return jsonify({"error": "Missing required fields"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+        target_operator, scope_error = _resolve_scoped_operator_for_requester(
+            user_data, requester_id, operator_id, allow_employee_accounting=False)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41234,7 +41300,8 @@ def add_work_schedule_fine():
         # Поимённый допуск даёт права СВ отдела, а СВ штрафует только своих
         # подчинённых — человек по допуску ничей не СВ, штраф ему не открыт.
         target_operator, scope_error = _resolve_scoped_operator_for_requester(
-            user_data, requester_id, operator_id, allow_grant=False)
+            user_data, requester_id, operator_id, allow_grant=False,
+            allow_employee_accounting=False)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41281,7 +41348,7 @@ def export_work_schedules_excel():
     ФИО | Ставка | YYYY-MM-DD даты (в файле выводятся как dd.mm.yyyy)
     """
     try:
-        requester_id, user_data, auth_error = _resolve_management_requester()
+        requester_id, user_data, auth_error = _resolve_work_schedule_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41359,7 +41426,8 @@ def export_work_schedules_excel():
                     selected_operator_ids.add(parsed)
 
         operators = db.get_operators_with_shifts(start_date, end_date) or []
-        operators = _filter_operators_for_requester_scope(user_data, requester_id, operators)
+        operators = _filter_operators_for_requester_scope(
+            user_data, requester_id, operators, schedule_keeping=True)
 
         if selected_department_id is not None:
             operators = [

@@ -58,6 +58,9 @@ UNDER_TEST = (
     "_with_granted_break_rules",
     "_resolve_management_requester",
     "_resolve_work_schedule_viewer",
+    # Проверка ручек ведения графика (смены, выходные, статусы) с 09.11.2026:
+    # управленцы — как прежде, плюс отдел кадров.
+    "_resolve_work_schedule_editor",
     "_can_remove_dismissal_blacklist",
     "_normalize_management_role",
     "get_operators_with_schedules",

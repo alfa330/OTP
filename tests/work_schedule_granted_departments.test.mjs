@@ -193,7 +193,8 @@ const modalFlags = (opId, { viewerCan = true } = {}) => {
         canRemoveBlacklist: evaluate('plannerModalCanRemoveBlacklist', {
             plannerViewerCanRemoveBlacklist: viewerCan, plannerModalInGrantedDepartment,
         }),
-        canFine: evaluate('plannerModalCanFine', { plannerModalInGrantedDepartment }),
+        // Кадровик штрафа не ставит (09.11.2026) — здесь зритель не кадровик.
+        canFine: evaluate('plannerModalCanFine', { plannerModalInGrantedDepartment, plannerViewerIsHrScheduler: false }),
     };
 };
 
