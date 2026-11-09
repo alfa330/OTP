@@ -1094,7 +1094,9 @@ class HiringService:
         if message['lid'] and not key.startswith('lid:') and queries.wa_chat_by_lid(cursor, message['lid'], lock=True):
             queries.wa_move_chat(cursor, 'lid:' + message['lid'], key, now)
             chat = queries.wa_get_chat(cursor, key)
-        if not inbound or not message['phone'] or not source or not source['is_active']:
+        if not inbound:
+            return self._wa_phone_reply(cursor, chat, message, now) if chat.get('card_id') else 'stored'
+        if not message['phone'] or not source or not source['is_active']:
             return 'stored'
         if chat.get('card_id'):
             card = queries.get_card(cursor, chat['card_id'])
@@ -1109,6 +1111,82 @@ class HiringService:
             queries.wa_set_chat_card(cursor, key, card_id, now)
         return outcome
 
+    def _wa_phone_reply(self, cursor, chat, message, now):
+        """Ответ с телефона найма в чате карточки (владелец 09.11.2026: 58 из 59 откликов WhatsApp висели
+        в «Откликах», хотя переписка уже шла). Первый ответ берёт карточку из пула в работу к тому, кто
+        отвечает с телефона (настройка номера), — со временем ответа; дальше каждый день переписки —
+        касание WhatsApp закреплённого рекрутера. Автоответ WhatsApp Business не считается."""
+        at = message['at'] or now
+        last_in = queries.wa_last_inbound(cursor, chat['key'], at)
+        if last_in is not None and at - last_in < whatsapp.AUTO_REPLY_GAP:
+            return 'auto_reply'
+        card = queries.get_card(cursor, chat['card_id'], lock=True)
+        # Наше сообщение раньше отклика (напоминание тому, кто писал до подключения номера) — не ответ
+        # по этой карточке: при прогоне задним числом взяло бы её в работу раньше, чем она появилась.
+        if not card or card['is_closed'] or (card.get('received_at') and at < card['received_at']):
+            return 'stored'
+        outcome = 'stored'
+        if card['stage'] in rules.POOL_STAGES:
+            recruiter = self._wa_phone_recruiter(cursor)
+            if not recruiter or not queries.claim_card(cursor, card['id'], recruiter['id'], at):
+                return 'stored'
+            queries.add_stage(cursor, card['id'], rules.IN_WORK, None, recruiter['id'], recruiter['name'], at)
+            queries.add_assignment(cursor, card['id'], recruiter['id'], 'take', recruiter['id'], recruiter['name'], at,
+                                   'Ответ с телефона найма')
+            card = queries.get_card(cursor, card['id'])
+            outcome = 'taken'
+        if not card.get('recruiter_id'):
+            return outcome
+        day_start = datetime.combine(at.date(), datetime.min.time())
+        if queries.wa_phone_touched(cursor, card['id'], day_start, day_start + timedelta(days=1)):
+            return outcome
+        author = int(card['recruiter_id'])
+        queries.add_touch(cursor, card['id'], rules.TOUCH_WHATSAPP, None, whatsapp.phone_reply_text(message), author,
+                          queries.user_name(cursor, author), at, meta={'source': whatsapp.PHONE_TOUCH, 'wa_id': message['id']})
+        fields = {'updated_at': now}
+        if not card.get('last_touch_at') or card['last_touch_at'] < at:
+            fields['last_touch_at'] = at
+        if card['stage'] == rules.IN_WORK and not card.get('substage'):
+            fields['substage'] = 'whatsapp'
+        queries.update_card(cursor, card['id'], **fields)
+        return outcome if outcome == 'taken' else 'touched'
+
+    def _wa_phone_recruiter(self, cursor):
+        """Кто отвечает с телефона найма — если выбран и ещё может вести карточки."""
+        row = queries.get_integration(cursor, whatsapp.INTEGRATION) or {}
+        user_id = _int((row.get('settings') or {}).get('phone_recruiter_id'))
+        if not user_id:
+            return None
+        names = {int(option['id']): option['name'] for option in queries.wa_recruiter_options(cursor)}
+        return {'id': user_id, 'name': names[user_id]} if user_id in names else None
+
+    def wa_settings(self, ctx, payload):
+        """«Отвечает с телефона». Выбор применяется и к уже идущей переписке: ответы с телефона
+        прогоняются по тем же правилам, как если бы настройка стояла с самого начала (уже отвеченные
+        карточки уходят в работу со временем ответа, касания — по дням)."""
+        if not access.can_manage(ctx):
+            raise _forbidden('Подключение WhatsApp ведёт руководитель рекрутинга')
+        raw = (payload or {}).get('phone_recruiter_id')
+        user_id = None if raw in (None, '') else _int(raw)
+        if raw not in (None, '') and not user_id:
+            raise HiringError('HIRING_BAD_RECRUITER', 'Этот человек не рекрутер')
+        now = self._now()
+        applied = 0
+        with self._cursor() as cursor:
+            queries.wa_lock_integration(cursor, now)
+            if user_id and user_id not in {int(option['id']) for option in queries.wa_recruiter_options(cursor)}:
+                raise HiringError('HIRING_BAD_RECRUITER', 'Этот человек не рекрутер')
+            queries.wa_save_settings(cursor, {'phone_recruiter_id': user_id}, now)
+            if user_id:
+                for reply in queries.wa_phone_replies(cursor):
+                    message = {'id': reply['wa_id'], 'at': reply['sent_at'], 'kind': reply['kind'], 'text': reply['body']}
+                    chat = {'key': reply['chat_key'], 'card_id': reply['card_id']}
+                    if self._wa_phone_reply(cursor, chat, message, now) == 'taken':
+                        applied += 1
+        data = self.wa_status(ctx)
+        data['applied'] = applied
+        return data
+
     def wa_status(self, ctx):
         if not access.can_manage(ctx):
             raise _forbidden('Подключение WhatsApp ведёт руководитель рекрутинга')
@@ -1116,8 +1194,10 @@ class HiringService:
         with self._cursor() as cursor:
             row = queries.get_integration(cursor, whatsapp.INTEGRATION)
             unmatched = queries.wa_unmatched(cursor)
+            options = queries.wa_recruiter_options(cursor)
         data = whatsapp.view(row, now)
         data['unmatched'] = unmatched
+        data['recruiter_options'] = options
         return data
 
     def wa_command(self, ctx, action):
@@ -1144,6 +1224,9 @@ class HiringService:
                 raise HiringError('HIRING_PHONE_HIDDEN', 'Переписка откроется, когда возьмёте карточку в работу', 403)
             chats = queries.wa_chats_for_phones(cursor, [card.get('phone'), card.get('whatsapp')])
             messages = queries.wa_messages(cursor, [chat['key'] for chat in chats])
+        for message in messages:
+            if message.get('ad'):
+                message['ad_label'] = whatsapp.campaign_of(message['ad'])
         return {'chats': chats, 'messages': messages}
 
     def wa_watchdog(self):

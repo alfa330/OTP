@@ -514,3 +514,11 @@ def test_whatsapp_bridge_is_signed_and_buttons_are_lead_only(client, monkeypatch
     remote = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC2)).get_json()
     assert remote['card']['phone'] is None and remote['whatsapp'] is None
     assert client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=as_user(REC2)).status_code == 403
+    # «Отвечает с телефона» — только руководитель; выбор берёт в работу уже отвеченную карточку.
+    reply = dict(message, id='w2', from_me=True, ts=1792047600 + 600, text='Добрый день!')
+    assert signed(events, {'events': [reply]})[0].get_json()['outcomes'] == {'stored': 1}
+    assert client.put('/api/hiring/whatsapp/settings', json={'phone_recruiter_id': REC1}, headers=recruiter).status_code == 403
+    saved = client.put('/api/hiring/whatsapp/settings', json={'phone_recruiter_id': REC1}, headers=lead)
+    assert saved.status_code == 200 and saved.get_json()['applied'] == 1 and saved.get_json()['phone_recruiter_id'] == REC1
+    taken = client.get('/api/hiring/cards/%s' % card['id'], headers=lead).get_json()['card']
+    assert taken['stage'] == 'in_work' and taken['recruiter_id'] == REC1

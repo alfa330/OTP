@@ -916,13 +916,15 @@ def wa_event(message_id, phone='77055552233', **extra):
 
 def test_whatsapp_first_message_becomes_response(world):
     service = world['service']
-    ad = {'title': 'Оператор КЦ — Алматы', 'source_id': '120208', 'ctwa_clid': 'abc'}
+    ad = {'title': 'Напишите нам!', 'body': 'Требуются операторы', 'source_id': '120208', 'source_app': 'instagram',
+          'ctwa_clid': 'abc'}
     result = service.wa_events({'events': [wa_event('m1', text='Хочу работать', ad=ad)]})
     assert result == {'accepted': 1, 'outcomes': {'created': 1}}
     with world['db']._get_cursor() as cur:
         card = queries.open_card_by_phone(cur, '+77055552233')
         assert card['stage'] == 'responses' and card['full_name'] == 'Айгерим' and card['received_at'] == NOW
-        assert card['campaign'] == 'Оператор КЦ — Алматы' and card['comment'] == 'WhatsApp: «Хочу работать»'
+        assert card['campaign'] == 'Instagram · объявление 120208 · Требуются операторы'
+        assert card['comment'] == 'WhatsApp: «Хочу работать»'
         # Ссылка на площадку — без телефона: её видят и удалённые рекрутеры, которым телефон пула скрыт.
         assert card['platform_ref'] == 'wa:m1'
         assert queries.get_source(cur, card['source_id'])['code'] == 'whatsapp'
@@ -932,10 +934,11 @@ def test_whatsapp_first_message_becomes_response(world):
                     (card['id'],))
         assert [row[0] for row in cur.fetchall()] == [REC1, REC2, REMOTE]
         assert queries.get_integration(cur, 'whatsapp')['received_total'] == 1
-    # Дальше чат открытой карточки — только переписка: ни отклика, ни касаний, ни уведомлений. Ответ с
-    # телефона (from_me) имя кандидата не перетирает; повтор доставки — тот же «m1» — не дублируется.
+    # Дальше чат открытой карточки — только переписка: ни отклика, ни уведомлений. Ответ с телефона
+    # (from_me) имя кандидата не перетирает; пока не выбран «Отвечает с телефона», в работу не берёт.
+    # Повтор доставки — тот же «m1» — не дублируется.
     again = service.wa_events({'events': [wa_event('m2', text='Есть вакансия?'),
-                                          wa_event('m3', from_me=True, push_name='Найм', text='Да, есть'),
+                                          wa_event('m3', from_me=True, push_name='Найм', text='Да, есть', ts=WA_TS + 120),
                                           wa_event('m1', text='Хочу работать')]})
     assert again['outcomes'] == {'stored': 2, 'duplicate': 1}
     with world['db']._get_cursor() as cur:
@@ -949,6 +952,93 @@ def test_whatsapp_first_message_becomes_response(world):
     assert [m['wa_id'] for m in thread['messages']] == ['m1', 'm2', 'm3']
     assert [m['from_me'] for m in thread['messages']] == [False, False, True]
     assert thread['messages'][0]['ad']['ctwa_clid'] == 'abc'
+    assert thread['messages'][0]['ad_label'] == 'Instagram · объявление 120208 · Требуются операторы'
+    assert 'ad_label' not in thread['messages'][1]
+
+
+def test_whatsapp_phone_reply_takes_card_into_work(world):
+    """Владелец 09.11.2026: отклики WhatsApp висели в «Откликах», хотя рекрутер уже переписывался с
+    телефона. Первый ответ с телефона берёт карточку в работу к выбранному «Отвечает с телефона»,
+    каждый день переписки — касание WhatsApp; автоответ WhatsApp Business не считается."""
+    service = world['service']
+    lead = ctx_of(world, HR_HEAD)
+    service.wa_events({'events': [wa_event('a1', text='Здравствуйте, по вакансии')]})
+    # Автоответ (через 5 с после кандидата) и ответ человека, пока отвечающий не выбран, — карточка в пуле.
+    assert service.wa_events({'events': [wa_event('a2', from_me=True, ts=WA_TS + 5, text='Спасибо! Ответим скоро')]}) \
+        == {'accepted': 1, 'outcomes': {'auto_reply': 1}}
+    assert service.wa_events({'events': [wa_event('a3', from_me=True, ts=WA_TS + 300, text='Добрый день! Удобно созвониться?')]}) \
+        == {'accepted': 1, 'outcomes': {'stored': 1}}
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77055552233')
+    assert card['stage'] == 'responses' and card['recruiter_id'] is None
+    # Отвечающего выбирает руководитель — рекрутер и посторонний не могут, чужого выбрать нельзя.
+    with pytest.raises(HiringError) as forbidden:
+        service.wa_settings(ctx_of(world, REC1), {'phone_recruiter_id': REC1})
+    assert forbidden.value.status == 403
+    with pytest.raises(HiringError) as stranger:
+        service.wa_settings(lead, {'phone_recruiter_id': STRANGER})
+    assert stranger.value.code == 'HIRING_BAD_RECRUITER'
+    options = {row['id'] for row in service.wa_status(lead)['recruiter_options']}
+    assert {REC1, REC2, REMOTE, LEAD_GRANT, HR_HEAD} <= options and STRANGER not in options and SUPER not in options
+    # Выбор применяется к уже идущей переписке: карточка уходит в работу со временем первого ответа
+    # человека (a3), автоответ a2 пропущен.
+    shown = service.wa_settings(lead, {'phone_recruiter_id': str(REC1)})
+    assert shown['applied'] == 1 and shown['phone_recruiter_id'] == REC1
+    reply_at = NOW + timedelta(minutes=5)
+    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, card['id'])
+        assert (card['stage'], card['substage'], card['recruiter_id']) == ('in_work', 'whatsapp', REC1)
+        assert card['taken_at'] == reply_at and card['last_touch_at'] == reply_at and card['candidate_no']
+        touches = queries.card_touches(cur, card['id'])
+        assert [(t['kind'], t['author_id'], t['at'], t['meta']['source'], t['meta']['wa_id']) for t in touches] \
+            == [('whatsapp', REC1, reply_at, 'wa_phone', 'a3')]
+        assert touches[0]['body'] == 'Ответ с телефона найма: «Добрый день! Удобно созвониться?»'
+        assistant = queries.card_assignments(cur, card['id'])
+        assert [(a['recruiter_id'], a['reason'], a['comment']) for a in assistant] == [(REC1, 'take', 'Ответ с телефона найма')]
+        assert [s['stage'] for s in queries.card_stages(cur, card['id'])] == ['responses', 'in_work']
+    # Повторный выбор того же — ничего не задваивает.
+    assert service.wa_settings(lead, {'phone_recruiter_id': REC1})['applied'] == 0
+    # Ещё ответ в тот же день — касания нет (одно в день); на следующий день — новое.
+    assert service.wa_events({'events': [wa_event('a4', from_me=True, ts=WA_TS + 3600, text='Жду звонка')]})['outcomes'] == {'stored': 1}
+    assert service.wa_events({'events': [wa_event('a5', from_me=True, ts=WA_TS + 86400, text='Вы придёте?')]})['outcomes'] == {'touched': 1}
+    with world['db']._get_cursor() as cur:
+        assert [t['meta']['wa_id'] for t in queries.card_touches(cur, card['id'])] == ['a3', 'a5']
+        assert queries.get_card(cur, card['id'])['last_touch_at'] == NOW + timedelta(days=1)
+    # Новый чат при выбранном отвечающем — первый ответ берёт в работу сразу.
+    service.wa_events({'events': [wa_event('b1', phone='77055554455', text='Добрый вечер')]})
+    assert service.wa_events({'events': [wa_event('b2', phone='77055554455', from_me=True, ts=WA_TS + 60, text='Здравствуйте!')]}) \
+        == {'accepted': 1, 'outcomes': {'taken': 1}}
+    # Карточку другого рекрутера ответ с телефона не перебирает — касание пишется за закреплённым.
+    outcome, other = add_response(world, REC2, '8 705 555 66 77', full_name='Сидоров')
+    other = service.take(ctx_of(world, REC2), other['id'])
+    service.wa_events({'events': [wa_event('c1', phone='77055556677', ts=WA_TS + 7200)]})
+    assert service.wa_events({'events': [wa_event('c2', phone='77055556677', from_me=True, ts=WA_TS + 7400)]})['outcomes'] \
+        == {'touched': 1}
+    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, other['id'])
+        assert card['recruiter_id'] == REC2
+        assert [(t['kind'], t['author_id']) for t in queries.card_touches(cur, other['id']) if t['kind'] == 'whatsapp'] \
+            == [('whatsapp', REC2)]
+        # Завершённая карточка не трогается.
+        cur.execute("UPDATE hiring_cards SET is_closed = TRUE, closed_at = %s WHERE id = %s", (NOW, other['id']))
+    assert service.wa_events({'events': [wa_event('c3', phone='77055556677', from_me=True, ts=WA_TS + 90000)]})['outcomes'] \
+        == {'stored': 1}
+    # Напоминание с телефона ушло раньше, чем человек написал (переписка до подключения номера), —
+    # карточка берётся в работу первым ответом ПОСЛЕ отклика, а не задним числом раньше него.
+    service.wa_settings(lead, {'phone_recruiter_id': None})
+    service.wa_events({'events': [wa_event('e1', phone='77055559900', from_me=True, ts=WA_TS - 3600, text='Напоминаю про обучение')]})
+    service.wa_events({'events': [wa_event('e2', phone='77055559900', text='Да, приду')]})
+    service.wa_events({'events': [wa_event('e3', phone='77055559900', from_me=True, ts=WA_TS + 600, text='Ждём')]})
+    assert service.wa_settings(lead, {'phone_recruiter_id': REC1})['applied'] == 1
+    with world['db']._get_cursor() as cur:
+        late = queries.open_card_by_phone(cur, '+77055559900')
+        assert late['taken_at'] == NOW + timedelta(minutes=10)
+        assert [t['meta']['wa_id'] for t in queries.card_touches(cur, late['id']) if t['kind'] == 'whatsapp'] == ['e3']
+    # Сняли отвечающего — новые ответы карточки из пула не берут.
+    service.wa_settings(lead, {'phone_recruiter_id': None})
+    service.wa_events({'events': [wa_event('d1', phone='77055557788')]})
+    assert service.wa_events({'events': [wa_event('d2', phone='77055557788', from_me=True, ts=WA_TS + 60)]})['outcomes'] \
+        == {'stored': 1}
 
 
 def test_whatsapp_repeat_closed_and_employee(world):

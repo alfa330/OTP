@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { FileText, Image as ImageIcon, MapPin, Mic, Music, Smile, UserRound, Video } from 'lucide-react';
+import CustomSelect from '../ui/CustomSelect';
 import { IosHint } from '../ui/ios';
 import { errorOf, plural, prettyPhone, shortTime } from './hiringMeta';
 import { ConfirmDialog, Empty, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
@@ -11,13 +12,19 @@ import { ConfirmDialog, Empty, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY }
  *   WhatsAppIntegration  строка «Настроек → Интеграции»: состояние, QR привязки, кнопки, предупреждения;
  *   WhatsAppThread       вкладка карточки: переписка с номером найма, старые сообщения сверху.
  *
- * Сервис сам ничего не отправляет (этап 1): рекрутеры отвечают с телефона, ответы приходят эхом.
+ * Сервис сам ничего не отправляет (этап 1): рекрутеры отвечают с телефона, ответы приходят эхом; первый
+ * ответ берёт карточку в работу к тому, кто выбран «Отвечает с телефона».
  */
 
 const HOW_IT_WORKS = 'Сервис на шлюзе подключён к номеру найма как связанное устройство (как WhatsApp Web). '
     + 'Каждый новый собеседник становится откликом в пуле с источником «WhatsApp», переписка — во вкладке карточки. '
     + 'Сервис сам ничего не отправляет — отвечайте с телефона. Чтобы номер не заблокировали: не писать с него первыми, '
     + 'без рассылок и одинаковых текстов, телефон держать в сети и открывать на нём WhatsApp Business каждый день.';
+
+const PHONE_RECRUITER_HINT = 'Кто отвечает кандидатам с телефона найма. Его первый ответ в чате берёт карточку из пула '
+    + 'в работу к нему, дальше каждый день переписки — касание WhatsApp в карточке. Ответ в первые 15 секунд после '
+    + 'сообщения кандидата — автоответ WhatsApp Business, он не считается. При выборе уже отвеченные карточки тоже '
+    + 'уходят в работу — со временем первого ответа.';
 
 const PAIR_STEPS = 'На телефоне с номером найма: WhatsApp Business → Настройки → Связанные устройства → '
     + 'Привязка устройства — и наведите камеру на код.';
@@ -69,6 +76,21 @@ export const WhatsAppIntegration = ({ api, toast }) => {
         }
     };
 
+    const savePhoneRecruiter = async (value) => {
+        setBusy('recruiter');
+        try {
+            const { data } = await api.put('/whatsapp/settings', { phone_recruiter_id: value ? Number(value) : null });
+            setStatus(data);
+            toast(data.applied
+                ? `Сохранено · в работу ${plural(data.applied, 'ушла', 'ушли', 'ушло')} ${data.applied} ${plural(data.applied, 'карточка', 'карточки', 'карточек')}`
+                : 'Сохранено', 'success');
+        } catch (error) {
+            toast(errorOf(error, 'Не сохранилось'), 'error');
+        } finally {
+            setBusy('');
+        }
+    };
+
     if (!status) {
         return (
             <li className="flex items-center gap-3 px-4 py-2.5 text-[13.5px] font-medium text-slate-900">
@@ -76,7 +98,7 @@ export const WhatsAppIntegration = ({ api, toast }) => {
             </li>
         );
     }
-    const { actions = {}, unmatched = {} } = status;
+    const { actions = {}, unmatched = {}, recruiter_options: recruiterOptions = [] } = status;
     const facts = [
         status.number ? prettyPhone(`+${status.number}`) : null,
         status.state === 'connected' && status.connected_since ? `подключён с ${shortTime(status.connected_since)}` : null,
@@ -107,6 +129,17 @@ export const WhatsAppIntegration = ({ api, toast }) => {
                         </div>
                     )}
                     {status.pending && <div className="mt-0.5 text-[12px] text-slate-500">Команда «{ACTION_LABELS[status.pending]}» отправлена сервису…</div>}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <span className="text-[12.5px] text-slate-600">Отвечает с телефона</span>
+                        <div className="w-64">
+                            <CustomSelect variant="ios" value={status.phone_recruiter_id ? String(status.phone_recruiter_id) : ''}
+                                          onChange={savePhoneRecruiter} disabled={busy === 'recruiter'} placeholder="Не выбран"
+                                          searchable searchPlaceholder="Фамилия" ariaLabel="Кто отвечает с телефона найма"
+                                          options={[{ value: '', label: 'Не выбран' },
+                                              ...recruiterOptions.map((person) => ({ value: String(person.id), label: person.name }))]} />
+                        </div>
+                        <IosHint text={PHONE_RECRUITER_HINT} label="Что это" />
+                    </div>
                 </div>
                 <div className="flex shrink-0 flex-wrap justify-end gap-2">
                     {actions.pair && (
@@ -208,8 +241,8 @@ export const WhatsAppThread = ({ api, cardId }) => {
                             <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
                                 <div className={`max-w-[80%] rounded-2xl px-3 py-1.5 text-[13.5px] leading-snug shadow-[0_1px_1px_rgba(15,23,42,0.04)] ring-1 ${
                                     mine ? 'rounded-br-md bg-blue-50 ring-blue-100' : 'rounded-bl-md bg-white ring-slate-200/70'}`}>
-                                    {message.ad?.title && !mine && (
-                                        <div className="mb-1 text-[11.5px] font-medium text-blue-700">Из рекламы: {message.ad.title}</div>
+                                    {message.ad_label && !mine && (
+                                        <div className="mb-1 text-[11.5px] font-medium text-blue-700">{message.ad_label}</div>
                                     )}
                                     {message.deleted_at ? (
                                         <span className="italic text-slate-400">Сообщение удалено</span>

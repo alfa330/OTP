@@ -61,9 +61,29 @@ def test_card_texts_from_message():
     assert whatsapp.first_message_comment(voice) == 'WhatsApp: [голосовое]'
     long = whatsapp.parse_message(event(text='а' * 700))
     assert whatsapp.first_message_comment(long).endswith('…»') and len(whatsapp.first_message_comment(long)) < 520
+    assert whatsapp.phone_reply_text(plain) == 'Ответ с телефона найма: «Хочу работать оператором»'
+    assert whatsapp.phone_reply_text(voice) == 'Ответ с телефона найма: голосовое'
+    assert whatsapp.phone_reply_text(long).endswith('…»') and len(whatsapp.phone_reply_text(long)) < 330
+
+
+def test_campaign_tells_ads_apart():
+    """Заголовок Click-to-WhatsApp — надпись кнопки, общая для всех объявлений («Напишите нам!» у всех
+    39 карточек, сверка 09.11.2026): различает их только номер объявления, текст — для людей."""
     assert whatsapp.campaign_of(None) is None
-    assert whatsapp.campaign_of({'title': 'Оператор — Алматы', 'source_id': '1'}) == 'Оператор — Алматы'
-    assert whatsapp.campaign_of({'source_id': '120208'}) == 'Реклама 120208'
+    instagram = {'title': 'Напишите нам!', 'body': 'Требуются  операторы\nв отделы продаж', 'source_id': '120250535993810050',
+                 'source_app': 'instagram', 'conversion_source': 'FB_Ads', 'entry_point': 'ctwa_ad', 'ctwa_clid': 'x'}
+    assert whatsapp.campaign_of(instagram) == 'Instagram · объявление 120250535993810050 · Требуются операторы в отделы продаж'
+    assert whatsapp.campaign_of({'title': 'Напишите нам!', 'source_id': '120251238264490050', 'source_app': 'facebook'}) \
+        == 'Facebook · объявление 120251238264490050'
+    assert whatsapp.campaign_of({'source_id': '120208'}) == 'Реклама · объявление 120208'
+    assert len(whatsapp.campaign_of({'source_id': '1', 'body': 'я' * 400})) == 200
+    # Без номера объявления — откуда пришёл человек.
+    assert whatsapp.campaign_of({'entry_point': 'phone_number_hyperlink'}) == 'Ссылка на номер'
+    assert whatsapp.campaign_of({'entry_point': 'message_short_link'}) == 'Короткая ссылка WhatsApp'
+    assert whatsapp.campaign_of({'conversion_source': 'FB_Post'}) == 'Пост в Facebook или Instagram'
+    assert whatsapp.campaign_of({'conversion_source': 'FB_Ads'}) == 'Реклама без номера объявления'
+    assert whatsapp.campaign_of({'conversion_source': 'NEW_KIND'}) == 'NEW_KIND'
+    assert whatsapp.campaign_of({'title': 'Оператор — Алматы'}) == 'Оператор — Алматы'
 
 
 def test_clean_detail_keeps_only_known_fields():

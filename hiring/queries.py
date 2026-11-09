@@ -1302,6 +1302,56 @@ def wa_set_command(cursor, command, now):
                        (json.dumps(command, ensure_ascii=False), now))
 
 
+def wa_last_inbound(cursor, key, at):
+    """Последнее сообщение кандидата не позже ответа — по нему автоответ отличается от рекрутера."""
+    cursor.execute("SELECT MAX(sent_at) FROM hiring_wa_messages WHERE chat_key = %s AND NOT from_me AND sent_at <= %s",
+                   (key, at))
+    return cursor.fetchone()[0]
+
+
+def wa_phone_touched(cursor, card_id, day_start, day_end):
+    """Касание «ответ с телефона» за эти сутки уже есть: переписка — одно касание в день."""
+    cursor.execute("""
+        SELECT 1 FROM hiring_touches
+         WHERE card_id = %s AND kind = 'whatsapp' AND meta->>'source' = 'wa_phone' AND at >= %s AND at < %s
+         LIMIT 1
+    """, (int(card_id), day_start, day_end))
+    return cursor.fetchone() is not None
+
+
+def wa_save_settings(cursor, patch, now):
+    """Настройки номера руками руководителя (кто отвечает с телефона) — поверх команды сервису."""
+    cursor.execute("UPDATE hiring_integrations SET settings = settings || %s::jsonb, updated_at = %s "
+                   "WHERE code = 'whatsapp'", (json.dumps(patch, ensure_ascii=False), now))
+
+
+def wa_recruiter_options(cursor):
+    """Кого можно выбрать «Отвечает с телефона»: рекрутеры и руководители по выдаче раздела, отдел HR."""
+    cursor.execute("""
+        SELECT u.id, u.name FROM users u
+         WHERE u.status NOT IN ('fired', 'dismissal')
+           AND (EXISTS (SELECT 1 FROM hiring_people p WHERE p.user_id = u.id AND p.is_active
+                         AND p.kind IN ('staff', 'remote', 'lead'))
+                OR u.department_id IN (SELECT id FROM departments WHERE lower(code) = 'hr'))
+         ORDER BY u.name
+    """)
+    return _all(cursor)
+
+
+def wa_phone_replies(cursor):
+    """Ответы с телефона в чатах открытых карточек по времени — для прогона задним числом, когда
+    «Отвечает с телефона» выбрали после того, как переписка уже шла."""
+    cursor.execute("""
+        SELECT m.chat_key, m.wa_id, m.sent_at, m.kind, m.body, w.card_id
+          FROM hiring_wa_messages m
+          JOIN hiring_wa_chats w ON w.key = m.chat_key AND w.card_id IS NOT NULL
+          JOIN hiring_cards c ON c.id = w.card_id AND NOT c.is_closed
+         WHERE m.from_me AND m.deleted_at IS NULL
+         ORDER BY m.sent_at, m.id
+    """)
+    return _all(cursor)
+
+
 def wa_save_state(cursor, state, detail, error, now, *, heartbeat=True, ok=False):
     """Состояние от сервиса (или от сторожа — heartbeat=False: время опроса не трогаем)."""
     cursor.execute("""

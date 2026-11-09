@@ -6,7 +6,9 @@
 связанным устройством: каждое входящее приходит сюда событием, первое — становится откликом в пуле.
 
 Сервис сам ничего не отправляет (этап 1): рекрутеры отвечают с телефона, их ответы приходят сюда
-эхом и видны во вкладке карточки. Касаниями они не пишутся — телефон общий, автора не узнать.
+эхом и видны во вкладке карточки. Кто отвечает с телефона — настройка номера (автора по эху не
+узнать): его первый ответ берёт карточку из пула в работу, каждый день переписки — касание WhatsApp
+(владелец 09.11.2026: 58 из 59 откликов висели в «Откликах», хотя переписка уже шла).
 
 Безопасность номера держит сервис (стоп без повторов на любой сигнал ограничения, одна сессия,
 предохранители на переподключения) — здесь только то, что видно людям: состояние, причина
@@ -61,6 +63,12 @@ OFFLINE_AFTER = timedelta(minutes=3)          # без опроса дольше
 QR_FRESH = timedelta(seconds=70)              # код QR живёт 20–60 с, сервис присылает новый
 PHONE_WARN_DAYS = 7                           # телефон давно не в сети: подсказка
 PHONE_ALERT_DAYS = 12                         # и тревога (предел WhatsApp — 14 дней)
+
+# Ответ быстрее этого после сообщения кандидата — автоответ WhatsApp Business («Приветственное
+# сообщение», «Сообщение об отсутствии»), а не рекрутер: в работу не берёт и касанием не считается.
+AUTO_REPLY_GAP = timedelta(seconds=15)
+# meta.source касаний, записанных по ответам с телефона: по ним — «одно касание в день».
+PHONE_TOUCH = 'wa_phone'
 
 MESSAGE_KINDS = ('text', 'image', 'video', 'audio', 'voice', 'document', 'sticker', 'location', 'contact', 'other')
 KIND_LABELS = {'image': 'Фото', 'video': 'Видео', 'audio': 'Аудио', 'voice': 'Голосовое', 'document': 'Документ',
@@ -196,14 +204,44 @@ def parse_message(raw):
     }
 
 
+APP_LABELS = {'instagram': 'Instagram', 'facebook': 'Facebook', 'whatsapp': 'WhatsApp'}
+# Откуда человек пришёл, когда номера объявления нет: точка входа точнее источника конверсии.
+ENTRY_LABELS = {'ctwa_ad': 'Реклама', 'phone_number_hyperlink': 'Ссылка на номер',
+                'message_short_link': 'Короткая ссылка WhatsApp'}
+CONVERSION_LABELS = {'FB_Ads': 'Реклама без номера объявления', 'FB_Post': 'Пост в Facebook или Instagram'}
+
+
 def campaign_of(ad):
-    """Кампания карточки из данных рекламы Click-to-WhatsApp: заголовок объявления или его id."""
+    """Кампания карточки — с чем человек пришёл в WhatsApp.
+
+    Заголовок у объявлений Click-to-WhatsApp — надпись кнопки, общая для всех («Напишите нам!» у всех
+    39 карточек из рекламы, сверка 09.11.2026), поэтому объявление различает только его номер
+    (source_id — «ID объявления» в Ads Manager): «Instagram · объявление 120250535993810050 ·
+    Требуются операторы…». Без номера — откуда пришёл: ссылка на номер, короткая ссылка, пост."""
     if not ad:
         return None
-    title = ad.get('title') or (ad.get('body') or '')[:120]
-    if title:
-        return title[:200]
-    return ('Реклама %s' % ad['source_id'])[:200] if ad.get('source_id') else None
+    app = APP_LABELS.get(str(ad.get('source_app') or '').lower()) or ad.get('source_app')
+    if ad.get('source_id'):
+        parts = [app or 'Реклама', 'объявление %s' % ad['source_id']]
+        body = ' '.join(str(ad.get('body') or '').split())
+        if body:
+            parts.append(body)
+        return ' · '.join(parts)[:200]
+    label = (ENTRY_LABELS.get(ad.get('entry_point')) or CONVERSION_LABELS.get(ad.get('conversion_source'))
+             or ad.get('entry_point') or ad.get('conversion_source'))
+    if label:
+        return ('%s · %s' % (app, label) if app else label)[:200]
+    title = ad.get('title') or ' '.join(str(ad.get('body') or '').split())
+    return title[:200] if title else None
+
+
+def phone_reply_text(message):
+    """Текст касания «ответ с телефона»: что рекрутер написал (начало), файл — его видом."""
+    text = ' '.join(str(message.get('text') or '').split())
+    if text:
+        return 'Ответ с телефона найма: «%s»' % (text if len(text) <= 300 else text[:299] + '…')
+    label = KIND_LABELS.get(message.get('kind'))
+    return 'Ответ с телефона найма: %s' % label.lower() if label else 'Ответ с телефона найма'
 
 
 def first_message_comment(message):
@@ -318,6 +356,7 @@ def view(row, now):
         'last_seen_at': last_run.isoformat(timespec='seconds') if last_run else None,
         'connected_since': detail.get('connected_since') or None,
         'received_total': int(row.get('received_total') or 0),
+        'phone_recruiter_id': _int(settings.get('phone_recruiter_id')),
         'actions': {action: can_command(action, state, detail)[0] for action in COMMANDS},
     }
 

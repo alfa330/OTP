@@ -27,6 +27,9 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/cards?key=               список карточек за цифрой дашборда
     GET    /reports/motivation[/export]      начисления месяца
     …/people, /sources, /vacancies, /reasons, /groups, /plans, /integrations — настройки
+    GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
+    PUT    /whatsapp/settings                кто отвечает с телефона (его первый ответ берёт карточку в работу)
+    GET    /cards/<id>/whatsapp              переписка карточки с номером найма
 
 Внешний вход откликов (Kaspi, таргет, любой интегратор) — отдельный Blueprint
 /api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма».
@@ -918,6 +921,10 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     @hiring_route('/whatsapp/command', methods=('POST',))
     def hiring_whatsapp_command(ctx):
         return jsonify(_json(service.wa_command(ctx, _body().get('action'))))
+
+    @hiring_route('/whatsapp/settings', methods=('PUT',))
+    def hiring_whatsapp_settings(ctx):
+        return jsonify(_json(service.wa_settings(ctx, _body())))
 
     @hiring_route('/cards/<int:card_id>/whatsapp')
     def hiring_card_whatsapp(card_id, ctx):
