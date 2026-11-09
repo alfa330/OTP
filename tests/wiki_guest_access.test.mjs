@@ -8,16 +8,19 @@ import {
     bannerText,
     clampDate,
     daysLeftLabel,
+    deadlineLabel,
     fmtDate,
     fmtDeadline,
     fmtTime,
     isEndOfDay,
+    isPermanent,
     plural,
     presetLabel,
     presetsWithin,
     targetLabel,
     urgency,
 } from '../src/components/wiki/guestAccess.js';
+import { auditFacts } from '../src/components/wiki/auditEvents.js';
 
 test('дата режется строкой, а не разбирается в Date', () => {
     // Сервер отдаёт наивное алматинское время без зоны. new Date() разберёт его
@@ -220,6 +223,80 @@ test('состояния выдачи совпадают с серверными
         assert.ok(python.includes(`return '${key}'`), `нет статуса ${key} на сервере`);
     }
     assert.deepEqual(Object.keys(STATUS_META).sort(), ['active', 'expired', 'revoked']);
+});
+
+/* Бессрочная выдача (решение владельца 09.11.2026, wiki/guests.py:
+ * PERMANENT_EXPIRES_AT). Сервер присылает признак permanent и НЕ присылает
+ * дату: метка 9999-12-31 — способ сказать «никогда», а не срок. */
+const PERMANENT_SPACE = {
+    kind: 'space', title: 'Таксопарки', permanent: true, expires_at: null, days_left: null,
+};
+
+test('бессрочность узнаётся по признаку сервера, а не по дате', () => {
+    assert.equal(isPermanent(PERMANENT_SPACE), true);
+    assert.equal(isPermanent({ permanent: false, expires_at: '2026-09-05T23:59:59' }), false);
+    // Без признака — обычная выдача, даже с дальней датой: угадывать по году
+    // значило бы завести второй источник истины о сроке.
+    assert.equal(isPermanent({ expires_at: '9999-12-31T23:59:59' }), false);
+    assert.equal(isPermanent(null), false);
+    assert.equal(isPermanent(undefined), false);
+});
+
+test('в списке выдач бессрочная читается словом, а не датой', () => {
+    assert.equal(deadlineLabel(PERMANENT_SPACE), 'бессрочно');
+    assert.equal(deadlineLabel({ expires_at: '2026-09-05T23:59:59' }), 'до 05.09.2026');
+    assert.equal(deadlineLabel({ expires_at: '2026-08-25T18:00:00' }), 'до 25.08.2026, 18:00');
+    // Подпись остатка у бессрочной пустая — второй строки под «бессрочно» нет.
+    assert.equal(daysLeftLabel(PERMANENT_SPACE.days_left, PERMANENT_SPACE.expires_at), '');
+    assert.equal(urgency(PERMANENT_SPACE.days_left), 'calm');
+});
+
+test('только бессрочные выдачи — баннера нет', () => {
+    // Сообщать нечего: срока нет, а полоса «доступ есть» каждый день — шум.
+    assert.equal(bannerText([PERMANENT_SPACE]), null);
+    assert.equal(bannerText([PERMANENT_SPACE, { ...PERMANENT_SPACE, title: 'Тез' }]), null);
+});
+
+test('рядом со срочной баннер говорит только о срочной', () => {
+    const banner = bannerText([
+        PERMANENT_SPACE,
+        { kind: 'section', title: 'Регламент СЗоВ', include_subsections: false,
+          expires_at: '2026-09-05T23:59:59', days_left: 3 },
+    ]);
+    assert.equal(banner.title, 'Гостевой доступ: Регламент СЗоВ');
+    assert.equal(banner.detail, 'до 05.09.2026 · осталось 3 дня');
+});
+
+test('журнал называет бессрочную выдачу словом, а не датой 31.12.9999', () => {
+    const facts = auditFacts({
+        action: 'guest.extend',
+        details: { user_name: 'Сотрудник', permanent: true,
+                   expires_at: '9999-12-31T23:59:59', reason: 'по решению владельца' },
+    });
+    assert.deepEqual(facts, ['Сотрудник', 'бессрочно', 'по решению владельца']);
+    // Обычная выдача — по-прежнему с датой.
+    assert.deepEqual(
+        auditFacts({ action: 'guest.grant',
+                     details: { user_name: 'Сотрудник', expires_at: '2026-09-05T23:59:59' } }),
+        ['Сотрудник', 'до 05.09.2026']);
+});
+
+test('экран статьи и списка прячет срок бессрочной выдачи', () => {
+    // Сами компоненты — модалка и статья с загрузкой по сети, серверный рендер
+    // до подписи не доходит. Сторожим исходник: бейдж «до …» и остаток дней в
+    // статье, кнопку «Продлить» в списке.
+    const article = readFileSync(
+        new URL('../src/components/wiki/WikiArticle.jsx', import.meta.url), 'utf8');
+    assert.equal(
+        (article.match(/article\.guest_access && !isPermanentGuest\(article\.guest_access\)/g)
+            || []).length, 2);
+    // «История» по-прежнему прячется у ЛЮБОЙ гостевой выдачи: сервер её гостю
+    // не отдаёт (routes_edit._history_denied), бессрочный он или нет.
+    assert.ok(article.includes('{!article.guest_access && ('));
+    const list = readFileSync(
+        new URL('../src/components/wiki/WikiGuests.jsx', import.meta.url), 'utf8');
+    assert.ok(list.includes('{deadlineLabel(item)}'));
+    assert.ok(/\{!isPermanent\(item\) && \(\s*<button[^>]*onClick=\{\(\) => onExtend\(item\)\}/.test(list));
 });
 
 test('потолок срока во фронте не зашит — он приезжает с сервера', () => {

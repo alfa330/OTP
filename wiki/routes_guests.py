@@ -329,6 +329,20 @@ def register(bp, wiki_route, db, log_ip):
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
+        # Бессрочная выдача того же объекта уже есть (wiki/guests.py:
+        # PERMANENT_EXPIRES_AT). Повторную выдачу create_grant считает
+        # продлением, а продлить бессрочную можно только укоротив её — молча
+        # превратив «насовсем» в «до такого-то числа». Отказ словами: выдающий
+        # обязан узнать, что доступ у человека уже есть и без срока.
+        if wiki_guests.permanent_grant_id(
+                cursor, user_id=target_id, section_id=section_id,
+                article_id=article_id, space_id=space_id):
+            return jsonify({
+                "error": "У сотрудника уже бессрочный доступ сюда — выдавать "
+                         "заново не нужно",
+                "code": "WIKI_GUEST_PERMANENT",
+            }), 409
+
         reason = (data.get('reason') or '').strip()[:500] or None
         # «Включая подразделы» — только у раздела: ни у статьи, ни у
         # пространства подразделов нет, и сохранённый TRUE на такой строке
@@ -427,6 +441,12 @@ def register(bp, wiki_route, db, log_ip):
         if grant['revoked_at']:
             return jsonify({"error": "Отозванную выдачу не продлевают — "
                                      "выдайте доступ заново"}), 400
+        # Бессрочную продлевать некуда: срок «сейчас + N дней» её только
+        # укоротил бы. Кнопки «Продлить» у неё в списке нет; это — на прямой
+        # запрос.
+        if wiki_guests.is_permanent(grant['expires_at']):
+            return jsonify({"error": "Выдача бессрочная — продлевать её не нужно",
+                            "code": "WIKI_GUEST_PERMANENT"}), 400
         data = _body()
         try:
             expires_at = wiki_guests.resolve_expiry(

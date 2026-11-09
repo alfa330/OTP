@@ -10,8 +10,11 @@ import { iosCard, iosGroupLabel, iosBtnSecondary, IosBadge } from '../ui/ios';
 // fmtDeadline под своим именем: в файле уже есть свой fmtDate — «5 сентября
 // 2026» для подписей статьи, а гостевому сроку нужен короткий цифровой формат
 // с часом, и разбирать наивную дату через new Date() ему нельзя (см.
-// guestAccess.js).
-import { daysLeftLabel, fmtDeadline as fmtGuestDeadline } from './guestAccess';
+// guestAccess.js). isPermanent — тоже под своим: «бессрочная» здесь про
+// гостевую выдачу, а не про статью.
+import {
+    daysLeftLabel, fmtDeadline as fmtGuestDeadline, isPermanent as isPermanentGuest,
+} from './guestAccess';
 import { STATUS_LABELS, STATUS_TONES, typeBadge } from './articleTypes';
 import { findTrainer } from './trainers/registry';
 import { getScrollContainer, scrollToElement } from './scrollContainer';
@@ -1001,8 +1004,10 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                             бы неправдой — пятого он увидит её как обычно.
                             Без бейджа человек узнаёт об окончании доступа
                             единственным способом: открыв статью, которая вчера
-                            открывалась, а сегодня отвечает «не найдена». */}
-                        {article.guest_access && (
+                            открывалась, а сегодня отвечает «не найдена».
+                            У бессрочной выдачи даты нет — и бейджа нет:
+                            предупреждать не о чем. */}
+                        {article.guest_access && !isPermanentGuest(article.guest_access) && (
                             <IosBadge tone="amber">
                                 Гостевой доступ до {fmtGuestDeadline(article.guest_access.expires_at)}
                             </IosBadge>
@@ -1142,7 +1147,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             {article.why && (
                 <p className="px-1 text-[11.5px] text-slate-400">
                     Доступ: {article.why}
-                    {article.guest_access && (
+                    {article.guest_access && !isPermanentGuest(article.guest_access) && (
                         <>{' — '}{daysLeftLabel(article.guest_access.days_left,
                                                 article.guest_access.expires_at)}</>
                     )}

@@ -614,6 +614,154 @@ class GuestSqlAgreementTest(unittest.TestCase):
         self.assertNotIn('granted_by', _normalize(update.group(0)))
 
 
+class _RowsCursor:
+    """Курсор, отдающий заранее заданные строки: SQL здесь не проверяется —
+    проверяется, во что функция превращает ответ базы."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, sql, params=None):
+        self.sql, self.params = sql, params
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class GuestPermanentTest(unittest.TestCase):
+    """Бессрочная выдача (решение владельца 09.11.2026, глава ООЗ, 476).
+
+    Ставится в базе, дверью API не выдаётся. Читающие запросы её не различают —
+    для них это просто дальний срок, — поэтому стражи здесь на два других
+    места: что срок «никогда» не уходит человеку датой 31.12.9999 и что ни
+    повторная выдача, ни продление не превращают «насовсем» обратно в «до
+    такого-то числа».
+    """
+
+    PERMANENT = guests.PERMANENT_EXPIRES_AT
+
+    def test_the_mark_and_the_driver_infinity_are_both_permanent(self):
+        """'infinity', записанный руками, драйвер отдаёт как datetime.max —
+        это тоже бессрочно; обычный и пустой срок — нет."""
+        self.assertTrue(guests.is_permanent(self.PERMANENT))
+        self.assertTrue(guests.is_permanent(datetime.max))
+        self.assertFalse(guests.is_permanent(NOW + timedelta(days=MAX_GUEST_DAYS)))
+        self.assertFalse(guests.is_permanent(datetime(9998, 12, 31, 23, 59, 59)))
+        self.assertFalse(guests.is_permanent(None))
+
+    def test_sql_floor_and_python_agree(self):
+        """Порог в SQL и признак в питоне — одна граница: первый день 9999 года."""
+        floor = guests._PERMANENT_FLOOR
+        self.assertTrue(guests.is_permanent(floor))
+        self.assertFalse(guests.is_permanent(floor - timedelta(seconds=1)))
+        self.assertLessEqual(floor, self.PERMANENT)
+
+    def test_the_form_never_issues_a_permanent_grant(self):
+        """Потолок формы на месте: самый дальний срок двери API — 14 дней."""
+        self.assertFalse(guests.is_permanent(
+            guests.resolve_expiry(NOW, days=MAX_GUEST_DAYS)))
+        with self.assertRaises(ValueError):
+            guests.resolve_expiry(NOW, until='9999-12-31')
+
+    def test_permanent_is_active_until_revoked(self):
+        self.assertEqual('active', guests.grant_status(
+            {'revoked_at': None, 'expires_at': self.PERMANENT}, NOW))
+        self.assertEqual('revoked', guests.grant_status(
+            {'revoked_at': NOW, 'expires_at': self.PERMANENT}, NOW))
+
+    def test_no_countdown_for_permanent(self):
+        """«Осталось 2 914 000 дней» — правда, но шум."""
+        self.assertIsNone(guests.days_left(self.PERMANENT, NOW))
+        self.assertIsNone(guests.days_left(datetime.max, NOW))
+
+    def test_payload_never_carries_the_mark(self):
+        self.assertEqual(guests.expiry_payload(self.PERMANENT, NOW),
+                         {'expires_at': None, 'days_left': None, 'permanent': True})
+        until = guests.resolve_expiry(NOW, days=3)
+        self.assertEqual(guests.expiry_payload(until, NOW),
+                         {'expires_at': '2026-08-28T23:59:59', 'days_left': 3,
+                          'permanent': False})
+
+    def test_banner_feed_marks_permanent(self):
+        """/ping: бессрочная выдача в списке есть, но без даты — по признаку
+        баннер молчит о ней (guestAccess.js: bannerText)."""
+        created = datetime(2026, 11, 9, 11, 23, 31)
+        cursor = _RowsCursor([
+            (8, None, None, 11, False, self.PERMANENT, None, created,
+             None, None, None, 'Таксопарки'),
+            (5, 37, None, None, True, datetime(2026, 8, 27, 23, 59, 59), None, created,
+             'Регламент', None, None, None),
+        ])
+        items = {item['id']: item for item in guests.my_active_grants(cursor, 476, now=NOW)}
+        self.assertTrue(items[8]['permanent'])
+        self.assertIsNone(items[8]['expires_at'])
+        self.assertIsNone(items[8]['days_left'])
+        self.assertEqual('space', items[8]['kind'])
+        self.assertFalse(items[5]['permanent'])
+        self.assertEqual('2026-08-27T23:59:59', items[5]['expires_at'])
+        self.assertEqual(2, items[5]['days_left'])
+
+    def test_grant_list_marks_permanent(self):
+        """Список выдач: «бессрочно» и статус «действует», даты нет."""
+        row = dict.fromkeys(guests._GRANT_KEYS)
+        row.update(id=8, user_id=476, user_name='Сотрудник', expires_at=self.PERMANENT,
+                   created_at=datetime(2026, 11, 9, 11, 23, 31), granted_space_id=11,
+                   space_id=11, space_name='Таксопарки', include_subsections=False)
+        cursor = _RowsCursor([tuple(row[key] for key in guests._GRANT_KEYS)])
+        [item] = guests.list_grants(cursor, actor_id=448, section_ids=(),
+                                    unbounded=True, now=NOW)
+        self.assertEqual('active', item['status'])
+        self.assertTrue(item['permanent'])
+        self.assertIsNone(item['expires_at'])
+        self.assertIsNone(item['days_left'])
+        self.assertEqual('space', item['kind'])
+
+    def _function_source(self, module, name):
+        return (Path(module.__file__).read_text(encoding='utf-8')
+                .split('def %s(' % name)[1].split('\ndef ')[0])
+
+    def test_regrant_does_not_shorten_a_permanent_grant(self):
+        """Повторная выдача продлевает ДО «сейчас + N дней» — бессрочную она
+        укоротила бы. Ветка UPDATE обязана её обходить."""
+        text = self._function_source(guests, 'create_grant')
+        update = re.search(r'UPDATE wiki_guest_access.*?RETURNING id', text, re.S)
+        self.assertIn('AND expires_at < %(permanent)s', _normalize(update.group(0)))
+        self.assertIn("'permanent': _PERMANENT_FLOOR", text)
+
+    def test_extension_does_not_shorten_a_permanent_grant(self):
+        text = _normalize(self._function_source(guests, 'extend_grant'))
+        self.assertIn('WHERE id = %s AND expires_at < %s', text)
+        self.assertIn('_PERMANENT_FLOOR', text)
+
+    def test_permanent_lookup_tells_three_objects_apart(self):
+        """Поиск бессрочной выдачи — тем же объектом, что и create_grant."""
+        text = _normalize(self._function_source(guests, 'permanent_grant_id'))
+        for column in ('section_id', 'article_id', 'space_id'):
+            with self.subTest(column=column):
+                self.assertIn('%s IS NOT DISTINCT FROM' % column, text)
+        self.assertIn('revoked_at IS NULL', text)
+        self.assertIn('expires_at >= %(permanent)s', text)
+
+    def test_routes_refuse_before_writing(self):
+        """Обе двери отвечают словами ДО записи: выдача — 409 до create_grant,
+        продление — 400 до extend_grant."""
+        from wiki import routes_guests
+        source = Path(routes_guests.__file__).read_text(encoding='utf-8')
+        create = source.split("def wiki_guests_create(")[1].split('\n    def ')[0]
+        self.assertLess(create.index('wiki_guests.permanent_grant_id('),
+                        create.index('wiki_guests.create_grant('))
+        change = source.split("def wiki_guests_change(")[1]
+        self.assertLess(change.index("wiki_guests.is_permanent(grant['expires_at'])"),
+                        change.index('wiki_guests.extend_grant('))
+        self.assertEqual(2, source.count('"WIKI_GUEST_PERMANENT"'))
+
+    def test_article_answer_uses_the_shared_payload(self):
+        """Статья берёт срок той же функцией, что баннер и список."""
+        from wiki import routes_articles
+        source = Path(routes_articles.__file__).read_text(encoding='utf-8')
+        self.assertIn('wiki_guests.expiry_payload(guest_until,', source)
+
+
 class BranchDepartmentAgreementTest(unittest.TestCase):
     """Страж №3б: поштучный и наборный вычислители отдела ветки — заодно.
 

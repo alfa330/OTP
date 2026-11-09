@@ -75,6 +75,40 @@ NOW_SQL = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')"
 # строк незачем.
 MAX_PAGE = 200
 
+# БЕССРОЧНАЯ ВЫДАЧА (решение владельца 09.11.2026). Первый случай — глава ООЗ
+# (users.id 476): ей нужны «Таксопарки» и «Тез», а её отдел не входит ни в одно
+# пространство. Гостевую выдачу обоих пространств ей выдавали трижды, и между
+# выдачами доступ пропадал (с 17.10 по 09.11.2026 — целиком). Включить в
+# границу весь ООЗ — значит открыть вику его рядовым и при этом оставить ей в
+# «Таксопарках» один раздел из 38: внутри пространства разделы раздают правила,
+# а не граница.
+#
+# Срок «никогда» — конечная дата, а не 'infinity': Postgres 16 на проде не
+# вычитает бесконечные метки («cannot subtract infinite timestamps»), и первый же
+# запрос вида «сколько осталось» уронил бы ответ. Читающим запросам такая дата
+# ничем не отличается от обычной: выдача действует, отзыв её отсекает, в оба
+# периметра она попадает без единой правки.
+#
+# Дверью API бессрочную выдачу НЕ завести: потолок MAX_GUEST_DAYS держит форма
+# для всех (бессрочный гостевой доступ к РАЗДЕЛУ подменял бы правило раздела).
+# Её ставят в базе, по слову владельца. Беречь её обязаны обе пишущие двери:
+# повторная выдача и продление тянут срок к «сейчас + N дней», то есть молча
+# превратили бы бессрочную выдачу обратно в двухнедельную.
+PERMANENT_EXPIRES_AT = datetime(9999, 12, 31, 23, 59, 59)
+
+# Порог бессрочности для SQL — тот же признак, что у is_permanent (год 9999), но
+# сравнением: «срок не раньше первого дня 9999 года».
+_PERMANENT_FLOOR = datetime(PERMANENT_EXPIRES_AT.year, 1, 1)
+
+
+def is_permanent(expires_at):
+    """Бессрочная ли выдача.
+
+    По году, а не равенством метке: 'infinity', если его запишут руками,
+    драйвер отдаёт как datetime.max — та же бессрочность, другая секунда.
+    """
+    return bool(expires_at) and expires_at.year >= PERMANENT_EXPIRES_AT.year
+
 
 def now_almaty():
     """Наивное «сейчас» по Алматы — в той же зоне, в какой считает SQL."""
@@ -171,10 +205,28 @@ def days_left(expires_at, now):
     По календарным дням, а не по часам: «осталось 0 дней» рядом с «до 25.08»
     означает «сегодня последний», и это ровно то, что человек видит в календаре.
     Отрицательное значение — выдача уже истекла.
+
+    У бессрочной выдачи считать нечего — None, как и без срока: «осталось
+    2 914 000 дней» в подписи было бы правдой, но шумом.
     """
-    if not expires_at:
+    if not expires_at or is_permanent(expires_at):
         return None
     return (expires_at.date() - now.date()).days
+
+
+def expiry_payload(expires_at, now):
+    """Срок выдачи в ответе: дата, остаток дней и признак бессрочности.
+
+    Одна функция на баннер, список и статью — три разных записи одного и того
+    же срока разошлись бы. У бессрочной даты в ответе нет вовсе: метка
+    9999-12-31 — не срок, а способ сказать «никогда», и показывать её человеку
+    нельзя.
+    """
+    if is_permanent(expires_at):
+        return {'expires_at': None, 'days_left': None, 'permanent': True}
+    return {'expires_at': expires_at.isoformat() if expires_at else None,
+            'days_left': days_left(expires_at, now),
+            'permanent': False}
 
 
 def grant_status(row, now):
@@ -414,8 +466,9 @@ def my_active_grants(cursor, user_id, now=None):
         item['kind'] = grant_kind(item)
         item['title'] = (item['article_title'] or item['section_name']
                          or item['space_name'] or 'Без названия')
-        item['days_left'] = days_left(item['expires_at'], now)
-        item['expires_at'] = item['expires_at'].isoformat() if item['expires_at'] else None
+        # Бессрочная выдача остаётся в списке: по ней баннер узнаёт, что доступ
+        # есть, и молчит о сроке (guestAccess.js: bannerText).
+        item.update(expiry_payload(item['expires_at'], now))
         item['created_at'] = item['created_at'].isoformat() if item['created_at'] else None
         items.append(item)
     return items
@@ -584,7 +637,9 @@ def list_grants(cursor, *, actor_id, section_ids, unbounded=False, space_id=None
     for row in cursor.fetchall():
         item = dict(zip(_GRANT_KEYS, row))
         item['status'] = grant_status(item, now)
-        item['days_left'] = days_left(item['expires_at'], now)
+        expiry = expiry_payload(item['expires_at'], now)
+        item['days_left'] = expiry['days_left']
+        item['permanent'] = expiry['permanent']
         # Вид считается по granted_space_id (колонка строки), а НЕ по space_id:
         # второй — это «в каком пространстве лежит выданное», и у выдачи на
         # раздел он тоже заполнен. Перепутай их — и каждая выдача раздела
@@ -593,8 +648,9 @@ def list_grants(cursor, *, actor_id, section_ids, unbounded=False, space_id=None
                                    'space_id': item['granted_space_id']})
         item['title'] = (item['article_title'] or item['section_name']
                          or item['space_name'] or 'Удалённый объект')
-        for field in ('expires_at', 'created_at', 'revoked_at'):
+        for field in ('created_at', 'revoked_at'):
             item[field] = item[field].isoformat() if item[field] else None
+        item['expires_at'] = expiry['expires_at']
         items.append(item)
     return items
 
@@ -634,6 +690,12 @@ def create_grant(cursor, *, user_id, section_id=None, article_id=None,
     (routes_guests._may_touch), и держится оно ровно на этом поле. Перепиши мы
     его на продлившего — первый выдавший потерял бы возможность отозвать свою же
     выдачу вообще ничем. Кто продлил, знает журнал: log_action зовётся всегда.
+
+    БЕССРОЧНУЮ выдачу повторная не трогает (условие expires_at < %(permanent)s):
+    «продлить» её до «сейчас + N дней» значит укоротить, и выдача, поставленная
+    насовсем, через две недели исчезла бы. Дверь API сюда с бессрочной не
+    доходит — роут отвечает раньше (permanent_grant_id), — а условие здесь
+    держит ту же границу на случай другой двери.
     """
     cursor.execute(
         """
@@ -647,11 +709,12 @@ def create_grant(cursor, *, user_id, section_id=None, article_id=None,
            AND space_id IS NOT DISTINCT FROM %(space)s
            AND revoked_at IS NULL
            AND expires_at > """ + NOW_SQL + """
+           AND expires_at < %(permanent)s
         RETURNING id
         """,
         {'user': user_id, 'section': section_id, 'article': article_id,
          'space': space_id, 'expires': expires_at, 'reason': reason,
-         'deep': bool(include_subsections)},
+         'deep': bool(include_subsections), 'permanent': _PERMANENT_FLOOR},
     )
     row = cursor.fetchone()
     if row:
@@ -674,12 +737,46 @@ def create_grant(cursor, *, user_id, section_id=None, article_id=None,
 
 
 def extend_grant(cursor, grant_id, expires_at):
-    """Продлить. Срок считается от «сейчас» — см. schema.MAX_GUEST_DAYS."""
+    """Продлить. Срок считается от «сейчас» — см. schema.MAX_GUEST_DAYS.
+
+    Бессрочную не трогает: «продление» до «сейчас + N дней» её укоротило бы.
+    Роут отказывает раньше и словами; условие здесь — на случай другой двери.
+    """
     cursor.execute(
-        'UPDATE wiki_guest_access SET expires_at = %s WHERE id = %s RETURNING id',
-        (expires_at, grant_id),
+        'UPDATE wiki_guest_access SET expires_at = %s'
+        ' WHERE id = %s AND expires_at < %s RETURNING id',
+        (expires_at, grant_id, _PERMANENT_FLOOR),
     )
     return bool(cursor.fetchone())
+
+
+def permanent_grant_id(cursor, *, user_id, section_id=None, article_id=None,
+                       space_id=None):
+    """Действующая бессрочная выдача этого объекта этому человеку. None — нет.
+
+    Нужна двери выдачи: повторную выдачу того же объекта create_grant считает
+    продлением, а продлевать бессрочную нечем — роут обязан сказать об этом
+    словами, а не ответить «выдано до 23.11» на доступ, который и так навсегда.
+    Объект сравнивается всеми тремя колонками, как в create_grant.
+    """
+    cursor.execute(
+        """
+        SELECT id
+          FROM wiki_guest_access
+         WHERE user_id = %(user)s
+           AND section_id IS NOT DISTINCT FROM %(section)s
+           AND article_id IS NOT DISTINCT FROM %(article)s
+           AND space_id IS NOT DISTINCT FROM %(space)s
+           AND revoked_at IS NULL
+           AND expires_at >= %(permanent)s
+         ORDER BY id
+         LIMIT 1
+        """,
+        {'user': user_id, 'section': section_id, 'article': article_id,
+         'space': space_id, 'permanent': _PERMANENT_FLOOR},
+    )
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def revoke_grant(cursor, grant_id, revoked_by):

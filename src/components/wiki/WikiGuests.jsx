@@ -16,8 +16,8 @@ import SectionTreeSelect from './SectionTreeSelect';
 import useStableCallback from './useStableCallback';
 import { spaceIcon } from './spaceIdentity';
 import {
-    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, fmtDeadline,
-    plural, presetLabel, presetsWithin, targetLabel, urgency,
+    STATUS_FILTERS, STATUS_META, clampDate, daysLeftLabel, deadlineLabel, fmtDeadline,
+    isPermanent, plural, presetLabel, presetsWithin, targetLabel, urgency,
 } from './guestAccess';
 
 /* Четвёртая половина вкладки «Статьи»: гостевой доступ.
@@ -203,7 +203,7 @@ const GrantRow = ({ item, onExtend, onRevoke, busy }) => {
 
             <div className="min-w-[9.5rem] shrink-0 text-right">
                 <div className="text-[12.5px] font-medium tabular-nums text-slate-900">
-                    до {fmtDeadline(item.expires_at)}
+                    {deadlineLabel(item)}
                 </div>
                 <div className={`mt-0.5 text-[11px] ${tone}`}>
                     {item.status === 'revoked'
@@ -217,13 +217,17 @@ const GrantRow = ({ item, onExtend, onRevoke, busy }) => {
 
             {/* Кнопки только у действующей выдачи: продлевать истёкшую или
                 отзывать отозванную нечего, а серая кнопка «ничего не делает»
-                читается как поломка. */}
+                читается как поломка. У бессрочной нет «Продлить» по той же
+                причине: новый срок её только укоротил бы (сервер такое
+                продление и не примет). Отозвать её можно как любую. */}
             {active && (
                 <div className="flex w-full shrink-0 gap-2 sm:w-auto">
-                    <button type="button" disabled={busy} onClick={() => onExtend(item)}
-                            className={iosBtnSecondary}>
-                        <CalendarClock size={14} /> Продлить
-                    </button>
+                    {!isPermanent(item) && (
+                        <button type="button" disabled={busy} onClick={() => onExtend(item)}
+                                className={iosBtnSecondary}>
+                            <CalendarClock size={14} /> Продлить
+                        </button>
+                    )}
                     <button type="button" disabled={busy} onClick={() => onRevoke(item)}
                             className={`${iosBtnSecondary} !text-rose-600`}>
                         <ShieldOff size={14} /> Отозвать

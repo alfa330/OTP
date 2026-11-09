@@ -454,9 +454,12 @@ def register(bp, wiki_route, db, log_ip, gcs):
         # и правилом тоже, подпись «доступ до 5 сентября» была бы неправдой:
         # пятого он её увидит как обычно, и предупреждение об исчезновении
         # доступа читалось бы как сбой.
+        #
+        # Бессрочная выдача поле не снимает: по нему экран прячет «Историю»
+        # (гостю её не отдаёт и сервер — routes_edit._history_denied). Даты в
+        # нём тогда нет, и подписи срока экран не рисует (permanent).
         article['guest_access'] = (
-            {'expires_at': guest_until.isoformat(),
-             'days_left': wiki_guests.days_left(guest_until, wiki_guests.now_almaty())}
+            wiki_guests.expiry_payload(guest_until, wiki_guests.now_almaty())
             if guest_until and permissions['_reason'] == 'гостевой доступ' else None)
         article['backlinks'] = wiki_articles.backlinks(cursor, article['id'], visible)
         # «Связанные материалы» считаются из ТЕЛА, которое уже здесь, а не из

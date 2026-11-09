@@ -307,8 +307,8 @@ const CONSUMED = {
     'article.ai_update': ['file', 'kind', 'changes', 'questions', 'model'],
     'article.ai_edit': ['changes', 'instruction', 'model'],
     'article.strict_bypass': ['reason'],
-    'guest.grant': ['expires_at', 'include_subsections', 'reason', 'user_name'],
-    'guest.extend': ['expires_at', 'include_subsections', 'reason', 'user_name'],
+    'guest.grant': ['expires_at', 'permanent', 'include_subsections', 'reason', 'user_name'],
+    'guest.extend': ['expires_at', 'permanent', 'include_subsections', 'reason', 'user_name'],
     'guest.revoke': ['grant_id'],
     'section.create': ['space_id', 'visibility_scope', 'department_id'],
     'section.move': ['from_space_id', 'to_space_id', 'parent_section_id',
@@ -502,7 +502,10 @@ export function auditFacts(item, nameOf = null) {
         case 'guest.grant':
         case 'guest.extend': {
             if (details.user_name) facts.push(String(details.user_name));
-            const until = String(details.expires_at || '').slice(0, 10);
+            /* Бессрочная выдача (wiki/guests.py: PERMANENT_EXPIRES_AT): даты у
+               неё нет, а «до 31.12.9999» читалось бы как сбой. */
+            const until = details.permanent ? '' : String(details.expires_at || '').slice(0, 10);
+            if (details.permanent) facts.push('бессрочно');
             if (until) {
                 const [year, month, day] = until.split('-');
                 facts.push(`до ${day}.${month}.${year}`);
