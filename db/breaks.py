@@ -419,6 +419,24 @@ class BreaksMixin:
             raise ValueError("cross_operator_gap_minutes must be <= 240")
         return minutes
 
+    def _normalize_break_allow_overlap(self, value):
+        """
+        Галочка «Разрешить пересечение» направления. None — значение не передано
+        (настройка остаётся прежней), иначе True/False.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in ('true', '1'):
+            return True
+        if text in ('false', '0'):
+            return False
+        raise ValueError("allowOverlap must be true or false")
+
     def get_work_schedule_break_rules(self, department_id=None):
         """
         Возвращает правила автоперерывов по направлениям.
@@ -432,11 +450,13 @@ class BreaksMixin:
             "rules": [
               {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
             ],
-            "crossOperatorGapMinutes": 10
+            "crossOperatorGapMinutes": 10,
+            "allowOverlap": false
           }
         ]
-        Направление попадает в ответ, если у него есть правила ИЛИ задан
-        промежуток между перерывами разных операторов.
+        Направление попадает в ответ, если у него есть правила, задан
+        промежуток между перерывами разных операторов или стоит галочка
+        «Разрешить пересечение» (allowOverlap).
         """
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -451,7 +471,7 @@ class BreaksMixin:
             rows = cursor.fetchall() or []
 
             cursor.execute("""
-                SELECT direction_name, cross_operator_gap_minutes
+                SELECT direction_name, cross_operator_gap_minutes, allow_break_overlap
                 FROM work_schedule_break_direction_settings
                 WHERE (%(dept)s IS NULL OR LOWER(TRIM(direction_name)) IN (
                     SELECT LOWER(TRIM(d.name)) FROM directions d
@@ -468,7 +488,7 @@ class BreaksMixin:
                 continue
             item = by_direction.setdefault(
                 direction_label,
-                {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0}
+                {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": False}
             )
             item["rules"].append({
                 "minMinutes": int(min_shift_minutes),
@@ -476,20 +496,22 @@ class BreaksMixin:
                 "breakDurations": self._normalize_break_durations_list(break_durations_json)
             })
 
-        for direction_name, cross_operator_gap_minutes in gap_rows:
+        for direction_name, cross_operator_gap_minutes, allow_break_overlap in gap_rows:
             direction_label = str(direction_name or '').strip()
             if not direction_label:
                 continue
             gap_minutes = max(0, int(cross_operator_gap_minutes or 0))
+            allow_overlap = bool(allow_break_overlap)
             item = by_direction.get(direction_label)
             if item is None:
-                if gap_minutes <= 0:
+                if gap_minutes <= 0 and not allow_overlap:
                     continue
                 item = by_direction.setdefault(
                     direction_label,
-                    {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0}
+                    {"direction": direction_label, "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": False}
                 )
             item["crossOperatorGapMinutes"] = gap_minutes
+            item["allowOverlap"] = allow_overlap
 
         result = list(by_direction.values())
         result.sort(key=lambda x: str(x.get('direction') or '').lower())
@@ -535,6 +557,43 @@ class BreaksMixin:
             return 0
         return max(0, int(row[0] or 0))
 
+    def get_work_schedule_break_overlap_directions(self):
+        """
+        Направления с галочкой «Разрешить пересечение» — множество normalized
+        direction key. Перерывы их операторов могут совпадать по времени.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT direction_name
+                FROM work_schedule_break_direction_settings
+                WHERE allow_break_overlap
+            """)
+            rows = cursor.fetchall() or []
+
+        result = set()
+        for (direction_name,) in rows:
+            key = self._normalize_direction_key(direction_name)
+            if key:
+                result.add(key)
+        return result
+
+    def _break_overlap_allowed_for_direction_tx(self, cursor, direction_name):
+        """Стоит ли у направления галочка «Разрешить пересечение»."""
+        direction_label = str(direction_name or '').strip()
+        if not direction_label:
+            return False
+        cursor.execute(
+            """
+            SELECT allow_break_overlap
+            FROM work_schedule_break_direction_settings
+            WHERE LOWER(TRIM(direction_name)) = LOWER(TRIM(%s))
+            LIMIT 1
+            """,
+            (direction_label,)
+        )
+        row = cursor.fetchone()
+        return bool(row and row[0])
+
     def get_work_schedule_break_rules_map(self):
         """
         Возвращает map по normalized direction key -> rules list.
@@ -576,13 +635,17 @@ class BreaksMixin:
           {
             "direction": "Название",
             "rules": [{"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}],
-            "crossOperatorGapMinutes": 10
+            "crossOperatorGapMinutes": 10,
+            "allowOverlap": false
           }
         ]
         Для направления переданные rules полностью заменяют старые.
         crossOperatorGapMinutes необязателен: если ключа нет — текущее значение
         промежутка между перерывами разных операторов остаётся без изменений
         (чтобы старый клиент не обнулял настройку молча), 0 — выключить.
+        allowOverlap («Разрешить пересечение») так же необязателен. Когда он
+        включён, промежуток не хранится: операторы направления друг другу не
+        мешают, и спрятанное в окне число не должно влиять на раскладку.
         """
         if not isinstance(direction_rules, list):
             raise ValueError("direction_rules must be a list")
@@ -607,30 +670,52 @@ class BreaksMixin:
                 if gap_key in item:
                     cross_gap_raw = item.get(gap_key)
                     break
+            allow_overlap_raw = None
+            for overlap_key in ('allowOverlap', 'allow_overlap', 'allow_break_overlap'):
+                if overlap_key in item:
+                    allow_overlap_raw = item.get(overlap_key)
+                    break
             normalized_payload.append({
                 'direction': direction,
                 'rules': rules,
-                'crossOperatorGapMinutes': self._normalize_break_cross_operator_gap(cross_gap_raw)
+                'crossOperatorGapMinutes': self._normalize_break_cross_operator_gap(cross_gap_raw),
+                'allowOverlap': self._normalize_break_allow_overlap(allow_overlap_raw)
             })
 
         with self._get_cursor() as cursor:
             for item in normalized_payload:
                 direction = item['direction']
                 cross_gap_minutes = item['crossOperatorGapMinutes']
-                if cross_gap_minutes is not None:
+                allow_overlap = item['allowOverlap']
+                if cross_gap_minutes is not None or allow_overlap is not None:
+                    # Чего не прислали — остаётся как было.
+                    cursor.execute("""
+                        SELECT cross_operator_gap_minutes, allow_break_overlap
+                        FROM work_schedule_break_direction_settings
+                        WHERE LOWER(TRIM(direction_name)) = LOWER(TRIM(%s))
+                        LIMIT 1
+                    """, (direction,))
+                    current = cursor.fetchone()
+                    if cross_gap_minutes is None:
+                        cross_gap_minutes = max(0, int(current[0] or 0)) if current else 0
+                    if allow_overlap is None:
+                        allow_overlap = bool(current[1]) if current else False
+                    if allow_overlap:
+                        cross_gap_minutes = 0
                     cursor.execute("""
                         DELETE FROM work_schedule_break_direction_settings
                         WHERE LOWER(TRIM(direction_name)) = LOWER(TRIM(%s))
                     """, (direction,))
-                    if cross_gap_minutes > 0:
+                    if cross_gap_minutes > 0 or allow_overlap:
                         cursor.execute("""
                             INSERT INTO work_schedule_break_direction_settings (
                                 direction_name,
                                 cross_operator_gap_minutes,
+                                allow_break_overlap,
                                 updated_at
                             )
-                            VALUES (%s, %s, CURRENT_TIMESTAMP)
-                        """, (direction, int(cross_gap_minutes)))
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                        """, (direction, int(cross_gap_minutes), bool(allow_overlap)))
                 cursor.execute("""
                     DELETE FROM work_schedule_break_rules
                     WHERE LOWER(direction_name) = LOWER(%s)
@@ -1477,7 +1562,8 @@ class BreaksMixin:
         cross_gap_minutes=None,
         frozen_breaks=None,
         planning_from_minutes=None,
-        extra_occupied=None
+        extra_occupied=None,
+        allow_overlap=None
     ):
         """
         Раскладывает перерывы смены равномерно, сверяясь с перерывами коллег направления.
@@ -1491,6 +1577,9 @@ class BreaksMixin:
         extra_occupied — перерывы коллег, которых в этот момент нет в базе: пути с
         предварительной очисткой дня удаляют смены до планирования, и замороженные
         перерывы коллег иначе не были бы видны.
+        allow_overlap — галочка «Разрешить пересечение» направления: перерывы
+        коллег не учитываются вовсе, смена раскладывается только по себе.
+        None — узнать по направлению оператора.
         Без этих аргументов поведение прежнее.
         """
         seg_start, seg_end = self._schedule_interval_minutes(start_time, end_time)
@@ -1510,14 +1599,23 @@ class BreaksMixin:
         if not isinstance(breaks, list) or not breaks:
             return protected
 
-        neighbors = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
-        if cross_gap_minutes is None:
-            cross_gap_minutes = self._get_break_cross_operator_gap_for_direction_tx(
+        if allow_overlap is None:
+            allow_overlap = self._break_overlap_allowed_for_direction_tx(
                 cursor,
                 self._get_operator_direction_name_tx(cursor, operator_id)
             )
-        neighbors.extend(self._normalize_break_intervals_soft(extra_occupied, dedupe=False))
-        neighbors = self._tag_break_intervals_with_cross_gap(neighbors, cross_gap_minutes)
+        if allow_overlap:
+            # «Разрешить пересечение»: перерывы коллег направления не мешают.
+            neighbors = []
+        else:
+            neighbors = self._load_occupied_break_intervals_for_operator_date_tx(cursor, operator_id, shift_date)
+            if cross_gap_minutes is None:
+                cross_gap_minutes = self._get_break_cross_operator_gap_for_direction_tx(
+                    cursor,
+                    self._get_operator_direction_name_tx(cursor, operator_id)
+                )
+            neighbors.extend(self._normalize_break_intervals_soft(extra_occupied, dedupe=False))
+            neighbors = self._tag_break_intervals_with_cross_gap(neighbors, cross_gap_minutes)
         # Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
         own_intervals = [{'start': int(p['start']), 'end': int(p['end'])} for p in protected]
 
@@ -1766,6 +1864,7 @@ class BreaksMixin:
 
             direction_rules_cache = {}
             direction_cross_gap_cache = {}
+            direction_overlap_cache = {}
 
             def _rules_for_direction(direction_name):
                 direction_key = self._normalize_direction_key(direction_name)
@@ -1784,6 +1883,15 @@ class BreaksMixin:
                         direction_name
                     )
                 return direction_cross_gap_cache[direction_key]
+
+            def _overlap_allowed_for_direction(direction_name):
+                direction_key = self._normalize_direction_key(direction_name)
+                if direction_key not in direction_overlap_cache:
+                    direction_overlap_cache[direction_key] = self._break_overlap_allowed_for_direction_tx(
+                        cursor,
+                        direction_name
+                    )
+                return direction_overlap_cache[direction_key]
 
             def _sort_key(row):
                 _, operator_id, shift_date, start_time_value, end_time_value, direction_name = row
@@ -1848,7 +1956,8 @@ class BreaksMixin:
                     rules_for_direction=_rules_for_direction,
                     cross_gap_for_direction=_cross_gap_for_direction,
                     recalc_now=recalc_now,
-                    recalc_direction_keys=recalc_direction_keys
+                    recalc_direction_keys=recalc_direction_keys,
+                    overlap_allowed_for_direction=_overlap_allowed_for_direction
                 )
                 score = self._break_layout_score(planned_by_shift, shift_meta)
                 if best_snapshot is None or score < best_snapshot[0]:

@@ -1,6 +1,8 @@
 import ast
+import json
 import math
 import random
+from contextlib import contextmanager
 from functools import lru_cache
 from datetime import datetime
 import re
@@ -64,9 +66,10 @@ class _MergeDummy:
 
 
 class _BreakAdjustDummy(_MergeDummy):
-    def __init__(self, occupied=None, cross_gap=0):
+    def __init__(self, occupied=None, cross_gap=0, allow_overlap=False):
         self.occupied = occupied or []
         self.cross_gap = int(cross_gap or 0)
+        self.allow_overlap = bool(allow_overlap)
 
     def _normalize_schedule_date(self, value):
         if hasattr(value, "year") and not isinstance(value, str):
@@ -84,6 +87,9 @@ class _BreakAdjustDummy(_MergeDummy):
 
     def _get_break_cross_operator_gap_for_direction_tx(self, cursor, direction_name):
         return self.cross_gap
+
+    def _break_overlap_allowed_for_direction_tx(self, cursor, direction_name):
+        return self.allow_overlap
 
 
 class _TechReasonDummy:
@@ -151,7 +157,7 @@ BREAK_RULE_CONSTANT_NAMES = (
 BREAK_RULE_CONSTANTS = _module_constants(DATABASE_PATH, BREAK_RULE_CONSTANT_NAMES)
 
 
-def _make_break_adjust_dummy(occupied=None):
+def _make_break_adjust_dummy(occupied=None, allow_overlap=False):
     namespace = {
         "math": math,
         "datetime": datetime,
@@ -163,7 +169,7 @@ def _make_break_adjust_dummy(occupied=None):
     for function_name in BREAK_ADJUST_METHODS:
         exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
 
-    dummy = _BreakAdjustDummy(occupied=occupied)
+    dummy = _BreakAdjustDummy(occupied=occupied, allow_overlap=allow_overlap)
     for function_name in BREAK_ADJUST_METHODS:
         setattr(dummy, function_name, namespace[function_name].__get__(dummy, _BreakAdjustDummy))
     return dummy
@@ -731,6 +737,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_ws_date_str",
             "_ws_add_days_str",
             "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
             "_ws_build_occupied_intervals_for_date",
             "_ws_break_layout_spacing",
             "_ws_break_start_bounds_for_index",
@@ -917,6 +924,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
             "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
             "_ws_add_days_str",
             "_ws_parse_date_str",
             "_ws_build_occupied_intervals_for_date",
@@ -967,6 +975,7 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_operator_info_is_chat_manager",
             "_ws_normalize_direction_key",
             "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
             "_ws_add_days_str",
             "_ws_parse_date_str",
             "_ws_build_occupied_intervals_for_date",
@@ -1004,12 +1013,17 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
 
         self.assertIn("getPlannerBreakCrossGapForDirection", app_source)
         self.assertIn("crossOperatorGapMinutes", app_source)
-        # Все три места локальной симуляции перерывов должны знать про промежуток.
-        # Все места локальной симуляции перерывов должны знать про промежуток:
+        # Все три места локальной симуляции перерывов должны знать про промежуток:
         # часть вызовов многострочная (туда добавлены замороженные перерывы).
         self.assertEqual(
-            app_source.count("getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection)")
+            app_source.count("getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection, ")
             + app_source.count("getPlannerBreakCrossGapForDirection,\n"),
+            3,
+        )
+        # …и про галочку «Разрешить пересечение» — последним аргументом.
+        self.assertEqual(
+            app_source.count("getPlannerBreakCrossGapForDirection, isPlannerBreakOverlapAllowedForDirection)")
+            + len(re.findall(r",\n\s+isPlannerBreakOverlapAllowedForDirection\n\s+\);", app_source)),
             3,
         )
 
@@ -1371,6 +1385,355 @@ class BreakFreezeWiringTests(unittest.TestCase):
         # прошедший перерыв в редакторе не перетаскивается
         self.assertIn("перерыв уже прошёл, изменить нельзя", app_source)
         self.assertIn("modalFrozenBreakIndexes", app_source)
+
+
+class _FakeBreakSettingsCursor:
+    """work_schedule_break_direction_settings в памяти — ровно те запросы, что шлёт сохранение."""
+
+    def __init__(self, settings=None):
+        self.settings = {
+            str(name).strip().lower(): dict(value) for name, value in (settings or {}).items()
+        }
+        self.settings_selects = 0
+        self._row = None
+
+    def execute(self, query, params=None):
+        sql = " ".join(str(query).split())
+        if sql.startswith(
+            "SELECT cross_operator_gap_minutes, allow_break_overlap FROM work_schedule_break_direction_settings"
+        ):
+            self.settings_selects += 1
+            row = self.settings.get(str(params[0]).strip().lower())
+            self._row = (row["gap"], row["allow"]) if row else None
+        elif sql.startswith("DELETE FROM work_schedule_break_direction_settings"):
+            self.settings.pop(str(params[0]).strip().lower(), None)
+        elif sql.startswith("INSERT INTO work_schedule_break_direction_settings"):
+            direction, gap, allow = params
+            self.settings[str(direction).strip().lower()] = {"gap": gap, "allow": allow}
+        elif sql.startswith("DELETE FROM work_schedule_break_rules"):
+            pass
+        else:
+            raise AssertionError(f"неожиданный запрос: {sql[:90]}")
+
+    def executemany(self, query, rows):
+        pass
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeRulesReadCursor:
+    """Отдаёт заготовленные выборки по очереди: правила, потом настройки направлений."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.current = []
+
+    def execute(self, query, params=None):
+        self.current = self.results.pop(0)
+
+    def fetchall(self):
+        return self.current
+
+
+def _make_break_settings_dummy(cursor):
+    method_names = (
+        "save_work_schedule_break_rules",
+        "get_work_schedule_break_rules",
+        "_normalize_break_cross_operator_gap",
+        "_normalize_break_allow_overlap",
+    )
+    namespace = {"json": json}
+    for function_name in method_names:
+        exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+
+    class SettingsDummy:
+        @contextmanager
+        def _get_cursor(self):
+            yield cursor
+
+        def _normalize_direction_key(self, value):
+            return " ".join(str(value or "").strip().lower().split())
+
+        def _normalize_break_rule_ranges(self, rules):
+            return list(rules or [])
+
+        def _normalize_break_durations_list(self, value):
+            return [int(item) for item in (value or []) if int(item) > 0]
+
+    dummy = SettingsDummy()
+    for function_name in method_names:
+        setattr(dummy, function_name, namespace[function_name].__get__(dummy, SettingsDummy))
+    # Настоящее чтение — отдельным именем: сохранение в конце перечитывает правила,
+    # а в тестах записи этот ответ не нужен.
+    dummy.read_rules = dummy.get_work_schedule_break_rules
+    dummy.get_work_schedule_break_rules = lambda department_id=None: "saved"
+    return dummy
+
+
+class BreakOverlapAllowedTests(unittest.TestCase):
+    """«Разрешить пересечение» (09.11.2026): перерывы операторов направления не разводятся."""
+
+    DATE = "2026-11-10"
+    SHIFT = ("10:00", "21:00")
+    SEED = [
+        {"start": 12 * 60 + 40, "end": 12 * 60 + 55},
+        {"start": 15 * 60 + 15, "end": 15 * 60 + 45},
+        {"start": 18 * 60 + 10, "end": 18 * 60 + 25},
+    ]
+
+    def _adjust(self, dummy, **kwargs):
+        return dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date=self.DATE,
+            start_time=self.SHIFT[0],
+            end_time=self.SHIFT[1],
+            breaks=[dict(item) for item in self.SEED],
+            cross_gap_minutes=0,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _crowd_on(breaks, people=3):
+        # Трое коллег уходят на перерыв ровно тогда же, когда и он сам.
+        return [{"start": b["start"], "end": b["end"]} for b in breaks for _ in range(people)]
+
+    def test_server_ignores_colleagues_when_overlap_is_allowed(self):
+        free = self._adjust(_make_break_adjust_dummy())
+        crowd = self._crowd_on(free)
+        blocked = self._adjust(_make_break_adjust_dummy(occupied=crowd))
+        self.assertNotEqual(blocked, free, "без галочки толпа коллег обязана сдвинуть перерывы")
+
+        self.assertEqual(self._adjust(_make_break_adjust_dummy(occupied=crowd), allow_overlap=True), free)
+        # Галочку сервер узнаёт сам, если вызывающий её не передал.
+        self.assertEqual(self._adjust(_make_break_adjust_dummy(occupied=crowd, allow_overlap=True)), free)
+        # Замороженные перерывы коллег из снимка дня тоже не мешают.
+        self.assertEqual(
+            self._adjust(_make_break_adjust_dummy(), extra_occupied=crowd, allow_overlap=True),
+            free,
+        )
+
+    def test_import_simulation_ignores_colleagues_exactly_like_the_server(self):
+        namespace = {
+            "math": math,
+            "datetime": __import__("datetime").datetime,
+            "timedelta": __import__("datetime").timedelta,
+            **BREAK_RULE_CONSTANTS,
+        }
+        for function_name in (
+            "_ws_time_to_minutes",
+            "_ws_normalize_direction_key",
+            "_ws_is_chat_manager_direction",
+            "_ws_normalize_break_durations",
+            "_ws_pick_break_durations_for_shift",
+            "_ws_place_break_durations_centered",
+            "_ws_compute_breaks_for_shift_minutes",
+            "_ws_parse_date_str",
+            "_ws_date_str",
+            "_ws_add_days_str",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
+            "_ws_build_occupied_intervals_for_date",
+            "_ws_break_layout_spacing",
+            "_ws_break_start_bounds_for_index",
+            "_ws_break_total_overlap_minutes",
+            "_ws_break_allowed_pair_overlap_minutes",
+            "_ws_break_pair_overlap_excess_minutes",
+            "_ws_break_concurrency_penalty_minutes",
+            "_ws_break_cross_gap_deficit_minutes",
+            "_ws_even_break_starts",
+            "_ws_break_position_cost",
+            "_ws_plan_break_positions",
+            "_ws_find_best_break_start",
+            "_ws_adjust_breaks_for_operator_on_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+
+        free = self._adjust(_make_break_adjust_dummy())
+        crowd = self._crowd_on(free)
+        blocked = self._adjust(_make_break_adjust_dummy(occupied=crowd))
+
+        def run(overlap_directions):
+            colleagues = [
+                {
+                    "id": 100 + index,
+                    "direction": "Чат",
+                    "shifts": {self.DATE: [{"start": "00:00", "end": "23:59", "breaks": [dict(item)]}]},
+                }
+                for index, item in enumerate(crowd)
+            ]
+            target = {
+                "id": 1,
+                "direction": "Чат",
+                "shifts": {self.DATE: [{
+                    "start": self.SHIFT[0],
+                    "end": self.SHIFT[1],
+                    "breaks": [dict(item) for item in self.SEED],
+                }]},
+            }
+            namespace["_ws_adjust_breaks_for_operator_on_date"](
+                op=target,
+                date_str=self.DATE,
+                all_operators=[target] + colleagues,
+                get_direction_scope_key=lambda value: f"dir:{str(value or '').strip().lower()}",
+                break_rules_map=None,
+                break_overlap_directions=overlap_directions,
+            )
+            return target["shifts"][self.DATE][0]["breaks"]
+
+        self.assertEqual(run({"чат"}), free)
+        self.assertEqual(run(None), blocked)
+
+    def _import_build(self):
+        namespace = {}
+        for function_name in (
+            "_operator_info_is_chat_manager",
+            "_ws_normalize_direction_key",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
+            "_ws_add_days_str",
+            "_ws_parse_date_str",
+            "_ws_build_occupied_intervals_for_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+        namespace["datetime"] = __import__("datetime").datetime
+        namespace["timedelta"] = __import__("datetime").timedelta
+        return namespace["_ws_build_occupied_intervals_for_date"]
+
+    def test_import_group_keeps_other_directions_and_drops_own_colleagues(self):
+        build = self._import_build()
+        operators = [
+            {"id": 1, "direction": "Чат", "shifts": {}},
+            {"id": 2, "direction": "Чат", "shifts": {self.DATE: [{"breaks": [{"start": 700, "end": 730}]}]}},
+            {"id": 3, "direction": "Линия", "shifts": {self.DATE: [{"breaks": [{"start": 800, "end": 830}]}]}},
+        ]
+        both = [{"start": 700, "end": 730, "gap": 0}, {"start": 800, "end": 830, "gap": 0}]
+
+        def build_for(overlap_directions, scope_key):
+            return build(
+                all_operators=operators,
+                date_str=self.DATE,
+                exclude_op_id=1,
+                direction_scope="Чат",
+                get_scope_key=scope_key,
+                break_overlap_directions=overlap_directions,
+            )
+
+        # Оба направления в одной группе перерывов.
+        group = lambda _value: "group:линия|чат"  # noqa: E731
+        self.assertEqual(build_for(None, group), both)
+        self.assertEqual(build_for({"чат"}, group), [{"start": 800, "end": 830, "gap": 0}])
+        # Галочка у соседнего направления «Чату» коллег не убирает.
+        self.assertEqual(build_for({"линия"}, group), both)
+        # Без группы у «Чата» с галочкой соседей нет вовсе.
+        per_direction = lambda value: f"dir:{str(value or '').strip().lower()}"  # noqa: E731
+        self.assertEqual(build_for({"чат"}, per_direction), [])
+
+    def test_import_layout_score_does_not_count_allowed_overlap(self):
+        namespace = dict(BREAK_RULE_CONSTANTS)
+        for function_name in (
+            "_ws_break_allowed_pair_overlap_minutes",
+            "_ws_break_pair_overlap_excess_minutes",
+            "_ws_break_concurrency_penalty_minutes",
+            "_ws_break_layout_score",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+        score = namespace["_ws_break_layout_score"]
+
+        same_time = [{"start": 600, "end": 630}]
+        groups = {("dir:чат", self.DATE): [(op_id, list(same_time), "чат") for op_id in (1, 2, 3)]}
+        self.assertGreater(score(groups)[0], 0)
+        self.assertEqual(score(groups, {"чат"})[0], 0)
+        # Старый вид группы (без направления) считается как раньше.
+        legacy = {key: [(op_id, breaks) for op_id, breaks, _ in group] for key, group in groups.items()}
+        self.assertEqual(score(legacy, {"чат"}), score(groups))
+
+    def test_settings_save_keeps_what_was_not_sent_and_drops_gap_with_overlap(self):
+        cursor = _FakeBreakSettingsCursor()
+        dummy = _make_break_settings_dummy(cursor)
+
+        # Галочка поставлена: промежуток не хранится, даже если его прислали.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 10, "allowOverlap": True},
+        ])
+        self.assertEqual(cursor.settings["чат"], {"gap": 0, "allow": True})
+
+        # Старый клиент присылает только промежуток — галочка не слетает.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 5},
+        ])
+        self.assertEqual(cursor.settings["чат"], {"gap": 0, "allow": True})
+
+        # Галочку сняли, промежутка нет — строка настроек не нужна.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": False},
+        ])
+        self.assertNotIn("чат", cursor.settings)
+
+        # Без ключа промежутка он остаётся прежним.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Основа", "rules": [], "crossOperatorGapMinutes": 10},
+        ])
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Основа", "rules": [], "allowOverlap": False},
+        ])
+        self.assertEqual(cursor.settings["основа"], {"gap": 10, "allow": False})
+
+        # Ни одного из ключей — настройки направления не читаются и не трогаются.
+        selects_before = cursor.settings_selects
+        dummy.save_work_schedule_break_rules([{"direction": "Основа", "rules": []}])
+        self.assertEqual(cursor.settings_selects, selects_before)
+        self.assertEqual(cursor.settings["основа"], {"gap": 10, "allow": False})
+
+        with self.assertRaises(ValueError):
+            dummy.save_work_schedule_break_rules([
+                {"direction": "Чат", "rules": [], "allowOverlap": "может быть"},
+            ])
+
+    def test_settings_read_returns_overlap_and_lists_overlap_only_direction(self):
+        cursor = _FakeRulesReadCursor([
+            [("Основа", 330, 390, [15])],
+            [("Основа", 10, False), ("Чат", 0, True), ("Пустое", 0, False)],
+        ])
+        dummy = _make_break_settings_dummy(cursor)
+        self.assertEqual(
+            dummy.read_rules(),
+            [
+                {
+                    "direction": "Основа",
+                    "rules": [{"minMinutes": 330, "maxMinutes": 390, "breakDurations": [15]}],
+                    "crossOperatorGapMinutes": 10,
+                    "allowOverlap": False,
+                },
+                {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": True},
+            ],
+        )
+
+    def test_every_path_that_lays_breaks_out_passes_the_setting(self):
+        save_source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
+        self.assertIn(
+            "allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name)",
+            save_source,
+        )
+        recalc_source = _function_source(DATABASE_PATH, "recalculate_work_schedule_breaks", class_name="Database")
+        self.assertIn("overlap_allowed_for_direction=_overlap_allowed_for_direction", recalc_source)
+        pass_source = _function_source(DATABASE_PATH, "_plan_recalc_pass", class_name="Database")
+        self.assertIn("allow_overlap=allow_overlap", pass_source)
+
+        import_source = _function_source(BOT_PATH, "import_work_schedules_excel")
+        self.assertIn("db.get_work_schedule_break_overlap_directions()", import_source)
+        self.assertIn("break_overlap_directions=break_overlap_directions", import_source)
+        entries_source = _function_source(BOT_PATH, "_ws_compute_breaks_for_entries")
+        self.assertEqual(entries_source.count("break_overlap_directions=break_overlap_directions"), 2)
+        self.assertEqual(entries_source.count("_ws_break_layout_score(_layout_groups(), break_overlap_directions)"), 2)
+
+        app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("Разрешить пересечение", app_source)
+        self.assertIn("allowOverlap: isOverlapDraftOn(directionName)", app_source)
+        # Подсветка конфликтов в окне смены знает про галочку и пересчитывается от неё.
+        self.assertIn("overlapAllowedHere && plannerNormalizeDirectionKey(otherOp?.direction) === ownDirectionKey", app_source)
+        self.assertIn("plannerBreakCrossGapLookup,\n                plannerBreakOverlapLookup\n            ]);", app_source)
 
 
 if __name__ == "__main__":

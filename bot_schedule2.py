@@ -38597,18 +38597,34 @@ def _ws_cross_operator_gap_for_direction(direction_value, break_gaps_map=None):
         return 0
 
 
+def _ws_break_overlap_allowed(direction_value, break_overlap_directions=None):
+    """
+    Галочка «Разрешить пересечение» направления: перерывы его операторов могут
+    совпадать по времени. break_overlap_directions — множество normalized key.
+    """
+    if not break_overlap_directions:
+        return False
+    key = _ws_normalize_direction_key(direction_value)
+    return bool(key) and key in break_overlap_directions
+
+
 def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key,
-                                          break_gaps_map=None):
+                                          break_gaps_map=None, break_overlap_directions=None):
     """
     Перерывы коллег направления как есть, каждый со своим требуемым промежутком.
     Сливать и раздувать их нельзя: по исходным интервалам считаются и лимит
     пересечения пары перерывов, и «одновременно не больше двух операторов».
+
+    У направления с галочкой «Разрешить пересечение» коллеги того же направления
+    не мешают; другие направления его группы перерывов — как раньше.
     """
     occupied = []
     prev_str = _ws_add_days_str(date_str, -1)
     next_str = _ws_add_days_str(date_str, 1)
     target_scope = str(get_scope_key(direction_scope))
     target_gap = _ws_cross_operator_gap_for_direction(direction_scope, break_gaps_map)
+    target_key = _ws_normalize_direction_key(direction_scope)
+    target_overlap_allowed = _ws_break_overlap_allowed(direction_scope, break_overlap_directions)
 
     def clamp_push(s, e, gap):
         ns = max(0, min(2880, int(s)))
@@ -38620,6 +38636,8 @@ def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id
         if int(op.get('id') or 0) == int(exclude_op_id or 0):
             continue
         if str(get_scope_key(op.get('direction'))) != target_scope:
+            continue
+        if target_overlap_allowed and _ws_normalize_direction_key(op.get('direction')) == target_key:
             continue
 
         # В группе направлений у сторон могут быть разные настройки — берём строгую.
@@ -38955,14 +38973,15 @@ def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, n
 
 def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None,
                                            break_gaps_map=None, frozen_breaks_by_index=None,
-                                           planning_from_minutes=None):
+                                           planning_from_minutes=None, break_overlap_directions=None):
     """
     Раскладка перерывов равномерно по смене, со сверкой с коллегами направления:
     пересечение допустимо в пределах правил, одновременно на перерыве не больше двух.
 
     frozen_breaks_by_index — уже прошедшие перерывы сегмента (по его индексу): их
     нельзя двигать, они лишь занимают время. planning_from_minutes — минута, раньше
-    которой нельзя ставить новый перерыв. Без этих аргументов поведение прежнее.
+    которой нельзя ставить новый перерыв. break_overlap_directions — направления
+    с галочкой «Разрешить пересечение». Без этих аргументов поведение прежнее.
     """
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
@@ -38973,7 +38992,8 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         exclude_op_id=op.get('id'),
         direction_scope=op.get('direction'),
         get_scope_key=get_direction_scope_key,
-        break_gaps_map=break_gaps_map
+        break_gaps_map=break_gaps_map,
+        break_overlap_directions=break_overlap_directions
     )
     # Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
     own_intervals = []
@@ -39089,22 +39109,31 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         )
 
 
-def _ws_break_layout_score(groups):
+def _ws_break_layout_score(groups, break_overlap_directions=None):
     """
     Оценка целого прохода раскладки (зеркало сервера): сперва нарушения правил,
     потом неравномерность рабочих отрезков. Нужна, потому что повторные проходы
     улучшают картину немонотонно — записываем лучший.
 
-    groups: {(scope_key, date_str): [(operator_id, [перерывы]), ...]}
+    groups: {(scope_key, date_str): [(operator_id, [перерывы], direction_key), ...]}
+    Пересечение коллег одного направления с галочкой «Разрешить пересечение»
+    нарушением не считается — как и при самой раскладке.
     """
     violations = 0
     unevenness = 0
+    allowed = break_overlap_directions or ()
     for group in (groups or {}).values():
-        for index, (_operator_id, breaks) in enumerate(group):
+        for index, entry in enumerate(group):
+            breaks = entry[1]
+            direction_key = entry[2] if len(entry) > 2 else None
+            skip_own_direction = bool(direction_key) and direction_key in allowed
             neighbors = []
-            for other_index, (_other_id, other_breaks) in enumerate(group):
+            for other_index, other in enumerate(group):
                 if other_index == index:
                     continue
+                if skip_own_direction and len(other) > 2 and other[2] == direction_key:
+                    continue
+                other_breaks = other[1]
                 neighbors.extend({'start': int(x['start']), 'end': int(x['end'])} for x in other_breaks)
             for item in breaks:
                 interval = {'start': int(item['start']), 'end': int(item['end'])}
@@ -39121,7 +39150,8 @@ def _ws_break_layout_score(groups):
 
 
 def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
-                                    break_direction_groups=None, break_gaps_map=None):
+                                    break_direction_groups=None, break_gaps_map=None,
+                                    break_overlap_directions=None):
     """
     Вычисляет перерывы для списка entries (оператор + дата + смены).
     Мутирует entries in-place: каждый shift получает поле 'breaks'.
@@ -39141,6 +39171,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
     break_rules_map: результат db.get_work_schedule_break_rules_map()
     break_gaps_map: результат db.get_work_schedule_break_cross_operator_gaps_map()
         (минимальный промежуток между перерывами разных операторов направления)
+    break_overlap_directions: результат db.get_work_schedule_break_overlap_directions()
+        (направления с галочкой «Разрешить пересечение»)
     """
     sim_operators = _ws_clone_ops_for_break_simulation(sim_source_operators)
     sim_op_by_id = {int(op.get('id')): op for op in sim_operators if op.get('id') is not None}
@@ -39286,7 +39318,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 break_rules_map=break_rules_map,
                 break_gaps_map=break_gaps_map,
                 frozen_breaks_by_index=frozen_by_index,
-                planning_from_minutes=planning_from_minutes
+                planning_from_minutes=planning_from_minutes,
+                break_overlap_directions=break_overlap_directions
             )
         replan_jobs.append((entry, sim_op, date_str, frozen_by_index, planning_from_minutes))
 
@@ -39303,7 +39336,11 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                     for b in (seg.get('breaks') or [])
                     if b is not None and int(b.get('end', 0)) > int(b.get('start', 0))
                 )
-            groups.setdefault(key, []).append((int(sim_op.get('id') or 0), breaks))
+            groups.setdefault(key, []).append((
+                int(sim_op.get('id') or 0),
+                breaks,
+                _ws_normalize_direction_key(sim_op.get('direction'))
+            ))
         return groups
 
     def _capture_layout():
@@ -39321,7 +39358,7 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
             for seg, breaks in zip((sim_op.get('shifts', {}).get(job_date) or []), seg_breaks):
                 seg['breaks'] = [dict(b) for b in breaks]
 
-    best_score = _ws_break_layout_score(_layout_groups())
+    best_score = _ws_break_layout_score(_layout_groups(), break_overlap_directions)
     best_state = _capture_layout()
     for _pass_index in range(max(0, int(SHIFT_BREAK_LAYOUT_PASSES) - 1)):
         for _entry, sim_op, job_date, frozen_map, plan_from in replan_jobs:
@@ -39335,9 +39372,10 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 break_rules_map=break_rules_map,
                 break_gaps_map=break_gaps_map,
                 frozen_breaks_by_index=frozen_map,
-                planning_from_minutes=plan_from
+                planning_from_minutes=plan_from,
+                break_overlap_directions=break_overlap_directions
             )
-        score = _ws_break_layout_score(_layout_groups())
+        score = _ws_break_layout_score(_layout_groups(), break_overlap_directions)
         if score < best_score:
             best_score = score
             best_state = _capture_layout()
@@ -40373,7 +40411,8 @@ def get_work_schedule_break_rules():
     """
     Получить правила автоперерывов по направлениям.
     Вместе с правилами отдаётся crossOperatorGapMinutes — минимальный
-    промежуток между перерывами разных операторов направления (0 = выключено).
+    промежуток между перерывами разных операторов направления (0 = выключено)
+    и allowOverlap — галочка «Разрешить пересечение».
     """
     try:
         requester_id, user_data, auth_error = _get_authenticated_requester()
@@ -40416,13 +40455,15 @@ def save_work_schedule_break_rules():
                 "rules": [
                     {"minMinutes": 360, "maxMinutes": 540, "breakDurations": [30]}
                 ],
-                "crossOperatorGapMinutes": 10
+                "crossOperatorGapMinutes": 10,
+                "allowOverlap": false
             }
         ]
     }
     crossOperatorGapMinutes — минимальный промежуток между перерывами РАЗНЫХ
-    операторов направления (0 = выключить). Ключ необязателен: без него текущее
-    значение сохраняется как есть.
+    операторов направления (0 = выключить). allowOverlap — «Разрешить
+    пересечение»: перерывы операторов направления могут совпадать. Оба ключа
+    необязательны: без них текущее значение сохраняется как есть.
     """
     try:
         requester_id, user_data, auth_error = _resolve_management_requester()
@@ -41664,12 +41705,14 @@ def import_work_schedules_excel():
         sim_source_operators = db.get_operators_with_shifts(sim_start, sim_end) or []
         break_rules_map = db.get_work_schedule_break_rules_map() or {}
         break_gaps_map = db.get_work_schedule_break_cross_operator_gaps_map() or {}
+        break_overlap_directions = db.get_work_schedule_break_overlap_directions() or set()
         _ws_compute_breaks_for_entries(
             parsed_entries,
             sim_source_operators,
             break_rules_map,
             break_direction_groups=break_direction_groups,
-            break_gaps_map=break_gaps_map
+            break_gaps_map=break_gaps_map,
+            break_overlap_directions=break_overlap_directions
         )
 
         result = db.import_work_schedule_excel_entries(parsed_entries, actor_id=requester_id)

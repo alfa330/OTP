@@ -1049,7 +1049,8 @@ class ShiftsMixin:
             ),
             frozen_breaks=frozen_breaks,
             planning_from_minutes=planning_window_start,
-            extra_occupied=extra_occupied
+            extra_occupied=extra_occupied,
+            allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name)
         )
         # Смене СВ перерывы ставит только РОП руками (задача #352): автоматика и
         # правила направлений тут не работают (у СВ направления нет — сработал бы

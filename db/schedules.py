@@ -655,10 +655,12 @@ class SchedulesMixin:
 
     def _plan_recalc_pass(self, cursor, ordered_rows, planned_by_shift, frozen_by_shift, shift_meta,
                           day_breaks_snapshots, rules_for_direction, cross_gap_for_direction,
-                          recalc_now, recalc_direction_keys):
+                          recalc_now, recalc_direction_keys, overlap_allowed_for_direction=None):
         """
         Один проход пересчёта по всем сменам: каждая раскладывается с оглядкой на
         текущий план коллег. Результат кладётся в planned_by_shift, база не трогается.
+        overlap_allowed_for_direction — галочка «Разрешить пересечение»: у такого
+        направления на коллег не оглядываемся вовсе.
         """
         for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in ordered_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
@@ -699,21 +701,28 @@ class SchedulesMixin:
                         self._remaining_break_durations_after_used(full_durations, used_breaks)
                     )
                 )
-            extra_occupied = self._extra_occupied_from_day_snapshots(
-                cursor=cursor,
-                day_breaks_snapshots=day_breaks_snapshots,
-                operator_id=operator_id,
-                shift_date=shift_date,
-                now=recalc_now,
-                direction_key_cache=recalc_direction_keys
+            allow_overlap = (
+                bool(overlap_allowed_for_direction(direction_name))
+                if callable(overlap_allowed_for_direction) else None
             )
-            extra_occupied = list(extra_occupied) + self._planned_occupied_for_shift(
-                planned_by_shift=planned_by_shift,
-                operator_id=operator_id,
-                shift_date=shift_date,
-                direction_key=self._normalize_direction_key(direction_name),
-                shift_meta=shift_meta
-            )
+            if allow_overlap:
+                extra_occupied = []
+            else:
+                extra_occupied = self._extra_occupied_from_day_snapshots(
+                    cursor=cursor,
+                    day_breaks_snapshots=day_breaks_snapshots,
+                    operator_id=operator_id,
+                    shift_date=shift_date,
+                    now=recalc_now,
+                    direction_key_cache=recalc_direction_keys
+                )
+                extra_occupied = list(extra_occupied) + self._planned_occupied_for_shift(
+                    planned_by_shift=planned_by_shift,
+                    operator_id=operator_id,
+                    shift_date=shift_date,
+                    direction_key=self._normalize_direction_key(direction_name),
+                    shift_meta=shift_meta
+                )
             adjusted_breaks = self._adjust_shift_breaks_against_occupied_tx(
                 cursor=cursor,
                 operator_id=operator_id,
@@ -724,7 +733,8 @@ class SchedulesMixin:
                 cross_gap_minutes=cross_gap_for_direction(direction_name),
                 frozen_breaks=frozen_breaks,
                 planning_from_minutes=window_start,
-                extra_occupied=extra_occupied
+                extra_occupied=extra_occupied,
+                allow_overlap=allow_overlap
             )
             planned_by_shift[int(shift_id)] = [dict(item) for item in adjusted_breaks]
             frozen_by_shift[int(shift_id)] = [dict(item) for item in frozen_breaks]

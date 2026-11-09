@@ -15996,12 +15996,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
             };
 
-            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey, getCrossOperatorGapForDirection = null) {
+            // isBreakOverlapAllowedForDirection — галочка «Разрешить пересечение»: у такого
+            // направления коллеги своего направления не мешают, другие направления его
+            // группы перерывов — как раньше (зеркало сервера и импорта).
+            function buildOccupiedIntervalsForDate(allOperators, dateStr, excludeOpId, directionScope, getDirectionBreakScopeKey, getCrossOperatorGapForDirection = null, isBreakOverlapAllowedForDirection = null) {
             const occupied = [];
             const dateObj = parseDateStr(dateStr);
             const prevStr = todayDateStr(addDays(dateObj, -1));
             const nextStr = todayDateStr(addDays(dateObj, 1));
             const normDirection = (v) => String(v ?? '').trim().toLowerCase();
+            const directionKey = (v) => normDirection(v).replace(/\s+/g, ' ');
+            const targetDirectionKey = directionKey(directionScope);
+            const overlapAllowed = typeof isBreakOverlapAllowedForDirection === 'function'
+                && Boolean(isBreakOverlapAllowedForDirection(directionScope));
             const getScopeKey = (v) => {
                 if (typeof getDirectionBreakScopeKey === 'function') return String(getDirectionBreakScopeKey(v) ?? '');
                 return `dir:${normDirection(v)}`;
@@ -16024,6 +16031,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             allOperators.forEach(op => {
                 if (op.id === excludeOpId) return;
                 if (getScopeKey(op?.direction) !== scopeDirectionKey) return;
+                if (overlapAllowed && directionKey(op?.direction) === targetDirectionKey) return;
                 // В группе направлений у сторон могут быть разные настройки — берём строгую.
                 const opGap = Math.max(targetGap, getCrossGap(op?.direction));
                 const segs = op.shifts?.[dateStr] ?? [];
@@ -16318,10 +16326,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // frozenBreaksBySegIndex — уже прошедшие перерывы сегмента: их не двигаем,
             // они лишь занимают время. planningFromMinutes — минута, раньше которой
             // новый перерыв ставить нельзя. Без них поведение прежнее.
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null) {
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null, isBreakOverlapAllowedForDirection = null) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
-            const neighbors = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+            const neighbors = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection);
             // Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
             const ownIntervals = [];
             const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
@@ -16419,13 +16427,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
             // Оценка целого прохода раскладки (зеркало сервера): сперва нарушения
             // правил, потом неравномерность рабочих отрезков.
-            function breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection) {
+            function breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection = null) {
             let violations = 0;
             let unevenness = 0;
             jobs.forEach(job => {
                 const neighbors = buildOccupiedIntervalsForDate(
                     allOperators, job.date, job.op.id, job.op?.direction,
-                    getDirectionBreakScopeKey, getCrossOperatorGapForDirection
+                    getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection
                 );
                 const breaks = [];
                 (job.op.shifts?.[job.date] ?? []).forEach(seg => {
@@ -16448,7 +16456,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Раскладка пачки смен в несколько проходов: за один проход тем, кого
             // раскладывают последними, свободного места уже не остаётся. Проходы
             // улучшают картину немонотонно, поэтому оставляем лучший.
-            function runBreakLayoutPasses(allOperators, pairs, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection) {
+            function runBreakLayoutPasses(allOperators, pairs, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection = null) {
             const jobs = [];
             pairs.forEach(({ opId, date }) => {
                 const op = allOperators.find(x => x.id === opId);
@@ -16462,15 +16470,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             });
             const runPass = () => jobs.forEach(job => {
                 try {
-                    adjustBreaksForOperatorOnDate(job.op, job.date, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection);
+                    adjustBreaksForOperatorOnDate(job.op, job.date, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, null, null, isBreakOverlapAllowedForDirection);
                 } catch (e) { /* одна смена не должна ронять раскладку остальных */ }
             });
             runPass();
-            let bestScore = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+            let bestScore = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection);
             let bestState = capture();
             for (let pass = 1; pass < BREAK_LAYOUT_PASSES; pass += 1) {
                 runPass();
-                const score = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection);
+                const score = breakLayoutScore(jobs, allOperators, getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection);
                 if (compareBreakScores(score, bestScore) < 0) { bestScore = score; bestState = capture(); }
             }
             restore(bestState);
@@ -17067,6 +17075,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Минимальный промежуток между перерывами РАЗНЫХ операторов направления (мин).
             const [plannerBreakCrossGapByDirection, setPlannerBreakCrossGapByDirection] = useState({});
             const [plannerBreakCrossGapDraftByDirection, setPlannerBreakCrossGapDraftByDirection] = useState({});
+            // «Разрешить пересечение»: { направление: true } с сервера и { направление: bool } в окне.
+            const [plannerBreakOverlapByDirection, setPlannerBreakOverlapByDirection] = useState({});
+            const [plannerBreakOverlapDraftByDirection, setPlannerBreakOverlapDraftByDirection] = useState({});
             const [plannerSystemDirections, setPlannerSystemDirections] = useState([]);
             const [plannerSystemDirectionItems, setPlannerSystemDirectionItems] = useState([]);
             const [showPlannerTopActionsMenu, setShowPlannerTopActionsMenu] = useState(false);
@@ -18152,6 +18163,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         if (breakRulesResp.ok) {
                             setPlannerBreakRulesByDirection(normalizePlannerBreakRulesPayload(breakRulesPayload));
                             setPlannerBreakCrossGapByDirection(normalizePlannerBreakCrossGapPayload(breakRulesPayload));
+                            setPlannerBreakOverlapByDirection(normalizePlannerBreakOverlapPayload(breakRulesPayload));
                         }
 
                         const directionsPayload = await directionsResp.json().catch(() => ({}));
@@ -18356,6 +18368,30 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 });
                 return map;
             };
+            const normalizePlannerBreakOverlapPayload = (payload) => {
+                const map = {};
+                plannerBreakRulesPayloadList(payload).forEach(item => {
+                    if (!item || typeof item !== 'object') return;
+                    const direction = String(item.direction ?? item.direction_name ?? '').trim();
+                    if (!direction) return;
+                    if ((item.allowOverlap ?? item.allow_overlap) === true) map[direction] = true;
+                });
+                return map;
+            };
+            const buildPlannerBreakOverlapDraftMap = (overlapByDirection, directionsList) => {
+                // По ключу, а не по написанию: в окне направление может стоять в
+                // написании карточек, а в настройке — в своём.
+                const allowedKeys = new Set(
+                    Object.keys(overlapByDirection || {}).map(plannerNormalizeDirectionKey).filter(Boolean)
+                );
+                const map = {};
+                (Array.isArray(directionsList) ? directionsList : []).forEach(directionName => {
+                    const direction = String(directionName || '').trim();
+                    if (!direction) return;
+                    map[direction] = allowedKeys.has(plannerNormalizeDirectionKey(direction));
+                });
+                return map;
+            };
             const plannerBreakRuleMinutesToText = (value) => {
                 const minutes = Math.max(0, Math.round(Number(value) || 0));
                 const hh = Math.floor(minutes / 60);
@@ -18482,6 +18518,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (!key) return 0;
                 return plannerBreakCrossGapLookup.get(key) || 0;
             };
+            const plannerBreakOverlapLookup = useMemo(() => new Set(
+                Object.keys(plannerBreakOverlapByDirection || {}).map(plannerNormalizeDirectionKey).filter(Boolean)
+            ), [plannerBreakOverlapByDirection]);
+            const isPlannerBreakOverlapAllowedForDirection = (directionValue) => {
+                const key = plannerNormalizeDirectionKey(directionValue);
+                return Boolean(key) && plannerBreakOverlapLookup.has(key);
+            };
             const plannerBreakRuleDirections = useMemo(() => {
                 const map = new Map();
                 (uniqueDirections || []).forEach(directionName => {
@@ -18499,15 +18542,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     if (!key) return;
                     if (!map.has(key)) map.set(key, directionName);
                 });
-                // Направление может иметь только промежуток между операторами, без правил
-                // по длительности — его тоже нужно показать и не потерять при сохранении.
-                Object.keys(plannerBreakCrossGapByDirection || {}).forEach(directionName => {
+                // Направление может иметь только промежуток между операторами или галочку
+                // «Разрешить пересечение», без правил по длительности — его тоже нужно
+                // показать и не потерять при сохранении.
+                [
+                    ...Object.keys(plannerBreakCrossGapByDirection || {}),
+                    ...Object.keys(plannerBreakOverlapByDirection || {})
+                ].forEach(directionName => {
                     const key = plannerNormalizeDirectionKey(directionName);
                     if (!key) return;
                     if (!map.has(key)) map.set(key, directionName);
                 });
                 return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
-            }, [uniqueDirections, plannerSystemDirections, plannerBreakRulesByDirection, plannerBreakCrossGapByDirection]);
+            }, [uniqueDirections, plannerSystemDirections, plannerBreakRulesByDirection, plannerBreakCrossGapByDirection, plannerBreakOverlapByDirection]);
             const breakDirectionGroupMembership = useMemo(() => {
                 const map = new Map();
                 (breakDirectionGroups || []).forEach((group, groupIndex) => {
@@ -20448,7 +20495,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     getPlannerBreakRuleRangesForDirection,
                     getPlannerBreakCrossGapForDirection,
                     frozenBySegIndex,
-                    planningFromForTarget
+                    planningFromForTarget,
+                    isPlannerBreakOverlapAllowedForDirection
                   );
                 } catch (e) { /* ignore */ }
 
@@ -20586,19 +20634,25 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     }
                     const normalized = normalizePlannerBreakRulesPayload(payload);
                     const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload);
+                    const normalizedOverlap = normalizePlannerBreakOverlapPayload(payload);
                     setPlannerBreakRulesByDirection(normalized);
                     setPlannerBreakCrossGapByDirection(normalizedGaps);
+                    setPlannerBreakOverlapByDirection(normalizedOverlap);
                     if (showBreakRulesSettingsModal) {
                         const mergedDirections = Array.from(new Set([
                             ...plannerBreakRuleDirections,
                             ...Object.keys(normalized || {}),
-                            ...Object.keys(normalizedGaps || {})
+                            ...Object.keys(normalizedGaps || {}),
+                            ...Object.keys(normalizedOverlap || {})
                         ])).sort((a, b) => a.localeCompare(b));
                         setPlannerBreakRulesDraftByDirection(
                             buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
                         );
                         setPlannerBreakCrossGapDraftByDirection(
                             buildPlannerBreakCrossGapDraftMap(normalizedGaps, mergedDirections)
+                        );
+                        setPlannerBreakOverlapDraftByDirection(
+                            buildPlannerBreakOverlapDraftMap(normalizedOverlap, mergedDirections)
                         );
                     }
                     return payload;
@@ -20694,21 +20748,29 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setPlannerBreakCrossGapDraftByDirection(
                     buildPlannerBreakCrossGapDraftMap(plannerBreakCrossGapByDirection, plannerBreakRuleDirections)
                 );
+                setPlannerBreakOverlapDraftByDirection(
+                    buildPlannerBreakOverlapDraftMap(plannerBreakOverlapByDirection, plannerBreakRuleDirections)
+                );
                 if (Object.keys(plannerBreakRulesByDirection || {}).length === 0 && !plannerBreakRulesLoading) {
                     try {
                         const payload = await loadPlannerBreakRulesFromServer();
                         const normalized = normalizePlannerBreakRulesPayload(payload || {});
                         const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload || {});
+                        const normalizedOverlap = normalizePlannerBreakOverlapPayload(payload || {});
                         const mergedDirections = Array.from(new Set([
                             ...plannerBreakRuleDirections,
                             ...Object.keys(normalized || {}),
-                            ...Object.keys(normalizedGaps || {})
+                            ...Object.keys(normalizedGaps || {}),
+                            ...Object.keys(normalizedOverlap || {})
                         ])).sort((a, b) => a.localeCompare(b));
                         setPlannerBreakRulesDraftByDirection(
                             buildPlannerBreakRulesDraftMap(normalized, mergedDirections)
                         );
                         setPlannerBreakCrossGapDraftByDirection(
                             buildPlannerBreakCrossGapDraftMap(normalizedGaps, mergedDirections)
+                        );
+                        setPlannerBreakOverlapDraftByDirection(
+                            buildPlannerBreakOverlapDraftMap(normalizedOverlap, mergedDirections)
                         );
                     } catch (_) { /* error already set in state */ }
                 }
@@ -20788,10 +20850,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }));
             };
 
+            const updatePlannerBreakOverlapDraft = (directionName, checked) => {
+                const direction = String(directionName || '').trim();
+                if (!direction) return;
+                setPlannerBreakOverlapDraftByDirection(prev => ({
+                    ...(prev || {}),
+                    [direction]: Boolean(checked)
+                }));
+            };
+
             const savePlannerBreakRulesToServer = async () => {
                 let parsedRulesByDirection = {};
                 let parsedCrossGapByDirection = {};
                 let supervisorBreakItems = [];
+                const isOverlapDraftOn = (directionName) => Boolean(plannerBreakOverlapDraftByDirection?.[directionName]);
                 try {
                     // Проверяем и перерывы СВ до первой записи: иначе правила направлений
                     // уже сохранились бы, а окно встало бы с ошибкой по СВ.
@@ -20800,9 +20872,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         plannerBreakRulesDraftByDirection,
                         plannerBreakRuleDirections
                     );
+                    // С галочкой «Разрешить пересечение» поле промежутка спрятано —
+                    // его содержимое не проверяем и не сохраняем.
                     parsedCrossGapByDirection = parsePlannerBreakCrossGapDraftMap(
                         plannerBreakCrossGapDraftByDirection,
-                        plannerBreakRuleDirections
+                        plannerBreakRuleDirections.filter(directionName => !isOverlapDraftOn(directionName))
                     );
                 } catch (error) {
                     setPlannerBreakRulesError(error?.message || 'Проверьте корректность введенных правил');
@@ -20812,7 +20886,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 const directionPayload = plannerBreakRuleDirections.map(directionName => ({
                     direction: directionName,
                     rules: normalizePlannerBreakRuleRanges(parsedRulesByDirection[directionName] || []),
-                    crossOperatorGapMinutes: normalizePlannerBreakCrossGapValue(parsedCrossGapByDirection[directionName])
+                    crossOperatorGapMinutes: isOverlapDraftOn(directionName)
+                        ? 0
+                        : normalizePlannerBreakCrossGapValue(parsedCrossGapByDirection[directionName]),
+                    allowOverlap: isOverlapDraftOn(directionName)
                 }));
                 setPlannerBreakRulesSaving(true);
                 setPlannerBreakRulesError('');
@@ -20831,13 +20908,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     }
                     const normalized = normalizePlannerBreakRulesPayload(payload);
                     const normalizedGaps = normalizePlannerBreakCrossGapPayload(payload);
+                    const normalizedOverlap = normalizePlannerBreakOverlapPayload(payload);
                     setPlannerBreakRulesByDirection(normalized);
                     setPlannerBreakCrossGapByDirection(normalizedGaps);
+                    setPlannerBreakOverlapByDirection(normalizedOverlap);
                     setPlannerBreakRulesDraftByDirection(
                         buildPlannerBreakRulesDraftMap(normalized, plannerBreakRuleDirections)
                     );
                     setPlannerBreakCrossGapDraftByDirection(
                         buildPlannerBreakCrossGapDraftMap(normalizedGaps, plannerBreakRuleDirections)
+                    );
+                    setPlannerBreakOverlapDraftByDirection(
+                        buildPlannerBreakOverlapDraftMap(normalizedOverlap, plannerBreakRuleDirections)
                     );
                     if (supervisorBreakItems.length > 0) {
                         const svResponse = await fetch(`${API_BASE_URL}/api/work_schedules/supervisor_hours_settings`, {
@@ -22706,7 +22788,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                       layoutPairs.push({ opId: target.opId, date: target.date });
                       touchedPairs.delete(pairKey);
                     });
-                    runBreakLayoutPasses(copy, layoutPairs, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection);
+                    runBreakLayoutPasses(copy, layoutPairs, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection, isPlannerBreakOverlapAllowedForDirection);
                     return copy;
                   });
               
@@ -24063,7 +24145,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         getPlannerBreakRuleRangesForDirection,
                         getPlannerBreakCrossGapForDirection,
                         localFrozenBySegIndex,
-                        null
+                        null,
+                        isPlannerBreakOverlapAllowedForDirection
                       );
                     } catch (e) { /* ignore */ }
                     // У смены не с линии перерывы только ручные (задача #352 — СВ, с
@@ -24423,10 +24506,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 let crossOperatorGapMinutes = getPlannerBreakCrossGapForDirection(op?.direction);
                 if (modalState?.opId && modalState?.date && op) {
                     const scopeKey = getBreakConflictDirectionScopeKey(op?.direction);
+                    // «Разрешить пересечение»: коллеги своего направления конфликтом не считаются.
+                    const ownDirectionKey = plannerNormalizeDirectionKey(op?.direction);
+                    const overlapAllowedHere = isPlannerBreakOverlapAllowedForDirection(op?.direction);
                     const seenDetailed = new Set();
                     (operators || []).forEach(otherOp => {
                         if (!otherOp || otherOp.id === modalState.opId) return;
                         if (getBreakConflictDirectionScopeKey(otherOp?.direction) !== scopeKey) return;
+                        if (overlapAllowedHere && plannerNormalizeDirectionKey(otherOp?.direction) === ownDirectionKey) return;
                         crossOperatorGapMinutes = Math.max(
                             crossOperatorGapMinutes,
                             getPlannerBreakCrossGapForDirection(otherOp?.direction)
@@ -24583,7 +24670,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 modalState?.opId,
                 modalState?.date,
                 getBreakConflictDirectionScopeKey,
-                plannerBreakCrossGapLookup
+                plannerBreakCrossGapLookup,
+                plannerBreakOverlapLookup
             ]);
 
             const modalBulkTargets = Array.isArray(modalState?.multipleTargets) ? modalState.multipleTargets : [];
@@ -40163,6 +40251,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 const rules = Array.isArray(plannerBreakRulesDraftByDirection?.[directionName])
                                     ? plannerBreakRulesDraftByDirection[directionName]
                                     : [];
+                                const overlapAllowedDraft = Boolean(plannerBreakOverlapDraftByDirection?.[directionName]);
                                 return (
                                     <div key={`planner-break-rules-${directionName}`} className="rounded-xl border border-slate-200 bg-white p-3">
                                         <div className="flex items-center justify-between gap-3 mb-2">
@@ -40177,22 +40266,41 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </button>
                                         </div>
 
-                                        <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2">
-                                            <div className="text-[12px] font-medium text-slate-700 min-w-0">
-                                                Промежуток между перерывами разных операторов
-                                            </div>
-                                            <div className="flex items-center gap-1.5 shrink-0">
-                                                <input
-                                                    type="text"
-                                                    inputMode="numeric"
-                                                    value={plannerBreakCrossGapDraftByDirection?.[directionName] ?? ''}
-                                                    placeholder="0"
-                                                    onChange={(e) => updatePlannerBreakCrossGapDraft(directionName, e.target.value)}
-                                                    className="w-16 px-2 py-1.5 text-sm text-right tabular-nums rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-300"
-                                                    aria-label={`Промежуток между перерывами разных операторов направления ${directionName}, минут`}
+                                        <div className="mb-2 rounded-lg border border-slate-200 bg-slate-50">
+                                            <div className="flex items-center gap-1.5 px-2.5 py-2">
+                                                <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[12px] font-medium text-slate-700">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={overlapAllowedDraft}
+                                                        onChange={(e) => updatePlannerBreakOverlapDraft(directionName, e.target.checked)}
+                                                        className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-slate-300 accent-amber-500"
+                                                    />
+                                                    Разрешить пересечение
+                                                </label>
+                                                <InfoHint
+                                                    side="left"
+                                                    text="Перерывы операторов этого направления могут совпадать по времени: каждому они встанут равномерно по его смене, без оглядки на коллег, и пересечения не будут отмечаться как ошибка. Уже стоящие перерывы переставит «Пересчитать перерывы»."
                                                 />
-                                                <span className="text-[11px] text-slate-500">мин</span>
                                             </div>
+                                            {!overlapAllowedDraft && (
+                                                <div className="flex items-center justify-between gap-3 border-t border-slate-200 px-2.5 py-2">
+                                                    <div className="text-[12px] font-medium text-slate-700 min-w-0">
+                                                        Промежуток между перерывами разных операторов
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5 shrink-0">
+                                                        <input
+                                                            type="text"
+                                                            inputMode="numeric"
+                                                            value={plannerBreakCrossGapDraftByDirection?.[directionName] ?? ''}
+                                                            placeholder="0"
+                                                            onChange={(e) => updatePlannerBreakCrossGapDraft(directionName, e.target.value)}
+                                                            className="w-16 px-2 py-1.5 text-sm text-right tabular-nums rounded-lg border border-slate-300 bg-white focus:outline-none focus:ring-2 focus:ring-amber-300"
+                                                            aria-label={`Промежуток между перерывами разных операторов направления ${directionName}, минут`}
+                                                        />
+                                                        <span className="text-[11px] text-slate-500">мин</span>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
 
                                         {rules.length === 0 ? (

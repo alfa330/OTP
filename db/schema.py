@@ -2369,6 +2369,25 @@ class SchemaMixin:
                     CHECK (cross_operator_gap_minutes >= 0 AND cross_operator_gap_minutes <= 240)
                 );
             """)
+            # «Разрешить пересечение» (09.11.2026): перерывы операторов направления
+            # могут совпадать по времени — автоматика не разводит их между собой.
+            # ALTER — только когда колонки ещё нет: даже с IF NOT EXISTS он берёт
+            # ACCESS EXCLUSIVE до конца инициализации, а таблицу читает каждое
+            # сохранение смены.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'work_schedule_break_direction_settings'
+                           AND column_name = 'allow_break_overlap'
+                    ) THEN
+                        ALTER TABLE work_schedule_break_direction_settings
+                            ADD COLUMN allow_break_overlap BOOLEAN NOT NULL DEFAULT FALSE;
+                    END IF;
+                END $$;
+            """)
             # Задача #352. Перерыв супервайзера, который РОП вычитает из его часов по
             # Clockster (supervisor_hours.py). На человека, а не на направление: у СВ
             # направления нет, а значение у разных СВ разное. Нет строки или NULL —
