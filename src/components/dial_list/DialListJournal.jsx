@@ -112,8 +112,11 @@ const STATE_LABEL = {
     ended: 'Разговор завершён, ждём исход от АТС',
 };
 
+// «Сначала новые» — бывшие «Сначала свежие», и обратная «Сначала старые» (владелец, 10.11.2026:
+// «свежие» — не по-деловому). Обе — по последнему действию с водителем: звонку или загрузке в базу.
 const SORT_OPTIONS = [
-    { value: 'activity', label: 'Сначала свежие' },
+    { value: 'activity', label: 'Сначала новые' },
+    { value: 'activity_asc', label: 'Сначала старые' },
     { value: 'name', label: 'По ФИО' },
     { value: 'created', label: 'По дате загрузки' },
     { value: 'attempts', label: 'Больше попыток' },
@@ -1338,8 +1341,9 @@ const DialListJournal = ({
             const data = await resp.json();
             if (seq !== requestSeq.current) return;
             const list = Array.isArray(data.items) ? data.items : [];
-            // При «Сначала свежие» водитель, по которому только что позвонили, между
-            // страницами переезжает вверх и пришёл бы второй раз — с тем же key.
+            // При «Сначала новые» водитель, по которому только что позвонили, между
+            // страницами переезжает вверх, при «Сначала старые» — вниз, и пришёл бы
+            // второй раз — с тем же key.
             setItems((cur) => {
                 if (offset === 0) return list;
                 const seen = new Set(cur.map((it) => it.id));

@@ -1613,11 +1613,16 @@ JOURNAL_SIGN_FILTERS = {
     "not_checked": "signed_at IS NULL AND iin <> '' AND sign_status = ''",
     "no_iin": "iin = ''",
 }
+# «Сначала новые» / «Сначала старые» (владелец, 10.11.2026) — по последнему действию с водителем:
+# звонку или загрузке в базу; вторая — зеркало первой. Последний ключ каждой сортировки — id:
+# у базы одного файла без звонков время одно на всех, и без него порядок равных строк не
+# закреплён — страницы «Показать ещё» повторяли бы одних водителей и теряли других.
 JOURNAL_SORTS = {
-    "activity": "activity_at DESC, created_at DESC",
-    "name": "lower(full_name) ASC, created_at ASC",
-    "created": "created_at DESC",
-    "attempts": "attempts_total DESC, activity_at DESC",
+    "activity": "activity_at DESC, created_at DESC, id DESC",
+    "activity_asc": "activity_at ASC, created_at ASC, id ASC",
+    "name": "lower(full_name) ASC, created_at ASC, id ASC",
+    "created": "created_at DESC, id DESC",
+    "attempts": "attempts_total DESC, activity_at DESC, id DESC",
 }
 JOURNAL_MAX_LIMIT = 200
 
