@@ -1,6 +1,10 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Calendar, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Calendar, Check, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
+import {
+    PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, monthCells, periodLabel, pickDayStep,
+    presetMatches, selectionBand, yearCells, yearPageEnd,
+} from './periodRange.js';
 
 /* Пикер диапазона дат в стиле сайта: поповер с одним месяцем, выбор в два
  * клика (начало → конец) с подсветкой полосы по курсору и пресетами.
@@ -12,16 +16,19 @@ import { Calendar, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
  * сетка, пресеты и место под свою кнопку), `IosDateRangePicker` — привычный
  * чип-поповер над ним. Разделение появилось, когда выгрузке табло СЗоВ
  * понадобился тот же календарь, но раскрывающимся из кнопки «Выгрузить» и с
- * «Подтвердить» под ним: чипа с датой на стене быть не должно. */
+ * «Подтвердить» под ним: чипа с датой на стене быть не должно.
+ *
+ * Календарь ПЕРИОДА (задача #389, ИИ-оценка и «Аналитика» журнала оценок) —
+ * тот же календарь с параметром `views`: сверху переключатель «Дни · Месяцы ·
+ * Годы», и кроме дня или диапазона можно выбрать целый месяц или год. Правила
+ * (подписи, какие месяцы недоступны, быстрые периоды) — в periodRange.js: их же
+ * берёт календарь журнала, у которого своя сборка без Tailwind. */
 
 const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
     'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн',
     'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const DAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-
-const daysInMonth = (y, m) => new Date(y, m + 1, 0).getDate();
-const firstWeekday = (y, m) => { const d = new Date(y, m, 1).getDay(); return d === 0 ? 6 : d - 1; };
 
 export const isoDate = (d) => {
     const p = (n) => String(n).padStart(2, '0');
@@ -61,13 +68,25 @@ export const rangeLabel = (from, to) => {
  * поэтому до этой ширины и у остальных разделов календарь прежний. В режиме
  * `portal` обёртки-чипа ширина панели считается прежней константой: с roomy
  * этот режим пока никто не сочетает, первому такому вызывающему — перейти на
- * замер ширины карточки. */
+ * замер ширины карточки.
+ *
+ * `views` — календарь периода (#389): массив видов из periodRange.PERIOD_VIEWS.
+ * Сверху переключатель видов; в «Месяцах» нажатие выбирает месяц целиком, в
+ * «Годах» — год целиком. Высота сетки у всех видов одна (шесть недель): иначе
+ * карточка прыгала бы при переключении вида и при листании месяцев. Быстрых
+ * периодов здесь четыре — они встают сеткой 2 × 2 (в одну строку «Весь
+ * период» не помещается), а совпавший с выбором подсвечен. Без `views`
+ * календарь ровно прежний — его используют два десятка разделов. */
+const VIEW_BODY_HEIGHT = 258;   // строка дней недели (32) + шесть недель (6 × 36 + 5 × 2)
+
 export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null,
-                                      single = false, initialMonth = null, roomy = false }) {
+                                      single = false, initialMonth = null, roomy = false, views = null }) {
     const today = isoDate(new Date());
     const [draft, setDraft] = useState({ from, to });   // выбор внутри календаря
     const [step, setStep] = useState(0);                // 0 — ждём начало, 1 — конец
     const [hover, setHover] = useState(null);
+    const viewList = !single && Array.isArray(views) && views.length > 1 ? views : null;
+    const [mode, setMode] = useState(() => (viewList ? initialPeriodView(from, to, viewList) : 'days'));
     /* `initialMonth` нужен пустому полю с границами: у даты, которую ещё не
        выбрали, месяц брать неоткуда, а сегодняшний у поля с min=«завтра» или
        max=«прошлый год» встретил бы человека полностью серым месяцем. */
@@ -75,6 +94,10 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
         const [y, m] = (to || from || initialMonth || today).split('-').map(Number);
         return { y, m: m - 1 };
     });
+    // Страницы годов кончаются годом верхней границы (обычно — текущим годом).
+    const anchorYear = Number((max || today).slice(0, 4));
+    const [yearsEnd, setYearsEnd] = useState(
+        () => yearPageEnd(Number((to || from || today).slice(0, 4)), anchorYear));
 
     const pickDay = (iso, disabled) => {
         if (disabled) return;
@@ -85,18 +108,12 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
             onChange({ from: iso, to: iso });
             return;
         }
-        if (step === 0) {
-            setDraft({ from: iso, to: iso });
-            setStep(1);
-            setHover(iso);
-            return;
-        }
-        const start = draft.from || iso;
-        const next = iso < start ? { from: iso, to: start } : { from: start, to: iso };
-        setStep(0);
-        setHover(null);
-        setDraft(next);
-        onChange(next);
+        // Начало → конец; тот же день вторым нажатием — один этот день.
+        const next = pickDayStep(draft, step, iso);
+        setDraft(next.draft);
+        setStep(next.step);
+        setHover(next.done ? null : iso);
+        if (next.done) onChange(next.done);
     };
 
     const setPreset = (next) => {
@@ -108,47 +125,77 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
     const prevMonth = () => setView((v) => (v.m === 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m: v.m - 1 }));
     const nextMonth = () => setView((v) => (v.m === 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m: v.m + 1 }));
 
-    // границы подсветки: на шаге выбора конца — по позиции курсора
-    let lo = draft.from, hi = draft.to;
-    if (step === 1 && hover && draft.from) {
-        lo = hover < draft.from ? hover : draft.from;
-        hi = hover < draft.from ? draft.from : hover;
-    }
-    const hasRange = lo && hi && lo !== hi;
+    /* Шапка вида: месяц со стрелками у дней, год — у месяцев, страница лет — у
+       годов. Вперёд за верхнюю границу месяцы и годы не листаются: там всё
+       серое, и пустая страница читалась бы как «данных нет». */
+    /* Годы до нижней границы (min) не показываются вовсе: раздел, который ведётся
+       с 2026 года, не предлагает 2015-й — это был бы выбор заведомо пустого. */
+    const pageYears = mode === 'years'
+        ? yearCells(yearsEnd, { from: draft.from, to: draft.to, min, max, today })
+            .filter((cell) => !(min && cell.range.to < min))
+        : null;
+    const header = mode === 'months'
+        ? { title: String(view.y), prev: () => setView((v) => ({ ...v, y: v.y - 1 })),
+            next: () => setView((v) => ({ ...v, y: v.y + 1 })),
+            prevDisabled: Boolean(min) && `${view.y - 1}-12-31` < min,
+            nextDisabled: Boolean(max) && `${view.y + 1}-01-01` > max,
+            prevLabel: 'Предыдущий год', nextLabel: 'Следующий год' }
+        : mode === 'years'
+            ? { title: pageYears.length > 1 ? `${pageYears[0].label} – ${pageYears[pageYears.length - 1].label}`
+                : (pageYears[0]?.label || String(yearsEnd)),
+                prev: () => setYearsEnd((y) => y - YEAR_PAGE), next: () => setYearsEnd((y) => y + YEAR_PAGE),
+                prevDisabled: Boolean(min) && `${yearsEnd - YEAR_PAGE}-12-31` < min,
+                nextDisabled: Boolean(max) && `${yearsEnd + 1}-01-01` > max,
+                prevLabel: 'Более ранние годы', nextLabel: 'Более поздние годы' }
+            : { title: `${MONTHS_RU[view.m]} ${view.y}`, prev: prevMonth, next: nextMonth,
+                prevDisabled: false, nextDisabled: false,
+                prevLabel: 'Предыдущий месяц', nextLabel: 'Следующий месяц' };
 
-    const cells = [];
-    const lead = firstWeekday(view.y, view.m);
+    /* Месяц или год целиком — сразу выбор, как быстрый период; дни потом
+       откроются на этом же месяце. */
+    const pickWhole = (cell) => {
+        if (cell.disabled) return;
+        const [y, m] = cell.range.from.split('-').map(Number);
+        setView({ y, m: m - 1 });
+        setPreset({ from: cell.range.from, to: cell.range.to });
+    };
+    const wholeCells = mode === 'months'
+        ? monthCells(view.y, { from: draft.from, to: draft.to, min, max, today })
+        : pageYears;
+
+    // границы подсветки: на шаге выбора конца — по позиции курсора
+    const { lo, hi } = selectionBand(draft, step, hover);
+
     /* Ширину ячейка берёт у колонки сетки (2xl:w-full), а не своим числом в
        скобках: оболочка телефона правит всё, в чьём классе есть «w-[», и
-       добавка с префиксом 2xl меняла бы календарь на телефоне. */
+       добавка с префиксом 2xl меняла бы календарь на телефоне.
+       Календарь периода держит шесть недель всегда: месяц в пять недель
+       иначе был бы ниже соседнего, и карточка прыгала бы при листании. */
     const cellSize = roomy ? ' 2xl:h-[42px] 2xl:w-full' : '';
-    for (let i = 0; i < lead; i += 1) cells.push(<div key={`e${i}`} className={`h-9 w-9${cellSize}`} />);
-    for (let d = 1; d <= daysInMonth(view.y, view.m); d += 1) {
-        const iso = `${view.y}-${String(view.m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-        const disabled = Boolean((max && iso > max) || (min && iso < min));
-        const isEnd = iso === lo || iso === hi;
-        const inBand = hasRange && iso > lo && iso < hi;
+    const cells = dayCells(view.y, view.m, { lo, hi, min, max, today, fill: Boolean(viewList) }).map((cell) => {
+        if (!cell.iso) return <div key={cell.key} className={`h-9 w-9${cellSize}`} />;
+        const { iso, disabled } = cell;
         let wrap = `relative flex h-9 w-9 items-center justify-center${cellSize}`;
-        if (inBand) wrap += ' bg-blue-500/10';
-        else if (hasRange && iso === lo) wrap += ' rounded-l-full bg-blue-500/10';
-        else if (hasRange && iso === hi) wrap += ' rounded-r-full bg-blue-500/10';
+        if (cell.inBand) wrap += ' bg-blue-500/10';
+        else if (cell.bandStart) wrap += ' rounded-l-full bg-blue-500/10';
+        else if (cell.bandEnd) wrap += ' rounded-r-full bg-blue-500/10';
         let btn = `flex h-8 w-8 items-center justify-center rounded-full text-[13px] transition ${
             roomy ? '2xl:size-[38px] 2xl:text-[15px] ' : ''}`;
         if (disabled) btn += 'cursor-not-allowed text-slate-300';
-        else if (isEnd) btn += 'bg-blue-500 font-semibold text-white shadow-sm';
-        else if (inBand) btn += 'text-blue-700 hover:bg-blue-500/15';
-        else if (iso === today) btn += 'font-semibold text-blue-600 ring-1 ring-inset ring-blue-300 hover:bg-slate-100';
+        else if (cell.isEnd) btn += 'bg-blue-500 font-semibold text-white shadow-sm';
+        else if (cell.inBand) btn += 'text-blue-700 hover:bg-blue-500/15';
+        else if (cell.today) btn += 'font-semibold text-blue-600 ring-1 ring-inset ring-blue-300 hover:bg-slate-100';
         else btn += 'text-slate-700 hover:bg-slate-100';
-        cells.push(
+        return (
             <div key={iso} className={wrap}>
                 <button type="button" disabled={disabled} className={btn}
                         onClick={() => pickDay(iso, disabled)}
                         onMouseEnter={() => step === 1 && !disabled && setHover(iso)}>
-                    {d}
+                    {cell.day}
                 </button>
-            </div>,
+            </div>
         );
-    }
+    });
 
     const navSize = roomy ? ' 2xl:h-8 2xl:w-8' : '';
     const footerPresets = presets || (single
@@ -157,46 +204,97 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
             { label: 'Сегодня', range: () => ({ from: today, to: today }) },
             { label: 'Весь период', range: () => ({ from: '', to: '' }) },
         ]);
+    // Четыре быстрых периода в одну строку не встают — сеткой 2 × 2.
+    const presetGrid = Boolean(viewList) && footerPresets.length > 3;
+    const hint = mode === 'months' ? 'Выберите месяц'
+        : mode === 'years' ? 'Выберите год'
+            : step === 0 ? 'Выберите начало периода'
+                /* «Конкретный день» (#389) — тот же день вторым нажатием; без
+                   подсказки до этого не догадаться. */
+                : viewList ? 'Выберите конец или тот же день ещё раз' : 'Выберите конец периода';
 
     return (
         <div className={`w-[268px] rounded-2xl bg-white p-3 shadow-xl ring-1 ring-slate-200/70${roomy ? ' 2xl:w-[326px] 2xl:p-4' : ''}`}>
+            {viewList && (
+                /* Не IosSegmented из ios.jsx: календарь — самостоятельный модуль
+                   (его рендерит node-тест без сборщика), поэтому переключатель —
+                   тот же вид из тех же классов, без импорта всего набора. */
+                <div role="tablist" aria-label="Что выбрать" className="mb-2.5 flex rounded-[10px] bg-slate-100 p-[3px]">
+                    {viewList.map((key) => (
+                        <button key={key} type="button" role="tab" aria-selected={mode === key}
+                                onClick={() => { setMode(key); setStep(0); setHover(null); }}
+                                className={`flex-1 rounded-[8px] px-2 py-[5px] text-[12.5px] font-medium transition-all active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+                                    mode === key ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+                                        : 'text-slate-500 hover:text-slate-800'}`}>
+                            {PERIOD_VIEW_LABELS[key] || key}
+                        </button>
+                    ))}
+                </div>
+            )}
             <div className="mb-2 flex items-center justify-between">
-                <button type="button" onClick={prevMonth}
-                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100${navSize}`}>
+                <button type="button" onClick={header.prev} aria-label={header.prevLabel} disabled={header.prevDisabled}
+                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent${navSize}`}>
                     <ChevronLeft size={16} />
                 </button>
-                <span className={`text-[13.5px] font-semibold text-slate-900${roomy ? ' 2xl:text-[15.5px]' : ''}`}>
-                    {MONTHS_RU[view.m]} {view.y}
+                <span className={`text-[13.5px] font-semibold tabular-nums text-slate-900${roomy ? ' 2xl:text-[15.5px]' : ''}`}>
+                    {header.title}
                 </span>
-                <button type="button" onClick={nextMonth}
-                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100${navSize}`}>
+                <button type="button" onClick={header.next} aria-label={header.nextLabel} disabled={header.nextDisabled}
+                        className={`grid h-7 w-7 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 disabled:cursor-default disabled:text-slate-300 disabled:hover:bg-transparent${navSize}`}>
                     <ChevronRight size={16} />
                 </button>
             </div>
-            <div className="mb-1 grid grid-cols-7">
-                {DAYS_SHORT.map((d) => (
-                    <div key={d} className={`flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400${
-                        roomy ? ' 2xl:h-8 2xl:w-full 2xl:text-[12px]' : ''}`}>
-                        {d}
+            {wholeCells ? (
+                <div className="grid grid-cols-3 grid-rows-4 gap-1.5" style={{ height: VIEW_BODY_HEIGHT }}>
+                    {wholeCells.map((cell) => (
+                        <button key={cell.key} type="button" disabled={cell.disabled} title={cell.title}
+                                aria-pressed={cell.selected} onClick={() => pickWhole(cell)}
+                                className={`flex h-full w-full items-center justify-center rounded-xl text-[13px] tabular-nums transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${
+                                    cell.disabled ? 'cursor-not-allowed text-slate-300'
+                                        : cell.selected ? 'bg-blue-500 font-semibold text-white shadow-sm'
+                                            : cell.current ? 'font-semibold text-blue-600 ring-1 ring-inset ring-blue-300 hover:bg-slate-100'
+                                                : 'text-slate-700 hover:bg-slate-100'}`}>
+                            {cell.label}
+                        </button>
+                    ))}
+                </div>
+            ) : (
+                <>
+                    <div className="mb-1 grid grid-cols-7">
+                        {DAYS_SHORT.map((d) => (
+                            <div key={d} className={`flex h-7 w-9 items-center justify-center text-[10.5px] font-semibold uppercase text-slate-400${
+                                roomy ? ' 2xl:h-8 2xl:w-full 2xl:text-[12px]' : ''}`}>
+                                {d}
+                            </div>
+                        ))}
                     </div>
-                ))}
-            </div>
-            <div className="grid grid-cols-7 gap-y-0.5">{cells}</div>
-            <div className="mt-2.5 flex items-center gap-2 border-t border-slate-100 pt-2.5">
-                {footerPresets.map((p) => (
-                    <button key={p.label} type="button" onClick={() => setPreset(p.range())}
-                            className={`flex-1 rounded-lg bg-slate-100 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200/80${
-                                roomy ? ' 2xl:py-2 2xl:text-[13.5px]' : ''}`}>
-                        {p.label}
-                    </button>
-                ))}
+                    <div className="grid grid-cols-7 gap-y-0.5">{cells}</div>
+                </>
+            )}
+            <div className={`mt-2.5 border-t border-slate-100 pt-2.5 ${presetGrid ? 'grid grid-cols-2 gap-2' : 'flex items-center gap-2'}`}>
+                {footerPresets.map((p) => {
+                    /* Совпавший с выбором быстрый период подсвечен мягким голубым с
+                       галочкой — по нему видно, что выбрано («Неделя», а не
+                       просто две даты). Только у календаря периода. */
+                    const active = Boolean(viewList) && presetMatches(p, draft.from, draft.to);
+                    return (
+                        <button key={p.label} type="button" onClick={() => setPreset(p.range())} aria-pressed={viewList ? active : undefined}
+                                className={`${presetGrid ? '' : 'flex-1 '}inline-flex items-center justify-center gap-1 rounded-lg py-1.5 text-[12px] font-semibold transition ${
+                                    active ? 'bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200/80'}${
+                                    roomy ? ' 2xl:py-2 2xl:text-[13.5px]' : ''}`}>
+                            {active && <Check size={12} strokeWidth={2.5} aria-hidden="true" />}
+                            {p.label}
+                        </button>
+                    );
+                })}
             </div>
             {/* Подсказка нужна только диапазону: там два клика и человеку
                 надо знать, какой из них он сейчас делает. Над одиночной датой
                 это была бы строка ради строки. */}
             {!single && (
                 <p className={`mt-2 text-center text-[11px] text-slate-400${roomy ? ' 2xl:text-[12.5px]' : ''}`}>
-                    {step === 0 ? 'Выберите начало периода' : 'Выберите конец периода'}
+                    {hint}
                 </p>
             )}
             {footer}
@@ -228,11 +326,12 @@ const EDGE_GAP = 8;
  * модалок остаётся прежний absolute-поповер: там резать нечем, а портал —
  * лишние слушатели прокрутки. */
 export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
-                                    triggerClassName = '', portal = false, roomy = false }) {
+                                    triggerClassName = '', portal = false, roomy = false, views = null }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const ref = useRef(null);
     const popRef = useRef(null);
+    const triggerRef = useRef(null);
 
     useEffect(() => {
         if (!open) return undefined;
@@ -241,8 +340,19 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
             if (ref.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
             setOpen(false);
         };
+        /* Esc закрывает, как у эталона пикера (выгрузка табло СЗоВ), и
+           возвращает фокус на чип — иначе он терялся бы на теле страницы. */
+        const onKey = (e) => {
+            if (e.key !== 'Escape') return;
+            setOpen(false);
+            triggerRef.current?.focus();
+        };
         document.addEventListener('mousedown', h);
-        return () => document.removeEventListener('mousedown', h);
+        document.addEventListener('keydown', onKey);
+        return () => {
+            document.removeEventListener('mousedown', h);
+            document.removeEventListener('keydown', onKey);
+        };
     }, [open]);
 
     const recompute = () => {
@@ -295,24 +405,28 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
 
     const calendar = (
         <IosDateRangeCalendar
-            from={from} to={to} max={max} min={min} presets={presets} roomy={roomy}
+            from={from} to={to} max={max} min={min} presets={presets} roomy={roomy} views={views}
             onChange={(next) => { onChange(next); setOpen(false); }}
         />
     );
 
     return (
         <div ref={ref} className="relative">
-            <button type="button" onClick={() => setOpen((o) => !o)}
+            <button ref={triggerRef} type="button" onClick={() => setOpen((o) => !o)}
+                    aria-expanded={open} aria-haspopup="dialog"
                     className={triggerClassName
                         || `flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
                             open ? 'bg-white text-slate-900 ring-2 ring-blue-500/70'
                                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200/80'}`}>
                 <Calendar size={14} className="text-slate-400" />
-                <span>{rangeLabel(from, to)}</span>
+                {/* У календаря периода целый месяц и год подписаны словами
+                    («Октябрь 2026», «2026 год»), а не двумя датами. */}
+                <span>{views ? periodLabel(from, to) : rangeLabel(from, to)}</span>
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />
             </button>
             {open && !portal && (
-                <div className="absolute left-0 top-full z-50 mt-2 motion-safe:animate-popover-in">{calendar}</div>
+                <div role="dialog" aria-label="Выбор периода"
+                     className="absolute left-0 top-full z-50 mt-2 motion-safe:animate-popover-in">{calendar}</div>
             )}
             {open && portal && coords && createPortal(
                 <div ref={popRef} role="dialog" className="motion-safe:animate-popover-in"

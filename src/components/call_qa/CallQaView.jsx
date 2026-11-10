@@ -25,7 +25,7 @@ import useDayList from './useDayList';
 import useDigest from './useDigest';
 import usePeriod from './usePeriod';
 import { applyReviewed, dayPageRequest, itemKey, mergeDayPage, NO_DAY } from './queueDayRules';
-import QaFilters from './QaFilters';
+import QaFilters, { QaPeriodField } from './QaFilters';
 import FindSubjectModal from './FindSubjectModal';
 import AudioPendingCard from './AudioPendingCard';
 import ExcludeModal from './ExcludeModal';
@@ -70,6 +70,11 @@ const TABS = [
 const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
 const EMPTY_QUEUE = { days: [], total: 0, truncated: false };
 const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];
+/* Где действует один ПЕРИОД без остального отбора (задача #389): «Обзор» —
+   метрики за дни разговоров, «Сводка» — дни списка, «База разборов» — правила
+   по дню разбора. Поле периода стоит на том же месте под вкладками, что и
+   панель фильтров, и пишет в тот же отбор — период общий для раздела. */
+const PERIOD_TABS = ['overview', 'digest', 'rag'];
 const EXPORT_TABS = ['chats', 'evals'];
 
 /* «Исключить оценку» в строке над карточкой — красным словом, как «Удалить» в
@@ -204,7 +209,18 @@ export default function CallQaView(props) {
                                    subject: SUBJECT_FAMILY_CALLS, enabled: tab === 'evals' });
     const chatsList = useDayList({ apiBaseUrl, headers, department, filters,
                                    subject: chatSubjectOf(department), enabled: tab === 'chats' });
-    const digest = useDigest({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast });
+    /* Период раздела (#389) отдельно от остального отбора: «Обзору» без модуля
+       маркетинга, «Сводке» и «Базе разборов» уходит только он — сотрудник или
+       балл ИИ, выставленные во «Звонках», к ним не относятся. */
+    const dateFrom = filters.date_from || '';
+    const dateTo = filters.date_to || '';
+    const periodFilters = useMemo(() => ({ ...EMPTY_FILTERS, date_from: dateFrom, date_to: dateTo }),
+        [dateFrom, dateTo]);
+    const setSectionPeriod = (next) => setFilters((current) => ({
+        ...current, date_from: next?.date_from || '', date_to: next?.date_to || '',
+    }));
+    const digest = useDigest({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast,
+                               dateFrom, dateTo });
     // Экран «Период» вкладки «Сводка» (цифры за несколько дней, сводка за месяц,
     // чат о периоде) — здесь же: из него открывают карточку разговора.
     const period = usePeriod({ apiBaseUrl, headers, department, enabled: tab === 'digest', showToast });
@@ -1026,6 +1042,16 @@ export default function CallQaView(props) {
                 сотруднику к ним отношения не имеет. В очереди ревью каждая
                 карточка по определению не проверена человеком, поэтому балл и
                 «есть оценка человека» там не показываем — они дали бы пусто. */}
+            {/* Только период (#389): «Обзор» и «База разборов» без модуля
+                маркетинга и «Сводка» со списком дней. На экране дня и экране
+                периода «Сводки» поля нет: у них своя навигация по датам, и
+                второй календарь над ними спорил бы с ней. */}
+            {!selected && PERIOD_TABS.includes(tab) && !FILTERABLE_TABS.includes(tab)
+                && !(marketingAccess && MARKETING_FILTERABLE_TABS.includes(tab))
+                && !(tab === 'digest' && (digest.openDay || period.range)) && (
+                <QaPeriodField filters={periodFilters} onChange={setSectionPeriod} />
+            )}
+
             {!selected && (FILTERABLE_TABS.includes(tab)
                 || (marketingAccess && MARKETING_FILTERABLE_TABS.includes(tab))) && (
                 <QaFilters
@@ -1192,11 +1218,13 @@ export default function CallQaView(props) {
                            onOpenDigest={openDigestDay} />
             ) : tab === 'digest' ? (
                 <DigestView digest={digestDays} period={period} scoped={isScopedSupervisor}
-                            chatRestore={digestChatRestore} onOpenRef={openFromDigest} />
+                            chatRestore={digestChatRestore} onOpenRef={openFromDigest}
+                            range={{ from: dateFrom, to: dateTo }}
+                            onResetRange={() => setSectionPeriod(null)} />
             ) : tab === 'overview' ? (
                 <QaDashboard apiBaseUrl={apiBaseUrl} withAccessTokenHeader={withAccessTokenHeader}
                              department={department}
-                             filters={marketingAccess ? filters : undefined} />
+                             filters={marketingAccess ? filters : periodFilters} />
             ) : tab === 'evals' ? (
                 /* Семейство, а не один вид: у СЗоВ и Тез КЦ звонок раздела приходит
                    из АТС и лежит в imported_calls, поэтому запрос одним `call`
@@ -1219,6 +1247,8 @@ export default function CallQaView(props) {
                                    showToast={showToast} canManage={canManageRag}
                                    department={department} departmentName={departmentName}
                                    filters={marketingAccess ? filters : undefined}
+                                   dateFrom={dateFrom} dateTo={dateTo}
+                                   onResetPeriod={() => setSectionPeriod(null)}
                                    onInteractionChange={setSectionInteraction} />
             )}
                 </div>

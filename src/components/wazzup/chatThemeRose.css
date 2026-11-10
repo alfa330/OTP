@@ -101,6 +101,7 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200 { border-color: #eed0dc !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-200\/70 { border-color: rgba(238, 208, 220, 0.7) !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .border-slate-300 { border-color: #e3bccc !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .disabled\:text-slate-300:disabled { color: #d4abbd !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #f5e0e8 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:bg-blue-50:focus-visible { background-color: #fdedf3 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .focus-visible\:ring-blue-400:focus-visible { --tw-ring-color: #e07ca4 !important; }
@@ -138,6 +139,7 @@ html:not([data-otp-theme='dark']) .wz-workspace[data-chat-theme='rose'] .EmojiPi
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .placeholder-slate-400::placeholder { color: #b08294 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .placeholder\:text-slate-400::placeholder { color: #b08294 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-100 { --tw-ring-color: #fadbe7 !important; }
+:is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-200 { --tw-ring-color: #f5bfd3 !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-300 { --tw-ring-color: #ee9fbe !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500 { --tw-ring-color: #d0568b !important; }
 :is(.wz-workspace[data-chat-theme="rose"], body[data-wz-chat-rose] > [role="menu"]) .ring-blue-500\/40 { --tw-ring-color: rgba(208, 86, 139, 0.4) !important; }

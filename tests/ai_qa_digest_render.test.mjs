@@ -309,3 +309,51 @@ test('«Поиск фрода»: свой ряд цифр по четырём ш
   // Правило шаблона — под «i», а не строкой под числом.
   assert.equal((html.match(/aria-label="Что считает «/g) || []).length, 4);
 });
+
+/* ── Период раздела (задача #389) ──────────────────────────────────────────
+ * Список дней «Сводки» — только дни выбранного периода (их отбирает сервер).
+ * Пусто под периодом — это «за эти дни нет», а не «пока нет вовсе», и рядом —
+ * «Показать весь период». «За период» открывает экран периода на выбранных
+ * днях, если их не больше 31 (экран периода — до месяца).
+ */
+const digestModule = await load('call_qa/DigestView.jsx', '*');
+
+test('период раздела: пустой список — «за этот период нет» и «Показать весь период»', () => {
+  const html = render(DigestView, {
+    digest: baseDigest({ days: [], daysPeriod: { from: '2026-11-04', to: '2026-11-10' } }),
+    range: { from: '2026-11-04', to: '2026-11-10' }, onResetRange: noop,
+  });
+  assert.ok(html.includes('За этот период оценённых разговоров нет'));
+  assert.ok(html.includes('Показать весь период'));
+  assert.ok(!html.includes('после первой ночной выборки'), 'с периодом это не «ещё не было выборки»');
+  const plain = render(DigestView, { digest: baseDigest({ days: [] }) });
+  assert.ok(plain.includes('Оценённых разговоров пока нет'));
+  assert.ok(!plain.includes('Показать весь период'));
+  // Выбран новый период, а загружен ещё прежний «весь»: надпись — о загруженном.
+  const pending = render(DigestView, {
+    digest: baseDigest({ days: [], daysPeriod: { from: '', to: '' }, daysLoading: true }),
+    range: { from: '2026-11-04', to: '2026-11-10' }, onResetRange: noop,
+  });
+  assert.ok(pending.includes('Оценённых разговоров пока нет'));
+});
+
+test('период раздела: пока читается новый период, прежние дни на месте и приглушены', () => {
+  const html = render(DigestView, { digest: baseDigest({ daysLoading: true }), range: { from: '2026-09-01', to: '2026-10-31' } });
+  assert.ok(html.includes('aria-busy="true"'));
+  assert.ok(html.includes('opacity-60'));
+  assert.ok(html.includes('Две критические ошибки'), 'прежний список не сменяется заглушкой');
+});
+
+test('«За период»: выбранный период до 31 дня, у длинного — последние 30 дней, конец не позже сегодня', () => {
+  const { periodForButton } = digestModule;
+  const now = new Date(2026, 10, 10, 12, 0);
+  assert.deepEqual(periodForButton(null, now), { from: '2026-10-12', to: '2026-11-10' });
+  assert.deepEqual(periodForButton({ from: '', to: '' }, now), { from: '2026-10-12', to: '2026-11-10' });
+  assert.deepEqual(periodForButton({ from: '2026-11-10', to: '2026-11-10' }, now), { from: '2026-11-10', to: '2026-11-10' });
+  assert.deepEqual(periodForButton({ from: '2026-10-01', to: '2026-10-31' }, now), { from: '2026-10-01', to: '2026-10-31' });
+  // Текущий месяц — по сегодня, как экран периода и считает текущий месяц.
+  assert.deepEqual(periodForButton({ from: '2026-11-01', to: '2026-11-30' }, now), { from: '2026-11-01', to: '2026-11-10' });
+  // Год — последние 30 дней внутри него.
+  assert.deepEqual(periodForButton({ from: '2025-01-01', to: '2025-12-31' }, now), { from: '2025-12-02', to: '2025-12-31' });
+  assert.deepEqual(periodForButton({ from: '2026-01-01', to: '2026-12-31' }, now), { from: '2026-10-12', to: '2026-11-10' });
+});

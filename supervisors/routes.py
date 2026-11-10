@@ -20,6 +20,62 @@ import time
 
 SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS = 31
 
+def _journal_period_args(args):
+    """Период «Аналитики» журнала оценок (задача #389) из запроса.
+
+    → (period, None) или (None, текст ошибки). period:
+      * {'kind': 'month', 'month': 'ГГГГ-ММ'} — один целый месяц или старый
+        параметр month: прежний месячный путь, с планом, цифра в цифру как раньше;
+      * {'kind': 'months', 'months': [...], 'start', 'end'} — несколько целых
+        месяцев (год, «сентябрь — октябрь»): по месяцу журнала;
+      * {'kind': 'range', 'start', 'end'} — день, неделя, диапазон: по дню обращения;
+      * {'kind': 'all'} — period=all, «Весь период».
+    Плана у трёх последних нет: он месячный (часы месяца → норма звонков), и
+    придумывать «план на неделю» — значит менять правило, а не показывать его.
+    """
+    raw_from = (args.get('date_from') or '').strip()
+    raw_to = (args.get('date_to') or '').strip()
+    if raw_from or raw_to:
+        try:
+            start = dt_date.fromisoformat(raw_from)
+            end = dt_date.fromisoformat(raw_to)
+        except ValueError:
+            return None, "Invalid date_from/date_to. Use YYYY-MM-DD"
+        if start > end:
+            return None, "Начало периода позже его конца"
+        months = _journal_whole_months(start, end)
+        if months and len(months) == 1:
+            return {'kind': 'month', 'month': months[0]}, None
+        if months:
+            return {'kind': 'months', 'months': months, 'start': start, 'end': end}, None
+        return {'kind': 'range', 'start': start, 'end': end}, None
+    if (args.get('period') or '').strip().lower() == 'all':
+        return {'kind': 'all'}, None
+    month = args.get('month')
+    if month:
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError:
+            return None, "Invalid month format. Use YYYY-MM"
+    else:
+        month = datetime.now().strftime("%Y-%m")
+    return {'kind': 'month', 'month': month}, None
+
+
+def _journal_whole_months(start, end):
+    """Месяцы «ГГГГ-ММ», если период — из ЦЕЛЫХ месяцев (с 1-го по последний
+    день), иначе None. Та же мерка, что wholeMonthsOf в periodRange.js."""
+    if start.day != 1 or end.day != calendar.monthrange(end.year, end.month)[1]:
+        return None
+    months, year, month = [], start.year, start.month
+    while (year, month) <= (end.year, end.month):
+        months.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return months
+
+
 def _clockster_error_types():
     from group_late.clockster import ClocksterError
     return (ClocksterError,)
@@ -508,15 +564,33 @@ def build_supervisors_blueprint(
                 except ValueError:
                     return jsonify({"error": "Invalid ID parameter"}), 400
 
-            # optional month YYYY-MM
-            month = request.args.get('month')
-            if month:
-                try:
-                    datetime.strptime(month, "%Y-%m")
-                except ValueError:
-                    return jsonify({"error": "Invalid month format. Use YYYY-MM"}), 400
+            # Период: месяц YYYY-MM (как было) или, с задачи #389, date_from/date_to
+            # и period=all. Целый месяц идёт прежним месячным путём.
+            period, period_error = _journal_period_args(request.args)
+            if period_error:
+                return jsonify({"error": period_error}), 400
+            month = period['month'] if period['kind'] == 'month' else None
+            if period['kind'] == 'month':
+                year_value, month_value = map(int, month.split('-'))
+                period_start = dt_date(year_value, month_value, 1)
+                period_end = dt_date(year_value, month_value, calendar.monthrange(year_value, month_value)[1])
+            elif period['kind'] == 'all':
+                # Состав «за всё время»: любое членство в группе, конец — сегодня
+                # (статус — сегодняшний, «Переведённые» — кто сейчас не в группе).
+                period_start, period_end = dt_date(2000, 1, 1), datetime.now().date()
             else:
-                month = datetime.now().strftime("%Y-%m")
+                period_start, period_end = period['start'], period['end']
+            requested_period = {
+                "from": period_start.isoformat() if period['kind'] != 'all' else '',
+                "to": period_end.isoformat() if period['kind'] != 'all' else '',
+            }
+            # Мерка для оценок и обратной связи: целые месяцы — по месяцу журнала,
+            # день/неделя/диапазон — по дню обращения, «Весь период» — без отбора.
+            metric_period = (
+                {'months': period['months']} if period['kind'] == 'months'
+                else {'start': period_start, 'end': period_end} if period['kind'] == 'range'
+                else {}
+            )
 
             requester_id, requester, auth_error = _get_authenticated_requester()
             if auth_error:
@@ -572,7 +646,11 @@ def build_supervisors_blueprint(
                     # Ссылка на таблицу оценок у группы своя не хранится — берём у её
                     # первого СВ; у группы без СВ (в проде такие есть) её просто нет.
                     "table": None,
+                    # Месяц — только у месячного ответа (там и план); у периода — None.
                     "requested_month": month,
+                    "requested_period": requested_period,
+                    "period_kind": period['kind'],
+                    "plan_available": period['kind'] == 'month',
                     "group_id": group_id,
                     "group_name": group_row.get('name') or '',
                     "group_status": group_row.get('status') or '',
@@ -582,7 +660,9 @@ def build_supervisors_blueprint(
                 }
 
                 try:
-                    operators = db.get_group_operators_for_month(group_id, month) or []
+                    operators = (db.get_group_operators_for_month(group_id, month)
+                                 if period['kind'] == 'month'
+                                 else db.get_group_operators_for_period(group_id, period_start, period_end)) or []
                 except Exception:
                     logging.exception("Failed to load group roster for /api/sv/data")
                     operators = []
@@ -615,6 +695,9 @@ def build_supervisors_blueprint(
                     "name": user_name,
                     "table": user[9] if (not isinstance(user, dict) and len(user) > 9) else (user.get("scores_table_url") if isinstance(user, dict) else None),
                     "requested_month": month,
+                    "requested_period": requested_period,
+                    "period_kind": period['kind'],
+                    "plan_available": period['kind'] == 'month',
                     "operators": []
                 }
 
@@ -701,24 +784,41 @@ def build_supervisors_blueprint(
 
             metric_ids = operator_ids + supervisor_ids
 
-            try:
-                operator_metrics = db.get_operator_score_aggregates_for_month(month=month, operator_ids=metric_ids)
-            except Exception:
-                operator_metrics = {}
+            if period['kind'] == 'month':
+                try:
+                    operator_metrics = db.get_operator_score_aggregates_for_month(month=month, operator_ids=metric_ids)
+                except Exception:
+                    operator_metrics = {}
 
-            try:
-                operator_targets = db.get_operator_call_evaluation_targets_for_month(metric_ids, month=month)
-            except Exception:
+                try:
+                    operator_targets = db.get_operator_call_evaluation_targets_for_month(metric_ids, month=month)
+                except Exception:
+                    operator_targets = {}
+
+                try:
+                    feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_month(
+                        month=month,
+                        operator_ids=metric_ids
+                    ) if metric_ids else {}
+                except Exception:
+                    logging.exception("Failed to load feedback SLA stats for /api/sv/data")
+                    feedback_stats_by_operator = {}
+            else:
+                # Период не из одного месяца (#389): оценки и обратная связь за
+                # период, плана нет — он месячный.
                 operator_targets = {}
-
-            try:
-                feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_month(
-                    month=month,
-                    operator_ids=metric_ids
-                ) if metric_ids else {}
-            except Exception:
-                logging.exception("Failed to load feedback SLA stats for /api/sv/data")
-                feedback_stats_by_operator = {}
+                try:
+                    operator_metrics = db.get_operator_score_aggregates_for_period(
+                        operator_ids=metric_ids, **metric_period) if metric_ids else {}
+                except Exception:
+                    logging.exception("Failed to load period score aggregates for /api/sv/data")
+                    operator_metrics = {}
+                try:
+                    feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_period(
+                        operator_ids=metric_ids, **metric_period) if metric_ids else {}
+                except Exception:
+                    logging.exception("Failed to load period feedback SLA stats for /api/sv/data")
+                    feedback_stats_by_operator = {}
 
             seen_response_ids = set()
             for op in operators:

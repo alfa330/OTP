@@ -3268,16 +3268,29 @@ def _rules_of_deals_predicate(cur, marketing):
             list(mkt_params))
 
 
+# День разбора — день создания правила по Алматы (created_at — timestamptz).
+# Тот же день стоит подписью в карточке «Базы разборов»: считай фильтр периода
+# день иначе, чем подпись, человек выбирал бы «10 ноября» и не находил карточку
+# с датой 10.11 (разбор в полночь по Алматы — ещё вчера по UTC).
+_RULE_DAY = "(c.created_at AT TIME ZONE 'Asia/Almaty')::date"
+
+
 def adjudications_list(direction=None, q=None, *, status=None, index_status=None,
                        page=1, page_size=20, allowed_direction_ids=None,
-                       department=None, filters=None) -> dict:
+                       department=None, filters=None, date_from=None, date_to=None) -> dict:
     """Server-paginated policy catalog with explicit health/degraded states.
 
     `filters` — отбор панели «ИИ-оценки». Из него здесь действуют ТОЛЬКО
     маркетинговые оси (ТЗ #317, п. 2.1: новый набор фильтров доступен и в
     «Базе разборов»): правило попадает в выдачу, если разговор, из которого
-    его вывели, связан со сделкой нужного канала, парка, этапа… Период,
-    сотрудник и балл к правилу не относятся — у каталога свои фильтры."""
+    его вывели, связан со сделкой нужного канала, парка, этапа… Сотрудник и
+    балл к правилу не относятся — у каталога свои фильтры.
+
+    `date_from`/`date_to` — период раздела (задача #389): правила, разобранные
+    в эти дни (день создания разбора по Алматы, как подпись даты в карточке).
+    Период сужает и счётчики статусов: «Ждут проверки» рядом со списком за
+    неделю — это ждущие из той же недели. Состояние индекса (knowledge/health)
+    остаётся по всей базе: это готовность базы на сегодня, а не история."""
     # Переиндексацию НЕ пинаем из GET-каталога: она дёргается при постановке задачи
     # (queue_reindex_adjudication) и сама себя перезапускает по Timer, пока очередь не
     # опустеет. Иначе каждый показ страницы/буква в поиске открывали бы RW-соединение
@@ -3301,6 +3314,16 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                             _scoped_qa_family(cur, allowed_direction_ids, department=department)]
             where.append("c.direction_id = ANY(%s)")
             params.append(scope_family or [-1])
+        # Период — как скоуп, а не как фасет: он сужает и счётчики статусов.
+        period_where, period_params = [], []
+        if date_from is not None:
+            period_where.append(f"{_RULE_DAY} >= %s")
+            period_params.append(date_from)
+        if date_to is not None:
+            period_where.append(f"{_RULE_DAY} <= %s")
+            period_params.append(date_to)
+        where.extend(period_where)
+        params.extend(period_params)
         if direction and direction != "all":
             if str(direction).isdigit():
                 where.append("c.direction_id=%s"); params.append(int(direction))
@@ -3347,7 +3370,8 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                        c.included_count,u.name,c.created_at,c.updated_at,c.index_error,
                        c.verified_excerpt,c.evidence_status,c.rule_version_id,
                        c.embedding_config_hash,COUNT(*) OVER(),
-                       c.review_corrected_count
+                       c.review_corrected_count,
+                       TO_CHAR({_RULE_DAY}, 'DD.MM.YYYY')
                   FROM qa_policy_rule_catalog c
                   LEFT JOIN users u ON u.id=c.created_by
                  WHERE {predicate}
@@ -3388,7 +3412,7 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
             "embedding_dim": row[14], "rule_version": row[15], "content_hash": row[16],
             "exposure_count": int(row[17] or 0), "use_count": int(row[17] or 0),
             "by": row[18] or "—", "created_at": row[19], "updated_at": row[20],
-            "date": row[19].strftime("%d.%m.%Y") if row[19] else "—",
+            "date": row[28] or "—",
             "index_error": row[21], "verified_excerpt": bool(row[22]),
             "evidence_status": row[23], "rule_version_id": row[24],
             "embedding_config_hash": row[25],
@@ -3405,6 +3429,9 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
         if scope_family is not None:
             facet_predicate = "c.direction_id = ANY(%s)"
             facet_params = [scope_family or [-1]]
+        if period_where:
+            facet_predicate = " AND ".join([facet_predicate, *period_where])
+            facet_params = [*facet_params, *period_params]
         facets = {}
         for name, column in (("directions", "direction_name"),
                              ("statuses", "rule_status")):
@@ -3476,7 +3503,8 @@ def adjudications_list(direction=None, q=None, *, status=None, index_status=None
                 # Legacy does not support modern lifecycle/index/deal filters.
                 # Do not return a broader catalog under an apparently applied filter.
                 if (status not in (None, "all") or index_status not in (None, "all")
-                        or (filters or {}).get('marketing')):
+                        or (filters or {}).get('marketing')
+                        or date_from is not None or date_to is not None):
                     raise RuntimeError("Для выбранных фильтров требуется актуальная схема каталога")
                 return _legacy_adjudications_page(
                     direction=direction, q=q, page=page, page_size=page_size,
@@ -6947,19 +6975,32 @@ def _reviewed_metrics(cur, subject_keys=None):
     return out
 
 
-def _rag_observability(cur) -> dict:
-    """Operational SLOs plus the latest leakage-safe paired experiment report."""
+def _rag_observability(cur, date_from=None, date_to=None) -> dict:
+    """Operational SLOs plus the latest leakage-safe paired experiment report.
+
+    Запуски поиска — за последние 30 дней, а при выбранном периоде раздела
+    (задача #389) — за его дни по Алматы. Устаревшие оценки, раскатка и
+    эксперимент — состояние на сегодня, от периода не зависят."""
     out = {"status": "ready", "runs": 0, "degraded_runs": 0, "no_match_runs": 0,
            "retrieved": 0, "included": 0, "retrieval_p50_ms": None,
            "retrieval_p95_ms": None, "stale_evaluations": 0,
            "rollout": [], "experiment": None}
+    runs_where, runs_params = [], []
+    if date_from is not None:
+        runs_where.append("(created_at AT TIME ZONE 'Asia/Almaty')::date >= %s")
+        runs_params.append(date_from)
+    if date_to is not None:
+        runs_where.append("(created_at AT TIME ZONE 'Asia/Almaty')::date <= %s")
+        runs_params.append(date_to)
+    if not runs_where:
+        runs_where.append("created_at>now()-interval '30 days'")
     cur.execute(
         """SELECT COUNT(*),COUNT(*) FILTER (WHERE status='failed'),
                   COUNT(*) FILTER (WHERE status='succeeded' AND included_count=0),
                   COALESCE(SUM(candidate_count),0),COALESCE(SUM(included_count),0),
                   percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms),
                   percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)
-             FROM qa_retrieval_runs WHERE created_at>now()-interval '30 days'""")
+             FROM qa_retrieval_runs WHERE """ + " AND ".join(runs_where), tuple(runs_params))
     row = cur.fetchone()
     out.update({"runs": int(row[0] or 0), "degraded_runs": int(row[1] or 0),
                 "no_match_runs": int(row[2] or 0), "retrieved": int(row[3] or 0),
@@ -7114,9 +7155,10 @@ def _fill_verdict_stats(cur, out, m):
         pass
 
 
-def _fill_rag_stats(cur, out):
+def _fill_rag_stats(cur, out, filters=None):
     try:
-        out["rag"] = _rag_observability(cur)
+        out["rag"] = _rag_observability(cur, (filters or {}).get('date_from'),
+                                        (filters or {}).get('date_to'))
     except Exception:
         logging.exception("ai-qa RAG observability unavailable")
         out["rag"] = {"status": "error"}
@@ -7138,7 +7180,7 @@ def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
         # Отбор заведомо пуст (чужое направление, модуль не развернулся):
         # нули, а не общесистемные цифры под чужим фильтром.
         out["reviewed"] = _reviewed_metrics(cur, subject_keys=set())
-        _fill_rag_stats(cur, out)
+        _fill_rag_stats(cur, out, filters)
         return out
     # Набор разговоров — как у «Звонков»: отбор проверяется на ПОСЛЕДНЕЙ оценке
     # субъекта (DISTINCT ON), а не на любой строке кэша. Иначе звонок, который
@@ -7182,7 +7224,7 @@ def _filtered_stats(cur, out, allowed_direction_ids, department, filters):
                 + f" AND (t.subject_kind, t.call_id) IN ({subjects_sql})", subjects_params)
     _fill_verdict_stats(cur, out, _verdict_metrics(cur.fetchall()))
     out["reviewed"] = _reviewed_metrics(cur, subject_keys=keys)
-    _fill_rag_stats(cur, out)
+    _fill_rag_stats(cur, out, filters)
     return out
 
 

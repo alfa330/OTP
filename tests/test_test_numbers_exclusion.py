@@ -491,6 +491,8 @@ class DatabaseMethodsTests(unittest.TestCase):
         'get_operator_stats', 'get_call_evaluations', 'get_operator_score_aggregates_for_month',
         'get_feedback_sla_rows_for_month', 'get_operators_summary_for_month', 'get_week_call_stats',
         'get_average_scores_for_period',
+        # «Аналитика» журнала за период (#389): оценки и обратная связь за дни/год.
+        'get_operator_score_aggregates_for_period', 'get_feedback_sla_rows_for_period',
         # Успешки ОП Тез — при чтении: пересчёт закрытых месяцев не идёт, снятая им успешка
         # иначе осталась бы в рейтинге, «Учёте часов», плане и воронке навсегда.
         'count_tez_successes', 'get_tez_operator_successes', 'get_tez_successes_by_day',
@@ -527,6 +529,9 @@ class DatabaseMethodsTests(unittest.TestCase):
         'get_operators_summary_for_month': [('AND """ + test_keys.sql_calls_not_test() + """', 1)],
         'get_week_call_stats': [('AND """ + test_keys.sql_calls_not_test() + """', 1)],
         'get_average_scores_for_period': [('AND """ + test_keys.sql_calls_not_test() + """', 1)],
+        'get_operator_score_aggregates_for_period': [
+            ('filter_clause = period_sql + " AND is_draft = FALSE AND " + test_keys.sql_calls_not_test()', 1)],
+        'get_feedback_sla_rows_for_period': [('AND {not_test_calls}', 1)],
         'count_tez_successes': [('+ ' + _SQL_S + ',', 1)],
         'get_tez_operator_successes': [('AND {' + _SQL_S + '}', 1)],
         'get_tez_successes_by_day': [('AND {' + _SQL_S + '}', 1)],
@@ -747,7 +752,9 @@ class BotScheduleTests(unittest.TestCase):
         self.assertEqual(sv.count("test_keys.sql_calls_not_test()"), 1)
         # Журнал во всех агрегатах — одним условием, с номером обращения у чатов Chat2Desk.
         source = _read(DATABASE_PY)
-        self.assertEqual(source.count("test_keys.sql_calls_not_test()"), 7)
+        # 7 мест журнала + 2 функции периода «Аналитики» (#389: оценки и ОС за дни/год),
+        # каждая — со своей проверкой в DatabaseMethodsTests.APPLIED.
+        self.assertEqual(source.count("test_keys.sql_calls_not_test()"), 9)
         self.assertNotIn("test_keys.sql_not_test('phone_number')", source)
         pull = _method_source(BOT_PY, 'api_ai_qa_pull_call')
         self.assertIn('test_keys.is_test_phone(phone, test_keys.current_keys())', pull)

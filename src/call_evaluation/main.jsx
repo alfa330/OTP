@@ -11,6 +11,8 @@ import {
     describeDismissalChip, describeTransferChip, isFiredStatus, normalizeEmploymentStatus,
 } from './employmentTabs';
 import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
+import EvalPeriodPicker from './EvalPeriodPicker';
+import { analyticsMonthPeriod, analyticsPeriodMonth, analyticsPeriodQuery, currentMonthPeriod } from './analyticsPeriod';
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://api.icorehub.kz';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
@@ -4750,8 +4752,19 @@ const App = ({ user, initialSelection }) => {
     const [analyticsGroups, setAnalyticsGroups] = useState([]);
     const [analyticsGroupsLoading, setAnalyticsGroupsLoading] = useState(false);
     const [analyticsSelectedSvData, setAnalyticsSelectedSvData] = useState(null);
-    const [analyticsMonth, setAnalyticsMonth] = useState(new Date().toISOString().slice(0, 7));
+    /* Период «Аналитики» (задача #389): день, неделя, диапазон, месяц, год или
+       «Весь период» ({from:'', to:''}). По умолчанию — текущий месяц, как был
+       выбран месяц до задачи. Месяц для того, что живёт по месяцам (выгрузка,
+       журнал оператора, ОС от ИИ), — analyticsMonth: сам месяц, если выбран
+       целый месяц, иначе месяц конца периода. */
+    const [analyticsPeriod, setAnalyticsPeriod] = useState(currentMonthPeriod);
+    const analyticsMonth = analyticsPeriodMonth(analyticsPeriod);
     const [analyticsLoading, setAnalyticsLoading] = useState(false);
+    // Чтение состава за период — отдельно от действий (выгрузка, уведомление):
+    // таблица гаснет только на время СВОЕГО чтения, и опоздавший ответ на
+    // прежний период не перерисовывает новый.
+    const [analyticsFetching, setAnalyticsFetching] = useState(false);
+    const analyticsRequestRef = useRef(0);
     /* Ключ статуса трудоустройства, а не 'active'/'fired': вкладок столько,
        сколько статусов реально есть в составе за месяц. */
     const [analyticsStatusTab, setAnalyticsStatusTab] = useState('working');
@@ -4762,7 +4775,9 @@ const App = ({ user, initialSelection }) => {
         show: false,
         format: 'standard',
         departmentId: '',
-        supervisorId: ''
+        supervisorId: '',
+        // Выгрузки журнала — помесячные; месяц выгрузки свой, по умолчанию — месяц периода.
+        month: ''
     });
     const [analyticsReportDepartments, setAnalyticsReportDepartments] = useState([]);
     const [analyticsReportDepartmentsLoading, setAnalyticsReportDepartmentsLoading] = useState(false);
@@ -5160,7 +5175,8 @@ const App = ({ user, initialSelection }) => {
         }
         if (initialSelection.month) {
             setSelectedMonth(initialSelection.month);
-            setAnalyticsMonth(initialSelection.month);
+            const monthPeriod = analyticsMonthPeriod(initialSelection.month);
+            if (monthPeriod) setAnalyticsPeriod(monthPeriod);
         }
         if (initialSelection.supervisorId != null) {
             const nextSupervisorId = Number(initialSelection.supervisorId) || null;
@@ -6315,13 +6331,22 @@ const App = ({ user, initialSelection }) => {
     }, [calibrationCall, activeCalibrationRoomId, userId, generalCommentDraft, fetchCalibrationRoomDetail]);
 
     // ─── Analytics helpers ───────────────────────────────────────────────────
-    const getAnalyticsMonthOptions = () => {
+    /* Месяцы окна выгрузки: последние двенадцать и, если выбранный старше, —
+       он сам: иначе список показал бы чужой месяц, а выгрузился бы выбранный. */
+    const getAnalyticsMonthOptions = (selected = '') => {
         const opts = [];
         const today = new Date();
+        const label = (y, m) => new Date(y, m, 1).toLocaleString('ru-RU', { month: 'long', year: 'numeric' });
+        const values = new Set();
         for (let i = 0; i < 12; i++) {
             const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
             const val = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-            opts.push(<option key={val} value={val}>{d.toLocaleString('ru-RU',{month:'long',year:'numeric'})}</option>);
+            values.add(val);
+            opts.push(<option key={val} value={val}>{label(d.getFullYear(), d.getMonth())}</option>);
+        }
+        if (/^\d{4}-\d{2}$/.test(selected) && !values.has(selected)) {
+            const [y, m] = selected.split('-').map(Number);
+            opts.push(<option key={selected} value={selected}>{label(y, m - 1)}</option>);
         }
         return opts;
     };
@@ -6416,7 +6441,8 @@ const App = ({ user, initialSelection }) => {
             case 'avg_score': { const sa = a.avg_score==null?-1:Number(a.avg_score), sb = b.avg_score==null?-1:Number(b.avg_score); return (sa-sb)*dir || nameCmp; }
             case 'feedback': { const fa = Number(a.feedback_count)||0, fb = Number(b.feedback_count)||0; return (fa-fb)*dir || nameCmp; }
             case 'percent': {
-                const getPct = (op) => { const meta = getAnalyticsEvaluationPlanMeta(op); const t = meta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return t > 0 ? ((parseInt(op.call_count)||0)/t)*100 : 0; };
+                // Без плана (период не из одного месяца, #389) «% нормы» нет — порядок по имени.
+                const getPct = (op) => { if (!analyticsPlanAvailable) return 0; const meta = getAnalyticsEvaluationPlanMeta(op); const t = meta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return t > 0 ? ((parseInt(op.call_count)||0)/t)*100 : 0; };
                 return (getPct(a)-getPct(b))*dir || nameCmp;
             }
             default: return nameCmp * dir;
@@ -6424,17 +6450,24 @@ const App = ({ user, initialSelection }) => {
     };
 
     // ─── Analytics API ───────────────────────────────────────────────────────
-    const fetchAnalyticsGroupData = useCallback(async (groupId, month) => {
-        if (!groupId) { setAnalyticsSelectedSvData(null); return; }
-        setAnalyticsLoading(true);
+    const fetchAnalyticsGroupData = useCallback(async (groupId, period) => {
+        const requestId = ++analyticsRequestRef.current;
+        if (!groupId) { setAnalyticsSelectedSvData(null); setAnalyticsFetching(false); return; }
+        setAnalyticsFetching(true);
         try {
-            const url = `${API_BASE_URL}/api/sv/data?group_id=${encodeURIComponent(groupId)}${month ? `&month=${encodeURIComponent(month)}` : ''}`;
-            const r = await authFetch(url, { headers: { 'X-User-Id': userId } });
+            /* Период (#389): даты или period=all. Целый месяц сервер считает
+               прежним месячным путём — с планом, ровно как до задачи. */
+            const query = new URLSearchParams({ group_id: String(groupId), ...analyticsPeriodQuery(period) });
+            const r = await authFetch(`${API_BASE_URL}/api/sv/data?${query.toString()}`, { headers: { 'X-User-Id': userId } });
             const d = await readJsonSafe(r);
+            if (requestId !== analyticsRequestRef.current) return;
             if (d?.status === 'success') setAnalyticsSelectedSvData(d);
             else emitCallEvaluationToast(d?.error || 'Ошибка загрузки данных', 'error');
-        } catch { emitCallEvaluationToast('Ошибка загрузки данных', 'error'); }
-        finally { setAnalyticsLoading(false); }
+        } catch {
+            if (requestId === analyticsRequestRef.current) emitCallEvaluationToast('Ошибка загрузки данных', 'error');
+        } finally {
+            if (requestId === analyticsRequestRef.current) setAnalyticsFetching(false);
+        }
     }, [userId]);
 
     const loadAnalyticsReportDepartments = useCallback(async () => {
@@ -6468,12 +6501,15 @@ const App = ({ user, initialSelection }) => {
             show: true,
             format: prev.format || 'standard',
             departmentId: prev.departmentId || '',
-            supervisorId: prev.supervisorId || (analyticsSelectedGroupSvId ? String(analyticsSelectedGroupSvId) : '')
+            supervisorId: prev.supervisorId || (analyticsSelectedGroupSvId ? String(analyticsSelectedGroupSvId) : ''),
+            // Выгрузка помесячная: месяц выбранного периода (у периода не из целого
+            // месяца — месяц его конца); в окне его можно сменить.
+            month: analyticsMonth
         }));
         if (isGlobalAdminRole) {
             loadAnalyticsReportDepartments();
         }
-    }, [isGlobalAdminRole, loadAnalyticsReportDepartments, analyticsSelectedGroupSvId]);
+    }, [isGlobalAdminRole, loadAnalyticsReportDepartments, analyticsSelectedGroupSvId, analyticsMonth]);
 
     const closeAnalyticsReportModal = useCallback(() => {
         if (analyticsLoading) return;
@@ -6490,6 +6526,7 @@ const App = ({ user, initialSelection }) => {
         }
 
         const { format = 'standard', departmentId = '', supervisorId = '' } = options;
+        const reportMonth = options.month || analyticsMonth;
         const normalizedFormat = format === 'dates'
             ? 'dates'
             : format === 'group'
@@ -6502,7 +6539,7 @@ const App = ({ user, initialSelection }) => {
         setAnalyticsLoading(true);
         try {
             const query = new URLSearchParams({
-                month: analyticsMonth,
+                month: reportMonth,
                 format: normalizedFormat
             });
             if (isGlobalAdminRole && departmentId) {
@@ -6520,10 +6557,10 @@ const App = ({ user, initialSelection }) => {
             const blob = await r.blob();
             const contentDisposition = r.headers.get('content-disposition') || '';
             let filename = normalizedFormat === 'dates'
-                ? `monthly_report_dates_${analyticsMonth}.xlsx`
+                ? `monthly_report_dates_${reportMonth}.xlsx`
                 : normalizedFormat === 'group'
-                    ? `journal_by_group_${analyticsMonth}.xlsx`
-                    : `monthly_report_${analyticsMonth}.xlsx`;
+                    ? `journal_by_group_${reportMonth}.xlsx`
+                    : `monthly_report_${reportMonth}.xlsx`;
             const utf8NameMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
             const plainNameMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
             if (utf8NameMatch?.[1]) {
@@ -6599,13 +6636,20 @@ const App = ({ user, initialSelection }) => {
         return '';
     };
 
+    /* Сменили группу или период — данные перечитываются сами (#389: «при
+       изменении периода данные и показатели обновляются автоматически»).
+       Зависимость — края периода строками, а не объект. */
+    const analyticsPeriodFrom = analyticsPeriod.from;
+    const analyticsPeriodTo = analyticsPeriod.to;
     useEffect(() => {
         if (activeSection === 'analytics' && analyticsSelectedGroupId) {
-            fetchAnalyticsGroupData(analyticsSelectedGroupId, analyticsMonth);
+            fetchAnalyticsGroupData(analyticsSelectedGroupId, { from: analyticsPeriodFrom, to: analyticsPeriodTo });
         } else if (activeSection === 'analytics' && !analyticsSelectedGroupId) {
+            analyticsRequestRef.current += 1;
+            setAnalyticsFetching(false);
             setAnalyticsSelectedSvData(null);
         }
-    }, [analyticsSelectedGroupId, analyticsMonth, activeSection, fetchAnalyticsGroupData]);
+    }, [analyticsSelectedGroupId, analyticsPeriodFrom, analyticsPeriodTo, activeSection, fetchAnalyticsGroupData]);
 
     /* Состав уже ограничен группой на сервере — клиентский фильтр по СВ убран:
        в группе операторы нескольких супервайзеров, и он вычищал бы таблицу.
@@ -6613,19 +6657,35 @@ const App = ({ user, initialSelection }) => {
        каждый рендер новая и раскладка по статусам пересчитывается вхолостую. */
     const analyticsScopedOperators = analyticsSelectedSvData?.operators ?? EMPTY_OPERATOR_ROWS;
 
-    /* Месяц и группа — из самого ответа, а не из селекторов: пока грузится новый
-       месяц, на экране ещё старые строки, и делить их надо по их же месяцу. */
-    const analyticsDataMonth = analyticsSelectedSvData?.requested_month || analyticsMonth;
+    /* Месяц, период и группа — из самого ответа, а не из селекторов: пока
+       грузится новый период, на экране ещё старые строки, и делить их надо по
+       их же периоду. Месяц есть, только когда ответ месячный (целый месяц):
+       тогда и вкладки, и план — прежние, месячные. */
+    const analyticsDataPeriod = analyticsSelectedSvData
+        ? (analyticsSelectedSvData.requested_period || null)
+        : analyticsPeriod;
+    const analyticsDataMonth = analyticsSelectedSvData
+        ? (analyticsSelectedSvData.requested_month || null)
+        : analyticsPeriodMonth(analyticsPeriod);
+    const analyticsTabsContext = React.useMemo(() => (analyticsDataMonth
+        ? { month: analyticsDataMonth }
+        : { period: analyticsDataPeriod || { from: '', to: '' } }),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [analyticsDataMonth, analyticsDataPeriod?.from, analyticsDataPeriod?.to]);
+    // План месячный: у периода не из одного месяца его нет — ни «плана», ни «% нормы».
+    const analyticsPlanAvailable = analyticsSelectedSvData
+        ? analyticsSelectedSvData.plan_available !== false
+        : true;
     const analyticsDataGroupId = analyticsSelectedSvData?.group_id ?? analyticsSelectedGroupId;
 
     /* Одна раскладка на рендер: из неё и счётчики вкладок, и состав таблицы, и
        разбор строки для чипов (перевод, дата увольнения). */
     const { buckets: analyticsStatusBuckets, infoByOperator: analyticsStatusInfo } = React.useMemo(
         () => buildEmploymentStatusBuckets(analyticsScopedOperators, {
-            month: analyticsDataMonth,
+            ...analyticsTabsContext,
             groupId: analyticsDataGroupId,
         }),
-        [analyticsScopedOperators, analyticsDataMonth, analyticsDataGroupId]
+        [analyticsScopedOperators, analyticsTabsContext, analyticsDataGroupId]
     );
     const analyticsStatusTabs = React.useMemo(
         () => buildEmploymentStatusTabs(analyticsStatusBuckets),
@@ -8549,12 +8609,12 @@ const App = ({ user, initialSelection }) => {
                                 <div className="field">
                                     <label className="label">Месяц</label>
                                     <select
-                                        value={analyticsMonth}
-                                        onChange={(e) => setAnalyticsMonth(e.target.value)}
+                                        value={analyticsReportModal.month || analyticsMonth}
+                                        onChange={(e) => setAnalyticsReportModal(prev => ({ ...prev, month: e.target.value }))}
                                         className="select"
                                         disabled={analyticsLoading}
                                     >
-                                        {getAnalyticsMonthOptions()}
+                                        {getAnalyticsMonthOptions(analyticsReportModal.month || analyticsMonth)}
                                     </select>
                                 </div>
                                 {isGlobalAdminRole && (
@@ -8674,7 +8734,8 @@ const App = ({ user, initialSelection }) => {
                                     confirmed: true,
                                     format: analyticsReportModal.format,
                                     departmentId: analyticsReportModal.departmentId,
-                                    supervisorId: analyticsReportModal.supervisorId
+                                    supervisorId: analyticsReportModal.supervisorId,
+                                    month: analyticsReportModal.month || analyticsMonth
                                 })}
                                 disabled={analyticsLoading || (analyticsReportModal.format === 'group' && !analyticsReportModal.supervisorId)}
                             >
@@ -8715,29 +8776,30 @@ const App = ({ user, initialSelection }) => {
                             )}
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                            <select
-                                value={analyticsMonth}
-                                onChange={(e) => setAnalyticsMonth(e.target.value)}
-                                className="select"
-                                disabled={analyticsLoading}
-                            >
-                                {getAnalyticsMonthOptions()}
-                            </select>
+                            {/* Период (#389): день, неделя, диапазон, месяц, год или весь.
+                                Данные перечитываются сами при выборе — эффект выше. */}
+                            <EvalPeriodPicker
+                                id="analytics-period"
+                                from={analyticsPeriod.from}
+                                to={analyticsPeriod.to}
+                                onChange={(next) => setAnalyticsPeriod({ from: next?.from || '', to: next?.to || '' })}
+                                ariaLabel="Период аналитики"
+                            />
                             <button
                                 className="btn btn-sm"
                                 style={{ background: 'var(--green-light)', color: 'var(--green)', borderColor: 'var(--green)' }}
                                 onClick={openAnalyticsReportModal}
                                 disabled={analyticsLoading}
-                                title="Скачать отчёт по прослушанным звонкам за выбранный месяц"
+                                title="Скачать отчёт по прослушанным звонкам за месяц"
                             >
                                 <FaIcon className="fas fa-file-excel" /> {analyticsLoading ? 'Загрузка...' : 'Скачать отчёт'}
                             </button>
                             <button
                                 className="btn btn-sm btn-primary"
-                                onClick={() => { if (!analyticsSelectedGroupId) { emitCallEvaluationToast('Выберите группу', 'error'); return; } fetchAnalyticsGroupData(analyticsSelectedGroupId, analyticsMonth); }}
-                                disabled={analyticsLoading || !analyticsSelectedGroupId}
+                                onClick={() => { if (!analyticsSelectedGroupId) { emitCallEvaluationToast('Выберите группу', 'error'); return; } fetchAnalyticsGroupData(analyticsSelectedGroupId, analyticsPeriod); }}
+                                disabled={analyticsLoading || analyticsFetching || !analyticsSelectedGroupId}
                             >
-                                <FaIcon className="fas fa-sync-alt" /> {analyticsLoading ? 'Обновление...' : 'Обновить'}
+                                <FaIcon className="fas fa-sync-alt" /> {analyticsFetching ? 'Обновление...' : 'Обновить'}
                             </button>
                         </div>
                     </div>
@@ -8771,7 +8833,9 @@ const App = ({ user, initialSelection }) => {
                         </div>
 
                         {/* Table */}
-                        {analyticsLoading ? (
+                        {/* Первое чтение — «Загрузка...»; смена периода или группы — прежняя
+                            таблица на месте и приглушена, пока не придёт новая (#389). */}
+                        {analyticsFetching && !analyticsSelectedSvData ? (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Загрузка...</p>
                         ) : analyticsScopedOperators.length > 0 ? (() => {
                             const filteredOps = analyticsStatusBuckets.get(analyticsStatusTab) || [];
@@ -8781,7 +8845,9 @@ const App = ({ user, initialSelection }) => {
                             const sorted = [...filteredOps].sort(compareAnalyticsByField);
 
                             const totalCalls = filteredOps.reduce((s, o) => s + (parseInt(o.call_count) || 0), 0);
-                            const totalPlanCalls = filteredOps.reduce((s, o) => { const m = getAnalyticsEvaluationPlanMeta(o); return s + (m ? m.requiredCalls : 0); }, 0);
+                            const totalPlanCalls = analyticsPlanAvailable
+                                ? filteredOps.reduce((s, o) => { const m = getAnalyticsEvaluationPlanMeta(o); return s + (m ? m.requiredCalls : 0); }, 0)
+                                : 0;
                             const scoresArr = filteredOps.map(o => o.avg_score == null ? NaN : Number(o.avg_score)).filter(v => !isNaN(v));
                             const avgByScored = scoresArr.length > 0 ? scoresArr.reduce((a, b) => a + b, 0) / scoresArr.length : null;
 
@@ -8792,13 +8858,18 @@ const App = ({ user, initialSelection }) => {
                             const getBarColor = (pct) => getAnalyticsNormTone(pct).color;
 
                             return (
-                                <div style={{ borderRadius: 8, border: '1px solid var(--border)' }}>
+                                <div style={{ borderRadius: 8, border: '1px solid var(--border)', opacity: analyticsFetching ? 0.6 : 1, transition: 'opacity 0.2s' }}
+                                     aria-busy={analyticsFetching}>
                                     <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                                         <thead style={{ background: 'var(--surface-2)' }}>
                                             <tr>
                                                 <th style={thStyle} onClick={() => handleAnalyticsSort('name')}>Оператор {getAnalyticsSortIcon('name')}</th>
-                                                <th style={thStyle} onClick={() => handleAnalyticsSort('listened')}>Оценено / план {getAnalyticsSortIcon('listened')}</th>
-                                                <th style={thStyle} onClick={() => handleAnalyticsSort('percent')}>% нормы {getAnalyticsSortIcon('percent')}</th>
+                                                {/* План оценок месячный: у периода не из одного месяца (#389)
+                                                    колонки плана и «% нормы» нет — только сколько оценено. */}
+                                                <th style={thStyle} onClick={() => handleAnalyticsSort('listened')}>{analyticsPlanAvailable ? 'Оценено / план' : 'Оценено'} {getAnalyticsSortIcon('listened')}</th>
+                                                {analyticsPlanAvailable && (
+                                                    <th style={thStyle} onClick={() => handleAnalyticsSort('percent')}>% нормы {getAnalyticsSortIcon('percent')}</th>
+                                                )}
                                                 <th style={thStyle} onClick={() => handleAnalyticsSort('avg_score')}>Ср. балл {getAnalyticsSortIcon('avg_score')}</th>
                                                 <th style={thStyle} onClick={() => handleAnalyticsSort('feedback')}>ОС / просрочки {getAnalyticsSortIcon('feedback')}</th>
                                                 <th style={{ ...thStyle, cursor: 'default' }}>Действия</th>
@@ -8807,8 +8878,10 @@ const App = ({ user, initialSelection }) => {
                                         <tbody>
                                             {sorted.map((op, index) => {
                                                 const callCount = parseInt(op.call_count) || 0;
-                                                const planMeta = getAnalyticsEvaluationPlanMeta(op);
-                                                const displayTarget = planMeta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek());
+                                                const planMeta = analyticsPlanAvailable ? getAnalyticsEvaluationPlanMeta(op) : null;
+                                                const displayTarget = analyticsPlanAvailable
+                                                    ? (planMeta?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()))
+                                                    : 0;
                                                 const pct = displayTarget > 0 ? Math.round((callCount / displayTarget) * 100) : 0;
                                                 const hasIssue = displayTarget > 0 && (callCount / displayTarget) * 100 < 95;
                                                 return (
@@ -8839,8 +8912,8 @@ const App = ({ user, initialSelection }) => {
                                                                        за месяц целиком, а не за его дни в группе. */
                                                                     const info = analyticsStatusInfo.get(op);
                                                                     const chip = info?.tab === 'fired'
-                                                                        ? describeDismissalChip(op, analyticsDataMonth)
-                                                                        : describeTransferChip(info?.transfer, analyticsDataMonth);
+                                                                        ? describeDismissalChip(op, analyticsTabsContext)
+                                                                        : describeTransferChip(info?.transfer, analyticsTabsContext);
                                                                     if (!chip) return null;
                                                                     return (
                                                                         <span className="ce-chip ce-chip-muted" title={chip.title}>
@@ -8850,15 +8923,19 @@ const App = ({ user, initialSelection }) => {
                                                                 })()}
                                                             </div>
                                                         </td>
-                                                        <td style={tdStyle}>{renderAnalyticsPlanContent(op, callCount)}</td>
-                                                        <td style={tdStyle}>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                                <div style={{ width: 64, height: 5, background: 'var(--border)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
-                                                                    <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: getBarColor(pct), borderRadius: 99, transition: 'width 0.4s' }} />
+                                                        <td style={tdStyle}>{analyticsPlanAvailable
+                                                            ? renderAnalyticsPlanContent(op, callCount)
+                                                            : <span className="analytics-plan-chip">{callCount}</span>}</td>
+                                                        {analyticsPlanAvailable && (
+                                                            <td style={tdStyle}>
+                                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                                    <div style={{ width: 64, height: 5, background: 'var(--border)', borderRadius: 99, overflow: 'hidden', flexShrink: 0 }}>
+                                                                        <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: getBarColor(pct), borderRadius: 99, transition: 'width 0.4s' }} />
+                                                                    </div>
+                                                                    <span style={{ fontSize: 12, fontWeight: 600, color: getBarColor(pct), tabularNums: true }}>{pct}%</span>
                                                                 </div>
-                                                                <span style={{ fontSize: 12, fontWeight: 600, color: getBarColor(pct), tabularNums: true }}>{pct}%</span>
-                                                            </div>
-                                                        </td>
+                                                            </td>
+                                                        )}
                                                         <td style={{ ...tdStyle, fontWeight: 600, color: getScoreColor(op.avg_score) }}>
                                                             {op.avg_score ? Number(op.avg_score).toFixed(2) : '—'}
                                                         </td>
@@ -8868,13 +8945,17 @@ const App = ({ user, initialSelection }) => {
                                                             <span style={{ fontWeight: 500, color: Number(op.feedback_overdue_count) > 0 ? 'var(--red)' : 'var(--text-2)' }}>{Number(op.feedback_overdue_count) || 0}</span>
                                                         </td>
                                                         <td style={{ ...tdStyle, whiteSpace: 'nowrap' }}>
-                                                            <div className={`analytics-actions ${isAdminRole ? 'analytics-actions-admin' : 'analytics-actions-compact'}`}>
+                                                            {/* Без плана (период не из одного месяца) «Уведомить» не бывает —
+                                                                и места под неё в ряду нет. */}
+                                                            <div className={`analytics-actions ${isAdminRole
+                                                                ? (analyticsPlanAvailable ? 'analytics-actions-admin' : 'analytics-actions-admin-noplan')
+                                                                : 'analytics-actions-compact'}`}>
                                                                 {isAdminRole && hasIssue && (
                                                                     <button className="btn btn-sm" style={{ background: 'var(--amber-light,#fffbeb)', color: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)' }} onClick={() => analyticsNotifySv(Number(op?.supervisor_id) || analyticsSelectedGroupSvId, op.name, callCount, displayTarget)} disabled={analyticsLoading || !(Number(op?.supervisor_id) || analyticsSelectedGroupSvId)}>
                                                                         ⚠ Уведомить
                                                                     </button>
                                                                 )}
-                                                                {isAdminRole && !hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
+                                                                {isAdminRole && analyticsPlanAvailable && !hasIssue && <span className="analytics-action-placeholder" aria-hidden="true" />}
                                                                 <button className="btn btn-sm btn-primary" onClick={() => {
                                                                     const nextSupervisorId = Number(op?.supervisor_id ?? op?.sv_id) || analyticsSelectedGroupSvId;
                                                                     if (nextSupervisorId) setSelectedSupervisor(nextSupervisorId);
@@ -8900,14 +8981,16 @@ const App = ({ user, initialSelection }) => {
                                             <tr>
                                                 <td style={{ ...tdStyle, fontWeight: 600 }}>Итого</td>
                                                 <td style={tdStyle}>{totalPlanCalls > 0 ? `${totalCalls} / ${totalPlanCalls}` : totalCalls}</td>
-                                                <td style={tdStyle}>
-                                                    {(() => {
-                                                        const withT = filteredOps.filter(o => (getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek())) > 0);
-                                                        if (!withT.length) return <span style={{ color: 'var(--text-2)' }}>—</span>;
-                                                        const ap = Math.round(withT.reduce((s, o) => { const t = getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return s + ((parseInt(o.call_count)||0)/t)*100; }, 0) / withT.length);
-                                                        return <span style={{ fontWeight: 600, color: getBarColor(ap) }}>{ap}%</span>;
-                                                    })()}
-                                                </td>
+                                                {analyticsPlanAvailable && (
+                                                    <td style={tdStyle}>
+                                                        {(() => {
+                                                            const withT = filteredOps.filter(o => (getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek())) > 0);
+                                                            if (!withT.length) return <span style={{ color: 'var(--text-2)' }}>—</span>;
+                                                            const ap = Math.round(withT.reduce((s, o) => { const t = getAnalyticsEvaluationPlanMeta(o)?.requiredCalls ?? getAnalyticsExpectedCalls(getAnalyticsCurrentWeek()); return s + ((parseInt(o.call_count)||0)/t)*100; }, 0) / withT.length);
+                                                            return <span style={{ fontWeight: 600, color: getBarColor(ap) }}>{ap}%</span>;
+                                                        })()}
+                                                    </td>
+                                                )}
                                                 <td style={{ ...tdStyle, fontWeight: 500 }}>{avgByScored == null ? '—' : avgByScored.toFixed(2)}</td>
                                                 <td style={tdStyle}>
                                                     {filteredOps.reduce((s, o) => s + (Number(o.feedback_count)||0), 0)}
@@ -8925,8 +9008,8 @@ const App = ({ user, initialSelection }) => {
                         })() : analyticsSelectedGroupId ? (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>
                                 {analyticsSelectedGroupIsArchived
-                                    ? 'В этой группе за выбранный месяц никого не было — она уже была в архиве. Выберите месяц, когда группа работала.'
-                                    : 'В этой группе за выбранный месяц никого не было.'}
+                                    ? 'В этой группе за выбранный период никого не было — она уже была в архиве. Выберите период, когда группа работала.'
+                                    : 'В этой группе за выбранный период никого не было.'}
                             </p>
                         ) : (
                             <p style={{ textAlign: 'center', color: 'var(--text-2)', padding: '32px 0', fontSize: 13 }}>Выберите группу для просмотра аналитики.</p>

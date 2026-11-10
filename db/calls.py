@@ -2133,6 +2133,193 @@ class CallsMixin:
             "has_critical_error": bool(has_critical_error)
         }
 
+    @staticmethod
+    def _journal_period_sql(months=None, start=None, end=None, alias=''):
+        """Условие периода «Аналитики» журнала оценок (задача #389) для строк calls
+        → (sql без ведущего AND, params).
+
+        * months — период из ЦЕЛЫХ месяцев (год, «сентябрь — октябрь»): по месяцу
+          журнала calls.month — ровно так всегда считался один месяц, план и выгрузки;
+        * start/end (date) — остальные периоды (день, неделя, диапазон): по дню
+          обращения calls.appeal_date — местное время звонка (пик в 9–20 ч). На
+          проде у 1277 из 1278 оценок октября 2026 обращение в том же октябре, а
+          дата самой оценки (created_at) у 418 из них — уже в ноябре: по ней «неделя»
+          не сложилась бы в месяц;
+        * ничего — за всё время («Весь период»).
+        """
+        col = f"{alias}." if alias else ''
+        if months:
+            return f"{col}month = ANY(%s)", [list(months)]
+        clauses, params = [], []
+        if start is not None:
+            clauses.append(f"{col}appeal_date >= %s")
+            params.append(start)
+        if end is not None:
+            # Конец включительно: до начала следующего дня.
+            clauses.append(f"{col}appeal_date < %s")
+            params.append(end + timedelta(days=1))
+        return (" AND ".join(clauses) or "TRUE"), params
+
+    def get_feedback_sla_rows_for_period(
+        self,
+        operator_ids: Optional[List[int]] = None,
+        *,
+        months=None,
+        start=None,
+        end=None,
+        reference_date=None
+    ) -> List[Dict[str, Any]]:
+        """Строки SLA обратной связи за ПЕРИОД «Аналитики» журнала (#389) — те же,
+        что get_feedback_sla_rows_for_month, но период задаёт _journal_period_sql
+        (целые месяцы — по месяцу журнала, остальное — по дню обращения)."""
+        operator_ids_norm = None
+        if operator_ids is not None:
+            operator_ids_norm = []
+            seen = set()
+            for value in operator_ids:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if parsed in seen:
+                    continue
+                seen.add(parsed)
+                operator_ids_norm.append(parsed)
+            if not operator_ids_norm:
+                return []
+
+        period_sql, period_params = self._journal_period_sql(months=months, start=start, end=end)
+        latest_period_sql, _ = self._journal_period_sql(months=months, start=start, end=end, alias='c')
+        # Люди — сразу в первой выборке, а не в конце, как у месячной функции: последняя
+        # версия оценки зависит только от строк самого оператора, а перебирать ради
+        # группы из двадцати человек все оценки года — это минуты на слабой базе.
+        operators_sql = ""
+        params: List[Any] = [*period_params]
+        if operator_ids_norm is not None:
+            operators_sql = " AND operator_id = ANY(%s)"
+            params.append(operator_ids_norm)
+        params.extend(period_params)
+        where_sql = "LOWER(COALESCE(op.role, '')) IN ('operator', 'trainee')"
+
+        # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) в счёт
+        # и средний балл оператора не входят: сотрудник проверял линию, а не работал.
+        from test_numbers import keys as test_keys
+        not_test_calls = test_keys.sql_calls_not_test()
+        query = f"""
+            WITH latest_versions AS (
+                SELECT
+                    operator_id,
+                    phone_number,
+                    month,
+                    appeal_date,
+                    MAX(created_at) AS latest_date
+                FROM calls
+                WHERE {period_sql}
+                  AND is_draft = FALSE
+                  AND score IS NOT NULL
+                  AND {not_test_calls}{operators_sql}
+                GROUP BY operator_id, phone_number, month, appeal_date
+            ),
+            latest_calls AS (
+                SELECT c.*
+                FROM calls c
+                JOIN latest_versions lv
+                  ON c.operator_id = lv.operator_id
+                 AND c.phone_number = lv.phone_number
+                 AND c.month = lv.month
+                 AND (
+                     (c.appeal_date IS NULL AND lv.appeal_date IS NULL)
+                     OR c.appeal_date = lv.appeal_date
+                 )
+                 AND c.created_at = lv.latest_date
+                WHERE {latest_period_sql}
+                  AND c.is_draft = FALSE
+                  AND c.score IS NOT NULL
+            )
+            SELECT
+                c.id AS call_id,
+                c.operator_id,
+                op.name AS operator_name,
+                op.supervisor_id,
+                sv.name AS supervisor_name,
+                c.score,
+                c.scores,
+                c.direction_id,
+                c.created_at AS evaluation_created_at,
+                cf.id AS feedback_id,
+                cf.feedback_date,
+                cf.created_at AS feedback_created_at,
+                cf.supervisor_id AS feedback_supervisor_id,
+                cf_sv.name AS feedback_supervisor_name
+            FROM latest_calls c
+            JOIN users op ON op.id = c.operator_id
+            LEFT JOIN users sv ON sv.id = op.supervisor_id
+            LEFT JOIN call_feedbacks cf ON cf.call_id = c.id
+            LEFT JOIN users cf_sv ON cf_sv.id = cf.supervisor_id
+            WHERE {where_sql}
+            ORDER BY COALESCE(sv.name, ''), op.name, c.created_at
+        """
+
+        # Критерии направления (нужны для «критической ошибки» — срок ОС день) —
+        # отдельным запросом, один раз на направление, а не в каждой строке: это
+        # JSON по 40–47 КБ, и за май 2026 месячный запрос тащил их ~20 МБ, а за год
+        # по группе тащил бы сотни мегабайт (замер на проде 10.11.2026).
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            direction_ids = sorted({row[7] for row in rows if row[7] is not None})
+            criteria = {}
+            if direction_ids:
+                cursor.execute("SELECT id, criteria FROM directions WHERE id = ANY(%s)", (direction_ids,))
+                criteria = {row[0]: row[1] for row in cursor.fetchall()}
+        return [self._feedback_sla_row_dict((*row[:7], criteria.get(row[7]), *row[8:]), reference_date)
+                for row in rows]
+
+    def _feedback_sla_row_dict(self, row, reference_date=None) -> Dict[str, Any]:
+        """Строка выборки SLA обратной связи → словарь строки (месяц и период)."""
+        evaluation_created_at = row[8]
+        feedback_exists = row[9] is not None
+
+        feedback_date_value = row[10]
+        if feedback_date_value is None and row[11] is not None and hasattr(row[11], 'date'):
+            feedback_date_value = row[11].date()
+
+        sla_payload = self._build_feedback_sla_payload(
+            evaluation_date_source=evaluation_created_at,
+            score_value=row[5],
+            scores_payload=row[6],
+            direction_criteria_payload=row[7],
+            feedback_date_source=feedback_date_value,
+            reference_date=reference_date
+        ) or {}
+
+        try:
+            score_numeric = float(row[5]) if row[5] is not None else None
+        except Exception:
+            score_numeric = None
+
+        return {
+            "call_id": int(row[0]),
+            "operator_id": int(row[1]),
+            "operator_name": row[2] or "",
+            "supervisor_id": int(row[3]) if row[3] is not None else None,
+            "supervisor_name": row[4] or "Без супервайзера",
+            "score": score_numeric,
+            "feedback_provided": bool(feedback_exists),
+            "feedback_supervisor_id": int(row[12]) if row[12] is not None else None,
+            "feedback_supervisor_name": row[13] or None,
+            "status": sla_payload.get("status"),
+            "is_overdue": bool(sla_payload.get("is_overdue")),
+            "is_on_time": bool(sla_payload.get("is_on_time")),
+            "overdue_days": int(sla_payload.get("overdue_days") or 0),
+            "deadline_days": int(sla_payload.get("deadline_days") or 0),
+            "evaluation_date": sla_payload.get("evaluation_date"),
+            "due_date": sla_payload.get("due_date"),
+            "feedback_date": sla_payload.get("feedback_date"),
+            "has_critical_error": bool(sla_payload.get("has_critical_error")),
+            "sla": sla_payload
+        }
+
     def get_feedback_sla_rows_for_month(
         self,
         month: str,
@@ -2256,53 +2443,7 @@ class CallsMixin:
         with self._get_cursor() as cursor:
             cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
-
-        result: List[Dict[str, Any]] = []
-        for row in rows:
-            evaluation_created_at = row[8]
-            feedback_exists = row[9] is not None
-
-            feedback_date_value = row[10]
-            if feedback_date_value is None and row[11] is not None and hasattr(row[11], 'date'):
-                feedback_date_value = row[11].date()
-
-            sla_payload = self._build_feedback_sla_payload(
-                evaluation_date_source=evaluation_created_at,
-                score_value=row[5],
-                scores_payload=row[6],
-                direction_criteria_payload=row[7],
-                feedback_date_source=feedback_date_value,
-                reference_date=reference_date
-            ) or {}
-
-            try:
-                score_numeric = float(row[5]) if row[5] is not None else None
-            except Exception:
-                score_numeric = None
-
-            result.append({
-                "call_id": int(row[0]),
-                "operator_id": int(row[1]),
-                "operator_name": row[2] or "",
-                "supervisor_id": int(row[3]) if row[3] is not None else None,
-                "supervisor_name": row[4] or "Без супервайзера",
-                "score": score_numeric,
-                "feedback_provided": bool(feedback_exists),
-                "feedback_supervisor_id": int(row[12]) if row[12] is not None else None,
-                "feedback_supervisor_name": row[13] or None,
-                "status": sla_payload.get("status"),
-                "is_overdue": bool(sla_payload.get("is_overdue")),
-                "is_on_time": bool(sla_payload.get("is_on_time")),
-                "overdue_days": int(sla_payload.get("overdue_days") or 0),
-                "deadline_days": int(sla_payload.get("deadline_days") or 0),
-                "evaluation_date": sla_payload.get("evaluation_date"),
-                "due_date": sla_payload.get("due_date"),
-                "feedback_date": sla_payload.get("feedback_date"),
-                "has_critical_error": bool(sla_payload.get("has_critical_error")),
-                "sla": sla_payload
-            })
-
-        return result
+        return [self._feedback_sla_row_dict(row, reference_date) for row in rows]
 
     def get_week_call_stats(self, operator_id, start_date, end_date):
         # Оценки разговоров с номерами «Реестра тестовых номеров» (test_numbers) не считаются.

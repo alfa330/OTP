@@ -229,3 +229,85 @@ test('незнакомый статус получает свою вкладку
     const { buckets } = buildEmploymentStatusBuckets([{ status: 'maternity' }, abylgazy], SEPT);
     assert.deepEqual(buildEmploymentStatusTabs(buckets).map((t) => t.key), ['working', 'maternity', 'fired']);
 });
+
+/* ── Период вместо месяца (задача #389) ─────────────────────────────────────
+ * «Аналитику» смотрят за любой период. Правило то же — уволен на конец периода,
+ * на последний день периода не в группе — переведён, — только по датам
+ * сегментов (start_date/end_date): номер дня у периода длиннее месяца ничего
+ * не говорит. Пустые края — «Весь период», его конец — сегодня.
+ */
+const dated = (groupId, start, end, isCurrent = false) => ({
+    group_id: groupId, group_name: `группа ${groupId}`, start_date: start, end_date: end, is_current: isCurrent,
+});
+
+test('период: ушла из группы внутри года — «Переведённые», чип с полной датой', () => {
+    const op = { id: 1, status: 'working', group_segments: [
+        dated(OSNOVA, '2026-01-01', '2026-09-07'), dated(CHAT, '2026-09-08', '2026-12-31', true)] };
+    const year = { period: { from: '2026-01-01', to: '2026-12-31' }, groupId: OSNOVA };
+    const info = classifyAnalyticsOperator(op, year);
+    assert.equal(info.tab, TRANSFERRED_TAB);
+    assert.deepEqual(info.transfer, { direction: 'out', date: '2026-09-08', groupName: `группа ${CHAT}` });
+    const chip = describeTransferChip(info.transfer, year);
+    assert.equal(chip.text, 'с 08.09');
+    assert.match(chip.title, /с 08\.09\.2026/);
+    assert.match(chip.title, /за весь выбранный период/);
+    // В новой группе та же — в «Активных», «в группе с 08.09».
+    const there = classifyAnalyticsOperator(op, { ...year, groupId: CHAT });
+    assert.equal(there.tab, 'working');
+    assert.equal(describeTransferChip(there.transfer, { ...year, groupId: CHAT }).text, 'в группе с 08.09');
+});
+
+test('период: неделя, целиком в группе — без перевода; без дат сегментов — тоже без перевода', () => {
+    const week = { period: { from: '2026-11-04', to: '2026-11-10' }, groupId: OSNOVA };
+    const stayed = { status: 'working', group_segments: [dated(OSNOVA, '2026-11-04', '2026-11-10', true)] };
+    assert.deepEqual(classifyAnalyticsOperator(stayed, week), { tab: 'working', statusKey: 'working', transfer: null });
+    // Старый ответ (только start_day/end_day) не превращается в выдуманный перевод.
+    const legacy = { status: 'working', group_segments: [{ group_id: OSNOVA, start_day: 1, end_day: 7 }] };
+    assert.equal(classifyAnalyticsOperator(legacy, week).transfer, null);
+});
+
+test('период: уволенный — дата в чипе, только если увольнение в выбранных днях', () => {
+    const op = { status: 'fired', dismissal_date: '2026-11-06', group_segments: [] };
+    const week = { period: { from: '2026-11-04', to: '2026-11-10' } };
+    assert.equal(classifyAnalyticsOperator(op, week).tab, 'fired');
+    assert.deepEqual(describeDismissalChip(op, week), { text: 'с 06.11', title: 'Уволен(а) с 06.11.2026' });
+    assert.equal(describeDismissalChip(op, { period: { from: '2026-11-07', to: '2026-11-10' } }), null);
+    // Увольнение ПОЗЖЕ конца периода — статус устарел, в периоде ещё работал.
+    assert.equal(classifyAnalyticsOperator(op, { period: { from: '2026-10-01', to: '2026-10-15' } }).tab, 'working');
+});
+
+test('«Весь период»: конец — сегодня, переведённый давно — в «Переведённых»', () => {
+    const op = { status: 'working', group_segments: [
+        dated(OSNOVA, '2025-03-01', '2025-05-31'), dated(CHAT, '2025-06-01', '2099-12-31', true)] };
+    const all = { period: { from: '', to: '' }, groupId: OSNOVA };
+    const info = classifyAnalyticsOperator(op, all);
+    assert.equal(info.tab, TRANSFERRED_TAB);
+    assert.equal(info.transfer.date, '2025-06-01');
+});
+
+test('месяц строкой и { month } — одно и то же, как было', () => {
+    const op = { status: 'fired', dismissal_date: '2026-09-14', group_segments: [] };
+    assert.deepEqual(describeDismissalChip(op, '2026-09'), describeDismissalChip(op, { month: '2026-09' }));
+});
+
+test('период: членство до последнего дня периода — ещё в группе; выведен без новой — день после ухода', () => {
+    const week = { period: { from: '2026-11-04', to: '2026-11-10' }, groupId: OSNOVA };
+    const untilEnd = { status: 'working', group_segments: [dated(OSNOVA, '2026-11-04', '2026-11-10')] };
+    const kept = classifyAnalyticsOperator(untilEnd, week);
+    assert.equal(kept.tab, 'working', 'конец членства = конец периода: на последний день он в группе');
+    assert.equal(kept.transfer, null);
+    const left = { status: 'working', group_segments: [dated(OSNOVA, '2026-11-04', '2026-11-07')] };
+    const info = classifyAnalyticsOperator(left, week);
+    assert.equal(info.tab, TRANSFERRED_TAB);
+    assert.deepEqual(info.transfer, { direction: 'out', date: '2026-11-08', groupName: '' });
+    const chip = describeTransferChip(info.transfer, week);
+    assert.equal(chip.text, 'с 08.11');
+    assert.match(chip.title, /^Выведен\(а\) из группы с 08\.11\.2026\./);
+});
+
+test('период: уволен в последний день периода — «Уволенные» и дата в чипе', () => {
+    const op = { status: 'fired', dismissal_date: '2026-11-10', group_segments: [] };
+    const week = { period: { from: '2026-11-04', to: '2026-11-10' } };
+    assert.equal(classifyAnalyticsOperator(op, week).tab, 'fired');
+    assert.deepEqual(describeDismissalChip(op, week), { text: 'с 10.11', title: 'Уволен(а) с 10.11.2026' });
+});

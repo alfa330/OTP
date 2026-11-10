@@ -7,6 +7,7 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker, { isoDate } from '../ui/DateRangePicker';
+import { PERIOD_VIEWS, quickPeriods } from '../ui/periodRange';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, activeFilterChips, operatorsMatching,
     clampScore, reasonsAllowed, filtersToParams, countMarketingFilters, clearMarketing,
@@ -40,20 +41,34 @@ import {
  * по всей выборке, а не по загруженной странице.
  */
 
-const shiftDays = (days) => {
-    const value = new Date();
-    value.setDate(value.getDate() - days);
-    return isoDate(value);
-};
+/* Период раздела (задача #389): год, месяц, день или диапазон и четыре быстрых
+   периода — «Сегодня», «Неделя», «Месяц», «Весь период». Раньше «Весь период»
+   не давали: в ряд четвёртая кнопка не вставала. У календаря периода быстрые
+   периоды — сеткой 2 × 2, и места хватает. */
+const PERIOD_PRESETS = quickPeriods();
+/* ИИ-оценка ведётся с 2026 года: раньше оценённых дней нет, и календарь не
+   предлагает заведомо пустые годы и месяцы. */
+export const QA_FIRST_DAY = '2026-01-01';
 
-/* Три пресета, как в «Посылках» и «Чатах». Четвёртым просился «Весь период», но
-   он не влезает в ряд и переносится на две строки, ломая ровную полосу кнопок, —
-   а снимается период тем же крестиком на чипе, что и любой другой фильтр. */
-const DATE_PRESETS = [
-    { label: 'Сегодня', range: () => ({ from: isoDate(new Date()), to: isoDate(new Date()) }) },
-    { label: 'Неделя', range: () => ({ from: shiftDays(6), to: isoDate(new Date()) }) },
-    { label: 'Месяц', range: () => ({ from: shiftDays(29), to: isoDate(new Date()) }) },
-];
+/** Период раздела — один на все вкладки, где он что-то отбирает: «Очередь»,
+    «Чаты», «Звонки» (внутри панели), «Обзор», «Сводка» и «База разборов»
+    (одно это поле над вкладкой). Живёт в тех же date_from/date_to отбора
+    CallQaView, поэтому выбранный на одной вкладке период действует и на
+    соседних — как и остальной отбор. */
+export function QaPeriodField({ filters, onChange }) {
+    const value = filters || EMPTY_FILTERS;
+    return (
+        <IosDateRangePicker
+            from={value.date_from || ''}
+            to={value.date_to || ''}
+            min={QA_FIRST_DAY}
+            max={isoDate(new Date())}
+            presets={PERIOD_PRESETS}
+            views={PERIOD_VIEWS}
+            onChange={({ from, to }) => onChange?.({ ...value, date_from: from || '', date_to: to || '' })}
+        />
+    );
+}
 
 const REVIEWED_OPTIONS = [
     { value: '', label: 'Все' },
@@ -403,13 +418,17 @@ export default function QaFilters(props) {
     );
 
     if (marketingOnly) {
-        // У отдела без сделок (СЗоВ, Тез КЦ) отбирать правила по сделке нечем.
-        if (!marketingReady) return null;
+        /* «База разборов»: период (#389 — правила за выбранные дни разбора) и,
+           если у отдела есть сделки, отбор по сделке. У отдела без сделок
+           (СЗоВ, Тез КЦ) отбирать правила по сделке нечем — остаётся период. */
         return (
             <div>
-                <section className="flex items-center gap-2.5">{toggleButton('Отбор по сделке')}</section>
-                {chipsRow}
-                {open && (
+                <section className="flex flex-wrap items-center gap-2.5">
+                    <QaPeriodField filters={value} onChange={onChange} />
+                    {marketingReady && toggleButton('Отбор по сделке')}
+                </section>
+                {marketingReady && chipsRow}
+                {marketingReady && open && (
                     <div className="mt-3">
                         <MarketingFilters value={value} set={set} marketing={marketing}
                                           groups={groups} operators={operators}
@@ -424,13 +443,7 @@ export default function QaFilters(props) {
         <div>
             {/* Полоса, с которой начинают: период и поиск. Остальное — за кнопкой. */}
             <section className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-                <IosDateRangePicker
-                    from={value.date_from || ''}
-                    to={value.date_to || ''}
-                    max={isoDate(new Date())}
-                    presets={DATE_PRESETS}
-                    onChange={({ from, to }) => set({ date_from: from || '', date_to: to || '' })}
-                />
+                <QaPeriodField filters={value} onChange={onChange} />
                 <div className="relative sm:flex-1">
                     <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input

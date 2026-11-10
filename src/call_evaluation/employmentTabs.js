@@ -18,6 +18,14 @@
  *   2. Ушёл из группы (на последний день месяца его в ней нет) — «Переведённые».
  *   3. Иначе — вкладка его статуса трудоустройства (Активные, Б/С, отпуск...).
  * Пришедший ИЗ другой группы остаётся в «Активных»: он теперь член этой группы.
+ *
+ * Период вместо месяца (задача #389). «Аналитику» теперь смотрят за любой
+ * период — день, неделю, диапазон, год, всё время. Правило то же, только
+ * «месяц» в нём — выбранный период: уволен на конец периода, на последний день
+ * периода не в этой группе — переведён. Сервер для периода отдаёт сегменты с
+ * датами (start_date/end_date): номер дня у периода длиннее месяца ничего не
+ * говорит. Контекст — { month } (как было) или { period: { from, to } };
+ * пустые края периода — «всё время», его конец — сегодня.
  */
 
 /* Тот же словарь, что в основном приложении. Импортировать оттуда нельзя:
@@ -78,6 +86,31 @@ export const formatDismissalDate = (op) => {
     return `${d}.${m}.${y}`;
 };
 
+const pad2 = (value) => String(value).padStart(2, '0');
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const todayIso = () => {
+    const now = new Date();
+    return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+};
+const nextIsoDay = (iso) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    const date = new Date(y, m - 1, d + 1);
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+};
+
+/* Выбранный период вкладок: месяц (как было) или { from, to } (#389).
+   Без месяца и без периода — null: правило по датам не применить. */
+const resolveContext = (context) => {
+    const ctx = typeof context === 'string' ? { month: context } : (context || {});
+    const month = parseMonth(ctx.month);
+    if (month) return { month };
+    const period = ctx.period;
+    if (!period || typeof period !== 'object') return null;
+    const from = ISO_DAY.test(String(period.from || '')) ? period.from : '';
+    const to = ISO_DAY.test(String(period.to || '')) ? period.to : todayIso();
+    return { period: { from, to } };
+};
+
 const parseMonth = (month) => {
     const match = /^(\d{4})-(\d{2})/.exec(String(month || ''));
     if (!match) return null;
@@ -103,6 +136,44 @@ const validSegments = (op) => (Array.isArray(op?.group_segments) ? op.group_segm
         && Number.isFinite(seg.endDay)
         && seg.endDay >= seg.startDay);
 
+/* Сегменты членства с датами — для периода (#389). */
+const datedSegments = (op) => (Array.isArray(op?.group_segments) ? op.group_segments : [])
+    .map((seg) => ({
+        groupId: Number(seg?.group_id),
+        groupName: String(seg?.group_name || '').trim(),
+        start: String(seg?.start_date || ''),
+        end: String(seg?.end_date || ''),
+        isCurrent: seg?.is_current === true,
+    }))
+    .filter((seg) => Number.isFinite(seg.groupId)
+        && ISO_DAY.test(seg.start) && ISO_DAY.test(seg.end) && seg.end >= seg.start);
+
+/* Перевод за ПЕРИОД — то же правило, что за месяц, только по датам:
+   { direction: 'out' | 'in', date, groupName } или { direction: 'shared', groupName }. */
+const getGroupTransferInPeriod = (op, gid, period) => {
+    const segments = datedSegments(op);
+    const here = segments.filter((seg) => seg.groupId === gid);
+    if (!here.length) return null;
+    const elsewhere = segments.filter((seg) => seg.groupId !== gid);
+
+    const stillHere = here.filter((seg) => seg.isCurrent || seg.end >= period.to);
+    if (!stillHere.length) {
+        const lastHere = here.map((seg) => seg.end).sort().pop();
+        const next = elsewhere
+            .filter((seg) => seg.start > lastHere)
+            .sort((a, b) => (a.start < b.start ? -1 : 1))[0];
+        return { direction: 'out', date: next ? next.start : nextIsoDay(lastHere), groupName: next ? next.groupName : '' };
+    }
+    if (!elsewhere.length) return null;
+
+    const joined = stillHere.reduce((a, b) => (b.start < a.start ? b : a));
+    const previous = elsewhere
+        .filter((seg) => seg.end < joined.start)
+        .sort((a, b) => (a.end > b.end ? -1 : 1))[0];
+    if (previous) return { direction: 'in', date: joined.start, groupName: previous.groupName };
+    return { direction: 'shared', groupName: elsewhere[0].groupName };
+};
+
 /**
  * Перевод относительно ВЫБРАННОЙ группы за месяц.
  *   { direction: 'out', day, groupName } — ушёл: day — первый день вне группы,
@@ -113,10 +184,12 @@ const validSegments = (op) => (Array.isArray(op?.group_segments) ? op.group_segm
  *       другой группе (пересечение членств);
  *   null — перевода не было или данных о группах нет (старый ответ).
  */
-export function getGroupTransfer(op, groupId, month) {
+export function getGroupTransfer(op, groupId, context) {
     const gid = Number(groupId);
-    const period = parseMonth(month);
-    if (!Number.isFinite(gid) || gid <= 0 || !period) return null;
+    const resolved = resolveContext(context);
+    if (!Number.isFinite(gid) || gid <= 0 || !resolved) return null;
+    if (resolved.period) return getGroupTransferInPeriod(op, gid, resolved.period);
+    const period = resolved.month;
 
     const segments = validSegments(op);
     const here = segments.filter((seg) => seg.groupId === gid);
@@ -145,15 +218,21 @@ export function getGroupTransfer(op, groupId, month) {
     return { direction: 'shared', groupName: elsewhere[0].groupName };
 }
 
-/** Вкладка и эффективный статус строки за месяц — см. правило в шапке файла. */
-export function classifyAnalyticsOperator(op, { month, groupId } = {}) {
-    const period = parseMonth(month);
+/** Вкладка и эффективный статус строки за месяц (или период) — см. правило в шапке файла. */
+export function classifyAnalyticsOperator(op, { month, period, groupId } = {}) {
+    const resolved = resolveContext({ month, period });
     let statusKey = normalizeEmploymentStatus(op?.status);
     if (statusKey === 'fired') {
-        const firedMonth = getDismissalMonth(op);
-        if (period && firedMonth !== null && firedMonth > period.key) statusKey = 'working';
+        if (resolved?.month) {
+            const firedMonth = getDismissalMonth(op);
+            if (firedMonth !== null && firedMonth > resolved.month.key) statusKey = 'working';
+        } else if (resolved?.period) {
+            // Уволен позже конца периода — статус устарел, в периоде человек ещё работал.
+            const firedOn = String(op?.dismissal_date || '').slice(0, 10);
+            if (ISO_DAY.test(firedOn) && firedOn > resolved.period.to) statusKey = 'working';
+        }
     }
-    const transfer = getGroupTransfer(op, groupId, month);
+    const transfer = getGroupTransfer(op, groupId, { month, period });
     const tab = statusKey !== 'fired' && transfer?.direction === 'out' ? TRANSFERRED_TAB : statusKey;
     return { tab, statusKey, transfer };
 }
@@ -193,9 +272,10 @@ export function buildEmploymentStatusTabs(buckets) {
     return [...known.filter((tab) => tab.key !== 'fired'), ...unknown, ...firedTab];
 }
 
-const pad2 = (value) => String(value).padStart(2, '0');
-
 const WHOLE_MONTH_NOTE = 'Оценки и план считаются за месяц целиком, поэтому здесь они показаны полностью, а не только за дни в этой группе.';
+const WHOLE_PERIOD_NOTE = 'Оценки считаются за весь выбранный период, поэтому здесь они показаны полностью, а не только за дни в этой группе.';
+const shortIso = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
+const fullIso = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
 
 /**
  * Чип перевода у строки: { text, title } или null.
@@ -204,27 +284,44 @@ const WHOLE_MONTH_NOTE = 'Оценки и план считаются за ме�
  * группы — «в группе с …»: он в «Активных», и слово «переведён» там читалось бы
  * как тот самый сбой, из-за которого завели задачу.
  */
-export function describeTransferChip(transfer, month) {
-    const period = parseMonth(month);
-    if (!transfer || !period) return null;
-    const mm = pad2(period.mon);
-    const short = (day) => `${pad2(day)}.${mm}`;
-    const full = (day) => `${pad2(day)}.${mm}.${period.year}`;
+export function describeTransferChip(transfer, context) {
+    const resolved = resolveContext(context);
+    if (!transfer || !resolved) return null;
+    let short;
+    let full;
+    let note = WHOLE_MONTH_NOTE;
+    let when = 'В этом месяце';
+    let at;
+    if (resolved.month) {
+        const period = resolved.month;
+        const mm = pad2(period.mon);
+        short = (day) => `${pad2(day)}.${mm}`;
+        full = (day) => `${pad2(day)}.${mm}.${period.year}`;
+        at = transfer.day;
+    } else {
+        // Период (#389): дата перевода — полная, период бывает длиннее месяца.
+        if (transfer.direction !== 'shared' && !ISO_DAY.test(String(transfer.date || ''))) return null;
+        short = shortIso;
+        full = fullIso;
+        note = WHOLE_PERIOD_NOTE;
+        when = 'В этом периоде';
+        at = transfer.date;
+    }
     if (transfer.direction === 'out') {
         const where = transfer.groupName
-            ? `Переведён(а) в группу «${transfer.groupName}» с ${full(transfer.day)}.`
-            : `Выведен(а) из группы с ${full(transfer.day)}.`;
-        return { text: `с ${short(transfer.day)}`, title: `${where} ${WHOLE_MONTH_NOTE}` };
+            ? `Переведён(а) в группу «${transfer.groupName}» с ${full(at)}.`
+            : `Выведен(а) из группы с ${full(at)}.`;
+        return { text: `с ${short(at)}`, title: `${where} ${note}` };
     }
     if (transfer.direction === 'in') {
         const from = transfer.groupName
-            ? `Переведён(а) из группы «${transfer.groupName}» ${full(transfer.day)}.`
-            : `В группе с ${full(transfer.day)}.`;
-        return { text: `в группе с ${short(transfer.day)}`, title: `${from} ${WHOLE_MONTH_NOTE}` };
+            ? `Переведён(а) из группы «${transfer.groupName}» ${full(at)}.`
+            : `В группе с ${full(at)}.`;
+        return { text: `в группе с ${short(at)}`, title: `${from} ${note}` };
     }
     if (transfer.direction === 'shared') {
         const other = transfer.groupName ? `и в группе «${transfer.groupName}»` : 'и в другой группе';
-        return { text: 'две группы', title: `В этом месяце числился(ась) ${other}. ${WHOLE_MONTH_NOTE}` };
+        return { text: 'две группы', title: `${when} числился(ась) ${other}. ${note}` };
     }
     return null;
 }
@@ -234,9 +331,16 @@ export function describeTransferChip(transfer, month) {
  * просматриваемый месяц: она объясняет, откуда у уволенного оценки и план. У
  * уволенных давно чип был бы шумом на каждой строке.
  */
-export function describeDismissalChip(op, month) {
-    const period = parseMonth(month);
+export function describeDismissalChip(op, context) {
+    const resolved = resolveContext(context);
     const firedOn = formatDismissalDate(op);
-    if (!period || !firedOn || getDismissalMonth(op) !== period.key) return null;
+    if (!resolved || !firedOn) return null;
+    if (resolved.month) {
+        if (getDismissalMonth(op) !== resolved.month.key) return null;
+    } else {
+        // Период (#389): дата — только если увольнение пришлось на выбранные дни.
+        const day = String(op?.dismissal_date || '').slice(0, 10);
+        if ((resolved.period.from && day < resolved.period.from) || day > resolved.period.to) return null;
+    }
     return { text: `с ${firedOn.slice(0, 5)}`, title: `Уволен(а) с ${firedOn}` };
 }

@@ -14,7 +14,7 @@ import {
     DAY_ROW_CLASS, DateLeaf, DayHeader, DayStat, MonthSection, RowChevron, Score, ShareBar, dayTitle, monthGroups,
 } from './dayKit';
 import { dayNeighbours, plural } from './queueDayRules';
-import { isoOf } from './usePeriod';
+import { isoOf, PERIOD_MAX_DAYS, spanDays } from './usePeriod';
 
 /* Вкладка «Сводка»: что ИИ увидел в разговорах дня — по направлениям, и чат о
  * том же дне; сверху — сводка за прошедший месяц и вход в произвольный период.
@@ -75,6 +75,21 @@ export const defaultPeriod = (now = new Date()) => {
     const from = new Date(now);
     from.setDate(from.getDate() - (DEFAULT_PERIOD_DAYS - 1));
     return { from: isoOf(from), to: isoOf(now) };
+};
+
+/** Что открывает «За период» (#389): выбранный в разделе период, если он не
+    длиннее месяца (экран периода — до 31 дня), у длинного — его последние 30
+    дней, без периода — последние 30 дней. Конец — не позже сегодня: у
+    текущего месяца экран периода и так кончается сегодняшним днём. */
+export const periodForButton = (range, now = new Date()) => {
+    if (!range?.from && !range?.to) return defaultPeriod(now);
+    const today = isoOf(now);
+    const to = !range.to || range.to > today ? today : range.to;
+    const tail = new Date(Number(to.slice(0, 4)), Number(to.slice(5, 7)) - 1, Number(to.slice(8, 10)));
+    tail.setDate(tail.getDate() - (DEFAULT_PERIOD_DAYS - 1));
+    let from = range.from && range.from <= to ? range.from : isoOf(tail);
+    if (spanDays({ from, to }) > PERIOD_MAX_DAYS) from = isoOf(tail);
+    return { from, to };
 };
 
 /** Последний прошедший месяц из тех, по которым есть дни, — для карточки сверху. */
@@ -180,8 +195,11 @@ function MonthCard({ monthKey, info, days, onOpen }) {
     );
 }
 
-function DigestDays({ digest, period, onOpenDay }) {
+function DigestDays({ digest, period, onOpenDay, range = null, onResetRange = null }) {
     const days = digest.days;
+    // Период загруженных дней (а не выбранный, пока он грузится); без него — выбранный.
+    const shown = digest.daysPeriod || range;
+    const filtered = Boolean(shown?.from || shown?.to);
     if (days === null) {
         return (
             <div className={`${iosCard} flex items-center justify-center gap-2 px-6 py-12 text-slate-500`} role="status">
@@ -201,11 +219,21 @@ function DigestDays({ digest, period, onOpenDay }) {
         );
     }
     if (!days.length) {
+        /* С выбранным периодом (#389) пусто — это «за эти дни нет», а не «пока
+           нет вовсе»: иначе человек решил бы, что сводок нет совсем. */
         return (
-            <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center`}>
+            <div className={`${iosCard} flex flex-col items-center gap-2 px-6 py-14 text-center transition-opacity ${
+                digest.daysLoading ? 'opacity-60' : ''}`} aria-busy={Boolean(digest.daysLoading)}>
                 <ScrollText size={26} className="text-slate-300" />
-                <p className="text-[13.5px] font-medium text-slate-600">Оценённых разговоров пока нет</p>
-                <p className="text-[12.5px] text-slate-400">Сводка появится после первой ночной выборки.</p>
+                <p className="text-[13.5px] font-medium text-slate-600">
+                    {filtered ? 'За этот период оценённых разговоров нет' : 'Оценённых разговоров пока нет'}
+                </p>
+                {!filtered && <p className="text-[12.5px] text-slate-400">Сводка появится после первой ночной выборки.</p>}
+                {filtered && onResetRange && (
+                    <button type="button" onClick={onResetRange} className={`${iosBtnSecondary} mt-2`}>
+                        Показать весь период
+                    </button>
+                )}
             </div>
         );
     }
@@ -217,7 +245,10 @@ function DigestDays({ digest, period, onOpenDay }) {
         monthInfo: months[group.key] || null,
     }));
     return (
-        <div className="space-y-6">
+        /* Новый период читается — прежние дни на месте и чуть гаснут, а не
+           сменяются заглушкой: экран не прыгает на каждую смену периода. */
+        <div className={`space-y-6 transition-opacity duration-200 ${digest.daysLoading ? 'opacity-60' : ''}`}
+             aria-busy={Boolean(digest.daysLoading)}>
             <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3 px-1">
                     <p className="flex min-w-0 grow basis-0 items-center gap-1.5 text-[13px] text-slate-500">
@@ -226,7 +257,7 @@ function DigestDays({ digest, period, onOpenDay }) {
                                  text="Сводку пишет та же модель, что статьи вики, по всем оценённым разговорам дня: что случилось острого, какие ошибки повторяются, где сотрудникам не хватает знаний, что беспокоит клиентов и кому нужна помощь. Первого числа она же пишет сводку за прошедший месяц. Цифры над текстом считает сервер, а не модель. ИИ может ошибаться — сверяйтесь с разговорами по ссылкам." />
                     </p>
                     <div className="flex shrink-0 items-center gap-2">
-                        <button type="button" onClick={() => period.open(defaultPeriod())} className={iosBtnSecondary}
+                        <button type="button" onClick={() => period.open(periodForButton(range))} className={iosBtnSecondary}
                                 title="Цифры, графики и вопросы ИИ за несколько дней — до месяца">
                             <Calendar size={14} aria-hidden="true" />За период
                         </button>
@@ -632,14 +663,16 @@ function DigestDay({ digest, scoped, chatRestore, onOpenRef }) {
 // Без экрана периода (стенд, старый вызов) — кнопки периода просто не действуют.
 const NO_PERIOD = { range: null, open: () => {}, openMonth: () => {} };
 
-export default function DigestView({ digest, period = NO_PERIOD, scoped = false, chatRestore = null, onOpenRef }) {
+export default function DigestView({ digest, period = NO_PERIOD, scoped = false, chatRestore = null, onOpenRef,
+                                     range = null, onResetRange = null }) {
     return (
         <div style={{ fontFamily: APPLE_FONT }}>
             {period?.range
                 ? <PeriodView period={period} scoped={scoped} chatRestore={chatRestore} onOpenRef={onOpenRef} />
                 : digest.openDay
                     ? <DigestDay digest={digest} scoped={scoped} chatRestore={chatRestore} onOpenRef={onOpenRef} />
-                    : <DigestDays digest={digest} period={period} onOpenDay={(day) => digest.open(day, { fromList: true })} />}
+                    : <DigestDays digest={digest} period={period} range={range} onResetRange={onResetRange}
+                                  onOpenDay={(day) => digest.open(day, { fromList: true })} />}
         </div>
     );
 }

@@ -46,6 +46,7 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .border-slate-200 { border-color: #2e333c !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .border-slate-200\/70 { border-color: rgba(46, 51, 60, 0.7) !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .border-slate-300 { border-color: #3a414b !important; }
+:is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .disabled\:text-slate-300:disabled { color: #666f7d !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #24282f !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .focus-visible\:bg-blue-50:focus-visible { background-color: #212b3c !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .focus-within\:border-slate-300:focus-within { border-color: #3a414b !important; }
@@ -84,6 +85,7 @@
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-amber-200 { --tw-ring-color: #826027 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-amber-300 { --tw-ring-color: #9b6e21 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-100 { --tw-ring-color: #324b74 !important; }
+:is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-200 { --tw-ring-color: #33548a !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-blue-300 { --tw-ring-color: #355ea2 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-100 { --tw-ring-color: #255b51 !important; }
 :is(.wz-workspace[data-chat-theme="night"], body[data-wz-chat-night] > [role="menu"]) .ring-emerald-200 { --tw-ring-color: #216b59 !important; }

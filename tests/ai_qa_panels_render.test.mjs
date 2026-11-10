@@ -25,7 +25,7 @@ const { buildSync } = require('esbuild');
 /* Собираем компонент вместе с его локальными импортами; пакеты из
    node_modules остаются внешними. Результат — внутри проекта, чтобы node
    нашёл react (см. custom_select_render.test.mjs). */
-async function load(relative) {
+async function load(relative, whole = false) {
   const dir = join(process.cwd(), 'node_modules', '.cache', 'otp-tests');
   mkdirSync(dir, { recursive: true });
   const outfile = join(dir, `${relative.replace(/[\\/]/g, '_')}.mjs`);
@@ -38,11 +38,12 @@ async function load(relative) {
     logLevel: 'silent',
   });
   const mod = await import(`file://${outfile.replace(/\\/g, '/')}`);
-  return mod.default;
+  return whole ? mod : mod.default;
 }
 
 const AdjudicationsRag = await load('call_qa/AdjudicationsRag.jsx');
 const QaFilters = await load('call_qa/QaFilters.jsx');
+const { QaPeriodField } = await load('call_qa/QaFilters.jsx', true);
 const QaDashboard = await load('call_qa/QaDashboard.jsx');
 const { EMPTY_FILTERS } = await import('../src/components/call_qa/filters.js');
 
@@ -69,8 +70,18 @@ test('панель фильтров: обычный режим и режим «�
   // выгрузка — всегда два пункта, по ней и видно, что модуль включён.
   const marketing = render(QaFilters, { ...base, canExport: true, marketingAccess: true });
   assert.ok(marketing.includes('Выгрузить'));
-  // Справочник сделки ещё не пришёл — в «Базе разборов» панели нет вовсе.
-  assert.equal(render(QaFilters, { ...base, marketingOnly: true, marketingAccess: true }), '');
+  // Справочник сделки ещё не пришёл (или у отдела сделок нет) — в «Базе
+  // разборов» остаётся только период раздела (#389), отбора по сделке нет.
+  const dealOnly = render(QaFilters, { ...base, marketingOnly: true, marketingAccess: true });
+  assert.ok(dealOnly.includes('Весь период'), 'период раздела в «Базе разборов» есть всегда');
+  assert.ok(!dealOnly.includes('Отбор по сделке'));
+});
+
+test('период раздела: календарь с видами и быстрыми периодами (#389)', () => {
+  const html = render(QaPeriodField, { filters: { ...EMPTY_FILTERS, date_from: '2026-10-01', date_to: '2026-10-31' },
+                                       onChange() {} });
+  assert.ok(html.includes('Октябрь 2026'), 'целый месяц подписан словами');
+  assert.ok(html.includes('aria-haspopup="dialog"'));
 });
 
 test('«Обзор» принимает отбор панели', () => {

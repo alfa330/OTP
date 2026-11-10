@@ -561,7 +561,12 @@ export function AdjudicationCard({ item, canManage, locked, editing, busy, onEdi
 
 export default function AdjudicationsRag(props) {
     const { apiBaseUrl, withAccessTokenHeader, showToast, canManage, department, departmentName,
-            onInteractionChange, filters } = props;
+            onInteractionChange, filters, dateFrom = '', dateTo = '', onResetPeriod } = props;
+    /* Период раздела (#389): правила, РАЗОБРАННЫЕ в эти дни (день создания
+       разбора по Алматы). Счётчики шапки и быстрых фильтров — за тот же
+       период: «Ждут проверки · 4» рядом со списком за неделю иначе считали бы
+       всю базу. */
+    const periodSignature = `${dateFrom}|${dateTo}`;
     /* Отбор по сделке из панели раздела (ТЗ #317): правило попадает в выдачу,
        если разговор, из которого его вывели, связан с подходящей сделкой.
        Остальной отбор панели к каталогу не относится и сюда не уходит. */
@@ -597,14 +602,15 @@ export default function AdjudicationsRag(props) {
         return () => window.clearTimeout(timer);
     }, [queryInput]);
 
-    // Новый отбор по сделке — с первой страницы: на пятой странице узкой
-    // выборки обычно пусто, и это читалось бы как «ничего не нашлось».
-    const dealSignatureRef = useRef(dealSignature);
+    // Новый отбор по сделке или новый период — с первой страницы: на пятой
+    // странице узкой выборки обычно пусто, и это читалось бы как «ничего не нашлось».
+    const dealSignatureRef = useRef(`${dealSignature}#${periodSignature}`);
     useEffect(() => {
-        if (dealSignatureRef.current === dealSignature) return;
-        dealSignatureRef.current = dealSignature;
+        const signature = `${dealSignature}#${periodSignature}`;
+        if (dealSignatureRef.current === signature) return;
+        dealSignatureRef.current = signature;
         setPage(1);
-    }, [dealSignature]);
+    }, [dealSignature, periodSignature]);
 
     useEffect(() => {
         onInteractionChange?.({
@@ -640,13 +646,18 @@ export default function AdjudicationsRag(props) {
                 ...(direction !== 'all' ? { direction } : {}),
                 ...(effectiveStatus !== 'all' ? { status: effectiveStatus } : {}),
                 ...(indexStatus !== 'all' ? { index_status: indexStatus } : {}),
+                ...(dateFrom ? { date_from: dateFrom } : {}),
+                ...(dateTo ? { date_to: dateTo } : {}),
                 ...dealParams,
             },
             headers: headers(),
             signal: controller.signal,
         }).then((response) => {
             if (controller.signal.aborted || currentRequest !== requestId.current) return;
-            const normalized = normalizeResponse(response.data, requestState);
+            /* Период, за который посчитан ответ: подпись счётчиков и «Одобрено»
+               берутся по нему, а не по выбранному сейчас — иначе, пока грузится
+               новый период, над старыми числами стояла бы новая подпись. */
+            const normalized = { ...normalizeResponse(response.data, requestState), hasPeriod: Boolean(dateFrom || dateTo) };
             setResult(normalized);
             if (normalized.page !== page) setPage(normalized.page);
         }).catch((requestError) => {
@@ -659,7 +670,7 @@ export default function AdjudicationsRag(props) {
         // Access-token headers are intentionally read at request time.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [apiBaseUrl, department, query, view, direction, status, indexStatus, page, pageSize, reloadKey,
-        dealSignature]);
+        dealSignature, periodSignature]);
 
     const refresh = () => setReloadKey((value) => value + 1);
     const items = result?.items || [];
@@ -677,8 +688,13 @@ export default function AdjudicationsRag(props) {
     const deletedCount = statuses.find((option) => option.value === 'deprecated')?.count;
     const knowledge = result?.knowledge || {};
     const health = healthMeta(result?.health);
-    const activeCount = knowledge.active_count ?? knowledge.active_rules ?? knowledge.active
-        ?? facets?.statuses?.active ?? facets?.status?.active ?? statuses.find((option) => option.value === 'active')?.count;
+    /* «Одобрено» без периода — из состояния базы знаний (как было); с периодом —
+       из счётчика статусов за выбранные дни: состояние базы — на сегодня. */
+    const resultHasPeriod = Boolean(result?.hasPeriod);
+    const activeCount = resultHasPeriod
+        ? (statuses.find((option) => option.value === 'active')?.count ?? 0)
+        : (knowledge.active_count ?? knowledge.active_rules ?? knowledge.active
+           ?? facets?.statuses?.active ?? facets?.status?.active ?? statuses.find((option) => option.value === 'active')?.count);
 
     const applyEdit = (id, saved) => {
         setResult((current) => current ? {
@@ -774,7 +790,7 @@ export default function AdjudicationsRag(props) {
                 </div>
                 <p className="px-4 pb-5 pt-3 text-[13px] leading-relaxed text-slate-500 sm:px-6">Исправления из карточек сразу становятся правилами: ИИ применяет их в следующих оценках похожих разговоров.</p>
                 <div className="grid grid-cols-3 divide-x divide-slate-100 border-t border-slate-100 bg-slate-50/50">
-                    {[{ value: catalogCount, label: 'Разборов в отделе', key: 'all' },
+                    {[{ value: catalogCount, label: resultHasPeriod ? 'Разборов за период' : 'Разборов в отделе', key: 'all' },
                       { value: draftCount, label: 'Ждут проверки', key: 'draft' },
                       { value: activeCount ?? 0, label: 'Одобрено', key: 'active' }].map((stat) => (
                         <button key={stat.key} type="button" disabled={locked || !result} onClick={() => chooseQuickFilter(stat.key)}
@@ -789,7 +805,9 @@ export default function AdjudicationsRag(props) {
             {showSettings && canManage && <RolloutPanel key={department} department={department} apiBaseUrl={apiBaseUrl} headers={headers}
                 showToast={showToast} onInteractionChange={setRolloutInteraction} />}
 
-            {result && !loading && health.status === 'healthy' && activeCount === 0 && draftCount > 0 && (
+            {/* Это слово обо всей базе, а не о выбранных днях: с периодом (#389)
+                счётчики — за период, и «ни одного одобренного» было бы неправдой. */}
+            {result && !loading && !resultHasPeriod && health.status === 'healthy' && activeCount === 0 && draftCount > 0 && (
                 <div className="flex items-start gap-2.5 rounded-2xl bg-amber-50 px-4 py-3 text-amber-900">
                     <Info size={17} className="mt-0.5 shrink-0" />
                     <p className="text-[12.5px] leading-relaxed"><span className="font-semibold">Разборы пока не влияют на оценки.</span> {canManage ? 'Откройте «Проверить» в карточке и одобрите подходящее правило. Режим применения задаётся в настройках ИИ.' : 'Правила ожидают проверки и одобрения администратором.'}</p>
@@ -855,9 +873,10 @@ export default function AdjudicationsRag(props) {
                 {[0, 1, 2, 3].map((key) => <div key={key} className={`${iosCard} space-y-4 p-6 motion-safe:animate-pulse`}><div className="h-4 w-1/3 rounded bg-slate-100" /><div className="h-6 w-2/3 rounded bg-slate-100" /><div className="h-16 rounded-xl bg-slate-100" /><div className="h-24 rounded-xl bg-slate-50" /></div>)}
             </div> : result && !error && health.status !== 'error' && items.length === 0 ? <div className={`${iosCard} flex flex-col items-center px-6 py-14 text-center`}>
                 <div className="mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-slate-100 text-slate-400"><BookOpen size={26} strokeWidth={1.5} /></div>
-                <h3 className="text-[16px] font-semibold text-slate-800">{hasFilters || hasDealFilters ? 'Подходящих разборов нет' : view === 'deleted' ? 'Удалённых разборов нет' : 'В этом отделе пока нет разборов'}</h3>
-                <p className="mt-2 max-w-md text-[13px] leading-relaxed text-slate-500">{hasFilters ? 'Попробуйте другое направление, статус или поисковый запрос.' : hasDealFilters ? 'Измените отбор по сделке в панели раздела.' : view === 'deleted' ? 'Здесь сохраняется история удалённых правил.' : 'Исправьте оценку ИИ при проверке разговора — разбор появится здесь и сразу начнёт применяться в оценках.'}</p>
+                <h3 className="text-[16px] font-semibold text-slate-800">{hasFilters || hasDealFilters ? 'Подходящих разборов нет' : resultHasPeriod ? (view === 'deleted' ? 'За этот период удалённых разборов нет' : 'За этот период разборов нет') : view === 'deleted' ? 'Удалённых разборов нет' : 'В этом отделе пока нет разборов'}</h3>
+                {!(resultHasPeriod && !hasFilters && !hasDealFilters) && <p className="mt-2 max-w-md text-[13px] leading-relaxed text-slate-500">{hasFilters ? 'Попробуйте другое направление, статус или поисковый запрос.' : hasDealFilters ? 'Измените отбор по сделке в панели раздела.' : view === 'deleted' ? 'Здесь сохраняется история удалённых правил.' : 'Исправьте оценку ИИ при проверке разговора — разбор появится здесь и сразу начнёт применяться в оценках.'}</p>}
                 {hasFilters && <button type="button" onClick={resetFilters} className={`${iosBtnSecondary} mt-5`}>Сбросить фильтры</button>}
+                {!hasFilters && resultHasPeriod && onResetPeriod && <button type="button" onClick={onResetPeriod} className={`${iosBtnSecondary} mt-5`}>Показать весь период</button>}
             </div> : result && !error && health.status !== 'error' ? <>
                 <div className="grid items-start gap-4 xl:grid-cols-2">
                     {items.map((item) => <AdjudicationCard key={item.id} item={item} canManage={canManage} locked={locked}

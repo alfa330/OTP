@@ -8,6 +8,7 @@ import {
     AlertCircle, RefreshCw,
 } from 'lucide-react';
 import { APPLE_FONT, iosCard, iosBtnSecondary, IosBadge } from '../ui/ios';
+import { periodLabel } from '../ui/periodRange';
 
 /* Обзор — метрики доверия (реальные данные с /api/ai-qa/stats).
  * Три вопроса вместо одной цифры «согласие»:
@@ -208,28 +209,42 @@ export default function QaDashboard(props) {
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
     const [s, setS] = useState(null);
     const [error, setError] = useState(null);
+    // Перечитываем под новый отбор или период: прежние цифры остаются на месте
+    // и чуть гаснут, а не сменяются заглушкой — экран не прыгает (#389).
+    const [refreshing, setRefreshing] = useState(false);
     const requestRef = useRef({ id: 0, controller: null });
+    const dataDepartment = useRef(null);
+    const periodFrom = filters?.date_from || '';
+    const periodTo = filters?.date_to || '';
 
     const load = () => {
         requestRef.current.controller?.abort();
         const controller = new AbortController();
         const requestId = requestRef.current.id + 1;
         requestRef.current = { id: requestId, controller };
-        setS(null); setError(null);
+        setError(null);
+        // Цифры чужого отдела под новым отделом не показываем ни секунды.
+        if (dataDepartment.current !== department) setS(null);
+        setRefreshing(true);
         if (!apiBaseUrl) {
             setError('Сервис статистики не настроен');
+            setRefreshing(false);
             return;
         }
         axios.get(`${apiBaseUrl}/api/ai-qa/stats`,
             { params: { ...(department ? { department } : {}), ...filtersToParams(filters) },
               headers: headers(), signal: controller.signal })
             .then((response) => {
-                if (requestId === requestRef.current.id) setS(response.data);
+                if (requestId !== requestRef.current.id) return;
+                dataDepartment.current = department;
+                setS(response.data);
+                setRefreshing(false);
             })
             .catch((requestError) => {
-                if (!axios.isCancel(requestError) && requestId === requestRef.current.id) {
-                    setError(requestError?.response?.data?.error || 'Не удалось загрузить статистику');
-                }
+                if (axios.isCancel(requestError) || requestId !== requestRef.current.id) return;
+                setS(null);
+                setRefreshing(false);
+                setError(requestError?.response?.data?.error || 'Не удалось загрузить статистику');
             });
     };
 
@@ -269,7 +284,8 @@ export default function QaDashboard(props) {
         : rag?.status === 'error' ? 'данные недоступны' : 'настройки не переданы';
 
     return (
-        <div style={{ fontFamily: APPLE_FONT }} className="space-y-4">
+        <div style={{ fontFamily: APPLE_FONT }} aria-busy={refreshing}
+             className={`space-y-4 transition-opacity duration-200 ${refreshing ? 'opacity-60' : ''}`}>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 <RateTile label="Точность тревог" Icon={Siren} rate={s.alarm_precision} good={70} ok={40}
                           hint="«Неверно» от ИИ, с которыми человек согласен" />
@@ -290,7 +306,10 @@ export default function QaDashboard(props) {
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
                         <div className="flex items-center gap-2 text-[13px] font-semibold text-slate-700">
-                            <Database size={15} className="text-slate-400" />Наблюдаемость RAG · 30 дней
+                            {/* Без периода — последние 30 дней, как было; с периодом
+                                (#389) запуски поиска считаются за выбранные дни. */}
+                            <Database size={15} className="text-slate-400" />
+                            Наблюдаемость RAG · {periodFrom || periodTo ? periodLabel(periodFrom, periodTo) : '30 дней'}
                         </div>
                         <p className="mt-0.5 text-[11.5px] text-slate-400">Режим раскатки: {rolloutLabel}</p>
                     </div>

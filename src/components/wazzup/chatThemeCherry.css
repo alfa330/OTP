@@ -133,6 +133,7 @@ html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], b
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .border-slate-200 { border-color: #efc9dc !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .border-slate-200\/70 { border-color: rgba(239, 201, 220, 0.7) !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .border-slate-300 { border-color: #e4b2cb !important; }
+html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .disabled\:text-slate-300:disabled { color: #c89bb0 !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .divide-slate-100 > :not([hidden]) ~ :not([hidden]) { border-color: #f6deea !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .focus-visible\:bg-blue-50:focus-visible { background-color: #fff0f6 !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .focus-visible\:ring-blue-400:focus-visible { --tw-ring-color: #dc6c9c !important; }
@@ -170,6 +171,7 @@ html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], b
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .placeholder-slate-400::placeholder { color: #80556b !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .placeholder\:text-slate-400::placeholder { color: #80556b !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .ring-blue-100 { --tw-ring-color: #f9dce9 !important; }
+html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .ring-blue-200 { --tw-ring-color: #f6bfd6 !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .ring-blue-300 { --tw-ring-color: #ee9fc1 !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .ring-blue-500 { --tw-ring-color: #bd3976 !important; }
 html:not([data-otp-theme="dark"]) :is(.wz-workspace[data-chat-theme="cherry"], body[data-wz-chat-cherry] > [role="menu"]) .ring-blue-500\/40 { --tw-ring-color: rgba(189, 57, 118, 0.4) !important; }

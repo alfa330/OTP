@@ -43,6 +43,8 @@ def _load_method(name):
 
 
 get_group_operators_for_month = _load_method("get_group_operators_for_month")
+# С задачи #389 месяц — частный случай периода: месячная функция зовёт функцию периода.
+get_group_operators_for_period = _load_method("get_group_operators_for_period")
 
 
 def _roster_row(op_id, name, status="working"):
@@ -68,15 +70,19 @@ class _Cursor:
 
 
 class _FakeDb:
+    get_group_operators_for_period = get_group_operators_for_period
+
     def __init__(self, rows, segments):
         self.cursor = _Cursor(rows)
         self.segments = segments
+        self.calls = []
 
     @contextmanager
     def _get_cursor(self):
         yield self.cursor
 
     def _resolve_user_field_as_of_tx(self, cursor, op_ids, field, ref_dt):
+        self.calls.append(("status_as_of", ref_dt))
         return {}
 
     def _load_dismissal_dates_tx(self, cursor, op_ids):
@@ -85,11 +91,14 @@ class _FakeDb:
     def _dismissal_date_iso(self, dismissal_dates, op_id):
         return None
 
-    def _load_segments_by_operator_tx(self, cursor, op_ids, start, end):
+    def _load_segments_by_operator_tx(self, cursor, op_ids, start, end, with_dates=False):
+        self.calls.append(("segments", start, end, with_dates))
         return self.segments
 
 
-def _seg(group_id, start_day, end_day, is_current=False):
+def _seg(group_id, start_day, end_day, is_current=False, month="2026-09", start_date=None, end_date=None):
+    """Сегмент, как его отдаёт _load_segments_by_operator_tx(with_dates=True): номера
+    дней и даты. У периода длиннее месяца даты задаются явно."""
     return {
         "group_id": group_id,
         "group_name": f"группа {group_id}",
@@ -98,6 +107,8 @@ def _seg(group_id, start_day, end_day, is_current=False):
         "start_day": start_day,
         "end_day": end_day,
         "is_current": is_current,
+        "start_date": start_date or f"{month}-{start_day:02d}",
+        "end_date": end_date or f"{month}-{end_day:02d}",
     }
 
 
@@ -141,3 +152,47 @@ class GroupRosterInvertedMembershipTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GroupRosterPeriodTests(unittest.TestCase):
+    """Задача #389: «Аналитика» за любой период — состав тот же, что за месяц, только
+    границы — выбранные дни; статус — на конец периода; у сегментов — даты."""
+
+    def test_month_is_a_period_from_first_to_last_day(self):
+        db = _FakeDb([_roster_row(7, "Оператор")], {7: [_seg(10, 1, 30, is_current=True)]})
+        get_group_operators_for_month(db, 10, "2026-09")
+        self.assertIn(("segments", date(2026, 9, 1), date(2026, 9, 30), True), db.calls)
+        # Статус «на конец месяца» — начало следующего дня, как и было.
+        self.assertIn(("status_as_of", datetime(2026, 10, 1)), db.calls)
+
+    def test_december_status_is_taken_at_new_year(self):
+        db = _FakeDb([_roster_row(7, "Оператор")], {7: []})
+        get_group_operators_for_month(db, 10, "2026-12")
+        self.assertIn(("status_as_of", datetime(2027, 1, 1)), db.calls)
+
+    def test_period_bounds_reach_roster_segments_and_status(self):
+        db = _FakeDb([_roster_row(7, "Оператор")], {7: [_seg(10, 4, 10, is_current=True)]})
+        get_group_operators_for_period(db, 10, date(2026, 11, 4), date(2026, 11, 10))
+        roster_sql = db.cursor.sql[0]
+        self.assertIn("gom.start_date <= %s", roster_sql)
+        self.assertIn("(gom.end_date IS NULL OR gom.end_date >= gom.start_date)", roster_sql)
+        self.assertIn(("segments", date(2026, 11, 4), date(2026, 11, 10), True), db.calls)
+        self.assertIn(("status_as_of", datetime(2026, 11, 11)), db.calls)
+
+    def test_long_period_keeps_membership_whose_end_day_number_is_smaller(self):
+        """«Весь период»: 20.07.2025 — 14.10.2026 по номерам дней «14 < 20», но
+        это год с лишним в группе, а не пустое членство (стенд #389)."""
+        db = _FakeDb(
+            [_roster_row(5, "Ганиева Асель")],
+            {5: [_seg(1, 20, 14, start_date="2025-07-20", end_date="2026-10-14"),
+                 _seg(10, 15, 10, is_current=True, start_date="2026-10-15", end_date="2026-11-10")]},
+        )
+        [op] = get_group_operators_for_period(db, 1, date(2000, 1, 1), date(2026, 11, 10))
+        self.assertEqual([s["group_id"] for s in op["group_segments"]], [1, 10])
+        self.assertTrue(op["has_other_group_in_month"])
+        # А настоящее пустое членство (конец раньше начала по датам) по-прежнему отсекается.
+        db = _FakeDb([_roster_row(5, "Ганиева Асель")],
+                     {5: [_seg(99, 17, 16, start_date="2026-07-17", end_date="2026-07-16"),
+                          _seg(1, 17, 31, is_current=True, month="2026-07")]})
+        [op] = get_group_operators_for_period(db, 1, date(2026, 1, 1), date(2026, 12, 31))
+        self.assertEqual([s["group_id"] for s in op["group_segments"]], [1])

@@ -40,7 +40,12 @@ async function loadCalendar() {
      проверяем разметку календаря, а не то, как нарисована стрелка. */
   const patched = code.replace(
     /import\s*\{[^}]*\}\s*from\s*['"]lucide-react['"];?/,
-    'const Stub = () => null; const Calendar = Stub, ChevronUp = Stub, ChevronLeft = Stub, ChevronRight = Stub;',
+    'const Stub = () => null; const Calendar = Stub, Check = Stub, ChevronUp = Stub, ChevronLeft = Stub, ChevronRight = Stub;',
+  ).replace(
+    /* Правила календаря периода (#389) — отдельный модуль без React. Собранный
+       файл лежит в другой папке, поэтому относительный путь — в абсолютный. */
+    /from\s*['"]\.\/periodRange\.js['"]/,
+    `from '${new URL('../src/components/ui/periodRange.js', import.meta.url).href}'`,
   );
   /* Собранный модуль кладём ВНУТРЬ проекта: из системной временной папки
      `import 'react'` не разрешается — node ищет node_modules вверх от файла. */

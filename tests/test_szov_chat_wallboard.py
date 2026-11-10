@@ -1173,8 +1173,12 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("export function IosDateRangeCalendar(", picker)
         self.assertIn("export function IosDateRangePicker(", picker)
         self.assertIn("<IosDateRangeCalendar", picker)
-        # Сетка месяца существует в одном экземпляре: в чипе её больше нет.
-        self.assertEqual(picker.count("daysInMonth(view.y, view.m)"), 1)
+        # Сетка месяца существует в одном экземпляре: с задачи #389 — в periodRange.dayCells
+        # (её же берёт календарь «Аналитики» журнала оценок), календарь зовёт её один раз.
+        self.assertEqual(picker.count("dayCells(view.y, view.m,"), 1)
+        self.assertNotIn("daysInMonth(view.y, view.m)", picker)
+        rules = (ROOT / "src" / "components" / "ui" / "periodRange.js").read_text(encoding="utf-8-sig")
+        self.assertEqual(rules.count("export const dayCells = (year, month0,"), 1)
 
     def test_export_file_name_carries_the_period(self):
         """Имя собирает фронт: Content-Disposition через CORS сюда не доходит."""

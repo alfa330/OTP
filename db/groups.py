@@ -133,10 +133,18 @@ class GroupsMixin:
         } for r in rows]
 
     def get_group_operators_for_month(self, group_id, month):
-        """Состав ГРУППЫ за месяц для «Аналитики» журнала оценок.
+        """Состав ГРУППЫ за месяц для «Аналитики» журнала оценок — частный случай
+        get_group_operators_for_period (с первого по последний день месяца)."""
+        year, mon = map(int, str(month).split('-'))
+        last_day = calendar.monthrange(year, mon)[1]
+        return self.get_group_operators_for_period(group_id, date(year, mon, 1), date(year, mon, last_day))
+
+    def get_group_operators_for_period(self, group_id, start, end):
+        """Состав ГРУППЫ за период для «Аналитики» журнала оценок (месяц, а с
+        задачи #389 — любой период: день, неделя, диапазон, год, всё время).
 
         Историческая видимость ровно как в «Учёте часов»: состав определяется
-        ЧЛЕНСТВОМ в группе, пересекающим месяц, а не текущим users.supervisor_id.
+        ЧЛЕНСТВОМ в группе, пересекающим период, а не текущим users.supervisor_id.
         Поэтому оператор не пропадает из прошлых месяцев, когда его перевели,
         повысили до СВ или уволили. Роль здесь не фильтруется намеренно.
 
@@ -155,12 +163,14 @@ class GroupsMixin:
         на проде 16 таких, 3 — в сентябре 2026) не покрывает ни одного дня. Без
         отсечки человек попадал в состав группы, где не был ни дня, и фронт
         записывал его в «Переведённые» этой группы.
+
+        Статус — на конец ПЕРИОДА (у месяца — на конец месяца, как и было).
+        Сегменты членства обрезаны по границам периода и несут даты start_date /
+        end_date: у периода длиннее месяца номер дня (start_day) уже ничего не
+        говорит, и фронт делит вкладки по датам.
         """
-        year, mon = map(int, str(month).split('-'))
-        last_day = calendar.monthrange(year, mon)[1]
-        start = date(year, mon, 1)
-        end = date(year, mon, last_day)
-        ref_dt = datetime(year + 1, 1, 1) if mon == 12 else datetime(year, mon + 1, 1)
+        # Начало следующего за периодом дня: статус «на конец периода».
+        ref_dt = datetime.fromordinal(end.toordinal() + 1)
 
         with self._get_cursor() as cursor:
             cursor.execute("""
@@ -233,17 +243,20 @@ class GroupsMixin:
             op_ids = [int(row[0]) for row in rows]
             status_as_of = self._resolve_user_field_as_of_tx(cursor, op_ids, 'status', ref_dt)
             dismissal_dates = self._load_dismissal_dates_tx(cursor, op_ids)
-            segments_by_operator = self._load_segments_by_operator_tx(cursor, op_ids, start, end)
+            segments_by_operator = self._load_segments_by_operator_tx(cursor, op_ids, start, end,
+                                                                      with_dates=True)
 
             operators = []
             for row in rows:
                 op_id = int(row[0])
                 # Сегменты общие с отчётами часов и там не фильтруются; здесь
                 # пустые (конец раньше начала) выбрасываем: по сегментам фронт
-                # решает, ушёл ли человек из группы и куда.
+                # решает, ушёл ли человек из группы и куда. Сравниваются ДАТЫ, а
+                # не номера дней: у периода длиннее месяца членство «20.07.2025 —
+                # 14.10.2026» дало бы 14 < 20 и пропало бы (#389).
                 segments = [
                     seg for seg in segments_by_operator.get(op_id, [])
-                    if int(seg.get('end_day') or 0) >= int(seg.get('start_day') or 0)
+                    if str(seg.get('end_date') or '') >= str(seg.get('start_date') or '')
                 ]
                 other_groups = {int(seg.get('group_id') or 0) for seg in segments} - {int(group_id)}
                 operators.append({

@@ -4912,6 +4912,20 @@ def _ai_qa_list_filters():
         return None, (jsonify({"error": str(error)}), 400)
 
 
+def _ai_qa_period_filters():
+    """Только период раздела (задача #389) из query-строки → (filters, None) либо
+    (None, ответ 400). «Сводка» и «База разборов» берут из отбора один период:
+    сотрудник, балл или поиск «Звонков» к их выборке не относятся. Проверка —
+    та же, что у списков: неверная дата или перевёрнутый период — 400, а не
+    молча снятый фильтр."""
+    from call_qa.api import normalise_list_filters
+    try:
+        filters = normalise_list_filters({key: request.args.get(key) for key in ('date_from', 'date_to')})
+        return {key: filters[key] for key in ('date_from', 'date_to') if key in filters}, None
+    except ValueError as error:
+        return None, (jsonify({"error": str(error)}), 400)
+
+
 @app.route('/api/ai-qa/filter-options', methods=['GET', 'OPTIONS'])
 @require_api_key
 def api_ai_qa_filter_options():
@@ -5642,13 +5656,18 @@ def api_ai_qa_adjudications():
         filters, filters_err = _ai_qa_list_filters()
         if filters_err:
             return filters_err
+        # И период раздела (#389) — по дню, когда разбор сделан.
+        period, period_err = _ai_qa_period_filters()
+        if period_err:
+            return period_err
         result = adjudications_list(
             direction=request.args.get('direction'), q=request.args.get('q'),
             status=request.args.get('status'), index_status=request.args.get('index_status'),
             page=request.args.get('page', 1), page_size=request.args.get('page_size', 20),
             allowed_direction_ids=_ai_qa_direction_scope(requester_id),
             department=department,
-            filters={'marketing': filters['marketing']} if filters.get('marketing') else None)
+            filters={'marketing': filters['marketing']} if filters.get('marketing') else None,
+            date_from=period.get('date_from'), date_to=period.get('date_to'))
         return jsonify({"status": "success", **result}), 200
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
@@ -7411,11 +7430,16 @@ def api_ai_qa_digests():
             return dept_err
         if not department:
             return jsonify({"error": "Сводка пишется по одному отделу — выберите отдел"}), 400
+        # Период раздела (#389): только дни выбранного периода — тот же день
+        # разговора, что у списков и строки дня.
+        period, period_err = _ai_qa_period_filters()
+        if period_err:
+            return period_err
         scope = _ai_qa_direction_scope(requester_id)
         # Цифры строки дня — как на экране дня сводки: без звонков, взятых по
         # триггеру фрода (SZOV-2), — их разбирает раздел «Поиск фрода».
         summary = evaluations_days(allowed_direction_ids=scope, department=department,
-                                   without_trigger_picks=True)
+                                   filters=period or None, without_trigger_picks=True)
         days = [d for d in summary.get("days") or [] if d.get("day") != QUEUE_NO_DAY]
         known = qa_digest.headlines(department, [d["day"] for d in days], scope)
         for day in days:

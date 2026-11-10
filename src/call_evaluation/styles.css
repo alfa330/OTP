@@ -162,6 +162,202 @@ html { color-scheme: light; }
         .ce-select-option-check { flex-shrink: 0; font-size: 11px; color: var(--accent); }
         .ce-select-empty { padding: 14px 12px; font-size: 12px; color: var(--text-3); text-align: center; }
 
+        /* ── Календарь периода «Аналитики» (EvalPeriodPicker, задача #389) ─────
+           Кнопка — та же, что у EvalSelect (.ce-select-btn), панель — как у его
+           списка. Раскладка — как у календаря периода в ИИ-оценке: «Дни ·
+           Месяцы · Годы», шесть недель всегда, быстрые периоды сеткой 2 × 2.
+           Цвета — переменными журнала: тёмный слой подменяет их сам. */
+        .ce-period { position: relative; display: inline-block; }
+        .ce-period-btn { width: auto; min-width: 176px; }
+        .ce-period-icon { flex-shrink: 0; font-size: 12px; color: var(--text-3); }
+        .ce-period-pop {
+            position: fixed;
+            z-index: 1200;
+            width: 284px;
+            padding: 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+        }
+        .ce-period-views {
+            display: flex;
+            margin-bottom: 10px;
+            padding: 3px;
+            background: var(--surface-2);
+            border-radius: 10px;
+        }
+        .ce-period-views button {
+            flex: 1;
+            padding: 5px 8px;
+            font-family: var(--font);
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--text-2);
+            background: transparent;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+        }
+        .ce-period-views button:hover { color: var(--text); }
+        .ce-period-views button.is-active {
+            color: var(--text);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .ce-period-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .ce-period-title {
+            font-size: 13.5px;
+            font-weight: 600;
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+        }
+        .ce-period-nav {
+            display: grid;
+            place-items: center;
+            width: 28px;
+            height: 28px;
+            font-size: 11px;
+            color: var(--text-2);
+            background: transparent;
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+        }
+        .ce-period-nav:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+        .ce-period-nav:disabled { color: var(--border-strong); cursor: default; }
+        .ce-period-weekdays {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            margin-bottom: 4px;
+        }
+        .ce-period-weekdays span {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 28px;
+            font-size: 10.5px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-3);
+        }
+        .ce-period-days {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            row-gap: 2px;
+        }
+        .ce-period-cell {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 36px;
+        }
+        .ce-period-cell.in-band,
+        .ce-period-cell.band-start,
+        .ce-period-cell.band-end { background: var(--accent-light); }
+        .ce-period-cell.band-start { border-radius: 999px 0 0 999px; }
+        .ce-period-cell.band-end { border-radius: 0 999px 999px 0; }
+        .ce-period-day {
+            width: 32px;
+            height: 32px;
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+            background: transparent;
+            border: none;
+            border-radius: 999px;
+            cursor: pointer;
+            transition: background var(--transition);
+        }
+        .ce-period-day:hover:not(:disabled) { background: var(--surface-2); }
+        .ce-period-day.in-band { color: var(--accent); }
+        .ce-period-day.is-today {
+            font-weight: 600;
+            color: var(--accent);
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+        .ce-period-day.is-end,
+        .ce-period-day.is-end:hover:not(:disabled) {
+            font-weight: 600;
+            color: #fff;
+            background: var(--accent);
+        }
+        .ce-period-day:disabled { color: var(--border-strong); cursor: not-allowed; }
+        .ce-period-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 6px;
+            /* Высота сетки дней (строка дней недели + шесть недель): панель не
+               прыгает, когда переключаешь «Дни», «Месяцы» и «Годы». */
+            height: 258px;
+        }
+        .ce-period-whole {
+            font-family: var(--font);
+            font-size: 13px;
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+            background: transparent;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background var(--transition);
+        }
+        .ce-period-whole:hover:not(:disabled) { background: var(--surface-2); }
+        .ce-period-whole.is-current {
+            font-weight: 600;
+            color: var(--accent);
+            box-shadow: inset 0 0 0 1px var(--accent);
+        }
+        .ce-period-whole.is-selected,
+        .ce-period-whole.is-selected:hover:not(:disabled) {
+            font-weight: 600;
+            color: #fff;
+            background: var(--accent);
+        }
+        .ce-period-whole:disabled { color: var(--border-strong); cursor: not-allowed; }
+        .ce-period-presets {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border);
+        }
+        .ce-period-preset {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding: 6px 8px;
+            font-family: var(--font);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-2);
+            background: var(--surface-2);
+            border: none;
+            border-radius: var(--radius);
+            cursor: pointer;
+            transition: background var(--transition), color var(--transition);
+        }
+        .ce-period-preset:hover { color: var(--text); background: var(--border); }
+        /* Совпавший с выбором быстрый период — мягким голубым с галочкой. */
+        .ce-period-preset.is-active,
+        .ce-period-preset.is-active:hover {
+            color: var(--accent);
+            background: var(--accent-light);
+            box-shadow: inset 0 0 0 1px var(--accent-light);
+        }
+        .ce-period-preset i { font-size: 10px; }
+        .ce-period-hint { margin-top: 8px; font-size: 11px; color: var(--text-3); text-align: center; }
+
         /* ── Чипы состояния ──────────────────────────────────────────────────
            Цвет только там, где он несёт смысл: уволен — красный, промежуточное
            состояние — янтарный, служебная пометка — нейтральная. */
@@ -728,6 +924,10 @@ html { color-scheme: light; }
         }
         .analytics-actions-compact {
             grid-template-columns: 74px;
+        }
+        /* Период не из одного месяца (#389): плана нет — нет и колонки «Уведомить». */
+        .analytics-actions-admin-noplan {
+            grid-template-columns: 74px 86px;
         }
         .analytics-actions .btn,
         .analytics-action-placeholder {

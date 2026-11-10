@@ -44,7 +44,8 @@ export const syncDayRow = (days, day, data) => (days ? days.map((d) => (d.day ==
     ...d, running: Boolean(data?.running), headline: data?.headline || d.headline || '',
 } : d)) : days);
 
-export default function useDigest({ apiBaseUrl, headers, department, enabled, showToast }) {
+export default function useDigest({ apiBaseUrl, headers, department, enabled, showToast,
+                                    dateFrom = '', dateTo = '' }) {
     const [days, setDays] = useState(null);
     const [daysError, setDaysError] = useState(false);
     // Сводки за месяцы списка ({ 'ГГГГ-ММ': { status, headline, running, hidden, complete } })
@@ -93,26 +94,43 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
 
     const daysRef = useRef(days);
     daysRef.current = days;
+    /* Период раздела (#389): список — только дни выбранного периода. Ответ на
+       прежний период, пришедший позже нового, на экран не попадает: у каждого
+       чтения списка свой номер, рисуется только последнее. */
+    const daysRequest = useRef(0);
+    const [daysLoading, setDaysLoading] = useState(false);
+    // Период, за который загружен список: надпись «за этот период нет» — о нём,
+    // а не о периоде, который уже выбран и ещё грузится.
+    const [daysPeriod, setDaysPeriod] = useState({ from: '', to: '' });
 
     /* background — перечитать уже показанный список (сводка дописалась, в
        списке «пишется»): сбой такого запроса список не стирает. */
     const loadDays = useCallback(({ background = false } = {}) => {
         if (!apiBaseUrl) { setDays([]); setDaysError(true); return; }
         const gen = generation.current;
-        if (!background) setDaysError(false);
-        axios.get(`${apiBaseUrl}/api/ai-qa/digests`, { params: params(), ...cfg() })
+        const requestId = ++daysRequest.current;
+        if (!background) { setDaysError(false); setDaysLoading(true); }
+        axios.get(`${apiBaseUrl}/api/ai-qa/digests`, {
+            params: params({ ...(dateFrom ? { date_from: dateFrom } : {}),
+                             ...(dateTo ? { date_to: dateTo } : {}) }),
+            ...cfg(),
+        })
             .then((r) => {
-                if (gen !== generation.current) return;
+                if (gen !== generation.current || requestId !== daysRequest.current) return;
                 setDays(r.data?.days || []);
                 setMonths(r.data?.months || {});
+                setDaysPeriod({ from: dateFrom, to: dateTo });
+                setDaysError(false);
+                setDaysLoading(false);
             })
             .catch(() => {
-                if (gen !== generation.current) return;
+                if (gen !== generation.current || requestId !== daysRequest.current) return;
+                setDaysLoading(false);
                 if (background && daysRef.current !== null) return;
                 setDays([]); setDaysError(true);
             });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [apiBaseUrl, params]);
+    }, [apiBaseUrl, params, dateFrom, dateTo]);
 
     // Ссылки на функции опроса друг на друга — через ref: loadView ставит опрос,
     // опрос по окончании зовёт loadView.
@@ -223,19 +241,25 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
         generation.current += 1;
         askingRef.current = new Set();
         generatingRef.current = false;
-        setDays(null); setDaysError(false); setMonths({}); setOpenDay(null); openDayRef.current = null;
+        daysRequest.current += 1;
+        setDays(null); setDaysError(false); setDaysLoading(false); setDaysPeriod({ from: '', to: '' });
+        setMonths({}); setOpenDay(null); openDayRef.current = null;
         setView(null); setSection(null); setChat({ day: null, messages: [], loading: false, error: '' });
         setAskingDays([]); setDraft(''); setDraftFocus(null); setGenerating(false);
     }, []);
 
+    /* Список читается при входе на вкладку и заново — при смене отдела или
+       периода. Прежний список остаётся на экране, пока не придёт новый: экран
+       не мигает заглушкой на каждую смену периода. */
     const loadedFor = useRef(null);
     useEffect(() => {
         if (!enabled || department === null) return;
-        if (loadedFor.current === department && days !== null) return;
-        loadedFor.current = department;
+        const key = `${department}|${dateFrom}|${dateTo}`;
+        if (loadedFor.current === key && days !== null) return;
+        loadedFor.current = key;
         loadDays();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enabled, department, loadDays]);
+    }, [enabled, department, dateFrom, dateTo, loadDays]);
 
     // Ушли из раздела: опрос и ответы, которые ещё в пути, — уже ни к чему.
     useEffect(() => () => { stopPoll(); generation.current += 1; }, []);
@@ -348,7 +372,7 @@ export default function useDigest({ apiBaseUrl, headers, department, enabled, sh
     }, []);
 
     return {
-        days, months, daysError, openDay, view, section, setSection, pane, setPane, chat,
+        days, months, daysError, daysLoading, daysPeriod, openDay, view, section, setSection, pane, setPane, chat,
         asking: askingFor(askingDays, chat.day),
         draft, setDraft, draftFocus,
         generating, open, close, reset, reloadDays: () => loadDays(),

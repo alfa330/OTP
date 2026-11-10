@@ -751,6 +751,90 @@ class OperatorsMixin:
             }
         return result
 
+    def get_operator_score_aggregates_for_period(self, operator_ids: Optional[List[int]] = None, *,
+                                                 months=None, start=None, end=None):
+        """Агрегаты завершённых оценок за ПЕРИОД «Аналитики» журнала (задача #389).
+
+        Выборка та же, что у get_operator_score_aggregates_for_month: одна
+        последняя завершённая версия оценки по ключу (оператор, номер, месяц,
+        дата обращения), оценка «Тестирование знаний» входит в балл, но не в
+        счёт звонков, тестовые номера не считаются. Период задаёт
+        _journal_period_sql: целые месяцы — по месяцу журнала, остальное — по
+        дню обращения, ничего — всё время. Один месяц «Аналитика» по-прежнему
+        считает функцией месяца — ради тех же цифр, что в журнале и выгрузке.
+        """
+        normalized_ids = None
+        if operator_ids is not None:
+            normalized_ids = []
+            seen_ids = set()
+            for raw_id in operator_ids:
+                try:
+                    op_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if op_id in seen_ids:
+                    continue
+                seen_ids.add(op_id)
+                normalized_ids.append(op_id)
+            if not normalized_ids:
+                return {}
+
+        from test_numbers import keys as test_keys
+        period_sql, params = self._journal_period_sql(months=months, start=start, end=end)
+        filter_clause = period_sql + " AND is_draft = FALSE AND " + test_keys.sql_calls_not_test()
+        if normalized_ids is not None:
+            filter_clause += " AND operator_id = ANY(%s)"
+            params.append(normalized_ids)
+
+        query = f"""
+            WITH latest_calls AS (
+                SELECT DISTINCT ON (operator_id, phone_number, month, appeal_date)
+                    operator_id,
+                    phone_number,
+                    month,
+                    appeal_date,
+                    score,
+                    survey_response_id
+                FROM calls
+                WHERE {filter_clause}
+                ORDER BY operator_id, phone_number, month, appeal_date, created_at DESC, id DESC
+            )
+            SELECT
+                operator_id,
+                COUNT(*) FILTER (WHERE score IS NOT NULL AND survey_response_id IS NULL) AS call_count,
+                AVG(score)::float AS avg_score,
+                COUNT(*) AS evaluation_row_count
+            FROM latest_calls
+            GROUP BY operator_id
+        """
+
+        with self._get_cursor() as cursor:
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+        result = {}
+        for operator_id, call_count, avg_score, evaluation_row_count in rows:
+            evaluation_rows = int(evaluation_row_count or 0)
+            avg_score_raw = float(avg_score) if avg_score is not None else None
+            result[int(operator_id)] = {
+                "call_count": int(call_count or 0),
+                "avg_score": round(avg_score_raw, 2) if avg_score_raw is not None else None,
+                "avg_score_raw": avg_score_raw,
+                "evaluation_row_count": evaluation_rows,
+                "has_evaluation_data": evaluation_rows > 0
+            }
+        return result
+
+    def get_feedback_sla_operator_stats_for_period(self, operator_ids: Optional[List[int]] = None, *,
+                                                   months=None, start=None, end=None,
+                                                   reference_date=None) -> Dict[int, Dict[str, Any]]:
+        """Обратная связь по оценкам за ПЕРИОД «Аналитики» журнала (#389) — счёт тот
+        же, что у get_feedback_sla_operator_stats_for_month."""
+        rows = self.get_feedback_sla_rows_for_period(
+            operator_ids=operator_ids, months=months, start=start, end=end,
+            reference_date=reference_date)
+        return self._feedback_sla_stats_from_rows(rows)
+
     def get_feedback_sla_operator_stats_for_month(
         self,
         month: str,
@@ -764,7 +848,11 @@ class OperatorsMixin:
             supervisor_ids=supervisor_ids,
             reference_date=reference_date
         )
+        return self._feedback_sla_stats_from_rows(rows)
 
+    @staticmethod
+    def _feedback_sla_stats_from_rows(rows) -> Dict[int, Dict[str, Any]]:
+        """Строки SLA обратной связи → счётчики по оператору (месяц и период)."""
         result: Dict[int, Dict[str, Any]] = {}
         for item in rows:
             operator_id = int(item.get("operator_id"))
@@ -1850,10 +1938,13 @@ class OperatorsMixin:
             })
         return segments
 
-    def _load_segments_by_operator_tx(self, cursor, op_ids, start, end):
+    def _load_segments_by_operator_tx(self, cursor, op_ids, start, end, with_dates=False):
         """Батч: {operator_id: [сегменты членства за месяц]} (клиппнутые к месяцу, с моделью
         группы) — БЕЗ агрегатов. Для отчётов: разбивка строки оператора по группам/моделям.
-        start/end — date границы месяца."""
+        start/end — date границы месяца.
+
+        with_dates — ещё и даты сегмента (start_date/end_date, ISO): «Аналитике»
+        журнала за период длиннее месяца (#389) номер дня ни о чём не говорит."""
         out = {}
         if not op_ids:
             return out
@@ -1871,7 +1962,7 @@ class OperatorsMixin:
         for op_id, g_id, g_name, model_code, dir_name, seg_start, seg_end in cursor.fetchall() or []:
             cs = seg_start if (seg_start and seg_start > start) else start
             ce = seg_end if (seg_end and seg_end < end) else end
-            out.setdefault(int(op_id), []).append({
+            segment = {
                 "group_id": int(g_id),
                 "group_name": g_name,
                 "direction_name": dir_name,
@@ -1879,7 +1970,11 @@ class OperatorsMixin:
                 "start_day": int(cs.day),
                 "end_day": int(ce.day),
                 "is_current": seg_end is None,
-            })
+            }
+            if with_dates:
+                segment["start_date"] = cs.isoformat()
+                segment["end_date"] = ce.isoformat()
+            out.setdefault(int(op_id), []).append(segment)
         return out
 
     def get_operator_segments_for_month(self, month, operator_ids):
