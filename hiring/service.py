@@ -1208,7 +1208,9 @@ class HiringService:
         for row in rows:
             item = {'id': row['wa_id'], 'chat': wa_media.resend_chat(row['jid'], row['phone'], row['lid'], row['attempts']),
                     'from_me': bool(row['from_me'])}
-            anchor = wa_media.resend_anchor(row['anchor_id'], row['anchor_from_me'], row['anchor_at'], rules.ALMATY)
+            # Сначала — просьба прислать само сообщение (проверено на проде); не помогла — история чата.
+            anchor = wa_media.resend_anchor(row['anchor_id'], row['anchor_from_me'], row['anchor_at'], rules.ALMATY) \
+                if row['attempts'] >= wa_media.RESEND_HISTORY_FROM else None
             if anchor:
                 item['anchor'] = anchor
             items.append(item)
