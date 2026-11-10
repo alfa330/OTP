@@ -1796,6 +1796,10 @@ def test_build_does_not_bundle_setuptools():
     bat = (Path(agent.__file__).parent / "build_exe.bat").read_text(encoding="utf-8")
     assert "--exclude-module pkg_resources" in bat
     assert "--exclude-module setuptools" in bat
+    # brotli тянет urllib3, если он стоит в окружении сборки (10.11.2026: +0,36 МБ и другой
+    # набор сжатий в запросах). Выпущенные сборки шли без него — состав держим прежним.
+    for module in ("brotli", "_brotli", "brotlicffi"):
+        assert f"--exclude-module {module} ^" in bat
 
 
 def test_agent_really_does_not_need_setuptools():

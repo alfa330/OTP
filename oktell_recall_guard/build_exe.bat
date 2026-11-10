@@ -36,6 +36,9 @@ REM когда onefile-процесс попадает на ЧУЖУЮ недо�
 REM остаются после убитых копий, имя считается от PID и повторяется), файла на
 REM месте нет — процесс умирает с модальным окном «Unhandled exception in
 REM script». Без этих модулей у падения нет и повода.
+REM brotli исключаем по той же причине «тянется сам»: его подхватывает urllib3, если он
+REM стоит в окружении сборки (10.11.2026: +0,36 МБ к exe). Выпущенные сборки шли без него —
+REM состав exe должен меняться только вместе с кодом агента.
 REM Значок — тот же, что у iCORE Phone (microsip-src\res\icore.ico): человек
 REM видит его на ярлыке, в панели задач и в «Программах и компонентах», и две
 REM наши программы должны выглядеть одной семьёй. Без --icon PyInstaller ставит
@@ -54,6 +57,9 @@ python -m PyInstaller --onefile --noconsole --name OktellRecallGuard ^
   --exclude-module pkg_resources ^
   --exclude-module setuptools ^
   --exclude-module pip ^
+  --exclude-module brotli ^
+  --exclude-module _brotli ^
+  --exclude-module brotlicffi ^
   --version-file version_info.txt ^
   agent.py
 set BUILD_RESULT=%errorlevel%

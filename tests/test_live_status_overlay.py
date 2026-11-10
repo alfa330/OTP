@@ -235,6 +235,19 @@ class OverlayRuleTests(unittest.TestCase):
         self.assertEqual(timeline(fresh)[-1], (start + timedelta(hours=16), "тренинг"))
         self.assertEqual(timeline(stale)[-1], (start + timedelta(hours=16, seconds=1), "выключен"))
 
+    def test_after_cut_the_day_follows_oktell_including_idle_states(self):
+        """Сессия телефона оборвана — дальше день идёт по Oktell целиком: «Выключен» и «Без
+        телефона» снова в ряду (исключением они были только как повод оборвать сессию)."""
+        events = [
+            ev(1, at(10), "готов", True),
+            ev(2, at(12), "готов", False),          # позже порога и рабочее — сессия оборвана
+            ev(3, at(13), "выключен", False),
+            ev(4, at(14), "без телефона", False),
+            ev(5, at(14, 5), "готов", False),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(10), "готов"), (at(13), "выключен"), (at(14), "без телефона"), (at(14, 5), "готов")])
+
     def test_session_reopens_after_cut(self):
         events = [
             ev(1, at(10), "готов", True),
