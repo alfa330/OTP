@@ -15,7 +15,8 @@
 * согласующий нажал «Вернуть на доработку» (п. 7);
 * бухгалтерия или финансовый отдел нажали «Запросить информацию» (п. 8);
 * сам раздел: заявка дошла до оплаты счёта, а счёта нет либо нет действующего
-  договора (правило «свыше 300 000 ₸ — только с договором»).
+  договора (правило «свыше 300 000 ₸ — только с договором или с отметкой
+  «Без договора»», отметка — с 10.11.2026).
 
 Когда инициатор отвечает, заявка возвращается ТОМУ, КТО СПРОСИЛ, — если
 существенные условия (сумма, поставщик, способ оплаты, карта, компания…) не
@@ -248,10 +249,56 @@ def _invoice_gate(cursor, request):
     contract = directory.read_contract(cursor, request.get('contract_id'))
     ok, reason = workflow.contract_gate(
         request.get('amount'), contract, counterparty_id=request.get('counterparty_id'),
-        on_date=request.get('invoice_date') or queries.today_almaty())
+        on_date=request.get('invoice_date') or queries.today_almaty(),
+        no_contract=bool(request.get('no_contract')),
+        regular=request.get('request_kind') == workflow.KIND_REGULAR)
     if not ok:
         return 'contract_required', reason
     return None, None
+
+
+def _template_contract(cursor, request):
+    """Договор и «Без договора» из справочника для заявки по регулярному платежу — их задаёт он
+    (п. 4.4, fixed.request_fields), а не инициатор. У остальных заявок — None."""
+    if request.get('request_kind') != workflow.KIND_REGULAR or not request.get('fixed_template_id'):
+        return None
+    template = directory.read_template(cursor, request['fixed_template_id'])
+    if not template:
+        return None
+    return {'contract_id': template.get('contract_id'),
+            'no_contract': bool(template.get('no_contract')) and not template.get('contract_id')}
+
+
+def _sync_template_contract(cursor, request, actor):
+    """Форма регулярной заявки берёт договор из справочника при каждом сохранении, а ответ из
+    окна заявки («Отправить ответ») форму не сохраняет. Без этого заявка, вернувшаяся за договором,
+    не видела бы «Без договора» или договора, которые администратор поставил в справочнике после
+    её создания (разбор 10.11.2026). Возвращает заявку — перечитанную, если что-то поменялось."""
+    fields = _template_contract(cursor, request)
+    if not fields:
+        return request
+    changes = queries.update_request_fields(cursor, request['id'], fields)
+    if not changes:
+        return request
+    queries.log_event(cursor, request['id'], 'edited', actor, payload={'changes': changes})
+    return queries.read_request(cursor, request['id'], lock=True)
+
+
+def answer_problems(cursor, request):
+    """Чего не хватает инициатору, которому бухгалтерия вернула счёт свыше порога без договора и без
+    «Без договора»: ответ «Отправить ответ» без этого выбора не пройдёт (submit), поэтому окно заявки
+    называет его заранее и ведёт в форму, а не к кнопке, которая откажет."""
+    if (request.get('current_kind') != workflow.KIND_INITIATION
+            or request.get('clarify_from') != workflow.KIND_INVOICE):
+        return []
+    probe = dict(request, **(_template_contract(cursor, request) or {}))
+    ok, _reason = workflow.contract_gate(
+        probe.get('amount'), directory.read_contract(cursor, probe.get('contract_id')),
+        counterparty_id=probe.get('counterparty_id'),
+        on_date=probe.get('invoice_date') or queries.today_almaty(),
+        no_contract=bool(probe.get('no_contract')),
+        regular=probe.get('request_kind') == workflow.KIND_REGULAR)
+    return [] if ok else [workflow.contract_missing_text(probe)]
 
 
 # ─── Движение по маршруту ────────────────────────────────────────────────────
@@ -337,6 +384,7 @@ def submit(cursor, request_id, actor, *, comment=None, outbox=None, base_url=Non
         raise FlowError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
     if not access.with_initiator(request):
         raise FlowError('Заявка уже отправлена', code='PAYMENT_NOT_WITH_INITIATOR', status=409)
+    request = _sync_template_contract(cursor, request, actor)
     missing = submit_problems(cursor, request, invoice_required=not by_calendar)
     if missing:
         _fail_missing(missing)
@@ -492,8 +540,16 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
 
     # ── Оплата ──
     if action == 'request_info':
-        return _ask_initiator(cursor, request, subtask, actor, reason=fields.get('reason'),
-                              comment=comment, status='clarification', event_kind='clarification', **done)
+        reason = fields.get('reason')
+        if reason == 'contract_required' and request.get('no_contract'):
+            # Бухгалтерия просит договор у счёта с «Без договора» (10.11.2026): отметка снимается,
+            # иначе ответ без единой правки вернул бы заявку ей же. Инициатор выбирает заново —
+            # договор или, если его правда нет, снова «Без договора» с пояснением в ответе.
+            queries.update_request_fields(cursor, request_id, {'no_contract': False})
+        # Окно исполнителя обещает: «Инициатор увидит: …» — без своего комментария он видит текст причины.
+        return _ask_initiator(cursor, request, subtask, actor, reason=reason,
+                              comment=comment or workflow.clarify_ask(reason, request) or None,
+                              status='clarification', event_kind='clarification', **done)
 
     if action in ('pay', 'top_up'):
         if action == 'pay' and workflow.supplier_vat_unknown(request):
@@ -654,7 +710,8 @@ def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None,
     if changes['counterparty_id'] != request.get('counterparty_id'):
         # Сменился поставщик — договор и реквизиты прежнего к новому не относятся. Карта
         # поставщика — тоже: пополнили бы карту прежнего (как и в форме, routes._request_fields).
-        changes.update(contract_id=None, counterparty_account_id=None)
+        # «Без договора» говорилось о прежнем поставщике — с новым договор выбирают заново.
+        changes.update(contract_id=None, no_contract=False, counterparty_account_id=None)
         if (request.get('payment_method') == workflow.METHOD_CARD
                 and request.get('card_recipient') == workflow.CARD_SUPPLIER
                 and not (card.get('number') or card.get('card_id'))):

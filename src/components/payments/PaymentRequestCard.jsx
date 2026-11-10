@@ -6,16 +6,16 @@ import IosDatePicker from '../ui/DatePicker';
 import useIsMobileShell from '../common/useIsMobileShell';
 import PaymentStageForm from './PaymentStageForm';
 import {
-    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, MAX_OBSERVERS,
-    OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, deletedLine,
-    describeEvent, amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty,
+    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, CONTRACT_THRESHOLD, DOCS_STATUS_META, HINTS,
+    MAX_OBSERVERS, OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, deletedLine,
+    contractSummary, describeEvent, amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty,
     historySummary, isClosed, isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel,
     paidWord, parseAmount, recordView, requestState, routeSummary, stageDeadlineLabel, stageStatusLabel, stageStep, tonePill,
 } from './paymentsMeta';
 import {
-    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FilePicker, Fold,
+    AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FieldHint, FilePicker, Fold,
     FoldGroup, Lifecycle, NoticeBox, PeopleValue, RequisitesBox, ReturnNotice, Row, SectionTitle, StatePill, TonePill,
-    UserSelect, WindowSkeleton, errorText, multipart, useIsoLayoutEffect,
+    UserSelect, WindowSkeleton, contractValue, errorText, multipart, useIsoLayoutEffect,
 } from './paymentsUi';
 
 /*
@@ -199,6 +199,11 @@ const PaymentRequestCard = ({
     const state = requestState(request);
     // Срок открытого этапа «чек» или «закрывающие документы» (п. 17) — с сервера.
     const stageDue = active ? (data?.stage_deadline || null) : null;
+    /* Договор (10.11.2026): порог — с сервера. Пока счёт не оплачен, а сумма больше порога, пустое
+       поле видно предупреждением: без договора или «Без договора» заявка вернётся инициатору. */
+    const contractThreshold = data?.contract_check?.threshold || CONTRACT_THRESHOLD;
+    const contractPending = Boolean(active && request?.payment_method === 'invoice' && !request?.paid_on
+        && contractSummary(request, contractThreshold).over);
     const titleOf = useCallback((kind) => (meta?.subtasks || []).find((item) => item.kind === kind)?.title || '', [meta]);
 
     const apply = useCallback((response) => {
@@ -868,7 +873,13 @@ const PaymentRequestCard = ({
                                         ) : (
                                             <>
                                                 <Row label="Счёт" wide>{request.invoice_number || request.invoice_date ? `${request.invoice_number ? `№${request.invoice_number}` : ''}${request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}`.trim() : null}</Row>
-                                                <Row label="Договор" wide>{request.contract_number ? `№${request.contract_number}` : null}</Row>
+                                                {/* Не выбран, а счёт больше порога — коротко, что значит — под «i» (разбор 10.11.2026). */}
+                                                <Row label="Договор" wide>{contractValue(request, contractThreshold, contractPending ? (
+                                                    <span className="inline-flex items-center gap-1">
+                                                        <span className="text-amber-700">не выбран</span>
+                                                        <FieldHint hint={HINTS.contractPending} />
+                                                    </span>
+                                                ) : null)}</Row>
                                                 <Row label="Реквизиты поставщика" wide>{data.counterparty_account?.text}</Row>
                                                 <Row label="Назначение платежа" wide>{request.payment_purpose}</Row>
                                             </>

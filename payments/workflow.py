@@ -22,8 +22,9 @@
 * в какой колонке доски стоит заявка (`board_column`, пп. 7–9);
 * условия закрытия (`closing_blockers`, п. 15);
 * правила первой версии, которые ТЗ не отменяет: счёт свыше 300 000 ₸ не идёт
-  в оплату без ДЕЙСТВУЮЩЕГО договора (`contract_gate`), позиции «количество ×
-  цена» с суммой до тиына.
+  в оплату без ДЕЙСТВУЮЩЕГО договора или явной отметки «Без договора»
+  (`contract_gate`, отметка — с 10.11.2026), позиции «количество × цена» с
+  суммой до тиына.
 
 Правила реализованы БУКВАЛЬНО по постановкам, без обобщений (требование
 владельца). Где постановка молчит, выбор назван в докстроке.
@@ -525,13 +526,17 @@ def board_column(board_code, request, subtasks, focus_kind=None):
 # Бухгалтер и финансовый отдел выбирают причину из списка, а не пишут с нуля:
 # так инициатор сразу видит, чего от него хотят. Системные причины (`system`)
 # человек не выбирает — их ставит сам раздел, когда заявка пришла на оплату без
-# счёта или без договора.
+# счёта. «Нужен действующий договор» ставит и раздел (счёт свыше 300 000 ₸, где
+# не выбраны ни договор, ни «Без договора»), и бухгалтер сам: с 10.11.2026 счёт
+# с отметкой «Без договора» уходит в оплату любой суммы, и решает, нужен ли всё же
+# договор, бухгалтерия.
 
 CLARIFY_REASONS = (
     {'code': 'invoice_missing', 'label': 'Счёт не приложен', 'kinds': (KIND_INVOICE,), 'system': True,
      'ask': 'Приложите счёт поставщика и укажите его номер и дату.'},
-    {'code': 'contract_required', 'label': 'Нужен действующий договор', 'kinds': (KIND_INVOICE,), 'system': True,
-     'ask': 'Укажите действующий договор с поставщиком.'},
+    {'code': 'contract_required', 'label': 'Нужен действующий договор', 'kinds': (KIND_INVOICE,),
+     'ask': 'Выберите в заявке действующий договор с поставщиком. Нет его в списке — договор вносит '
+            'в справочник «Договоры» администратор раздела.'},
     {'code': 'invoice_unreadable', 'label': 'Счёт не читается или это не счёт', 'kinds': (KIND_INVOICE,),
      'ask': 'Приложите читаемый счёт на оплату.'},
     {'code': 'amount_mismatch', 'label': 'Сумма не совпадает с согласованной', 'kinds': (KIND_INVOICE, KIND_CARD),
@@ -556,9 +561,24 @@ CLARIFY_BY_CODE = {item['code']: item for item in CLARIFY_REASONS}
 CLARIFY_REWORK = 'rework'
 
 
-def clarify_reasons_for(kind):
-    """Причины, которые исполнитель подзадачи выбирает сам."""
-    return [item for item in CLARIFY_REASONS if kind in item['kinds'] and not item.get('system')]
+def clarify_reasons_for(kind, request=None):
+    """Причины, которые исполнитель подзадачи выбирает сам; `ask` — под эту заявку (clarify_ask)."""
+    return [dict(item, ask=clarify_ask(item['code'], request)) for item in CLARIFY_REASONS
+            if kind in item['kinds'] and not item.get('system')]
+
+
+# Договор регулярного платежа инициатор в заявке не выбирает — его задаёт справочник (п. 4.4).
+CONTRACT_ASK_REGULAR = ('Договор регулярного платежа задаёт справочник «Регулярные платежи»: попросите '
+                        'администратора раздела указать в нём действующий договор, затем отправьте заявку снова.')
+
+
+def clarify_ask(code, request=None):
+    """Что инициатор прочтёт под причиной запроса, если исполнитель ничего не дописал (окно
+    исполнителя обещает ему именно этот текст). У регулярного платежа договор просят через
+    администратора справочника: в самой заявке его не выбрать."""
+    if code == 'contract_required' and (request or {}).get('request_kind') == KIND_REGULAR:
+        return CONTRACT_ASK_REGULAR
+    return (CLARIFY_BY_CODE.get(code) or {}).get('ask') or ''
 
 
 def clarify_label(code):
@@ -656,7 +676,16 @@ def items_total(items):
 
 # ─── Договор ─────────────────────────────────────────────────────────────────
 
-def contract_gate(amount, contract, *, counterparty_id=None, on_date=None):
+# Что делать инициатору, когда счёт остановлен. У регулярного платежа договор задаёт
+# справочник (п. 4.4), и выбрать его в заявке нельзя: форма берёт его из справочника
+# при каждом сохранении — поэтому и просить надо администратора раздела.
+CONTRACT_FIX = 'Выберите действующий договор с поставщиком или «Без договора».'
+CONTRACT_FIX_REGULAR = ('Договор регулярного платежа задаёт справочник «Регулярные платежи»: попросите '
+                        'администратора раздела указать в нём действующий договор или «Без договора», '
+                        'затем откройте заявку и отправьте её снова.')
+
+
+def contract_gate(amount, contract, *, counterparty_id=None, on_date=None, no_contract=False, regular=False):
     """(пропускать ли счёт дальше, причина отказа).
 
     Правило дополнения Колкомбаевой: сумма > 300 000 ₸ и при этом договора нет,
@@ -664,35 +693,59 @@ def contract_gate(amount, contract, *, counterparty_id=None, on_date=None):
     инициатора. Причина формулируется так, чтобы инициатор увидел, что именно
     исправить. Договор с ДРУГИМ контрагентом — тоже отсутствие договора: право
     на оплату даёт договор именно с поставщиком по счёту.
+
+    С 10.11.2026 (решение владельца) договора может не быть осознанно: отметка
+    «Без договора» (`no_contract`) пропускает счёт любой суммы, а бухгалтер видит
+    её в окне оплаты и, если договор всё же нужен, запрашивает его («Запросить
+    информацию → Нужен действующий договор»). Пропускает только отметка: пустое
+    поле («не выбрано») держит счёт у инициатора, как раньше. Выбранный договор
+    проверяется всегда — отметка рядом с ним не ставится (её снимает сервер).
+    `regular` — заявка по регулярному платежу: договор в ней из справочника.
     """
     total = to_decimal(amount)
     if total <= CONTRACT_REQUIRED_OVER:
         return True, None
+    if not contract and no_contract:
+        return True, None
     on_date = on_date or date.today()
     prefix = 'Сумма счёта %s превышает %s. ' % (fmt_money(total), fmt_money(CONTRACT_REQUIRED_OVER))
+    fix = CONTRACT_FIX_REGULAR if regular else CONTRACT_FIX
     if not contract:
-        return False, (prefix + 'Действующий договор с контрагентом не найден. '
-                       'Укажите действующий договор — до этого счёт не может быть '
-                       'передан в оплату.')
+        return False, (prefix + 'Договор не указан — до этого счёт не может быть передан в оплату. ' + fix)
     number = contract.get('number') or '—'
     status = str(contract.get('status') or '').strip().lower()
     if status != 'active':
         return False, (prefix + 'Договор №%s имеет статус «%s» и для проверки считается '
-                       'отсутствующим. Укажите действующий договор.'
-                       % (number, CONTRACT_STATUS_LABELS.get(status, status or '—')))
+                       'отсутствующим. %s'
+                       % (number, CONTRACT_STATUS_LABELS.get(status, status or '—'), fix))
     if counterparty_id is not None and contract.get('counterparty_id') not in (None, counterparty_id):
-        return False, (prefix + 'Договор №%s заключён с другим контрагентом. Укажите '
-                       'договор с поставщиком по счёту.' % number)
+        return False, (prefix + 'Договор №%s заключён с другим контрагентом. %s' % (number, fix))
     ends_on = _as_date(contract.get('ends_on'))
     if ends_on and ends_on < on_date:
-        return False, (prefix + 'Договор №%s просрочен: срок действия истёк %s. '
-                       'Счёт не может быть передан в оплату до указания '
-                       'действующего договора.' % (number, fmt_date(ends_on)))
+        return False, (prefix + 'Договор №%s просрочен: срок действия истёк %s, и счёт не может быть '
+                       'передан в оплату. %s' % (number, fmt_date(ends_on), fix))
     starts_on = _as_date(contract.get('starts_on'))
     if starts_on and starts_on > on_date:
-        return False, (prefix + 'Договор №%s вступает в силу только %s.'
-                       % (number, fmt_date(starts_on)))
+        return False, (prefix + 'Договор №%s вступает в силу только %s. %s'
+                       % (number, fmt_date(starts_on), fix))
     return True, None
+
+
+def contract_missing_text(request):
+    """Пункт «чего не хватает» у инициатора, которому счёт вернули за договором: короче причины
+    contract_gate — сумма и порог уже названы в самом возврате."""
+    if (request or {}).get('request_kind') == KIND_REGULAR:
+        return ('В регулярном платеже не указан договор — его или «Без договора» указывает администратор '
+                'раздела в справочнике «Регулярные платежи»')
+    return 'Выберите договор с поставщиком или «Без договора»'
+
+
+def contract_text(request):
+    """Колонка «Договор» выгрузки: номер договора, «Без договора» (отметка инициатора) или пусто."""
+    request = request or {}
+    if request.get('contract_number') or request.get('contract_id'):
+        return request.get('contract_number') or ''
+    return 'Без договора' if request.get('no_contract') else ''
 
 
 CONTRACT_STATUS_LABELS = {

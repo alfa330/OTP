@@ -1096,6 +1096,30 @@ _STATEMENTS = [
         ADD COLUMN IF NOT EXISTS to_legal_entity_name VARCHAR(200)
     """,
 
+    # ── «Без договора» (решение владельца 10.11.2026) ──────────────────────
+    #
+    # Отметка, что договора с поставщиком нет, — осознанный выбор, а не пустое
+    # поле: счёт с ней уходит в оплату любой суммы (workflow.contract_gate), а
+    # пустое поле свыше 300 000 ₸ по-прежнему возвращает счёт инициатору.
+    # Регулярный платёж хранит тот же выбор — заявка берёт его из справочника. Под проверкой
+    # наличия: ALTER берёт блокировку таблицы даже с IF NOT EXISTS, а на старте рядом может
+    # работать прежний экземпляр (55P03 при выкладке встык).
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_requests'
+                          AND column_name = 'no_contract') THEN
+            ALTER TABLE payment_requests ADD COLUMN no_contract BOOLEAN NOT NULL DEFAULT FALSE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_fixed_templates'
+                          AND column_name = 'no_contract') THEN
+            ALTER TABLE payment_fixed_templates ADD COLUMN no_contract BOOLEAN NOT NULL DEFAULT FALSE;
+        END IF;
+    END $$
+    """,
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход

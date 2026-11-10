@@ -232,7 +232,7 @@ _REQUEST_FIELDS = (
     'id', 'created_at', 'updated_at',
     'initiator_id', 'initiator_name', 'manager_id', 'manager_name', 'department_id', 'department_name',
     'request_kind', 'project_id', 'branch', 'expense_name', 'justification', 'category_id', 'subcategory_id',
-    'counterparty_id', 'counterparty_account_id', 'legal_entity_id', 'contract_id',
+    'counterparty_id', 'counterparty_account_id', 'legal_entity_id', 'contract_id', 'no_contract',
     'amount', 'currency', 'payment_period', 'payment_method', 'payment_purpose',
     'card_recipient', 'card_holder_name', 'card_holder_user_id', 'card_id', 'card_last4',
     'object_type', 'accounting_category',
@@ -280,7 +280,7 @@ _REQUEST_SQL = """
 EDITABLE_FIELDS = (
     'request_kind', 'department_id', 'project_id', 'branch', 'expense_name', 'justification',
     'category_id', 'subcategory_id', 'counterparty_id', 'counterparty_account_id', 'legal_entity_id',
-    'contract_id', 'payment_period', 'payment_method', 'payment_purpose', 'card_recipient',
+    'contract_id', 'no_contract', 'payment_period', 'payment_method', 'payment_purpose', 'card_recipient',
     'card_holder_name', 'card_holder_user_id', 'card_id', 'object_type', 'accounting_category',
     'no_alternatives', 'no_alternatives_reason', 'no_alternatives_comment', 'supplier_choice_reason',
     'notes', 'due_on', 'invoice_number', 'invoice_date', 'invoice_description', 'fixed_template_id',
@@ -970,6 +970,7 @@ def create_request(cursor, *, fields, items, actor, initiator, system_comment=No
     for col in EDITABLE_FIELDS:
         values[col] = fields.get(col)
     values['no_alternatives'] = bool(values.get('no_alternatives'))
+    values['no_contract'] = bool(values.get('no_contract')) and not values.get('contract_id')
     for extra in ('department_name', 'supplier_kind', 'supplier_vat'):
         if fields.get(extra) is not None:
             cols.append(extra)

@@ -52,7 +52,7 @@ import {
 
 const SECTIONS = [
     { value: 'counterparties', label: 'Поставщики', icon: Building2, group: 'pay', about: 'Кому платим. Согласующий и лимит поставщика направляют его заявки нужному утверждающему.' },
-    { value: 'contracts', label: 'Договоры', icon: FileSignature, group: 'pay', about: 'Договоры с поставщиками. Счёт свыше 300 000 ₸ проходит только по действующему договору.' },
+    { value: 'contracts', label: 'Договоры', icon: FileSignature, group: 'pay', about: 'Договоры с поставщиками. Счёт свыше 300 000 ₸ проходит по действующему договору или с отметкой «Без договора».' },
     { value: 'legal_entities', label: 'Реквизиты компаний', icon: Landmark, group: 'pay', about: 'Наши компании-плательщики. Реквизиты подставляются в заявку и копируются одним щелчком.' },
     { value: 'counterparty_accounts', label: 'Банковские реквизиты поставщиков', icon: WalletCards, group: 'pay', about: 'Банковские счета поставщиков, на которые уходит оплата.' },
     { value: 'cards', label: 'Банковские карты сотрудников/поставщиков', icon: CreditCard, group: 'pay', need: 'can_manage_cards', about: 'Карты для пополнения. Полные номера видит только финансовый отдел.' },

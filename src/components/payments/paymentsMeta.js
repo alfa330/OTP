@@ -410,8 +410,40 @@ export const HINTS = {
         outro: 'По номеру и дате раздел предупреждает о возможном дубле: такой же счёт этому поставщику уже мог быть оплачен.',
     },
     contract: {
-        intro: 'Договор с этим поставщиком.',
-        outro: 'Для счёта свыше 300 000 ₸ действующий договор обязателен: без него счёт не уйдёт в оплату.',
+        intro: 'Договор с поставщиком из справочника «Договоры».',
+        options: [
+            ['Без договора', 'договора с поставщиком нет: счёт уйдёт в оплату, а утвердитель и бухгалтерия увидят эту отметку'],
+            ['№ договора', 'действующий договор с этим поставщиком'],
+        ],
+        outro: 'Счёт свыше 300 000 ₸ уходит в оплату с действующим договором или с отметкой «Без договора». Не выбрали — после согласования заявка вернётся к вам за этим выбором.',
+    },
+    // То же поле в окне Helpdesk IT: поставщика подбирает он, а вернётся заявка инициатору.
+    helpdeskContract: {
+        intro: 'Договор с рекомендуемым поставщиком из справочника «Договоры».',
+        options: [
+            ['Без договора', 'договора с поставщиком нет: счёт уйдёт в оплату, а утвердитель и бухгалтерия увидят эту отметку'],
+            ['№ договора', 'действующий договор с этим поставщиком'],
+        ],
+        outro: 'Счёт свыше 300 000 ₸ уходит в оплату с действующим договором или с отметкой «Без договора». Не выбрано — после утверждения заявка вернётся инициатору за этим выбором.',
+    },
+    // Карточка заявки: договор не выбран, а счёт больше порога.
+    contractPending: {
+        intro: 'Счёт свыше 300 000 ₸ уходит в оплату только с действующим договором или с отметкой «Без договора».',
+        outro: 'Пока не выбрано ни то ни другое, после согласования заявка вернётся инициатору за этим выбором.',
+    },
+    // Заявка по регулярному платежу: договор задаёт справочник, в заявке его не выбрать.
+    regularContract: {
+        intro: 'Договор регулярного платежа задаёт справочник «Регулярные платежи» — в заявке его не выбрать.',
+        outro: 'Счёт свыше 300 000 ₸ без договора или отметки «Без договора» после согласования вернётся к вам: попросите администратора раздела указать договор в справочнике.',
+    },
+    // Тот же выбор в справочнике «Регулярные платежи»: заявка по платежу берёт его сама.
+    templateContract: {
+        intro: 'Договор с поставщиком этого платежа — заявка возьмёт его сама.',
+        options: [
+            ['Без договора', 'договора нет: счёт заявки уйдёт в оплату любой суммы, бухгалтерия увидит отметку'],
+            ['№ договора', 'действующий договор с поставщиком из справочника «Договоры»'],
+        ],
+        outro: 'Не выбрано ни то ни другое — счёт свыше 300 000 ₸ после согласования вернётся инициатору, а договор он в заявке выбрать не сможет: его задаёт этот справочник.',
     },
     received: { intro: 'Сколько получили — как в накладной: «10 уп», «1 шт».' },
     vatPayer: {
@@ -445,7 +477,7 @@ export const HINTS = {
         ],
     },
     contractStatus: {
-        intro: 'Счёт свыше 300 000 ₸ проходит только по действующему договору.',
+        intro: 'Счёт свыше 300 000 ₸ проходит по действующему договору или с отметкой «Без договора».',
         options: [
             ['Действующий', 'договор работает — счёт пройдёт'],
             ['Расторгнут, Отменён, Архивный, Недействующий', 'для проверки счёта договора как будто нет'],
@@ -556,6 +588,43 @@ export const VAT_OPTIONS = [{ value: false, label: 'Без НДС' }, { value: t
 // Порог договора — тот же, что CONTRACT_REQUIRED_OVER на сервере; сервер отдаёт
 // его в /ping, здесь значение по умолчанию до ответа.
 export const CONTRACT_THRESHOLD = 300000;
+
+/* «Без договора» (решение владельца 10.11.2026) — отдельный пункт списка «Договор», а не
+   пустое поле: с ним счёт уходит в оплату любой суммы, а пустое поле («не выбран») свыше
+   порога держит счёт у инициатора. В заявке это `no_contract`, в списке — этот ключ. */
+export const NO_CONTRACT = 'none';
+export const NO_CONTRACT_LABEL = 'Без договора';
+
+/* Договор заявки для карточки и окна бухгалтера: номер, «Без договора» или ничего.
+   `marked` — пометка «счёт больше порога» у «Без договора»: её видят утвердитель и бухгалтер. */
+export const contractSummary = (request, threshold = CONTRACT_THRESHOLD) => {
+    const over = parseAmount(request?.amount) > (threshold || CONTRACT_THRESHOLD);
+    if (request?.contract_number) return { text: `№${request.contract_number}`, chosen: true, over, marked: false };
+    if (request?.no_contract) return { text: NO_CONTRACT_LABEL, chosen: true, over, marked: over };
+    return { text: '', chosen: false, over, marked: false };
+};
+
+/* Чей «Без договора» (разбор 10.11.2026): отметка относится к рекомендуемому поставщику, при котором
+   её выбрали. Сменили поставщика — выбирают заново, как и договор (он из списка нового поставщика).
+   Поставщик из справочника — по номеру, вписанный названием — по своей строке. */
+export const supplierKeyOf = (offer) => {
+    if (!offer) return '';
+    if (!offer.custom && offer.counterparty_id) return `id:${offer.counterparty_id}`;
+    return `row:${offer.key || ''}`;
+};
+
+/* Что видно в поле «Договор» и уйдёт на сервер: договор — только из списка нынешнего поставщика,
+   «Без договора» — только при том поставщике, при котором её выбрали. */
+export const contractChoice = (draft, contractOptions = [], supplierKey = '') => {
+    const contractId = contractOptions.some((option) => option.value === draft?.contract_id) ? draft.contract_id : null;
+    const noContract = Boolean(draft?.no_contract) && !contractId && (draft?.no_contract_for ?? '') === supplierKey;
+    return { contractId, noContract };
+};
+
+/* Выбор в поле «Договор»: пункт «Без договора» (запоминает поставщика) или договор. */
+export const contractPick = (value, supplierKey = '') => (value === NO_CONTRACT
+    ? { contract_id: null, no_contract: true, no_contract_for: supplierKey }
+    : { contract_id: value ?? null, no_contract: false, no_contract_for: null });
 
 /* ── Оттенок строки ────────────────────────────────────────────────────────── */
 
@@ -1660,7 +1729,10 @@ export const cardIssues = (draft, { hasCard = false, staffed = {} } = {}) => {
    пишет, что и сколько нужно, срок и пожелания (06.11.2026), а поставщиков, цены, товар или
    услугу, категорию учёта и способ оплаты выберет Helpdesk IT — их здесь не требуем. Название
    закупа у него складывается из позиций (itemsTitle), отдельного поля нет. */
-export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {}, helpdesk = false } = {}) => {
+/* `contractMissing` — заявку вернули с оплаты счёта, а сумма выше порога и ни договор, ни «Без
+   договора» не выбраны: без этого выбора ответ не пройдёт (flow.answer_problems), поле красное. */
+export const CONTRACT_ISSUE = 'выберите договор или «Без договора»';
+export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCard = false, staffed = {}, helpdesk = false, contractMissing = false } = {}) => {
     const issues = [];
     const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
     // Компании здесь нет намеренно (просьба владельца 15.10.2026): не знает её инициатор —
@@ -1682,7 +1754,11 @@ export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCar
         }
     }
     if (!draft.due_on) add('due_on', 'укажите желаемый срок');
-    if (helpdesk) return issues;
+    if (helpdesk) {
+        // IT-закуп: оплату счётом выбрал Helpdesk IT, а договор в ответе бухгалтерии — инициатор.
+        if (contractMissing) add('contract_id', CONTRACT_ISSUE);
+        return issues;
+    }
     issues.push(...objectIssues(draft, { staffed }));
     if (!draft.payment_method) add('payment_method', 'выберите способ оплаты');
 
@@ -1691,6 +1767,7 @@ export const purchaseIssues = (draft, { minSuppliers = 3, fileKinds = [], hasCar
     if (draft.payment_method === 'card') {
         issues.push(...cardIssues(draft, { hasCard, staffed }));
     } else if (draft.payment_method === 'invoice') {
+        if (contractMissing) add('contract_id', CONTRACT_ISSUE);
         // Счёт у нового закупа обычно появляется после согласования; но если его
         // уже прикладывают — номер и дата нужны сразу.
         const started = fileKinds.includes('invoice') || String(draft.invoice_number || '').trim() || draft.invoice_date;
@@ -1792,7 +1869,7 @@ export const UNSTAFFED = {
 
 /* Регулярный платёж: `template` — строка справочника. Поставщика, компанию и
    категорию учёта товара задаёт она — исправить их в заявке человек не может. */
-export const regularIssues = (draft, { fileKinds = [], template = null, staffed = {} } = {}) => {
+export const regularIssues = (draft, { fileKinds = [], template = null, staffed = {}, contractMissing = false } = {}) => {
     const issues = [];
     // Поставщика, компанию и категорию учёта задаёт строка справочника — пункты о
     // них стоят у выбора платежа: в самой заявке этих полей нет.
@@ -1805,6 +1882,9 @@ export const regularIssues = (draft, { fileKinds = [], template = null, staffed 
         ].filter(Boolean);
         if (gaps.length) {
             issues.push(issueOf('fixed_template_id', `в справочнике у платежа не указаны: ${gaps.join(', ')} — попросите администратора дополнить`));
+        } else if (contractMissing) {
+            // Счёт вернули с оплаты за договором, а договор регулярного платежа задаёт справочник (10.11.2026).
+            issues.push(issueOf('fixed_template_id', 'в справочнике у платежа не указан договор или «Без договора» — попросите администратора дополнить'));
         } else if (template.accounting_category === 'asset' && staffed.asset_keeper === false) {
             issues.push(issueOf('fixed_template_id', UNSTAFFED.asset_keeper));
         }
@@ -1905,6 +1985,7 @@ const FIELD_LABELS = {
     counterparty_account_id: 'Реквизиты поставщика',
     legal_entity_id: 'Компания',
     contract_id: 'Договор',
+    no_contract: 'Договор',
     department_id: 'Подразделение',
     amount: 'Сумма',
     items: 'Позиции',

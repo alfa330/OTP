@@ -84,7 +84,7 @@ COLUMNS = (
     ('Варианты поставщиков', 'offers_text', 'plain'),
     ('Альтернативы', 'alternatives_label', 'plain'),
     ('Обоснование выбора поставщика', 'supplier_choice_reason', 'plain'),
-    ('Договор', 'contract_number', 'text'),
+    ('Договор', 'contract_label', 'text'),
     ('Способ оплаты', 'method_label', 'plain'),
     ('Получатель по карте', 'card_label', 'plain'),
     ('Карта', 'card_mask', 'text'),
@@ -178,6 +178,8 @@ def enrich(request, items, offers=()):
     row['object_label'] = workflow.OBJECT_TYPE_LABELS.get(request.get('object_type'), '')
     row['accounting_label'] = workflow.ACCOUNTING_CATEGORY_LABELS.get(request.get('accounting_category'), '')
     row['method_label'] = workflow.PAYMENT_METHOD_LABELS.get(request.get('payment_method'), '')
+    # Номер договора либо «Без договора» — отметка инициатора (10.11.2026), а не пустая ячейка.
+    row['contract_label'] = workflow.contract_text(request)
     amount = workflow.to_decimal(request.get('amount'))
     refund = workflow.to_decimal(request.get('refund_amount'))
     row['total_amount'] = Decimal('0') if request.get('issued_from_stock') else amount - refund

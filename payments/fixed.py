@@ -99,6 +99,9 @@ def request_fields(template):
         'expense_name': template['name'],
         'counterparty_id': template.get('counterparty_id'),
         'contract_id': template.get('contract_id'),
+        # «Без договора» — выбор администратора в справочнике (10.11.2026): с ним счёт
+        # регулярного платежа уходит в оплату любой суммы, как и у нового закупа.
+        'no_contract': bool(template.get('no_contract')) and not template.get('contract_id'),
         'legal_entity_id': template.get('legal_entity_id'),
         'counterparty_account_id': template.get('counterparty_account_id'),
         'payment_purpose': template.get('payment_purpose'),
@@ -501,7 +504,7 @@ def commit_import(cursor, rows, actor_id):
             'legal_entity_id': None,
             # Договор, реквизиты, назначение, лимит и согласующего файл не
             # несёт — их дополняют в карточке платежа.
-            'contract_id': None, 'counterparty_account_id': None, 'payment_purpose': None,
+            'contract_id': None, 'no_contract': False, 'counterparty_account_id': None, 'payment_purpose': None,
             'amount_limit': None, 'approver_user_id': None, 'object_type': workflow.OBJECT_SERVICE,
             'accounting_category': None, 'due_day': due_day_of(next_due_on, row['periodicity']),
             'auto_create': True,

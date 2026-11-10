@@ -12,7 +12,8 @@ import { windowResizeMotion } from '../../utils/windowResize';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    ATTACHMENT_LABELS, REQUEST_FORMS, approvalSummary, cardNumberLabel, dueChip, edgeFade, fileSizeLabel, fmtMoney, initialsOf,
+    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, REQUEST_FORMS, approvalSummary, cardNumberLabel, contractSummary, dueChip, edgeFade,
+    fileSizeLabel, fmtMoney, initialsOf,
     issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText,
     shortPersonName, stateMeta, toneEdge, tonePill, toneRow,
 } from './paymentsMeta';
@@ -432,6 +433,20 @@ export const Row = ({ label, children, wide = false }) => {
             <div className={`${wide ? 'w-[168px]' : 'w-[140px]'} shrink-0 text-[12.5px] text-slate-500`}>{label}</div>
             <div className="min-w-0 flex-1 whitespace-pre-line break-words text-[13.5px] text-slate-900">{children}</div>
         </div>
+    );
+};
+
+/* Договор заявки словами (10.11.2026) — для карточки и окна бухгалтера: номер договора либо
+   «Без договора» — выбор инициатора; при счёте больше порога у «Без договора» пометка, её видят
+   утвердитель и бухгалтер. Не выбрано ничего — `empty` (Row без значения не рисуется). */
+export const contractValue = (request, threshold, empty = null) => {
+    const contract = contractSummary(request, threshold);
+    if (!contract.chosen) return empty;
+    return (
+        <>
+            {contract.text}
+            {contract.marked && <span className="text-amber-700"> · счёт больше {fmtMoney(threshold || CONTRACT_THRESHOLD)}</span>}
+        </>
     );
 };
 

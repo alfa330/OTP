@@ -264,9 +264,16 @@ test('форма заявки IT-закупа: что, сколько, срок 
     const payload = form.slice(form.indexOf('        if (helpdesk) {'), form.indexOf('        const sent = offers.filter((offer) => !isBlankOffer(offer));'));
     assert.ok(payload.includes('const title = itemsTitle(draft.items);') && payload.includes('...(title ? { expense_name: title } : {})'));
     for (const key of ['offers', 'payment_method', 'object_type', 'accounting_category', 'card_recipient', 'card_number', 'legal_entity_id',
-        'contract_id', 'invoice_number']) {
+        'invoice_number']) {
         assert.ok(!payload.includes(`${key}:`), `IT-закуп не шлёт ${key}: его выбирает Helpdesk IT`);
     }
+    // Договор (10.11.2026) выбирает Helpdesk IT вместе с оплатой счётом, а инициатор — запасным ходом, когда
+    // счёт свыше порога вернулся к нему: только при оплате счётом и только договор или «Без договора».
+    const contract = payload.match(/contract_id/g) || [];
+    assert.equal(contract.length, 1, 'договор — одним местом');
+    assert.ok(payload.includes('...(itInvoice ? { contract_id: contractId, no_contract: noContract } : {}),'));
+    // Оплату счётом выбрал Helpdesk IT — это записано в заявке; способ из черновика до смены категории не в счёт.
+    assert.ok(form.includes("const itInvoice = helpdesk && request?.payment_method === 'invoice';"));
     assert.ok(form.includes("if (!regular && !helpdesk) {"), 'КП к вариантам — тоже нет');
     // Как у сервера: отправленная заявка с прежней категорией — по запомненному it_purchase.
     assert.ok(form.includes("const helpdesk = kind === 'purchase' && !legacy && (sentSameCategory ? Boolean(request?.it_purchase)"));

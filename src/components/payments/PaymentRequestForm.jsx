@@ -6,11 +6,11 @@ import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
 import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CONTRACT_THRESHOLD, HINTS, MAX_OBSERVERS,
+    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, CONTRACT_THRESHOLD, HINTS, MAX_OBSERVERS, NO_CONTRACT, NO_CONTRACT_LABEL,
     OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, UNSTAFFED, approvalSummary, cardDigits,
     fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
     issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTitle, itemsTotal, legacyIssues, observersClosedLine, observersPatch,
-    parseAmount, priceTrend, purchaseIssues, regularIssues, trendLabel,
+    parseAmount, priceTrend, purchaseIssues, regularIssues, trendLabel, contractChoice, contractPick, supplierKeyOf,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, Choice, ErrorBox, Field, FieldHint, FilePicker, FormDate, FormInput, FormSelect, FormText,
@@ -92,7 +92,7 @@ const emptyDraft = (me, kind = null) => ({
     offers: [newOffer(), newOffer(), newOffer()],
     no_alternatives: false, no_alternatives_reason: null, no_alternatives_comment: '',
     supplier_choice_reason: '',
-    contract_id: null, counterparty_account_id: null, invoice_number: '', invoice_date: '',
+    contract_id: null, no_contract: false, no_contract_for: null, counterparty_account_id: null, invoice_number: '', invoice_date: '',
     card_recipient: null, card_holder_user_id: me?.id || null, card_holder_name: '', card_id: null,
     card_number: '', payment_purpose: '', notes: '',
     fixed_template_id: null, amount: 0, payment_period: '',
@@ -114,6 +114,9 @@ const draftFromData = (data, me) => {
     if (!offers.length && request.counterparty_id) {
         offers = [newOffer({ counterparty_id: request.counterparty_id, amount: parseAmount(request.amount), is_recommended: true })];
     }
+    // «Без договора» в заявке — выбор при её нынешнем поставщике: тем же правилом, что `recommended` в форме.
+    const chosenFor = request.no_contract
+        ? supplierKeyOf(request.no_alternatives ? offers[0] : offers.find((offer) => offer.is_recommended)) : null;
     return {
         ...base,
         legal_entity_id: request.legal_entity_id ?? null,
@@ -135,6 +138,8 @@ const draftFromData = (data, me) => {
         no_alternatives_comment: request.no_alternatives_comment || '',
         supplier_choice_reason: request.supplier_choice_reason || '',
         contract_id: request.contract_id ?? null,
+        no_contract: Boolean(request.no_contract),
+        no_contract_for: chosenFor,
         counterparty_account_id: request.counterparty_account_id ?? null,
         invoice_number: request.invoice_number || '',
         invoice_date: request.invoice_date ? String(request.invoice_date).slice(0, 10) : '',
@@ -297,6 +302,10 @@ const PaymentRequestForm = ({
     const sentSameCategory = editing && Boolean(request?.submitted_at) && draft.category_id === (request?.category_id ?? null);
     const helpdesk = kind === 'purchase' && !legacy && (sentSameCategory ? Boolean(request?.it_purchase)
         : Boolean(categories.find((item) => item.id === draft.category_id)?.via_helpdesk));
+    /* IT-закуп, где Helpdesk IT уже выбрал оплату счётом (это записано в заявке, а не в черновике: способ
+       оплаты, выбранный до смены категории на IT-шную, ничего не решает). Договор здесь — выбор
+       инициатора (10.11.2026): счёт свыше порога без него вернётся к нему. */
+    const itInvoice = helpdesk && request?.payment_method === 'invoice';
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || [])
         .map((item) => ({ value: item.id, label: item.bin ? `${item.name} · БИН ${item.bin}` : item.name })), [dictionaries]);
     const projectOptions = useMemo(() => [{ value: null, label: 'Без проекта' },
@@ -348,10 +357,20 @@ const PaymentRequestForm = ({
     const threshold = meta?.contract_threshold || CONTRACT_THRESHOLD;
     // Договор и реквизиты относятся к поставщику: сменили рекомендуемого — выбранные
     // для прежнего больше не действуют (сервер отказал бы: «договор заключён с другим»).
-    const contractId = contractOptions.some((option) => option.value === draft.contract_id) ? draft.contract_id : null;
+    // «Без договора» — осознанный выбор (10.11.2026) при этом поставщике: сменили поставщика — выбирают заново.
+    const supplierKey = regular ? '' : supplierKeyOf(recommended);
+    const { contractId, noContract } = contractChoice(draft, contractOptions, supplierKey);
     const accountId = accountOptions.some((option) => option.value === draft.counterparty_account_id)
         ? draft.counterparty_account_id : null;
-    const contractNeeded = draft.payment_method === 'invoice' && total > threshold && !contractId;
+    const contractNeeded = draft.payment_method === 'invoice' && total > threshold && !contractId && !noContract;
+    const contractChoices = useMemo(() => [{ value: NO_CONTRACT, label: NO_CONTRACT_LABEL }, ...contractOptions], [contractOptions]);
+    const pickContract = (value) => setDraft((prev) => ({ ...prev, ...contractPick(value, supplierKey) }));
+    /* Заявку вернули с оплаты счёта, а сумма выше порога и договор не выбран: ответ без выбора не пройдёт
+       (flow.answer_problems) — поле красное и окно ведёт к нему. У регулярного платежа договор задаёт справочник. */
+    const answering = Boolean(editing && request?.current_kind === 'initiation' && request?.clarify_from === 'invoice_payment');
+    const contractMissing = answering && total > threshold && (regular
+        ? !template?.contract_id && !template?.no_contract
+        : (draft.payment_method === 'invoice' || itInvoice) && !contractId && !noContract);
     const trend = useMemo(() => priceTrend(history), [history]);
     // Сохранённый номер карты действует, пока получатель прежний. Сменили получателя,
     // сотрудника или поставщика — это уже карта другого человека: номер вводится заново.
@@ -371,10 +390,10 @@ const PaymentRequestForm = ({
         if (!kind) return [];
         let list;
         if (legacy) list = legacyIssues({ ...draft, offers }, { fileKinds });
-        else if (regular) list = regularIssues(draft, { fileKinds, template, staffed });
+        else if (regular) list = regularIssues(draft, { fileKinds, template, staffed, contractMissing });
         else {
             list = purchaseIssues({ ...draft, offers }, {
-                minSuppliers: settings?.min_suppliers ?? 3, fileKinds, hasCard: cardKept, staffed, helpdesk,
+                minSuppliers: settings?.min_suppliers ?? 3, fileKinds, hasCard: cardKept, staffed, helpdesk, contractMissing,
             });
         }
         const placed = [];
@@ -391,7 +410,7 @@ const PaymentRequestForm = ({
             placed.push(item);
         });
         return placed;
-    }, [kind, legacy, regular, draft, offers, fileKinds, settings, cardKept, template, staffed, helpdesk]);
+    }, [kind, legacy, regular, draft, offers, fileKinds, settings, cardKept, template, staffed, helpdesk, contractMissing]);
     const byKey = useMemo(() => issuesByKey(issues), [issues]);
     const keys = useMemo(() => issueKeys(issues), [issues]);
     const nav = useIssueNav(formRef, keys);
@@ -530,6 +549,9 @@ const PaymentRequestForm = ({
                 ...(title ? { expense_name: title } : {}), justification: draft.justification.trim(),
                 category_id: draft.category_id, subcategory_id: draft.subcategory_id, due_on: draft.due_on || null,
                 items, notes: draft.notes.trim(),
+                // Договор — выбор инициатора и у IT-закупа (10.11.2026), когда Helpdesk IT выбрал оплату
+                // счётом: иначе счёт свыше порога вернулся бы к нему без поля, где его выбрать.
+                ...(itInvoice ? { contract_id: contractId, no_contract: noContract } : {}),
                 ...observersPayload(),
                 submit,
             };
@@ -556,6 +578,8 @@ const PaymentRequestForm = ({
             no_alternatives_comment: draft.no_alternatives ? draft.no_alternatives_comment.trim() : '',
             supplier_choice_reason: draft.supplier_choice_reason.trim(),
             contract_id: contractId, counterparty_account_id: accountId,
+            // «Без договора» — только у оплаты счёта: у карты договора не спрашивают.
+            no_contract: draft.payment_method === 'invoice' && noContract,
             invoice_number: draft.invoice_number.trim(), invoice_date: draft.invoice_date || null,
             replace_invoice: Boolean(invoiceFile),
             card_recipient: draft.payment_method === 'card' ? draft.card_recipient : null,
@@ -625,6 +649,26 @@ const PaymentRequestForm = ({
         if (!confirmClose && touched()) { setConfirmClose(true); return; }
         onClose?.();
     };
+
+    /* Поле «Договор» и подсказка под ним — одни и те же у нового закупа и у IT-закупа, где способ
+       оплаты выбрал Helpdesk IT: счёт свыше порога без договора вернётся к инициатору, и выбрать
+       «Без договора» ему нужно и там. */
+    const contractField = (
+        <Field label="Договор" required={total > threshold} hint={HINTS.contract} anchor="contract_id" issue={issueOf('contract_id')}>
+            <FormSelect value={noContract ? NO_CONTRACT : contractId} onChange={pickContract} options={contractChoices} placeholder="Не выбран" ariaLabel="Договор" />
+        </Field>
+    );
+    /* Одна строка под полем, а не плашка: выбрали — строка уходит, и окно почти не сдвигается (разбор
+       10.11.2026). Заявку вернули за этим выбором — вместо строки красное поле (contractMissing). Уже
+       согласованная заявка («после согласования» наступило) — без обещания выбрать позже. */
+    const contractNotice = contractNeeded && !contractMissing ? (
+        <div className="px-1 text-[12.5px] text-amber-700">
+            {approvedBefore
+                ? `Сумма выше ${fmtMoney(threshold)}: без договора или «${NO_CONTRACT_LABEL}» счёт не уйдёт в оплату.`
+                : `Сумма выше ${fmtMoney(threshold)}: выберите договор или «${NO_CONTRACT_LABEL}», иначе после согласования заявка вернётся к вам.`}
+        </div>
+    ) : null;
+    const clarifyLabel = (data?.subtasks || []).find((item) => item.kind === 'initiation')?.clarify_label;
 
     const route = approvalSummary(preview?.route);
     const entityStep = entityOptional && Boolean(preview?.entity_step);
@@ -761,7 +805,7 @@ const PaymentRequestForm = ({
                 {editing && request.clarify_reason && (
                     <NoticeBox text="">
                         <span className="font-medium">
-                            {request.clarify_reason === 'rework' ? 'Вернули на доработку' : 'Требуется уточнение'}
+                            {request.clarify_reason === 'rework' ? 'Вернули на доработку' : (clarifyLabel || 'Требуется уточнение')}
                             {request.clarify_by_name ? ` — ${request.clarify_by_name}` : ''}.
                         </span>
                         {request.clarify_comment ? ` ${request.clarify_comment}` : ''}
@@ -805,7 +849,16 @@ const PaymentRequestForm = ({
                             {template && (
                                 <div className="rounded-xl bg-slate-50 px-3 py-1.5">
                                     <Row label="Поставщик">{template.counterparty_name || <span className="text-rose-600">не указан в справочнике</span>}</Row>
-                                    <Row label="Договор">{template.contract_number ? `№${template.contract_number}` : null}</Row>
+                                    {/* Договор задаёт справочник (п. 4.4): не выбран — строка видна всегда (её рост не меняется
+                                        от суммы), а свыше порога — оранжевым; что делать — под «i». */}
+                                    <Row label="Договор">
+                                        {template.contract_number ? `№${template.contract_number}` : template.no_contract ? NO_CONTRACT_LABEL : (
+                                            <span className="inline-flex items-center gap-1">
+                                                <span className={parseAmount(draft.amount) > threshold ? 'text-amber-700' : 'text-slate-500'}>не указан в справочнике</span>
+                                                <FieldHint hint={HINTS.regularContract} />
+                                            </span>
+                                        )}
+                                    </Row>
                                     <Row label="Компания">{template.legal_entity_name || <span className="text-rose-600">не указана в справочнике</span>}</Row>
                                     <Row label="Реквизиты">{template.account_text}</Row>
                                     <Row label="Назначение платежа">{template.payment_purpose}</Row>
@@ -984,6 +1037,14 @@ const PaymentRequestForm = ({
                                             ))}
                                         </div>
                                     )}
+                                    {/* Оплату счётом выбрал Helpdesk IT; договор с его поставщиком — выбор инициатора (10.11.2026):
+                                        счёт свыше порога без договора или «Без договора» вернётся к нему. */}
+                                    {itInvoice && (
+                                        <>
+                                            <div className="grid gap-3 pt-1 sm:grid-cols-2">{contractField}</div>
+                                            {contractNotice}
+                                        </>
+                                    )}
                                 </div>
                             ) : (<>
                             <Field as="div" label="Альтернативные предложения" required optionalMark={false} hint={HINTS.alternatives}>
@@ -1049,23 +1110,18 @@ const PaymentRequestForm = ({
 
                             {draft.payment_method === 'invoice' && (
                                 <>
-                                    {supplierId && (contractOptions.length > 0 || accountOptions.length > 0) && (
-                                        <div className="grid gap-3 sm:grid-cols-2">
-                                            {contractOptions.length > 0 && (
-                                                <Field label="Договор" required={total > threshold} hint={HINTS.contract}>
-                                                    <FormSelect value={contractId} onChange={(value) => set('contract_id', value)} options={[{ value: null, label: 'Без договора' }, ...contractOptions]} placeholder="Без договора" ariaLabel="Договор" />
-                                                </Field>
-                                            )}
-                                            {accountOptions.length > 0 && (
-                                                <Field label="Реквизиты поставщика" hint="Счёт поставщика из справочника «Банковские реквизиты поставщиков» — бухгалтерия сверит его со счётом.">
-                                                    <FormSelect value={accountId} onChange={(value) => set('counterparty_account_id', value)} options={[{ value: null, label: 'Не указывать' }, ...accountOptions]} placeholder="Не указывать" ariaLabel="Реквизиты поставщика" />
-                                                </Field>
-                                            )}
-                                        </div>
-                                    )}
-                                    {contractNeeded && (
-                                        <NoticeBox text={`Сумма выше ${fmtMoney(threshold)}: счёт не уйдёт в оплату без действующего договора с поставщиком. Договор можно указать сейчас или после согласования.`} />
-                                    )}
+                                    {/* «Договор» при оплате счёта виден всегда (10.11.2026): «Без договора» —
+                                        отдельный пункт, и выбрать его можно и у поставщика, которого нет в
+                                        справочнике или у которого договоров нет. */}
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        {contractField}
+                                        {supplierId && accountOptions.length > 0 && (
+                                            <Field label="Реквизиты поставщика" hint="Счёт поставщика из справочника «Банковские реквизиты поставщиков» — бухгалтерия сверит его со счётом.">
+                                                <FormSelect value={accountId} onChange={(value) => set('counterparty_account_id', value)} options={[{ value: null, label: 'Не указывать' }, ...accountOptions]} placeholder="Не указывать" ariaLabel="Реквизиты поставщика" />
+                                            </Field>
+                                        )}
+                                    </div>
+                                    {contractNotice}
                                     {invoiceOpen ? (
                                         <>
                                             <div className="grid gap-3 sm:grid-cols-2">

@@ -4,8 +4,8 @@ import { CalendarClock, Download, Loader2, Pencil, Play, Plus, Trash2, Upload } 
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, AUTO_CREATE_OPTIONS, HINTS, OBJECT_TYPE_OPTIONS, PERIOD_META, PERIOD_OPTIONS, fmtDate,
-    fmtMoney,
+    ACCOUNTING_CATEGORY_OPTIONS, AUTO_CREATE_OPTIONS, HINTS, NO_CONTRACT, NO_CONTRACT_LABEL, OBJECT_TYPE_OPTIONS, PERIOD_META,
+    PERIOD_OPTIONS, fmtDate, fmtMoney,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, Choice, DATE_TRIGGER, ErrorBox, Field, FormSelect, NoticeBox, UserSelect, cardCell,
@@ -37,10 +37,13 @@ const TEMPLATE_ACTIVE_OPTIONS = [{ value: true, label: 'Активен' }, { val
 const emptyDraft = (me) => ({
     id: null, name: '', amount: 0, periodicity: 'monthly', interval_days: '', next_due_on: '', lead_days: 7,
     project_id: null, branch: '', responsible_user_id: me?.id || null, category_id: null, subcategory_id: null,
-    counterparty_id: null, legal_entity_id: null, contract_id: null, counterparty_account_id: null,
+    counterparty_id: null, legal_entity_id: null, contract_id: null, no_contract: false, counterparty_account_id: null,
     payment_purpose: '', amount_limit: '', approver_user_id: null, object_type: 'service', accounting_category: null,
     auto_create: true, note: '', is_active: true,
 });
+
+// Договор платежа в строке списка: номер либо «без договора» — выбор администратора (10.11.2026).
+const contractShort = (row) => (row.contract_number ? `договор №${row.contract_number}` : row.no_contract ? 'без договора' : null);
 
 const FixedPaymentsPanel = ({
     apiBaseUrl, headers, users, dictionaries, me, showToast, canEdit, onChanged, onRequestsChanged, onOpenRequest,
@@ -86,8 +89,9 @@ const FixedPaymentsPanel = ({
     const projectOptions = useMemo(() => [{ value: '', label: 'Без проекта' }, ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
     const legalEntityOptions = useMemo(() => (dictionaries?.legal_entities || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
-    // Договор и реквизиты — только выбранного поставщика: чужие к платежу не относятся.
-    const contractOptions = useMemo(() => [{ value: '', label: 'Без договора' }, ...(dictionaries?.contracts || [])
+    // Договор и реквизиты — только выбранного поставщика: чужие к платежу не относятся. «Без договора» —
+    // выбор, а не пустое поле (10.11.2026): с ним счёт заявки уходит в оплату любой суммы.
+    const contractOptions = useMemo(() => [{ value: NO_CONTRACT, label: NO_CONTRACT_LABEL }, ...(dictionaries?.contracts || [])
         .filter((item) => item.counterparty_id === draft.counterparty_id && (item.status === 'active' || item.id === draft.contract_id))
         .map((item) => ({ value: item.id, label: `№${item.number}${item.ends_on ? ` до ${fmtDate(item.ends_on)}` : ''}` }))], [dictionaries, draft.counterparty_id, draft.contract_id]);
     const accountOptions = useMemo(() => [{ value: '', label: 'Не выбраны' }, ...(dictionaries?.counterparty_accounts || [])
@@ -104,6 +108,7 @@ const FixedPaymentsPanel = ({
             responsible_user_id: row.responsible_user_id ?? null, category_id: row.category_id ?? null,
             subcategory_id: row.subcategory_id ?? null, counterparty_id: row.counterparty_id ?? null,
             legal_entity_id: row.legal_entity_id ?? null, contract_id: row.contract_id ?? null,
+            no_contract: Boolean(row.no_contract) && !row.contract_id,
             counterparty_account_id: row.counterparty_account_id ?? null, payment_purpose: row.payment_purpose || '',
             amount_limit: row.amount_limit ?? '', approver_user_id: row.approver_user_id ?? null,
             object_type: row.object_type || 'service', accounting_category: row.accounting_category ?? null,
@@ -309,7 +314,7 @@ const FixedPaymentsPanel = ({
                                         </td>
                                         <td className={cell}>
                                             <div className={`truncate ${row.counterparty_name ? main : 'text-slate-400'}`}>{row.counterparty_name || '—'}</div>
-                                            <div className="truncate text-[12px] text-slate-500">{[row.contract_number && `договор №${row.contract_number}`, row.legal_entity_name && `от ${row.legal_entity_name}`].filter(Boolean).join(' · ')}</div>
+                                            <div className="truncate text-[12px] text-slate-500">{[contractShort(row), row.legal_entity_name && `от ${row.legal_entity_name}`].filter(Boolean).join(' · ')}</div>
                                         </td>
                                         <td className={cell}>
                                             <div className={`truncate ${row.responsible_name ? main : 'text-slate-400'}`}>{row.responsible_name || '—'}</div>
@@ -359,7 +364,7 @@ const FixedPaymentsPanel = ({
                                 </span>
                             </div>
                             <div className="truncate text-[12px] text-slate-500">
-                                {[row.counterparty_name, row.contract_number && `договор №${row.contract_number}`, row.legal_entity_name && `от ${row.legal_entity_name}`,
+                                {[row.counterparty_name, contractShort(row), row.legal_entity_name && `от ${row.legal_entity_name}`,
                                     row.responsible_name && `отв. ${row.responsible_name}`, row.approver_name && `согласует ${row.approver_name}`,
                                     row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ') || '—'}
                             </div>
@@ -434,10 +439,19 @@ const FixedPaymentsPanel = ({
 
                     <div className="grid gap-3 sm:grid-cols-2">
                         <Field label="Поставщик" hint="Кому платим. Подставится в заявку сам.">
-                            <FormSelect value={draft.counterparty_id} onChange={(v) => setDraft((prev) => ({ ...prev, counterparty_id: v || null, contract_id: null, counterparty_account_id: null }))} options={[{ value: '', label: 'Не выбран' }, ...counterpartyOptions]} searchable ariaLabel="Поставщик" />
+                            <FormSelect value={draft.counterparty_id} onChange={(v) => setDraft((prev) => ({ ...prev, counterparty_id: v || null, contract_id: null, no_contract: false, counterparty_account_id: null }))} options={[{ value: '', label: 'Не выбран' }, ...counterpartyOptions]} searchable ariaLabel="Поставщик" />
                         </Field>
-                        <Field label="Договор" hint={HINTS.contract}>
-                            <FormSelect value={draft.contract_id} onChange={(v) => set('contract_id', v || null)} options={contractOptions} disabled={!draft.counterparty_id} placeholder={draft.counterparty_id ? 'Без договора' : 'Сначала поставщик'} ariaLabel="Договор" />
+                        <Field label="Договор" hint={HINTS.templateContract}>
+                            <FormSelect
+                                value={draft.no_contract ? NO_CONTRACT : draft.contract_id}
+                                onChange={(v) => setDraft((prev) => (v === NO_CONTRACT
+                                    ? { ...prev, contract_id: null, no_contract: true }
+                                    : { ...prev, contract_id: v || null, no_contract: false }))}
+                                options={contractOptions}
+                                disabled={!draft.counterparty_id}
+                                placeholder={draft.counterparty_id ? 'Не выбран' : 'Сначала поставщик'}
+                                ariaLabel="Договор"
+                            />
                         </Field>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">

@@ -790,13 +790,13 @@ def save_setting(cursor, key, value, actor_id=None):
 
 _TEMPLATE_FIELDS = ('id', 'name', 'amount', 'periodicity', 'interval_days', 'next_due_on', 'lead_days',
                     'project_id', 'branch', 'responsible_user_id', 'category_id', 'subcategory_id',
-                    'counterparty_id', 'legal_entity_id', 'contract_id', 'counterparty_account_id',
+                    'counterparty_id', 'legal_entity_id', 'contract_id', 'no_contract', 'counterparty_account_id',
                     'payment_purpose', 'amount_limit', 'approver_user_id', 'object_type',
                     'accounting_category', 'due_day', 'auto_create',
                     'note', 'is_active', 'last_generated_on', 'created_at', 'updated_at')
 _TEMPLATE_WRITE = ('name', 'amount', 'periodicity', 'interval_days', 'next_due_on', 'lead_days', 'project_id',
                    'branch', 'responsible_user_id', 'category_id', 'subcategory_id', 'counterparty_id',
-                   'legal_entity_id', 'contract_id', 'counterparty_account_id', 'payment_purpose',
+                   'legal_entity_id', 'contract_id', 'no_contract', 'counterparty_account_id', 'payment_purpose',
                    'amount_limit', 'approver_user_id', 'object_type', 'accounting_category', 'due_day',
                    'auto_create', 'note', 'is_active')
 _TEMPLATE_EXTRA = ('responsible_name', 'project_name', 'category_name', 'subcategory_name',
@@ -847,6 +847,8 @@ def read_template(cursor, template_id, *, lock=False):
 
 
 def upsert_template(cursor, *, template_id=None, fields, actor_id=None):
+    # «Без договора» — только когда договор не выбран; пусто — «не выбрано» (NOT NULL).
+    fields = dict(fields, no_contract=bool(fields.get('no_contract')) and not fields.get('contract_id'))
     values = [fields.get(col) for col in _TEMPLATE_WRITE]
     if template_id:
         cursor.execute(

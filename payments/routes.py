@@ -57,7 +57,9 @@ STOCK_PAGE_MAX = 30
 SUPPLIER_HISTORY_LIMIT = 3
 # Что Helpdesk IT выбирает вместе с поставщиком (владелец 06.11.2026) — поля формы заявки.
 HELPDESK_PAYMENT_KEYS = ('object_type', 'accounting_category', 'payment_method', 'card_recipient',
-                         'card_holder_user_id', 'card_holder_name', 'card_id', 'card_number', 'payment_purpose')
+                         'card_holder_user_id', 'card_holder_name', 'card_id', 'card_number', 'payment_purpose',
+                         # Договор с подобранным поставщиком или «Без договора» (10.11.2026) — тоже его.
+                         'contract_id', 'no_contract')
 
 _LINK_RE = re.compile(r'^https?://', re.IGNORECASE)
 
@@ -298,7 +300,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         contract = directory.read_contract(cursor, request_row.get('contract_id'))
         gate_ok, gate_reason = workflow.contract_gate(
             request_row.get('amount'), contract, counterparty_id=request_row.get('counterparty_id'),
-            on_date=request_row.get('invoice_date') or queries.today_almaty())
+            on_date=request_row.get('invoice_date') or queries.today_almaty(),
+            no_contract=bool(request_row.get('no_contract')),
+            regular=request_row.get('request_kind') == workflow.KIND_REGULAR)
         asset_rows = assets_sql.for_request(cursor, request_id)
         permissions = _permissions(ctx, request_row, subtasks, members)
         # IT-закуп (владелец 04.11.2026): что уже числится за сотрудником — Helpdesk IT проверяет
@@ -356,8 +360,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 request_row, subtasks, assets=asset_rows,
                 has_handover_act=any(item['kind'] == 'handover_act' for item in attachments)),
             'clarify_reasons': [{'code': item['code'], 'label': item['label'], 'ask': item['ask']}
-                                for item in workflow.clarify_reasons_for(current_kind)] if current_kind else [],
-            'submit_problems': flow.submit_problems(cursor, request_row) if permissions['can_edit'] else [],
+                                for item in workflow.clarify_reasons_for(current_kind, request_row)] if current_kind else [],
+            # Плюс выбор договора, без которого ответ бухгалтерии не пройдёт (flow.answer_problems).
+            'submit_problems': (flow.submit_problems(cursor, request_row) + flow.answer_problems(cursor, request_row)
+                                if permissions['can_edit'] else []),
             'permissions': permissions,
             'observers': observers,
             # Фото наблюдателей — как на карточках досок: номер человека → ссылка. Ссылки
@@ -538,6 +544,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                         'counterparty_account_id'):
                 if creating or has(key):
                     fields[key] = as_int(data.get(key), key)
+            if creating or has('no_contract'):
+                # «Без договора» — осознанный выбор инициатора (10.11.2026), а не пустое поле:
+                # с ним счёт уходит в оплату любой суммы (workflow.contract_gate).
+                fields['no_contract'] = as_bool(data.get('no_contract'))
             for key in ('expense_name', 'branch', 'justification', 'supplier_choice_reason', 'payment_purpose'):
                 if creating or has(key):
                     fields[key] = as_text(data.get(key), key)
@@ -583,9 +593,17 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                     errors.append('Подкатегория не относится к выбранной категории')
             counterparty_id = fields.get('counterparty_id', current.get('counterparty_id'))
             if 'counterparty_id' in fields and fields['counterparty_id'] != current.get('counterparty_id'):
-                # Сменили поставщика — договор и счёт прежнего к новому не относятся.
+                # Сменили поставщика — договор и счёт прежнего к новому не относятся, и «Без
+                # договора» говорилось о прежнем: с новым поставщиком выбирают заново.
                 fields.setdefault('contract_id', None)
+                fields.setdefault('no_contract', False)
                 fields.setdefault('counterparty_account_id', None)
+            # Договор и «Без договора» — одно из двух: выбранный договор снимает отметку, отметка
+            # снимает прежний договор. Прислали и то и другое — верим договору: его проверят.
+            if fields.get('contract_id'):
+                fields['no_contract'] = False
+            elif fields.get('no_contract'):
+                fields['contract_id'] = None
             if fields.get('contract_id'):
                 contract = directory.read_contract(cursor, fields['contract_id'])
                 if not contract:
@@ -601,6 +619,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
             # ── Карта (пп. 5.2–5.4) ──
             method = fields.get('payment_method', current.get('payment_method'))
+            if method == workflow.METHOD_CARD and fields.get('no_contract', current.get('no_contract')):
+                # Договор — у оплаты по счёту; у пополнения карты отметке «Без договора» не место.
+                fields['no_contract'] = False
             if method == workflow.METHOD_CARD:
                 if creating or has('card_recipient'):
                     fields['card_recipient'] = as_choice(data.get('card_recipient'), schema.CARD_RECIPIENTS,
@@ -1740,7 +1761,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             contract = directory.read_contract(cursor, as_int(args.get('contract_id')))
         ok, reason = workflow.contract_gate(
             draft['amount'], contract, counterparty_id=draft['counterparty_id'],
-            on_date=as_date(args.get('on_date'), 'on_date') or queries.today_almaty())
+            on_date=as_date(args.get('on_date'), 'on_date') or queries.today_almaty(),
+            no_contract=as_bool(args.get('no_contract')),
+            regular=draft['request_kind'] == workflow.KIND_REGULAR)
         return jsonify({
             'route': basis,
             'manager': manager,

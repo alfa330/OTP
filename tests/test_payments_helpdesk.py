@@ -432,6 +432,17 @@ class OffersFlowTests(_FlowBase):
         self.act('it_offers', **self.fields())
         self.assertEqual((self.row['contract_id'], self.row['counterparty_account_id']), (None, None))
 
+    def test_helpdesk_contract_choice_lands_after_the_reset(self):
+        """Договор или «Без договора» Helpdesk IT выбирает вместе с оплатой счётом (10.11.2026): сброс при
+        смене поставщика идёт раньше его выбора, и выбор для нового поставщика ложится в заявку. Не выбрал —
+        отметка прежнего поставщика к новому не переезжает."""
+        self.row.update(counterparty_id=55, contract_id=9, no_contract=False)
+        self.act('it_offers', **dict(self.fields(), payment={'payment_method': 'invoice', 'no_contract': True}))
+        self.assertEqual((self.row['contract_id'], self.row['no_contract']), (None, True))
+        self.row.update(counterparty_id=55, no_contract=True)
+        self.act('it_offers', **dict(self.fields(), payment={'payment_method': 'invoice'}))
+        self.assertIs(self.row['no_contract'], False)
+
     def test_incomplete_offers_change_nothing(self):
         with self.assertRaises(flow.FlowError) as caught:
             self.act('it_offers', **dict(self.fields(), items=items('1')))

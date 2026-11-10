@@ -745,6 +745,14 @@ def register(api):
             account = directory.read_account(cursor, account_id)
             if not account or (counterparty_id and account['counterparty_id'] != counterparty_id):
                 raise ApiError('Банковские реквизиты принадлежат другому поставщику')
+        if 'no_contract' in data:
+            no_contract = as_bool(data.get('no_contract'))
+        else:
+            # Окно справочника из прежней сборки отметки «Без договора» не знает и не шлёт:
+            # его сохранение не должно её стирать (как НДС «не указан» — `vat_tristate`).
+            template_id = as_int(data.get('id'), 'id')
+            current = directory.read_template(cursor, template_id) if template_id else None
+            no_contract = bool((current or {}).get('no_contract'))
         return {
             'name': as_text(data.get('name'), 'Наименование', required=True, limit=300),
             'amount': amount, 'periodicity': periodicity,
@@ -759,6 +767,8 @@ def register(api):
             'counterparty_id': counterparty_id,
             'legal_entity_id': as_int(data.get('legal_entity_id'), 'legal_entity_id'),
             'contract_id': contract_id,
+            # «Без договора» — осознанный выбор (10.11.2026); рядом с договором не ставится.
+            'no_contract': no_contract and not contract_id,
             'counterparty_account_id': account_id,
             'payment_purpose': as_text(data.get('payment_purpose'), 'payment_purpose'),
             'amount_limit': as_money(data.get('amount_limit'), 'Лимит'),

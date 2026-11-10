@@ -8,14 +8,15 @@ import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
 import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, DOCS_STATUS_META, HINTS,
-    OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, VAT_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney,
+    ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, CONTRACT_THRESHOLD,
+    DOCS_STATUS_META, HINTS, NO_CONTRACT, NO_CONTRACT_LABEL, OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, VAT_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney,
     helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount,
     pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO, vatLabel,
+    contractChoice, contractPick, supplierKeyOf,
 } from './paymentsMeta';
 import {
     AmountInput, CardNumber, Choice, Field, FieldHint, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText,
-    INVALID_RING, IssueNav, NoticeBox, ReturnNotice, Row, TonePill, errorText, fromKeyboard, useIssueNav,
+    INVALID_RING, IssueNav, NoticeBox, ReturnNotice, Row, TonePill, contractValue, errorText, fromKeyboard, useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -207,6 +208,9 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
     const [draft, setDraft] = useState(() => {
         // Поставщики, уже лежащие в заявке (Helpdesk проверяет её второй раз), — с ними.
         const offers = (data.offers || []).map(offerFromRow);
+        // «Без договора» в заявке — выбор при её нынешнем рекомендуемом поставщике (как в форме заявки).
+        const chosenFor = request.no_contract
+            ? supplierKeyOf(recommendedOffer({ no_alternatives: Boolean(request.no_alternatives), offers })) : null;
         return {
             offers: offers.length ? offers : Array.from({ length: minSuppliers }, () => newOffer()),
             no_alternatives: Boolean(request.no_alternatives),
@@ -218,6 +222,11 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
             object_type: request.object_type ?? null,
             accounting_category: request.accounting_category ?? null,
             payment_method: request.payment_method ?? null,
+            // Договор с поставщиком или «Без договора» (10.11.2026): поставщика подбирает Helpdesk IT — ему
+            // и знать, есть ли с ним договор. Счёт свыше порога без этого выбора вернётся инициатору.
+            contract_id: request.contract_id ?? null,
+            no_contract: Boolean(request.no_contract),
+            no_contract_for: chosenFor,
             card_recipient: request.card_recipient ?? null,
             card_holder_user_id: request.card_holder_user_id ?? null,
             card_holder_name: request.card_holder_name || '',
@@ -311,6 +320,20 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
 
     const total = itemsTotal(draft.items.filter((item) => !isBlankItem(item)));
     const price = parseAmount(recommended?.amount);
+    // Договор — только с рекомендуемым поставщиком из справочника; сменили поставщика — выбранный
+    // для прежнего не предлагается и не уходит (как в форме заявки).
+    const supplierId = recommended && !recommended.custom ? (recommended.counterparty_id || null) : null;
+    const contractOptions = useMemo(() => (dictionaries?.contracts || [])
+        .filter((item) => supplierId && item.counterparty_id === supplierId)
+        .map((item) => ({
+            value: item.id,
+            label: `№${item.number}${item.ends_on ? ` до ${fmtDate(item.ends_on)}` : ''}${item.status !== 'active' ? ' · недействующий' : ''}`,
+        })), [dictionaries, supplierId]);
+    // Сменили рекомендуемого поставщика — «Без договора», выбранное при прежнем, не действует.
+    const supplierKey = supplierKeyOf(recommended);
+    const { contractId, noContract } = contractChoice(draft, contractOptions, supplierKey);
+    const threshold = meta?.contract_threshold || CONTRACT_THRESHOLD;
+    const contractNeeded = draft.payment_method === 'invoice' && Math.max(total, price) > threshold && !contractId && !noContract;
     // Позиция одна, а сумма с поставщиком не сходится — цену можно поставить одной кнопкой.
     const priced = recommended && price > 0 && Math.round(total * 100) !== Math.round(price * 100)
         ? pricedByOffer(draft.items, price) : null;
@@ -336,6 +359,7 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                 object_type: draft.object_type,
                 accounting_category: draft.object_type === 'goods' ? draft.accounting_category : null,
                 payment_method: draft.payment_method,
+                ...(draft.payment_method === 'invoice' ? { contract_id: contractId, no_contract: noContract } : {}),
                 ...(draft.payment_method === 'card' ? {
                     card_recipient: draft.card_recipient,
                     card_holder_user_id: draft.card_recipient === 'employee' ? draft.card_holder_user_id : null,
@@ -519,7 +543,26 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                             <Choice value={draft.payment_method} options={PAYMENT_METHOD_OPTIONS} onChange={(value) => set('payment_method', value)} ariaLabel="Способ оплаты" />
                         </Field>
                         {draft.payment_method === 'invoice' && (
-                            <div className="px-1 text-[12.5px] text-slate-500">Счёт приложат после утверждения — раздел попросит его перед оплатой.</div>
+                            <>
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <Field label="Договор" required={Math.max(total, price) > threshold} hint={HINTS.helpdeskContract}>
+                                        <FormSelect
+                                            value={noContract ? NO_CONTRACT : contractId}
+                                            onChange={(value) => setDraft((prev) => ({ ...prev, ...contractPick(value, supplierKey) }))}
+                                            options={[{ value: NO_CONTRACT, label: NO_CONTRACT_LABEL }, ...contractOptions]}
+                                            placeholder="Не выбран"
+                                            ariaLabel="Договор"
+                                        />
+                                    </Field>
+                                </div>
+                                {/* Строка, а не плашка: выбрали — уходит, окно почти не сдвигается (разбор 10.11.2026). */}
+                                {contractNeeded && (
+                                    <div className="px-1 text-[12.5px] text-amber-700">
+                                        Сумма выше {fmtMoney(threshold)}: выберите договор или «{NO_CONTRACT_LABEL}», иначе после утверждения заявка вернётся инициатору.
+                                    </div>
+                                )}
+                                <div className="px-1 text-[12.5px] text-slate-500">Счёт приложат после утверждения — раздел попросит его перед оплатой.</div>
+                            </>
                         )}
                         {draft.payment_method === 'card' && (
                             <PaymentCardFields
@@ -810,8 +853,11 @@ const PaymentStageForm = ({
                     <Row label="Счёт">
                         {request.invoice_number ? `№${request.invoice_number}` : '—'}{request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}
                     </Row>
+                    {/* П. 8: договор. «Без договора» — выбор инициатора (10.11.2026): счёт с ним приходит
+                        сюда любой суммы, а свыше порога — с пометкой. Нужен договор — «Запросить
+                        информацию → Нужен действующий договор». */}
                     <Row label="Договор">
-                        {request.contract_number ? `№${request.contract_number}` : 'без договора'}
+                        {contractValue(request, check.threshold, 'не указан')}
                         {check.applies && !check.ok && <div className="text-amber-700">{check.reason}</div>}
                     </Row>
                     <Row label="Прошлые оплаты">
