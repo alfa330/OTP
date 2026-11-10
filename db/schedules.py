@@ -695,7 +695,13 @@ class SchedulesMixin:
                     start_min if planning_from_min <= start_min and not used_breaks
                     else max(start_min, planning_from_min)
                 )
-                computed_breaks = [fixed_here] if int(fixed_here['start']) >= window_start else []
+                # Время перерыва направления — ровно оно, и в уже наступившей части дня
+                # тоже; не ставится, только если его место занял прошедший перерыв.
+                # Иначе сегодняшняя смена теряла старые перерывы и не получала новых.
+                computed_breaks = (
+                    [] if self._break_total_overlap_minutes(fixed_here, frozen_breaks) > 0
+                    else [fixed_here]
+                )
             elif planning_from_min <= start_min and not used_breaks:
                 window_start = start_min
                 computed_breaks = self._place_break_durations_centered_minutes(

@@ -1798,8 +1798,11 @@ class BreaksMixin:
             win_start = max(win_start, protected_end)
         win_start = min(win_start, seg_end)
 
+        # Границей служит начало смены, а не «сейчас + буфер»: время перерыва направления
+        # ставится и в уже наступившую часть дня, а ручные перерывы из прошлого сюда не
+        # доходят — их отсекают до раскладки (_save_shift_tx берёт прошлое из снимка).
         if allow_overlap and keep_positions and self._breaks_fit_as_placed(
-            prepared_breaks, own_intervals, win_start, seg_end
+            prepared_breaks, own_intervals, seg_start, seg_end
         ):
             # Коллеги не мешают, а ручное время — решение руководителя (у регионов,
             # например, обед с 13 до 14): равномерностью его не перетираем.

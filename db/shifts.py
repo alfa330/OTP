@@ -937,6 +937,14 @@ class ShiftsMixin:
             seg_start=new_start_min,
             seg_end=new_end_min
         )
+        # Время перерыва направления ставится всегда, когда смена его покрывает, — и в
+        # уже наступившую часть дня: это обычное время направления, а не догадка. Не
+        # ставится, только если его место уже занимает прошедший перерыв.
+        fixed_here = self._fixed_break_for_segment(new_start_min, new_end_min, fixed_break)
+        fixed_placeable = (
+            fixed_here is not None
+            and self._break_total_overlap_minutes(fixed_here, frozen_breaks) <= 0
+        )
         # Смена целиком в прошлом и сохранять нечего (заводят задним числом) —
         # раскладываем по всей смене, как раньше: переписывать нечего.
         nothing_to_protect = not frozen_breaks and not used_breaks and not stored_upcoming_breaks
@@ -988,10 +996,9 @@ class ShiftsMixin:
             отсиженное, разложенная только по остатку смены. Перерывы, которые уже
             стоят в графике и ещё не начались, остаются на своих местах.
             """
-            fixed_here = self._fixed_break_for_segment(new_start_min, new_end_min, fixed_break)
             if fixed_here is not None:
-                # Время перерыва направления: ровно этот перерыв, если он ещё впереди.
-                return [fixed_here] if int(fixed_here['start']) >= planning_window_start else []
+                # Время перерыва направления: ровно оно; место занято прошедшим — ничего.
+                return [dict(fixed_here)] if fixed_placeable else []
             full_durations = self._pick_break_durations_for_shift(
                 duration_minutes=new_duration_min,
                 direction_name=direction_name,
@@ -1041,9 +1048,12 @@ class ShiftsMixin:
                 # из присланного списка используем только ещё не наступившие.
                 # Границами смены присланное не режем — их, как и раньше,
                 # приводит в порядок анти-пересечение.
+                # Исключение — время перерыва направления: клиент ставит его и в уже
+                # наступившую часть дня, если его место свободно (как и сервер выше).
                 breaks_norm = [
                     item for item in incoming_breaks_norm
                     if int(item['start']) >= planning_from_min
+                    or (fixed_placeable and item == fixed_here)
                 ]
                 breaks_are_placed = True
 

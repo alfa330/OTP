@@ -146,6 +146,17 @@ test('время перерыва ставится сменам, которые 
     assert.deepEqual(plan.frozen, []);
 });
 
+test('время перерыва ставится и в уже наступившую часть дня, но не вторым поверх прошедшего', () => {
+    // Весь день уже прошёл: перерывов не осталось — обед всё равно встаёт в 13–14
+    // (жалоба 10.11: пересчёт в 13:00 стирал перерывы и ничего не ставил взамен).
+    const empty = planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), [], '2020-01-06');
+    assert.deepEqual(empty.breaks, [LUNCH]);
+    // Обед на это время уже стоит (прошедший) — второго не добавляем.
+    const taken = planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), [LUNCH], '2020-01-06');
+    assert.deepEqual(taken.frozen, [LUNCH]);
+    assert.deepEqual(taken.breaks, []);
+});
+
 test('раскладка не двигает время перерыва направления с галочкой', () => {
     const rules = [{ minMinutes: 300, maxMinutes: 720, breakDurations: [60] }];
     const layout = (ranges, overlapAllowed) => {

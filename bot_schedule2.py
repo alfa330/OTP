@@ -39154,7 +39154,7 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
             win_start = max(win_start, protected_end)
         win_start = min(win_start, seg_end)
 
-        if fixed_break is not None and _ws_breaks_fit_as_placed(prepared_breaks, own_intervals, win_start, seg_end):
+        if fixed_break is not None and _ws_breaks_fit_as_placed(prepared_breaks, own_intervals, seg_start, seg_end):
             # Время перерыва направления равномерностью не двигаем (зеркало сервера).
             kept = [{'start': int(b['start']), 'end': int(b['end'])} for b in prepared_breaks]
             own_intervals.extend(dict(item) for item in kept)
@@ -39403,9 +39403,10 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 _ws_fixed_break_for_direction(sim_op.get('direction'), break_fixed_map, break_overlap_directions)
             )
             if fixed_here is not None:
-                # Время перерыва направления: ровно этот перерыв, если он ещё впереди.
+                # Время перерыва направления — ровно оно, и в уже наступившей части дня;
+                # не ставится, только если его место занял прошедший перерыв (зеркало сервера).
                 window_start = smin if seg_planning_from <= smin and not used else min(max(smin, seg_planning_from), emin)
-                seg_breaks = [fixed_here] if int(fixed_here['start']) >= window_start else []
+                seg_breaks = [] if _ws_break_total_overlap_minutes(fixed_here, frozen) > 0 else [fixed_here]
             elif seg_planning_from <= smin and not used:
                 window_start = smin
                 seg_breaks = _ws_place_break_durations_centered(smin, emin, full_durations)

@@ -1951,6 +1951,64 @@ class BreakOverlapAllowedTests(unittest.TestCase):
         # Без галочки «время перерыва» не действует.
         self.assertIsNone(engine["_ws_fixed_break_for_direction"]("Регионы", {"регионы": dict(self.LUNCH)}, set()))
 
+    def _recalc_pass(self, shift_date, now, snapshot):
+        """Один проход «Пересчитать перерывы» для смены 09:00–18:00 региона с временем 13–14."""
+        dummy = _make_break_adjust_dummy()
+        namespace = {
+            "math": math,
+            "datetime": datetime,
+            "SHIFT_BREAK_PLANNING_BUFFER_MINUTES": 15,
+            **BREAK_RULE_CONSTANTS,
+        }
+        for function_name in (
+            "_plan_recalc_pass",
+            "_fixed_break_for_segment",
+            "_pick_break_durations_for_shift",
+            "_normalize_direction_key",
+        ):
+            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+            setattr(dummy, function_name, namespace[function_name].__get__(dummy, type(dummy)))
+        dummy._normalize_break_durations_list = lambda value: [int(x) for x in (value or []) if int(x) > 0]
+        dummy._is_chat_manager_direction = lambda name: False
+
+        day = datetime.strptime(shift_date, "%Y-%m-%d").date()
+        planned, frozen = {}, {}
+        dummy._plan_recalc_pass(
+            cursor=None,
+            ordered_rows=[(7, 1, day, "09:00", "18:00", "Регионы")],
+            planned_by_shift=planned,
+            frozen_by_shift=frozen,
+            shift_meta={7: (1, day, "регионы")},
+            day_breaks_snapshots={(1, shift_date): [dict(item) for item in snapshot]},
+            rules_for_direction=lambda name: [{"minMinutes": 300, "maxMinutes": 720, "breakDurations": [60]}],
+            cross_gap_for_direction=lambda name: 0,
+            recalc_now=now,
+            recalc_direction_keys={},
+            overlap_allowed_for_direction=lambda name: True,
+            fixed_break_for_direction=lambda name: dict(self.LUNCH),
+        )
+        return planned[7]
+
+    def test_recalc_puts_fixed_break_today_too_and_never_leaves_shift_empty(self):
+        today = "2026-11-10"
+        # Будущий день — ровно время перерыва.
+        self.assertEqual(self._recalc_pass("2026-11-11", datetime(2026, 11, 10, 14, 30), []), [self.LUNCH])
+        # Сегодня в 12:50: до обеда меньше буфера планирования — всё равно ставим 13–14,
+        # а не убираем старый будущий перерыв, ничего не поставив взамен (жалоба 10.11).
+        self.assertEqual(
+            self._recalc_pass(today, datetime(2026, 11, 10, 12, 50), [{"start": 13 * 60 + 15, "end": 13 * 60 + 30}]),
+            [self.LUNCH],
+        )
+        # Сегодня в 14:30, перерывов на день не осталось — время направления ставится задним числом.
+        self.assertEqual(self._recalc_pass(today, datetime(2026, 11, 10, 14, 30), []), [self.LUNCH])
+        # Прошедший короткий перерыв остаётся, обед добавляется.
+        self.assertEqual(
+            self._recalc_pass(today, datetime(2026, 11, 10, 14, 30), [{"start": 10 * 60 + 30, "end": 10 * 60 + 45}]),
+            [{"start": 10 * 60 + 30, "end": 10 * 60 + 45}, self.LUNCH],
+        )
+        # На 13–14 уже стоит прошедший перерыв — второй не добавляем.
+        self.assertEqual(self._recalc_pass(today, datetime(2026, 11, 10, 14, 30), [self.LUNCH]), [self.LUNCH])
+
     def test_every_path_that_lays_breaks_out_uses_fixed_break(self):
         save_source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
         self.assertIn("overlap_settings = self._get_break_overlap_settings_tx(cursor, direction_name)", save_source)

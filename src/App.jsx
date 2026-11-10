@@ -14828,11 +14828,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const { frozen, upcoming, used } = splitBreaksByFreezeBoundary(dayBreaks, planningFrom, startMin, endMin);
             const fixedHere = plannerFixedBreakForSegment(startMin, endMin, breakRuleRanges?.fixedBreak);
             if (fixedHere) {
-                // Время перерыва направления: ровно этот перерыв, если он ещё впереди.
+                // Время перерыва направления — ровно оно, и в уже наступившей части дня;
+                // не ставится, только если его место занял прошедший перерыв (зеркало сервера).
                 const fixedWindowStart = (planningFrom <= startMin && used.length === 0)
                     ? startMin
                     : Math.min(Math.max(startMin, planningFrom), endMin);
-                return { frozen, planningFrom: fixedWindowStart, breaks: fixedHere.start >= fixedWindowStart ? [fixedHere] : [] };
+                return { frozen, planningFrom: fixedWindowStart, breaks: breakTotalOverlapMinutes(fixedHere, frozen) > 0 ? [] : [fixedHere] };
             }
             const fullDurations = plannerPickBreakDurationsForShift(endMin - startMin, directionValue, breakRuleRanges);
             if (planningFrom <= startMin && used.length === 0) {
@@ -16432,7 +16433,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (protectedEnd !== null) winStart = Math.max(winStart, protectedEnd);
                 winStart = Math.min(winStart, segEnd);
 
-                if (keepPlacedHere && breaksFitAsPlaced(preparedBreaks, ownIntervals, winStart, segEnd)) {
+                // Граница — начало смены: время перерыва направления ставится и в уже
+                // наступившую часть дня; ручные перерывы из прошлого сюда не доходят.
+                if (keepPlacedHere && breaksFitAsPlaced(preparedBreaks, ownIntervals, segStart, segEnd)) {
                     // Коллеги не мешают, а ручное время (обед с 13 до 14) равномерностью не перетираем.
                     const kept = preparedBreaks.map(b => ({ start: b.start, end: b.end }));
                     kept.forEach(item => ownIntervals.push({ ...item }));
