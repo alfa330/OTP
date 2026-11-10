@@ -247,13 +247,13 @@ def test_driver_counted_once_on_the_first_talk_day(db):
     seed.call(petrov, OWN, _at(14, 11, 0), billsec=9)
     seed.call(petrov, OWN, _at(14, 11, 5), billsec=15)
     seed.call(petrov, OWN, _at(14, 11, 30), billsec=40)
-    # Сидоров: отмена до ответа и сообщение сети с длительностью — ни один не первый разговор, засчитан
-    # следующий настоящий.
-    seed.call(sidorov, OWN, _at(13, 12, 0), disposition='CANCEL', cancelled=True)
+    # Сидоров: отмена до ответа (даже если Binotel потом прислал ответ с длительностью) и сообщение сети с
+    # длительностью — ни один не первый разговор; засчитан следующий настоящий, ровно 10 с — граница входит.
+    seed.call(sidorov, OWN, _at(13, 12, 0), disposition='ANSWER', billsec=30, cancelled=True)
     with db._get_cursor() as cur:
         cur.execute("UPDATE dial_list_attempts SET auto_hangup = 'announcement' WHERE id = %s",
                     (seed.call(sidorov, OWN, _at(13, 12, 5), billsec=30),))
-    seed.call(sidorov, OWN, _at(14, 15, 0), billsec=12)
+    seed.call(sidorov, OWN, _at(14, 15, 0), billsec=10)
     with db._get_cursor() as cur:
         cur.execute("UPDATE dial_list_leads SET signed_at = %s, success_attempt_id = %s, success_operator_id = %s "
                     "WHERE id = %s", (_at(15, 10, 0), success, OWN, ivanov))
