@@ -96,6 +96,34 @@ test('в группе перерывов чужое направление ме�
     );
 });
 
+// Обед, поставленный руками (у регионов — с 13 до 14), в смене 08:00–17:00.
+// Равномерная точка этой смены — 12:00, туда его и утаскивала раскладка.
+const HAND_LUNCH = [{ start: 13 * 60, end: 14 * 60 }];
+const lunchShift = (breaks) => ({
+    id: 1,
+    direction: 'Чат',
+    shifts: { [DATE]: [{ start: '08:00', end: '17:00', __startMin: 480, __endMin: 1020, breaks: breaks.map(b => ({ ...b })) }] },
+});
+function lunchLayout(breaks, { overlapAllowed = chatAllowsOverlap, keepPlaced = true } = {}) {
+    const op = lunchShift(breaks);
+    adjustBreaksForOperatorOnDate(op, DATE, [op], perDirection, null, noGap, null, null, overlapAllowed, keepPlaced);
+    return op.shifts[DATE][0].breaks.map(b => ({ start: b.start, end: b.end }));
+}
+
+test('с галочкой поставленный руками перерыв остаётся там, где его поставили', () => {
+    assert.deepEqual(lunchLayout(HAND_LUNCH), HAND_LUNCH);
+    // Не ручной (сгенерированный) — по-прежнему встаёт равномерно.
+    assert.deepEqual(lunchLayout(HAND_LUNCH, { keepPlaced: false }), [{ start: 12 * 60, end: 13 * 60 }]);
+});
+
+test('без галочки ручной перерыв, как и раньше, подстраивается под правила', () => {
+    assert.deepEqual(lunchLayout(HAND_LUNCH, { overlapAllowed: () => false }), [{ start: 12 * 60, end: 13 * 60 }]);
+});
+
+test('ручной перерыв, который не помещается в смену, раскладывается обычным порядком', () => {
+    assert.deepEqual(lunchLayout([{ start: 16 * 60 + 30, end: 17 * 60 + 30 }]), [{ start: 12 * 60, end: 13 * 60 }]);
+});
+
 test('совпавшие перерывы направления с галочкой не считаются нарушением прохода', () => {
     const sameTime = [{ start: 600 + 120, end: 600 + 150 }];
     const ops = [1, 2, 3].map(id => operator(id, 'Чат', sameTime));

@@ -1011,6 +1011,10 @@ class ShiftsMixin:
                 )
             return self._seed_break_positions_from_existing(planned, stored_upcoming_breaks)
 
+        # Перерывы пришли готовыми (руками в окне смены или разложены клиентом),
+        # а не сгенерированы здесь: у направления с «Разрешить пересечение» они
+        # остаются где стоят.
+        breaks_are_placed = False
         if breaks is None:
             breaks_norm = _auto_breaks_for_remaining_shift()
         else:
@@ -1032,6 +1036,7 @@ class ShiftsMixin:
                     item for item in incoming_breaks_norm
                     if int(item['start']) >= planning_from_min
                 ]
+                breaks_are_placed = True
 
         # Приводим перерывы к правилам анти-пересечения между операторами одного направления
         # (включая минимальный промежуток между перерывами разных операторов).
@@ -1050,7 +1055,8 @@ class ShiftsMixin:
             frozen_breaks=frozen_breaks,
             planning_from_minutes=planning_window_start,
             extra_occupied=extra_occupied,
-            allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name)
+            allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name),
+            keep_positions=breaks_are_placed
         )
         # Смене СВ перерывы ставит только РОП руками (задача #352): автоматика и
         # правила направлений тут не работают (у СВ направления нет — сработал бы

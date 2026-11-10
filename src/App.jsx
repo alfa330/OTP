@@ -16323,13 +16323,35 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             return bestStart;
             }
 
+            // Готовые перерывы можно оставить как есть: каждый в доступной части смены
+            // и ни один не наезжает на свой же, в том числе прошедший (зеркало сервера).
+            function breaksFitAsPlaced(breaks, ownIntervals, winStart, segEnd) {
+            const placed = [];
+            for (const item of (breaks || [])) {
+                const start = Number(item?.start);
+                const end = Number(item?.end);
+                if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+                if (start < Number(winStart) || end > Number(segEnd)) return false;
+                const interval = { start, end };
+                if (breakTotalOverlapMinutes(interval, ownIntervals) > 0) return false;
+                if (breakTotalOverlapMinutes(interval, placed) > 0) return false;
+                placed.push(interval);
+            }
+            return true;
+            }
+
             // frozenBreaksBySegIndex — уже прошедшие перерывы сегмента: их не двигаем,
             // они лишь занимают время. planningFromMinutes — минута, раньше которой
-            // новый перерыв ставить нельзя. Без них поведение прежнее.
-            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null, isBreakOverlapAllowedForDirection = null) {
+            // новый перерыв ставить нельзя. keepPlacedBreaks — перерывы поставлены
+            // руками: у направления с «Разрешить пересечение» они остаются где стоят,
+            // если помещаются в смену. Без них поведение прежнее.
+            function adjustBreaksForOperatorOnDate(op, dateStr, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection = null, getCrossOperatorGapForDirection = null, frozenBreaksBySegIndex = null, planningFromMinutes = null, isBreakOverlapAllowedForDirection = null, keepPlacedBreaks = false) {
             const segs = op.shifts?.[dateStr];
             if (!segs || segs.length === 0) return;
             const neighbors = buildOccupiedIntervalsForDate(allOperators, dateStr, op.id, op?.direction, getDirectionBreakScopeKey, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection);
+            const keepPlacedHere = Boolean(keepPlacedBreaks)
+                && typeof isBreakOverlapAllowedForDirection === 'function'
+                && Boolean(isBreakOverlapAllowedForDirection(op?.direction));
             // Свои перерывы — отдельно от чужих: они запрещены наглухо, а не «нежелательны».
             const ownIntervals = [];
             const breakRuleRanges = (typeof getBreakRuleRangesForDirection === 'function')
@@ -16379,6 +16401,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
                 if (protectedEnd !== null) winStart = Math.max(winStart, protectedEnd);
                 winStart = Math.min(winStart, segEnd);
+
+                if (keepPlacedHere && breaksFitAsPlaced(preparedBreaks, ownIntervals, winStart, segEnd)) {
+                    // Коллеги не мешают, а ручное время (обед с 13 до 14) равномерностью не перетираем.
+                    const kept = preparedBreaks.map(b => ({ start: b.start, end: b.end }));
+                    kept.forEach(item => ownIntervals.push({ ...item }));
+                    seg.breaks = protectedBreaks.concat(kept).sort((a, b) => (a.start - b.start) || (a.end - b.end));
+                    continue;
+                }
 
                 const breakDurations = preparedBreaks.map(b => b.length);
                 const { edgeMargin, minGap } = getBreakLayoutSpacing(winStart, segEnd, breakDurations);
@@ -16456,7 +16486,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Раскладка пачки смен в несколько проходов: за один проход тем, кого
             // раскладывают последними, свободного места уже не остаётся. Проходы
             // улучшают картину немонотонно, поэтому оставляем лучший.
-            function runBreakLayoutPasses(allOperators, pairs, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection = null) {
+            function runBreakLayoutPasses(allOperators, pairs, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, isBreakOverlapAllowedForDirection = null, keepPlacedBreaks = false) {
             const jobs = [];
             pairs.forEach(({ opId, date }) => {
                 const op = allOperators.find(x => x.id === opId);
@@ -16470,7 +16500,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             });
             const runPass = () => jobs.forEach(job => {
                 try {
-                    adjustBreaksForOperatorOnDate(job.op, job.date, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, null, null, isBreakOverlapAllowedForDirection);
+                    adjustBreaksForOperatorOnDate(job.op, job.date, allOperators, getDirectionBreakScopeKey, getBreakRuleRangesForDirection, getCrossOperatorGapForDirection, null, null, isBreakOverlapAllowedForDirection, keepPlacedBreaks);
                 } catch (e) { /* одна смена не должна ронять раскладку остальных */ }
             });
             runPass();
@@ -20518,7 +20548,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     getPlannerBreakCrossGapForDirection,
                     frozenBySegIndex,
                     planningFromForTarget,
-                    isPlannerBreakOverlapAllowedForDirection
+                    isPlannerBreakOverlapAllowedForDirection,
+                    hasExplicitBreaks
                   );
                 } catch (e) { /* ignore */ }
 
@@ -22810,7 +22841,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                       layoutPairs.push({ opId: target.opId, date: target.date });
                       touchedPairs.delete(pairKey);
                     });
-                    runBreakLayoutPasses(copy, layoutPairs, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection, isPlannerBreakOverlapAllowedForDirection);
+                    runBreakLayoutPasses(copy, layoutPairs, getBreakConflictDirectionScopeKey, getPlannerBreakRuleRangesForDirection, getPlannerBreakCrossGapForDirection, isPlannerBreakOverlapAllowedForDirection, Array.isArray(breaksForBulk));
                     return copy;
                   });
               
@@ -24168,7 +24199,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         getPlannerBreakCrossGapForDirection,
                         localFrozenBySegIndex,
                         null,
-                        isPlannerBreakOverlapAllowedForDirection
+                        isPlannerBreakOverlapAllowedForDirection,
+                        Array.isArray(breaks)
                       );
                     } catch (e) { /* ignore */ }
                     // У смены не с линии перерывы только ручные (задача #352 — СВ, с
@@ -40325,7 +40357,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </label>
                                                 <InfoHint
                                                     side="left"
-                                                    text="Перерывы операторов этого направления могут совпадать по времени: каждому они встанут равномерно по его смене, без оглядки на коллег, и пересечения не будут отмечаться как ошибка. Уже стоящие перерывы переставит «Пересчитать перерывы»."
+                                                    text="Перерывы операторов этого направления могут совпадать по времени: автоматика ставит их равномерно по смене каждого, без оглядки на коллег, а перерыв, поставленный руками в окне смены, остаётся там, где его поставили. Пересечения не отмечаются как ошибка. «Пересчитать перерывы» расставит всё заново по правилам."
                                                 />
                                             </div>
                                             {!overlapAllowedDraft && (

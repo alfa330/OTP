@@ -102,6 +102,7 @@ BREAK_ADJUST_METHODS = (
     "_break_freeze_boundary_minutes",
     "_extra_occupied_from_day_snapshots",
     "_tag_break_intervals_with_cross_gap",
+    "_breaks_fit_as_placed",
     "_break_layout_spacing",
     "_break_start_bounds_for_index",
     "_break_total_overlap_minutes",
@@ -1020,10 +1021,14 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             + app_source.count("getPlannerBreakCrossGapForDirection,\n"),
             3,
         )
-        # …и про галочку «Разрешить пересечение» — последним аргументом.
+        # …и про галочку «Разрешить пересечение» вместе с признаком «перерывы
+        # поставлены руками» — их всех трёх мест.
         self.assertEqual(
-            app_source.count("getPlannerBreakCrossGapForDirection, isPlannerBreakOverlapAllowedForDirection)")
-            + len(re.findall(r",\n\s+isPlannerBreakOverlapAllowedForDirection\n\s+\);", app_source)),
+            len(re.findall(
+                r"isPlannerBreakOverlapAllowedForDirection,\s*"
+                r"(?:hasExplicitBreaks|Array\.isArray\(breaks\)|Array\.isArray\(breaksForBulk\))\s*\)",
+                app_source,
+            )),
             3,
         )
 
@@ -1513,6 +1518,70 @@ class BreakOverlapAllowedTests(unittest.TestCase):
             self._adjust(_make_break_adjust_dummy(), extra_occupied=crowd, allow_overlap=True),
             free,
         )
+
+    # Смена 08:00–17:00 с одним часовым перерывом: равномерная точка — 12:00,
+    # а у регионов обед принят с 13 до 14 и ставится руками.
+    LUNCH_SHIFT = ("08:00", "17:00")
+    HAND_LUNCH = [{"start": 13 * 60, "end": 14 * 60}]
+
+    def _adjust_lunch(self, dummy, breaks=None, frozen=None, **kwargs):
+        return dummy._adjust_shift_breaks_against_occupied_tx(
+            cursor=None,
+            operator_id=1,
+            shift_date=self.DATE,
+            start_time=self.LUNCH_SHIFT[0],
+            end_time=self.LUNCH_SHIFT[1],
+            breaks=[dict(item) for item in (breaks if breaks is not None else self.HAND_LUNCH)],
+            cross_gap_minutes=0,
+            frozen_breaks=frozen,
+            **kwargs,
+        )
+
+    def test_server_keeps_hand_placed_break_when_overlap_is_allowed(self):
+        dummy = _make_break_adjust_dummy()
+        even = self._adjust_lunch(dummy, allow_overlap=True)
+        self.assertEqual(even, [{"start": 12 * 60, "end": 13 * 60}], "без признака — равномерная точка")
+
+        kept = self._adjust_lunch(dummy, allow_overlap=True, keep_positions=True)
+        self.assertEqual(kept, self.HAND_LUNCH)
+        # Галочку сервер узнаёт сам, если вызывающий её не передал.
+        self.assertEqual(
+            self._adjust_lunch(_make_break_adjust_dummy(allow_overlap=True), keep_positions=True),
+            self.HAND_LUNCH,
+        )
+        # Без галочки ручной перерыв по-прежнему подчиняется правилам пересечения.
+        self.assertEqual(self._adjust_lunch(dummy, allow_overlap=False, keep_positions=True), even)
+
+    def test_server_lays_out_hand_breaks_that_do_not_fit(self):
+        dummy = _make_break_adjust_dummy()
+        # Перерыв вылез за конец смены — раскладываем обычным порядком.
+        outside = self._adjust_lunch(
+            dummy, breaks=[{"start": 16 * 60 + 30, "end": 17 * 60 + 30}], allow_overlap=True, keep_positions=True
+        )
+        self.assertEqual(outside, [{"start": 12 * 60, "end": 13 * 60}])
+        # Два своих перерыва наехали друг на друга — тоже.
+        clash = self._adjust_lunch(
+            dummy,
+            breaks=[{"start": 13 * 60, "end": 14 * 60}, {"start": 13 * 60 + 30, "end": 13 * 60 + 45}],
+            allow_overlap=True,
+            keep_positions=True,
+        )
+        self.assertNotEqual(clash, [{"start": 13 * 60, "end": 14 * 60}, {"start": 13 * 60 + 30, "end": 13 * 60 + 45}])
+        self.assertTrue(all(b["start"] >= a["end"] for a, b in zip(clash, clash[1:])))
+        # Ручной перерыв поверх уже прошедшего своего — не оставляем.
+        frozen = [{"start": 13 * 60 + 15, "end": 13 * 60 + 30}]
+        over_frozen = self._adjust_lunch(dummy, frozen=frozen, allow_overlap=True, keep_positions=True)
+        self.assertIn(frozen[0], over_frozen)
+        self.assertNotIn(self.HAND_LUNCH[0], over_frozen)
+
+    def test_save_shift_marks_sent_breaks_as_placed(self):
+        source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
+        self.assertIn("keep_positions=breaks_are_placed", source)
+        # Признак ставится только присланным перерывам, а не сгенерированным здесь.
+        self.assertEqual(source.count("breaks_are_placed = True"), 1)
+        placed_pos = source.index("breaks_are_placed = True")
+        self.assertLess(source.index("if should_regenerate_auto_breaks:"), placed_pos)
+        self.assertLess(source.index("if int(item['start']) >= planning_from_min"), placed_pos)
 
     def test_import_simulation_ignores_colleagues_exactly_like_the_server(self):
         namespace = {

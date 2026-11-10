@@ -1551,6 +1551,29 @@ class BreaksMixin:
                 tagged.append({'start': start, 'end': end, 'gap': max(gap, int(item.get('gap') or 0))})
         return sorted(tagged, key=lambda item: (item['start'], item['end']))
 
+    def _breaks_fit_as_placed(self, breaks, own_intervals, win_start, seg_end):
+        """
+        Готовые перерывы можно оставить как есть: каждый лежит в доступной части
+        смены (не в прошлом и не за её концом) и не наезжает ни на другой свой
+        перерыв, ни на уже прошедший.
+        """
+        placed = []
+        for item in (breaks or []):
+            try:
+                start = int(item['start'])
+                end = int(item['end'])
+            except Exception:
+                return False
+            if end <= start or start < int(win_start) or end > int(seg_end):
+                return False
+            interval = {'start': start, 'end': end}
+            if self._break_total_overlap_minutes(interval, own_intervals) > 0:
+                return False
+            if self._break_total_overlap_minutes(interval, placed) > 0:
+                return False
+            placed.append(interval)
+        return True
+
     def _adjust_shift_breaks_against_occupied_tx(
         self,
         cursor,
@@ -1563,7 +1586,8 @@ class BreaksMixin:
         frozen_breaks=None,
         planning_from_minutes=None,
         extra_occupied=None,
-        allow_overlap=None
+        allow_overlap=None,
+        keep_positions=False
     ):
         """
         Раскладывает перерывы смены равномерно, сверяясь с перерывами коллег направления.
@@ -1580,6 +1604,10 @@ class BreaksMixin:
         allow_overlap — галочка «Разрешить пересечение» направления: перерывы
         коллег не учитываются вовсе, смена раскладывается только по себе.
         None — узнать по направлению оператора.
+        keep_positions — перерывы пришли готовыми (поставлены руками в окне смены
+        или уже разложены клиентом). У направления с галочкой они остаются где
+        стоят, если помещаются в смену и не наезжают на свои же; иначе — обычная
+        раскладка. Без галочки ничего не меняет: там двигают правила пересечения.
         Без этих аргументов поведение прежнее.
         """
         seg_start, seg_end = self._schedule_interval_minutes(start_time, end_time)
@@ -1638,6 +1666,14 @@ class BreaksMixin:
         if protected_end is not None:
             win_start = max(win_start, protected_end)
         win_start = min(win_start, seg_end)
+
+        if allow_overlap and keep_positions and self._breaks_fit_as_placed(
+            prepared_breaks, own_intervals, win_start, seg_end
+        ):
+            # Коллеги не мешают, а ручное время — решение руководителя (у регионов,
+            # например, обед с 13 до 14): равномерностью его не перетираем.
+            kept = [{'start': int(b['start']), 'end': int(b['end'])} for b in prepared_breaks]
+            return sorted(protected + kept, key=lambda item: (int(item['start']), int(item['end'])))
 
         break_durations = [int(b['length']) for b in prepared_breaks]
         edge_margin, min_gap = self._break_layout_spacing(win_start, seg_end, break_durations)
