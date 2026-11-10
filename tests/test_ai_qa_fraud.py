@@ -239,6 +239,104 @@ class SubjectDirectionSqlTests(unittest.TestCase):
         self.assertEqual(api._SUBJECT_NOT_TRIGGER_PICK, "NOT " + api._SUBJECT_TRIGGER_PICK)
 
 
+class _Catalog:
+    """Курсор справочника фильтров: отвечает на запросы filter_options по их началу."""
+
+    def __init__(self, counts, people):
+        self.counts, self.people, self.people_params, self.rows = counts, people, None, []
+
+    def cursor(self):
+        return self
+
+    def close(self):
+        pass
+
+    def execute(self, sql, params=()):
+        s = " ".join(sql.split())
+        if s.startswith("SET client_encoding"):
+            self.rows = []
+        elif s.startswith("SELECT d.id, d.name"):
+            self.rows = [(70, "Основа"), (AVR, "Обзвон — подписание АВР")]
+        elif s.startswith("SELECT d.id FROM directions d WHERE d.id = ANY"):
+            self.rows = [(AVR,)]
+        elif "AS op_id, COUNT(*)" in s:
+            self.rows = list(self.counts.items())
+        elif s.startswith("SELECT u.id, u.name"):
+            self.people_params = params
+            self.rows = list(self.people)
+        else:
+            raise AssertionError(s[:80])
+
+    def fetchall(self):
+        return list(self.rows)
+
+
+class FilterCatalogGuestTests(unittest.TestCase):
+    """Фильтр «Сотрудник» СЗоВ предлагает и тех, чьи звонки удалённого КЦ лежат в отделе
+    (менеджер фронт-офиса), — но не для «Из АТС» и без групп чужого отдела."""
+
+    def test_guest_with_evaluations_is_offered_without_pull_and_group(self):
+        people = [
+            # id, имя, направление, его имя, группа, имя группы, статус, роль, sip, модель
+            (5, "Иванова Анна", 70, "Основа", 1, "Группа СЗоВ", "working", "operator", True, "operator"),
+            (9, "Тулегенулы Максат", 87, "Регионы", 2, "Регионы-1", "working", "operator", True,
+             "operator"),
+        ]
+        catalog = _Catalog({5: 3, 9: 4}, people)
+        with mock.patch.object(api.config, "connect_ro", return_value=catalog), \
+                mock.patch.object(api, "_scoped_qa_family", return_value=[70, AVR]), \
+                mock.patch.object(api, "_direction_predicate", return_value=(" AND TRUE", ())):
+            result = api.filter_options(None, department="szov", subject_kind="call")
+        # Люди — по своему направлению ИЛИ по оценкам в отделе.
+        self.assertEqual(catalog.people_params, ([70, AVR], [5, 9]))
+        by_id = {p["id"]: p for p in result["operators"]}
+        self.assertTrue(by_id[5]["can_pull"])
+        self.assertFalse(by_id[9]["can_pull"])
+        self.assertEqual(by_id[9]["evaluations"], 4)
+        self.assertEqual([g["id"] for g in result["groups"]], [1])
+        scale = {d["id"]: d["scale_only"] for d in result["directions"]}
+        self.assertTrue(scale[AVR])          # у шкалы обзвона своих людей по-прежнему нет
+        self.assertFalse(scale[70])
+
+
+class DigestDaysWithoutTriggerTests(unittest.TestCase):
+    def test_digest_day_list_counts_only_the_random_sample(self):
+        seen = []
+
+        class Cur:
+            def execute(self, sql, params=()):
+                seen.append(" ".join(sql.split()))
+
+            def fetchall(self):
+                return []
+
+            def close(self):
+                pass
+
+        class Conn:
+            def cursor(self):
+                return Cur()
+
+            def close(self):
+                pass
+
+        with mock.patch.object(api.config, "connect_ro", return_value=Conn()), \
+                mock.patch.object(api, "_evaluations_where", return_value=(" WHERE TRUE", ())), \
+                mock.patch.object(api, "_excluded_total", return_value=0):
+            api.evaluations_days(department="szov", without_trigger_picks=True)
+            api.evaluations_days(department="szov")
+        days_sql = [s for s in seen if "GROUP BY day" in s]
+        self.assertIn(api._SUBJECT_NOT_TRIGGER_PICK, days_sql[0])
+        self.assertNotIn("pick_reason", days_sql[1])
+
+    def test_digests_route_asks_without_trigger_picks(self):
+        from tests import source_cache
+        source = source_cache.monolith_flat_path().read_text(encoding="utf-8-sig")
+        body = source[source.index("def api_ai_qa_digests("):]
+        body = body[:body.index("\ndef ", 1)]
+        self.assertIn("without_trigger_picks=True", body)
+
+
 class TriggeredSamplingTests(unittest.TestCase):
     """Звонки под триггерами — сверх N, по важности, до потолка, без повторов."""
 

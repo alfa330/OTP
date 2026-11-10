@@ -297,12 +297,15 @@ class PackageSqlTests(unittest.TestCase):
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, outcomes)
         self.assertIn(keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL, subtypes)
         self.assertEqual(conversion.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 3)
-        self.assertEqual(today.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        # С 4604aa92 (SZOV-3) успешки дня считаются из тех же попыток дня, что и диалоги
+        # (подзапрос att): условие реестра одно на оба счётчика — отдельного подзапроса
+        # успешек со своим условием больше нет.
+        self.assertEqual(today.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 1)
         # «Рейтинг» дня (14.10.2026) — тот же запрос дня, без отбора оператора.
         cursor.sql.clear()
         svc.operator_rating(7, now=datetime(2026, 10, 14, 21, 30, tzinfo=service.PERIOD_TZ))
         rating, = cursor.sql
-        self.assertEqual(rating.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertEqual(rating.count(keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 1)
 
     def test_resource_fte_chat(self):
         from resource_fte import chat

@@ -6228,25 +6228,6 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
                 ([item["id"] for item in directions],))
             marked = {int(r[0]) for r in cur.fetchall()}
 
-        cur.execute(
-            f"""SELECT u.id, u.name, COALESCE(d.canonical_id, d.id), d.name,
-                       g.id, g.name, COALESCE(u.status, ''), COALESCE(u.role, ''),
-                       (COALESCE(btrim(u.sip_number), '') <> ''),
-                       COALESCE(d.calculation_model_code, '')
-                  FROM users u
-                  JOIN directions d ON d.id = u.direction_id
-                  LEFT JOIN LATERAL (
-                      SELECT gr.id, gr.name
-                        FROM group_operator_memberships gom
-                        JOIN groups gr ON gr.id = gom.group_id
-                       WHERE gom.operator_id = u.id AND {_MEMBERSHIP_TODAY}
-                       ORDER BY gom.start_date DESC, gom.id DESC
-                       LIMIT 1
-                  ) g ON TRUE
-                 WHERE COALESCE(d.canonical_id, d.id) = ANY(%s)
-                 ORDER BY u.name""", (family,))
-        people = cur.fetchall()
-
         # Сколько оценок у каждого — по той же последней оценке субъекта, что
         # показывает список, и в том же скоупе. Вид субъекта берём из вкладки:
         # на вкладке звонков число чатов рядом с фамилией только сбивало бы.
@@ -6265,8 +6246,34 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
                 + f" GROUP BY {_SUBJECT_OPERATOR_ID}",
                 (*scope_params, *kind_params))
             counts = {int(r[0]): int(r[1]) for r in cur.fetchall() if r[0] is not None}
+
+        # Люди отдела — и те, чьи разговоры лежат в отделе, хотя сами они в чужом
+        # направлении: в базу удалённого КЦ звонят фронт-офисы и удалённые операторы,
+        # а их звонки — разговоры «Обзвона — подписания АВР» (imported_calls.
+        # scope_direction_id, SZOV-2). Без них фильтр «Сотрудник» не предлагал бы
+        # человека, чьи оценки стоят в списке.
+        cur.execute(
+            f"""SELECT u.id, u.name, COALESCE(d.canonical_id, d.id), d.name,
+                       g.id, g.name, COALESCE(u.status, ''), COALESCE(u.role, ''),
+                       (COALESCE(btrim(u.sip_number), '') <> ''),
+                       COALESCE(d.calculation_model_code, '')
+                  FROM users u
+                  JOIN directions d ON d.id = u.direction_id
+                  LEFT JOIN LATERAL (
+                      SELECT gr.id, gr.name
+                        FROM group_operator_memberships gom
+                        JOIN groups gr ON gr.id = gom.group_id
+                       WHERE gom.operator_id = u.id AND {_MEMBERSHIP_TODAY}
+                       ORDER BY gom.start_date DESC, gom.id DESC
+                       LIMIT 1
+                  ) g ON TRUE
+                 WHERE COALESCE(d.canonical_id, d.id) = ANY(%s) OR u.id = ANY(%s)
+                 ORDER BY u.name""", (family, sorted(counts)))
+        people = cur.fetchall()
         cur.close(); conn.close()
 
+        own_family = {int(x) for x in family}
+        guests: set[int] = set()
         operators = []
         for row in people:
             user_id = int(row[0])
@@ -6274,6 +6281,11 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
             evaluations = counts.get(user_id, 0)
             if fired and not evaluations:
                 continue
+            # Чужой человек (его оценки здесь только звонками базы удалённого КЦ) — не
+            # для «Из АТС»: подтяжка ищет звонки в АТС ЕГО отдела, а не этого.
+            own = row[2] is not None and int(row[2]) in own_family
+            if not own:
+                guests.add(user_id)
             operators.append({
                 "id": user_id, "name": row[1] or "—",
                 "direction_id": int(row[2]) if row[2] is not None else None,
@@ -6283,14 +6295,16 @@ def filter_options(allowed_direction_ids=None, department=None, subject_kind=Non
                 "evaluations": evaluations,
                 "fired": fired,
                 "has_sip": bool(row[8]),
-                "can_pull": (not fired and row[7] == 'operator'
+                "can_pull": (own and not fired and row[7] == 'operator'
                              and row[6] in ('working', '') and row[9] != 'chat_manager'),
             })
 
         groups: dict[int, dict] = {}
         for person in operators:
             group_id = person["group_id"]
-            if group_id is None:
+            # Группы чужих людей (фронт-офисов на обзвоне удалённого КЦ) в группы
+            # отдела не идут: в фильтре СЗоВ стояли бы группы чужого отдела.
+            if group_id is None or person["id"] in guests:
                 continue
             entry = groups.setdefault(group_id, {"id": group_id, "name": person["group"] or "—",
                                                  "operators": 0, "evaluations": 0})
@@ -6477,13 +6491,17 @@ def _evaluations_where(cur, allowed_direction_ids, subject_kind, department, fil
 
 
 def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=None,
-                     filters=None) -> dict:
+                     filters=None, without_trigger_picks=False) -> dict:
     """Оценённое ИИ по дням разговора — сводка каждого дня для строк списка дней.
 
     День — день разговора (_SUBJECT_DAY), как у очереди и фильтра периода. Строка
     дня отвечает на то же, что строка очереди, только про всё оценённое: сколько
     оценено, сколько из них критических, сколько уже проверено людьми (и в скольких
-    ИИ поправили), средние баллы ИИ и человека, кто работал."""
+    ИИ поправили), средние баллы ИИ и человека, кто работал.
+
+    without_trigger_picks — для списка дней «Сводки»: её цифры считаются по случайной
+    выборке, без звонков, взятых по триггеру фрода (SZOV-2), и строка дня обязана
+    совпасть с экраном дня. В «Звонках» такие звонки — обычные строки списка."""
     empty = {"days": [], "total": 0, "excluded": 0}
     conn = None
     try:
@@ -6494,6 +6512,8 @@ def evaluations_days(allowed_direction_ids=None, subject_kind=None, department=N
             cur.close(); conn.close()
             return empty
         where_sql, where_params = where
+        if without_trigger_picks:
+            where_sql += " AND " + _SUBJECT_NOT_TRIGGER_PICK
         cur.execute(
             f"""SELECT day, COUNT(*),
                        COUNT(*) FILTER (WHERE outcome IS NOT NULL OR human IS NOT NULL),

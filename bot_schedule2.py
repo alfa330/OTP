@@ -7412,7 +7412,10 @@ def api_ai_qa_digests():
         if not department:
             return jsonify({"error": "Сводка пишется по одному отделу — выберите отдел"}), 400
         scope = _ai_qa_direction_scope(requester_id)
-        summary = evaluations_days(allowed_direction_ids=scope, department=department)
+        # Цифры строки дня — как на экране дня сводки: без звонков, взятых по
+        # триггеру фрода (SZOV-2), — их разбирает раздел «Поиск фрода».
+        summary = evaluations_days(allowed_direction_ids=scope, department=department,
+                                   without_trigger_picks=True)
         days = [d for d in summary.get("days") or [] if d.get("day") != QUEUE_NO_DAY]
         known = qa_digest.headlines(department, [d["day"] for d in days], scope)
         for day in days:
