@@ -1568,14 +1568,14 @@ def test_whatsapp_old_files_requested_from_phone(world, monkeypatch):
                      media={'mime': 'image/jpeg', 'size': 900, 'fetch': True}, **in_lid)
     assert service.wa_events({'events': [again]})['outcomes'] == {'duplicate': 1}
     assert service.wa_media('old1', b'\xff\xd8jpeg') == {'stored': True} and len(storage.files) == 1
-    # Через полчаса без ответа — новая просьба; третья — другим видом чата (номером), четвёртая — снова LID.
+    # Через полчаса без ответа — новая просьба; последняя — другим видом чата (номером).
+    clock.now += timedelta(minutes=31)
+    assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
     clock.now += timedelta(minutes=31)
     assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
     clock.now += timedelta(minutes=31)
     assert [(item['id'], item['chat']) for item in poll()['resend']] == [
         ('old2', '77055552233@s.whatsapp.net'), ('stale', '77055552233@s.whatsapp.net')]
-    clock.now += timedelta(minutes=31)
-    assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
     # Четыре просьбы без ответа — «не сохранился (телефон не прислал файл)», больше не просим.
     clock.now += timedelta(minutes=31)
     assert 'resend' not in poll()

@@ -144,7 +144,7 @@ def public_view(kind, media, sign=None):
 
 def resend_chat(jid, phone, lid, attempt):
     """JID чата для просьбы к телефону. Личный чат WhatsApp живёт и по номеру, и по LID, а у чата в
-    портале записан вид последнего сообщения: третья просьба — другим видом, если он известен
+    портале записан вид последнего сообщения: последняя просьба — другим видом, если он известен
     (сообщение могло прийти до смены вида), остальные — как у чата."""
     jid = str(jid or '').strip()
     other = None
@@ -154,7 +154,7 @@ def resend_chat(jid, phone, lid, attempt):
     elif jid.endswith('@s.whatsapp.net'):
         digits = ''.join(ch for ch in str(lid or '') if ch.isdigit())
         other = (digits + '@lid') if digits else None
-    return other if other and attempt == 2 else jid
+    return other if other and attempt == RESEND_ATTEMPTS - 1 else jid
 
 
 def resend_anchor(anchor_id, anchor_from_me, anchor_at, tz):
