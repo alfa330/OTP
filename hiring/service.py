@@ -1204,8 +1204,15 @@ class HiringService:
         rows = queries.wa_media_resend_due(cursor, wa_media.MAX_BYTES, retry_before, now - wa_media.FETCH_STALE,
                                            wa_media.RESEND_ATTEMPTS, wa_media.RESEND_BATCH)
         queries.wa_media_resend_mark(cursor, [row['id'] for row in rows], now.isoformat(timespec='seconds'))
-        return [{'id': row['wa_id'], 'chat': wa_media.resend_chat(row['jid'], row['phone'], row['lid'], row['attempts']),
-                 'from_me': bool(row['from_me'])} for row in rows]
+        items = []
+        for row in rows:
+            item = {'id': row['wa_id'], 'chat': wa_media.resend_chat(row['jid'], row['phone'], row['lid'], row['attempts']),
+                    'from_me': bool(row['from_me'])}
+            anchor = wa_media.resend_anchor(row['anchor_id'], row['anchor_from_me'], row['anchor_at'], rules.ALMATY)
+            if anchor:
+                item['anchor'] = anchor
+            items.append(item)
+        return items
 
     def wa_events(self, payload):
         """Сообщения личных чатов номера от сервиса. Первое входящее чата — отклик в пуле; дальше

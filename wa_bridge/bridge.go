@@ -10,8 +10,8 @@ package main
 //     сигнал для антиспама; при недоступной сети пауза между попытками растёт до 5 минут;
 //   * сразу после подключения — статус «не в сети»: так телефон рекрутера получает уведомления;
 //   * отметки «прочитано» и «печатает» не ставятся, людям ничего не отправляется: единственный запрос
-//     от сервиса — своему телефону, прислать заново старое сообщение с файлом (resend.go), как в
-//     WhatsApp Web; по одному с паузой и не больше 60 в час;
+//     от сервиса — своему телефону, прислать историю чата со старым сообщением с файлом (resend.go), как
+//     в WhatsApp Web; по одному с паузой и не больше 60 в час;
 //   * файлы сообщений качаются по одному, с паузой, как в WhatsApp Web (media.go).
 
 import (
@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -29,7 +31,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-const bridgeVersion = "1.2.0"
+const bridgeVersion = "1.2.1"
 
 const (
 	stateUnpaired   = "unpaired"
@@ -323,6 +325,11 @@ func (b *bridge) handle(raw any) {
 		if evt.IsFromMe && evt.Sender.Device == 0 {
 			_ = b.guard.phoneSeen(now) // рекрутер прочитал на телефоне
 		}
+	case *events.HistorySync:
+		// Только история по нашей просьбе (resend.go); первичная при привязке сервису не нужна.
+		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
+			b.historyFiles(evt.Data, now)
+		}
 	}
 }
 
@@ -341,12 +348,29 @@ func (b *bridge) sendPresence() {
 	}
 }
 
-// requestFromPhone — просьба к своему телефону прислать сообщение заново (resend.go): ответ придёт
-// обычным сообщением, и его файл встанет в очередь media.go.
+// requestFromPhone — просьба к своему телефону (resend.go): история чата до следующего сообщения
+// (придёт событием HistorySync) или, если следующего нет, само сообщение заново (придёт обычным).
 func (b *bridge) requestFromPhone(ctx context.Context, chat types.JID, item resendItem) error {
 	cli := b.client()
-	_, err := cli.SendPeerMessage(ctx, cli.BuildUnavailableMessageRequest(chat, resendSender(chat, item.FromMe), item.ID))
+	var request *waE2E.Message
+	if anchor, ok := historyAnchor(item); ok {
+		request = cli.BuildHistorySyncRequest(&types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, IsFromMe: anchor.FromMe},
+			ID:            anchor.ID,
+			Timestamp:     time.Unix(anchor.TS, 0),
+		}, historyCount)
+	} else {
+		request = cli.BuildUnavailableMessageRequest(chat, resendSender(chat, item.FromMe), item.ID)
+	}
+	_, err := cli.SendPeerMessage(ctx, request)
 	return err
+}
+
+// historyFiles — история чата от телефона: файлы сообщений, которые просил портал, — в очередь.
+func (b *bridge) historyFiles(data *waHistorySync.HistorySync, now time.Time) {
+	total, queued := b.resend.filesFromHistory(data, now, b.client().ParseWebMessage,
+		func(job mediaJob) error { return b.spool.pushMedia(job, now) })
+	b.log.Infof("телефон прислал историю чата: сообщений %d, файлов в очередь %d", total, queued)
 }
 
 func (b *bridge) freshDevice() {

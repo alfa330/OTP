@@ -1335,11 +1335,17 @@ _NO_FILE = """m.kind IN ('image', 'video', 'audio', 'voice', 'document') AND m.d
 def wa_media_resend_due(cursor, max_bytes, retry_before_iso, stale_before, attempts, limit):
     """Сообщения без файла, которые пора попросить у телефона заново: шлюз файл не качает (пришло до
     09.11.2026 или «загружается» дольше суток) и прошлая просьба осталась без ответа дольше паузы —
-    пока попытки не кончились. Сначала свежие. Строки захватываются до конца транзакции опроса."""
+    пока попытки не кончились. Сначала свежие. С каждым — следующее сообщение того же чата (anchor_*):
+    от него телефон отсчитывает историю. Строки захватываются до конца транзакции опроса."""
     cursor.execute("""
         SELECT m.id, m.wa_id, m.from_me, c.jid, c.phone, c.lid,
-               COALESCE((m.media->'resend'->>'attempts')::int, 0) AS attempts
+               COALESCE((m.media->'resend'->>'attempts')::int, 0) AS attempts,
+               n.wa_id AS anchor_id, n.from_me AS anchor_from_me, n.sent_at AS anchor_at
           FROM hiring_wa_messages m JOIN hiring_wa_chats c ON c.key = m.chat_key
+          LEFT JOIN LATERAL (
+                SELECT x.wa_id, x.from_me, x.sent_at FROM hiring_wa_messages x
+                 WHERE x.chat_key = m.chat_key AND (x.sent_at, x.id) > (m.sent_at, m.id)
+                 ORDER BY x.sent_at, x.id LIMIT 1) n ON TRUE
          WHERE """ + _NO_FILE + """
            AND COALESCE((m.media->>'size')::bigint, 0) <= %s
            AND CASE WHEN m.media ? 'resend'

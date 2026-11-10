@@ -7,7 +7,7 @@
 
 from datetime import datetime, timedelta
 
-from hiring import wa_media, whatsapp
+from hiring import rules, wa_media, whatsapp
 
 NOW = datetime(2026, 11, 6, 15, 0)
 
@@ -226,13 +226,17 @@ def test_media_view_states():
     assert wa_media.public_view('image', {'object': 'x.jpg', 'stored_type': 'image/jpeg'}, lambda *a: None)['state'] == 'failed'
 
 
-def test_resend_chat_alternates_number_and_lid():
-    """Просьба к телефону: первая и третья — видом чата в портале, вторая — другим видом, если известен."""
+def test_resend_chat_and_anchor():
+    """Просьба к телефону: третья — другим видом чата (номер ↔ LID), если он известен, остальные — видом
+    чата в портале. Отсчёт истории — следующее сообщение, время — секунды Unix из времени Алматы."""
     lid_chat = ('205981234567890@lid', '+77055552233', '205981234567890')
-    assert [wa_media.resend_chat(*lid_chat, attempt) for attempt in range(3)] == [
-        '205981234567890@lid', '77055552233@s.whatsapp.net', '205981234567890@lid']
+    assert [wa_media.resend_chat(*lid_chat, attempt) for attempt in range(4)] == [
+        '205981234567890@lid', '205981234567890@lid', '77055552233@s.whatsapp.net', '205981234567890@lid']
     phone_chat = ('77055552233@s.whatsapp.net', '+77055552233', '205981234567890')
-    assert wa_media.resend_chat(*phone_chat, 1) == '205981234567890@lid'
+    assert wa_media.resend_chat(*phone_chat, 2) == '205981234567890@lid'
     # Другого вида нет — всегда вид чата.
-    assert wa_media.resend_chat('205981234567890@lid', None, '205981234567890', 1) == '205981234567890@lid'
-    assert wa_media.resend_chat('77055552233@s.whatsapp.net', '+77055552233', None, 1) == '77055552233@s.whatsapp.net'
+    assert wa_media.resend_chat('205981234567890@lid', None, '205981234567890', 2) == '205981234567890@lid'
+    assert wa_media.resend_chat('77055552233@s.whatsapp.net', '+77055552233', None, 2) == '77055552233@s.whatsapp.net'
+    at = whatsapp.moment_of(1792047600)
+    assert wa_media.resend_anchor('3EB0A2', 1, at, rules.ALMATY) == {'id': '3EB0A2', 'from_me': True, 'ts': 1792047600}
+    assert wa_media.resend_anchor(None, None, None, rules.ALMATY) is None

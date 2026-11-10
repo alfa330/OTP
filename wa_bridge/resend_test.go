@@ -8,7 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -77,6 +82,70 @@ func TestResenderSkipsAndHourLimit(t *testing.T) {
 		func(context.Context, types.JID, resendItem) error { return errors.New("i/o timeout") })
 	if !failing.request(context.Background(), item, now) || len(failing.sent) != 1 {
 		t.Fatal("запрос с ошибкой не засчитан")
+	}
+}
+
+func TestHistoryAnchorAndWaiting(t *testing.T) {
+	item := resendItem{ID: "3EB0A1", Chat: testLID, Anchor: &resendAnchor{ID: "3EB0A2", FromMe: true, TS: 1792047600}}
+	if anchor, ok := historyAnchor(item); !ok || anchor.ID != "3EB0A2" || !anchor.FromMe {
+		t.Fatalf("отсчёт истории: %#v %v", anchor, ok)
+	}
+	// Нет отсчёта, битый id, нет времени, отсчёт — само сообщение: просьба прислать сообщение заново.
+	for _, bad := range []*resendAnchor{nil, {ID: "../x", TS: 1}, {ID: "3EB0A2"}, {ID: "3EB0A1", TS: 5}} {
+		if _, ok := historyAnchor(resendItem{ID: "3EB0A1", Chat: testLID, Anchor: bad}); ok {
+			t.Fatalf("принят отсчёт %#v", bad)
+		}
+	}
+	var asked []resendItem
+	r := newResender(waLog.Noop, func() bool { return true }, func(_ context.Context, _ types.JID, item resendItem) error {
+		asked = append(asked, item)
+		return nil
+	})
+	now := time.Unix(1792047600, 0)
+	r.request(context.Background(), item, now)
+	r.request(context.Background(), resendItem{ID: "3EB0B1", Chat: testLID}, now)
+	if len(asked) != 2 || asked[0].Anchor == nil || asked[1].Anchor != nil {
+		t.Fatalf("просьбы: %#v", asked)
+	}
+	// Историю ждём только по просьбе с отсчётом, один раз и не дольше historyWait.
+	if !r.take("3EB0A1", now.Add(time.Minute)) || r.take("3EB0A1", now.Add(time.Minute)) || r.take("3EB0B1", now) {
+		t.Fatal("ожидание истории")
+	}
+	r.request(context.Background(), item, now)
+	if r.take("3EB0A1", now.Add(historyWait)) {
+		t.Fatal("история после срока ожидания принята")
+	}
+}
+
+func TestFilesFromHistoryOnlyRequested(t *testing.T) {
+	r := newResender(waLog.Noop, func() bool { return true }, func(context.Context, types.JID, resendItem) error { return nil })
+	now := time.Unix(1792047600, 0)
+	r.request(context.Background(), resendItem{ID: "WANT", Chat: testLID, Anchor: &resendAnchor{ID: "NEXT", TS: 1792047600}}, now)
+	image := &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: str("image/jpeg"), FileLength: u64(900),
+		DirectPath: str("/v/t62.7118-24/img"), MediaKey: []byte("0123456789abcdef0123456789abcdef")}}
+	data := &waHistorySync.HistorySync{SyncType: waHistorySync.HistorySync_ON_DEMAND.Enum(),
+		Conversations: []*waHistorySync.Conversation{{ID: str(testLID), Messages: []*waHistorySync.HistorySyncMsg{
+			{Message: &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{ID: str("OTHER")}, Message: image}},
+			{Message: &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{ID: str("WANT")}, Message: image}},
+			{},
+		}}}}
+	parse := func(chat types.JID, web *waWeb.WebMessageInfo) (*events.Message, error) {
+		return &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat}, ID: web.GetKey().GetID()},
+			Message: web.GetMessage()}, nil
+	}
+	var pushed []mediaJob
+	push := func(job mediaJob) error {
+		pushed = append(pushed, job)
+		return nil
+	}
+	// В очередь — только файл запрошенного сообщения; чужие сообщения истории не трогаются.
+	if total, queued := r.filesFromHistory(data, now, parse, push); total != 2 || queued != 1 ||
+		len(pushed) != 1 || pushed[0].WAID != "WANT" || pushed[0].Kind != "image" {
+		t.Fatalf("файлы из истории: %d %d %#v", total, queued, pushed)
+	}
+	// Та же история второй раз (кусками или повтором) — файл уже в очереди.
+	if _, queued := r.filesFromHistory(data, now, parse, push); queued != 0 || len(pushed) != 1 {
+		t.Fatalf("повтор истории: %d", queued)
 	}
 }
 

@@ -1554,23 +1554,29 @@ def test_whatsapp_old_files_requested_from_phone(world, monkeypatch):
     assert 'resend' not in poll(features=None)
     assert 'resend' not in poll(state='connecting')
     # Сначала свежие, по две за опрос; своё сообщение — с from_me (ключ запроса — «отправлено мной»).
-    assert poll()['resend'] == [{'id': 'old2', 'chat': lid + '@lid', 'from_me': True},
-                                {'id': 'old1', 'chat': lid + '@lid', 'from_me': False}]
-    assert poll()['resend'] == [{'id': 'stale', 'chat': lid + '@lid', 'from_me': False}]
+    # Отсчёт истории — следующее сообщение того же чата (телефон присылает историю до него).
+    assert poll()['resend'] == [
+        {'id': 'old2', 'chat': lid + '@lid', 'from_me': True, 'anchor': {'id': 'fresh', 'from_me': False, 'ts': ts - 100}},
+        {'id': 'old1', 'chat': lid + '@lid', 'from_me': False, 'anchor': {'id': 'old2', 'from_me': True, 'ts': ts - 200}}]
+    assert poll()['resend'] == [
+        {'id': 'stale', 'chat': lid + '@lid', 'from_me': False, 'anchor': {'id': 'old1', 'from_me': False, 'ts': ts - 300}}]
     assert 'resend' not in poll()                                    # пауза до следующей просьбы
     assert thread()['old1'] == {'mime': 'image/jpeg', 'size': 900, 'state': 'loading'}
-    # Телефон прислал old1 заново: событие — дубль (второй строки нет), файл — обычным путём.
+    # Файл old1 пришёл (из истории чата — без события; запасной путь — сообщение заново: событие — дубль,
+    # второй строки нет).
     again = wa_event('old1', kind='image', text='Я увидел вакансию', ts=ts - 300,
                      media={'mime': 'image/jpeg', 'size': 900, 'fetch': True}, **in_lid)
     assert service.wa_events({'events': [again]})['outcomes'] == {'duplicate': 1}
     assert service.wa_media('old1', b'\xff\xd8jpeg') == {'stored': True} and len(storage.files) == 1
-    # Через полчаса без ответа — вторая просьба другим видом чата (номером), третья — снова LID.
-    clock.now += timedelta(minutes=31)
-    assert poll()['resend'] == [{'id': 'old2', 'chat': '77055552233@s.whatsapp.net', 'from_me': True},
-                                {'id': 'stale', 'chat': '77055552233@s.whatsapp.net', 'from_me': False}]
+    # Через полчаса без ответа — новая просьба; третья — другим видом чата (номером), четвёртая — снова LID.
     clock.now += timedelta(minutes=31)
     assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
-    # Три просьбы без ответа — «не сохранился (телефон не прислал файл)», больше не просим.
+    clock.now += timedelta(minutes=31)
+    assert [(item['id'], item['chat']) for item in poll()['resend']] == [
+        ('old2', '77055552233@s.whatsapp.net'), ('stale', '77055552233@s.whatsapp.net')]
+    clock.now += timedelta(minutes=31)
+    assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
+    # Четыре просьбы без ответа — «не сохранился (телефон не прислал файл)», больше не просим.
     clock.now += timedelta(minutes=31)
     assert 'resend' not in poll()
     files = thread()
