@@ -115,6 +115,11 @@ STATUS_IMPORT_INSERT_PAGE_SIZE = max(200, int(os.getenv('STATUS_IMPORT_INSERT_PA
 # (purge_old_operator_status_events) drops events older than this, and segment rebuilds are
 # clamped to this floor so they never depend on already-purged events. Minimum 30d guard rail.
 STATUS_EVENTS_RETENTION_DAYS = _env_int('STATUS_EVENTS_RETENTION_DAYS', 120, minimum=30)
+# Два источника статусов у одного человека (оператор СЗоВ: Oktell выгрузкой + iCORE Phone на
+# обзвоне). Пока телефон подключён, учёт идёт по нему; если он замолчал без «выключен» дольше
+# этого порога, а в выгрузке после этого есть события, сессия телефона считается оборванной
+# (OperatorStatusMixin._overlay_live_status_sessions). Час — длиннее обычного перерыва.
+LIVE_STATUS_SILENCE_LIMIT_MINUTES = _env_int('LIVE_STATUS_SILENCE_LIMIT_MINUTES', 60, minimum=5)
 # Прогоны парсера резюме: каждый хранит полный снимок выдачи, а раздел читает только
 # последний успешный. Две недели — запас на разбор «что нашлось вчера»; без чистки 98%
 # recruiting_resumes были повторами (89 тыс. строк на 1,8 тыс. разных резюме, 19.10.2026).

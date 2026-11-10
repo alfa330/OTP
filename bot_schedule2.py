@@ -27654,10 +27654,15 @@ def sync_oktell_operator_statuses(day=None, date_from=None, date_to=None, trigge
             'date_to': None,
         }
         if events_for_save:
+            # keep_live_events: оператор СЗоВ на обзвоне удалённого КЦ работает в iCORE
+            # Phone, и его телефонные статусы выгрузка стирать не должна (решение владельца
+            # 10.11.2026: пока человек подключён к обзвону через телефон, время идёт по
+            # телефону). Заменяются только прежние события Oktell за эти дни.
             save_summary = db.save_operator_status_import(
                 events=events_for_save,
                 segments=parsed.get('segments') or [],
                 imported_by=imported_by,
+                keep_live_events=True,
                 summary={
                     'source_rows': int(parsed.get('source_rows') or 0),
                     'valid_events': int(parsed.get('valid_events') or 0),
@@ -42250,6 +42255,10 @@ def import_work_schedules_statuses_csv():
             events=parsed.get('events') or [],
             segments=parsed.get('segments') or [],
             imported_by=requester_id,
+            # Файл статусов Oktell — те же данные, что выгрузка: телефонные события дня
+            # (оператор СЗоВ на обзвоне в iCORE Phone) он не стирает. Выгрузка TEZ с точными
+            # интервалами работает как раньше.
+            keep_live_events=not is_tez_format,
             summary={
                 'source_rows': int(parsed.get('source_rows') or 0),
                 'valid_events': int(parsed.get('valid_events') or 0),

@@ -11,6 +11,7 @@ from db.core import (  # noqa: F401
     dt_time,
     execute_values,
     json,
+    LIVE_STATUS_SILENCE_LIMIT_MINUTES,
     logging,
     SCHEDULE_AUTO_NO_PHONE_STATUS_KEY,
     SCHEDULE_STATUS_KEY_LABELS,
@@ -258,6 +259,87 @@ class OperatorStatusMixin:
             canonical.append(event)
         return canonical
 
+    # ── Два источника статусов у одного человека ────────────────────────────
+    # Оператор СЗоВ работает в Oktell (статусы приходят выгрузкой несколько раз в день),
+    # а на обзвон удалённого КЦ садится в iCORE Phone (телефон шлёт события сам, у них
+    # есть client_event_id). Решение владельца 10.11.2026: пока человек подключён к
+    # обзвону через телефон, время считается по телефону, а не по Oktell.
+    LIVE_STATUS_OFF_KEYS = frozenset({'выключен'})
+    LIVE_STATUS_SILENCE_LIMIT_SECONDS = int(LIVE_STATUS_SILENCE_LIMIT_MINUTES) * 60
+    # Состояния выгрузки «не на линии» (Oktell: 0 и 7). Работой в Oktell они не являются
+    # и оборванную сессию телефона не доказывают: окно Oktell, оставленное на экране
+    # входа, пишет «Без телефона» → «Выключен» каждую минуту (прод, 10.11.2026).
+    LIVE_STATUS_IDLE_IMPORT_KEYS = frozenset({'выключен', 'без телефона'})
+    # Состояние выгрузки возвращается после сессии телефона, только пока оно свежее. В базе
+    # лежат и старые выгрузки отделов, давно работающих только в телефоне (ОП — до 01.08.2026,
+    # Тез — до 27.07.2026): без этой границы после каждого «выключен» телефона у них
+    # всплывал бы статус трёхмесячной давности. 16 часов — длиннее любой смены.
+    LIVE_STATUS_RESUME_MAX_AGE_SECONDS = 16 * 3600
+
+    def _overlay_live_status_sessions(self, events):
+        """Свести события двух источников в один ряд: живой источник поверх выгрузки.
+
+        events — события одного оператора по порядку времени; у каждого 'live':
+        True — пришло само (iCORE Phone, рабочее место «Чатов ОП»), False — выгрузка
+        (Oktell, Chat2Desk, файл).
+
+        У кого источник один, ряд возвращается как есть: так считались и считаются
+        отделы, работающие только в телефоне, и все, кто работает только в Oktell.
+
+        Когда источников два, действует сессия живого источника:
+        - она открыта от его статуса до его же «выключен»; события выгрузки за это
+          время в ряд не идут, но запоминаются;
+        - «выключен» закрывает сессию, и с этой секунды действует состояние выгрузки
+          на этот момент: человек вышел из телефона, а в Oktell он, возможно, «Готов» —
+          или «Выключен», если сессию Oktell закрыли при входе в телефон. Состояние
+          старше LIVE_STATUS_RESUME_MAX_AGE_SECONDS не возвращается — это не «сейчас»;
+        - телефон может пропасть без «выключен» (сбой, пропал свет). Тогда рабочее
+          событие выгрузки (не «Выключен» и не «Без телефона»), пришедшее позже порога
+          молчания, означает, что человек работает в Oktell: с момента «последнее
+          событие телефона + порог» ряд снова идёт по выгрузке. Пока таких событий нет,
+          статус телефона стоит — долгий «Тренинг» в телефоне сам сессию не рвёт.
+        """
+        events = list(events or [])
+        if not (any(event.get('live') for event in events)
+                and any(not event.get('live') for event in events)):
+            return events
+
+        silence_limit = timedelta(seconds=int(self.LIVE_STATUS_SILENCE_LIMIT_SECONDS))
+        resume_max_age = timedelta(seconds=int(self.LIVE_STATUS_RESUME_MAX_AGE_SECONDS))
+        merged = []
+        session_open = False
+        last_live_at = None
+        last_imported = None
+
+        def resume_imported(moment):
+            """Состояние выгрузки на этот момент — событием в ряд (если оно ещё свежее)."""
+            if last_imported is not None and moment - last_imported.get('event_at') <= resume_max_age:
+                merged.append(dict(last_imported, event_at=moment))
+
+        for event in events:
+            event_at = event.get('event_at')
+            if event.get('live'):
+                merged.append(event)
+                if event.get('status_key') in self.LIVE_STATUS_OFF_KEYS:
+                    # Тем же моментом возвращаем состояние выгрузки: из двух событий с
+                    # одним временем ряд оставляет последнее (см. канонизацию выше).
+                    session_open = False
+                    resume_imported(event_at)
+                else:
+                    session_open = True
+                    last_live_at = event_at
+                continue
+            if session_open:
+                if (event_at - last_live_at <= silence_limit
+                        or event.get('status_key') in self.LIVE_STATUS_IDLE_IMPORT_KEYS):
+                    last_imported = event
+                    continue
+                session_open = False
+                resume_imported(last_live_at + silence_limit)
+            last_imported = event
+            merged.append(event)
+        return merged
+
     def _merge_adjacent_status_timeline_segments(self, segments):
         """Merge presentation rows that represent one uninterrupted state."""
         merged = []
@@ -363,6 +445,11 @@ class OperatorStatusMixin:
             if self._normalize_import_status_key(item)
         })
 
+        # is_live — событие пришло само (iCORE Phone, рабочее место «Чатов ОП»), а не
+        # выгрузкой. Опорные события до и после окна берём ПО ИСТОЧНИКУ: человеку с двумя
+        # источниками (_overlay_live_status_sessions) на границе окна нужно знать и
+        # открыта ли сессия телефона, и какое состояние у выгрузки. У кого источник
+        # один, опорных по-прежнему по одному с каждой стороны.
         cursor.execute(
             """
             WITH candidates AS (
@@ -372,7 +459,8 @@ class OperatorStatusMixin:
                     event_at,
                     status_key,
                     state_note,
-                    COALESCE(event_kind, 'status') AS event_kind
+                    COALESCE(event_kind, 'status') AS event_kind,
+                    (client_event_id IS NOT NULL) AS is_live
                 FROM operator_status_events
                 WHERE operator_id = ANY(%s)
                   AND COALESCE(event_kind, 'status') <> 'action'
@@ -380,26 +468,26 @@ class OperatorStatusMixin:
                   AND NOT (LOWER(TRIM(status_key)) = ANY(%s))
             ),
             previous_events AS (
-                SELECT DISTINCT ON (operator_id)
-                    id, operator_id, event_at, status_key, state_note, event_kind
+                SELECT DISTINCT ON (operator_id, is_live)
+                    id, operator_id, event_at, status_key, state_note, event_kind, is_live
                 FROM candidates
                 WHERE event_at < %s
-                ORDER BY operator_id, event_at DESC, id DESC
+                ORDER BY operator_id, is_live, event_at DESC, id DESC
             ),
             main_events AS (
-                SELECT id, operator_id, event_at, status_key, state_note, event_kind
+                SELECT id, operator_id, event_at, status_key, state_note, event_kind, is_live
                 FROM candidates
                 WHERE event_at >= %s
                   AND event_at < %s
             ),
             next_events AS (
-                SELECT DISTINCT ON (operator_id)
-                    id, operator_id, event_at, status_key, state_note, event_kind
+                SELECT DISTINCT ON (operator_id, is_live)
+                    id, operator_id, event_at, status_key, state_note, event_kind, is_live
                 FROM candidates
                 WHERE event_at >= %s
-                ORDER BY operator_id, event_at ASC, id DESC
+                ORDER BY operator_id, is_live, event_at ASC, id DESC
             )
-            SELECT id, operator_id, event_at, status_key, state_note, event_kind
+            SELECT id, operator_id, event_at, status_key, state_note, event_kind, is_live
             FROM (
                 SELECT * FROM previous_events
                 UNION ALL
@@ -445,7 +533,7 @@ class OperatorStatusMixin:
             authoritative_until[(int(operator_id), status_date)] = authoritative_end
 
         events_by_operator = {}
-        for event_id, operator_id, event_at_value, status_key, state_note, event_kind in rows:
+        for event_id, operator_id, event_at_value, status_key, state_note, event_kind, is_live in rows:
             if not isinstance(event_at_value, datetime):
                 continue
             status_key_norm = self._normalize_import_status_key(status_key)
@@ -457,14 +545,15 @@ class OperatorStatusMixin:
                 'id': int(event_id),
                 'event_at': event_at_value,
                 'status_key': status_key_norm,
-                'state_note': str(state_note or '').strip() or None
+                'state_note': str(state_note or '').strip() or None,
+                'live': bool(is_live)
             })
 
         segment_values = []
         now_dt = datetime.now()
         for op_id in op_ids:
             events_list = self._canonicalize_status_transition_events(
-                events_by_operator.get(int(op_id)) or []
+                self._overlay_live_status_sessions(events_by_operator.get(int(op_id)) or [])
             )
             if not events_list:
                 continue
@@ -1003,7 +1092,8 @@ class OperatorStatusMixin:
                 })
         return result
 
-    def save_operator_status_import(self, events, segments, imported_by=None, summary=None):
+    def save_operator_status_import(self, events, segments, imported_by=None, summary=None,
+                                    keep_live_events=False):
         """
         Сохранить импорт статусов операторов:
         - сырые события переключений (operator_status_events)
@@ -1011,6 +1101,12 @@ class OperatorStatusMixin:
 
         Перед вставкой удаляет существующие данные по затронутым операторам и датам,
         чтобы импорт работал как "replace" в рамках импортированного диапазона.
+
+        keep_live_events — не трогать события, которые пришли сами (iCORE Phone: у них
+        есть client_event_id). Так ходит выгрузка Oktell: оператор СЗоВ часть дня сидит
+        на обзвоне в телефоне, и «replace» по дню стирал бы его телефонные статусы при
+        каждой выгрузке. Заменяются только прежние события выгрузки; сегменты дня
+        пересобираются из обоих источников (_overlay_live_status_sessions).
         """
         if not isinstance(events, list):
             raise ValueError("events must be a list")
@@ -1242,14 +1338,17 @@ class OperatorStatusMixin:
         with self._get_cursor() as cursor:
             self._lock_operator_status_segments_tx(cursor, affected_operator_ids)
 
-            for operator_id, start_date_obj, end_date_obj in event_ranges:
-                cursor.execute(
-                    """
+            delete_events_sql = """
                     DELETE FROM operator_status_events
                     WHERE operator_id = %s
                       AND event_date >= %s
                       AND event_date <= %s
-                    """,
+                    """
+            if keep_live_events:
+                delete_events_sql += "  AND client_event_id IS NULL\n"
+            for operator_id, start_date_obj, end_date_obj in event_ranges:
+                cursor.execute(
+                    delete_events_sql,
                     (operator_id, start_date_obj, end_date_obj)
                 )
                 deleted_events += max(0, int(cursor.rowcount or 0))
@@ -1536,7 +1635,7 @@ class OperatorStatusMixin:
                 })
                 cursor.execute(
                     """
-                    SELECT status_key, state_note
+                    SELECT status_key, state_note, (client_event_id IS NOT NULL) AS is_live
                     FROM operator_status_events
                     WHERE operator_id = %s
                       AND event_at <= %s
@@ -1549,8 +1648,13 @@ class OperatorStatusMixin:
                     (operator_id, event_at_obj, action_status_keys)
                 )
                 previous_state = cursor.fetchone()
+                # Повтор — только если прежнее событие тоже пришло само. У оператора СЗоВ
+                # перед «готов» телефона может лежать «Готов» из выгрузки Oktell: это два
+                # разных источника, и первое событие телефона открывает его сессию
+                # (_overlay_live_status_sessions) — проглотить его нельзя.
                 if (
                     previous_state is not None
+                    and bool(previous_state[2])
                     and self._status_transition_signature(
                         previous_state[0],
                         previous_state[1]

@@ -173,7 +173,7 @@ class StatusEventCanonicalizationTests(unittest.TestCase):
 
 class AppendStatusEventTests(unittest.TestCase):
     def test_same_client_event_id_remains_transport_duplicate(self):
-        cursor = _FakeCursor(duplicate_row=(77,), previous_state=("занят", None))
+        cursor = _FakeCursor(duplicate_row=(77,), previous_state=("занят", None, True))
         database = _database_with_cursor(cursor)
 
         result = database.append_operator_status_event(
@@ -187,7 +187,7 @@ class AppendStatusEventTests(unittest.TestCase):
         self.assertFalse(database.rebuild_calls)
 
     def test_new_guid_with_same_effective_state_is_semantic_noop(self):
-        cursor = _FakeCursor(previous_state=("  ГОТОВ  ", "  "))
+        cursor = _FakeCursor(previous_state=("  ГОТОВ  ", "  ", True))
         database = _database_with_cursor(cursor)
 
         result = database.append_operator_status_event(
@@ -207,7 +207,7 @@ class AppendStatusEventTests(unittest.TestCase):
         self.assertFalse(database.rebuild_calls)
 
     def test_real_transition_is_inserted_and_rebuilt(self):
-        cursor = _FakeCursor(previous_state=("готов", None), inserted_id=901)
+        cursor = _FakeCursor(previous_state=("готов", None, True), inserted_id=901)
         database = _database_with_cursor(cursor)
 
         result = database.append_operator_status_event(
@@ -222,8 +222,23 @@ class AppendStatusEventTests(unittest.TestCase):
         self.assertEqual(len(database.rebuild_calls), 1)
         self.assertEqual(len(database.auto_calls), 1)
 
+    def test_same_state_from_import_is_not_a_noop(self):
+        """Перед «готов» телефона лежит «Готов» из выгрузки Oktell: источники разные,
+        событие телефона открывает его сессию и обязано сохраниться."""
+        cursor = _FakeCursor(previous_state=("готов", None, False), inserted_id=903)
+        database = _database_with_cursor(cursor)
+
+        result = database.append_operator_status_event(
+            322, datetime(2026, 7, 29, 14, 25), "готов",
+            client_event_id="event-5"
+        )
+
+        self.assertNotIn("noop", result)
+        self.assertEqual(result["event_id"], 903)
+        self.assertEqual(len(database.rebuild_calls), 1)
+
     def test_action_event_is_never_collapsed_as_status_noop(self):
-        cursor = _FakeCursor(previous_state=("take chat", None), inserted_id=902)
+        cursor = _FakeCursor(previous_state=("take chat", None, True), inserted_id=902)
         database = _database_with_cursor(cursor)
 
         result = database.append_operator_status_event(

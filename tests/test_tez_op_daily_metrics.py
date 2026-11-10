@@ -338,8 +338,8 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
                         self.rows = []
                     else:
                         self.rows = [
-                            (1, 7, start_at, "active", None, "status"),
-                            (2, 7, stop_at, "inactive", None, "status"),
+                            (1, 7, start_at, "active", None, "status", False),
+                            (2, 7, stop_at, "inactive", None, "status", False),
                         ]
                 elif normalized.startswith("SELECT id, operator_id, status_date"):
                     # Уже лежащие неавторитетные сегменты окна — с ними пересборка
@@ -390,6 +390,10 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
                 return list(events or [])
 
             @staticmethod
+            def _overlay_live_status_sessions(events):
+                return list(events or [])
+
+            @staticmethod
             def _split_status_segment_datetimes_by_day(start_value, end_value):
                 return [{
                     "status_date": start_value.date(),
@@ -416,7 +420,7 @@ class TezStatusAuthoritativeSegmentTests(unittest.TestCase):
         )
         self.assertIn("COALESCE(is_authoritative, FALSE) = FALSE", candidates_sql)
         self.assertIn(
-            "ORDER BY operator_id, event_at ASC, id DESC",
+            "ORDER BY operator_id, is_live, event_at ASC, id DESC",
             candidates_sql,
         )
         # Пересборка пишет разницу: удаляет только id из выборки уже лежащих

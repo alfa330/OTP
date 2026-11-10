@@ -72,6 +72,10 @@ class _Db:
         return list(events or [])
 
     @staticmethod
+    def _overlay_live_status_sessions(events):
+        return list(events or [])
+
+    @staticmethod
     def _split_status_segment_datetimes_by_day(start_value, end_value):
         return [{"status_date": start_value.date(), "start_at": start_value, "end_at": end_value,
                  "duration_sec": int((end_value - start_value).total_seconds())}]
@@ -91,10 +95,10 @@ class _Cursor:
         normalized = " ".join(str(query).split())
         self.queries.append((normalized, params))
         if "WITH candidates AS" in normalized:
-            self.rows = [(1, OP, AT(9), "готов", None, "status"),
-                         (2, OP, AT(12), "перерыв", None, "status"),
-                         (3, OP, AT(12, 30), "готов", None, "status"),
-                         (4, OP, AT(18), "вышел", None, "status")]
+            self.rows = [(1, OP, AT(9), "готов", None, "status", False),
+                         (2, OP, AT(12), "перерыв", None, "status", False),
+                         (3, OP, AT(12, 30), "готов", None, "status", False),
+                         (4, OP, AT(18), "вышел", None, "status", False)]
         elif normalized.startswith("SELECT id, operator_id, status_date"):
             self.rows = list(self.existing)
         else:
