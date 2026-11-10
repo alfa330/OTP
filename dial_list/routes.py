@@ -154,9 +154,11 @@ phone_event, outcome и mode — без замка: идущий разгово�
     GET/PUT /api/dial_list/operators/<user_id>/settings      {enabled: true|false|null}
     GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
                                                              посадить (candidates — сотрудники других
-                                                             отделов: только главе и СВ СЗоВ и суперадмину)
+                                                             отделов: только главе и СВ СЗоВ и суперадмину);
+                                                             informer: true — с линии звонит автоинформатор
     POST    /api/dial_list/departments/<id>/lines/assign     {user_id, internal_number}; сотрудника
-                                                             другого отдела — только они же, иначе 403
+                                                             другого отдела — только они же, иначе 403;
+                                                             на линию автоинформатора — 409
     POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
                                                              ИИН обязателен, после загрузки — проверка подписания;
@@ -749,6 +751,22 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         saved["effective"] = enabled if enabled is not None else department_enabled
         return jsonify({"status": "success", **saved}), 200
 
+    # Линии робота-автоинформатора (владелец, 10.11.2026: «оставить всего 5 линий… и сделать их серыми, чтобы
+    # другие не могли забрать эти линии»). Какие линии у робота, сообщает сам диспетчер на шлюзе
+    # (INFORMER_LINES → informer_agent_state.lines): сменили список на шлюзе — вкладка «Линии» сразу видит
+    # новый, второго списка в портале нет. Робот звонит с линий кабинета удалённого КЦ, поэтому только у
+    # отделов этого профиля. Не прочитали — пусто: вкладка из-за соседнего раздела не ломается.
+    def _robot_lines(department_id):
+        if informer_service is None:
+            return frozenset()
+        try:
+            if svc.department_profile(department_id) != PROFILE_REMOTE_CC:
+                return frozenset()
+            return frozenset(str(line) for line in (informer_service.robot_status().get('lines') or {}))
+        except Exception:
+            log.exception("dial_list: не прочитаны линии автоинформатора (отдел %s)", department_id)
+            return frozenset()
+
     @bp.route('/api/dial_list/departments/<int:department_id>/lines', methods=['GET', 'OPTIONS'])
     @require_api_key
     @_guard
@@ -757,13 +775,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
         users — сотрудники отдела и те, кто уже сидит на его линиях. candidates —
         сотрудники ДРУГИХ отделов для выбора по ФИО: только главе и СВ СЗоВ и
-        суперадмину (can_seat_anyone), остальным список пуст, а сервер чужого не посадит."""
+        суперадмину (can_seat_anyone), остальным список пуст, а сервер чужого не посадит.
+        informer у линии — с неё звонит автоинформатор: назначить на неё нельзя."""
         _manager(department_id)
         anyone = _seats_anyone()
+        robot = _robot_lines(department_id)
+        line_rows = svc.list_lines(department_id)
+        for line in line_rows:
+            line["informer"] = str(line.get("internal_number") or "") in robot
         return jsonify({
             "status": "success",
             "sip_server": svc.department_sip_server(department_id),
-            "lines": svc.list_lines(department_id),
+            "lines": line_rows,
             "users": svc.department_users(department_id),
             "can_seat_anyone": anyone,
             "candidates": svc.line_candidates(department_id) if anyone else [],
@@ -779,6 +802,9 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             user_id = int(payload.get('user_id'))
         except (TypeError, ValueError):
             raise DialListError("user_id: число")
+        number = str(payload.get('internal_number') or '').strip()
+        if number and number in _robot_lines(department_id):
+            raise DialListError(f"С линии {number} звонит автоинформатор — назначить на неё нельзя", 409)
         result = svc.assign_line(department_id, user_id, payload.get('internal_number'),
                                  changed_by=requester_id, seat_anyone=_seats_anyone())
         return jsonify({"status": "success", **result}), 200

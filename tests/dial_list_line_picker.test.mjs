@@ -14,8 +14,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-    NO_DEPARTMENT_GROUP, assignedToast, buildLinePickerOptions, canReleaseHolder, defaultPickedUser,
-    operatorsForFilter, sameSectionTitle,
+    NO_DEPARTMENT_GROUP, assignedToast, buildLinePickerOptions, canAssignLine, canReleaseHolder, defaultPickedUser,
+    isRobotLine, operatorsForFilter, sameSectionTitle,
 } from '../src/components/dial_list/linePicker.js';
 
 // Без переводов строк Windows: сверки исходника ниже многострочные.
@@ -176,7 +176,7 @@ test('название отдела, совпавшее с названием р
 
 test('вкладка «Линии» берёт право и список с сервера и раскладывает их этим модулем', () => {
     const panel = read('../src/components/dial_list/DialListLinesPanel.jsx');
-    assert.ok(panel.includes("import { assignedToast, buildLinePickerOptions, canReleaseHolder, defaultPickedUser } from './linePicker';"));
+    assert.ok(panel.includes("import { assignedToast, buildLinePickerOptions, canAssignLine, canReleaseHolder, defaultPickedUser, isRobotLine } from './linePicker';"));
     assert.ok(panel.includes('const canSeatAnyone = data?.can_seat_anyone === true;'));
     assert.ok(panel.includes('users: data?.users, candidates: data?.candidates, canSeatAnyone, departmentName,'));
     assert.ok(panel.includes('options={pickerOptions}'));
@@ -200,4 +200,43 @@ test('вкладка «Линии» берёт право и список с с�
     assert.ok(journal.includes("import { operatorsForFilter } from './linePicker';"));
     assert.ok(journal.includes('if (!cancelled) setUsers(operatorsForFilter(data));'));
     assert.ok(journal.includes('...(u.former ? { muted: true } : {})'));
+});
+
+/*
+ * Линии робота-автоинформатора (владелец, 10.11.2026: «сделать их серыми, чтобы другие не могли забрать
+ * эти линии»). Признак informer приходит с сервера (список линий сообщает сам робот), сервер посадку на
+ * такую линию отклоняет — tests/test_dial_list_informer_lines.py.
+ */
+test('линия робота — без «Назначить», остальные как раньше', () => {
+    const robot = { internal_number: '902', informer: true, icore_user: null };
+    const free = { internal_number: '914', informer: false, icore_user: null };
+    const taken = { internal_number: '915', informer: false, icore_user: { id: 11, name: 'Аверин Аким' } };
+    assert.equal(isRobotLine(robot), true);
+    assert.equal(canAssignLine(robot), false);
+    assert.equal(canAssignLine(free), true);
+    assert.equal(canAssignLine(taken), false, 'занятую линию назначают только после «Снять»');
+    // Старый сервер признака не присылает — линия обычная; признак только true, не «что-то правдивое».
+    assert.equal(isRobotLine({ internal_number: '902' }), false);
+    assert.equal(isRobotLine({ internal_number: '902', informer: 'true' }), false);
+    assert.equal(canAssignLine({ internal_number: '902' }), true);
+    assert.equal(isRobotLine(null), false);
+    assert.equal(canAssignLine(null), false);
+    // Человека, оставшегося на линии робота, снять можно — как с любой линии.
+    assert.equal(canReleaseHolder({ id: 11, guest: false }, false), true);
+});
+
+test('вкладка «Линии»: линия робота серая, с подписью и без кнопки назначения', () => {
+    const panel = read('../src/components/dial_list/DialListLinesPanel.jsx');
+    assert.ok(panel.includes('const robot = isRobotLine(line);'));
+    assert.ok(panel.includes("className={`px-4 py-3 ${robot ? 'bg-slate-50' : ''}`}"));
+    assert.ok(panel.includes("robot ? 'bg-slate-200/70 text-slate-400'"));
+    assert.ok(panel.includes('<IosBadge tone="slate"><FaIcon className="fas fa-robot" />автоинформатор</IosBadge>'));
+    assert.ok(panel.includes('{robot && !line.icore_user ? ('));
+    assert.ok(panel.includes('звонит робот — назначить нельзя'));
+    // «Назначить» — только через общее правило, своей проверки рядом нет.
+    assert.ok(panel.includes(') : canAssignLine(line) && ('));
+    assert.equal((panel.match(/^\s*Назначить$/gm) || []).length, 2, 'кнопка в строке и кнопка в выборе сотрудника');
+    // Иконка робота есть в наборе FaIcon (без неё — пустой кружок).
+    const icons = read('../src/components/common/FaIcon.jsx');
+    assert.ok(icons.includes("'fa-robot': 'Bot',"));
 });

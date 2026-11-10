@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
-import { assignedToast, buildLinePickerOptions, canReleaseHolder, defaultPickedUser } from './linePicker';
+import { assignedToast, buildLinePickerOptions, canAssignLine, canReleaseHolder, defaultPickedUser, isRobotLine } from './linePicker';
 
 /*
  * Линии Binotel отдела: какие внутренние номера есть у компании, кто из них
@@ -148,27 +148,39 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                     ) : lines.map((line) => {
                         const isPicking = picking === line.internal_number;
                         const busy = busyLine === line.internal_number;
+                        // С линии звонит автоинформатор: строка серая, «Назначить» нет (см. isRobotLine).
+                        const robot = isRobotLine(line);
                         return (
-                            <div key={line.internal_number} className="px-4 py-3">
+                            <div key={line.internal_number} className={`px-4 py-3 ${robot ? 'bg-slate-50' : ''}`}>
                                 <div className="flex items-center gap-3">
                                     <div className={`grid h-9 w-14 shrink-0 place-items-center rounded-xl font-mono text-[14px] font-semibold ${
-                                        line.online ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
+                                        robot ? 'bg-slate-200/70 text-slate-400'
+                                            : line.online ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
                                     }`}>
                                         {line.internal_number}
                                     </div>
                                     <div className="min-w-0 flex-1">
                                         <div className="flex flex-wrap items-center gap-1.5">
-                                            <IosBadge tone={line.online ? 'green' : 'slate'}>{line.online ? 'онлайн' : 'офлайн'}</IosBadge>
-                                            {line.tls && <IosBadge tone="blue">TLS</IosBadge>}
-                                            {line.binotel_employee?.name && (
-                                                <span className="text-[12px] text-slate-500">в Binotel: {line.binotel_employee.name}</span>
-                                            )}
-                                            {!line.online && line.was_online_at && (
-                                                <span className="text-[11.5px] text-slate-400">был онлайн {fmtAgo(line.was_online_at)}</span>
+                                            {robot ? (
+                                                /* Робот на линии не регистрируется: «офлайн» и имя из Binotel здесь ничего не значат. */
+                                                <IosBadge tone="slate"><FaIcon className="fas fa-robot" />автоинформатор</IosBadge>
+                                            ) : (
+                                                <>
+                                                    <IosBadge tone={line.online ? 'green' : 'slate'}>{line.online ? 'онлайн' : 'офлайн'}</IosBadge>
+                                                    {line.tls && <IosBadge tone="blue">TLS</IosBadge>}
+                                                    {line.binotel_employee?.name && (
+                                                        <span className="text-[12px] text-slate-500">в Binotel: {line.binotel_employee.name}</span>
+                                                    )}
+                                                    {!line.online && line.was_online_at && (
+                                                        <span className="text-[11.5px] text-slate-400">был онлайн {fmtAgo(line.was_online_at)}</span>
+                                                    )}
+                                                </>
                                             )}
                                         </div>
                                         <div className="mt-0.5 text-[13.5px]">
-                                            {line.icore_user ? (
+                                            {robot && !line.icore_user ? (
+                                                <span className="text-slate-400">звонит робот — назначить нельзя</span>
+                                            ) : line.icore_user ? (
                                                 <span className="font-medium text-slate-800">
                                                     {line.icore_user.name}
                                                     {line.icore_user.login && <span className="ml-1 text-[12px] font-normal text-slate-400">@{line.icore_user.login}</span>}
@@ -191,7 +203,7 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                                                     Снять
                                                 </button>
                                             )
-                                        ) : (
+                                        ) : canAssignLine(line) && (
                                             <button
                                                 type="button"
                                                 onClick={() => { setPicking(line.internal_number); setPickedUser(defaultPickedUser(users)); }}
