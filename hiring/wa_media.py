@@ -11,6 +11,13 @@
 двойное прослушивание коротких записей против выдумок, проверка правдоподобия), со своим вступлением:
 говорят кандидаты на работу и рекрутер, а не водители. Правила расшифровки — общие, из того модуля.
 
+Файлы старых сообщений (владелец 10.11.2026: «фото отображается просто как фото, и непонятно, как его
+посмотреть»). До 09.11.2026 10:00 шлюз файлы не качал, а ключ к файлу приходит только вместе с самим
+сообщением. Он есть у телефона номера: в ответе на опрос портал отдаёт шлюзу сообщения без файла, шлюз
+просит телефон прислать их заново (wa_bridge/resend.go), и файл приходит обычным путём. Так же — файл,
+который «загружается» дольше суток (очередь шлюза потерялась). Телефон не прислал за RESEND_ATTEMPTS
+просьб — «не сохранился (телефон не прислал файл)».
+
 Модуль без базы и без Flask: пути, типы, подписи и вид для экрана — чистые функции, бакет и модель
 приходят снаружи (HiringService получает их зависимостями, тесты — подделками).
 """
@@ -35,7 +42,14 @@ FAILURE_REASONS = {
     'rejected': 'портал не принял файл',
     'retries': 'не удалось скачать',
     'broken': 'не удалось скачать',
+    'unanswered': 'телефон не прислал файл',
 }
+
+# Просьбы к телефону прислать старое сообщение заново (см. начало модуля).
+RESEND_BATCH = 2                          # за один опрос шлюза (опрос — раз в 10 с)
+RESEND_RETRY = timedelta(minutes=30)      # телефон не ответил — следующая просьба
+RESEND_ATTEMPTS = 3                       # после последней — «телефон не прислал файл»
+FETCH_STALE = timedelta(hours=24)         # очередь шлюза: 8 попыток за ~11 часов — дольше суток не ждёт
 
 # Показываются прямо в ленте (inline); всё остальное — только скачиванием.
 _INLINE = ('image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/3gpp', 'video/quicktime',
@@ -96,8 +110,9 @@ def public_view(kind, media, sign=None):
     """Файл сообщения для вкладки карточки: что показывать и подписанная ссылка. Путь в бакете наружу
     не уходит.
 
-    state: stored — файл есть (url); loading — ждём от шлюза; failed — не сохранится (reason);
-    too_large — больше 25 МБ; none — сообщение пришло раньше, чем шлюз начал качать файлы."""
+    state: stored — файл есть (url); loading — ждём от шлюза (качает сам или просит телефон прислать
+    старое сообщение заново); failed — не сохранится (reason); too_large — больше 25 МБ; none — не файл
+    (стикер, геопозиция, контакт)."""
     media = dict(media or {})
     view = {key: media[key] for key in ('mime', 'size', 'seconds', 'file_name') if media.get(key) is not None}
     if kind not in DOWNLOADABLE:
@@ -121,11 +136,24 @@ def public_view(kind, media, sign=None):
         view['reason'] = FAILURE_REASONS.get(media['failed'], 'не удалось скачать')
     elif (media.get('size') or 0) > MAX_BYTES:
         view['state'] = 'too_large'
-    elif media.get('fetch'):
-        view['state'] = 'loading'
     else:
-        view['state'] = 'none'
+        view['state'] = 'loading'
     return view
+
+
+def resend_chat(jid, phone, lid, attempt):
+    """JID чата для просьбы к телефону. Личный чат WhatsApp живёт и по номеру, и по LID, а у чата в
+    портале записан вид последнего сообщения: первая и третья просьбы — как у чата, вторая — другим
+    видом, если он известен (сообщение могло прийти до смены вида)."""
+    jid = str(jid or '').strip()
+    other = None
+    if jid.endswith('@lid'):
+        digits = ''.join(ch for ch in str(phone or '') if ch.isdigit())
+        other = (digits + '@s.whatsapp.net') if digits else None
+    elif jid.endswith('@s.whatsapp.net'):
+        digits = ''.join(ch for ch in str(lid or '') if ch.isdigit())
+        other = (digits + '@lid') if digits else None
+    return other if other and attempt % 2 == 1 else jid
 
 
 # ─── Бакет ────────────────────────────────────────────────────────────────────

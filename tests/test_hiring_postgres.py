@@ -1485,7 +1485,8 @@ def test_whatsapp_media_files_and_transcripts(world):
     assert thread['d1']['state'] == 'stored' and thread['d1']['file_name'] == 'Резюме.pdf' and thread['d1']['inline'] is False
     assert any(sign[1] == 'application/pdf' and sign[2].startswith('attachment; filename="') for sign in storage.signed)
     assert thread['p1'] == {'mime': 'image/jpeg', 'size': 900, 'state': 'failed', 'reason': 'файла у WhatsApp уже нет'}
-    assert thread['big']['state'] == 'too_large' and thread['old']['state'] == 'none'
+    # Старое сообщение без метки шлюза — его файл шлюз попросит у телефона заново: тоже «загружается…».
+    assert thread['big']['state'] == 'too_large' and thread['old']['state'] == 'loading'
     # Кандидат удалил голосовое у всех — исчезает и из бакета; файл, пришедший после удаления, не кладётся.
     assert service.wa_events({'events': [wa_event('v2', revoke_of='v1')]})['outcomes'] == {'revoked': 1}
     assert storage.deleted == [path] and path not in storage.files
@@ -1514,6 +1515,72 @@ def test_whatsapp_transcript_retries_then_gives_up(world):
     clock.now = NOW + timedelta(minutes=30)
     service.wa_watchdog()
     assert len(heard) == 3
+
+
+def test_whatsapp_old_files_requested_from_phone(world, monkeypatch):
+    """Владелец 10.11.2026: «фото отображается просто как фото, и непонятно, как его посмотреть». Файлы
+    сообщений до 09.11.2026 шлюз не качал: портал отдаёт их шлюзу в ответе на опрос, шлюз просит телефон
+    прислать сообщение заново, файл приходит обычным путём. Три просьбы без ответа — «не сохранился»."""
+    service, storage, _heard = media_world(world, [])
+    clock = world['clock']
+    lid = '205981234567890'
+    in_lid = {'chat': lid + '@lid', 'lid': lid}
+    # Файл «загружается» дольше суток — очередь шлюза потерялась: его тоже просим у телефона.
+    service.wa_events({'events': [wa_event('stale', kind='image', text='', media={'mime': 'image/jpeg', 'size': 50, 'fetch': True},
+                                           **in_lid)]})
+    clock.now = NOW + timedelta(hours=25)
+    ts = WA_TS + 25 * 3600
+    service.wa_events({'events': [
+        wa_event('old1', kind='image', text='Я увидел вакансию', ts=ts - 300, media={'mime': 'image/jpeg', 'size': 900}, **in_lid),
+        wa_event('old2', kind='voice', text='', ts=ts - 200, from_me=True, media={'mime': 'audio/ogg', 'size': 900}, **in_lid),
+        wa_event('fresh', kind='image', text='', ts=ts - 100, media={'mime': 'image/jpeg', 'size': 900, 'fetch': True}, **in_lid),
+        wa_event('huge', kind='video', text='', ts=ts - 90, media={'mime': 'video/mp4', 'size': wa_media.MAX_BYTES + 1}, **in_lid),
+        wa_event('gone', kind='image', text='', ts=ts - 80, media={'mime': 'image/jpeg', 'size': 900}, **in_lid),
+        wa_event('note', text='Ещё актуально?', ts=ts - 70, **in_lid),
+        wa_event('pin', kind='sticker', text='', ts=ts - 60, **in_lid),
+    ]})
+    service.wa_events({'events': [wa_event('gone-x', revoke_of='gone', ts=ts - 50, **in_lid)]})
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77055552233')
+    lead = ctx_of(world, HR_HEAD)
+
+    def thread():
+        return {m['wa_id']: m.get('media') for m in service.card_whatsapp(lead, card['id'])['messages']}
+
+    def poll(**extra):
+        return service.wa_poll(dict({'state': 'connected', 'detail': {'paired': True}, 'features': ['resend']}, **extra))
+
+    # Старый сервис (без features) и сервис не на связи просьб не получают — попытки не тратятся.
+    assert 'resend' not in poll(features=None)
+    assert 'resend' not in poll(state='connecting')
+    # Сначала свежие, по две за опрос; своё сообщение — с from_me (ключ запроса — «отправлено мной»).
+    assert poll()['resend'] == [{'id': 'old2', 'chat': lid + '@lid', 'from_me': True},
+                                {'id': 'old1', 'chat': lid + '@lid', 'from_me': False}]
+    assert poll()['resend'] == [{'id': 'stale', 'chat': lid + '@lid', 'from_me': False}]
+    assert 'resend' not in poll()                                    # пауза до следующей просьбы
+    assert thread()['old1'] == {'mime': 'image/jpeg', 'size': 900, 'state': 'loading'}
+    # Телефон прислал old1 заново: событие — дубль (второй строки нет), файл — обычным путём.
+    again = wa_event('old1', kind='image', text='Я увидел вакансию', ts=ts - 300,
+                     media={'mime': 'image/jpeg', 'size': 900, 'fetch': True}, **in_lid)
+    assert service.wa_events({'events': [again]})['outcomes'] == {'duplicate': 1}
+    assert service.wa_media('old1', b'\xff\xd8jpeg') == {'stored': True} and len(storage.files) == 1
+    # Через полчаса без ответа — вторая просьба другим видом чата (номером), третья — снова LID.
+    clock.now += timedelta(minutes=31)
+    assert poll()['resend'] == [{'id': 'old2', 'chat': '77055552233@s.whatsapp.net', 'from_me': True},
+                                {'id': 'stale', 'chat': '77055552233@s.whatsapp.net', 'from_me': False}]
+    clock.now += timedelta(minutes=31)
+    assert [item['chat'] for item in poll()['resend']] == [lid + '@lid', lid + '@lid']
+    # Три просьбы без ответа — «не сохранился (телефон не прислал файл)», больше не просим.
+    clock.now += timedelta(minutes=31)
+    assert 'resend' not in poll()
+    files = thread()
+    assert files['old1']['state'] == 'stored' and files['old1']['url'].startswith('https://storage.test/hiring/whatsapp/')
+    assert files['old2'] == {'mime': 'audio/ogg', 'size': 900, 'state': 'failed', 'reason': 'телефон не прислал файл'}
+    assert files['stale']['state'] == 'failed' and files['fresh']['state'] == 'loading'
+    assert files['huge']['state'] == 'too_large' and files['pin'] == {'state': 'none'}
+    # Сбой выборки не роняет опрос: состояние и команды сервиса важнее докачки файлов.
+    monkeypatch.setattr(queries, 'wa_media_resend_due', lambda *args: (_ for _ in ()).throw(RuntimeError('сбой')))
+    assert poll() == {'command': None, 'next_poll_sec': 10}
 
 
 def test_whatsapp_repeat_closed_and_employee(world):

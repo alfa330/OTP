@@ -9,7 +9,9 @@ package main
 //   * обрывы установленного соединения чаще 12 в час — тоже остановка: шторм переподключений —
 //     сигнал для антиспама; при недоступной сети пауза между попытками растёт до 5 минут;
 //   * сразу после подключения — статус «не в сети»: так телефон рекрутера получает уведомления;
-//   * отметки «прочитано» и «печатает» не ставятся, сообщения не отправляются — кода отправки нет;
+//   * отметки «прочитано» и «печатает» не ставятся, людям ничего не отправляется: единственный запрос
+//     от сервиса — своему телефону, прислать заново старое сообщение с файлом (resend.go), как в
+//     WhatsApp Web; по одному с паузой и не больше 60 в час;
 //   * файлы сообщений качаются по одному, с паузой, как в WhatsApp Web (media.go).
 
 import (
@@ -27,7 +29,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-const bridgeVersion = "1.1.0"
+const bridgeVersion = "1.2.0"
 
 const (
 	stateUnpaired   = "unpaired"
@@ -45,6 +47,7 @@ type bridge struct {
 	guard     *guard
 	spool     *spool
 	portal    *portal
+	resend    *resender
 	drops     dropCounter
 	ctx       context.Context
 	pollNow   chan struct{}
@@ -67,6 +70,7 @@ func newBridge(ctx context.Context, cfg config, log waLog.Logger, container *sql
 	p *portal) (*bridge, error) {
 	b := &bridge{cfg: cfg, log: log, clientLog: waLog.Stdout("WhatsApp", cfg.logLevel, false), container: container,
 		guard: g, spool: sp, portal: p, ctx: ctx, pollNow: make(chan struct{}, 1)}
+	b.resend = newResender(log, func() bool { return b.currentState() == stateConnected }, b.requestFromPhone)
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		return nil, err
@@ -300,6 +304,9 @@ func (b *bridge) handle(raw any) {
 		if evt.Info.IsFromMe && evt.Info.Sender.Device == 0 {
 			_ = b.guard.phoneSeen(now) // ответ отправлен с самого телефона
 		}
+		if evt.UnavailableRequestID != "" {
+			b.log.Infof("телефон прислал заново сообщение %s", evt.Info.ID)
+		}
 		if event := convertMessage(b.ctx, evt, b.resolvePN); event != nil {
 			if job := mediaJobOf(evt); job != nil {
 				if err := b.spool.pushMedia(*job, now.Add(mediaFirstDelay)); err != nil {
@@ -332,6 +339,14 @@ func (b *bridge) sendPresence() {
 	if err != nil {
 		b.log.Infof("статус «не в сети» отложен: %v", err)
 	}
+}
+
+// requestFromPhone — просьба к своему телефону прислать сообщение заново (resend.go): ответ придёт
+// обычным сообщением, и его файл встанет в очередь media.go.
+func (b *bridge) requestFromPhone(ctx context.Context, chat types.JID, item resendItem) error {
+	cli := b.client()
+	_, err := cli.SendPeerMessage(ctx, cli.BuildUnavailableMessageRequest(chat, resendSender(chat, item.FromMe), item.ID))
+	return err
 }
 
 func (b *bridge) freshDevice() {
@@ -528,7 +543,8 @@ func (b *bridge) pollLoop() {
 		b.mu.Lock()
 		ack := b.ack
 		b.mu.Unlock()
-		payload := map[string]any{"state": b.currentState(), "detail": b.detail()}
+		// features — что умеет эта версия: портал не просит лишнего у старой.
+		payload := map[string]any{"state": b.currentState(), "detail": b.detail(), "features": []string{"resend"}}
 		if ack != "" {
 			payload["ack"] = ack
 		}
@@ -542,6 +558,9 @@ func (b *bridge) pollLoop() {
 			}
 			if reply.Command != nil {
 				b.command(*reply.Command)
+			}
+			if len(reply.Resend) > 0 {
+				b.resend.offer(reply.Resend)
 			}
 		} else if b.ctx.Err() == nil {
 			failures++

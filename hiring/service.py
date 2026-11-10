@@ -1151,13 +1151,16 @@ class HiringService:
         """Опрос сервиса шлюза: его состояние → строка интеграции; в ответ — команда человека.
 
         Команда держится, пока сервис не подтвердит её номером (ack): потерянный ответ не теряет
-        «Подключить». Тревога руководителям — на входе в «Остановлен» и на возврате после него."""
+        «Подключить». Тревога руководителям — на входе в «Остановлен» и на возврате после него.
+        Подключённому сервису, который это умеет (features), — сообщения без файла: попросить телефон
+        прислать их заново (wa_media, файлы старых сообщений)."""
         payload = payload if isinstance(payload, dict) else {}
         state = str(payload.get('state') or '').strip()
         if state not in whatsapp.BRIDGE_STATES:
             raise HiringError('HIRING_WA_BAD_STATE', 'Неизвестное состояние сервиса')
         detail = whatsapp.clean_detail(payload.get('detail'))
         ack = str(payload.get('ack') or '').strip() or None
+        features = payload.get('features') if isinstance(payload.get('features'), list) else []
         now = self._now()
         with self._cursor() as cursor:
             row = queries.wa_lock_integration(cursor, now)
@@ -1176,11 +1179,33 @@ class HiringService:
             recipients = notices.whatsapp_alert(cursor, alert, now, tone='default' if state == whatsapp.CONNECTED else 'warning') \
                 if alert else []
             chats = queries.telegram_chats(cursor, recipients) if alert and state == whatsapp.PARKED else {}
+        resend = []
+        if state == whatsapp.CONNECTED and 'resend' in features:
+            try:
+                with self._cursor() as cursor:
+                    resend = self._wa_resend_batch(cursor, now)
+            except Exception:  # noqa: BLE001 — состояние, команды и пульс сервиса важнее докачки файлов
+                log.exception('WhatsApp найма: файлы старых сообщений не выданы шлюзу')
+                resend = []
         for chat_id in chats.values():
             self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
         busy = command or state in (whatsapp.PAIRING, whatsapp.CONNECTING)
-        return {'command': {'id': command['id'], 'action': command['action']} if command else None,
-                'next_poll_sec': 2 if busy else 10}
+        reply = {'command': {'id': command['id'], 'action': command['action']} if command else None,
+                 'next_poll_sec': 2 if busy else 10}
+        if resend:
+            reply['resend'] = resend
+        return reply
+
+    def _wa_resend_batch(self, cursor, now):
+        """Файлы старых сообщений: что попросить у телефона заново в этом опросе. Попытка засчитывается
+        при выдаче: потерянный ответ опроса — та же пауза до следующей просьбы."""
+        retry_before = (now - wa_media.RESEND_RETRY).isoformat(timespec='seconds')
+        queries.wa_media_resend_exhausted(cursor, retry_before, wa_media.RESEND_ATTEMPTS, now)
+        rows = queries.wa_media_resend_due(cursor, wa_media.MAX_BYTES, retry_before, now - wa_media.FETCH_STALE,
+                                           wa_media.RESEND_ATTEMPTS, wa_media.RESEND_BATCH)
+        queries.wa_media_resend_mark(cursor, [row['id'] for row in rows], now.isoformat(timespec='seconds'))
+        return [{'id': row['wa_id'], 'chat': wa_media.resend_chat(row['jid'], row['phone'], row['lid'], row['attempts']),
+                 'from_me': bool(row['from_me'])} for row in rows]
 
     def wa_events(self, payload):
         """Сообщения личных чатов номера от сервиса. Первое входящее чата — отклик в пуле; дальше

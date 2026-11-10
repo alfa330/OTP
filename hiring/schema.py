@@ -405,6 +405,14 @@ _STATEMENTS = [
     # Файл сообщения от шлюза приходит по id сообщения (владелец 09.11.2026: файлы и голосовые в карточке):
     # путь в бакете, тип и расшифровка — в media; сам файл — в бакете, как фото задач.
     "CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_wa_id ON hiring_wa_messages (wa_id)",
+    # Файлы, которых нет и не будет от шлюза само (владелец 10.11.2026: старые фото — «непонятно, как
+    # посмотреть»): опрос шлюза раз в 10 с ищет, что попросить у телефона заново, — только среди них.
+    # Условие — то же, что queries._NO_FILE.
+    """
+    CREATE INDEX IF NOT EXISTS idx_hiring_wa_messages_no_file ON hiring_wa_messages (sent_at)
+     WHERE kind IN ('image', 'video', 'audio', 'voice', 'document') AND deleted_at IS NULL
+       AND media->>'object' IS NULL AND media->>'failed' IS NULL
+    """,
 
     # Каналы — метки откликов с цветом (владелец 09.11.2026): откуда кандидат узнал о вакансии (таргет,
     # hh, Kaspi). Справочник ведёт руководитель, выключенный канал карточки помнят; у карточки — одна

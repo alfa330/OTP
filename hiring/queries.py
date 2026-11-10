@@ -1325,6 +1325,58 @@ def wa_media_failed(cursor, wa_id, reason, now):
     return cursor.rowcount
 
 
+# Сообщение с файлом, которого в бакете нет и уже не будет от шлюза само (wa_media: файлы старых
+# сообщений). Условие совпадает с частичным индексом idx_hiring_wa_messages_no_file (schema.py): опрос
+# шлюза раз в 10 с читает только такие строки — обычно ни одной.
+_NO_FILE = """m.kind IN ('image', 'video', 'audio', 'voice', 'document') AND m.deleted_at IS NULL
+              AND m.media->>'object' IS NULL AND m.media->>'failed' IS NULL"""
+
+
+def wa_media_resend_due(cursor, max_bytes, retry_before_iso, stale_before, attempts, limit):
+    """Сообщения без файла, которые пора попросить у телефона заново: шлюз файл не качает (пришло до
+    09.11.2026 или «загружается» дольше суток) и прошлая просьба осталась без ответа дольше паузы —
+    пока попытки не кончились. Сначала свежие. Строки захватываются до конца транзакции опроса."""
+    cursor.execute("""
+        SELECT m.id, m.wa_id, m.from_me, c.jid, c.phone, c.lid,
+               COALESCE((m.media->'resend'->>'attempts')::int, 0) AS attempts
+          FROM hiring_wa_messages m JOIN hiring_wa_chats c ON c.key = m.chat_key
+         WHERE """ + _NO_FILE + """
+           AND COALESCE((m.media->>'size')::bigint, 0) <= %s
+           AND CASE WHEN m.media ? 'resend'
+                    THEN m.media->'resend'->>'at' < %s AND COALESCE((m.media->'resend'->>'attempts')::int, 0) < %s
+                    ELSE COALESCE(m.media->>'fetch', '') <> 'true' OR m.created_at < %s END
+         ORDER BY m.sent_at DESC
+         LIMIT %s
+           FOR UPDATE OF m SKIP LOCKED
+    """, (int(max_bytes), retry_before_iso, int(attempts), stale_before, int(limit)))
+    return _all(cursor)
+
+
+def wa_media_resend_mark(cursor, message_ids, now_iso):
+    """Просьба ушла шлюзу: время и номер попытки — в описание файла (во вкладке — «загружается…»)."""
+    if not message_ids:
+        return
+    cursor.execute("""
+        UPDATE hiring_wa_messages
+           SET media = COALESCE(media, '{}'::jsonb) || jsonb_build_object('resend', jsonb_build_object(
+                   'at', %s::text, 'attempts', COALESCE((media->'resend'->>'attempts')::int, 0) + 1))
+         WHERE id = ANY(%s)
+    """, (now_iso, [int(message_id) for message_id in message_ids]))
+
+
+def wa_media_resend_exhausted(cursor, retry_before_iso, attempts, now):
+    """Телефон не прислал сообщение ни на одну просьбу — «не сохранился (телефон не прислал файл)»."""
+    cursor.execute("""
+        UPDATE hiring_wa_messages m
+           SET media = m.media || jsonb_build_object('failed', 'unanswered', 'failed_at', %s::text)
+         WHERE """ + _NO_FILE + """
+           AND m.media ? 'resend'
+           AND COALESCE((m.media->'resend'->>'attempts')::int, 0) >= %s
+           AND m.media->'resend'->>'at' < %s
+    """, (now.isoformat(timespec='seconds'), int(attempts), retry_before_iso))
+    return cursor.rowcount
+
+
 def wa_claim_transcript(cursor, message_id, now_iso, stale_iso):
     """Взять голосовое в расшифровку: ждёт своей очереди или прежний захват устарел (процесс умер на
     выкладке). Два процесса выкладки одно и то же не берут — за распознавание платим один раз."""

@@ -974,7 +974,7 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
     Ed25519 — тем же протоколом и ключами, что мост «Касаний» и автоинформатор (cdr/agent_auth.py,
     открытые ключи — CDR_AGENT_KEYS).
 
-        POST /api/hiring/wa/agent/poll          {state, detail, ack} → {command, next_poll_sec}
+        POST /api/hiring/wa/agent/poll          {state, detail, ack, features} → {command, next_poll_sec, resend?}
         POST /api/hiring/wa/agent/events        {events: [...]}      → {accepted, outcomes}
         POST /api/hiring/wa/agent/media/<id>    файл сообщения телом → {stored}; 404 — сообщение ещё не дошло
     """

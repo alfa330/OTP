@@ -38,7 +38,9 @@ type httpError struct {
 	Body   string
 }
 
-func (e *httpError) Error() string { return fmt.Sprintf("портал ответил %d: %s", e.Status, e.Body) }
+func (e *httpError) Error() string {
+	return fmt.Sprintf("портал ответил %d: %s", e.Status, e.Body)
+}
 
 func newPortal(base, proxy, caBundle string, s *signer) (*portal, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
@@ -125,4 +127,6 @@ type pollCommand struct {
 type pollReply struct {
 	Command     *pollCommand `json:"command"`
 	NextPollSec int          `json:"next_poll_sec"`
+	// Сообщения без файла: попросить телефон прислать их заново (resend.go).
+	Resend []resendItem `json:"resend"`
 }

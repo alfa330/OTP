@@ -215,6 +215,24 @@ def test_media_view_states():
     assert wa_media.public_view('video', {'size': wa_media.MAX_BYTES + 1})['state'] == 'too_large'
     failed = wa_media.public_view('document', {'failed': 'gone', 'fetch': True})
     assert failed['state'] == 'failed' and failed['reason'] == 'файла у WhatsApp уже нет'
-    assert wa_media.public_view('image', {'size': 10})['state'] == 'none'         # до 09.11.2026 файлы не качались
+    # До 09.11.2026 шлюз файлы не качал — такие шлюз просит у телефона заново: тоже «загружается…»;
+    # телефон так и не прислал — «не сохранился».
+    assert wa_media.public_view('image', {'size': 10})['state'] == 'loading'
+    assert wa_media.public_view('voice', None)['state'] == 'loading'
+    unanswered = wa_media.public_view('image', {'size': 10, 'resend': {'at': '2026-11-10T11:00:00', 'attempts': 3},
+                                                'failed': 'unanswered'})
+    assert unanswered == {'size': 10, 'state': 'failed', 'reason': 'телефон не прислал файл'}
     assert wa_media.public_view('sticker', None) == {'state': 'none'}
     assert wa_media.public_view('image', {'object': 'x.jpg', 'stored_type': 'image/jpeg'}, lambda *a: None)['state'] == 'failed'
+
+
+def test_resend_chat_alternates_number_and_lid():
+    """Просьба к телефону: первая и третья — видом чата в портале, вторая — другим видом, если известен."""
+    lid_chat = ('205981234567890@lid', '+77055552233', '205981234567890')
+    assert [wa_media.resend_chat(*lid_chat, attempt) for attempt in range(3)] == [
+        '205981234567890@lid', '77055552233@s.whatsapp.net', '205981234567890@lid']
+    phone_chat = ('77055552233@s.whatsapp.net', '+77055552233', '205981234567890')
+    assert wa_media.resend_chat(*phone_chat, 1) == '205981234567890@lid'
+    # Другого вида нет — всегда вид чата.
+    assert wa_media.resend_chat('205981234567890@lid', None, '205981234567890', 1) == '205981234567890@lid'
+    assert wa_media.resend_chat('77055552233@s.whatsapp.net', '+77055552233', None, 1) == '77055552233@s.whatsapp.net'

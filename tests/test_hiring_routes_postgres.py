@@ -579,3 +579,21 @@ def test_whatsapp_bridge_is_signed_and_buttons_are_lead_only(client, monkeypatch
                        headers=signer.headers('POST', unknown, raw)).status_code == 404
     shown = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()['messages']
     assert [m['media']['state'] for m in shown if m['wa_id'] == 'w3'] == ['stored']
+
+    # Фото до 09.11.2026 (шлюз его не качал): подключённый сервис новой версии получает его в ответе на
+    # опрос — попросить телефон прислать заново; старый сервис (без features) — нет. Файл — обычным путём.
+    old = dict(message, id='w4', kind='image', text='Я увидел вакансию', ts=1792047600 + 800,
+               media={'mime': 'image/jpeg', 'size': 5})
+    assert signed(events, {'events': [old]})[0].status_code == 200
+    connected = {'state': 'connected', 'detail': {'paired': True}}
+    assert 'resend' not in signed(poll, connected)[0].get_json()
+    asked = signed(poll, dict(connected, features=['resend']))[0]
+    assert asked.status_code == 200
+    assert asked.get_json()['resend'] == [{'id': 'w4', 'chat': '77055551122@s.whatsapp.net', 'from_me': False}]
+    shown = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()['messages']
+    assert [m['media']['state'] for m in shown if m['wa_id'] == 'w4'] == ['loading']
+    old_path = '/api/hiring/wa/agent/media/w4'
+    resent = client.post(old_path, data=raw, content_type='application/octet-stream', headers=signer.headers('POST', old_path, raw))
+    assert resent.status_code == 200 and resent.get_json() == {'stored': True}
+    shown = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()['messages']
+    assert [m['media']['state'] for m in shown if m['wa_id'] == 'w4'] == ['stored']

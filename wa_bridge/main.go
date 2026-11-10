@@ -151,6 +151,7 @@ func run(ctx context.Context, cfg config, log waLog.Logger) error {
 			return b.client().Download(ctx, part)
 		}}
 	go files.run(ctx)
+	go b.resend.run(ctx)
 
 	<-ctx.Done()
 	log.Infof("остановка по сигналу: закрываю соединение")
