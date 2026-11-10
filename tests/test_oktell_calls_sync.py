@@ -235,10 +235,12 @@ class SyncOperatorCallsTests(unittest.TestCase):
         "Тёзка Неоднозначная": [{"id": 1}, {"id": 2}],
     }
 
-    def _ns(self, fetch, db):
+    def _ns(self, fetch, db, dial_list=None):
         return _extract(
             ["_oktell_parse_date", "_oktell_calls_target_days", "_oktell_calls_record_run",
-             "sync_oktell_operator_calls"],
+             "_softphone_calls_for_hours", "sync_oktell_operator_calls"],
+            # Раздел «Удаленный КЦ»: None — не поднят, звонков из телефона нет.
+            _dial_list_service=dial_list,
             OKTELL_CALLS_MAX_RANGE_DAYS=31,
             OKTELL_CALLS_SYNC_LOCK=threading.Lock(),
             STATUS_IMPORT_INVALID_ROWS_PREVIEW_LIMIT=30,
@@ -347,6 +349,103 @@ class SyncOperatorCallsTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(db.saved, [[(77, "2026-10-18", 232)]])
+
+
+class _FakeDialList:
+    """Раздел «Удаленный КЦ» глазами синка: сколько звонков из телефона у кого за день."""
+
+    def __init__(self, calls=None, error=None):
+        self.calls = dict(calls or {})
+        self.error = error
+        self.asked = []
+
+    def hours_calls(self, day_from, day_to):
+        self.asked.append((day_from, day_to))
+        if self.error:
+            raise self.error
+        return dict(self.calls)
+
+
+class SoftphoneCallsTests(unittest.TestCase):
+    """Задача SZOV-4 (владелец 10.11.2026: «все звонки нужно учитывать»). Оператор СЗоВ на обзвоне
+    звонит из iCORE Phone: часы идут по телефону, а «Звонки» дня писал один Oktell — «звонков в
+    час» у него падал. Синк прибавляет звонки из телефона к звонкам Oktell того же дня."""
+
+    # Те же стабы, что у синка Oktell (сами его тесты здесь второй раз не идут). Люди выдуманы:
+    # 77 — оператор и в Oktell, и в телефоне; 613 — только в телефоне; 518 — чат-менеджер.
+    NAMES = {"Обзвонова Айша": [{"id": 77}]}
+    _ns = SyncOperatorCallsTests._ns
+    _assert_lock_released = SyncOperatorCallsTests._assert_lock_released
+    OKTELL = [{"OperatorName": "Обзвонова Айша", "CallDate": "2026-11-10", "CallCount": 40}]
+
+    def _sync(self, dial_list, rows=None, db=None, **period):
+        db = db or _FakeDB()
+        ns = self._ns(lambda d_from, d_to: list(self.OKTELL if rows is None else rows), db, dial_list=dial_list)
+        return ns["sync_oktell_operator_calls"](**(period or {"day": "2026-11-10"})), db, ns
+
+    def test_softphone_calls_are_added_to_the_oktell_calls_of_the_day(self):
+        dial_list = _FakeDialList({
+            (77, "2026-11-10"): 120,      # с утра линия Oktell, после обеда обзвон
+            (613, "2026-11-10"): 95,      # весь день на обзвоне: в Oktell звонков нет вовсе
+        })
+        result, db, ns = self._sync(dial_list)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-10", 160), (613, "2026-11-10", 95)])
+        self.assertEqual((result["phone_calls"], result["phone_days"]), (215, 2))
+        self.assertEqual((result["updated"], result["operators_count"]), (2, 2))
+        # Раздел спрошен один раз и за тот же период, что и Oktell.
+        self.assertEqual(dial_list.asked, [(date(2026, 11, 10), date(2026, 11, 10))])
+        self.assertEqual(db.runs[0]["updated_days"], 2)
+        self._assert_lock_released(ns)
+
+    def test_period_is_passed_whole_and_days_stay_apart(self):
+        dial_list = _FakeDialList({(77, "2026-11-09"): 7, (77, "2026-11-10"): 120})
+        result, db, _ns = self._sync(dial_list, date_from="2026-11-09", date_to="2026-11-10")
+
+        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-09", 7), (77, "2026-11-10", 160)])
+        self.assertEqual(dial_list.asked, [(date(2026, 11, 9), date(2026, 11, 10))])
+        self.assertEqual((result["phone_calls"], result["phone_days"]), (127, 2))
+
+    def test_chat_manager_day_takes_no_softphone_calls(self):
+        # 518 с 19.10 чат-менеджер: его день не операторский — ни звонки Oktell, ни звонки телефона.
+        dial_list = _FakeDialList({(518, "2026-11-10"): 30, (77, "2026-11-10"): 5})
+        result, db, _ns = self._sync(dial_list)
+
+        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-10", 45)])
+        self.assertEqual((result["phone_calls"], result["phone_days"]), (5, 1))
+
+    def test_zero_softphone_calls_create_no_day(self):
+        dial_list = _FakeDialList({(613, "2026-11-10"): 0})
+        result, db, _ns = self._sync(dial_list, rows=[])
+
+        self.assertEqual(db.saved, [[]])
+        self.assertEqual((result["updated"], result["phone_calls"], result["phone_days"]), (0, 0, 0))
+
+    def test_without_the_dial_out_section_only_oktell_calls_are_written(self):
+        result, db, _ns = self._sync(None)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(db.saved, [[(77, "2026-11-10", 40)]])
+        self.assertEqual((result["phone_calls"], result["phone_days"]), (0, 0))
+
+    def test_unread_softphone_calls_fail_the_run_without_writing(self):
+        # Записать день одним Oktell значило бы занизить его и счесть добранным: ночью его
+        # уже не перечитают. Прогон падает целиком — день остаётся недобранным.
+        dial_list = _FakeDialList(error=RuntimeError("dial_list_attempts is unavailable"))
+        result, db, ns = self._sync(dial_list)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("dial_list_attempts is unavailable", result["error"])
+        self.assertEqual(db.saved, [])
+        self.assertEqual([r["status"] for r in db.runs], ["failed"])
+        self._assert_lock_released(ns)
+
+    def test_manual_sync_names_both_sources_only_when_the_phone_added_calls(self):
+        source = BOT_PATH.read_text(encoding="utf-8")
+        route = source.split("@app.route('/api/hours/sync_calls_oktell'", 1)[1].split("\n@app.route(", 1)[0]
+        self.assertIn('"Звонки операторов синхронизированы из Oktell и iCORE Phone"', route)
+        self.assertIn("if result.get('phone_calls') else \"Звонки операторов синхронизированы из Oktell\"", route)
 
 
 if __name__ == "__main__":

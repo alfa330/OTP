@@ -27944,8 +27944,19 @@ def _oktell_fetch_call_counts(range_from, range_to):
     return rows
 
 
+def _softphone_calls_for_hours(range_from, range_to):
+    """{(operator_id, 'YYYY-MM-DD'): звонков} — звонки из iCORE Phone (раздел «Удаленный КЦ») к
+    «Звонкам» «Учёта часов» (задача SZOV-4; владелец 10.11.2026: «все звонки нужно учитывать»).
+    Чьи звонки и какие считаются — правило раздела (dial_list.service.hours_calls). Раздел не
+    поднят — из телефона никто и не звонил."""
+    if _dial_list_service is None:
+        return {}
+    return _dial_list_service.hours_calls(range_from, range_to)
+
+
 def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered_by='scheduler', force=False, imported_by=None):
-    """Синхронизирует кол-во звонков операторов из Oktell в daily_hours.calls.
+    """Синхронизирует кол-во звонков операторов в daily_hours.calls: звонки Oktell плюс звонки
+    из iCORE Phone за тот же день (_softphone_calls_for_hours).
     Только операторы (чат-менеджеры исключаются матчингом по имени). Меняет ТОЛЬКО calls
     дня и, где число изменилось, месячный итог work_hours, который из дней и считается."""
     if not force and not _oktell_calls_sync_enabled():
@@ -28018,6 +28029,21 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
             names_by_operator_day.setdefault(key, set()).add(operator_name)
             matched_operators.add(operator_id)
 
+        # Звонки из iCORE Phone — к звонкам Oktell того же дня (SZOV-4): оператор на обзвоне звонит
+        # из телефона, и в Oktell этих звонков нет. Гейт тот же — операторский день. Не прочитались —
+        # прогон падает целиком: записать день без них значило бы занизить его и счесть добранным.
+        phone_calls_total = 0
+        phone_days = 0
+        for (operator_id, day_str), phone_calls in sorted(_softphone_calls_for_hours(range_from, range_to).items()):
+            phone_calls = int(phone_calls or 0)
+            if phone_calls <= 0 or not is_operator_model_day(operator_id, day_str):
+                continue
+            key = (int(operator_id), day_str)
+            calls_by_operator_day[key] = calls_by_operator_day.get(key, 0) + phone_calls
+            matched_operators.add(int(operator_id))
+            phone_calls_total += phone_calls
+            phone_days += 1
+
         saved = db.upsert_daily_calls(
             (operator_id, day_str, calls)
             for (operator_id, day_str), calls in calls_by_operator_day.items()
@@ -28036,10 +28062,10 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
         ]
 
         logging.info(
-            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s skipped_non_operator_day=%s merged=%s aggregated_months=%s",
+            "Oktell calls sync %s..%s: source_rows=%s updated=%s operators=%s unmatched=%s skipped_non_operator_day=%s merged=%s aggregated_months=%s phone_calls=%s phone_days=%s",
             range_from.strftime('%Y-%m-%d'), range_to.strftime('%Y-%m-%d'),
             source_rows, updated, len(matched_operators), unmatched, skipped_non_operator_day,
-            len(merged_keys), aggregated_months
+            len(merged_keys), aggregated_months, phone_calls_total, phone_days
         )
         _oktell_calls_record_run(run_started_at, range_from, range_to, triggered_by, 'success', updated)
         return {
@@ -28054,6 +28080,9 @@ def sync_oktell_operator_calls(day=None, date_from=None, date_to=None, triggered
             'skipped_non_operator_day': skipped_non_operator_day,
             'merged': len(merged_keys),
             'aggregated_months': aggregated_months,
+            # Из них звонков iCORE Phone и оператор-дней с ними.
+            'phone_calls': phone_calls_total,
+            'phone_days': phone_days,
             'unmatched_preview': unmatched_preview,
             'merged_preview': merged_preview,
             'elapsed_seconds': round(time.time() - started, 2),
@@ -42806,7 +42835,9 @@ def sync_hours_calls_oktell():
 
         return jsonify({
             "status": "success",
-            "message": "Звонки операторов синхронизированы из Oktell",
+            # К звонкам Oktell прибавились звонки из телефона (SZOV-4) — говорим об этом в тосте.
+            "message": ("Звонки операторов синхронизированы из Oktell и iCORE Phone"
+                        if result.get('phone_calls') else "Звонки операторов синхронизированы из Oktell"),
             "sync": result,
             "warnings": {"unmatched_preview": result.get('unmatched_preview') or []}
         }), 200

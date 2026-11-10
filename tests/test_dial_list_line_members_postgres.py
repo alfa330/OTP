@@ -286,6 +286,65 @@ def test_overview_is_scoped_by_the_base_and_former_operators_are_listed(db):
     assert svc.former_operators(RCC, exclude_ids=[OWN, GUEST]) == []
 
 
+def test_hours_calls_count_every_placed_call_of_szov_staff_by_almaty_day(db, monkeypatch):
+    """Задача SZOV-4 (владелец 10.11.2026: «все звонки нужно учитывать»): звонки из телефона идут
+    в «Звонки» «Учёта часов». Считается каждый набранный звонок сотрудника СЗоВ — по его
+    отделу, а не по отделу базы или линии; день — алматинский."""
+    monkeypatch.delenv(dial_service.HOURS_CALLS_ENV, raising=False)
+    svc = dial_service.DialListService(db)
+    almaty = timezone(timedelta(hours=5))
+    day = datetime(2026, 11, 10, tzinfo=almaty)
+    with db._get_cursor() as cur:
+        cur.execute("INSERT INTO test_phone_numbers (phone_key) VALUES ('7010000009')")
+        leads = {}
+        for dept, phone in ((RCC, '77010000001'), (TEZ, '77010000003'), (RCC, '77010000009')):
+            cur.execute('INSERT INTO dial_list_leads (department_id, phone_norm, full_name) VALUES (%s, %s, %s) '
+                        'RETURNING id', (dept, phone, 'Водитель ' + phone[-1]))
+            leads[phone] = cur.fetchone()[0]
+        calls = (
+            # кто, база, номер, когда (Алматы), состояние, итог АТС, секунд, сброшен оператором
+            (GUEST, RCC, '77010000001', day.replace(hour=10), 'finished', 'ANSWER', 40, False),
+            (GUEST, RCC, '77010000001', day.replace(hour=11), 'finished', 'NOANSWER', 0, False),
+            (GUEST, RCC, '77010000001', day.replace(hour=12), 'finished', 'CANCEL', 0, True),
+            (GUEST, RCC, '77010000001', day.replace(hour=13), 'finished', 'ANSWER', 3, False),
+            (GUEST, RCC, '77010000001', day.replace(hour=14), 'leg_answered', '', 0, False),   # идёт сейчас
+            (GUEST, TEZ, '77010000003', day.replace(hour=15), 'finished', 'ANSWER', 15, False),  # чужая база
+            (GUEST, RCC, '77010000001', day.replace(hour=16), 'failed', '', 0, False),          # отказ АТС
+            (GUEST, RCC, '77010000009', day.replace(hour=17), 'finished', 'ANSWER', 60, False),  # тестовый номер
+            # Сутки — алматинские: 23:30 ещё 10-е, 00:10 уже 11-е (по UTC оба — 10-е).
+            (GUEST, RCC, '77010000001', day.replace(hour=23, minute=30), 'finished', 'BUSY', 0, False),
+            (GUEST, RCC, '77010000001', day + timedelta(days=1, minutes=10), 'finished', 'ANSWER', 20, False),
+            (GUEST2, RCC, '77010000001', day + timedelta(days=1, hours=9), 'finished', 'ANSWER', 20, False),
+            (FIRED, RCC, '77010000001', day.replace(hour=9), 'finished', 'ANSWER', 20, False),
+            # Не СЗоВ: свой сотрудник удалённого КЦ, оператор Тез, человек без отдела.
+            (OWN, RCC, '77010000001', day.replace(hour=10), 'finished', 'ANSWER', 40, False),
+            (TEZ_OP, TEZ, '77010000003', day.replace(hour=10), 'finished', 'ANSWER', 40, False),
+            (NOBODY, RCC, '77010000001', day.replace(hour=10), 'finished', 'ANSWER', 40, False),
+            # Вне периода.
+            (GUEST, RCC, '77010000001', day - timedelta(minutes=1), 'finished', 'ANSWER', 40, False),
+            (GUEST, RCC, '77010000001', day + timedelta(days=2), 'finished', 'ANSWER', 40, False),
+        )
+        for operator, dept, phone, at, state, disposition, billsec, cancelled in calls:
+            cur.execute('INSERT INTO dial_list_portions (operator_id, department_id, size) VALUES (%s, %s, 1) '
+                        'RETURNING id', (operator, dept))
+            portion = cur.fetchone()[0]
+            cur.execute("INSERT INTO dial_list_assignments (portion_id, lead_id, operator_id, position, state) "
+                        "VALUES (%s, %s, %s, 1, 'done') RETURNING id", (portion, leads[phone], operator))
+            assignment = cur.fetchone()[0]
+            cur.execute("INSERT INTO dial_list_attempts (assignment_id, operator_id, internal_number, requested_at, "
+                        "state, disposition, billsec, cancelled) VALUES (%s, %s, '903', %s, %s, %s, %s, %s)",
+                        (assignment, operator, at, state, disposition, billsec, cancelled))
+    first, second = '2026-11-10', '2026-11-11'
+    assert svc.hours_calls(day.date(), day.date() + timedelta(days=1)) == {
+        (GUEST, first): 7, (FIRED, first): 1, (GUEST, second): 1, (GUEST2, second): 1}
+    # Один день — только его звонки; строкой день принимается так же, как датой.
+    assert svc.hours_calls(first, first) == {(GUEST, first): 7, (FIRED, first): 1}
+    assert svc.hours_calls(second, second) == {(GUEST, second): 1, (GUEST2, second): 1}
+    # Рубильник на сервере.
+    monkeypatch.setenv(dial_service.HOURS_CALLS_ENV, '0')
+    assert svc.hours_calls(first, second) == {}
+
+
 def _find_holder_method():
     node = source_cache.function_copy(source_cache.database_flat_path(), 'find_dial_list_line_holder', class_name='Database')
     module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))

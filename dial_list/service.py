@@ -585,6 +585,22 @@ OKTELL_LOGOUT_ENV = "ICORE_PHONE_OKTELL_LOGOUT"
 def oktell_logout_enabled():
     return (os.getenv(OKTELL_LOGOUT_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
 
+
+# Звонки из телефона — в «Звонки» «Учёта часов» (задача SZOV-4; владелец 10.11.2026: «все звонки
+# нужно учитывать»). Время оператора СЗоВ на обзвоне с 10.11 считается по телефону, а «Звонки» дня
+# писал только синк Oktell: часы у человека на обзвоне росли, звонки нет, и «звонков в час» — до
+# 50 баллов премии в формуле оператора — падал. Синк звонков прибавляет к Oktell звонки из
+# телефона (hours_calls). Считается всё, что телефон набрал: и без ответа, и сброшенное оператором
+# до ответа; не считается только отказ АТС (попытка 'failed' — набора не было). Коды отделов
+# departments.code — где человек числится, а не отдел линии; рубильник — переменная
+# ICORE_PHONE_CALLS_TO_HOURS=0 (читается на каждый прогон синка).
+HOURS_CALLS_DEPARTMENT_CODES = ("szov",)
+HOURS_CALLS_ENV = "ICORE_PHONE_CALLS_TO_HOURS"
+
+
+def hours_calls_enabled():
+    return (os.getenv(HOURS_CALLS_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
+
 # ── Автообзвон Тез КЦ (ТЗ руководителя Тез и решения владельца 15.10.2026) ──────────────────
 # Тот же движок с ПРОФИЛЕМ отдела (dial_list_department_settings.profile). 'remote_cc' — удалённый
 # КЦ, всё как было; 'tez' — база ФИО + телефон без ИИН, «цель» лида — водитель вышел на линию
@@ -7931,6 +7947,36 @@ class DialListService:
                 department=department, day_from=day_from, day_to=day_to, generated_by=generated_by,
                 text_warning_patch=text_warning_patch, groups=group_names)
         return (stream, written) if written else (None, 0)
+
+    # Звонки из телефона по людям и дням — для «Звонков» «Учёта часов» (HOURS_CALLS_DEPARTMENT_CODES).
+    # День — по Алматы, звонок — по началу попытки; границы периода — моменты, как у
+    # _DAY_RESULTS_SQL (индекс по requested_at работает). Базы — любые: человек считается по своим
+    # звонкам, какую бы базу ни обзванивал. Отказ АТС — не звонок; лид с номером «Реестра тестовых
+    # номеров» — проверка обзвона, а не работа.
+    _HOURS_CALLS_SQL = """
+        SELECT t.operator_id, (t.requested_at AT TIME ZONE 'Asia/Almaty')::date AS day, COUNT(*)
+        FROM dial_list_attempts t
+        JOIN users u ON u.id = t.operator_id
+        JOIN departments d ON d.id = u.department_id
+        WHERE t.requested_at >= (%(day_from)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND t.requested_at < ((%(day_to)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'
+          AND t.state <> 'failed'
+          AND lower(d.code) = ANY(%(codes)s)
+          AND """ + test_keys.DIAL_LIST_ATTEMPT_NOT_TEST_SQL + """
+        GROUP BY 1, 2
+    """
+
+    def hours_calls(self, day_from, day_to):
+        """{(operator_id, 'YYYY-MM-DD'): звонков} — сколько раз телефон сотрудника набрал водителя
+        за дни day_from..day_to по Алматы. Только сотрудники отделов HOURS_CALLS_DEPARTMENT_CODES
+        (числятся там сами — отдел линии не в счёт). Рубильник выключен — пусто: синк звонков
+        запишет в «Учёт часов» одни звонки Oktell, как до SZOV-4."""
+        if not hours_calls_enabled():
+            return {}
+        with self.db._get_cursor() as cur:
+            cur.execute(self._HOURS_CALLS_SQL, {"day_from": day_from, "day_to": day_to,
+                                               "codes": list(HOURS_CALLS_DEPARTMENT_CODES)})
+            return {(int(r[0]), r[1].isoformat()): int(r[2]) for r in cur.fetchall()}
 
     # Сводка дня у отдела автообзвона Тез (15.10.2026): звонки автоцикла, согласия выйти на линию,
     # назначенные перезвоны, просрочки постобработки (итог — по due_kind).
