@@ -17,7 +17,10 @@
 на листе «Звонки», — фильтр по оператору в Excel даёт ровно их. Дозвон засчитывается от
 DIAL_MIN_SEC секунд разговора (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки
 меньше 10 секунд»): короткий разговор остаётся «Дозвонились» по Binotel, как в журнале, но в
-«Подробностях» помечен, а в «Дозвонились» листа «Операторы» не входит.
+«Подробностях» помечен, а в «Дозвонились» листа «Операторы» не входит. С 10.11.2026 (задача SZOV-3 —
+отчёт для оплаты) водитель засчитывается оператору один раз: в день первого разговора с ним от
+DIAL_MIN_SEC с (колонка «Засчитан»); повторный разговор помечен в «Подробностях». Успешка — у
+засчитанного разговора, «Конверсия» — успешки ÷ засчитанные дозвоны.
 
 Номер водителя — только маской (service.mask_phone), как в журнале: полный номер из раздела не
 выходит ни в одну ручку, а файл — тоже ручка. ИИН и ID водителя — полностью (владелец, 29.10.2026:
@@ -74,6 +77,9 @@ CANCELLED_NOTE = "попытка не засчитана"
 # дозвонов убрать звонки меньше 10 секунд»; service.ATTEMPT_DIAL_COUNTED_SQL — двойник в SQL).
 DIAL_MIN_SEC = signing.SUCCESS_MIN_BILLSEC
 SHORT_TALK_NOTE = f"разговор короче {DIAL_MIN_SEC} с — в дозвоны не засчитан"
+# Повторный разговор оператора с тем же водителем (задача SZOV-3, 10.11.2026: водитель — один раз):
+# засчитан только первый разговор от DIAL_MIN_SEC с, в том числе если он был раньше начала периода.
+REPEAT_TALK_NOTE = "повторный разговор с водителем — в дозвоны не засчитан, засчитан первый"
 
 # Почему звонок не начался (service.call_error_kind). Сам текст Binotel в файл не идёт: он
 # английский, а у попыток до 13.10.2026 в нём бывает номер водителя.
@@ -103,6 +109,7 @@ COLUMNS = (
     ("phone", "Номер", 17),
     ("result", "Результат", 19),
     ("talk_sec", "Разговор", 10),
+    ("counted", "Засчитан", 10),
     ("outcome", "Итог оператора", 30),
     ("comment", "Комментарий оператора", 44),
     ("success", "Успешка", 10),
@@ -115,11 +122,12 @@ TEXT_COLUMNS = ("line", "driver_ids", "iin")
 OPERATOR_COLUMNS = (
     ("Оператор", 30),
     ("Звонков", 10),
-    (f"Дозвонились (от {DIAL_MIN_SEC} с)", 13),
+    (f"Дозвонились (водителей, от {DIAL_MIN_SEC} с)", 15),
     ("Дозвон", 9),
     ("Разговор", 12),
     ("Средний разговор", 12),
     ("Успешки", 10),
+    ("Конверсия", 11),
     ("Отменено до ответа", 13),
     ("Ошибки АТС", 11),
 )
@@ -139,17 +147,27 @@ DATETIME_FORMAT = "DD.MM.YYYY HH:MM:SS"
 TALK_FORMAT = "[m]:ss"
 TALK_TOTAL_FORMAT = "[h]:mm:ss"
 PERCENT_FORMAT = "0%"
+# Конверсия — с десятыми: цена диалога меняется на целых процентах (pay.TARIFF), и «70 %» при 69,6 %
+# читалось бы как следующая ступень.
+CONVERSION_FORMAT = "0.0%"
 
 # Звонки отдела за дни [date_from; date_to] по Алматы. Отдел — базы, которую обзванивали, а не
 # человека (как сводка «Операторы»): на линии отдела сидят и сотрудники других отделов.
+# Засчитан (задача SZOV-3, 10.11.2026) — засчитанный разговор (service.DIALOG_PAID_SQL): первый
+# разговор оператора с водителем от DIAL_MIN_SEC с — водитель один раз и только в день этого разговора,
+# с какой бы даты ни начинался период. Успешка — у засчитанного разговора (service.DIALOG_SUCCESS_SQL):
+# подписал после повторного разговора — отмечена всё равно у засчитанного, поэтому «Успешки» и
+# «Конверсия» листа «Операторы» — по тем же строкам, что «Дозвонились».
 _CALLS_SELECT = """
     SELECT t.requested_at, t.operator_id, COALESCE(u.name, ''), t.internal_number, t.state,
            t.disposition, t.billsec, t.cancelled, t.auto_hangup, t.talk_detected, t.ring_timeout_at,
            t.api_error, l.full_name, l.phone_norm, o.name, os.name, COALESCE(t.operator_comment, ''),
-           COALESCE(l.success_attempt_id = t.id, FALSE), l.iin, COALESCE(l.yandex_driver_ids, '')
+           COALESCE(d.paid AND """ + service.DIALOG_SUCCESS_SQL + """, FALSE), l.iin,
+           COALESCE(l.yandex_driver_ids, ''), COALESCE(d.paid, FALSE)
     FROM dial_list_attempts t
     JOIN dial_list_assignments a ON a.id = t.assignment_id
     JOIN dial_list_leads l ON l.id = a.lead_id
+    CROSS JOIN LATERAL (SELECT (""" + service.DIALOG_PAID_SQL + """) AS paid) d
     LEFT JOIN users u ON u.id = t.operator_id
     LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
     LEFT JOIN dial_list_outcome_subtypes os ON os.id = t.outcome_subtype_id
@@ -243,17 +261,20 @@ def counted_dial(result, billsec):
     return result == "answered" and int(billsec or 0) >= DIAL_MIN_SEC
 
 
-def call_note(result, auto_hangup="", ring_timeout_at=None, api_error="", billsec=None):
+def call_note(result, auto_hangup="", ring_timeout_at=None, api_error="", billsec=None, repeat=False):
     """«Подробности» звонка — то, что карточка водителя пишет под попыткой; '' — нечего добавить.
     Приписку автосброса получает только недозвон: у разговора и у отмены она была бы неправдой
     (как autoHangupHint в attemptHints.js); сообщение сети сильнее гудков. Разговор короче
-    DIAL_MIN_SEC (billsec передан) — пометка, что в дозвоны он не засчитан."""
+    DIAL_MIN_SEC (billsec передан) — пометка, что в дозвоны он не засчитан; repeat — разговор от
+    DIAL_MIN_SEC с, но с этим водителем оператор уже говорил (засчитан первый разговор)."""
     if result == "failed":
         return failure_note(api_error)
     if result == "cancelled":
         return CANCELLED_NOTE
     if result == "answered":
-        return SHORT_TALK_NOTE if billsec is not None and not counted_dial(result, billsec) else ""
+        if billsec is not None and not counted_dial(result, billsec):
+            return SHORT_TALK_NOTE
+        return REPEAT_TALK_NOTE if repeat else ""
     if result == "":
         return ""
     if auto_hangup == service.AUTO_HANGUP_ANNOUNCEMENT:
@@ -276,11 +297,15 @@ def call_from_row(r):
     """Строка CALLS_SQL → звонок словарём (одно место, где колонки запроса знают по номерам)."""
     (requested_at, operator_id, operator_name, internal_number, state, disposition, billsec,
      cancelled, auto_hangup, talk_detected, ring_timeout_at, api_error, full_name, phone_norm,
-     outcome_name, subtype_name, comment, is_success, iin, yandex_ids) = r
+     outcome_name, subtype_name, comment, is_success, iin, yandex_ids, paid) = r
     auto_hangup = auto_hangup or ""
     result = service.attempt_outcome(state or "", disposition or "", billsec, auto_hangup, talk_detected,
                                      cancelled=bool(cancelled))
     talk_sec = int(billsec or 0) if result == "answered" else 0
+    # Засчитан — первый разговор оператора с водителем от DIAL_MIN_SEC с (service.DIALOG_PAID_SQL);
+    # разговор той же длины, но не первый, — повторный.
+    counted = bool(paid) and counted_dial(result, talk_sec)
+    repeat = counted_dial(result, talk_sec) and not counted
     return {
         "at": _local(requested_at),
         "operator_id": operator_id,
@@ -293,13 +318,14 @@ def call_from_row(r):
         "result": result,
         # Разговор — только у дозвона: у сообщения сети Binotel пишет длительность автоответчика.
         "talk_sec": talk_sec,
-        # В «Дозвонились» листа «Операторы» — только разговор не короче DIAL_MIN_SEC.
-        "counted": counted_dial(result, talk_sec),
+        # В «Дозвонились» листа «Операторы» — только засчитанный разговор: водитель один раз.
+        "counted": counted,
         # Итог с типом — одной строкой, как бейдж в журнале: «Отказ · Дорого».
         "outcome": " · ".join(part for part in (outcome_name, subtype_name) if part),
         "comment": comment or "",
-        "success": bool(is_success),
-        "note": call_note(result, auto_hangup, ring_timeout_at, api_error, billsec=talk_sec),
+        # Успешка — у засчитанного разговора (service.DIALOG_SUCCESS_SQL).
+        "success": bool(is_success) and counted,
+        "note": call_note(result, auto_hangup, ring_timeout_at, api_error, billsec=talk_sec, repeat=repeat),
     }
 
 
@@ -393,6 +419,7 @@ def _call_cells(sheet, call):
         _text(sheet, call["phone"]),
         _text(sheet, RESULT_LABELS.get(call["result"], call["result"])),
         _duration(sheet, call["talk_sec"]),
+        _text(sheet, "да" if call["counted"] else ""),
         _text(sheet, call["outcome"]),
         _text(sheet, call["comment"]),
         _text(sheet, "да" if call["success"] else ""),
@@ -400,8 +427,9 @@ def _call_cells(sheet, call):
     ]
 
 
-# answered — засчитанные дозвоны (counted), counted_talk_sec — их разговор: из него средний разговор.
-# talk_sec — весь разговор, и короткий тоже: это время, которое оператор говорил.
+# answered — засчитанные дозвоны (counted: водитель один раз, первый разговор от DIAL_MIN_SEC с),
+# counted_talk_sec — их разговор: из него средний разговор. talk_sec — весь разговор, и короткий, и
+# повторный: это время, которое оператор говорил. successes — успешки засчитанных разговоров.
 TOTAL_KEYS = ("calls", "answered", "talk_sec", "counted_talk_sec", "successes", "cancelled", "failed")
 
 
@@ -444,6 +472,9 @@ def _operator_cells(sheet, totals, total_row=False):
         # Средний — по засчитанным дозвонам: короткий разговор не в счёт и здесь.
         _duration(sheet, round(counted_talk / answered) if answered else 0, TALK_FORMAT, style),
         plain(totals["successes"]),
+        # Конверсия (задача SZOV-3, п. 3) — успешки из засчитанных дозвонов: звонки короче DIAL_MIN_SEC
+        # и повторные в знаменатель не входят. Успешка всегда у засчитанного разговора — не больше 100 %.
+        plain(totals["successes"] / answered if answered else None, CONVERSION_FORMAT),
         plain(totals["cancelled"]),
         plain(totals["failed"]),
     ]
@@ -469,16 +500,24 @@ def _fill_context(sheet, *, department, day_from, day_to, generated_at, generate
         ("Результат", "Чем кончился звонок по данным Binotel. «Дозвонились» — водитель ответил и был "
                       "разговор; сообщение сети «абонент недоступен» и ответ без единой реплики — недозвон. "
                       f"Разговор короче {DIAL_MIN_SEC} с в дозвоны не засчитывается — так и помечен в «Подробностях»."),
+        ("Засчитан", f"«да» — засчитанный дозвон: первый разговор оператора с этим водителем от {DIAL_MIN_SEC} с. "
+                     "Водитель засчитывается оператору один раз — в день первого разговора; повторные разговоры "
+                     "с ним не засчитываются ни в этот день, ни позже (помечены в «Подробностях»), даже если "
+                     "первый был до начала периода. С водителем говорили два оператора — у каждого свой."),
         ("Отменён до ответа", "Оператор сам завершил звонок до ответа водителя — попытка не засчитана."),
         ("Ошибка АТС", "Звонок не начался; почему — в «Подробностях»."),
-        ("Успешка", "Водитель подписал документы после этого разговора — успешка засчитана оператору."),
+        ("Успешка", "Водитель подписал документы, и успешка засчитана этому оператору. Отмечается у засчитанного "
+                    "разговора — даже если подписал он после повторного."),
         ("ID водителя", "Yandex Driver Id из Sapar — тот же, что в выгрузке услуг iTaxi. Аккаунтов у водителя "
                         "несколько — все, через запятую. Пусто — Sapar водителя не знает."),
         ("ИИН", "Полностью, из базы водителей раздела."),
         ("Номер", "Только последние четыре цифры, как в журнале раздела."),
-        ("Операторы", f"Итоги по тем же звонкам, что на листе «Звонки». «Дозвонились» — разговоры от {DIAL_MIN_SEC} с, "
-                      "«Дозвон» — их доля от всех звонков, как на вкладке «Операторы»; «Средний разговор» — по "
-                      "ним же, «Разговор» — весь, и короткий тоже."),
+        ("Операторы", "Итоги по тем же звонкам, что на листе «Звонки». «Дозвонились» — засчитанные дозвоны "
+                      "(«Засчитан» — «да»): каждый водитель один раз, поэтому отчёты за отдельные дни складываются "
+                      "в отчёт за весь период. «Дозвон» — их доля от всех звонков, как на вкладке «Операторы»; "
+                      "«Конверсия» — успешки ÷ засчитанные дозвоны (звонки короче "
+                      f"{DIAL_MIN_SEC} с и повторные в неё не входят); «Средний разговор» — по засчитанным, "
+                      "«Разговор» — весь, и короткий, и повторный."),
         ("Тестовые номера", "Звонки на номера из «Реестра тестовых номеров» в файл не входят."),
     ]
     for index, (label, value) in enumerate(lines, start=1):

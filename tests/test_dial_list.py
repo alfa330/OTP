@@ -5171,13 +5171,27 @@ class AnnouncementTests(unittest.TestCase):
         self.assertIn("AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s",
                       ' '.join(svc._PROGRESS_CONVERSION_SQL.split()))
         overview = ' '.join(inspect.getsource(svc.overview).split())
-        self.assertIn("answered_sql = ATTEMPT_TALK_SQL if tez else ATTEMPT_DIAL_COUNTED_SQL", overview)
-        self.assertIn("IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS') AND {answered_sql}) AS answered", overview)
+        # Тез — любой разговор; удалённый КЦ — засчитанный разговор (SZOV-3, 10.11.2026: водитель один раз,
+        # в день первого разговора от 10 с), успешка — у него же.
+        self.assertIn("answered_sql = (\"t.state = 'finished' AND UPPER(t.disposition) IN "
+                      "('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS')\" \" AND \" + ATTEMPT_TALK_SQL)", overview)
+        self.assertIn("else: answered_sql = DIALOG_PAID_SQL", overview)
+        self.assertIn("COUNT(*) FILTER (WHERE {answered_sql}) AS answered", overview)
+        self.assertIn("AND {DIALOG_SUCCESS_SQL} AND {DIALOG_PAID_SQL}", overview)
         self.assertIn("FILTER (WHERE t.state = 'finished' AND {ATTEMPT_TALK_SQL}), 0) AS talk_sec", overview)
         self.assertEqual(dial_service.ATTEMPT_DIAL_COUNTED_SQL, talk + " AND t.billsec >= 10")
+        # Засчитанный разговор — разговор от 10 с, и раньше у этого оператора с этим водителем такого не было.
+        paid = ' '.join(dial_service.DIALOG_PAID_SQL.split())
+        self.assertTrue(paid.startswith(dial_service.dialog_talk_sql('t') + ' AND NOT EXISTS ('))
+        self.assertIn("WHERE pa.lead_id = a.lead_id AND pt.operator_id = t.operator_id "
+                      "AND (pt.requested_at, pt.id) < (t.requested_at, t.id) AND " + dial_service.dialog_talk_sql('pt'),
+                      paid)
+        self.assertIn("t.billsec >= 10", dial_service.dialog_talk_sql('t'))
+        self.assertIn("NOT t.cancelled", dial_service.dialog_talk_sql('t'))
         # Вставляются в запросы с параметрами как есть.
-        self.assertNotIn('%', talk)
-        self.assertNotIn('%', dial_service.ATTEMPT_DIAL_COUNTED_SQL)
+        for sql in (talk, dial_service.ATTEMPT_DIAL_COUNTED_SQL, dial_service.DIALOG_PAID_SQL,
+                    dial_service.DIALOG_SUCCESS_SQL):
+            self.assertNotIn('%', sql)
 
 
 class LastCommentTests(unittest.TestCase):

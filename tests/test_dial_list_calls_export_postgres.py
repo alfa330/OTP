@@ -176,7 +176,8 @@ def test_period_department_tests_and_columns(db):
     tester = seed.lead(RCC, 'Тестовый номер', '77019999999')      # номер из «Реестра тестовых номеров»
     stranger = seed.lead(TEZ, 'Чужой водитель', '77015550000')    # база другого отдела
 
-    # Сутки — по Алматы: 23:59:59 13.10 — ещё не период, 00:00 14.10 — уже он.
+    # Сутки — по Алматы: 23:59:59 13.10 — ещё не период, 00:00 14.10 — уже он. Первый разговор с Ивановым —
+    # 13.10: он и засчитан (SZOV-3), разговор 14.10 — повторный, хоть он и первый в периоде.
     seed.call(ivanov, OWN, _at(13, 23, 59, 59), billsec=20)
     first = seed.call(ivanov, OWN, _at(14, 0, 0, 0), billsec=125, outcome=refusal, comment='дорого, подумает')
     seed.call(petrov, GUEST, _at(14, 9, 30), line='903', disposition='NOANSWER')
@@ -185,8 +186,8 @@ def test_period_department_tests_and_columns(db):
     seed.call(petrov, GUEST, _at(16, 0, 0, 0), line='903', billsec=40)       # уже после периода
     seed.call(tester, OWN, _at(14, 12, 0), billsec=60)
     seed.call(stranger, TEZ_OP, _at(14, 12, 0), line='913', billsec=60)
-    # Успешка засчитана первому разговору с Ивановым. ID водителя — у Иванова два аккаунта; Петрова Sapar
-    # ещё не спрашивали (NULL) — в файле пусто.
+    # Успешка (sign_check) — последнему разговору до подписи, 14.10; в файле она у засчитанного, 13.10, — вне
+    # периода. ID водителя — у Иванова два аккаунта; Петрова Sapar ещё не спрашивали (NULL) — в файле пусто.
     ivan_ids = 'a' * 32 + ', ' + 'b' * 32
     with db._get_cursor() as cur:
         cur.execute("UPDATE dial_list_leads SET signed_at = %s, success_attempt_id = %s, success_operator_id = %s, "
@@ -203,11 +204,12 @@ def test_period_department_tests_and_columns(db):
     ivan, petr_no, petr_fail = calls[1:]
     assert ivan[1:9] == ['Своев Сава', '902', 'Иванов Иван', ivan_ids, iin('77011234567'), '+7 ••• ••• 45 67',
                          'Дозвонились', timedelta(seconds=125)]
-    assert ivan[9:13] == ['Отказ · Дорого', 'дорого, подумает', 'да', None]
+    assert ivan[9:14] == [None, 'Отказ · Дорого', 'дорого, подумает', None,
+                          'повторный разговор с водителем — в дозвоны не засчитан, засчитан первый']
     # Гость с линии удалённого КЦ (сотрудник СЗоВ) — в детализации отдела базы.
     assert petr_no[1:8] == ['Гостев Глеб', '903', 'Петров Пётр', None, iin('77017654321'), '+7 ••• ••• 43 21',
                             'Не поднял трубку']
-    assert petr_fail[7] == 'Ошибка АТС' and petr_fail[12] == 'АТС отказала (код 104)'
+    assert petr_fail[7] == 'Ошибка АТС' and petr_fail[13] == 'АТС отказала (код 104)'
     flat = repr(book)
     for forbidden in ('77011234567', '7654321', 'Тестовый номер', 'Чужой водитель', 'Тезов'):
         assert forbidden not in flat, forbidden
@@ -215,10 +217,104 @@ def test_period_department_tests_and_columns(db):
     operators = book['Операторы']
     assert [r[0] for r in operators[1:]] == ['Гостев Глеб', 'Своев Сава', 'Итого']
     assert operators[1][1:4] == [2, 0, 0]
-    assert operators[2][1:4] == [1, 1, 1]
-    assert operators[3][1:3] == [3, 1] and operators[3][6:] == [1, 0, 1]
+    assert operators[2][1:4] == [1, 0, 0]
+    assert operators[3][1:3] == [3, 0] and operators[3][6:] == [0, None, 0, 1]
     context = {r[0]: r[1] for r in book['Контекст'] if r and r[0]}
     assert (context['Отдел'], context['Период'], context['Звонков']) == ('Удаленный КЦ', '14.10.2026 — 15.10.2026', 3)
+
+
+def _operator_rows(stream):
+    """Лист «Операторы» → {имя: [звонков, дозвонились, дозвон, разговор, средний, успешки, конверсия, …]}."""
+    return {r[0]: r[1:] for r in _rows(stream)['Операторы'][1:]}
+
+
+def test_driver_counted_once_on_the_first_talk_day(db):
+    """Задача SZOV-3 (10.11.2026): водитель засчитывается оператору один раз — в день первого разговора с ним
+    от 10 с; повторный разговор не засчитан ни в тот же день, ни позже; с водителем говорили двое — у каждого
+    свой; подписал после повторного — успешка у засчитанного разговора, и конверсия не больше 100 %. Отчёты
+    за дни складываются в отчёт за период — и в «Детализации», и во вкладке «Операторы»."""
+    seed = _Seed(db)
+    svc = dial_service.DialListService(db)
+    ivanov = seed.lead(RCC, 'Иванов Иван', '77011234567')
+    petrov = seed.lead(RCC, 'Петров Пётр', '77017654321')
+    sidorov = seed.lead(RCC, 'Сидоров Сидор', '77015551234')
+    # Иванов: Сава говорит 13-го (засчитан), 14-го ещё раз — после этого Иванов подписал; Глеб говорит с ним
+    # 14-го — у Глеба он свой, засчитан.
+    seed.call(ivanov, OWN, _at(13, 11, 0), billsec=15)
+    success = seed.call(ivanov, OWN, _at(14, 9, 0), billsec=125)
+    seed.call(ivanov, GUEST, _at(14, 10, 0), line='903', billsec=30)
+    # Петров: 14-го у Савы 0:09 (не дозвон), потом 0:15 (засчитан), потом 0:40 (повторный в тот же день).
+    seed.call(petrov, OWN, _at(14, 11, 0), billsec=9)
+    seed.call(petrov, OWN, _at(14, 11, 5), billsec=15)
+    seed.call(petrov, OWN, _at(14, 11, 30), billsec=40)
+    # Сидоров: отмена до ответа и сообщение сети с длительностью — ни один не первый разговор, засчитан
+    # следующий настоящий.
+    seed.call(sidorov, OWN, _at(13, 12, 0), disposition='CANCEL', cancelled=True)
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE dial_list_attempts SET auto_hangup = 'announcement' WHERE id = %s",
+                    (seed.call(sidorov, OWN, _at(13, 12, 5), billsec=30),))
+    seed.call(sidorov, OWN, _at(14, 15, 0), billsec=12)
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE dial_list_leads SET signed_at = %s, success_attempt_id = %s, success_operator_id = %s "
+                    "WHERE id = %s", (_at(15, 10, 0), success, OWN, ivanov))
+
+    period = _operator_rows(svc.calls_export(RCC, date(2026, 10, 13), date(2026, 10, 14))[0])
+    day13 = _operator_rows(svc.calls_export(RCC, date(2026, 10, 13), date(2026, 10, 13))[0])
+    day14 = _operator_rows(svc.calls_export(RCC, date(2026, 10, 14), date(2026, 10, 14))[0])
+    # Сава: Иванов (13-го) и Петров, Сидоров (14-го) — по одному разу; успешка Иванова — 13-го.
+    assert period['Своев Сава'][1] == 3 and period['Своев Сава'][5:7] == [1, 1 / 3]
+    assert day13['Своев Сава'][1] == 1 and day13['Своев Сава'][5:7] == [1, 1.0]
+    assert day14['Своев Сава'][1] == 2 and day14['Своев Сава'][5:7] == [0, 0.0]
+    # Глеб: Иванов — его первый разговор с ним, засчитан, успешки у него нет.
+    assert period['Гостев Глеб'][1] == 1 and day14['Гостев Глеб'][1] == 1 and 'Гостев Глеб' not in day13
+    assert period['Итого'][1] == 4 and period['Итого'][5] == 1
+    # Дни складываются в период.
+    for name in ('Своев Сава', 'Гостев Глеб'):
+        days = [d[name] for d in (day13, day14) if name in d]
+        assert sum(d[1] for d in days) == period[name][1]
+        assert sum(d[5] for d in days) == period[name][5]
+
+    # «Засчитан» и «Успешка» на листе «Звонки» — у тех самых звонков.
+    calls = _rows(svc.calls_export(RCC, date(2026, 10, 13), date(2026, 10, 14))[0])['Звонки']
+    titles = calls[0]
+    at, who, counted, won, note = (titles.index(t) for t in ('Дата и время', 'Оператор', 'Засчитан', 'Успешка',
+                                                              'Подробности'))
+    marks = {(r[at], r[who]): (r[counted], r[won], r[note]) for r in calls[1:]}
+    repeat = 'повторный разговор с водителем — в дозвоны не засчитан, засчитан первый'
+    assert marks[(datetime(2026, 10, 13, 11, 0), 'Своев Сава')] == ('да', 'да', None)
+    assert marks[(datetime(2026, 10, 14, 9, 0), 'Своев Сава')] == (None, None, repeat)
+    assert marks[(datetime(2026, 10, 14, 10, 0), 'Гостев Глеб')] == ('да', None, None)
+    assert marks[(datetime(2026, 10, 14, 11, 0), 'Своев Сава')] == (None, None, 'разговор короче 10 с — в дозвоны не засчитан')
+    assert marks[(datetime(2026, 10, 14, 11, 5), 'Своев Сава')] == ('да', None, None)
+    assert marks[(datetime(2026, 10, 14, 11, 30), 'Своев Сава')] == (None, None, repeat)
+    assert marks[(datetime(2026, 10, 14, 15, 0), 'Своев Сава')] == ('да', None, None)
+
+    # Вкладка «Операторы» — те же числа по дням.
+    tab13 = {r['operator_id']: r for r in svc.overview([RCC], date(2026, 10, 13))}
+    tab14 = {r['operator_id']: r for r in svc.overview([RCC], date(2026, 10, 14))}
+    assert (tab13[OWN]['answered'], tab13[OWN]['successes']) == (1, 1)
+    assert (tab14[OWN]['answered'], tab14[OWN]['successes']) == (2, 0)
+    assert (tab14[GUEST]['answered'], tab14[GUEST]['successes']) == (1, 0)
+    assert GUEST not in tab13
+    # Подписал 15-го — во вкладке за 15-е успешки нет: она у дня засчитанного разговора.
+    assert OWN not in {r['operator_id'] for r in svc.overview([RCC], date(2026, 10, 15))}
+
+
+def test_new_month_base_counts_the_driver_again(db):
+    """Строка базы — водитель одного месяца: в базе следующего месяца первый разговор с ним снова засчитан."""
+    seed = _Seed(db)
+    svc = dial_service.DialListService(db)
+    october = seed.lead(RCC, 'Иванов Иван', '77011234567')
+    november = seed.lead(RCC, 'Иванов Иван', '77011234568')
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE dial_list_leads SET period = '2026-10-01' WHERE id = %s", (october,))
+        cur.execute("UPDATE dial_list_leads SET period = '2026-11-01', iin = %s WHERE id = %s",
+                    (iin('77011234567'), november))
+    seed.call(october, OWN, _at(20, 12, 0), billsec=30)
+    seed.call(november, OWN, datetime(2026, 11, 2, 12, 0, tzinfo=ALMATY), billsec=30)
+    oct_rows = _operator_rows(svc.calls_export(RCC, date(2026, 10, 20), date(2026, 10, 20))[0])
+    nov_rows = _operator_rows(svc.calls_export(RCC, date(2026, 11, 2), date(2026, 11, 2), )[0])
+    assert oct_rows['Своев Сава'][1] == 1 and nov_rows['Своев Сава'][1] == 1
 
 
 def test_no_calls_gives_no_file(db):

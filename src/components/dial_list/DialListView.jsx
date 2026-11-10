@@ -110,6 +110,8 @@ const SECTION_TITLE = 'Удаленный КЦ';
 const OperatorRow = ({ row, showDepartment }) => {
     const progress = row.issued ? Math.min(100, Math.round((row.done / row.issued) * 100)) : 0;
     const answered = pct(row.answered, row.attempts);
+    // Конверсия (SZOV-3, п. 3) — успешки ÷ засчитанные дозвоны: короткие и повторные звонки не в счёт.
+    const conversion = pct(row.successes, row.answered);
     return (
         <div className="flex items-center gap-3 px-4 py-3">
             <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-[12px] font-semibold text-slate-600">
@@ -133,14 +135,21 @@ const OperatorRow = ({ row, showDepartment }) => {
             </div>
             <div className="hidden shrink-0 items-center gap-1.5 sm:flex">
                 <IosBadge tone="blue" title="Попыток">{row.attempts} звон.</IosBadge>
-                {/* Дозвон — разговор от 10 с (владелец, 29.10.2026); короткий — в минутах, но не здесь. */}
-                <IosBadge tone={answered == null ? 'slate' : answered >= 50 ? 'green' : 'amber'} title="Дозвонились: разговор от 10 секунд">
+                {/* Дозвон — разговор от 10 с (владелец, 29.10.2026), и водитель один раз — в день первого
+                    разговора оператора с ним (SZOV-3, 10.11.2026); короткий и повторный — в минутах, но не здесь. */}
+                <IosBadge
+                    tone={answered == null ? 'slate' : answered >= 50 ? 'green' : 'amber'}
+                    title="Дозвонились: водители, с которыми оператор впервые поговорил от 10 секунд — каждый один раз, в день первого разговора. % — от всех звонков"
+                >
                     {row.answered}{answered != null ? ` · ${answered}%` : ''}
                 </IosBadge>
                 <IosBadge tone="slate" title="Разговоры">{fmtTalk(row.talk_sec)}</IosBadge>
                 {row.successes > 0 && (
-                    <IosBadge tone="green" title="Успешки: водитель подписал документы в этот день после разговора с оператором">
-                        успешки {row.successes}
+                    <IosBadge
+                        tone="green"
+                        title="Успешки: водители, которых оператор засчитал в этот день и которые потом подписали документы. % — конверсия: успешки ÷ дозвонились"
+                    >
+                        успешки {row.successes}{conversion != null ? ` · ${conversion}%` : ''}
                     </IosBadge>
                 )}
                 {row.failed > 0 && <IosBadge tone="red" title="Отказы АТС">АТС {row.failed}</IosBadge>}

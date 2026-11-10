@@ -41,18 +41,19 @@ YANDEX_ID = '0f' * 16
 
 
 def row(**over):
-    """Строка CALLS_SQL: по умолчанию — разговор 2:05 с итогом и комментарием."""
+    """Строка CALLS_SQL: по умолчанию — разговор 2:05 с итогом и комментарием, первый с этим водителем
+    (paid — засчитанный разговор, service.DIALOG_PAID_SQL)."""
     base = dict(
         requested_at=datetime(2026, 10, 14, 4, 5, 6, tzinfo=UTC), operator_id=520, operator='Своев Сава',
         line='902', state='finished', disposition='ANSWER', billsec=125, cancelled=False, auto_hangup='',
         talk_detected=None, ring_timeout_at=None, api_error='', driver='Иванов Иван', phone=PHONE,
         outcome='Отказ', subtype='Дорого', comment='перезвонить после 18', success=False, iin=IIN,
-        driver_ids=YANDEX_ID)
+        driver_ids=YANDEX_ID, paid=True)
     base.update(over)
     return tuple(base[key] for key in (
         'requested_at', 'operator_id', 'operator', 'line', 'state', 'disposition', 'billsec', 'cancelled',
         'auto_hangup', 'talk_detected', 'ring_timeout_at', 'api_error', 'driver', 'phone', 'outcome',
-        'subtype', 'comment', 'success', 'iin', 'driver_ids'))
+        'subtype', 'comment', 'success', 'iin', 'driver_ids', 'paid'))
 
 
 def call(**over):
@@ -183,6 +184,36 @@ class CallRowTests(unittest.TestCase):
         self.assertIn(f't.billsec >= {calls_export.DIAL_MIN_SEC}', dial_service.ATTEMPT_DIAL_COUNTED_SQL)
         self.assertIn(dial_service.ATTEMPT_TALK_SQL, dial_service.ATTEMPT_DIAL_COUNTED_SQL)
 
+    def test_repeat_talk_with_the_same_driver_is_not_counted(self):
+        """SZOV-3 (10.11.2026): «если одному водителю звонили несколько раз, считать его один раз». Засчитан
+        только первый разговор оператора с водителем от 10 с (paid из SQL); повторный той же длины —
+        «Дозвонились» по Binotel, но не засчитан, и это сказано в «Подробностях»."""
+        first, repeat = call(), call(paid=False)
+        self.assertEqual((first['counted'], first['note']), (True, ''))
+        self.assertEqual((repeat['result'], repeat['counted'], repeat['note']),
+                         ('answered', False, 'повторный разговор с водителем — в дозвоны не засчитан, засчитан первый'))
+        # Короткий — по-прежнему «короче 10 с», а не «повторный»: засчитан он не был бы и первым.
+        self.assertEqual(call(billsec=7, paid=False)['note'], calls_export.SHORT_TALK_NOTE)
+        # Не разговор — ни «повторного», ни засчитанного, что бы ни пришло из SQL.
+        for over in (dict(disposition='NOANSWER', billsec=0), dict(auto_hangup='announcement', billsec=40),
+                     dict(disposition='CANCEL', billsec=0, cancelled=True), dict(billsec=9)):
+            with self.subTest(over=over):
+                for paid in (True, False):
+                    c = call(paid=paid, **over)
+                    self.assertFalse(c['counted'])
+                    self.assertNotIn('повторный', c['note'])
+
+    def test_success_sits_on_the_counted_talk(self):
+        """Успешка — у засчитанного разговора (SQL кладёт её только туда): подписал после повторного —
+        отмечена всё равно у первого, и конверсия не выходит за 100 %."""
+        self.assertTrue(call(success=True)['success'])
+        self.assertFalse(call(success=True, paid=False)['success'])
+        self.assertFalse(call(success=True, billsec=7)['success'])
+        sql = calls_export.CALLS_SQL
+        self.assertIn(dial_service.DIALOG_PAID_SQL, sql)
+        self.assertIn('COALESCE(d.paid AND ' + dial_service.DIALOG_SUCCESS_SQL + ', FALSE)', sql)
+        self.assertNotIn('success_attempt_id = t.id', sql)
+
     def test_twins_on_the_site(self):
         """Подписи исхода и приписки — те же слова, что в журнале и карточке водителя."""
         journal = (ROOT / 'src/components/dial_list/DialListJournal.jsx').read_text(encoding='utf-8')
@@ -222,7 +253,7 @@ class WorkbookTests(unittest.TestCase):
         ws = wb['Звонки']
         self.assertEqual([c.value for c in ws[1]], [title for _k, title, _w in calls_export.COLUMNS])
         self.assertEqual([c.value for c in ws[1]][3:7], ['Водитель', 'ID водителя', 'ИИН', 'Номер'])
-        self.assertEqual((ws.freeze_panes, ws.auto_filter.ref), ('A2', 'A1:M3'))
+        self.assertEqual((ws.freeze_panes, ws.auto_filter.ref), ('A2', 'A1:N3'))
         first = {title: cell for (_k, title, _w), cell in zip(calls_export.COLUMNS, ws[2])}
         # ИИН и ID — текстом: у ИИН числом пропал бы ведущий ноль.
         for title, expected in (('ИИН', IIN), ('ID водителя', YANDEX_ID)):
@@ -238,11 +269,15 @@ class WorkbookTests(unittest.TestCase):
         # Комментарий с «=» — строка, а не живая формула.
         self.assertEqual((first['Комментарий оператора'].value, first['Комментарий оператора'].data_type),
                          ('=HYPERLINK("http://x")', 's'))
-        self.assertEqual((first['Результат'].value, first['Успешка'].value), ('Дозвонились', 'да'))
+        self.assertEqual((first['Результат'].value, first['Засчитан'].value, first['Успешка'].value),
+                         ('Дозвонились', 'да', 'да'))
         second = {title: cell.value for (_k, title, _w), cell in zip(calls_export.COLUMNS, ws[3])}
-        # Пусто там, где нечего сказать: ни «0:00» разговора, ни «нет» успешки.
-        self.assertEqual((second['Результат'], second['Разговор'], second['Итог оператора'], second['Успешка']),
-                         ('Не поднял трубку', None, None, None))
+        # Пусто там, где нечего сказать: ни «0:00» разговора, ни «нет» засчитанного и успешки.
+        self.assertEqual((second['Результат'], second['Разговор'], second['Засчитан'], second['Итог оператора'],
+                          second['Успешка']), ('Не поднял трубку', None, None, None, None))
+        # «Засчитан» — сразу за «Разговором»: он про этот разговор.
+        titles = [title for _k, title, _w in calls_export.COLUMNS]
+        self.assertEqual(titles.index('Засчитан'), titles.index('Разговор') + 1)
 
     def test_several_ids_wrap_and_unknown_is_empty(self):
         """Аккаунтов несколько — все, каждый своей строкой в ячейке; Sapar водителя не знает — пусто."""
@@ -261,7 +296,8 @@ class WorkbookTests(unittest.TestCase):
             call(),                                                                    # Своев: разговор 2:05
             call(billsec=55, success=True),                                            # Своев: 0:55, успешка
             call(disposition='NOANSWER', billsec=0),                                   # Своев: недозвон
-            call(billsec=7),                                                           # Своев: 0:07 — не дозвон
+            call(billsec=7, paid=False),                                               # Своев: 0:07 — не дозвон
+            call(billsec=40, paid=False),                                              # Своев: повторный 0:40
             call(operator_id=701, operator='Гостев Глеб', disposition='CANCEL', billsec=0, cancelled=True),
             call(operator_id=701, operator='Гостев Глеб', state='failed', disposition='', billsec=0),
             call(operator_id=701, operator='Гостев Глеб', billsec=30),
@@ -270,30 +306,46 @@ class WorkbookTests(unittest.TestCase):
         wb, written, _ = book(calls)
         ws = wb['Операторы']
         self.assertEqual([c.value for c in ws[1]], [title for title, _w in calls_export.OPERATOR_COLUMNS])
-        self.assertEqual(ws['C1'].value, 'Дозвонились (от 10 с)')
+        self.assertEqual((ws['C1'].value, ws['H1'].value), ('Дозвонились (водителей, от 10 с)', 'Конверсия'))
         rows = values(ws)[1:]
         # Больше звонков — выше; поровну — по имени.
-        self.assertEqual([r[0] for r in rows], ['Гостев Глеб', 'Своев Сава', 'Итого'])
-        gostev, svoev, total = rows
+        self.assertEqual([r[0] for r in rows], ['Своев Сава', 'Гостев Глеб', 'Итого'])
+        svoev, gostev, total = rows
+        # Разговор 0:07 и повторный 0:40 с тем же водителем — в минутах оператора, но не в дозвонах и не в
+        # среднем разговоре (29.10.2026: «убрать звонки меньше 10 секунд»; SZOV-3: водитель — один раз).
+        self.assertEqual(svoev[1:4], [5, 2, 0.4])
+        self.assertEqual((svoev[4], svoev[5]), (timedelta(seconds=227), timedelta(seconds=90)))
+        # Конверсия — успешки ÷ засчитанные дозвоны (SZOV-3, п. 3), а не ÷ звонки.
+        self.assertEqual(svoev[6:], [1, 0.5, 0, 0])
         self.assertEqual(gostev[1:4], [4, 1, 0.25])
         self.assertEqual((gostev[4], gostev[5]), (timedelta(seconds=30), timedelta(seconds=30)))
-        self.assertEqual(gostev[6:], [0, 1, 1])
-        # Разговор 0:07 — в минутах оператора, но не в дозвонах и не в среднем разговоре
-        # (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки меньше 10 секунд»).
-        self.assertEqual(svoev[1:4], [4, 2, 0.5])
-        self.assertEqual((svoev[4], svoev[5]), (timedelta(seconds=187), timedelta(seconds=90)))
-        self.assertEqual(svoev[6:], [1, 0, 0])
-        self.assertEqual(total[1:3], [8, 3])
-        self.assertEqual(total[4], timedelta(seconds=217))
+        self.assertEqual(gostev[6:], [0, 0, 1, 1])
+        self.assertEqual(total[1:3], [9, 3])
+        self.assertAlmostEqual(total[3], 3 / 9)
+        self.assertEqual(total[4], timedelta(seconds=257))
         self.assertEqual(total[5], timedelta(seconds=70))       # (125 + 55 + 30) / 3
-        self.assertEqual(total[6:], [1, 1, 1])
+        self.assertEqual(total[6], 1)
+        self.assertAlmostEqual(total[7], 1 / 3)
+        self.assertEqual(total[8:], [1, 1])
         # Сумма «Разговор» на листе «Звонки» равна итогу — это одни и те же строки.
-        talk_column = [title for _k, title, _w in calls_export.COLUMNS].index('Разговор')
-        talk = sum((r[talk_column] for r in values(wb['Звонки'])[1:] if r[talk_column]), timedelta())
-        self.assertEqual(talk, timedelta(seconds=217))
+        sheet = values(wb['Звонки'])
+        titles = [title for _k, title, _w in calls_export.COLUMNS]
+        talk_column, counted_column, success_column = (titles.index(t) for t in ('Разговор', 'Засчитан', 'Успешка'))
+        talk = sum((r[talk_column] for r in sheet[1:] if r[talk_column]), timedelta())
+        self.assertEqual(talk, timedelta(seconds=257))
+        # «Дозвонились» и «Успешки» — ровно строки с «да» в «Засчитан» и «Успешка»: фильтр Excel даёт их же.
+        self.assertEqual(sum(1 for r in sheet[1:] if r[counted_column] == 'да'), total[2])
+        self.assertEqual(sum(1 for r in sheet[1:] if r[success_column] == 'да'), total[6])
         self.assertEqual(wb['Операторы']['D2'].number_format, '0%')
         self.assertEqual(wb['Операторы']['E2'].number_format, '[h]:mm:ss')
+        self.assertEqual(wb['Операторы']['H2'].number_format, '0.0%')
         self.assertTrue(wb['Операторы']['A4'].font.bold)
+
+    def test_operator_without_counted_dials_has_no_conversion(self):
+        """Нет засчитанных дозвонов — конверсии нет (пустая клетка), а не ноль и не деление на ноль."""
+        wb, _, _ = book([call(disposition='NOANSWER', billsec=0), call(billsec=40, paid=False)])
+        (svoev,) = values(wb['Операторы'])[1:]
+        self.assertEqual((svoev[2], svoev[3], svoev[6], svoev[7]), (0, 0, 0, None))
 
     def test_single_operator_has_no_total_row(self):
         wb, _, _ = book([call(), call(disposition='BUSY', billsec=0)])
@@ -331,7 +383,7 @@ class WorkbookTests(unittest.TestCase):
         src = (ROOT / 'dial_list/calls_export.py').read_text(encoding='utf-8')
         sql = calls_export.CALLS_SQL
         # ИИН и ID — из строки водителя; ещё не спрошенный у Sapar ID приходит пустым, а не NULL.
-        self.assertIn("l.iin, COALESCE(l.yandex_driver_ids, '')", sql)
+        self.assertRegex(sql, r"l\.iin,\s+COALESCE\(l\.yandex_driver_ids, ''\)")
         # Номер читается ровно один раз — чтобы тут же стать маской.
         self.assertEqual(src.count('phone_norm'), 3)  # SQL, распаковка строки, mask_phone(phone_norm)
         self.assertIn('"phone": service.mask_phone(phone_norm)', src)

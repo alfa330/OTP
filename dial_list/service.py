@@ -317,8 +317,9 @@ AUTO_HANGUPS = (AUTO_HANGUP_RING_TIMEOUT, AUTO_HANGUP_ANNOUNCEMENT)
 ATTEMPT_TALK_SQL = "t.auto_hangup <> 'announcement' AND (t.talk_detected IS NOT FALSE OR t.billsec >= 1)"
 # Засчитанный дозвон удалённого КЦ (владелец, 29.10.2026: «с засчитанного кол-во дозвонов убрать звонки
 # меньше 10 секунд»): разговор не короче signing.SUCCESS_MIN_BILLSEC — та же граница, что у диалога в
-# оплате и у успешки. «Дозвонились» вкладки «Операторы», «Моего прогресса» и «Детализации» (двойник —
-# calls_export.counted_dial). У автообзвона Тез дозвон — по-прежнему любой разговор (ATTEMPT_TALK_SQL).
+# оплате и у успешки. «Дозвонились» «Моего прогресса» в телефоне (двойник — calls_export.counted_dial);
+# вкладка «Операторы» и «Детализация» с 10.11.2026 (SZOV-3) считают ещё и водителя один раз —
+# DIALOG_PAID_SQL. У автообзвона Тез дозвон — по-прежнему любой разговор (ATTEMPT_TALK_SQL).
 ATTEMPT_DIAL_COUNTED_SQL = ATTEMPT_TALK_SQL + " AND t.billsec >= " + str(signing.SUCCESS_MIN_BILLSEC)
 # Подписание — до выдачи (владелец, 11.10.2026: «подписавших не выдавать»). Перед «Ещё»
 # сервер спрашивает Sapar о тех, кто попадёт в порцию (с запасом), если их проверка
@@ -439,6 +440,45 @@ COMPANY_RE = re.compile(r"^[a-z][a-z0-9_]{1,31}$")
 PHONE_EVENTS = ("ringing", "answered", "ended", "no_leg", "operator_hangup", "ring_timeout", "wrapup_expired")
 # Для SQL `UPPER(disposition) IN %s` (psycopg2 разворачивает tuple в список).
 ANSWERED_SQL = tuple(sorted(ANSWERED_DISPOSITIONS))
+
+
+def dialog_talk_sql(alias="t"):
+    """Разговор от signing.SUCCESS_MIN_BILLSEC у попытки `alias` — SQL без параметров: попытка
+    завершена, не отменена, Binotel ответил, это не сообщение сети, и разговор не короче границы
+    (ATTEMPT_DIAL_COUNTED_SQL с исходом). Python-двойник — calls_export.counted_dial."""
+    dispositions = ", ".join(f"'{d}'" for d in ANSWERED_SQL)
+    return (f"{alias}.state = 'finished' AND NOT {alias}.cancelled"
+            f" AND UPPER({alias}.disposition) IN ({dispositions})"
+            f" AND {alias}.auto_hangup <> 'announcement'"
+            f" AND ({alias}.talk_detected IS NOT FALSE OR {alias}.billsec >= 1)"
+            f" AND {alias}.billsec >= {int(signing.SUCCESS_MIN_BILLSEC)}")
+
+
+# Засчитанный дозвон удалённого КЦ — водитель один раз (задача SZOV-3, Зарина Алиева, 10.11.2026:
+# «если одному водителю звонили несколько раз, считать его один раз для оплаты в отчёте по дням и
+# итоговом»; «если после нескольких звонков водитель подписал — засчитывать один звонок длительностью
+# более 10 секунд»). Решения по задаче (10.11.2026): у каждого оператора свой счёт (с водителем
+# говорили двое — по одному каждому) и только в день ПЕРВОГО разговора — повторные разговоры с ним
+# того же оператора не засчитываются ни в тот день, ни позже, поэтому дни складываются ровно в итог
+# периода. Строка базы — водитель одного месяца (ИИН в базе месяца уникален), так что в базе нового
+# месяца первый разговор снова засчитывается. Успешка — у этого же разговора (DIALOG_SUCCESS_SQL):
+# конверсия «успешки ÷ дозвонились» не выходит за 100 % ни в одном дне. Попытка `alias`, её лид —
+# выражение `lead_id`. Без параметров: годится в любой запрос.
+def paid_dialog_sql(alias="t", lead_id="a.lead_id"):
+    return (dialog_talk_sql(alias) + f"""
+        AND NOT EXISTS (
+            SELECT 1 FROM dial_list_assignments pa
+            JOIN dial_list_attempts pt ON pt.assignment_id = pa.id
+            WHERE pa.lead_id = {lead_id} AND pt.operator_id = {alias}.operator_id
+              AND (pt.requested_at, pt.id) < ({alias}.requested_at, {alias}.id)
+              AND {dialog_talk_sql('pt')})""")
+
+
+DIALOG_PAID_SQL = paid_dialog_sql()
+# Успешка засчитанного разговора: водитель подписал, и успешка — этому оператору (sign_check:
+# последний разговор от 10 с до подписи). Засчитанный разговор у оператора с успешкой есть всегда —
+# сама засчитанная попытка и есть такой разговор. Лид — под алиасом l, попытка — t.
+DIALOG_SUCCESS_SQL = "l.success_attempt_id IS NOT NULL AND l.success_operator_id = t.operator_id"
 
 # Итоги звонка: стартовый набор отдела (руководитель правит в разделе), цвет —
 # hex как в системной палитре iOS, requeue — «перезвонить»: водитель снова
@@ -7877,8 +7917,13 @@ class DialListService:
 
     def overview(self, department_ids, day, tez=False):
         """Сводка за день по операторам: сколько строк выдано/обработано, попыток,
-        дозвонов, секунд разговора, успешек (водитель подписал в этот день и
-        подпись засчитана оператору). department_ids=None — все отделы.
+        дозвонов, секунд разговора, успешек. department_ids=None — все отделы.
+
+        Удалённый КЦ (задача SZOV-3, 10.11.2026): дозвон — засчитанный разговор (DIALOG_PAID_SQL:
+        водитель один раз, в день первого разговора оператора с ним от 10 с), успешка — у того же
+        засчитанного разговора (подписал позже — успешка всё равно в день этого разговора), так что
+        успешек в дне не больше дозвонов. Тез — как было: дозвон — любой разговор, успешка —
+        водитель вышел на линию в этот день.
 
         tez — отдел автообзвона Тез: ещё auto_attempts, agreements, callbacks, wrapup_expired и
         live_status — статус оператора в телефоне сейчас (active | outbound | break | offline | off)."""
@@ -7889,9 +7934,13 @@ class DialListService:
         # Лид с номером «Реестра тестовых номеров» — проверка обзвона: ни попыток, ни
         # выдачи, ни успешки по нему в сводке нет. Сообщение сети, которое положил телефон
         # (ATTEMPT_TALK_SQL), — попытка, но не дозвон и не минуты разговора. Дозвон удалённого
-        # КЦ — разговор не короче 10 с (ATTEMPT_DIAL_COUNTED_SQL); короткий — в минутах, но не
+        # КЦ — засчитанный разговор (DIALOG_PAID_SQL); короткий и повторный — в минутах, но не
         # в дозвонах.
-        answered_sql = ATTEMPT_TALK_SQL if tez else ATTEMPT_DIAL_COUNTED_SQL
+        if tez:
+            answered_sql = ("t.state = 'finished' AND UPPER(t.disposition) IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS')"
+                            " AND " + ATTEMPT_TALK_SQL)
+        else:
+            answered_sql = DIALOG_PAID_SQL
         lead_filter = "AND " + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL
         if department_ids is not None:
             lead_filter += " AND l.department_id = ANY(%(departments)s)"
@@ -7899,14 +7948,30 @@ class DialListService:
         tez_att = self._OVERVIEW_TEZ_ATT if tez else ""
         tez_join = self._OVERVIEW_TEZ_JOIN if tez else ""
         tez_columns = self._OVERVIEW_TEZ_COLUMNS if tez else ""
+        if tez:
+            # Тез: успешка — водитель вышел на линию в этот день (signed_at).
+            suc_sql = f"""
+                    SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
+                    FROM dial_list_leads l
+                    WHERE l.success_attempt_id IS NOT NULL
+                      AND (l.signed_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
+                    GROUP BY l.success_operator_id"""
+        else:
+            # Удалённый КЦ: успешка — у засчитанного разговора этого дня.
+            suc_sql = f"""
+                    SELECT t.operator_id, COUNT(*) AS successes
+                    FROM dial_list_attempts t
+                    JOIN dial_list_assignments a ON a.id = t.assignment_id
+                    JOIN dial_list_leads l ON l.id = a.lead_id
+                    WHERE (t.requested_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
+                      AND {DIALOG_SUCCESS_SQL} AND {DIALOG_PAID_SQL}
+                    GROUP BY t.operator_id"""
         with self.db._get_cursor() as cur:
             cur.execute(f"""
                 WITH att AS (
                     SELECT t.operator_id,
                            COUNT(*) AS attempts,
-                           COUNT(*) FILTER (WHERE t.state = 'finished'
-                                            AND UPPER(t.disposition) IN ('ANSWER','ANSWERED','SUCCESS','VM-SUCCESS')
-                                            AND {answered_sql}) AS answered,
+                           COUNT(*) FILTER (WHERE {answered_sql}) AS answered,
                            COALESCE(SUM(t.billsec) FILTER (WHERE t.state = 'finished'
                                                            AND {ATTEMPT_TALK_SQL}), 0) AS talk_sec,
                            COUNT(*) FILTER (WHERE t.state = 'failed') AS failed,
@@ -7924,12 +7989,7 @@ class DialListService:
                     JOIN dial_list_leads l ON l.id = a.lead_id
                     WHERE (a.created_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
                     GROUP BY a.operator_id
-                ), suc AS (
-                    SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
-                    FROM dial_list_leads l
-                    WHERE l.success_attempt_id IS NOT NULL
-                      AND (l.signed_at AT TIME ZONE 'Asia/Almaty')::date = %(day)s {lead_filter}
-                    GROUP BY l.success_operator_id
+                ), suc AS ({suc_sql}
                 )
                 SELECT u.id, u.name, u.department_id, dep.name,
                        COALESCE(asg.issued, 0), COALESCE(asg.done, 0),
