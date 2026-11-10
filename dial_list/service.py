@@ -137,6 +137,7 @@ from crm import sapar as sapar_api
 from test_numbers import keys as test_keys
 
 from . import live_calls
+from . import month_base
 from . import pay
 from . import sign_report
 from . import signing
@@ -1674,7 +1675,8 @@ class DialListService:
                (s.department_id IS NOT NULL) AS configured,
                COALESCE(s.enabled, FALSE),
                COALESCE(s.portion_size, %s),
-               (SELECT COUNT(*) FROM dial_list_leads l WHERE l.department_id = d.id) AS leads_total,
+               (SELECT COUNT(*) FROM dial_list_leads l
+                 WHERE l.department_id = d.id AND """ + month_base.in_month_base_sql("l") + """) AS leads_total,
                (SELECT COUNT(*) FROM dial_list_leads l
                  WHERE l.department_id = d.id AND l.status IN ('new', 'in_progress')
                    AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open,
@@ -3047,11 +3049,14 @@ class DialListService:
         with self.db._get_cursor() as cur:
             # Подписавшие — отдельной строкой, а не в своём статусе: их больше не
             # обзванивают, и «Не звонили» / «В работе» с ними врали бы.
+            # База месяца — без исключённых не из списка месяца (month_base, 10.11.2026): во всех местах раздела
+            # «в базе» одно и то же число.
             cur.execute("""
-                SELECT CASE WHEN signed_at IS NOT NULL THEN 'signed' ELSE status END, COUNT(*),
-                       COUNT(*) FILTER (WHERE iin = '')
-                FROM dial_list_leads
-                WHERE department_id = %s AND period = %s GROUP BY 1
+                SELECT CASE WHEN l.signed_at IS NOT NULL THEN 'signed' ELSE l.status END, COUNT(*),
+                       COUNT(*) FILTER (WHERE l.iin = '')
+                FROM dial_list_leads l
+                WHERE l.department_id = %s AND l.period = %s AND """ + month_base.in_month_base_sql("l") + """
+                GROUP BY 1
             """, (department_id, period))
             by_status, without_iin = {}, 0
             for row in cur.fetchall():
@@ -3075,13 +3080,14 @@ class DialListService:
                 "rows_bad_iin": int(r[7] or 0),
             } for r in cur.fetchall()]
             cur.execute("""
-                SELECT period, COUNT(*),
-                       COUNT(*) FILTER (WHERE status = 'done' AND answered_at IS NOT NULL),
-                       COUNT(*) FILTER (WHERE status IN ('new', 'in_progress') AND signed_at IS NULL
-                                          AND sign_status <> 'processing'),
-                       COUNT(*) FILTER (WHERE signed_at IS NOT NULL)
-                FROM dial_list_leads WHERE department_id = %s
-                GROUP BY period ORDER BY period DESC
+                SELECT l.period, COUNT(*),
+                       COUNT(*) FILTER (WHERE l.status = 'done' AND l.answered_at IS NOT NULL),
+                       COUNT(*) FILTER (WHERE l.status IN ('new', 'in_progress') AND l.signed_at IS NULL
+                                          AND l.sign_status <> 'processing'),
+                       COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL)
+                FROM dial_list_leads l
+                WHERE l.department_id = %s AND """ + month_base.in_month_base_sql("l") + """
+                GROUP BY l.period ORDER BY l.period DESC
             """, (department_id,))
             periods = [{"period": r[0].isoformat(), "label": period_label(r[0]), "total": int(r[1]),
                         "answered": int(r[2]), "open": int(r[3]), "signed": int(r[4]), "active": r[0] == active}
@@ -3895,6 +3901,9 @@ class DialListService:
         if period != "all":
             params["period"] = period
             scope += " AND l.period = %(period)s"
+        # Те же водители, что в «Аналитике» и счётчике месяца: исключённый не из списка месяца в базу месяца не
+        # входит (month_base, 10.11.2026). Карточку такого водителя по ссылке открыть по-прежнему можно.
+        scope += " AND " + month_base.in_month_base_sql("l")
         filters = ["TRUE"]
         # Этап и итог — отдельно от остальных фильтров: сводка по полосе этапов и
         # по чипам итогов считается без «своего» фильтра (см. _JOURNAL_PAGE_SQL).

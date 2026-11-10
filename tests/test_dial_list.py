@@ -2767,7 +2767,8 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         self.assertIn("AND l.sign_status <> 'processing'", svc._POOL_SQL)
         self.assertIn("AND l.signed_at IS NULL AND l.sign_status <> 'processing') AS leads_open",
                       svc._DEPARTMENTS_SQL)
-        self.assertIn("AND sign_status <> 'processing'", inspect.getsource(svc.leads_summary))
+        # Счётчик месяца «открыто» (с 10.11.2026 запрос с псевдонимом l — база месяца, month_base).
+        self.assertIn("AND l.sign_status <> 'processing'", inspect.getsource(svc.leads_summary))
         # Кандидаты проверки перед выдачей — тот же пул: те же условия и порядок, без замка.
         cand = svc._POOL_CANDIDATES_SQL
         self.assertTrue(cand.strip().startswith('SELECT l.id, l.iin, l.period, l.sign_checked_at, l.sign_error\n'))

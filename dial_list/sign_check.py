@@ -46,7 +46,7 @@ from psycopg2.extras import execute_values
 
 from crm import sapar
 from test_numbers import keys as test_keys
-from . import driver_ids, signing
+from . import driver_ids, month_base, signing
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +225,10 @@ class SignChecker:
             if not params["lead_ids"]:
                 return summary
         else:
-            scope = "AND l.period BETWEEN %(from_period)s AND %(to_period)s"
+            # Исключённых не из списка месяца (month_base, 10.11.2026) не проверяем: их нет в базе месяца, а это
+            # тысячи лишних запросов в Sapar каждые три часа. «Проверить сейчас» по водителю (lead_ids) — для любого.
+            scope = ("AND l.period BETWEEN %(from_period)s AND %(to_period)s AND "
+                     + month_base.in_month_base_sql("l"))
         with self.db._get_cursor() as cur:
             cur.execute(self._DUE_SQL.format(due=due_filter, scope=scope), params)
             due = cur.fetchall()
@@ -308,12 +311,15 @@ class SignChecker:
         return summary
 
     # ------------------------------------------------------------ перепроверка перед отчётом
+    # Только база месяца (month_base, 10.11.2026): исключённых не из списка месяца нет и в отчёте, перепроверять
+    # их к рассылке — лишние тысячи запросов в те же полчаса.
     _REFRESH_SQL = """
         SELECT l.id, l.iin, l.period
         FROM dial_list_leads l
         WHERE l.iin <> '' AND l.signed_at IS NULL
           AND (l.sign_checked_at IS NULL OR l.sign_checked_at < %(fresh_before)s)
           AND ({bases})
+          AND """ + month_base.in_month_base_sql("l") + """
         ORDER BY l.sign_checked_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %(limit)s
     """

@@ -18,7 +18,7 @@ from datetime import date, datetime, time, timedelta
 
 from crm import sapar
 from test_numbers import keys as test_keys
-from . import signing
+from . import month_base, signing
 
 ANSWERED_SQL = ("ANSWER", "ANSWERED", "SUCCESS", "VM-SUCCESS")
 
@@ -37,6 +37,8 @@ _LEADS_CTE = """
         WHERE l.department_id = %(department_id)s AND l.period = %(period)s
           -- Номер из реестра тестовых (test_numbers) — проверка обзвона, а не водитель.
           AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
+          -- Исключённый не из списка месяца — не в базе месяца (month_base, 10.11.2026).
+          AND """ + month_base.in_month_base_sql("l") + """
     ),
     att AS (
         SELECT a.lead_id, t.operator_id, t.requested_at, t.cancelled,
