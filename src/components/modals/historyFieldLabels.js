@@ -32,6 +32,15 @@ export const HISTORY_FIELD_LABELS = {
     study_completion_year: 'Год окончания учебы',
     company_name: 'ТОО/ИП',
     employment_type: 'Оформлен как',
+    // «Прием» (ТЗ HR «iCore 4»): значения ИИН, документа, адресов и суммы в историю
+    // не пишутся — только факт правки. У ИИН — тоже без цифр: последние 4 вместе с датой
+    // рождения и полом из карточки восстанавливают его целиком.
+    hr_iin: 'ИИН',
+    hr_document: 'Удостоверение',
+    hr_addresses: 'Адреса',
+    hr_project: 'Проект',
+    hr_contract: 'Договор',
+    hr_amount: 'Сумма договора',
     has_proxy: 'Прокси',
     proxy_card_number: 'Номер прокси',
     proxy_status: 'Статус прокси',

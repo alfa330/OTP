@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import EmployeeStatusBlock from '../hr_office/EmployeeStatusBlock';
+import { createHrApi } from '../hr_office/hrOffice';
 import {
     Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Bell, BellOff, Building2,
     CalendarClock, CalendarRange, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Clock, Download, FileSpreadsheet,
@@ -860,13 +862,18 @@ const DepartmentPicker = ({ all, selected, onChange }) => {
     );
 };
 
-export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, showToast }) {
+export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, showToast, hrStatuses = false }) {
     const headers = useCallback(
         () => (withAccessTokenHeader ? withAccessTokenHeader() : {}),
         [withAccessTokenHeader],
     );
     const base = `${apiBaseUrl}/api/group_late_bot`;
     const isMobileShell = useIsMobileShell();
+    // Статус сотрудника (ТЗ HR «iCore 4», п. 5) — в карточке дня: строки «Отметок» — карточки
+    // Workpace/Clockster, учётку iCore блок находит по ФИО. Нет прав — блока нет (403).
+    const hrHeadersRef = useRef(headers);
+    useEffect(() => { hrHeadersRef.current = headers; }, [headers]);
+    const hrApi = useMemo(() => createHrApi(apiBaseUrl, hrHeadersRef), [apiBaseUrl]);
 
     // «Отметки» — то, ради чего в раздел заходят чаще всего, поэтому они и открываются.
     const [tab, setTab] = useState('attendance');
@@ -2081,6 +2088,11 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                         <div className="mt-1.5 flex"><AttendanceStatusPill row={row} /></div>
                     </div>
                 </div>
+
+                {/* Статус по ТЗ «iCore 4» — пока идёт пилот «Кадров», только его учёткам (hrStatuses). */}
+                {hrStatuses && row.employee && row.employee !== '—' && (
+                    <EmployeeStatusBlock api={hrApi} name={row.employee} employeeId={row.employee_id} title="Статус сотрудника" />
+                )}
 
                 <div>
                     <div className={`${iosGroupLabel} mb-1.5`}>День</div>

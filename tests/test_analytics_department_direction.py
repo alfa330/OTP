@@ -125,6 +125,11 @@ def _free_names(name):
             stored.add(item.arg)
         elif isinstance(item, ast.ExceptHandler) and item.name:
             stored.add(item.name)
+        elif isinstance(item, (ast.Import, ast.ImportFrom)):
+            # Импорт внутри ручки — её собственное определение, а не имя снаружи
+            # («Прием»: hr_office.service для данных документов новой учётки).
+            for alias in item.names:
+                stored.add((alias.asname or alias.name).split('.')[0])
     return {n for n in loaded - stored if not hasattr(builtins, n)}
 
 

@@ -1182,6 +1182,14 @@ def _get_user_payload(user):
     # экран рисует по флагу (canAccessHiringSectionForUser), границу держат роуты раздела.
     hiring_access = _hiring_section_open_for(user_id)
 
+    # Раздел «Кадры» (ТЗ HR «iCore 4»): вкладки «Прием» и «Табель учета рабочего времени» — отдел
+    # кадров и суперадмины (hr_office_access), «АВР» — ещё главы отделов и супервайзеры, на своих
+    # (hr_acts_access). Пункт меню экран рисует по флагам (canAccessHrOfficeForUser), границу держат
+    # ручки hr_office. hr_office_features — новое из ТЗ в общих окнах (данные для документов при
+    # создании учётки, подписи статусов по виду оформления): пока идёт пилот — только его учёткам.
+    hr_office_access, hr_acts_access = _hr_office_flags_for(user_id, role, headed_department_ids)
+    hr_office_features = _hr_office_features_for(user_id, role)
+
     return {
         "role": role,
         "id": user_id,
@@ -1197,6 +1205,9 @@ def _get_user_payload(user):
         "twofa_access": twofa_access,
         "rental_access": rental_access,
         "hiring_access": hiring_access,
+        "hr_office_access": hr_office_access,
+        "hr_acts_access": hr_acts_access,
+        "hr_office_features": hr_office_features,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -17683,6 +17694,21 @@ def add_user():
         login = f"{login_prefix}_{str(uuid.uuid4())[:8]}"
         password = str(uuid.uuid4())[:8]
 
+        # «Прием» (ТЗ HR «iCore 4», п. 2): данные для документов (ИИН, удостоверение, адреса)
+        # вводит тот, кто заводит учётку. Проверка — ДО создания: ошибка в ИИН не должна
+        # оставить учётку без данных. Пишутся они в свою таблицу «Приема», не в users: создающий
+        # их потом не видит, видит только отдел кадров.
+        hr_intake_data, hr_intake_warnings = {}, []
+        if isinstance(data.get('hr_intake'), dict):
+            from hr_office import service as hr_office_service  # noqa: E402
+            hr_intake_data, hr_intake_errors, hr_intake_warnings = hr_office_service.clean_intake(
+                data.get('hr_intake'),
+                birth_date=datetime.strptime(birth_date, '%Y-%m-%d').date() if birth_date else None,
+                gender=gender)
+            if hr_intake_errors:
+                return jsonify({"error": hr_office_service.intake_error_text(hr_intake_errors),
+                                "fields": hr_intake_errors}), 400
+
         user_id = db.create_user(
             telegram_id=None,
             name=name,
@@ -17744,6 +17770,18 @@ def add_user():
             db.update_user(user_id, 'direction_id', None, changed_by=changed_by)
             db.update_user(user_id, 'supervisor_id', None, changed_by=changed_by)
 
+        # Данные для документов — сразу за учёткой. Не записались — учётка всё равно создана,
+        # а окно скажет внести данные в «Приеме» (там их и так дополняет отдел кадров).
+        intake_saved = None
+        if hr_intake_data:
+            try:
+                with db._get_cursor() as cursor:
+                    hr_office_service.save_intake(cursor, user_id, hr_intake_data, requester_id)
+                intake_saved = True
+            except Exception:  # noqa: BLE001
+                logging.exception('add_user: данные для документов сотрудника %s не записались', user_id)
+                intake_saved = False
+
         if role == 'trainer':
             role_label = 'Тренер'
         elif role == 'admin':
@@ -17765,7 +17803,9 @@ def add_user():
             "id": user_id,
             "role": role,
             "login": login,
-            "password": password
+            "password": password,
+            "intake_saved": intake_saved,
+            "intake_warnings": hr_intake_warnings,
         })
     except Exception as e:
         logging.error(f"Error adding user: {e}")
@@ -53344,6 +53384,71 @@ try:
     logging.info("Табель фронт-офисов: Blueprint подключён на /api/front_office_timesheet")
 except Exception:
     logging.exception("Табель фронт-офисов: Blueprint НЕ подключён")
+
+
+# ── «Прием», «Табель учета рабочего времени», «АВР» (ТЗ HR «iCore 4», 10.11.2026) ───
+# «Прием» и «Табель учета рабочего времени» — отдел кадров (членство в отделе, как у «Учета
+# сотрудников») и суперадмины; глобальные админы — нет: там ИИН, удостоверения и суммы договоров.
+# «АВР» — ещё главы отделов и супервайзеры, каждому на своих (hr_office/service.py).
+def _hr_office_viewer(requester_id, requester):
+    role = _normalize_user_role(requester[3])
+    return {
+        'user_id': int(requester_id),
+        'role': role,
+        'is_hr': bool(_is_employee_accounting_manager(requester_id)),
+        'is_super': _is_super_admin_role(role),
+        'is_admin': _is_admin_role(role),
+        # Глобальный админ (админ, который не глава отдела) видит статусы всех — как в графиках.
+        'is_global_admin': _is_global_admin_requester(role, requester_id),
+        'is_supervisor': _is_supervisor_role(role),
+        'department_id': db.get_user_department_id(requester_id),
+        'headed_department_ids': sorted(int(d) for d in _headed_department_ids(requester_id)),
+    }
+
+
+def _hr_office_features_for(user_id, role):
+    """Новое из ТЗ HR «iCore 4» в общих окнах — пока идёт пилот «Кадров», только его учёткам."""
+    if user_id is None:
+        return False
+    try:
+        from hr_office import rules as hr_office_rules  # noqa: E402
+        return hr_office_rules.pilot_allows(user_id, _normalize_user_role(role))
+    except Exception:
+        logging.exception("Кадры: не удалось определить пилот для пользователя %s", user_id)
+        return False
+
+
+def _hr_office_flags_for(user_id, role, headed_department_ids=None):
+    """(весь раздел, только АВР) для пункта меню. Сбой не роняет вход: без флага пункта нет."""
+    if user_id is None:
+        return False, False
+    if not _hr_office_features_for(user_id, role):
+        return False, False
+    try:
+        role = _normalize_user_role(role)
+        full = _is_super_admin_role(role) or bool(_is_employee_accounting_manager(user_id))
+        acts = full or bool(headed_department_ids) or _is_supervisor_role(role)
+        return full, acts
+    except Exception:
+        logging.exception("Кадры: не удалось определить доступ пользователя %s", user_id)
+        return False, False
+
+
+try:
+    from hr_office.routes import build_hr_office_blueprint  # noqa: E402
+
+    app.register_blueprint(build_hr_office_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        viewer_context=_hr_office_viewer,
+        update_user_field=lambda user_id, field, value, changed_by: db.update_user(
+            user_id, field, value, changed_by=changed_by),
+    ))
+    logging.info("Прием, табель, АВР: Blueprint подключён на /api/hr_office")
+except Exception:
+    logging.exception("Прием, табель, АВР: Blueprint НЕ подключён")
 
 
 # ── «Учет сотрудников» по страницам ─────────────────────────────────────────

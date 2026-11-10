@@ -10,6 +10,7 @@ import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kaza
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
 import InfoHint from '../common/InfoHint';
+import { LEGACY_STATUS_OPTIONS, defaultHiringFor, employmentStatusOptions } from '../../utils/employmentStatus';
 import './user-edit-mobile.css';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
@@ -389,6 +390,16 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // должностей в системе нет и заводить его владелец не просил. У
     // фронт-офисов поле есть ради колонки «Должность» табеля (06.11.2026).
     const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);
+    // «Прием», ТЗ п. 2–3: данные для документов новой учётки и умолчание оформления её отдела.
+    const intake = editedUser?.hr_intake || {};
+    const setIntake = (key, value) => setEditedUser((prev) => ({ ...prev, hr_intake: { ...(prev?.hr_intake || {}), [key]: value } }));
+    const createHiring = defaultHiringFor(effectiveDeptCode);
+    /* Пилот «Кадров» (профиль hr_office_features): данные для документов при создании учётки и
+       статусы по виду оформления — только его учёткам; остальные видят окно как до ТЗ. */
+    const hrFeatures = user?.hr_office_features === true;
+    const statusOptions = hrFeatures
+        ? employmentStatusOptions(editedUser?.employment_type, editedUser?.status, { withFired: true })
+        : LEGACY_STATUS_OPTIONS;
     const employeeJobTitlePlaceholder = String(effectiveDeptCode || '').toLowerCase() === 'front_office'
         ? 'Например, менеджер'
         : 'Например, бухгалтер по расчётам';
@@ -1409,6 +1420,74 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         />
                     </div>
 
+                    {/* «Прием» (ТЗ HR «iCore 4», п. 2): данные для документов вводит тот, кто заводит
+                        учётку, — по ним кадровик соберёт договор, анкету и остальные документы. Сервер
+                        проверит ИИН по дате рождения и полу до создания учётки; после создания эти
+                        данные видит только отдел кадров (раздел «Прием»). */}
+                    {hrFeatures && (
+                    <div className="space-y-3 rounded-xl border border-blue-100 bg-blue-50/40 p-3" data-hr-intake>
+                        <div className="flex items-center gap-1.5">
+                            <span className="text-sm font-semibold text-gray-800">Документы для приема</span>
+                            <InfoHint text="По этим данным кадровик соберёт договор, анкету и другие документы приема. После создания учётки их видит только отдел кадров — в разделе «Прием». Не знаете — оставьте пустым, кадровик внесёт сам." />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">ИИН</label>
+                            <input type="text" inputMode="numeric" maxLength={14} placeholder="12 цифр"
+                                value={intake.iin || ""} onChange={(e) => setIntake('iin', e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                        </div>
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Документ</label>
+                                <CustomSelect value={intake.doc_type || "id_card"} onChange={(v) => setIntake('doc_type', v)}
+                                    disabled={fieldsLocked} ariaLabel="Вид документа"
+                                    options={[{ value: "id_card", label: "Удостоверение" }, { value: "passport", label: "Паспорт" }]} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Номер документа</label>
+                                <input type="text" value={intake.doc_number || ""} onChange={(e) => setIntake('doc_number', e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Кем выдан</label>
+                                <input type="text" placeholder="МВД РК" value={intake.doc_issuer || ""}
+                                    onChange={(e) => setIntake('doc_issuer', e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Дата выдачи</label>
+                                <input type="date" max={todayInputDate()} value={intake.doc_issued_on || ""}
+                                    onChange={(e) => setIntake('doc_issued_on', e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Гражданство</label>
+                                <input type="text" placeholder="Казахстан" value={intake.citizenship || ""}
+                                    onChange={(e) => setIntake('citizenship', e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Место рождения</label>
+                                <input type="text" value={intake.birth_place || ""}
+                                    onChange={(e) => setIntake('birth_place', e.target.value)}
+                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Адрес регистрации</label>
+                            <input type="text" placeholder="Город, улица, дом, квартира" value={intake.registration_address || ""}
+                                onChange={(e) => setIntake('registration_address', e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Фактический адрес</label>
+                            <input type="text" placeholder="Если отличается от адреса регистрации" value={intake.actual_address || ""}
+                                onChange={(e) => setIntake('actual_address', e.target.value)}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900" disabled={fieldsLocked} />
+                        </div>
+                    </div>
+                    )}
+
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Место учебы</label>
                         <input
@@ -1673,6 +1752,18 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     </div>
                     )}
 
+                    {/* ТЗ «Прием», п. 2–3: вид оформления и компанию выбирает кадровик в «Приеме» — из
+                        справочника компаний, а не текстом (в картах было 18 написаний ~10 фирм). Здесь —
+                        только что будет по умолчанию. В уже заведённой карточке поля остаются как были. */}
+                    {hrFeatures ? (
+                    <div className="rounded-xl bg-gray-50 px-3 py-2.5 text-sm leading-relaxed text-gray-600" data-hr-hiring-note>
+                        <div className="font-medium text-gray-800">Вид оформления и компания</div>
+                        {createHiring
+                            ? <div>Выберет кадровик в разделе «Прием». По умолчанию для {createHiring.for} — {createHiring.type}, {createHiring.company}.</div>
+                            : <div>Выберет кадровик в разделе «Прием». По умолчанию для ОП и СЗоВ — ГПХ, ИП «Eazy Go Rent»; для операторов TEZ — ГПХ, ИП «GaBa».</div>}
+                    </div>
+                    ) : (
+                    <>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">Наименование ТОО/ИП</label>
                         <input
@@ -1699,6 +1790,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                         ]}
                         />
                     </div>
+                    </>
+                    )}
 
                     {showInternshipField && (
                     <div>
@@ -1782,13 +1875,10 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             });
                         }}
                         disabled={fieldsLocked}
-                        options={[
-                            { value: "working", label: "Работает" },
-                            { value: "fired", label: "Уволен" },
-                            { value: "bs", label: "Б/С" },
-                            { value: "sick_leave", label: "Больничный" },
-                            { value: "annual_leave", label: "Ежегодный отпуск" },
-                        ]}
+                        // ТЗ HR «iCore 4», п. 5: подписи и пункты — по виду оформления
+                        // (ТД: трудовой отпуск, без содержания, больничный; ГПХ и СМЗ:
+                        // оплачиваемый отпуск, приостановление договора). Коды прежние.
+                        options={statusOptions}
                         />
                     </div>
 
@@ -2500,11 +2590,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                             className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all bg-white/90 text-gray-900"
                             disabled={fieldsLocked}
                             >
-                            <option value="working">Работает</option>
-                            <option value="fired">Уволен</option>
-                            <option value="bs">Б/С</option>
-                            <option value="sick_leave">Больничный</option>
-                            <option value="annual_leave">Ежегодный отпуск</option>
+                            {statusOptions.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
                             </select>
                         </div>
 
