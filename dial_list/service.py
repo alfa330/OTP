@@ -5195,25 +5195,20 @@ class DialListService:
     # Итоги дня по операторам базы отдела (владелец, 14.10.2026) — «Рейтинг» на телефоне и
     # «сегодня» у зарплаты. День — по Алматы, звонок — по началу попытки; границы суток —
     # моменты, как у _PROGRESS_SQL (индекс по requested_at работает). Базы — все базы отдела:
-    # рейтинг — о работе за день, а не о месяце базы. Диалоги — по определению конверсии
-    # (_PROGRESS_CONVERSION_SQL): водители, с которыми оператор в этот день поговорил не
-    # меньше SUCCESS_MIN_BILLSEC, и это не сообщение сети. Подписавшие дня — успешки
-    # оператора, чья засчитанная попытка (success_attempt_id) начата в этот же день: так они
-    # всегда из диалогов того же дня, и конверсия дня не больше 100 %. Подпись не бывает
-    # раньше засчитанного разговора (sign_check._RESOLVE_SQL), поэтому граница по signed_at
-    # ничего не отсекает — она для индекса (success_operator_id, signed_at): без неё запрос
-    # читал бы все успешки отдела за всё время. attempts — попытки без отменённых до ответа:
-    # по ним видно, звонил ли оператор в этот день. %(operator_id)s — только этот оператор
-    # (NULL — все). Наружу — числа и имена операторов; ни ФИО водителей, ни номеров: номер
-    # читает лишь условие «Реестра тестовых номеров», у каждой части своё.
+    # рейтинг — о работе за день, а не о месяце базы. Диалоги — засчитанные разговоры дня, как во
+    # вкладке «Операторы» и в «Детализации» (DIALOG_PAID_SQL; SZOV-3, 10.11.2026, решение Руслана —
+    # телефон «так же»): водитель один раз, в день первого разговора оператора с ним от
+    # SUCCESS_MIN_BILLSEC; повторный разговор с ним ни в тот же день, ни позже не засчитан. Подписавшие
+    # дня — успешки этих же разговоров (DIALOG_SUCCESS_SQL; подписал позже — успешка всё равно в
+    # дне засчитанного разговора): они всегда из диалогов того же дня, и конверсия дня не больше
+    # 100 %. attempts — попытки без отменённых до ответа: по ним видно, звонил ли оператор в этот
+    # день. %(operator_id)s — только этот оператор (NULL — все). Наружу — числа и имена операторов;
+    # ни ФИО водителей, ни номеров: номер читает лишь условие «Реестра тестовых номеров».
     _DAY_RESULTS_SQL = """
-        WITH calls AS (
-            SELECT t.operator_id,
-                   COUNT(*) FILTER (WHERE NOT t.cancelled) AS attempts,
-                   COUNT(DISTINCT a.lead_id) FILTER (
-                       WHERE t.state = 'finished' AND UPPER(t.disposition) IN %(answered)s
-                         AND t.auto_hangup <> 'announcement'
-                         AND t.billsec >= %(min_sec)s) AS dialogs
+        WITH att AS (
+            SELECT t.operator_id, t.cancelled,
+                   (""" + DIALOG_PAID_SQL + """) AS paid,
+                   (""" + DIALOG_SUCCESS_SQL + """) AS won
             FROM dial_list_attempts t
             JOIN dial_list_assignments a ON a.id = t.assignment_id
             JOIN dial_list_leads l ON l.id = a.lead_id
@@ -5222,24 +5217,17 @@ class DialListService:
               AND t.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'
               AND (%(operator_id)s IS NULL OR t.operator_id = %(operator_id)s)
               AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
-            GROUP BY t.operator_id
-        ), suc AS (
-            SELECT l.success_operator_id AS operator_id, COUNT(*) AS successes
-            FROM dial_list_leads l
-            JOIN dial_list_attempts st ON st.id = l.success_attempt_id
-            WHERE l.department_id = %(department_id)s AND l.success_attempt_id IS NOT NULL
-              AND l.signed_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
-              AND st.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty'
-              AND st.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'
-              AND (%(operator_id)s IS NULL OR l.success_operator_id = %(operator_id)s)
-              AND """ + test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL + """
-            GROUP BY l.success_operator_id
+        ), calls AS (
+            SELECT operator_id,
+                   COUNT(*) FILTER (WHERE NOT cancelled) AS attempts,
+                   COUNT(*) FILTER (WHERE paid) AS dialogs,
+                   COUNT(*) FILTER (WHERE paid AND won) AS successes
+            FROM att
+            GROUP BY operator_id
         )
-        SELECT COALESCE(c.operator_id, s.operator_id), COALESCE(u.name, ''),
-               COALESCE(c.attempts, 0), COALESCE(c.dialogs, 0), COALESCE(s.successes, 0)
+        SELECT c.operator_id, COALESCE(u.name, ''), c.attempts, c.dialogs, c.successes
         FROM calls c
-        FULL JOIN suc s ON s.operator_id = c.operator_id
-        LEFT JOIN users u ON u.id = COALESCE(c.operator_id, s.operator_id)
+        LEFT JOIN users u ON u.id = c.operator_id
     """
 
     def _operator_base_counts(self, ctx):

@@ -354,3 +354,35 @@ def test_yesterday_stays_open_until_ten_am(env):
     # В 10:00 вчерашний рейтинг закрыт — отсчёт до итогов сегодняшнего.
     closed = env.svc.operator_rating(SAVA, now=env.at(env.day, 10, 0))
     assert (closed["visible"], closed["day"], closed["seconds_to_open"]) == (False, env.day.isoformat(), 11 * 3600)
+
+
+def test_day_counts_the_driver_once_on_the_first_talk_day(env):
+    """Задача SZOV-3 (10.11.2026; телефон — «так же», как вкладка «Операторы» и «Детализация»): водитель в
+    итогах дня оператора — один раз, в день ПЕРВОГО разговора с ним от 10 с; повторный разговор на
+    следующий день диалогом не считается, а успешка после него — у засчитанного вчерашнего разговора."""
+    x = env.lead('Водитель повторный', '77010000777')
+    env.call(x, SAVA, env.at(env.prev, 14, 0), billsec=20)      # первый разговор — вчера
+    env.call(x, SAVA, env.at(env.day, 16, 0), billsec=60)       # повторный — сегодня; после него подписал
+    env.sign(x, env.at(env.day, 16, 30))
+    SignChecker(env.db).resolve_successes()
+    credited = env.q("SELECT (t.requested_at AT TIME ZONE 'Asia/Almaty')::date FROM dial_list_leads l "
+                     "JOIN dial_list_attempts t ON t.id = l.success_attempt_id WHERE l.id = %s", (x,))
+    assert credited == [(env.day,)]                              # успешка Sapar — сегодняшнему разговору
+    # Сегодня у Савы — как без этого водителя (4 диалога, 2 подписали): ни диалога, ни успешки.
+    today = env.svc.operator_rating(SAVA, now=env.at(env.day, 21, 30))
+    assert (today["me"]["dialogs"], today["me"]["successes"]) == (4, 2)
+    assert env.svc.operator_progress(SAVA)["salary"]["today"] == {"dialogs": 4, "successes": 2}
+    # Вчера — на одного больше и с успешкой: 4 диалога, 3 подписали.
+    yesterday = env.svc.operator_rating(SAVA, now=env.at(env.day, 9, 0))
+    assert (yesterday["day"], yesterday["me"]["dialogs"], yesterday["me"]["successes"]) == (env.prev.isoformat(), 4, 3)
+    # Вкладка «Операторы» руководителя — те же числа по дням.
+    tab = {d: {r["operator_id"]: r for r in env.svc.overview([RCC], d)} for d in (env.prev, env.day)}
+    assert (tab[env.prev][SAVA]["answered"], tab[env.prev][SAVA]["successes"]) == (4, 3)
+    assert (tab[env.day][SAVA]["answered"], tab[env.day][SAVA]["successes"]) == (4, 2)
+    # Ни у кого успешек дня не больше диалогов дня.
+    for when in (env.at(env.day, 21, 30), env.at(env.day, 9, 0)):
+        for row in env.svc.operator_rating(SAVA, now=when)["operators"]:
+            assert row["successes"] <= row["dialogs"], row
+    # Месяц базы — водитель один раз: обзвонил 10, диалогов 7, подписали 4.
+    salary = env.svc.operator_progress(SAVA)["salary"]
+    assert (salary["called"], salary["dialogs"], salary["successes"]) == (10, 7, 4)

@@ -297,11 +297,12 @@ class NumberNeverReachesOperatorTests(unittest.TestCase):
             self.assertNotIn('phone', inspect.getsource(helper), helper.__name__)
             self.assertNotIn('iin', inspect.getsource(helper), helper.__name__)
         # Оплата по конверсии и рейтинг дня (14.10.2026): только числа и имена операторов. Номер
-        # лида в запросе дня читает лишь условие «Реестра тестовых номеров» (у звонков и у успешек
-        # своё) — без него там нет ни номера, ни ИИН, ни ФИО водителя.
+        # лида в запросе дня читает лишь условие «Реестра тестовых номеров» (успешки с 10.11.2026,
+        # SZOV-3, — у засчитанных разговоров тех же звонков) — без него там нет ни номера, ни ИИН, ни
+        # ФИО водителя.
         from test_numbers import keys as test_keys
         day_sql = dial_service.DialListService._DAY_RESULTS_SQL
-        self.assertEqual(day_sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 2)
+        self.assertEqual(day_sql.count(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL), 1)
         bare = day_sql.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
         for forbidden in ('phone_norm', 'iin', 'full_name'):
             self.assertNotIn(forbidden, bare, f'_DAY_RESULTS_SQL: {forbidden}')
@@ -963,8 +964,8 @@ class OperatorProgressTests(unittest.TestCase):
         # «Сегодня» у зарплаты — итоги дня с отбором оператора: наружу из них уходят только два
         # числа (диалоги и подписавшие); имя оператора — из users, водителей там нет.
         day = svc._DAY_RESULTS_SQL.replace(test_keys.DIAL_LIST_LEAD_NOT_TEST_SQL, '')
-        self.assertEqual(re.findall(r'\bAS (\w+)', day), ['attempts', 'dialogs', 'operator_id', 'successes'])
-        self.assertIn("LEFT JOIN users u ON u.id = COALESCE(c.operator_id, s.operator_id)", day)
+        self.assertEqual(re.findall(r'\bAS (\w+)', day), ['paid', 'won', 'attempts', 'dialogs', 'successes'])
+        self.assertIn("LEFT JOIN users u ON u.id = c.operator_id", day)
         self.assertIn('_operator_day(ctx, today)', progress)
         # Отменённые до ответа попытки не входят в «попытки», дозвон — по диспозициям Binotel.
         self.assertIn('WHERE NOT cancelled', dial_service.DialListService._PROGRESS_SQL)
@@ -2597,24 +2598,29 @@ class OperatorSalaryTests(unittest.TestCase):
         self.assertEqual(db.rolled_back, [False, True])
 
     def test_day_results_follow_conversion_definition(self):
+        """Итоги дня телефона («Рейтинг», «сегодня» у зарплаты) — по тому же правилу, что вкладка
+        «Операторы» и «Детализация» (SZOV-3, 10.11.2026): диалог — засчитанный разговор (водитель один
+        раз, в день первого разговора), подписавший — успешка этого же разговора."""
         sql = ' '.join(dial_service.DialListService._DAY_RESULTS_SQL.split())
+        paid = ' '.join(dial_service.DIALOG_PAID_SQL.split())
         for fragment in (
-                "COUNT(*) FILTER (WHERE NOT t.cancelled) AS attempts",
-                "COUNT(DISTINCT a.lead_id) FILTER ( WHERE t.state = 'finished' AND UPPER(t.disposition) IN "
-                "%(answered)s AND t.auto_hangup <> 'announcement' AND t.billsec >= %(min_sec)s) AS dialogs",
-                # Сутки по Алматы — у звонков и у засчитанной попытки успешки.
+                f"({paid}) AS paid",
+                f"({dial_service.DIALOG_SUCCESS_SQL}) AS won",
+                "COUNT(*) FILTER (WHERE NOT cancelled) AS attempts",
+                "COUNT(*) FILTER (WHERE paid) AS dialogs",
+                "COUNT(*) FILTER (WHERE paid AND won) AS successes",
+                # Сутки по Алматы — по началу попытки.
                 "t.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty' "
                 "AND t.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'",
-                "JOIN dial_list_attempts st ON st.id = l.success_attempt_id",
-                "st.requested_at >= (%(day)s::date)::timestamp AT TIME ZONE 'Asia/Almaty' "
-                "AND st.requested_at < ((%(day)s::date) + 1)::timestamp AT TIME ZONE 'Asia/Almaty'",
-                "(%(operator_id)s IS NULL OR t.operator_id = %(operator_id)s)",
-                "(%(operator_id)s IS NULL OR l.success_operator_id = %(operator_id)s)",
-                "FULL JOIN suc s ON s.operator_id = c.operator_id"):
+                "(%(operator_id)s IS NULL OR t.operator_id = %(operator_id)s)"):
             self.assertIn(fragment, sql)
         # Отдел — отдел базы (линии), а не отдел человека; месяц базы рейтингу не важен.
-        self.assertEqual(sql.count("l.department_id = %(department_id)s"), 2)
+        self.assertEqual(sql.count("l.department_id = %(department_id)s"), 1)
         self.assertNotIn('l.period', sql)
+        # Успешки — только у засчитанных разговоров этого дня: отдельной выборки по засчитанной попытке
+        # успешки (st.requested_at) больше нет.
+        self.assertNotIn('st.requested_at', sql)
+        self.assertNotIn('FULL JOIN', sql)
 
 
 class OperatorRatingTests(unittest.TestCase):
