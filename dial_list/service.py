@@ -3858,7 +3858,8 @@ class DialListService:
             # ИИН — только хвост (как номер). Подписание по Sapar и кому засчитана успешка.
             "iin_masked": mask_iin(r[39]),
             "has_iin": bool(r[39]),
-            "sign": self._sign_block(r[39], r[40], r[41], r[42], r[43], r[44], r[45], r[46], r[47]),
+            "sign": self._sign_block(r[39], r[40], self._sign_checked_at(r[0], r[41]), r[42], r[43], r[44], r[45],
+                                     r[46], r[47]),
             # Город — колонка «город» файла базы (или «Города по ИИН»); '' — не указан.
             "city": (r[59] or "").strip(),
         }
@@ -3877,6 +3878,13 @@ class DialListService:
                            "registration_label": registration_label(r[60], r[61])}
             row["profile_url"] = driver_profile_url(r[58])
         return row
+
+    def _sign_checked_at(self, lead_id, stored):
+        """Когда Sapar последний раз ответил по водителю. В строке базы это время переписывается не каждый круг
+        проверки — точное держит её память (sign_check.seen_at); после перезапуска сервера, пока круг до водителя
+        не дошёл, — время из строки. У проверки, подменённой в тестах, памяти нет."""
+        seen_at = getattr(self.sign_checker, "seen_at", None)
+        return seen_at(lead_id, stored) if seen_at else stored
 
     @staticmethod
     def _sign_block(iin, sign_status, checked_at, sign_error, signed_at, success_attempt_id,
@@ -7227,7 +7235,7 @@ class DialListService:
     # ------------------------------------------------------------ подписание документов
     def request_sign_check(self, reason=""):
         """Поставить проверку подписания в очередь своего потока, не дожидаясь её
-        (планировщик раз в полчаса, загрузка базы). См. sign_check.py."""
+        (планировщик каждые несколько минут, загрузка базы). См. sign_check.py."""
         return self.sign_checker.request(reason)
 
     def check_lead_signature(self, lead_id):
@@ -7491,6 +7499,7 @@ class DialListService:
                                                        configured=self.sign_checker.configured())
         doc_month = datetime.strptime(data["sign_check"]["doc_month"], "%Y-%m-%d").date()
         data["sign_check"]["doc_month_label"] = period_label(doc_month)
+        data["sign_check"].update(self._sign_cycle(data["sign_check"]))
         data.update({
             "department_id": department_id,
             "period": period.isoformat(),
@@ -7499,6 +7508,20 @@ class DialListService:
             "is_active_period": period == settings["_period"],
         })
         return data
+
+    def _sign_cycle(self, check, now=None):
+        """Круг проверки подписания для отсчёта в «Аналитике» (владелец, 10.11.2026: «отображать ближайшее
+        обновление»): updated_at — когда закончился последний полный круг, next_update_at — когда закончится
+        следующий (оценка проверки), updating — идёт ли круг сейчас, server_now — часы сервера: отсчёт не
+        зависит от часов компьютера. База не проверяется (старый месяц) или Sapar не настроен — отсчёта нет."""
+        now = now or _utcnow()
+        block = {"server_now": _iso_utc(now), "updated_at": None, "next_update_at": None, "updating": False}
+        cycle_state = getattr(self.sign_checker, "cycle_state", None)
+        if check.get("active") and check.get("configured") and cycle_state:
+            cycle = cycle_state(now)
+            block.update(updated_at=_iso_utc(cycle["finished_at"]), next_update_at=_iso_utc(cycle["eta_at"]),
+                         updating=bool(cycle["running"]))
+        return block
 
     def funnel(self, department_id, period=None, batch_id=None, date_from=None, date_to=None, city=None):
         """«Воронка ОП» во вкладке «Аналитика» Тез (задача #407, 03.11.2026): база → уже

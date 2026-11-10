@@ -86,7 +86,6 @@ _TOTALS_SQL = "WITH " + _LEADS_CTE + """,
         COUNT(*) FILTER (WHERE l.status = 'excluded' AND l.signed_at IS NULL),
         COALESCE(SUM(p.attempts), 0),
         MAX(l.sign_checked_at),
-        MIN(l.sign_checked_at) FILTER (WHERE l.iin <> '' AND l.signed_at IS NULL),
         COUNT(*) FILTER (WHERE l.iin <> '' AND l.signed_at IS NULL AND l.sign_error <> ''),
         COUNT(*) FILTER (WHERE l.iin <> '' AND l.signed_at IS NULL AND l.sign_checked_at IS NULL)
     FROM leads l
@@ -152,11 +151,11 @@ def department_analytics(cur, department_id, period, today=None, configured=None
               "min_sec": signing.SUCCESS_MIN_BILLSEC}
 
     cur.execute(_TOTALS_SQL, params)
-    r = cur.fetchone() or (0,) * len(_TOTAL_KEYS) + (None, None, 0, 0)
+    r = cur.fetchone() or (0,) * len(_TOTAL_KEYS) + (None, 0, 0)
     totals = {key: int(r[i] or 0) for i, key in enumerate(_TOTAL_KEYS)}
     totals["without_iin"] = totals["leads"] - totals["with_iin"]
-    last_checked, oldest_check = r[len(_TOTAL_KEYS)], r[len(_TOTAL_KEYS) + 1]
-    sign_errors, never_checked = int(r[len(_TOTAL_KEYS) + 2] or 0), int(r[len(_TOTAL_KEYS) + 3] or 0)
+    last_checked = r[len(_TOTAL_KEYS)]
+    sign_errors, never_checked = int(r[len(_TOTAL_KEYS) + 1] or 0), int(r[len(_TOTAL_KEYS) + 2] or 0)
 
     cur.execute(_BY_DAY_SQL, params)
     by_day_rows = {row[0]: row for row in cur.fetchall()}
@@ -199,14 +198,6 @@ def department_analytics(cur, department_id, period, today=None, configured=None
     month, year = signing.doc_month_for(period)
     in_window = signing.check_window(today)
     checked_now = in_window[0] <= period <= in_window[1]
-    next_check = None
-    if checked_now and totals["with_iin"] - totals["signed"] > 0:
-        # Следующая проверка — не раньше, чем «старейшей» строке исполнится 3 часа;
-        # никогда не проверенные уйдут в ближайший получасовой прогон.
-        if never_checked or oldest_check is None:
-            next_check = None
-        else:
-            next_check = (oldest_check + timedelta(hours=signing.RECHECK_HOURS)).isoformat()
     return {
         "totals": totals,
         "rates": {
@@ -222,11 +213,11 @@ def department_analytics(cur, department_id, period, today=None, configured=None
             # Проверяется ли база этого месяца сейчас: текущий и прошлый месяцы.
             "active": checked_now,
             "doc_month": date(year, month, 1).isoformat(),
+            # Когда последний раз записано состояние водителя. Круг проверки (когда закончился последний и когда
+            # закончится идущий — для отсчёта) дописывает сервис: он живёт в памяти проверки, а не в базе.
             "last_checked_at": last_checked.isoformat() if last_checked else None,
-            "next_check_at": next_check,
             "never_checked": never_checked,
             "errors": sign_errors,
-            "recheck_hours": signing.RECHECK_HOURS,
             "min_billsec": signing.SUCCESS_MIN_BILLSEC,
         },
     }

@@ -3,10 +3,16 @@
 
 Правила — в signing.py, сеть — в crm/sapar.py, здесь порядок работы:
 
-  1. Кому пора. Водители с ИИН из баз текущего и прошлого месяца, ещё не
-     подписавшие, которых не проверяли дольше RECHECK_HOURS (минус запас, чтобы
-     получасовой запуск не отодвигал проверку на лишние полчаса). Свежая база
-     проверяется сразу после загрузки: у её строк проверки не было вовсе.
+  1. Кого и как часто. Круг: неподписавшие водители с ИИН из баз текущего и
+     прошлого месяца (база месяца — month_base), все подряд и без перерывов, в
+     PASS_LANES потоков. Так с 10.11.2026 (владелец: «проверять только тех, кто
+     в списке, способом, который показывает статусы точно, и максимально
+     быстро»); до этого каждого спрашивали раз в 3 часа одним потоком. Точно
+     все статусы отдаёт только поимённая ручка Sapar: его общий список парка
+     не отличает «на проверке у Яндекса» от «не подписал» (сверка 10.11.2026).
+     Реже, раз в EXPIRED_RECHECK_HOURS, и только в базе текущего месяца
+     спрашиваем тех, у кого срок подписания истёк: подписать такой документ
+     уже нельзя. Свежая база идёт в круге первой: у её строк проверки не было.
   2. Один запрос в Sapar на пару (ИИН, месяц документов) — одного водителя в
      двух отделах спрашиваем один раз. Итог пишется пачками: оборвавшийся на
      середине прогон не теряет уже проверенное.
@@ -22,15 +28,23 @@
 Перед проверкой — ID водителей из Sapar (driver_ids.py), если в базах есть
 водители, о которых его ещё не спрашивали: свежая база получает ID сразу.
 
-Где крутится. Свой поток на ОДНО место: прогон — сотни запросов подряд, в общем
-пуле бота из четырёх мест он держал бы четверть приложения (см. заметку про
-executor_pool). Запросы на проверку склеиваются: пока идёт прогон, следующий
-запрос лишь просит пройти ещё раз после него.
+Где крутится. Свой поток на ОДНО место ведёт очередь (круг, перепроверка перед
+отчётом): в общем пуле бота из четырёх мест он держал бы четверть приложения
+(см. заметку про executor_pool). Сами запросы к Sapar идут в его потоках-дорожках
+(_ask). Запросы на проверку склеиваются: пока идёт круг, следующий запрос лишь
+просит пройти ещё раз после него. Планировщик будит проверку каждые
+CHECK_TICK_MINUTES минут — так круги и идут один за другим.
+
+Запись. Строку водителя переписываем, когда у него что-то изменилось, а одно лишь
+время проверки — не чаще раза в STAMP_MINUTES: иначе круг переписывал бы десятки
+тысяч строк каждые несколько минут ради метки времени. Точное время последнего
+ответа Sapar держит память круга (seen_at): по ней строится очередь круга, её же
+показывает карточка водителя. Память живёт до перезапуска сервера.
 
 Проверка «сейчас» (check_now, владелец 11.10.2026: «подписавших не выдавать») —
 другое дело: её ждёт человек — оператор нажал «Ещё» или «Позвонить». Поэтому
 несколько водителей сразу, параллельно, с коротким таймаутом и жёстким сроком;
-не успели — выдача идёт как раньше, остальных проверит прогон. Sapar не ответил —
+не успели — выдача идёт как раньше, остальных проверит круг. Sapar не ответил —
 NOW_BACKOFF_SEC секунд её не пробуем: пока он лежит, каждый клик ждал бы таймаута.
 """
 import json
@@ -50,16 +64,26 @@ from . import driver_ids, month_base, signing
 
 log = logging.getLogger(__name__)
 
-# Запас к «раз в 3 часа»: проверка идёт каждые 30 минут, и водитель,
-# проверенный в 12:05, должен попасть в прогон 14:50, а не 15:20.
-RECHECK_SLACK_MINUTES = 15
-# Один прогон — не дольше этого: остаток доберёт следующий, через полчаса.
-RUN_BUDGET_SEC = 25 * 60
-RUN_MAX_LEADS = 20000
-# Sapar лежит: после стольких сетевых сбоев подряд прогон прекращается.
+# Круг: столько потоков спрашивают Sapar разом, у каждого своё соединение и пауза REQUEST_PAUSE_SEC между
+# запросами. Замеры 10.11.2026: запрос с сервера — ~0,125 с (сам Sapar отвечает за 16 мс, остальное — дорога),
+# три потока идут ровно втрое быстрее одного, 12 потоков с рабочей машины — 190 запросов в секунду без единого
+# отказа. Шесть потоков — ~34 запроса в секунду: 24 тыс. неподписавших списка обходятся за ~12 минут. Больше не
+# ставим из-за своего сервера: один запрос — 3–5 мс его процессора, 34 в секунду — уже 0,1–0,2 ядра из одного.
+PASS_LANES = 6
+# Страховки круга: больше водителей за круг не берём и дольше не идём (сеть повисла мимо таймаутов).
+PASS_MAX_LEADS = 100000
+PASS_BUDGET_SEC = 3 * 3600
+# Одно лишь время проверки (статус и документы прежние) переписываем в строке водителя не чаще раза в столько
+# минут — см. «Запись» в шапке.
+STAMP_MINUTES = 30
+# Запас к «раз в 3 часа» у истёкших: проверенный в 12:05 идёт в круг около 14:50, а не после 15:05.
+EXPIRED_SLACK_MINUTES = 15
+# Оценка конца круга по его скорости — не раньше, чем он проработал столько секунд (до этого — по прошлому кругу).
+CYCLE_ETA_MIN_SEC = 20
+# Sapar лежит: после стольких сетевых сбоев подряд круг прекращается.
 MAX_SYSTEMIC_ERRORS_IN_ROW = 5
 REQUEST_TIMEOUT_SEC = 10
-# Пауза между запросами: ~10 в секунду, чтобы не упереться в чужие лимиты.
+# Пауза между запросами одного потока: вместе с дорогой до Sapar это ~6 запросов в секунду на поток.
 REQUEST_PAUSE_SEC = 0.05
 WRITE_CHUNK = 200
 # Звонок в «живом» состоянии старше этого — зависший (телефон выключен, reconcile
@@ -68,10 +92,9 @@ IN_FLIGHT_MAX_AGE_MINUTES = 90
 # Проверка «сейчас» упёрлась в лежащий Sapar — столько секунд следующие не пробуем.
 NOW_BACKOFF_SEC = 30
 # Перепроверка перед отчётом о подписании (владелец, 20.10.2026: «до отправки показателей все данные
-# самые актуальные — начать собирать примерно за 30 минут до рассылки»). Последовательно водитель —
-# ~0,17 с (замер прода 19.10: 1 538 за 4 мин 20 с), 12 тыс. неподписавших в полчаса не уложились бы:
-# столько потоков, у каждого та же пауза между запросами. Проверка «сейчас» держит к Sapar 4.
-REFRESH_LANES = 3
+# самые актуальные — начать собирать примерно за 30 минут до рассылки»). С быстрым кругом ей остаются те, кого
+# круг не спросил за последние минуты (сервер перезапускался, база выросла), — теми же потоками, к сроку.
+REFRESH_LANES = PASS_LANES
 REFRESH_MAX_LEADS = 60000
 # ID водителя (driver_ids.py): Sapar не отдал список — следующая попытка не раньше: пока массовая ручка
 # лежит, каждый прогон ждал бы её таймаута.
@@ -133,6 +156,12 @@ class SignChecker:
         self.last_refresh = None
         # До какого момента (time.monotonic) проверку «сейчас» не пробуем: Sapar лежит.
         self._now_backoff_until = 0.0
+        # Память круга: id лида → когда Sapar последний раз по нему ответил (см. «Запись» в шапке).
+        self._seen = {}
+        # Круг для отсчёта в «Аналитике» (cycle_state): идёт ли, сколько водителей в нём и сколько спрошено,
+        # когда закончился последний полный и сколько он шёл (duration_sec на leads водителей).
+        self._cycle = {"running": False, "started_at": None, "total": 0, "done": 0,
+                       "finished_at": None, "duration_sec": 0.0, "leads": 0}
 
     def configured(self):
         """Есть ли доступ к Sapar (SAPAR_API в окружении сервера)."""
@@ -140,8 +169,9 @@ class SignChecker:
 
     # ------------------------------------------------------------ очередь
     def request(self, reason=""):
-        """Поставить прогон в свой поток, не дожидаясь его. Идёт прогон — после
-        него пройти ещё раз (новая база, пришедшая посреди прогона, не ждёт полчаса)."""
+        """Поставить круг в свой поток, не дожидаясь его. Идёт круг — после него
+        пройти ещё раз: так круги и идут один за другим (планировщик зовёт сюда каждые
+        CHECK_TICK_MINUTES минут), а новая база, пришедшая посреди круга, не ждёт."""
         with self._lock:
             if self._running:
                 self._again = True
@@ -188,7 +218,7 @@ class SignChecker:
                 log.exception("dial_list: проверка подписания упала (%s)",
                               refresh.get("reason") if refresh is not None else reason)
 
-    # ------------------------------------------------------------ прогон
+    # ------------------------------------------------------------ круг
     _DUE_SQL = """
         SELECT l.id, l.iin, l.period
         FROM dial_list_leads l
@@ -198,40 +228,51 @@ class SignChecker:
         ORDER BY l.sign_checked_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %(limit)s
     """
+    # Кому не пора: у кого срок подписания истёк. Подписать такой документ уже нельзя — спрашиваем по-старому, раз
+    # в EXPIRED_RECHECK_HOURS (вдруг Sapar срок продлит), и только в базе текущего месяца; в базе прошлого месяца
+    # истёкшие уже не изменятся — там круг ждёт лишь подписи Яндекса у тех, кто «на проверке».
+    _EXPIRED_DUE_SQL = ("AND (l.sign_status <> %(expired)s OR (l.period = %(to_period)s AND "
+                        "(l.sign_checked_at IS NULL OR l.sign_checked_at < %(expired_before)s)))")
 
-    def run(self, reason="", now=None, lead_ids=None, force=False, budget_sec=RUN_BUDGET_SEC):
-        """Проверить всех, кому пора, из баз текущего и прошлого месяца. lead_ids —
-        только этих, из базы любого месяца («Проверить сейчас» в карточке); force —
-        не глядя на время прошлой проверки. Возвращает сводку прогона."""
+    def run(self, reason="", now=None, lead_ids=None, force=False, budget_sec=None, lanes=PASS_LANES):
+        """Круг: спросить Sapar о неподписавших баз текущего и прошлого месяца (кого именно — шапка модуля и
+        _DUE_SQL) в `lanes` потоков. lead_ids — только об этих, из базы любого месяца, одним потоком («Проверить
+        сейчас» в карточке); force — и об истёкших, не глядя на время их прошлой проверки. `now` задают тесты:
+        тогда им помечены все записи; без него у каждого ответа Sapar своё время. Возвращает сводку."""
         summary = {"reason": reason, "checked": 0, "signed": 0, "errors": 0, "stopped": "",
                    "successes": 0, "closed_rows": 0}
+        cycle = lead_ids is None
         if not self.configured():
             log.warning("dial_list: проверка подписания пропущена — нет доступа к Sapar (SAPAR_API)")
             summary["stopped"] = "not_configured"
             self.last_run = summary
             return summary
+        fixed_now = now
         now = now or _utcnow()
-        if lead_ids is None:
-            # ID водителя — до проверки подписания: свежая база получает их сразу, а не после прогона по ней.
+        if cycle:
+            # ID водителя — до проверки подписания: свежая база получает их сразу, а не после круга по ней.
             self.sync_driver_ids(now)
         from_period, to_period = signing.check_window(now.astimezone(signing.PERIOD_TZ).date())
-        params = {"from_period": from_period, "to_period": to_period, "limit": RUN_MAX_LEADS,
-                  "due_before": now - timedelta(hours=signing.RECHECK_HOURS)
-                  + timedelta(minutes=RECHECK_SLACK_MINUTES)}
-        due_filter = "" if force else "AND (l.sign_checked_at IS NULL OR l.sign_checked_at < %(due_before)s)"
-        if lead_ids is not None:
+        params = {"from_period": from_period, "to_period": to_period, "limit": PASS_MAX_LEADS,
+                  "expired": signing.EXPIRED,
+                  "expired_before": now - timedelta(hours=signing.EXPIRED_RECHECK_HOURS)
+                  + timedelta(minutes=EXPIRED_SLACK_MINUTES)}
+        due_filter = "" if force else self._EXPIRED_DUE_SQL
+        if cycle:
+            # Исключённых не из списка месяца (month_base, 10.11.2026) не проверяем: их нет в базе месяца, а это
+            # тысячи лишних запросов в Sapar. «Проверить сейчас» по водителю (lead_ids) — для любого.
+            scope = ("AND l.period BETWEEN %(from_period)s AND %(to_period)s AND "
+                     + month_base.in_month_base_sql("l"))
+        else:
             params["lead_ids"] = [str(x) for x in lead_ids]
             scope = "AND l.id = ANY(%(lead_ids)s::uuid[])"
             if not params["lead_ids"]:
                 return summary
-        else:
-            # Исключённых не из списка месяца (month_base, 10.11.2026) не проверяем: их нет в базе месяца, а это
-            # тысячи лишних запросов в Sapar каждые три часа. «Проверить сейчас» по водителю (lead_ids) — для любого.
-            scope = ("AND l.period BETWEEN %(from_period)s AND %(to_period)s AND "
-                     + month_base.in_month_base_sql("l"))
         with self.db._get_cursor() as cur:
             cur.execute(self._DUE_SQL.format(due=due_filter, scope=scope), params)
             due = cur.fetchall()
+        if cycle:
+            due = self._cycle_begin(due, now)
         # (ИИН, месяц документов) → строки: один водитель в двух базах одного
         # месяца документов (разные отделы) — один запрос.
         groups = OrderedDict()
@@ -239,57 +280,178 @@ class SignChecker:
             groups.setdefault((str(iin), signing.doc_month_for(period)), []).append(str(lead_id))
 
         started = time.monotonic()
-        session = _new_session()
-        pending, newly_signed = [], []
-        systemic_in_row = 0
-        first = True
         try:
-            for (iin, (month, year)), ids in groups.items():
-                if time.monotonic() - started > budget_sec:
-                    summary["stopped"] = "budget"
-                    break
-                if not first and REQUEST_PAUSE_SEC:
-                    self._sleep(REQUEST_PAUSE_SEC)
-                first = False
-                result = self._fetch(iin, month, year, session=session)
+            # «Проверить сейчас» в карточке — время проверки пишем всегда: человек только что спросил сам.
+            newly_signed = self._ask(groups, summary, fixed_now, lanes=lanes if cycle else 1,
+                                     end=started + (PASS_BUDGET_SEC if budget_sec is None else budget_sec),
+                                     end_reason="budget", cycle=cycle, sparse=cycle)
+        except Exception:
+            summary["stopped"] = summary["stopped"] or "error"
+            raise
+        finally:
+            summary["elapsed_sec"] = round(time.monotonic() - started, 1)
+            if cycle:
+                self._cycle_end(summary, len(due), fixed_now or _utcnow())
+        summary["signed"] = len(newly_signed)
+        summary["closed_rows"] = self.close_signed_rows(newly_signed)
+        summary["successes"] = self.resolve_successes(fixed_now or _utcnow())
+        if due or summary["stopped"]:
+            log.info("dial_list: проверка подписания (%s): к проверке %d, проверено %d, подписали %d, "
+                     "успешек %d, снято со списков %d, ошибок %d, потоков %d, за %.0f с%s", reason, len(due),
+                     summary["checked"], summary["signed"], summary["successes"], summary["closed_rows"],
+                     summary["errors"], summary["lanes"], summary["elapsed_sec"],
+                     f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
+        if cycle:
+            self.last_run = summary
+            if summary["stopped"] == "refresh":
+                # Уступили перепроверке перед отчётом — после неё круг продолжается сам, не дожидаясь планировщика.
+                with self._lock:
+                    self._again = True
+        return summary
+
+    def _cycle_begin(self, due, now):
+        """Начало круга → `due` в порядке «кого дольше всех не спрашивали». В строке базы время проверки
+        переписывается не каждый круг, точное помнит память круга: о ком она не знает (сервер перезапускался,
+        новая база) — первыми, в порядке запроса (по времени из базы), остальные — по времени из памяти.
+        Заодно память забывает тех, кого в круге уже нет (подписали, исключены), а счётчик круга обнуляется."""
+        seen = self._seen
+        self._seen = seen = {lid: seen[lid] for lid in (str(row[0]) for row in due) if lid in seen}
+        never = datetime.min.replace(tzinfo=timezone.utc)
+        due = sorted(due, key=lambda row: seen.get(str(row[0]), never))     # сортировка устойчивая
+        self._cycle.update(running=True, started_at=now, total=len(due), done=0)
+        return due
+
+    def _cycle_end(self, summary, leads, now):
+        """Конец круга. Полным считается круг, спросивший всех: его конец — «обновлено» в «Аналитике», его
+        длительность — оценка следующего. Остановленный (Sapar лежит, уступил перепроверке) ничего не меняет."""
+        self._cycle["running"] = False
+        if not summary["stopped"]:
+            self._cycle.update(finished_at=now, duration_sec=summary["elapsed_sec"], leads=leads)
+
+    def cycle_state(self, now=None):
+        """Круг для отсчёта в «Аналитике» → {running, total, done, finished_at, eta_at}: идёт ли, сколько в нём
+        водителей и сколько спрошено, когда закончился последний полный круг и когда закончится следующий.
+        Оценка конца: идёт круг — по его скорости (в первые секунды — по длительности прошлого); круг вот-вот
+        начнётся (поток проверки занят: пауза между кругами, перепроверка перед отчётом) — длительность прошлого
+        от сейчас; поток свободен — она же от ближайшего запуска планировщика. Неоткуда оценить — None.
+        Моменты — aware."""
+        now = now or _utcnow()
+        cycle = dict(self._cycle)
+        expected = None      # сколько секунд займёт круг — по прошлому полному, с поправкой на число водителей
+        if cycle["leads"] and cycle["duration_sec"]:
+            leads = cycle["total"] if cycle["running"] else cycle["leads"]
+            expected = timedelta(seconds=cycle["duration_sec"] * leads / cycle["leads"])
+        eta = None
+        if cycle["running"] and cycle["started_at"] is not None:
+            elapsed = (now - cycle["started_at"]).total_seconds()
+            if cycle["done"] and elapsed >= CYCLE_ETA_MIN_SEC:
+                eta = now + timedelta(seconds=max(0, cycle["total"] - cycle["done"]) * elapsed / cycle["done"])
+            elif expected is not None:
+                eta = max(now, cycle["started_at"] + expected)
+        elif self._running:
+            eta = now + expected if expected is not None else None
+        else:
+            eta = signing.next_check_tick(now) + (expected or timedelta(0))
+        return {"running": bool(cycle["running"]), "total": cycle["total"], "done": cycle["done"],
+                "finished_at": cycle["finished_at"], "eta_at": eta}
+
+    def seen_at(self, lead_id, stored=None):
+        """Когда Sapar последний раз ответил по водителю: позднее из записанного в строке (`stored`) и того, что
+        помнит круг. В строке время переписывается не каждый круг (STAMP_MINUTES); память точнее, но живёт до
+        перезапуска сервера."""
+        seen = self._seen.get(str(lead_id))
+        if seen is None or stored is None:
+            return seen or stored
+        if stored.tzinfo is None:
+            stored = stored.replace(tzinfo=timezone.utc)
+        return max(stored, seen)
+
+    # ------------------------------------------------------------ запросы к Sapar
+    def _ask(self, groups, summary, fixed_now, *, lanes, end, end_reason, cycle=False, sparse=True):
+        """Спросить Sapar обо всех `groups` {(ИИН, (месяц, год) документов): [id лидов]} в `lanes` потоков и
+        записать ответы пачками (_write; sparse — см. там). У каждого потока свой requests.Session и пауза
+        между запросами. `end` (time.monotonic) — после него новых запросов нет; что осталось неспрошенным —
+        summary["stopped"] = end_reason. MAX_SYSTEMIC_ERRORS_IN_ROW сетевых сбоев подряд — Sapar лежит,
+        остановка. cycle — это круг: ведём его счётчик и уступаем перепроверке перед отчётом, как только её
+        поставили (у неё срок, а круг потом продолжится). fixed_now — время для всех записей (тесты); без него у
+        каждого ответа своё. Наполняет summary (checked, errors, lanes, stopped) → id подписавших."""
+        work, answers, stop = queue.Queue(), queue.Queue(), threading.Event()
+        for key in groups:
+            work.put(key)
+        lanes = max(1, min(int(lanes), len(groups) or 1))
+
+        def lane():
+            session = _new_session()
+            first = True
+            try:
+                while not stop.is_set() and time.monotonic() < end:
+                    try:
+                        key = work.get_nowait()
+                    except queue.Empty:
+                        return
+                    if not first and REQUEST_PAUSE_SEC:
+                        self._sleep(REQUEST_PAUSE_SEC)
+                    first = False
+                    iin, (month, year) = key
+                    try:
+                        result = self._fetch(iin, month, year, session=session)
+                    except Exception as exc:  # sapar.driver_documents не бросает, подменённый fetch — может
+                        result = {"ok": False, "error": str(exc), "systemic": True}
+                    answers.put((key, result))
+            finally:
+                if session is not None:
+                    session.close()
+                answers.put(None)
+
+        threads = [threading.Thread(target=lane, name="dial-sign-lane-%d" % i, daemon=True)
+                   for i in range(lanes)] if groups else []
+        summary["lanes"] = len(threads)
+        for thread in threads:
+            thread.start()
+        pending, newly_signed = [], []
+        systemic_in_row, finished = 0, 0
+        try:
+            while finished < len(threads):
+                item = answers.get()
+                if item is None:
+                    finished += 1
+                    continue
+                key, result = item
+                ids = groups[key]
+                at = fixed_now or _utcnow()
+                if cycle:
+                    self._cycle["done"] += len(ids)
                 if not result.get("ok"):
                     summary["errors"] += len(ids)
                     error = str(result.get("error") or "Sapar не ответил")[:300]
-                    pending.extend(("error", lid, error, bool(result.get("systemic"))) for lid in ids)
+                    pending.extend(("error", lid, error, bool(result.get("systemic")), at) for lid in ids)
                     if result.get("systemic"):
                         systemic_in_row += 1
-                        if systemic_in_row >= MAX_SYSTEMIC_ERRORS_IN_ROW:
+                        if systemic_in_row >= MAX_SYSTEMIC_ERRORS_IN_ROW and not stop.is_set():
                             summary["stopped"] = "sapar_unavailable"
-                            break
+                            stop.set()
                     continue
                 systemic_in_row = 0
-                documents = result.get("yandex") or []
-                code, docs_json, signed_at = _package_verdict(documents, now)
+                code, docs_json, signed_at = _package_verdict(result.get("yandex") or [], at)
                 for lid in ids:
-                    pending.append(("ok", lid, code, docs_json, signed_at))
+                    pending.append(("ok", lid, code, docs_json, signed_at, at))
                     summary["checked"] += 1
+                    self._seen[lid] = at
                     if signed_at is not None:
                         newly_signed.append(lid)
                 if len(pending) >= WRITE_CHUNK:
-                    self._write(pending, now)
+                    self._write(pending, at, sparse)
                     pending = []
+                if cycle and self._refresh is not None and not stop.is_set():
+                    summary["stopped"] = "refresh"
+                    stop.set()
         finally:
+            stop.set()
             if pending:
-                self._write(pending, now)
-            if session is not None:
-                session.close()
-        summary["signed"] = len(newly_signed)
-        summary["closed_rows"] = self.close_signed_rows(newly_signed)
-        summary["successes"] = self.resolve_successes(now)
-        summary["elapsed_sec"] = round(time.monotonic() - started, 1)
-        if due or summary["stopped"]:
-            log.info("dial_list: проверка подписания (%s): к проверке %d, проверено %d, подписали %d, "
-                     "успешек %d, снято со списков %d, ошибок %d%s", reason, len(due), summary["checked"],
-                     summary["signed"], summary["successes"], summary["closed_rows"], summary["errors"],
-                     f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
-        if lead_ids is None:
-            self.last_run = summary
-        return summary
+                self._write(pending, fixed_now or _utcnow(), sparse)
+        if not summary["stopped"] and not work.empty():
+            summary["stopped"] = end_reason
+        return newly_signed
 
     # ------------------------------------------------------------ ID водителя
     def sync_driver_ids(self, now=None, force=False):
@@ -325,12 +487,12 @@ class SignChecker:
     """
 
     def refresh(self, bases, fresh_before, deadline, reason="", now=None, lanes=REFRESH_LANES):
-        """Перепроверить к отчёту всех неподписавших баз `bases` [(department_id, period)], кого
-        проверяли раньше fresh_before (момент, aware): в отчёте статусы на время рассылки, а не
-        трёхчасовой давности. deadline (aware) — после него новых запросов нет, отчёт уходит с тем,
-        что успели. Как прогон: один запрос на пару (ИИН, месяц документов), итог пачками (_write),
-        подписавшие снимаются со списков, по ним решается успешка; Sapar лежит — остановка. Запросы —
-        в `lanes` потоков, у каждого свой requests.Session и та же пауза, что у прогона."""
+        """Перепроверить к отчёту неподписавших баз `bases` [(department_id, period)], кого не спрашивали
+        после fresh_before (момент, aware): в отчёте статусы на время рассылки. deadline (aware) — после него
+        новых запросов нет, отчёт уходит с тем, что успели. Как круг: один запрос на пару (ИИН, месяц
+        документов) в `lanes` потоков, итог пачками (_write), подписавшие снимаются со списков, по ним решается
+        успешка; Sapar лежит — остановка. Круг идёт каждые несколько минут, поэтому обычно спрашивать почти
+        некого: работа есть после перезапуска сервера и когда база больше, чем круг успевает обойти."""
         summary = {"reason": reason, "refresh": True, "due": 0, "checked": 0, "signed": 0, "errors": 0,
                    "stopped": "", "successes": 0, "closed_rows": 0}
         if not self.configured():
@@ -342,6 +504,7 @@ class SignChecker:
         if not bases:
             self.last_refresh = summary
             return summary
+        fixed_now = now
         now = now or _utcnow()
         params = {"fresh_before": fresh_before, "limit": REFRESH_MAX_LEADS}
         clauses = []
@@ -351,89 +514,26 @@ class SignChecker:
         with self.db._get_cursor() as cur:
             cur.execute(self._REFRESH_SQL.format(bases=" OR ".join(clauses)), params)
             due = cur.fetchall()
+        # В строке время проверки переписывается не каждый круг (STAMP_MINUTES) — кого круг на самом деле
+        # спросил после fresh_before, знает его память.
+        seen = self._seen
+        due = [row for row in due if str(row[0]) not in seen or seen[str(row[0])] < fresh_before]
         summary["due"] = len(due)
         groups = OrderedDict()
         for lead_id, iin, period in due:
             groups.setdefault((str(iin), signing.doc_month_for(period)), []).append(str(lead_id))
 
         started = time.monotonic()
-        end = started + max(0.0, (deadline - now).total_seconds())
-        work, answers, stop = queue.Queue(), queue.Queue(), threading.Event()
-        for key in groups:
-            work.put(key)
-        lanes = max(1, min(int(lanes), len(groups) or 1))
-
-        def lane():
-            session = _new_session()
-            first = True
-            try:
-                while not stop.is_set() and time.monotonic() < end:
-                    try:
-                        key = work.get_nowait()
-                    except queue.Empty:
-                        return
-                    if not first and REQUEST_PAUSE_SEC:
-                        self._sleep(REQUEST_PAUSE_SEC)
-                    first = False
-                    iin, (month, year) = key
-                    try:
-                        result = self._fetch(iin, month, year, session=session)
-                    except Exception as exc:  # sapar.driver_documents не бросает, подменённый fetch — может
-                        result = {"ok": False, "error": str(exc), "systemic": True}
-                    answers.put((key, result))
-            finally:
-                if session is not None:
-                    session.close()
-                answers.put(None)
-
-        threads = [threading.Thread(target=lane, name="dial-sign-refresh-%d" % i, daemon=True)
-                   for i in range(lanes)] if groups else []
-        for thread in threads:
-            thread.start()
-        pending, newly_signed = [], []
-        systemic_in_row, finished = 0, 0
-        try:
-            while finished < len(threads):
-                item = answers.get()
-                if item is None:
-                    finished += 1
-                    continue
-                key, result = item
-                ids = groups[key]
-                if not result.get("ok"):
-                    summary["errors"] += len(ids)
-                    error = str(result.get("error") or "Sapar не ответил")[:300]
-                    pending.extend(("error", lid, error, bool(result.get("systemic"))) for lid in ids)
-                    if result.get("systemic"):
-                        systemic_in_row += 1
-                        if systemic_in_row >= MAX_SYSTEMIC_ERRORS_IN_ROW and not stop.is_set():
-                            summary["stopped"] = "sapar_unavailable"
-                            stop.set()
-                    continue
-                systemic_in_row = 0
-                code, docs_json, signed_at = _package_verdict(result.get("yandex") or [], now)
-                for lid in ids:
-                    pending.append(("ok", lid, code, docs_json, signed_at))
-                    summary["checked"] += 1
-                    if signed_at is not None:
-                        newly_signed.append(lid)
-                if len(pending) >= WRITE_CHUNK:
-                    self._write(pending, now)
-                    pending = []
-        finally:
-            stop.set()
-            if pending:
-                self._write(pending, now)
-        if not summary["stopped"] and not work.empty():
-            summary["stopped"] = "deadline"
+        newly_signed = self._ask(groups, summary, fixed_now, lanes=lanes,
+                                 end=started + max(0.0, (deadline - now).total_seconds()), end_reason="deadline")
         summary["signed"] = len(newly_signed)
         summary["closed_rows"] = self.close_signed_rows(newly_signed)
-        summary["successes"] = self.resolve_successes(now)
+        summary["successes"] = self.resolve_successes(fixed_now or _utcnow())
         summary["elapsed_sec"] = round(time.monotonic() - started, 1)
         log.info("dial_list: перепроверка подписания перед отчётом (%s): к проверке %d, проверено %d, подписали %d, "
                  "успешек %d, снято со списков %d, ошибок %d, потоков %d, за %.0f с%s", reason, len(due),
                  summary["checked"], summary["signed"], summary["successes"], summary["closed_rows"],
-                 summary["errors"], len(threads), summary["elapsed_sec"],
+                 summary["errors"], summary["lanes"], summary["elapsed_sec"],
                  f", остановлена: {summary['stopped']}" if summary["stopped"] else "")
         self.last_refresh = summary
         return summary
@@ -525,6 +625,7 @@ class SignChecker:
                 for lid in ids:
                     pending.append(("ok", lid, code, docs_json, signed_at))
                     summary["checked"] += 1
+                    self._seen[lid] = now
                     if signed_at is not None:
                         summary["signed"].append(lid)
                     elif code == signing.PROCESSING:
@@ -540,12 +641,28 @@ class SignChecker:
         summary["elapsed_sec"] = round(time.monotonic() - started, 1)
         return summary
 
-    def _write(self, items, now):
-        """Итоги Sapar → строки лидов. Подписавшего не трогаем повторно (signed_at
-        только ставится). Сетевой сбой не сдвигает время проверки: такой водитель
-        снова «пора» в следующем прогоне; отказ Sapar по конкретному ИИН — сдвигает."""
-        ok = [(i[1], i[2], i[3], i[4], now) for i in items if i[0] == "ok"]
-        errors = [(i[1], i[2], i[3], now) for i in items if i[0] == "error"]
+    # Запись круга (sparse): строку переписываем, только если есть что писать, — водитель подписал, сменился
+    # статус или документы, была ошибка, проверяли впервые — либо времени проверки в строке уже STAMP_MINUTES.
+    # Круг спрашивает каждого раз в несколько минут, и почти всегда ответ тот же: без этого условия он переписывал
+    # бы все строки базы каждый круг ради одной метки времени.
+    _SPARSE_OK_SQL = """
+                      AND (v.signed_at IS NOT NULL OR l.sign_status <> v.code OR l.sign_docs <> v.docs
+                           OR l.sign_error <> '' OR l.sign_checked_at IS NULL
+                           OR l.sign_checked_at < v.now - make_interval(mins => {minutes}))
+    """.format(minutes=STAMP_MINUTES)
+    _SPARSE_ERROR_SQL = """
+                      AND (l.sign_error <> v.error OR (NOT v.systemic AND (l.sign_checked_at IS NULL
+                           OR l.sign_checked_at < v.now - make_interval(mins => {minutes}))))
+    """.format(minutes=STAMP_MINUTES)
+
+    def _write(self, items, now, sparse=False):
+        """Ответы Sapar → строки лидов. Запись — ("ok", id, статус, документы, момент подписи) или ("error", id,
+        текст, сетевой ли сбой); последним может идти время ответа, без него — `now`. Подписавшего не трогаем
+        повторно (signed_at только ставится). Сетевой сбой не сдвигает время проверки; отказ Sapar по конкретному
+        ИИН — сдвигает. sparse — запись круга: только если есть что писать (_SPARSE_OK_SQL). Проверка «сейчас» и
+        «Проверить сейчас» в карточке пишут время всегда: по нему видно, что человек только что спросил."""
+        ok = [(i[1], i[2], i[3], i[4], i[5] if len(i) > 5 else now) for i in items if i[0] == "ok"]
+        errors = [(i[1], i[2], i[3], i[4] if len(i) > 4 else now) for i in items if i[0] == "error"]
         with self.db._get_cursor() as cur:
             if ok:
                 execute_values(cur, """
@@ -560,8 +677,8 @@ class SignChecker:
                                           ELSE l.updated_at END
                     FROM (VALUES %s) AS v(id, code, docs, signed_at, now)
                     WHERE l.id = v.id AND l.signed_at IS NULL
-                """, ok, template="(%s::uuid, %s, %s::jsonb, %s::timestamptz, %s::timestamptz)",
-                    page_size=WRITE_CHUNK)
+                """ + (self._SPARSE_OK_SQL if sparse else ""), ok,
+                    template="(%s::uuid, %s, %s::jsonb, %s::timestamptz, %s::timestamptz)", page_size=WRITE_CHUNK)
             if errors:
                 execute_values(cur, """
                     UPDATE dial_list_leads l
@@ -569,7 +686,8 @@ class SignChecker:
                         sign_checked_at = CASE WHEN v.systemic THEN l.sign_checked_at ELSE v.now END
                     FROM (VALUES %s) AS v(id, error, systemic, now)
                     WHERE l.id = v.id AND l.signed_at IS NULL
-                """, errors, template="(%s::uuid, %s, %s::boolean, %s::timestamptz)", page_size=WRITE_CHUNK)
+                """ + (self._SPARSE_ERROR_SQL if sparse else ""), errors,
+                    template="(%s::uuid, %s, %s::boolean, %s::timestamptz)", page_size=WRITE_CHUNK)
 
     # ------------------------------------------------------------ успешки
     # Сообщение сети «абонент недоступен», плечо на котором положил сам телефон

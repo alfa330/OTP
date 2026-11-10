@@ -58445,9 +58445,10 @@ if __name__ == '__main__':
             logging.exception(f"Error running tez_op_successes_job: {e}")
 
     async def dial_list_sign_check_job():
-        # «Обзвон»: подписали ли водители базы документы (Sapar). Джоба лишь ставит
-        # прогон в собственный поток раздела на одно место и ничего не ждёт; каждого
-        # водителя прогон перепроверяет раз в 3 часа (dial_list/sign_check.py).
+        # «Удаленный КЦ»: подписали ли водители базы документы (Sapar). Джоба лишь ставит круг
+        # проверки в собственный поток раздела и ничего не ждёт. Идёт круг — он пройдёт ещё раз
+        # сразу за собой: круги идут один за другим (владелец, 10.11.2026: «максимально
+        # быстро»; до этого каждого водителя спрашивали раз в 3 часа; dial_list/sign_check.py).
         try:
             if _dial_list_service is not None:
                 _dial_list_service.request_sign_check('планировщик')
@@ -58589,16 +58590,19 @@ if __name__ == '__main__':
         coalesce=True
     )
 
-    # «Обзвон»: проверка подписания документов по базам (Sapar) — каждые полчаса,
-    # в стороне от :05/:35 и :12/:42. Кому пора (проверен ≥ 3 ч назад или ни разу),
-    # решает сам раздел; без SAPAR_API прогон — no-op с предупреждением в логе.
+    # «Удаленный КЦ»: проверка подписания документов по базам (Sapar) — будим каждые 5 минут
+    # (то же число — dial_list/signing.py::CHECK_TICK_MINUTES, по нему идёт отсчёт в «Аналитике»)
+    # и раз при старте: перезапуск сервера обрывает идущий круг, новый должен начаться сразу, а
+    # не через несколько минут. Пока круг идёт, запуск лишь просит пройти ещё раз после него.
+    # Без SAPAR_API круг — no-op с предупреждением в логе.
     scheduler.add_job(
         dial_list_sign_check_job,
-        CronTrigger(minute='20,50', timezone=ZoneInfo('Asia/Almaty')),
+        CronTrigger(minute='*/5', timezone=ZoneInfo('Asia/Almaty')),
         id='dial_list_sign_check',
-        misfire_grace_time=600,
+        misfire_grace_time=120,
         max_instances=1,
-        coalesce=True
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')),
     )
 
     # «Удаленный КЦ»: отчёт «Подписание водителей по городам» в выбранные группы — в 10:00 и

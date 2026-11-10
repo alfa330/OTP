@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common import leads_file  # noqa: E402
 from dial_list import analytics as dial_analytics  # noqa: E402
+from dial_list import month_base  # noqa: E402
 from dial_list import routes as dial_routes  # noqa: E402
 from dial_list import schema as dial_schema  # noqa: E402
 from dial_list import service as dial_service  # noqa: E402
@@ -68,10 +69,12 @@ class AggregateStatusTests(unittest.TestCase):
         self.assertEqual(signing.aggregate([_doc('Подписано'), _doc('НовыйСтатус')]), signing.UNSIGNED)
 
     def test_park_documents_do_not_count(self):
-        # Решают только документы Яндекса: у прогона в руках yandex, АВР парка он не читает.
-        src = inspect.getsource(sign_check.SignChecker.run)
+        # Решают только документы Яндекса: у круга в руках yandex, АВР парка он не читает. Ответы Sapar
+        # разбирает _ask — он один у круга, у «Проверить сейчас» в карточке и у перепроверки перед отчётом.
+        src = inspect.getsource(sign_check.SignChecker._ask)
         self.assertIn('result.get("yandex")', src)
-        self.assertNotIn('park', src)
+        for method in (sign_check.SignChecker._ask, sign_check.SignChecker.run, sign_check.SignChecker.refresh):
+            self.assertNotIn('park', inspect.getsource(method))
 
 
 class SignMomentTests(unittest.TestCase):
@@ -111,7 +114,24 @@ class DocumentMonthTests(unittest.TestCase):
 
     def test_owner_numbers(self):
         self.assertEqual(signing.SUCCESS_MIN_BILLSEC, 10)
-        self.assertEqual(signing.RECHECK_HOURS, 3)
+        # С 10.11.2026 «раз в 3 часа» — только у тех, у кого срок подписания истёк; остальные — по кругу.
+        self.assertEqual(signing.EXPIRED_RECHECK_HOURS, 3)
+        self.assertFalse(hasattr(signing, 'RECHECK_HOURS'))
+
+    def test_next_check_tick_is_the_next_scheduler_minute(self):
+        self.assertEqual(signing.CHECK_TICK_MINUTES, 5)
+        utc = timezone.utc
+        for now, tick in (
+                (datetime(2026, 11, 10, 14, 7, 30, tzinfo=utc), datetime(2026, 11, 10, 14, 10, tzinfo=utc)),
+                (datetime(2026, 11, 10, 14, 9, 59, 999999, tzinfo=utc), datetime(2026, 11, 10, 14, 10, tzinfo=utc)),
+                # Ровно в минуту запуска — следующий: этот уже идёт.
+                (datetime(2026, 11, 10, 14, 10, tzinfo=utc), datetime(2026, 11, 10, 14, 15, tzinfo=utc)),
+                (datetime(2026, 11, 10, 23, 58, 1, tzinfo=utc), datetime(2026, 11, 11, 0, 0, tzinfo=utc)),
+        ):
+            self.assertEqual(signing.next_check_tick(now), tick, now)
+        # По Алматы (+5) минуты те же: пояс — целые часы.
+        almaty = datetime(2026, 11, 10, 19, 7, tzinfo=signing.PERIOD_TZ)
+        self.assertEqual(signing.next_check_tick(almaty), datetime(2026, 11, 10, 19, 10, tzinfo=signing.PERIOD_TZ))
 
     def test_status_code_for_row(self):
         now = datetime.now(timezone.utc)
@@ -338,6 +358,12 @@ class _FakeCursor:
 
 
 class SignCheckRunTests(unittest.TestCase):
+    """Круг проверки подписания (владелец, 10.11.2026: «проверять только тех, кто в списке, способом, который
+    показывает статусы точно, и максимально быстро»): все неподписавшие базы по кругу, в несколько потоков.
+    Sapar и курсор подставные, потоки настоящие."""
+
+    NOW = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+
     def _checker(self, due, fetch, configured=True):
         cur = _FakeCursor(due)
 
@@ -348,10 +374,23 @@ class SignCheckRunTests(unittest.TestCase):
         db = type('Db', (), {'_get_cursor': staticmethod(cursor)})()
         written = []
         checker = sign_check.SignChecker(db, fetch=fetch, configured=lambda: configured, sleep=lambda s: None)
-        checker._write = lambda items, now: written.extend(items)
+        checker.write_modes = []
+
+        def write(items, now, sparse=False):
+            written.extend(items)
+            checker.write_modes.append(sparse)
+
+        checker._write = write
         checker.close_signed_rows = lambda ids: len(ids)
         checker.resolve_successes = lambda now=None, lead_ids=None: 0
+        # ID водителей — своя сверка (driver_ids.py); здесь видно только, что круг её зовёт.
+        checker.ids_synced = []
+        checker.sync_driver_ids = lambda now=None, force=False: checker.ids_synced.append(now)
         return checker, written, cur
+
+    @staticmethod
+    def _unsigned(*args, **kwargs):
+        return {'ok': True, 'yandex': [_doc('НаПодписанииУВодителя')]}
 
     def test_not_configured_does_nothing(self):
         calls = []
@@ -368,34 +407,228 @@ class SignCheckRunTests(unittest.TestCase):
 
         due = [('l1', VALID, date(2026, 9, 1)), ('l2', VALID, date(2026, 9, 1)), ('l3', VALID, date(2026, 8, 1))]
         checker, written, _ = self._checker(due, fetch)
-        summary = checker.run(now=datetime(2026, 9, 29, 12, tzinfo=timezone.utc))
-        self.assertEqual(calls, [(VALID, 8, 2026), (VALID, 7, 2026)])
+        summary = checker.run(now=self.NOW)
+        self.assertEqual(sorted(calls), [(VALID, 7, 2026), (VALID, 8, 2026)])
         self.assertEqual(summary['signed'], 3)
         self.assertEqual({w[1] for w in written}, {'l1', 'l2', 'l3'})
+        self.assertEqual(checker.ids_synced, [self.NOW])        # ID водителей — в начале круга
 
-    def test_sapar_down_stops_the_run_and_keeps_check_time(self):
+    def test_sapar_down_stops_the_cycle_and_keeps_check_time(self):
         calls = []
 
         def fetch(iin, month, year, session=None):
             calls.append(iin)
+            time.sleep(0.02)                     # настоящий запрос идёт не мгновенно
             return {'ok': False, 'error': 'timeout', 'systemic': True}
 
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(20)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(60)]
         checker, written, _ = self._checker(due, fetch)
-        summary = checker.run(now=datetime(2026, 9, 29, 12, tzinfo=timezone.utc))
-        self.assertEqual(len(calls), sign_check.MAX_SYSTEMIC_ERRORS_IN_ROW)
+        summary = checker.run(now=self.NOW)
         self.assertEqual(summary['stopped'], 'sapar_unavailable')
+        # Остановка — после MAX_SYSTEMIC_ERRORS_IN_ROW сбоев подряд; запросы, уже ушедшие в других потоках,
+        # дорабатывают, новых нет.
+        self.assertGreaterEqual(len(calls), sign_check.MAX_SYSTEMIC_ERRORS_IN_ROW)
+        self.assertLessEqual(len(calls), sign_check.MAX_SYSTEMIC_ERRORS_IN_ROW + 2 * sign_check.PASS_LANES)
+        self.assertEqual(len(written), len(calls))
         self.assertTrue(all(w[0] == 'error' and w[3] is True for w in written))
-        # Сетевой сбой не сдвигает время проверки — водитель снова «пора» через полчаса.
+        # Сетевой сбой не сдвигает время проверки.
         write_src = inspect.getsource(sign_check.SignChecker._write)
         self.assertIn('CASE WHEN v.systemic THEN l.sign_checked_at ELSE v.now END', write_src)
+        # Круг, не спросивший всех, полным не считается: «обновлено» в «Аналитике» не сдвигается.
+        self.assertIsNone(checker.cycle_state(self.NOW)['finished_at'])
 
-    def test_due_rule_every_three_hours_and_manual_check_ignores_it(self):
-        due_sql = sign_check.SignChecker._DUE_SQL
-        self.assertIn('l.signed_at IS NULL', due_sql)
-        run = inspect.getsource(sign_check.SignChecker.run)
-        self.assertIn('due_filter = "" if force else', run)
-        self.assertIn('l.period BETWEEN %(from_period)s AND %(to_period)s', run)
+    def test_cycle_asks_everyone_and_expired_every_three_hours_in_the_current_base(self):
+        checker, _, cur = self._checker([], self._unsigned)
+        checker.run(now=self.NOW)
+        sql, params = cur.sql[0]
+        flat = ' '.join(sql.split())
+        self.assertIn("WHERE l.iin <> '' AND l.signed_at IS NULL", flat)
+        # Истёкшие (подписать уже нельзя) — только в базе текущего месяца и не чаще раза в 3 часа; остальные —
+        # каждый круг: условия на время прошлой проверки у них нет.
+        self.assertIn('AND (l.sign_status <> %(expired)s OR (l.period = %(to_period)s AND '
+                      '(l.sign_checked_at IS NULL OR l.sign_checked_at < %(expired_before)s)))', flat)
+        self.assertIn('AND l.period BETWEEN %(from_period)s AND %(to_period)s AND '
+                      + month_base.in_month_base_sql('l'), flat)
+        self.assertIn('ORDER BY l.sign_checked_at ASC NULLS FIRST, l.created_at ASC', flat)
+        self.assertEqual((params['expired'], params['from_period'], params['to_period'], params['limit']),
+                         (signing.EXPIRED, date(2026, 8, 1), date(2026, 9, 1), sign_check.PASS_MAX_LEADS))
+        self.assertEqual(params['expired_before'], self.NOW - timedelta(hours=3) + timedelta(minutes=15))
+        self.assertEqual(flat.count('sign_checked_at <'), 1)
+        self.assertNotIn('due_before', params)          # прежнего «каждого — раз в 3 часа» больше нет
+
+        # «Проверить сейчас» в карточке: этот водитель из базы любого месяца, истёкший — тоже.
+        checker, _, cur = self._checker([], self._unsigned)
+        checker.run(now=self.NOW, lead_ids=['l1'], force=True)
+        sql, params = cur.sql[0]
+        flat = ' '.join(sql.split())
+        self.assertIn("WHERE l.iin <> '' AND l.signed_at IS NULL AND l.id = ANY(%(lead_ids)s::uuid[]) ORDER BY", flat)
+        self.assertEqual(params['lead_ids'], ['l1'])
+        self.assertEqual(checker.ids_synced, [])        # сверка ID — дело круга
+
+    def test_cycle_order_is_longest_unasked_first(self):
+        calls = []
+
+        def fetch(iin, month, year, session=None):
+            calls.append(iin)
+            return self._unsigned()
+
+        # Порядок запроса — по времени проверки из базы; оно переписывается не каждый круг.
+        due = [(f'l{i}', f'iin-{i}', date(2026, 9, 1)) for i in range(1, 6)]
+        checker, _, _ = self._checker(due, fetch)
+        checker._seen = {'l1': self.NOW - timedelta(minutes=1), 'l3': self.NOW - timedelta(minutes=9),
+                         'l4': self.NOW - timedelta(minutes=5), 'gone': self.NOW - timedelta(minutes=30)}
+        checker.run(now=self.NOW, lanes=1)
+        # О ком память круга не знает (l2, l5) — первыми, в порядке запроса; остальные — кого дольше не спрашивали.
+        self.assertEqual(calls, ['iin-2', 'iin-5', 'iin-3', 'iin-4', 'iin-1'])
+        # Спрошенные помнятся на сейчас; кого в круге уже нет (подписал, исключён) — забыт.
+        self.assertEqual(checker._seen, {f'l{i}': self.NOW for i in range(1, 6)})
+
+    def test_cycle_runs_in_parallel_lanes_and_card_check_in_one(self):
+        lock, active, peak = threading.Lock(), [0], [0]
+
+        def fetch(iin, month, year, session=None):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.01)
+            with lock:
+                active[0] -= 1
+            return self._unsigned()
+
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(60)]
+        checker, written, _ = self._checker(due, fetch)
+        summary = checker.run(now=self.NOW)
+        self.assertEqual(sign_check.PASS_LANES, 6)
+        self.assertEqual((peak[0], summary['lanes'], summary['checked'], summary['stopped']), (6, 6, 60, ''))
+        # Круг пишет «только если есть что писать»: иначе переписывал бы всю базу каждые несколько минут.
+        self.assertTrue(checker.write_modes and all(mode is True for mode in checker.write_modes))
+        # У каждой записи последним — время ответа Sapar (у круга с заданным `now` — оно).
+        self.assertTrue(all(w == ('ok', w[1], signing.UNSIGNED, w[3], None, self.NOW) for w in written))
+
+        peak[0] = 0
+        checker, written, _ = self._checker(due[:5], fetch)
+        summary = checker.run(now=self.NOW, lead_ids=[row[0] for row in due[:5]], force=True)
+        # «Проверить сейчас» в карточке — одним потоком, и время проверки пишется всегда: человек спросил сам.
+        self.assertEqual((peak[0], summary['lanes'], summary['checked']), (1, 1, 5))
+        self.assertEqual(checker.write_modes, [False])
+        # Счётчик круга такая проверка не трогает.
+        self.assertEqual(checker.cycle_state(self.NOW)['total'], 0)
+
+    def test_every_answer_gets_its_own_time(self):
+        ticks = iter(datetime(2026, 9, 29, 12, 0, second, tzinfo=timezone.utc) for second in range(60))
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(3)]
+        checker, written, _ = self._checker(due, self._unsigned)
+        with unittest.mock.patch.object(sign_check, '_utcnow', lambda: next(ticks)):
+            checker.run(lanes=1)
+        # Без заданного `now` у каждого ответа Sapar своё время — оно и в записи, и в памяти круга.
+        self.assertEqual(len({w[5] for w in written}), 3)
+        self.assertEqual({w[1]: w[5] for w in written}, checker._seen)
+
+    def test_cycle_yields_to_the_report_refresh(self):
+        calls = []
+
+        def fetch(iin, month, year, session=None):
+            calls.append(iin)
+            if len(calls) == 3:
+                # Посреди круга поставили перепроверку перед отчётом (request_refresh): у неё срок.
+                checker._refresh = {'bases': [], 'fresh_before': self.NOW, 'deadline': self.NOW, 'reason': 'отчёт'}
+            time.sleep(0.005)
+            return self._unsigned()
+
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(40)]
+        checker, written, _ = self._checker(due, fetch)
+        summary = checker.run(now=self.NOW, lanes=1)
+        self.assertEqual(summary['stopped'], 'refresh')
+        self.assertTrue(3 <= len(calls) < 10, calls)        # остальных спросит следующий круг
+        self.assertEqual(len(written), len(calls))          # что спросили — записано
+        self.assertTrue(checker._again)                     # после перепроверки круг продолжится сам
+        self.assertIsNone(checker.cycle_state(self.NOW)['finished_at'])
+
+    def test_cycle_state_counts_down_to_the_end_of_the_cycle(self):
+        gate, reached, calls = threading.Event(), threading.Event(), []
+
+        def fetch(iin, month, year, session=None):
+            calls.append(iin)
+            if len(calls) == 6:
+                reached.set()
+                gate.wait(5)                    # круг стоит на шестом водителе из десяти
+            return self._unsigned()
+
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(10)]
+        checker, _, _ = self._checker(due, fetch)
+        # Кругов ещё не было: «обновлено» нет, круг начнётся с запуском планировщика.
+        self.assertEqual(checker.cycle_state(self.NOW), {
+            'running': False, 'total': 0, 'done': 0, 'finished_at': None,
+            'eta_at': signing.next_check_tick(self.NOW)})
+        worker = threading.Thread(target=lambda: checker.run(now=self.NOW, lanes=1))
+        worker.start()
+        try:
+            self.assertTrue(reached.wait(5))
+            for _ in range(300):
+                if checker._cycle['done'] == 5:
+                    break
+                time.sleep(0.01)
+            # Первые секунды круга, а прошлого не было — оценить конец не по чему.
+            state = checker.cycle_state(self.NOW + timedelta(seconds=10))
+            self.assertEqual((state['running'], state['total'], state['done'], state['eta_at']), (True, 10, 5, None))
+            # Дальше — по скорости круга: 5 из 10 за 50 секунд — ещё 50.
+            later = self.NOW + timedelta(seconds=50)
+            self.assertEqual(checker.cycle_state(later)['eta_at'], later + timedelta(seconds=50))
+        finally:
+            gate.set()
+            worker.join(5)
+        end = self.NOW + timedelta(minutes=3)
+        state = checker.cycle_state(end)
+        # Круг спросил всех — он полный: его конец и есть «обновлено».
+        self.assertEqual((state['running'], state['done'], state['finished_at']), (False, 10, self.NOW))
+        self.assertEqual(checker._cycle['leads'], 10)
+        checker._cycle['duration_sec'] = 600.0
+        # Поток проверки свободен: следующий круг начнётся с запуском планировщика и пройдёт как прошлый.
+        self.assertEqual(checker.cycle_state(end)['eta_at'], signing.next_check_tick(end) + timedelta(seconds=600))
+        # Поток занят (пауза между кругами, перепроверка перед отчётом): круг вот-вот начнётся.
+        checker._running = True
+        self.assertEqual(checker.cycle_state(end)['eta_at'], end + timedelta(seconds=600))
+        # Новый круг только начался, водителей в нём вдвое больше — идти будет вдвое дольше прошлого.
+        checker._cycle.update(running=True, started_at=end, total=20, done=0)
+        self.assertEqual(checker.cycle_state(end + timedelta(seconds=5))['eta_at'], end + timedelta(seconds=1200))
+
+    def test_broken_write_is_not_a_full_cycle(self):
+        checker, _, _ = self._checker([('l1', VALID, date(2026, 9, 1))], self._unsigned)
+
+        def broken(items, now, sparse=False):
+            raise RuntimeError('база недоступна')
+
+        checker._write = broken
+        with self.assertRaises(RuntimeError):
+            checker.run(now=self.NOW)
+        state = checker.cycle_state(self.NOW)
+        self.assertEqual((state['running'], state['finished_at']), (False, None))
+
+    def test_seen_at_is_the_later_of_the_row_and_the_memory(self):
+        checker = sign_check.SignChecker(db=None, configured=lambda: True)
+        early, late = self.NOW - timedelta(minutes=40), self.NOW - timedelta(minutes=3)
+        self.assertIsNone(checker.seen_at('l1'))
+        self.assertEqual(checker.seen_at('l1', early), early)           # память не знает — время из строки
+        checker._seen['l1'] = late
+        self.assertEqual(checker.seen_at('l1', early), late)
+        self.assertEqual(checker.seen_at('l1'), late)
+        self.assertEqual(checker.seen_at('l1', self.NOW), self.NOW)     # строку записали позже — она и права
+        self.assertEqual(checker.seen_at('l1', early.replace(tzinfo=None)), late)   # время без пояса — UTC
+
+    def test_cycle_write_touches_a_row_only_when_there_is_something_to_write(self):
+        # Настоящим SQL это прогоняет tests/test_dial_list_sign_cycle_postgres.py; здесь — что условие на месте.
+        ok = ' '.join(sign_check.SignChecker._SPARSE_OK_SQL.split())
+        self.assertEqual(ok, "AND (v.signed_at IS NOT NULL OR l.sign_status <> v.code OR l.sign_docs <> v.docs "
+                             "OR l.sign_error <> '' OR l.sign_checked_at IS NULL "
+                             "OR l.sign_checked_at < v.now - make_interval(mins => 30))")
+        error = ' '.join(sign_check.SignChecker._SPARSE_ERROR_SQL.split())
+        self.assertEqual(error, "AND (l.sign_error <> v.error OR (NOT v.systemic AND (l.sign_checked_at IS NULL "
+                                "OR l.sign_checked_at < v.now - make_interval(mins => 30))))")
+        self.assertEqual(sign_check.STAMP_MINUTES, 30)
+        write = inspect.getsource(sign_check.SignChecker._write)
+        self.assertIn('(self._SPARSE_OK_SQL if sparse else "")', write)
+        self.assertIn('(self._SPARSE_ERROR_SQL if sparse else "")', write)
+        self.assertIn('def _write(self, items, now, sparse=False)', write)
 
     def test_requests_coalesce_while_running(self):
         import threading
@@ -482,6 +715,22 @@ class SignRefreshTests(unittest.TestCase):
         checker, written, _, _, _ = self._checker(due, lambda iin, *a, **k: calls.append(iin) or {'ok': True})
         summary = checker.refresh(self.BASES, self.FRESH, self.NOW, now=self.NOW)   # срок уже вышел
         self.assertEqual((calls, written, summary['stopped']), ([], [], 'deadline'))
+
+    def test_skips_those_the_cycle_asked_after_fresh_before(self):
+        calls = []
+        due = [(f'l{i}', f'{i:012d}', date(2026, 10, 1)) for i in range(4)]
+        checker, written, _, _, _ = self._checker(
+            due, lambda iin, *a, **k: calls.append(iin) or {'ok': True, 'yandex': []})
+        # В строке базы время проверки переписывается не каждый круг — запрос считает «старыми» и тех, кого круг
+        # спросил минуту назад. Кого он на самом деле спросил после fresh_before, знает его память.
+        checker._seen = {'l0': self.FRESH + timedelta(minutes=1), 'l1': self.FRESH - timedelta(minutes=1),
+                         'l2': self.FRESH}
+        summary = checker.refresh(self.BASES, self.FRESH, self.DEADLINE, now=self.NOW)
+        self.assertEqual(sorted(calls), ['000000000001', '000000000003'])
+        self.assertEqual((summary['due'], summary['checked'], summary['lanes']), (2, 2, 2))
+        # Пишет перепроверка так же, как круг, — только если есть что писать.
+        self.assertEqual(checker.write_modes, [True])
+        self.assertEqual({w[1] for w in written}, {'l1', 'l3'})
 
     def test_sapar_down_stops_and_keeps_check_time(self):
         import time
@@ -621,6 +870,8 @@ class CheckNowTests(unittest.TestCase):
         self.assertEqual(by_lead['l4'][2], signing.UNSIGNED)
         # Успешка — сразу и только по новым подписавшим.
         self.assertEqual([(now, sorted(ids)) for now, ids in resolved], [(self.NOW, ['l1', 'l2', 'l6'])])
+        # Память круга знает и об этих ответах: очередь круга и карточка водителя видят точное время.
+        self.assertEqual(checker._seen, {lead: self.NOW for lead in ('l1', 'l2', 'l3', 'l4', 'l6')})
 
     def test_parallel_workers_each_with_own_session(self):
         barrier, lock = threading.Barrier(4, timeout=5), threading.Lock()
@@ -716,11 +967,14 @@ class CheckNowTests(unittest.TestCase):
 
     def test_same_reading_as_the_run(self):
         now_src = inspect.getsource(sign_check.SignChecker.check_now)
-        run_src = inspect.getsource(sign_check.SignChecker.run)
+        ask_src = inspect.getsource(sign_check.SignChecker._ask)        # запросы круга и перепроверки
         self.assertIn('result.get("yandex")', now_src)
         self.assertNotIn('park', now_src)
-        for src in (now_src, run_src):
+        for src in (now_src, ask_src):
             self.assertIn('_package_verdict(', src)
+        self.assertIn('_ask(', inspect.getsource(sign_check.SignChecker.run))
+        self.assertIn('_ask(', inspect.getsource(sign_check.SignChecker.refresh))
+        # Проверка «сейчас» пишет время всегда (без sparse): по нему выдача видит, что водителя только что спросили.
         self.assertIn('self._write(pending, now)', now_src)
         self.assertIn('self.resolve_successes(now, lead_ids=summary["signed"])', now_src)
         # Строки со списков снимает вызывающий: пул выдачи, проверка в транзакции звонка.
@@ -739,13 +993,18 @@ class SchemaAndWiringTests(unittest.TestCase):
         unique = next(s for s in dial_schema.DDL if 'uq_dial_list_leads_period_iin' in s)
         self.assertIn('EXCEPTION WHEN unique_violation', unique)
 
-    def test_scheduler_asks_every_half_hour(self):
+    def test_scheduler_wakes_the_check_every_five_minutes_and_at_start(self):
         text = (source_cache.monolith_flat_path()).read_text(encoding='utf-8')
         job = text[text.index('async def dial_list_sign_check_job'):]
-        self.assertIn("_dial_list_service.request_sign_check('планировщик')", job[:600])
+        self.assertIn("_dial_list_service.request_sign_check('планировщик')", job[:700])
         self.assertIn("id='dial_list_sign_check'", text)
         block = text[text.index("dial_list_sign_check_job,\n"):text.index("id='dial_list_sign_check'")]
-        self.assertIn("minute='20,50'", block)
+        # Шаг планировщика — тот же, по которому идёт отсчёт в «Аналитике» (signing.next_check_tick).
+        self.assertIn("CronTrigger(minute='*/%d'," % signing.CHECK_TICK_MINUTES, block)
+        tail = text[text.index("id='dial_list_sign_check'"):]
+        tail = tail[:tail.index('    )')]
+        # И раз при старте сервера: перезапуск обрывает идущий круг, новый начинается сразу.
+        self.assertIn("next_run_time=datetime.now(ZoneInfo('Asia/Almaty'))", tail)
 
     def test_sign_routes_split_manager_card_and_operator_status(self):
         # Аналитика и «Проверить сейчас» с карточкой (маски ИИН и номера, документы) — только
@@ -803,6 +1062,76 @@ class SchemaAndWiringTests(unittest.TestCase):
         self.assertIn('AND t.billsec >= %(min_sec)s) AS talked', dial_analytics._LEADS_CTE)
         self.assertEqual(dial_analytics._TOTAL_KEYS[:7],
                          ('leads', 'with_iin', 'called', 'answered', 'talked', 'signed', 'successes'))
+
+
+class SignCycleOnScreenTests(unittest.TestCase):
+    """Что видит руководитель (владелец, 10.11.2026: «отображать ближайшее обновление… обратный отсчёт»):
+    отсчёт до конца круга в «Аналитике» и точное время проверки в карточке водителя — из памяти круга."""
+
+    NOW = datetime(2026, 11, 10, 14, 7, 30, tzinfo=timezone.utc)
+
+    def test_analytics_reads_its_columns_and_leaves_the_cycle_to_the_service(self):
+        last = datetime(2026, 11, 10, 14, 0, tzinfo=timezone.utc)
+        row = tuple(range(1, len(dial_analytics._TOTAL_KEYS) + 1)) + (last, 7, 3)
+
+        class Cursor:
+            def execute(self, sql, params=None):
+                pass
+
+            def fetchone(self):
+                return row
+
+            def fetchall(self):
+                return []
+
+        data = dial_analytics.department_analytics(Cursor(), 1954, date(2026, 11, 1), today=date(2026, 11, 10),
+                                                   configured=True)
+        self.assertEqual(data['sign_check'], {
+            'configured': True, 'active': True, 'doc_month': '2026-10-01',
+            'last_checked_at': last.isoformat(), 'never_checked': 3, 'errors': 7, 'min_billsec': 10})
+        # «Следующая — через 3 часа после самой старой проверки» ушла вместе с трёхчасовым правилом.
+        self.assertNotIn('MIN(l.sign_checked_at)', dial_analytics._TOTALS_SQL)
+        self.assertNotIn('RECHECK_HOURS', inspect.getsource(dial_analytics))
+
+    def test_analytics_block_carries_the_cycle_for_the_countdown(self):
+        checker = sign_check.SignChecker(db=None, configured=lambda: True)
+        checker._cycle.update(finished_at=self.NOW - timedelta(minutes=4), duration_sec=720.0, leads=24000)
+        svc = dial_service.DialListService(db=None, sign_checker=checker)
+        self.assertEqual(svc._sign_cycle({'active': True, 'configured': True}, now=self.NOW), {
+            'server_now': '2026-11-10T14:07:30+00:00',
+            'updated_at': '2026-11-10T14:03:30+00:00',
+            # Поток проверки свободен: круг начнётся с запуском планировщика в 14:10 и пройдёт за 12 минут.
+            'next_update_at': '2026-11-10T14:22:00+00:00',
+            'updating': False,
+        })
+        checker._cycle.update(running=True, started_at=self.NOW - timedelta(minutes=3), total=24000, done=6000)
+        block = svc._sign_cycle({'active': True, 'configured': True}, now=self.NOW)
+        # Круг идёт: четверть за 3 минуты — ещё 9.
+        self.assertEqual((block['updating'], block['next_update_at']), (True, '2026-11-10T14:16:30+00:00'))
+        # Старый месяц (база больше не проверяется) и Sapar не настроен — отсчёта нет.
+        for check in ({'active': False, 'configured': True}, {'active': True, 'configured': False}):
+            block = svc._sign_cycle(check, now=self.NOW)
+            self.assertEqual((block['updated_at'], block['next_update_at'], block['updating']), (None, None, False))
+            self.assertEqual(block['server_now'], '2026-11-10T14:07:30+00:00')
+        # Проверка, подменённая без памяти круга (тесты других мест раздела), ничего не ломает.
+        bare = dial_service.DialListService(db=None, sign_checker=object())
+        block = bare._sign_cycle({'active': True, 'configured': True}, now=self.NOW)
+        self.assertEqual((block['updated_at'], block['next_update_at'], block['updating']), (None, None, False))
+        analytics = inspect.getsource(dial_service.DialListService.analytics)
+        self.assertIn('data["sign_check"].update(self._sign_cycle(data["sign_check"]))', analytics)
+
+    def test_card_shows_the_time_the_cycle_remembers(self):
+        checker = sign_check.SignChecker(db=None, configured=lambda: True)
+        stored, seen = self.NOW - timedelta(minutes=25), self.NOW - timedelta(minutes=2)
+        checker._seen['lead-1'] = seen
+        svc = dial_service.DialListService(db=None, sign_checker=checker)
+        self.assertEqual(svc._sign_checked_at('lead-1', stored), seen)
+        self.assertEqual(svc._sign_checked_at('lead-2', stored), stored)       # круг до него ещё не дошёл
+        bare = dial_service.DialListService(db=None, sign_checker=object())
+        self.assertEqual(bare._sign_checked_at('lead-1', stored), stored)
+        # Строка журнала и карточка водителя собираются одним местом — время проверки идёт через память круга.
+        row = inspect.getsource(dial_service.DialListService._journal_row)
+        self.assertIn('self._sign_block(r[39], r[40], self._sign_checked_at(r[0], r[41]), r[42], r[43]', row)
 
 
 if __name__ == '__main__':

@@ -702,7 +702,7 @@ const CampaignSheet = ({ campaignId, onClose, api, robot, showToast, onChanged, 
                     <Tile label="Подписали" value={signing.after_call}
                         sub={`после звонка · ${signing.after_call_self} сами`}
                         hint={'Подписали документы уже после того, как ответили роботу (по данным Sapar из базы «Обзвона», '
-                            + 'проверка раз в три часа). «Сами» — до подписи с водителем не разговаривал оператор. '
+                            + 'проверка по кругу, раз в несколько минут). «Сами» — до подписи с водителем не разговаривал оператор. '
                             + `Ещё ${signing.before_call} подписали до звонка. В базе «Обзвона» найдено ${signing.matched} из ${total} водителей`
                             + (signing.checked_at ? `; проверка Sapar на ${shortDateTime(signing.checked_at)}.` : '.')} />
                 )}

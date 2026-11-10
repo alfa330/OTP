@@ -864,8 +864,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
                                   period=period, require_iin=not tez)
         fresh = bool(counts.get("rows_new") or counts.get("rows_duplicate"))
         if not tez:
-            # Свежую базу проверяем сразу, не дожидаясь получасового прогона: подписавшие
-            # ещё до загрузки не должны уйти операторам. Проверка идёт в своём потоке.
+            # Свежую базу проверяем сразу, не дожидаясь планировщика: подписавшие ещё до
+            # загрузки не должны уйти операторам. Проверка идёт в своём потоке.
             if fresh:
                 svc.request_sign_check("загрузка базы")
             return jsonify({"status": "success", **counts}), 200

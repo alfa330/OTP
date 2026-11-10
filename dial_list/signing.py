@@ -86,8 +86,14 @@ SIGN_STATUS_LABELS = {
 
 # Разговор, после которого подписание засчитывается оператору (правило владельца).
 SUCCESS_MIN_BILLSEC = 10
-# Как часто перепроверять водителя (правило владельца — каждые 3 часа).
-RECHECK_HOURS = 3
+# Как часто спрашивать о водителе. С 29.09.2026 — раз в 3 часа. С 10.11.2026 — по кругу без перерывов (владелец:
+# «проверять только тех, кто в списке, способом, который показывает статусы точно, и максимально быстро»):
+# планировщик будит проверку каждые CHECK_TICK_MINUTES минут и при старте сервера, а пока круг идёт, следующий
+# начинается сразу за ним (sign_check.py). Число — и для планировщика (bot_schedule2.py), и для отсчёта.
+CHECK_TICK_MINUTES = 5
+# Раз в 3 часа остались те, у кого срок подписания истёк (EXPIRED): подписать такой документ уже нельзя, спрашиваем
+# на случай, если Sapar срок продлит.
+EXPIRED_RECHECK_HOURS = 3
 
 _FRACTION_RE = re.compile(r"\.(\d+)")
 
@@ -172,6 +178,13 @@ def check_window(today):
     дни месяца становится «подписано» уже в следующем."""
     current = month_start(today)
     return shift_month(current, -1), current
+
+
+def next_check_tick(now):
+    """Ближайший запуск планировщика после `now` (aware): минута, кратная CHECK_TICK_MINUTES. Нужен отсчёту в
+    «Аналитике», когда круг не идёт: следующий начнётся с этим запуском."""
+    minute = now.replace(second=0, microsecond=0)
+    return minute + timedelta(minutes=CHECK_TICK_MINUTES - minute.minute % CHECK_TICK_MINUTES)
 
 
 def status_code(iin, sign_status, signed_at):

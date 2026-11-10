@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, ChevronRight, Loader2, RefreshCw, Table2, TriangleAlert } from 'lucide-react';
 import { Bar as RBar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { iosCard, iosGroupLabel, iosBtnGhost, IosHint, IosSegmented } from '../ui/ios';
@@ -6,6 +6,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { Bar, Metric, PagedTable, Td, Th } from '../wiki/reportKit';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_BREAKDOWN, signMeta } from './signStatus';
+import { clockOffset, reloadDelay, signCycleLine } from './signCycle';
 import DialListSignReport from './DialListSignReport';
 
 /*
@@ -79,8 +80,12 @@ const METRICS = [
 ];
 const CHART_COLOR = '#2a78d6';
 
-const RULES_HINT = 'Раз в 3 часа сервер спрашивает Sapar по ИИН, подписал ли водитель документы за прошлый '
-    + 'месяц: документы месяца приходят в следующем. Документов у водителя несколько, общий статус — худший '
+// Владелец, 10.11.2026: проверять только тех, кто в списке, точным способом и максимально быстро — раньше
+// каждого водителя спрашивали раз в 3 часа, теперь по кругу без перерыва.
+const RULES_HINT = 'Сервер по кругу спрашивает Sapar по ИИН о каждом неподписавшем водителе базы: подписал ли он '
+    + 'документы за прошлый месяц (документы месяца приходят в следующем). Круги идут без перерыва; отсчёт '
+    + 'показывает, когда закончится текущий, — тогда числа на вкладке обновятся сами. Тех, у кого срок '
+    + 'подписания истёк, сервер спрашивает раз в 3 часа. Документов у водителя несколько, общий статус — худший '
     + 'из них: «подписал» — только когда подписаны все. Подписавший уходит из обзвона, а успешка '
     + 'засчитывается оператору, который последним поговорил с ним не меньше 10 секунд до подписи. '
     + 'Подписал без такого разговора — «подписал сам», успешки нет.';
@@ -94,23 +99,39 @@ const Notice = ({ tone = 'amber', children }) => (
     </div>
 );
 
-/* Строка проверки подписания: за какой месяц документы и когда спрашивали Sapar. */
-const SignCheckLine = ({ check }) => {
+/* Строка проверки подписания: за какой месяц документы, когда обновлено и отсчёт до следующего
+   обновления (владелец, 10.11.2026: «отображать ближайшее обновление… обратный отсчёт»). Правила строки —
+   signCycle.js. Отсчёт стоит отдельным неразрывным куском: в тесной шапке обрезается начало строки, а не он;
+   на телефоне он уходит на свою строку вместе с «i». */
+const SignCheckLine = ({ check, offsetMs }) => {
+    const [nowMs, setNowMs] = useState(() => Date.now());
+    const ticking = Boolean(check?.active && check?.configured && check?.next_update_at);
+    useEffect(() => {
+        if (!ticking) return undefined;
+        setNowMs(Date.now());
+        const timer = setInterval(() => setNowMs(Date.now()), 1000);
+        return () => clearInterval(timer);
+    }, [ticking, check?.next_update_at]);
     if (!check) return null;
-    let when;
-    if (!check.active) when = 'эта база больше не проверяется';
-    else if (check.never_checked) when = 'первая проверка — в ближайшие полчаса';
-    else if (check.last_checked_at) {
-        when = `проверено ${fmtWhen(check.last_checked_at)}`;
-        if (check.next_check_at) when += ` · следующая ${fmtWhen(check.next_check_at)}`;
-    }
+    const line = signCycleLine(check, { nowMs, offsetMs, fmtWhen });
+    const hint = <IosHint text={RULES_HINT} align="right" label="Как проверяется подписание" />;
     return (
-        <div className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-slate-500">
+        <div className={`flex min-w-0 items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-slate-500 ${
+            line.countdown ? 'flex-wrap sm:flex-nowrap' : ''}`}
+        >
             <span className="min-w-0 sm:truncate">
                 Документы за <span className="font-medium text-slate-700">{(check.doc_month_label || '').toLowerCase()}</span>
-                {when ? ` · ${when}` : ''}
+                {line.text ? ` · ${line.text}` : ''}
             </span>
-            <IosHint text={RULES_HINT} align="right" label="Как проверяется подписание" />
+            {line.countdown ? (
+                <span className="flex shrink-0 basis-full items-center gap-1.5 whitespace-nowrap sm:basis-auto">
+                    <span>
+                        <span className="hidden sm:inline">· </span>
+                        следующее через <span className="font-medium tabular-nums text-slate-700">{line.countdown}</span>
+                    </span>
+                    {hint}
+                </span>
+            ) : hint}
         </div>
     );
 };
@@ -291,13 +312,27 @@ const DialListAnalytics = ({
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    // На сколько часы сервера впереди наших: отсчёт до конца круга проверки идёт по серверным (signCycle.js).
+    const [clock, setClock] = useState(0);
+    // Свои перезапросы: сколько их было (после любого следующий встаёт в очередь заново) и удался ли последний
+    // (не удался — следующий нескоро: сеть или вышла сессия, каждые секунды стучаться незачем).
+    const [reloads, setReloads] = useState({ count: 0, failed: false });
+    // Вкладка браузера не на экране — сами не перезапрашиваем; вернулись на неё — свежие числа через секунды.
+    const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
+    const requestRef = useRef(0);
 
     // 'all' — режим журнала; аналитика всегда про один месяц.
     const shownPeriod = period && period !== 'all' ? period : '';
 
-    const load = useCallback(async () => {
-        setLoading(true);
-        setError('');
+    // silent — свой перезапрос в конце круга проверки: без затемнения и без текста ошибки, числа остаются.
+    const load = useCallback(async ({ silent = false } = {}) => {
+        requestRef.current += 1;
+        const mine = requestRef.current;
+        let failed = false;
+        if (!silent) {
+            setLoading(true);
+            setError('');
+        }
         try {
             const qs = shownPeriod ? `?period=${encodeURIComponent(shownPeriod)}` : '';
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/analytics${qs}`, {
@@ -305,15 +340,28 @@ const DialListAnalytics = ({
             });
             const body = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(body?.error || `HTTP ${resp.status}`);
+            // Пока шёл запрос, спросили заново (сменили месяц, нажали «Обновить») — этот ответ уже не нужен.
+            if (mine !== requestRef.current) return;
             setData(body);
+            setClock(clockOffset(body?.sign_check, Date.now()));
         } catch (e) {
-            setError(e.message || 'Не удалось загрузить аналитику');
+            failed = true;
+            if (!silent && mine === requestRef.current) setError(e.message || 'Не удалось загрузить аналитику');
         } finally {
-            setLoading(false);
+            if (mine === requestRef.current) {
+                setReloads((prev) => ({ count: prev.count + 1, failed: silent && failed }));
+                if (!silent) setLoading(false);
+            }
         }
     }, [apiBaseUrl, authHeaders, departmentId, shownPeriod]);
 
     useEffect(() => { load(); }, [load]);
+
+    useEffect(() => {
+        const onVisibility = () => setVisible(!document.hidden);
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => document.removeEventListener('visibilitychange', onVisibility);
+    }, []);
 
     const periodOptions = useMemo(
         () => buildPeriodOptions(periods, { activePeriod, grouped: true }),
@@ -325,11 +373,23 @@ const DialListAnalytics = ({
     const check = data?.sign_check;
     const operators = data?.operators || [];
 
+    // Круг проверки подписания закончился (по оценке сервера) — подтягиваем числа сами, без кнопки (владелец,
+    // 10.11.2026). Пока идёт обычная загрузка, не вмешиваемся: её ответ и принесёт новый отсчёт.
+    useEffect(() => {
+        const delay = reloadDelay(check, clock, Date.now(), reloads.failed);
+        if (delay == null || !visible || loading) return undefined;
+        const timer = setTimeout(() => load({ silent: true }), delay);
+        return () => clearTimeout(timer);
+    }, [check, clock, visible, loading, reloads, load]);
+
     return (
         <section className="space-y-4">
-            {/* Фильтр один и над всем: месяц базы; справа — когда спрашивали Sapar. */}
+            {/* Фильтр один и над всем: месяц базы; справа — когда обновлены статусы подписания и отсчёт
+                до следующего обновления. */}
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-center gap-2">
+                {/* sm:shrink-0 — в тесной шапке сжимается строка справа (она умеет обрезаться), а не кнопки:
+                    иначе «Отчёт в Telegram» наезжал на неё. */}
+                <div className="flex items-center gap-2 sm:shrink-0">
                     <CustomSelect
                         value={shownPeriod || data?.period || activePeriod}
                         onChange={(v) => onPeriodChange?.(v)}
@@ -338,7 +398,7 @@ const DialListAnalytics = ({
                         className="min-w-0 flex-1 sm:w-64 sm:flex-none"
                         ariaLabel="Месяц базы"
                     />
-                    <button type="button" onClick={load} disabled={loading} className={`${iosBtnGhost} shrink-0`} aria-label="Обновить" title="Обновить">
+                    <button type="button" onClick={() => load()} disabled={loading} className={`${iosBtnGhost} shrink-0`} aria-label="Обновить" title="Обновить">
                         <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
                     </button>
                     {/* Картинка «Подписание по городам» в группы в 10:00 и 19:00 (владелец, 19.10.2026). */}
@@ -350,7 +410,7 @@ const DialListAnalytics = ({
                         showToast={showToast}
                     />
                 </div>
-                <SignCheckLine check={check} />
+                <SignCheckLine check={check} offsetMs={clock} />
             </div>
 
             {error && !data && <div className="rounded-xl bg-rose-50 px-4 py-3 text-[13px] text-rose-700">{error}</div>}
