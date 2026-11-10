@@ -1203,6 +1203,9 @@ RECALL_REFUSALS = {
 # Водитель из базы отдела, где оператор работал раньше (13.10.2026): строка на вкладке итогов
 # остаётся, «Позвонить ещё раз» — нет (operator_worked).
 RECALL_OTHER_DEPARTMENT = "Водитель из другого отдела"
+# Водитель не из обзваниваемой базы месяца (_dial_base, 10.11.2026) — «Позвонить» и «Позвонить
+# ещё раз» отвечают так; строку телефон после ответа перечитает и уже не покажет.
+OLD_BASE_REFUSAL = "Водитель из базы прошлого месяца — звонить ему не нужно"
 
 
 def recall_verdict(columns, operator_id):
@@ -4634,11 +4637,29 @@ class DialListService:
                    l.month_first_order_at, l.last_order_before_at, l.trip_checked_at, l.driver_id,
                    l.city, l.account_registered_at, l.account_checked_at"""
 
-    def _portion_items(self, cur, portion_id, today=None, tez=False, with_phone=False):
+    @staticmethod
+    def _dial_base(settings):
+        """База месяца, водителей которой видит телефон удалённого КЦ, — обзваниваемая (_period).
+
+        Смена месяца (владелец, 10.11.2026: «у операторов в телефоне контакты за прошлый месяц —
+        такого вообще не должно быть»). Пул выдаёт только обзваниваемую базу, но выданное раньше
+        оставалось у оператора: открытая пачка прошлой базы висела на экране, «Ещё» не давало новую,
+        пока её не прозвонят, а вкладки итогов показывали отработанных из прошлой базы. 10.11.2026
+        так было у 46 операторов из 51: у 42 — от 3 до 100 октябрьских строк в очереди, у 4 — закрытая
+        октябрьская пачка на экране. Теперь строки других баз
+        не показываются, «Ещё» не держат и не переезжают в новую пачку, «Позвонить» и «Позвонить ещё
+        раз» по ним — отказ. В базе ничего не меняется: история и сводки за прошлые дни те же, а
+        если руководитель снова сделает обзваниваемой прошлую базу, её строки вернутся на экран.
+        У автообзвона Тез (свои сроки перезвона через границу месяца) — None: всё как было."""
+        return None if is_tez(settings) else settings.get("_period")
+
+    def _portion_items(self, cur, portion_id, today=None, tez=False, with_phone=False, period=None):
         # Новые колонки — только в конец (строки читаются по номерам): r[18] — почему плечо
         # последней попытки положил сам телефон, r[19:22] — _LAST_COMMENT_COLUMNS, r[22] — текст
         # отказа АТС у последней попытки (наружу — только его вид, last_error_kind); у Тез —
         # ещё _PORTION_TEZ_COLUMNS, а с прямым звонком (with_phone, только Тез) — номер r[34].
+        # period — только строки водителей этой базы месяца (_dial_base): строки прежней базы
+        # телефону не показываются (10.11.2026).
         with_phone = bool(with_phone and tez)
         cur.execute("""
             SELECT a.id, a.position, l.full_name, a.state, a.result, a.attempts, a.done_at,
@@ -4658,9 +4679,9 @@ class DialListService:
             LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
             LEFT JOIN dial_list_outcome_subtypes os ON os.id = t.outcome_subtype_id
             """ + self._LAST_COMMENT_JOIN_SQL.format(lead="a.lead_id", operator="a.operator_id") + """
-            WHERE a.portion_id = %s
+            WHERE a.portion_id = %s""" + (" AND l.period = %s" if period else "") + """
             ORDER BY a.position
-        """, (portion_id,))
+        """, (portion_id, period) if period else (portion_id,))
         today = today or _today()
         items = []
         for r in cur.fetchall():
@@ -4819,7 +4840,13 @@ class DialListService:
             # Открытая выдача либо последняя закрытая: обработанная пачка остаётся на
             # экране с итогами, пока оператор не возьмёт следующую («Ещё»).
             portion = self._last_portion(cur, user_id)
-            items = self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct) if portion else []
+            base = self._dial_base(settings)
+            items = (self._portion_items(cur, portion["id"], today, tez=tez, with_phone=direct, period=base)
+                     if portion else [])
+            if portion and base and not items:
+                # Пачка целиком из прошлой базы месяца (_dial_base) — на экране её нет: оператор
+                # видит пустой список и берёт «Ещё» из обзваниваемой базы.
+                portion = None
             active = self._active_attempt(cur, user_id, include_ended=not guarded)
             if active:
                 # Что оператор записал по этому водителю раньше — в карточку звонка.
@@ -5391,8 +5418,9 @@ class DialListService:
     # Колонки к нему — в том порядке, в каком их разбирает recall_verdict.
     _RECALL_COLUMNS = """(l.signed_at IS NOT NULL OR l.sign_status = 'processing'), l.status = 'excluded',
                ri.issued_id, ri.issued_to, rc.owner_id, rc.owner_requeue, rc.taken_after"""
+    # row[8] — база месяца водителя: из прошлой базы «Позвонить ещё раз» нельзя (_dial_base).
     _RECALL_LEAD_SQL = """
-        SELECT l.id, """ + _RECALL_COLUMNS + """
+        SELECT l.id, """ + _RECALL_COLUMNS + """, l.period
         FROM dial_list_leads l
         """ + _RECALL_JOINS_SQL + """
         WHERE l.id = %(lead_id)s AND l.department_id = %(department_id)s
@@ -5436,7 +5464,11 @@ class DialListService:
         ) t ON TRUE
         LEFT JOIN dial_list_outcomes o ON o.id = t.outcome_id
         LEFT JOIN dial_list_outcome_subtypes st ON st.id = t.outcome_subtype_id
-    """ + _RECALL_JOINS_SQL + _LAST_COMMENT_JOIN_SQL.format(lead="s.lead_id", operator="%(operator_id)s")
+    """ + _RECALL_JOINS_SQL + _LAST_COMMENT_JOIN_SQL.format(lead="s.lead_id", operator="%(operator_id)s") + """
+        WHERE (%(period)s::date IS NULL OR l.period = %(period)s::date)
+    """
+    # %(period)s — база месяца, водителей которой видит телефон (_dial_base): отработанные из
+    # прошлой базы на вкладках не показываются (10.11.2026); NULL (автообзвон Тез) — все.
 
     def operator_worked(self, user_id, q=""):
         """Вкладки итогов на телефоне: кого оператор отработал за месяц и с каким итогом.
@@ -5468,7 +5500,8 @@ class DialListService:
         today = _today()
         with self.db._get_cursor() as cur:
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
-            cur.execute(self._WORKED_SQL, {"operator_id": ctx["user_id"], "month": month})
+            cur.execute(self._WORKED_SQL, {"operator_id": ctx["user_id"], "month": month,
+                                           "period": self._dial_base(ctx.get("settings") or {})})
             rows = cur.fetchall()
         tabs = {o["id"]: {"key": o["id"], "name": o["name"], "color": o["color"], "position": o["position"],
                           "count": 0} for o in outcomes}
@@ -5556,15 +5589,21 @@ class DialListService:
         Строка, плечо по которой кончилось, а исход от АТС ещё едет (последняя попытка ended),
         в «осталось» не считается (13.10.2026): её закроет исход, а «Ещё» перенесёт её в новую
         выдачу (issue_next_portion). Итог, если он по ней окажется нужен, потребует следующий
-        звонок."""
+        звонок.
+
+        Строки водителей прошлой базы месяца (_dial_base) «Ещё» не держат (10.11.2026): телефон
+        их не показывает, и обрабатывать их оператору не нужно."""
         portion = self._open_portion(cur, ctx["user_id"])
         if portion:
+            base = self._dial_base(ctx.get("settings") or {})
             cur.execute("""
                 SELECT COUNT(*) FROM dial_list_assignments a
                 WHERE portion_id = %s AND state = 'issued'
                   AND COALESCE((SELECT t.state FROM dial_list_attempts t WHERE t.assignment_id = a.id
                                 ORDER BY t.requested_at DESC LIMIT 1), '') <> 'ended'
-            """, (portion["id"],))
+                  AND (%s::date IS NULL OR EXISTS (SELECT 1 FROM dial_list_leads l
+                                                   WHERE l.id = a.lead_id AND l.period = %s::date))
+            """, (portion["id"], base, base))
             pending = int(cur.fetchone()[0])
             if pending:
                 raise DialListError(
@@ -5672,13 +5711,18 @@ class DialListService:
                         # закроет их там, а отбой до ответа водителя (строка остаётся в работе) не
                         # оставит строку в закрытой выдаче, которую телефон уже не показывает. FOR
                         # UPDATE — до закрытия выдачи (порядок замков — выше); строку, которую финал
-                        # закрыл, пока мы ждали её замка, база из ответа исключит сама.
+                        # закрыл, пока мы ждали её замка, база из ответа исключит сама. Строки прошлой
+                        # базы месяца (_dial_base) не переезжают: остаются в закрытой выдаче, телефон
+                        # их не показывает (10.11.2026).
+                        base = self._dial_base(settings)
                         cur.execute("""
                             SELECT a.id FROM dial_list_assignments a
                             WHERE a.portion_id = %s AND a.state = 'issued'
+                              AND (%s::date IS NULL OR EXISTS (SELECT 1 FROM dial_list_leads l
+                                                               WHERE l.id = a.lead_id AND l.period = %s::date))
                             ORDER BY a.position
                             FOR UPDATE
-                        """, (portion["id"],))
+                        """, (portion["id"], base, base))
                         carried = [str(r[0]) for r in cur.fetchall()]
                         # Все строки закрыты (или едут дальше), а выдача открыта — закрываем здесь.
                         cur.execute("UPDATE dial_list_portions SET closed_at = CURRENT_TIMESTAMP WHERE id = %s",
@@ -5743,6 +5787,10 @@ class DialListService:
                 verdict = recall_verdict(row[1:8], ctx["user_id"])
                 if verdict in ("signed", "excluded"):
                     raise DialListError(RECALL_REFUSALS[verdict], 409)
+                base = self._dial_base(ctx.get("settings") or {})
+                if base and len(row) > 8 and row[8] is not None and row[8] != base:
+                    # Водитель из прошлой базы месяца (_dial_base, 10.11.2026): на вкладках его нет.
+                    raise DialListError(OLD_BASE_REFUSAL, 409)
                 active = self._active_attempt(cur, ctx["user_id"])
                 if active:
                     raise DialListError(
@@ -5874,7 +5922,7 @@ class DialListService:
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT a.id, a.state, a.attempts, l.phone_norm, l.full_name, l.id,
-                       (l.signed_at IS NOT NULL OR l.sign_status = 'processing')
+                       (l.signed_at IS NOT NULL OR l.sign_status = 'processing'), l.period
                 FROM dial_list_assignments a
                 JOIN dial_list_leads l ON l.id = a.lead_id
                 WHERE a.id = %s AND a.operator_id = %s
@@ -5885,6 +5933,11 @@ class DialListService:
                 raise DialListError("Строка списка не найдена", 404)
             if row[1] != "issued":
                 raise DialListError("Эта строка уже обработана", 409)
+            base = self._dial_base(settings)
+            if base and len(row) > 7 and row[7] is not None and row[7] != base:
+                # Строка прошлой базы месяца (_dial_base, 10.11.2026): телефон её уже не показывает,
+                # звонок — только со старого экрана. Строку не трогаем: история и сводки прежние.
+                raise DialListError(OLD_BASE_REFUSAL, 409)
             active = self._active_attempt(cur, user_id)
             if active:
                 raise DialListError(
