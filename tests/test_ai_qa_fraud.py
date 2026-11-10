@@ -625,7 +625,9 @@ class PromptTests(unittest.TestCase):
     def test_fraud_prompt_names_the_four_task_templates(self):
         system = prompts.fraud_system("szov")
         for phrase in ("11–20 секунд", "до 30 секунд", "11–15 секунд", "11–12 секунд",
-                       "«Подписал в звонке»", "дисциплинарных мер", "КРАТКО:"):
+                       "«Подписал в звонке»", "дисциплинарных мер", "КРАТКО:",
+                       # живой прогон 21.10: «этот статус часто используется для закрытия звонка»
+                       "Не утверждай, как и зачем вообще"):
             self.assertIn(phrase, system)
 
     def test_call_line(self):
