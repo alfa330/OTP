@@ -71,6 +71,30 @@ PUBLISH_FAIL_WINDOW_S = 900
 
 _publish_failures = {}
 
+# Программа «Oktell» 1.0.35+ закрывает сессию Oktell, когда iCORE Phone на том же
+# компьютере подключился к обзвону, и называет это в heartbeat (last_command, тип
+# phone_logout). В базу это не пишем — достаточно строки в журнале сервера, чтобы видеть,
+# что закрытие происходит. Команда едет в каждом следующем heartbeat, пока не случится
+# новая, поэтому помним последнюю записанную у агента.
+PHONE_LOGOUT_COMMAND = 'phone_logout'
+_phone_logout_logged = {}
+
+
+def note_phone_logout(agent_id, command) -> bool:
+    """Записать в журнал закрытие Oktell по подключению к обзвону. True — строка новая."""
+    if not isinstance(command, dict) or str(command.get('type') or '') != PHONE_LOGOUT_COMMAND:
+        return False
+    command_id = str(command.get('id') or '')[:64]
+    agent_id = str(agent_id or '')[:160]
+    if not command_id or _phone_logout_logged.get(agent_id) == command_id:
+        return False
+    if len(_phone_logout_logged) > 5000:
+        _phone_logout_logged.clear()
+    _phone_logout_logged[agent_id] = command_id
+    logging.info("Ограничитель Перезвона: Oktell закрыт по подключению к обзвону — агент %s, итог %s (%s)",
+                 agent_id or '—', str(command.get('status') or '—')[:32], command_id)
+    return True
+
 
 def token_is_strong(token) -> bool:
     """Короткий или предсказуемый ключ здесь недопустим: его подберут.
@@ -654,6 +678,7 @@ def build_oktell_guard_blueprint(*, db, require_api_key, build_cors_preflight_re
             if browser.get('managed_window') and browser.get('session_present'):
                 queries.mark_managed_day(cursor, (personal or {}).get('user_id'))
             settings = queries.get_settings(cursor)
+        note_phone_logout(data.get('agent_id'), data.get('last_command'))
         return jsonify({"ok": True, "poll_interval_s": int(settings.get('heartbeat_interval_s') or 60),
                         "report_every_s": queries.HEARTBEAT_REPORT_EVERY_S})
 

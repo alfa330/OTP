@@ -64,7 +64,7 @@ APP_NAME = "Oktell Recall Guard"
 # стоять то же слово, что на ярлыке, по которому он сюда попал.
 APP_NAME_SHORT = "Oktell"
 APP_DIR_NAME = "OktellRecallGuard"
-VERSION = "1.0.34"
+VERSION = "1.0.35"
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -173,6 +173,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 COMMAND_TTL_S = 6 * 3600
 COMMAND_LEDGER_LIMIT = 500
+
+# --- iCORE Phone: оператор сел на обзвон ---
+# Телефон и эта программа стоят на одном компьютере. Когда оператор СЗоВ подключается к
+# обзвону удалённого КЦ, телефон (3.22.49+) пишет момент подключения в свой раздел
+# реестра, а агент по этой метке выходит из Oktell и закрывает его окно (решение
+# владельца 10.11.2026: «если у них активная сессия октела есть, её нужно выкинуть в
+# момент подключения к icore phone»). Кому закрывать, решает сервер — флагом в настройках
+# телефона (dial_list.oktell_logout); сама метка локальная: задержка — секунды, лишних
+# запросов к серверу нет. Закрывается только окно, открытое ярлыком этой программы.
+PHONE_REG_KEY = r"Software\iCORE Phone"
+PHONE_LOGOUT_VALUE = "OktellLogoutAt"
+# Метка старше — телефон подключился давно. Окно Oktell, открытое уже после этого,
+# человек открыл сам; закрывать его задним числом нельзя.
+PHONE_LOGOUT_FRESH_S = 180
+# Идущий разговор в Oktell не рвём: ждём его конца, но не дольше этого.
+PHONE_LOGOUT_CALL_WAIT_S = 900
 
 
 # --------------------------------------------------------------------------- #
@@ -2238,6 +2254,67 @@ class CommandLedger:
         self._items[str(command_id)] = {"ts": now, "status": status}
         self.prune(now)
         self._save()
+
+
+def read_phone_logout_stamp() -> int:
+    """Когда iCORE Phone на этом компьютере подключился к обзвону (UTC, секунды).
+
+    0 — метки нет. Раздел реестра чужой (телефона), поэтому только чтение одного
+    значения, и любой сбой или мусор в нём — тоже «метки нет».
+    """
+    if not IS_WINDOWS:
+        return 0
+    try:
+        import winreg  # type: ignore
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, PHONE_REG_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, PHONE_LOGOUT_VALUE)
+        return max(0, int(value))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def phone_logout_handled_path() -> Path:
+    return app_dir() / "phone_logout.json"
+
+
+def load_phone_logout_handled() -> int:
+    """Последняя отработанная метка: перезапуск агента не должен закрыть Oktell второй раз."""
+    try:
+        return max(0, int(json.loads(phone_logout_handled_path().read_text(encoding="utf-8")).get("handled") or 0))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def save_phone_logout_handled(stamp: int) -> None:
+    try:
+        phone_logout_handled_path().write_text(json.dumps({"handled": int(stamp)}), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        logging.debug("Отметка о метке телефона не записана", exc_info=True)
+
+
+def phone_logout_step(stamp: int, handled: int, accepted: int, now: float,
+                      window: bool, in_call: bool) -> str:
+    """Что делать с меткой iCORE Phone на этом шаге.
+
+    idle    — метки нет или она уже отработана;
+    stale   — метка старая: телефон подключился до того, как мы её увидели свежей
+              (программа запустилась позже), — Oktell не трогаем;
+    nothing — окна Oktell нет, закрывать нечего;
+    wait    — в Oktell идёт разговор: ждём его конца (метка принята, свежесть больше
+              не проверяется — accepted);
+    logout  — выйти из Oktell и закрыть окно.
+    """
+    if not stamp or stamp == handled:
+        return "idle"
+    age = now - stamp
+    if stamp != accepted and not (-PHONE_LOGOUT_FRESH_S <= age <= PHONE_LOGOUT_FRESH_S):
+        return "stale"
+    if not window:
+        return "nothing"
+    if in_call and age <= PHONE_LOGOUT_CALL_WAIT_S:
+        return "wait"
+    return "logout"
 
 
 def backoff_delay(attempt: int, base_s: float, cap_s: float) -> float:
@@ -4647,6 +4724,50 @@ class ManagedBrowser:
             report["status"] = "not_verified"
         return report
 
+    def close_for_phone(self) -> dict:
+        """Оператор сел на обзвон в iCORE Phone: выйти из Oktell и закрыть его окно.
+
+        Это не санкция, а смена инструмента, поэтому не как logout(): окно не
+        поднимаем и экран входа не показываем. Окно именно ЗАКРЫВАЕМ: оставь мы его
+        на экране входа, цикл агента через минуту вошёл бы обратно сам — учётку
+        кабинета он подставляет в любую форму входа. Вернуться в Oktell оператор
+        может ярлыком, как обычно.
+        """
+        report: dict[str, Any] = {"status": "failed", "steps": {}}
+        target = self.oktell_target()
+        if not target:
+            report["status"] = "no_window"
+            return report
+        page = self.page(target)
+        if page:
+            # Сначала штатный выход по сокету: сервер АТС закрывает сессию сам и
+            # пишет «Выключен» сразу, а не по тайм-ауту оборванного соединения.
+            try:
+                report["steps"]["page"] = page.evaluate(
+                    build_logout_js(self.cfg.get("session_keys", DEFAULT_SESSION_KEYS)))
+            except Exception as exc:  # noqa: BLE001
+                report["steps"]["page_error"] = str(exc)
+            if self.origin:
+                try:
+                    page.call(
+                        "Storage.clearDataForOrigin",
+                        {"origin": self.origin, "storageTypes": "cookies,local_storage,session_storage,indexeddb"},
+                    )
+                    report["steps"]["storage_cleared"] = True
+                except Exception as exc:  # noqa: BLE001
+                    report["steps"]["storage_error"] = str(exc)
+            # Кадру выхода нужно уйти в сокет до того, как вкладка исчезнет.
+            time.sleep(0.5)
+        else:
+            report["steps"]["no_cdp"] = True
+        self.close_page()
+        _close_target(self, str(target.get("id") or ""))
+        report["steps"]["closed"] = True
+
+        time.sleep(1.5)
+        report["status"] = "done" if not self.oktell_target() else "not_verified"
+        return report
+
 
 # --------------------------------------------------------------------------- #
 # Неуправляемые окна Oktell (обход ярлыка)
@@ -5118,6 +5239,53 @@ def run_agent(cfg: dict) -> int:
                                            # включая ПРИЧИНУ перерыва: обед и
                                            # тренинг — оба `break`, и один
                                            # статус их не различает
+    # Метка iCORE Phone «оператор сел на обзвон» (см. PHONE_REG_KEY).
+    phone_handled = load_phone_logout_handled()
+    phone_accepted = 0
+
+    def handle_phone_logout() -> bool:
+        """Оператор подключился к обзвону в iCORE Phone — закрыть сессию Oktell.
+
+        Зовётся из паузы между кругами (каждые полсекунды–две): телефон и Oktell на
+        одном экране, и минута до следующего круга — это минута, когда человек уже
+        звонит из телефона, а Oktell ещё шлёт ему входящие. Чтение одного значения
+        реестра ничего не стоит; вкладку трогаем, только когда метка новая.
+        """
+        nonlocal phone_handled, phone_accepted, last_command_report
+        stamp = read_phone_logout_stamp()
+        if not stamp or stamp == phone_handled:
+            return False
+        now = time.time()
+        state: dict = {}
+        if stamp == phone_accepted or abs(now - stamp) <= PHONE_LOGOUT_FRESH_S:
+            state = browser.probe() if browser.is_debug_port_alive() else {}
+        step = phone_logout_step(stamp, phone_handled, phone_accepted, now,
+                                 bool(state.get("window")),
+                                 bool((state.get("rule") or {}).get("inCall")))
+        if step == "wait":
+            if phone_accepted != stamp:
+                logging.info("iCORE Phone подключился к обзвону, но в Oktell идёт разговор — жду его конца")
+            phone_accepted = stamp
+            return False
+        phone_accepted = 0
+        phone_handled = stamp
+        save_phone_logout_handled(stamp)
+        if step == "stale":
+            logging.info("Метка iCORE Phone старая (%d с) — Oktell не трогаю", int(now - stamp))
+            return False
+        if step == "nothing":
+            logging.info("iCORE Phone подключился к обзвону — окна Oktell нет, закрывать нечего")
+            return False
+        report = browser.close_for_phone()
+        logging.warning("iCORE Phone подключился к обзвону — выход из Oktell и закрытие окна: %s",
+                        report.get("status"))
+        last_command_report = {
+            "id": f"phone-{stamp}",
+            "type": "phone_logout",
+            "status": report.get("status"),
+            "at": now_iso(),
+        }
+        return True
 
     def rule_print(current: dict) -> str:
         """Отпечаток того, что реально уедет в окно: правило плюс обкатка."""
@@ -5233,6 +5401,10 @@ def run_agent(cfg: dict) -> int:
         while time.time() < deadline:
             step = 0.5 if active_news is not None else 2.0
             time.sleep(min(step, max(0.0, deadline - time.time())))
+            try:
+                handle_phone_logout()
+            except Exception:  # noqa: BLE001 — метка телефона не должна ронять цикл
+                logging.debug("Разбор метки iCORE Phone не удался", exc_info=True)
             try:
                 if active_news is not None:
                     if handle_news_press() and active_news is None:
@@ -5594,6 +5766,13 @@ def run_open(cfg: dict) -> int:
     if cfg.get("_config_error"):
         logging.error("Конфиг %s не читается (%s) — окно не открываю", cfg.get("_config_path"), cfg["_config_error"])
         return 2
+    # Человек открывает Oktell сам. Метка iCORE Phone, поставленная до этого, к новому окну
+    # не относится: агент, который в момент подключения телефона не работал и поднимется
+    # только сейчас, принял бы свежую метку за «только что сел на обзвон» и закрыл окно,
+    # которое человек открыл нарочно.
+    phone_stamp = read_phone_logout_stamp()
+    if phone_stamp:
+        save_phone_logout_handled(phone_stamp)
     # Вход ДО открытия клиента, а не после: логин с паролем АТС подставляет
     # агент, и взять их он может только у сервера, назвав, кто за машиной.
     # Открыть окно раньше входа значило бы показать оператору пустую форму

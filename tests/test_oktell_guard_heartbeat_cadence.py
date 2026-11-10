@@ -84,6 +84,36 @@ class HeartbeatReplyTest(unittest.TestCase):
         self.assertEqual(len(self.upserts), 1)
 
 
+    def test_phone_logout_report_is_logged_once(self):
+        """Программа 1.0.35+ сообщает, что закрыла Oktell по подключению iCORE Phone к
+        обзвону. В журнал сервера — одна строка на событие, хотя сама отметка едет в каждом
+        следующем heartbeat; чужие команды и мусор строки не дают."""
+        from oktell_guard import routes
+        routes._phone_logout_logged.clear()
+
+        def beat(command, agent='wks-12|operator1'):
+            return self.client.post('/api/oktell_guard/heartbeat', json={
+                'agent_id': agent, 'version': '1.0.35',
+                'browser': {'managed_window': False, 'session_present': False},
+                'last_command': command,
+            })
+
+        done = {'id': 'phone-1800000123', 'type': 'phone_logout', 'status': 'done', 'at': '2026-11-11T09:00:02+0500'}
+        with self.assertLogs(level='INFO') as captured:
+            self.assertEqual(beat(done).status_code, 200)
+            self.assertEqual(beat(done).status_code, 200)                       # тот же — молчим
+            self.assertEqual(beat(done, agent='wks-13|operator2').status_code, 200)   # другая машина
+            self.assertEqual(beat(dict(done, id='phone-1800009999')).status_code, 200)  # новое подключение
+            for junk in (None, 'phone_logout', {'type': 'logout', 'id': 'x'}, {'type': 'phone_logout'}):
+                self.assertEqual(beat(junk).status_code, 200)
+        lines = [line for line in captured.output if 'по подключению к обзвону' in line]
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn('wks-12|operator1', lines[0])
+        self.assertIn('итог done', lines[0])
+        self.assertIn('wks-13|operator2', lines[1])
+        self.assertIn('phone-1800009999', lines[2])
+
+
 class CadenceContractTest(unittest.TestCase):
     def test_config_names_the_news_period(self):
         payload = queries.agent_config_payload({'heartbeat_interval_s': 60}, None)

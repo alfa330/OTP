@@ -2044,3 +2044,179 @@ def test_file_version_reads_resource_without_running_file(tmp_path):
     plain = tmp_path / "plain.exe"
     plain.write_bytes(b"MZ")
     assert agent.file_version(plain) == ""
+
+
+# --------------------------------------------------------------------------- #
+# iCORE Phone: оператор сел на обзвон — выйти из Oktell и закрыть окно (1.0.35)
+# --------------------------------------------------------------------------- #
+# Решение владельца 10.11.2026: «если у них активная сессия октела есть, её нужно
+# выкинуть в момент подключения к icore phone». Телефон пишет момент подключения в
+# реестр, агент по метке выходит из Oktell.
+
+def test_phone_logout_step_table():
+    now = 1_800_000_000.0
+    fresh = int(now) - 5
+    step = agent.phone_logout_step
+    # Метки нет / уже отработана.
+    assert step(0, 0, 0, now, True, False) == "idle"
+    assert step(fresh, fresh, 0, now, True, False) == "idle"
+    # Свежая метка и окно Oktell — выходим; окна нет — закрывать нечего.
+    assert step(fresh, 0, 0, now, True, False) == "logout"
+    assert step(fresh, 0, 0, now, False, False) == "nothing"
+    # Идёт разговор — ждём; после конца разговора выходим, даже если метка уже «постарела».
+    assert step(fresh, 0, 0, now, True, True) == "wait"
+    later = now + agent.PHONE_LOGOUT_FRESH_S + 60
+    assert step(fresh, 0, fresh, later, True, True) == "wait"
+    assert step(fresh, 0, fresh, later, True, False) == "logout"
+    # Пока ждали конца разговора, оператор закрыл Oktell сам — закрывать уже нечего.
+    assert step(fresh, 0, fresh, later, False, False) == "nothing"
+    # Разговор длиннее предела ожидания — выходим всё равно.
+    assert step(fresh, 0, fresh, fresh + agent.PHONE_LOGOUT_CALL_WAIT_S + 1, True, True) == "logout"
+
+
+def test_old_phone_mark_never_closes_oktell():
+    """Программа запустилась позже, чем телефон подключился к обзвону (или метка осталась
+    со вчера): окно Oktell, открытое после этого, человек открыл сам — не трогаем."""
+    now = 1_800_000_000.0
+    old = int(now) - agent.PHONE_LOGOUT_FRESH_S - 1
+    assert agent.phone_logout_step(old, 0, 0, now, True, False) == "stale"
+    assert agent.phone_logout_step(old, 0, 0, now, True, True) == "stale"
+    # Ровно на границе — ещё свежая.
+    edge = int(now) - agent.PHONE_LOGOUT_FRESH_S
+    assert agent.phone_logout_step(edge, 0, 0, now, True, False) == "logout"
+    # Часы компьютера перевели назад дальше порога — метке тоже не верим.
+    future = int(now) + agent.PHONE_LOGOUT_FRESH_S + 1
+    assert agent.phone_logout_step(future, 0, 0, now, True, False) == "stale"
+
+
+def test_phone_mark_is_read_from_the_phone_registry_key(monkeypatch):
+    seen = {}
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    class _Winreg:
+        HKEY_CURRENT_USER = "HKCU"
+
+        @staticmethod
+        def OpenKey(hive, path):
+            seen["key"] = (hive, path)
+            return _Key()
+
+        @staticmethod
+        def QueryValueEx(_key, name):
+            seen["value"] = name
+            return 1_800_000_123, 11
+
+    monkeypatch.setattr(agent, "IS_WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "winreg", _Winreg)
+    assert agent.read_phone_logout_stamp() == 1_800_000_123
+    # Тот же раздел и то же имя, что пишет телефон (iCoreAuth.cpp: kSessionKey, OktellLogoutAt).
+    assert seen == {"key": ("HKCU", r"Software\iCORE Phone"), "value": "OktellLogoutAt"}
+
+    class _Broken(_Winreg):
+        @staticmethod
+        def QueryValueEx(_key, _name):
+            raise FileNotFoundError
+
+    monkeypatch.setitem(sys.modules, "winreg", _Broken)
+    assert agent.read_phone_logout_stamp() == 0
+
+    class _Garbage(_Winreg):
+        @staticmethod
+        def QueryValueEx(_key, _name):
+            return "не число", 1
+
+    monkeypatch.setitem(sys.modules, "winreg", _Garbage)
+    assert agent.read_phone_logout_stamp() == 0
+    monkeypatch.setattr(agent, "IS_WINDOWS", False)
+    assert agent.read_phone_logout_stamp() == 0
+
+
+def test_handled_phone_mark_survives_agent_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    assert agent.load_phone_logout_handled() == 0
+    agent.save_phone_logout_handled(1_800_000_123)
+    assert agent.load_phone_logout_handled() == 1_800_000_123
+    (tmp_path / "phone_logout.json").write_text("мусор", encoding="utf-8")
+    assert agent.load_phone_logout_handled() == 0
+
+
+def test_close_for_phone_logs_out_and_closes_without_login_screen(monkeypatch):
+    """Выход по сокету, чистка сессии и ЗАКРЫТИЕ окна — без перезагрузки на экран входа и
+    без подъёма окна: оставленную форму входа агент через минуту заполнил бы сам."""
+    browser = _browser()
+    page = _FakePage(HEALTHY)
+    targets = [{"id": "T1"}]
+    closed = []
+    monkeypatch.setattr(browser, "oktell_target", lambda: targets[0] if targets else None)
+    monkeypatch.setattr(browser, "page", lambda target=None: page)
+    monkeypatch.setattr(browser, "ensure_window_visible",
+                        lambda **_k: (_ for _ in ()).throw(AssertionError("окно поднимать нельзя")))
+    monkeypatch.setattr(agent, "_close_target", lambda _b, tid: (closed.append(tid), targets.clear()))
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+
+    report = browser.close_for_phone()
+
+    assert report["status"] == "done"
+    assert closed == ["T1"]
+    assert any("'logout'" in js for js in page.evaluated), "штатный выход по сокету не отправлен"
+    assert "Storage.clearDataForOrigin" in page.calls
+    assert "Page.reload" not in page.calls
+    assert browser._page is None
+
+
+def test_close_for_phone_without_window_or_cdp(monkeypatch):
+    browser = _browser()
+    monkeypatch.setattr(agent.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(browser, "oktell_target", lambda: None)
+    assert browser.close_for_phone()["status"] == "no_window"
+    # Вкладка есть, а CDP не отвечает — окно всё равно закрываем: соединение с АТС рвётся с ним.
+    closed = []
+    targets = [{"id": "T9"}]
+    monkeypatch.setattr(browser, "oktell_target", lambda: targets[0] if targets else None)
+    monkeypatch.setattr(browser, "page", lambda target=None: None)
+    monkeypatch.setattr(agent, "_close_target", lambda _b, tid: (closed.append(tid), targets.clear()))
+    report = browser.close_for_phone()
+    assert (report["status"], closed, report["steps"].get("no_cdp")) == ("done", ["T9"], True)
+
+
+def test_agent_checks_the_phone_mark_between_rounds():
+    """Метку смотрим в паузе между кругами (раз в полсекунды–две), а не раз в минуту: иначе
+    оператор минуту звонит из телефона, а Oktell ещё шлёт ему входящие."""
+    source = Path(agent.__file__).read_text(encoding="utf-8")
+    body = source[source.index("def run_agent("):source.index("def run_watchdog(")]
+    wait = body[body.index("def wait_for_next_round("):body.index("def adopt_new_login(")]
+    assert "handle_phone_logout()" in wait
+    handler = body[body.index("def handle_phone_logout("):body.index("def rule_print(")]
+    assert "browser.close_for_phone()" in handler
+    assert "save_phone_logout_handled(stamp)" in handler
+    # Обкатка ограничителя («только писать в журнал») к смене инструмента не относится.
+    assert "dry_run" not in handler
+    assert agent.VERSION == "1.0.35"
+
+
+def test_shortcut_consumes_the_phone_mark(tmp_path, monkeypatch):
+    """Ярлык «Oktell» — человек открывает Oktell сам. Метку телефона, поставленную до этого,
+    агент, поднявшийся только сейчас, не должен принять за «только что сел на обзвон»."""
+    monkeypatch.setattr(agent, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(agent, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(agent, "read_phone_logout_stamp", lambda: 1_800_000_555)
+    order = []
+    real_save = agent.save_phone_logout_handled
+    monkeypatch.setattr(agent, "save_phone_logout_handled",
+                        lambda stamp: (order.append("метка отработана"), real_save(stamp)))
+    monkeypatch.setattr(agent, "ensure_session", lambda cfg: (order.append("вход"), {})[1])
+    # Вход не выполнен — окно не открываем, но метка уже отмечена.
+    assert agent.run_open({}) == 3
+    assert order == ["метка отработана", "вход"]
+    assert agent.load_phone_logout_handled() == 1_800_000_555
+    # Метки нет — файл не трогаем.
+    monkeypatch.setattr(agent, "read_phone_logout_stamp", lambda: 0)
+    (tmp_path / "phone_logout.json").unlink()
+    assert agent.run_open({}) == 3
+    assert not (tmp_path / "phone_logout.json").exists()

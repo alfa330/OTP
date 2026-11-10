@@ -570,6 +570,20 @@ PHONE_MODE_REMOTE_CC = "remote_cc"
 PHONE_MODE_PHONE = "phone"
 PHONE_MODES = (PHONE_MODE_REMOTE_CC, PHONE_MODE_PHONE)
 
+# Сессия Oktell закрывается при подключении к обзвону (владелец 10.11.2026: «если у них активная
+# сессия октела есть, её нужно выкинуть в момент подключения к icore phone»). Касается отделов,
+# работающих в Oktell: их сотрудник садится на линию удалённого КЦ, телефон (3.22.49+) по флагу
+# oktell_logout ставит на компьютере метку, и программа «Oktell» (1.0.35+) по ней выходит из
+# Oktell и закрывает его окно. Сервер сам в Oktell не ходит: закрывается сессия на том же
+# компьютере, где запущен телефон. Коды отделов departments.code; рубильник — переменная
+# ICORE_PHONE_OKTELL_LOGOUT=0 (читается на каждый запрос настроек).
+OKTELL_LOGOUT_DEPARTMENT_CODES = ("szov",)
+OKTELL_LOGOUT_ENV = "ICORE_PHONE_OKTELL_LOGOUT"
+
+
+def oktell_logout_enabled():
+    return (os.getenv(OKTELL_LOGOUT_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
+
 # ── Автообзвон Тез КЦ (ТЗ руководителя Тез и решения владельца 15.10.2026) ──────────────────
 # Тот же движок с ПРОФИЛЕМ отдела (dial_list_department_settings.profile). 'remote_cc' — удалённый
 # КЦ, всё как было; 'tez' — база ФИО + телефон без ИИН, «цель» лида — водитель вышел на линию
@@ -2600,10 +2614,17 @@ class DialListService:
             return {"enabled": False}
         dept = self.department_settings(department_id)
         enabled = resolve_enabled(self.user_setting(user_id), dept["enabled"] if dept["configured"] else None)
+        # Свой отдел сидящего на чужой линии: в карточке раздела он подменён отделом линии.
+        own_code = self._own_department_code(user_id) if operator.get("line_member") else ""
         return {
             "enabled": enabled,
             # Телефон показывает переключатель «Удалённый КЦ» в меню статуса (3.22.45+).
-            "switchable": self._mode_switchable(user_id, operator, dept),
+            "switchable": self._mode_switchable(user_id, operator, dept, own_code=own_code),
+            # Телефон при старте в режиме обзвона закрывает сессию Oktell на этом компьютере
+            # (OKTELL_LOGOUT_DEPARTMENT_CODES). Только тем, у кого обзвон включён: в режиме
+            # обычного телефона человек к обзвону не подключается.
+            "oktell_logout": bool(enabled and own_code in OKTELL_LOGOUT_DEPARTMENT_CODES
+                                  and oktell_logout_enabled()),
             "portion_size": dept["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
             # Телефон в этом режиме прячет номера везде: история, окно звонка,
@@ -2617,15 +2638,8 @@ class DialListService:
             "auto": bool(is_tez(dept) and dept.get("auto_dial")),
         }
 
-    def _mode_switchable(self, user_id, operator, dept):
-        """Может ли сотрудник сам переключать режим телефона (MODE_SWITCH_DEPARTMENT_CODES):
-        сидит на линии удалённого КЦ, где обзвон включён отделом, а сам — из отдела-исключения.
-        operator — карточка глазами раздела (dial_operator): у сидящего на чужой линии в ней
-        отмечено line_member, а отдел подменён отделом линии, поэтому свой отдел читаем здесь."""
-        if not operator.get("line_member") or not dept.get("configured") or not dept.get("enabled"):
-            return False
-        if (dept.get("profile") or PROFILE_REMOTE_CC) != PROFILE_REMOTE_CC:
-            return False
+    def _own_department_code(self, user_id):
+        """Код отдела, где человек числится (а не отдела линии, на которую его посадили)."""
         with self.db._get_cursor() as cur:
             cur.execute("""
                 SELECT lower(COALESCE(d.code, '')) FROM users u
@@ -2633,7 +2647,21 @@ class DialListService:
                 WHERE u.id = %s
             """, (int(user_id),))
             row = cur.fetchone()
-        return bool(row) and row[0] in MODE_SWITCH_DEPARTMENT_CODES
+        return (row[0] or "") if row else ""
+
+    def _mode_switchable(self, user_id, operator, dept, own_code=None):
+        """Может ли сотрудник сам переключать режим телефона (MODE_SWITCH_DEPARTMENT_CODES):
+        сидит на линии удалённого КЦ, где обзвон включён отделом, а сам — из отдела-исключения.
+        operator — карточка глазами раздела (dial_operator): у сидящего на чужой линии в ней
+        отмечено line_member, а отдел подменён отделом линии, поэтому свой отдел читаем здесь
+        (own_code — уже прочитанный вызывающим)."""
+        if not operator.get("line_member") or not dept.get("configured") or not dept.get("enabled"):
+            return False
+        if (dept.get("profile") or PROFILE_REMOTE_CC) != PROFILE_REMOTE_CC:
+            return False
+        if own_code is None:
+            own_code = self._own_department_code(user_id)
+        return own_code in MODE_SWITCH_DEPARTMENT_CODES
 
     def set_phone_mode(self, user_id, mode):
         """Сотрудник сам выбирает режим телефона: «remote_cc» — как у отдела линии (обзвон),

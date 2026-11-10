@@ -532,6 +532,28 @@ def test_only_front_office_on_an_enabled_line_switches(db):
     assert svc.phone_settings(FO1) == dict(svc.phone_settings(FO1), enabled=False, switchable=False)
 
 
+def test_oktell_session_closes_only_for_szov_on_dial_out(db, monkeypatch):
+    """Владелец 10.11.2026: оператор СЗоВ подключается к обзвону через телефон — сессию Oktell
+    на его компьютере закрыть. Флаг уходит телефону в блоке dial_list."""
+    monkeypatch.delenv(dial_service.OKTELL_LOGOUT_ENV, raising=False)
+    svc = dial_service.DialListService(db)
+    assert svc.phone_settings(SZ)['oktell_logout'] is True
+    assert svc.phone_settings(FO1)['oktell_logout'] is False       # фронт-офис в Oktell не работает
+    assert 'oktell_logout' not in svc.phone_settings(FO_IDLE)      # без линии обзвона нет вовсе
+    # Обзвон лично выключен — человек к обзвону не подключается, Oktell не трогаем.
+    svc.save_user_setting(SZ, False)
+    assert svc.phone_settings(SZ)['oktell_logout'] is False
+    svc.save_user_setting(SZ, None)
+    assert svc.phone_settings(SZ)['oktell_logout'] is True
+    # Рубильник на сервере.
+    monkeypatch.setenv(dial_service.OKTELL_LOGOUT_ENV, '0')
+    assert svc.phone_settings(SZ)['oktell_logout'] is False
+    monkeypatch.delenv(dial_service.OKTELL_LOGOUT_ENV)
+    # Отдел линии выключил обзвон — закрывать Oktell незачем.
+    _q(db, 'UPDATE dial_list_department_settings SET enabled = FALSE WHERE department_id = 1954')
+    assert svc.phone_settings(SZ)['oktell_logout'] is False
+
+
 def test_mode_switch_route(db):
     from flask import Flask, jsonify
     from dial_list.routes import build_dial_list_blueprint
