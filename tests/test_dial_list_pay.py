@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """«Оплата по конверсии» и рейтинг дня (владелец, 14.10.2026): чистые правила dial_list/pay.py.
 
-Тариф на сетке конверсий, пример с плаката владельца, показанный процент (не выше ступени,
-за которую платим), окно рейтинга по часам Алматы, места при равенствах. Без базы и сети.
+Тариф на сетке конверсий, пример с плаката владельца, конверсия 0 % без оплаты (владелец,
+10.11.2026), показанный процент (не выше ступени, за которую платим), окно рейтинга по часам
+Алматы, места при равенствах. Без базы и сети.
 """
 import os
 import sys
@@ -24,12 +25,19 @@ def percent_level(percent):
     return bisect_right(STARTS, percent) - 1
 
 
+def shown_price(percent):
+    """Цена диалога по показанному проценту: «0,0 %» — без оплаты, иначе — цена ступени."""
+    return 0 if percent == 0 else pay.TARIFF[percent_level(percent)][1]
+
+
 class TariffTests(unittest.TestCase):
     """Цена диалога по конверсии: ступени по точной доле, а не по округлённому проценту."""
 
     # (подписавших, диалогов, конверсия, цена диалога)
     GRID = (
-        (0, 10000, '0 %', 30),
+        (0, 10000, '0 %', 0),           # подписавших нет — вне тарифа, диалоги не оплачиваются
+        (0, 1, '0 % из одного', 0),
+        (1, 10000, '0,01 %', 30),       # первый подписавший — уже первая ступень; показано «0,1 %»
         (1000, 10000, '10 %', 30),
         (1990, 10000, '19,9 %', 30),
         (2000, 10000, '20 %', 30),      # 20–29 % плакат не называет: 15 тн за полные 10 %, не ниже 30
@@ -52,8 +60,8 @@ class TariffTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertEqual(pay.price(s, d), cost)
                 self.assertEqual(pay.salary(d, d, s)["amount"], d * cost)
-                # Показанный процент читается в ту же ступень, что и цена.
-                self.assertEqual(pay.TARIFF[percent_level(pay.display_percent(s, d))][1], cost)
+                # Показанный процент читается в ту же цену, что и заплатят.
+                self.assertEqual(shown_price(pay.display_percent(s, d)), cost)
 
     def test_tariff_table(self):
         self.assertEqual(pay.CURRENCY, "тн")
@@ -76,8 +84,68 @@ class TariffTests(unittest.TestCase):
         self.assertEqual((pay.price(350, 500), pay.price(349, 500)), (105, 90))
         # Подписавших больше диалогов не бывает — считаем как 100 %, а не падаем.
         self.assertEqual(pay.level(12, 10), len(pay.TARIFF) - 1)
-        self.assertEqual(pay.level(-3, 10), 0)
+        # Отрицательных подписавших тоже не бывает — это ноль подписавших: вне тарифа.
+        self.assertIsNone(pay.level(-3, 10))
+        self.assertEqual(pay.price(-3, 10), 0)
         self.assertEqual(pay.level(None, None), 0)
+
+
+class ZeroConversionTests(unittest.TestCase):
+    """Конверсия 0 % (владелец, 10.11.2026): диалоги есть, подписавших нет — оператор не попадает
+    в проценты конверсии и денег не получает. Первый подписавший ставит на ступень его доли, и
+    оплачиваются все диалоги."""
+
+    def test_no_successes_no_pay(self):
+        # Экран владельца: 4 диалога, подписавших нет. Было 4 × 30 = 120 тн — стало 0.
+        self.assertEqual(pay.salary(8, 4, 0), {
+            "currency": "тн", "called": 8, "dialogs": 4, "no_dialog": 4, "successes": 0,
+            "percent": 0.0, "price": 0, "amount": 0, "level": None,
+            "next": {"from": 0, "price": 30, "need": 1, "amount": 120},
+            # Ступеней телефону нет: ни полоски на карточке, ни лесенки, ни подписи «ступень „до 30 %“».
+            "tariff": [],
+        })
+        for d in (1, 2, 4, 99, 100, 101, 2500, 10000):
+            with self.subTest(d):
+                self.assertIsNone(pay.level(0, d))
+                self.assertEqual((pay.price(0, d), pay.salary(d, d, 0)["amount"]), (0, 0))
+                self.assertEqual(pay.display_percent(0, d), 0.0)
+
+    def test_first_success_pays_for_every_dialog(self):
+        # Один подписавший из четырёх — 25 %, первая ступень: оплачены все четыре диалога.
+        salary = pay.salary(8, 4, 1)
+        self.assertEqual((salary["level"], salary["price"], salary["amount"], salary["percent"]), (0, 30, 120, 25.0))
+        self.assertEqual(salary["tariff"], pay.tariff_rows())
+        # «Следующая ступень» при 0 % — та, на которую ставит первый подписавший: при одном-трёх
+        # диалогах она выше первой (1 из 3 — 33 %, 1 из 1 — 100 %).
+        self.assertEqual(pay.next_level(0, 4), {"from": 0, "price": 30, "need": 1, "amount": 120})
+        self.assertEqual(pay.next_level(0, 3), {"from": 30, "price": 45, "need": 1, "amount": 135})
+        self.assertEqual(pay.next_level(0, 2), {"from": 50, "price": 75, "need": 1, "amount": 150})
+        self.assertEqual(pay.next_level(0, 1), {"from": 90, "price": 135, "need": 1, "amount": 135})
+        for d in range(1, 301):
+            nxt = pay.next_level(0, d)
+            self.assertEqual((nxt["need"], nxt["price"], nxt["amount"]), (1, pay.price(1, d), d * pay.price(1, d)), d)
+            self.assertEqual(nxt["from"], pay.TARIFF[pay.level(1, d)][0], d)
+            self.assertEqual(pay.salary(d, d, 1)["amount"], nxt["amount"], d)
+
+    def test_no_dialogs_is_not_zero_conversion(self):
+        # Диалогов нет — конверсии ещё нет: первая ступень, «от 30 тн за диалог», тариф на месте.
+        salary = pay.salary(12, 0, 0)
+        self.assertEqual((salary["level"], salary["price"], salary["percent"], salary["next"]), (0, 30, None, None))
+        self.assertEqual(salary["tariff"], pay.tariff_rows())
+
+    def test_paid_conversion_is_never_shown_as_zero(self):
+        # 1 из 2500 — 0,04 %: аналитика округляет до «0,0 %», а телефон рядом с оплатой покажет «0,1 %».
+        self.assertEqual((analytics._pct(1, 2500), pay.display_percent(1, 2500), pay.price(1, 2500)), (0.0, 0.1, 30))
+        self.assertEqual((analytics._pct(3, 10000), pay.display_percent(3, 10000)), (0.0, 0.1))
+        # Где аналитика сама показывает не ноль — без отличий.
+        for s, d in ((1, 1000), (1, 1999), (2, 2500), (1, 4)):
+            self.assertEqual(pay.display_percent(s, d), analytics._pct(s, d), (s, d))
+            self.assertGreater(pay.display_percent(s, d), 0, (s, d))
+        # Показан ноль — только когда не платим, и наоборот.
+        for d in range(1, 6001, 13):
+            for s in (0, 1, 2, 3):
+                if s <= d:
+                    self.assertEqual(pay.display_percent(s, d) == 0, pay.price(s, d) == 0, (s, d))
 
 
 class OwnerPosterTests(unittest.TestCase):
@@ -103,13 +171,14 @@ class OwnerPosterTests(unittest.TestCase):
 
     def test_next_level(self):
         self.assertEqual(pay.next_level(349, 500), {"from": 70, "price": 105, "need": 1, "amount": 52500})
-        # Не набрано и 30 %: 3 из 7 — первые, что дают ⌈2,1⌉ подписавших.
-        self.assertEqual(pay.next_level(0, 7), {"from": 30, "price": 45, "need": 3, "amount": 315})
+        # Не набрано и 30 %: 3 из 7 — первые, что дают ⌈2,1⌉ подписавших; один уже есть.
+        self.assertEqual(pay.next_level(1, 7), {"from": 30, "price": 45, "need": 2, "amount": 315})
         self.assertIsNone(pay.next_level(9, 10))          # 90 % — ступень последняя
         self.assertIsNone(pay.next_level(10, 10))
-        # need — ровно столько, сколько нужно: на одного меньше — порог ещё не взят.
+        # need — ровно столько, сколько нужно: на одного меньше — порог ещё не взят. Конверсия 0 %
+        # (s = 0) — в ZeroConversionTests: там следующая ступень — первого подписавшего.
         for d in range(1, 301):
-            for s in range(d + 1):
+            for s in range(1, d + 1):
                 nxt = pay.next_level(s, d)
                 if nxt is None:
                     self.assertEqual(pay.level(s, d), len(pay.TARIFF) - 1, (s, d))
@@ -139,6 +208,13 @@ class DisplayPercentTests(unittest.TestCase):
                     shares.update(range(max(0, (start - 1) * d // 100 - 1), min(d, (start + 1) * d // 100 + 1) + 1))
             for s in shares:
                 shown, manager, paid = pay.display_percent(s, d), analytics._pct(s, d), pay.level(s, d)
+                if paid is None:
+                    # Конверсия 0 % — вне тарифа: показан ровно ноль, как у аналитики.
+                    if s != 0 or shown != 0.0 or manager != 0.0:
+                        wrong.append(('вне тарифа не при нуле подписавших', s, d, shown, manager))
+                    continue
+                if shown <= 0:
+                    wrong.append(('оплаченная конверсия показана нулём', s, d, shown))
                 if percent_level(shown) > paid:
                     wrong.append(('показан процент ступени выше оплаченной', s, d, shown))
                 if shown == manager:
@@ -253,6 +329,15 @@ class RankTests(unittest.TestCase):
         ranked = pay.rank([self.row("Г", 2, 3), self.row("Б", 2, 4), self.row("А", 2, 4), self.row("В", 3, 3)])
         self.assertEqual([(r["name"], r["place"]) for r in ranked], [("В", 1), ("А", 2), ("Б", 2), ("Г", 4)])
         self.assertEqual(pay.rank([]), [])
+
+    def test_day_without_successes_earns_nothing(self):
+        # День с конверсией 0 % — заработок 0, сколько бы диалогов ни было: ниже любого, у кого есть
+        # подписавший (до 10.11.2026 сорок диалогов без подписей давали 1200 тн и первое место).
+        # Между собой такие дни — по числу диалогов.
+        ranked = pay.rank([self.row("Сорок Диалогов", 0, 40), self.row("Один Подписавший", 1, 2),
+                           self.row("Три Диалога", 0, 3)])
+        self.assertEqual([(r["name"], r["place"], r["amount"]) for r in ranked], [
+            ("Один Подписавший", 1, 150), ("Сорок Диалогов", 2, 0), ("Три Диалога", 3, 0)])
 
 
 if __name__ == '__main__':

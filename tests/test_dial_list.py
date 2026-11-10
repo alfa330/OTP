@@ -2577,6 +2577,29 @@ class OperatorSalaryTests(unittest.TestCase):
         self.assertEqual(salary["today"], {"dialogs": 0, "successes": 0})
         self.assertIsNone(res["conversion"]["percent"])
 
+    def test_zero_conversion_no_pay(self):
+        # Владелец, 10.11.2026: при конверсии 0 % оператор не попадает в проценты конверсии и денег
+        # не получает. Его экран: 4 диалога, подписавших нет — было 4 × 30 = 120 тн, стало 0.
+        res, _, _ = self._progress(base_row=(4, 0, 8), day_rows=((7, 'Оператор', 8, 4, 0),))
+        salary = res["salary"]
+        self.assertEqual({key: salary[key] for key in ("called", "dialogs", "no_dialog", "successes", "percent",
+                                                        "price", "amount", "level", "next", "tariff")},
+                         {"called": 8, "dialogs": 4, "no_dialog": 4, "successes": 0, "percent": 0.0,
+                          "price": 0, "amount": 0, "level": None,
+                          "next": {"from": 0, "price": 30, "need": 1, "amount": 120},
+                          # Без ступеней: телефон не рисует ни полоску, ни лесенку, ни «ступень „до 30 %“».
+                          "tariff": []})
+        self.assertEqual(salary["today"], {"dialogs": 4, "successes": 0})
+        self.assertEqual(res["conversion"]["percent"], 0.0)
+        # Телефону уходит JSON: «вне ступеней» — null, список ступеней — пустой.
+        body = json.dumps(salary, ensure_ascii=False)
+        self.assertIn('"level": null', body)
+        self.assertIn('"tariff": []', body)
+        # Первый подписавший — и оплачены все четыре диалога, ступени на месте.
+        paid = self._progress(base_row=(4, 1, 8))[0]["salary"]
+        self.assertEqual((paid["percent"], paid["price"], paid["amount"], paid["level"], len(paid["tariff"])),
+                         (25.0, 30, 120, 0, 8))
+
     def test_today_failure_keeps_salary(self):
         res, cur, db = self._progress(broken=('AS dialogs',))
         self.assertNotIn("today", res["salary"])
@@ -2705,6 +2728,18 @@ class OperatorRatingTests(unittest.TestCase):
             self.assertNotIn("id", row)
         (_sql, params), = cur.executed
         self.assertIsNone(params["operator_id"])
+
+    def test_day_without_successes_earns_nothing(self):
+        # Конверсия дня 0 % — заработок дня 0, как в зарплате (владелец, 10.11.2026): пять диалогов
+        # без подписавших (раньше 5 × 30 = 150 тн и первое место) — ниже двух диалогов с подписавшим.
+        self.ROWS = [(520, 'Своев Сава', 9, 5, 0), (521, 'Новичков Назар', 4, 2, 1)]    # Назар: 50 % → 75 × 2
+        res, _ = self._rating(datetime(2026, 10, 14, 21, 30, tzinfo=self.TZ))
+        self.assertEqual(res["operators"], [
+            {"place": 1, "name": "Новичков Назар", "me": False, "dialogs": 2, "successes": 1, "percent": 50.0},
+            {"place": 2, "name": "Своев Сава", "me": True, "dialogs": 5, "successes": 0, "percent": 0.0,
+             "price": 0, "amount": 0},
+        ])
+        self.assertEqual(res["me"], res["operators"][1])
 
     def test_colleague_without_name_is_not_shown_by_id(self):
         # Пустое users.name: у руководителя в аналитике это «#id», а коллегам в рейтинг id не

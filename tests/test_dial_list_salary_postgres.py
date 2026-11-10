@@ -351,9 +351,42 @@ def test_yesterday_stays_open_until_ten_am(env):
              "price": 90, "amount": 270},
             {"place": 2, "name": "Третьякова Тамара", "me": False, "dialogs": 1, "successes": 0, "percent": 0.0},
         ]
+    # Тамара вчера — диалог без подписи: конверсия дня 0 %, заработок дня 0 (владелец, 10.11.2026).
+    tamara = env.svc.operator_rating(TAMARA, now=env.at(env.day, 9, 59))["me"]
+    assert (tamara["place"], tamara["percent"], tamara["price"], tamara["amount"]) == (2, 0.0, 0, 0)
     # В 10:00 вчерашний рейтинг закрыт — отсчёт до итогов сегодняшнего.
     closed = env.svc.operator_rating(SAVA, now=env.at(env.day, 10, 0))
     assert (closed["visible"], closed["day"], closed["seconds_to_open"]) == (False, env.day.isoformat(), 11 * 3600)
+
+
+def test_zero_conversion_pays_nothing_until_the_first_signature(env):
+    """Владелец, 10.11.2026: при конверсии 0 % оператор не попадает в проценты конверсии и денег не
+    получает — ни в зарплате за базу, ни в заработке дня. Первый подписавший ставит на ступень его
+    доли, и оплачиваются все диалоги."""
+    first, second = env.lead('Водитель первый', '77010000801'), env.lead('Водитель второй', '77010000802')
+    env.call(first, PROKHOR, env.at(env.day, 15, 0), billsec=40)
+    env.call(second, PROKHOR, env.at(env.day, 15, 10), billsec=25)
+    SignChecker(env.db).resolve_successes()
+    salary = env.svc.operator_progress(PROKHOR)["salary"]
+    assert {key: salary[key] for key in ("called", "dialogs", "no_dialog", "successes", "percent", "price",
+                                         "amount", "level", "next", "tariff", "today")} == {
+        "called": 2, "dialogs": 2, "no_dialog": 0, "successes": 0, "percent": 0.0, "price": 0, "amount": 0,
+        "level": None, "next": {"from": 50, "price": 75, "need": 1, "amount": 150}, "tariff": [],
+        "today": {"dialogs": 2, "successes": 0}}
+    # Рейтинг дня: два диалога без подписавших — заработок 0 и последнее место.
+    rating = env.svc.operator_rating(PROKHOR, now=env.at(env.day, 21, 30))
+    assert rating["me"] == {"place": 4, "name": "Пустых Прохор", "me": True, "dialogs": 2, "successes": 0,
+                            "percent": 0.0, "price": 0, "amount": 0}
+    assert (rating["total"], rating["operators"][-1]) == (4, rating["me"])
+    # Первый водитель подписал — успешка Прохора: 1 из 2 = 50 %, оплачены оба диалога.
+    env.sign(first, env.at(env.day, 16, 0))
+    SignChecker(env.db).resolve_successes()
+    salary = env.svc.operator_progress(PROKHOR)["salary"]
+    assert (salary["successes"], salary["percent"], salary["price"], salary["amount"], salary["level"]) == \
+        (1, 50.0, 75, 150, 3)
+    assert salary["tariff"] == pay.tariff_rows()
+    me = env.svc.operator_rating(PROKHOR, now=env.at(env.day, 21, 30))["me"]
+    assert (me["place"], me["successes"], me["price"], me["amount"]) == (4, 1, 75, 150)
 
 
 def test_day_counts_the_driver_once_on_the_first_talk_day(env):
