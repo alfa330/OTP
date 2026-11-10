@@ -70,8 +70,10 @@ const dayLabel = (iso) => {
     return `${Number(d)}.${m}`;
 };
 
+// «Успешки» в карточке «По дням» — «Подписали после звонка» (владелец, 10.11.2026):
+// так же, как столбец таблицы под переключателем.
 const METRICS = [
-    { value: 'successes', label: 'Успешки', name: 'Успешек' },
+    { value: 'successes', label: 'Подписали после звонка', name: 'Подписавших после звонка' },
     { value: 'talked', label: 'Разговоры ≥10 с', name: 'Разговоров ≥10 с' },
     { value: 'attempts', label: 'Звонки', name: 'Звонков' },
 ];
@@ -181,6 +183,11 @@ const DocumentsCard = ({ totals, check, onOpen }) => {
     );
 };
 
+/* Заголовок таблицы «По дням», который при тесной карточке (ноутбук, половина экрана)
+   переносится на вторую строку, а не уводит последние столбцы за горизонтальную
+   прокрутку: Th из reportKit — nowrap. На широком экране — в одну строку, как был. */
+const WrapHead = ({ children }) => <span className="whitespace-normal">{children}</span>;
+
 const DayTooltip = ({ active, payload, metricName }) => {
     if (!active || !payload?.length) return null;
     const row = payload[0].payload;
@@ -202,7 +209,7 @@ const ByDayCard = ({ days }) => {
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
                     <span className={iosGroupLabel}>По дням</span>
-                    <IosHint text="Звонки и разговоры — по дню звонка, успешки — по дню, когда водитель подписал документы. Всё — по водителям базы выбранного месяца." />
+                    <IosHint text="Звонки и разговоры — по дню звонка, подписи — по дню, когда водитель подписал документы. «Подписали после звонка» — после разговора с оператором от 10 секунд (это успешки), «Подписали в общ.» — все подписавшие, в том числе без такого разговора. Всё — по водителям базы выбранного месяца." />
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                     <IosSegmented value={metric} onChange={setMetric} options={METRICS} size="xs" ariaLabel="Показатель" />
@@ -246,7 +253,16 @@ const ByDayCard = ({ days }) => {
                     <div className="max-h-72 overflow-y-auto">
                         <table className="w-full border-collapse">
                             <thead className="sticky top-0 border-b border-slate-100 bg-white">
-                                <tr><Th>День</Th><Th right>Звонки</Th><Th right>Разговоры ≥10 с</Th><Th right>Время разговоров</Th><Th right>Подписали</Th><Th right>Успешки</Th></tr>
+                                {/* Владелец, 10.11.2026: «Успешки» → «Подписали после звонка», «Подписали» →
+                                    «Подписали в общ.» и в конец — сначала часть, потом все подписавшие. */}
+                                <tr>
+                                    <Th>День</Th>
+                                    <Th right>Звонки</Th>
+                                    <Th right><WrapHead>Разговоры ≥10&nbsp;с</WrapHead></Th>
+                                    <Th right><WrapHead>Время разговоров</WrapHead></Th>
+                                    <Th right><WrapHead>Подписали после звонка</WrapHead></Th>
+                                    <Th right><WrapHead>Подписали в общ.</WrapHead></Th>
+                                </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-50">
                                 {[...days].reverse().map((d) => (
@@ -255,8 +271,8 @@ const ByDayCard = ({ days }) => {
                                         <Td right>{num(d.attempts)}</Td>
                                         <Td right>{num(d.talked)}</Td>
                                         <Td right muted>{fmtTalk(d.talk_sec)}</Td>
-                                        <Td right>{num(d.signed)}</Td>
                                         <Td right>{num(d.successes)}</Td>
+                                        <Td right>{num(d.signed)}</Td>
                                     </tr>
                                 ))}
                             </tbody>
