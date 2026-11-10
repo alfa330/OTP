@@ -24,6 +24,8 @@ from collections import Counter
 from datetime import date
 
 from .. import config
+from .. import fraud as fraud_rules
+from .. import remote_cc
 from . import data as digest_data
 from . import prompts
 from . import render
@@ -117,10 +119,150 @@ def _read_day(day, department):
         base = _baseline(cur, day, department) if talks else {}
         name = _department_name(cur, department)
         digest = store.get(cur, department, day)
+        fraud_day = _fraud_day(cur, day, department) if talks else None
         cur.close()
     finally:
         conn.close()
-    return talks, base, name, digest
+    return talks, base, name, digest, fraud_day
+
+
+# ── «Поиск фрода» (SZOV-2) ────────────────────────────────────────────────────
+
+def _fraud_department(cur) -> str | None:
+    """Отдел, в чьей сводке живёт «Поиск фрода», — отдел направления, через которое
+    оцениваются звонки удалённого КЦ («Обзвон — подписание АВР» — СЗоВ)."""
+    direction_id = config.REMOTE_CC_QA_DIRECTION_ID
+    if not direction_id:
+        return None
+    cur.execute("""SELECT lower(COALESCE(dep.code, ''))
+                     FROM directions d JOIN departments dep ON dep.id = d.department_id
+                    WHERE d.id = %s""", (int(direction_id),))
+    row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def _fraud_day(cur, day, department) -> dict | None:
+    """Совпадения шаблонов фрода за день и какие из звонков ИИ слушал.
+
+    None — у отдела «Поиска фрода» нет или удалённый КЦ в этот день не звонил.
+    subjects — {попытка журнала удалённого КЦ: звонок пула ИИ-оценки}: по нему
+    совпадение получает номер разговора [[#n]] (если звонок оценён)."""
+    if _fraud_department(cur) != config.normalise_department_code(department):
+        return None
+    calls = fraud_rules.load_day(cur, day)
+    if not calls:
+        return None
+    keys = sorted({c["general_call_id"] for c in calls if c["general_call_id"]})
+    subjects = {}
+    if keys:
+        cur.execute("""SELECT external_id, id FROM imported_calls
+                        WHERE notes = %s AND external_id = ANY(%s)""", (remote_cc.NOTES, keys))
+        by_key = {str(key): int(subject_id) for key, subject_id in cur.fetchall()}
+        subjects = {c["id"]: by_key[c["general_call_id"]] for c in calls
+                    if c["general_call_id"] in by_key}
+    return {"calls": {c["id"]: c for c in calls}, "found": fraud_rules.find(calls),
+            "subjects": subjects}
+
+
+def _fraud_hash(found: dict, heard) -> str:
+    """Отпечаток раздела: совпадения (какие звонки под какими шаблонами) и оценки
+    прослушанных звонков. Изменилось одно из двух — раздел переписывается."""
+    import hashlib
+    keys = [f"{kind}:{','.join(hit['calls'])}" for kind in fraud_rules.KINDS
+            for hit in found.get(kind) or []]
+    keys.append(digest_data.inputs_hash(heard))
+    return hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()[:32]
+
+
+def _fraud_section(day, department, department_name, fraud_day, talks, refs, kept, *,
+                   force, generate_fn, usage, models, errors) -> tuple[dict, bool]:
+    """Раздел «Поиск фрода»: (запись раздела, звали ли модель успешно).
+
+    Ни один шаблон не сработал — модель не зовём: одна строка без счёта за неё."""
+    found = fraud_day["found"]
+    direction_id = int(config.REMOTE_CC_QA_DIRECTION_ID)
+    ref_of_subject = {t["id"]: t["ref"] for t in talks
+                      if t["kind"] == config.SUBJECT_IMPORTED_CALL}
+    ref_by_call = {call_id: ref_of_subject[subject_id]
+                   for call_id, subject_id in fraud_day["subjects"].items()
+                   if subject_id in ref_of_subject}
+    talk_by_ref = {t["ref"]: t for t in talks}
+    flagged = [call_id for call_id, _kinds in fraud_rules.flagged_calls(found)]
+    heard = [talk_by_ref[ref] for ref in dict.fromkeys(
+        ref_by_call[call_id] for call_id in flagged if call_id in ref_by_call)]
+    stats = fraud_rules.public_stats(found)
+    entry = {"key": prompts.FRAUD_KEY, "kind": prompts.FRAUD_KIND, "direction_id": direction_id,
+             "direction": prompts.FRAUD_TITLE, "family": digest_data.FAMILY_CALLS,
+             # Видят те, кому открыто направление звонков удалённого КЦ (_visible).
+             "subject_directions": [direction_id], "stats": stats, "usual": None,
+             "inputs_hash": _fraud_hash(found, heard), "inputs_count": len(heard),
+             "headline": "", "html": "", "refs": [], "error": None}
+    if kept and kept.get("html") and kept.get("inputs_hash") == entry["inputs_hash"] and not force:
+        entry.update(headline=kept.get("headline") or "", html=kept["html"],
+                     refs=kept.get("refs") or [])
+        return entry, False
+    if not stats["flagged"]:
+        entry.update(headline="Шаблоны фрода за день не сработали",
+                     html="<p>Ни один из четырёх шаблонов за день не сработал.</p>")
+        return entry, False
+    # Ссылки — только на звонки удалённого КЦ: номер чужого разговора открыл бы
+    # СВ сотрудника другого направления (как у обычных разделов).
+    own_refs = {t["ref"]: refs[t["ref"]] for t in talks
+                if t.get("subject_direction") == direction_id and t["ref"] in refs}
+    try:
+        text, meta = generate_fn(
+            prompts.fraud_system(department),
+            prompts.fraud_user(day, department_name, found, fraud_day["calls"], ref_by_call,
+                               heard, stats),
+            max_tokens=prompts.FRAUD_MAX_TOKENS)
+        _usage_add(usage, {**(meta.get("usage") or {}), "calls": 1})
+        models[f"{meta.get('provider')}:{meta.get('model')}"] += 1
+        headline, body = render.parse_envelope(text)
+        html, used = render.render(body, own_refs)
+        html = render.drop_fraud_header_stats(html, stats)
+        if not html:
+            raise DigestError("ИИ вернул пустой ответ")
+        entry.update(headline=_fraud_headline(headline or render.headline_from(html), found),
+                     html=html, refs=sorted(set(used)))
+        return entry, True
+    except Exception as error:   # noqa: BLE001 — раздел не роняет сводку
+        logging.exception("ai-qa сводка %s %s: «Поиск фрода» не написан", department, day)
+        if kept and kept.get("html"):
+            entry.update(headline=kept.get("headline") or "", html=kept["html"],
+                         refs=kept.get("refs") or [], inputs_hash=kept.get("inputs_hash"),
+                         inputs_count=kept.get("inputs_count"), outdated=True)
+            errors.append(f"{prompts.FRAUD_TITLE}: {_cause(error)} (оставлен прежний текст)")
+        else:
+            entry["error"] = _section_error(error)
+            errors.append(f"{prompts.FRAUD_TITLE}: {_cause(error)}")
+        return entry, False
+
+
+def _fraud_headline(headline: str, found: dict) -> str:
+    """«КРАТКО» раздела — без фамилий: промпт это запрещает, но модель называла
+    оператора в заголовке («…у Тулегенулы Максата», живой прогон 21.10). Заголовок
+    раздела встаёт подписью дня в списке, где фамилия обвиняемым тоном — лишнее.
+    Названа фамилия кого-то из операторов с совпадениями — заголовок считает код."""
+    operators = {hit["operator"] for kind in fraud_rules.KINDS for hit in found.get(kind) or []
+                 if hit.get("operator") and hit["operator"] != "—"}
+    lowered = str(headline or "").casefold()
+    for name in operators:
+        for word in str(name).split():
+            stem = word.casefold()[:max(4, len(word) - 2)]
+            if len(word) >= 4 and stem in lowered:
+                count = len(operators)
+                return (f"Шаблоны фрода сработали у {count} "
+                        f"{'оператора' if count % 10 == 1 and count % 100 != 11 else 'операторов'}")
+    return headline
+
+
+def _place_fraud(sections_out, entry) -> None:
+    """«Поиск фрода» — сразу за разделом направления звонков удалённого КЦ."""
+    for position, section in enumerate(sections_out):
+        if section.get("direction_id") == entry["direction_id"]:
+            sections_out.insert(position + 1, entry)
+            return
+    sections_out.append(entry)
 
 
 def _cause(error) -> str:
@@ -178,10 +320,14 @@ def generate(department: str, day: date, *, triggered_by: str = "manual", force:
         return {"status": "running"}
     started = time.monotonic()
     try:
-        talks, base, department_name, digest = _read_day(day, department)
+        talks, base, department_name, digest, fraud_day = _read_day(day, department)
         if not talks:
             store.release(department, day, forget_pending=True)
             return {"status": "empty"}
+        # Отпечаток дня — по ВСЕМ оценкам, и взятым по триггеру тоже: оценили новый
+        # подозрительный звонок — «Поиск фрода» пора дописать. Разделы направлений и
+        # цифры — только по случайной выборке (regular_talks).
+        regular = digest_data.regular_talks(talks)
         fingerprint = digest_data.inputs_hash(talks)
         if (not force and digest and digest.get("status") == "ready"
                 and digest.get("inputs_hash") == fingerprint and not incomplete(digest)):
@@ -197,7 +343,7 @@ def generate(department: str, day: date, *, triggered_by: str = "manual", force:
         # rewritten — сколько разделов РЕАЛЬНО переписано (по нему решается,
         # переписывать ли «Главное»), attempted — сколько раз звали модель.
         rewritten = attempted = 0
-        for section in _sections_of(talks):
+        for section in _sections_of(regular):
             stats = digest_data.section_stats(section["talks"])
             stats_by_key[section["key"]] = stats
             section_hash = digest_data.inputs_hash(section["talks"])
@@ -258,13 +404,25 @@ def generate(department: str, day: date, *, triggered_by: str = "manual", force:
                     errors.append(f"{section['direction']}: {_cause(error)}")
             sections_out.append(entry)
 
+        if fraud_day:
+            kept = next((s for s in (digest or {}).get("sections") or []
+                         if isinstance(s, dict) and s.get("key") == prompts.FRAUD_KEY), None)
+            fraud_entry, fraud_written = _fraud_section(
+                day, department, department_name, fraud_day, talks, refs, kept, force=force,
+                generate_fn=generate_fn, usage=usage, models=models, errors=errors)
+            _place_fraud(sections_out, fraud_entry)
+            if fraud_entry["html"] and fraud_entry["html"] != (kept or {}).get("html"):
+                rewritten += 1
+            attempted += 1 if fraud_written or fraud_entry.get("error") or \
+                fraud_entry.get("outdated") else 0
+
         written = [s for s in sections_out if s["html"]]
         if not written:
             store.release(department, day,
                           error=f"{_cause_of(errors)} — попробуйте ещё раз через несколько минут.")
             return {"status": "failed", "errors": errors}
 
-        whole = digest_data.section_stats(talks)
+        whole = digest_data.section_stats(regular)
         old_overview = (digest or {}).get("overview_html")
         old_outdated = bool(((digest or {}).get("stats") or {}).get("overview_outdated"))
         overview_html, headline, overview_outdated = None, written[0]["headline"], False
@@ -275,20 +433,20 @@ def generate(department: str, day: date, *, triggered_by: str = "manual", force:
                 headline = digest.get("headline") or headline
             else:
                 numbers = {f"{t['kind']}:{t['id']}": t["ref"] for t in talks}
-                brief = [{"key": s["key"], "direction": s["direction"],
+                brief = [{"key": s["key"], "direction": s["direction"], "kind": s.get("kind"),
                           "text": render.to_text(s["html"], numbers)} for s in written]
                 try:
                     text, meta = generate_fn(
                         prompts.overview_system(department, department_name),
                         prompts.overview_user(day, department_name, brief, stats_by_key,
-                                              whole=whole, usual=_usual_department(base, talks)),
+                                              whole=whole, usual=_usual_department(base, regular)),
                         max_tokens=prompts.OVERVIEW_MAX_TOKENS)
                     _usage_add(usage, {**(meta.get("usage") or {}), "calls": 1})
                     models[f"{meta.get('provider')}:{meta.get('model')}"] += 1
                     overview_headline, body = render.parse_envelope(text)
                     overview_html, _used = render.render(body, refs)
                     overview_html = render.drop_header_stats(
-                        overview_html, whole, _usual_department(base, talks)) or None
+                        overview_html, whole, _usual_department(base, regular)) or None
                     if not overview_html:
                         raise DigestError("ИИ вернул пустой ответ")
                     headline = overview_headline or render.headline_from(overview_html) or headline
@@ -308,7 +466,7 @@ def generate(department: str, day: date, *, triggered_by: str = "manual", force:
             headline = digest.get("headline") or headline
 
         save_stats = {"department": digest_data.public_stats(whole),
-                      "usual": _usual_department(base, talks)}
+                      "usual": _usual_department(base, regular)}
         if overview_outdated:
             save_stats["overview_outdated"] = True
         # Расход — накопительно за день: дописывание зовёт модель на часть
@@ -402,19 +560,37 @@ def read(department: str, day: date, allowed_direction_ids=None) -> dict:
     everything = everything or []
     restricted = allowed_direction_ids is not None
     allowed = {int(x) for x in (allowed_direction_ids or [])}
-    mine = [t for t in everything
-            if not restricted or (t.get("subject_direction") is not None
-                                  and int(t["subject_direction"]) in allowed)]
+    mine_all = [t for t in everything
+                if not restricted or (t.get("subject_direction") is not None
+                                      and int(t["subject_direction"]) in allowed)]
+    # Разделы направлений и цифры — по случайной выборке, как у генерации: звонки,
+    # взятые по триггеру фрода, разбирает «Поиск фрода» (SZOV-2).
+    mine = digest_data.regular_talks(mine_all)
     live_sections = {s["key"]: s for s in _sections_of(mine)}
     # Раздел целиком, со всеми его людьми, — тот, что увидит генерация. «Устарела»
     # сверяется с ним: после перевода сотрудника в чужое направление разговоры
     # раздела те же, и generate ответит «свежая», — вечной кнопки «обновить»,
     # которая ничего не делает, у СВ быть не должно.
-    full_sections = {s["key"]: s for s in _sections_of(everything)} if restricted else live_sections
+    full_sections = ({s["key"]: s for s in _sections_of(digest_data.regular_talks(everything))}
+                     if restricted else live_sections)
     stored = [s for s in (digest or {}).get("sections") or [] if isinstance(s, dict)]
     sections = []
     stale_mine, new_mine, broken, hidden_own = False, 0, False, 0
     for entry in stored:
+        if entry.get("kind") == prompts.FRAUD_KIND:
+            # «Поиск фрода»: своих оценок у раздела нет, цифры — совпадения шаблонов
+            # по журналу удалённого КЦ за прошедший день, они уже не меняются. Свежесть
+            # сводки с ним держит отпечаток дня (по всем оценкам, и по триггерным).
+            if not _visible(entry, allowed_direction_ids):
+                continue
+            if entry.get("error") or not entry.get("html") or entry.get("outdated"):
+                broken = True
+            sections.append({"key": entry.get("key"), "kind": entry.get("kind"),
+                             "direction": entry.get("direction"), "family": entry.get("family"),
+                             "headline": entry.get("headline") or "",
+                             "html": entry.get("html") or "", "error": entry.get("error"),
+                             "stats": entry.get("stats"), "usual": None})
+            continue
         # Живой раздел снимается и тогда, когда сохранённый скрыт: иначе его
         # «свои» разговоры всплыли бы ниже фантомом «этого направления ещё нет».
         live = live_sections.pop(entry.get("key"), None)
@@ -470,7 +646,9 @@ def read(department: str, day: date, allowed_direction_ids=None) -> dict:
         # «Обычно» — живое, как и цифры: по прошлой неделе тех разделов, что видит
         # зритель (у СВ — только его направлений).
         "usual": _usual_department(base, mine) if mine else None,
-        "evaluated": len(mine),
+        # Сколько разговоров читает сводка — со взятыми по триггеру: их читает «Поиск
+        # фрода». Цифры в stats — без них.
+        "evaluated": len(mine_all),
         "stale": stale, "new_evaluations": new_count,
         # Раздел упал или «Главное» не написано — допишет «Обновить» (generate
         # переписывает только недостающее).
@@ -641,7 +819,9 @@ def _ask(department, day, question, *, user_id, allowed_direction_ids, generate_
     numbers = {f"{t['kind']}:{t['id']}": t["ref"] for t in talks}
     refs = {t["ref"]: render.ref_entry(t) for t in talks}
     restricted = allowed_direction_ids is not None
-    sections = _sections_of(talks)
+    # Цифры — по случайной выборке, как на экране; сами звонки под триггерами чат
+    # видит (с пометкой в шапке разговора) — о них и спрашивают.
+    sections = _sections_of(digest_data.regular_talks(talks)) or _sections_of(talks)
     stats_by_key = {s["key"]: digest_data.section_stats(s["talks"]) for s in sections}
     stored = [s for s in ((digest or {}).get("sections") or [])
               if isinstance(s, dict) and _visible(s, allowed_direction_ids) and s.get("html")]

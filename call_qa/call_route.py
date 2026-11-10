@@ -12,7 +12,10 @@
   исходящего клиент — B-сторона, а на A-стороне внутренний номер оператора,
   поэтому нашего номера нет;
 * Тез КЦ — зеркало Binotel (tez_lead_calls): только направление, линию зеркало
-  не хранит.
+  не хранит;
+* база удалённого КЦ (пометка импорта …:remote_cc, SZOV-2) — звонок всегда
+  исходящий: оператор звонит водителю из базы раздела «Удаленный КЦ»; наш номер —
+  общий номер кабинета, журнал попытки его не хранит.
 
 Неизвестное не выдумывается: нет данных — поле None, и карточка его не рисует.
 """
@@ -26,6 +29,8 @@ from . import config
 from .taxi_parks import _conn_id, oktell_connections
 
 IN, OUT = "in", "out"
+# Хвост пометки импорта у звонков базы удалённого КЦ (call_qa.remote_cc.NOTES).
+REMOTE_CC_SOURCE = "remote_cc"
 
 _BASE_SQL = {
     # Номер из АТС точнее набранного руками в журнале — он и показывается.
@@ -55,7 +60,7 @@ def source_of(notes, external_id):
     старых строк без хвоста — вид идентификатора: UUID соединения Oktell, linkedid
     станции «секунды.номер», голые цифры — generalCallID Binotel."""
     tail = str(notes or "").rsplit(":", 1)[-1]
-    if tail in ("cdr", "oktell", "binotel"):
+    if tail in ("cdr", "oktell", "binotel", REMOTE_CC_SOURCE):
         return tail
     ext = str(external_id or "").strip()
     if not ext:
@@ -133,6 +138,8 @@ def load(subject_kind, call_id, *, oktell_query=None):
                 found = _cdr_route(cur, external_id, route["client"])
             elif source == "binotel":
                 found = _binotel_route(cur, external_id)
+            elif source == REMOTE_CC_SOURCE:
+                found = {"direction": OUT}
             elif source == "oktell":
                 oktell_conn = _conn_id(external_id)
         finally:

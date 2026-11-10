@@ -805,7 +805,8 @@ class CallsMixin:
 
     def import_single_random_call(self, *, operator_id, operator_name, external_id, month,
                                   datetime_raw, phone, duration_sec, notes=None, audio_path=None,
-                                  call_end_party=None, status=None, qa_direction_id=None):
+                                  call_end_party=None, status=None, qa_direction_id=None,
+                                  scope_direction_id=None):
         """Кладёт ОДИН звонок в imported_calls как НЕ оценённый (status='not_evaluated') —
         для кнопки «Случайный звонок» в журнале. Возвращает id новой строки или None, если
         такой звонок уже импортирован (ON CONFLICT (external_id, month)).
@@ -819,6 +820,10 @@ class CallsMixin:
         qa_direction_id — шкала ИИ-оценки этого звонка, если она не совпадает с
         направлением оператора (звонки обзвона, см. subjects.scale_direction_id). Уже
         лежащую строку конфликт не трогает: пометку ей ставят отдельным UPDATE.
+
+        scope_direction_id — направление, которому принадлежит сам разговор, когда это
+        не направление оператора: звонки базы удалённого КЦ (call_qa.remote_cc, SZOV-2).
+        По нему разговор попадает в отдел и скоуп «ИИ-оценки» (api._SUBJECT_DIRECTION).
 
         Звонок с номером из «Реестра тестовых номеров» (test_numbers) в пул не кладётся
         вовсе — None, как у дубля: и для журнала, и для ИИ это не работа с водителем.
@@ -834,15 +839,16 @@ class CallsMixin:
                 INSERT INTO imported_calls
                 (external_id, operator_name, operator_id, month, datetime_raw,
                  phone_number, phone_normalized, duration_sec, status, imported_at, notes,
-                 audio_path, call_end_party, qa_direction_id)
+                 audio_path, call_end_party, qa_direction_id, scope_direction_id)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s, %s)
+                        CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty', %s, %s, %s, %s, %s)
                 ON CONFLICT (external_id, month) DO NOTHING
                 RETURNING id
             """, (external_id, operator_name, operator_id, month, parsed_dt,
                   phone, phone_norm, duration_sec, status or 'not_evaluated', notes, audio_path,
                   _normalize_call_end_party(call_end_party) or 'unknown',
-                  int(qa_direction_id) if qa_direction_id is not None else None))
+                  int(qa_direction_id) if qa_direction_id is not None else None,
+                  int(scope_direction_id) if scope_direction_id is not None else None))
             row = cur.fetchone()
         return int(row[0]) if row else None
 

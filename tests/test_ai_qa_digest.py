@@ -938,9 +938,10 @@ class GenerateTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _read_day(self, talks, digest=None):
+    def _read_day(self, talks, digest=None, fraud_day=None):
         return mock.patch.object(service, "_read_day",
-                                 return_value=([dict(t) for t in talks], {}, "Отдел продаж", digest))
+                                 return_value=([dict(t) for t in talks], {}, "Отдел продаж", digest,
+                                               fraud_day))
 
     def test_sections_and_overview(self):
         calls = []

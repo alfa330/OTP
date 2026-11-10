@@ -13,8 +13,11 @@
   (записи нет, оценка не удалась N раз) из счёта выпадает, и следующий проход
   того же дня заменяет его другим.
 * Звонки приносят адаптеры АТС (CallSource): ОП — касания CDR (запись везёт мост
-  по заказу, обычно минуты), СЗоВ — Oktell, Тез КЦ — Binotel. Живут адаптеры в
-  bot_schedule2 рядом с «Из АТС» — там их хелперы. Звонок ложится в
+  по заказу, обычно минуты), СЗоВ — Oktell и база удалённого КЦ (Binotel его
+  кабинета, направление «Обзвон — подписание АВР», call_qa.remote_cc), Тез КЦ —
+  Binotel. Живут адаптеры в bot_schedule2 рядом с «Из АТС» — там их хелперы.
+* Звонки удалённого КЦ под триггерами фрода (call_qa.fraud, SZOV-2) берутся СВЕРХ
+  N случайных (pick_reason 'trigger'): в N не считаются, в цифры сводки не входят. Звонок ложится в
   imported_calls со статусом IMPORT_STATUS, то есть ВНЕ журнала и плана
   прослушки: журнал показывает только 'not_evaluated', норма «Деления звонков»
   считает их же. Двести с лишним чужих «Не оценён» в сутки засорили бы журнал
@@ -56,6 +59,12 @@ STATUS_PICKED = "picked"
 STATUS_EVALUATED = "evaluated"
 STATUS_FAILED = "failed"
 
+# Почему разговор в выборке (ai_qa_daily_samples.pick_reason). Звонки под триггерами
+# фрода (SZOV-2) идут СВЕРХ N случайных: в N не считаются и в цифры сводки не
+# входят — случайная выборка остаётся честной.
+PICK_RANDOM = "random"
+PICK_TRIGGER = "trigger"
+
 # imported_calls.status у звонков выборки. Колонка без CHECK, а журнал, норма
 # «Деления звонков» и «Случайный звонок» журнала смотрят только на
 # 'not_evaluated' / 'evaluated' — строка выборки им не видна. Оценка человеком
@@ -93,11 +102,21 @@ class CallSource:
     получает обратно в import_call.
     import_call(candidate) → id строки imported_calls со статусом IMPORT_STATUS
     или None, если звонок взять нельзя (записи нет, уже лежит в пуле).
-    audio_state(imported_id) → AUDIO_READY / AUDIO_PENDING / AUDIO_MISSING."""
+    audio_state(imported_id) → AUDIO_READY / AUDIO_PENDING / AUDIO_MISSING.
+    triggered(day) → звонки под триггерами фрода (call_qa.fraud) в порядке важности;
+    они берутся СВЕРХ случайной выборки и в её N не входят (PICK_TRIGGER). Есть
+    только у источника удалённого КЦ.
+
+    Источников звонков у отдела может быть несколько: у СЗоВ — Oktell его линии и
+    база удалённого КЦ (её звонки — работа направления «Обзвон — подписание АВР»).
+    Запись проверяет audio_state первого источника отдела — у источников одного
+    отдела он обязан понимать записи всех (Oktell и Binotel — одна докачка,
+    _ensure_imported_call_audio по хвосту пометки импорта)."""
     department: str
     candidates: Callable
     import_call: Callable
     audio_state: Callable
+    triggered: Callable | None = None
 
 
 @dataclass(frozen=True)
@@ -169,21 +188,25 @@ def _pass_lock():
 
 def _cell_counts(cur, day) -> dict:
     """{(направление, семейство): сколько в выборке} — без сорвавшихся: их место
-    свободно, и следующий проход того же дня возьмёт замену."""
+    свободно, и следующий проход того же дня возьмёт замену. Звонки под триггерами
+    в N не входят — их берут сверх него."""
     cur.execute("""SELECT direction_id, family, count(*)
                      FROM ai_qa_daily_samples
-                    WHERE sample_day = %s AND status <> %s
-                    GROUP BY direction_id, family""", (day, STATUS_FAILED))
+                    WHERE sample_day = %s AND status <> %s AND pick_reason <> %s
+                    GROUP BY direction_id, family""", (day, STATUS_FAILED, PICK_TRIGGER))
     return {(int(direction_id), str(family)): int(n) for direction_id, family, n in cur.fetchall()}
 
 
-def _record(cur, day, department, direction_id, family, subject_kind, subject_id) -> bool:
+def _record(cur, day, department, direction_id, family, subject_kind, subject_id,
+            reason=PICK_RANDOM) -> bool:
     cur.execute("""INSERT INTO ai_qa_daily_samples
-                       (sample_day, department_code, direction_id, family, subject_kind, subject_id)
-                   VALUES (%s, %s, %s, %s, %s, %s)
+                       (sample_day, department_code, direction_id, family, subject_kind, subject_id,
+                        pick_reason)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)
                    ON CONFLICT (subject_kind, subject_id) DO NOTHING
                    RETURNING id""",
-                (day, department, int(direction_id), family, subject_kind, int(subject_id)))
+                (day, department, int(direction_id), family, subject_kind, int(subject_id),
+                 reason))
     return cur.fetchone() is not None
 
 
@@ -325,6 +348,77 @@ def _sample_calls(day, source: CallSource, size, rng, *, deadline=None,
     return _take(day, source.department, candidates, source.import_call, size, rng,
                  family=FAMILY_CALLS, subject_kind=config.SUBJECT_IMPORTED_CALL,
                  taken_keys=taken_keys, deadline=deadline, monotonic=monotonic)
+
+
+def _sample_triggered(day, source: CallSource, *, deadline=None, monotonic=time.monotonic) -> dict:
+    """Звонки под триггерами фрода (SZOV-2) — СВЕРХ случайной выборки: все, что
+    сработали, по важности шаблона, до потолка AI_QA_FRAUD_TRIGGER_DAILY_CAP на день.
+
+    Звонок, который уже лежит в пуле (взят случайной выборкой этого же прохода или
+    раньше), второй раз не берётся: он и так оценится, а «Поиск фрода» найдёт его
+    по номеру звонка. Возвращает {направление: сколько добавлено}."""
+    if source.triggered is None:
+        return {}
+    candidates = [c for c in (source.triggered(day) or []) if c.get("key")]
+    if not candidates:
+        return {}
+    cap = config.AI_QA_FRAUD_TRIGGER_DAILY_CAP
+    keys = sorted({str(c["key"]) for c in candidates})
+    conn = config.connect_rw()
+    try:
+        with conn, conn.cursor() as cur:
+            departments = _direction_departments(cur, [c.get("direction_id") for c in candidates])
+            cur.execute("SELECT external_id FROM imported_calls WHERE external_id = ANY(%s)", (keys,))
+            taken_keys = {str(row[0]) for row in cur.fetchall()}
+            cur.execute("""SELECT count(*) FROM ai_qa_daily_samples
+                            WHERE sample_day = %s AND department_code = %s
+                              AND pick_reason = %s AND status <> %s""",
+                        (day, source.department, PICK_TRIGGER, STATUS_FAILED))
+            have = int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+    fresh = [c for c in candidates if str(c["key"]) not in taken_keys
+             and c.get("direction_id") is not None
+             and departments.get(int(c["direction_id"])) == source.department]
+    room = max(0, cap - have)
+    if len(fresh) > room:
+        # Не молча: потолок — страховка от аварийного дня, и руководитель должен знать,
+        # что ИИ послушал не всё (сводка при этом видит все совпадения — их считает код).
+        logging.warning("ai-qa выборка %s: под триггерами %s новых звонков (%s), на прослушку "
+                        "берём %s — потолок %s в день", day, len(fresh), source.department,
+                        room, cap)
+        fresh = fresh[:room]
+    added: dict[int, int] = {}
+    errors = 0
+    for candidate in fresh:
+        if errors >= _IMPORT_ERROR_LIMIT:
+            logging.warning("ai-qa выборка %s: звонки под триггерами (%s) — АТС отказывает "
+                            "подряд, доберёт следующий проход", day, source.department)
+            break
+        if deadline is not None and monotonic() >= deadline:
+            logging.warning("ai-qa выборка %s: предел прохода вышел на звонках под "
+                            "триггерами (%s) — доберёт следующий проход", day, source.department)
+            break
+        try:
+            subject_id = source.import_call(candidate)
+        except Exception:
+            errors += 1
+            logging.exception("ai-qa выборка %s: не удалось подтянуть звонок под триггером %s",
+                              day, candidate["key"])
+            continue
+        errors = 0
+        if not subject_id:
+            continue
+        direction_id = int(candidate["direction_id"])
+        conn = config.connect_rw()
+        try:
+            with conn, conn.cursor() as cur:
+                if _record(cur, day, source.department, direction_id, FAMILY_CALLS,
+                           config.SUBJECT_IMPORTED_CALL, subject_id, reason=PICK_TRIGGER):
+                    added[direction_id] = added.get(direction_id, 0) + 1
+        finally:
+            conn.close()
+    return added
 
 
 def _sample_downloaded_chats(day, source: ChatSource, size, rng, *, deadline=None,
@@ -479,13 +573,15 @@ def _evaluate_batch(samples, evaluate, in_queue, deadline, monotonic) -> None:
         list(pool.map(one, samples))
 
 
-def _audio_state(source, sample) -> str:
-    if source is None:
+def _audio_state(sources, sample) -> str:
+    if not sources:
         # Звонок выборки без адаптера своей АТС (отдел убрали из раздела) — запись
         # взять неоткуда.
         return AUDIO_MISSING
     try:
-        return source.audio_state(sample["subject_id"])
+        # Первый источник отдела: у источников одного отдела проверка записи общая
+        # (см. CallSource).
+        return sources[0].audio_state(sample["subject_id"])
     except Exception:
         logging.exception("ai-qa выборка: не удалось проверить запись звонка %s",
                           sample["subject_id"])
@@ -551,8 +647,9 @@ def run(day=None, *, call_sources=(), chat_sources=(), evaluate=None, in_queue=N
     того же дня безопасен: он добирает недостающее и дооценивает недоделанное."""
     day = parse_day(day) if day is not None else sample_day(now)
     size = int(size or config.AI_QA_DAILY_SAMPLE_SIZE)
-    sources = {config.normalise_department_code(source.department): source
-               for source in (call_sources or ())}
+    sources: dict[str, list[CallSource]] = {}
+    for source in (call_sources or ()):
+        sources.setdefault(config.normalise_department_code(source.department), []).append(source)
     downloads = {config.normalise_department_code(source.department): source
                  for source in (chat_sources or ())}
     evaluate = evaluate or _review_payload
@@ -589,14 +686,29 @@ def run(day=None, *, call_sources=(), chat_sources=(), evaluate=None, in_queue=N
                         chats[direction_id] = chats.get(direction_id, 0) + n
                 except Exception:
                     logging.exception("ai-qa выборка %s: переписки отдела %s не скачаны", day, code)
-            source = sources.get(code)
-            if source is not None:
+            for source in sources.get(code) or []:
+                # Источники отдела независимы: лежащий Oktell не оставляет без выборки
+                # звонки удалённого КЦ, и наоборот.
                 try:
-                    added[code][FAMILY_CALLS] = _sample_calls(day, source, size, rng,
-                                                              deadline=deadline,
-                                                              monotonic=monotonic)
+                    calls = added[code][FAMILY_CALLS]
+                    for direction_id, n in _sample_calls(day, source, size, rng,
+                                                         deadline=deadline,
+                                                         monotonic=monotonic).items():
+                        calls[direction_id] = calls.get(direction_id, 0) + n
                 except Exception:
                     logging.exception("ai-qa выборка %s: звонки отдела %s не выбраны", day, code)
+                if source.triggered is None:
+                    continue
+                # Сначала случайные (честная выборка не зависит от триггеров), потом
+                # подозрительные сверх них.
+                try:
+                    triggered = _sample_triggered(day, source, deadline=deadline,
+                                                  monotonic=monotonic)
+                    if triggered:
+                        added[code][PICK_TRIGGER] = triggered
+                except Exception:
+                    logging.exception("ai-qa выборка %s: звонки под триггерами отдела %s "
+                                      "не выбраны", day, code)
         _evaluate_open(day, sources, evaluate, in_queue, deadline,
                        sleep=sleep, monotonic=monotonic)
     result = status(day)
@@ -615,15 +727,17 @@ def status(day) -> dict:
             cur.execute("""SELECT s.department_code, s.direction_id, d.name, s.family,
                                   count(*) FILTER (WHERE s.status = 'evaluated'),
                                   count(*) FILTER (WHERE s.status = 'picked'),
-                                  count(*) FILTER (WHERE s.status = 'failed')
+                                  count(*) FILTER (WHERE s.status = 'failed'),
+                                  count(*) FILTER (WHERE s.pick_reason = %s)
                              FROM ai_qa_daily_samples s
                              LEFT JOIN directions d ON d.id = s.direction_id
                             WHERE s.sample_day = %s
                             GROUP BY s.department_code, s.direction_id, d.name, s.family
-                            ORDER BY s.department_code, d.name, s.family""", (day,))
+                            ORDER BY s.department_code, d.name, s.family""", (PICK_TRIGGER, day))
+            # triggered — сколько из них взято по триггерам фрода (сверх N случайных).
             cells = [{"department": row[0], "direction_id": row[1], "direction": row[2],
                       "family": row[3], "evaluated": int(row[4]), "pending": int(row[5]),
-                      "failed": int(row[6])} for row in cur.fetchall()]
+                      "failed": int(row[6]), "triggered": int(row[7])} for row in cur.fetchall()]
             cur.execute("""SELECT subject_kind, subject_id, last_error
                              FROM ai_qa_daily_samples
                             WHERE sample_day = %s AND status = 'failed'

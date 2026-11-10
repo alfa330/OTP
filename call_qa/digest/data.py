@@ -152,7 +152,8 @@ def _subjects_sql(api, scope_sql: str) -> str:
     return (f"""SELECT rc.subject_kind, rc.call_id, rc.model, {api._SUBJECT_OPERATOR},
                        {api._SUBJECT_OPERATOR_ID}, {api._SUBJECT_DATETIME},
                        COALESCE(d.canonical_id, d.id), {api._SUBJECT_HUMAN_SCORE},
-                       m.review_outcome, rc.payload->>'_evaluation_run_id'
+                       m.review_outcome, rc.payload->>'_evaluation_run_id',
+                       {api._SUBJECT_TRIGGER_PICK}
                   FROM (SELECT DISTINCT ON (rc.subject_kind, rc.call_id)
                                rc.subject_kind, rc.call_id, rc.model, rc.created_at, rc.payload
                           FROM ai_review_cache rc
@@ -176,7 +177,7 @@ def day_subjects(cur, day, department, allowed_direction_ids=None) -> list[dict]
     cur.execute(_subjects_sql(api, scope_sql), (day, *scope_params))
     talks = []
     for (kind, subject_id, model, operator, operator_id, label, subject_direction,
-         human, outcome, run_id) in cur.fetchall():
+         human, outcome, run_id, trigger) in cur.fetchall():
         match = _TIME_RE.search(str(label or ""))
         talks.append({
             "kind": kind or config.SUBJECT_CALL, "id": int(subject_id), "model": model,
@@ -186,11 +187,21 @@ def day_subjects(cur, day, department, allowed_direction_ids=None) -> list[dict]
             "time": match.group(1) if match else "",
             "subject_direction": int(subject_direction) if subject_direction is not None else None,
             "human_score": _num(human), "outcome": outcome, "run_id": run_id,
+            # Взят только по триггеру фрода (SZOV-2): в цифры и разделы направлений не
+            # входит — его разбирает «Поиск фрода» (regular_talks).
+            "trigger": bool(trigger),
         })
     # Порядок — по времени разговора: так номера ссылок идут по ленте дня, и
     # «#3» в сводке раньше «#12» по часам.
     talks.sort(key=lambda t: (t["time"] or "99:99", t["kind"], t["id"]))
     return talks
+
+
+def regular_talks(talks) -> list[dict]:
+    """Разговоры дня без взятых только по триггеру фрода (SZOV-2): по ним считаются
+    цифры, «обычно» и разделы направлений. Подозрительные звонки разбирает «Поиск
+    фрода», а среднему баллу направления они не должны мешать."""
+    return [t for t in talks or [] if not t.get("trigger")]
 
 
 def inputs_hash(talks) -> str:
@@ -634,7 +645,9 @@ def baseline(cur, day, department, allowed_direction_ids=None) -> dict:
                       FROM ai_review_cache rc
                      ORDER BY rc.subject_kind, rc.call_id, rc.created_at DESC) rc"""
         + api._SUBJECT_JOIN
-        + f" WHERE {api._SUBJECT_DAY} BETWEEN %s AND %s" + api._SUBJECT_EXISTS + scope_sql,
+        + f" WHERE {api._SUBJECT_DAY} BETWEEN %s AND %s" + api._SUBJECT_EXISTS
+        # Звонки под триггерами фрода — не «обычный» день направления (regular_talks).
+        + " AND " + api._SUBJECT_NOT_TRIGGER_PICK + scope_sql,
         (first, last, *scope_params))
     acc: dict[str, dict] = {}
     for direction_id, score, criteria in cur.fetchall():
@@ -691,7 +704,7 @@ def dumps(value) -> str:
 
 __all__ = [
     "FAMILY_CALLS", "FAMILY_CHATS", "FAIL", "DEFICIENCY", "BASELINE_DAYS",
-    "transcript_text", "clip", "day_subjects", "inputs_hash", "collect_day",
+    "transcript_text", "clip", "day_subjects", "regular_talks", "inputs_hash", "collect_day",
     "attach_details", "attach_human_reviews", "attach_direction_names",
     "effective_verdict", "is_critical_failure", "low_confidence", "section_key",
     "section_stats", "public_stats", "baseline", "refs_text", "dumps",

@@ -93,10 +93,13 @@ _SCOPE_SQL = {
                                     LEFT JOIN users u ON u.id = e.operator_user_id
                                     LEFT JOIN directions d ON d.id = u.direction_id
                                    WHERE e.id = %s""",
+    # Разговор, который принадлежит направлению, а не оператору (scope_direction_id:
+    # звонки базы удалённого КЦ — «Обзвон — подписание АВР»), — по этому направлению.
     config.SUBJECT_IMPORTED_CALL: """SELECT COALESCE(d.canonical_id, d.id)
                                        FROM imported_calls ic
                                        LEFT JOIN users u ON u.id = ic.operator_id
-                                       LEFT JOIN directions d ON d.id = u.direction_id
+                                       LEFT JOIN directions d
+                                              ON d.id = COALESCE(ic.scope_direction_id, u.direction_id)
                                       WHERE ic.id = %s""",
     config.SUBJECT_C2D_SNAPSHOT: """SELECT COALESCE(d.canonical_id, d.id)
                                       FROM c2d_chat_snapshots s
@@ -240,8 +243,8 @@ _SUBJECT_JOIN = """
                  LEFT JOIN users ua ON ua.id = ce.operator_user_id
                  LEFT JOIN directions d
                         ON d.id = COALESCE(c.direction_id, ue.direction_id,
-                                           ui.direction_id, us.direction_id,
-                                           ua.direction_id)
+                                           ic.scope_direction_id, ui.direction_id,
+                                           us.direction_id, ua.direction_id)
                  LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
 """
 # Номер разговора по виду субъекта — чтобы разговоры с номерами «Реестра тестовых
@@ -280,8 +283,22 @@ _SUBJECT_PRESENT = (" AND (c.id IS NOT NULL OR e.id IS NOT NULL OR ic.id IS NOT 
                     " OR cs.id IS NOT NULL OR ce.id IS NOT NULL)"
                     " AND " + _SUBJECT_NOT_TEST)
 _SUBJECT_EXISTS = _SUBJECT_PRESENT + " AND " + _SUBJECT_NOT_EXCLUDED
-_SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
-                      " us.direction_id, ua.direction_id)")
+# Разговор взят в выборку по триггеру фрода (звонки удалённого КЦ, SZOV-2), а не
+# случайно. Такие идут сверх N случайных и в цифры сводки, «обычно» и периода не
+# входят: случайная выборка остаётся честной, а короткие подозрительные звонки не
+# роняют средний балл направления. Строка выборки у субъекта одна (UNIQUE), и
+# случайный выбор записывается раньше триггерного — «trigger» значит «только по нему».
+_SUBJECT_TRIGGER_PICK = ("EXISTS (SELECT 1 FROM ai_qa_daily_samples qs"
+                         " WHERE qs.subject_kind = rc.subject_kind AND qs.subject_id = rc.call_id"
+                         " AND qs.pick_reason = 'trigger')")
+_SUBJECT_NOT_TRIGGER_PICK = "NOT " + _SUBJECT_TRIGGER_PICK
+# Направление субъекта — по нему считаются отдел и скоуп зрителя. Обычно это
+# направление оператора; у звонка из АТС, который принадлежит направлению, а не
+# человеку (imported_calls.scope_direction_id — звонки базы удалённого КЦ: звонят
+# фронт-офисы, удалённые операторы и СЗоВ, а разговор — работа «Обзвона — подписания
+# АВР», задача SZOV-2), — направление разговора.
+_SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ic.scope_direction_id,"
+                      " ui.direction_id, us.direction_id, ua.direction_id)")
 # Направление ШКАЛЫ субъекта — для фильтра «Направление», подписей и пометки
 # «устарела». Отличается от _SUBJECT_DIRECTION только у звонка из АТС со своей
 # шкалой (imported_calls.qa_direction_id, звонки обзвона): оператор там остаётся в
@@ -289,7 +306,8 @@ _SUBJECT_DIRECTION = ("COALESCE(c.direction_id, ue.direction_id, ui.direction_id
 # иначе СВ «Основы» потерял бы звонки своих операторов (в его скоупе шкалы нет).
 # Чатовая карта ТЭЗ сюда не входит: её поверх кладёт subjects.scale_direction_id.
 _SUBJECT_SCALE_DIRECTION = ("COALESCE(ic.qa_direction_id, c.direction_id, ue.direction_id,"
-                            " ui.direction_id, us.direction_id, ua.direction_id)")
+                            " ic.scope_direction_id, ui.direction_id, us.direction_id,"
+                            " ua.direction_id)")
 # Подпись направления в строках и днях списков — по шкале, по которой оценён разговор:
 # без неё критерии обзвона стояли бы под подписью «Основа».
 _SUBJECT_DIRECTION_NAME = "COALESCE(dq.name, d.name)"
@@ -5373,9 +5391,10 @@ def random_call(allowed_direction_ids=None, department=None, filters=None) -> di
                                      'DD.MM HH24:MI')
                         FROM imported_calls ic
                         JOIN users u ON u.id = ic.operator_id
-                        LEFT JOIN directions d ON d.id = u.direction_id
+                        LEFT JOIN directions d
+                               ON d.id = COALESCE(ic.scope_direction_id, u.direction_id)
                         LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
-                       WHERE u.direction_id = ANY(%s)
+                       WHERE COALESCE(ic.scope_direction_id, u.direction_id) = ANY(%s)
                          AND COALESCE(ic.status, '') <> 'evaluated'
                          AND NOT EXISTS (SELECT 1 FROM calls c
                                           WHERE c.imported_call_id = ic.id
@@ -5598,7 +5617,8 @@ def _find_imported_calls(cur, family, suffix, operator_id, date_from, date_to, l
                    ic.phone_number, hc.score, ai.ai, ic.audio_path, ic.duration_sec
               FROM imported_calls ic
               JOIN users u ON u.id = ic.operator_id
-              LEFT JOIN directions d ON d.id = u.direction_id
+              LEFT JOIN directions d
+                     ON d.id = COALESCE(ic.scope_direction_id, u.direction_id)
               LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
               LEFT JOIN LATERAL (
                   SELECT c.score FROM calls c
@@ -5607,7 +5627,7 @@ def _find_imported_calls(cur, family, suffix, operator_id, date_from, date_to, l
                    ORDER BY c.created_at DESC LIMIT 1
               ) hc ON TRUE
               {_find_ai_lateral(config.SUBJECT_IMPORTED_CALL, 'ic.id')}
-             WHERE u.direction_id = ANY(%s)
+             WHERE COALESCE(ic.scope_direction_id, u.direction_id) = ANY(%s)
                -- Оценённый в журнале звонок показывает строка журнала — кроме
                -- случая, когда ИИ уже оценил его как звонок из АТС: тогда его
                -- карточка живёт здесь, а оценка человека подтянется через связь.
@@ -7206,8 +7226,7 @@ def stats(allowed_direction_ids=None, department=None, filters=None) -> dict:
 
         cur.execute(
             _RAW_BENCHMARK_SQL
-            + (" AND COALESCE(c.direction_id, ue.direction_id, ui.direction_id,"
-               " us.direction_id, ua.direction_id) = ANY(%s)"
+            + (f" AND {_SUBJECT_DIRECTION} = ANY(%s)"
                if scope_family is not None else ""),
             ((scope_family or [-1],) if scope_family is not None else ()))
         _fill_verdict_stats(cur, out, _verdict_metrics(cur.fetchall()))

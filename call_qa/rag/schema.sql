@@ -1344,6 +1344,11 @@ CREATE TABLE IF NOT EXISTS ai_qa_daily_samples (
     evaluated_at    timestamptz,
     UNIQUE (subject_kind, subject_id)
 );
+-- Почему разговор в выборке (задача SZOV-2): 'random' — одна из N случайных,
+-- 'trigger' — звонок удалённого КЦ, попавший под триггер фрода (call_qa.fraud). Такие
+-- идут СВЕРХ N и не входят ни в N, ни в цифры сводки: случайная выборка остаётся
+-- честной, а «Поиск фрода» видит, что сказано в подозрительных звонках.
+ALTER TABLE ai_qa_daily_samples ADD COLUMN IF NOT EXISTS pick_reason text NOT NULL DEFAULT 'random';
 CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_day
     ON ai_qa_daily_samples (sample_day, direction_id, family);
 CREATE INDEX IF NOT EXISTS idx_ai_qa_daily_samples_open

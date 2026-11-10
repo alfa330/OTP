@@ -287,3 +287,25 @@ test('«Начать заново» недоступно, пока ИИ отве
     onOpenRef: noop });
   assert.match(busy, /aria-label="Действия с перепиской"[^>]*disabled=""|disabled=""[^>]*aria-label="Действия с перепиской"/);
 });
+
+test('«Поиск фрода»: свой ряд цифр по четырём шаблонам задачи вместо баллов, «i» у каждого', () => {
+  const stats = {
+    talks: 323, operators: 13, flagged: 51,
+    series: { hits: 6, calls: 13, operators: 2 },
+    short_positive: { hits: 42, calls: 42, operators: 8 },
+    share: { hits: 0, calls: 0, operators: 0 },
+    redial: { hits: 1, calls: 2, operators: 1 },
+  };
+  const sections = [section('96', 'Обзвон — подписание АВР', '<p>Т</p>'),
+                    section('fraud', 'Поиск фрода', '<p>Ф</p>', { kind: 'fraud', stats, usual: null })];
+  const html = render(DigestView, {
+    digest: dayView({ sections }, { digest: { section: 'fraud' } }), onOpenRef: noop });
+  for (const piece of ['Поиск фрода', 'Подряд по 11–20 с', 'До 30 с с «подпишет»', 'Много по 11–15 с',
+                       'Повтор после 11–12 с', 'у 8 операторов', 'не сработал', '>42<']) {
+    assert.ok(html.includes(piece), `нет «${piece}»`);
+  }
+  // Ряд баллов направления у раздела фрода не рисуется: у него своих оценок нет.
+  assert.ok(!html.includes('Средний балл ИИ'), 'у «Поиска фрода» нет баллов');
+  // Правило шаблона — под «i», а не строкой под числом.
+  assert.equal((html.match(/aria-label="Что считает «/g) || []).length, 4);
+});

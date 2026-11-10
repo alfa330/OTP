@@ -357,6 +357,224 @@ def chat_system(department, scope_text: str, context: str) -> str:
                               refs=REF_RULE, markup=MARKUP, charts=CHART_MARKUP, context=context)
 
 
+# ── «Поиск фрода» в звонках удалённого КЦ (задача SZOV-2) ──────────────────────
+# Владелец 10.11.2026: «проверять на фрод, делают ли операторы какие-то лишние вещи,
+# чтобы быстрее обрабатывать водителей. Такой промпт лучше задать на сводке, поиск
+# фрода». Совпадения с четырьмя шаблонами задачи находит код (call_qa.fraud), модель
+# объясняет их по словам самих разговоров — звонки под шаблонами ИИ прослушал сверх
+# случайной выборки.
+FRAUD_KIND = "fraud"
+FRAUD_KEY = "fraud"
+FRAUD_TITLE = "Поиск фрода"
+FRAUD_MAX_TOKENS = 6144
+FRAUD_TRANSCRIPT_LIMIT = 2500
+FRAUD_TRANSCRIPT_BUDGET = 120_000
+
+_FRAUD_CONTEXT = """Удалённый КЦ обзванивает водителей из своей базы и добивается, чтобы
+водитель подписал акт выполненных работ (АВР) в eGov / Sapar. Звонят удалённые операторы,
+менеджеры фронт-офисов и сотрудники СЗоВ. Оператору платят за каждый диалог — водителя,
+с которым он проговорил не меньше 10 секунд, — и цена диалога растёт с долей водителей,
+которые потом подписали. Итог звонка («Подписал в звонке», «Сообщил, что подпишет»,
+«Подпишет в офисе», «Перезвонить позже», «Отказ» и другие) оператор выбирает сам.
+Поэтому подозрительно то, что похоже на разговор ради того, чтобы перешагнуть
+10 секунд, и «положительный» итог без настоящего согласия водителя."""
+
+FRAUD_SYSTEM = """Ты — аналитик контроля качества контакт-центра. {context}
+
+Код уже нашёл в звонках дня совпадения с четырьмя шаблонами, которые руководитель
+просил проверять:
+1. Два-три разговора подряд по 11–20 секунд, особенно когда трубку кладёт сам оператор.
+2. Короткий разговор (до 30 секунд) с положительным итогом: «Подписал в звонке»,
+   «Сообщил, что подпишет», «Подпишет в офисе».
+3. Необычно высокая доля разговоров 11–15 секунд у оператора по сравнению с остальными.
+4. Повторяющийся сценарий: первый звонок 11–12 секунд, сброс, повторный звонок тому же
+   водителю и продолжение разговора.
+Совпадение — сигнал, а не доказательство: короткий разговор бывает честным
+(водитель уже подписал, неверный номер, просит перезвонить, сам кладёт трубку).
+Разговоры под шаблонами ИИ прослушал: у них есть номер (#n), транскрипт и оценка по
+шкале «Обзвон — подписание АВР». У части совпадений номера и транскрипта нет — у них
+пометка «не прослушан»: о словах такого звонка не утверждай ничего, называй его
+временем и длительностью («в 12:06, 16 с») — без квадратных скобок, ссылки у него нет.
+Правил работы и требований к операторам, которых нет в данных (кто должен класть
+трубку, сколько длится разговор), не придумывай.
+
+{reading}
+
+ЗАДАЧА — раздел «Поиск фрода» сводки дня для руководителя и супервайзеров: у кого из
+операторов есть признаки, что он делает лишнее, чтобы быстрее «обработать» водителей,
+и насколько это вероятно.
+1. Вводка — одна-две фразы о главном за день: у кого и какой признак. Если по
+   транскриптам совпадения объяснимы — так и скажи.
+2. По каждому оператору с признаками — сначала самые серьёзные, не больше восьми:
+   заголовок <h4> — фамилия и имя; какие шаблоны и сколько раз; что на деле
+   происходит в этих разговорах по транскриптам: успевает ли водитель что-то
+   сказать, есть ли настоящее согласие подписать там, где стоит положительный итог,
+   кто кладёт трубку, о чём второй звонок тому же водителю; цитата, если она
+   решает дело; ссылки на разговоры. Последней строкой — вывод: «похоже на
+   накрутку», «сомнительно — стоит проверить» или «объяснимо» — и почему.
+   Положительный итог, а водитель в Sapar так и не подписал, — довод, но не
+   доказательство: подписать он может и позже.
+3. «Что проверить» — два-четыре конкретных шага: какие звонки прослушать целиком,
+   что сверить (итог оператора с подписью в Sapar, повторные звонки), с кем
+   поговорить. Это проверка и разбор, а не наказание: дисциплинарных мер (уволить,
+   лишить оплаты, отстранить) не предлагай — решает человек.
+
+Не называй человека мошенником и не утверждай фрод как факт — пиши о признаках.
+Числа бери из данных, не пересчитывай. Строку «НАД ТЕКСТОМ» не повторяй ни
+числами, ни словами — скажи, что за ними стоит. Объём — 200–450 слов. Пиши
+по-русски, коротко, без воды. Сотрудников называй по фамилии и имени, как в данных.
+
+{refs}
+
+{markup}
+
+{envelope}"""
+
+_FRAUD_KIND_TITLES = {
+    "short_positive": "шаблон 2 — разговор до 30 с с положительным итогом",
+    "redial": "шаблон 4 — разговор 11–12 с, затем повторный звонок тому же водителю",
+    "series": "шаблон 1 — разговоры подряд по 11–20 с",
+    "share": "шаблон 3 — необычно высокая доля разговоров 11–15 с",
+}
+_FRAUD_SCREEN = {
+    "series": "серии 11–20 с", "short_positive": "до 30 с с «подписал/подпишет»",
+    "share": "высокая доля 11–15 с", "redial": "повторный звонок после 11–12 с",
+}
+
+
+def fraud_system(department) -> str:
+    return FRAUD_SYSTEM.format(context=_FRAUD_CONTEXT, reading=_READING, refs=REF_RULE,
+                               markup=MARKUP, envelope=ENVELOPE)
+
+
+def fraud_header_line(stats: dict) -> str:
+    """Что экран показывает над «Поиском фрода» (DigestView: FraudStats)."""
+    from .. import fraud as fraud_rules
+    parts = [f"разговоров удалённого КЦ за день {stats.get('talks', 0)} "
+             f"у {stats.get('operators', 0)} операторов"]
+    for kind in fraud_rules.KINDS:
+        entry = stats.get(kind) or {}
+        parts.append(f"{_FRAUD_SCREEN[kind]} — {entry.get('hits', 0)} "
+                     f"(операторов {entry.get('operators', 0)})")
+    return "НАД ТЕКСТОМ (уже на экране — не повторяй): " + "; ".join(parts) + "."
+
+
+def _fraud_stamp(value) -> str:
+    """Время подписи в Sapar: того же дня — часы, другого — дата и часы."""
+    from .. import fraud as fraud_rules
+    if value is None:
+        return ""
+    return value.astimezone(fraud_rules.ALMATY).strftime("%d.%m %H:%M")
+
+
+def fraud_call_line(call: dict, ref) -> str:
+    """Звонок под шаблоном одной строкой: время, длительность, итог, кто положил
+    трубку, подпись в Sapar (у положительного итога) и номер разговора — или
+    «не прослушан», если ИИ его не слушал."""
+    from .. import fraud as fraud_rules
+    parts = [fraud_rules.local_time(call.get("started_at")), f"{call.get('billsec', 0)} с"]
+    if call.get("outcome"):
+        parts.append(f"итог «{_safe(call['outcome'])}»")
+    end = {"operator": "трубку положил оператор",
+           "client": "трубку положил водитель"}.get(call.get("end_party"))
+    if end:
+        parts.append(end)
+    if fraud_rules.is_positive(call.get("outcome")):
+        signed = call.get("signed_at")
+        parts.append(f"в Sapar подписал {_fraud_stamp(signed)}" if signed
+                     else "в Sapar пока не подписал")
+    parts.append(f"#{ref}" if ref else "не прослушан")
+    return " · ".join(part for part in parts if part)
+
+
+def fraud_user(day, department_name, found: dict, calls_by_id: dict, ref_by_call: dict,
+               talks, stats: dict) -> str:
+    """Данные «Поиска фрода»: совпадения по операторам и прослушанные звонки."""
+    from .. import fraud as fraud_rules
+
+    def line(call_id):
+        call = calls_by_id.get(call_id)
+        return fraud_call_line(call, ref_by_call.get(call_id)) if call else "звонок не найден"
+
+    talks_per_operator: dict = {}
+    for call in calls_by_id.values():
+        talks_per_operator[call["operator_id"]] = talks_per_operator.get(call["operator_id"], 0) + 1
+    by_operator: dict = {}
+    for kind in fraud_rules.KINDS:
+        for hit in found.get(kind) or []:
+            by_operator.setdefault(hit["operator_id"], {"name": hit["operator"], "hits": {}}) \
+                ["hits"].setdefault(kind, []).append(hit)
+    # Сначала операторы с самыми серьёзными шаблонами и с большим числом совпадений.
+    order = sorted(by_operator.items(), key=lambda item: (
+        min(fraud_rules.KINDS.index(k) for k in item[1]["hits"]),
+        -sum(len(v) for v in item[1]["hits"].values()), item[1]["name"] or ""))
+    blocks = []
+    for operator_id, entry in order:
+        rows = [f"ОПЕРАТОР: {_safe(entry['name'])} — разговоров за день "
+                f"{talks_per_operator.get(operator_id, 0)}"]
+        for kind in fraud_rules.KINDS:
+            hits = entry["hits"].get(kind)
+            if not hits:
+                continue
+            rows.append(f"  {_FRAUD_KIND_TITLES[kind]}: {len(hits)}")
+            # Итоги по оператору — готовыми числами: пересчитывая строки сама, модель
+            # ошибалась («в 10 из 19 трубку положил оператор» при 11 на живом 21.10).
+            ids = list(dict.fromkeys(c for hit in hits for c in hit["calls"]))
+            own = [calls_by_id[c] for c in ids if c in calls_by_id]
+            if kind != "share" and own:
+                ended = sum(1 for c in own if c.get("end_party") == "operator")
+                summary = f"    итого звонков {len(own)}, трубку положил оператор — в {ended}"
+                if kind == "short_positive":
+                    signed = sum(1 for c in own if c.get("signed_at"))
+                    summary += (f"; в Sapar потом подписали {signed}, "
+                                f"пока не подписали {len(own) - signed}")
+                heard_n = sum(1 for c in ids if ref_by_call.get(c))
+                summary += f"; прослушано ИИ {heard_n} из {len(own)}"
+                rows.append(summary)
+            for hit in hits:
+                if kind == "series":
+                    ended = hit.get("operator_ended", 0)
+                    rows.append(f"    серия из {len(hit['calls'])} подряд, оператор положил трубку "
+                                f"в {ended} из {len(hit['calls'])}:")
+                    rows.extend(f"      {line(call_id)}" for call_id in hit["calls"])
+                elif kind == "share":
+                    rows.append(
+                        f"    {hit['short']} из {hit['talks']} разговоров по 11–15 с "
+                        f"({_pct(hit['short'], hit['talks'])}); у остальных операторов "
+                        f"{hit['rest_short']} из {hit['rest_talks']} "
+                        f"({_pct(hit['rest_short'], hit['rest_talks'])}). Эти разговоры:")
+                    rows.extend(f"      {line(call_id)}" for call_id in hit["calls"])
+                elif kind == "redial":
+                    first, second = hit["calls"][0], hit["calls"][1]
+                    minutes = max(0, int(hit.get("gap_s", 0))) // 60
+                    rows.append(f"    {line(first)}  →  через {minutes} мин тому же водителю: "
+                                f"{line(second)}")
+                else:
+                    rows.extend(f"    {line(call_id)}" for call_id in hit["calls"])
+        blocks.append("\n".join(rows))
+    # Итоги дня по шаблонам — тоже готовыми: модель складывала строки операторов сама.
+    totals = []
+    for kind in fraud_rules.KINDS:
+        ids = list(dict.fromkeys(c for hit in found.get(kind) or [] for c in hit["calls"]))
+        own = [calls_by_id[c] for c in ids if c in calls_by_id]
+        if not own:
+            continue
+        line = (f"  {_FRAUD_KIND_TITLES[kind]}: совпадений {len(found.get(kind) or [])}, "
+                f"звонков {len(own)}, трубку положил оператор — в "
+                f"{sum(1 for c in own if c.get('end_party') == 'operator')}")
+        if kind == "short_positive":
+            signed = sum(1 for c in own if c.get("signed_at"))
+            line += f"; в Sapar потом подписали {signed}, пока не подписали {len(own) - signed}"
+        totals.append(line)
+    limit = _fit(talks, FRAUD_TRANSCRIPT_LIMIT, FRAUD_TRANSCRIPT_BUDGET)
+    heard = "\n\n".join(talk_block(t, limit) for t in talks) or "(прослушанных звонков нет)"
+    return (f"ДЕНЬ: {day.strftime('%d.%m.%Y')}\nОТДЕЛ: {department_name}\n"
+            f"РАЗДЕЛ: {FRAUD_TITLE} — звонки базы удалённого КЦ\n\n{fraud_header_line(stats)}\n\n"
+            f"ИТОГИ ДНЯ ПО ШАБЛОНАМ (числа готовые — не пересчитывай)\n" + "\n".join(totals) + "\n\n"
+            f"СОВПАДЕНИЯ ПО ОПЕРАТОРАМ (время по Алматы)\n" + "\n\n".join(blocks) + "\n\n"
+            f"{DATA_OPEN}\n{LISTED_CRITERIA}\n\n{heard}\n{DATA_CLOSE}")
+
+
 # ── день в текст ──────────────────────────────────────────────────────────────
 
 _VERDICT_RU = {"Incorrect": "Неверно", "Error": "Неверно", "Deficiency": "Недочёт",
@@ -402,6 +620,9 @@ def talk_header(talk) -> str:
         parts.append("звук распознан плохо")
     if talk.get("media_failed"):
         parts.append("вложение не прочитано")
+    if talk.get("trigger"):
+        # Взят не случайно, а по триггеру фрода (SZOV-2): в цифры направления не входит.
+        parts.append("взят на проверку по триггеру фрода")
     return " · ".join(parts)
 
 
@@ -594,6 +815,11 @@ def overview_user(day, department_name, sections, stats_by_section, whole=None,
     if whole:
         parts.append(header_line(whole, usual))
     for section in sections:
+        if section.get("kind") == FRAUD_KIND:
+            # У «Поиска фрода» своих оценок нет — только совпадения шаблонов.
+            parts.append(f"РАЗДЕЛ «{section['direction']}» (звонки удалённого КЦ)\n"
+                         f"Сводка:\n{_safe(section.get('text')) or '(сводки нет)'}")
+            continue
         stats = stats_by_section.get(section["key"]) or {}
         parts.append(
             f"НАПРАВЛЕНИЕ «{section['direction']}»\n"

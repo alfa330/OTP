@@ -60,6 +60,8 @@ class TaxiParksTests(unittest.TestCase):
             INSERT INTO imported_calls VALUES (1, 1, 'cdr-1', '77770000001'),
                 (2, 2, '12345678-1234-1234-1234-123456789abc', '77770000002'),
                 (3, 3, '123456', '77770000003');
+            -- Чей разговор, если не оператора (звонки базы удалённого КЦ, SZOV-2).
+            ALTER TABLE imported_calls ADD COLUMN scope_direction_id INTEGER;
             INSERT INTO wazzup_episodes VALUES (1, 1, '77770000001', 'wz-1'),
                 (2, 1, '77770000001', 'missing');
             INSERT INTO c2d_chat_snapshots VALUES (1, 2, '77770000001', ' Qazaq ', NULL, 'chat2desk');

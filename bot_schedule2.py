@@ -6547,6 +6547,35 @@ def _ai_qa_sample_binotel_import(candidate):
         status=qa_sample.IMPORT_STATUS)
 
 
+def _remote_cc_fetch_record_to_gcs(department_id, general_call_id):
+    """Запись звонка базы удалённого КЦ (Binotel его кабинета) → GCS. audio_path или None.
+
+    Клиент — раздела «Удаленный КЦ» (dial_list): тот же ключ кабинета и тот же темп
+    запросов к Binotel, что у самого раздела, а не клиент Тез КЦ, как у
+    _binotel_fetch_record_to_gcs (у кабинетов разные ключи — чужой запись не отдаст)."""
+    service = _dial_list_service
+    if service is None or department_id is None:
+        return None
+    url = service.client_for_department(int(department_id)).get_call_record_url(str(general_call_id))
+    if not url:
+        return None
+    resp = requests.get(url, timeout=120)
+    if resp.status_code != 200 or not resp.content:
+        logging.warning("remote-cc record download %s: HTTP %s", general_call_id, resp.status_code)
+        return None
+    return _upload_external_record_to_gcs(resp.content, f"remote-cc-{uuid.uuid4()}.mp3",
+                                          resp.headers.get('Content-Type'))
+
+
+def _ai_qa_sample_remote_cc_import(candidate):
+    """Звонок базы удалённого КЦ → пул ИИ-оценки со шкалой и направлением «Обзвон —
+    подписание АВР» (call_qa.remote_cc, SZOV-2). Запись — до строки, как у Binotel Тез."""
+    from call_qa import daily_sample as qa_sample, remote_cc as qa_remote_cc
+    return qa_remote_cc.import_candidate(candidate, fetch_record=_remote_cc_fetch_record_to_gcs,
+                                         import_call=db.import_single_random_call,
+                                         status=qa_sample.IMPORT_STATUS)
+
+
 def _ai_qa_sample_pbx_audio_state(imported_id):
     """Oktell и Binotel: запись в облаке — готово, иначе докачка тем же путём, что у
     аудио-ручки журнала (_ensure_imported_call_audio)."""
@@ -6637,7 +6666,7 @@ def _ai_qa_sample_chat_sources():
 
 
 def _ai_qa_sample_sources():
-    from call_qa import daily_sample as qa_sample
+    from call_qa import daily_sample as qa_sample, remote_cc as qa_remote_cc
     return [
         qa_sample.CallSource(department=CDR_CALL_DISTRIBUTION_DEPARTMENT_CODE,
                              candidates=_ai_qa_sample_cdr_candidates,
@@ -6651,6 +6680,14 @@ def _ai_qa_sample_sources():
                              candidates=_ai_qa_sample_binotel_candidates,
                              import_call=_ai_qa_sample_binotel_import,
                              audio_state=_ai_qa_sample_pbx_audio_state),
+        # База удалённого КЦ — направление «Обзвон — подписание АВР» отдела СЗоВ (SZOV-2):
+        # 30 случайных разговоров и сверх них — звонки под триггерами фрода. Источник
+        # второй у СЗоВ, после Oktell: проверка записи у отдела общая (pbx_audio_state).
+        qa_sample.CallSource(department=call_qa_config.SZOV_DEPARTMENT_CODE,
+                             candidates=qa_remote_cc.candidates,
+                             import_call=_ai_qa_sample_remote_cc_import,
+                             audio_state=_ai_qa_sample_pbx_audio_state,
+                             triggered=qa_remote_cc.triggered),
     ]
 
 
@@ -20807,6 +20844,18 @@ def _ensure_imported_call_audio(imported_id, rec=None):
     if not ext_id:
         return None
     notes = str(rec.get('notes') or '')
+    if notes.endswith(':remote_cc'):
+        # База удалённого КЦ (call_qa.remote_cc): запись у Binotel ЕГО кабинета.
+        try:
+            audio_path = _remote_cc_fetch_record_to_gcs(
+                _call_distribution_department_id_by_code(call_qa_config.REMOTE_CC_DEPARTMENT_CODE),
+                str(ext_id))
+            if audio_path:
+                db.set_imported_call_audio_path(imported_id, audio_path)
+            return audio_path
+        except Exception:
+            logging.exception("remote-cc on-demand record fetch failed (imported_call=%s)", imported_id)
+            return None
     if notes.endswith(':binotel'):
         try:
             return _binotel_store_record(imported_id, str(ext_id))

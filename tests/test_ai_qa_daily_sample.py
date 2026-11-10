@@ -98,10 +98,11 @@ class FakeCursor:
         elif s.startswith("SELECT d.id, lower(COALESCE(dep.code"):
             self.rows = [(d, db.departments[d]) for d in params[0] if d in db.departments]
         elif s.startswith("SELECT direction_id, family, count(*)"):
-            day, failed = params
+            day, failed, trigger = params
             counts = {}
             for x in db.samples:
-                if x["sample_day"] == day and x["status"] != failed:
+                if (x["sample_day"] == day and x["status"] != failed
+                        and x.get("pick_reason", ds.PICK_RANDOM) != trigger):
                     key = (x["direction_id"], x["family"])
                     counts[key] = counts.get(key, 0) + 1
             self.rows = [(d, f, n) for (d, f), n in counts.items()]
@@ -112,8 +113,13 @@ class FakeCursor:
         elif "FROM wazzup_episodes t" in s:
             db.chat_sql.append((s, params))
             self.rows = [(i,) for i in db.chat_ids[:params[-1]]]
+        elif s.startswith("SELECT count(*) FROM ai_qa_daily_samples"):
+            day, department, trigger, failed = params
+            self.rows = [(sum(1 for x in db.samples
+                              if x["sample_day"] == day and x["department"] == department
+                              and x.get("pick_reason") == trigger and x["status"] != failed),)]
         elif s.startswith("INSERT INTO ai_qa_daily_samples"):
-            day, department, direction_id, family, kind, subject_id = params
+            day, department, direction_id, family, kind, subject_id, reason = params
             if any(x["subject_kind"] == kind and x["subject_id"] == subject_id for x in db.samples):
                 self.rows = []
                 return
@@ -121,7 +127,8 @@ class FakeCursor:
             db.samples.append({"id": sample_id, "sample_day": day, "department": department,
                                "direction_id": direction_id, "family": family,
                                "subject_kind": kind, "subject_id": subject_id,
-                               "status": ds.STATUS_PICKED, "attempts": 0, "last_error": None})
+                               "status": ds.STATUS_PICKED, "attempts": 0, "last_error": None,
+                               "pick_reason": reason})
             self.rows = [(sample_id,)]
         elif s.startswith("UPDATE ai_qa_daily_samples") and "sample_day <" in s:
             failed, error, picked, cutoff = params
@@ -272,7 +279,8 @@ class DownloadedChatTests(_DbCase):
             self.db.samples.append({"id": i + 1, "sample_day": DAY, "department": "szov",
                                     "direction_id": 69, "family": ds.FAMILY_CHATS,
                                     "subject_kind": "c2d_snapshot", "subject_id": 100 + i,
-                                    "status": ds.STATUS_PICKED, "attempts": 0, "last_error": None})
+                                    "status": ds.STATUS_PICKED, "attempts": 0, "last_error": None,
+                                    "pick_reason": ds.PICK_RANDOM})
         chats = [{"key": f"r{i}", "direction_id": 69, "operator_id": 1} for i in range(40)]
         added = ds._sample_downloaded_chats(DAY, self.source(chats), 30, random.Random(1))
         self.assertEqual(added, {69: 5})
@@ -360,7 +368,7 @@ class EvaluationTests(_DbCase):
                 if isinstance(when, float) and self.clock[0] >= when:
                     self.audio[key] = ds.AUDIO_READY
         with mock.patch.object(config, "AI_QA_DAILY_SAMPLE_AUDIO_WAIT_S", audio_wait):
-            ds._evaluate_open(DAY, {"op": source}, self.evaluate,
+            ds._evaluate_open(DAY, {"op": [source]}, self.evaluate,
                               lambda sid, kind: sid not in self.not_in_queue, deadline,
                               sleep=sleep, monotonic=lambda: self.clock[0])
 

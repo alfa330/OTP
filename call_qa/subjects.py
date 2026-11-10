@@ -381,7 +381,8 @@ def _load_imported_call(imported_call_id: int) -> dict:
         cur = conn.cursor()
         cur.execute("SET client_encoding TO 'UTF8'")
         cur.execute(
-            """SELECT ic.id, u.direction_id, d.name, COALESCE(u.name, ic.operator_name),
+            """SELECT ic.id, COALESCE(ic.scope_direction_id, u.direction_id), d.name,
+                      COALESCE(u.name, ic.operator_name),
                       TO_CHAR(ic.datetime_raw AT TIME ZONE 'UTC', 'DD.MM.YYYY, HH24:MI'),
                       ic.audio_path, ic.operator_id, ic.phone_number, ic.duration_sec,
                       ic.status, dep.code, hc.score, ic.call_end_party,
@@ -389,7 +390,13 @@ def _load_imported_call(imported_call_id: int) -> dict:
                       """ + test_keys.sql_is_test('ic.phone_number') + """
                  FROM imported_calls ic
                  LEFT JOIN users u ON u.id = ic.operator_id
-                 LEFT JOIN directions d ON d.id = u.direction_id
+                 -- Разговор, который принадлежит направлению, а не оператору
+                 -- (scope_direction_id: звонки базы удалённого КЦ — «Обзвон —
+                 -- подписание АВР», SZOV-2), — направление, подпись и отдел по нему,
+                 -- как у api._SUBJECT_DIRECTION: иначе звонок фронт-офиса открывался
+                 -- бы в отделе, которого в разделе нет, и промпт считался бы по нему.
+                 LEFT JOIN directions d
+                        ON d.id = COALESCE(ic.scope_direction_id, u.direction_id)
                  LEFT JOIN directions dq ON dq.id = ic.qa_direction_id
                  -- Отдел берём у НАПРАВЛЕНИЯ, а не у users.department_id:
                  -- отдел входит в prompt_hash, а пометку «устарела» очередь

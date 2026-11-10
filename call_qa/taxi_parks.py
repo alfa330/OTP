@@ -29,7 +29,8 @@ _SOURCES = {
                                 NULL, NULL
                            FROM imported_calls ic
                            LEFT JOIN users u ON u.id = ic.operator_id
-                           LEFT JOIN directions d ON d.id = u.direction_id
+                           LEFT JOIN directions d
+                                  ON d.id = COALESCE(ic.scope_direction_id, u.direction_id)
                            LEFT JOIN departments dep
                              ON dep.id = COALESCE(d.department_id, u.department_id)
                           WHERE ic.id = ANY(%s)""",

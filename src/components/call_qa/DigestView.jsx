@@ -1,6 +1,7 @@
 import React from 'react';
 import {
-    AlertCircle, Calendar, ChevronRight, Loader2, MessageSquare, PhoneCall, RotateCcw, ScrollText, Sparkles,
+    AlertCircle, Calendar, ChevronRight, Loader2, MessageSquare, PhoneCall, RotateCcw, ScrollText, ShieldAlert,
+    Sparkles,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosBtnPrimary, iosBtnSecondary, iosCard, IosHint, IosMenu, IosSegmented, scoreTone,
@@ -299,6 +300,64 @@ function SectionStats({ stats, usual }) {
     );
 }
 
+/* «Поиск фрода» (задача SZOV-2): над текстом — сколько раз за день сработал каждый
+   из четырёх шаблонов задачи в звонках удалённого КЦ. Номера — как в задаче;
+   точное правило — под «i», а не строкой под числом. Ненулевое число подкрашено:
+   это сигнал проверить, нулевое остаётся нейтральным. */
+export const FRAUD_CELLS = [
+    {
+        kind: 'series', label: 'Подряд по 11–20 с',
+        hint: 'Шаблон 1. Два и больше разговоров оператора подряд, каждый от 11 до 20 секунд. Недозвон между ними серию не прерывает. Число — сколько таких серий; сколько раз трубку положил сам оператор, сказано в тексте ниже.',
+    },
+    {
+        kind: 'short_positive', label: 'До 30 с с «подпишет»',
+        hint: 'Шаблон 2. Разговор до 30 секунд с итогом «Подписал в звонке», «Сообщил, что подпишет» или «Подпишет в офисе». Число — сколько таких разговоров.',
+    },
+    {
+        kind: 'share', label: 'Много по 11–15 с',
+        hint: 'Шаблон 3. У оператора доля разговоров от 11 до 15 секунд минимум вдвое выше, чем у остальных за этот день, таких разговоров не меньше трёх, и случайно так бывает реже, чем в одном дне из двадцати. Число — у скольких операторов.',
+    },
+    {
+        kind: 'redial', label: 'Повтор после 11–12 с',
+        hint: 'Шаблон 4. Разговор 11–12 секунд, затем тот же оператор в течение 10 минут снова звонит тому же водителю и разговаривает. Число — сколько таких случаев.',
+    },
+];
+
+/* Подпись под числом: у скольких операторов. У шаблона 3 само число — операторы. */
+export function fraudCellSub(kind, entry) {
+    const hits = entry?.hits || 0;
+    const operators = entry?.operators || 0;
+    if (!hits) return 'не сработал';
+    if (kind === 'share') return plural(hits, 'оператор', 'оператора', 'операторов');
+    return `у ${operators} ${plural(operators, 'оператора', 'операторов', 'операторов')}`;
+}
+
+function FraudStats({ stats }) {
+    if (!stats) return null;
+    return (
+        <dl className="grid grid-cols-2 gap-px border-b border-slate-100 bg-slate-100 sm:grid-cols-4">
+            {FRAUD_CELLS.map((cell, index) => {
+                const entry = stats[cell.kind] || {};
+                const hits = entry.hits || 0;
+                return (
+                    /* Своя клетка, а не DayStat: подпись DayStat обрезается (truncate), и
+                       пузырёк «i» внутри неё не раскрылся бы. */
+                    <div key={cell.kind} className="min-w-0 bg-white px-4 py-3.5 sm:px-5">
+                        <dt className="flex min-w-0 items-center gap-1 text-[12px] text-slate-500">
+                            <span className="truncate">{cell.label}</span>
+                            <IosHint label={`Что считает «${cell.label}»`} text={cell.hint}
+                                     align={index % 2 ? 'right' : 'left'} />
+                        </dt>
+                        <dd className={`mt-1 text-[24px] font-semibold leading-none tabular-nums ${
+                            hits ? 'text-amber-600' : 'text-slate-900'}`}>{hits}</dd>
+                        <dd className="mt-1.5 truncate text-[12px] text-slate-400">{fraudCellSub(cell.kind, entry)}</dd>
+                    </div>
+                );
+            })}
+        </dl>
+    );
+}
+
 /* Под текстом — только когда он написан: число разговоров уже стоит в шапке
    карточки, второй раз его не повторяем. */
 function SummaryFooter({ data }) {
@@ -343,9 +402,11 @@ function SummaryPane({ digest, data, stalled, onOpenRef }) {
         ...(data.overview_html ? [{ value: 'overview', label: 'Главное' }] : []),
         ...sections.map((s) => ({
             value: s.key, label: s.direction,
-            icon: s.family === 'chats'
-                ? <MessageSquare size={13} className="text-slate-400" aria-hidden="true" />
-                : <PhoneCall size={13} className="text-slate-400" aria-hidden="true" />,
+            icon: s.kind === 'fraud'
+                ? <ShieldAlert size={13} className="text-slate-400" aria-hidden="true" />
+                : s.family === 'chats'
+                    ? <MessageSquare size={13} className="text-slate-400" aria-hidden="true" />
+                    : <PhoneCall size={13} className="text-slate-400" aria-hidden="true" />,
         })),
     ];
     const selected = options.some((o) => o.value === digest.section) ? digest.section : options[0]?.value;
@@ -418,7 +479,9 @@ function SummaryPane({ digest, data, stalled, onOpenRef }) {
                 </div>
             )}
             <article className={`${iosCard} overflow-hidden`} aria-label={section ? `Сводка: ${section.direction}` : 'Сводка: главное'}>
-                <SectionStats stats={section ? section.stats : data.stats} usual={section ? section.usual : data.usual} />
+                {section?.kind === 'fraud'
+                    ? <FraudStats stats={section.stats} />
+                    : <SectionStats stats={section ? section.stats : data.stats} usual={section ? section.usual : data.usual} />}
                 <div className="px-5 py-5 sm:px-6">
                     {selected === 'overview' ? (
                         <AiMarkup html={data.overview_html} onOpenRef={onOpenRef} />

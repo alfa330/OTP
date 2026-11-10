@@ -152,9 +152,13 @@ def compact(talks, day) -> dict:
 
 
 def compute_day(cur, department, day) -> dict | None:
-    """Слепок дня с отпечатками. None — оценённых разговоров нет."""
-    talks = digest_data.collect_day(cur, day, department, None, with_transcripts=False,
-                                    with_notes=True)
+    """Слепок дня с отпечатками. None — оценённых разговоров нет.
+
+    Звонки, взятые только по триггеру фрода (SZOV-2), в слепок не входят: период —
+    это цифры, а они считаются по честной случайной выборке (data.regular_talks).
+    day_signatures отсекает их тем же условием — иначе отпечатки разошлись бы."""
+    talks = digest_data.regular_talks(digest_data.collect_day(
+        cur, day, department, None, with_transcripts=False, with_notes=True))
     if not talks:
         return None
     return {"facts": compact(talks, day), "inputs_hash": digest_data.inputs_hash(talks),
@@ -187,7 +191,8 @@ def day_signatures(cur, department, first, last) -> dict[str, dict]:
                                        OR {api._SUBJECT_HUMAN_SCORE} IS NOT NULL),
                    count(*) FILTER (WHERE m.review_outcome = 'adjudicated')
               FROM {api._LATEST_EVALUATIONS}""" + api._SUBJECT_JOIN + api._EVAL_META_JOIN
-        + f" WHERE {api._SUBJECT_DAY} BETWEEN %s AND %s" + api._SUBJECT_EXISTS + scope_sql
+        + f" WHERE {api._SUBJECT_DAY} BETWEEN %s AND %s" + api._SUBJECT_EXISTS
+        + " AND " + api._SUBJECT_NOT_TRIGGER_PICK + scope_sql
         + " GROUP BY 1",
         (first, last, *scope_params))
     out = {}

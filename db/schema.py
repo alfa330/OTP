@@ -795,6 +795,12 @@ class SchemaMixin:
                 -- в основном направлении — видимость и отдел по-прежнему считаются по нему.
                 -- NULL — шкала оператора, как было всегда.
                 ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS qa_direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
+                -- Направление, которому принадлежит САМ разговор, когда это не направление
+                -- оператора (call_qa.api._SUBJECT_DIRECTION): в базу удалённого КЦ звонят
+                -- фронт-офисы, удалённые операторы и СЗоВ, а разговор — работа направления
+                -- «Обзвон — подписание АВР» (задача SZOV-2). По нему считаются отдел,
+                -- видимость и место в сводке. NULL — направление оператора, как было всегда.
+                ALTER TABLE imported_calls ADD COLUMN IF NOT EXISTS scope_direction_id INTEGER REFERENCES directions(id) ON DELETE SET NULL;
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_imported_calls_external_id_month ON imported_calls (external_id, month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_month ON imported_calls(month);
                 CREATE INDEX IF NOT EXISTS idx_imported_calls_operator_id ON imported_calls(operator_id);

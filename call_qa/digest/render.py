@@ -56,10 +56,17 @@ _REF_GROUP_RE = re.compile(r"\[\[\s*((?:#\s*\d{1,4}\s*[,;]\s*)+#\s*\d{1,4})\s*\]
 _REF_NUMBER_RE = re.compile(r"#\s*(\d{1,4})")
 
 
+# Время вместо номера — «[[#12:06]]»: так модель ссылается на звонок без номера
+# (в «Поиске фрода» непрослушанный звонок назван временем). Кнопки у такого нет —
+# остаётся само время, а не сырая метка в тексте.
+_REF_TIME_RE = re.compile(r"\[\[\s*#?\s*(\d{1,2}:\d{2})\s*\]\]")
+
+
 def split_ref_groups(text: str) -> str:
-    """«[[#2, #9, #10]]» → «[[#2]], [[#9]], [[#10]]»."""
+    """«[[#2, #9, #10]]» → «[[#2]], [[#9]], [[#10]]»; «[[#12:06]]» → «12:06»."""
     if not text or "[[" not in text:
         return text or ""
+    text = _REF_TIME_RE.sub(r"\1", text)
     return _REF_GROUP_RE.sub(
         lambda match: ", ".join(f"[[#{n}]]" for n in _REF_NUMBER_RE.findall(match.group(1))), text)
 _FENCE_RE = re.compile(r"```[a-zA-Z]*\s*")
@@ -566,6 +573,39 @@ def drop_header_stats(html: str, stats: dict | None, usual: dict | None = None) 
     if not changed:
         return html
     # Сетка, в которой не осталось показателей, — пустая рамка: вон и её.
+    for grid in list(soup.find_all("div", attrs={"data-wiki-block": "stats"})):
+        if not grid.find("div", attrs={"data-wiki-block": "stat"}):
+            grid.decompose()
+    return str(soup)
+
+
+def drop_fraud_header_stats(html: str, stats: dict | None) -> str:
+    """«Поиск фрода»: выбросить показатели, которые повторяют ряд цифр над разделом
+    (DigestView: FraudStats) — сколько раз сработал каждый шаблон, разговоров и
+    операторов за день. На живом 21.10 модель поставила «42 — подозрительных итога по
+    всему отделу» прямо под той же клеткой «42». Показатель «N из M» (у оператора
+    «19 из 72») — свой, не повтор: он остаётся."""
+    if not html or "data-wiki-block" not in html or not stats:
+        return html or ""
+    header = {int(stats.get(key) or 0) for key in ("talks", "operators")}
+    header |= {int((stats.get(kind) or {}).get("hits") or 0)
+               for kind in ("series", "short_positive", "share", "redial")}
+    header.discard(0)
+    if not header:
+        return html
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for stat in list(soup.find_all("div", attrs={"data-wiki-block": "stat"})):
+        title_text = stat.find("h4").get_text(" ", strip=True) if stat.find("h4") else ""
+        match = _LEADING_NUMBER_RE.match(title_text)
+        if not match or match.group(2) or _OF_RE.search(title_text):
+            continue
+        if _half_up(match.group(1).replace(",", ".")) in header:
+            stat.decompose()
+            changed = True
+    if not changed:
+        return html
     for grid in list(soup.find_all("div", attrs={"data-wiki-block": "stats"})):
         if not grid.find("div", attrs={"data-wiki-block": "stat"}):
             grid.decompose()
