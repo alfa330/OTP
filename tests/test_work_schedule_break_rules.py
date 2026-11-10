@@ -733,16 +733,19 @@ class WorkScheduleBreakRuleTests(unittest.TestCase):
             "_ws_normalize_break_durations",
             "_ws_pick_break_durations_for_shift",
             "_ws_place_break_durations_centered",
+            "_ws_fixed_break_for_segment",
             "_ws_compute_breaks_for_shift_minutes",
             "_ws_parse_date_str",
             "_ws_date_str",
             "_ws_add_days_str",
             "_ws_cross_operator_gap_for_direction",
             "_ws_break_overlap_allowed",
+            "_ws_fixed_break_for_direction",
             "_ws_build_occupied_intervals_for_date",
             "_ws_break_layout_spacing",
             "_ws_break_start_bounds_for_index",
             "_ws_break_total_overlap_minutes",
+            "_ws_breaks_fit_as_placed",
             "_ws_break_allowed_pair_overlap_minutes",
             "_ws_break_pair_overlap_excess_minutes",
             "_ws_break_concurrency_penalty_minutes",
@@ -1405,16 +1408,22 @@ class _FakeBreakSettingsCursor:
     def execute(self, query, params=None):
         sql = " ".join(str(query).split())
         if sql.startswith(
-            "SELECT cross_operator_gap_minutes, allow_break_overlap FROM work_schedule_break_direction_settings"
+            "SELECT cross_operator_gap_minutes, allow_break_overlap, fixed_break_start_minutes, "
+            "fixed_break_end_minutes FROM work_schedule_break_direction_settings"
         ):
             self.settings_selects += 1
             row = self.settings.get(str(params[0]).strip().lower())
-            self._row = (row["gap"], row["allow"]) if row else None
+            self._row = (
+                (row["gap"], row["allow"], row.get("fixed_start"), row.get("fixed_end")) if row else None
+            )
         elif sql.startswith("DELETE FROM work_schedule_break_direction_settings"):
             self.settings.pop(str(params[0]).strip().lower(), None)
         elif sql.startswith("INSERT INTO work_schedule_break_direction_settings"):
-            direction, gap, allow = params
-            self.settings[str(direction).strip().lower()] = {"gap": gap, "allow": allow}
+            direction, gap, allow, fixed_start, fixed_end = params
+            row = {"gap": gap, "allow": allow}
+            if fixed_start is not None or fixed_end is not None:
+                row.update({"fixed_start": fixed_start, "fixed_end": fixed_end})
+            self.settings[str(direction).strip().lower()] = row
         elif sql.startswith("DELETE FROM work_schedule_break_rules"):
             pass
         else:
@@ -1447,6 +1456,8 @@ def _make_break_settings_dummy(cursor):
         "get_work_schedule_break_rules",
         "_normalize_break_cross_operator_gap",
         "_normalize_break_allow_overlap",
+        "_normalize_break_fixed_interval",
+        "_fixed_break_payload",
     )
     namespace = {"json": json}
     for function_name in method_names:
@@ -1597,16 +1608,19 @@ class BreakOverlapAllowedTests(unittest.TestCase):
             "_ws_normalize_break_durations",
             "_ws_pick_break_durations_for_shift",
             "_ws_place_break_durations_centered",
+            "_ws_fixed_break_for_segment",
             "_ws_compute_breaks_for_shift_minutes",
             "_ws_parse_date_str",
             "_ws_date_str",
             "_ws_add_days_str",
             "_ws_cross_operator_gap_for_direction",
             "_ws_break_overlap_allowed",
+            "_ws_fixed_break_for_direction",
             "_ws_build_occupied_intervals_for_date",
             "_ws_break_layout_spacing",
             "_ws_break_start_bounds_for_index",
             "_ws_break_total_overlap_minutes",
+            "_ws_breaks_fit_as_placed",
             "_ws_break_allowed_pair_overlap_minutes",
             "_ws_break_pair_overlap_excess_minutes",
             "_ws_break_concurrency_penalty_minutes",
@@ -1763,7 +1777,13 @@ class BreakOverlapAllowedTests(unittest.TestCase):
     def test_settings_read_returns_overlap_and_lists_overlap_only_direction(self):
         cursor = _FakeRulesReadCursor([
             [("Основа", 330, 390, [15])],
-            [("Основа", 10, False), ("Чат", 0, True), ("Пустое", 0, False)],
+            [
+                ("Основа", 10, False, None, None),
+                ("Чат", 0, True, None, None),
+                ("Регионы", 0, True, 780, 840),
+                # Время без галочки не действует и наружу не отдаётся.
+                ("Пустое", 0, False, 780, 840),
+            ],
         ])
         dummy = _make_break_settings_dummy(cursor)
         self.assertEqual(
@@ -1774,17 +1794,196 @@ class BreakOverlapAllowedTests(unittest.TestCase):
                     "rules": [{"minMinutes": 330, "maxMinutes": 390, "breakDurations": [15]}],
                     "crossOperatorGapMinutes": 10,
                     "allowOverlap": False,
+                    "fixedBreak": None,
                 },
-                {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": True},
+                {
+                    "direction": "Регионы", "rules": [], "crossOperatorGapMinutes": 0,
+                    "allowOverlap": True, "fixedBreak": {"startMinutes": 780, "endMinutes": 840},
+                },
+                {"direction": "Чат", "rules": [], "crossOperatorGapMinutes": 0, "allowOverlap": True, "fixedBreak": None},
             ],
         )
 
+    def test_settings_save_keeps_fixed_break_only_with_overlap(self):
+        cursor = _FakeBreakSettingsCursor()
+        dummy = _make_break_settings_dummy(cursor)
+        lunch = {"startMinutes": 13 * 60, "endMinutes": 14 * 60}
+
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Регионы", "rules": [], "allowOverlap": True, "fixedBreak": lunch},
+        ])
+        self.assertEqual(
+            cursor.settings["регионы"], {"gap": 0, "allow": True, "fixed_start": 780, "fixed_end": 840}
+        )
+        # Не прислали время — остаётся прежним.
+        dummy.save_work_schedule_break_rules([{"direction": "Регионы", "rules": [], "allowOverlap": True}])
+        self.assertEqual(cursor.settings["регионы"]["fixed_start"], 780)
+        # Прислали пустым — убрано, галочка осталась.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Регионы", "rules": [], "allowOverlap": True, "fixedBreak": None},
+        ])
+        self.assertEqual(cursor.settings["регионы"], {"gap": 0, "allow": True})
+        # Без галочки время не хранится.
+        dummy.save_work_schedule_break_rules([
+            {"direction": "Чат", "rules": [], "allowOverlap": False, "fixedBreak": lunch, "crossOperatorGapMinutes": 5},
+        ])
+        self.assertEqual(cursor.settings["чат"], {"gap": 5, "allow": False})
+        for broken in (
+            {"startMinutes": 840, "endMinutes": 780},
+            {"startMinutes": 780, "endMinutes": 1500},
+            {"startMinutes": "обед"},
+        ):
+            with self.assertRaises(ValueError, msg=broken):
+                dummy.save_work_schedule_break_rules([
+                    {"direction": "Регионы", "rules": [], "allowOverlap": True, "fixedBreak": broken},
+                ])
+
+    # --- «Время перерыва» направления (10.11.2026) ---------------------------------
+    LUNCH = {"start": 13 * 60, "end": 14 * 60}
+
+    def _auto_breaks_dummy(self):
+        method_names = (
+            "_pick_break_durations_for_shift",
+            "_place_break_durations_centered_minutes",
+            "_fixed_break_for_segment",
+            "_compute_auto_shift_breaks_minutes",
+        )
+        namespace = {"math": math}
+        for function_name in method_names:
+            exec(_function_source(DATABASE_PATH, function_name, class_name="Database"), namespace)
+
+        class AutoBreaksDummy(_BreakRuleDummy):
+            pass
+
+        dummy = AutoBreaksDummy()
+        for function_name in method_names:
+            setattr(dummy, function_name, namespace[function_name].__get__(dummy, AutoBreaksDummy))
+        return dummy
+
+    def test_fixed_break_lands_only_in_shifts_that_cover_it(self):
+        dummy = self._auto_breaks_dummy()
+        self.assertEqual(dummy._fixed_break_for_segment(9 * 60, 18 * 60, self.LUNCH), self.LUNCH)
+        self.assertIsNone(dummy._fixed_break_for_segment(14 * 60, 23 * 60, self.LUNCH))
+        self.assertIsNone(dummy._fixed_break_for_segment(13 * 60 + 30, 22 * 60, self.LUNCH))
+        self.assertIsNone(dummy._fixed_break_for_segment(9 * 60, 18 * 60, None))
+        # Ночная смена 20:00–08:00: время 01:00–02:00 — уже на шкале следующих суток.
+        self.assertEqual(
+            dummy._fixed_break_for_segment(20 * 60, 32 * 60, {"start": 60, "end": 120}),
+            {"start": 25 * 60, "end": 26 * 60},
+        )
+
+    def test_server_auto_breaks_use_fixed_break_instead_of_rules(self):
+        dummy = self._auto_breaks_dummy()
+        self.assertEqual(
+            dummy._compute_auto_shift_breaks_minutes(9 * 60, 18 * 60, "Регионы", [], fixed_break=self.LUNCH),
+            [self.LUNCH],
+        )
+        # Смена, куда время не попадает, — по правилам, как без него.
+        self.assertEqual(
+            dummy._compute_auto_shift_breaks_minutes(14 * 60, 23 * 60, "Регионы", [], fixed_break=self.LUNCH),
+            dummy._compute_auto_shift_breaks_minutes(14 * 60, 23 * 60, "Регионы", []),
+        )
+
+    def _import_engine(self):
+        namespace = {
+            "math": math,
+            "datetime": __import__("datetime").datetime,
+            "timedelta": __import__("datetime").timedelta,
+            **BREAK_RULE_CONSTANTS,
+        }
+        for function_name in (
+            "_operator_info_is_chat_manager",
+            "_ws_time_to_minutes",
+            "_ws_normalize_direction_key",
+            "_ws_is_chat_manager_direction",
+            "_ws_normalize_break_durations",
+            "_ws_pick_break_durations_for_shift",
+            "_ws_place_break_durations_centered",
+            "_ws_fixed_break_for_segment",
+            "_ws_compute_breaks_for_shift_minutes",
+            "_ws_parse_date_str",
+            "_ws_date_str",
+            "_ws_add_days_str",
+            "_ws_cross_operator_gap_for_direction",
+            "_ws_break_overlap_allowed",
+            "_ws_fixed_break_for_direction",
+            "_ws_build_occupied_intervals_for_date",
+            "_ws_break_layout_spacing",
+            "_ws_break_start_bounds_for_index",
+            "_ws_break_total_overlap_minutes",
+            "_ws_breaks_fit_as_placed",
+            "_ws_break_allowed_pair_overlap_minutes",
+            "_ws_break_pair_overlap_excess_minutes",
+            "_ws_break_concurrency_penalty_minutes",
+            "_ws_break_cross_gap_deficit_minutes",
+            "_ws_even_break_starts",
+            "_ws_break_position_cost",
+            "_ws_plan_break_positions",
+            "_ws_find_best_break_start",
+            "_ws_adjust_breaks_for_operator_on_date",
+        ):
+            exec(_function_source(BOT_PATH, function_name), namespace)
+        return namespace
+
+    def test_import_puts_fixed_break_and_does_not_move_it(self):
+        engine = self._import_engine()
+        self.assertEqual(
+            engine["_ws_compute_breaks_for_shift_minutes"](9 * 60, 18 * 60, "Регионы", None, fixed_break=self.LUNCH),
+            [self.LUNCH],
+        )
+
+        def lay_out(fixed_map):
+            # Смена 08:00–17:00: равномерная точка часового перерыва — 12:00.
+            op = {"id": 1, "direction": "Регионы", "shifts": {self.DATE: [{"start": "08:00", "end": "17:00"}]}}
+            engine["_ws_adjust_breaks_for_operator_on_date"](
+                op=op,
+                date_str=self.DATE,
+                all_operators=[op],
+                get_direction_scope_key=lambda value: f"dir:{str(value or '').strip().lower()}",
+                break_rules_map={"регионы": [{"minMinutes": 300, "maxMinutes": 720, "breakDurations": [60]}]},
+                break_overlap_directions={"регионы"},
+                break_fixed_map=fixed_map,
+            )
+            return op["shifts"][self.DATE][0]["breaks"]
+
+        self.assertEqual(lay_out({"регионы": dict(self.LUNCH)}), [self.LUNCH])
+        self.assertEqual(lay_out(None), [{"start": 12 * 60, "end": 13 * 60}])
+        # Без галочки «время перерыва» не действует.
+        self.assertIsNone(engine["_ws_fixed_break_for_direction"]("Регионы", {"регионы": dict(self.LUNCH)}, set()))
+
+    def test_every_path_that_lays_breaks_out_uses_fixed_break(self):
+        save_source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
+        self.assertIn("overlap_settings = self._get_break_overlap_settings_tx(cursor, direction_name)", save_source)
+        self.assertIn("self._fixed_break_for_segment(new_start_min, new_end_min, fixed_break)", save_source)
+        self.assertIn("keep_positions=breaks_are_placed or fixed_break is not None", save_source)
+        self.assertIn("fixed_break=fixed_break", save_source)
+
+        recalc_source = _function_source(DATABASE_PATH, "recalculate_work_schedule_breaks", class_name="Database")
+        self.assertIn("fixed_break_for_direction=_fixed_break_for_direction", recalc_source)
+        pass_source = _function_source(DATABASE_PATH, "_plan_recalc_pass", class_name="Database")
+        self.assertIn("self._fixed_break_for_segment(start_min, end_min, fixed_break)", pass_source)
+        self.assertIn("keep_positions=fixed_break is not None", pass_source)
+        replace_source = _function_source(
+            DATABASE_PATH, "_resolve_breaks_for_day_replacement_tx", class_name="Database"
+        )
+        self.assertIn("fixed_break=self._get_break_overlap_settings_tx(cursor, direction_name)['fixed_break']", replace_source)
+
+        entries_source = _function_source(BOT_PATH, "_ws_compute_breaks_for_entries")
+        self.assertIn("_ws_fixed_break_for_segment(", entries_source)
+        self.assertEqual(entries_source.count("break_fixed_map=break_fixed_map"), 2)
+        import_source = _function_source(BOT_PATH, "import_work_schedules_excel")
+        self.assertIn("db.get_work_schedule_break_fixed_map()", import_source)
+        self.assertIn("break_fixed_map=break_fixed_map", import_source)
+
+        app_source = (ROOT / "src" / "App.jsx").read_text(encoding="utf-8-sig")
+        self.assertIn("Время перерыва", app_source)
+        self.assertIn("fixedBreak: isOverlapDraftOn(directionName)", app_source)
+        self.assertEqual(app_source.count("plannerFixedBreakForSegment(startMin, endMin, breakRuleRanges?.fixedBreak)"), 2)
+        self.assertIn("Boolean(breakRuleRanges?.fixedBreak)", app_source)
+
     def test_every_path_that_lays_breaks_out_passes_the_setting(self):
         save_source = _function_source(DATABASE_PATH, "_save_shift_tx", class_name="Database")
-        self.assertIn(
-            "allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name)",
-            save_source,
-        )
+        self.assertIn("allow_overlap=overlap_settings['allow_overlap']", save_source)
         recalc_source = _function_source(DATABASE_PATH, "recalculate_work_schedule_breaks", class_name="Database")
         self.assertIn("overlap_allowed_for_direction=_overlap_allowed_for_direction", recalc_source)
         pass_source = _function_source(DATABASE_PATH, "_plan_recalc_pass", class_name="Database")

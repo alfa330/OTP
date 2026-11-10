@@ -655,12 +655,14 @@ class SchedulesMixin:
 
     def _plan_recalc_pass(self, cursor, ordered_rows, planned_by_shift, frozen_by_shift, shift_meta,
                           day_breaks_snapshots, rules_for_direction, cross_gap_for_direction,
-                          recalc_now, recalc_direction_keys, overlap_allowed_for_direction=None):
+                          recalc_now, recalc_direction_keys, overlap_allowed_for_direction=None,
+                          fixed_break_for_direction=None):
         """
         Один проход пересчёта по всем сменам: каждая раскладывается с оглядкой на
         текущий план коллег. Результат кладётся в planned_by_shift, база не трогается.
         overlap_allowed_for_direction — галочка «Разрешить пересечение»: у такого
-        направления на коллег не оглядываемся вовсе.
+        направления на коллег не оглядываемся вовсе. fixed_break_for_direction —
+        «время перерыва» направления: покрывающая его смена получает ровно его.
         """
         for shift_id, operator_id, shift_date, start_time_value, end_time_value, direction_name in ordered_rows:
             start_min, end_min = self._schedule_interval_minutes(start_time_value, end_time_value)
@@ -683,7 +685,18 @@ class SchedulesMixin:
                 direction_name=direction_name,
                 direction_rules=direction_rules
             )
-            if planning_from_min <= start_min and not used_breaks:
+            fixed_break = (
+                fixed_break_for_direction(direction_name)
+                if callable(fixed_break_for_direction) else None
+            )
+            fixed_here = self._fixed_break_for_segment(start_min, end_min, fixed_break)
+            if fixed_here is not None:
+                window_start = (
+                    start_min if planning_from_min <= start_min and not used_breaks
+                    else max(start_min, planning_from_min)
+                )
+                computed_breaks = [fixed_here] if int(fixed_here['start']) >= window_start else []
+            elif planning_from_min <= start_min and not used_breaks:
                 window_start = start_min
                 computed_breaks = self._place_break_durations_centered_minutes(
                     start_min,
@@ -734,7 +747,8 @@ class SchedulesMixin:
                 frozen_breaks=frozen_breaks,
                 planning_from_minutes=window_start,
                 extra_occupied=extra_occupied,
-                allow_overlap=allow_overlap
+                allow_overlap=allow_overlap,
+                keep_positions=fixed_break is not None
             )
             planned_by_shift[int(shift_id)] = [dict(item) for item in adjusted_breaks]
             frozen_by_shift[int(shift_id)] = [dict(item) for item in frozen_breaks]

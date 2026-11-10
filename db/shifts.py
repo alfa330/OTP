@@ -915,6 +915,10 @@ class ShiftsMixin:
         new_duration_min = max(0, new_end_min - new_start_min)
         direction_name = self._get_operator_direction_name_tx(cursor, operator_id)
         direction_rules = self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name)
+        # «Разрешить пересечение» и «время перерыва» направления (у регионов — обед
+        # с 13 до 14): смена, покрывающая это время, получает ровно этот перерыв.
+        overlap_settings = self._get_break_overlap_settings_tx(cursor, direction_name)
+        fixed_break = overlap_settings['fixed_break']
 
         # Снимок перерывов дня снимаем ДО любых удалений: перерывы уезжают из базы
         # каскадом вместе со строкой смены, а прошедшие переписывать нельзя.
@@ -973,7 +977,8 @@ class ShiftsMixin:
                 previous_start_min,
                 previous_end_min,
                 direction_name=direction_name,
-                direction_rules=direction_rules
+                direction_rules=direction_rules,
+                fixed_break=fixed_break
             )
             previous_shift_breaks_were_auto = (previous_shift_breaks == previous_auto_breaks)
 
@@ -983,6 +988,10 @@ class ShiftsMixin:
             отсиженное, разложенная только по остатку смены. Перерывы, которые уже
             стоят в графике и ещё не начались, остаются на своих местах.
             """
+            fixed_here = self._fixed_break_for_segment(new_start_min, new_end_min, fixed_break)
+            if fixed_here is not None:
+                # Время перерыва направления: ровно этот перерыв, если он ещё впереди.
+                return [fixed_here] if int(fixed_here['start']) >= planning_window_start else []
             full_durations = self._pick_break_durations_for_shift(
                 duration_minutes=new_duration_min,
                 direction_name=direction_name,
@@ -1055,8 +1064,9 @@ class ShiftsMixin:
             frozen_breaks=frozen_breaks,
             planning_from_minutes=planning_window_start,
             extra_occupied=extra_occupied,
-            allow_overlap=self._break_overlap_allowed_for_direction_tx(cursor, direction_name),
-            keep_positions=breaks_are_placed
+            allow_overlap=overlap_settings['allow_overlap'],
+            # С заданным временем перерыва раскладка равномерностью его не двигает.
+            keep_positions=breaks_are_placed or fixed_break is not None
         )
         # Смене СВ перерывы ставит только РОП руками (задача #352): автоматика и
         # правила направлений тут не работают (у СВ направления нет — сработал бы

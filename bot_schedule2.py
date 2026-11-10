@@ -38407,10 +38407,35 @@ def _ws_place_break_durations_centered(start_min, end_min, break_durations):
     return normalized
 
 
-def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None, break_rules_map=None):
+def _ws_fixed_break_for_segment(seg_start, seg_end, fixed_break):
+    """
+    «Время перерыва» направления внутри смены (зеркало сервера): интервал в
+    минутах шкалы смены, у ночной — со сдвигом на сутки; смена не покрывает его
+    целиком — None.
+    """
+    if not fixed_break:
+        return None
+    try:
+        start = int(fixed_break['start'])
+        end = int(fixed_break['end'])
+        seg_start = int(seg_start)
+        seg_end = int(seg_end)
+    except Exception:
+        return None
+    for day_shift in (0, 1440):
+        if seg_start <= start + day_shift and end + day_shift <= seg_end:
+            return {'start': start + day_shift, 'end': end + day_shift}
+    return None
+
+
+def _ws_compute_breaks_for_shift_minutes(start_min, end_min, direction_value=None, break_rules_map=None,
+                                         fixed_break=None):
     dur = int(end_min) - int(start_min)
     if dur <= 0:
         return []
+    fixed_here = _ws_fixed_break_for_segment(start_min, end_min, fixed_break)
+    if fixed_here is not None:
+        return [fixed_here]
     break_durations = _ws_pick_break_durations_for_shift(
         duration_minutes=dur,
         direction_value=direction_value,
@@ -38657,6 +38682,33 @@ def _ws_break_overlap_allowed(direction_value, break_overlap_directions=None):
         return False
     key = _ws_normalize_direction_key(direction_value)
     return bool(key) and key in break_overlap_directions
+
+
+def _ws_fixed_break_for_direction(direction_value, break_fixed_map=None, break_overlap_directions=None):
+    """«Время перерыва» направления; без галочки «Разрешить пересечение» не действует."""
+    if not break_fixed_map or not _ws_break_overlap_allowed(direction_value, break_overlap_directions):
+        return None
+    return break_fixed_map.get(_ws_normalize_direction_key(direction_value))
+
+
+def _ws_breaks_fit_as_placed(breaks, own_intervals, win_start, seg_end):
+    """Готовые перерывы можно оставить как есть (зеркало сервера)."""
+    placed = []
+    for item in (breaks or []):
+        try:
+            start = int(item['start'])
+            end = int(item['end'])
+        except Exception:
+            return False
+        if end <= start or start < int(win_start) or end > int(seg_end):
+            return False
+        interval = {'start': start, 'end': end}
+        if _ws_break_total_overlap_minutes(interval, own_intervals) > 0:
+            return False
+        if _ws_break_total_overlap_minutes(interval, placed) > 0:
+            return False
+        placed.append(interval)
+    return True
 
 
 def _ws_build_occupied_intervals_for_date(all_operators, date_str, exclude_op_id, direction_scope, get_scope_key,
@@ -39024,7 +39076,8 @@ def _ws_find_best_break_start(desired_start, length, lower_bound, upper_bound, n
 
 def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_direction_scope_key, break_rules_map=None,
                                            break_gaps_map=None, frozen_breaks_by_index=None,
-                                           planning_from_minutes=None, break_overlap_directions=None):
+                                           planning_from_minutes=None, break_overlap_directions=None,
+                                           break_fixed_map=None):
     """
     Раскладка перерывов равномерно по смене, со сверкой с коллегами направления:
     пересечение допустимо в пределах правил, одновременно на перерыве не больше двух.
@@ -39032,11 +39085,14 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
     frozen_breaks_by_index — уже прошедшие перерывы сегмента (по его индексу): их
     нельзя двигать, они лишь занимают время. planning_from_minutes — минута, раньше
     которой нельзя ставить новый перерыв. break_overlap_directions — направления
-    с галочкой «Разрешить пересечение». Без этих аргументов поведение прежнее.
+    с галочкой «Разрешить пересечение», break_fixed_map — их «время перерыва»:
+    у такого направления перерывы не двигаются, если помещаются в смену.
+    Без этих аргументов поведение прежнее.
     """
     segs = (op or {}).get('shifts', {}).get(date_str) or []
     if not segs:
         return
+    fixed_break = _ws_fixed_break_for_direction(op.get('direction'), break_fixed_map, break_overlap_directions)
     neighbors = _ws_build_occupied_intervals_for_date(
         all_operators=all_operators,
         date_str=date_str,
@@ -39071,7 +39127,8 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
                 raw_seg_start,
                 raw_seg_end,
                 op.get('direction'),
-                break_rules_map=break_rules_map
+                break_rules_map=break_rules_map,
+                fixed_break=fixed_break
             )
 
         prepared_breaks = []
@@ -39096,6 +39153,13 @@ def _ws_adjust_breaks_for_operator_on_date(op, date_str, all_operators, get_dire
         if protected_end is not None:
             win_start = max(win_start, protected_end)
         win_start = min(win_start, seg_end)
+
+        if fixed_break is not None and _ws_breaks_fit_as_placed(prepared_breaks, own_intervals, win_start, seg_end):
+            # Время перерыва направления равномерностью не двигаем (зеркало сервера).
+            kept = [{'start': int(b['start']), 'end': int(b['end'])} for b in prepared_breaks]
+            own_intervals.extend(dict(item) for item in kept)
+            seg['breaks'] = sorted(protected + kept, key=lambda item: (int(item['start']), int(item['end'])))
+            continue
 
         break_durations = [int(b['length']) for b in prepared_breaks]
         edge_margin, min_gap = _ws_break_layout_spacing(win_start, seg_end, break_durations)
@@ -39202,7 +39266,7 @@ def _ws_break_layout_score(groups, break_overlap_directions=None):
 
 def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_map,
                                     break_direction_groups=None, break_gaps_map=None,
-                                    break_overlap_directions=None):
+                                    break_overlap_directions=None, break_fixed_map=None):
     """
     Вычисляет перерывы для списка entries (оператор + дата + смены).
     Мутирует entries in-place: каждый shift получает поле 'breaks'.
@@ -39333,7 +39397,16 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 direction_value=sim_op.get('direction'),
                 break_rules_map=break_rules_map
             )
-            if seg_planning_from <= smin and not used:
+            fixed_here = _ws_fixed_break_for_segment(
+                smin,
+                emin,
+                _ws_fixed_break_for_direction(sim_op.get('direction'), break_fixed_map, break_overlap_directions)
+            )
+            if fixed_here is not None:
+                # Время перерыва направления: ровно этот перерыв, если он ещё впереди.
+                window_start = smin if seg_planning_from <= smin and not used else min(max(smin, seg_planning_from), emin)
+                seg_breaks = [fixed_here] if int(fixed_here['start']) >= window_start else []
+            elif seg_planning_from <= smin and not used:
                 window_start = smin
                 seg_breaks = _ws_place_break_durations_centered(smin, emin, full_durations)
             else:
@@ -39347,7 +39420,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                         _ws_remaining_break_durations_after_used(full_durations, used)
                     )
                 )
-            seg_breaks = _ws_seed_break_positions_from_existing(seg_breaks, upcoming)
+            if fixed_here is None:
+                seg_breaks = _ws_seed_break_positions_from_existing(seg_breaks, upcoming)
             frozen_by_index[len(prepared_shifts)] = frozen
             if planning_from_minutes is None or window_start > planning_from_minutes:
                 planning_from_minutes = window_start
@@ -39370,7 +39444,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 break_gaps_map=break_gaps_map,
                 frozen_breaks_by_index=frozen_by_index,
                 planning_from_minutes=planning_from_minutes,
-                break_overlap_directions=break_overlap_directions
+                break_overlap_directions=break_overlap_directions,
+                break_fixed_map=break_fixed_map
             )
         replan_jobs.append((entry, sim_op, date_str, frozen_by_index, planning_from_minutes))
 
@@ -39424,7 +39499,8 @@ def _ws_compute_breaks_for_entries(entries, sim_source_operators, break_rules_ma
                 break_gaps_map=break_gaps_map,
                 frozen_breaks_by_index=frozen_map,
                 planning_from_minutes=plan_from,
-                break_overlap_directions=break_overlap_directions
+                break_overlap_directions=break_overlap_directions,
+                break_fixed_map=break_fixed_map
             )
         score = _ws_break_layout_score(_layout_groups(), break_overlap_directions)
         if score < best_score:
@@ -41774,13 +41850,15 @@ def import_work_schedules_excel():
         break_rules_map = db.get_work_schedule_break_rules_map() or {}
         break_gaps_map = db.get_work_schedule_break_cross_operator_gaps_map() or {}
         break_overlap_directions = db.get_work_schedule_break_overlap_directions() or set()
+        break_fixed_map = db.get_work_schedule_break_fixed_map() or {}
         _ws_compute_breaks_for_entries(
             parsed_entries,
             sim_source_operators,
             break_rules_map,
             break_direction_groups=break_direction_groups,
             break_gaps_map=break_gaps_map,
-            break_overlap_directions=break_overlap_directions
+            break_overlap_directions=break_overlap_directions,
+            break_fixed_map=break_fixed_map
         )
 
         result = db.import_work_schedule_excel_entries(parsed_entries, actor_id=requester_id)

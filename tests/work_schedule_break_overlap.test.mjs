@@ -25,13 +25,19 @@ function slice(source, start, end) {
     return source.slice(from, to);
 }
 
-const basics = slice(APP, 'const cpad = (n) => String(n).padStart(2, "0");', '// Время рабочего часового пояса, а не браузера');
+// Даты, правила перерывов и автогенерация (с «временем перерыва»), затем раскладка.
+const basics = slice(APP, 'const cpad = (n) => String(n).padStart(2, "0");', 'const intervalsOverlap = (a, b) =>');
 const engine = slice(APP, 'function buildOccupiedIntervalsForDate(', 'function mergeSegments(');
 
-const { adjustBreaksForOperatorOnDate, breakLayoutScore } = new Function(`
+const {
+    adjustBreaksForOperatorOnDate,
+    breakLayoutScore,
+    computeBreaksForShiftMinutes,
+    planBreaksForShiftWithFrozen,
+} = new Function(`
     ${basics}
     ${engine}
-    return { adjustBreaksForOperatorOnDate, breakLayoutScore };
+    return { adjustBreaksForOperatorOnDate, breakLayoutScore, computeBreaksForShiftMinutes, planBreaksForShiftWithFrozen };
 `)();
 
 const DATE = '2026-11-10';
@@ -122,6 +128,37 @@ test('без галочки ручной перерыв, как и раньше,
 
 test('ручной перерыв, который не помещается в смену, раскладывается обычным порядком', () => {
     assert.deepEqual(lunchLayout([{ start: 16 * 60 + 30, end: 17 * 60 + 30 }]), [{ start: 12 * 60, end: 13 * 60 }]);
+});
+
+// «Время перерыва» направления едет вместе с его правилами: поле fixedBreak у массива.
+const LUNCH = { start: 13 * 60, end: 14 * 60 };
+const withFixed = (rules, fixed = LUNCH) => Object.assign(rules.slice(), { fixedBreak: { ...fixed } });
+
+test('время перерыва ставится сменам, которые его покрывают, остальным — по правилам', () => {
+    assert.deepEqual(computeBreaksForShiftMinutes(9 * 60, 18 * 60, 'Регионы', withFixed([])), [LUNCH]);
+    assert.deepEqual(
+        computeBreaksForShiftMinutes(14 * 60, 23 * 60, 'Регионы', withFixed([])),
+        computeBreaksForShiftMinutes(14 * 60, 23 * 60, 'Регионы', []),
+    );
+    // Окно смены предлагает то же время (будущая дата — прошлого нет).
+    const plan = planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), [], '2099-01-05');
+    assert.deepEqual(plan.breaks, [LUNCH]);
+    assert.deepEqual(plan.frozen, []);
+});
+
+test('раскладка не двигает время перерыва направления с галочкой', () => {
+    const rules = [{ minMinutes: 300, maxMinutes: 720, breakDurations: [60] }];
+    const layout = (ranges, overlapAllowed) => {
+        // Смена 08:00–17:00 без перерывов: их ставит автогенерация.
+        const op = { id: 1, direction: 'Регионы', shifts: { [DATE]: [{ start: '08:00', end: '17:00', __startMin: 480, __endMin: 1020 }] } };
+        adjustBreaksForOperatorOnDate(op, DATE, [op], perDirection, () => ranges, noGap, null, null, overlapAllowed);
+        return op.shifts[DATE][0].breaks.map(b => ({ start: b.start, end: b.end }));
+    };
+    assert.deepEqual(layout(withFixed(rules), () => true), [LUNCH]);
+    // Без времени — равномерная точка 12:00.
+    assert.deepEqual(layout(rules, () => true), [{ start: 12 * 60, end: 13 * 60 }]);
+    // Без галочки время не держится (в жизни оно и не приезжает без неё).
+    assert.deepEqual(layout(withFixed(rules), () => false), [{ start: 12 * 60, end: 13 * 60 }]);
 });
 
 test('совпавшие перерывы направления с галочкой не считаются нарушением прохода', () => {

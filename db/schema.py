@@ -2388,6 +2388,24 @@ class SchemaMixin:
                     END IF;
                 END $$;
             """)
+            # «Время перерыва» направления с «Разрешить пересечение» (10.11.2026): у
+            # регионов, например, обед с 13:00 до 14:00 всем. Минуты от полуночи;
+            # пусто — перерывы по правилам. Тот же приём: ALTER только без колонки.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                         WHERE table_schema = current_schema()
+                           AND table_name = 'work_schedule_break_direction_settings'
+                           AND column_name = 'fixed_break_start_minutes'
+                    ) THEN
+                        ALTER TABLE work_schedule_break_direction_settings
+                            ADD COLUMN fixed_break_start_minutes INTEGER NULL,
+                            ADD COLUMN fixed_break_end_minutes INTEGER NULL;
+                    END IF;
+                END $$;
+            """)
             # Задача #352. Перерыв супервайзера, который РОП вычитает из его часов по
             # Clockster (supervisor_hours.py). На человека, а не на направление: у СВ
             # направления нет, а значение у разных СВ разное. Нет строки или NULL —
