@@ -1,11 +1,18 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, IdCard, Loader2, Pencil, X } from 'lucide-react';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, IdCard, Loader2, MessagesSquare, Pencil, X } from 'lucide-react';
 import { IosHint } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import {
     amoStatus, changedFields, fmtCardTime, normalizeDriverId, pickSuggested, sameCardValues,
 } from './driverCards';
 import { loadDriverCardOptions, lookupDriver, useDriverInfo } from './useDriverCard';
+import lazyWithRetry from '../../utils/lazyWithRetry';
+import { driverPhones } from '../syntony/syntonyRules';
+
+/* Окно Syntony грузится только по нажатию и только тем, кому оно открыто: в общий
+   код «Чатов ОП» оно не попадает. */
+const SyntonyDriverWindow = lazyWithRetry(() => import('../syntony/SyntonyDriverWindow'));
 
 /* Карточка водителя в чатах Верификаторов: ID водителя, таксопарк и город
  * привлечения (постановка владельца 16.10.2026), в amoCRM уходят эти три поля.
@@ -571,12 +578,25 @@ function HistoryGroup({ items, onRetry, retrying }) {
     );
 }
 
-export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, showToast, onClose }) {
+/* Номера водителя для окна Syntony: номер чата и номер из CRM. chatId — номер только
+   у WhatsApp: у Telegram и прочих каналов это внутренний id, а не телефон. */
+export const syntonyPhonesOf = (chat, crm) => driverPhones(
+    chat?.contactPhone,
+    /^(whatsapp|wapi)/i.test(String(chat?.chatType || '')) ? chat?.chatId : null,
+    crm?.phone,
+);
+
+export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, showToast, onClose, syntonyAccess = false }) {
     const { current, items, canEdit, loading, error, save, retry, refresh, unavailable } = driverCard;
     const driver = useDriverInfo({ chat, driverId: unavailable ? null : current?.driverId, apiBaseUrl, headers });
     const [editing, setEditing] = useState(false);
     const [retrying, setRetrying] = useState(false);
+    // null — окно ещё не открывали (и не грузили); потом true/false, чтобы закрытие шло с анимацией.
+    const [syntonyOpen, setSyntonyOpen] = useState(null);
     const crm = driver.data?.state === 'found' ? driver.data.info : null;
+    /* Переписка водителя в Syntony (решение владельца 11.11.2026: кнопкой в карточке).
+       Кнопка — только тому, кому окно открыто, и только когда есть номер. */
+    const syntonyPhones = syntonyAccess ? syntonyPhonesOf(chat, crm) : [];
     const title = crm?.name || chat?.contactName || chat?.contactPhone || chat?.chatId || 'Карточка водителя';
     const profession = crm?.profession?.name || '';
     if (unavailable) return null;
@@ -625,6 +645,12 @@ export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, s
                     <a href={crm.fleetUrl} target="_blank" rel="noopener noreferrer" className={actionRow}>
                         Открыть во Fleet <ExternalLink size={14} className="text-slate-300" aria-hidden="true" />
                     </a>
+                )}
+                {syntonyPhones.length > 0 && (
+                    <button type="button" onClick={() => setSyntonyOpen(true)} className={actionRow}
+                        data-testid="wazzup-driver-syntony">
+                        Переписка в Syntony <MessagesSquare size={14} className="text-slate-300" aria-hidden="true" />
+                    </button>
                 )}
                 {canEdit && (
                     <button type="button" onClick={() => setEditing(true)} className={actionRow}>
@@ -692,6 +718,15 @@ export function DriverCardPanel({ card: driverCard, chat, apiBaseUrl, headers, s
                 {current?.driverId && !editing && <DriverCrm driver={driver} />}
                 {!editing && <HistoryGroup items={items} onRetry={canEdit ? onRetry : null} retrying={retrying} />}
             </div>
+            {/* В body, а не внутри панели: панель въезжает сдвигом (transform), и окно с
+                position: fixed внутри неё отсчитывалось бы от панели, а не от экрана. */}
+            {syntonyOpen !== null && typeof document !== 'undefined' && createPortal(
+                <Suspense fallback={null}>
+                    <SyntonyDriverWindow open={syntonyOpen} onClose={() => setSyntonyOpen(false)} phones={syntonyPhones}
+                        apiBaseUrl={apiBaseUrl} withAccessTokenHeader={headers} />
+                </Suspense>,
+                document.body,
+            )}
         </aside>
     );
 }

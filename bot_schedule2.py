@@ -1190,6 +1190,12 @@ def _get_user_payload(user):
     hr_office_access, hr_acts_access = _hr_office_flags_for(user_id, role, headed_department_ids)
     hr_office_features = _hr_office_features_for(user_id, role)
 
+    # Окно Syntony: разделы «Чаты Syntony» и «Заявки Syntony» — супер-админу и тем, кого он
+    # добавил в список доступа в самом разделе (пункты меню — по syntony_access,
+    # canAccessSyntonyForUser); само окно — только людям из списка (syntony_window: кнопка
+    # «Переписка в Syntony» в карточке водителя «Чатов ОП»). Границу держат ручки syntony_window.
+    syntony_access, syntony_window_open = _syntony_flags_for(user_id)
+
     return {
         "role": role,
         "id": user_id,
@@ -1208,6 +1214,8 @@ def _get_user_payload(user):
         "hr_office_access": hr_office_access,
         "hr_acts_access": hr_acts_access,
         "hr_office_features": hr_office_features,
+        "syntony_access": syntony_access,
+        "syntony_window": syntony_window_open,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -54060,6 +54068,55 @@ try:
     logging.info("Ключи партнёров: подключены на /api/admin/partner-keys")
 except Exception:
     logging.exception("Ключи партнёров: НЕ подключены")
+
+
+# ── Окно Syntony: чаты и заявки сети во встроенном окне (ТЗ Syntony, 11.11.2026) ──
+# Браузер просит ссылку на окно у НАС, мы — у Syntony ключом из окружения
+# (SYNTONY_WINDOW_API_KEY): в браузер ключ не попадает. Кому окно открыто — список в
+# самом разделе, его ведут супер-админы; рядовым окно открывается после обычного QR
+# портала — тем же ключом, что «Чаты ОП» и «Вики» (syntony_window/).
+try:
+    from syntony_window.routes import build_syntony_window_blueprint  # noqa: E402
+
+    app.register_blueprint(build_syntony_window_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        sensitive_access_granted=_sensitive_access_granted_for_user,
+    ))
+    logging.info("Окно Syntony: Blueprint подключён на /api/syntony")
+except Exception:
+    logging.exception("Окно Syntony: Blueprint НЕ подключён")
+
+
+def _syntony_flags_for(user_id):
+    """Что человеку открыто в окне Syntony — те же правила, что у его ручек
+    (syntony_window/access.py). Пара (разделы, окно):
+
+    * разделы — пункты меню «Чаты Syntony» и «Заявки Syntony»: супер-админ (ведёт список
+      доступа) и те, кто в списке;
+    * окно — само окно Syntony, только тем, кто в списке: по нему портал рисует кнопку
+      «Переписка в Syntony» в карточке водителя «Чатов ОП».
+
+    Список правят в самом разделе, поэтому экран рисует пункты и кнопку только по этим
+    флагам. Отказ базы вход не роняет: без флагов их просто не будет, а границу держит
+    каждый роут.
+    """
+    if user_id is None:
+        return False, False
+    try:
+        from syntony_window import access as syntony_access
+        from syntony_window import queries as syntony_queries
+
+        with db._get_cursor() as cursor:
+            ctx = syntony_queries.load_access_context(cursor, user_id)
+        if not ctx:
+            return False, False
+        return bool(syntony_access.can_open_section(ctx)), bool(syntony_access.can_request_window(ctx))
+    except Exception:
+        logging.exception("Не удалось определить доступ к окну Syntony пользователя %s", user_id)
+        return False, False
 
 
 # ── «Мои данные» в «Профиле» оператора (задача #357) ─────────────────────────

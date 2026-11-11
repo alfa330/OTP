@@ -2437,7 +2437,11 @@ function ChatsWorkspace(props) {
                 {driverCardEnabled && cardPanelOpen && (
                     <DriverCardPanel key={`card-panel:${selectedKey}`} card={driverCard} chat={selected}
                         apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                        onClose={() => setCardPanelOpen(false)} />
+                        onClose={() => setCardPanelOpen(false)}
+                        /* «Переписка в Syntony» — тем, кому открыто само окно Syntony (флаг профиля
+                           syntony_window: человек в списке доступа). В окне чатов внутри CRM её
+                           нет: там сессии открыты только ручки чатов. */
+                        syntonyAccess={!embed && user?.syntony_window === true} />
                 )}
             </div>
             {customize.mounted && (

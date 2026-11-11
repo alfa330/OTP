@@ -309,6 +309,7 @@ const DriverMailingsView = lazyWithRetry(() => import('./components/driver_maili
 const PaymentsView = lazyWithRetry(() => import('./components/payments/PaymentsView'));
 const ProductionView = lazyWithRetry(() => import('./components/production/ProductionView'));
 const TwofaView = lazyWithRetry(() => import('./components/twofa/TwofaView'));
+const SyntonyView = lazyWithRetry(() => import('./components/syntony/SyntonyView'));
 const RentalView = lazyWithRetry(() => import('./components/rental/RentalView'));
 const HiringView = lazyWithRetry(() => import('./components/hiring/HiringView'));
 const HrOfficeView = lazyWithRetry(() => import('./components/hr_office/HrOfficeView'));
@@ -905,6 +906,11 @@ const TRAINER_ALLOWED_VIEWS = Object.freeze([
     // тренер под выдачу попадает. Без выдачи раздел закрыт своим предикатом
     // (canAccessTwofaSectionForUser) и своей веткой перебросов.
     'twofa',
+    // Окно Syntony: доступ выдаёт супер-админ поимённо любому работающему сотруднику, и
+    // тренер под выдачу попадает. Без выдачи разделы закрыты своим предикатом
+    // (canAccessSyntonyForUser) и своей веткой перебросов.
+    'syntony_chats',
+    'syntony_leads',
     // «Воронка найма» (#404): тренер группы на обучение отмечает выход на обучение и отсев —
     // раздел ему открывает сервер флагом (canAccessHiringSectionForUser) по его группам.
     'hiring',
@@ -963,6 +969,8 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     payments: 'Invoice approval',
     production: 'Production',
     twofa: '2FA codes',
+    syntony_chats: 'Syntony chats',
+    syntony_leads: 'Syntony leads',
     rental: 'Car rental',
     hiring: 'Hiring funnel',
     hr_office: 'HR office',
@@ -2626,6 +2634,17 @@ const canAccessProductionForUser = (userLike) => userLike?.production_access ===
    true: профиль без поля (старый кэш) — не доступ. Набор разделов человека его не
    прячет: у раздела свой круг, как у «Оплаты счетов». */
 const canAccessTwofaSectionForUser = (userLike) => userLike?.twofa_access === true;
+
+/* Окно Syntony — разделы «Чаты Syntony» и «Заявки Syntony» (ТЗ Syntony от 09.11.2026).
+   Круг поимённый: супер-админ ведёт список доступа кнопкой «Доступ» в самом разделе
+   (решение владельца 11.11.2026), и пункты меню видят только люди из списка. Круг
+   считает сервер (bot_schedule2.py: _syntony_flags_for — те же правила, что у ручек
+   syntony_window/access.py) и отдаёт флагом в профиле: зеркало здесь показывало бы
+   пункт тому, у кого доступ уже сняли. Строго true: профиль без поля (старый кэш) —
+   не доступ. Набор разделов человека его не прячет: у раздела свой круг, как у «Кодов 2FA». */
+const SYNTONY_VIEWS = Object.freeze(['syntony_chats', 'syntony_leads']);
+const isSyntonyViewName = (viewName) => SYNTONY_VIEWS.includes(viewName);
+const canAccessSyntonyForUser = (userLike) => userLike?.syntony_access === true;
 
 /* «Аренда авто»: ночной отчёт по арендным машинам (#398) — ООЗ, сотрудники и глава отдела;
    наличие авто и направления в офис (#391) — отдел продаж и отдел аренды; плюс супер-админ и
@@ -44700,6 +44719,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // «Продакшн»: флаг сервера; личный набор разделов прячет его, как «Вики».
             const canAccessProductionSection = canAccessProductionForUser(user) && personalViewsAllow(user, 'production');
             const canAccessTwofaSection = canAccessTwofaSectionForUser(user);
+            const canAccessSyntonySection = canAccessSyntonyForUser(user);
             const canAccessRentalSection = canAccessRentalSectionForUser(user);
             const canAccessHiringSection = canAccessHiringSectionForUser(user);
             // «Кадры»: вкладки «Прием» и «Табель…» — отделу кадров, «АВР» — ещё главам и СВ.
@@ -45320,6 +45340,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // У «Списков Байги» круг уже на аналитика — свой замок, тот же ключ.
             const baigaLocked = baigaQrRequiredFor(user) && !sensitiveAccess.granted;
             const baigaChecking = baigaLocked && !sensitiveAccess.checked;
+            /* Окно Syntony рядовой сотрудник открывает после того же QR, что «Чаты ОП»
+               (решение владельца 11.11.2026). Круг замка — все, кому портал выдаёт QR:
+               двойник правила — syntony_window/access.py: requires_qr. */
+            const isSyntonyView = isSyntonyViewName(view);
+            const syntonyLocked = sensitiveQrAvailableFor(user) && !sensitiveAccess.granted;
+            const syntonyChecking = syntonyLocked && !sensitiveAccess.checked;
+            /* Открытое окно Syntony живёт, пока человек ходит по другим разделам (SyntonyView):
+               помним, чья учётка его открывала, — после смены учётки чужое окно не остаётся. */
+            const [syntonyOpenedFor, setSyntonyOpenedFor] = useState(null);
+            useEffect(() => {
+                if (isSyntonyView && user?.id != null) setSyntonyOpenedFor(user.id);
+            }, [isSyntonyView, user?.id]);
             const callEvaluationFrameRef = useRef(null);
             const callEvaluationActivatedRef = useRef(false);
             // Images and state for dev letter modal
@@ -48368,6 +48400,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'payments' || canAccessPaymentsSection) &&
                     (requestedViewFromUrl !== 'production' || canAccessProductionSection) &&
                     (requestedViewFromUrl !== 'twofa' || canAccessTwofaSection) &&
+                    ((requestedViewFromUrl !== 'syntony_chats' && requestedViewFromUrl !== 'syntony_leads') || canAccessSyntonySection) &&
                     (requestedViewFromUrl !== 'rental' || canAccessRentalSection) &&
                     // «Воронка найма»: ссылка из колокола и Telegram ведёт на ?view=hiring&card=<id>.
                     (requestedViewFromUrl !== 'hiring' || canAccessHiringSection) &&
@@ -48395,7 +48428,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks') return;
@@ -48554,6 +48587,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
+                // Окно Syntony открыто поимённо — списком в самом разделе. Ссылка ?view=syntony_chats
+                // от коллеги или снятый доступ оставляли бы пустой экран.
+                if ((view === 'syntony_chats' || view === 'syntony_leads') && !canAccessSyntonySection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
                 // «Аренда авто» — свой круг (ООЗ, продажи, аренда и супер-админ): ссылка ?view=rental у того, кому
                 // раздел не открыт, иначе оставила бы пустой экран.
                 if (view === 'rental' && !canAccessRentalSection) {
@@ -48582,7 +48624,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -54620,6 +54662,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Коды 2FA» — свой круг (выдачи главы маркетинга), а у «Маркетинга» есть
                 // allowlist: без этой строки проверка ниже выбросила бы сотрудника из раздела.
                 if (view === 'twofa' && canAccessTwofaSection) return;
+                // Окно Syntony — свой круг (список доступа в разделе): без этой строки проверка
+                // ниже выбросила бы из раздела сотрудника отдела с набором разделов.
+                if ((view === 'syntony_chats' || view === 'syntony_leads') && canAccessSyntonySection) return;
                 // «Аренда авто» — свой круг (ООЗ, продажи, аренда), а у ООЗ и продаж есть allowlist:
                 // без этой строки проверка ниже выбросила бы ночную смену и операторов ОП из раздела.
                 if (view === 'rental' && canAccessRentalSection) return;
@@ -54690,7 +54735,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessHrOfficeSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -54760,7 +54805,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     return;
                 }
 
-                // «Обращения», «Вики», «Посылки», «Чаты водителей», «Списки Байги» и
+                // «Обращения», «Вики», «Посылки», «Чаты водителей», окно Syntony, «Списки Байги» и
                 // «Рассылки» закрыты тем же ключом. Статус спрашиваем до отрисовки
                 // раздела: иначе замок мигнёт тому, кто доступ уже подтвердил, а сам
                 // раздел успеет получить 403. Раздела нет в списке — оператор, не
@@ -54768,6 +54813,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Проверяем доступ…» без кнопки QR.
                 if (view === 'complaints' || view === 'crm_tickets' || view === 'wiki' || view === 'parcels'
                         || view === 'water' || view === 'driver_chats' || view === 'sign_links'
+                        || view === 'syntony_chats' || view === 'syntony_leads'
                         || view === 'baiga' || view === 'driver_mailings') {
                     fetchSensitiveAccessStatus();
                 }
@@ -55454,6 +55500,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || canAccessLibrarySection
                     || canAccessProductionSection
                     || canAccessTwofaSection
+                    || canAccessSyntonySection
                     || canAccessRentalSection
                     || canAccessHiringSection
                     || canAccessHrOfficeSection
@@ -56123,6 +56170,31 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                         </>
+                                    )}
+                                    {/* Окно Syntony — два пункта, один раз на все роли: круг поимённый (список
+                                        доступа ведёт супер-админ в самом разделе), и по ролевым ветвям пункты
+                                        легко потерять в одной из них. */}
+                                    {canAccessSyntonySection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'syntony_chats')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'syntony_chats' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-comment-dots"></FaIcon> <span className="sidebar-text">Чаты Syntony</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {canAccessSyntonySection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'syntony_leads')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'syntony_leads' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-inbox"></FaIcon> <span className="sidebar-text">Заявки Syntony</span>
+                                        </button>
+                                    </li>
                                     )}
                                     {/* «Продакшн» (задача #316) — объявлен один раз на все роли:
                                         круг разнородный (маркетинг, админы, постановщики задач
@@ -58185,6 +58257,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 ? 'p-0 h-screen overflow-hidden'
                                 : view === 'wazzup_chats'
                                     ? 'wz-main-content p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
+                                : (isSyntonyView && canAccessSyntonySection && !syntonyLocked)
+                                    ? 'p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
@@ -58250,6 +58324,30 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     initialChat={wazzupInitialChat}
                                     onInitialChatConsumed={clearWazzupInitialChat}
+                                />
+                            </Suspense>
+                        )}
+                        {/* Окно Syntony: «Чаты Syntony» и «Заявки Syntony». Рядовым — за обычным QR
+                            портала. Раз открытое окно остаётся в дереве спрятанным, пока человек в
+                            других разделах: вернулся — тот же чат, без новой ссылки (SyntonyView). */}
+                        {isSyntonyView && canAccessSyntonySection && syntonyLocked && (
+                            <SensitiveSectionGate
+                                sectionTitle={view === 'syntony_leads' ? 'Заявки Syntony' : 'Чаты Syntony'}
+                                description="В окне переписка с водителями и заявки таксопарков. Раздел открывается после подтверждения доступа старшим."
+                                checking={syntonyChecking}
+                                onRequestQr={requestSensitiveQrAccess}
+                            />
+                        )}
+                        {canAccessSyntonySection && !syntonyLocked && (isSyntonyView || syntonyOpenedFor === user?.id) && (
+                            <Suspense fallback={isSyntonyView ? <div className="flex h-full min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div> : null}>
+                                <SyntonyView
+                                    key={`syntony:${user?.id}`}
+                                    active={isSyntonyView ? view : null}
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                    canManage={normalizeRole(user?.role) === 'super_admin'}
+                                    currentUserId={user?.id}
                                 />
                             </Suspense>
                         )}

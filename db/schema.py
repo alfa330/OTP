@@ -5885,6 +5885,7 @@ class SchemaMixin:
             self._init_twofa_schema_tx(cursor)
             self._init_rental_schema_tx(cursor)
             self._init_hiring_schema_tx(cursor)
+            self._init_syntony_window_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -8601,6 +8602,30 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT hiring_schema")
+
+    def _init_syntony_window_schema_tx(self, cursor):
+        """Схема окна Syntony (список доступа к окну, 11.11.2026) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете syntony_window/schema.py, как у «Кодов 2FA»; импорт локальный,
+        иначе цикл. Не развернулась — пунктов меню окна не будет ни у кого (флаг профиля
+        считается по этой таблице), остальное приложение работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT syntony_window_schema")
+        try:
+            from syntony_window.schema import init_syntony_window_schema
+            init_syntony_window_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT syntony_window_schema")
+            logging.exception(
+                "Схема окна Syntony не применилась — окно будет недоступно, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT syntony_window_schema")
 
     def _init_baiga_schema_tx(self, cursor):
         """Схема раздела «Списки Байги» (#356) — своим SAVEPOINT'ом.
