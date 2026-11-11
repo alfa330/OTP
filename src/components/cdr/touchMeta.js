@@ -193,3 +193,56 @@ export const fullDay = (value) => {
 export const exportFileName = (from, to) => (
     from === to ? `Касания ${fullDay(from)}.xlsx`
         : `Касания ${fullDay(from)} — ${fullDay(to)}.xlsx`);
+
+/** Имя файла «Отчёта по входу» — по тому же правилу; совпадает с серверным
+ *  cdr/inbound_report.py:report_filename. */
+export const inboundReportFileName = (from, to) => (
+    from === to ? `Отчёт по входу ${fullDay(from)}.xlsx`
+        : `Отчёт по входу ${fullDay(from)} — ${fullDay(to)}.xlsx`);
+
+/* Отчёты раздела — окно за кнопкой «Отчёты». У каждого описание: по названию
+ * «Отчёт по входу» не понять, что в нём считается и чем он отличается от
+ * построчной выгрузки. `filtered` — действуют ли на отчёт фильтры раздела:
+ * «Касания» выгружают то, что на экране, а «Отчёт по входу» — срез линии целиком
+ * (суженный по оператору или результату он считал бы AR и SL по обрывку). */
+export const REPORTS = [
+    {
+        key: 'touches',
+        title: 'Касания',
+        text: 'Все звонки периода построчно, с учётом фильтров раздела: кто звонил, чем '
+            + 'закончилось, сколько говорили и ждали, линия и запись. Отдельными листами — '
+            + 'операторы, дни и сводка.',
+        path: '/export',
+        filtered: true,
+        fileName: exportFileName,
+    },
+    {
+        key: 'inbound',
+        title: 'Отчёт по входу',
+        text: 'Входящая линия по дням и очередям: план и факт звонков, принято, AR, AHT и SL '
+            + 'за 20 секунд. Считаются звонки клиентов, дошедшие до очереди, — без автообзвона. '
+            + 'Часы, ОСС и CR вписываются в файл вручную.',
+        path: '/reports/inbound',
+        filtered: false,
+        fileName: inboundReportFileName,
+    },
+];
+
+/** Что сказать под отчётом и можно ли его скачать — только когда есть что сказать:
+ *  подпись под каждым отчётом всегда была бы шумом.
+ *    total         сколько касаний под фильтрами раздела сейчас
+ *    filtersCount  сколько фильтров включено */
+export const reportState = (report, { total = 0, filtersCount = 0 } = {}) => {
+    if (report.filtered) {
+        return total > 0 ? { disabled: false, note: '' }
+            : { disabled: true, note: 'За этот период под фильтры ничего не попало.' };
+    }
+    return { disabled: false, note: filtersCount ? 'Фильтры раздела на этот отчёт не действуют.' : '' };
+};
+
+/** Параметры запроса отчёта: отчёту с фильтрами — весь запрос раздела без страницы,
+ *  остальным — только период. */
+export const reportParams = (report, query) => {
+    const { page: _page, page_size: _size, ...rest } = query || {};
+    return report.filtered ? rest : { date_from: rest.date_from, date_to: rest.date_to };
+};

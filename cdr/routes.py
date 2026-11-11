@@ -32,6 +32,7 @@ JWT. Проверка идёт первой строкой тела. Основ�
     POST /api/cdr/sync     то же явно, с force для перечитывания закрытых суток
     GET  /api/cdr/stats    разрезы по операторам и по дням
     GET  /api/cdr/export   xlsx за период
+    GET  /api/cdr/reports/inbound     «Отчёт по входу»: линия по дням и очередям
     POST /api/cdr/directory/refresh   пересобрать справочник номеров
 
 Фронт опрашивает /period, пока `coverage.pending` не станет нулём. Перезапуск
@@ -56,9 +57,9 @@ from io import BytesIO
 
 from flask import Blueprint, g, jsonify, request, send_file
 
-from . import (access, agent_auth, config, directory as directory_mod, lead_queries, lead_report,
-               leads as leads_mod, lines as lines_mod, missed_config, queries, queue_facts,
-               report, schema, sync, touches as touches_mod)
+from . import (access, agent_auth, config, directory as directory_mod, inbound_report,
+               lead_queries, lead_report, leads as leads_mod, lines as lines_mod, missed_config,
+               queries, queue_facts, report, schema, sync, touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -515,6 +516,30 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                  day_from, day_to, written, ctx.get('name'))
         return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
                          download_name=report.report_filename(day_from, day_to))
+
+    @cdr_route('/reports/inbound')
+    def cdr_inbound_report(ctx):
+        """«Отчёт по входу»: входящая линия по дням и очередям (cdr/inbound_report.py).
+
+        Фильтры раздела сюда не доходят намеренно: отчёт — срез линии целиком, и
+        суженный по оператору или результату он считал бы AR и SL по обрывку."""
+        day_from, day_to = _period()
+        # План суток — факт недельной давности, поэтому данные нужны на неделю раньше
+        # периода. Недостающие сутки уходят мосту в очередь так же, как при открытии
+        # раздела; ждать их здесь не станем — в «Пояснениях» файла сказано, каких нет.
+        plan_from = day_from - timedelta(days=inbound_report.PLAN_SHIFT_DAYS)
+        coverage = _coverage(plan_from, day_to, access.can_sync(ctx), ctx['user_id'])
+        missing = sync.days_awaiting(coverage['days'], plan_from, day_to,
+                                     queries.today_almaty())
+        with db._get_cursor() as cursor:
+            touches = queries.incoming_touches_compact(cursor, plan_from, day_to)
+        workbook, days = inbound_report.build_workbook(
+            touches, day_from=day_from, day_to=day_to,
+            generated_by=ctx.get('name') or '', missing_days=missing)
+        log.info('Касания: отчёт по входу %s..%s — %d сут., входящих %d, собрал %s',
+                 day_from, day_to, days, len(touches), ctx.get('name'))
+        return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
+                         download_name=inbound_report.report_filename(day_from, day_to))
 
     @cdr_route('/directory/refresh', methods=('POST',))
     def cdr_directory_refresh(ctx):

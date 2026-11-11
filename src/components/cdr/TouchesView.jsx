@@ -1,20 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Download, ExternalLink, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed, PhoneOff,
-    PhoneOutgoing, PlugZap, RefreshCw, Search, X,
+    Download, ExternalLink, FileSpreadsheet, Filter, Loader2, Phone, PhoneIncoming, PhoneMissed,
+    PhoneOff, PhoneOutgoing, PlugZap, RefreshCw, Search, X,
 } from 'lucide-react';
 
 import {
     APPLE_FONT, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel,
-    iosInput, IosPager, IosSegmented,
+    iosInput, IosModal, IosPager, IosSegmented,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
-    amoAnsweredNote, amoMark, exportFileName, hms, hours, lineCaption, percent, prettyPhone,
-    resultTone, ringSeconds, seconds, shortDay, shortTime, silence, splitCallType,
-    TYPE_IN_BEFORE_QUEUE,
+    amoAnsweredNote, amoMark, hms, hours, lineCaption, percent, prettyPhone, reportParams,
+    REPORTS, reportState, resultTone, ringSeconds, seconds, shortDay, shortTime, silence,
+    splitCallType, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
 import DealsView from './DealsView';
 import LivePanel, { CallButton, usePbxLive } from './LivePanel';
@@ -180,7 +180,10 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const [stats, setStats] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [downloading, setDownloading] = useState(false);
+    /* Окно «Отчёты» и ключ отчёта, который сейчас собирается ('' — ни один). Ключ, а не
+       флаг: в окне два отчёта, и «Готовим…» должно гореть на том, который нажали. */
+    const [reportsOpen, setReportsOpen] = useState(false);
+    const [downloading, setDownloading] = useState('');
 
     const poll = useRef(null);
 
@@ -283,15 +286,17 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 errText(exc, 'Не удалось обновить данные со станции'), 'error'));
     };
 
-    const download = () => {
-        setDownloading(true);
-        const { page: _p, page_size: _s, ...rest } = query;
-        axios.get(`${base}/export`, { headers: headers(), params: rest, responseType: 'blob' })
+    /* Любой отчёт раздела — файл за период, выбранный на экране (REPORTS в touchMeta). */
+    const downloadReport = (report) => {
+        setDownloading(report.key);
+        axios.get(`${base}${report.path}`, {
+            headers: headers(), params: reportParams(report, query), responseType: 'blob',
+        })
             .then((response) => {
                 const url = URL.createObjectURL(response.data);
                 const link = document.createElement('a');
                 link.href = url;
-                link.download = exportFileName(range.from, range.to);
+                link.download = report.fileName(range.from, range.to);
                 document.body.appendChild(link);
                 link.click();
                 link.remove();
@@ -299,14 +304,14 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
             })
             .catch(async (exc) => {
                 // Ошибку сервер прислал JSON-ом, а мы просили blob — разворачиваем.
-                let message = 'Не удалось собрать выгрузку';
+                let message = `Не удалось собрать отчёт «${report.title}»`;
                 try {
                     const text = await exc?.response?.data?.text?.();
                     message = JSON.parse(text || '{}').error || message;
                 } catch (_) { /* пусто — останется общая фраза */ }
                 toastRef.current?.(message, 'error');
             })
-            .finally(() => setDownloading(false));
+            .finally(() => setDownloading(''));
     };
 
     const summary = data?.summary || {};
@@ -384,10 +389,12 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                                     title="Перечитать период со станции — если там дописали звонки задним числом">
                                 <RefreshCw size={14} className={pending > 0 ? 'animate-spin' : ''} />
                             </button>
+                            {/* Одна кнопка на все файлы раздела: отчётов больше одного, и
+                                что в каком — сказано в окне, а не на кнопке. */}
                             <button type="button" className={`${iosBtnPrimary} flex-1 sm:flex-none`}
-                                    onClick={download} disabled={downloading || !total}>
-                                {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-                                {downloading ? 'Готовим…' : 'Выгрузить в Excel'}
+                                    onClick={() => setReportsOpen(true)}>
+                                <FileSpreadsheet size={15} />
+                                Отчёты
                             </button>
                         </>
                     ) : null}
@@ -594,9 +601,50 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>
+
+            <ReportsModal open={reportsOpen} onClose={() => setReportsOpen(false)}
+                          range={range} total={total} filtersCount={activeFilters.length}
+                          downloading={downloading} onDownload={downloadReport} />
             </>
             )}
         </div>
+    );
+}
+
+/* Окно «Отчёты»: файлы раздела списком, у каждого — что в нём. Период не выбирается
+   заново, а назван в шапке: он уже выбран на экране, и второй пикер рядом с первым
+   заставлял бы гадать, какой из двух уйдёт в файл. */
+export function ReportsModal({ open, onClose, range, total, filtersCount, downloading, onDownload }) {
+    return (
+        <IosModal open={open} onClose={onClose} title="Отчёты" maxWidth="max-w-xl"
+                  subtitle={`Период: ${rangeLabel(range.from, range.to)}`}>
+            <ul className={`${iosCard} overflow-hidden`}>
+                {REPORTS.map((report) => {
+                    const state = reportState(report, { total, filtersCount });
+                    const busy = downloading === report.key;
+                    return (
+                        <li key={report.key}
+                            className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3.5 last:border-0 sm:flex-row sm:items-center sm:gap-4">
+                            <div className="min-w-0 flex-1">
+                                <div className="text-[14px] font-semibold text-slate-900">{report.title}</div>
+                                <p className="mt-0.5 text-[12.5px] leading-relaxed text-slate-500">{report.text}</p>
+                                {state.note ? (
+                                    <p className="mt-1 text-[12px] text-slate-400">{state.note}</p>
+                                ) : null}
+                            </div>
+                            {/* Пока собирается один файл, второй не начать: оба читают период
+                                целиком, и два запроса разом только удлинили бы оба. */}
+                            <button type="button" className={`${iosBtnSecondary} shrink-0`}
+                                    onClick={() => onDownload(report)}
+                                    disabled={state.disabled || Boolean(downloading)}>
+                                {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+                                {busy ? 'Готовим…' : 'Скачать'}
+                            </button>
+                        </li>
+                    );
+                })}
+            </ul>
+        </IosModal>
     );
 }
 

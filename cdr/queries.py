@@ -760,22 +760,14 @@ def daily_stats(cursor, day_from, day_to, filters=None):
             for row in cursor.fetchall()]
 
 
-def day_touches_compact(cursor, day):
-    """Касания одних суток без телефона и ссылки на запись — ровно то, что нужно
-    табло для итогов, разрезов по линиям, часам и операторам. Один SELECT по
-    индексу call_day, тысячи строк, считается в памяти за миллисекунды.
+_COMPACT_COLUMNS = ("started_at, answered_at, ext, call_type, result, talk_seconds, "
+                    "dial_seconds, queue, linkedid, "
+                    "queued_at, wait_seconds, talk_measured_seconds, hangup_side")
 
-    Не дошедших до очереди табло не видит вовсе: входящие у него — только дошедшие до
-    очереди (решение владельца 21.09.2026), и строки без оператора ему не нужны."""
-    cursor.execute("""
-        SELECT started_at, answered_at, ext, call_type, result, talk_seconds,
-               dial_seconds, queue, linkedid,
-               queued_at, wait_seconds, talk_measured_seconds, hangup_side
-          FROM cdr_touches
-         WHERE call_day = %s AND call_type <> %s
-           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
-    """, (day, touches_mod.TYPE_IN_BEFORE_QUEUE))
-    return [{
+
+def _compact_touch(row):
+    """Строка `_COMPACT_COLUMNS` → касание в том виде, в каком его считает табло."""
+    return {
         'started_at': row[0].strftime('%Y-%m-%d %H:%M:%S') if row[0] else '',
         'answered_at': row[1].strftime('%Y-%m-%d %H:%M:%S') if row[1] else '',
         'ext': row[2] or '', 'call_type': row[3] or '', 'result': row[4] or '',
@@ -790,7 +782,41 @@ def day_touches_compact(cursor, day):
         'wait_seconds': None if row[10] is None else int(row[10]),
         'talk_measured_seconds': None if row[11] is None else int(row[11]),
         'hangup_side': row[12] or '',
-    } for row in cursor.fetchall()]
+    }
+
+
+def day_touches_compact(cursor, day):
+    """Касания одних суток без телефона и ссылки на запись — ровно то, что нужно
+    табло для итогов, разрезов по линиям, часам и операторам. Один SELECT по
+    индексу call_day, тысячи строк, считается в памяти за миллисекунды.
+
+    Не дошедших до очереди табло не видит вовсе: входящие у него — только дошедшие до
+    очереди (решение владельца 21.09.2026), и строки без оператора ему не нужны."""
+    cursor.execute("""
+        SELECT """ + _COMPACT_COLUMNS + """
+          FROM cdr_touches
+         WHERE call_day = %s AND call_type <> %s
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
+    """, (day, touches_mod.TYPE_IN_BEFORE_QUEUE))
+    return [_compact_touch(row) for row in cursor.fetchall()]
+
+
+def incoming_touches_compact(cursor, day_from, day_to):
+    """Входящие периода, дошедшие до очереди, — в том же виде, что касания табло, плюс
+    сутки звонка (`call_day`). Сырьё «Отчёта по входу» (cdr/inbound_report.py): он
+    считает их тем же правилом, что «Табло ОП», поэтому и форма строки та же.
+
+    Только входящие с очередью: бросивших трубку на приветствии отчёт не видит, как и
+    табло, а исходящие ему не нужны вовсе — это десятая часть касаний периода."""
+    cursor.execute("""
+        SELECT call_day, """ + _COMPACT_COLUMNS + """
+          FROM cdr_touches
+         WHERE call_day BETWEEN %s AND %s
+           AND call_type IN (%s, %s) AND queue <> ''
+           AND """ + test_keys.sql_not_test('cdr_touches.phone', digits=True) + """
+    """, (day_from, day_to, touches_mod.TYPE_IN, touches_mod.TYPE_IN_MISSED))
+    return [dict(_compact_touch(row[1:]), call_day=row[0].isoformat())
+            for row in cursor.fetchall()]
 
 
 def filter_values(cursor, day_from, day_to):

@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    RESULT_CLIENT_HUNG_UP, RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark, exportFileName,
-    hms, hours, percent, fullDay, prettyPhone, resultTone, ringSeconds, shortDay, shortTime,
-    silence,
+    REPORTS, RESULT_CLIENT_HUNG_UP, RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark,
+    exportFileName, hms, hours, inboundReportFileName, percent, fullDay, prettyPhone, reportParams,
+    reportState, resultTone, ringSeconds, shortDay, shortTime, silence,
 } from '../src/components/cdr/touchMeta.js';
 
 /* Подписи раздела «Касания».
@@ -131,6 +131,44 @@ test('имя файла собирает фронт — через CORS оно �
                  'Касания 01.08.2026 — 31.08.2026.xlsx');
     assert.equal(fullDay('2026-08-24'), '24.08.2026');
     assert.equal(fullDay(''), '');
+    // «Отчёт по входу» — то же правило; совпадает с cdr/inbound_report.py:report_filename.
+    assert.equal(inboundReportFileName('2026-11-02', '2026-11-02'), 'Отчёт по входу 02.11.2026.xlsx');
+    assert.equal(inboundReportFileName('2026-11-01', '2026-11-10'),
+                 'Отчёт по входу 01.11.2026 — 10.11.2026.xlsx');
+});
+
+/* Окно «Отчёты» (владелец, 11.11.2026): прежняя выгрузка с описанием и «Отчёт по входу». */
+test('в окне «Отчёты» два отчёта, у каждого описание и своя ручка', () => {
+    assert.deepEqual(REPORTS.map((report) => report.title), ['Касания', 'Отчёт по входу']);
+    assert.deepEqual(REPORTS.map((report) => report.path), ['/export', '/reports/inbound']);
+    for (const report of REPORTS) assert.ok(report.text.length > 40, report.title);
+    const [touches, inbound] = REPORTS;
+    assert.equal(touches.fileName('2026-11-02', '2026-11-02'), 'Касания 02.11.2026.xlsx');
+    assert.equal(inbound.fileName('2026-11-02', '2026-11-02'), 'Отчёт по входу 02.11.2026.xlsx');
+    // В описании сказано главное отличие от ручного файла: автообзвон не считается.
+    assert.match(inbound.text, /без автообзвона/);
+});
+
+test('фильтры раздела идут только в «Касания»', () => {
+    const [touches, inbound] = REPORTS;
+    const query = { date_from: '2026-11-02', date_to: '2026-11-10', page: 3, page_size: 50,
+                    ext: '6474', call_type: 'Входящий' };
+    assert.deepEqual(reportParams(touches, query),
+                     { date_from: '2026-11-02', date_to: '2026-11-10', ext: '6474', call_type: 'Входящий' });
+    assert.deepEqual(reportParams(inbound, query), { date_from: '2026-11-02', date_to: '2026-11-10' });
+});
+
+test('подпись под отчётом — только когда есть что сказать', () => {
+    const [touches, inbound] = REPORTS;
+    assert.deepEqual(reportState(touches, { total: 12, filtersCount: 2 }), { disabled: false, note: '' });
+    // Под фильтры ничего не попало — пустой файл не выгружаем и говорим почему.
+    const empty = reportState(touches, { total: 0, filtersCount: 2 });
+    assert.equal(empty.disabled, true);
+    assert.match(empty.note, /ничего не попало/);
+    // «Отчёт по входу» от фильтров не зависит и доступен всегда; об этом сказано,
+    // только если фильтры включены.
+    assert.deepEqual(reportState(inbound, { total: 0, filtersCount: 0 }), { disabled: false, note: '' });
+    assert.match(reportState(inbound, { total: 0, filtersCount: 1 }).note, /не действуют/);
 });
 
 /* Метка робота пропущенных (задача #291). Сервер отдаёт amo_state, экран решает, что
