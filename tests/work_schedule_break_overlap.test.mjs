@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
@@ -146,15 +146,28 @@ test('время перерыва ставится сменам, которые 
     assert.deepEqual(plan.frozen, []);
 });
 
-test('время перерыва ставится и в уже наступившую часть дня, но не вторым поверх прошедшего', () => {
-    // Весь день уже прошёл: перерывов не осталось — обед всё равно встаёт в 13–14
+test('время перерыва ставится и в уже наступившую часть дня, но не вторым поверх прошедшего', (t) => {
+    // Часы — тестовые: граница прошедшего считается от времени суток по Алматы (у старой
+    // даты тоже), и с настоящими часами проверка краснела каждое утро с 09:00 до 12:45.
+    const DAY = '2026-11-10';
+    const plan = (dayBreaks) => planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), dayBreaks, DAY);
+    mock.timers.enable({ apis: ['Date'], now: Date.parse(`${DAY}T13:00:00+05:00`) });
+    t.after(() => mock.timers.reset());
+    // Пересчёт в 13:00, перерывов не осталось — обед всё равно встаёт в 13–14
     // (жалоба 10.11: пересчёт в 13:00 стирал перерывы и ничего не ставил взамен).
-    const empty = planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), [], '2020-01-06');
+    const empty = plan([]);
+    assert.deepEqual(empty.frozen, []);
     assert.deepEqual(empty.breaks, [LUNCH]);
-    // Обед на это время уже стоит (прошедший) — второго не добавляем.
-    const taken = planBreaksForShiftWithFrozen(9 * 60, 18 * 60, 'Регионы', withFixed([]), [LUNCH], '2020-01-06');
+    // Обед на это время уже идёт (прошедший) — второго не добавляем.
+    const taken = plan([LUNCH]);
     assert.deepEqual(taken.frozen, [LUNCH]);
     assert.deepEqual(taken.breaks, []);
+    // Вечером смена позади целиком — так же.
+    mock.timers.setTime(Date.parse(`${DAY}T19:00:00+05:00`));
+    assert.deepEqual(plan([]).breaks, [LUNCH]);
+    const takenEvening = plan([LUNCH]);
+    assert.deepEqual(takenEvening.frozen, [LUNCH]);
+    assert.deepEqual(takenEvening.breaks, []);
 });
 
 test('раскладка не двигает время перерыва направления с галочкой', () => {
