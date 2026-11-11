@@ -6,13 +6,15 @@
 До 10.11.2026 базу Oktell портал читал через мост — HTTP-прокси `/query`, выставленный наружу.
 На каждое HTTP-соединение мост поднимал новое ODBC-подключение к SQL Server (вход в базу —
 его узкое место: ~36 запросов за 40 секунд клали вход всему проду), а 10.11 лёг совсем.
-Коннектор на VM шлюза стоит в одной сети с базой и держит ОДНО постоянное соединение.
+Коннектор на VM шлюза стоит в одной сети с базой и держит постоянные соединения: одно — для
+снимка табло и по одному на исполнителя запросов по требованию (`oktell_jobs.py`, их два).
 
 Чем это безопасно для станции
 -----------------------------
   * учётка — только на чтение; какой запрос исполнять, решает коннектор, а не портал
-    (текст — `cdr/oktell_wallboard.py`);
-  * одно соединение, без пула; запрос — один в такт;
+    (тексты — `cdr/oktell_wallboard.py` и каталог `cdr/oktell_datasets.py`);
+  * соединений — по числу потоков, без пула; снимок — один запрос в такт, запросы по
+    требованию — не больше одного на исполнителя одновременно;
   * `autocommit`: без него драйвер открывает транзакцию на первом же SELECT и держит её всё
     время жизни соединения — открытая сутками транзакция на боевой базе телефонии не нужна
     никому (та же ловушка, что стоила суток «Табло ОП» на MariaDB, только с другим концом);
@@ -63,6 +65,33 @@ ENCRYPTION_MODES = ('require', 'request', 'off')
 # при политике блокировки учётка запирается.
 LOGIN_FAILED = 18456
 
+# Вид отказа — по нему исполнитель запросов решает, что сказать порталу (OktellDbError.kind):
+#   permission  учётке не дано право: на таблицу (229), на колонку (230), на базу (916);
+#   timeout     запрос не уложился в таймаут драйвера (20003) или в LOCK_TIMEOUT (1222);
+#   deadlock    запрос выбран жертвой взаимной блокировки (1205) — его можно повторить;
+#   unavailable до базы не достучались или соединение оборвалось;
+#   auth        учётка не подошла;
+#   db          всё остальное — база отклонила сам запрос.
+PERMISSION_ERRORS = (229, 230, 916)
+TIMEOUT_ERRORS = (20003, 1222)
+DEADLOCK_ERROR = 1205
+CONNECTION_ERRORS = (20002, 20004, 20005, 20006, 20009, 20047)
+
+
+def error_kind(number, connecting=False):
+    """Вид отказа по номеру ошибки SQL Server / DB-Library."""
+    if number == LOGIN_FAILED:
+        return 'auth'
+    if number in PERMISSION_ERRORS:
+        return 'permission'
+    if number in TIMEOUT_ERRORS:
+        return 'timeout'
+    if number == DEADLOCK_ERROR:
+        return 'deadlock'
+    if connecting or number in CONNECTION_ERRORS:
+        return 'unavailable'
+    return 'db'
+
 # Настройки сессии. Первые — те же ANSI-режимы, что драйвер ставит сам (свой список их
 # заменяет, а не дополняет), остальное — про вежливость к боевой базе, см. шапку.
 SESSION_SETUP = (
@@ -97,11 +126,14 @@ WRITE_PERMISSIONS_SQL = 'SELECT ' + ', '.join('%s AS %s' % (expr, name)
 
 
 class OktellDbError(RuntimeError):
-    """База Oktell не прочиталась. `auth` — учётка не подошла (повторять вход не спеша)."""
+    """База Oktell не прочиталась. `auth` — учётка не подошла (повторять вход не спеша);
+    `kind` — вид отказа (см. `error_kind`), `number` — номер ошибки сервера, если был."""
 
-    def __init__(self, message, auth=False):
+    def __init__(self, message, auth=False, kind=None, number=None):
         super().__init__(message)
         self.auth = bool(auth)
+        self.kind = kind or ('auth' if auth else 'db')
+        self.number = number
 
 
 def json_value(value):
@@ -154,10 +186,18 @@ def _error_text(exc):
 
 
 class OktellDb:
-    """Одно постоянное соединение с базой Oktell. Не потокобезопасен — у коннектора один поток."""
+    """Одно постоянное соединение с базой Oktell. Не потокобезопасен: у каждого потока
+    коннектора (снимок табло, каждый исполнитель запросов) — свой экземпляр.
+
+    query_timeout — сколько драйвер ждёт ответа, прежде чем послать серверу отмену;
+    row_limit — потолок строк ответа на стороне сервера (`SET ROWCOUNT`): сервер сам
+    останавливается на этой строке, и в соединении не остаётся недочитанного хвоста. Так
+    исполнитель повторяет правило моста Oktell «не больше тысячи строк на запрос», на котором
+    стоит постраничная логика портала."""
 
     def __init__(self, host, port=DEFAULT_PORT, user='', password='', database=DEFAULT_DATABASE,
-                 encryption='require', connect=None):
+                 encryption='require', connect=None, query_timeout=QUERY_TIMEOUT, row_limit=None,
+                 app_name=APP_NAME):
         self.host = str(host or '').strip()
         try:
             self.port = int(port or DEFAULT_PORT)
@@ -167,8 +207,18 @@ class OktellDb:
         self._password = password or ''
         self.database = str(database or DEFAULT_DATABASE).strip() or DEFAULT_DATABASE
         self.encryption = encryption if encryption in ENCRYPTION_MODES else 'require'
+        self.query_timeout = max(1, int(query_timeout or QUERY_TIMEOUT))
+        self.row_limit = max(1, int(row_limit)) if row_limit else None
+        self.app_name = str(app_name or APP_NAME)[:60]
         self._connect = connect
         self._connection = None
+
+    def session_setup(self):
+        """Настройки сессии этого соединения: общие и, если задан, потолок строк."""
+        setup = list(SESSION_SETUP)
+        if self.row_limit:
+            setup.append('SET ROWCOUNT %d' % self.row_limit)
+        return setup
 
     @property
     def enabled(self):
@@ -189,13 +239,13 @@ class OktellDb:
             raise OktellDbError('драйвер pymssql не установлен')
         return pymssql.connect(
             server=self.host, port=str(self.port), user=self.user, password=self._password,
-            database=self.database, login_timeout=LOGIN_TIMEOUT, timeout=QUERY_TIMEOUT,
-            charset='UTF-8', as_dict=True, appname=APP_NAME, tds_version='7.4',
+            database=self.database, login_timeout=LOGIN_TIMEOUT, timeout=self.query_timeout,
+            charset='UTF-8', as_dict=True, appname=self.app_name, tds_version='7.4',
             # Шифрование — весь сеанс, не только вход. read_only — намерение «только чтение»
             # (ApplicationIntent); права всё равно задаёт учётка.
             encryption=self.encryption, read_only=True,
             # См. шапку: без autocommit соединение держало бы открытую транзакцию.
-            autocommit=True, conn_properties=list(SESSION_SETUP))
+            autocommit=True, conn_properties=self.session_setup())
 
     def _ensure(self):
         if self._connection is not None:
@@ -207,8 +257,10 @@ class OktellDb:
         except OktellDbError:
             raise
         except Exception as exc:  # noqa: BLE001 - у драйвера своё дерево исключений
+            number = _error_number(exc)
             raise OktellDbError('вход в базу Oktell %s не удался: %s' % (self.describe(), _error_text(exc)),
-                                auth=_error_number(exc) == LOGIN_FAILED) from exc
+                                auth=number == LOGIN_FAILED, kind=error_kind(number, connecting=True),
+                                number=number) from exc
         log.info('База Oktell %s: соединение открыто', self.describe())
         return self._connection
 
@@ -226,7 +278,9 @@ class OktellDb:
             fetched = cursor.fetchmany(MAX_ROWS + 1)
         except Exception as exc:  # noqa: BLE001
             self.close()
-            raise OktellDbError('запрос к базе Oktell не выполнен: %s' % _error_text(exc)) from exc
+            number = _error_number(exc)
+            raise OktellDbError('запрос к базе Oktell не выполнен: %s' % _error_text(exc),
+                                kind=error_kind(number), number=number) from exc
         finally:
             if cursor is not None:
                 try:
@@ -277,8 +331,9 @@ class OktellDb:
             pass
 
 
-def from_config(config):
+def from_config(config, **options):
+    """Читатель по настройкам коннектора. `options` — query_timeout, row_limit, app_name."""
     return OktellDb(config.get('sql_host'), config.get('sql_port') or DEFAULT_PORT,
                     config.get('sql_user'), config.get('sql_password'),
                     config.get('sql_database') or DEFAULT_DATABASE,
-                    encryption=config.get('sql_encryption') or 'require')
+                    encryption=config.get('sql_encryption') or 'require', **options)

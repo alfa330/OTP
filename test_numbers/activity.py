@@ -36,6 +36,8 @@ import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from cdr import oktell_datasets
+
 from . import keys as keys_mod
 from . import rules as rules_mod
 
@@ -375,30 +377,17 @@ def oktell_sql(phone_keys, start, end):
     Наш номер — набранная линия цепочки: `ANumberDialed` у плеча «снаружи в IVR»
     (ConnectionType = 4, есть у каждого входящего). Поиск по индексу IdChain: на
     живом прокси 0,2 с на 79 звонков. У исходящего такого плеча нет — линия пустая."""
-    condition = keys_mod.tsql_not_test('t.[number]', phone_keys)
-    if not condition:
+    # Условие «НЕ тестовый» перевёрнуто: здесь нужны как раз тестовые. Реестр пуст (или в
+    # нём нет ни одного годного ключа) — спрашивать не о чем.
+    if not keys_mod.tsql_not_test('t.[number]', phone_keys):
         return None
-    # Условие «НЕ тестовый» переворачиваем: здесь нужны как раз тестовые.
-    match = condition.replace(' NOT IN (', ' IN (', 1)
-    date_from = start.strftime('%Y%m%d')
-    date_to = (end + timedelta(days=1)).strftime('%Y%m%d')
-    return (
-        f"SELECT TOP {OKTELL_ROW_CAP} t.Id AS call_id, "
-        "CONVERT(varchar(19), t.dt_insert, 120) AS occurred_at, t.route AS route, "
-        "COALESCE(t.[number], N'') AS phone, t.taxi_park AS taxi_park, "
-        "t.result_call AS result_call, t.call_result AS call_result, "
-        "t.total_length AS total_length, oi.Name AS operator_name, l.ANumberDialed AS line "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        "LEFT JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi "
-        "ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
-        "OUTER APPLY (SELECT TOP 1 s.ANumberDialed FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        "WHERE s.IdChain = TRY_CONVERT(uniqueidentifier, t.chainid) AND s.ConnectionType = 4 "
-        "ORDER BY s.TimeStart) l "
-        f"WHERE t.dt_insert >= '{date_from}' AND t.dt_insert < '{date_to}' "
-        f"AND {match} "
-        # Упрёмся в потолок — пусть пропадут старые, а не сегодняшние: их смотрят чаще.
-        "ORDER BY t.dt_insert DESC"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор test_number_calls): один на портал и
+    # на коннектор Oktell VM шлюза. Упрёмся в потолок — пропадут старые, а не сегодняшние.
+    return oktell_datasets.build('test_number_calls', {
+        'phone_keys': sorted(key for key in phone_keys if isinstance(key, str)),
+        'date_from': start.strftime('%Y%m%d'),
+        'date_to': (end + timedelta(days=1)).strftime('%Y%m%d'),
+        'row_cap': OKTELL_ROW_CAP})
 
 
 def _oktell(oktell_query, phone_keys, start, end, *, clock=time.monotonic, line_key=None, park_label=None):

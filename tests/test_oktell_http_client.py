@@ -79,11 +79,15 @@ def _namespace(outcomes=(), token='secret', url='http://proxy.test:8085/query'):
         'OKTELL_API_TIMEOUT_SECONDS': 60,
         'OKTELL_API_CONNECT_TIMEOUT_SECONDS': 5,
         '_oktell_api_ready': lambda: bool(url) and bool(token),
+        '_oktell_bridge_ready': lambda: bool(url) and bool(token),
         '_oktell_session': session,
     }
+    # _oktell_query — общий вход (сначала коннектор Oktell на VM шлюза, потом мост);
+    # обычная строка SQL без набора каталога уходит только мосту — его и проверяем.
     _load_names(source, {
         '_OKTELL_DROPPED_CONNECTION_ERRORS',
         '_oktell_dropped_keepalive',
+        '_oktell_bridge_query',
         '_oktell_query',
     }, ns)
     ns['_fake_session'] = session

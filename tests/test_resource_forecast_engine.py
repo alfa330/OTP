@@ -347,21 +347,25 @@ class ForecastEngineTests(unittest.TestCase):
         keys = mock.MagicMock()
         keys.TABLE = "test_phone_numbers"
         keys.sql_not_test.side_effect = lambda expr, digits=False: f"NOT EXISTS (registry {expr})"
-        keys.tsql_and_not_test.side_effect = lambda expr: f"AND {expr} NOT IN ('7011234567') "
+        keys.current_keys.return_value = frozenset({"7011234567"})
         ready = mock.MagicMock()
         ready.fetchone.return_value = (True,)
         with mock.patch.object(forecast_engine, "_test_keys", keys):
             self.assertEqual(forecast_engine._not_test_sql(ready, "t.phone"), " AND NOT EXISTS (registry t.phone)")
             self.assertIn("NOT EXISTS (registry t.phone)", forecast_engine.volume_sql("op", forecast_engine._not_test_sql(ready, "t.phone")))
-            sql = forecast_engine.oktell_daily_sql("20260101", "20260201", forecast_engine._oktell_not_test_sql())
-            self.assertIn("AND t.[number] NOT IN ('7011234567') GROUP BY", sql)
-            params_sql = forecast_engine.oktell_params_sql("20260101", "20260201", "20251231", forecast_engine._oktell_not_test_sql())
+            # Ключи реестра уходят в каталог запросов (cdr/oktell_datasets.py) списком цифр,
+            # а текст условия строит он — один на портал и на коннектор Oktell VM шлюза.
+            self.assertEqual(forecast_engine._oktell_test_keys(), ["7011234567"])
+            sql = forecast_engine.oktell_daily_sql("20260101", "20260201", forecast_engine._oktell_test_keys())
+            self.assertIn("AND RIGHT(REPLACE(REPLACE(REPLACE(ISNULL(t.[number], ''), '+', ''), ' ', ''), '-', ''), 10) "
+                          "NOT IN ('7011234567') GROUP BY", sql)
+            params_sql = forecast_engine.oktell_params_sql("20260101", "20260201", "20251231", forecast_engine._oktell_test_keys())
             self.assertTrue(params_sql.endswith("NOT IN ('7011234567')"))
             missing = mock.MagicMock()
             missing.fetchone.return_value = (False,)
             self.assertEqual(forecast_engine._not_test_sql(missing, "t.phone"), "")
         with mock.patch.object(forecast_engine, "_test_keys", None):
-            self.assertEqual(forecast_engine._oktell_not_test_sql(), "")
+            self.assertEqual(forecast_engine._oktell_test_keys(), [])
             self.assertIn("N'Неудачный звонок' GROUP BY", forecast_engine.oktell_daily_sql("20260101", "20260201"))
 
     def test_line_profile_is_none_when_engine_off_or_empty(self):

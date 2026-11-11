@@ -647,14 +647,45 @@ class BotScheduleTests(unittest.TestCase):
         self.assertIn('_test_numbers_keys.configure(db._get_cursor)', self.source)
 
     def test_every_oktell_builder_carries_the_condition(self):
-        for name, count in (('_oktell_wallboard_totals_sql', 3), ('_oktell_wallboard_hourly_sql', 1),
-                            ('_oktell_billing_sql', 1), ('_oktell_billing_detail_source_sql', 1),
-                            ('_oktell_billing_operator_calls_sql', 1), ('_oktell_resource_hourly_sql', 1),
-                            ('_oktell_eval_operators_sql', 1), ('_oktell_eval_sample_sql', 1)):
+        # Снимок табло строит условие сам (три места: очередь, разговоры, итоги дня).
+        body = _method_source(BOT_PY, '_oktell_wallboard_totals_sql')
+        self.assertEqual(body.count('test_keys.tsql_and_not_test('), 3)
+        self.assertIn('from test_numbers import keys as test_keys', body)
+        # Остальные запросы к Oktell строит общий каталог (cdr/oktell_datasets.py — по нему же
+        # их строит коннектор Oktell на VM шлюза). Построитель портала обязан отдать каталогу
+        # ключи реестра; что каталог с ними делает — проверка ниже.
+        for name in ('_oktell_wallboard_hourly_sql', '_oktell_billing_sql',
+                     '_oktell_billing_detail_page_sql', '_oktell_billing_detail_export_page_sql',
+                     '_oktell_billing_operator_calls_sql', '_oktell_resource_hourly_sql',
+                     '_oktell_eval_operators_sql', '_oktell_eval_sample_sql'):
             with self.subTest(name=name):
                 body = _method_source(BOT_PY, name)
-                self.assertEqual(body.count('test_keys.tsql_and_not_test('), count)
+                self.assertEqual(body.count("'test_keys': sorted(test_keys.current_keys())"), 1)
                 self.assertIn('from test_numbers import keys as test_keys', body)
+                self.assertIn('oktell_datasets.build(', body)
+
+    def test_catalog_datasets_exclude_the_registry_numbers(self):
+        """Каждый набор каталога, который считает звонки по номеру клиента, исключает номера
+        реестра — тем же условием, что test_numbers.keys.tsql_not_test."""
+        from datetime import date
+        from cdr import oktell_datasets
+
+        counting = {'resource_hourly': 't.[number]', 'billing': 't.[number]',
+                    'billing_detail_page': 't.[number]', 'billing_detail_export': 't.[number]',
+                    'billing_operator_calls': 't.[number]', 'wallboard_hourly': 't.[number]',
+                    'forecast_daily': 't.[number]', 'forecast_params': 't.[number]',
+                    'eval_operators': f'({oktell_datasets.EVAL_PHONE_EXPR})',
+                    'eval_sample': f'({oktell_datasets.EVAL_PHONE_EXPR})'}
+        samples = oktell_datasets.samples(date(2026, 10, 8))
+        # Набор, читающий звонки с номером клиента, без параметра test_keys появиться не должен.
+        self.assertEqual({name for name, params in samples.items() if 'test_keys' in params}, set(counting))
+        for name, expr in counting.items():
+            with self.subTest(name=name):
+                bare = oktell_datasets.build(name, samples[name])
+                self.assertNotIn('RIGHT(REPLACE', bare, 'реестр пуст — запрос прежний')
+                filtered = oktell_datasets.build(name, dict(samples[name], test_keys=[TEST, 'мусор', 12345]))
+                self.assertEqual(filtered.count('AND ' + keys.tsql_not_test(expr, {TEST})), 1)
+                self.assertNotIn('мусор', filtered)
 
     def test_extracted_builder_works_in_a_bare_namespace(self):
         """Тесты вырезают построители через AST: вставка реестра не должна требовать

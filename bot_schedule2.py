@@ -19969,13 +19969,10 @@ def _oktell_record_paths_by_conn(conn_ids):
     paths = {}
     for start in range(0, len(unique_ids), OKTELL_RECORD_PATH_BATCH):
         chunk = unique_ids[start:start + OKTELL_RECORD_PATH_BATCH]
-        id_list = ", ".join(f"'{value}'" for value in chunk)
-        sql = (
-            "SELECT CONVERT(varchar(36), Id) AS conn_id, ALineNum, BLineNum, "
-            "CONVERT(varchar(23), TimeStart, 121) AS ts "
-            "FROM oktell.dbo.A_Stat_Connections_1x1 "
-            f"WHERE Id IN ({id_list})"
-        )
+        # Текст — в каталоге cdr/oktell_datasets.py (набор record_paths): линии и момент
+        # начала соединения из A_Stat_Connections_1x1.
+        from cdr import oktell_datasets
+        sql = oktell_datasets.build('record_paths', {'conn_ids': chunk})
         try:
             rows = _oktell_query(sql)
         except Exception as exc:
@@ -27509,8 +27506,18 @@ def _oktell_sync_enabled():
     return bool(OKTELL_SYNC_ENABLED)
 
 
-def _oktell_api_ready():
+def _oktell_bridge_ready():
+    """Настроен ли мост Oktell — HTTP-прокси /query (OKTELL_IP и OKTELL_API_TOKEN)."""
     return bool(OKTELL_API_URL) and bool(OKTELL_API_TOKEN)
+
+
+def _oktell_api_ready():
+    """Есть ли откуда читать базу Oktell: настроен мост или на связи коннектор Oktell на VM
+    шлюза (с 11.11.2026 запросы исполняет он, мост — запасной путь; см. _oktell_query)."""
+    if _oktell_bridge_ready():
+        return True
+    from oktell_live import jobs as oktell_jobs
+    return oktell_jobs.known()
 
 
 def _oktell_parse_date(value):
@@ -27608,12 +27615,50 @@ def _oktell_dropped_keepalive(exc):
 
 
 def _oktell_query(sql, timeout=None):
-    """Один read-only SELECT к прокси Oktell. Возвращает список dict (rows).
+    """Один read-only SELECT к базе Oktell. Возвращает список dict (rows).
+
+    Дорог две, и первая — коннектор Oktell на VM шлюза (с 11.11.2026). Запрос, построенный
+    каталогом cdr/oktell_datasets.py, помнит имя набора и параметры; на шлюз уходят они и
+    отпечаток текста, а сам текст коннектор строит из своей копии каталога — SQL портала шлюз
+    не исполняет (oktell_live/jobs.py). Ответ режется на тысячу строк, как резал мост: на
+    этом стоит вся постраничная логика вызывающих.
+
+    Мост Oktell (HTTP-прокси /query) — запасной путь: когда шлюз за запрос не взялся
+    (исполнителя нет на связи, он не знает набор, каталоги разошлись, учётке базы не дана
+    таблица) и для текста без набора. Запрос, который шлюз исполнял и не осилил (ошибка
+    базы, таймаут), мосту НЕ повторяется: второй тяжёлый запрос к базе телефонии вслед
+    первому — то самое «долбить умирающего», от которого отказались.
 
     timeout — переопределение общего OKTELL_API_TIMEOUT_SECONDS для ОЖИДАНИЯ ОТВЕТА. Нужно
     интерактивным потребителям (табло): экрану лучше быстро сдаться и показать предыдущий
-    снимок, чем ждать минуту. Установка соединения ограничена отдельно и всегда коротко."""
-    if not _oktell_api_ready():
+    снимок, чем ждать минуту."""
+    from oktell_live import jobs as oktell_jobs
+    vm_note = oktell_jobs.why_not(sql)
+    if not vm_note:
+        try:
+            return oktell_jobs.run(sql, timeout or OKTELL_API_TIMEOUT_SECONDS)
+        except oktell_jobs.Refused as exc:
+            vm_note = str(exc)
+    # Шлюз мог бы исполнить этот запрос, но не взялся — причину надо сохранить: без неё отказ
+    # лежащего моста выглядит так, будто дело в мосте.
+    for_gateway = getattr(sql, 'dataset', None) is not None and oktell_jobs.enabled()
+    if not _oktell_bridge_ready():
+        if for_gateway:
+            raise RuntimeError(f"Oktell: {vm_note}; мост Oktell не настроен")
+        raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
+    try:
+        return _oktell_bridge_query(sql, timeout)
+    except Exception as exc:
+        if for_gateway:
+            raise RuntimeError(f"Oktell: {vm_note}; мост Oktell: {exc}") from exc
+        raise
+
+
+def _oktell_bridge_query(sql, timeout=None):
+    """Один read-only SELECT к мосту Oktell — HTTP-прокси /query. Возвращает список dict (rows).
+
+    Установка соединения ограничена отдельно от ожидания ответа и всегда коротко."""
+    if not _oktell_bridge_ready():
         raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
     timeouts = (OKTELL_API_CONNECT_TIMEOUT_SECONDS, timeout or OKTELL_API_TIMEOUT_SECONDS)
     request_kwargs = {
@@ -27637,26 +27682,11 @@ def _oktell_query(sql, timeout=None):
 
 
 def _oktell_status_page_sql(date_from_compact, date_to_excl_compact, cursor):
-    # Один SELECT, keyset по Enumerator. Прокси режет на 1000 строк -> листаем по курсору.
-    return (
-        "SELECT TOP 1000 "
-        "oi.Name AS OperatorName, "
-        "CASE h.State "
-        "WHEN 0 THEN N'Выключен' WHEN 1 THEN N'Готов' WHEN 2 THEN N'Перерыв' "
-        "WHEN 3 THEN N'Нет на месте' WHEN 5 THEN N'Занят' WHEN 6 THEN N'Зарезервировано' "
-        "WHEN 7 THEN N'Без телефона' "
-        "ELSE N'Неизвестно (' + CAST(h.State AS nvarchar(10)) + N')' END AS StateName, "
-        "COALESCE(ls.Name, ist.Name, NULLIF(LTRIM(RTRIM(h.Info)), N'')) AS StateNote, "
-        "CONVERT(varchar(19), h.TimeChange, 120) AS TimeChange, "
-        "h.Enumerator AS Enumerator "
-        "FROM oktell.dbo.A_UserStateHistory h "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = h.UserId "
-        "LEFT JOIN oktell_settings.dbo.A_TaskManager_CardLunchStates ls ON ls.Id = h.ICode "
-        "LEFT JOIN oktell.dbo.A_UserStateInfoTypes ist ON ist.Id = h.ICode "
-        f"WHERE h.TimeChange >= '{date_from_compact}' AND h.TimeChange < '{date_to_excl_compact}' "
-        f"AND h.Enumerator > {int(cursor)} "
-        "ORDER BY h.Enumerator"
-    )
+    # Один SELECT, keyset по Enumerator: ответ режется на 1000 строк -> листаем по курсору.
+    # Текст — в каталоге cdr/oktell_datasets.py: один на портал и на коннектор Oktell VM шлюза.
+    from cdr import oktell_datasets
+    return oktell_datasets.build('status_page', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact, 'cursor': cursor})
 
 
 def _oktell_fetch_status_rows(range_from, range_to):
@@ -27905,17 +27935,10 @@ def _oktell_calls_record_run(started_at, range_from, range_to, triggered_by, sta
 
 
 def _oktell_call_count_sql(date_from_compact, date_to_excl_compact):
-    return (
-        "SELECT oi.Name AS OperatorName, "
-        "CONVERT(varchar(10), os.DateStart, 23) AS CallDate, "
-        "COUNT(*) AS CallCount "
-        "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates os "
-        "INNER JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = os.IdOperator "
-        "INNER JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_Task tk ON tk.Id = os.IdTask "
-        "WHERE os.State IN (6, 14) AND os.CallResult IS NOT NULL "
-        f"AND os.DateStart >= '{date_from_compact}' AND os.DateStart < '{date_to_excl_compact}' "
-        "GROUP BY oi.Name, CONVERT(varchar(10), os.DateStart, 23)"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор call_count).
+    from cdr import oktell_datasets
+    return oktell_datasets.build('call_count', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact})
 
 
 def _oktell_fetch_call_counts(range_from, range_to):
@@ -28167,28 +28190,13 @@ def _oktell_resource_target_days(day=None, date_from=None, date_to=None):
 
 
 def _oktell_resource_hourly_sql(date_from_compact, date_to_excl_compact):
+    # Текст — в каталоге cdr/oktell_datasets.py (набор resource_hourly); тестовые номера
+    # исключает он же — по ключам «Реестра тестовых номеров», которые передаются отсюда.
+    from cdr import oktell_datasets
     from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    return (
-        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
-        "DATEPART(HOUR, t.dt_insert) AS hour, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS received_calls, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS accepted_calls, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_time_seconds, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS success_wait_seconds, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_time_seconds, "
-        f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greeting_abandoned, "
-        f"SUM(CASE WHEN t.result_call = N'{grt}' THEN t.total_length ELSE 0 END) AS greeting_time_seconds, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN 1 ELSE 0 END) AS queue_abandoned, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.total_length ELSE 0 END) AS queue_wait_seconds, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS lost_lenqueue_seconds "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
-        f"{test_keys.tsql_and_not_test('t.[number]')}"
-        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), DATEPART(HOUR, t.dt_insert)"
-    )
+    return oktell_datasets.build('resource_hourly', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_fetch_resource_hours(range_from, range_to):
@@ -28404,15 +28412,6 @@ def _oktell_billing_parse_time(value):
     return int(match.group(1)) * 60 + int(match.group(2))
 
 
-def _oktell_billing_minute_filter(minute_from, minute_to, column='t.dt_insert'):
-    if int(minute_from) > 0 or int(minute_to) < 1439:
-        return (
-            f"AND (DATEPART(HOUR, {column}) * 60 + DATEPART(MINUTE, {column})) "
-            f"BETWEEN {int(minute_from)} AND {int(minute_to)} "
-        )
-    return ''
-
-
 # --- Время разговора входящего звонка -----------------------------------------------------------
 # ⚠️ `Call_Systems_hst.total_length` — это НЕ разговор, а длина всей цепочки: IVR плюс очередь
 # плюс разговор. Проверено 18.09.2026 на 2846 отвеченных звонках за 15–17.09: у 2846 из 2846
@@ -28429,93 +28428,22 @@ def _oktell_billing_minute_filter(minute_from, minute_to, column='t.dt_insert'):
 # может быть несколько, поэтому суммируем все плечи цепочки. Нужен «Операторам»: там ATT — сам
 # разговор, а AHT — звонок целиком (владелец). Окно по TimeStart расширено на сутки назад:
 # звонок мог начаться до полуночи.
-def _oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact, chain_expr='t.chainid', alias='k'):
-    conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
-    return (
-        "LEFT JOIN (SELECT IdChain, SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 "
-        f"WHERE ConnectionType = 5 AND TimeStart >= '{conn_from}' AND TimeStart < '{date_to_excl_compact}' "
-        f"GROUP BY IdChain) {alias} ON {alias}.IdChain = TRY_CAST({chain_expr} AS uniqueidentifier) "
-    )
-
-
+#
 # Цепочка не нашлась — считаем разговор нулевым, а не берём total_length: смешивать в одной
 # колонке две разные величины нельзя. На практике непокрытых звонков нет (0 из 7290 за неделю).
-_OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"
+# Сами выражения (джойн плеч ct=5 и COALESCE(k.talk_sec, 0)) — в каталоге запросов
+# cdr/oktell_datasets.py: `_talk_join` и `BILLING_TALK_EXPR`.
 
 
 def _oktell_billing_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to, sl_seconds, group_by='park'):
+    # Текст — в каталоге cdr/oktell_datasets.py (набор billing): разрезы «таксопарк», «линия»
+    # и «час», оценка водителя из quality_employes, исключение тестовых номеров.
+    from cdr import oktell_datasets
     from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
-    line_select = ''
-    line_join = ''
-    line_group = ''
-    # Разрез «Группировка» — день x час без таксопарка. Метрики те же, что у остальных
-    # разрезов, поэтому итог дня по часам сходится с итогом по таксопаркам.
-    key_select = "t.taxi_park AS taxi_park, "
-    key_group = "t.taxi_park"
-    if group_by == 'hour':
-        key_select = "DATEPART(HOUR, t.dt_insert) AS report_hour, "
-        key_group = "DATEPART(HOUR, t.dt_insert)"
-    # Оценка водителя после разговора (задача #298): IVR-опрос пишет балл 1–5 в quality_employes
-    # по цепочке звонка, '0' — водитель ничего не нажал, в среднее не идёт. Считаем только у
-    # обслуженных: оценивают разговор с оператором. GROUP BY chainid держит одну оценку на
-    # цепочку, чтобы повторный опрос не удвоил звонок в сумме.
-    rating_select = (
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN qe.rating ELSE 0 END) AS rating_sum, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND qe.rating IS NOT NULL THEN 1 ELSE 0 END) AS rating_count "
-    )
-    rating_join = (
-        "LEFT JOIN (SELECT chainid, MAX(CASE WHEN answer IN (N'1', N'2', N'3', N'4', N'5') "
-        "THEN CAST(answer AS int) END) AS rating FROM oktell.dbo.quality_employes GROUP BY chainid) qe "
-        "ON qe.chainid = t.chainid "
-    )
-    if group_by == 'hour':
-        # В «Группировке» оценки не показываются, а подзапрос по quality_employes
-        # агрегирует всю таблицу опросов — в этом разрезе его не гоняем.
-        rating_select = "0 AS rating_sum, 0 AS rating_count "
-        rating_join = ''
-    if group_by == 'line':
-        # Набранная SIP-линия: лег ConnectionType=4 (снаружи в IVR) той же цепочки.
-        # Цепочки бывают с несколькими легами ct=4 (повторные заходы в IVR) — дедуп через MIN;
-        # разные номера внутри одной цепочки — единичные случаи (2 за неделю), MIN детерминирован.
-        # Окно по TimeStart расширено на день назад: звонок может начаться до полуночи.
-        conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
-        line_select = "COALESCE(c.line_number, N'') AS line_number, "
-        line_join = (
-            "LEFT JOIN (SELECT IdChain, MIN(ANumberDialed) AS line_number "
-            "FROM oktell.dbo.A_Stat_Connections_1x1 "
-            f"WHERE ConnectionType = 4 AND TimeStart >= '{conn_from}' AND TimeStart < '{date_to_excl_compact}' "
-            "GROUP BY IdChain) c ON c.IdChain = TRY_CAST(t.chainid AS uniqueidentifier) "
-        )
-        line_group = ", COALESCE(c.line_number, N'')"
-    return (
-        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
-        f"{key_select}"
-        f"{line_select}"
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS arrived, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END) AS served, "
-        # числитель SL: отвечены оператором И ждали в очереди не дольше порога (LenQueue — секунды в очереди)
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END) AS served_sl, "
-        f"SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END) AS greet_drop, "
-        # Разговор — как в отчёте Oktell: принятый звонок целиком (см. «Время разговора
-        # входящего звонка» выше).
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END) AS talk_seconds, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END) AS wait_ok_seconds, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{grt}', N'{fail}') THEN t.LenQueue ELSE 0 END) AS wait_lost_seconds, "
-        f"SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN t.total_length ELSE 0 END) AS total_seconds, "
-        f"{rating_select}"
-        "FROM oktell.dbo.Call_Systems_hst t "
-        f"{line_join}"
-        f"{rating_join}"
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
-        f"{minute_filter}"
-        f"{test_keys.tsql_and_not_test('t.[number]')}"
-        f"GROUP BY CONVERT(varchar(10), t.dt_insert, 23), {key_group}{line_group}"
-    )
+    return oktell_datasets.build('billing', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'minute_from': minute_from, 'minute_to': minute_to, 'sl_seconds': sl_seconds,
+        'group_by': group_by, 'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_fetch_billing_rows(range_from, range_to, minute_from, minute_to, sl_seconds, group_by='park'):
@@ -28728,98 +28656,30 @@ def _oktell_billing_grouping_report(params, raw_rows):
 # --- «Биллинг Oktell»: построчная детализация звонков -------------------------------------------
 # Одна строка = один входящий звонок. Снимок по максимальному Id фиксирует выборку при переходе
 # между страницами, чтобы новые звонки текущего дня не сдвигали уже просмотренные строки.
-def _oktell_billing_detail_source_sql(date_from_compact, date_to_excl_compact,
-                                      minute_from, minute_to, max_call_id=None):
-    from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
-    id_filter = f"AND t.Id <= {int(max_call_id)} " if max_call_id is not None else ''
-    return (
-        "FROM oktell.dbo.Call_Systems_hst t "
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{fail}' "
-        f"AND (t.result_call = N'{grt}' OR (t.result_call <> N'{grt}' AND t.call_result IN (5,13,19))) "
-        f"{id_filter}{minute_filter}"
-        f"{test_keys.tsql_and_not_test('t.[number]')}"
-    )
-
-
-def _oktell_billing_detail_select_sql():
-    return (
-        "t.Id AS call_id, "
-        "t.dt_insert AS occurred_at, "
-        "t.taxi_park AS taxi_park, "
-        "COALESCE(t.[number], N'') AS driver_number, "
-        "t.chainid AS chain_id, t.result_call AS result_call, "
-        "t.call_result AS call_result, t.total_length AS total_length"
-    )
-
-
-def _oktell_billing_detail_line_apply_sql(call_alias, date_from_compact, date_to_excl_compact):
-    conn_from = (datetime.strptime(date_from_compact, '%Y%m%d') - timedelta(days=1)).strftime('%Y%m%d')
-    return (
-        "OUTER APPLY (SELECT TOP 1 s.ANumberDialed AS line_number, s.AOutNumber AS caller_number "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        f"WHERE s.IdChain = TRY_CAST({call_alias}.chain_id AS uniqueidentifier) "
-        "AND s.ConnectionType = 4 "
-        f"AND s.TimeStart >= '{conn_from}' AND s.TimeStart < '{date_to_excl_compact}' "
-        "ORDER BY s.TimeStart ASC, s.Id ASC) c "
-    )
-
-
 def _oktell_billing_detail_page_sql(date_from_compact, date_to_excl_compact,
                                     minute_from, minute_to, page, per_page, snapshot_id=None):
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    page = max(1, int(page))
-    per_page = max(1, min(100, int(per_page)))
-    row_from = (page - 1) * per_page + 1
-    row_to = row_from + per_page - 1
-    source_sql = _oktell_billing_detail_source_sql(
-        date_from_compact, date_to_excl_compact, minute_from, minute_to, snapshot_id)
-    select_sql = _oktell_billing_detail_select_sql()
-    return (
-        "SELECT q.call_id, CONVERT(varchar(19), q.occurred_at, 120) AS occurred_at, "
-        "q.taxi_park, COALESCE(c.line_number, N'') AS line_number, "
-        "COALESCE(NULLIF(q.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
-        f"CASE WHEN q.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
-        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        # Разговор — как в отчёте Oktell, тот же, что у «Таксопарков» (см. «Время разговора
-        # входящего звонка»): сумма по детализации сходится с их итогом.
-        f"CASE WHEN q.result_call <> N'{grt}' AND q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds, "
-        "q.total_count, q.snapshot_id "
-        "FROM (SELECT ranked.* FROM (SELECT "
-        f"{select_sql}, "
-        "COUNT(*) OVER() AS total_count, MAX(t.Id) OVER() AS snapshot_id, "
-        "ROW_NUMBER() OVER (ORDER BY t.dt_insert DESC, t.Id DESC) AS row_num "
-        f"{source_sql}"
-        ") ranked "
-        f"WHERE ranked.row_num BETWEEN {row_from} AND {row_to}) q "
-        f"{_oktell_billing_detail_line_apply_sql('q', date_from_compact, date_to_excl_compact)}"
-        "ORDER BY q.row_num"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор billing_detail_page).
+    from cdr import oktell_datasets
+    from test_numbers import keys as test_keys
+    return oktell_datasets.build('billing_detail_page', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'minute_from': minute_from, 'minute_to': minute_to,
+        'page': page, 'per_page': per_page, 'snapshot_id': snapshot_id,
+        'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_billing_detail_export_page_sql(date_from_compact, date_to_excl_compact,
                                            minute_from, minute_to, max_call_id=None,
                                            page_size=None):
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
+    # Текст — в каталоге cdr/oktell_datasets.py (набор billing_detail_export).
+    from cdr import oktell_datasets
+    from test_numbers import keys as test_keys
     size = max(1, min(int(page_size or OKTELL_API_PAGE_SIZE), int(OKTELL_API_PAGE_SIZE)))
-    source_sql = _oktell_billing_detail_source_sql(
-        date_from_compact, date_to_excl_compact, minute_from, minute_to, max_call_id)
-    return (
-        "SELECT p.call_id, CONVERT(varchar(19), p.occurred_at, 120) AS occurred_at, "
-        "p.taxi_park, COALESCE(c.line_number, N'') AS line_number, "
-        "COALESCE(NULLIF(p.driver_number, N''), NULLIF(c.caller_number, N''), N'') AS driver_number, "
-        f"CASE WHEN p.result_call = N'{grt}' THEN 1 ELSE 0 END AS ivr_drop, "
-        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result IN (13,19) THEN 1 ELSE 0 END AS queue_drop, "
-        f"CASE WHEN p.result_call <> N'{grt}' AND p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds "
-        f"FROM (SELECT TOP {size} {_oktell_billing_detail_select_sql()} "
-        f"{source_sql}"
-        "ORDER BY t.Id DESC) p "
-        f"{_oktell_billing_detail_line_apply_sql('p', date_from_compact, date_to_excl_compact)}"
-        "ORDER BY p.call_id DESC"
-    )
+    return oktell_datasets.build('billing_detail_export', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'minute_from': minute_from, 'minute_to': minute_to,
+        'max_call_id': max_call_id, 'size': size,
+        'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_billing_detail_row(raw):
@@ -28939,65 +28799,26 @@ def _oktell_billing_operator_calls_sql(date_from_compact, date_to_excl_compact, 
       handle_* — ВСЁ время обработки звонка (AHT), то есть длина цепочки целиком.
     У исходящих момент ответа водителя станция не пишет, поэтому там обе величины —
     одна и та же длина коммутации (гудки внутри).
+
+    Текст — в каталоге cdr/oktell_datasets.py (набор billing_operator_calls).
     """
+    from cdr import oktell_datasets
     from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to)
-    incoming = "t.route = 'incoming' AND t.taxi_park <> ''"
-    outgoing = "t.route = 'outgoing'"
-    return (
-        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
-        "oi.Name AS operator_name, "
-        f"SUM(CASE WHEN {incoming} THEN 1 ELSE 0 END) AS served_in, "
-        f"SUM(CASE WHEN {incoming} THEN {_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds, "
-        f"SUM(CASE WHEN {incoming} THEN t.total_length ELSE 0 END) AS handle_in_seconds, "
-        f"SUM(CASE WHEN {outgoing} THEN 1 ELSE 0 END) AS served_out, "
-        f"SUM(CASE WHEN {outgoing} THEN t.total_length ELSE 0 END) AS call_out_seconds, "
-        f"SUM(CASE WHEN {outgoing} THEN t.total_length ELSE 0 END) AS handle_out_seconds "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = TRY_CAST(t.id_operator AS uniqueidentifier) "
-        f"{_oktell_billing_talk_join_sql(date_from_compact, date_to_excl_compact)}"
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        "AND t.route IN ('incoming', 'outgoing') "
-        f"AND t.result_call NOT IN (N'{grt}', N'{fail}') AND t.call_result IN (5) "
-        f"{minute_filter}"
-        f"{test_keys.tsql_and_not_test('t.[number]')}"
-        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23), oi.Name"
-    )
+    return oktell_datasets.build('billing_operator_calls', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'minute_from': minute_from, 'minute_to': minute_to,
+        'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_billing_operator_states_sql(date_from_compact, date_to_excl_compact, minute_from, minute_to):
-    minute_filter = _oktell_billing_minute_filter(minute_from, minute_to, column='s.DateTimeStart')
-    return (
-        "SELECT CONVERT(varchar(10), s.DateStart, 23) AS report_date, "
-        "oi.Name AS operator_name, "
-        "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS talk_in_seconds, "
-        "SUM(CASE WHEN s.State = 6 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS talk_out_seconds, "
-        "SUM(CASE WHEN s.State = 7 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS postproc_in_seconds, "
-        "SUM(CASE WHEN s.State = 7 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS postproc_out_seconds, "
-        "SUM(CASE WHEN s.State = 33 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS hold_in_seconds, "
-        "SUM(CASE WHEN s.State = 33 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS hold_out_seconds, "
-        # «Ожидание» — это State=10 «Готов»: оператор на линии и ждёт звонка.
-        "SUM(CASE WHEN s.State = 10 THEN s.LenTime ELSE 0 END) AS wait_seconds, "
-        # «Пауза» — State=9 «Перерыв» (в нём же лежат подпричины перерыва в ICode).
-        "SUM(CASE WHEN s.State = 9 THEN s.LenTime ELSE 0 END) AS pause_seconds, "
-        "SUM(CASE WHEN s.State = 3 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS dial_in_seconds, "
-        "SUM(CASE WHEN s.State = 3 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS dial_out_seconds, "
-        "SUM(CASE WHEN s.State = 12 THEN s.LenTime ELSE 0 END) AS dial_other_seconds, "
-        # «Дозвон» исходящего — State=2 «Ожидание ответа абонента»: время от набора до
-        # ответа водителя. Станция пишет его только в предиктивном режиме обзвона, когда
-        # сначала дозванивается сама и лишь потом подключает оператора. У боевой задачи
-        # «Таксопарк исходящая» режим другой (оператор занят с момента набора), поэтому
-        # сейчас здесь ноль, а гудки лежат внутри «Разговора». Колонка появляется на
-        # экране и в выгрузке только когда в периоде есть ненулевое значение.
-        "SUM(CASE WHEN s.State = 2 AND s.IsOutput = 1 THEN s.LenTime ELSE 0 END) AS dial_wait_out_seconds "
-        "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates s "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = s.IdOperator "
-        f"WHERE s.DateTimeStart >= '{date_from_compact}' AND s.DateTimeStart < '{date_to_excl_compact}' "
-        f"{minute_filter}"
-        "GROUP BY CONVERT(varchar(10), s.DateStart, 23), oi.Name"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор billing_operator_states). «Ожидание» —
+    # State=10 «Готов», «Пауза» — State=9 «Перерыв»; «Дозвон» исходящего — State=2, станция
+    # пишет его только в предиктивном режиме обзвона, поэтому сейчас там ноль, а колонка
+    # появляется на экране и в выгрузке, только когда в периоде есть ненулевое значение.
+    from cdr import oktell_datasets
+    return oktell_datasets.build('billing_operator_states', {
+        'date_from': date_from_compact, 'date_to': date_to_excl_compact,
+        'minute_from': minute_from, 'minute_to': minute_to})
 
 
 def _oktell_fetch_billing_operator_rows(range_from, range_to, minute_from, minute_to):
@@ -30727,38 +30548,15 @@ def _oktell_wallboard_hourly_sql(hour_to=None, day=None):
     иначе отставшие на пару секунд часы сервера унесли бы запрос на позавчера.
     served_sl — принятые с ожиданием в очереди не дольше порога SL, тем же правилом, что у
     снимка табло (_oktell_wallboard_totals_sql): SL часа и SL на экране не должны спорить.
-    wait_served_seconds — ожидание принятых, числитель ASA; тоже правило снимка табло."""
+    wait_served_seconds — ожидание принятых, числитель ASA; тоже правило снимка табло.
+
+    Текст — в каталоге cdr/oktell_datasets.py (набор wallboard_hourly)."""
+    from cdr import oktell_datasets
     from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    cutoff = ''
-    if hour_to is not None:
-        cutoff = f"AND DATEPART(HOUR, t.dt_insert) <= {int(hour_to)} "
-    if day is None:
-        day_start = "CONVERT(date, GETDATE())"
-        day_end = "DATEADD(day, 1, CONVERT(date, GETDATE()))"
-    else:
-        day_start = "'%s'" % day.strftime('%Y%m%d')
-        day_end = "'%s'" % (day + timedelta(days=1)).strftime('%Y%m%d')
-    return (
-        "SELECT DATEPART(HOUR, t.dt_insert) AS hh, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN 1 ELSE 0 END), 0) AS served, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
-        f"ISNULL(SUM(CASE WHEN t.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) AND t.LenQueue <= {sl_seconds} THEN 1 ELSE 0 END), 0) AS served_sl, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.LenQueue ELSE 0 END), 0) AS wait_served_seconds, "
-        f"ISNULL(SUM(CASE WHEN t.result_call <> N'{grt}' AND t.call_result IN (5) THEN t.total_length ELSE 0 END), 0) AS talk_seconds "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        "WHERE t.route = 'incoming' AND t.taxi_park <> '' "
-        f"AND t.result_call <> N'{fail}' "
-        f"AND t.dt_insert >= {day_start} "
-        f"AND t.dt_insert < {day_end} "
-        f"{cutoff}"
-        f"{test_keys.tsql_and_not_test('t.[number]')}"
-        "GROUP BY DATEPART(HOUR, t.dt_insert) ORDER BY hh"
-    )
+    return oktell_datasets.build('wallboard_hourly', {
+        'hour_to': hour_to, 'day': day.strftime('%Y%m%d') if day is not None else None,
+        'sl_seconds': int(OKTELL_BILLING_SL_DEFAULT_SECONDS),
+        'test_keys': sorted(test_keys.current_keys())})
 
 
 def _szov_broadcast_hourly_rows(hour_to=None, day=None):
@@ -30918,20 +30716,13 @@ def _oktell_break_episodes_sql(window_from, window_to):
     оказалась бы следующая пауза, а не возврат на линию. Открытый эпизод (оператор всё ещё на
     перерыве) приезжает с пустым ended_at — это нормально, длительность уточнит следующий заход.
 
-    Формат 126 (ISO 8601) вместо 'YYYYMMDD': локаль сервера dmy, а тут нужны и часы."""
-    return (
-        "SELECT oi.Name AS operator_name, "
-        "CONVERT(varchar(19), x.TimeChange, 120) AS started_at, "
-        "CONVERT(varchar(19), x.next_change, 120) AS ended_at "
-        "FROM (SELECT h.UserId, h.State, h.ICode, h.TimeChange, "
-        "LEAD(h.TimeChange) OVER (PARTITION BY h.UserId ORDER BY h.Enumerator) AS next_change "
-        "FROM oktell.dbo.A_UserStateHistory h "
-        f"WHERE h.TimeChange >= CONVERT(datetime, '{window_from.strftime('%Y-%m-%dT%H:%M:%S')}', 126) "
-        f"AND h.TimeChange < CONVERT(datetime, '{window_to.strftime('%Y-%m-%dT%H:%M:%S')}', 126)) x "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = x.UserId "
-        f"WHERE x.State = 2 AND x.ICode = {int(SZOV_BREAK_ICODE)} "
-        "ORDER BY oi.Name, x.TimeChange"
-    )
+    Формат 126 (ISO 8601) вместо 'YYYYMMDD': локаль сервера dmy, а тут нужны и часы.
+    Текст — в каталоге cdr/oktell_datasets.py (набор break_episodes)."""
+    from cdr import oktell_datasets
+    return oktell_datasets.build('break_episodes', {
+        'since': window_from.strftime('%Y-%m-%dT%H:%M:%S'),
+        'until': window_to.strftime('%Y-%m-%dT%H:%M:%S'),
+        'icode': int(SZOV_BREAK_ICODE)})
 
 
 def _szov_break_parse_time(value):
@@ -37505,29 +37296,14 @@ def _oktell_eval_month_bounds(month_str):
     return start.strftime('%Y%m%d'), end_excl.strftime('%Y%m%d')
 
 
-def _oktell_eval_duration_clause(min_d, max_d):
-    clause = f"AND DATEDIFF(second, s.TimeAnswer, s.TimeStop) >= {int(min_d or 0)} "
-    if max_d and int(max_d) > 0:
-        clause += f"AND DATEDIFF(second, s.TimeAnswer, s.TimeStop) <= {int(max_d)} "
-    return clause
-
-
 # Оператор сидит на разных сторонах соединения в зависимости от типа звонка
 # (A_Stat_Connections_1x1.ConnectionType): 1 = «изнутри наружу» (ИСХОДЯЩИЙ) — оператор
 # на A-стороне; 5 = «снаружи внутрь» (ВХОДЯЩИЙ) — оператор на B-стороне. Берём оба типа:
 # во входящем КЦ основной массив записанных разговоров — это входящие (ct=5), и раньше
 # они не попадали в выборку, потому что джойн шёл только по AUserId с ConnectionType=1.
 _OKTELL_EVAL_CONNECTION_TYPES = "(1, 5)"
-# UUID оператора: A-сторона для исходящих, B-сторона для входящих.
-_OKTELL_EVAL_OPERATOR_UID_EXPR = "CASE WHEN s.ConnectionType = 1 THEN s.AUserId ELSE s.BUserId END"
-# Номер клиента (вторая сторона): для исходящего — B, для входящего — A.
-_OKTELL_EVAL_PHONE_EXPR = (
-    "CASE WHEN s.ConnectionType = 1 "
-    "THEN CASE WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber "
-    "ELSE COALESCE(NULLIF(s.BOutNumber, ''), s.AOutNumber) END "
-    "ELSE CASE WHEN LEN(s.AOutNumber) >= 10 THEN s.AOutNumber WHEN LEN(s.BOutNumber) >= 10 THEN s.BOutNumber "
-    "ELSE COALESCE(NULLIF(s.AOutNumber, ''), s.BOutNumber) END END"
-)
+# UUID оператора (A-сторона для исходящих, B-сторона для входящих) и номер клиента (вторая
+# сторона) — выражения EVAL_OPERATOR_UID_EXPR и EVAL_PHONE_EXPR каталога cdr/oktell_datasets.py.
 
 
 def _oktell_eval_range_bounds(date_from, date_to):
@@ -37585,14 +37361,10 @@ def _oktell_call_end_party(connection_type, stop_side, reason_stop):
 
 
 def _oktell_call_end_party_rows_sql(conn_ids):
-    normalized_ids = [_oktell_normalize_conn_id(conn_id) for conn_id in conn_ids]
-    ids_sql = ", ".join("'" + conn_id + "'" for conn_id in normalized_ids)
-    return (
-        "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
-        "s.ConnectionType AS ct, s.StopSide AS stop_side, s.ReasonStop AS reason_stop "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        f"WHERE s.Id IN ({ids_sql})"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор call_end_party).
+    from cdr import oktell_datasets
+    return oktell_datasets.build('call_end_party', {
+        'conn_ids': [_oktell_normalize_conn_id(conn_id) for conn_id in conn_ids]})
 
 
 def backfill_oktell_call_end_parties(batch_size=500, max_batches=8):
@@ -37693,47 +37465,27 @@ def _oktell_eval_operators_sql(mstart, mnext, min_d, max_d, conn_types=_OKTELL_E
     # доступно. UUID оператора считаем в подзапросе, группируем снаружи. Джойн к OperatorInfo
     # по операторской стороне заодно отсеивает внешнюю линию/IVR (их Id нет в каталоге).
     # conn_types — фильтр исход/вход для «Случайного звонка»; по умолчанию оба типа (как в синке).
+    # Текст — в каталоге cdr/oktell_datasets.py (набор eval_operators).
+    from cdr import oktell_datasets
     from test_numbers import keys as test_keys
-    return (
-        "SELECT t.auserid, t.operator_name, COUNT(*) AS available FROM ("
-        f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, oi.Name AS operator_name "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        f"JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = {_OKTELL_EVAL_OPERATOR_UID_EXPR} "
-        f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
-        + _oktell_eval_duration_clause(min_d, max_d)
-        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
-        ") t GROUP BY t.auserid, t.operator_name"
-    )
+    return oktell_datasets.build('eval_operators', {
+        'date_from': mstart, 'date_to': mnext, 'min_duration': min_d, 'max_duration': max_d,
+        'conn_types': conn_types, 'test_keys': sorted(test_keys.current_keys())})
 
 
 def _oktell_eval_sample_sql(mstart, mnext, auserids, cap, min_d, max_d, conn_types=_OKTELL_EVAL_CONNECTION_TYPES,
                             phone_digits=None):
-    from test_numbers import keys as test_keys
-    ids = ", ".join("'" + str(a).replace("'", "") + "'" for a in auserids)
     # Точечный подбор по номеру клиента («ИИ-оценка» → найти звонок по телефону):
     # хвост цифр сравнивается прямо в SQL, иначе случайная выборка в 60 строк
     # могла бы просто не содержать нужный звонок. Только цифры — подстановка
     # безопасна, форматов номера у станции несколько, поэтому сравниваем хвост.
-    digits = re.sub(r'\D', '', str(phone_digits or ''))[-10:]
-    phone_clause = f"AND ({_OKTELL_EVAL_PHONE_EXPR}) LIKE '%{digits}' " if digits else ""
-    return (
-        "SELECT q.auserid, q.conn_id, q.phone, q.dt_raw, q.talk_sec, q.ct, "
-        "q.stop_side, q.reason_stop FROM ("
-        f"SELECT LOWER(CONVERT(varchar(36), {_OKTELL_EVAL_OPERATOR_UID_EXPR})) AS auserid, LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
-        f"{_OKTELL_EVAL_PHONE_EXPR} AS phone, "
-        "CONVERT(varchar(10), s.TimeStart, 104) + ' ' + CONVERT(varchar(8), s.TimeStart, 108) AS dt_raw, "
-        "DATEDIFF(second, s.TimeAnswer, s.TimeStop) AS talk_sec, s.ConnectionType AS ct, "
-        "s.StopSide AS stop_side, s.ReasonStop AS reason_stop, "
-        f"ROW_NUMBER() OVER (PARTITION BY {_OKTELL_EVAL_OPERATOR_UID_EXPR} ORDER BY NEWID()) AS rn "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        f"WHERE s.TimeStart >= '{mstart}' AND s.TimeStart < '{mnext}' "
-        f"AND s.ConnectionType IN {conn_types} AND s.IsRecorded = 1 AND s.TimeStop IS NOT NULL "
-        f"AND {_OKTELL_EVAL_OPERATOR_UID_EXPR} IN ({ids}) "
-        + _oktell_eval_duration_clause(min_d, max_d) + phone_clause
-        + test_keys.tsql_and_not_test(f"({_OKTELL_EVAL_PHONE_EXPR})") +
-        f") q WHERE q.rn <= {int(cap)} ORDER BY q.auserid"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор eval_sample).
+    from cdr import oktell_datasets
+    from test_numbers import keys as test_keys
+    return oktell_datasets.build('eval_sample', {
+        'date_from': mstart, 'date_to': mnext, 'min_duration': min_d, 'max_duration': max_d,
+        'conn_types': conn_types, 'test_keys': sorted(test_keys.current_keys()),
+        'operator_ids': [str(a) for a in auserids], 'cap': cap, 'phone_digits': phone_digits})
 
 
 def sync_oktell_evaluation_calls(month=None, date_from=None, date_to=None, triggered_by='scheduler',

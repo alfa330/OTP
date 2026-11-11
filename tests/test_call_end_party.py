@@ -238,15 +238,23 @@ class OktellCallEndPartyTests(unittest.TestCase):
 
 class CallEndPartyBackendContractTests(unittest.TestCase):
     def test_oktell_queries_select_stop_side_reason_and_connection_type(self):
-        sample = _function_source(BOT_PATH, "_oktell_eval_sample_sql")
+        # Тексты запросов — в общем каталоге (cdr/oktell_datasets.py): по нему их строят и
+        # портал, и коннектор Oktell на VM шлюза. Проверяется готовый текст, а не исходник.
+        from cdr import oktell_datasets
+
+        conn_id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+        self.assertIn("oktell_datasets.build('eval_sample'",
+                      _function_source(BOT_PATH, "_oktell_eval_sample_sql"))
+        sample = oktell_datasets.build("eval_sample", {
+            "date_from": "20261101", "date_to": "20261201", "operator_ids": [conn_id], "cap": 5})
         self.assertIn("s.ConnectionType AS ct", sample)
         self.assertIn("s.StopSide AS stop_side", sample)
         self.assertIn("s.ReasonStop AS reason_stop", sample)
         self.assertIn("q.stop_side, q.reason_stop", sample)
 
-        backfill_query = _function_source(
-            BOT_PATH, "_oktell_call_end_party_rows_sql"
-        )
+        self.assertIn("oktell_datasets.build('call_end_party'",
+                      _function_source(BOT_PATH, "_oktell_call_end_party_rows_sql"))
+        backfill_query = oktell_datasets.build("call_end_party", {"conn_ids": [conn_id]})
         self.assertIn("s.ConnectionType AS ct", backfill_query)
         self.assertIn("s.StopSide AS stop_side", backfill_query)
         self.assertIn("s.ReasonStop AS reason_stop", backfill_query)

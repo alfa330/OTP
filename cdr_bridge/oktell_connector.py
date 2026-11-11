@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Коннектор Oktell: снимок «Табло СЗоВ · Линия» из базы Oktell → портал.
+"""Коннектор Oktell: база Oktell → портал. Снимок «Табло СЗоВ · Линия» и запросы по требованию.
 
 Зачем
 -----
@@ -20,12 +20,21 @@ VM шлюза стоит в одной сети с базой Oktell, поэто
 подписанным запросом. Соединение с базой постоянное, соединение с порталом — keep-alive через
 прокси шлюза. Входящих портов нет: соединение всегда открывает коннектор.
 
+Запросы по требованию (с 1.1.0)
+-------------------------------
+Остальные чтения базы Oktell — отбивка линии, разбор перерывов, выгрузки статусов и звонков,
+биллинг, выборка звонков на оценку — портал делает, когда они ему нужны. Их исполняют
+исполнители (`cdr_bridge/oktell_jobs.py`): отдельные потоки со своим соединением к базе, которые
+забирают задание длинным опросом `POST /api/oktell_live/agent/jobs`. В задании имя набора
+каталога `cdr/oktell_datasets.py` и параметры; текст запроса исполнитель строит сам.
+
 Чему коннектор НЕ верит
 -----------------------
-Порталу — не безусловно. Текст запроса строит сам коннектор; от портала приходят только два
-параметра — порог SL числом и ключи «Реестра тестовых номеров» цифрами, — и оба чистятся перед
-подстановкой (`oktell_wallboard.clean_params`): в запрос попадают число в границах и строки из
-десяти цифр. Ничего, что прислал портал, не исполняется как SQL. Учётка базы — только на
+Порталу — не безусловно. Текст запроса строит сам коннектор; от портала приходят только
+параметры: у снимка — порог SL числом и ключи «Реестра тестовых номеров» цифрами, у запросов по
+требованию — имя набора каталога и его параметры (даты, целые в границах, идентификаторы, цифры
+номеров). Все они чистятся перед подстановкой. Ничего, что прислал портал, не исполняется как
+SQL: исполниться может только запрос из каталога в образе шлюза. Учётка базы — только на
 чтение. HTTPS_PROXY и подобные переменные не читаются — наружу только через прокси из настроек
 (как у моста).
 
@@ -43,6 +52,8 @@ VM шлюза стоит в одной сети с базой Oktell, поэто
     python -m cdr_bridge.oktell_connector           рабочий режим (служба oktell-connector)
     python -m cdr_bridge.oktell_connector --once    один такт и выход
     python -m cdr_bridge.oktell_connector --check   проверить базу и портал, ничего не меняя
+    python -m cdr_bridge.oktell_connector --check --datasets
+                                                    то же и каждый набор каталога узким окном
 
 Настройки — окружение (или .env.codex.local при отладке):
     CDR_BRIDGE_PORTAL, CDR_AGENT_KEY_FILE | CDR_AGENT_PRIVATE_KEY, CDR_PORTAL_PROXY,
@@ -52,6 +63,7 @@ VM шлюза стоит в одной сети с базой Oktell, поэто
     OKTELL_SQL_DB                 база по умолчанию (oktell)
     OKTELL_SQL_ENCRYPTION         require (по умолчанию) | request | off
     OKTELL_LIVE_INTERVAL_SECONDS  такт, пока портал не назвал свой (10)
+    OKTELL_JOB_WORKERS            исполнителей запросов по требованию (2; 0 — выключены)
     OKTELL_HEARTBEAT_FILE         файл пульса для проверки живости контейнера
 """
 
@@ -70,11 +82,11 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cdr import oktell_wallboard  # noqa: E402
-from cdr_bridge import oktell_db  # noqa: E402
+from cdr import oktell_datasets, oktell_wallboard  # noqa: E402
+from cdr_bridge import oktell_db, oktell_jobs  # noqa: E402
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'oktell/1.0.1'
+VERSION = 'oktell/1.1.0'
 log = logging.getLogger('cdr_bridge.oktell_connector')
 
 PUSH_PATH = '/api/oktell_live/agent/push'
@@ -126,17 +138,22 @@ def load_config():
         'sql_database': value('OKTELL_SQL_DB', oktell_db.DEFAULT_DATABASE),
         'sql_encryption': value('OKTELL_SQL_ENCRYPTION', 'require').lower(),
         'interval': _clamp_interval(value('OKTELL_LIVE_INTERVAL_SECONDS', str(DEFAULT_INTERVAL_SECONDS))),
+        'job_workers': oktell_jobs.clamp_workers(value('OKTELL_JOB_WORKERS', str(oktell_jobs.DEFAULT_WORKERS))),
         'heartbeat_file': value('OKTELL_HEARTBEAT_FILE'),
     }
 
 
 class Connector:
-    def __init__(self, config, session=None, db=None, clock=time.time):
+    def __init__(self, config, session=None, db=None, clock=time.time, jobs_db=None):
         self.config = config
         self.portal = config['portal']
         self.session = session or Bridge._build_session(config)
         self.signer = Bridge._build_signer(config)
         self.db = db if db is not None else oktell_db.from_config(config)
+        # Соединение для запросов по требованию — не то, которым снимается табло: у него свой
+        # таймаут (минута, а не 15 с) и потолок строк ответа. Подставленный читатель (тесты)
+        # служит обоим.
+        self._jobs_db = jobs_db or ((lambda: db) if db is not None else self._open_jobs_db)
         self.clock = clock
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         # Параметры снимка называет портал; пока не спросили — None, и базу не трогаем.
@@ -146,6 +163,7 @@ class Connector:
         self.db_failures = 0
         self.portal_failures = 0
         self.stop_event = threading.Event()
+        self.workers = []
         self._privileges_checked = False
         self._summary_at = None
         self._taken = 0
@@ -155,6 +173,11 @@ class Connector:
         self._query_ms = 0.0
 
     # ── служебное ────────────────────────────────────────────────────────────
+
+    def _open_jobs_db(self):
+        return oktell_db.from_config(self.config, query_timeout=oktell_jobs.QUERY_TIMEOUT_SECONDS,
+                                     row_limit=oktell_datasets.MAX_ROWS,
+                                     app_name='%s-jobs' % oktell_db.APP_NAME)
 
     def _hello(self):
         return {'agent_id': self.agent_id, 'hostname': socket.gethostname(),
@@ -365,10 +388,26 @@ class Connector:
         self._taken = self._accepted = self._refused = self._failed = 0
         self._query_ms = 0.0
 
+    def start_workers(self):
+        """Исполнители запросов по требованию — отдельными потоками, каждый со своим
+        соединением к базе и своей сессией к порталу. Снимок табло от них не зависит."""
+        count = oktell_jobs.clamp_workers(self.config.get('job_workers'))
+        if not count or self.signer is None:
+            return []
+        self.workers = oktell_jobs.build_workers(
+            self.config, count, lambda: Bridge._build_session(self.config), self.signer,
+            self._hello, self.stop_event)
+        for worker in self.workers:
+            worker.start()
+        log.info('исполнителей запросов: %d, наборов в каталоге: %d, отпечаток каталога %s',
+                 len(self.workers), len(oktell_datasets.NAMES), oktell_datasets.fingerprint())
+        return self.workers
+
     def run(self):
         log.info('Коннектор Oktell %s запущен. Портал: %s (ключ %s), база: %s, такт %.0f с, id: %s',
                  VERSION, self.portal, self.signer.key_id if self.signer else '—',
                  self.db.describe(), self.interval, self.agent_id)
+        self.start_workers()
         while not self.stop_event.is_set():
             try:
                 wait = self.cycle()
@@ -386,12 +425,46 @@ class Connector:
         self.stop_event.set()
 
 
-def check(connector, require_readonly=False):
+def check_tables(db):
+    """Какие таблицы каталога учётке даны — строками для человека. Возвращает ключи недоступных."""
+    denied = oktell_jobs.probe_tables(db)
+    names = [oktell_datasets.TABLES[key][0] for key in sorted(oktell_datasets.TABLES)]
+    if not denied:
+        print('таблицы  даны все %d: %s' % (len(names), ', '.join(names)))
+        return denied
+    print('таблицы  НЕ даны %d из %d: %s' % (len(denied), len(names),
+                                             ', '.join(oktell_datasets.TABLES[key][0] for key in denied)))
+    blocked = sorted(name for name in oktell_datasets.NAMES
+                     if set(oktell_datasets.tables_of(name)) & set(denied))
+    print('         без них не исполнятся наборы (или часть их разрезов): %s' % ', '.join(blocked))
+    return denied
+
+
+def check_datasets(db, denied=()):
+    """Каждый набор каталога узким окном (сегодня) — что запрос разбирается и исполняется.
+    Наборы с недоступной таблицей пропускаются. Возвращает число отказов."""
+    failures = 0
+    for name, params in sorted(oktell_datasets.samples().items()):
+        if set(oktell_datasets.tables_of(name, oktell_datasets.build(name, params).params)) & set(denied):
+            print('  —  %-26s пропущен: таблица не дана' % name)
+            continue
+        result = oktell_jobs.execute(db, {'id': name, 'dataset': name, 'params': params,
+                                          'digest': oktell_datasets.build(name, params).digest})
+        if result.get('ok'):
+            print('  ок %-26s %4d строк за %5d мс' % (name, len(result['rows']), result['query_ms']))
+        else:
+            failures += 1
+            print('  ✗  %-26s %s: %s' % (name, result.get('reason'), result.get('error')))
+    return failures
+
+
+def check(connector, require_readonly=False, datasets=False):
     """Проверка установки: база читается, учётка только читает, портал принимает подпись.
     Ничего не меняет: снимок на портал не отправляется, уходит только «я на связи».
 
     require_readonly — учётка, умеющая больше чтения, считается отказом (так проверяет
-    выкладка на шлюз); без флага о ней только сказано."""
+    выкладка на шлюз); без флага о ней только сказано. datasets — исполнить ещё и каждый
+    набор каталога узким окном."""
     ok = True
     print('ключ     %s' % (connector.signer.key_id if connector.signer else 'НЕ ЗАДАН'))
     try:
@@ -410,6 +483,17 @@ def check(connector, require_readonly=False):
                 ok = False
         else:
             print('учётка   только чтение')
+        # Запросы по требованию: какие таблицы каталога даны учётке (и, по просьбе, каждый
+        # набор узким окном). Отдельным соединением — с тем же потолком строк, что у исполнителя.
+        jobs_db = connector._jobs_db()
+        try:
+            print('каталог  наборов %d, отпечаток %s' % (len(oktell_datasets.NAMES),
+                                                         oktell_datasets.fingerprint()))
+            denied = check_tables(jobs_db)
+            if datasets and check_datasets(jobs_db, denied):
+                ok = False
+        finally:
+            jobs_db.close()
     except oktell_db.OktellDbError as exc:
         ok = False
         print('база     %s — НЕ читается: %s' % (connector.db.describe(), exc))
@@ -437,6 +521,8 @@ def main(argv=None):
                         help='проверить базу Oktell и портал, снимок не отправлять')
     parser.add_argument('--require-readonly', action='store_true',
                         help='вместе с --check: учётка базы, умеющая больше чтения, — отказ')
+    parser.add_argument('--datasets', action='store_true',
+                        help='вместе с --check: исполнить каждый набор каталога узким окном')
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -460,7 +546,7 @@ def main(argv=None):
         print('Ключ подписи не годится: %s' % exc)
         return 2
     if args.check:
-        return check(connector, require_readonly=args.require_readonly)
+        return check(connector, require_readonly=args.require_readonly, datasets=args.datasets)
     if args.once:
         wait = connector.cycle()
         connector.db.close()

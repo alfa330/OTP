@@ -12,7 +12,7 @@ from time import monotonic
 from uuid import UUID
 
 from . import config
-from cdr import lines, queries
+from cdr import lines, oktell_datasets, queries
 
 
 _SOURCES = {
@@ -73,25 +73,14 @@ def oktell_parks_sql(conn_ids):
     ids = sorted({value for raw in conn_ids if (value := _conn_id(raw))})
     if not ids:
         return None
-    literals = ", ".join(f"'{value}'" for value in ids)
     # Общий JOIN читает историю один раз на пакет. Коррелированный TOP 1
     # через OUTER APPLY сканировал её заново для каждого звонка: 50 строк
     # занимали больше 30 секунд и в UI превращались в неизвестные парки.
     # Тип и номера соединения — из той же строки: по ним карточка оценки
     # показывает маршрут звонка (call_route.py) без второго похода в Oktell.
-    return (
-        "SELECT conn_id, taxi_park, ct, a_out, b_out, a_dialed FROM ("
-        "SELECT LOWER(CONVERT(varchar(36), s.Id)) AS conn_id, "
-        "NULLIF(LTRIM(RTRIM(t.taxi_park)), '') AS taxi_park, "
-        "s.ConnectionType AS ct, s.AOutNumber AS a_out, s.BOutNumber AS b_out, "
-        "s.ANumberDialed AS a_dialed, "
-        "ROW_NUMBER() OVER (PARTITION BY s.Id ORDER BY t.dt_insert DESC, t.Id DESC) AS rn "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 s "
-        "LEFT JOIN oktell.dbo.Call_Systems_hst t "
-        "ON t.chainid = CONVERT(varchar(36), s.IdChain) "
-        "AND NULLIF(LTRIM(RTRIM(t.taxi_park)), '') IS NOT NULL "
-        f"WHERE s.Id IN ({literals})) q WHERE rn = 1"
-    )
+    # Текст — в каталоге cdr/oktell_datasets.py (набор call_parks): один на
+    # портал и на коннектор Oktell VM шлюза.
+    return oktell_datasets.build('call_parks', {'conn_ids': ids})
 
 
 def oktell_connections(conn_ids, query):

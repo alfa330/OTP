@@ -31,6 +31,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from cdr import oktell_datasets
+
 from . import calendar_model, erlang_a, timesfm_bq
 
 try:  # the registry ships on its own; until it is deployed nothing is excluded
@@ -279,11 +281,12 @@ def _not_test_sql(cursor, phone_expr: str) -> str:
     return " AND " + _test_keys.sql_not_test(phone_expr, digits=True)
 
 
-def _oktell_not_test_sql() -> str:
-    """The same rule for the Oktell queries, keys as literals like the hourly sync has them."""
+def _oktell_test_keys() -> List[str]:
+    """The same rule for the Oktell queries: the registry keys, which the query catalog
+    (cdr/oktell_datasets.py) puts into the text as literals, like the hourly sync has them."""
     if _test_keys is None:
-        return ""
-    return _test_keys.tsql_and_not_test("t.[number]")
+        return []
+    return sorted(_test_keys.current_keys())
 
 
 # ── daily volumes ────────────────────────────────────────────────────────────
@@ -355,19 +358,13 @@ def refresh_volume(cursor, department: str, date_from: date, date_to: date) -> i
     return len(rows)
 
 
-def oktell_daily_sql(date_from_compact: str, date_to_excl_compact: str, not_test: str = "") -> str:
-    """Daily totals of the line straight from Oktell, same filters as the hourly sync."""
-    greeting = "Бросили трубку на приветствии"
-    failed = "Неудачный звонок"
-    return (
-        "SELECT CONVERT(varchar(10), t.dt_insert, 23) AS report_date, "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result IN (13,19,5) THEN 1 ELSE 0 END) AS received, "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result = 5 THEN 1 ELSE 0 END) AS accepted "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{failed}' {not_test}"
-        "GROUP BY CONVERT(varchar(10), t.dt_insert, 23)"
-    )
+def oktell_daily_sql(date_from_compact: str, date_to_excl_compact: str, test_keys: Sequence[str] = ()) -> str:
+    """Daily totals of the line straight from Oktell, same filters as the hourly sync.
+
+    The text lives in the query catalog (cdr/oktell_datasets.py, dataset forecast_daily): the
+    portal and the Oktell connector on the gateway VM build it from the same code."""
+    return oktell_datasets.build("forecast_daily", {
+        "date_from": date_from_compact, "date_to": date_to_excl_compact, "test_keys": list(test_keys)})
 
 
 def fetch_szov_history_from_oktell(oktell_query: Callable[[str], List[dict]], history_start: date,
@@ -382,13 +379,13 @@ def fetch_szov_history_from_oktell(oktell_query: Callable[[str], List[dict]], hi
     out: List[Tuple[date, int, int]] = []
     window_start = history_start
     first = True
-    not_test = _oktell_not_test_sql()
+    test_keys = _oktell_test_keys()
     while window_start < first_known:
         window_end = min(first_known, window_start + timedelta(days=150))
         if not first:
             sleep(OKTELL_PAUSE_SECONDS)
         first = False
-        rows = oktell_query(oktell_daily_sql(window_start.strftime("%Y%m%d"), window_end.strftime("%Y%m%d"), not_test)) or []
+        rows = oktell_query(oktell_daily_sql(window_start.strftime("%Y%m%d"), window_end.strftime("%Y%m%d"), test_keys)) or []
         for row in rows:
             try:
                 day = date.fromisoformat(str(row.get("report_date"))[:10])
@@ -429,37 +426,22 @@ def load_volume(cursor, department: str, date_from: date, date_to: date) -> Dict
 # ── handle time and patience ─────────────────────────────────────────────────
 
 def oktell_params_sql(date_from_compact: str, date_to_excl_compact: str, conn_from_compact: str,
-                      not_test: str = "") -> str:
+                      test_keys: Sequence[str] = ()) -> str:
     """Answered calls, operator talk from the connection legs (not total_length, which also
-    holds IVR and queue time), queue waits of answered and lost calls."""
-    greeting = "Бросили трубку на приветствии"
-    failed = "Неудачный звонок"
-    return (
-        "SELECT "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result = 5 THEN 1 ELSE 0 END) AS accepted, "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result = 5 THEN COALESCE(k.talk_sec, 0) ELSE 0 END) AS talk_sec, "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result = 5 AND k.talk_sec IS NULL THEN 1 ELSE 0 END) AS no_chain, "
-        f"SUM(CASE WHEN t.result_call <> N'{greeting}' AND t.call_result = 5 THEN COALESCE(t.LenQueue, 0) ELSE 0 END) AS wait_ok_sec, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{greeting}', N'{failed}') THEN 1 ELSE 0 END) AS lost, "
-        f"SUM(CASE WHEN t.call_result IN (13,19) AND t.result_call NOT IN (N'{greeting}', N'{failed}') THEN COALESCE(t.LenQueue, 0) ELSE 0 END) AS wait_lost_sec "
-        "FROM oktell.dbo.Call_Systems_hst t "
-        "LEFT JOIN (SELECT IdChain, SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 "
-        f"WHERE ConnectionType = 5 AND TimeStart >= '{conn_from_compact}' AND TimeStart < '{date_to_excl_compact}' "
-        "GROUP BY IdChain) k ON k.IdChain = TRY_CAST(t.chainid AS uniqueidentifier) "
-        f"WHERE t.dt_insert >= '{date_from_compact}' AND t.dt_insert < '{date_to_excl_compact}' "
-        f"AND t.taxi_park <> '' AND t.route = 'incoming' AND t.result_call <> N'{failed}' {not_test}"
-    ).rstrip()
+    holds IVR and queue time), queue waits of answered and lost calls.
+
+    The text lives in the query catalog (cdr/oktell_datasets.py, dataset forecast_params)."""
+    return oktell_datasets.build("forecast_params", {
+        "date_from": date_from_compact, "date_to": date_to_excl_compact,
+        "conn_from": conn_from_compact, "test_keys": list(test_keys)})
 
 
 def oktell_after_call_sql(date_from_compact: str, date_to_excl_compact: str) -> str:
-    """After-call work and hold of incoming calls from the operator-state cube."""
-    return (
-        "SELECT SUM(CASE WHEN s.State = 7 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS post_sec, "
-        "SUM(CASE WHEN s.State = 33 AND s.IsOutput = 0 THEN s.LenTime ELSE 0 END) AS hold_sec "
-        "FROM oktell_cc_temp.dbo.A_Cube_CC_OperatorStates s "
-        f"WHERE s.DateTimeStart >= '{date_from_compact}' AND s.DateTimeStart < '{date_to_excl_compact}'"
-    )
+    """After-call work and hold of incoming calls from the operator-state cube.
+
+    The text lives in the query catalog (cdr/oktell_datasets.py, dataset forecast_after_call)."""
+    return oktell_datasets.build("forecast_after_call", {
+        "date_from": date_from_compact, "date_to": date_to_excl_compact})
 
 
 def _num(value) -> float:
@@ -475,7 +457,7 @@ def measure_szov_params(oktell_query: Callable[[str], List[dict]], made_on: date
     date_to_excl = made_on + timedelta(days=1)
     calls = (oktell_query(oktell_params_sql(date_from.strftime("%Y%m%d"), date_to_excl.strftime("%Y%m%d"),
                                             (date_from - timedelta(days=1)).strftime("%Y%m%d"),
-                                            _oktell_not_test_sql())) or [{}])[0]
+                                            _oktell_test_keys())) or [{}])[0]
     sleep(OKTELL_PAUSE_SECONDS)
     after = (oktell_query(oktell_after_call_sql(date_from.strftime("%Y%m%d"), date_to_excl.strftime("%Y%m%d"))) or [{}])[0]
     accepted = _num(calls.get("accepted"))

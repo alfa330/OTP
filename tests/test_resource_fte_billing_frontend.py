@@ -9,6 +9,9 @@ from tests import source_cache
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_PATH = ROOT / "src" / "components" / "resources" / "ResourceFteView.jsx"
 BOT_PATH = source_cache.monolith_flat_path()
+# Тексты запросов к базе Oktell — в общем каталоге: по нему их строят и портал, и коннектор
+# Oktell на VM шлюза (с 11.11.2026).
+QUERIES_PATH = ROOT / "cdr" / "oktell_datasets.py"
 
 
 class BillingExportChoiceTests(unittest.TestCase):
@@ -203,6 +206,7 @@ class BillingOperatorDirectionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
         cls.backend = BOT_PATH.read_text(encoding="utf-8-sig")
+        cls.queries = QUERIES_PATH.read_text(encoding="utf-8-sig")
         cls.helper = (ROOT / "src" / "components" / "resources"
                       / "billingOperatorDirection.js").read_text(encoding="utf-8-sig")
 
@@ -225,7 +229,7 @@ class BillingOperatorDirectionTests(unittest.TestCase):
         start = self.source.index("const billingReport = useMemo(")
         end = self.source.index("const billingError = billingErrors[billingMode]")
         self.assertNotIn("fetchBillingReport", self.source[start:end])
-        self.assertIn("t.route IN ('incoming', 'outgoing')", self.backend)
+        self.assertIn("t.route IN ('incoming', 'outgoing')", self.queries)
 
     def test_outgoing_columns_are_renamed_and_talk_time_is_honest(self):
         self.assertIn("{isOutgoing ? 'Звонков' : 'Обслужено'}", self.source)
@@ -239,7 +243,7 @@ class BillingOperatorDirectionTests(unittest.TestCase):
         self.assertIn("const billingShowDialWait = billingIsOutgoing && billingOperatorHasDialWait(billingReport);",
                       self.source)
         self.assertIn("{showDialWait ? (", self.source)
-        self.assertIn("AS dial_wait_out_seconds", self.backend)
+        self.assertIn("AS dial_wait_out_seconds", self.queries)
 
     def test_export_carries_direction(self):
         self.assertIn("? { direction: billingOperatorDirection }", self.source)
@@ -262,6 +266,7 @@ class BillingTalkTimeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
         cls.backend = BOT_PATH.read_text(encoding="utf-8-sig")
+        cls.queries = QUERIES_PATH.read_text(encoding="utf-8-sig")
 
     def _has(self, needle, haystack, where):
         self.assertTrue(needle in haystack, f"в {where} нет фрагмента: {needle}")
@@ -276,21 +281,22 @@ class BillingTalkTimeTests(unittest.TestCase):
             "q.call_result = 5 THEN q.total_length ELSE 0 END AS talk_seconds",
             "p.call_result = 5 THEN p.total_length ELSE 0 END AS talk_seconds",
         ):
-            self._has(needle, self.backend, "bot_schedule2.py")
+            self._has(needle, self.queries, "cdr/oktell_datasets.py")
         for needle in (
-            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds",
+            "{BILLING_TALK_EXPR} ELSE 0 END) AS talk_seconds",
             "THEN COALESCE(k.talk_sec, 0) ELSE 0 END AS talk_seconds",
         ):
+            self._has_not(needle, self.queries, "cdr/oktell_datasets.py")
             self._has_not(needle, self.backend, "bot_schedule2.py")
 
     def test_operators_keep_the_operator_leg(self):
         for needle in (
-            '_OKTELL_BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"',
+            'BILLING_TALK_EXPR = "COALESCE(k.talk_sec, 0)"',
             "SUM(DATEDIFF(second, TimeAnswer, TimeStop)) AS talk_sec",
             "WHERE ConnectionType = 5 AND TimeStart >=",
-            "{_OKTELL_BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds",
+            "{BILLING_TALK_EXPR} ELSE 0 END) AS call_in_seconds",
         ):
-            self._has(needle, self.backend, "bot_schedule2.py")
+            self._has(needle, self.queries, "cdr/oktell_datasets.py")
 
     def test_averages_are_truncated_like_oktell(self):
         self._has("const attSeconds = truncatedRatio(item.talk_seconds, item.served);", self.source,
@@ -302,9 +308,9 @@ class BillingTalkTimeTests(unittest.TestCase):
         for needle in (
             "THEN t.total_length ELSE 0 END) AS total_seconds",
             "t.total_length ELSE 0 END) AS handle_in_seconds",
-            "float(item.get('handle_seconds') or 0)",
         ):
-            self._has(needle, self.backend, "bot_schedule2.py")
+            self._has(needle, self.queries, "cdr/oktell_datasets.py")
+        self._has("float(item.get('handle_seconds') or 0)", self.backend, "bot_schedule2.py")
         self._has("Number(item.handle_seconds || 0)", self.source, "ResourceFteView.jsx")
 
     def test_labels_say_what_is_counted(self):

@@ -21,6 +21,16 @@ CDR_AGENT_KEYS). Общего токена нет вовсе.
 Что закреплено здесь, а не в коннекторе: от строк остаются только известные колонки запроса и
 простые значения (store.clean_rows), так что ничего, кроме чисел и коротких строк, в снимок
 табло не попадёт, что бы ни прислали.
+
+    POST /api/oktell_live/agent/jobs
+        {agent_id, hostname, version, worker, catalog, datasets: [имена], unreadable: [таблицы],
+         done: [{id, ok: true, rows, query_ms} | {id, ok: false, reason, error}], wait}
+      → {status, jobs: [{id, dataset, params, digest}], delivered, catalog, wait_seconds}
+
+Исполнители запросов коннектора: остальные запросы портала к базе Oktell (отбивка, перерывы,
+выгрузки статусов и звонков, биллинг, выборка звонков на оценку) — очередь в `jobs.py`. Ручка
+держит запрос, пока не появится задание (длинный опрос); в задании имя набора каталога и
+параметры, а не SQL.
 """
 
 import logging
@@ -29,18 +39,22 @@ from flask import Blueprint, jsonify, request
 
 from cdr import agent_auth
 from cdr import config as cdr_config
+from cdr import oktell_datasets
 from cdr import oktell_wallboard
 
+from . import jobs as jobs_mod
 from . import store as store_mod
 
 log = logging.getLogger(__name__)
 
 
-def build_oktell_live_blueprint(*, build_cors_preflight_response, wallboard_params, store=None):
+def build_oktell_live_blueprint(*, build_cors_preflight_response, wallboard_params, store=None,
+                                job_queue=None):
     """wallboard_params() → {'sl_seconds': …, 'test_keys': […]} — параметры снимка табло, какими
     их сейчас считает портал (порог SL и реестр тестовых номеров)."""
     bp = Blueprint('oktell_live', __name__, url_prefix='/api/oktell_live')
     live_store = store or store_mod.store
+    job_queue = job_queue or jobs_mod.jobs
 
     def _authenticate():
         """(идентификатор ключа | None, готовый отказ | None). Причина отказа — в журнал, не наружу."""
@@ -93,6 +107,39 @@ def build_oktell_live_blueprint(*, build_cors_preflight_response, wallboard_para
                             'params': params, 'interval_seconds': store_mod.interval_seconds()})
         except Exception as exc:  # noqa: BLE001
             log.exception('Коннектор Oktell: ошибка в ручке приёма')
+            return jsonify({"error": "Внутренняя ошибка", "detail": str(exc)[:200]}), 500
+
+    @bp.route('/agent/jobs', methods=['POST', 'OPTIONS'])
+    def agent_jobs():
+        """Исполнитель запросов: приносит результаты прошлых заданий и ждёт следующее.
+
+        Длинный опрос: ответ приходит сразу, как только портал кладёт задание, а без заданий —
+        через `wait_seconds`. В задании — имя набора каталога, параметры и отпечаток текста;
+        самого SQL в нём нет (cdr/oktell_datasets.py)."""
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        key_id, refusal = _authenticate()
+        if refusal is not None:
+            return refusal
+        try:
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict):
+                return jsonify({"error": "Тело запроса — объект JSON"}), 400
+            worker = '%s#%s' % (str(payload.get('agent_id') or payload.get('hostname') or key_id or '')[:100],
+                                str(payload.get('worker') or 0)[:8])
+            delivered = job_queue.finish(payload.get('done'))
+            job_queue.worker_seen(worker, version=payload.get('version'), catalog=payload.get('catalog'),
+                                  datasets=payload.get('datasets'), unreadable=payload.get('unreadable'))
+            try:
+                wait = float(payload.get('wait') or 0)
+            except (TypeError, ValueError):
+                wait = 0.0
+            taken = job_queue.take(worker, wait)
+            return jsonify({'status': 'ok', 'jobs': taken, 'delivered': delivered,
+                            'catalog': oktell_datasets.fingerprint(),
+                            'wait_seconds': jobs_mod.POLL_WAIT_SECONDS})
+        except Exception as exc:  # noqa: BLE001
+            log.exception('Коннектор Oktell: ошибка в ручке заданий')
             return jsonify({"error": "Внутренняя ошибка", "detail": str(exc)[:200]}), 500
 
     return bp

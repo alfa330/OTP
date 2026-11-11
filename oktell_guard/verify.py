@@ -17,6 +17,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+from cdr import oktell_datasets
+
 RECALL_STATE = 2      # перерыв
 RECALL_ICODE = 2      # подпричина «Перезвон»
 
@@ -78,20 +80,14 @@ def build_history_sql(sip_number: str, moment: datetime, window_s: int) -> str:
     Только SELECT — доступ к базе Oktell у нас на чтение, и это правильно:
     ограничитель не должен уметь править историю, по которой сам же проверяется.
     """
-    safe_sip = str(sip_number or '').replace("'", "''")
-    since = (moment - timedelta(seconds=window_s + CLOCK_SKEW_S)).strftime('%Y%m%d %H:%M:%S')
+    since = (moment - timedelta(seconds=window_s + CLOCK_SKEW_S)).strftime(oktell_datasets.GUARD_STAMP)
     # Строки берём с запасом вперёд: расхождение часов может сдвинуть последнюю
     # запись истории. На подсчёт это не влияет — он всё равно обрывается на моменте.
-    until = (moment + timedelta(seconds=CLOCK_SKEW_S)).strftime('%Y%m%d %H:%M:%S')
-    return (
-        "SELECT TOP 50 h.State, h.ICode, "
-        "CONVERT(varchar(19), h.TimeChange, 120) AS time_change "
-        "FROM oktell.dbo.A_UserStateHistory h "
-        "JOIN oktell_settings.dbo.A_Users u ON u.ID = h.UserId "
-        f"WHERE u.Login = '{safe_sip}' "
-        f"AND h.TimeChange BETWEEN '{since}' AND '{until}' "
-        "ORDER BY h.Enumerator"
-    )
+    until = (moment + timedelta(seconds=CLOCK_SKEW_S)).strftime(oktell_datasets.GUARD_STAMP)
+    # Текст — в каталоге cdr/oktell_datasets.py (набор guard_operator_history): один на
+    # портал и на коннектор Oktell VM шлюза. Логин уходит в литерал с удвоением кавычек.
+    return oktell_datasets.build('guard_operator_history', {
+        'login': str(sip_number or ''), 'since': since, 'until': until})
 
 
 def recall_seconds_in_window(rows, moment: datetime, window_s: int) -> int:

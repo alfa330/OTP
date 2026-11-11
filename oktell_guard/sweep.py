@@ -20,6 +20,8 @@ Oktell говорит, что человек просидел в «Перезв�
 
 from datetime import datetime, timedelta
 
+from cdr import oktell_datasets
+
 RECALL_STATE = 2      # перерыв
 RECALL_ICODE = 2      # подпричина «Перезвон»
 
@@ -36,20 +38,17 @@ def build_history_sql(since: datetime, until: datetime, cursor_enum: int = 0, li
 
     Только SELECT: доступ к базе Oktell у нас на чтение, и это правильно —
     ограничитель не должен уметь править историю, по которой сам проверяется.
-    Прокси режет ответ на 1000 строк, поэтому листаем keyset'ом по Enumerator,
+    Ответ режется на 1000 строк, поэтому листаем keyset'ом по Enumerator,
     а не OFFSET'ом: за смену строк тысячи, и OFFSET на них разъезжается.
+
+    Текст — в каталоге cdr/oktell_datasets.py (набор guard_history): один на
+    портал и на коннектор Oktell VM шлюза. Из пользователей Oktell читаются
+    только ID и Login.
     """
-    return (
-        f"SELECT TOP {int(limit)} u.Login AS login, h.State AS state, h.ICode AS icode, "
-        "CONVERT(varchar(19), h.TimeChange, 120) AS time_change, "
-        "h.Enumerator AS enumerator "
-        "FROM oktell.dbo.A_UserStateHistory h "
-        "JOIN oktell_settings.dbo.A_Users u ON u.ID = h.UserId "
-        f"WHERE h.TimeChange >= '{since.strftime('%Y%m%d %H:%M:%S')}' "
-        f"AND h.TimeChange < '{until.strftime('%Y%m%d %H:%M:%S')}' "
-        f"AND h.Enumerator > {int(cursor_enum)} "
-        "ORDER BY h.Enumerator"
-    )
+    return oktell_datasets.build('guard_history', {
+        'since': since.strftime(oktell_datasets.GUARD_STAMP),
+        'until': until.strftime(oktell_datasets.GUARD_STAMP),
+        'cursor': int(cursor_enum), 'limit': int(limit)})
 
 
 def _parse(value):

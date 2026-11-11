@@ -153,6 +153,8 @@ class BillingDriverRatingTests(unittest.TestCase):
         for group_by in ("park", "line"):
             with self.subTest(group_by=group_by):
                 sql = self.ns["_oktell_billing_sql"]("20260908", "20260915", 0, 1440, 20, group_by)
+                # Текст строит каталог запросов (cdr/oktell_datasets.py), имя набора едет с ним.
+                self.assertEqual(sql.dataset, "billing")
                 self.assertIn("FROM oktell.dbo.quality_employes GROUP BY chainid) qe", sql)
                 self.assertIn("ON qe.chainid = t.chainid", sql)
                 # '0' — водитель ничего не нажал за отведённое время: в среднее не идёт.
