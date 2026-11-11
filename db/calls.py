@@ -277,6 +277,10 @@ class CallsMixin:
         оставался прежним. Месяцы считаются уже после коммита звонков, каждый своей короткой
         транзакцией: сбой пересчёта у одного оператора не откатывает звонки остальных, а
         строки дней не держатся под блокировкой, пока считаются месяцы.
+
+        rows — звонки Oktell. Звонки из iCORE Phone этого дня (upsert_daily_phone_calls) лежат в
+        том же числе, а сколько их — помнит extra_metrics.phone_calls: здесь к звонкам Oktell
+        прибавляется эта часть, так что синк Oktell звонки телефона не стирает.
         """
         calls_by_key = {}
         for operator_id, day, calls in rows or []:
@@ -289,19 +293,21 @@ class CallsMixin:
         keys = sorted(calls_by_key)
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT dh.operator_id, dh.day, dh.calls, dh.group_id
+                SELECT dh.operator_id, dh.day, dh.calls, dh.group_id,
+                       COALESCE((dh.extra_metrics->>'phone_calls')::int, 0)
                 FROM daily_hours dh
                 JOIN UNNEST(%s::int[], %s::date[]) AS k(operator_id, day)
                   ON k.operator_id = dh.operator_id AND k.day = dh.day
             """, ([key[0] for key in keys], [key[1] for key in keys]))
-            previous = {(int(row[0]), row[1]): (int(row[2] or 0), row[3]) for row in cursor.fetchall()}
+            previous = {(int(row[0]), row[1]): (int(row[2] or 0), row[3], int(row[4] or 0))
+                        for row in cursor.fetchall()}
 
             # Группа на дату нужна только новой строке или строке без группы: у остальных
             # upsert её не меняет, а запрос на каждую строку ручного синка за месяц — это
             # тысяча с лишним лишних запросов.
             values = []
             for operator_id, day in keys:
-                group_id = (previous.get((operator_id, day)) or (0, None))[1]
+                group_id = (previous.get((operator_id, day)) or (0, None, 0))[1]
                 if group_id is None:
                     group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
                 values.append((operator_id, day, calls_by_key[(operator_id, day)], group_id))
@@ -312,14 +318,25 @@ class CallsMixin:
                 VALUES %s
                 ON CONFLICT (operator_id, day)
                 DO UPDATE SET
-                    calls = EXCLUDED.calls,
+                    calls = EXCLUDED.calls
+                            + COALESCE((daily_hours.extra_metrics->>'phone_calls')::int, 0),
                     group_id = COALESCE(daily_hours.group_id, EXCLUDED.group_id)
                 """,
                 values,
                 page_size=500,
             )
 
-        changed = [key for key in keys if (previous.get(key) or (0, None))[0] != calls_by_key[key]]
+        changed = []
+        for key in keys:
+            previous_calls, _group_id, phone_calls = previous.get(key) or (0, None, 0)
+            if previous_calls != calls_by_key[key] + phone_calls:
+                changed.append(key)
+        return self._recount_calls_months(len(values), changed, "upsert_daily_calls")
+
+    def _recount_calls_months(self, saved_days, changed, source):
+        """Пересчёт месячных итогов там, где число звонков дня изменилось (changed — ключи
+        (operator_id, day)), и сводка записи — общий хвост upsert_daily_calls и
+        upsert_daily_phone_calls. Зовётся после коммита звонков."""
         changed_months = sorted({
             (operator_id, day.strftime("%Y-%m")) for operator_id, day in changed
         })
@@ -330,15 +347,93 @@ class CallsMixin:
             except Exception:
                 aggregate_errors += 1
                 logging.exception(
-                    "upsert_daily_calls: месяц %s оператора %s не пересчитан", month_key, operator_id
+                    "%s: месяц %s оператора %s не пересчитан", source, month_key, operator_id
                 )
 
         return {
-            "saved_days": len(values),
+            "saved_days": saved_days,
             "changed_days": len(changed),
             "aggregated_months": len(changed_months) - aggregate_errors,
             "aggregate_errors": aggregate_errors,
         }
+
+    def upsert_daily_phone_calls(self, rows, day_from=None, day_to=None):
+        """Записывает в daily_hours.calls звонки из iCORE Phone, не трогая звонки Oktell
+        (задача SZOV-4). rows — (operator_id, day, phone_calls), по строке на оператор-день.
+
+        calls дня — звонки Oktell плюс звонки телефона. Сколько звонков телефона в числе уже
+        лежит, помнит extra_metrics.phone_calls, и меняется только эта часть: calls = calls −
+        прежняя часть + новая. Поэтому запись не зависит от Oktell (10–11.11.2026 его шлюз
+        лежал сутки, а звонки телефона, привязанные к прогону Oktell, не записались ни разу),
+        повтор тех же чисел ничего не меняет, а ручная правка звонков дня остаётся.
+
+        day_from..day_to — период, за который rows полны. День периода, где часть телефона
+        записана, а в rows его нет (все звонки оказались отказами АТС, рубильник выключен),
+        обнуляется — иначе число застряло бы навсегда. День, где часть не изменилась, не
+        трогается вовсе. Месяцы — как у upsert_daily_calls.
+        """
+        phone_by_key = {}
+        for operator_id, day, calls in rows or []:
+            if isinstance(day, str):
+                day = datetime.strptime(day, "%Y-%m-%d").date()
+            phone_by_key[(int(operator_id), day)] = max(0, int(calls or 0))
+
+        values = []
+        with self._get_cursor() as cursor:
+            if day_from is not None and day_to is not None:
+                cursor.execute("""
+                    SELECT operator_id, day
+                    FROM daily_hours
+                    WHERE day >= %s AND day <= %s
+                      AND COALESCE((extra_metrics->>'phone_calls')::int, 0) > 0
+                """, (day_from, day_to))
+                for operator_id, day in cursor.fetchall():
+                    phone_by_key.setdefault((int(operator_id), day), 0)
+            if not phone_by_key:
+                return {"saved_days": 0, "changed_days": 0, "aggregated_months": 0, "aggregate_errors": 0}
+
+            keys = sorted(phone_by_key)
+            cursor.execute("""
+                SELECT dh.operator_id, dh.day, dh.group_id,
+                       COALESCE((dh.extra_metrics->>'phone_calls')::int, 0)
+                FROM daily_hours dh
+                JOIN UNNEST(%s::int[], %s::date[]) AS k(operator_id, day)
+                  ON k.operator_id = dh.operator_id AND k.day = dh.day
+            """, ([key[0] for key in keys], [key[1] for key in keys]))
+            previous = {(int(row[0]), row[1]): (row[2], int(row[3] or 0)) for row in cursor.fetchall()}
+
+            for operator_id, day in keys:
+                phone_calls = phone_by_key[(operator_id, day)]
+                group_id, previous_phone = previous.get((operator_id, day)) or (None, 0)
+                if phone_calls == previous_phone:
+                    continue
+                if group_id is None:
+                    group_id = self._get_operator_group_id_tx(cursor, operator_id, day)
+                values.append((operator_id, day, phone_calls, group_id))
+            if values:
+                execute_values(
+                    cursor,
+                    """
+                    INSERT INTO daily_hours (operator_id, day, calls, group_id, extra_metrics)
+                    SELECT v.operator_id, v.day, v.calls, v.group_id,
+                           jsonb_build_object('phone_calls', v.calls)
+                    FROM (VALUES %s) AS v(operator_id, day, calls, group_id)
+                    ON CONFLICT (operator_id, day)
+                    DO UPDATE SET
+                        calls = GREATEST(COALESCE(daily_hours.calls, 0)
+                                         - COALESCE((daily_hours.extra_metrics->>'phone_calls')::int, 0), 0)
+                                + EXCLUDED.calls,
+                        extra_metrics = COALESCE(daily_hours.extra_metrics, '{}'::jsonb)
+                                        || EXCLUDED.extra_metrics,
+                        group_id = COALESCE(daily_hours.group_id, EXCLUDED.group_id)
+                    """,
+                    values,
+                    template="(%s::int, %s::date, %s::int, %s::int)",
+                    page_size=500,
+                )
+
+        changed = [(operator_id, day) for operator_id, day, _calls, _group_id in values]
+        return self._recount_calls_months(len(values), changed, "upsert_daily_phone_calls")
 
     def record_oktell_calls_sync_run(self, started_at, finished_at, date_from, date_to,
                                      triggered_by, status, updated_days=0, error=None):

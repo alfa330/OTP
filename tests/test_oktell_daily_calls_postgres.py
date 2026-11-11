@@ -36,7 +36,8 @@ MODULE = source_cache.parse(SOURCE)
 DATABASE_CLASS = next(n for n in MODULE.body if isinstance(n, ast.ClassDef) and n.name == 'Database')
 _LINES = SOURCE.splitlines(keepends=True)
 _MODULE_SQL = ('MEMBERSHIP_MONTH_OVERLAP_SQL', 'MEMBERSHIP_DAY_DISTANCE_SQL')
-_METHODS = ('upsert_daily_calls', '_get_operator_group_id_tx',
+_METHODS = ('upsert_daily_calls', '_recount_calls_months', 'upsert_daily_phone_calls',
+            '_get_operator_group_id_tx',
             'record_oktell_calls_sync_run', 'get_oktell_calls_unfinished_days')
 
 
@@ -215,6 +216,132 @@ def test_empty_input_touches_nothing(cursor):
         'saved_days': 0, 'changed_days': 0, 'aggregated_months': 0, 'aggregate_errors': 0}
     cursor.execute('SELECT COUNT(*) FROM daily_hours')
     assert cursor.fetchone()[0] == 4
+    assert aggregated == []
+
+
+# ── Звонки из iCORE Phone (задача SZOV-4) ────────────────────────────────────────────────────
+# calls дня = звонки Oktell + звонки телефона; часть телефона помнит extra_metrics.phone_calls,
+# и каждая сторона меняет только свою. 10–11.11.2026 шлюз Oktell лежал сутки: звонки телефона,
+# ехавшие одним числом со звонками Oktell, не записались ни разу — теперь Oktell им не нужен.
+
+_NOTHING = {'saved_days': 0, 'changed_days': 0, 'aggregated_months': 0, 'aggregate_errors': 0}
+
+
+def _calls(cur, operator_id, day):
+    cur.execute('SELECT calls, extra_metrics FROM daily_hours WHERE operator_id = %s AND day = %s',
+                (operator_id, day))
+    return cur.fetchone()
+
+
+def test_phone_calls_join_the_oktell_calls_and_are_remembered(cursor):
+    aggregated = []
+    db = _database_double(cursor, aggregated)
+
+    result = db.upsert_daily_phone_calls([
+        (77, '2026-10-18', 112),            # в дне уже 88 звонков Oktell
+        (613, date(2026, 10, 18), 95),      # звонков Oktell нет; в extra_metrics лежит чужой ключ
+        (518, '2026-10-18', 30),            # строки дня ещё не было
+    ])
+
+    assert result == {'saved_days': 3, 'changed_days': 3, 'aggregated_months': 3, 'aggregate_errors': 0}
+    assert aggregated == [(77, '2026-10'), (518, '2026-10'), (613, '2026-10')]
+    # Часы, опоздание и пометка пересчёта — как были; пустая группа дополнена по членству.
+    assert _row(cursor, 77, '2026-10-18') == (7.10, 4.00, 200, 0, 8, {'phone_calls': 112}, True)
+    assert _row(cursor, 613, '2026-10-18') == (4.53, 2.93, 95, 1, 8, {'note': 1, 'phone_calls': 95}, True)
+    assert _row(cursor, 518, '2026-10-18') == (0.0, 0.0, 30, 0, 8, {'phone_calls': 30}, False)
+
+
+def test_repeat_changes_nothing_and_a_new_count_replaces_only_the_phone_part(cursor):
+    aggregated = []
+    db = _database_double(cursor, aggregated)
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 112)])
+    del aggregated[:]
+
+    # Тот же срез ещё раз (каждый прогон синка): день не тронут, месяц не пересчитан.
+    assert db.upsert_daily_phone_calls([(77, '2026-10-18', 112)]) == _NOTHING
+    assert aggregated == []
+    assert _calls(cursor, 77, '2026-10-18') == (200, {'phone_calls': 112})
+    # Звонков стало больше: 88 + 120, а не 200 + 120.
+    assert db.upsert_daily_phone_calls([(77, '2026-10-18', 120)])['changed_days'] == 1
+    assert _calls(cursor, 77, '2026-10-18') == (208, {'phone_calls': 120})
+    # И меньше (номер попал в «Реестр тестовых номеров»).
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 100)])
+    assert _calls(cursor, 77, '2026-10-18') == (188, {'phone_calls': 100})
+    assert aggregated == [(77, '2026-10'), (77, '2026-10')]
+
+
+def test_oktell_sync_adds_its_calls_to_the_phone_part_in_any_order(cursor):
+    aggregated = []
+    db = _database_double(cursor, aggregated)
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 112), (613, '2026-10-18', 95)])
+    del aggregated[:]
+
+    # Синк Oktell приносит только свои числа — звонки телефона он не стирает.
+    result = db.upsert_daily_calls([(77, '2026-10-18', 232), (613, '2026-10-18', 126)])
+    assert result == {'saved_days': 2, 'changed_days': 2, 'aggregated_months': 2, 'aggregate_errors': 0}
+    assert _calls(cursor, 77, '2026-10-18') == (344, {'phone_calls': 112})
+    assert _calls(cursor, 613, '2026-10-18') == (221, {'note': 1, 'phone_calls': 95})
+    # Повтор тех же чисел Oktell: «изменилось ли» сравнивается с суммой, месяц не пересчитан.
+    del aggregated[:]
+    assert db.upsert_daily_calls([(77, '2026-10-18', 232), (613, '2026-10-18', 126)]) == {
+        'saved_days': 2, 'changed_days': 0, 'aggregated_months': 0, 'aggregate_errors': 0}
+    assert aggregated == []
+    assert _calls(cursor, 77, '2026-10-18')[0] == 344
+    # Обратный порядок: телефон после Oktell.
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 120)])
+    assert _calls(cursor, 77, '2026-10-18') == (352, {'phone_calls': 120})
+    # Новая строка от Oktell — без части телефона.
+    db.upsert_daily_calls([(518, '2026-10-18', 6)])
+    assert _calls(cursor, 518, '2026-10-18') == (6, {})
+
+
+def test_days_of_the_period_that_lost_their_phone_calls_are_zeroed(cursor):
+    aggregated = []
+    db = _database_double(cursor, aggregated)
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 112), (613, '2026-10-17', 9), (47, '2026-09-30', 5)])
+    del aggregated[:]
+
+    # Период 17–18.10: у 77 звонков из телефона больше нет (оказались отказами АТС, рубильник
+    # выключен), у 613 — те же; 30.09 в период не входит.
+    result = db.upsert_daily_phone_calls([(613, '2026-10-17', 9)],
+                                         day_from=date(2026, 10, 17), day_to=date(2026, 10, 18))
+
+    assert result == {'saved_days': 1, 'changed_days': 1, 'aggregated_months': 1, 'aggregate_errors': 0}
+    assert aggregated == [(77, '2026-10')]
+    assert _calls(cursor, 77, '2026-10-18') == (88, {'phone_calls': 0})
+    assert _calls(cursor, 613, '2026-10-17') == (129, {'phone_calls': 9})
+    assert _calls(cursor, 47, '2026-09-30') == (15, {'phone_calls': 5})
+    # Пустой период без записанных звонков и пустой список без периода — ничего не трогают.
+    assert db.upsert_daily_phone_calls([], day_from=date(2026, 10, 19), day_to=date(2026, 10, 20)) == _NOTHING
+    assert db.upsert_daily_phone_calls([]) == _NOTHING
+    assert _calls(cursor, 613, '2026-10-17') == (129, {'phone_calls': 9})
+
+
+def test_manual_edit_of_the_day_survives_the_phone_sync(cursor):
+    db = _database_double(cursor, [])
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 112)])                       # 88 + 112
+    cursor.execute("UPDATE daily_hours SET calls = 150 WHERE operator_id = 77 AND day = '2026-10-18'")
+
+    # СВ поправил число руками: тот же срез телефона правку не трогает…
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 112)],
+                                day_from=date(2026, 10, 18), day_to=date(2026, 10, 18))
+    assert _calls(cursor, 77, '2026-10-18')[0] == 150
+    # …а новый меняет только часть телефона: (150 − 112) + 115.
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 115)])
+    assert _calls(cursor, 77, '2026-10-18') == (153, {'phone_calls': 115})
+    # Правка ниже части телефона: основа в минус не уходит.
+    cursor.execute("UPDATE daily_hours SET calls = 50 WHERE operator_id = 77 AND day = '2026-10-18'")
+    db.upsert_daily_phone_calls([(77, '2026-10-18', 120)])
+    assert _calls(cursor, 77, '2026-10-18') == (120, {'phone_calls': 120})
+
+
+def test_zero_phone_calls_for_a_missing_row_create_nothing(cursor):
+    aggregated = []
+    db = _database_double(cursor, aggregated)
+
+    assert db.upsert_daily_phone_calls([(613, '2026-10-20', 0), (77, '2026-10-18', 0)]) == _NOTHING
+    assert _calls(cursor, 613, '2026-10-20') is None
+    assert _calls(cursor, 77, '2026-10-18') == (88, {})
     assert aggregated == []
 
 

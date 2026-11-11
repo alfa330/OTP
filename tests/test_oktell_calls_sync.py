@@ -208,20 +208,28 @@ class FetchCallCountsTests(unittest.TestCase):
 
 
 class _FakeDB(_HistoryDB):
-    def __init__(self, save_result=None, save_error=None):
+    def __init__(self, save_result=None, save_error=None, events=None):
         super().__init__()
         self.saved = []
+        self.phone_saved = []
         self.save_result = save_result if save_result is not None else {"aggregated_months": 0}
         self.save_error = save_error
+        self.events = events if events is not None else []
 
     def get_all_operators(self):
         return [(613,), (77,), (518,)]
 
     def upsert_daily_calls(self, rows):
+        self.events.append("oktell_written")
         self.saved.append(list(rows))
         if self.save_error:
             raise self.save_error
         return self.save_result
+
+    def upsert_daily_phone_calls(self, rows, day_from=None, day_to=None):
+        self.events.append("phone_written")
+        self.phone_saved.append((list(rows), day_from, day_to))
+        return {"aggregated_months": 0}
 
 
 class SyncOperatorCallsTests(unittest.TestCase):
@@ -238,8 +246,8 @@ class SyncOperatorCallsTests(unittest.TestCase):
     def _ns(self, fetch, db, dial_list=None):
         return _extract(
             ["_oktell_parse_date", "_oktell_calls_target_days", "_oktell_calls_record_run",
-             "_softphone_calls_for_hours", "sync_oktell_operator_calls"],
-            # Раздел «Удаленный КЦ»: None — не поднят, звонков из телефона нет.
+             "_softphone_calls_for_hours", "_sync_softphone_calls", "sync_oktell_operator_calls"],
+            # Раздел «Удаленный КЦ»: None — не поднят, о звонках из телефона ничего не известно.
             _dial_list_service=dial_list,
             OKTELL_CALLS_MAX_RANGE_DAYS=31,
             OKTELL_CALLS_SYNC_LOCK=threading.Lock(),
@@ -369,7 +377,9 @@ class _FakeDialList:
 class SoftphoneCallsTests(unittest.TestCase):
     """Задача SZOV-4 (владелец 10.11.2026: «все звонки нужно учитывать»). Оператор СЗоВ на обзвоне
     звонит из iCORE Phone: часы идут по телефону, а «Звонки» дня писал один Oktell — «звонков в
-    час» у него падал. Синк прибавляет звонки из телефона к звонкам Oktell того же дня."""
+    час» у него падал. Звонки телефона пишутся в то же число, но отдельно от звонков Oktell и до
+    него: 10–11.11.2026 шлюз Oktell не отвечал сутки, прогон падал — и звонки телефона,
+    ехавшие одним числом со звонками Oktell, не записались ни разу."""
 
     # Те же стабы, что у синка Oktell (сами его тесты здесь второй раз не идут). Люди выдуманы:
     # 77 — оператор и в Oktell, и в телефоне; 613 — только в телефоне; 518 — чат-менеджер.
@@ -377,13 +387,20 @@ class SoftphoneCallsTests(unittest.TestCase):
     _ns = SyncOperatorCallsTests._ns
     _assert_lock_released = SyncOperatorCallsTests._assert_lock_released
     OKTELL = [{"OperatorName": "Обзвонова Айша", "CallDate": "2026-11-10", "CallCount": 40}]
+    DAY = date(2026, 11, 10)
+    DAY_BEFORE = date(2026, 11, 9)
 
-    def _sync(self, dial_list, rows=None, db=None, **period):
+    def _sync(self, dial_list, rows=None, db=None, fetch=None, **period):
         db = db or _FakeDB()
-        ns = self._ns(lambda d_from, d_to: list(self.OKTELL if rows is None else rows), db, dial_list=dial_list)
+
+        def default_fetch(d_from, d_to):
+            db.events.append("oktell_asked")
+            return list(self.OKTELL if rows is None else rows)
+
+        ns = self._ns(fetch or default_fetch, db, dial_list=dial_list)
         return ns["sync_oktell_operator_calls"](**(period or {"day": "2026-11-10"})), db, ns
 
-    def test_softphone_calls_are_added_to_the_oktell_calls_of_the_day(self):
+    def test_softphone_calls_are_written_apart_from_oktell_calls(self):
         dial_list = _FakeDialList({
             (77, "2026-11-10"): 120,      # с утра линия Oktell, после обеда обзвон
             (613, "2026-11-10"): 95,      # весь день на обзвоне: в Oktell звонков нет вовсе
@@ -391,61 +408,136 @@ class SoftphoneCallsTests(unittest.TestCase):
         result, db, ns = self._sync(dial_list)
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-10", 160), (613, "2026-11-10", 95)])
-        self.assertEqual((result["phone_calls"], result["phone_days"]), (215, 2))
-        self.assertEqual((result["updated"], result["operators_count"]), (2, 2))
-        # Раздел спрошен один раз и за тот же период, что и Oktell.
-        self.assertEqual(dial_list.asked, [(date(2026, 11, 10), date(2026, 11, 10))])
-        self.assertEqual(db.runs[0]["updated_days"], 2)
+        # Звонки телефона — своей записью, с периодом; звонки Oktell — своей, одними числами Oktell:
+        # сумму собирает база, которая помнит часть телефона у дня.
+        self.assertEqual(db.phone_saved, [(
+            [(77, "2026-11-10", 120), (613, "2026-11-10", 95)], self.DAY_BEFORE, self.DAY)])
+        self.assertEqual(db.saved, [[(77, "2026-11-10", 40)]])
+        self.assertEqual((result["phone_calls"], result["phone_days"], result["phone_operators"]), (215, 2, 2))
+        self.assertEqual((result["updated"], result["operators_count"]), (1, 1))
+        self.assertEqual(db.runs[0]["updated_days"], 1)
         self._assert_lock_released(ns)
 
-    def test_period_is_passed_whole_and_days_stay_apart(self):
-        dial_list = _FakeDialList({(77, "2026-11-09"): 7, (77, "2026-11-10"): 120})
-        result, db, _ns = self._sync(dial_list, date_from="2026-11-09", date_to="2026-11-10")
+    def test_softphone_calls_are_written_before_oktell_is_asked(self):
+        dial_list = _FakeDialList({(77, "2026-11-10"): 120})
+        _result, db, _ns = self._sync(dial_list)
 
-        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-09", 7), (77, "2026-11-10", 160)])
-        self.assertEqual(dial_list.asked, [(date(2026, 11, 9), date(2026, 11, 10))])
-        self.assertEqual((result["phone_calls"], result["phone_days"]), (127, 2))
+        self.assertEqual(db.events, ["phone_written", "oktell_asked", "oktell_written"])
+
+    def test_oktell_outage_does_not_stop_softphone_calls(self):
+        def refused(d_from, d_to):
+            raise ConnectionRefusedError(111, "Connection refused")
+
+        dial_list = _FakeDialList({(77, "2026-11-10"): 112, (613, "2026-11-10"): 95})
+        result, db, ns = self._sync(dial_list, fetch=refused)
+
+        # Прогон упал — день для Oktell остался недобранным, ночь его перечитает…
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Connection refused", result["error"])
+        self.assertEqual(db.saved, [])
+        self.assertEqual([r["status"] for r in db.runs], ["failed"])
+        # …а звонки телефона уже записаны, и прогон об этом говорит.
+        self.assertEqual(db.phone_saved, [(
+            [(77, "2026-11-10", 112), (613, "2026-11-10", 95)], self.DAY_BEFORE, self.DAY)])
+        self.assertEqual((result["phone_calls"], result["phone_days"], result["phone_operators"]), (207, 2, 2))
+        self._assert_lock_released(ns)
+
+    def test_one_day_run_also_takes_the_day_before(self):
+        # Дневной прогон «сегодня» дописывает и вчера: звонки после последнего прогона того дня и
+        # день, чей ночной прогон не прошёл, не ждут следующей ночи.
+        dial_list = _FakeDialList({(77, "2026-11-09"): 7, (77, "2026-11-10"): 120})
+        result, db, _ns = self._sync(dial_list)
+
+        self.assertEqual(dial_list.asked, [(self.DAY_BEFORE, self.DAY)])
+        self.assertEqual(db.phone_saved, [(
+            [(77, "2026-11-09", 7), (77, "2026-11-10", 120)], self.DAY_BEFORE, self.DAY)])
+        self.assertEqual((result["phone_calls"], result["phone_days"], result["phone_operators"]), (127, 2, 1))
+        # Oktell спрошен только за свой день.
+        self.assertEqual(db.saved, [[(77, "2026-11-10", 40)]])
+
+    def test_longer_period_is_taken_as_asked(self):
+        dial_list = _FakeDialList({(77, "2026-11-03"): 7})
+        _result, db, _ns = self._sync(dial_list, rows=[], date_from="2026-11-03", date_to="2026-11-10")
+
+        self.assertEqual(dial_list.asked, [(date(2026, 11, 3), self.DAY)])
+        self.assertEqual(db.phone_saved, [([(77, "2026-11-03", 7)], date(2026, 11, 3), self.DAY)])
+
+    def test_gate_of_the_day_before_does_not_widen_the_oktell_lookup(self):
+        gates = []
+        lookups = []
+        db = _FakeDB()
+        ns = self._ns(lambda d_from, d_to: [], db, dial_list=_FakeDialList({(518, "2026-11-09"): 30}))
+
+        def gate(d_from, d_to, ids):
+            gates.append((d_from, d_to))
+            # 518 — оператор до 09.11 включительно, с 10.11 чат-менеджер.
+            return ({518} if d_from <= self.DAY_BEFORE else set(),
+                    lambda op_id, day: not (op_id == 518 and day >= "2026-11-10"))
+
+        ns["_oktell_operator_model_gate"] = gate
+        ns["_status_import_build_operator_lookup"] = lambda restrict_to_ids=None: lookups.append(
+            set(restrict_to_ids)) or {}
+        ns["sync_oktell_operator_calls"](day="2026-11-10")
+
+        self.assertEqual(gates, [(self.DAY, self.DAY), (self.DAY_BEFORE, self.DAY)])
+        # Сопоставление имён Oktell — по гейту своего дня: вчерашний оператор в него не попал…
+        self.assertEqual(lookups, [set()])
+        # …а его вчерашние звонки из телефона записаны по гейту вчерашнего дня.
+        self.assertEqual(db.phone_saved, [([(518, "2026-11-09", 30)], self.DAY_BEFORE, self.DAY)])
 
     def test_chat_manager_day_takes_no_softphone_calls(self):
         # 518 с 19.10 чат-менеджер: его день не операторский — ни звонки Oktell, ни звонки телефона.
         dial_list = _FakeDialList({(518, "2026-11-10"): 30, (77, "2026-11-10"): 5})
         result, db, _ns = self._sync(dial_list)
 
-        self.assertEqual(sorted(db.saved[0]), [(77, "2026-11-10", 45)])
-        self.assertEqual((result["phone_calls"], result["phone_days"]), (5, 1))
+        self.assertEqual(db.phone_saved, [([(77, "2026-11-10", 5)], self.DAY_BEFORE, self.DAY)])
+        self.assertEqual((result["phone_calls"], result["phone_days"], result["phone_operators"]), (5, 1, 1))
 
-    def test_zero_softphone_calls_create_no_day(self):
+    def test_no_softphone_calls_still_pass_the_period(self):
+        # Строк нет, а период передан: день, где звонки телефона были записаны и пропали
+        # (отказы АТС, рубильник), база по нему обнулит.
         dial_list = _FakeDialList({(613, "2026-11-10"): 0})
         result, db, _ns = self._sync(dial_list, rows=[])
 
+        self.assertEqual(db.phone_saved, [([], self.DAY_BEFORE, self.DAY)])
         self.assertEqual(db.saved, [[]])
         self.assertEqual((result["updated"], result["phone_calls"], result["phone_days"]), (0, 0, 0))
 
-    def test_without_the_dial_out_section_only_oktell_calls_are_written(self):
+    def test_without_the_dial_out_section_stored_softphone_calls_are_left_alone(self):
+        # Раздел не поднят — о звонках ничего не известно: не пишем ничего, даже пустой период,
+        # иначе уже записанные звонки телефона обнулились бы.
         result, db, _ns = self._sync(None)
 
         self.assertEqual(result["status"], "success")
+        self.assertEqual(db.phone_saved, [])
         self.assertEqual(db.saved, [[(77, "2026-11-10", 40)]])
-        self.assertEqual((result["phone_calls"], result["phone_days"]), (0, 0))
+        self.assertEqual((result["phone_calls"], result["phone_days"], result["phone_operators"]), (0, 0, 0))
 
-    def test_unread_softphone_calls_fail_the_run_without_writing(self):
-        # Записать день одним Oktell значило бы занизить его и счесть добранным: ночью его
-        # уже не перечитают. Прогон падает целиком — день остаётся недобранным.
+    def test_unread_softphone_calls_fail_the_run_before_oktell(self):
         dial_list = _FakeDialList(error=RuntimeError("dial_list_attempts is unavailable"))
         result, db, ns = self._sync(dial_list)
 
         self.assertEqual(result["status"], "failed")
         self.assertIn("dial_list_attempts is unavailable", result["error"])
-        self.assertEqual(db.saved, [])
+        self.assertEqual((db.phone_saved, db.saved, db.events), ([], [], []))
         self.assertEqual([r["status"] for r in db.runs], ["failed"])
+        self.assertEqual((result["phone_calls"], result["phone_days"]), (0, 0))
         self._assert_lock_released(ns)
 
-    def test_manual_sync_names_both_sources_only_when_the_phone_added_calls(self):
+    def test_manual_sync_says_what_was_written(self):
         source = BOT_PATH.read_text(encoding="utf-8")
         route = source.split("@app.route('/api/hours/sync_calls_oktell'", 1)[1].split("\n@app.route(", 1)[0]
         self.assertIn('"Звонки операторов синхронизированы из Oktell и iCORE Phone"', route)
         self.assertIn("if result.get('phone_calls') else \"Звонки операторов синхронизированы из Oktell\"", route)
+        # Звонки Oktell не прошли, а звонки телефона записаны — страница перечитывает «Учёт часов»
+        # (ответ 200), а не показывает ошибку всей кнопки.
+        partial = route.split("if status == 'failed':", 1)[1].split("return jsonify({\"error\"", 1)[0]
+        self.assertIn("if result.get('phone_days'):", partial)
+        self.assertIn('"status": "partial"', partial)
+        self.assertIn('"Звонки Oktell обновить не удалось. Звонки из iCORE Phone записаны"', partial)
+        self.assertIn("}), 200", partial)
+        self.assertIn("updated=int(result.get('phone_days') or 0)", partial)
+        self.assertIn("operators_count=int(result.get('phone_operators') or 0)", partial)
 
 
 if __name__ == "__main__":
