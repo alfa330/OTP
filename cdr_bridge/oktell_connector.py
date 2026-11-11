@@ -74,7 +74,7 @@ from cdr import oktell_wallboard  # noqa: E402
 from cdr_bridge import oktell_db  # noqa: E402
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'oktell/1.0.0'
+VERSION = 'oktell/1.0.1'
 log = logging.getLogger('cdr_bridge.oktell_connector')
 
 PUSH_PATH = '/api/oktell_live/agent/push'

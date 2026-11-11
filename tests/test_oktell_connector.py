@@ -13,8 +13,8 @@
     раз в пять минут; портал лёг — пауза, и базу в это время не дёргаем каждый такт;
   * параметры сменились — снимок переснимается сразу;
   * пульс пишется только после принятого снимка;
-  * соединение с базой: autocommit, шифрование, только чтение, таймауты, вежливые настройки
-    сессии; значения колонок уходят в JSON простыми.
+  * соединение с базой: autocommit, шифрование, только чтение, без блокировок чтения, таймауты,
+    вежливые настройки сессии; значения колонок уходят в JSON простыми.
 """
 import decimal
 import io
@@ -713,8 +713,11 @@ class OktellDbTests(unittest.TestCase):
         setup = ' ; '.join(captured['conn_properties'])
         self.assertIn('SET LOCK_TIMEOUT 5000', setup)
         self.assertIn('SET DEADLOCK_PRIORITY LOW', setup)
-        self.assertIn('SET TRANSACTION ISOLATION LEVEL READ COMMITTED', setup)
-        self.assertNotIn('READ UNCOMMITTED', setup)
+        # Чтение без разделяемых блокировок: под READ COMMITTED снимок на третьей минуте работы
+        # попал во взаимную блокировку с пишущим процессом станции (11.11.2026, ошибка 1205).
+        self.assertIn('SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED', setup)
+        self.assertNotIn('READ COMMITTED', setup)
+        self.assertEqual(sum('ISOLATION LEVEL' in item for item in captured['conn_properties']), 1)
 
     def test_write_permissions_reads_only_own_rights(self):
         sql = oktell_db.WRITE_PERMISSIONS_SQL
