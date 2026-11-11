@@ -1,5 +1,5 @@
 /*
- * Настоящие компоненты калькуляторов ОП «Верификатор» и «Яндекс Регистрация»
+ * Настоящие компоненты калькуляторов ОП «Верификатор», «Яндекс Регистрация» и «Основа»
  * прогоняются через react-dom/server: браузерного окружения в проекте нет
  * (ни jsdom, ни puppeteer), а серверный рендер закрывает главное — что карточка
  * результата не падает и показывает те же суммы, что и формулы.
@@ -53,13 +53,17 @@ function buildModule(relativePath, outName) {
 const resultUrl = buildModule('components/salary/SalaryCalculationResult.jsx', 'SalaryCalculationResult.mjs');
 const verificatorUrl = buildModule('components/salary/SalaryCalculatorVerificator.jsx', 'SalaryCalculatorVerificator.mjs');
 const yandexRegUrl = buildModule('components/salary/SalaryCalculatorYandexReg.jsx', 'SalaryCalculatorYandexReg.mjs');
+const osnovaUrl = buildModule('components/salary/SalaryCalculatorOsnova.jsx', 'SalaryCalculatorOsnova.mjs');
 
 const SalaryCalculationResult = (await import(resultUrl)).default;
 const SalaryCalculatorVerificator = (await import(verificatorUrl)).default;
 const SalaryCalculatorYandexReg = (await import(yandexRegUrl)).default;
+const SalaryCalculatorOsnova = (await import(osnovaUrl)).default;
 const {
+  calculateOsnovaSalary,
   calculateVerificatorSalary,
   calculateYandexRegSalary,
+  OSNOVA_DEAL_PRICE_STEPS,
   VERIFICATOR_QUALITY_POINT_STEPS,
   VERIFICATOR_CHAT_POINT_STEPS,
 } = await import(FORMULA_URL);
@@ -149,6 +153,47 @@ test('подсказки карточки «Верификатор» собра�
   assert.equal(result.qualityPoints, 20);
   assert.equal(result.chatPoints, 15);
   assert.ok(html.includes('120,23%'), 'итого баллов — с запятой, как и деньги рядом');
+});
+
+test('калькулятор «Основа» рисуется без данных и не падает', () => {
+  const html = plain(renderToStaticMarkup(React.createElement(SalaryCalculatorOsnova, { month: '2026-11' })));
+  assert.ok(html.includes('Модель: Оператор ОП «Основа»'));
+  // Пустая форма — 0% плана, нижняя ступень шкалы п. 3.1.
+  assert.ok(html.includes('цена сделки 200 ₸'));
+  // Норма 1 FTE ноября (30 дней → 21 раб. день × 8 ч) подставляется сама.
+  assert.ok(html.includes('value="168"'));
+});
+
+test('карточка «Основа»: сумма по шкале п. 3.1, подсказка собрана из самой шкалы', () => {
+  // Строка «Оператор со стажем»: 691 сделка ровно на 100% плана → 800 ₸ за продажу.
+  const result = calculateOsnovaSalary({
+    hoursWorked: 176,
+    hoursNorm: 176,
+    deals: 691,
+    planPerFte: 691,
+    normHoursFte: 176,
+    quality: 98,
+  });
+  const html = plain(renderToStaticMarkup(
+    React.createElement(SalaryCalculationResult, { salaryResult: result, label: 'Оператор ОП «Основа»' })
+  ));
+
+  assert.ok(html.includes('658 400,00 ТГ'), 'итог = часы × 600 + продажи × ставку');
+  assert.ok(html.includes('552 800,00 ТГ'), 'бонус = 691 × 800 ₸');
+  assert.ok(html.includes('105 600,00 ТГ'), 'постоянная часть = 176 × 600');
+  // Все девять ступеней — в подсказке, с ценой каждой.
+  for (const step of OSNOVA_DEAL_PRICE_STEPS) {
+    assert.ok(
+      html.includes(`<span>${step.label}</span><span>${step.price.toLocaleString('ru-RU').replace(/[  ]/g, ' ')} ₸</span>`),
+      `ступень ${step.label} → ${step.price} ₸ должна быть в подсказке`,
+    );
+  }
+  // Текущая ступень выделена, и только она.
+  assert.match(html, /font-semibold text-gray-900"><span>100–119,9%<\/span>/);
+  assert.equal((html.match(/flex justify-between gap-3 font-semibold/g) || []).length, 1);
+  // Прежних ступеней (100/400/450/600 ₸, потолок на 140%) в тексте не осталось.
+  assert.ok(!html.includes('450 ₸'), 'старая ступень 450 ₸ не должна остаться в подсказке');
+  assert.ok(!html.includes('от 140%'), 'потолок ставки теперь 200%, а не 140%');
 });
 
 test('карточка результата «Яндекс Регистрация» показывает сумму из формулы', () => {

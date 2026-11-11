@@ -9,8 +9,8 @@ NODE_TEST = ROOT / "tests" / "salary_osnova.test.mjs"
 
 
 class SalaryOsnovaRuntimeTests(unittest.TestCase):
-    """Формулы ОП «Основа» гоняются настоящим Node — сверка с таблицей владельца
-    (416 550 ₸ у оператора со стажем, 135 600 ₸ у новичка) идёт в .mjs."""
+    """Формулы ОП «Основа» гоняются настоящим Node — строки таблицы владельца
+    по шкале п. 3.1 (658 400 ₸ у оператора со стажем, 180 600 ₸ у новичка) — в .mjs."""
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required")
     def test_osnova_salary_runtime(self):

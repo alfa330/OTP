@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+    OSNOVA_DEAL_PRICE_STEPS,
     OSNOVA_HOURLY_RATE,
     OSNOVA_NORM_HOURS_FTE,
     calculateOsnovaMonthlyPlan,
@@ -11,11 +12,13 @@ import {
     osnovaQualityWithholdRate,
 } from '../src/utils/salaryFormula.js';
 
-// Эталон — файл владельца «Основа_калькулятор зарплаты.xlsx», лист «Основа»:
+// Входные строки — файл владельца «Основа_калькулятор зарплаты.xlsx», лист «Основа»:
 // план на 1 FTE (день) = 691 сделка, норма 1 FTE = 176 ч, оплата 600 ₸/ч.
+// Цена сделки — уже по новой шкале п. 3.1 (11.11.2026), поэтому бонус и итог
+// отличаются от N24/N25 файла: там ещё ступени 100/200/400/450/500/600 ₸.
 const PLAN_PER_FTE = 691;
 
-test('строка «Оператор со стажем» из таблицы владельца сходится до тенге', () => {
+test('строка «Оператор со стажем»: ровно 100% плана — 800 ₸ за продажу', () => {
     // B5=691 сделка, C5=176 ч, B24=98% качества, штрафов нет.
     const r = calculateOsnovaSalary({
         hoursWorked: 176,
@@ -28,15 +31,15 @@ test('строка «Оператор со стажем» из таблицы в
 
     assert.equal(r.planTarget, 691);          // D5 = 691/176*176
     assert.equal(r.planPercent, 1);           // E5 = 100%
-    assert.equal(r.dealPrice, 450);           // J24: ровно 100% → ступень 100–120%
+    assert.equal(r.dealPrice, 800);           // ступень 100–119,9%
     assert.equal(r.oklad, 105600);            // I24 = 176 × 600
-    assert.equal(r.bonusDeals, 310950);       // K24 = 691 × 450
+    assert.equal(r.bonusDeals, 552800);       // 691 × 800
     assert.equal(r.qualityWithholdRate, 0);   // C24: качество 98 ≥ 96
-    assert.equal(r.qualityWithheld, 0);       // L24
-    assert.equal(r.finalSalary, 416550);      // N24
+    assert.equal(r.qualityWithheld, 0);
+    assert.equal(r.finalSalary, 658400);      // 105 600 + 552 800
 });
 
-test('строка «Новичок» из таблицы владельца сходится до тенге', () => {
+test('строка «Новичок»: 54% плана — 500 ₸ за продажу, удержание 50% за качество', () => {
     // B6=300 сделок, C6=176 ч, план ×0,8, B25=70% качества → удержание 50%.
     const r = calculateOsnovaSalary({
         hoursWorked: 176,
@@ -50,28 +53,53 @@ test('строка «Новичок» из таблицы владельца с�
 
     assert.equal(Number(r.planTarget.toFixed(4)), 552.8);        // D6 = 691/176*176*0,8
     assert.equal(Number(r.planPercent.toFixed(6)), 0.542692);    // E6
-    assert.equal(r.dealPrice, 200);                              // 50% ≤ % < 80% → 200 ₸
-    assert.equal(r.bonusDeals, 60000);                           // K25 = 300 × 200
+    assert.equal(r.dealPrice, 500);                              // ступень 50–79,9%
+    assert.equal(r.bonusDeals, 150000);                          // 300 × 500
     assert.equal(r.qualityWithholdRate, 0.5);                    // C25: 70 < 74
-    assert.equal(r.qualityWithheld, 30000);                      // L25
-    assert.equal(r.finalSalary, 135600);                         // N25
+    assert.equal(r.qualityWithheld, 75000);                      // 150 000 × 0,5
+    assert.equal(r.finalSalary, 180600);                         // 105 600 + 150 000 − 75 000
 });
 
-test('ступени цены сделки повторяют формулу J24, а не подписи слайдов', () => {
-    assert.equal(osnovaDealPrice(0), 100);
-    assert.equal(osnovaDealPrice(0.4999), 100);
-    assert.equal(osnovaDealPrice(0.5), 200);
-    assert.equal(osnovaDealPrice(0.7999), 200);
-    assert.equal(osnovaDealPrice(0.8), 400);
-    assert.equal(osnovaDealPrice(0.9999), 400);
-    // Ровно 100% плана — это ещё 450 ₸, а не 500: в J24 стоит E24<120%.
-    assert.equal(osnovaDealPrice(1), 450);
-    assert.equal(osnovaDealPrice(1.1999), 450);
-    assert.equal(osnovaDealPrice(1.2), 500);
-    assert.equal(osnovaDealPrice(1.3999), 500);
-    assert.equal(osnovaDealPrice(1.4), 600);
-    // Выше 140% цена не растёт — в таблице 160% и 180% тоже 600 ₸.
-    assert.equal(osnovaDealPrice(3), 600);
+test('ставка за продажу — ступени п. 3.1 мотивационной шкалы', () => {
+    // Каждая граница документа: последнее значение ступени и первое следующей.
+    const cases = [
+        [0, 200], [0.499, 200], [0.4999, 200],
+        [0.5, 500], [0.799, 500],
+        [0.8, 700], [0.999, 700], [0.9999, 700],
+        [1, 800], [1.199, 800],
+        [1.2, 900], [1.399, 900],
+        [1.4, 1000], [1.599, 1000],
+        [1.6, 1100], [1.799, 1100],
+        [1.8, 1200], [1.999, 1200],
+        [2, 1300], [5, 1300],          // выше 200% ставка не растёт
+    ];
+    for (const [ratio, price] of cases) {
+        assert.equal(osnovaDealPrice(ratio), price, `${ratio * 100}% плана → ${price} ₸`);
+    }
+    // Пустое и мусор — как 0% плана (нижняя ступень), без NaN.
+    assert.equal(osnovaDealPrice(''), 200);
+    assert.equal(osnovaDealPrice(undefined), 200);
+});
+
+test('шкала ставок — девять ступеней документа, подписи как в п. 3.1', () => {
+    assert.deepEqual(
+        OSNOVA_DEAL_PRICE_STEPS.map((s) => [s.label, s.price]),
+        [
+            ['0–49,9%', 200],
+            ['50–79,9%', 500],
+            ['80–99,9%', 700],
+            ['100–119,9%', 800],
+            ['120–139,9%', 900],
+            ['140–159,9%', 1000],
+            ['160–179,9%', 1100],
+            ['180–199,9%', 1200],
+            ['200% и выше', 1300],
+        ],
+    );
+    // Границы идут по возрастанию — иначе цикл выбора ступени ошибётся молча.
+    OSNOVA_DEAL_PRICE_STEPS.forEach((s, i, all) => {
+        if (i > 0) assert.ok(s.from > all[i - 1].from, `ступень ${s.label} выше предыдущей`);
+    });
 });
 
 test('шкала удержания за качество берёт границы из формулы C24', () => {
@@ -110,8 +138,8 @@ test('ночная смена делит план на 1 FTE пополам (H6 
         planPerFte: PLAN_PER_FTE, nightShift: true, quality: 100,
     });
     assert.equal(r.planPercent, 2);
-    assert.equal(r.dealPrice, 600);
-    assert.equal(r.finalSalary, 105600 + 691 * 600);
+    assert.equal(r.dealPrice, 1300);
+    assert.equal(r.finalSalary, 105600 + 691 * 1300);
 });
 
 test('норма часов на 1 FTE зависит от месяца: 31 день → 176 ч, 30 → 168 ч', () => {
@@ -144,11 +172,11 @@ test('оклад не зависит от продаж и качества — �
     assert.equal(Number(r.hoursPercentage.toFixed(4)), Number((150 / 176 * 100).toFixed(4)));
 });
 
-test('без плана бонус не начисляется, а не делится на ноль', () => {
+test('без плана процент не делится на ноль — продажи идут по нижней ступени', () => {
     const r = calculateOsnovaSalary({ hoursWorked: 176, hoursNorm: 176, deals: 500, planPerFte: 0, quality: 100 });
     assert.equal(r.planTarget, 0);
     assert.equal(r.planPercent, 0);
-    assert.equal(r.dealPrice, 100);          // ступень «ниже 50%»
-    assert.equal(r.bonusDeals, 50000);       // 500 × 100 — как посчитала бы таблица
+    assert.equal(r.dealPrice, 200);          // ступень 0–49,9%
+    assert.equal(r.bonusDeals, 100000);      // 500 × 200
     assert.ok(Number.isFinite(r.finalSalary));
 });

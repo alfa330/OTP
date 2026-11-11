@@ -5,6 +5,7 @@ import {
     TEZ_LINE_OKLAD,
     TEZ_OP_OKLAD,
     OSNOVA_HOURLY_RATE,
+    OSNOVA_DEAL_PRICE_STEPS,
     POTOK_HOURLY_RATE,
     VERIFICATOR_HOURLY_RATE,
     VERIFICATOR_QUALITY_POINT_STEPS,
@@ -409,10 +410,18 @@ const OsnovaCalculationResult = ({ salaryResult, label }) => {
                         value={shortMoney(dealPrice)}
                         tooltip={(
                             <>
-                                <div className="font-medium mb-1">Ступени по % плана</div>
-                                <div className="text-xs text-gray-600">
-                                    &lt;50% → 100 ₸, 50–80% → 200 ₸, 80–100% → 400 ₸, 100–120% → 450 ₸,
-                                    120–140% → 500 ₸, от 140% → 600 ₸
+                                <div className="font-medium mb-1">Ставка за продажу по % плана</div>
+                                {/* Строки — из самой шкалы формул, текущая ступень выделена. */}
+                                <div className="text-xs text-gray-600 tabular-nums">
+                                    {OSNOVA_DEAL_PRICE_STEPS.map((step) => (
+                                        <div
+                                            key={step.label}
+                                            className={`flex justify-between gap-3${step.price === dealPrice ? ' font-semibold text-gray-900' : ''}`}
+                                        >
+                                            <span>{step.label}</span>
+                                            <span>{step.price.toLocaleString('ru-RU')} ₸</span>
+                                        </div>
+                                    ))}
                                 </div>
                             </>
                         )}

@@ -180,7 +180,7 @@ const SalaryCalculatorOsnova = ({ prefill = null, prefillNonce = 0, month = '' }
           {numberInput(deals, setDeals, { min: 0, step: '1' })}
           <div className="mt-2 text-xs text-gray-500">
             Выполнение плана: <span className="font-medium text-gray-700">{planPercentText}</span>
-            <span className="ml-1 text-gray-400">— цена сделки {result.dealPrice} ₸</span>
+            <span className="ml-1 text-gray-400">— цена сделки {result.dealPrice.toLocaleString('ru-RU')} ₸</span>
           </div>
         </Field>
 
