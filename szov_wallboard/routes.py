@@ -1179,8 +1179,12 @@ def build_szov_wallboard_blueprint(
         requester_id, err = _szov_wallboard_guard()
         if err:
             return err
-        if not _oktell_api_ready():
-            return jsonify({"error": "Интеграция с Oktell недоступна: OKTELL_IP/OKTELL_API_TOKEN не задан"}), 503
+        # Мост Oktell не настроен — табло всё равно живёт, если снимок присылает коннектор на
+        # VM шлюза (пакет oktell_live). 503 — только когда нет ни того ни другого.
+        from oktell_live import store as oktell_live_store
+        if not _oktell_api_ready() and not oktell_live_store.agent_known():
+            return jsonify({"error": "Интеграция с Oktell недоступна: мост не настроен "
+                                     "(OKTELL_IP/OKTELL_API_TOKEN), коннектор на VM шлюза не на связи"}), 503
         try:
             return jsonify(_szov_wallboard_snapshot())
         except Exception as exc:

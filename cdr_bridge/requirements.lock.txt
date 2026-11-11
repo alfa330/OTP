@@ -13,7 +13,8 @@
 #       --platform manylinux2014_x86_64 --platform any
 #   pip hash whl/*.whl
 #
-# Обновлено 21.09.2026 (добавлен PyMySQL).
+# Обновлено 21.09.2026 (добавлен PyMySQL), 10.11.2026 (добавлен pymssql — коннектор Oktell;
+# колесо manylinux_2_28 x86_64 под CPython 3.12, зависимостей у него нет).
 
 requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0
@@ -33,3 +34,5 @@ pycparser==3.0 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
 pymysql==1.2.3 \
     --hash=sha256:14f1c68e2ed859243ae5ca41ffbe677027fc46bc136a9f0be8a4e928e5e7415a
+pymssql==2.4.6 \
+    --hash=sha256:dd1e5a1af9508033ef14bb8d074cfbf6cf2a4e04aab09207e63c9d4b37e3c485

@@ -30263,79 +30263,31 @@ def _oktell_wallboard_totals_sql(sl_seconds):
     Фрагмент: подставляется подзапросом в _oktell_wallboard_snapshot_sql. Считаем всё одним
     выражением — прокси Oktell просит не распараллеливать и не частить. «Сегодня» берём по
     часам самого Oktell (CONVERT(date, GETDATE())), чтобы граница суток совпадала с
-    источником, а не с нашим сервером."""
+    источником, а не с нашим сервером.
+
+    Сам текст запроса — в cdr/oktell_wallboard.py: тем же текстом снимок снимает коннектор
+    Oktell на VM шлюза, и двум путям показывать разные цифры нельзя. Здесь остаётся то, чем
+    путь портала отличается: условия «не тестовый номер» из реестра и константы монолита."""
     from test_numbers import keys as test_keys
-    grt = _OKTELL_GREETING_ABANDON.replace("'", "''")
-    fail = _OKTELL_FAILED_CALL.replace("'", "''")
-    # Цепочки, которые прямо сейчас ждут ответа: открытый лег в IVR/очереди и ни одного лега
-    # на оператора за всю историю цепочки (иначе это пост-обработка после разговора).
-    waiting_chains = (
-        "SELECT a.IdChain, MIN(a.TimeStart) AS started "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 a "
-        "WHERE a.ConnectionType = 4 AND a.BLineNum = N'IVR' AND a.TimeStop IS NULL "
-        f"AND a.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS}, GETDATE()) "
-        f"{test_keys.tsql_and_not_test('a.AOutNumber')}"
-        "AND NOT EXISTS (SELECT 1 FROM oktell.dbo.A_Stat_Connections_1x1 d "
-        "WHERE d.IdChain = a.IdChain AND d.ConnectionType = 5) "
-        "GROUP BY a.IdChain"
-    )
-    return (
-        "SELECT CONVERT(varchar(19), GETDATE(), 120) AS oktell_now, "
-        "q.queue_now, q.queue_max_wait_seconds, k.talking_now, "
-        "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
-        "t.wait_seconds, t.wait_served_seconds, t.max_wait_seconds, t.talk_seconds "
-        "FROM ("
-        "SELECT COUNT(*) AS queue_now, "
-        "ISNULL(MAX(DATEDIFF(second, w.started, GETDATE())), 0) AS queue_max_wait_seconds "
-        f"FROM ({waiting_chains}) w"
-        ") q CROSS JOIN ("
-        "SELECT COUNT(DISTINCT c.IdChain) AS talking_now "
-        "FROM oktell.dbo.A_Stat_Connections_1x1 c "
-        "WHERE c.ConnectionType = 5 AND c.TimeStop IS NULL "
-        f"AND c.TimeStart >= DATEADD(hour, -{_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS}, GETDATE()) "
-        f"{test_keys.tsql_and_not_test('c.AOutNumber')}"
-        ") k CROSS JOIN ("
-        "SELECT "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN 1 ELSE 0 END), 0) AS arrived, "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN 1 ELSE 0 END), 0) AS served, "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19) THEN 1 ELSE 0 END), 0) AS lost, "
-        f"ISNULL(SUM(CASE WHEN x.result_call = N'{grt}' THEN 1 ELSE 0 END), 0) AS greet_drop, "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) AND x.LenQueue <= {int(sl_seconds)} THEN 1 ELSE 0 END), 0) AS served_sl, "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue ELSE 0 END), 0) AS wait_seconds, "
-        # Числитель ASA: ожидание в очереди только у принятых — потерянные в него не входят.
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN x.LenQueue ELSE 0 END), 0) AS wait_served_seconds, "
-        f"MAX(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (13,19,5) THEN x.LenQueue END) AS max_wait_seconds, "
-        f"ISNULL(SUM(CASE WHEN x.result_call <> N'{grt}' AND x.call_result IN (5) THEN x.total_length ELSE 0 END), 0) AS talk_seconds "
-        "FROM oktell.dbo.Call_Systems_hst x "
-        "WHERE x.route = 'incoming' AND x.taxi_park <> '' "
-        f"AND x.result_call <> N'{fail}' "
-        f"{test_keys.tsql_and_not_test('x.[number]')}"
-        "AND x.dt_insert >= CONVERT(date, GETDATE()) "
-        "AND x.dt_insert < DATEADD(day, 1, CONVERT(date, GETDATE()))"
-        ") t"
-    )
+    from cdr import oktell_wallboard
+    return oktell_wallboard.totals_sql(
+        sl_seconds,
+        waiting_not_test=test_keys.tsql_and_not_test('a.AOutNumber'),
+        talking_not_test=test_keys.tsql_and_not_test('c.AOutNumber'),
+        totals_not_test=test_keys.tsql_and_not_test('x.[number]'),
+        greeting=_OKTELL_GREETING_ABANDON, failed=_OKTELL_FAILED_CALL,
+        queue_hours=_SZOV_WALLBOARD_QUEUE_LOOKBACK_HOURS,
+        talk_hours=_SZOV_WALLBOARD_TALK_LOOKBACK_HOURS)
 
 
 def _oktell_wallboard_operator_states_sql():
     """Текущий статус каждого оператора: последняя запись A_UserStateHistory на пользователя.
 
     Фрагмент без ORDER BY: подставляется подзапросом в _oktell_wallboard_snapshot_sql, а
-    производной таблице сортировка запрещена — она навешивается снаружи.
-
-    State 0/7 (Выключен/Без телефона) отбрасываем — это «не на линии». Окно в 2 суток нужно,
-    чтобы поймать смену, начавшуюся вчера; Oktell пишет явный переход в 0 при отключении,
-    поэтому «залипших» готовых операторов из прошлых дней здесь не будет."""
-    return (
-        "SELECT oi.Name AS operator_name, x.State AS state, x.ICode AS icode, "
-        "CONVERT(varchar(19), x.TimeChange, 120) AS since, "
-        "DATEDIFF(second, x.TimeChange, GETDATE()) AS in_state_seconds "
-        "FROM (SELECT h.UserId, h.State, h.ICode, h.TimeChange, "
-        "ROW_NUMBER() OVER (PARTITION BY h.UserId ORDER BY h.Enumerator DESC) AS rn "
-        "FROM oktell.dbo.A_UserStateHistory h "
-        "WHERE h.TimeChange >= DATEADD(day, -2, GETDATE())) x "
-        "JOIN oktell_cc_temp.dbo.A_Cube_CC_Cat_OperatorInfo oi ON oi.Id = x.UserId "
-        "WHERE x.rn = 1 AND x.State NOT IN (0, 7)"
-    )
+    производной таблице сортировка запрещена — она навешивается снаружи. Текст — в
+    cdr/oktell_wallboard.py (общий с коннектором Oktell на VM шлюза)."""
+    from cdr import oktell_wallboard
+    return oktell_wallboard.operator_states_sql()
 
 
 def _oktell_wallboard_snapshot_sql(sl_seconds):
@@ -30347,17 +30299,11 @@ def _oktell_wallboard_snapshot_sql(sl_seconds):
     его работы. Однострочные итоги подклеиваются к каждой строке статусов; на 20-40 операторов
     это десяток лишних килобайт в ответе — несопоставимо дешевле второго обращения.
 
-    LEFT JOIN, а не CROSS JOIN: если на линии нет ни одного оператора (ночь, все выключены),
-    итоги дня всё равно должны приехать — вернётся одна строка со статусными колонками NULL."""
-    return (
-        "SELECT t.oktell_now, t.queue_now, t.queue_max_wait_seconds, t.talking_now, "
-        "t.arrived, t.served, t.lost, t.greet_drop, t.served_sl, "
-        "t.wait_seconds, t.wait_served_seconds, t.max_wait_seconds, t.talk_seconds, "
-        "s.operator_name, s.state, s.icode, s.since, s.in_state_seconds "
-        f"FROM ({_oktell_wallboard_totals_sql(sl_seconds)}) t "
-        f"LEFT JOIN ({_oktell_wallboard_operator_states_sql()}) s ON 1 = 1 "
-        "ORDER BY s.operator_name"
-    )
+    Склейка двух фрагментов (LEFT JOIN: ночью без операторов итоги дня всё равно приезжают) —
+    в cdr/oktell_wallboard.py, общая с коннектором Oktell на VM шлюза."""
+    from cdr import oktell_wallboard
+    return oktell_wallboard.join_sql(_oktell_wallboard_totals_sql(sl_seconds),
+                                     _oktell_wallboard_operator_states_sql())
 
 
 def _szov_wallboard_int(value):
@@ -30474,10 +30420,29 @@ def _szov_wallboard_build_operators(raw_rows):
 
 
 def _szov_wallboard_fetch_snapshot():
-    """Свежий снимок табло. Ровно ОДИН запрос к Oktell — итоги и статусы приезжают вместе."""
+    """Свежий снимок табло. Итоги и статусы приезжают вместе, одним запросом.
+
+    Строки снимает коннектор Oktell на VM шлюза и присылает сам (пакет oktell_live): пока его
+    снимок свеж, портал к мосту Oktell не ходит вовсе. Коннектор молчит — ровно ОДИН запрос к
+    мосту, как до коннектора. Запрос у обоих путей один и тот же (cdr/oktell_wallboard.py)."""
+    from oktell_live import store as oktell_live_store
     sl_seconds = int(OKTELL_BILLING_SL_DEFAULT_SECONDS)
-    rows = _oktell_query(_oktell_wallboard_snapshot_sql(sl_seconds),
-                         timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS) or []
+    pushed = oktell_live_store.wallboard_rows(sl_seconds)
+    if pushed is not None:
+        rows, source = pushed['rows'], oktell_live_store.SOURCE_VM
+    else:
+        try:
+            rows = _oktell_query(_oktell_wallboard_snapshot_sql(sl_seconds),
+                                 timeout=SZOV_WALLBOARD_OKTELL_TIMEOUT_SECONDS) or []
+        except Exception as exc:
+            # Коннектор у портала есть, а снимка от него нет: без этой причины «мост не
+            # отвечает» читалось бы как единственная беда, и искали бы не там.
+            note = oktell_live_store.silence_note()
+            if note:
+                raise RuntimeError(f"{note}; мост Oktell: {exc}") from exc
+            raise
+        source = oktell_live_store.SOURCE_BRIDGE
+    oktell_live_store.note_source(source)
     # Итоги дня продублированы в каждой строке — берём из первой. Строка без имени оператора
     # означает «на линии никого»: LEFT JOIN отдал итоги с пустой статусной частью.
     totals = (rows or [{}])[0] or {}
@@ -30493,6 +30458,9 @@ def _szov_wallboard_fetch_snapshot():
     max_wait = totals.get('max_wait_seconds')
     return {
         'oktell_now': totals.get('oktell_now'),
+        # Кто дал строки: 'vm' — коннектор на VM шлюза, 'bridge' — мост Oktell. На экран не
+        # выводится; нужно, чтобы по ответу было видно, каким путём пришёл снимок.
+        'source': source,
         'sl_threshold_seconds': sl_seconds,
         'now': {
             'queue': _szov_wallboard_int(totals.get('queue_now')),
@@ -30585,7 +30553,8 @@ def _szov_wallboard_persist_cache(payload, captured_at):
 
 
 def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max, retry_after,
-                                   lock_wait, before=None, after=None, label='Табло СЗоВ'):
+                                   lock_wait, before=None, after=None, label='Табло СЗоВ',
+                                   newer_source=None):
     """Снимок табло с общим TTL-кэшем на процесс. Одна механика на оба направления.
 
     Табло смотрят несколько человек сразу, и оно висит на стене весь день, поэтому к источнику
@@ -30598,7 +30567,12 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
     одни: разъедутся — и одно табло будет показывать замёрзшие данные как свежие. Поэтому
     копии этой функции быть не должно. before/after — то, чем направления отличаются:
     поднять кэш из БД на старте и дублировать туда удачные снимки. `label` — название табло
-    для текста ошибки и лога: зритель табло Тез не должен читать про «Табло СЗоВ»."""
+    для текста ошибки и лога: зритель табло Тез не должен читать про «Табло СЗоВ».
+
+    newer_source(момент) — для источника, который приносит данные сам, а не ждёт запроса
+    (коннектор Oktell на VM шлюза): есть ли у него данные новее готового снимка. Тогда снимок
+    пересобирается сразу — ни TTL, ни пауза после отказа этому не мешают: обе берегут
+    источник от лишних запросов, а здесь запроса к нему нет."""
 
     def _fresh(payload, at):
         return dict(payload, stale=False, age_seconds=int(max(0, time.time() - at)))
@@ -30606,18 +30580,22 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
     def _stale(payload, at, reason):
         return dict(payload, stale=True, age_seconds=int(max(0, time.time() - at)), error=reason)
 
+    def _newer(at):
+        return newer_source is not None and bool(newer_source(at))
+
     if before is not None:
         before()
     cached = cache.get('payload')
     cached_at = cache['ts']
-    if cached is not None and time.time() - cached_at < ttl:
+    if cached is not None and time.time() - cached_at < ttl and not _newer(cached_at):
         return _fresh(cached, cached_at)
 
     # Источник недавно не ответил — не идём к нему снова до конца паузы.
     failed_at = cache.get('failed_at') or 0.0
     if (cached is not None
             and time.time() - failed_at < retry_after
-            and time.time() - cached_at < stale_max):
+            and time.time() - cached_at < stale_max
+            and not _newer(cached_at)):
         return _stale(cached, cached_at, cache.get('error') or f'{source} не отвечает')
 
     if not lock.acquire(timeout=lock_wait):
@@ -30629,7 +30607,7 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
         # Пока ждали лок, соседний поток мог уже обновить кэш.
         cached = cache.get('payload')
         cached_at = cache['ts']
-        if cached is not None and time.time() - cached_at < ttl:
+        if cached is not None and time.time() - cached_at < ttl and not _newer(cached_at):
             return _fresh(cached, cached_at)
         try:
             payload = fetch()
@@ -30652,6 +30630,7 @@ def _wallboard_snapshot_with_cache(*, cache, lock, fetch, source, ttl, stale_max
 
 def _szov_wallboard_snapshot():
     """Снимок направления «Линия»: входящая линия Oktell."""
+    from oktell_live import store as oktell_live_store
     return _wallboard_snapshot_with_cache(
         cache=_szov_wallboard_cache,
         lock=_szov_wallboard_lock,
@@ -30662,7 +30641,10 @@ def _szov_wallboard_snapshot():
         retry_after=SZOV_WALLBOARD_RETRY_AFTER_FAIL_SECONDS,
         lock_wait=SZOV_WALLBOARD_LOCK_WAIT_SECONDS,
         before=_szov_wallboard_restore_cache,
-        after=_szov_wallboard_persist_cache)
+        after=_szov_wallboard_persist_cache,
+        # Коннектор Oktell на VM шлюза привёз снимок новее готового — табло показывает его
+        # сразу, а не через TTL: строки уже в памяти портала, к Oktell за ними идти не надо.
+        newer_source=oktell_live_store.wallboard_newer_than)
 
 
 
@@ -54980,6 +54962,27 @@ try:
     logging.info("Раздел «АТС»: Blueprint подключён на /api/pbx")
 except Exception:
     logging.exception("Раздел «АТС»: Blueprint НЕ подключён")
+
+# --- Oktell с VM шлюза: снимок «Табло СЗоВ · Линия» (коннектор cdr_bridge/oktell_connector.py) ---
+# Коннектор стоит в одной сети с базой Oktell, читает её сам (учётка только на чтение) и раз в
+# несколько секунд присылает снимок табло подписанным запросом — тем же ключом, что мост
+# «Касаний». Пока снимок свеж, табло к мосту Oktell (HTTP /query) не ходит; текст запроса —
+# общий, cdr/oktell_wallboard.py. От портала коннектору уходят только параметры снимка.
+try:
+    from oktell_live.routes import build_oktell_live_blueprint  # noqa: E402
+
+    def _oktell_live_wallboard_params():
+        # Те же порог SL и «Реестр тестовых номеров», с которыми портал сам строит запрос.
+        return {'sl_seconds': int(OKTELL_BILLING_SL_DEFAULT_SECONDS),
+                'test_keys': sorted(_test_numbers_keys.current_keys())}
+
+    app.register_blueprint(build_oktell_live_blueprint(
+        build_cors_preflight_response=_build_cors_preflight_response,
+        wallboard_params=_oktell_live_wallboard_params,
+    ))
+    logging.info("Oktell с VM шлюза: Blueprint подключён на /api/oktell_live")
+except Exception:
+    logging.exception("Oktell с VM шлюза: Blueprint НЕ подключён")
 
 # --- Табло ОП: отдел продаж на FreePBX -----------------------------------------------------
 # Аналог табло СЗоВ по «Линии», но портал к станции не ходит: цифры дня — из касаний,
