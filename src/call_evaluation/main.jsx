@@ -12,7 +12,9 @@ import {
 } from './employmentTabs';
 import { AUTH_REFRESH_OUTCOME, createSharedAuthRefresh, isRecoverableAuthBody, watchAuthTokensFromOtherTabs } from '../utils/authRefresh';
 import EvalPeriodPicker from './EvalPeriodPicker';
-import { analyticsMonthPeriod, analyticsPeriodMonth, analyticsPeriodQuery, currentMonthPeriod } from './analyticsPeriod';
+import {
+    analyticsDataView, analyticsMonthPeriod, analyticsPeriodMonth, analyticsPeriodQuery, currentMonthPeriod,
+} from './analyticsPeriod';
 const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL || 'https://api.icorehub.kz';
 const AUTH_REFRESH_URL = `${API_BASE_URL}/api/auth/refresh`;
 const EMBED_STATE_KEY = 'call_evaluation_embed_state';
@@ -6657,25 +6659,19 @@ const App = ({ user, initialSelection }) => {
        каждый рендер новая и раскладка по статусам пересчитывается вхолостую. */
     const analyticsScopedOperators = analyticsSelectedSvData?.operators ?? EMPTY_OPERATOR_ROWS;
 
-    /* Месяц, период и группа — из самого ответа, а не из селекторов: пока
-       грузится новый период, на экране ещё старые строки, и делить их надо по
-       их же периоду. Месяц есть, только когда ответ месячный (целый месяц):
-       тогда и вкладки, и план — прежние, месячные. */
-    const analyticsDataPeriod = analyticsSelectedSvData
-        ? (analyticsSelectedSvData.requested_period || null)
-        : analyticsPeriod;
-    const analyticsDataMonth = analyticsSelectedSvData
-        ? (analyticsSelectedSvData.requested_month || null)
-        : analyticsPeriodMonth(analyticsPeriod);
+    /* Месяц, период и план — из самого ответа, а не из селекторов (правило —
+       analyticsDataView в analyticsPeriod.js, там же тест). План месячный: у
+       периода не из одного месяца его нет — ни «плана», ни «% нормы». */
+    const analyticsView = analyticsDataView(analyticsSelectedSvData, analyticsPeriod);
+    const analyticsDataMonth = analyticsView.dataMonth;
+    const analyticsDataFrom = analyticsView.tabsContext.period?.from;
+    const analyticsDataTo = analyticsView.tabsContext.period?.to;
+    // Объект контекста — тот же, пока не сменились месяц или края: от него зависят раскладка и чипы.
     const analyticsTabsContext = React.useMemo(() => (analyticsDataMonth
         ? { month: analyticsDataMonth }
-        : { period: analyticsDataPeriod || { from: '', to: '' } }),
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-        [analyticsDataMonth, analyticsDataPeriod?.from, analyticsDataPeriod?.to]);
-    // План месячный: у периода не из одного месяца его нет — ни «плана», ни «% нормы».
-    const analyticsPlanAvailable = analyticsSelectedSvData
-        ? analyticsSelectedSvData.plan_available !== false
-        : true;
+        : { period: { from: analyticsDataFrom, to: analyticsDataTo } }),
+        [analyticsDataMonth, analyticsDataFrom, analyticsDataTo]);
+    const analyticsPlanAvailable = analyticsView.planAvailable;
     const analyticsDataGroupId = analyticsSelectedSvData?.group_id ?? analyticsSelectedGroupId;
 
     /* Одна раскладка на рендер: из неё и счётчики вкладок, и состав таблицы, и

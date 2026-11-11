@@ -55,10 +55,11 @@ export const QA_FIRST_DAY = '2026-01-01';
     (одно это поле над вкладкой). Живёт в тех же date_from/date_to отбора
     CallQaView, поэтому выбранный на одной вкладке период действует и на
     соседних — как и остальной отбор. */
-export function QaPeriodField({ filters, onChange }) {
+export function QaPeriodField({ filters, onChange, disabled = false }) {
     const value = filters || EMPTY_FILTERS;
     return (
         <IosDateRangePicker
+            disabled={disabled}
             from={value.date_from || ''}
             to={value.date_to || ''}
             min={QA_FIRST_DAY}
@@ -135,6 +136,9 @@ export default function QaFilters(props) {
            Без доступа: ни блока сделки, ни пресетов, ни выгрузки, и их
            справочники даже не запрашиваются. */
         marketingAccess = false,
+        /* Пока в «Базе разборов» правят правило, период не меняется: новый период
+           перерисовал бы каталог и молча унёс набранную правку. */
+        periodDisabled = false,
     } = props;
 
     const headers = () => (withAccessTokenHeader ? withAccessTokenHeader() : {});
@@ -337,12 +341,18 @@ export default function QaFilters(props) {
     const directions = options?.directions || [];
     const groups = options?.groups || [];
     const operators = options?.operators || [];
-    const activeCount = marketingOnly ? countMarketingFilters(value) : countActiveFilters(value);
+    /* На кнопке «Фильтры · N» — только отобранное в панели: период стоит рядом
+       своим календарём, и «· 1» за один период звало бы искать его в панели. */
+    const activeCount = marketingOnly ? countMarketingFilters(value)
+        : countActiveFilters({ ...value, date_from: '', date_to: '' });
     const allChips = activeFilterChips(value, { directions, groups, operators,
                                                marketing: marketing || {} });
-    const chips = marketingOnly
+    /* Чипа «Период» нет: календарь стоит тут же и сам подписывает период
+       («Ноябрь 2026»), а снимается кнопкой «Весь период» в календаре (#389). Второй
+       подписью того же — «01.11 — 30.11» под «Ноябрь 2026» — был бы шум. */
+    const chips = (marketingOnly
         ? allChips.filter((chip) => MARKETING_CHIP_KEYS.includes(chip.key))
-        : allChips;
+        : allChips).filter((chip) => chip.key !== 'period');
     const marketingReady = !!marketing?.available;
     const set = (fields) => onChange?.({ ...value, ...fields });
 
@@ -377,7 +387,10 @@ export default function QaFilters(props) {
     /* «Сбросить» в «Базе разборов» снимает только оси сделки: остальной отбор
        там не виден, и молча стирать его — значит потерять период, выставленный
        во «Звонках». */
-    const resetAll = () => onChange?.(marketingOnly ? clearMarketing(value) : EMPTY_FILTERS);
+    /* «Сбросить» снимает отбор, а не период: период — общий для раздела и
+       меняется своим календарём («Весь период»). */
+    const resetAll = () => onChange?.(marketingOnly ? clearMarketing(value)
+        : { ...EMPTY_FILTERS, date_from: value.date_from || '', date_to: value.date_to || '' });
     const chipsRow = chips.length > 0 && (
         <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
             {chips.map((chip) => (
@@ -424,7 +437,7 @@ export default function QaFilters(props) {
         return (
             <div>
                 <section className="flex flex-wrap items-center gap-2.5">
-                    <QaPeriodField filters={value} onChange={onChange} />
+                    <QaPeriodField filters={value} onChange={onChange} disabled={periodDisabled} />
                     {marketingReady && toggleButton('Отбор по сделке')}
                 </section>
                 {marketingReady && chipsRow}

@@ -752,7 +752,7 @@ class OperatorsMixin:
         return result
 
     def get_operator_score_aggregates_for_period(self, operator_ids: Optional[List[int]] = None, *,
-                                                 months=None, start=None, end=None):
+                                                 months=None, start=None, end=None, operator_months=None):
         """Агрегаты завершённых оценок за ПЕРИОД «Аналитики» журнала (задача #389).
 
         Выборка та же, что у get_operator_score_aggregates_for_month: одна
@@ -762,9 +762,15 @@ class OperatorsMixin:
         _journal_period_sql: целые месяцы — по месяцу журнала, остальное — по
         дню обращения, ничего — всё время. Один месяц «Аналитика» по-прежнему
         считает функцией месяца — ради тех же цифр, что в журнале и выгрузке.
+
+        operator_months — пары (оператор, «ГГГГ-ММ»): месяцы журнала, когда человек
+        был в группе; вместо operator_ids (режим группы, период длиннее месяца).
         """
+        pair_ids, pair_months = self._journal_operator_month_pairs(operator_months)
+        if operator_months is not None and not pair_ids:
+            return {}
         normalized_ids = None
-        if operator_ids is not None:
+        if operator_ids is not None and operator_months is None:
             normalized_ids = []
             seen_ids = set()
             for raw_id in operator_ids:
@@ -782,7 +788,10 @@ class OperatorsMixin:
         from test_numbers import keys as test_keys
         period_sql, params = self._journal_period_sql(months=months, start=start, end=end)
         filter_clause = period_sql + " AND is_draft = FALSE AND " + test_keys.sql_calls_not_test()
-        if normalized_ids is not None:
+        if pair_ids:
+            filter_clause += " AND (operator_id, month) IN (SELECT * FROM unnest(%s::int[], %s::text[]))"
+            params.extend([pair_ids, pair_months])
+        elif normalized_ids is not None:
             filter_clause += " AND operator_id = ANY(%s)"
             params.append(normalized_ids)
 
@@ -826,13 +835,13 @@ class OperatorsMixin:
         return result
 
     def get_feedback_sla_operator_stats_for_period(self, operator_ids: Optional[List[int]] = None, *,
-                                                   months=None, start=None, end=None,
+                                                   months=None, start=None, end=None, operator_months=None,
                                                    reference_date=None) -> Dict[int, Dict[str, Any]]:
         """Обратная связь по оценкам за ПЕРИОД «Аналитики» журнала (#389) — счёт тот
         же, что у get_feedback_sla_operator_stats_for_month."""
         rows = self.get_feedback_sla_rows_for_period(
             operator_ids=operator_ids, months=months, start=start, end=end,
-            reference_date=reference_date)
+            operator_months=operator_months, reference_date=reference_date)
         return self._feedback_sla_stats_from_rows(rows)
 
     def get_feedback_sla_operator_stats_for_month(

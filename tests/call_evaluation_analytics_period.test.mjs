@@ -14,7 +14,7 @@ import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
-    analyticsMonthPeriod, analyticsPeriodMonth, analyticsPeriodQuery, currentMonthPeriod,
+    analyticsDataView, analyticsMonthPeriod, analyticsPeriodMonth, analyticsPeriodQuery, currentMonthPeriod,
 } from '../src/call_evaluation/analyticsPeriod.js';
 import { dayCells, pickDayStep, selectionBand } from '../src/components/ui/periodRange.js';
 
@@ -77,6 +77,31 @@ test('выбор дня: начало, конец, тот же день дваж
         { lo: '2026-11-01', hi: '2026-11-03', hasRange: true }, 'вне шага «конец» курсор полосу не тянет');
 });
 
+test('таблица делится по периоду ответа: пока грузится неделя, строки октября — помесячно и с планом', () => {
+    const october = { requested_month: '2026-10', requested_period: { from: '2026-10-01', to: '2026-10-31' },
+                      plan_available: true, operators: [] };
+    const week = { from: '2026-11-04', to: '2026-11-10' };
+    assert.deepEqual(analyticsDataView(october, week),
+        { dataMonth: '2026-10', tabsContext: { month: '2026-10' }, planAvailable: true });
+});
+
+test('ответ не за один месяц — вкладки по датам ответа и без плана, «% нормы» и «Уведомить»', () => {
+    const weekly = { requested_month: null, requested_period: { from: '2026-11-04', to: '2026-11-10' },
+                     plan_available: false };
+    assert.deepEqual(analyticsDataView(weekly, { from: '2026-10-01', to: '2026-10-31' }),
+        { dataMonth: null, tabsContext: { period: { from: '2026-11-04', to: '2026-11-10' } }, planAvailable: false });
+    const all = { requested_month: null, requested_period: { from: '', to: '' }, plan_available: false };
+    assert.deepEqual(analyticsDataView(all, null).tabsContext, { period: { from: '', to: '' } });
+});
+
+test('ответ старого сервера (без plan_available) — с планом, как было; ответа нет — по выбранному', () => {
+    assert.equal(analyticsDataView({ requested_month: '2026-10' }, null).planAvailable, true);
+    assert.deepEqual(analyticsDataView(null, { from: '2026-10-01', to: '2026-10-31' }),
+        { dataMonth: '2026-10', tabsContext: { month: '2026-10' }, planAvailable: true });
+    assert.deepEqual(analyticsDataView(null, { from: '2026-11-04', to: '2026-11-10' }),
+        { dataMonth: null, tabsContext: { period: { from: '2026-11-04', to: '2026-11-10' } }, planAvailable: false });
+});
+
 /* ── календарь журнала ─────────────────────────────────────────────────── */
 
 async function loadPicker() {
@@ -88,10 +113,10 @@ async function loadPicker() {
         bundle: true, format: 'esm', platform: 'node', target: 'node18', outfile,
         packages: 'external', loader: { '.js': 'jsx', '.jsx': 'jsx', '.css': 'empty' }, logLevel: 'silent',
     });
-    return (await import(`file://${outfile.replace(/\\/g, '/')}`)).default;
+    return import(`file://${outfile.replace(/\\/g, '/')}`);
 }
 
-const EvalPeriodPicker = await loadPicker();
+const { default: EvalPeriodPicker, PeriodCalendar } = await loadPicker();
 const chip = (props) => renderToStaticMarkup(React.createElement(EvalPeriodPicker, { onChange() {}, ...props }));
 
 test('кнопка календаря журнала: подпись периода словами, вид кнопки журнала', () => {
@@ -104,3 +129,40 @@ test('кнопка календаря журнала: подпись перио�
     assert.ok(chip({ from: '2026-11-10', to: '2026-11-10' }).includes('10 ноя 2026'));
     assert.ok(!month.includes('role="dialog"'), 'закрытый календарь панели не рисует');
 });
+
+/* Панель (PeriodCalendar) — в портале, его react-dom/server не рисует; рисуем её
+   саму. Разбор #389 (тест ревьюера): годы до начала журнала не предлагаются, за
+   границы не листается, шесть недель всегда. */
+const panel = (props) => renderToStaticMarkup(React.createElement(PeriodCalendar, {
+    min: '2025-01-01', max: '2026-11-10', onPick() {}, ...props }));
+const buttons = (html, cls) => [...html.matchAll(new RegExp(`<button[^>]*class="${cls}[^"]*"[^>]*>([^<]*)<`, 'g'))]
+    .map((m) => ({ tag: m[0], text: m[1] }));
+
+test('панель журнала, год: вид «Годы», годов до начала журнала нет', () => {
+    const html = panel({ from: '2025-01-01', to: '2025-12-31' });
+    assert.match(html, /aria-selected="true"[^>]*>Годы</);
+    const years = buttons(html, 'ce-period-whole');
+    assert.deepEqual(years.map((b) => b.text), ['2025', '2026']);
+    assert.ok(years.find((b) => b.text === '2025').tag.includes('aria-pressed="true"'));
+    assert.match(html, /aria-label="Более ранние годы" disabled=""/);
+});
+
+test('панель журнала, месяц: вид «Месяцы»; назад за начало журнала не листается, будущее недоступно', () => {
+    const html = panel({ from: '2025-01-01', to: '2025-01-31' });
+    assert.match(html, /aria-selected="true"[^>]*>Месяцы</);
+    assert.match(html, /aria-label="Предыдущий год" disabled=""/);
+    const now = panel({ from: '2026-11-01', to: '2026-11-30' });
+    const dec = buttons(now, 'ce-period-whole').find((b) => /дек/i.test(b.text));
+    assert.ok(dec && dec.tag.includes('disabled=""'), 'декабрь 2026 позже max');
+});
+
+test('панель журнала, дни: шесть недель, дни после max недоступны, быстрые периоды 2 × 2', () => {
+    const html = panel({ from: '2026-11-10', to: '2026-11-10' });
+    assert.match(html, /aria-selected="true"[^>]*>Дни</);
+    assert.equal((html.match(/class="ce-period-cell/g) || []).length, 42);
+    const days = buttons(html, 'ce-period-day');
+    assert.ok(days.find((b) => b.text === '11').tag.includes('disabled=""'), '11 ноября позже max');
+    assert.ok(!days.find((b) => b.text === '10').tag.includes('disabled=""'));
+    assert.equal((html.match(/class="ce-period-preset[ "]/g) || []).length, 4);
+});
+

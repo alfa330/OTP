@@ -33,3 +33,22 @@ export const analyticsPeriodMonth = (period, now = new Date()) => {
 export const analyticsPeriodQuery = (period) => (period?.from && period?.to
     ? { date_from: period.from, date_to: period.to }
     : { period: 'all' });
+
+/** Как делить и подписывать строки «Аналитики» — по самому ответу, а не по
+    селекторам: пока грузится новый период, на экране ещё прежние строки, и
+    вкладки, чипы и план считаются по их же периоду. Месяц — только у ответа за
+    один целый месяц: тогда вкладки и план прежние, месячные. Ответа ещё нет —
+    по выбранному периоду. Ответ старого сервера (без plan_available) — с планом,
+    как было.
+    → { dataMonth, tabsContext: { month } | { period: { from, to } }, planAvailable } */
+export const analyticsDataView = (svData, period) => {
+    const month = svData
+        ? (svData.requested_month || null)
+        : wholeMonthOf(period?.from, period?.to);
+    const range = svData ? (svData.requested_period || {}) : (period || {});
+    return {
+        dataMonth: month,
+        tabsContext: month ? { month } : { period: { from: range.from || '', to: range.to || '' } },
+        planAvailable: svData ? svData.plan_available !== false : Boolean(month),
+    };
+};

@@ -2160,6 +2160,20 @@ class CallsMixin:
             params.append(end + timedelta(days=1))
         return (" AND ".join(clauses) or "TRUE"), params
 
+    @staticmethod
+    def _journal_operator_month_pairs(operator_months):
+        """Пары (оператор, «ГГГГ-ММ») → два списка для unnest; кривые пары — мимо."""
+        ids, months = [], []
+        for pair in operator_months or []:
+            try:
+                operator_id, month = int(pair[0]), str(pair[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if len(month) == 7 and month[4] == '-':
+                ids.append(operator_id)
+                months.append(month)
+        return ids, months
+
     def get_feedback_sla_rows_for_period(
         self,
         operator_ids: Optional[List[int]] = None,
@@ -2167,13 +2181,20 @@ class CallsMixin:
         months=None,
         start=None,
         end=None,
+        operator_months=None,
         reference_date=None
     ) -> List[Dict[str, Any]]:
         """Строки SLA обратной связи за ПЕРИОД «Аналитики» журнала (#389) — те же,
         что get_feedback_sla_rows_for_month, но период задаёт _journal_period_sql
-        (целые месяцы — по месяцу журнала, остальное — по дню обращения)."""
+        (целые месяцы — по месяцу журнала, остальное — по дню обращения).
+
+        operator_months — пары (оператор, «ГГГГ-ММ»): месяцы журнала, когда человек
+        был в группе; вместо operator_ids (режим группы, период длиннее месяца)."""
+        pair_ids, pair_months = self._journal_operator_month_pairs(operator_months)
+        if operator_months is not None and not pair_ids:
+            return []
         operator_ids_norm = None
-        if operator_ids is not None:
+        if operator_ids is not None and operator_months is None:
             operator_ids_norm = []
             seen = set()
             for value in operator_ids:
@@ -2195,7 +2216,10 @@ class CallsMixin:
         # группы из двадцати человек все оценки года — это минуты на слабой базе.
         operators_sql = ""
         params: List[Any] = [*period_params]
-        if operator_ids_norm is not None:
+        if pair_ids:
+            operators_sql = " AND (operator_id, month) IN (SELECT * FROM unnest(%s::int[], %s::text[]))"
+            params.extend([pair_ids, pair_months])
+        elif operator_ids_norm is not None:
             operators_sql = " AND operator_id = ANY(%s)"
             params.append(operator_ids_norm)
         params.extend(period_params)

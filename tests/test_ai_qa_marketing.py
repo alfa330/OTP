@@ -515,9 +515,15 @@ class TabWiringTests(unittest.TestCase):
 
     def test_frontend(self):
         view = _read('src', 'components', 'call_qa', 'CallQaView.jsx')
-        self.assertIn("const FILTERABLE_TABS = ['queue', 'chats', 'evals'];", view)
-        self.assertIn("const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];", view)
-        self.assertIn("marketingOnly={tab === 'rag'}", view)
+        # Что стоит под вкладками, решает sectionStripMode в filters.js (#389): модулю
+        # маркетинга на «Обзоре» — вся панель, в «Базе разборов» — только сделка.
+        # Поведение правила проверяет tests/ai_qa_filters.test.mjs, здесь — проводка.
+        rules = _read('src', 'components', 'call_qa', 'filters.js')
+        self.assertIn("export const FILTERABLE_TABS = ['queue', 'chats', 'evals'];", rules)
+        self.assertIn("if (marketingAccess && tab === 'overview') return 'filters';", rules)
+        self.assertIn("if (marketingAccess && tab === 'rag') return 'deal';", rules)
+        self.assertIn('const stripMode = sectionStripMode({', view)
+        self.assertIn("marketingOnly={stripMode === 'deal'}", view)
         self.assertIn('filters={marketingAccess ? filters : undefined}', view)
         self.assertIn('filtersToParams(filters)', _read('src', 'components', 'call_qa', 'QaDashboard.jsx'))
         self.assertIn('...dealParams', _read('src', 'components', 'call_qa', 'AdjudicationsRag.jsx'))

@@ -2,8 +2,8 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Calendar, Check, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
-    PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, monthCells, periodLabel, pickDayStep,
-    presetMatches, selectionBand, yearCells, yearPageEnd,
+    PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, monthCells, periodHeader, periodLabel,
+    pickDayStep, portalTabStep, presetMatches, selectionBand, visibleYearCells, yearPageEnd,
 } from './periodRange.js';
 
 /* Пикер диапазона дат в стиле сайта: поповер с одним месяцем, выбор в два
@@ -24,8 +24,6 @@ import {
  * (подписи, какие месяцы недоступны, быстрые периоды) — в periodRange.js: их же
  * берёт календарь журнала, у которого своя сборка без Tailwind. */
 
-const MONTHS_RU = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
-    'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн',
     'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const DAYS_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -128,28 +126,17 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
     /* Шапка вида: месяц со стрелками у дней, год — у месяцев, страница лет — у
        годов. Вперёд за верхнюю границу месяцы и годы не листаются: там всё
        серое, и пустая страница читалась бы как «данных нет». */
-    /* Годы до нижней границы (min) не показываются вовсе: раздел, который ведётся
-       с 2026 года, не предлагает 2015-й — это был бы выбор заведомо пустого. */
+    // Годы до нижней границы (min) не показываются; шапка — общая с календарём журнала.
     const pageYears = mode === 'years'
-        ? yearCells(yearsEnd, { from: draft.from, to: draft.to, min, max, today })
-            .filter((cell) => !(min && cell.range.to < min))
+        ? visibleYearCells(yearsEnd, { from: draft.from, to: draft.to, min, max, today })
         : null;
-    const header = mode === 'months'
-        ? { title: String(view.y), prev: () => setView((v) => ({ ...v, y: v.y - 1 })),
-            next: () => setView((v) => ({ ...v, y: v.y + 1 })),
-            prevDisabled: Boolean(min) && `${view.y - 1}-12-31` < min,
-            nextDisabled: Boolean(max) && `${view.y + 1}-01-01` > max,
-            prevLabel: 'Предыдущий год', nextLabel: 'Следующий год' }
-        : mode === 'years'
-            ? { title: pageYears.length > 1 ? `${pageYears[0].label} – ${pageYears[pageYears.length - 1].label}`
-                : (pageYears[0]?.label || String(yearsEnd)),
-                prev: () => setYearsEnd((y) => y - YEAR_PAGE), next: () => setYearsEnd((y) => y + YEAR_PAGE),
-                prevDisabled: Boolean(min) && `${yearsEnd - YEAR_PAGE}-12-31` < min,
-                nextDisabled: Boolean(max) && `${yearsEnd + 1}-01-01` > max,
-                prevLabel: 'Более ранние годы', nextLabel: 'Более поздние годы' }
-            : { title: `${MONTHS_RU[view.m]} ${view.y}`, prev: prevMonth, next: nextMonth,
-                prevDisabled: false, nextDisabled: false,
-                prevLabel: 'Предыдущий месяц', nextLabel: 'Следующий месяц' };
+    const header = {
+        ...periodHeader(mode, { view, yearsEnd, years: pageYears || [], min, max }),
+        prev: mode === 'months' ? () => setView((v) => ({ ...v, y: v.y - 1 }))
+            : mode === 'years' ? () => setYearsEnd((y) => y - YEAR_PAGE) : prevMonth,
+        next: mode === 'months' ? () => setView((v) => ({ ...v, y: v.y + 1 }))
+            : mode === 'years' ? () => setYearsEnd((y) => y + YEAR_PAGE) : nextMonth,
+    };
 
     /* Месяц или год целиком — сразу выбор, как быстрый период; дни потом
        откроются на этом же месяце. */
@@ -326,12 +313,16 @@ const EDGE_GAP = 8;
  * модалок остаётся прежний absolute-поповер: там резать нечем, а портал —
  * лишние слушатели прокрутки. */
 export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
-                                    triggerClassName = '', portal = false, roomy = false, views = null }) {
+                                    triggerClassName = '', portal = false, roomy = false, views = null,
+                                    disabled = false }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const ref = useRef(null);
     const popRef = useRef(null);
     const triggerRef = useRef(null);
+
+    // Поле выключили, пока панель открыта (началась правка рядом) — панель закрывается.
+    useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
 
     useEffect(() => {
         if (!open) return undefined;
@@ -343,17 +334,48 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
         /* Esc закрывает, как у эталона пикера (выгрузка табло СЗоВ), и
            возвращает фокус на чип — иначе он терялся бы на теле страницы. */
         const onKey = (e) => {
-            if (e.key !== 'Escape') return;
+            if (e.key === 'Escape') {
+                setOpen(false);
+                triggerRef.current?.focus();
+                return;
+            }
+            /* Панель в портале — в конце body: Tab ведётся так, будто она стоит
+               сразу за чипом (как без портала и в календаре журнала). */
+            if (e.key !== 'Tab' || !portal) return;
+            const items = [...(popRef.current?.querySelectorAll('button:not([disabled])') || [])];
+            const step = portalTabStep({
+                onTrigger: document.activeElement === triggerRef.current,
+                index: items.indexOf(document.activeElement),
+                count: items.length,
+                shift: e.shiftKey,
+            });
+            if (step === 'first') {
+                e.preventDefault();
+                items[0].focus();
+            } else if (step === 'trigger') {
+                e.preventDefault();
+                triggerRef.current?.focus();
+            } else if (step === 'leave') {
+                triggerRef.current?.focus();
+                setOpen(false);
+            }
+        };
+        /* Фокус ушёл с чипа и из панели (Tab дальше по странице) — панель
+           закрывается, как у календаря журнала, а не висит забытой. */
+        const onFocusOut = (e) => {
+            const next = e.relatedTarget;
+            if (!next || ref.current?.contains(next) || popRef.current?.contains(next)) return;
             setOpen(false);
-            triggerRef.current?.focus();
         };
         document.addEventListener('mousedown', h);
         document.addEventListener('keydown', onKey);
+        document.addEventListener('focusout', onFocusOut);
         return () => {
             document.removeEventListener('mousedown', h);
             document.removeEventListener('keydown', onKey);
+            document.removeEventListener('focusout', onFocusOut);
         };
-    }, [open]);
+    }, [open, portal]);
 
     const recompute = () => {
         const el = ref.current;
@@ -406,16 +428,23 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
     const calendar = (
         <IosDateRangeCalendar
             from={from} to={to} max={max} min={min} presets={presets} roomy={roomy} views={views}
-            onChange={(next) => { onChange(next); setOpen(false); }}
+            onChange={(next) => {
+                onChange(next);
+                setOpen(false);
+                /* Выбранная кнопка исчезает вместе с панелью — фокус обратно на
+                   чип, как при Esc и в календаре журнала; иначе он падал на body,
+                   и следующий Tab начинался с начала страницы. */
+                requestAnimationFrame(() => triggerRef.current?.focus());
+            }}
         />
     );
 
     return (
         <div ref={ref} className="relative">
-            <button ref={triggerRef} type="button" onClick={() => setOpen((o) => !o)}
-                    aria-expanded={open} aria-haspopup="dialog"
+            <button ref={triggerRef} type="button" onClick={() => !disabled && setOpen((o) => !o)}
+                    disabled={disabled} aria-expanded={open} aria-haspopup="dialog"
                     className={triggerClassName
-                        || `flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium transition ${
+                        || `flex items-center gap-2 rounded-xl px-3 py-2 text-[13px] font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
                             open ? 'bg-white text-slate-900 ring-2 ring-blue-500/70'
                                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200/80'}`}>
                 <Calendar size={14} className="text-slate-400" />
@@ -429,7 +458,7 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
                      className="absolute left-0 top-full z-50 mt-2 motion-safe:animate-popover-in">{calendar}</div>
             )}
             {open && portal && coords && createPortal(
-                <div ref={popRef} role="dialog" className="motion-safe:animate-popover-in"
+                <div ref={popRef} role="dialog" aria-label="Выбор периода" className="motion-safe:animate-popover-in"
                      style={{ position: 'fixed', left: coords.left, top: coords.top,
                               maxHeight: coords.maxHeight, zIndex: 99999 }}>
                     {calendar}

@@ -273,9 +273,15 @@ export function buildEmploymentStatusTabs(buckets) {
 }
 
 const WHOLE_MONTH_NOTE = 'Оценки и план считаются за месяц целиком, поэтому здесь они показаны полностью, а не только за дни в этой группе.';
-const WHOLE_PERIOD_NOTE = 'Оценки считаются за весь выбранный период, поэтому здесь они показаны полностью, а не только за дни в этой группе.';
+/* Сервер в режиме группы считает человеку только месяцы, когда он был в этой
+   группе, — и в каждом такой месяц все дни периода (как месячный вид, #389). */
+const WHOLE_PERIOD_NOTE = 'Оценки считаются за все дни периода в месяцах, когда сотрудник был в этой группе, а не только за дни в группе.';
 const shortIso = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 const fullIso = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+/* Год на чипе нужен, когда его не видно из самого периода: «Весь период» или
+   период через границу года («05.03» без года — какого?). В пределах одного года
+   год назван на кнопке периода, и чип остаётся коротким. */
+const periodSpansYears = (period) => !period.from || period.from.slice(0, 4) !== period.to.slice(0, 4);
 
 /**
  * Чип перевода у строки: { text, title } или null.
@@ -301,7 +307,7 @@ export function describeTransferChip(transfer, context) {
     } else {
         // Период (#389): дата перевода — полная, период бывает длиннее месяца.
         if (transfer.direction !== 'shared' && !ISO_DAY.test(String(transfer.date || ''))) return null;
-        short = shortIso;
+        short = periodSpansYears(resolved.period) ? fullIso : shortIso;
         full = fullIso;
         note = WHOLE_PERIOD_NOTE;
         when = 'В этом периоде';
@@ -341,6 +347,7 @@ export function describeDismissalChip(op, context) {
         // Период (#389): дата — только если увольнение пришлось на выбранные дни.
         const day = String(op?.dismissal_date || '').slice(0, 10);
         if ((resolved.period.from && day < resolved.period.from) || day > resolved.period.to) return null;
+        if (periodSpansYears(resolved.period)) return { text: `с ${firedOn}`, title: `Уволен(а) с ${firedOn}` };
     }
     return { text: `с ${firedOn.slice(0, 5)}`, title: `Уволен(а) с ${firedOn}` };
 }

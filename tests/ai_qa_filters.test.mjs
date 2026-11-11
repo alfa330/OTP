@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
     EMPTY_FILTERS, NO_GROUP, countActiveFilters, hasActiveFilters, filtersToParams,
     filtersKey, clampScore, activeFilterChips, pullParamsFromFilters, operatorsMatching,
-    scaleOnlyDirectionIds,
+    scaleOnlyDirectionIds, sectionStripMode, periodOnlyFilters,
 } from '../src/components/call_qa/filters.js';
 
 /**
@@ -234,3 +234,34 @@ test('оба списка и оба подбора получают отбор, 
     const chats = readLf('src/components/call_qa/ChatQueue.jsx');
     assert.ok(chats.includes('...filtersToParams(filters)'), 'подбор переписки без отбора');
 });
+
+/* ── Период раздела (задача #389) ─────────────────────────────────────────
+ * Что стоит под вкладками: полная панель, «Отбор по сделке» или одно поле
+ * периода — правило в filters.js, а не в разметке CallQaView. */
+test('под вкладками: панель у списков, один период у «Обзора», «Сводки» и «Базы разборов»', () => {
+    for (const tab of ['queue', 'chats', 'evals']) assert.equal(sectionStripMode({ tab }), 'filters', tab);
+    for (const tab of ['overview', 'digest', 'rag']) assert.equal(sectionStripMode({ tab }), 'period', tab);
+    assert.equal(sectionStripMode({ tab: 'settings' }), null);
+});
+
+test('модуль маркетинга: «Обзор» — вся панель, «База разборов» — «Отбор по сделке» с периодом', () => {
+    assert.equal(sectionStripMode({ tab: 'overview', marketingAccess: true }), 'filters');
+    assert.equal(sectionStripMode({ tab: 'rag', marketingAccess: true }), 'deal');
+    assert.equal(sectionStripMode({ tab: 'digest', marketingAccess: true }), 'period');
+});
+
+test('открытый разговор, экран дня и экран периода «Сводки» — без поля: у них своя навигация', () => {
+    assert.equal(sectionStripMode({ tab: 'evals', selected: true }), null);
+    assert.equal(sectionStripMode({ tab: 'digest', digestSubscreen: true }), null);
+    assert.equal(sectionStripMode({ tab: 'overview', digestSubscreen: true }), 'period',
+        'экран «Сводки» не прячет поле на других вкладках');
+});
+
+test('только период: «Обзору» без модуля и при смене отдела уходят одни даты', () => {
+    const full = { ...EMPTY_FILTERS, date_from: '2026-11-04', date_to: '2026-11-10', group_id: 7, operator_id: 42,
+                   q: 'Иванов', channels: ['youtube'] };
+    assert.deepEqual(periodOnlyFilters(full), { ...EMPTY_FILTERS, date_from: '2026-11-04', date_to: '2026-11-10' });
+    assert.deepEqual(periodOnlyFilters(null), EMPTY_FILTERS);
+    assert.deepEqual(periodOnlyFilters({ ...EMPTY_FILTERS, operator_id: 42 }), EMPTY_FILTERS);
+});
+

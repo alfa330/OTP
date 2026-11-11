@@ -31,7 +31,9 @@ import AudioPendingCard from './AudioPendingCard';
 import ExcludeModal from './ExcludeModal';
 import { exclusionAuthor, exclusionLabel } from './exclusionRules';
 import { buildEvalLink, copyText, readEvalLink, syncEvalLink } from './evalLink';
-import { EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters } from './filters';
+import {
+    EMPTY_FILTERS, filtersToParams, filtersKey, hasActiveFilters, periodOnlyFilters, sectionStripMode,
+} from './filters';
 
 /* Контейнер раздела «ИИ-оценка» (App.jsx: view === "ai_qa").
  *
@@ -67,14 +69,10 @@ const TABS = [
    звонки. Модулю маркетинга (ТЗ #317) — ещё «Обзор» (метрики по тому же
    отбору) и «База разборов» (только оси сделки: правило отбирается по сделке
    разговора, из которого его вывели). Кому открыт модуль, говорит сервер. */
-const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
+/* Где панель фильтров, а где один ПЕРИОД (#389), — filters.js, sectionStripMode.
+   Поле периода стоит на том же месте под вкладками, что и панель, и пишет в
+   тот же отбор — период общий для раздела. */
 const EMPTY_QUEUE = { days: [], total: 0, truncated: false };
-const MARKETING_FILTERABLE_TABS = ['overview', 'rag'];
-/* Где действует один ПЕРИОД без остального отбора (задача #389): «Обзор» —
-   метрики за дни разговоров, «Сводка» — дни списка, «База разборов» — правила
-   по дню разбора. Поле периода стоит на том же месте под вкладками, что и
-   панель фильтров, и пишет в тот же отбор — период общий для раздела. */
-const PERIOD_TABS = ['overview', 'digest', 'rag'];
 const EXPORT_TABS = ['chats', 'evals'];
 
 /* «Исключить оценку» в строке над карточкой — красным словом, как «Удалить» в
@@ -214,7 +212,7 @@ export default function CallQaView(props) {
        балл ИИ, выставленные во «Звонках», к ним не относятся. */
     const dateFrom = filters.date_from || '';
     const dateTo = filters.date_to || '';
-    const periodFilters = useMemo(() => ({ ...EMPTY_FILTERS, date_from: dateFrom, date_to: dateTo }),
+    const periodFilters = useMemo(() => periodOnlyFilters({ date_from: dateFrom, date_to: dateTo }),
         [dateFrom, dateTo]);
     const setSectionPeriod = (next) => setFilters((current) => ({
         ...current, date_from: next?.date_from || '', date_to: next?.date_to || '',
@@ -334,8 +332,10 @@ export default function CallQaView(props) {
         callsList.reset(); chatsList.reset(); digest.reset(); period.reset();
         // Отбор принадлежит ОТДЕЛУ: сотрудники, группы и направления у отделов
         // разные, и сохранённый выбор после переключения ссылался бы на чужого
-        // человека — список молча оказался бы пустым при живых оценках.
-        setFilters(EMPTY_FILTERS);
+        // человека — список молча оказался бы пустым при живых оценках. Период —
+        // общий для раздела (#389) и остаётся: «Неделя» не должна молча стать
+        // «Весь период» (а «Обзор» — самым тяжёлым запросом).
+        setFilters(periodOnlyFilters);
         setDepartment(nextCode);
     };
 
@@ -540,7 +540,7 @@ export default function CallQaView(props) {
         if (!(departments || []).some((item) => item.code === code)) return;
         resetQueue();
         callsList.reset(); chatsList.reset(); digest.reset(); period.reset();
-        setFilters(EMPTY_FILTERS);
+        setFilters(periodOnlyFilters);
         setDepartment(code);
     };
 
@@ -990,6 +990,15 @@ export default function CallQaView(props) {
         }
     };
 
+    /* Что под вкладками (#389, filters.js): панель, «Отбор по сделке» с периодом,
+       один период или ничего. Пока в «Базе разборов» правят правило или
+       сохраняют его, период не меняется: новый каталог унёс бы набранную правку. */
+    const stripMode = sectionStripMode({
+        tab, selected: Boolean(selected), marketingAccess,
+        digestSubscreen: Boolean(digest.openDay || period.range),
+    });
+    const periodLocked = tab === 'rag' && (sectionInteraction.editing || sectionInteraction.busy);
+
     return (
         /* relative — опора для всего absolute внутри раздела. Без неё подписи для
            экранного диктора (`sr-only` — это position:absolute) в строках длинного
@@ -1046,14 +1055,11 @@ export default function CallQaView(props) {
                 маркетинга и «Сводка» со списком дней. На экране дня и экране
                 периода «Сводки» поля нет: у них своя навигация по датам, и
                 второй календарь над ними спорил бы с ней. */}
-            {!selected && PERIOD_TABS.includes(tab) && !FILTERABLE_TABS.includes(tab)
-                && !(marketingAccess && MARKETING_FILTERABLE_TABS.includes(tab))
-                && !(tab === 'digest' && (digest.openDay || period.range)) && (
-                <QaPeriodField filters={periodFilters} onChange={setSectionPeriod} />
+            {stripMode === 'period' && (
+                <QaPeriodField filters={periodFilters} onChange={setSectionPeriod} disabled={periodLocked} />
             )}
 
-            {!selected && (FILTERABLE_TABS.includes(tab)
-                || (marketingAccess && MARKETING_FILTERABLE_TABS.includes(tab))) && (
+            {(stripMode === 'filters' || stripMode === 'deal') && (
                 <QaFilters
                     filters={filters}
                     onChange={setFilters}
@@ -1071,7 +1077,8 @@ export default function CallQaView(props) {
                        своя выборка, и кнопка там обещала бы не то, что на экране. */
                     canExport={marketingAccess && EXPORT_TABS.includes(tab)}
                     marketingAccess={marketingAccess}
-                    marketingOnly={tab === 'rag'}
+                    marketingOnly={stripMode === 'deal'}
+                    periodDisabled={periodLocked}
                     showToast={showToast}
                 />
             )}

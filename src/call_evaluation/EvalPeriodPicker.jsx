@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import FaIcon from '../components/common/FaIcon';
 import {
-    MONTH_NAMES, PERIOD_VIEWS, PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, isoDate,
-    monthCells, periodLabel, pickDayStep, presetMatches, quickPeriods, selectionBand, yearCells, yearPageEnd,
+    PERIOD_VIEWS, PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, isoDate, monthCells, periodHeader,
+    periodLabel, pickDayStep, portalTabStep, presetMatches, quickPeriods, selectionBand, visibleYearCells,
+    yearPageEnd,
 } from '../components/ui/periodRange';
 
 /* Календарь периода «Аналитики» журнала оценок (задача #389): год, месяц,
@@ -28,7 +29,8 @@ const GAP = 6;
 const EDGE = 8;
 const PRESETS = quickPeriods();
 
-function PeriodCalendar({ from, to, min, max, onPick }) {
+// Экспорт — для теста: панель живёт в портале, а порталы react-dom/server не рисует.
+export function PeriodCalendar({ from, to, min, max, onPick }) {
     const today = isoDate(new Date());
     const [draft, setDraft] = useState({ from, to });
     const [step, setStep] = useState(0);
@@ -62,29 +64,19 @@ function PeriodCalendar({ from, to, min, max, onPick }) {
         choose({ from: cell.range.from, to: cell.range.to });
     };
 
-    // Годы до нижней границы не показываются — как у календаря ИИ-оценки.
+    // Годы до нижней границы не показываются; шапка — общая с календарём ИИ-оценки.
     const pageYears = mode === 'years'
-        ? yearCells(yearsEnd, { from: draft.from, to: draft.to, min, max, today })
-            .filter((cell) => !(min && cell.range.to < min))
+        ? visibleYearCells(yearsEnd, { from: draft.from, to: draft.to, min, max, today })
         : null;
-    const header = mode === 'months'
-        ? { title: String(view.y), prev: () => setView((v) => ({ ...v, y: v.y - 1 })),
-            next: () => setView((v) => ({ ...v, y: v.y + 1 })),
-            prevDisabled: Boolean(min) && `${view.y - 1}-12-31` < min,
-            nextDisabled: Boolean(max) && `${view.y + 1}-01-01` > max,
-            prevLabel: 'Предыдущий год', nextLabel: 'Следующий год' }
-        : mode === 'years'
-            ? { title: pageYears.length > 1 ? `${pageYears[0].label} – ${pageYears[pageYears.length - 1].label}`
-                : (pageYears[0]?.label || String(yearsEnd)),
-                prev: () => setYearsEnd((y) => y - YEAR_PAGE), next: () => setYearsEnd((y) => y + YEAR_PAGE),
-                prevDisabled: Boolean(min) && `${yearsEnd - YEAR_PAGE}-12-31` < min,
-                nextDisabled: Boolean(max) && `${yearsEnd + 1}-01-01` > max,
-                prevLabel: 'Более ранние годы', nextLabel: 'Более поздние годы' }
-            : { title: `${MONTH_NAMES[view.m]} ${view.y}`,
-                prev: () => setView((v) => (v.m === 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m: v.m - 1 })),
-                next: () => setView((v) => (v.m === 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m: v.m + 1 })),
-                prevDisabled: false, nextDisabled: false,
-                prevLabel: 'Предыдущий месяц', nextLabel: 'Следующий месяц' };
+    const header = {
+        ...periodHeader(mode, { view, yearsEnd, years: pageYears || [], min, max }),
+        prev: mode === 'months' ? () => setView((v) => ({ ...v, y: v.y - 1 }))
+            : mode === 'years' ? () => setYearsEnd((y) => y - YEAR_PAGE)
+                : () => setView((v) => (v.m === 0 ? { y: v.y - 1, m: 11 } : { y: v.y, m: v.m - 1 })),
+        next: mode === 'months' ? () => setView((v) => ({ ...v, y: v.y + 1 }))
+            : mode === 'years' ? () => setYearsEnd((y) => y + YEAR_PAGE)
+                : () => setView((v) => (v.m === 11 ? { y: v.y + 1, m: 0 } : { y: v.y, m: v.m + 1 })),
+    };
 
     const { lo, hi } = selectionBand(draft, step, hover);
     const hint = mode === 'months' ? 'Выберите месяц'
@@ -218,11 +210,40 @@ export default function EvalPeriodPicker({ from = '', to = '', onChange, min = J
             if (btnRef.current?.contains(event.target) || popRef.current?.contains(event.target)) return;
             setOpen(false);
         };
+        /* Панель — в портале в конце body, и обычный Tab с кнопки ушёл бы мимо
+           неё, оставив её открытой (разбор #389). Правило — portalTabStep. */
         const onKey = (event) => {
-            if (event.key !== 'Escape') return;
-            event.stopPropagation();
+            if (event.key === 'Escape') {
+                event.stopPropagation();
+                setOpen(false);
+                btnRef.current?.focus();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const items = [...(popRef.current?.querySelectorAll('button:not([disabled])') || [])];
+            const step = portalTabStep({
+                onTrigger: doc.activeElement === btnRef.current,
+                index: items.indexOf(doc.activeElement),
+                count: items.length,
+                shift: event.shiftKey,
+            });
+            if (step === 'first') {
+                event.preventDefault();
+                items[0].focus();
+            } else if (step === 'trigger') {
+                event.preventDefault();
+                btnRef.current?.focus();
+            } else if (step === 'leave') {
+                // Без preventDefault: фокус встаёт на кнопку, и Tab идёт от неё дальше.
+                btnRef.current?.focus();
+                setOpen(false);
+            }
+        };
+        // Фокус ушёл куда-то вне кнопки и панели — панель не висит забытой.
+        const onFocusOut = (event) => {
+            const next = event.relatedTarget;
+            if (!next || btnRef.current?.contains(next) || popRef.current?.contains(next)) return;
             setOpen(false);
-            btnRef.current?.focus();
         };
         // Прокрутка внутри самой панели её не двигает; снаружи — панель едет за кнопкой.
         const onScroll = (event) => {
@@ -231,12 +252,14 @@ export default function EvalPeriodPicker({ from = '', to = '', onChange, min = J
         };
         doc.addEventListener('mousedown', onDown, true);
         doc.addEventListener('keydown', onKey);
+        doc.addEventListener('focusout', onFocusOut);
         view.addEventListener('scroll', onScroll, true);
         view.addEventListener('resize', recompute);
         return () => {
             cancelAnimationFrame(raf);
             doc.removeEventListener('mousedown', onDown, true);
             doc.removeEventListener('keydown', onKey);
+            doc.removeEventListener('focusout', onFocusOut);
             view.removeEventListener('scroll', onScroll, true);
             view.removeEventListener('resize', recompute);
         };

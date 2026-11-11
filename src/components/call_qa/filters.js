@@ -349,3 +349,31 @@ export const operatorsMatching = (operators, filters, scaleOnlyIds) => {
         return true;
     });
 };
+
+/* ── Что стоит под вкладками (задача #389) ─────────────────────────────────
+ * Панель фильтров — там, где под ней выборка разговоров (очередь, чаты,
+ * звонки), и у модуля маркетинга — на «Обзоре». В «Базе разборов» модулю
+ * маркетинга — «Отбор по сделке» с периодом. «Обзор», «Сводка» и «База
+ * разборов» без модуля — один период. На экране дня и экране периода «Сводки»
+ * — ничего: у них своя навигация по датам. Правило здесь, а не в разметке
+ * CallQaView, — чтобы его проверял тест, а не чтение исходника. */
+export const FILTERABLE_TABS = ['queue', 'chats', 'evals'];
+export const PERIOD_TABS = ['overview', 'digest', 'rag'];
+
+/** 'filters' | 'deal' | 'period' | null — что показать под вкладками. */
+export const sectionStripMode = ({ tab, selected = false, marketingAccess = false, digestSubscreen = false }) => {
+    if (selected) return null;
+    if (FILTERABLE_TABS.includes(tab)) return 'filters';
+    if (marketingAccess && tab === 'overview') return 'filters';
+    if (marketingAccess && tab === 'rag') return 'deal';
+    if (tab === 'digest' && digestSubscreen) return null;
+    return PERIOD_TABS.includes(tab) ? 'period' : null;
+};
+
+/** Только период из отбора: его получают «Обзор» без модуля маркетинга, «Сводка» и
+    «База разборов», и он же переживает смену отдела (люди и группы — нет). */
+export const periodOnlyFilters = (filters) => ({
+    ...EMPTY_FILTERS,
+    date_from: (filters || EMPTY_FILTERS).date_from || '',
+    date_to: (filters || EMPTY_FILTERS).date_to || '',
+});

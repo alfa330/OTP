@@ -10,6 +10,7 @@ from datetime import datetime
 from datetime import timedelta
 from google.cloud import storage as gcs_storage
 import calendar
+import re
 import group_late
 import logging
 import os
@@ -19,6 +20,10 @@ import time
 
 
 SUPERVISOR_CLOCKSTER_SYNC_MAX_DAYS = 31
+
+_JOURNAL_DAY_RE = re.compile(r'\d{4}-\d{2}-\d{2}')
+_JOURNAL_FIRST_DAY = dt_date(2000, 1, 1)
+
 
 def _journal_period_args(args):
     """Период «Аналитики» журнала оценок (задача #389) из запроса.
@@ -36,6 +41,9 @@ def _journal_period_args(args):
     raw_from = (args.get('date_from') or '').strip()
     raw_to = (args.get('date_to') or '').strip()
     if raw_from or raw_to:
+        # Только ГГГГ-ММ-ДД: fromisoformat в 3.11 принимает и «2026-W45-1», и «20261110».
+        if not (_JOURNAL_DAY_RE.fullmatch(raw_from) and _JOURNAL_DAY_RE.fullmatch(raw_to)):
+            return None, "Invalid date_from/date_to. Use YYYY-MM-DD"
         try:
             start = dt_date.fromisoformat(raw_from)
             end = dt_date.fromisoformat(raw_to)
@@ -43,6 +51,11 @@ def _journal_period_args(args):
             return None, "Invalid date_from/date_to. Use YYYY-MM-DD"
         if start > end:
             return None, "Начало периода позже его конца"
+        # Границы разумного: с 2000 года (раньше данных нет) по конец следующего
+        # года (календарь дальше конца текущего года не даёт). «9999-12-31» иначе
+        # дал бы 95 тысяч месяцев и молча пустую группу вместо ошибки.
+        if start < _JOURNAL_FIRST_DAY or end > dt_date(datetime.now().year + 1, 12, 31):
+            return None, "Период вне журнала оценок"
         months = _journal_whole_months(start, end)
         if months and len(months) == 1:
             return {'kind': 'month', 'month': months[0]}, None
@@ -60,6 +73,78 @@ def _journal_period_args(args):
     else:
         month = datetime.now().strftime("%Y-%m")
     return {'kind': 'month', 'month': month}, None
+
+
+def _journal_period_bounds(period, today):
+    """Границы периода и мерка для оценок (#389) — чистая функция ради теста.
+
+    → (start, end, requested_period, metric_period):
+      * start/end — дни, по которым собирается состав группы (у «Весь период» —
+        с 2000-01-01 по сегодня: любое членство, статус — сегодняшний);
+      * requested_period — что ответ говорит о своём периоде (у «Весь период» — пусто);
+      * metric_period — мерка оценок и ОС: целые месяцы — по месяцу журнала,
+        день/неделя/диапазон — по дню обращения, «Весь период» — без отбора.
+    """
+    kind = period['kind']
+    if kind == 'month':
+        year_value, month_value = map(int, period['month'].split('-'))
+        start = dt_date(year_value, month_value, 1)
+        end = dt_date(year_value, month_value, calendar.monthrange(year_value, month_value)[1])
+    elif kind == 'all':
+        start, end = dt_date(2000, 1, 1), today
+    else:
+        start, end = period['start'], period['end']
+    requested_period = {
+        "from": start.isoformat() if kind != 'all' else '',
+        "to": end.isoformat() if kind != 'all' else '',
+    }
+    metric_period = (
+        {'months': period['months']} if kind == 'months'
+        else {'start': start, 'end': end} if kind == 'range'
+        else {}
+    )
+    return start, end, requested_period, metric_period
+
+
+def _journal_member_months(operators, group_id, months=None):
+    """Пары (оператор, «ГГГГ-ММ») — месяцы, когда человек был в ЭТОЙ группе (#389).
+
+    Месячный вид считает человеку месяц целиком, если он был в группе хоть день
+    этого месяца, — и только такие месяцы. Для периода длиннее месяца (год,
+    «Весь период») то же правило: сумма месяцев, каждый — как в месячном виде.
+    Без него переведённый на день в январе приносил бы группе свои оценки за
+    весь год, в том числе из другого отдела. Сегменты уже обрезаны по периоду;
+    `months` — ещё и только месяцы периода (у целых месяцев).
+    """
+    allowed = set(months) if months is not None else None
+    pairs = []
+    for op in operators or []:
+        try:
+            operator_id = int(op.get('id'))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        member = set()
+        for seg in op.get('group_segments') or []:
+            try:
+                if int(seg.get('group_id') or 0) != int(group_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            seg_start, seg_end = str(seg.get('start_date') or ''), str(seg.get('end_date') or '')
+            # Членство «конец раньше начала» — ни одного дня в группе (сравнение дат, не месяцев).
+            if len(seg_start) != 10 or len(seg_end) != 10 or seg_end < seg_start:
+                continue
+            first, last = seg_start[:7], seg_end[:7]
+            year, month = int(first[:4]), int(first[5:7])
+            while f"{year:04d}-{month:02d}" <= last:
+                member.add(f"{year:04d}-{month:02d}")
+                month += 1
+                if month == 13:
+                    year, month = year + 1, 1
+        if allowed is not None:
+            member &= allowed
+        pairs.extend((operator_id, key) for key in sorted(member))
+    return pairs
 
 
 def _journal_whole_months(start, end):
@@ -570,27 +655,8 @@ def build_supervisors_blueprint(
             if period_error:
                 return jsonify({"error": period_error}), 400
             month = period['month'] if period['kind'] == 'month' else None
-            if period['kind'] == 'month':
-                year_value, month_value = map(int, month.split('-'))
-                period_start = dt_date(year_value, month_value, 1)
-                period_end = dt_date(year_value, month_value, calendar.monthrange(year_value, month_value)[1])
-            elif period['kind'] == 'all':
-                # Состав «за всё время»: любое членство в группе, конец — сегодня
-                # (статус — сегодняшний, «Переведённые» — кто сейчас не в группе).
-                period_start, period_end = dt_date(2000, 1, 1), datetime.now().date()
-            else:
-                period_start, period_end = period['start'], period['end']
-            requested_period = {
-                "from": period_start.isoformat() if period['kind'] != 'all' else '',
-                "to": period_end.isoformat() if period['kind'] != 'all' else '',
-            }
-            # Мерка для оценок и обратной связи: целые месяцы — по месяцу журнала,
-            # день/неделя/диапазон — по дню обращения, «Весь период» — без отбора.
-            metric_period = (
-                {'months': period['months']} if period['kind'] == 'months'
-                else {'start': period_start, 'end': period_end} if period['kind'] == 'range'
-                else {}
-            )
+            period_start, period_end, requested_period, metric_period = _journal_period_bounds(
+                period, datetime.now().date())
 
             requester_id, requester, auth_error = _get_authenticated_requester()
             if auth_error:
@@ -805,20 +871,32 @@ def build_supervisors_blueprint(
                     feedback_stats_by_operator = {}
             else:
                 # Период не из одного месяца (#389): оценки и обратная связь за
-                # период, плана нет — он месячный.
+                # период, плана нет — он месячный. В режиме группы человек приносит
+                # оценки только месяцев, когда был в этой группе (каждый — целиком,
+                # как в месячном виде); СВ группы — за весь период, как и было.
                 operator_targets = {}
-                try:
-                    operator_metrics = db.get_operator_score_aggregates_for_period(
-                        operator_ids=metric_ids, **metric_period) if metric_ids else {}
-                except Exception:
-                    logging.exception("Failed to load period score aggregates for /api/sv/data")
-                    operator_metrics = {}
-                try:
-                    feedback_stats_by_operator = db.get_feedback_sla_operator_stats_for_period(
-                        operator_ids=metric_ids, **metric_period) if metric_ids else {}
-                except Exception:
-                    logging.exception("Failed to load period feedback SLA stats for /api/sv/data")
-                    feedback_stats_by_operator = {}
+                member_months = (_journal_member_months(operators, group_id, period.get('months'))
+                                 if group_id is not None else None)
+                # СВ, который сам числится в составе группы, считается как член группы.
+                supervisors_only = [sv_id for sv_id in supervisor_ids if sv_id not in set(operator_ids)]
+                batches = ([({'operator_months': member_months}, bool(member_months)),
+                            ({'operator_ids': supervisors_only}, bool(supervisors_only))]
+                           if member_months is not None
+                           else [({'operator_ids': metric_ids}, bool(metric_ids))])
+                operator_metrics, feedback_stats_by_operator = {}, {}
+                for scope, needed in batches:
+                    if not needed:
+                        continue
+                    try:
+                        operator_metrics.update(db.get_operator_score_aggregates_for_period(
+                            **scope, **metric_period) or {})
+                    except Exception:
+                        logging.exception("Failed to load period score aggregates for /api/sv/data")
+                    try:
+                        feedback_stats_by_operator.update(db.get_feedback_sla_operator_stats_for_period(
+                            **scope, **metric_period) or {})
+                    except Exception:
+                        logging.exception("Failed to load period feedback SLA stats for /api/sv/data")
 
             seen_response_ids = set()
             for op in operators:

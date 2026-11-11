@@ -84,6 +84,25 @@ test('период раздела: календарь с видами и быс�
   assert.ok(html.includes('aria-haspopup="dialog"'));
 });
 
+test('панель фильтров: период подписан один раз — календарём, без чипа и без «· 1» на «Фильтрах»', () => {
+  // Разбор #389: под кнопкой «Ноябрь 2026» стоял чип «01.11 — 30.11» — тот же
+  // период второй подписью, а «Фильтры · 1» звали искать его в панели.
+  const html = render(QaFilters, { filters: { ...EMPTY_FILTERS, date_from: '2026-11-01', date_to: '2026-11-30' },
+                                   onChange() {}, apiBaseUrl: 'http://stub', department: 'op' });
+  assert.ok(html.includes('Ноябрь 2026'));
+  assert.ok(!html.includes('01.11 — 30.11'), 'чипа периода нет');
+  assert.ok(!/Фильтры[^<]*·/.test(html), 'один период не делает «Фильтры · 1»');
+  const withGroup = render(QaFilters, { filters: { ...EMPTY_FILTERS, date_from: '2026-11-01', date_to: '2026-11-30',
+                                                   group_id: 'none' },
+                                        onChange() {}, apiBaseUrl: 'http://stub', department: 'op' });
+  assert.ok(withGroup.includes('без группы'), 'остальные чипы на месте');
+});
+
+test('период раздела: календарь можно выключить на время правки (#389)', () => {
+  const html = render(QaPeriodField, { filters: EMPTY_FILTERS, onChange() {}, disabled: true });
+  assert.match(html, /<button[^>]*aria-haspopup="dialog"[^>]*disabled=""|<button[^>]*disabled=""[^>]*aria-haspopup="dialog"/);
+});
+
 test('«Обзор» принимает отбор панели', () => {
   const html = render(QaDashboard, { apiBaseUrl: 'http://stub', department: 'op',
                                      filters: { ...EMPTY_FILTERS, channels: ['youtube'] } });

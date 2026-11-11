@@ -250,7 +250,7 @@ test('период: ушла из группы внутри года — «Пе�
     const chip = describeTransferChip(info.transfer, year);
     assert.equal(chip.text, 'с 08.09');
     assert.match(chip.title, /с 08\.09\.2026/);
-    assert.match(chip.title, /за весь выбранный период/);
+    assert.match(chip.title, /все дни периода в месяцах, когда сотрудник был в этой группе/);
     // В новой группе та же — в «Активных», «в группе с 08.09».
     const there = classifyAnalyticsOperator(op, { ...year, groupId: CHAT });
     assert.equal(there.tab, 'working');
@@ -283,6 +283,23 @@ test('«Весь период»: конец — сегодня, переведё
     const info = classifyAnalyticsOperator(op, all);
     assert.equal(info.tab, TRANSFERRED_TAB);
     assert.equal(info.transfer.date, '2025-06-01');
+});
+
+test('«Весь период» и период через границу года: дата на чипах — с годом', () => {
+    // «с 05.03» без года при «Весь период» не сказать, какого года (разбор #389).
+    const all = { period: { from: '', to: '' } };
+    assert.equal(describeTransferChip({ direction: 'in', date: '2025-03-05', groupName: 'X' }, all).text,
+        'в группе с 05.03.2025');
+    assert.deepEqual(describeDismissalChip({ status: 'fired', dismissal_date: '2025-08-12' }, all),
+        { text: 'с 12.08.2025', title: 'Уволен(а) с 12.08.2025' });
+    const winter = { period: { from: '2025-12-01', to: '2026-01-31' } };
+    assert.equal(describeTransferChip({ direction: 'out', date: '2026-01-10', groupName: 'X' }, winter).text,
+        'с 10.01.2026');
+    // В пределах одного года год уже на кнопке периода — чип короткий.
+    const year = { period: { from: '2026-01-01', to: '2026-12-31' } };
+    assert.equal(describeTransferChip({ direction: 'in', date: '2026-03-05', groupName: 'X' }, year).text,
+        'в группе с 05.03');
+    assert.equal(describeDismissalChip({ status: 'fired', dismissal_date: '2026-08-12' }, year).text, 'с 12.08');
 });
 
 test('месяц строкой и { month } — одно и то же, как было', () => {

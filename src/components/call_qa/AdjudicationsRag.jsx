@@ -621,6 +621,13 @@ export default function AdjudicationsRag(props) {
 
     useEffect(() => () => onInteractionChange?.({ editing: false, busy: false }), [onInteractionChange]);
 
+    /* Правленого правила нет в новом ответе (сменился отбор) — правка снимается:
+       иначе editId держал бы раздел серым без кнопки «Отмена» на экране. */
+    useEffect(() => {
+        if (editId === null || !result || loading) return;
+        if (!(result.items || []).some((item) => item.id === editId)) setEditId(null);
+    }, [result, editId, loading]);
+
     useEffect(() => {
         const currentRequest = ++requestId.current;
         const controller = new AbortController();

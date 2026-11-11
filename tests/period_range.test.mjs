@@ -17,9 +17,9 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 import {
-    YEAR_PAGE, dayCells, initialPeriodView, monthCells, monthRange, parseIso, periodLabel, presetMatches,
-    quickPeriods, shiftIso, wholeMonthOf, wholeMonthsOf, wholeYearOf, yearCells, yearPageEnd,
-    yearRange,
+    YEAR_PAGE, dayCells, initialPeriodView, monthCells, monthRange, parseIso, periodHeader, periodLabel,
+    portalTabStep, presetMatches, quickPeriods, shiftIso, visibleYearCells, wholeMonthOf, wholeMonthsOf,
+    wholeYearOf, yearCells, yearPageEnd, yearRange,
 } from '../src/components/ui/periodRange.js';
 
 const require = createRequire(import.meta.url);
@@ -121,6 +121,38 @@ test('годы: страница из двенадцати лет кончает
     assert.equal(cells.find((c) => c.key === '2026').disabled, false);
     const next = yearCells(2038, { max: '2026-11-10' });
     assert.ok(next.every((c) => c.disabled), 'годы после границы недоступны');
+});
+
+test('годы до нижней границы скрыты, шапка «Годов» — первый и последний видимые', () => {
+    const years = visibleYearCells(2026, { min: '2025-01-01', max: '2026-11-10' });
+    assert.deepEqual(years.map((c) => c.key), ['2025', '2026']);
+    assert.equal(visibleYearCells(2026, { max: '2026-11-10' }).length, YEAR_PAGE, 'без границы — вся страница');
+    const head = periodHeader('years', { yearsEnd: 2026, years, min: '2025-01-01', max: '2026-11-10' });
+    assert.equal(head.title, '2025 – 2026');
+    assert.equal(head.prevDisabled, true, 'раньше 2015-го журнала нет — листать некуда');
+    assert.equal(head.nextDisabled, true, '2027 позже границы');
+    assert.equal(periodHeader('years', { yearsEnd: 2026, years: years.slice(1), min: '2026-01-01' }).title, '2026');
+});
+
+test('шапка «Месяцев» и «Дней»: год и месяц словами, листание — в пределах границ', () => {
+    const months = periodHeader('months', { view: { y: 2025, m: 0 }, min: '2025-01-01', max: '2026-11-10' });
+    assert.deepEqual([months.title, months.prevDisabled, months.nextDisabled], ['2025', true, false]);
+    assert.equal(periodHeader('months', { view: { y: 2026, m: 0 }, max: '2026-11-10' }).nextDisabled, true);
+    assert.equal(periodHeader('months', { view: { y: 2026, m: 0 }, min: '2025-01-01' }).prevDisabled, false);
+    const days = periodHeader('days', { view: { y: 2026, m: 10 }, min: '2026-01-01', max: '2026-11-10' });
+    assert.deepEqual([days.title, days.prevDisabled, days.nextDisabled], ['Ноябрь 2026', false, false],
+        'в днях листание не ограничено, как и было: недоступные дни просто серые');
+    assert.deepEqual([days.prevLabel, months.prevLabel], ['Предыдущий месяц', 'Предыдущий год']);
+});
+
+test('Tab у календаря в портале: с кнопки — в панель, с первой назад — на кнопку, с последней — дальше', () => {
+    // Разбор #389: в журнале Tab с открытой кнопки уходил мимо панели, а та висела открытой.
+    assert.equal(portalTabStep({ onTrigger: true, count: 20 }), 'first');
+    assert.equal(portalTabStep({ onTrigger: true, count: 20, shift: true }), null, 'Shift+Tab с кнопки — обычный');
+    assert.equal(portalTabStep({ index: 0, count: 20, shift: true }), 'trigger');
+    assert.equal(portalTabStep({ index: 19, count: 20 }), 'leave');
+    assert.equal(portalTabStep({ index: 5, count: 20 }), null, 'внутри панели — обычный Tab');
+    assert.equal(portalTabStep({ onTrigger: true, count: 0 }), null, 'пустая панель — ничего не перехватываем');
 });
 
 /* ── разметка календаря ────────────────────────────────────────────────── */

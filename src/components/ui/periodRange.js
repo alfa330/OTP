@@ -231,3 +231,52 @@ export const yearCells = (endYear, { from = '', to = '', min = '', max = '', tod
         };
     });
 };
+
+/** Годы страницы без тех, что целиком раньше нижней границы: раздел, который
+    ведётся с 2026 года, не предлагает 2015-й — это был бы выбор заведомо пустого. */
+export const visibleYearCells = (endYear, options = {}) => yearCells(endYear, options)
+    .filter((cell) => !(options.min && cell.range.to < options.min));
+
+/** Шапка вида календаря: заголовок, подписи стрелок и можно ли листать. Дни
+    листаются без ограничений (как было); месяцы и годы — не дальше границ:
+    за ними всё серое, и пустая страница читалась бы как «данных нет».
+    Одна на оба календаря — портала и журнала. */
+export const periodHeader = (mode, { view, yearsEnd, years = [], min = '', max = '' }) => {
+    if (mode === 'months') {
+        return {
+            title: String(view.y),
+            prevDisabled: Boolean(min) && `${view.y - 1}-12-31` < min,
+            nextDisabled: Boolean(max) && `${view.y + 1}-01-01` > max,
+            prevLabel: 'Предыдущий год', nextLabel: 'Следующий год',
+        };
+    }
+    if (mode === 'years') {
+        return {
+            title: years.length > 1 ? `${years[0].label} – ${years[years.length - 1].label}`
+                : (years[0]?.label || String(yearsEnd)),
+            prevDisabled: Boolean(min) && `${yearsEnd - YEAR_PAGE}-12-31` < min,
+            nextDisabled: Boolean(max) && `${yearsEnd + 1}-01-01` > max,
+            prevLabel: 'Более ранние годы', nextLabel: 'Более поздние годы',
+        };
+    }
+    return {
+        title: `${MONTH_NAMES[view.m]} ${view.y}`,
+        prevDisabled: false, nextDisabled: false,
+        prevLabel: 'Предыдущий месяц', nextLabel: 'Следующий месяц',
+    };
+};
+
+/** Tab у календаря, чья панель вынесена в портал в конец страницы (журнал
+    оценок, #389): обычный Tab с кнопки ушёл бы мимо панели. Ведём так, будто
+    панель стоит сразу за кнопкой, — как у календаря ИИ-оценки. `index` —
+    место фокуса среди кнопок панели (-1 — не в панели).
+    → 'first' — на первую кнопку панели, 'trigger' — обратно на кнопку,
+      'leave' — дальше по странице от кнопки (панель закрывается), null — обычный Tab. */
+export const portalTabStep = ({ onTrigger = false, index = -1, count = 0, shift = false }) => {
+    if (!count) return null;
+    if (onTrigger) return shift ? null : 'first';
+    if (index === 0 && shift) return 'trigger';
+    if (index === count - 1 && !shift) return 'leave';
+    return null;
+};
+

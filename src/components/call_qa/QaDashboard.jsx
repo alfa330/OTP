@@ -237,7 +237,9 @@ export default function QaDashboard(props) {
             .then((response) => {
                 if (requestId !== requestRef.current.id) return;
                 dataDepartment.current = department;
-                setS(response.data);
+                // Период запомнен вместе с цифрами: пока идёт новый запрос, подпись
+                // блока RAG говорит о тех днях, которые сейчас на экране.
+                setS({ ...response.data, shownPeriod: { from: periodFrom, to: periodTo } });
                 setRefreshing(false);
             })
             .catch((requestError) => {
@@ -279,6 +281,7 @@ export default function QaDashboard(props) {
     const chart = (s.by_criterion || []).slice(0, 16);
     const reviewedTotal = s.reviewed ? s.reviewed.confirmed + s.reviewed.adjudicated : null;
     const rag = s.rag || null;
+    const ragPeriod = s.shownPeriod || { from: '', to: '' };
     const rolloutLabel = rag?.rollout?.length
         ? rag.rollout.map((item) => `${item.direction_id}: ${item.mode}${item.mode === 'canary' ? ` ${item.canary_percent}%` : ''}`).join(' · ')
         : rag?.status === 'error' ? 'данные недоступны' : 'настройки не переданы';
@@ -309,7 +312,7 @@ export default function QaDashboard(props) {
                             {/* Без периода — последние 30 дней, как было; с периодом
                                 (#389) запуски поиска считаются за выбранные дни. */}
                             <Database size={15} className="text-slate-400" />
-                            Наблюдаемость RAG · {periodFrom || periodTo ? periodLabel(periodFrom, periodTo) : '30 дней'}
+                            Наблюдаемость RAG · {ragPeriod.from || ragPeriod.to ? periodLabel(ragPeriod.from, ragPeriod.to) : '30 дней'}
                         </div>
                         <p className="mt-0.5 text-[11.5px] text-slate-400">Режим раскатки: {rolloutLabel}</p>
                     </div>
