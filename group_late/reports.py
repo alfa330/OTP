@@ -1,9 +1,10 @@
-"""Excel-отчёт по посещаемости из данных Workpace.
+"""Excel-отчёт по посещаемости из данных Workpace и Clockster.
 
-Перенесено из прежнего сервиса group_late_bot без изменений в самом отчёте:
-структура листов, подсчёты и цветовая индикация статусов те же — люди к этой
-выгрузке привыкли. Отличия только в обвязке: клиент Workpace синхронный, а
-показатели готового отчёта отдаются наружу для карточки в разделе на сайте.
+Лист дня собран по образцу владельца (11.11.2026): «№», ФИО, график, все
+отметки за день, отработано без обеда и отклонение; строки — по алфавиту ФИО,
+номер — слева. Опоздания, неявки и ранние уходы по-прежнему считаются: из них
+собираются сводный лист периода, подпись к файлу в Telegram и показатели
+карточки отчёта в разделе на сайте.
 """
 
 import logging
@@ -16,7 +17,6 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 from group_late import config, icore_plan, plan_rules
 from group_late.clockster import (
-    MARK_SYSTEM as CLOCKSTER_SYSTEM,
     build_user_lookup as build_clockster_user_lookup,
     clockster_client,
     to_records as clockster_to_records,
@@ -75,14 +75,46 @@ def _schedule_cell(span: dict, plan_in_dt, plan_out_dt) -> str:
     return str((span or {}).get("scheduleName") or "").strip() or "—"
 
 
-def _fact_time(moment, day) -> str:
-    """Время факта; уход ночной смены (другой календарный день) — с датой."""
-    if not moment:
-        return "—"
-    text = moment.strftime("%H:%M")
-    if moment.date() != day.date():
-        text += f" ({moment.strftime('%d.%m')})"
-    return text
+# Порядок ФИО — как у localeCompare('ru') в браузере и в списках сотрудников
+# (`employees/page.py`, `sort_key_sql`): «ё» — та же «е», казахская буква встаёт
+# сразу за своей основой (а ә … и і й … у ү ұ … х һ), латиница — после
+# кириллицы. Сравнение строк как есть унесло бы «Ізбасарова» и «Ёлкина» в
+# начало листа, а «Қасымова» и «Әлиеву» — за «Я».
+_PAST_LETTER = chr(0xFFFC)
+_NAME_ORDER = str.maketrans({
+    "ё": "е",
+    "ә": "а" + _PAST_LETTER,
+    "ғ": "г" + _PAST_LETTER,
+    "і": "и" + _PAST_LETTER,
+    "қ": "к" + _PAST_LETTER,
+    "ң": "н" + _PAST_LETTER,
+    "ө": "о" + _PAST_LETTER,
+    "ү": "у" + _PAST_LETTER,
+    "ұ": "у" + chr(0xFFFD),
+    "һ": "х" + _PAST_LETTER,
+    **{chr(ord("a") + index): chr(0x0500 + index) for index in range(26)},
+})
+
+
+def _name_sort_key(name) -> str:
+    return " ".join(str(name or "").split()).lower().translate(_NAME_ORDER)
+
+
+def _number_column_width(rows: int) -> int:
+    """Ширина колонки «№»: по самому длинному номеру, но не уже заголовка."""
+    return max(len(str(max(rows, 1))) + 3, 5)
+
+
+def _marks_latest_first(marks) -> list:
+    """Отметки дня от последней к первой — как в образце владельца.
+
+    Порядок задаём сами: Workpace отдаёт отметки от последней, Clockster — от
+    первой, и строки одного листа читались бы в разные стороны. Отметка, время
+    которой не разобрать, уходит в конец."""
+    def moment(mark):
+        when = _parse_dt(_mark_date(mark))
+        return (when is not None, when.timestamp() if when else 0.0)
+    return sorted(marks or [], key=moment, reverse=True)
 
 
 def _plan_inputs(db):
@@ -241,16 +273,11 @@ def generate_report(
     # Colors and Fonts
     font_title = Font(name="Calibri", size=16, bold=True, color="1F4E78")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-    font_bold = Font(name="Calibri", size=11, bold=True)
     font_regular = Font(name="Calibri", size=11)
 
     fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     fill_even = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
     fill_odd = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-
-    fill_green = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")  # light green
-    fill_red = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")    # light red
-    fill_yellow = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # light yellow
 
     align_center = Alignment(horizontal="center", vertical="center")
     align_left = Alignment(horizontal="left", vertical="center")
@@ -414,19 +441,14 @@ def generate_report(
         ws.row_dimensions[1].height = 30
         ws.append([]) # Spacer
 
-        # «Должность» и «Система» — требование ТЗ #273: кадровик ищет по должности,
-        # а по системе отметки понимает, где смотреть первоисточник.
-        #
-        # Столбцов плана было два — «время прихода (план)» и «время ухода (план)».
-        # По ТЗ #307 (п. 4) вместо них один столбец «График»: план читается как
-        # отрезок 10:00–19:00, а разнесённый по двум колонкам он заставлял глазами
-        # склеивать половинки и мешался с фактом, который стоит рядом.
+        # Колонки — по образцу владельца (11.11.2026): номер строки слева, ФИО,
+        # график, все отметки за день, отработано без обеда и отклонение. Отдела,
+        # должности, системы, прихода и ухода отдельными колонками, опоздания,
+        # раннего ухода и статуса в листе дня нет. «График» — один столбец
+        # отрезком 10:00–19:00, а не два столбца плана (ТЗ #307, п. 4).
         headers = [
-            "Отдел", "ФИО сотрудника", "Должность", "График", "Система",
-            "Все отметки за день",
-            "Время прихода (факт)", "Опоздание (мин)",
-            "Время ухода (факт)", "Ранний уход (мин)",
-            "Отработано (без обеда)", "Отклонение (HH:MM)", "Статус"
+            "№", "ФИО сотрудника", "График", "Все отметки за день",
+            "Отработано (без обеда)", "Отклонение (HH:MM)",
         ]
         ws.append(headers)
         ws.row_dimensions[3].height = 25
@@ -438,280 +460,241 @@ def generate_report(
             cell.alignment = align_center
             cell.border = thin_border
 
-        # Group employees by department
-        dept_groups = {}
-        for emp_id, info in emp_data.items():
-            dept = info["dept"]
-            if dept not in dept_groups:
-                dept_groups[dept] = []
-            dept_groups[dept].append(info)
+        # Строки — по алфавиту ФИО через все отделы, как в образце: колонки
+        # «Отдел» нет, и разбивка по отделам читалась бы алфавитом, который
+        # начинается заново посреди листа. Отдел и id — только чтобы порядок
+        # однофамильцев не прыгал от выгрузки к выгрузке.
+        ordered = sorted(emp_data.items(), key=lambda item: (
+            _name_sort_key(item[1]["name"]), _name_sort_key(item[1]["dept"]), str(item[0])))
 
         current_row = 4
-        for dept_name, emps in sorted(dept_groups.items()):
-            for info in sorted(emps, key=lambda x: x["name"]):
-                name = info["name"]
-                span = info["span"]
-                raw_marks = info["marks"]
+        for row_number, (_emp_id, info) in enumerate(ordered, 1):
+            dept_name = info["dept"]
+            name = info["name"]
+            span = info["span"]
+            raw_marks = info["marks"]
+            
+            # Update unique employees set
+            total_unique_employees.add(name)
+            total_row_count += 1
+
+            # Format raw marks list
+            formatted_marks = []
+            for m in _marks_latest_first(raw_marks):
+                m_dt = _parse_dt(_mark_date(m))
+                m_time = m_dt.strftime("%H:%M") if m_dt else "??:??"
+                mtype_val = _mark_type(m)
+                mtype = "Вход" if mtype_val == 0 else "Выход" if mtype_val == 1 else "Отм"
+                if m_dt and m_dt.date() != current_date.date():
+                    # Уход ночной смены — на следующий день: без даты «ушёл
+                    # в 08:18» читается как уход раньше прихода.
+                    mtype += f", {m_dt.strftime('%d.%m')}"
+                is_suspicious = m.get("status") == 0
+                susp_prefix = "⚠️ " if is_suspicious else ""
+                formatted_marks.append(f"{susp_prefix}{m_time}({mtype})")
+            marks_str = ", ".join(formatted_marks) if formatted_marks else "нет отметок"
+
+            # Опоздание, ранний уход и статус в листе дня не выводятся, но
+            # считаются: на них стоят сводный лист периода, подпись в Telegram
+            # и счётчики карточки отчёта.
+            late_in = 0
+            early_out = 0
+            status_text = "Вне графика"
+
+            fact_in_dt = None
+            fact_out_dt = None
+            plan_in_dt = None
+            plan_out_dt = None
+            # Человек отрабатывает часы, а не график (ТЗ #307, п. 2): графика у
+            # него нет, поэтому нет и опоздания — ему не к чему опаздывать.
+            is_hours = (span or {}).get("planMode") == plan_rules.MODE_HOURS
+
+            if span:
+                plan_in_dt = _parse_dt(span.get("workTimeStart"))
+                fact_in_dt = _parse_dt(span.get("inMark"))
+                # Clockster отдаёт уже сведённые приход и уход смены (ТЗ iCore 3,
+                # п. 4): перебирать отметки поверх них нельзя.
+                shift_facts = bool(span.get("factFromShifts"))
                 
-                # Update unique employees set
-                total_unique_employees.add(name)
-                total_row_count += 1
+                # Факт достаём из отметок и когда плана нет: у часовика графика
+                # не бывает вовсе, а раньше без плана приход просто терялся и
+                # человек с четырьмя отметками значился отсутствующим.
+                if not fact_in_dt and not shift_facts:
+                    in_marks = [m for m in raw_marks if _mark_type(m) == 0]
+                    if in_marks:
+                        in_marks.sort(key=lambda x: _mark_date(x) or "")
+                        fact_in_dt = _parse_dt(_mark_date(in_marks[0]))
 
-                # Format raw marks list
-                formatted_marks = []
-                for m in raw_marks:
-                    m_dt = _parse_dt(_mark_date(m))
-                    m_time = m_dt.strftime("%H:%M") if m_dt else "??:??"
-                    mtype_val = _mark_type(m)
-                    mtype = "Вход" if mtype_val == 0 else "Выход" if mtype_val == 1 else "Отм"
-                    if m_dt and m_dt.date() != current_date.date():
-                        # Уход ночной смены — на следующий день: без даты «ушёл
-                        # в 08:18» читается как уход раньше прихода.
-                        mtype += f", {m_dt.strftime('%d.%m')}"
-                    is_suspicious = m.get("status") == 0
-                    susp_prefix = "⚠️ " if is_suspicious else ""
-                    formatted_marks.append(f"{susp_prefix}{m_time}({mtype})")
-                marks_str = ", ".join(formatted_marks) if formatted_marks else "нет отметок"
-
-                plan_in = "—"
-                fact_in = "—"
-                late_in = 0
-                plan_out = "—"
-                fact_out = "—"
-                early_out = 0
-                status_text = "Вне графика"
-                status_fill = fill_yellow
-
-                fact_in_dt = None
-                fact_out_dt = None
-                plan_in_dt = None
-                plan_out_dt = None
-                # Человек отрабатывает часы, а не график (ТЗ #307, п. 2): графика у
-                # него нет, поэтому нет и опоздания — ему не к чему опаздывать.
-                is_hours = (span or {}).get("planMode") == plan_rules.MODE_HOURS
-
-                if span:
-                    plan_in_dt = _parse_dt(span.get("workTimeStart"))
-                    fact_in_dt = _parse_dt(span.get("inMark"))
-                    # Clockster отдаёт уже сведённые приход и уход смены (ТЗ iCore 3,
-                    # п. 4): перебирать отметки поверх них нельзя.
-                    shift_facts = bool(span.get("factFromShifts"))
-                    
-                    # Факт достаём из отметок и когда плана нет: у часовика графика
-                    # не бывает вовсе, а раньше без плана приход просто терялся и
-                    # человек с четырьмя отметками значился отсутствующим.
-                    if not fact_in_dt and not shift_facts:
-                        in_marks = [m for m in raw_marks if _mark_type(m) == 0]
-                        if in_marks:
-                            in_marks.sort(key=lambda x: _mark_date(x) or "")
-                            fact_in_dt = _parse_dt(_mark_date(in_marks[0]))
-
-                    plan_in = plan_in_dt.strftime("%H:%M") if plan_in_dt else "—"
-                    fact_in = _fact_time(fact_in_dt, current_date)
-                    
-                    if is_hours:
-                        late_in = 0
-                    elif plan_in_dt and fact_in_dt:
-                        diff_mins = (fact_in_dt - plan_in_dt).total_seconds() / 60
-                        late_in = max(0, int(diff_mins))
-                    else:
-                        late_in = span.get("lateIn") or 0
-
-                    plan_out_dt = _parse_dt(span.get("workTimeEnd"))
-                    fact_out_dt = _parse_dt(span.get("outMark"))
-                    
-                    if not fact_out_dt and not shift_facts:
-                        out_marks = [m for m in raw_marks if _mark_type(m) == 1]
-                        if out_marks:
-                            out_marks.sort(key=lambda x: _mark_date(x) or "")
-                            fact_out_dt = _parse_dt(_mark_date(out_marks[-1]))
-
-                    plan_out = plan_out_dt.strftime("%H:%M") if plan_out_dt else "—"
-                    fact_out = _fact_time(fact_out_dt, current_date)
-
-                    if is_hours:
-                        early_out = 0
-                    elif plan_out_dt and fact_out_dt:
-                        diff_out_mins = (plan_out_dt - fact_out_dt).total_seconds() / 60
-                        early_out = max(0, int(diff_out_mins))
-                    else:
-                        early_out = span.get("earlyOut") or 0
-
-                    if not fact_in_dt:
-                        status_text = "Отсутствует"
-                        status_fill = fill_red
-                        total_absent_count += 1
-                    else:
-                        status_parts = []
-                        if late_in >= threshold:
-                            status_parts.append(f"Опоздал ({late_in} м)")
-                            status_fill = fill_red
-                            total_late_count += 1
-                        if early_out >= threshold:
-                            status_parts.append(f"Ранний уход ({early_out} м)")
-                            status_fill = fill_red
-                            total_early_out_count += 1
-                        
-                        in_marks = [m for m in raw_marks if _mark_type(m) == 0]
-                        is_susp = in_marks and in_marks[0].get("status") == 0
-                        
-                        if not status_parts:
-                            if is_susp:
-                                status_parts.append("Вовремя (⚠️)")
-                                status_fill = fill_yellow
-                            else:
-                                status_parts.append("Вовремя")
-                                status_fill = fill_green
-                            total_ontime_days += 1
-                        else:
-                            if is_susp:
-                                status_parts.append("(⚠️)")
-                            status_fill = fill_red
-                        status_text = ", ".join(status_parts)
+                if is_hours:
+                    late_in = 0
+                elif plan_in_dt and fact_in_dt:
+                    diff_mins = (fact_in_dt - plan_in_dt).total_seconds() / 60
+                    late_in = max(0, int(diff_mins))
                 else:
-                    if raw_marks:
-                        in_marks = [m for m in raw_marks if _mark_type(m) == 0]
-                        if in_marks:
-                            in_marks.sort(key=lambda x: _mark_date(x) or "")
-                            fact_in_dt = _parse_dt(_mark_date(in_marks[0]))
-                            fact_in = fact_in_dt.strftime("%H:%M") if fact_in_dt else "—"
+                    late_in = span.get("lateIn") or 0
 
-                        out_marks = [m for m in raw_marks if _mark_type(m) == 1]
-                        if out_marks:
-                            out_marks.sort(key=lambda x: _mark_date(x) or "")
-                            fact_out_dt = _parse_dt(_mark_date(out_marks[-1]))
-                            fact_out = fact_out_dt.strftime("%H:%M") if fact_out_dt else "—"
-
-                        status_text = "Вне графика"
-                        status_fill = fill_yellow
-                    else:
-                        status_text = "Не явился"
-                        status_fill = fill_red
-                        total_absent_count += 1
-
-                # Время в работе — за вычетом обеда (ТЗ #273). Считаем от отрезка
-                # «приход → уход»; на коротком отрезке обеда нет, см. lunch_seconds.
-                work_time_str = "—"
-                work_seconds = 0
-                lunch_sec = 0
-                if is_hours:
-                    # У часовика «отработано» — это сумма отрезков «вход → выход» по
-                    # ВСЕМ отметкам дня (ТЗ #307, п. 2). Плановый обед не вычитается:
-                    # уход на обед у него и так виден отметками, и вычет посчитал бы
-                    # этот час дважды.
-                    work_seconds = _presence_seconds(raw_marks)
-                    if work_seconds > 0:
-                        work_time_str = f"{int(work_seconds // 3600):02d}:{int((work_seconds % 3600) // 60):02d}"
-                elif fact_in_dt and fact_out_dt:
-                    span_sec = (fact_out_dt - fact_in_dt).total_seconds()
-                    if span_sec > 0:
-                        # Настоящий перерыв этого человека, если источник его знает
-                        # (Clockster отдаёт break_time); иначе общее правило.
-                        planned_break = (span or {}).get("breakSeconds")
-                        lunch_sec = _lunch_seconds(span_sec, planned_break)
-                        work_seconds = _net_work_seconds(span_sec, planned_break)
-                        h = int(work_seconds // 3600)
-                        m = int((work_seconds % 3600) // 60)
-                        work_time_str = f"{h:02d}:{m:02d}"
-
-                deviation_str = "—"
-                diff_sec = None
-                if is_hours:
-                    # Отклонение у часовика считается от нормы часов, а не от смены.
-                    diff_sec = _work_deviation_seconds(
-                        work_seconds, hours_norm=(span or {}).get("hoursNorm") or 0)
-                elif span and fact_in_dt and fact_out_dt:
-                    diff_sec = _work_deviation_seconds(
-                        work_seconds,
-                        plan_in=_parse_dt(span.get("workTimeStart")),
-                        plan_out=_parse_dt(span.get("workTimeEnd")),
-                        lunch_sec=lunch_sec)
-                if diff_sec is not None:
-                    sign = "+" if diff_sec >= 0 else "-"
-                    abs_diff = abs(diff_sec)
-                    deviation_str = (f"{sign}{int(abs_diff // 3600):02d}:"
-                                     f"{int((abs_diff % 3600) // 60):02d}")
-
-                # Update Period Aggregated Statistics
-                emp_key = (dept_name, name)
-                if emp_key not in emp_summary:
-                    emp_summary[emp_key] = {
-                        "scheduled_days": 0,
-                        "worked_days": 0,
-                        "ontime_days": 0,
-                        "late_count": 0,
-                        "late_mins": 0,
-                        "early_out_count": 0,
-                        "early_out_mins": 0,
-                        "absent_count": 0,
-                        "total_work_seconds": 0,
-                    }
+                plan_out_dt = _parse_dt(span.get("workTimeEnd"))
+                fact_out_dt = _parse_dt(span.get("outMark"))
                 
-                stats = emp_summary[emp_key]
-                if span:
-                    stats["scheduled_days"] += 1
-                if fact_in_dt:
-                    stats["worked_days"] += 1
-                    stats["total_work_seconds"] += work_seconds
-                if status_text in ("Вовремя", "Вовремя (⚠️)"):
-                    stats["ontime_days"] += 1
-                if late_in >= threshold and span and fact_in_dt:
-                    stats["late_count"] += 1
-                    stats["late_mins"] += late_in
-                if early_out >= threshold and span and fact_out_dt:
-                    stats["early_out_count"] += 1
-                    stats["early_out_mins"] += early_out
-                if status_text in ("Отсутствует", "Не явился"):
-                    stats["absent_count"] += 1
+                if not fact_out_dt and not shift_facts:
+                    out_marks = [m for m in raw_marks if _mark_type(m) == 1]
+                    if out_marks:
+                        out_marks.sort(key=lambda x: _mark_date(x) or "")
+                        fact_out_dt = _parse_dt(_mark_date(out_marks[-1]))
 
-                # Append Row Data
-                row_span = info.get("span") or {}
-                # Система берётся из записи, а не угадывается: у записей Workpace
-                # пометки нет, и отсутствие пометки и есть Workpace.
-                system_label = ("Клокстер" if row_span.get("markSystem") == CLOCKSTER_SYSTEM
-                                else "Воркпейс")
-                # У часовика лента отметок заменяется итогом: ТЗ #307 (п. 2) просит
-                # «сразу отработанные часы, а не по каждой отметке отдельно».
-                # Число отметок остаётся — по нему видно, что итог не с потолка.
-                marks_cell = marks_str
                 if is_hours:
-                    marks_cell = (f"Отработано {work_time_str} · {len(raw_marks)} отм."
-                                  if raw_marks else "нет отметок")
-                row_data = [
-                    dept_name, name,
-                    row_span.get("positionName") or "—",
-                    _schedule_cell(row_span, plan_in_dt, plan_out_dt),
-                    system_label,
-                    marks_cell, fact_in, late_in if late_in > 0 else "—",
-                    fact_out, early_out if early_out > 0 else "—",
-                    work_time_str, deviation_str, status_text
-                ]
-                ws.append(row_data)
-                ws.row_dimensions[current_row].height = 20
+                    early_out = 0
+                elif plan_out_dt and fact_out_dt:
+                    diff_out_mins = (plan_out_dt - fact_out_dt).total_seconds() / 60
+                    early_out = max(0, int(diff_out_mins))
+                else:
+                    early_out = span.get("earlyOut") or 0
 
-                # Style the row
-                for col_idx in range(1, len(headers) + 1):
-                    cell = ws.cell(row=current_row, column=col_idx)
-                    cell.font = font_regular
-                    cell.border = thin_border
+                if not fact_in_dt:
+                    status_text = "Отсутствует"
+                    total_absent_count += 1
+                else:
+                    status_parts = []
+                    if late_in >= threshold:
+                        status_parts.append(f"Опоздал ({late_in} м)")
+                        total_late_count += 1
+                    if early_out >= threshold:
+                        status_parts.append(f"Ранний уход ({early_out} м)")
+                        total_early_out_count += 1
 
-                    # Текстовые колонки слева: отдел, ФИО, должность, график,
-                    # система и лента отметок.
-                    if col_idx in [1, 2, 3, 4, 5, 6]:
-                        cell.alignment = align_left
-                    else:
-                        cell.alignment = align_center
+                    in_marks = [m for m in raw_marks if _mark_type(m) == 0]
+                    is_susp = in_marks and in_marks[0].get("status") == 0
 
-                    if col_idx == len(headers):
-                        cell.fill = status_fill
-                        cell.font = font_bold
-                    else:
-                        if current_row % 2 == 0:
-                            cell.fill = fill_even
+                    if not status_parts:
+                        if is_susp:
+                            status_parts.append("Вовремя (⚠️)")
                         else:
-                            cell.fill = fill_odd
+                            status_parts.append("Вовремя")
+                        total_ontime_days += 1
+                    else:
+                        if is_susp:
+                            status_parts.append("(⚠️)")
+                    status_text = ", ".join(status_parts)
+            else:
+                if raw_marks:
+                    in_marks = [m for m in raw_marks if _mark_type(m) == 0]
+                    if in_marks:
+                        in_marks.sort(key=lambda x: _mark_date(x) or "")
+                        fact_in_dt = _parse_dt(_mark_date(in_marks[0]))
 
-                current_row += 1
+                    out_marks = [m for m in raw_marks if _mark_type(m) == 1]
+                    if out_marks:
+                        out_marks.sort(key=lambda x: _mark_date(x) or "")
+                        fact_out_dt = _parse_dt(_mark_date(out_marks[-1]))
+
+                    status_text = "Вне графика"
+                else:
+                    status_text = "Не явился"
+                    total_absent_count += 1
+
+            # Время в работе — за вычетом обеда (ТЗ #273). Считаем от отрезка
+            # «приход → уход»; на коротком отрезке обеда нет, см. lunch_seconds.
+            work_time_str = "—"
+            work_seconds = 0
+            lunch_sec = 0
+            if is_hours:
+                # У часовика «отработано» — это сумма отрезков «вход → выход» по
+                # ВСЕМ отметкам дня (ТЗ #307, п. 2). Плановый обед не вычитается:
+                # уход на обед у него и так виден отметками, и вычет посчитал бы
+                # этот час дважды.
+                work_seconds = _presence_seconds(raw_marks)
+                if work_seconds > 0:
+                    work_time_str = f"{int(work_seconds // 3600):02d}:{int((work_seconds % 3600) // 60):02d}"
+            elif fact_in_dt and fact_out_dt:
+                span_sec = (fact_out_dt - fact_in_dt).total_seconds()
+                if span_sec > 0:
+                    # Настоящий перерыв этого человека, если источник его знает
+                    # (Clockster отдаёт break_time); иначе общее правило.
+                    planned_break = (span or {}).get("breakSeconds")
+                    lunch_sec = _lunch_seconds(span_sec, planned_break)
+                    work_seconds = _net_work_seconds(span_sec, planned_break)
+                    h = int(work_seconds // 3600)
+                    m = int((work_seconds % 3600) // 60)
+                    work_time_str = f"{h:02d}:{m:02d}"
+
+            deviation_str = "—"
+            diff_sec = None
+            if is_hours:
+                # Отклонение у часовика считается от нормы часов, а не от смены.
+                diff_sec = _work_deviation_seconds(
+                    work_seconds, hours_norm=(span or {}).get("hoursNorm") or 0)
+            elif span and fact_in_dt and fact_out_dt:
+                diff_sec = _work_deviation_seconds(
+                    work_seconds,
+                    plan_in=_parse_dt(span.get("workTimeStart")),
+                    plan_out=_parse_dt(span.get("workTimeEnd")),
+                    lunch_sec=lunch_sec)
+            if diff_sec is not None:
+                sign = "+" if diff_sec >= 0 else "-"
+                abs_diff = abs(diff_sec)
+                deviation_str = (f"{sign}{int(abs_diff // 3600):02d}:"
+                                 f"{int((abs_diff % 3600) // 60):02d}")
+
+            # Update Period Aggregated Statistics
+            emp_key = (dept_name, name)
+            if emp_key not in emp_summary:
+                emp_summary[emp_key] = {
+                    "scheduled_days": 0,
+                    "worked_days": 0,
+                    "ontime_days": 0,
+                    "late_count": 0,
+                    "late_mins": 0,
+                    "early_out_count": 0,
+                    "early_out_mins": 0,
+                    "absent_count": 0,
+                    "total_work_seconds": 0,
+                }
+            
+            stats = emp_summary[emp_key]
+            if span:
+                stats["scheduled_days"] += 1
+            if fact_in_dt:
+                stats["worked_days"] += 1
+                stats["total_work_seconds"] += work_seconds
+            if status_text in ("Вовремя", "Вовремя (⚠️)"):
+                stats["ontime_days"] += 1
+            if late_in >= threshold and span and fact_in_dt:
+                stats["late_count"] += 1
+                stats["late_mins"] += late_in
+            if early_out >= threshold and span and fact_out_dt:
+                stats["early_out_count"] += 1
+                stats["early_out_mins"] += early_out
+            if status_text in ("Отсутствует", "Не явился"):
+                stats["absent_count"] += 1
+
+            # Append Row Data
+            row_span = info.get("span") or {}
+            # У часовика лента отметок заменяется итогом: ТЗ #307 (п. 2) просит
+            # «сразу отработанные часы, а не по каждой отметке отдельно».
+            # Число отметок остаётся — по нему видно, что итог не с потолка.
+            marks_cell = marks_str
+            if is_hours:
+                marks_cell = (f"Отработано {work_time_str} · {len(raw_marks)} отм."
+                              if raw_marks else "нет отметок")
+            row_data = [
+                row_number, name,
+                _schedule_cell(row_span, plan_in_dt, plan_out_dt),
+                marks_cell, work_time_str, deviation_str,
+            ]
+            ws.append(row_data)
+            ws.row_dimensions[current_row].height = 20
+
+            # Style the row
+            for col_idx in range(1, len(headers) + 1):
+                cell = ws.cell(row=current_row, column=col_idx)
+                cell.font = font_regular
+                cell.border = thin_border
+                # Текст слева — ФИО, график и лента отметок; номер и время
+                # по центру.
+                cell.alignment = align_left if col_idx in (2, 3, 4) else align_center
+                cell.fill = fill_even if current_row % 2 == 0 else fill_odd
+
+            current_row += 1
 
         # Auto-fit columns for daily sheet
         for col in ws.columns:
@@ -724,6 +707,9 @@ def generate_report(
                 if len(val) > max_len:
                     max_len = len(val)
             ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+        # Номер строки — узкий столбец: общий минимум в 10 знаков сделал бы его
+        # шире самого номера.
+        ws.column_dimensions["A"].width = _number_column_width(current_row - 4)
 
         current_date += timedelta(days=1)
 
@@ -736,8 +722,9 @@ def generate_report(
         sum_ws.row_dimensions[1].height = 30
         sum_ws.append([]) # Spacer
 
+        # Номер слева — как в листах дней (образец владельца, 11.11.2026).
         sum_headers = [
-            "Отдел", "ФИО сотрудника", "Дней по графику", "Дней отработано", "Дней вовремя",
+            "№", "Отдел", "ФИО сотрудника", "Дней по графику", "Дней отработано", "Дней вовремя",
             "Опозданий (кол-во)", "Опозданий (всего мин)", "Ранних уходов (кол-во)", "Ранних уходов (всего мин)",
             "Прогулов/Неявок (кол-во)", "Всего отработано без обеда (HH:MM)", "Среднее время работы (HH:MM)"
         ]
@@ -752,7 +739,12 @@ def generate_report(
             cell.border = thin_border
 
         sum_row = 4
-        for (dept_name, name), stats in sorted(emp_summary.items()):
+        # Тот же порядок, что в листах дней, — по алфавиту ФИО через все отделы:
+        # иначе у одного человека в одной книге были бы разные номера. Отдел
+        # остаётся колонкой и разводит однофамильцев.
+        summary_rows = sorted(emp_summary.items(), key=lambda item: (
+            _name_sort_key(item[0][1]), _name_sort_key(item[0][0]), item[0]))
+        for row_number, ((dept_name, name), stats) in enumerate(summary_rows, 1):
             tot_sec = stats["total_work_seconds"]
             work_days = stats["worked_days"]
             
@@ -768,7 +760,7 @@ def generate_report(
                 avg_worked_str = f"{avg_h:02d}:{avg_m:02d}"
 
             sum_row_data = [
-                dept_name, name, stats["scheduled_days"], stats["worked_days"], stats["ontime_days"],
+                row_number, dept_name, name, stats["scheduled_days"], stats["worked_days"], stats["ontime_days"],
                 stats["late_count"], stats["late_mins"] if stats["late_mins"] > 0 else "—",
                 stats["early_out_count"], stats["early_out_mins"] if stats["early_out_mins"] > 0 else "—",
                 stats["absent_count"], total_worked_str, avg_worked_str
@@ -777,12 +769,12 @@ def generate_report(
             sum_ws.row_dimensions[sum_row].height = 20
 
             # Style sum row
-            for col_idx in range(1, 13):
+            for col_idx in range(1, len(sum_headers) + 1):
                 cell = sum_ws.cell(row=sum_row, column=col_idx)
                 cell.font = font_regular
                 cell.border = thin_border
-                
-                if col_idx in [1, 2]:
+
+                if col_idx in [2, 3]:
                     cell.alignment = align_left
                 else:
                     cell.alignment = align_center
@@ -805,6 +797,7 @@ def generate_report(
                 if len(val) > max_len:
                     max_len = len(val)
             sum_ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+        sum_ws.column_dimensions["A"].width = _number_column_width(sum_row - 4)
 
     # Save workbook to memory stream
     file_stream = BytesIO()
@@ -859,6 +852,6 @@ def generate_report(
             summary_lines.append(f"• Ранний уход: <b>{total_early_out_count}</b>")
         if total_suspicious_marks_count > 0:
             summary_lines.append(f"• Подозрительные отметки: <b>⚠️ {total_suspicious_marks_count}</b>")
-        summary_lines.append("\n📂 <i>Детальный отчет с разбивкой по отделам и всеми отметками прикреплен в Excel-файле ниже.</i>")
+        summary_lines.append("\n📂 <i>Детальный отчет со всеми отметками за день прикреплен в Excel-файле ниже.</i>")
 
     return excel_bytes, filename, "\n".join(summary_lines)

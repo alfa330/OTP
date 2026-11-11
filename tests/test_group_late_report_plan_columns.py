@@ -49,10 +49,12 @@ class HeaderTests(unittest.TestCase):
     def test_schedule_column_stays_single(self):
         self.assertEqual(self._headers().count('"График"'), 1)
 
-    def test_fact_columns_remain(self):
+    def test_fact_columns_left_with_the_owner_sample(self):
+        # Образец владельца (11.11.2026): приход и уход читаются по ленте
+        # «Все отметки за день», отдельных колонок факта в листе дня нет.
         headers = self._headers()
-        self.assertIn("Время прихода (факт)", headers)
-        self.assertIn("Время ухода (факт)", headers)
+        self.assertNotIn("Время прихода (факт)", headers)
+        self.assertNotIn("Время ухода (факт)", headers)
 
 
 class ScheduleCellTests(unittest.TestCase):

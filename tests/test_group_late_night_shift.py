@@ -57,20 +57,22 @@ class ReportTests(unittest.TestCase):
     def _line(self, wb, day):
         return [c.value for c in wb[day][4]]
 
+    # Строка листа дня по образцу владельца (11.11.2026):
+    # № · ФИО · График · Все отметки за день · Отработано · Отклонение.
+    # Приход и уход отдельными колонками больше не выводятся — ночной уход
+    # виден в ленте отметок с датой, а смена через полночь — в «Отработано».
     def test_evening_shift_until_after_midnight_is_counted(self):
         wb = self._report("2026-09-22")
         line = self._line(wb, "2026-09-22")
-        self.assertEqual(line[6], "13:39")
-        self.assertEqual(line[8], "00:02 (23.09)")
-        self.assertEqual(line[10], "09:23")
-        self.assertEqual(line[5], "13:39(Вход), 00:02(Выход, 23.09)")
+        self.assertEqual(line[4], "09:23")
+        self.assertEqual(line[3], "00:02(Выход, 23.09), 13:39(Вход)")
 
     def test_previous_night_departure_is_not_the_next_days_departure(self):
         wb = self._report("2026-09-23")
         line = self._line(wb, "2026-09-23")
-        self.assertEqual(line[6], "14:54")
-        self.assertEqual(line[8], "00:01 (24.09)")
-        self.assertNotIn("00:02", line[5])
+        self.assertEqual(line[3], "00:01(Выход, 24.09), 14:54(Вход)")
+        self.assertEqual(line[4], "08:07")
+        self.assertNotIn("00:02", line[3])
 
     def test_sources_are_read_with_a_day_on_each_side(self):
         self._report("2026-09-22", "2026-09-23")

@@ -100,11 +100,11 @@ class ReportUsesTheDeductionTests(unittest.TestCase):
         # людей он не час, и плоское правило соврало бы именно им.
         self.assertIn('planned_break = (span or {}).get("breakSeconds")', REPORTS_SRC)
 
-    def test_report_shows_position_and_source_system(self):
-        # Требование ТЗ: кадровик ищет по должности и видит, где смотреть первоисточник.
-        self.assertIn('"Должность"', REPORTS_SRC)
-        self.assertIn('"Система"', REPORTS_SRC)
-        self.assertIn('"Клокстер" if row_span.get("markSystem") == CLOCKSTER_SYSTEM', REPORTS_SRC)
+    def test_report_follows_the_owner_sample_without_position_and_system(self):
+        # Колонки «Должность» и «Система» (ТЗ #273) убраны по образцу владельца
+        # 11.11.2026; должность и система остаются на экране «Отметок».
+        self.assertNotIn('"Должность"', REPORTS_SRC)
+        self.assertNotIn('"Система"', REPORTS_SRC)
 
     def test_norm_is_net_of_lunch_too(self):
         # Иначе у отработавшего ровно по графику «Отклонение» показывало бы −1:00.
