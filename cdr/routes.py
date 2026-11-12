@@ -137,7 +137,7 @@ _LEAD_AUTO = {}
 
 def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                         resolve_requester, excel_text_warning=None, store_audio=None,
-                        share_call_end_parties=None):
+                        share_call_end_parties=None, inbound_line_numbers=None):
     """Своего пула у раздела нет и не нужно: тяжёлую работу делает мост внутри
     корпоративной сети, а портал только читает свою базу и собирает книгу.
 
@@ -149,7 +149,11 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
     share_call_end_parties() -> сколько обновлено — дописать, кто положил трубку, звонкам
     журнала оценок, взятым раньше, чем это стало известно (исходящим до моста 1.6.0
     стороны не знал никто): по всем касаниям, где она уже есть. Своего журнала у раздела
-    нет; без этого аргумента сутки просто сохраняются."""
+    нет; без этого аргумента сутки просто сохраняются.
+
+    inbound_line_numbers — {очередь: номера линий} для колонки «Номера» «Отчёта по входу».
+    Таблица номеров компании лежит в конфиге линий монолита, а не в пакете (репозиторий
+    публичный, и место для неё одно); без аргумента отчёт собирается с пустой колонкой."""
     bp = Blueprint('cdr', __name__, url_prefix='/api/cdr')
 
     # {номер: очередь} для подписи парка и момент, когда его собрали. Экземпляр портала
@@ -535,7 +539,8 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             touches = queries.incoming_touches_compact(cursor, plan_from, day_to)
         workbook, days = inbound_report.build_workbook(
             touches, day_from=day_from, day_to=day_to,
-            generated_by=ctx.get('name') or '', missing_days=missing)
+            generated_by=ctx.get('name') or '', missing_days=missing,
+            line_numbers=inbound_line_numbers)
         log.info('Касания: отчёт по входу %s..%s — %d сут., входящих %d, собрал %s',
                  day_from, day_to, days, len(touches), ctx.get('name'))
         return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,

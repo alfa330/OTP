@@ -8,10 +8,17 @@
 * план звонков — факт той же очереди в тот же день недели неделей раньше;
 * «ОСС», часы и «CR%» портал не заполняет: клетки пустые, доли часов — формулами,
   которые молчат, пока часы не вписаны;
-* лист на день, очереди и номера — из образца, очередь не из образца со звонками
-  дописывается, а не теряется.
+* лист на день, очереди — из образца, очередь не из образца со звонками
+  дописывается, а не теряется;
+* номеров линий в модуле отчёта нет: репозиторий публичный, таблица номеров компании
+  лежит в конфиге линий в bot_schedule2.py и приходит в книгу аргументом.
+
+Номера в тестах учебные (7XX555XXXX).
 """
 
+import ast
+import io
+import os
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -47,6 +54,28 @@ def call(day, queue, *, talk=0, wait=None, clock='10:00:00', missed=False):
 MON, TUE = '2026-11-02', '2026-11-03'
 PREV_MON = '2026-10-26'
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Учебные номера линий: у первой очереди три номера (три строки листа), у Jana один.
+TEST_LINES = {'3000': ('77015550001', '77015550002', '77015550003'), '3034': ('77015550034',)}
+TEMPLATE_QUEUES = [queue for queue, _park in R.QUEUES]
+
+
+def company_lines():
+    """Таблица номеров из конфига линий монолита — разбором исходника: импорт
+    bot_schedule2 поднимает всё приложение."""
+    with io.open(os.path.join(ROOT, 'bot_schedule2.py'), encoding='utf-8') as handle:
+        source = handle.read()
+    start = source.index('_CDR_INBOUND_REPORT_LINES = {')
+    end = source.index('\n    }\n', start) + len('\n    }')
+    return source, ast.literal_eval(source[source.index('{', start):end])
+
+
+def queue_row(sheet, queue):
+    """Первая строка очереди на листе — по колонке «Очередь»."""
+    return next(row for row in range(R.FIRST_DATA_ROW, sheet.max_row + 1)
+                if sheet.cell(row=row, column=3).value == int(queue))
+
 
 def sample_touches():
     return [
@@ -70,17 +99,35 @@ def row_of(table, queue):
 
 class TemplateTests(unittest.TestCase):
 
-    def test_queues_and_numbers_are_the_owner_sample(self):
-        queues = [queue for queue, _park, _numbers in R.QUEUES]
-        self.assertEqual(len(queues), 22)
-        self.assertEqual(len(set(queues)), 22)
-        self.assertEqual(queues[0], '3000')
-        self.assertEqual(queues[-1], '3077')
-        # В образце строки 3–46: по строке на номер.
-        self.assertEqual(sum(len(numbers) for _q, _p, numbers in R.QUEUES), 44)
-        for _queue, _park, numbers in R.QUEUES:
-            for number in numbers:
-                self.assertRegex(number, r'^7\d{10}$')
+    def test_queues_are_the_owner_sample(self):
+        self.assertEqual(len(TEMPLATE_QUEUES), 22)
+        self.assertEqual(len(set(TEMPLATE_QUEUES)), 22)
+        self.assertEqual(TEMPLATE_QUEUES[0], '3000')
+        self.assertEqual(TEMPLATE_QUEUES[-1], '3077')
+
+    def test_report_module_holds_no_phone_numbers(self):
+        # Репозиторий публичный: таблица номеров компании допускается только в
+        # bot_schedule2.py (tests/test_no_personal_data_in_repo.py). 11.11.2026 она лежала
+        # здесь, и страж уронил прогон main.
+        with io.open(os.path.join(ROOT, 'cdr', 'inbound_report.py'), encoding='utf-8') as handle:
+            self.assertNotRegex(handle.read(), r'(?<![0-9])(?:\+?7|8)7[0-9]{9}(?![0-9])')
+
+    def test_company_lines_live_in_the_line_config_and_reach_the_report(self):
+        source, lines = company_lines()
+        # Те же очереди, что в образце, и строки 3–46 листа: по строке на номер.
+        self.assertEqual(sorted(lines), sorted(TEMPLATE_QUEUES))
+        numbers = [number for queue in TEMPLATE_QUEUES for number in lines[queue]]
+        self.assertEqual(len(numbers), 44)
+        self.assertEqual(len(set(numbers)), 44)
+        for number in numbers:
+            self.assertRegex(number, r'^7\d{10}$')
+        self.assertIn('inbound_line_numbers=_CDR_INBOUND_REPORT_LINES,', source)
+        stream, _days = R.build_workbook([], day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
+                                         line_numbers=lines)
+        sheet = load_workbook(stream)['02.11']
+        self.assertEqual([sheet['B%d' % row].value for row in range(3, 47)],
+                         [int(number) for number in numbers])
+        self.assertEqual(sheet['A47'].value, 'Итого')
 
     def test_headers_follow_the_sample(self):
         titles = [title for _key, title, _norm, _width, _fmt in R.COLUMNS]
@@ -151,11 +198,20 @@ class DayTablesTests(unittest.TestCase):
     def test_queue_outside_the_sample_is_appended_not_lost(self):
         for table in self.tables:
             queues = [row['queue'] for row in table['rows']]
-            self.assertEqual(queues[:22], [queue for queue, _p, _n in R.QUEUES])
+            self.assertEqual(queues[:22], TEMPLATE_QUEUES)
             self.assertEqual(queues[22:], ['3042'])
         extra = row_of(self.tuesday, '3042')
         self.assertEqual((extra['fact'], extra['park'], extra['numbers']), (1, 'Достойный', ()))
         self.assertEqual(self.tuesday['total']['fact'], 1)
+
+    def test_line_numbers_come_from_outside(self):
+        tables = R.day_tables(sample_touches(), date(2026, 11, 2), date(2026, 11, 2),
+                              line_numbers=TEST_LINES)
+        self.assertEqual(row_of(tables[0], '3000')['numbers'], TEST_LINES['3000'])
+        self.assertEqual(row_of(tables[0], '3034')['numbers'], TEST_LINES['3034'])
+        # Очередь без номеров в конфиге — строка с пустой клеткой, а не пропуск.
+        self.assertEqual(row_of(tables[0], '3001')['numbers'], ())
+        self.assertEqual(row_of(self.monday, '3000')['numbers'], ())
 
     def test_extra_queue_from_the_plan_week_only_is_not_a_row(self):
         touches = sample_touches() + [call(PREV_MON, '3033', talk=5, wait=1)]
@@ -175,9 +231,14 @@ class WorkbookTests(unittest.TestCase):
     def setUp(self):
         stream, self.days = R.build_workbook(
             sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 3),
-            generated_at=datetime(2026, 11, 11, 12, 30), generated_by='Проверяющий')
+            generated_at=datetime(2026, 11, 11, 12, 30), generated_by='Проверяющий',
+            line_numbers=TEST_LINES)
         self.book = load_workbook(stream)
         self.sheet = self.book['02.11']
+        # 22 очереди образца (у первой три строки номеров) и одна дописанная: строки 3–27.
+        self.jana = queue_row(self.sheet, '3034')
+        self.last = 27
+        self.total = 28
 
     def test_sheet_per_day_then_notes(self):
         self.assertEqual(self.days, 2)
@@ -195,51 +256,60 @@ class WorkbookTests(unittest.TestCase):
 
     def test_queue_block_spans_its_numbers(self):
         merged = {str(area) for area in self.sheet.merged_cells.ranges}
-        # 3000 — три номера: строки 3–5, как в образце.
+        # У 3000 три номера: строки 3–5.
         self.assertEqual([self.sheet['B%d' % row].value for row in (3, 4, 5)],
-                         [77003330602, 77078544503, 77082364572])
+                         [int(number) for number in TEST_LINES['3000']])
+        self.assertEqual(self.sheet['B%d' % self.jana].value, int(TEST_LINES['3034'][0]))
+        # Очередь без номеров — одна строка с пустой клеткой.
+        self.assertEqual(queue_row(self.sheet, '3001'), 6)
+        self.assertIsNone(self.sheet['B6'].value)
         self.assertEqual(self.sheet['C3'].value, 3000)
         self.assertEqual(self.sheet['D3'].value, 'Честный')
         for column in 'CDEFGHIOPQ':
             self.assertIn('%s3:%s5' % (column, column), merged)
-        # Дата и дневные ручные колонки — одной клеткой на все очереди (44 строки образца
-        # и одна дописанная очередь).
+        # Дата и дневные ручные колонки — одной клеткой на все очереди.
         for column in 'AJKLMN':
-            self.assertIn('%s3:%s47' % (column, column), merged)
+            self.assertIn('%s3:%s%d' % (column, column, self.last), merged)
         self.assertEqual(self.sheet['A3'].value, datetime(2026, 11, 2))
 
     def test_portal_numbers_are_values_not_formulas(self):
-        # Jana — строка 39 образца.
-        self.assertEqual(self.sheet['C39'].value, 3034)
-        self.assertEqual((self.sheet['E39'].value, self.sheet['F39'].value,
-                          self.sheet['H39'].value, self.sheet['O39'].value), (4, 3, 2, 75))
-        self.assertAlmostEqual(self.sheet['G39'].value, 0.75)
-        self.assertAlmostEqual(self.sheet['I39'].value, 1 / 3)
-        self.assertAlmostEqual(self.sheet['P39'].value, 1 / 3)
-        self.assertEqual(self.sheet['I39'].number_format, '0.0%')
-        self.assertEqual(self.sheet['G39'].number_format, '0%')
+        def cell(column):
+            return self.sheet['%s%d' % (column, self.jana)]
+
+        self.assertEqual((cell('E').value, cell('F').value, cell('H').value, cell('O').value),
+                         (4, 3, 2, 75))
+        self.assertAlmostEqual(cell('G').value, 0.75)
+        self.assertAlmostEqual(cell('I').value, 1 / 3)
+        self.assertAlmostEqual(cell('P').value, 1 / 3)
+        self.assertEqual(cell('I').number_format, '0.0%')
+        self.assertEqual(cell('G').number_format, '0%')
 
     def test_manual_fields_are_blank_and_formulas_wait_for_hours(self):
-        for cell in ('J3', 'K3', 'L3', 'Q3', 'Q39', 'Q48'):
+        for cell in ('J3', 'K3', 'L3', 'Q3', 'Q%d' % self.jana, 'Q%d' % self.total):
             self.assertIsNone(self.sheet[cell].value, cell)
         self.assertEqual(self.sheet['M3'].value, '=IF(OR(K3="",L3=""),"",L3/K3)')
         self.assertEqual(self.sheet['N3'].value, '=IF(OR(K3="",L3=""),"",(K3-L3)/K3)')
         # Итог повторяет дневное значение и не показывает ноль на пустой клетке.
-        self.assertEqual(self.sheet['K48'].value, '=IF(K3="","",K3)')
-        self.assertEqual(self.sheet['M48'].value, '=IF(M3="","",M3)')
+        self.assertEqual(self.sheet['K%d' % self.total].value, '=IF(K3="","",K3)')
+        self.assertEqual(self.sheet['M%d' % self.total].value, '=IF(M3="","",M3)')
 
     def test_total_row(self):
-        self.assertEqual(self.sheet['A48'].value, 'Итого')
-        self.assertIn('A48:D48', {str(area) for area in self.sheet.merged_cells.ranges})
-        self.assertEqual((self.sheet['E48'].value, self.sheet['F48'].value,
-                          self.sheet['H48'].value, self.sheet['O48'].value), (4, 4, 3, 70))
-        self.assertAlmostEqual(self.sheet['I48'].value, 0.25)
-        self.assertAlmostEqual(self.sheet['P48'].value, 0.5)
-        self.assertTrue(self.sheet['A48'].font.bold)
+        def cell(column):
+            return self.sheet['%s%d' % (column, self.total)]
+
+        self.assertEqual(self.sheet.max_row, self.total)
+        self.assertEqual(cell('A').value, 'Итого')
+        self.assertIn('A%d:D%d' % (self.total, self.total),
+                      {str(area) for area in self.sheet.merged_cells.ranges})
+        self.assertEqual((cell('E').value, cell('F').value, cell('H').value, cell('O').value),
+                         (4, 4, 3, 70))
+        self.assertAlmostEqual(cell('I').value, 0.25)
+        self.assertAlmostEqual(cell('P').value, 0.5)
+        self.assertTrue(cell('A').font.bold)
 
     def test_ar_data_bar_covers_queue_rows(self):
         ranges = [str(rule.sqref) for rule in self.sheet.conditional_formatting]
-        self.assertEqual(ranges, ['I3:I47'])
+        self.assertEqual(ranges, ['I3:I%d' % self.last])
 
     def test_notes_explain_what_is_counted(self):
         notes = self.book[R.NOTES_SHEET]
@@ -379,7 +449,8 @@ class RouteTests(unittest.TestCase):
         app.register_blueprint(routes.build_cdr_blueprint(
             db=_FakeDb(), require_api_key=lambda fn: fn,
             build_cors_preflight_response=lambda: ('', 204),
-            resolve_requester=lambda: (1, None, None)))
+            resolve_requester=lambda: (1, None, None),
+            inbound_line_numbers=TEST_LINES))
         app.config['TESTING'] = True
         return app.test_client()
 
@@ -398,7 +469,11 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(double.asked, (date(2026, 10, 26), date(2026, 11, 3)))
         book = load_workbook(BytesIO(response.data))
         self.assertEqual(book.sheetnames, ['02.11', '03.11', R.NOTES_SHEET])
-        self.assertEqual((book['02.11']['E39'].value, book['02.11']['F39'].value), (4, 3))
+        sheet = book['02.11']
+        jana = queue_row(sheet, '3034')
+        self.assertEqual((sheet['E%d' % jana].value, sheet['F%d' % jana].value), (4, 3))
+        # Номера линий доходят до книги из того, что передано фабрике раздела.
+        self.assertEqual(sheet['B3'].value, int(TEST_LINES['3000'][0]))
         # Все сутки на месте — мосту ставить нечего и оговорки в файле нет.
         self.assertEqual(double.enqueued, [])
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
