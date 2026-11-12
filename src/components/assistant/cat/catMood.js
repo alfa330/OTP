@@ -3,8 +3,9 @@
  * талисманов — ../mascot/mood.js; здесь — какая поза котика на какой жест.
  * Проверяет tests/assistant_cat.test.mjs; сам котик — CatMascot.jsx.
  *
- *   спокойно        → сидит (normal), моргает; курсор двигается — поглядывает
- *                     на него, замер — снова смотрит прямо;
+ *   спокойно        → сидит (normal), моргает и плавно ведёт головой за курсором
+ *                     во все стороны (catLook.js); курсор замер — снова смотрит
+ *                     на человека;
  *   курсор над котиком → Happy;  нажатие → Surprised;
  *   щелчок          → по кругу: Excited, Mischievous, Confused, Happy, Surprised;
  *                     4 щелчка подряд → Angry;
@@ -18,8 +19,10 @@ import { createMascotMood } from '../mascot/mood.js';
 export const EMOTIONS = ['normal', 'happy', 'excited', 'sad', 'angry', 'surprised', 'scared', 'sleepy',
     'confused', 'mischievous', 'asleep'];
 
-/* Кадры — эмоции плюс спокойная поза с головой к курсору и моргание. */
-export const FRAMES = [...EMOTIONS, 'look-left', 'look-right', 'blink'];
+/* Кадры целиком — эмоции. Голова к курсору и моргание в спокойной позе — слоями
+   (тело и голова под сеткой углов, catLook.js), отдельных кадров look-left, look-right
+   и blink больше нет. */
+export const FRAMES = [...EMOTIONS];
 
 export const CLICK_CYCLE = ['excited', 'mischievous', 'confused', 'happy', 'surprised'];
 export const DROWSY_MS = 4000;
@@ -41,30 +44,6 @@ const catMood = createMascotMood({
 
 export const { initialMood, moodReducer, displayEmotion, nextChangeAt } = catMood;
 export default catMood;
-
-/* Голова к курсору: дальше LOOK_TURN — повернуть, ближе LOOK_BACK — снова
-   прямо. Зазор между порогами — чтобы на границе голова не дёргалась. Курсор
-   замер на LOOK_HOLD_MS — голова снова прямо: котик «оглядывается» на движение
-   и возвращается к человеку (разбор 02.11: шарик у правого края, и без этого
-   голова была повёрнута влево почти всё время, а моргание не наступало). */
-export const LOOK_TURN = 0.5;
-export const LOOK_BACK = 0.3;
-export const LOOK_HOLD_MS = 2500;
-
-export const lookSide = (current, x) => {
-    if (x >= LOOK_TURN) return 'right';
-    if (x <= -LOOK_TURN) return 'left';
-    if (Math.abs(x) <= LOOK_BACK) return 'center';
-    return current;
-};
-
-/* Какой кадр показать: в спокойной позе — поворот головы или моргание
-   (моргает только глядя прямо — кадр моргания смотрит прямо). */
-export const frameFor = (emotion, side, blink) => {
-    if (emotion !== 'normal') return emotion;
-    if (side !== 'center') return `look-${side}`;
-    return blink ? 'blink' : 'normal';
-};
 
 /* Моргает раз в 3–6 с, на BLINK_MS. */
 export const BLINK_MS = 150;

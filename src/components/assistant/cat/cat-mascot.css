@@ -73,6 +73,37 @@
     opacity: 1;
 }
 
+/* Спокойная поза слоями (CatMascot.jsx, catLook.js): тело и голова, которая ведёт за
+   курсором. Группа появляется и гаснет целиком — как кадр эмоции. */
+.cat-mascot__calm,
+.cat-mascot__head {
+    position: absolute;
+    inset: 0;
+    display: block;
+}
+
+.cat-mascot__calm {
+    opacity: 0;
+    transition: opacity 0.12s ease-out;
+}
+
+.cat-mascot__calm.is-on {
+    opacity: 1;
+}
+
+/* Голова к курсору: непрозрачность и порядок слоёв головы CatMascot пишет прямо в узлы на
+   каждом кадре движения — соседние углы перетекают друг в друга (catLook.js: нижний слой
+   непрозрачный, тело не просвечивает). CSS-переход тут только запаздывал бы. */
+.cat-mascot__head img {
+    transition: none;
+}
+
+/* Моргание — накладка на глаза поверх всех слоёв головы, мгновенно. */
+.cat-mascot__lean .cat-mascot__blink {
+    z-index: 9;
+    transition: none;
+}
+
 /* Радость, восторг, удивление — короткий подскок. */
 .cat-mascot.is-happy .cat-mascot__lean,
 .cat-mascot.is-excited .cat-mascot__lean,

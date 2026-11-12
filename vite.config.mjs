@@ -21,6 +21,10 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 1500,
+    // Слои головы котика (cat-head-*, cat-calm-body) — отдельными файлами, не в код: накладки
+    // моргания по 2 КБ ниже порога встраивания раздували чанк котика с 9 до 51 КБ, а нужны
+    // они не сразу — грузятся в простое (CatMascot.jsx). Остальное — как по умолчанию.
+    assetsInlineLimit: (file) => (/[\\/]assistant[\\/]cat[\\/]assets[\\/]cat-(head|calm)-/.test(file) ? false : undefined),
     rollupOptions: {
       input: {
         main: resolve(rootDir, 'index.html'),

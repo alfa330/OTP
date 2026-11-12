@@ -1,14 +1,24 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { isLowEndDevice } from '../../../utils/devicePerformance';
 import useMascotMood from '../mascot/useMascotMood.js';
-import catMood, { BLINK_MS, FRAMES, LOOK_HOLD_MS, frameFor, lookSide, nextBlinkDelay } from './catMood.js';
+import catMood, { BLINK_MS, FRAMES, nextBlinkDelay } from './catMood.js';
+import {
+    LOOK_HOLD_MS,
+    atRest,
+    blendLayers,
+    cellAngles,
+    centerCell,
+    headBlend,
+    headCell,
+    headName,
+    springStep,
+    targetAngles,
+} from './catLook.js';
 import { CAT_LAYOUT } from './catLayout.js';
 import './cat-mascot.css';
 import logoUrl from './assets/cat-logo.webp';
 import normalUrl from './assets/cat-normal.webp';
-import lookLeftUrl from './assets/cat-look-left.webp';
-import lookRightUrl from './assets/cat-look-right.webp';
-import blinkUrl from './assets/cat-blink.webp';
+import calmBodyUrl from './assets/cat-calm-body.webp';
 import happyUrl from './assets/cat-happy.webp';
 import excitedUrl from './assets/cat-excited.webp';
 import sadUrl from './assets/cat-sad.webp';
@@ -24,16 +34,19 @@ import asleepUrl from './assets/cat-asleep.webp';
  * (02.11.2026): девять эмоций с листа и спящий клубочек. Каждая эмоция — своя
  * поза, отрендеренная в Blender (scripts/assistant_cat/cat_models.py, сборка —
  * build_assets.py), поэтому эмоция меняется подменой кадра целиком. В покое
- * котик моргает и поворачивает голову к курсору (кадры look-left/right),
- * а весь он чуть наклоняется следом.
+ * котик слоями: тело и голова, которая плавно ведёт за курсором во все стороны
+ * (сетка углов: пружина без отскока, соседние кадры перетекают друг в друга —
+ * catLook.js), моргает при любом повороте, а весь он чуть наклоняется следом.
  *
  * Помощника котик не трогает: жесты шарика он только слушает — общим для
  * талисманов хуком ../mascot/useMascotMood.js.
  *
  * Дёшево для любого компьютера: в разметке только уже показанные кадры,
  * остальные грузятся в простое; кадр, который ещё не доехал, не гасит
- * прежний; тень запечена в картинки — без CSS-фильтров; на слабой машине
- * котик не дышит, а значки эмоций стоят (isLowEndDevice).
+ * прежний; тень запечена в картинки — без CSS-фильтров; голова двигается
+ * только пока догоняет цель (requestAnimationFrame гаснет, когда догнала), а
+ * смешение кадров — непрозрачность слоёв прямо в узлах, мимо React; на слабой
+ * машине котик не дышит, а значки эмоций стоят (isLowEndDevice).
  */
 
 const LOW_END = isLowEndDevice();
@@ -42,9 +55,6 @@ const REDUCED = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(p
 
 const FRAME_URLS = {
     normal: normalUrl,
-    'look-left': lookLeftUrl,
-    'look-right': lookRightUrl,
-    blink: blinkUrl,
     happy: happyUrl,
     excited: excitedUrl,
     sad: sadUrl,
@@ -56,6 +66,20 @@ const FRAME_URLS = {
     mischievous: mischievousUrl,
     asleep: asleepUrl,
 };
+
+/* Головы спокойной позы (cat-head-<столбец>-<строка>.webp) и их накладки моргания. */
+const assetName = (path) => path.replace(/^.*\/cat-/, '').replace(/\.webp$/, '');
+const HEAD_URLS = {};
+const BLINK_URLS = {};
+Object.entries(import.meta.glob('./assets/cat-head-*.webp', { eager: true, query: '?url', import: 'default' }))
+    .forEach(([path, url]) => {
+        const name = assetName(path);
+        if (name.endsWith('-blink')) BLINK_URLS[name.slice(0, -'-blink'.length)] = url;
+        else HEAD_URLS[name] = url;
+    });
+const HEAD_NAMES = Object.keys(HEAD_URLS).sort();
+const CALM_BODY = 'calm-body';
+const START_CELL = centerCell();
 
 const HEART = 'M0 -2.2C-1.1 -4.6 -4.6 -4.2 -4.6 -1.4C-4.6 0.8 -2.3 2.5 0 4.2C2.3 2.5 4.6 0.8 4.6 -1.4C4.6 -4.2 1.1 -4.6 0 -2.2Z';
 const SPARK = 'M0 -5C0.6 -1.6 1.6 -0.6 5 0C1.6 0.6 0.6 1.6 0 5C-0.6 1.6 -1.6 0.6 -5 0C-1.6 -0.6 -0.6 -1.6 0 -5Z';
@@ -152,12 +176,13 @@ function Extras({ emotion }) {
 }
 
 /* Остальные кадры — в простое после первой отрисовки: браузер положит их в
-   кэш, и смена эмоции не будет ждать сеть. */
+   кэш, и смена эмоции или поворот головы не будут ждать сеть. */
 let framesPreloaded = false;
 const preloadFrames = () => {
     if (framesPreloaded || typeof window === 'undefined') return;
     framesPreloaded = true;
-    const run = () => Object.values(FRAME_URLS).forEach((url) => {
+    const urls = [...Object.values(FRAME_URLS), calmBodyUrl, ...Object.values(HEAD_URLS), ...Object.values(BLINK_URLS)];
+    const run = () => urls.forEach((url) => {
         const img = new Image();
         img.decoding = 'async';
         img.src = url;
@@ -169,10 +194,11 @@ const preloadFrames = () => {
 export default function CatMascot({ variant = 'orb', animated = true }) {
     const rootRef = useRef(null);
     const leanRef = useRef(null);
-    const sideRef = useRef('center');
+    const headRef = useRef(null);
     const shownRef = useRef(new Set(['normal']));
     const lastLoadedRef = useRef('normal');
-    const [side, setSide] = useState('center');
+    const [dominant, setDominant] = useState(headName(START_CELL));
+    const [allHeads, setAllHeads] = useState(false);
     const [blink, setBlink] = useState(false);
     const [loaded, setLoaded] = useState(() => new Set());
     const interactive = variant !== 'mini';
@@ -181,30 +207,84 @@ export default function CatMascot({ variant = 'orb', animated = true }) {
         if (interactive) preloadFrames();
     }, [interactive]);
 
-    /* Взгляд: весь котик чуть наклоняется к курсору (прямо в узел, мимо React),
-       а голова поворачивается кадром — только когда курсор перешёл порог. Курсор
-       замер на LOOK_HOLD_MS — котик снова смотрит на человека и моргает: шарик
-       стоит у края экрана, и иначе голова почти всё время была бы повёрнута. */
-    const turn = useCallback((next) => {
-        if (next === sideRef.current) return;
-        sideRef.current = next;
-        setSide(next);
-    }, []);
+    /* Голова к курсору: цель — ближайший угол сетки (headCell, с запасом на границе); голова
+       идёт к ней пружиной без отскока (springStep) в requestAnimationFrame и гаснет, когда
+       дошла. Между углами соседние кадры смешиваются по весам (headBlend → blendLayers) —
+       непрозрачность слоёв пишется прямо в узлы, мимо React; в покое — один чёткий кадр.
+       Весь котик чуть наклоняется следом. Курсор замер на LOOK_HOLD_MS — котик спокойно
+       поворачивается к человеку. */
+    const motionRef = useRef({ yaw: 0, pitch: 0, vy: 0, vp: 0 });
+    const cellRef = useRef(START_CELL);
+    const targetRef = useRef(cellAngles(START_CELL));
+    const loadedHeadsRef = useRef(new Set());
+    const dominantRef = useRef(headName(START_CELL));
+    const rafRef = useRef(0);
+    const tickAtRef = useRef(0);
     const holdRef = useRef(0);
-    const onLook = useCallback((x) => {
+    const paint = useCallback((angles) => {
+        const node = headRef.current;
+        if (!node) return;
+        // Только доехавшие кадры: недоехавший дал бы дыру, сквозь которую видно тело.
+        const ready = loadedHeadsRef.current;
+        let blend = headBlend(angles).filter((part) => ready.has(part.name));
+        if (!blend.length) blend = [{ name: dominantRef.current, weight: 1 }];
+        const total = blend.reduce((sum, part) => sum + part.weight, 0);
+        const layers = new Map(blendLayers(blend.map((part) => ({ ...part, weight: part.weight / total })))
+            .map((layer) => [layer.name, layer]));
+        node.querySelectorAll('img[data-head]').forEach((img) => {
+            const layer = layers.get(img.dataset.head);
+            img.style.opacity = layer ? layer.opacity.toFixed(3) : '0';
+            img.style.zIndex = layer ? String(layer.z) : '0';
+        });
+        if (blend[0].name !== dominantRef.current) {
+            dominantRef.current = blend[0].name;
+            setDominant(blend[0].name);
+        }
+    }, []);
+    const tick = useCallback((at) => {
+        const dt = tickAtRef.current ? at - tickAtRef.current : 16;
+        tickAtRef.current = at;
+        const target = targetRef.current;
+        let next = springStep(motionRef.current, target, dt);
+        const done = atRest(next, target);
+        if (done) next = { yaw: target.yaw, pitch: target.pitch, vy: 0, vp: 0 };
+        motionRef.current = next;
+        paint(next);
+        if (done) {
+            rafRef.current = 0;
+            tickAtRef.current = 0;
+            return;
+        }
+        rafRef.current = window.requestAnimationFrame(tick);
+    }, [paint]);
+    const aim = useCallback((cell) => {
+        cellRef.current = cell;
+        targetRef.current = cellAngles(cell);
+        if (!rafRef.current) rafRef.current = window.requestAnimationFrame(tick);
+    }, [tick]);
+    const onLook = useCallback((x, y) => {
         if (REDUCED) return;
-        if (leanRef.current) leanRef.current.style.transform = `rotate(${(x * 3).toFixed(2)}deg)`;
-        turn(lookSide(sideRef.current, x));
+        if (leanRef.current) leanRef.current.style.transform = `rotate(${(x * 2).toFixed(2)}deg)`;
+        aim(headCell(targetAngles(x, y), cellRef.current));
         window.clearTimeout(holdRef.current);
         holdRef.current = window.setTimeout(() => {
             if (leanRef.current) leanRef.current.style.transform = '';
-            turn('center');
+            aim(START_CELL);
         }, LOOK_HOLD_MS);
-    }, [turn]);
-    useEffect(() => () => window.clearTimeout(holdRef.current), []);
+    }, [aim]);
+    const onHeadLoad = useCallback((name) => {
+        loadedHeadsRef.current.add(name);
+        setLoaded((prev) => (prev.has(name) ? prev : new Set(prev).add(name)));
+        paint(motionRef.current);
+    }, [paint]);
+    useEffect(() => () => {
+        window.clearTimeout(holdRef.current);
+        window.cancelAnimationFrame(rafRef.current);
+    }, []);
     const emotion = useMascotMood(rootRef, catMood, { interactive, onLook });
 
-    const canBlink = interactive && animated && !REDUCED && emotion === 'normal' && side === 'center';
+    // Моргает при любом повороте головы: у каждого угла своя накладка моргания.
+    const canBlink = interactive && animated && !REDUCED && emotion === 'normal';
     useEffect(() => {
         if (!canBlink) return undefined;
         let timer = 0;
@@ -227,6 +307,10 @@ export default function CatMascot({ variant = 'orb', animated = true }) {
     const markLoaded = useCallback((name) => {
         setLoaded((prev) => (prev.has(name) ? prev : new Set(prev).add(name)));
     }, []);
+    // Остальные углы головы — когда показались тело и голова прямо: первый кадр не ждёт их.
+    useEffect(() => {
+        if (!allHeads && loaded.has(CALM_BODY) && loaded.has(headName(START_CELL))) setAllHeads(true);
+    }, [loaded, allHeads]);
 
     if (!interactive) {
         return (
@@ -236,11 +320,16 @@ export default function CatMascot({ variant = 'orb', animated = true }) {
         );
     }
 
-    const frame = frameFor(emotion, side, blink && canBlink);
+    const frame = emotion;
     shownRef.current.add(frame);
     // Пока новый кадр не доехал, остаётся прежний — котик не мигает пустотой.
     if (loaded.has(frame)) lastLoadedRef.current = frame;
     const visible = loaded.has(frame) ? frame : lastLoadedRef.current;
+    // Спокойная поза слоями — когда доехали тело и голова; до того — кадр normal целиком.
+    const calm = !REDUCED && emotion === 'normal' && loaded.has(CALM_BODY) && loaded.has(dominant);
+    const blinking = calm && blink && canBlink;
+    // Сначала — голова прямо; остальные углы монтируются, когда спокойная поза показалась.
+    const heads = allHeads ? HEAD_NAMES : [headName(START_CELL)];
     return (
         <span
             ref={rootRef}
@@ -252,13 +341,40 @@ export default function CatMascot({ variant = 'orb', animated = true }) {
                     {FRAMES.filter((name) => shownRef.current.has(name)).map((name) => (
                         <img
                             key={name}
-                            className={name === visible ? 'is-on' : undefined}
+                            className={name === visible && !calm ? 'is-on' : undefined}
                             src={FRAME_URLS[name]}
                             alt=""
                             draggable={false}
                             onLoad={() => markLoaded(name)}
                         />
                     ))}
+                    {!REDUCED && (
+                        <span className={`cat-mascot__calm${calm ? ' is-on' : ''}`}>
+                            <img className="is-on" src={calmBodyUrl} alt="" draggable={false}
+                                onLoad={() => markLoaded(CALM_BODY)} />
+                            <span ref={headRef} className="cat-mascot__head">
+                                {heads.map((name) => (
+                                    <img
+                                        key={name}
+                                        data-head={name}
+                                        src={HEAD_URLS[name]}
+                                        alt=""
+                                        draggable={false}
+                                        onLoad={() => onHeadLoad(name)}
+                                    />
+                                ))}
+                                {BLINK_URLS[dominant] && (
+                                    <img
+                                        key={`${dominant}-blink`}
+                                        className={`cat-mascot__blink${blinking ? ' is-on' : ''}`}
+                                        src={BLINK_URLS[dominant]}
+                                        alt=""
+                                        draggable={false}
+                                    />
+                                )}
+                            </span>
+                        </span>
+                    )}
                 </span>
             </span>
             <Extras key={emotion} emotion={emotion} />

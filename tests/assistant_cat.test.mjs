@@ -18,17 +18,29 @@ import {
     DROWSY_MS,
     EMOTIONS,
     FRAMES,
-    LOOK_BACK,
-    LOOK_TURN,
     displayEmotion,
-    frameFor,
     initialMood,
-    lookSide,
     moodReducer,
     nextBlinkDelay,
     nextChangeAt,
 } from '../src/components/assistant/cat/catMood.js';
-import { CAT_LAYOUT } from '../src/components/assistant/cat/catLayout.js';
+import {
+    HEAD_HYSTERESIS,
+    LOOK_HOLD_MS,
+    MAX_TURN_SPEED,
+    atRest,
+    blendLayers,
+    cellAngles,
+    centerCell,
+    gridPosition,
+    headBlend,
+    headCell,
+    headName,
+    nearestIndex,
+    springStep,
+    targetAngles,
+} from '../src/components/assistant/cat/catLook.js';
+import { CAT_HEAD_GRID, CAT_LAYOUT } from '../src/components/assistant/cat/catLayout.js';
 import { CLOSE_CLICK_MS, RAPID_CLICKS, SLEEP_AFTER_MS } from '../src/components/assistant/mascot/mood.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -158,29 +170,98 @@ test('простой: сначала зевает, через DROWSY_MS — кл
     assert.equal(moodReducer(idle, { type: 'wake', now: 5 }), idle, 'бодрого котика мышь не перерисовывает');
 });
 
-test('голова к курсору — с зазором между порогами, без дрожи на границе', () => {
-    assert.ok(LOOK_BACK < LOOK_TURN);
-    assert.equal(lookSide('center', 0.2), 'center');
-    assert.equal(lookSide('center', LOOK_TURN), 'right');
-    assert.equal(lookSide('center', -LOOK_TURN), 'left');
-    const between = (LOOK_TURN + LOOK_BACK) / 2;
-    assert.equal(lookSide('right', between), 'right', 'в зазоре голова остаётся, где была');
-    assert.equal(lookSide('center', between), 'center');
-    assert.equal(lookSide('right', LOOK_BACK - 0.01), 'center');
-    assert.equal(lookSide('left', -between), 'left');
-    assert.equal(lookSide('right', -LOOK_TURN), 'left');
+test('голова к курсору: во все стороны, плавно и без дрожи на границе углов', () => {
+    /* Владелец 09.11: «чтобы нормально следил за курсором, чтобы голова могла нормально
+       двигаться» — было три кадра (влево, прямо, вправо) скачком и только по горизонтали. */
+    const grid = CAT_HEAD_GRID;
+    assert.ok(grid.yaw.length >= 5 && grid.pitch.length >= 3, 'и поворот, и наклон, не три положения');
+    const center = centerCell();
+    assert.equal(grid.yaw[center.col], 0);
+    assert.equal(grid.pitch[center.row], 0);
+    // Курсор слева сверху — голова влево и вверх; справа снизу — вправо и вниз; рядом — прямо.
+    assert.deepEqual(headCell(targetAngles(-1, -1)), { col: 0, row: 0 });
+    assert.deepEqual(headCell(targetAngles(1, 1)), { col: grid.yaw.length - 1, row: grid.pitch.length - 1 });
+    assert.deepEqual(headCell(targetAngles(0, 0)), center);
+    const up = targetAngles(0, -0.6);
+    assert.ok(up.pitch < 0 && headCell(up).row < center.row, 'курсор выше — смотрит вверх');
+    // У границы двух углов голова не дрожит: уходит с угла, только перейдя середину с запасом.
+    const step = grid.yaw[center.col + 1] - grid.yaw[center.col];
+    const mid = grid.yaw[center.col] + step / 2;
+    assert.equal(nearestIndex(grid.yaw, mid + 0.05 * step, center.col), center.col);
+    assert.equal(nearestIndex(grid.yaw, mid + HEAD_HYSTERESIS * step, center.col), center.col + 1);
+    assert.equal(nearestIndex(grid.yaw, mid - 0.05 * step, center.col + 1), center.col + 1);
+    // Между углами соседние кадры перетекают друг в друга: веса по месту в сетке, сумма — 1.
+    assert.equal(gridPosition(grid.yaw, grid.yaw[center.col] + step / 2), center.col + 0.5);
+    const half = headBlend({ yaw: grid.yaw[center.col] + step / 2, pitch: 0 });
+    assert.equal(half.length, 2);
+    assert.ok(Math.abs(half[0].weight - 0.5) < 1e-9 && Math.abs(half[1].weight - 0.5) < 1e-9);
+    const corner = headBlend({ yaw: grid.yaw[1] + 3, pitch: grid.pitch[0] + 2 });
+    assert.equal(corner.length, 4);
+    assert.ok(Math.abs(corner.reduce((sum, part) => sum + part.weight, 0) - 1) < 1e-9);
+    // На угле сетки — один чёткий кадр, без двоения.
+    assert.deepEqual(headBlend(cellAngles(center)), [{ name: headName(center), weight: 1 }]);
+    // Наложение без провала прозрачности: нижний слой целиком, итог — взвешенная сумма.
+    const layers = blendLayers(corner);
+    assert.equal(layers[0].opacity, 1);
+    let mix = layers.map(() => 0);
+    layers.forEach((layer, i) => {
+        mix = mix.map((v, j) => v * (1 - layer.opacity) + (j === i ? layer.opacity : 0));
+    });
+    corner.forEach((part, i) => assert.ok(Math.abs(mix[i] - part.weight) < 1e-9, `вклад ${part.name}`));
+    // Ход — пружина без отскока: трогается мягко, скорость ограничена, у цели — без перелёта.
+    const to = cellAngles({ col: 0, row: 0 });
+    let state = { yaw: 0, pitch: 0, vy: 0, vp: 0 };
+    const first = springStep(state, to, 16);
+    assert.ok(first.yaw < 0 && first.yaw > -1, `первый кадр — ${first.yaw.toFixed(2)}°, без рывка`);
+    let farthest = 0;
+    let frames = 0;
+    while (!atRest(state, to) && frames < 200) {
+        state = springStep(state, to, 16);
+        assert.ok(Math.abs(state.vy) <= MAX_TURN_SPEED + 1e-9);
+        farthest = Math.min(farthest, state.yaw);
+        frames += 1;
+    }
+    assert.ok(atRest(state, to), 'дошла и остановилась');
+    assert.ok(farthest >= to.yaw - 0.05, 'без перелёта за цель');
+    assert.ok(frames * 16 > 350 && frames * 16 < 1500, `поворот через всю сетку — ${frames * 16} мс`);
+    // Курсор замер — голова держит его, а не возвращается через 2,5 с, как раньше.
+    assert.ok(LOOK_HOLD_MS >= 4000);
+    assert.equal(headName({ col: 1, row: 2 }), 'head-1-2');
 });
 
-test('моргает и вертит головой только в покое; моргает раз в 3–6 с', () => {
-    assert.equal(frameFor('normal', 'center', false), 'normal');
-    assert.equal(frameFor('normal', 'center', true), 'blink');
-    assert.equal(frameFor('normal', 'left', true), 'look-left', 'повёрнутая голова не моргает кадром «прямо»');
-    assert.equal(frameFor('normal', 'right', false), 'look-right');
-    assert.equal(frameFor('happy', 'left', true), 'happy');
-    assert.equal(frameFor('asleep', 'center', true), 'asleep');
+test('моргает раз в 3–6 с; целиком кадрами — только эмоции', () => {
     assert.equal(nextBlinkDelay(() => 0), 3000);
     assert.equal(nextBlinkDelay(() => 1), 6000);
-    for (const frame of FRAMES) assert.ok(frameFor(frame, 'center', false) === frame || frame.startsWith('look-') || frame === 'blink');
+    assert.deepEqual(FRAMES, EMOTIONS);
+});
+
+test('спокойная поза слоями: тело, голова под каждым углом сетки и моргание у каждого угла', () => {
+    const asset = (name) => new URL(`../src/components/assistant/cat/assets/cat-${name}.webp`, import.meta.url);
+    assert.ok(existsSync(asset('calm-body')), 'нет тела');
+    assert.deepEqual(webpSize(readFileSync(asset('calm-body'))), [256, 256]);
+    let total = statSync(asset('calm-body')).size;
+    for (let row = 0; row < CAT_HEAD_GRID.pitch.length; row += 1) {
+        for (let col = 0; col < CAT_HEAD_GRID.yaw.length; col += 1) {
+            for (const [suffix, limit] of [['', 12000], ['-blink', 4000]]) {
+                const name = `${headName({ col, row })}${suffix}`;
+                assert.ok(existsSync(asset(name)), `нет кадра ${name}`);
+                const size = statSync(asset(name)).size;
+                assert.ok(size < limit, `${name}: ${size} байт — тяжелее ${limit}`);
+                // Слои одной рамки с телом: голова садится на шею без подгонки.
+                assert.deepEqual(webpSize(readFileSync(asset(name))), [256, 256], `размер ${name}`);
+                total += size;
+            }
+        }
+    }
+    assert.ok(total < 160000, `слои спокойной позы — ${total} байт`);
+    // Сетка сайта — та же, что в рендере Blender.
+    const model = read('../scripts/assistant_cat/cat_models.py');
+    const tuple = (key) => /\(([^)]*)\)/.exec(new RegExp(`^${key} = .*$`, 'm').exec(model)[0])[1]
+        .split(',').map((v) => Number(v.trim()));
+    assert.deepEqual(tuple('HEAD_YAW'), CAT_HEAD_GRID.yaw);
+    assert.deepEqual(tuple('HEAD_PITCH'), CAT_HEAD_GRID.pitch);
+    // Прежних кадров «три положения» больше нет.
+    for (const old of ['look-left', 'look-right', 'blink']) assert.ok(!existsSync(asset(old)), `лишний кадр ${old}`);
 });
 
 test('значки эмоций стоят у головы, в кадре', () => {
@@ -304,4 +385,8 @@ test('котик дёшев для слабого компьютера', () => {
     assert.match(jsx, /FRAMES\.filter\(\(name\)\s*=>\s*shownRef\.current\.has\(name\)\)/);
     assert.match(jsx, /visible\s*=\s*loaded\.has\(frame\)\s*\?\s*frame\s*:\s*lastLoadedRef\.current/);
     assert.match(jsx, /requestIdleCallback/);
+    // Голова: цикл кадров гаснет, когда дошла до цели; смешение — прямо в узлы, мимо React.
+    assert.match(jsx, /if \(done\) \{\s*rafRef\.current = 0;/);
+    assert.match(jsx, /img\.style\.opacity = layer \? layer\.opacity/);
+    assert.match(css, /\.cat-mascot__head img \{\s*transition: none;/, 'смешение без запаздывающих CSS-переходов');
 });
