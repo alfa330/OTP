@@ -24,6 +24,10 @@
 ставили и руками: в образце план 09.11 и 10.11 равен факту 02.11 и 03.11 во всех
 строках. Поэтому данные нужны на неделю раньше периода (`PLAN_SHIFT_DAYS`).
 
+СБРОСЫ НА ОЖИДАНИИ (владелец, 12.11.2026) — два столбца сверх образца: потерянные
+звонки по времени ожидания в очереди, до пяти секунд и от пяти (`drops`). Короткий
+сброс — клиент передумал сам, длинный — не дождался: это разные потери.
+
 СМЕНЫ И ЗАНЯТОСТЬ (владелец, 12.11.2026)
 ----------------------------------------
 «CR%» и «ОСС» портал считает сам: смены группы «Основа» из «Графиков работы» против
@@ -65,11 +69,15 @@ from openpyxl.utils import get_column_letter
 
 from op_wallboard import snapshot as snapshot_mod
 
-from . import inbound_staffing, lines as lines_mod, sync
+from . import inbound_staffing, lines as lines_mod, sync, touches as touches_mod
 
 ALMATY = ZoneInfo('Asia/Almaty')
 
 SL_SECONDS = snapshot_mod.DEFAULT_SL_SECONDS
+# Граница «короткого» ожидания у потерянных звонков: «меньше 5 сек» и «больше 5 сек»
+# владельца; ровно пять секунд — уже «от 5».
+DROP_WAIT_SECONDS = 5
+_INCOMING_TYPES = (touches_mod.TYPE_IN, touches_mod.TYPE_IN_MISSED)
 # План суток — факт недельной давности: тот же день недели.
 PLAN_SHIFT_DAYS = 7
 
@@ -116,6 +124,10 @@ COLUMNS = (
     ('match', '% совпадения', '', 16.3, '0%'),
     ('answered', 'Принято', '', 10.9, '0'),
     ('ar', 'AR%', 'норма >5%', 12.4, '0.0%'),
+    # Два столбца сверх образца (владелец, 12.11.2026): потерянные звонки по тому,
+    # сколько клиент ждал в очереди, прежде чем положить трубку.
+    ('drops_short', 'Сбросы на ожидании до 5 сек', '', 19.0, '0'),
+    ('drops_long', 'Сбросы на ожидании от 5 сек', '', 19.0, '0'),
     ('occupancy', 'ОСС', 'норма >67%', 13.4, '0.0%'),
     ('hours_plan', 'План часов', '', 12.1, 'General'),
     ('hours_fact', 'Факт часов', '', 12.7, 'General'),
@@ -137,7 +149,8 @@ STAFFING_VALUES = {'occupancy': 'occ', 'cr': 'cr'}
 # Часы вписывает человек, их доли — формулы.
 MANUAL_HOURS = ('hours_plan', 'hours_fact')
 # Числа портала по очереди: объединяются по строкам номеров этой очереди.
-QUEUE_VALUES = ('plan', 'fact', 'match', 'answered', 'ar', 'aht', 'sl')
+QUEUE_VALUES = ('plan', 'fact', 'match', 'answered', 'ar', 'drops_short', 'drops_long',
+                'aht', 'sl')
 # Объединяется по строкам очереди всё, кроме самих номеров, даты и дневных колонок.
 _QUEUE_MERGED = ('queue', 'park') + QUEUE_VALUES
 
@@ -171,6 +184,31 @@ NO_CALLS_ROW = {'queue': '', 'park': 'Звонков не было', 'numbers': 
 
 # ── расчёт ───────────────────────────────────────────────────────────────────
 
+def drops(touches, threshold=DROP_WAIT_SECONDS):
+    """(до порога, от порога) — сколько потерянных звонков ждали в очереди меньше
+    `threshold` секунд и сколько — столько же и дольше.
+
+    Потерянный — тот же, что у «Табло ОП» (`snapshot.aggregate`): входящий в очередь,
+    который не закончился разговором. Ожидание — от входа в очередь до того, как клиент
+    положил трубку; его называет журнал очередей станции. Звонок, у которого ожидания
+    нет (сутки до 22.09.2026, когда журнала ещё не было), не попадает ни в один столбец:
+    угадать, сколько он ждал, не из чего."""
+    short = long = 0
+    for touch in touches or ():
+        if touch.get('call_type') not in _INCOMING_TYPES:
+            continue
+        if touch.get('call_type') == touches_mod.TYPE_IN and int(touch.get('talk_seconds') or 0) > 0:
+            continue
+        wait = touch.get('wait_seconds')
+        if wait is None or wait == '':
+            continue
+        if int(wait) < threshold:
+            short += 1
+        else:
+            long += 1
+    return short, long
+
+
 def _stats(touches, sl_seconds):
     """Показатели одной клетки (очередь за сутки или сутки целиком) правилом табло."""
     totals = snapshot_mod.aggregate(touches or [], sl_seconds)['totals']
@@ -178,11 +216,15 @@ def _stats(touches, sl_seconds):
     if not arrived:
         # Звонков не было — клетки пустые, как в образце: ноль в «Принято» и «AR%»
         # читался бы как «всех потеряли».
-        return {'fact': None, 'answered': None, 'ar': None, 'aht': None, 'sl': None}
+        return {'fact': None, 'answered': None, 'ar': None, 'drops_short': None,
+                'drops_long': None, 'aht': None, 'sl': None}
+    short, long = drops(touches)
     return {
         'fact': arrived,
         'answered': totals['answered'],
         'ar': totals['ar'],
+        'drops_short': short,
+        'drops_long': long,
         'aht': totals['avg_talk_seconds'],
         'sl': totals['sl'],
     }
@@ -429,6 +471,11 @@ def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_day
         ('% совпадения', 'Факт звонки ÷ План звонки.'),
         ('Принято', 'Звонки из «Факт звонки», которые закончились разговором с оператором.'),
         ('AR%', '(Факт звонки − Принято) ÷ Факт звонки.'),
+        ('Сбросы на ожидании',
+         'Непринятые звонки (Факт звонки − Принято) по тому, сколько клиент ждал в очереди, '
+         'прежде чем положить трубку: меньше %d секунд и %d секунд и больше. Приветствие в '
+         'ожидание не входит. У звонков до 22.09.2026 ожидание неизвестно — они не входят '
+         'ни в один из двух столбцов.' % (DROP_WAIT_SECONDS, DROP_WAIT_SECONDS)),
         ('AHT', 'Средняя длительность разговора принятых звонков, секунды. Ожидание в '
                 'очереди в неё не входит.'),
         ('SL/20сек',

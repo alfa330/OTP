@@ -77,6 +77,15 @@ def queue_row(sheet, queue):
                 if sheet.cell(row=row, column=3).value == int(queue))
 
 
+def ref(key, row):
+    """Адрес клетки по ключу колонки: буквы меняются, когда в отчёт добавляют столбцы."""
+    return '%s%d' % (R._LETTER[key], row)
+
+
+def cell_of(sheet, key, row):
+    return sheet[ref(key, row)]
+
+
 def sample_touches():
     return [
         # Понедельник, Jana: два приняты (ожидание 5 и 40 с), один потерян.
@@ -135,8 +144,13 @@ class TemplateTests(unittest.TestCase):
         titles = [title for _key, title, _norm, _width, _fmt in R.COLUMNS]
         self.assertEqual(titles, [
             'Дата', 'Номера', 'Очередь', 'Парк', 'План звонки', 'Факт звонки', '% совпадения',
-            'Принято', 'AR%', 'ОСС', 'План часов', 'Факт часов', '% выработки часов',
-            '% невыходов', 'AHT', 'SL/20сек', 'CR%'])
+            'Принято', 'AR%', 'Сбросы на ожидании до 5 сек', 'Сбросы на ожидании от 5 сек',
+            'ОСС', 'План часов', 'Факт часов', '% выработки часов', '% невыходов', 'AHT',
+            'SL/20сек', 'CR%'])
+        # Образец кончается на «AR%» и продолжается с «ОСС»: два столбца сбросов — между ними.
+        keys = [key for key, _title, _norm, _width, _fmt in R.COLUMNS]
+        self.assertEqual(keys[keys.index('ar') + 1:keys.index('occupancy')],
+                         ['drops_short', 'drops_long'])
         norms = {title: norm for _key, title, norm, _width, _fmt in R.COLUMNS if norm}
         self.assertEqual(norms, {'AR%': 'норма >5%', 'ОСС': 'норма >67%', 'SL/20сек': 'норма 80%'})
 
@@ -165,6 +179,29 @@ class DayTablesTests(unittest.TestCase):
         self.assertEqual((jana['fact'], jana['answered'], jana['ar'], jana['sl'], jana['aht']),
                          (own['arrived'], own['answered'], own['ar'], own['sl'],
                           own['avg_talk_seconds']))
+
+    def test_drops_are_split_by_the_wait_in_the_queue(self):
+        touches = [
+            call(MON, '3034', talk=60, wait=2),            # принят — не сброс
+            call(MON, '3034', wait=0, missed=True),        # бросил сразу
+            call(MON, '3034', wait=4, missed=True),        # 4 с — «до 5»
+            call(MON, '3034', wait=5, missed=True),        # ровно 5 с — уже «от 5»
+            call(MON, '3034', wait=120, missed=True),
+            call(MON, '3034', wait=None, missed=True),     # ожидание неизвестно — никуда
+        ]
+        self.assertEqual(R.drops(touches), (2, 2))
+        table = R.day_tables(touches, date(2026, 11, 2), date(2026, 11, 2))[0]
+        jana = row_of(table, '3034')
+        self.assertEqual((jana['fact'], jana['answered']), (6, 1))
+        self.assertEqual((jana['drops_short'], jana['drops_long']), (2, 2))
+        self.assertEqual((table['total']['drops_short'], table['total']['drops_long']), (2, 2))
+
+    def test_no_drops_is_zero_not_blank(self):
+        itaxi = row_of(self.monday, '3001')
+        self.assertEqual((itaxi['drops_short'], itaxi['drops_long']), (0, 0))
+        jana = row_of(self.monday, '3034')
+        self.assertEqual((jana['drops_short'], jana['drops_long']), (0, 1))
+        self.assertEqual(jana['fact'] - jana['answered'], jana['drops_short'] + jana['drops_long'])
 
     def test_plan_is_the_same_weekday_a_week_before(self):
         jana = row_of(self.monday, '3034')
@@ -260,7 +297,8 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(self.sheet['A1'].value, 'Дата')
         self.assertEqual(self.sheet['F1'].value, 'Факт звонки')
         self.assertEqual(self.sheet['I2'].value, 'норма >5%')
-        self.assertEqual(self.sheet['P2'].value, 'норма 80%')
+        self.assertEqual(cell_of(self.sheet, 'sl', 2).value, 'норма 80%')
+        self.assertEqual(cell_of(self.sheet, 'drops_short', 1).value, 'Сбросы на ожидании до 5 сек')
         merged = {str(area) for area in self.sheet.merged_cells.ranges}
         # Колонка без нормы — одна клетка на обе строки шапки; с нормой — две.
         self.assertIn('F1:F2', merged)
@@ -280,38 +318,48 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(tuesday['A4'].value, 'Итого')
         self.assertEqual(self.sheet['C3'].value, 3001)
         self.assertEqual(self.sheet['D3'].value, 'iTaxi вход')
-        for column in 'CDEFGHIOP':
-            self.assertIn('%s3:%s5' % (column, column), merged)
+        for key in ('queue', 'park', 'plan', 'fact', 'match', 'answered', 'ar', 'drops_short',
+                    'drops_long', 'aht', 'sl'):
+            self.assertIn('%s:%s' % (ref(key, 3), ref(key, 5)), merged)
         # Дата и дневные колонки (часы, ОСС, CR%) — одной клеткой на все очереди.
-        for column in 'AJKLMNQ':
-            self.assertIn('%s3:%s%d' % (column, column, self.last), merged)
+        for key in ('date', 'occupancy', 'hours_plan', 'hours_fact', 'hours_done', 'hours_missed',
+                    'cr'):
+            self.assertIn('%s:%s' % (ref(key, 3), ref(key, self.last)), merged)
         self.assertEqual(self.sheet['A3'].value, datetime(2026, 11, 2))
 
     def test_portal_numbers_are_values_not_formulas(self):
-        def cell(column):
-            return self.sheet['%s%d' % (column, self.jana)]
+        def cell(key):
+            return cell_of(self.sheet, key, self.jana)
 
-        self.assertEqual((cell('E').value, cell('F').value, cell('H').value, cell('O').value),
-                         (4, 3, 2, 75))
-        self.assertAlmostEqual(cell('G').value, 0.75)
-        self.assertAlmostEqual(cell('I').value, 1 / 3)
-        self.assertAlmostEqual(cell('P').value, 1 / 3)
-        self.assertEqual(cell('I').number_format, '0.0%')
-        self.assertEqual(cell('G').number_format, '0%')
+        self.assertEqual((cell('plan').value, cell('fact').value, cell('answered').value,
+                          cell('aht').value), (4, 3, 2, 75))
+        self.assertAlmostEqual(cell('match').value, 0.75)
+        self.assertAlmostEqual(cell('ar').value, 1 / 3)
+        self.assertAlmostEqual(cell('sl').value, 1 / 3)
+        self.assertEqual(cell('ar').number_format, '0.0%')
+        self.assertEqual(cell('match').number_format, '0%')
+        # Один потерянный, ждал 30 секунд: «от 5 сек».
+        self.assertEqual((cell('drops_short').value, cell('drops_long').value), (0, 1))
 
     def test_hours_are_blank_and_formulas_wait_for_them(self):
-        for cell in ('K3', 'L3'):
-            self.assertIsNone(self.sheet[cell].value, cell)
-        self.assertEqual(self.sheet['M3'].value, '=IF(OR(K3="",L3=""),"",L3/K3)')
-        self.assertEqual(self.sheet['N3'].value, '=IF(OR(K3="",L3=""),"",(K3-L3)/K3)')
+        plan, fact, done = ref('hours_plan', 3), ref('hours_fact', 3), ref('hours_done', 3)
+        for address in (plan, fact):
+            self.assertIsNone(self.sheet[address].value, address)
+        self.assertEqual(self.sheet[done].value,
+                         '=IF(OR(%s="",%s=""),"",%s/%s)' % (plan, fact, fact, plan))
+        self.assertEqual(cell_of(self.sheet, 'hours_missed', 3).value,
+                         '=IF(OR(%s="",%s=""),"",(%s-%s)/%s)' % (plan, fact, plan, fact, plan))
         # Итог повторяет дневное значение и не показывает ноль на пустой клетке.
-        self.assertEqual(self.sheet['K%d' % self.total].value, '=IF(K3="","",K3)')
-        self.assertEqual(self.sheet['M%d' % self.total].value, '=IF(M3="","",M3)')
+        self.assertEqual(cell_of(self.sheet, 'hours_plan', self.total).value,
+                         '=IF(%s="","",%s)' % (plan, plan))
+        self.assertEqual(cell_of(self.sheet, 'hours_done', self.total).value,
+                         '=IF(%s="","",%s)' % (done, done))
 
     def test_occ_and_cr_are_blank_without_staffing(self):
-        for cell in ('J3', 'Q3', 'J%d' % self.total, 'Q%d' % self.total):
-            self.assertIsNone(self.sheet[cell].value, cell)
-        self.assertIsNone(self.sheet['Q3'].comment)
+        for key in ('occupancy', 'cr'):
+            for row in (3, self.total):
+                self.assertIsNone(cell_of(self.sheet, key, row).value, (key, row))
+        self.assertIsNone(cell_of(self.sheet, 'cr', 3).comment)
 
     def test_occ_and_cr_are_day_values_with_their_source_in_a_note(self):
         staffing = {date(2026, 11, 2): {
@@ -322,19 +370,20 @@ class WorkbookTests(unittest.TestCase):
             line_numbers=TEST_LINES, staffing=staffing)
         book = load_workbook(stream)
         sheet = book['02.11']
-        self.assertAlmostEqual(sheet['J3'].value, 0.3)
-        self.assertAlmostEqual(sheet['Q3'].value, 8 / 14)
+        occ, cr = cell_of(sheet, 'occupancy', 3), cell_of(sheet, 'cr', 3)
+        self.assertAlmostEqual(occ.value, 0.3)
+        self.assertAlmostEqual(cr.value, 8 / 14)
         # В «Итого» — те же числа, а не формула: файл читают и там, где формул не считают.
-        self.assertAlmostEqual(sheet['J%d' % self.total].value, 0.3)
-        self.assertAlmostEqual(sheet['Q%d' % self.total].value, 8 / 14)
-        self.assertEqual((sheet['J3'].number_format, sheet['Q3'].number_format), ('0.0%', '0%'))
-        self.assertEqual(sheet['Q3'].comment.text, 'Смен по графику: 14, отработано: 8')
-        self.assertEqual(sheet['J3'].comment.text,
+        self.assertAlmostEqual(cell_of(sheet, 'occupancy', self.total).value, 0.3)
+        self.assertAlmostEqual(cell_of(sheet, 'cr', self.total).value, 8 / 14)
+        self.assertEqual((occ.number_format, cr.number_format), ('0.0%', '0%'))
+        self.assertEqual(cr.comment.text, 'Смен по графику: 14, отработано: 8')
+        self.assertEqual(occ.comment.text,
                          'На линии: 61,2 ч, из них в разговоре и наборе номера: 18,4 ч')
         # День, по которому показателей нет, остаётся пустым и без примечаний.
         tuesday = book['03.11']
-        self.assertIsNone(tuesday['Q3'].value)
-        self.assertIsNone(tuesday['J3'].comment)
+        self.assertIsNone(cell_of(tuesday, 'cr', 3).value)
+        self.assertIsNone(cell_of(tuesday, 'occupancy', 3).comment)
 
     def test_day_without_shifts_keeps_cr_blank_but_shows_occ(self):
         staffing = {date(2026, 11, 2): {
@@ -344,23 +393,24 @@ class WorkbookTests(unittest.TestCase):
             sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
             staffing=staffing)
         sheet = load_workbook(stream)['02.11']
-        self.assertIsNone(sheet['Q3'].value)
-        self.assertIsNone(sheet['Q3'].comment)
-        self.assertAlmostEqual(sheet['J3'].value, 0.5)
+        self.assertIsNone(cell_of(sheet, 'cr', 3).value)
+        self.assertIsNone(cell_of(sheet, 'cr', 3).comment)
+        self.assertAlmostEqual(cell_of(sheet, 'occupancy', 3).value, 0.5)
 
     def test_total_row(self):
-        def cell(column):
-            return self.sheet['%s%d' % (column, self.total)]
+        def cell(key):
+            return cell_of(self.sheet, key, self.total)
 
         self.assertEqual(self.sheet.max_row, self.total)
-        self.assertEqual(cell('A').value, 'Итого')
+        self.assertEqual(cell('date').value, 'Итого')
         self.assertIn('A%d:D%d' % (self.total, self.total),
                       {str(area) for area in self.sheet.merged_cells.ranges})
-        self.assertEqual((cell('E').value, cell('F').value, cell('H').value, cell('O').value),
-                         (4, 4, 3, 70))
-        self.assertAlmostEqual(cell('I').value, 0.25)
-        self.assertAlmostEqual(cell('P').value, 0.5)
-        self.assertTrue(cell('A').font.bold)
+        self.assertEqual((cell('plan').value, cell('fact').value, cell('answered').value,
+                          cell('aht').value), (4, 4, 3, 70))
+        self.assertAlmostEqual(cell('ar').value, 0.25)
+        self.assertAlmostEqual(cell('sl').value, 0.5)
+        self.assertEqual((cell('drops_short').value, cell('drops_long').value), (0, 1))
+        self.assertTrue(cell('date').font.bold)
 
     def test_ar_data_bar_covers_queue_rows(self):
         ranges = [str(rule.sqref) for rule in self.sheet.conditional_formatting]
@@ -375,7 +425,7 @@ class WorkbookTests(unittest.TestCase):
         self.assertIsNone(sheet['C3'].value)
         self.assertEqual(sheet['A4'].value, 'Итого')
         self.assertIsNone(sheet['F4'].value)
-        self.assertEqual(sheet['M3'].value, '=IF(OR(K3="",L3=""),"",L3/K3)')
+        self.assertTrue(str(cell_of(sheet, 'hours_done', 3).value).startswith('=IF(OR('))
 
     def test_notes_explain_what_is_counted(self):
         notes = self.book[R.NOTES_SHEET]
@@ -390,6 +440,8 @@ class WorkbookTests(unittest.TestCase):
         self.assertIn('÷ смены, поставленные операторам группы «Основа»', text)
         self.assertIn('не меньше 90 %', text)
         self.assertIn('÷ всё их время на линии за день', text)
+        self.assertIn('Сбросы на ожидании|Непринятые звонки (Факт звонки − Принято)', text)
+        self.assertIn('меньше 5 секунд и 5 секунд и больше', text)
         self.assertIn('Вписать вручную|«План часов» и «Факт часов»', text)
         self.assertNotIn('Нет данных станции', text)
         self.assertNotIn('не посчитаны', text)
@@ -401,7 +453,7 @@ class WorkbookTests(unittest.TestCase):
         book = load_workbook(stream)
         text = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
         self.assertIn('ОСС и CR% не посчитаны', text)
-        self.assertIsNone(book['02.11']['Q3'].value)
+        self.assertIsNone(cell_of(book['02.11'], 'cr', 3).value)
 
     def test_missing_days_are_named(self):
         stream, _days = R.build_workbook(
@@ -593,13 +645,13 @@ class RouteTests(unittest.TestCase):
         book = load_workbook(BytesIO(response.data))
         sheet = book['02.11']
         # Из двух смен «Основы» отработана одна: второй ушёл за три часа до конца.
-        self.assertAlmostEqual(sheet['Q3'].value, 0.5)
-        self.assertEqual(sheet['Q3'].comment.text, 'Смен по графику: 2, отработано: 1')
+        self.assertAlmostEqual(cell_of(sheet, 'cr', 3).value, 0.5)
+        self.assertEqual(cell_of(sheet, 'cr', 3).comment.text, 'Смен по графику: 2, отработано: 1')
         # На линии 8 ч и 5 ч, в разговоре по часу у каждого: 2 ÷ 13.
-        self.assertAlmostEqual(sheet['J3'].value, 2 / 13)
+        self.assertAlmostEqual(cell_of(sheet, 'occupancy', 3).value, 2 / 13)
         # 03.11 смен в графике нет и на линии никого не было — пусто, а не ноль.
-        self.assertIsNone(book['03.11']['Q3'].value)
-        self.assertIsNone(book['03.11']['J3'].value)
+        self.assertIsNone(cell_of(book['03.11'], 'cr', 3).value)
+        self.assertIsNone(cell_of(book['03.11'], 'occupancy', 3).value)
         # Состав — группа «Основа»; события телефонов — с запасом на сутки до и после.
         self.assertEqual(self.staffing.windows['roster'],
                          ('op_osnova', date(2026, 11, 2), date(2026, 11, 3)))
@@ -612,7 +664,7 @@ class RouteTests(unittest.TestCase):
     def test_group_without_people_leaves_the_cells_blank(self):
         response = self.get(_Queries(), _Staffing(operator_ids=()))
         book = load_workbook(BytesIO(response.data))
-        self.assertIsNone(book['02.11']['Q3'].value)
+        self.assertIsNone(cell_of(book['02.11'], 'cr', 3).value)
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
         self.assertNotIn('не посчитаны', notes)
 
@@ -623,7 +675,7 @@ class RouteTests(unittest.TestCase):
         sheet = book['02.11']
         jana = queue_row(sheet, '3034')
         self.assertEqual(sheet['F%d' % jana].value, 3)
-        self.assertIsNone(sheet['Q3'].value)
+        self.assertIsNone(cell_of(sheet, 'cr', 3).value)
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
         self.assertIn('ОСС и CR% не посчитаны', notes)
 
