@@ -341,10 +341,9 @@ class WorkbookTests(unittest.TestCase):
         # Один потерянный, ждал 30 секунд: «от 5 сек».
         self.assertEqual((cell('drops_short').value, cell('drops_long').value), (0, 1))
 
-    def test_hours_are_blank_and_formulas_wait_for_them(self):
+    def test_plan_hours_are_blank_and_formulas_wait_for_them(self):
         plan, fact, done = ref('hours_plan', 3), ref('hours_fact', 3), ref('hours_done', 3)
-        for address in (plan, fact):
-            self.assertIsNone(self.sheet[address].value, address)
+        self.assertIsNone(self.sheet[plan].value)
         self.assertEqual(self.sheet[done].value,
                          '=IF(OR(%s="",%s=""),"",%s/%s)' % (plan, fact, fact, plan))
         self.assertEqual(cell_of(self.sheet, 'hours_missed', 3).value,
@@ -354,6 +353,31 @@ class WorkbookTests(unittest.TestCase):
                          '=IF(%s="","",%s)' % (plan, plan))
         self.assertEqual(cell_of(self.sheet, 'hours_done', self.total).value,
                          '=IF(%s="","",%s)' % (done, done))
+
+    def test_fact_hours_without_staffing_stay_hand_fillable(self):
+        # Статусов за день нет — портал своего числа не даёт: клетка пустая, и вписанное
+        # в неё руками «Итого» повторит формулой.
+        fact = ref('hours_fact', 3)
+        self.assertIsNone(self.sheet[fact].value)
+        self.assertEqual(cell_of(self.sheet, 'hours_fact', self.total).value,
+                         '=IF(%s="","",%s)' % (fact, fact))
+
+    def test_fact_hours_are_the_line_time_of_the_group(self):
+        staffing = {date(2026, 11, 2): {
+            'shifts_plan': 14, 'shifts_fact': 8, 'cr': 8 / 14, 'online_seconds': 220320,
+            'online_hours': 61.2, 'busy_seconds': 66240, 'occ': 0.3}}
+        stream, _days = R.build_workbook(
+            sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
+            line_numbers=TEST_LINES, staffing=staffing)
+        sheet = load_workbook(stream)['02.11']
+        fact = cell_of(sheet, 'hours_fact', 3)
+        self.assertEqual(fact.value, 61.2)
+        self.assertEqual(fact.number_format, '0.0')
+        self.assertIsNone(fact.comment)
+        # В «Итого» — число, а не формула; доли часов ждут только план.
+        self.assertEqual(cell_of(sheet, 'hours_fact', self.total).value, 61.2)
+        self.assertIsNone(cell_of(sheet, 'hours_plan', 3).value)
+        self.assertTrue(str(cell_of(sheet, 'hours_done', 3).value).startswith('=IF(OR('))
 
     def test_occ_and_cr_are_blank_without_staffing(self):
         for key in ('occupancy', 'cr'):
@@ -438,14 +462,16 @@ class WorkbookTests(unittest.TestCase):
         # Доля названа формулой «что ÷ что», а не одним словом.
         self.assertIn('÷ Факт звонки', text)
         self.assertIn('÷ смены, поставленные операторам группы «Основа»', text)
-        self.assertIn('не меньше 90 %', text)
+        self.assertIn('не меньше 65 %', text)
+        self.assertIn('Факт часов|Всё время операторов группы «Основа» на линии за день', text)
         self.assertIn('на листе «Смены»', text)
         # Показателей смен в этой книге нет — нет и листа со сменами.
         self.assertNotIn(R.SHIFTS_SHEET, self.book.sheetnames)
         self.assertIn('÷ всё их время на линии за день', text)
         self.assertIn('Сбросы на ожидании|Непринятые звонки (Факт звонки − Принято)', text)
         self.assertIn('меньше 5 секунд и 5 секунд и больше', text)
-        self.assertIn('Вписать вручную|«План часов» и «Факт часов»', text)
+        self.assertIn('Вписать вручную|«План часов» — портал его не заполняет', text)
+        self.assertIn('Факт часов ÷ План часов', text)
         self.assertNotIn('Нет данных станции', text)
         self.assertNotIn('не посчитаны', text)
 
@@ -655,9 +681,13 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(cell_of(sheet, 'cr', 3).comment.text, 'Смен по графику: 2, отработано: 1')
         # На линии 8 ч и 5 ч, в разговоре по часу у каждого: 2 ÷ 13.
         self.assertAlmostEqual(cell_of(sheet, 'occupancy', 3).value, 2 / 13)
+        # «Факт часов» — те же 13 часов на линии, числом и в дневной клетке, и в «Итого».
+        self.assertEqual(cell_of(sheet, 'hours_fact', 3).value, 13.0)
+        self.assertEqual(cell_of(sheet, 'hours_fact', sheet.max_row).value, 13.0)
         # 03.11 смен в графике нет и на линии никого не было — пусто, а не ноль.
         self.assertIsNone(cell_of(book['03.11'], 'cr', 3).value)
         self.assertIsNone(cell_of(book['03.11'], 'occupancy', 3).value)
+        self.assertIsNone(cell_of(book['03.11'], 'hours_fact', 3).value)
         # Состав — группа «Основа»; события телефонов — с запасом на сутки до и после.
         self.assertEqual(self.staffing.windows['roster'],
                          ('op_osnova', date(2026, 11, 2), date(2026, 11, 3)))

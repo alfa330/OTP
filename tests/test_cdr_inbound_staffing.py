@@ -123,14 +123,14 @@ class DayStaffingTests(unittest.TestCase):
 
     def test_cr_is_worked_shifts_over_scheduled_shifts(self):
         result = self.stats([shift(1), shift(2), shift(3)],
-                            {1: full_day_events(), 2: full_day_events(logout='16:00')})[DAY]
-        # Первый отработал смену, второй ушёл на два часа раньше, третий не вышел вовсе.
+                            {1: full_day_events(), 2: full_day_events(logout='15:00')})[DAY]
+        # Первый отработал смену, второй ушёл на три часа раньше (62,5 %), третий не вышел.
         self.assertEqual((result['shifts_plan'], result['shifts_fact']), (3, 1))
         self.assertAlmostEqual(result['cr'], 1 / 3)
 
     def test_every_planned_shift_is_listed_with_its_share(self):
         rows = self.stats([shift(2), shift(1), shift(3, start='08:00', end='17:00', breaks=())],
-                          {1: full_day_events(), 2: full_day_events(logout='16:00')})[DAY]['shifts']
+                          {1: full_day_events(), 2: full_day_events(logout='15:00')})[DAY]['shifts']
         # По началу смены, при равном — по оператору.
         self.assertEqual([row['operator_id'] for row in rows], [3, 1, 2])
         first, worked, left_early = rows
@@ -139,17 +139,29 @@ class DayStaffingTests(unittest.TestCase):
                           first['counted']), (9 * 3600, 0, 0.0, False))
         self.assertEqual((worked['planned_seconds'], worked['online_seconds'], worked['adherence'],
                           worked['counted']), (8 * 3600, 8 * 3600, 1.0, True))
-        self.assertEqual((left_early['online_seconds'], left_early['counted']), (6 * 3600, False))
-        self.assertAlmostEqual(left_early['adherence'], 0.75)
+        self.assertEqual((left_early['online_seconds'], left_early['counted']), (5 * 3600, False))
+        self.assertAlmostEqual(left_early['adherence'], 0.625)
 
-    def test_ninety_percent_is_enough(self):
-        # Опоздал на 45 минут: 7 ч 15 мин из 8 ч = 90,6 %.
-        late = [(at('09:45'), 'готов'), (at('13:00'), 'перерыв'), (at('14:00'), 'готов'),
-                (at('18:00'), 'выключен')]
-        self.assertEqual(self.stats([shift(1)], {1: late})[DAY]['shifts_fact'], 1)
-        # Опоздал на 50 минут: 89,6 % — уже нет.
-        later = [(at('09:50'), 'готов')] + late[1:]
-        self.assertEqual(self.stats([shift(1)], {1: later})[DAY]['shifts_fact'], 0)
+    def test_threshold_is_sixty_five_percent(self):
+        # Порог владельца (12.11.2026): сначала 90 %, в тот же день — 65 %.
+        self.assertEqual(S.ADHERENCE_MIN, 0.65)
+
+        def day(logout):
+            return [(at('09:00'), 'готов'), (at('12:00'), 'занят'), (at('12:05'), 'готов'),
+                    (at('13:00'), 'перерыв'), (at('14:00'), 'готов'), (at(logout), 'выключен')]
+        # Ушёл в 15:15: 5 ч 15 мин из 8 ч = 65,6 % — смена засчитана.
+        self.assertEqual(self.stats([shift(1)], {1: day('15:15')})[DAY]['shifts_fact'], 1)
+        # Ушёл в 15:10: 64,6 % — уже нет.
+        self.assertEqual(self.stats([shift(1)], {1: day('15:10')})[DAY]['shifts_fact'], 0)
+        # Ушёл в 16:00 (75 %): при прежних 90 % не проходил, теперь проходит.
+        self.assertEqual(self.stats([shift(1)], {1: day('16:00')})[DAY]['shifts_fact'], 1)
+
+    def test_fact_hours_are_the_line_time_of_the_day(self):
+        result = self.stats([shift(1)], {1: full_day_events(), 2: full_day_events(logout='15:00')})[DAY]
+        # 8 ч у первого и 5 ч у второго — со сменой в графике или без неё.
+        self.assertEqual(result['online_hours'], 13.0)
+        # На линии никого — пусто, а не ноль: ноль дал бы дню «невыходов 100 %».
+        self.assertIsNone(self.stats([shift(1)], {})[DAY]['online_hours'])
 
     def test_occ_is_busy_time_over_line_time(self):
         result = self.stats([shift(1)], {1: full_day_events()})[DAY]
