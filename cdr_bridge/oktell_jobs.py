@@ -39,7 +39,7 @@ import time
 import requests
 
 from cdr import oktell_datasets
-from cdr_bridge import oktell_db
+from cdr_bridge import oktell_db, oktell_records
 
 log = logging.getLogger('cdr_bridge.oktell_jobs')
 
@@ -136,10 +136,14 @@ def execute(db, job):
 
 
 class Worker:
-    """Один исполнитель: своё соединение с базой, своя сессия к порталу, свой поток."""
+    """Один исполнитель: своё соединение с базой, своя сессия к порталу, свой поток.
+
+    records — скачивание записей разговоров с веб-сервера Oktell (`oktell_records.Records`,
+    общий на коннектор) или None, если записи не настроены: тогда задания на запись
+    исполнитель отклоняет, а портал о них и не просит (`records: false` в опросе)."""
 
     def __init__(self, index, portal, session, signer, db, hello, stop_event, clock=time.monotonic,
-                 sleep=None):
+                 sleep=None, records=None):
         self.index = int(index)
         self.portal = portal
         self.session = session
@@ -149,6 +153,7 @@ class Worker:
         self.stop_event = stop_event
         self.clock = clock
         self._sleep = sleep or (lambda seconds: stop_event.wait(seconds))
+        self.records = records
         self.unreadable = None      # None — ещё не проверяли
         self._probe_at = None
         self._db_blocked_until = 0.0
@@ -195,6 +200,7 @@ class Worker:
         body.update({'worker': self.index, 'catalog': oktell_datasets.fingerprint(),
                      'datasets': list(oktell_datasets.NAMES),
                      'unreadable': list(self.unreadable or ()),
+                     'records': self.records is not None,
                      'done': done, 'wait': POLL_WAIT_SECONDS})
         return body
 
@@ -228,7 +234,12 @@ class Worker:
         self._db_blocked_reason = str(exc)[:300]
 
     def execute(self, job):
-        """Задание → результат; после отказа входа или связи базу какое-то время не трогаем."""
+        """Задание → результат; после отказа входа или связи базу какое-то время не трогаем.
+
+        Задание на запись разговора (`kind: record`) идёт не в базу, а на веб-сервер Oktell —
+        пауза базы его не касается."""
+        if isinstance(job, dict) and job.get('kind') == oktell_records.KIND:
+            return self.execute_record(job)
         now = self.clock()
         if now < self._db_blocked_until:
             return {'id': str((job or {}).get('id') or '')[:64], 'ok': False, 'reason': 'unavailable',
@@ -246,6 +257,19 @@ class Worker:
             # Право отозвали или базу куба пересоздали — перепроверим таблицы следующим заходом.
             self._probe_at = None
         return result
+
+    def execute_record(self, job):
+        """Задание на запись разговора → результат. Записи не настроены — `unknown`: портал
+        отдаст запрос мосту Oktell, если он есть."""
+        job_id = str(job.get('id') or '')[:64]
+        if self.records is None:
+            return {'id': job_id, 'ok': False, 'reason': 'unknown',
+                    'error': 'записи разговоров коннектору не настроены (OKTELL_RECORD_URL)'}
+        try:
+            return self.records.execute(job)
+        except Exception as exc:  # noqa: BLE001 — исполнитель не должен падать из-за одного файла
+            log.exception('исполнитель %d: запись разговора не скачалась', self.index)
+            return {'id': job_id, 'ok': False, 'reason': 'record', 'error': str(exc)[:300]}
 
     # ── цикл ─────────────────────────────────────────────────────────────────
 
@@ -313,12 +337,14 @@ class Worker:
         return self.thread
 
 
-def build_workers(config, count, session_factory, signer, hello, stop_event):
-    """Исполнители по настройкам коннектора: у каждого своя сессия и своё соединение с базой."""
+def build_workers(config, count, session_factory, signer, hello, stop_event, records=None):
+    """Исполнители по настройкам коннектора: у каждого своя сессия и своё соединение с базой;
+    скачивание записей (records) — общее."""
     workers = []
     for index in range(clamp_workers(count)):
         db = oktell_db.from_config(config, query_timeout=QUERY_TIMEOUT_SECONDS,
                                    row_limit=oktell_datasets.MAX_ROWS,
                                    app_name='%s-jobs' % oktell_db.APP_NAME)
-        workers.append(Worker(index, config['portal'], session_factory(), signer, db, hello, stop_event))
+        workers.append(Worker(index, config['portal'], session_factory(), signer, db, hello, stop_event,
+                              records=records))
     return workers

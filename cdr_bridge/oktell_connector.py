@@ -28,6 +28,14 @@ VM шлюза стоит в одной сети с базой Oktell, поэто
 забирают задание длинным опросом `POST /api/oktell_live/agent/jobs`. В задании имя набора
 каталога `cdr/oktell_datasets.py` и параметры; текст запроса исполнитель строит сам.
 
+Записи разговоров (с 1.2.0)
+---------------------------
+Файлы записей портал брал у моста Oktell, а мост лежит с 10.11.2026. Теперь их приносят те же
+исполнители: задание `{kind: 'record', paths: [...]}` — относительные пути к файлу, которые портал
+вычислил из базы; исполнитель скачивает файл с веб-сервера Oktell (каталог записей лежит в его
+папке `WWW`) по HTTPS с закреплённым отпечатком сертификата и отдаёт порталу следующим опросом
+(`cdr_bridge/oktell_records.py`).
+
 Чему коннектор НЕ верит
 -----------------------
 Порталу — не безусловно. Текст запроса строит сам коннектор; от портала приходят только
@@ -54,6 +62,8 @@ SQL: исполниться может только запрос из катал
     python -m cdr_bridge.oktell_connector --check   проверить базу и портал, ничего не меняя
     python -m cdr_bridge.oktell_connector --check --datasets
                                                     то же и каждый набор каталога узким окном
+    python -m cdr_bridge.oktell_connector --check --record <ГГГГММДД/ЧЧММ/mix_….mp3>
+                                                    то же и скачать одну запись (размер, формат)
 
 Настройки — окружение (или .env.codex.local при отладке):
     CDR_BRIDGE_PORTAL, CDR_AGENT_KEY_FILE | CDR_AGENT_PRIVATE_KEY, CDR_PORTAL_PROXY,
@@ -64,6 +74,9 @@ SQL: исполниться может только запрос из катал
     OKTELL_SQL_ENCRYPTION         require (по умолчанию) | request | off
     OKTELL_LIVE_INTERVAL_SECONDS  такт, пока портал не назвал свой (10)
     OKTELL_JOB_WORKERS            исполнителей запросов по требованию (2; 0 — выключены)
+    OKTELL_RECORD_URL             каталог записей на веб-сервере Oktell:
+                                  https://<сервер>/data/<guid>/record/ (пусто — записи не носим)
+    OKTELL_RECORD_TLS_SHA256      отпечаток SHA-256 сертификата веб-сервера Oktell (для https)
     OKTELL_HEARTBEAT_FILE         файл пульса для проверки живости контейнера
 """
 
@@ -83,10 +96,10 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr import oktell_datasets, oktell_wallboard  # noqa: E402
-from cdr_bridge import oktell_db, oktell_jobs  # noqa: E402
+from cdr_bridge import oktell_db, oktell_jobs, oktell_records  # noqa: E402
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'oktell/1.1.0'
+VERSION = 'oktell/1.2.0'
 log = logging.getLogger('cdr_bridge.oktell_connector')
 
 PUSH_PATH = '/api/oktell_live/agent/push'
@@ -139,12 +152,24 @@ def load_config():
         'sql_encryption': value('OKTELL_SQL_ENCRYPTION', 'require').lower(),
         'interval': _clamp_interval(value('OKTELL_LIVE_INTERVAL_SECONDS', str(DEFAULT_INTERVAL_SECONDS))),
         'job_workers': oktell_jobs.clamp_workers(value('OKTELL_JOB_WORKERS', str(oktell_jobs.DEFAULT_WORKERS))),
+        'record_url': value('OKTELL_RECORD_URL'),
+        'record_tls_sha256': value('OKTELL_RECORD_TLS_SHA256'),
         'heartbeat_file': value('OKTELL_HEARTBEAT_FILE'),
     }
 
 
+def build_records(config):
+    """Скачивание записей по настройкам или None. Ошибка настройки работу коннектора не
+    останавливает — табло и запросы важнее, — но видна в журнале с первой строки."""
+    try:
+        return oktell_records.Records.from_config(config)
+    except ValueError as exc:
+        log.error('записи разговоров выключены: %s', exc)
+        return None
+
+
 class Connector:
-    def __init__(self, config, session=None, db=None, clock=time.time, jobs_db=None):
+    def __init__(self, config, session=None, db=None, clock=time.time, jobs_db=None, records=False):
         self.config = config
         self.portal = config['portal']
         self.session = session or Bridge._build_session(config)
@@ -155,6 +180,8 @@ class Connector:
         # служит обоим.
         self._jobs_db = jobs_db or ((lambda: db) if db is not None else self._open_jobs_db)
         self.clock = clock
+        # records=False — взять из настроек; тесты подставляют своё (или None).
+        self.records = build_records(config) if records is False else records
         self.agent_id = '%s-%d' % (socket.gethostname()[:60], os.getpid())
         # Параметры снимка называет портал; пока не спросили — None, и базу не трогаем.
         self.params = None
@@ -384,6 +411,14 @@ class Connector:
                  'запрос в среднем %.0f мс, такт %.0f с',
                  int((now - self._summary_at) / 60), self._taken, self._accepted, self._refused,
                  self._failed, average, self.interval)
+        if self.records is not None:
+            stats = self.records.take_stats()
+            if stats['found'] or stats['missing'] or stats['failed']:
+                log.info('записи за %d мин: принесено %d (%.1f МБ, в среднем %.0f мс), нет файла %d, '
+                         'отказов %d', int((now - self._summary_at) / 60), stats['found'],
+                         stats['bytes'] / 1048576.0,
+                         (stats['ms'] / stats['found']) if stats['found'] else 0.0,
+                         stats['missing'], stats['failed'])
         self._summary_at = now
         self._taken = self._accepted = self._refused = self._failed = 0
         self._query_ms = 0.0
@@ -396,11 +431,12 @@ class Connector:
             return []
         self.workers = oktell_jobs.build_workers(
             self.config, count, lambda: Bridge._build_session(self.config), self.signer,
-            self._hello, self.stop_event)
+            self._hello, self.stop_event, records=self.records)
         for worker in self.workers:
             worker.start()
-        log.info('исполнителей запросов: %d, наборов в каталоге: %d, отпечаток каталога %s',
-                 len(self.workers), len(oktell_datasets.NAMES), oktell_datasets.fingerprint())
+        log.info('исполнителей запросов: %d, наборов в каталоге: %d, отпечаток каталога %s, записи: %s',
+                 len(self.workers), len(oktell_datasets.NAMES), oktell_datasets.fingerprint(),
+                 self.records.describe() if self.records is not None else 'не настроены')
         return self.workers
 
     def run(self):
@@ -458,14 +494,41 @@ def check_datasets(db, denied=()):
     return failures
 
 
-def check(connector, require_readonly=False, datasets=False):
-    """Проверка установки: база читается, учётка только читает, портал принимает подпись.
-    Ничего не меняет: снимок на портал не отправляется, уходит только «я на связи».
+def check_records(connector, record_path=None):
+    """Записи разговоров: веб-сервер Oktell отвечает, сертификат совпал, путь, которого нет,
+    даёт 404. С record_path — ещё и скачать эту запись. Возвращает True, если всё в порядке."""
+    if connector.records is None:
+        if connector.config.get('record_url'):
+            print('записи   НЕ настроены: ошибка в OKTELL_RECORD_URL / OKTELL_RECORD_TLS_SHA256 '
+                  '(см. журнал выше)')
+            return False
+        print('записи   не настроены (OKTELL_RECORD_URL) — пропущены')
+        return not record_path
+    try:
+        print('записи   %s' % connector.records.probe())
+        if record_path:
+            found = connector.records.fetch(record_path)
+            if found is None:
+                print('запись   %s — файла нет (404)' % record_path)
+                return False
+            body, content_type = found
+            print('запись   %s — %d байт, %s, %s' % (record_path, len(body), content_type,
+                                                    oktell_records.audio_format(body)))
+    except (oktell_records.RecordError, ValueError) as exc:
+        print('записи   НЕ работают: %s' % exc)
+        return False
+    return True
+
+
+def check(connector, require_readonly=False, datasets=False, record_path=None):
+    """Проверка установки: база читается, учётка только читает, портал принимает подпись,
+    веб-сервер Oktell отдаёт записи. Ничего не меняет: снимок на портал не отправляется,
+    уходит только «я на связи».
 
     require_readonly — учётка, умеющая больше чтения, считается отказом (так проверяет
     выкладка на шлюз); без флага о ней только сказано. datasets — исполнить ещё и каждый
-    набор каталога узким окном."""
-    ok = True
+    набор каталога узким окном. record_path — скачать ещё и эту запись."""
+    ok = check_records(connector, record_path)
     print('ключ     %s' % (connector.signer.key_id if connector.signer else 'НЕ ЗАДАН'))
     try:
         snapshot = connector.take()
@@ -523,6 +586,8 @@ def main(argv=None):
                         help='вместе с --check: учётка базы, умеющая больше чтения, — отказ')
     parser.add_argument('--datasets', action='store_true',
                         help='вместе с --check: исполнить каждый набор каталога узким окном')
+    parser.add_argument('--record', metavar='ПУТЬ',
+                        help='вместе с --check: скачать одну запись по относительному пути')
     parser.add_argument('--verbose', action='store_true')
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -546,7 +611,8 @@ def main(argv=None):
         print('Ключ подписи не годится: %s' % exc)
         return 2
     if args.check:
-        return check(connector, require_readonly=args.require_readonly, datasets=args.datasets)
+        return check(connector, require_readonly=args.require_readonly, datasets=args.datasets,
+                     record_path=args.record)
     if args.once:
         wait = connector.cycle()
         connector.db.close()

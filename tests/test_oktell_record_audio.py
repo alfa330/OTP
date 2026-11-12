@@ -7,6 +7,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlparse
+
+import requests as real_requests
+
 from tests import source_cache
 
 
@@ -25,6 +28,10 @@ class FakeResponse:
 
 
 class FakeRequests:
+    # Настоящие классы исключений: код ловит requests.exceptions.RequestException. Сам модуль —
+    # подделка, чтобы голый requests.get не ушёл в сеть, а попал в calls (его там быть не должно).
+    exceptions = real_requests.exceptions
+
     def __init__(self, response):
         self.response = response
         self.calls = []
@@ -69,6 +76,8 @@ def _oktell_audio_namespace(response=None, session=None):
         "_oktell_record_get",
         "_oktell_detect_audio_format",
         "_oktell_download_record",
+        "_oktell_bridge_download_record",
+        "_oktell_bridge_ready",
         "_oktell_fetch_record_to_gcs",
         "_oktell_store_record",
         "_oktell_prepare_distribution_audio",

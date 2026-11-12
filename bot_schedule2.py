@@ -20082,12 +20082,52 @@ def _oktell_detect_audio_format(audio_bytes):
 def _oktell_download_record(conn_id, rel_paths=None):
     """Скачать запись одной коммутации. None — файла нет (это норма, ~0,4% записей).
 
+    Дорог две, как у запросов к базе (_oktell_query). Первая — коннектор Oktell на VM шлюза
+    (с 12.11.2026): он в одной сети с сервером Oktell и берёт готовый файл с его веб-сервера по
+    относительному пути (oktell_live/jobs.py → cdr_bridge/oktell_records.py). Нужны пути —
+    без них шлюзу нечего просить; их считает _oktell_record_paths_by_conn.
+
+    Мост Oktell — запасной путь, когда шлюз за файл не взялся (исполнителя нет на связи, он
+    старой версии, путь не вычислен). Мост лежит с 10.11.2026 — пока были только его записи,
+    «Случайный звонок» СЗоВ отвечал «Не удалось получить аудиозапись из Oktell». Скачивание,
+    которое шлюз начал и не довёл (таймаут, обрыв, чужой сертификат), мосту не повторяется."""
+    normalized_id = _oktell_normalize_conn_id(conn_id)
+    from oktell_live import jobs as oktell_jobs
+    vm_note = oktell_jobs.records_why_not() if rel_paths else 'путь к записи не вычислен'
+    if not vm_note:
+        try:
+            downloaded = oktell_jobs.fetch_record(list(rel_paths), OKTELL_API_TIMEOUT_SECONDS)
+        except oktell_jobs.Refused as exc:
+            vm_note = str(exc)
+        else:
+            if downloaded is None:
+                return None
+            audio_bytes, content_type = downloaded
+            if not _oktell_detect_audio_format(audio_bytes):
+                raise RuntimeError("Коннектор Oktell принёс не MP3 и не WAV")
+            return audio_bytes, content_type
+    for_gateway = oktell_jobs.enabled()
+    if not _oktell_bridge_ready():
+        if for_gateway:
+            raise RuntimeError(f"Запись Oktell: {vm_note}")
+        raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
+    try:
+        return _oktell_bridge_download_record(normalized_id, rel_paths)
+    except requests.exceptions.RequestException as exc:
+        # Человеку — причина на стороне шлюза: она и есть неисправность. Отказ моста —
+        # следствие (он лежит с 10.11.2026); его технический текст остаётся в __cause__.
+        if for_gateway:
+            raise RuntimeError(
+                f"Запись Oktell: {vm_note}. Запасной путь (мост Oktell) тоже недоступен") from exc
+        raise
+
+
+def _oktell_bridge_download_record(normalized_id, rel_paths=None):
+    """Запись одной коммутации у моста Oktell. None — файла нет.
+
     Порядок попыток важен для НАГРУЗКИ на их сервер: сначала прямой путь (?path=) — это чистое
     чтение файла, без SQL на стороне прокси и без штатных ручек Oktell, которые при отложенной
     упаковке принудительно будят однопоточный микшер. /record/{conn_id} остаётся фолбэком."""
-    if not _oktell_api_ready():
-        raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
-    normalized_id = _oktell_normalize_conn_id(conn_id)
     urls = [_oktell_record_path_url(rel_path) for rel_path in (rel_paths or ())]
     urls.append(_oktell_record_url(normalized_id))
 

@@ -24,13 +24,18 @@ CDR_AGENT_KEYS). Общего токена нет вовсе.
 
     POST /api/oktell_live/agent/jobs
         {agent_id, hostname, version, worker, catalog, datasets: [имена], unreadable: [таблицы],
-         done: [{id, ok: true, rows, query_ms} | {id, ok: false, reason, error}], wait}
-      → {status, jobs: [{id, dataset, params, digest}], delivered, catalog, wait_seconds}
+         records: true|false,
+         done: [{id, ok: true, rows, query_ms} | {id, ok: false, reason, error}
+                | {id, ok: true, found: true, path, content_type, audio: base64} | {id, ok: true, found: false}],
+         wait}
+      → {status, jobs: [{id, dataset, params, digest} | {id, kind: 'record', paths}], delivered,
+         catalog, wait_seconds}
 
 Исполнители запросов коннектора: остальные запросы портала к базе Oktell (отбивка, перерывы,
 выгрузки статусов и звонков, биллинг, выборка звонков на оценку) — очередь в `jobs.py`. Ручка
 держит запрос, пока не появится задание (длинный опрос); в задании имя набора каталога и
-параметры, а не SQL.
+параметры, а не SQL. С 12.11.2026 той же очередью исполнитель приносит файлы записей разговоров
+(`records: true` — умеет; задание — относительные пути к файлу на веб-сервере Oktell).
 """
 
 import logging
@@ -129,7 +134,8 @@ def build_oktell_live_blueprint(*, build_cors_preflight_response, wallboard_para
                                 str(payload.get('worker') or 0)[:8])
             delivered = job_queue.finish(payload.get('done'))
             job_queue.worker_seen(worker, version=payload.get('version'), catalog=payload.get('catalog'),
-                                  datasets=payload.get('datasets'), unreadable=payload.get('unreadable'))
+                                  datasets=payload.get('datasets'), unreadable=payload.get('unreadable'),
+                                  records=payload.get('records'))
             try:
                 wait = float(payload.get('wait') or 0)
             except (TypeError, ValueError):

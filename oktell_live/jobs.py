@@ -35,8 +35,21 @@
 Мосту такой запрос не повторяют: это второй тяжёлый запрос к базе телефонии вслед первому.
 
 Рубильник: `OKTELL_VM_QUERIES=0` — запросы на шлюз не уходят, только мосту, как до 11.11.2026.
+
+Записи разговоров (с 12.11.2026)
+--------------------------------
+Той же очередью ездят задания «принеси файл записи»: `{id, kind: 'record', paths: [...]}` —
+относительные пути, которые портал вычислил из базы (сначала .mp3, потом .wav). Исполнитель
+скачивает файл с веб-сервера Oktell и приносит его следующим опросом в base64
+(`cdr_bridge/oktell_records.py`). Портал берётся за такое задание, только если исполнитель на
+связи сказал, что умеет (`records: true` в опросе); принесённое проверяет сам: путь — один из
+запрошенных, тип — `audio/…`, base64 честный, размер не больше потолка. До 12.11.2026 файлы
+брались только у моста Oktell, а он лежит с 10.11.2026 — «Случайный звонок» отвечал «Не удалось
+получить аудиозапись из Oktell».
 """
 
+import base64
+import binascii
 import collections
 import logging
 import math
@@ -87,6 +100,28 @@ REASON_TEXT = {
 }
 
 
+RECORD_KIND = 'record'
+# Потолок файла записи — тот же, что у исполнителя (cdr_bridge/oktell_records.py): час с лишним
+# MP3 Oktell; обычная запись — сотни килобайт.
+MAX_RECORD_BYTES = 16 * 1024 * 1024
+MAX_RECORD_PATHS = 4
+_MAX_RECORD_B64 = (MAX_RECORD_BYTES + 2) // 3 * 4
+
+# Причины отказа исполнителя по записи, при которых файл не скачивался, — их можно отдать мосту.
+RECORD_REFUSED_REASONS = ('unknown', 'params', 'unavailable')
+
+RECORD_REASON_TEXT = {
+    'unknown': 'коннектор Oktell на VM шлюза не умеет приносить записи разговоров — '
+               'его нужно обновить или задать ему OKTELL_RECORD_URL',
+    'params': 'коннектор Oktell на VM шлюза не принял путь к записи',
+    'unavailable': 'коннектор на VM шлюза не достучался до веб-сервера Oktell',
+    'timeout': 'веб-сервер Oktell не отдал запись коннектору на VM шлюза вовремя',
+    'tls': 'сертификат веб-сервера Oktell не совпал с закреплённым на VM шлюза',
+    'big': 'запись разговора больше потолка, который возит коннектор',
+    'record': 'веб-сервер Oktell не отдал запись коннектору на VM шлюза',
+}
+
+
 class Refused(RuntimeError):
     """Шлюз за запрос не взялся; запрос не исполнялся."""
 
@@ -132,15 +167,57 @@ def clean_rows(raw):
     return rows
 
 
-class _Job:
-    __slots__ = ('id', 'dataset', 'params', 'digest', 'created_at', 'deadline', 'taken_at',
-                 'worker', 'done', 'result')
+def record_result(item, paths):
+    """Результат исполнителя по записи → {'ok': True, 'found': False} | {'ok': True, 'found': True,
+    'path', 'content_type', 'audio': bytes} | {'ok': False, 'reason', 'error'}.
 
-    def __init__(self, query, now, timeout):
+    Что принесли, проверяется здесь, что бы ни прислал исполнитель: путь — один из запрошенных,
+    тип — audio/…, base64 честный и не длиннее потолка."""
+    if not item.get('ok'):
+        return {'ok': False, 'reason': str(item.get('reason') or 'record')[:20],
+                'error': str(item.get('error') or '')[:400]}
+
+    def bad(text):
+        return {'ok': False, 'reason': 'record', 'error': 'ответ коннектора не похож на запись: %s' % text}
+
+    # «Файла нет» — только явным found: false. Ответ без признака (чужой формат, строки
+    # запроса вместо файла) — ошибка, а не тихое «записи нет».
+    found = item.get('found')
+    if found is False:
+        return {'ok': True, 'found': False}
+    if found is not True:
+        return bad('нет признака found')
+    path = item.get('path')
+    if not isinstance(path, str) or path not in paths:
+        return bad('файл не по запрошенному пути')
+    content_type = str(item.get('content_type') or '').split(';', 1)[0].strip().lower()
+    if not content_type.startswith('audio/') or len(content_type) > 60:
+        return bad('тип %r' % content_type[:60])
+    raw = item.get('audio')
+    if not isinstance(raw, str) or not raw:
+        return bad('нет файла')
+    if len(raw) > _MAX_RECORD_B64:
+        return {'ok': False, 'reason': 'big', 'error': 'файл больше %d байт' % MAX_RECORD_BYTES}
+    try:
+        audio = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        return bad('base64 испорчен')
+    if not audio:
+        return bad('пустой файл')
+    return {'ok': True, 'found': True, 'path': path, 'content_type': content_type, 'audio': audio}
+
+
+class _Job:
+    __slots__ = ('id', 'kind', 'dataset', 'params', 'digest', 'paths', 'created_at', 'deadline',
+                 'taken_at', 'worker', 'done', 'result')
+
+    def __init__(self, now, timeout, query=None, paths=None):
         self.id = uuid.uuid4().hex
-        self.dataset = query.dataset
-        self.params = query.params
-        self.digest = query.digest
+        self.kind = RECORD_KIND if paths is not None else 'query'
+        self.dataset = getattr(query, 'dataset', None)
+        self.params = getattr(query, 'params', None)
+        self.digest = getattr(query, 'digest', None)
+        self.paths = tuple(paths) if paths is not None else None
         self.created_at = now
         self.deadline = now + timeout
         self.taken_at = None
@@ -148,7 +225,14 @@ class _Job:
         self.done = threading.Event()
         self.result = None
 
+    @property
+    def label(self):
+        """Что это за задание — словами для журнала и сообщений."""
+        return 'запись разговора' if self.kind == RECORD_KIND else 'набор %s' % self.dataset
+
     def view(self):
+        if self.kind == RECORD_KIND:
+            return {'id': self.id, 'kind': RECORD_KIND, 'paths': list(self.paths)}
         return {'id': self.id, 'dataset': self.dataset, 'params': self.params, 'digest': self.digest}
 
 
@@ -166,8 +250,12 @@ class Jobs:
 
     # ── исполнители ──────────────────────────────────────────────────────────
 
-    def worker_seen(self, worker, *, version=None, catalog=None, datasets=None, unreadable=None):
-        """Исполнитель вышел на связь: что он умеет и какие таблицы его учётке не даны."""
+    def worker_seen(self, worker, *, version=None, catalog=None, datasets=None, unreadable=None,
+                    records=None):
+        """Исполнитель вышел на связь: что он умеет и какие таблицы его учётке не даны.
+
+        records — умеет ли он приносить записи разговоров: True/False у коннектора с 1.2.0,
+        None — коннектор старше и о записях не знает."""
         now = self._clock()
         names = None
         if isinstance(datasets, (list, tuple)):
@@ -175,6 +263,7 @@ class Jobs:
         denied = frozenset()
         if isinstance(unreadable, (list, tuple)):
             denied = frozenset(str(key) for key in unreadable[:200] if isinstance(key, str))
+        can_records = records if isinstance(records, bool) else None
         with self._cond:
             previous = self._workers.get(worker)
             self._workers[worker] = {
@@ -184,13 +273,15 @@ class Jobs:
                 'catalog': str(catalog or '')[:32] or None,
                 'datasets': names,
                 'unreadable': denied,
+                'records': can_records,
             }
             self._forget_silent_workers(now)
         if previous is None:
             mine = oktell_datasets.fingerprint()
-            log.info('Исполнитель запросов Oktell на связи: %s, %s, наборов %s, каталог %s%s',
+            log.info('Исполнитель запросов Oktell на связи: %s, %s, наборов %s, каталог %s%s, записи %s',
                      worker, version, len(names) if names is not None else '—', catalog,
-                     '' if catalog == mine else ' (у портала %s — версии разные)' % mine)
+                     '' if catalog == mine else ' (у портала %s — версии разные)' % mine,
+                     {True: 'носит', False: 'не настроены', None: 'не умеет'}[can_records])
         if denied and (previous is None or previous['unreadable'] != denied):
             log.warning('Коннектор Oktell: учётке базы не даны таблицы %s — наборы с ними идут '
                         'мосту Oktell', ', '.join(sorted(denied)))
@@ -242,13 +333,23 @@ class Jobs:
                     % ', '.join(oktell_datasets.TABLES[key][0] for key in denied))
         return ''
 
+    def records_why_not(self):
+        """Почему запись разговора не попросить у шлюза — словами; пусто, если можно."""
+        if not enabled():
+            return 'запросы на VM шлюза выключены (%s)' % ENABLED_ENV
+        with self._cond:
+            alive = self._alive_workers(self._clock())
+        if not alive:
+            return 'коннектор Oktell на VM шлюза не на связи'
+        if any(info.get('records') for info in alive):
+            return ''
+        if any(info.get('records') is False for info in alive):
+            return 'коннектору Oktell на VM шлюза не задан адрес записей разговоров (OKTELL_RECORD_URL)'
+        return RECORD_REASON_TEXT['unknown']
+
     # ── вызывающий ───────────────────────────────────────────────────────────
 
-    def run(self, query, timeout):
-        """Исполнить запрос на шлюзе и вернуть строки. `Refused` или `Failed` — см. шапку."""
-        timeout = max(1.0, float(timeout))
-        now = self._clock()
-        job = _Job(query, now, timeout)
+    def _submit(self, job):
         with self._cond:
             if len(self._pending) >= MAX_PENDING:
                 self._stats['overflow'] += 1
@@ -257,6 +358,10 @@ class Jobs:
             self._jobs[job.id] = job
             self._stats['submitted'] += 1
             self._cond.notify_all()
+
+    def _await(self, job, timeout):
+        """Дождаться результата задания. `Refused` — до него очередь не дошла (можно идти к
+        мосту), `Failed` — забрали и не ответили вовремя."""
         while True:
             remaining = job.deadline - self._clock()
             if remaining <= 0:
@@ -265,12 +370,12 @@ class Jobs:
                     self._drop(job)
                     self._stats['no_answer' if taken else 'not_taken'] += 1
                 if taken:
-                    raise Failed('коннектор Oktell на VM шлюза не ответил за %d с (набор %s)'
-                                 % (int(timeout), job.dataset))
+                    raise Failed('коннектор Oktell на VM шлюза не ответил за %d с (%s)'
+                                 % (int(timeout), job.label))
                 # До запроса очередь так и не дошла — он не исполнялся, его можно отдать мосту.
                 raise Refused('очередь запросов к VM шлюза не дошла до запроса за %d с' % int(timeout))
             if job.done.wait(min(PICKUP_SECONDS, remaining)):
-                break
+                return job.result or {}
             with self._cond:
                 # Никто не забрал задание и никто ничего не исполняет — исполнителей нет (шлюз
                 # перезапускается, связь оборвалась). Если же исполнители заняты чужими
@@ -280,7 +385,13 @@ class Jobs:
                     self._stats['not_taken'] += 1
                     raise Refused('коннектор Oktell на VM шлюза не забрал запрос за %d с'
                                   % int(min(PICKUP_SECONDS, timeout)))
-        result = job.result or {}
+
+    def run(self, query, timeout):
+        """Исполнить запрос на шлюзе и вернуть строки. `Refused` или `Failed` — см. шапку."""
+        timeout = max(1.0, float(timeout))
+        job = _Job(self._clock(), timeout, query=query)
+        self._submit(job)
+        result = self._await(job, timeout)
         if result.get('ok'):
             self._stats['ok'] += 1
             return result['rows']
@@ -292,6 +403,40 @@ class Jobs:
         self._stats['refused' if reason in REFUSED_REASONS else 'failed'] += 1
         self._warn(job.dataset, reason, message)
         if reason in REFUSED_REASONS:
+            raise Refused(message)
+        raise Failed(message)
+
+    def fetch_record(self, paths, timeout):
+        """Принести файл записи разговора с веб-сервера Oktell через шлюз.
+
+        paths — относительные пути-кандидаты (сначала .mp3, потом .wav). Возвращает
+        (байты, тип) первого найденного или None, если файла нет ни по одному пути (это норма:
+        у ~0,4 % записанных звонков файла на диске нет). `Refused` — шлюз за запись не взялся
+        (не умеет, не принял путь, не достучался до веб-сервера Oktell): файл можно попросить у
+        моста. `Failed` — скачивание шло и не удалось."""
+        clean = [str(path) for path in (paths or ()) if isinstance(path, str) and path]
+        if not clean or len(clean) > MAX_RECORD_PATHS:
+            raise Refused('путь к записи не вычислен' if not clean else 'путей к записи больше %d'
+                          % MAX_RECORD_PATHS)
+        timeout = max(1.0, float(timeout))
+        job = _Job(self._clock(), timeout, paths=clean)
+        self._submit(job)
+        result = self._await(job, timeout)
+        if result.get('ok'):
+            if not result.get('found'):
+                self._stats['record_missing'] += 1
+                return None
+            self._stats['record_ok'] += 1
+            return result['audio'], result['content_type']
+        reason = result.get('reason') or 'record'
+        message = RECORD_REASON_TEXT.get(reason, RECORD_REASON_TEXT['record'])
+        detail = str(result.get('error') or '').strip()
+        if detail:
+            message = '%s: %s' % (message, detail[:300])
+        refused = reason in RECORD_REFUSED_REASONS
+        self._stats['record_refused' if refused else 'record_failed'] += 1
+        self._warn(RECORD_KIND, reason, message)
+        if refused:
             raise Refused(message)
         raise Failed(message)
 
@@ -362,7 +507,9 @@ class Jobs:
                 # Вызывающий уже не ждёт (таймаут) или задание чужое: результат выбрасываем.
                 self._stats['late'] += 1
                 continue
-            if item.get('ok'):
+            if job.kind == RECORD_KIND:
+                job.result = record_result(item, job.paths)
+            elif item.get('ok'):
                 try:
                     job.result = {'ok': True, 'rows': clean_rows(item.get('rows'))}
                 except ValueError as exc:
@@ -383,7 +530,7 @@ class Jobs:
             workers = [{'worker': key, 'version': info['version'], 'catalog': info['catalog'],
                         'waiting': info['waiting'], 'silent_seconds': int(max(0, now - info['seen_at'])),
                         'datasets': len(info['datasets']) if info['datasets'] is not None else None,
-                        'unreadable': sorted(info['unreadable'])}
+                        'unreadable': sorted(info['unreadable']), 'records': info.get('records')}
                        for key, info in sorted(self._workers.items())]
             return {'enabled': enabled(), 'catalog': oktell_datasets.fingerprint(),
                     'pending': len(self._pending), 'in_flight': len(self._jobs) - len(self._pending),
@@ -407,3 +554,5 @@ why_not = jobs.why_not
 run = jobs.run
 known = jobs.known
 status = jobs.status
+records_why_not = jobs.records_why_not
+fetch_record = jobs.fetch_record
