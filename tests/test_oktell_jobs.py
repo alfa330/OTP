@@ -197,13 +197,16 @@ class RoundTripTests(Harness):
         self.assertEqual(status['workers'][0]['catalog'], oktell_datasets.fingerprint())
         self.assertEqual(status['workers'][0]['datasets'], len(oktell_datasets.NAMES))
         # Набор с неданной таблицей портал шлюзу даже не предлагает.
-        self.assertIn('не дано право', self.jobs.why_not(query('guard_history', since='20261008 10:00:00',
-                                                               until='20261008 11:00:00')))
+        refusal = self.jobs.why_not(query('guard_history', since='20261008 10:00:00', until='20261008 11:00:00'))
+        # Таблица названа по имени: по этой строке человек понимает, что делать.
+        self.assertEqual(refusal, 'учётке шлюза не выдано право читать таблицы базы Oktell: '
+                                  'oktell_settings.dbo.A_Users (права выдаёт администратор SQL Server)')
         self.assertEqual(self.jobs.why_not(query()), '')
         # Таблицы считаются по параметрам: «Группировка» биллинга оценок водителей не читает.
         billing = {'minute_from': 0, 'minute_to': 1439, 'sl_seconds': 20}
         self.assertEqual(self.jobs.why_not(query('billing', group_by='hour', **billing)), '')
-        self.assertIn('не дано право', self.jobs.why_not(query('billing', group_by='park', **billing)))
+        self.assertIn('не выдано право читать таблицы базы Oktell: oktell.dbo.quality_employes',
+                      self.jobs.why_not(query('billing', group_by='park', **billing)))
 
     def test_unsigned_worker_is_not_let_in(self):
         os.environ['CDR_AGENT_KEYS'] = signing.generate()[1]
@@ -259,7 +262,7 @@ class RefusalTests(Harness):
     """Шлюз за запрос не взялся — его можно отдать мосту."""
 
     def test_no_worker_means_no_waiting(self):
-        self.assertEqual(self.jobs.why_not(query()), 'исполнителя запросов на VM шлюза нет на связи')
+        self.assertEqual(self.jobs.why_not(query()), 'коннектор Oktell на VM шлюза не на связи')
         self.assertFalse(self.jobs.can_run(query()))
 
     def test_plain_sql_never_goes_to_the_gateway(self):
@@ -328,7 +331,7 @@ class RefusalTests(Harness):
         with self.assertLogs(live_jobs.log, level='WARNING'):
             with self.assertRaises(live_jobs.Refused) as caught:
                 self.jobs.run(query(), 5)
-        self.assertIn('не дано право', str(caught.exception))
+        self.assertIn('не выдано право читать таблицу базы Oktell', str(caught.exception))
 
     def test_database_down_goes_to_the_bridge_and_is_not_hammered(self):
         self.serve()
@@ -511,9 +514,12 @@ class PortalEntryTests(Harness):
         ns = self.namespace([requests.exceptions.ConnectTimeout('Connection to 89.107.98.195 timed out')])
         with self.assertRaises(RuntimeError) as caught:
             ns['_oktell_query'](query())
-        text = str(caught.exception)
-        self.assertIn('исполнителя запросов на VM шлюза нет на связи', text)
-        self.assertIn('мост Oktell: Connection to 89.107.98.195 timed out', text)
+        # Человеку — причина на стороне шлюза и то, что запасного пути нет; технический текст
+        # отказа моста в сообщение не идёт (его читали как «ошибку моста»), но остаётся причиной.
+        self.assertEqual(str(caught.exception), 'Oktell: коннектор Oktell на VM шлюза не на связи. '
+                                                'Запасной путь (мост Oktell) тоже недоступен')
+        self.assertNotIn('HTTPConnectionPool', str(caught.exception))
+        self.assertIsInstance(caught.exception.__cause__, requests.exceptions.ConnectTimeout)
 
     def test_gateway_alone_is_enough_when_the_bridge_is_gone(self):
         ns = self.namespace(bridge=False)

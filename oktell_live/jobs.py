@@ -79,7 +79,8 @@ REASON_TEXT = {
     'catalog': 'каталог запросов на VM шлюза другой версии — коннектор Oktell нужно обновить',
     'unknown': 'коннектор Oktell на VM шлюза не знает такой набор — его нужно обновить',
     'params': 'коннектор Oktell на VM шлюза не принял параметры набора',
-    'permission': 'учётке базы Oktell на VM шлюза не дано право на таблицу набора',
+    'permission': 'учётке шлюза не выдано право читать таблицу базы Oktell '
+                  '(права выдаёт администратор SQL Server)',
     'unavailable': 'коннектор на VM шлюза не достучался до базы Oktell',
     'timeout': 'база Oktell не ответила коннектору на VM шлюза вовремя',
     'db': 'база Oktell отклонила запрос коннектора на VM шлюза',
@@ -228,12 +229,17 @@ class Jobs:
         with self._cond:
             alive = self._alive_workers(self._clock())
         if not alive:
-            return 'исполнителя запросов на VM шлюза нет на связи'
+            return 'коннектор Oktell на VM шлюза не на связи'
         knowing = [info for info in alive if info['datasets'] is None or dataset in info['datasets']]
         if not knowing:
             return REASON_TEXT['unknown']
         if all(tables & info['unreadable'] for info in knowing):
-            return REASON_TEXT['permission']
+            # Называем таблицы: по этой строке человек должен понять, что делать, не открывая
+            # журнал (12.11.2026 то же самое без имён прочитали как «ошибку моста»).
+            denied = sorted({key for info in knowing for key in tables & info['unreadable']})
+            return ('учётке шлюза не выдано право читать таблицы базы Oktell: %s '
+                    '(права выдаёт администратор SQL Server)'
+                    % ', '.join(oktell_datasets.TABLES[key][0] for key in denied))
         return ''
 
     # ── вызывающий ───────────────────────────────────────────────────────────

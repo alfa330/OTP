@@ -27647,18 +27647,21 @@ def _oktell_query(sql, timeout=None):
             return oktell_jobs.run(sql, timeout or OKTELL_API_TIMEOUT_SECONDS)
         except oktell_jobs.Refused as exc:
             vm_note = str(exc)
-    # Шлюз мог бы исполнить этот запрос, но не взялся — причину надо сохранить: без неё отказ
-    # лежащего моста выглядит так, будто дело в мосте.
+    # Шлюз мог бы исполнить этот запрос, но не взялся — человеку показываем ЭТУ причину: она
+    # и есть неисправность. Отказ запасного моста — следствие (он лежит с 10.11.2026), и его
+    # технический текст в сообщении только сбивает: 12.11.2026 строку «…; мост Oktell:
+    # HTTPConnectionPool(...)» в окне синхронизации прочитали как «ошибку моста». Сам отказ
+    # моста остаётся причиной исключения (__cause__) и виден в журнале.
     for_gateway = getattr(sql, 'dataset', None) is not None and oktell_jobs.enabled()
     if not _oktell_bridge_ready():
         if for_gateway:
-            raise RuntimeError(f"Oktell: {vm_note}; мост Oktell не настроен")
+            raise RuntimeError(f"Oktell: {vm_note}")
         raise RuntimeError("OKTELL_IP/OKTELL_API_TOKEN is not set")
     try:
         return _oktell_bridge_query(sql, timeout)
     except Exception as exc:
         if for_gateway:
-            raise RuntimeError(f"Oktell: {vm_note}; мост Oktell: {exc}") from exc
+            raise RuntimeError(f"Oktell: {vm_note}. Запасной путь (мост Oktell) тоже недоступен") from exc
         raise
 
 
