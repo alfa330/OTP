@@ -24,13 +24,22 @@
 ставили и руками: в образце план 09.11 и 10.11 равен факту 02.11 и 03.11 во всех
 строках. Поэтому данные нужны на неделю раньше периода (`PLAN_SHIFT_DAYS`).
 
+СМЕНЫ И ЗАНЯТОСТЬ (владелец, 12.11.2026)
+----------------------------------------
+«CR%» и «ОСС» портал считает сам: смены группы «Основа» из «Графиков работы» против
+времени на линии по статусам iCORE Phone — правила и формулы в
+`cdr/inbound_staffing.py`. Значение одно на день (смены — про людей, а не про
+очередь) и стоит в клетке, объединённой по всем очередям; из чего получилась доля —
+в примечании к клетке.
+
 ЧТО ОСТАЁТСЯ ЧЕЛОВЕКУ (решение владельца 11.11.2026)
 ---------------------------------------------------
-«ОСС», «План часов», «Факт часов» и «CR%» портал не заполняет — готового источника
-для них нет. Клетки пустые; «% выработки часов» и «% невыходов» стоят формулами и
-считаются, когда часы вписаны. Всё, что портал знает сам, лежит ЧИСЛАМИ, а не
-формулами: файл открывают и в просмотрщиках, которые формул не считают, и клетка
-без посчитанного значения там пустая.
+«План часов» и «Факт часов» портал не заполняет: 11.11 владелец оставил их под
+ручной ввод, 12.11 попросил считать только «CR%» и «ОСС». Клетки пустые;
+«% выработки часов» и «% невыходов» стоят формулами и считаются, когда часы вписаны.
+Всё, что портал знает сам, лежит ЧИСЛАМИ, а не формулами: файл открывают и в
+просмотрщиках, которые формул не считают, и клетка без посчитанного значения там
+пустая.
 
 Очереди и названия парков — из образца (`QUEUES`); номера линий приходят снаружи
 (`line_numbers`): в этом модуле их нет, таблица номеров компании лежит в конфиге
@@ -49,13 +58,14 @@ from io import BytesIO
 from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.formatting.rule import DataBarRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from op_wallboard import snapshot as snapshot_mod
 
-from . import lines as lines_mod, sync
+from . import inbound_staffing, lines as lines_mod, sync
 
 ALMATY = ZoneInfo('Asia/Almaty')
 
@@ -120,11 +130,16 @@ _LETTER = {key: get_column_letter(index) for key, index in _COL.items()}
 _LAST_COLUMN = len(COLUMNS)
 
 # Одно значение на весь день — клетка объединена по всем строкам очередей.
-DAY_WIDE = ('occupancy', 'hours_plan', 'hours_fact', 'hours_done', 'hours_missed')
+DAY_WIDE = ('occupancy', 'hours_plan', 'hours_fact', 'hours_done', 'hours_missed', 'cr')
+# Из них портал считает сам (cdr/inbound_staffing.py): ключ колонки → ключ показателя дня.
+# Смены и занятость — про людей группы, а не про очередь, поэтому значение одно на день.
+STAFFING_VALUES = {'occupancy': 'occ', 'cr': 'cr'}
+# Часы вписывает человек, их доли — формулы.
+MANUAL_HOURS = ('hours_plan', 'hours_fact')
 # Числа портала по очереди: объединяются по строкам номеров этой очереди.
 QUEUE_VALUES = ('plan', 'fact', 'match', 'answered', 'ar', 'aht', 'sl')
 # Объединяется по строкам очереди всё, кроме самих номеров, даты и дневных колонок.
-_QUEUE_MERGED = ('queue', 'park') + QUEUE_VALUES + ('cr',)
+_QUEUE_MERGED = ('queue', 'park') + QUEUE_VALUES
 
 HEADER_ROWS = 2
 FIRST_DATA_ROW = HEADER_ROWS + 1
@@ -147,6 +162,8 @@ NOTES_TITLE_FONT = Font(name='Calibri', size=13, bold=True)
 NOTES_WRAP = Alignment(wrap_text=True, vertical='top')
 
 NOTES_SHEET = 'Пояснения'
+# Автор примечаний к клеткам «ОСС» и «CR%».
+COMMENT_AUTHOR = 'iCORE'
 
 # Строка листа за день, когда в очереди не поступило ни одного звонка.
 NO_CALLS_ROW = {'queue': '', 'park': 'Звонков не было', 'numbers': ()}
@@ -189,8 +206,12 @@ def day_queues(queues):
             for queue in ordered]
 
 
-def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=None):
-    """[{day, rows, total}] по дням периода.
+def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=None,
+               staffing=None):
+    """[{day, rows, total, staffing}] по дням периода.
+
+    staffing — {день: показатели смен и занятости} из `inbound_staffing.day_staffing`
+    (для «ОСС» и «CR%»); None или дня нет — клетки пустые.
 
     touches — входящие с очередью за период И за неделю до него (план). Звонок с
     двумя очередями (перевод) считается за первой — тем же правилом, каким «Касания»
@@ -235,28 +256,32 @@ def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=No
         # и с ним колонка не сходилась бы со своим итогом.
         total = _stats(by_day.get(key), sl_seconds)
         total.update(plan=plan_total or None, match=_match(total['fact'], plan_total))
-        tables.append({'day': day, 'rows': rows, 'total': total})
+        tables.append({'day': day, 'rows': rows, 'total': total,
+                       'staffing': (staffing or {}).get(day)})
     return tables
 
 
 # ── книга ────────────────────────────────────────────────────────────────────
 
 def build_workbook(touches, *, day_from, day_to, generated_at=None, generated_by='',
-                   missing_days=(), sl_seconds=SL_SECONDS, line_numbers=None):
+                   missing_days=(), sl_seconds=SL_SECONDS, line_numbers=None,
+                   staffing=None, staffing_failed=False):
     """Книга отчёта: лист на день и «Пояснения» в конце. Возвращает (BytesIO, дней).
 
     missing_days — сутки (из периода или недели до него), которых на портале ещё нет:
     о них сказано в «Пояснениях», иначе пустой план читался бы как «звонков не было».
-    line_numbers — {очередь: номера линий} для колонки «Номера» (см. `QUEUES`)."""
+    line_numbers — {очередь: номера линий} для колонки «Номера» (см. `QUEUES`).
+    staffing — показатели смен и занятости по дням (см. `day_tables`);
+    staffing_failed — они не посчитались: клетки пустые, и в «Пояснениях» сказано почему."""
     generated_at = generated_at or datetime.now(ALMATY)
-    tables = day_tables(touches, day_from, day_to, sl_seconds, line_numbers)
+    tables = day_tables(touches, day_from, day_to, sl_seconds, line_numbers, staffing)
 
     workbook = Workbook()
     workbook.remove(workbook.active)
     for table in tables:
         _fill_day(workbook.create_sheet(table['day'].strftime('%d.%m')), table)
     _fill_notes(workbook.create_sheet(NOTES_SHEET), day_from, day_to, generated_at,
-                generated_by, missing_days, sl_seconds)
+                generated_by, missing_days, sl_seconds, staffing_failed)
 
     stream = BytesIO()
     workbook.save(stream)
@@ -276,6 +301,22 @@ def _ru_date(day):
 
 def _put(sheet, row, key, value):
     return sheet.cell(row=row, column=_COL[key], value=value)
+
+
+def _hours_text(seconds):
+    """Секунды → часы с одним знаком и запятой: «61,2»."""
+    return ('%.1f' % (float(seconds or 0) / 3600.0)).replace('.', ',')
+
+
+def _staffing_note(source, staffing):
+    """Из чего получилась доля — текст примечания к клетке; пусто, если клетка пустая."""
+    if staffing.get(source) is None:
+        return ''
+    if source == 'cr':
+        return 'Смен по графику: %d, отработано: %d' % (staffing.get('shifts_plan') or 0,
+                                                       staffing.get('shifts_fact') or 0)
+    return 'На линии: %s ч, из них в разговоре и наборе номера: %s ч' % (
+        _hours_text(staffing.get('online_seconds')), _hours_text(staffing.get('busy_seconds')))
 
 
 def _merge(sheet, key, row_from, row_to):
@@ -317,9 +358,18 @@ def _fill_day(sheet, table):
 
     _put(sheet, FIRST_DATA_ROW, 'date', table['day'])
     _merge(sheet, 'date', FIRST_DATA_ROW, last_data)
-    # Часы и ОСС вписывает человек; доли считаются, когда вписаны ОБА числа часов —
-    # иначе пустой «Факт часов» показывал бы «невыходов 100 %».
     top = FIRST_DATA_ROW
+    # «ОСС» и «CR%» портал считает сам — числами, в дневной клетке и в «Итого». Из чего
+    # получилась доля, сказано в примечании к клетке: «57 %» без «8 из 14 смен» не проверить.
+    staffing = table.get('staffing') or {}
+    for key, source in STAFFING_VALUES.items():
+        cell = _put(sheet, top, key, staffing.get(source))
+        _put(sheet, total_row, key, staffing.get(source))
+        note = _staffing_note(source, staffing)
+        if note:
+            cell.comment = Comment(note, COMMENT_AUTHOR)
+    # Часы вписывает человек; доли считаются, когда вписаны ОБА числа часов — иначе
+    # пустой «Факт часов» показывал бы «невыходов 100 %».
     plan_ref, fact_ref = '%s%d' % (_LETTER['hours_plan'], top), '%s%d' % (_LETTER['hours_fact'], top)
     blank = 'OR(%s="",%s="")' % (plan_ref, fact_ref)
     _put(sheet, top, 'hours_done', '=IF(%s,"",%s/%s)' % (blank, fact_ref, plan_ref))
@@ -332,8 +382,8 @@ def _fill_day(sheet, table):
                       start_column=_COL['date'], end_column=_COL['park'])
     for key in QUEUE_VALUES:
         _put(sheet, total_row, key, table['total'][key])
-    for key in DAY_WIDE:
-        # Итог повторяет дневное значение. Пустую клетку `=J3` показал бы нулём.
+    for key in MANUAL_HOURS + ('hours_done', 'hours_missed'):
+        # Итог повторяет дневное значение. Пустую клетку `=K3` показал бы нулём.
         ref = '%s%d' % (_LETTER[key], top)
         _put(sheet, total_row, key, '=IF(%s="","",%s)' % (ref, ref))
 
@@ -357,7 +407,7 @@ def _fill_day(sheet, table):
 
 
 def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_days,
-                sl_seconds):
+                sl_seconds, staffing_failed=False):
     sheet.column_dimensions['A'].width = 24
     sheet.column_dimensions['B'].width = 110
     period = (_ru_date(day_from) if day_from == day_to
@@ -387,10 +437,29 @@ def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_day
         ('Очереди', 'На листе дня — только очереди, в которые за этот день поступил хотя бы '
                     'один звонок; остальные скрыты.'),
         ('Итого', 'AR%, AHT и SL/20сек — по всем звонкам дня разом, а не среднее по строкам.'),
+        ('ОСС',
+         'Время операторов группы «Основа» в разговоре и в наборе номера ÷ всё их время на '
+         'линии за день. На линии — рабочие статусы iCORE Phone: ожидание звонка, набор и '
+         'разговор; перерыв, технический перерыв, тренинг и офлайн — нет. Часы — в '
+         'примечании к клетке.'),
+        ('CR%',
+         'Смены, отработанные по графику, ÷ смены, поставленные операторам группы «Основа» '
+         'на этот день в «Графиках работы». Смена отработана, если время на линии внутри '
+         'неё ÷ (длительность смены − перерывы по графику) не меньше %d %%. Не считаются '
+         '«Практика в офисе», «Смена на телефонах» и смены, которые ещё не закончились. '
+         'Сколько смен в плане и сколько отработано — в примечании к клетке.'
+         % round(inbound_staffing.ADHERENCE_MIN * 100)),
         ('Вписать вручную',
-         '«ОСС», «План часов», «Факт часов» и «CR%» — портал их не заполняет. '
-         '«% выработки часов» и «% невыходов» посчитаются сами, когда вписаны часы.'),
+         '«План часов» и «Факт часов» — портал их не заполняет. «% выработки часов» и '
+         '«% невыходов» посчитаются сами, когда вписаны часы.'),
     ]
+    if staffing_failed:
+        lines += [
+            ('', None),
+            ('ОСС и CR% не посчитаны',
+             'Графики или статусы телефонов не прочитались — клетки пустые. Соберите отчёт '
+             'ещё раз; если не помогло, сообщите разработчику.'),
+        ]
     if missing_days:
         lines += [
             ('', None),

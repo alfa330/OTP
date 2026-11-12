@@ -58,8 +58,9 @@ from io import BytesIO
 from flask import Blueprint, g, jsonify, request, send_file
 
 from . import (access, agent_auth, config, directory as directory_mod, inbound_report,
-               lead_queries, lead_report, leads as leads_mod, lines as lines_mod, missed_config,
-               queries, queue_facts, report, schema, sync, touches as touches_mod)
+               inbound_staffing, lead_queries, lead_report, leads as leads_mod, lines as lines_mod,
+               missed_config, queries, queue_facts, report, schema, staffing_queries, sync,
+               touches as touches_mod)
 
 log = logging.getLogger(__name__)
 
@@ -521,6 +522,35 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,
                          download_name=report.report_filename(day_from, day_to))
 
+    def _inbound_staffing(day_from, day_to):
+        """«CR%» и «ОСС» по дням периода: {день: показатели} (cdr/inbound_staffing.py).
+
+        События телефонов читаются с запасом: сутками раньше — чтобы смена телефона,
+        начатая накануне, нарезалась целиком, и до конца суток после периода — ночная
+        смена последнего дня кончается утром следующего."""
+        now = queries.now_almaty()
+        model = inbound_staffing.GROUP_MODEL
+        since = datetime.combine(day_from, datetime.min.time()) - timedelta(days=1)
+        until = min(datetime.combine(day_to, datetime.min.time()) + timedelta(days=2),
+                    now + timedelta(minutes=1))
+        with db._get_cursor() as cursor:
+            operator_ids = staffing_queries.roster(cursor, model, day_from, day_to)
+            if not operator_ids:
+                return {}
+            memberships = staffing_queries.memberships(cursor, operator_ids, day_from, day_to)
+            exts = staffing_queries.operator_exts(cursor, operator_ids)
+            shifts = staffing_queries.scheduled_shifts(cursor, operator_ids, day_from, day_to)
+            events = staffing_queries.phone_events(cursor, operator_ids, since, until)
+            moments = staffing_queries.human_call_moments(
+                cursor, exts.values(), day_from - timedelta(days=1), day_to + timedelta(days=1))
+        intervals = {
+            operator_id: inbound_staffing.online_intervals(
+                events.get(operator_id) or (), moments.get(exts.get(operator_id)) or ())
+            for operator_id in operator_ids}
+        return inbound_staffing.day_staffing(
+            sync.days_in_period(day_from, day_to), shifts=shifts,
+            intervals_by_operator=intervals, memberships=memberships, now=now)
+
     @cdr_route('/reports/inbound')
     def cdr_inbound_report(ctx):
         """«Отчёт по входу»: входящая линия по дням и очередям (cdr/inbound_report.py).
@@ -537,10 +567,19 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                      queries.today_almaty())
         with db._get_cursor() as cursor:
             touches = queries.incoming_touches_compact(cursor, plan_from, day_to)
+        # Смены и занятость — отдельным чтением и со своим отказом: без них отчёт о
+        # звонках всё равно верен, а в файле будет сказано, чего в нём нет.
+        try:
+            staffing, staffing_failed = _inbound_staffing(day_from, day_to), False
+        except Exception:  # noqa: BLE001
+            log.exception('Касания: отчёт по входу %s..%s — смены и занятость не посчитались',
+                          day_from, day_to)
+            staffing, staffing_failed = None, True
         workbook, days = inbound_report.build_workbook(
             touches, day_from=day_from, day_to=day_to,
             generated_by=ctx.get('name') or '', missing_days=missing,
-            line_numbers=inbound_line_numbers)
+            line_numbers=inbound_line_numbers,
+            staffing=staffing, staffing_failed=staffing_failed)
         log.info('Касания: отчёт по входу %s..%s — %d сут., входящих %d, собрал %s',
                  day_from, day_to, days, len(touches), ctx.get('name'))
         return send_file(workbook, mimetype=XLSX_MIME, as_attachment=True,

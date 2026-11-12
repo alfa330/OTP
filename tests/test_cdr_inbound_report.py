@@ -21,7 +21,7 @@ import io
 import os
 import unittest
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from unittest import mock
 
@@ -280,10 +280,10 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(tuesday['A4'].value, 'Итого')
         self.assertEqual(self.sheet['C3'].value, 3001)
         self.assertEqual(self.sheet['D3'].value, 'iTaxi вход')
-        for column in 'CDEFGHIOPQ':
+        for column in 'CDEFGHIOP':
             self.assertIn('%s3:%s5' % (column, column), merged)
-        # Дата и дневные ручные колонки — одной клеткой на все очереди.
-        for column in 'AJKLMN':
+        # Дата и дневные колонки (часы, ОСС, CR%) — одной клеткой на все очереди.
+        for column in 'AJKLMNQ':
             self.assertIn('%s3:%s%d' % (column, column, self.last), merged)
         self.assertEqual(self.sheet['A3'].value, datetime(2026, 11, 2))
 
@@ -299,14 +299,54 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(cell('I').number_format, '0.0%')
         self.assertEqual(cell('G').number_format, '0%')
 
-    def test_manual_fields_are_blank_and_formulas_wait_for_hours(self):
-        for cell in ('J3', 'K3', 'L3', 'Q3', 'Q%d' % self.jana, 'Q%d' % self.total):
+    def test_hours_are_blank_and_formulas_wait_for_them(self):
+        for cell in ('K3', 'L3'):
             self.assertIsNone(self.sheet[cell].value, cell)
         self.assertEqual(self.sheet['M3'].value, '=IF(OR(K3="",L3=""),"",L3/K3)')
         self.assertEqual(self.sheet['N3'].value, '=IF(OR(K3="",L3=""),"",(K3-L3)/K3)')
         # Итог повторяет дневное значение и не показывает ноль на пустой клетке.
         self.assertEqual(self.sheet['K%d' % self.total].value, '=IF(K3="","",K3)')
         self.assertEqual(self.sheet['M%d' % self.total].value, '=IF(M3="","",M3)')
+
+    def test_occ_and_cr_are_blank_without_staffing(self):
+        for cell in ('J3', 'Q3', 'J%d' % self.total, 'Q%d' % self.total):
+            self.assertIsNone(self.sheet[cell].value, cell)
+        self.assertIsNone(self.sheet['Q3'].comment)
+
+    def test_occ_and_cr_are_day_values_with_their_source_in_a_note(self):
+        staffing = {date(2026, 11, 2): {
+            'shifts_plan': 14, 'shifts_fact': 8, 'cr': 8 / 14,
+            'online_seconds': 61 * 3600 + 720, 'busy_seconds': 18 * 3600 + 1440, 'occ': 0.3}}
+        stream, _days = R.build_workbook(
+            sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 3),
+            line_numbers=TEST_LINES, staffing=staffing)
+        book = load_workbook(stream)
+        sheet = book['02.11']
+        self.assertAlmostEqual(sheet['J3'].value, 0.3)
+        self.assertAlmostEqual(sheet['Q3'].value, 8 / 14)
+        # В «Итого» — те же числа, а не формула: файл читают и там, где формул не считают.
+        self.assertAlmostEqual(sheet['J%d' % self.total].value, 0.3)
+        self.assertAlmostEqual(sheet['Q%d' % self.total].value, 8 / 14)
+        self.assertEqual((sheet['J3'].number_format, sheet['Q3'].number_format), ('0.0%', '0%'))
+        self.assertEqual(sheet['Q3'].comment.text, 'Смен по графику: 14, отработано: 8')
+        self.assertEqual(sheet['J3'].comment.text,
+                         'На линии: 61,2 ч, из них в разговоре и наборе номера: 18,4 ч')
+        # День, по которому показателей нет, остаётся пустым и без примечаний.
+        tuesday = book['03.11']
+        self.assertIsNone(tuesday['Q3'].value)
+        self.assertIsNone(tuesday['J3'].comment)
+
+    def test_day_without_shifts_keeps_cr_blank_but_shows_occ(self):
+        staffing = {date(2026, 11, 2): {
+            'shifts_plan': 0, 'shifts_fact': 0, 'cr': None,
+            'online_seconds': 7200, 'busy_seconds': 3600, 'occ': 0.5}}
+        stream, _days = R.build_workbook(
+            sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
+            staffing=staffing)
+        sheet = load_workbook(stream)['02.11']
+        self.assertIsNone(sheet['Q3'].value)
+        self.assertIsNone(sheet['Q3'].comment)
+        self.assertAlmostEqual(sheet['J3'].value, 0.5)
 
     def test_total_row(self):
         def cell(column):
@@ -347,7 +387,21 @@ class WorkbookTests(unittest.TestCase):
         self.assertIn('тот же день недели неделей раньше', text)
         # Доля названа формулой «что ÷ что», а не одним словом.
         self.assertIn('÷ Факт звонки', text)
+        self.assertIn('÷ смены, поставленные операторам группы «Основа»', text)
+        self.assertIn('не меньше 90 %', text)
+        self.assertIn('÷ всё их время на линии за день', text)
+        self.assertIn('Вписать вручную|«План часов» и «Факт часов»', text)
         self.assertNotIn('Нет данных станции', text)
+        self.assertNotIn('не посчитаны', text)
+
+    def test_failed_staffing_is_said_in_the_notes(self):
+        stream, _days = R.build_workbook(
+            sample_touches(), day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
+            staffing=None, staffing_failed=True)
+        book = load_workbook(stream)
+        text = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
+        self.assertIn('ОСС и CR% не посчитаны', text)
+        self.assertIsNone(book['02.11']['Q3'].value)
 
     def test_missing_days_are_named(self):
         stream, _days = R.build_workbook(
@@ -459,15 +513,63 @@ class _Queries:
         return datetime(2026, 11, 11, 12, 0, 0)
 
 
+class _Staffing:
+    """Двойник cdr.staffing_queries: двое в «Основе», у обоих смена 02.11 с 09 до 18.
+
+    Первый отработал её целиком, второй ушёл в 15:00 — отработана одна смена из двух."""
+
+    def __init__(self, operator_ids=(1, 2), broken=False):
+        self.operator_ids = list(operator_ids)
+        self.broken = broken
+        self.windows = {}
+
+    def roster(self, cursor, model, day_from, day_to):
+        if self.broken:
+            raise RuntimeError('таблица графиков недоступна')
+        self.windows['roster'] = (model, day_from, day_to)
+        return list(self.operator_ids)
+
+    def memberships(self, cursor, operator_ids, day_from, day_to):
+        return {operator_id: [{'id': operator_id, 'start_date': date(2026, 1, 1),
+                               'end_date': None, 'group_id': 36, 'model': 'op_osnova'}]
+                for operator_id in operator_ids}
+
+    def operator_exts(self, cursor, operator_ids):
+        return {operator_id: '61%02d' % operator_id for operator_id in operator_ids}
+
+    def scheduled_shifts(self, cursor, operator_ids, day_from, day_to):
+        return [{'operator_id': operator_id, 'day': date(2026, 11, 2),
+                 'start_time': time(9, 0), 'end_time': time(18, 0),
+                 'shift_type': 'regular', 'breaks': [(780, 840)]}
+                for operator_id in operator_ids]
+
+    def phone_events(self, cursor, operator_ids, since, until):
+        self.windows['events'] = (since, until)
+
+        def day(logout):
+            return [(datetime(2026, 11, 2, 9, 0), 'готов'), (datetime(2026, 11, 2, 9, 30), 'занят'),
+                    (datetime(2026, 11, 2, 10, 30), 'готов'), (datetime(2026, 11, 2, 13, 0), 'перерыв'),
+                    (datetime(2026, 11, 2, 14, 0), 'готов'), (datetime(2026, 11, 2, logout, 0), 'выключен')]
+        return {1: day(18), 2: day(15)}
+
+    def human_call_moments(self, cursor, exts, day_from, day_to):
+        self.windows['calls'] = (day_from, day_to)
+        return {}
+
+
 @unittest.skipIf(Flask is None, 'flask не установлен')
 class RouteTests(unittest.TestCase):
-    """Ручка исполняется целиком: свой Flask и двойник `queries`, как в
-    tests/test_cdr_lead_routes.py."""
+    """Ручка исполняется целиком: свой Flask и двойники `queries` и `staffing_queries`,
+    как в tests/test_cdr_lead_routes.py."""
 
-    def client(self, double):
+    def client(self, double, staffing=None):
         patcher = mock.patch.object(routes, 'queries', double)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.staffing = staffing or _Staffing()
+        staffing_patch = mock.patch.object(routes, 'staffing_queries', self.staffing)
+        staffing_patch.start()
+        self.addCleanup(staffing_patch.stop)
         schema_patch = mock.patch.object(routes.schema, 'schema_is_ready', return_value=True)
         schema_patch.start()
         self.addCleanup(schema_patch.stop)
@@ -480,10 +582,50 @@ class RouteTests(unittest.TestCase):
         app.config['TESTING'] = True
         return app.test_client()
 
-    def get(self, double, **params):
+    def get(self, double, staffing=None, **params):
         params.setdefault('date_from', '2026-11-02')
         params.setdefault('date_to', '2026-11-03')
-        return self.client(double).get('/api/cdr/reports/inbound', query_string=params)
+        return self.client(double, staffing).get('/api/cdr/reports/inbound', query_string=params)
+
+    def test_cr_and_occ_come_from_schedules_and_phone_statuses(self):
+        response = self.get(_Queries())
+        self.assertEqual(response.status_code, 200)
+        book = load_workbook(BytesIO(response.data))
+        sheet = book['02.11']
+        # Из двух смен «Основы» отработана одна: второй ушёл за три часа до конца.
+        self.assertAlmostEqual(sheet['Q3'].value, 0.5)
+        self.assertEqual(sheet['Q3'].comment.text, 'Смен по графику: 2, отработано: 1')
+        # На линии 8 ч и 5 ч, в разговоре по часу у каждого: 2 ÷ 13.
+        self.assertAlmostEqual(sheet['J3'].value, 2 / 13)
+        # 03.11 смен в графике нет и на линии никого не было — пусто, а не ноль.
+        self.assertIsNone(book['03.11']['Q3'].value)
+        self.assertIsNone(book['03.11']['J3'].value)
+        # Состав — группа «Основа»; события телефонов — с запасом на сутки до и после.
+        self.assertEqual(self.staffing.windows['roster'],
+                         ('op_osnova', date(2026, 11, 2), date(2026, 11, 3)))
+        self.assertEqual(self.staffing.windows['events'],
+                         (datetime(2026, 11, 1), datetime(2026, 11, 5)))
+        self.assertEqual(self.staffing.windows['calls'], (date(2026, 11, 1), date(2026, 11, 4)))
+        notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
+        self.assertNotIn('не посчитаны', notes)
+
+    def test_group_without_people_leaves_the_cells_blank(self):
+        response = self.get(_Queries(), _Staffing(operator_ids=()))
+        book = load_workbook(BytesIO(response.data))
+        self.assertIsNone(book['02.11']['Q3'].value)
+        notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
+        self.assertNotIn('не посчитаны', notes)
+
+    def test_broken_staffing_does_not_take_the_calls_report_down(self):
+        response = self.get(_Queries(), _Staffing(broken=True))
+        self.assertEqual(response.status_code, 200)
+        book = load_workbook(BytesIO(response.data))
+        sheet = book['02.11']
+        jana = queue_row(sheet, '3034')
+        self.assertEqual(sheet['F%d' % jana].value, 3)
+        self.assertIsNone(sheet['Q3'].value)
+        notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
+        self.assertIn('ОСС и CR% не посчитаны', notes)
 
     def test_workbook_for_the_period_with_the_plan_week(self):
         double = _Queries()
