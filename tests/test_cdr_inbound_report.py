@@ -677,6 +677,8 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(rows[2], (datetime(2026, 11, 2), 'Карабек Ержан', '09:00–18:00',
                                    8.0, 5.0, 0.625, 'нет'))
         self.assertEqual(len(rows), 3)
+        # Доля — с десятыми: 89,6 % не должны читаться как «90 %» рядом с «нет».
+        self.assertEqual(book[R.SHIFTS_SHEET]['F2'].number_format, '0.0%')
 
     def test_group_without_people_leaves_the_cells_blank(self):
         response = self.get(_Queries(), _Staffing(operator_ids=()))
