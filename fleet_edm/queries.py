@@ -662,6 +662,28 @@ def load_helper_sessions(cursor):
     return [row] if row['cookies'] else []
 
 
+def fallback_status(cursor):
+    """Запасная учётка (та же строка «Рассылок») БЕЗ кук — для экрана: жива ли
+    она, когда своя не действует (см. accounts.choose). «Жива» здесь — то, что
+    знает база: «Рассылки» отмечают в своей строке и успех, и 401."""
+    cursor.execute("SELECT to_regclass('driver_mailing_session')")
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return {'configured': False}
+    cursor.execute(
+        """
+        SELECT account, parks_count, updated_at, last_ok_at, last_error,
+               COALESCE(BTRIM(cookies), '') NOT IN ('', '[]', '{}') AS configured
+          FROM driver_mailing_session WHERE id = 1
+        """
+    )
+    row = _row_to_dict(cursor, cursor.fetchone())
+    if not row:
+        return {'configured': False}
+    row['configured'] = bool(row.get('configured'))
+    return row
+
+
 def mark_session_ok(cursor):
     cursor.execute(
         "UPDATE fleet_edm_session SET last_ok_at = NOW(), last_error = NULL WHERE id = 1"

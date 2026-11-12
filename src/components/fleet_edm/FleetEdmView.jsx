@@ -121,12 +121,18 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
 
     const jobs = overview?.jobs || [];
     const session = overview?.session || {};
+    // Запасная учётка — раздела «Рассылки». Сервер присылает её, только когда свой
+    // вход не действует: выгрузки тогда идут ею, и прятать загрузку незачем.
+    const fallback = overview?.fallback || {};
     const canManage = Boolean(overview?.can_manage_session);
     const running = useMemo(() => jobs.find((job) => job.status === 'running'), [jobs]);
     // Идущая выгрузка живёт наверху отдельной карточкой, поэтому в истории её нет:
     // один и тот же прогресс в двух местах на одном экране — это шум.
     const history = useMemo(() => jobs.filter((job) => job.status !== 'running'), [jobs]);
-    const linked = Boolean(session.configured) && !session.last_error;
+    const ownLinked = Boolean(session.configured) && !session.last_error;
+    const viaFallback = !ownLinked && Boolean(fallback.configured) && !fallback.last_error;
+    const linked = ownLinked || viaFallback;
+    const activeAccount = viaFallback ? fallback : session;
 
     const load = useCallback(() => {
         setLoadError(null);
@@ -255,12 +261,15 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
         setBusy('link');
         try {
             const response = await axios.post(`${base}/session/check`, {}, { headers: headers() });
-            showToast?.(
-                response.data?.alive
-                    ? `Связь есть: ${response.data.parks_count} диспетчерских`
-                    : 'Связь с диспетчерской не отвечает',
-                response.data?.alive ? 'success' : 'error',
-            );
+            const data = response.data || {};
+            let message = 'Связь с диспетчерской не отвечает';
+            if (data.alive && data.via_fallback) {
+                message = `Свой вход не действует — выгрузки идут учёткой «Рассылок»: `
+                    + `${data.parks_count} диспетчерских`;
+            } else if (data.alive) {
+                message = `Связь есть: ${data.parks_count} диспетчерских`;
+            }
+            showToast?.(message, data.alive ? 'success' : 'error');
             await load();
         } catch (error) {
             showToast?.('Не удалось проверить связь', 'error');
@@ -457,6 +466,11 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                         </span>
                         <span className={`text-[13px] ${linked ? 'text-slate-500' : 'text-amber-700'}`}>
                             {linked ? 'активна' : 'нужно восстановить'}
+                            {/* Админу — что свой вход умер, хоть выгрузки и идут:
+                                восстанавливать его всё равно ему. Остальным это шум. */}
+                            {viaFallback && canManage && (
+                                <span className="text-slate-400"> · запасная учётка</span>
+                            )}
                         </span>
                         <ChevronDown
                             size={16}
@@ -469,9 +483,10 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                             <p className="text-[12.5px] leading-relaxed text-slate-600">
                                 {linked
                                     ? <>Раздел заходит в диспетчерскую от имени рабочей учётной записи —
-                                       сейчас это <span className="text-slate-800">{session.account || 'настроенный аккаунт'}</span>,
-                                       доступно {num(session.parks_count)} диспетчерских.
-                                       Обновлено {formatDateTime(session.updated_at)}.</>
+                                       сейчас это <span className="text-slate-800">{activeAccount.account || 'настроенный аккаунт'}</span>
+                                       {viaFallback && ' (запасная, раздела «Рассылки»)'},
+                                       доступно {num(activeAccount.parks_count)} диспетчерских.
+                                       Обновлено {formatDateTime(activeAccount.updated_at)}.</>
                                     : <>Вход в диспетчерскую перестал действовать, и выгрузки временно не работают.
                                        Восстановление занимает пару минут.</>}
                             </p>
@@ -485,9 +500,14 @@ export default function FleetEdmView({ apiBaseUrl, withAccessTokenHeader, showTo
                                 разработчику, и выгрузки заработают снова.
                             </p>
 
-                            {session.last_error && (
+                            {/* Пока выгрузки идут запасной учёткой, про умерший свой вход
+                                читать нужно только тому, кто его восстанавливает. */}
+                            {session.last_error && (!viaFallback || canManage) && (
                                 <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-                                    {session.last_error}
+                                    {viaFallback
+                                        ? `Свой вход раздела${session.account ? ` (${session.account})` : ''} `
+                                          + `не действует: ${session.last_error}`
+                                        : session.last_error}
                                 </div>
                             )}
 

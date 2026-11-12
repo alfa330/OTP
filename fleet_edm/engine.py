@@ -607,7 +607,7 @@ def _entry_prior(contractor_id, park_id, provider_name, provider_id, info, known
 def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_SAMPLE,
             max_orphan_lookups=MAX_ORPHAN_CARD_LOOKUPS, rng=None,
             checkpoint=None, resume=None, should_stop=None,
-            verify_providers=VERIFY_BY_CARD, card_cache=None, helpers=()):
+            verify_providers=VERIFY_BY_CARD, card_cache=None, helpers=(), parks=None):
     """Главная функция: заполняет провайдера по строкам. Возвращает словарь с
     результатом по каждому уникальному ID и статистикой прогона.
 
@@ -619,6 +619,8 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
     helpers — другие учётки того же кабинета, только для карточек (CardPool).
     card_cache — объект с get/put (подтверждения «бумажных», неделя) и, если
     есть, get_known (всё известное за KNOWN_PROVIDER_DAYS, с датой).
+    parks — диспетчерские основной учётки, если их уже спросили (выбор учётки,
+    см. accounts.choose): второй раз тот же запрос не шлём.
     """
     progress = Progress(progress) if not isinstance(progress, Progress) else progress
     save = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint(checkpoint)
@@ -660,7 +662,7 @@ def resolve(rows, client: FleetClient, *, progress=None, control_sample=CONTROL_
         progress(percent=4, rows_total=len(rows),
                  note='Читаем справочник парков и провайдеров')
 
-    parks = client.parks()
+    parks = list(parks) if parks is not None else client.parks()
     park_names = {str(park.get('id')): _park_label(park) for park in parks}
     if not parks:
         raise FleetError('Кабинет не отдал ни одного парка')

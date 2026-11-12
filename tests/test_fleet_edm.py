@@ -24,7 +24,7 @@ from openpyxl import Workbook, load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet_edm import access, engine, report  # noqa: E402
+from fleet_edm import access, accounts, engine, report  # noqa: E402
 from fleet_edm import client as client_module  # noqa: E402
 from fleet_edm.client import (CARD_RECOVERY_AFTER, MAX_BATCH,  # noqa: E402
                                THROTTLE_RECOVERY_AFTER, THROTTLE_WAIT_MAX,
@@ -1662,6 +1662,299 @@ class ReportTest(unittest.TestCase):
         text = '\n'.join(str(cell.value or '') for row in sheet.iter_rows() for cell in row)
         self.assertIn('Дата и время сборки', text)
         self.assertIn('Бумажный документооборот', text)   # оговорка «это выбор, а не пропуск»
+
+
+# ── какой учёткой идти (12.11.2026) ──────────────────────────────────────────
+#
+# Своя учётка раздела получала 401 с 03.11.2026, и раздел встал целиком —
+# «Выгрузки временно недоступны», выгрузка на 228 строк упала на первом запросе,
+# — хотя учётка «Рассылок» была жива и видела больше диспетчерских.
+
+EXPIRED_401 = 'Кабинет Fleet не принял сессию (401). Нужен новый вход.'
+
+
+class _ParksOnly:
+    """Учётка для выбора: на список диспетчерских отвечает как задали и
+    помнит, спрашивали ли её вообще."""
+
+    def __init__(self, parks=(PARK_A,), error=None):
+        self._parks = list(parks)
+        self.error = error
+        self.parks_calls = 0
+
+    def parks(self, park_id=None):
+        self.parks_calls += 1
+        if self.error is not None:
+            raise self.error
+        return [{'id': park, 'name': 'Парк ' + park[:2]} for park in self._parks]
+
+
+def _cookie_row(name, account):
+    return {'cookies': [{'name': 'Session_id', 'value': name}], 'user_agent': 'ua',
+            'account': account}
+
+
+def _choose(own, mailings, own_configured=True):
+    clients = {'own': own, 'mailings': mailings}
+    own_row = _cookie_row('own', 'edm@') if own_configured else {'cookies': []}
+    return accounts.choose(
+        [(accounts.OWN, own_row), (accounts.MAILINGS, _cookie_row('mailings', 'ooz@'))],
+        lambda row: clients[row['cookies'][0]['value']])
+
+
+class AccountChoiceTest(unittest.TestCase):
+    def test_live_own_account_stays_main_and_mailings_only_helps(self):
+        own, mailings = _ParksOnly((PARK_A, PARK_B)), _ParksOnly()
+        selection = _choose(own, mailings)
+        self.assertIs(selection.main, own)
+        self.assertEqual(selection.name, accounts.OWN)
+        self.assertEqual([park['id'] for park in selection.parks], [PARK_A, PARK_B])
+        self.assertEqual(selection.helpers, [mailings])
+        self.assertEqual(selection.helper_names, ['ooz@'])
+        self.assertTrue(selection.spare)
+        self.assertEqual(selection.failures, [])
+        # Помощницу заранее не спрашиваем — карточки сами снимут её с прогона.
+        self.assertEqual(mailings.parks_calls, 0)
+
+    def test_expired_own_account_hands_the_run_to_mailings(self):
+        own = _ParksOnly(error=FleetSessionExpired(EXPIRED_401))
+        mailings = _ParksOnly((PARK_A, PARK_B))
+        selection = _choose(own, mailings)
+        self.assertIs(selection.main, mailings)
+        self.assertEqual(selection.name, accounts.MAILINGS)
+        self.assertEqual(selection.account, 'ooz@')
+        self.assertEqual(len(selection.parks), 2)
+        self.assertEqual(selection.helpers, [])
+        self.assertFalse(selection.spare)
+        self.assertTrue(selection.expired(accounts.OWN))
+        self.assertFalse(selection.expired(accounts.MAILINGS))
+
+    def test_unconfigured_own_account_is_skipped_without_a_request(self):
+        mailings = _ParksOnly()
+        selection = _choose(None, mailings, own_configured=False)
+        self.assertIs(selection.main, mailings)
+        self.assertEqual(selection.failures, [])
+        self.assertFalse(selection.expired(accounts.OWN))
+
+    def test_own_account_without_rights_is_skipped_but_not_called_expired(self):
+        own = _ParksOnly(error=FleetAccessDenied('403'))
+        mailings = _ParksOnly()
+        selection = _choose(own, mailings)
+        self.assertIs(selection.main, mailings)
+        self.assertFalse(selection.expired(accounts.OWN))
+        self.assertEqual([name for name, _error in selection.failures], [accounts.OWN])
+
+    def test_account_with_no_parks_is_not_an_account(self):
+        selection = _choose(_ParksOnly(parks=()), _ParksOnly())
+        self.assertEqual(selection.name, accounts.MAILINGS)
+        self.assertTrue(selection.expired(accounts.OWN))
+
+    def test_nobody_alive_gives_no_main_and_errors_in_order(self):
+        selection = _choose(_ParksOnly(error=FleetSessionExpired(EXPIRED_401)),
+                            _ParksOnly(error=FleetSessionExpired('401 рассылок')))
+        self.assertIsNone(selection.main)
+        self.assertEqual([name for name, _error in selection.failures],
+                         [accounts.OWN, accounts.MAILINGS])
+
+    def test_network_blink_does_not_switch_accounts(self):
+        """Моргнувший кабинет — не умерший вход: ошибка уходит наружу, и
+        выгрузка встаёт на подхват той же учёткой, а не меняет её."""
+        mailings = _ParksOnly()
+        with self.assertRaises(FleetError):
+            _choose(_ParksOnly(error=FleetError('HTTP 502')), mailings)
+        self.assertEqual(mailings.parks_calls, 0)
+
+    def test_resolve_takes_the_already_asked_parks(self):
+        drivers = {_driver_id(1): {'park': PARK_A, 'provider': '2KZSP'}}
+
+        class Counting(FakeClient):
+            parks_calls = 0
+
+            def parks(self, park_id=None):
+                type(self).parks_calls += 1
+                return super().parks(park_id)
+
+        client = Counting(drivers)
+        result = engine.resolve(_park_rows(drivers), client, control_sample=0,
+                                parks=[{'id': PARK_A, 'name': 'Парк A'}])
+        self.assertEqual(Counting.parks_calls, 0)
+        self.assertEqual(result['results'][_driver_id(1)]['provider_name'], 'Sapar')
+
+
+class _Expired(FakeClient):
+    """Своя учётка 12.11.2026: на любой запрос — 401."""
+
+    def parks(self, park_id=None):
+        raise FleetSessionExpired(EXPIRED_401)
+
+
+class _DiesMidRun(FakeClient):
+    """Вход жив на старте и умирает посреди обхода."""
+
+    def contractors_all(self, *args, **kwargs):
+        raise FleetSessionExpired(EXPIRED_401)
+
+
+class RunJobAccountTest(unittest.TestCase):
+    """Выгрузка целиком — через ручки раздела, с подставными базой и кабинетом."""
+
+    JOB_ID = 7
+
+    def setUp(self):
+        from contextlib import contextmanager
+        from unittest import mock
+
+        from flask import Flask
+
+        from fleet_edm import queries as queries_module
+        from fleet_edm import routes as routes_module
+
+        self.drivers = {_driver_id(i): {'park': PARK_A, 'provider': '2KZSP'}
+                        for i in range(1, 5)}
+        self.source = _xlsx([('Парк', PARK_A, cid, 'ФИО', '+77000000000')
+                             for cid in self.drivers])
+        self.calls = {'finish': [], 'release': [], 'session_error': [], 'session_ok': 0}
+        self.own_row = {**_cookie_row('own', 'edm@'), 'parks_count': 86,
+                        'last_error': None}
+        self.mailings_row = _cookie_row('mailings', 'ooz@')
+        self.clients = {}
+
+        class FakeDb:
+            @contextmanager
+            def _get_cursor(self):
+                yield object()
+
+        class Pool:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, fn, *args):
+                self.submitted.append((fn, args))
+
+        calls = self.calls
+        own_row = self.own_row
+        test = self
+
+        def finish_job(cursor, job_id, **kwargs):
+            calls['finish'].append(kwargs)
+
+        def mark_session_ok(cursor):
+            calls['session_ok'] += 1
+
+        def mark_session_error(cursor, message):
+            calls['session_error'].append(message)
+            own_row['last_error'] = message
+
+        def session_status(cursor):
+            status = {key: value for key, value in own_row.items() if key != 'cookies'}
+            status['configured'] = True
+            return status
+
+        patches = {
+            'access_context': lambda cursor, user_id: {'id': 1, 'name': 'Админ',
+                                                       'role': 'super_admin'},
+            'orphan_jobs': lambda cursor, instance: {'resume': [self.JOB_ID], 'exhausted': []},
+            'claim_job': lambda cursor, job_id, instance, note=None: 1,
+            'session_status': session_status,
+            'fallback_status': lambda cursor: {'configured': True, 'account': 'ooz@',
+                                               'parks_count': 89, 'last_error': None},
+            'list_jobs': lambda cursor, limit=50: [],
+            'has_running_job': lambda cursor: self.JOB_ID,
+            'job_file': lambda cursor, job_id, kind='result': {
+                'file_name': 'id per.xlsx', 'content': self.source},
+            'load_checkpoint': lambda cursor, job_id: {},
+            'load_session': lambda cursor: dict(own_row),
+            'load_helper_sessions': lambda cursor: [dict(self.mailings_row)],
+            'update_progress': lambda cursor, job_id, **kwargs: None,
+            'save_checkpoint': lambda cursor, job_id, **kwargs: None,
+            'load_card_providers': lambda cursor, ids: {},
+            'load_known_providers': lambda cursor, ids, max_age_days=None: {},
+            'save_card_providers': lambda cursor, rows: None,
+            'touch_job': lambda cursor, job_id, instance: {'mine': True, 'status': 'running'},
+            'finish_job': finish_job,
+            'release_job': lambda cursor, job_id, instance, note=None:
+                calls['release'].append(note) or True,
+            'mark_session_ok': mark_session_ok,
+            'mark_session_error': mark_session_error,
+            'drop_checkpoint': lambda cursor, job_id: None,
+        }
+        for name, fake in patches.items():
+            patcher = mock.patch.object(queries_module, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in (
+                # Сторож брошенных выгрузок в тесте не нужен: выгрузку зовём сами.
+                ('SWEEP_FIRST_DELAY', 10 ** 6),
+                ('FleetClient', lambda cookies, user_agent=None:
+                    test.clients[cookies[0]['value']])):
+            patcher = mock.patch.object(routes_module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        self.pool = Pool()
+        app = Flask(__name__)
+        app.register_blueprint(routes_module.build_fleet_edm_blueprint(
+            db=FakeDb(), require_api_key=lambda handler: handler,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (1, None, None), pool=self.pool))
+        self.http = app.test_client()
+
+    def _overview_and_run(self):
+        """Экран открывают — сторож находит выгрузку — она идёт в этом потоке."""
+        response = self.http.get('/api/fleet_edm/overview')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.pool.submitted), 1)
+        run_job, args = self.pool.submitted[0]
+        run_job(*args)
+        return response.get_json()
+
+    def test_expired_own_account_builds_the_file_with_mailings(self):
+        self.clients = {'own': _Expired(self.drivers), 'mailings': FakeClient(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual(len(self.calls['finish']), 1)
+        finished = self.calls['finish'][0]
+        self.assertNotIn('error_code', finished)
+        self.assertEqual(finished['rows_resolved'], 4)
+        self.assertTrue(finished['file_bytes'])
+        # Свой вход отмечен протухшим — экран админа это покажет, — и «жив» ему
+        # никто не написал: файл собрала запасная.
+        self.assertEqual(self.calls['session_error'], [EXPIRED_401])
+        self.assertEqual(self.calls['session_ok'], 0)
+        self.assertEqual(self.calls['release'], [])
+
+    def test_live_own_account_is_confirmed_alive(self):
+        self.clients = {'own': FakeClient(self.drivers), 'mailings': FakeClient(self.drivers)}
+        self._overview_and_run()
+        self.assertNotIn('error_code', self.calls['finish'][0])
+        self.assertEqual(self.calls['session_ok'], 1)
+        self.assertEqual(self.calls['session_error'], [])
+
+    def test_own_account_dying_mid_run_goes_back_to_the_queue(self):
+        """Умерла посреди обхода, а запасная есть — не «Ошибка», а подхват: он
+        начнёт с выбора учётки и пойдёт запасной."""
+        self.clients = {'own': _DiesMidRun(self.drivers), 'mailings': FakeClient(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual(self.calls['finish'], [])
+        self.assertEqual(len(self.calls['release']), 1)
+        self.assertEqual(self.calls['session_error'], [EXPIRED_401])
+
+    def test_both_accounts_dead_is_still_an_honest_error(self):
+        self.clients = {'own': _Expired(self.drivers), 'mailings': _Expired(self.drivers)}
+        self._overview_and_run()
+        self.assertEqual([call.get('error_code') for call in self.calls['finish']],
+                         ['session_expired'])
+        self.assertEqual(self.calls['release'], [])
+
+    def test_overview_tells_the_screen_about_the_spare_account(self):
+        self.clients = {'own': FakeClient(self.drivers), 'mailings': FakeClient(self.drivers)}
+        self.own_row['last_error'] = EXPIRED_401
+        data = self.http.get('/api/fleet_edm/overview').get_json()
+        self.assertEqual(data['fallback']['account'], 'ooz@')
+        self.assertNotIn('cookies', data['fallback'])
+        # Свой вход жив — про запасную экрану знать незачем.
+        self.own_row['last_error'] = None
+        data = self.http.get('/api/fleet_edm/overview').get_json()
+        self.assertIsNone(data['fallback'])
 
 
 # ── мелочи, на которых уже обжигались ────────────────────────────────────────

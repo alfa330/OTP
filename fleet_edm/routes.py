@@ -41,7 +41,7 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, engine, queries, report
+from . import access, accounts, engine, queries, report
 from .client import FleetAccessDenied, FleetClient, FleetError, FleetSessionExpired
 
 # Обычная выгрузка из кабинета на 150 тысяч строк весит около 10 МБ. Двадцать
@@ -304,6 +304,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
         """
         life = JobLife(job_id)
         requests_count = 0
+        selection = None
         try:
             with db._get_cursor() as cursor:
                 source = queries.job_file(cursor, job_id, kind='source')
@@ -312,11 +313,6 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             if not source or not source.get('content'):
                 raise engine.InputError(
                     'Исходный файл выгрузки не найден в базе — загрузите его заново.')
-            if not session or not session.get('cookies'):
-                raise FleetSessionExpired(
-                    'Сессия кабинета Fleet не настроена. Нужен вход в кабинет и '
-                    'передача сессии в раздел.'
-                )
 
             source_name = source.get('file_name') or ''
             rows, meta = engine.parse_input(source['content'], source_name)
@@ -329,26 +325,45 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                        .format(ready, meta['rows_total']) if ready
                        else 'Файл разобран: {} строк'.format(meta['rows_total'])))
 
-            # Вторая учётка кабинета — только для карточек: у каждой учётки свой
-            # лимит (см. queries.load_helper_sessions). Не прочитали — идём одной.
+            # Учётки кабинета по старшинству: своя, затем учётка «Рассылок». Основной
+            # становится первая живая (accounts.choose), остальные помогают с
+            # карточками — у каждой учётки свой лимит (см. queries.load_helper_sessions).
             helper_sessions = []
             try:
                 with db._get_cursor() as cursor:
                     helper_sessions = queries.load_helper_sessions(cursor)
             except Exception:
-                logging.exception('Провайдер ЭДО: вторую учётку кабинета не прочитали — '
-                                  'карточки пойдут одной')
+                logging.exception('Провайдер ЭДО: учётку «Рассылок» не прочитали — '
+                                  'идём одной своей')
+            candidates = [(accounts.OWN, session)] + [
+                (accounts.MAILINGS, extra) for extra in helper_sessions]
+            if not any(row and row.get('cookies') for _name, row in candidates):
+                raise FleetSessionExpired(
+                    'Сессия кабинета Fleet не настроена. Нужен вход в кабинет и '
+                    'передача сессии в раздел.'
+                )
 
             life.start()
-            client = FleetClient(session['cookies'], session.get('user_agent'))
-            helpers = [FleetClient(extra['cookies'], extra.get('user_agent'))
-                       for extra in helper_sessions]
+            selection = accounts.choose(
+                candidates, lambda row: FleetClient(row['cookies'], row.get('user_agent')))
+            for name, error in selection.failures:
+                logging.warning('Провайдер ЭДО: задание %s — учётка %s не годится (%s)',
+                                job_id, name, str(error)[:160])
+            if selection.expired(accounts.OWN):
+                # Своя протухла — экран должен это знать, даже если выгрузка
+                # спокойно пойдёт запасной: восстанавливать вход всё равно нужно.
+                _mark_own_session_error(selection.failures)
+            if selection.main is None:
+                raise selection.failures[0][1]
+            client = selection.main
+            helpers = selection.helpers
             clients = [client] + helpers
+            if selection.name != accounts.OWN:
+                logging.warning('Провайдер ЭДО: задание %s идёт учёткой «Рассылок» (%s) — '
+                                'своя не действует', job_id, selection.account or '?')
             if helpers:
                 logging.info('Провайдер ЭДО: задание %s — карточки спрашиваем %s учётками (%s)',
-                             job_id, len(clients),
-                             ', '.join(str(extra.get('account') or '?')
-                                       for extra in helper_sessions))
+                             job_id, len(clients), ', '.join(selection.helper_names))
             resolution = engine.resolve(
                 rows, client, progress=emit,
                 checkpoint=make_checkpoint(
@@ -362,6 +377,7 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 should_stop=engine.Stopper(life.should_stop, interval=1.0),
                 card_cache=CardCache(),
                 helpers=helpers,
+                parks=selection.parks,
             )
             requests_count = requests_before + (
                 resolution.get('requests') or sum(each.requests_count for each in clients))
@@ -413,7 +429,10 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                                     - stats['no_provider_by_kind']),
                     requests_count=requests_count,
                 )
-                queries.mark_session_ok(cursor)
+                # Живой своя учётка подтверждена, только если ею и шли: выгрузка,
+                # собранная запасной, не повод гасить «нужно восстановить вход».
+                if selection.name == accounts.OWN:
+                    queries.mark_session_ok(cursor)
                 # Файл собран — держать рядом ещё и построчную копию незачем.
                 queries.drop_checkpoint(cursor, job_id)
             logging.info("Провайдер ЭДО: задание %s готово, %s строк, %s запросов",
@@ -426,12 +445,18 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
             logging.info("Провайдер ЭДО: задание %s остановлено — его ведёт кто-то другой",
                          job_id)
         except FleetSessionExpired as error:
-            _fail(job_id, error, 'session_expired', requests_count)
-            try:
-                with db._get_cursor() as cursor:
-                    queries.mark_session_error(cursor, str(error))
-            except Exception:
-                logging.exception("Провайдер ЭДО: не удалось отметить сессию протухшей")
+            in_flight = selection is not None and selection.main is not None
+            if selection is None or (in_flight and selection.name == accounts.OWN):
+                # Не настроена ни одна учётка, или своя умерла посреди обхода.
+                # Протухшую на выборе уже отметили выше, а чужую строку
+                # («Рассылок») раздел не трогает — её ведут «Рассылки».
+                _mark_own_session_error([(accounts.OWN, error)])
+            if in_flight and selection.spare:
+                # Основная умерла посреди обхода, а запасная есть: контрольная
+                # точка на месте — подхват начнёт с выбора учётки и продолжит ею.
+                _pause(job_id, error)
+            else:
+                _fail(job_id, error, 'session_expired', requests_count)
         except engine.InputError as error:
             _fail(job_id, error, 'bad_file', requests_count)
         except FleetAccessDenied as error:
@@ -470,6 +495,18 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                 )
         except Exception:
             logging.exception("Провайдер ЭДО: не удалось закрыть карточку %s", job_id)
+
+    def _mark_own_session_error(failures):
+        """Своя сессия протухла — запомнить это в её строке, чтобы экран сказал
+        «нужно восстановить вход» (failures — [(имя учётки, ошибка)])."""
+        message = next((str(error) for name, error in failures if name == accounts.OWN), '')
+        if not message:
+            return
+        try:
+            with db._get_cursor() as cursor:
+                queries.mark_session_error(cursor, message)
+        except Exception:
+            logging.exception("Провайдер ЭДО: не удалось отметить сессию протухшей")
 
     def _pause(job_id, error):
         """Оставить выгрузку на подхват: карточка остаётся «идёт», в примечании —
@@ -577,11 +614,15 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
         sweep_jobs()
         with db._get_cursor() as cursor:
             session = queries.session_status(cursor)
+            # Запасная учётка экрану нужна, только когда своя не действует: тогда
+            # по ней решается, принимать ли файлы (см. accounts.choose).
+            fallback = None if _own_alive(session) else queries.fallback_status(cursor)
             jobs = queries.list_jobs(cursor, limit=request.args.get('limit', 50))
             running = queries.has_running_job(cursor)
         return jsonify({
             'status': 'success',
             'session': session,
+            'fallback': fallback,
             'jobs': jobs,
             'running_job_id': running,
             'can_manage_session': access.can_manage_session(requester),
@@ -624,7 +665,8 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
         sweep_jobs()
         with db._get_cursor() as cursor:
             session = queries.session_status(cursor)
-            if not session.get('configured'):
+            if (not session.get('configured')
+                    and not queries.fallback_status(cursor).get('configured')):
                 return jsonify({
                     "error": "Сессия кабинета Fleet не настроена — выгрузка не сможет "
                              "туда зайти.",
@@ -789,21 +831,43 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @section_route('/session/check', methods=('POST',))
     def fleet_edm_session_check(requester_id, requester):
         """Жива ли сессия прямо сейчас. Отдельной кнопкой: узнавать об этом из
-        упавшей через десять минут выгрузки — плохой способ."""
+        упавшей через десять минут выгрузки — плохой способ.
+
+        Своя не действует — проверяем и запасную (учётку «Рассылок»): выгрузки
+        пойдут ею (см. accounts.choose), и ответ «связи нет» при рабочих
+        выгрузках был бы неправдой. Строку «Рассылок» при этом не пишем."""
         with db._get_cursor() as cursor:
             session = queries.load_session(cursor)
-        if not session or not session.get('cookies'):
-            return jsonify({'status': 'success', 'alive': False,
-                            'error': 'Сессия не настроена'}), 200
-        try:
-            client = FleetClient(session['cookies'], session.get('user_agent'))
-            checked = client.check()
-        except FleetError as error:
+        error_text = 'Сессия не настроена'
+        if session and session.get('cookies'):
+            try:
+                client = FleetClient(session['cookies'], session.get('user_agent'))
+                checked = client.check()
+                error_text = None
+            except FleetError as error:
+                error_text = str(error)
+                with db._get_cursor() as cursor:
+                    queries.mark_session_error(cursor, error_text)
+        if error_text is not None:
             with db._get_cursor() as cursor:
-                queries.mark_session_error(cursor, str(error))
+                spare_rows = queries.load_helper_sessions(cursor)
+            spare = None
+            for row in spare_rows:
+                try:
+                    spare = FleetClient(row['cookies'], row.get('user_agent')).check()
+                    break
+                except FleetError as error:
+                    logging.warning('Провайдер ЭДО: запасная учётка тоже не отвечает (%s)',
+                                    str(error)[:160])
+            with db._get_cursor() as cursor:
                 status = queries.session_status(cursor)
-            return jsonify({'status': 'success', 'alive': False,
-                            'error': str(error), 'session': status}), 200
+                fallback = queries.fallback_status(cursor)
+            return jsonify({'status': 'success', 'alive': bool(spare),
+                            'via_fallback': bool(spare),
+                            'account': (spare or {}).get('account'),
+                            'parks_count': (spare or {}).get('parks_count'),
+                            'error': error_text, 'session': status,
+                            'fallback': fallback}), 200
         with db._get_cursor() as cursor:
             queries.mark_session_ok(cursor)
             status = queries.session_status(cursor)
@@ -813,6 +877,12 @@ def build_fleet_edm_blueprint(*, db, require_api_key, build_cors_preflight_respo
                         'session': status}), 200
 
     return bp
+
+
+def _own_alive(session):
+    """Своя сессия настроена и последний раз не падала — то же правило, по
+    которому экран решает, жива ли связь."""
+    return bool(session and session.get('configured') and not session.get('last_error'))
 
 
 def _safe_name(filename):
