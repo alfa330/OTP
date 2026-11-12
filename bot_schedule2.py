@@ -12033,6 +12033,11 @@ app.register_blueprint(build_shift_auction_blueprint(
         _is_supervisor_role=_is_supervisor_role,
         _normalize_origin=_normalize_origin,
         _normalize_user_role=_normalize_user_role,
+        # Разбор клеток Excel объявлен ниже по модулю (раздел «Графики работы»), а блюпринт
+        # собирается раньше — поэтому обёртки: имя ищется в момент вызова, когда модуль
+        # уже загружен целиком. Формат клеток один на импорт графиков и аукцион Теза.
+        _parse_schedule_excel_cell_value=lambda raw_value: _parse_schedule_excel_cell_value(raw_value),
+        _parse_schedule_excel_header_date=lambda cell: _parse_schedule_excel_header_date(cell),
         _record_elapsed_server_timing=_record_elapsed_server_timing,
         _send_telegram_text_message=_send_telegram_text_message,
         _truncate_for_telegram=_truncate_for_telegram,

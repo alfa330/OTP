@@ -625,7 +625,8 @@ const SIDEBAR_SECTION_DEPARTMENTS = {
     // плиткой окна «Сформировать отчёт», и при выбранном отделе пункт нужен на месте.
     sv_hours: ['szov', 'op', 'tez', 'front_office'],
     resource_fte: ['szov'],
-    shift_auction: ['szov'],
+    // Тез КЦ — с задачи #124: смены загружает руководитель, выбирают операторы.
+    shift_auction: ['szov', 'tez'],
     technical_issues: ['szov', 'op'],
     group_late_bot: ['front_office', 'hr'],
     // Табло

@@ -20,6 +20,7 @@ from db.core import (  # noqa: F401
     math,
     normalize_calculation_model_code,
     normalize_role_value,
+    normalize_shift_auction_mode,
     Optional,
     re,
     SCHEDULE_AUTO_AGGREGATION_START_DATE,
@@ -194,7 +195,9 @@ class SchedulesMixin:
 
     def get_resource_saved_schedule(self, date_from=None, date_to=None, plan_id=None,
                                     direction_mode='line'):
-        mode = 'chat' if str(direction_mode or 'line').lower() == 'chat' else 'line'
+        # Направление плана — то же, что у прогона аукциона: линия, чат или линии
+        # Тез КЦ (их планы загружаются файлом, задача #124). Неизвестное — линия.
+        mode = normalize_shift_auction_mode(direction_mode)
         with self._get_cursor() as cursor:
             if plan_id:
                 cursor.execute("""
@@ -236,7 +239,24 @@ class SchedulesMixin:
             return self._serialize_resource_saved_schedule_plan(plan_row, shift_rows)
 
     def save_resource_saved_schedule(self, payload, updated_by=None, direction_mode='line'):
-        mode = 'chat' if str(direction_mode or 'line').lower() == 'chat' else 'line'
+        with self._get_cursor() as cursor:
+            saved = self._save_resource_saved_schedule_tx(
+                cursor, payload, updated_by=updated_by, direction_mode=direction_mode
+            )
+        return {
+            "schedule": self.get_resource_saved_schedule(plan_id=saved["plan_id"]),
+            "auction_count": saved["auction_count"],
+            "event": saved["event"],
+        }
+
+    def _save_resource_saved_schedule_tx(self, cursor, payload, updated_by=None, direction_mode='line'):
+        """Записать план графика в транзакции вызывающего.
+
+        Отдельно от обёртки ради загрузки смен Тез КЦ (задача #124): план и пересев
+        лотов аукциона обязаны лечь одной транзакцией, иначе между ними кто-то успел
+        бы взять смену, которую пересев тут же сотрёт.
+        """
+        mode = normalize_shift_auction_mode(direction_mode)
         safe_payload = payload or {}
         days = safe_payload.get("days") if isinstance(safe_payload.get("days"), list) else []
         if not days:
@@ -264,163 +284,163 @@ class SchedulesMixin:
         except Exception:
             plan_id = None
 
-        with self._get_cursor() as cursor:
-            direction_context = self._resolve_resource_schedule_direction_context_tx(cursor, {
-                **safe_payload,
-                "capacity": capacity,
-                "meta": base_meta,
-            })
-            shift_rows = self._normalize_resource_saved_schedule_shifts(
-                days,
-                direction_name=direction_context.get("direction_name"),
-                direction_rules=direction_context.get("break_rules")
-            )
-            meta = {
-                **base_meta,
-                "days": days,
-                "shiftCount": len(shift_rows),
-                "savedAt": datetime.now().isoformat(),
-                "breakDirectionId": direction_context.get("direction_id"),
-                "breakDirectionName": direction_context.get("direction_name"),
-                "selectedDirectionIds": direction_context.get("selected_direction_ids") or [],
-                "selectedDirections": direction_context.get("selected_directions") or [],
-                "breakRules": direction_context.get("break_rules") or [],
-            }
+        direction_context = self._resolve_resource_schedule_direction_context_tx(cursor, {
+            **safe_payload,
+            "capacity": capacity,
+            "meta": base_meta,
+        })
+        shift_rows = self._normalize_resource_saved_schedule_shifts(
+            days,
+            direction_name=direction_context.get("direction_name"),
+            direction_rules=direction_context.get("break_rules")
+        )
+        meta = {
+            **base_meta,
+            "days": days,
+            "shiftCount": len(shift_rows),
+            "savedAt": datetime.now().isoformat(),
+            "breakDirectionId": direction_context.get("direction_id"),
+            "breakDirectionName": direction_context.get("direction_name"),
+            "selectedDirectionIds": direction_context.get("selected_direction_ids") or [],
+            "selectedDirections": direction_context.get("selected_directions") or [],
+            "breakRules": direction_context.get("break_rules") or [],
+        }
 
-            if plan_id:
-                cursor.execute("""
-                    SELECT id
-                    FROM resource_saved_schedule_plans
-                    WHERE id = %s AND archived_at IS NULL
-                    FOR UPDATE
-                """, (plan_id,))
-                if not cursor.fetchone():
-                    plan_id = None
-
-            if not plan_id:
-                cursor.execute("""
-                    SELECT id
-                    FROM resource_saved_schedule_plans
-                    WHERE date_from = %s
-                      AND date_to = %s
-                      AND direction_mode = %s
-                      AND archived_at IS NULL
-                    ORDER BY updated_at DESC, id DESC
-                    LIMIT 1
-                    FOR UPDATE
-                """, (start_date, end_date, mode))
-                existing = cursor.fetchone()
-                plan_id = int(existing[0]) if existing else None
-
-            if plan_id:
-                cursor.execute("""
-                    UPDATE resource_saved_schedule_plans
-                    SET date_from = %s,
-                        date_to = %s,
-                        title = %s,
-                        selected_variant_key = %s,
-                        include_incident_uplift = %s,
-                        summary = %s,
-                        capacity = %s,
-                        templates = %s,
-                        meta = %s,
-                        direction_mode = %s,
-                        updated_by = %s,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
-                """, (
-                    start_date,
-                    end_date,
-                    title,
-                    variant_key,
-                    include_incident_uplift,
-                    Json(summary),
-                    Json(capacity),
-                    Json(templates),
-                    Json(meta),
-                    mode,
-                    updated_by,
-                    plan_id,
-                ))
-            else:
-                cursor.execute("""
-                    INSERT INTO resource_saved_schedule_plans (
-                        date_from, date_to, title, selected_variant_key,
-                        include_incident_uplift, summary, capacity, templates,
-                        meta, direction_mode, created_by, updated_by
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    start_date,
-                    end_date,
-                    title,
-                    variant_key,
-                    include_incident_uplift,
-                    Json(summary),
-                    Json(capacity),
-                    Json(templates),
-                    Json(meta),
-                    mode,
-                    updated_by,
-                    updated_by,
-                ))
-                plan_id = int(cursor.fetchone()[0])
-
-            cursor.execute("DELETE FROM resource_saved_schedule_shifts WHERE plan_id = %s", (plan_id,))
-            if shift_rows:
-                execute_values(
-                    cursor,
-                    """
-                    INSERT INTO resource_saved_schedule_shifts (
-                        plan_id, client_shift_id, shift_date, start_minute, end_minute,
-                        start_time, end_time, duration_minutes, rate_min, label,
-                        template_id, source, tone, overnight, breaks, meta
-                    )
-                    VALUES %s
-                    """,
-                    [
-                        (
-                            plan_id,
-                            row["client_shift_id"],
-                            row["shift_date"],
-                            row["start_minute"],
-                            row["end_minute"],
-                            row["start_time"],
-                            row["end_time"],
-                            row["duration_minutes"],
-                            row["rate_min"],
-                            row["label"],
-                            row["template_id"],
-                            row["source"],
-                            row["tone"],
-                            row["overnight"],
-                            Json(row["breaks"]),
-                            Json(row["meta"]),
-                        )
-                        for row in shift_rows
-                    ],
-                )
-
+        if plan_id:
             cursor.execute("""
-                SELECT id, shift_date, start_time, end_time, rate_min, breaks
-                FROM resource_saved_schedule_shifts
-                WHERE plan_id = %s
-                  AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
-                ORDER BY shift_date, start_minute, end_minute, id
+                SELECT id
+                FROM resource_saved_schedule_plans
+                WHERE id = %s AND archived_at IS NULL
+                FOR UPDATE
             """, (plan_id,))
-            saved_shift_rows = cursor.fetchall() or []
-            event = self._insert_shift_auction_test_event(cursor, "resource_schedule_saved", {
-                "plan_id": plan_id,
-                "count": len(saved_shift_rows),
-                "date_from": start_date.strftime('%Y-%m-%d'),
-                "date_to": end_date.strftime('%Y-%m-%d'),
-                "updated_by": updated_by,
-                "break_direction_name": direction_context.get("direction_name"),
-            }, direction_mode=mode)
+            if not cursor.fetchone():
+                plan_id = None
+
+        if not plan_id:
+            cursor.execute("""
+                SELECT id
+                FROM resource_saved_schedule_plans
+                WHERE date_from = %s
+                  AND date_to = %s
+                  AND direction_mode = %s
+                  AND archived_at IS NULL
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+            """, (start_date, end_date, mode))
+            existing = cursor.fetchone()
+            plan_id = int(existing[0]) if existing else None
+
+        if plan_id:
+            cursor.execute("""
+                UPDATE resource_saved_schedule_plans
+                SET date_from = %s,
+                    date_to = %s,
+                    title = %s,
+                    selected_variant_key = %s,
+                    include_incident_uplift = %s,
+                    summary = %s,
+                    capacity = %s,
+                    templates = %s,
+                    meta = %s,
+                    direction_mode = %s,
+                    updated_by = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (
+                start_date,
+                end_date,
+                title,
+                variant_key,
+                include_incident_uplift,
+                Json(summary),
+                Json(capacity),
+                Json(templates),
+                Json(meta),
+                mode,
+                updated_by,
+                plan_id,
+            ))
+        else:
+            cursor.execute("""
+                INSERT INTO resource_saved_schedule_plans (
+                    date_from, date_to, title, selected_variant_key,
+                    include_incident_uplift, summary, capacity, templates,
+                    meta, direction_mode, created_by, updated_by
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                start_date,
+                end_date,
+                title,
+                variant_key,
+                include_incident_uplift,
+                Json(summary),
+                Json(capacity),
+                Json(templates),
+                Json(meta),
+                mode,
+                updated_by,
+                updated_by,
+            ))
+            plan_id = int(cursor.fetchone()[0])
+
+        cursor.execute("DELETE FROM resource_saved_schedule_shifts WHERE plan_id = %s", (plan_id,))
+        if shift_rows:
+            execute_values(
+                cursor,
+                """
+                INSERT INTO resource_saved_schedule_shifts (
+                    plan_id, client_shift_id, shift_date, start_minute, end_minute,
+                    start_time, end_time, duration_minutes, rate_min, label,
+                    template_id, source, tone, overnight, breaks, meta
+                )
+                VALUES %s
+                """,
+                [
+                    (
+                        plan_id,
+                        row["client_shift_id"],
+                        row["shift_date"],
+                        row["start_minute"],
+                        row["end_minute"],
+                        row["start_time"],
+                        row["end_time"],
+                        row["duration_minutes"],
+                        row["rate_min"],
+                        row["label"],
+                        row["template_id"],
+                        row["source"],
+                        row["tone"],
+                        row["overnight"],
+                        Json(row["breaks"]),
+                        Json(row["meta"]),
+                    )
+                    for row in shift_rows
+                ],
+            )
+
+        cursor.execute("""
+            SELECT id, shift_date, start_time, end_time, rate_min, breaks
+            FROM resource_saved_schedule_shifts
+            WHERE plan_id = %s
+              AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
+            ORDER BY shift_date, start_minute, end_minute, id
+        """, (plan_id,))
+        saved_shift_rows = cursor.fetchall() or []
+        event = self._insert_shift_auction_test_event(cursor, "resource_schedule_saved", {
+            "plan_id": plan_id,
+            "count": len(saved_shift_rows),
+            "date_from": start_date.strftime('%Y-%m-%d'),
+            "date_to": end_date.strftime('%Y-%m-%d'),
+            "updated_by": updated_by,
+            "break_direction_name": direction_context.get("direction_name"),
+        }, direction_mode=mode)
 
         return {
-            "schedule": self.get_resource_saved_schedule(plan_id=plan_id),
+            "plan_id": plan_id,
+            "shift_rows": shift_rows,
             "auction_count": sum(1 for row in shift_rows if not bool((row.get("meta") or {}).get("excludeFromAuction"))),
             "event": event,
         }

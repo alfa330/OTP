@@ -35,6 +35,7 @@ import {
   Square,
   Table,
   Undo2,
+  Upload,
   UserCog,
   Users,
   Wifi,
@@ -82,30 +83,92 @@ import {
 import { MyShiftsTimeline } from '../schedule/MyShiftsMobile';
 import useIsMobileShell from '../common/useIsMobileShell';
 import MobileActionSheet from '../common/MobileActionSheet';
+import ShiftAuctionUploadSheet from './ShiftAuctionUploadSheet';
 import './shift-auction-mobile.css';
 
-// Аукцион идёт на двух направлениях: линия (СЗоВ «Основа») и чат («Чат менеджер»).
-// Это два независимых прогона на одном разделе. У СВ и выше вверху есть тумблер,
-// оператор же видит ТОЛЬКО своё направление — его присылает сервер полем
-// `direction_mode` снапшота, и подменить его из браузера нельзя.
+// Аукцион идёт на нескольких направлениях — независимых прогонах одного раздела:
+// линия (СЗоВ «Основа»), чат («Чат менеджер») и две линии Тез КЦ (задача #124).
+// У СВ и выше вверху есть тумблер — с прогонами СВОЕГО отдела (список и правила
+// присылает сервер: available_directions / direction_rules). Оператор видит ТОЛЬКО
+// своё направление — его присылает сервер полем `direction_mode` снапшота, и
+// подменить его из браузера нельзя.
 const AUCTION_DIRECTION_LINE = 'line';
 const AUCTION_DIRECTION_CHAT = 'chat';
-const AUCTION_DIRECTIONS = [
-  { key: AUCTION_DIRECTION_LINE, label: 'Линия' },
-  { key: AUCTION_DIRECTION_CHAT, label: 'Чат' },
+const AUCTION_DIRECTION_TEZ_TP = 'tez_tp';
+const AUCTION_DIRECTION_TEZ_OP = 'tez_op';
+const AUCTION_DIRECTION_KEYS = [
+  AUCTION_DIRECTION_LINE,
+  AUCTION_DIRECTION_CHAT,
+  AUCTION_DIRECTION_TEZ_TP,
+  AUCTION_DIRECTION_TEZ_OP,
 ];
 const AUCTION_DIRECTION_LABELS = {
   [AUCTION_DIRECTION_LINE]: 'Линия',
   [AUCTION_DIRECTION_CHAT]: 'Чат',
+  [AUCTION_DIRECTION_TEZ_TP]: 'ТП линия',
+  [AUCTION_DIRECTION_TEZ_OP]: 'ОП линия',
 };
+const AUCTION_DEPARTMENT_LABELS = { szov: 'СЗоВ', tez: 'Тез КЦ' };
 // Ключ выбора направления у управляющего: раздел переоткрывается там же, где закрыли.
 const AUCTION_DIRECTION_STORAGE_KEY = 'otp_shift_auction_direction_v1';
 
-const normalizeAuctionDirection = (value) => (
-  String(value || '').trim().toLowerCase() === AUCTION_DIRECTION_CHAT
-    ? AUCTION_DIRECTION_CHAT
-    : AUCTION_DIRECTION_LINE
-);
+const normalizeAuctionDirection = (value) => {
+  const key = String(value || '').trim().toLowerCase();
+  return AUCTION_DIRECTION_KEYS.includes(key) ? key : AUCTION_DIRECTION_LINE;
+};
+
+// Правила направления до первого ответа сервера. Те же, что отдаёт
+// shift_auction_direction_rules (db/core.py); настоящие приходят снапшотом и
+// перекрывают эти — экран не сравнивает направление со словом 'chat' у себя.
+const fallbackAuctionDirectionRules = (value) => {
+  const key = normalizeAuctionDirection(value);
+  const isTez = key === AUCTION_DIRECTION_TEZ_TP || key === AUCTION_DIRECTION_TEZ_OP;
+  return {
+    key,
+    label: AUCTION_DIRECTION_LABELS[key],
+    department_code: isTez ? 'tez' : 'szov',
+    department_label: isTez ? AUCTION_DEPARTMENT_LABELS.tez : AUCTION_DEPARTMENT_LABELS.szov,
+    shift_source: isTez ? 'upload' : 'plan',
+    partial_claims: key === AUCTION_DIRECTION_CHAT,
+    several_shifts_per_day: key === AUCTION_DIRECTION_CHAT || isTez,
+    night_shifts: isTez
+      ? [{ start: '20:00', end: '08:00' }, { start: '21:00', end: '09:00' }]
+      : [{ start: '20:00', end: '08:00' }],
+  };
+};
+
+// Сколько направлений знает экран до ответа сервера: прежние линия и чат СЗоВ.
+const DEFAULT_AUCTION_DIRECTION_CATALOG = [
+  fallbackAuctionDirectionRules(AUCTION_DIRECTION_LINE),
+  fallbackAuctionDirectionRules(AUCTION_DIRECTION_CHAT),
+];
+
+const normalizeAuctionDirectionCatalog = (raw) => {
+  const seen = new Set();
+  return (Array.isArray(raw) ? raw : [])
+    .map((item) => {
+      const key = String(item?.key || '').trim().toLowerCase();
+      if (!AUCTION_DIRECTION_KEYS.includes(key) || seen.has(key)) return null;
+      seen.add(key);
+      const fallback = fallbackAuctionDirectionRules(key);
+      const nights = (Array.isArray(item?.night_shifts) ? item.night_shifts : [])
+        .map((night) => ({ start: String(night?.start || '').slice(0, 5), end: String(night?.end || '').slice(0, 5) }))
+        .filter((night) => night.start && night.end);
+      const departmentCode = String(item?.department_code || '').trim().toLowerCase() || fallback.department_code;
+      return {
+        key,
+        label: String(item?.label || '').trim() || fallback.label,
+        department_code: departmentCode,
+        department_label: String(item?.department_label || '').trim()
+          || AUCTION_DEPARTMENT_LABELS[departmentCode] || fallback.department_label,
+        shift_source: item?.shift_source === 'upload' ? 'upload' : 'plan',
+        partial_claims: Boolean(item?.partial_claims),
+        several_shifts_per_day: Boolean(item?.several_shifts_per_day),
+        night_shifts: nights.length ? nights : fallback.night_shifts,
+      };
+    })
+    .filter(Boolean);
+};
 
 const readStoredAuctionDirection = () => {
   if (typeof window === 'undefined') return AUCTION_DIRECTION_LINE;
@@ -861,10 +924,16 @@ const getAuctionLotNetMinutes = (lot) => Math.max(0, getAuctionLotDurationMinute
 const AUCTION_NIGHT_START_HHMM = '20:00';
 const AUCTION_NIGHT_END_HHMM = '08:00';
 
-const isAuctionNightShift = (startTime, endTime) => (
-  String(startTime || '').slice(0, 5) === AUCTION_NIGHT_START_HHMM
-  && String(endTime || '').slice(0, 5) === AUCTION_NIGHT_END_HHMM
-);
+// Ночь у каждого направления своя: в СЗоВ ровно «20*08», у Тез КЦ ещё и «21*09».
+// Пары приходят с сервера в правилах направления (night_shifts) — без них
+// действует прежняя ночь СЗоВ.
+const isAuctionNightShift = (startTime, endTime, nightShifts = null) => {
+  const start = String(startTime || '').slice(0, 5);
+  const end = String(endTime || '').slice(0, 5);
+  if (start === AUCTION_NIGHT_START_HHMM && end === AUCTION_NIGHT_END_HHMM) return true;
+  return (Array.isArray(nightShifts) ? nightShifts : [])
+    .some((night) => night && night.start === start && night.end === end);
+};
 
 // «2026-09-02» → «02.09»: подпись причины должна читаться, а не быть ISO-датой.
 const formatAuctionShortDate = (dateStr) => {
@@ -2611,7 +2680,68 @@ const ADMIN_INSTRUCTION_STEPS = [
   }
 ];
 
-const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onClose }) => {
+// Тез КЦ (задача #124): смены не генерируются, а загружаются файлом — первые два
+// шага руководителя другие, остальное как у СЗоВ.
+const ADMIN_UPLOAD_INSTRUCTION_STEPS = [
+  ADMIN_INSTRUCTION_STEPS[0],
+  {
+    icon: Upload,
+    title: 'Шаг 1 · Загрузите смены файлом',
+    body: 'Нажмите «Загрузить смены» в блоке «Период аукциона» и выберите Excel — тот же, что загружаете в «Графики работы». Имена и ставки строк не учитываются: каждая смена из клетки станет сменой аукциона.',
+    visual: (
+      <div className="flex flex-col items-start gap-2">
+        <ButtonPreview variant="outline" icon={Upload}>Загрузить смены</ButtonPreview>
+        <span className="text-xs text-slate-500">Перед записью окно покажет сверку: период, смены по дням и что изменится.</span>
+      </div>
+    ),
+    nuances: [
+      'Клетка «11*15 18*20» — две смены: их можно взять вместе или по отдельности.',
+      '«Выходной» и пустые клетки пропускаются; нераспознанные клетки сверка покажет списком.',
+      'Дни по сегодняшний тоже пропускаются: аукцион идёт только по будущим дням, а итоги не трогают уже отработанное.',
+      'Тот же период можно загрузить заново, пока операторы ничего не выбрали.',
+    ],
+  },
+  {
+    icon: CalendarDays,
+    title: 'Шаг 2 · Выберите период аукциона',
+    body: 'Загруженный файл появится в блоке «Период аукциона» — выберите его, и его смены станут сменами аукциона. Норма часов — как в СЗоВ: по ставке, остаток добирают «Режимом добора».',
+    visual: (
+      <div className="grid max-w-sm gap-2">
+        <span className="rounded-lg border border-blue-500 bg-blue-50 px-3 py-2 text-left">
+          <span className="block text-sm font-semibold text-blue-900">16.11 – 22.11</span>
+          <span className="mt-0.5 block text-xs text-slate-500">56 смен · активная</span>
+        </span>
+      </div>
+    ),
+    nuances: [
+      'Смена периода или «Начать заново» очищает выбранные операторами смены и выходные этого периода.',
+    ],
+  },
+  ...ADMIN_INSTRUCTION_STEPS.slice(3),
+];
+
+// У Тез КЦ смены из файла: длины по ставкам СЗоВ (9 / 6,5 / 4 ч) и ночь «20*08» в
+// тексте были бы неправдой — ставка смены по-прежнему по длительности, а ночей две.
+const UPLOAD_DIRECTION_TEXT_FIXES = [
+  ['«Ставка 1» (9 ч), «Ставка 0.75» (6.5 ч), «Ставка 0.5» (4 ч) и «Ночные 20*08»', '«Ставка 1», «Ставка 0.75» и «Ставка 0.5» — по длительности смены'],
+  ['(«Ставка 1», «Ставка 0.75», «Ставка 0.5», «Ночные 20*08»)', '(«Ставка 1», «Ставка 0.75», «Ставка 0.5» — по длительности смены)'],
+  ['(включая ночные 20*08)', '(включая ночные)'],
+  ['Две ночные 20*08 подряд взять нельзя.', 'Две ночные смены (20*08 или 21*09) подряд взять нельзя.'],
+];
+
+const fixUploadDirectionText = (text) => (
+  typeof text === 'string'
+    ? UPLOAD_DIRECTION_TEXT_FIXES.reduce((acc, [from, to]) => acc.split(from).join(to), text)
+    : text
+);
+
+const adaptInstructionStepsForUpload = (steps) => steps.map((step) => ({
+  ...step,
+  body: fixUploadDirectionText(step.body),
+  nuances: Array.isArray(step.nuances) ? step.nuances.map(fixUploadDirectionText) : step.nuances,
+}));
+
+const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onClose, uploadDirection = false }) => {
   const isMobileShell = useIsMobileShell();
   const [viewRole, setViewRole] = useState(role === 'admin' ? 'admin' : 'operator');
   const [currentStep, setCurrentStep] = useState(0);
@@ -2624,9 +2754,13 @@ const ShiftAuctionInstructionsModal = ({ open, role, canSwitchRole = false, onCl
   }, [open, role]);
 
   const isAdminView = viewRole === 'admin';
-  const steps = isAdminView
-    ? ADMIN_INSTRUCTION_STEPS
+  const baseSteps = isAdminView
+    ? (uploadDirection ? ADMIN_UPLOAD_INSTRUCTION_STEPS : ADMIN_INSTRUCTION_STEPS)
     : (isMobileShell ? OPERATOR_PHONE_INSTRUCTION_STEPS : OPERATOR_INSTRUCTION_STEPS);
+  const steps = useMemo(
+    () => (uploadDirection ? adaptInstructionStepsForUpload(baseSteps) : baseSteps),
+    [baseSteps, uploadDirection]
+  );
   const totalSteps = steps.length;
 
   useEffect(() => {
@@ -4522,9 +4656,12 @@ const ShiftAuctionShiftsTable = ({
 const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null }) => {
   const role = normalizeRole(user?.role);
   const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
-  // Супервайзеры СЗоВ управляют аукционом наравне с главой отдела (он — admin).
-  const isSzovSupervisor = isSupervisorRole(role) && departmentCode === 'szov';
-  const canManage = isAdminLikeRole(role) || isSzovSupervisor;
+  // Супервайзеры СЗоВ и Тез КЦ (задача #124) управляют аукционом своего отдела
+  // наравне с главой (он — admin). Чьи прогоны — решает сервер: тумблер приходит
+  // только с направлениями отдела, а действия вне их сервер отклонит.
+  const isAuctionDepartmentSupervisor = isSupervisorRole(role)
+    && (departmentCode === 'szov' || departmentCode === 'tez');
+  const canManage = isAdminLikeRole(role) || isAuctionDepartmentSupervisor;
   const canMonitor = canManage || isSupervisorRole(role);
   const apiRoot = String(apiBaseUrl || '').replace(/\/+$/, '');
   const isMobileShell = useIsMobileShell();
@@ -4619,6 +4756,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const pendingClaimLotIdsRef = useRef(new Set());
   const lastClaimErrorRef = useRef({ message: '', shownAt: 0 });
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
+  // Окно «Загрузить смены» (Тез КЦ): сверка файла и запись после «Подтвердить».
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [dayOffLoadingDate, setDayOffLoadingDate] = useState('');
   const [connectionState, setConnectionState] = useState('idle');
   const [statusVersion, setStatusVersion] = useState(0);
@@ -4652,14 +4791,56 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const [journalError, setJournalError] = useState('');
   // Направление аукциона. Управляющий выбирает тумблером (выбор переживает
   // перезагрузку), оператору его назначает сервер снапшотом.
-  const [direction, setDirection] = useState(() => (
-    canMonitor ? readStoredAuctionDirection() : AUCTION_DIRECTION_LINE
-  ));
+  const [direction, setDirection] = useState(() => {
+    if (!canMonitor) return AUCTION_DIRECTION_LINE;
+    const stored = readStoredAuctionDirection();
+    const storedIsTez = stored === AUCTION_DIRECTION_TEZ_TP || stored === AUCTION_DIRECTION_TEZ_OP;
+    // Руководству Тез КЦ (#124) с «Линией» по умолчанию сразу его прогон: иначе до
+    // первого ответа сервера в заголовке мелькала бы чужая «Линия».
+    if (departmentCode === 'tez' && !storedIsTez) return AUCTION_DIRECTION_TEZ_TP;
+    // Ключ выбора общий для браузера: после руководителя Теза на том же компьютере
+    // руководитель СЗоВ до первого ответа видел бы «ТП линия» и «Загрузить смены».
+    // Суперадмину выбор оставляем — ему доступны все прогоны.
+    if (storedIsTez && departmentCode !== 'tez' && role !== 'super_admin') return AUCTION_DIRECTION_LINE;
+    return stored;
+  });
   // Чей прогон сейчас лежит в settings. После переключения тумблера, пока не
   // пришёл снапшот нового направления (или если он не загрузился), там остаются
   // период, состав и статус ПРОШЛОГО — публиковать по ним нельзя.
   const [settingsDirection, setSettingsDirection] = useState(null);
   const [canSwitchDirection, setCanSwitchDirection] = useState(false);
+  // Направления для тумблера и их правила — с сервера (прогоны отдела человека).
+  const [directionCatalog, setDirectionCatalog] = useState(DEFAULT_AUCTION_DIRECTION_CATALOG);
+  const directionRules = useMemo(
+    () => directionCatalog.find((item) => item.key === direction) || fallbackAuctionDirectionRules(direction),
+    [direction, directionCatalog]
+  );
+  const directionLabel = directionRules.label || AUCTION_DIRECTION_LABELS[direction] || '';
+  const directionNightShifts = directionRules.night_shifts;
+  // Смены прогона из файла руководителя (Тез КЦ), а не из «Расчёта ресурсов».
+  const isUploadDirection = directionRules.shift_source === 'upload';
+  // День не запирается первой сменой (чат, Тез КЦ): ещё смена в тот же день
+  // берётся, если не пересекается с уже взятым; потолок держит норма.
+  const allowsSeveralShiftsPerDay = Boolean(directionRules.several_shifts_per_day);
+  // Прогоны по отделам. Отделов больше одного — у суперадмина (СЗоВ и пилот Тез КЦ):
+  // сначала он выбирает отдел, тумблер показывает направления только этого отдела.
+  // У руководства СЗоВ отдел один — селектора нет, тумблер прежний «Линия / Чат».
+  const auctionDepartments = useMemo(() => {
+    const byCode = new Map();
+    directionCatalog.forEach((item) => {
+      const code = item.department_code || '';
+      if (!byCode.has(code)) {
+        byCode.set(code, { code, label: item.department_label || AUCTION_DEPARTMENT_LABELS[code] || code, directions: [] });
+      }
+      byCode.get(code).directions.push(item);
+    });
+    return Array.from(byCode.values());
+  }, [directionCatalog]);
+  const activeDepartmentCode = directionRules.department_code || '';
+  const departmentDirections = useMemo(
+    () => auctionDepartments.find((item) => item.code === activeDepartmentCode)?.directions || directionCatalog,
+    [activeDepartmentCode, auctionDepartments, directionCatalog]
+  );
   // Чат берёт смену ЧАСТЯМИ прямо в аукционе: клик по свободной смене открывает
   // тот же таймлайн, что и добор, но кладёт кусок в текущий прогон.
   const [partialClaimLot, setPartialClaimLot] = useState(null);
@@ -4778,6 +4959,17 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     [direction]
   );
 
+  useEffect(() => {
+    if (canSwitchDirection) storeAuctionDirection(direction);
+  }, [canSwitchDirection, direction]);
+
+  // Последнее направление каждого отдела: вернулся в «СЗоВ» — снова на «Чате», если
+  // уходил с него, а не на первой кнопке.
+  const lastDirectionByDepartmentRef = useRef({});
+  useEffect(() => {
+    if (activeDepartmentCode) lastDirectionByDepartmentRef.current[activeDepartmentCode] = direction;
+  }, [activeDepartmentCode, direction]);
+
   const handleSwitchDirection = useCallback((nextDirection) => {
     const normalized = normalizeAuctionDirection(nextDirection);
     if (normalized === direction) return;
@@ -4814,6 +5006,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setQuery('');
     setIsLoading(true);
   }, [direction]);
+
+  const handleSwitchDepartment = useCallback((departmentCode) => {
+    if (!departmentCode || departmentCode === activeDepartmentCode) return;
+    const target = auctionDepartments.find((item) => item.code === departmentCode);
+    if (!target || !target.directions.length) return;
+    const remembered = lastDirectionByDepartmentRef.current[departmentCode];
+    const next = target.directions.some((item) => item.key === remembered) ? remembered : target.directions[0].key;
+    handleSwitchDirection(next);
+  }, [activeDepartmentCode, auctionDepartments, handleSwitchDirection]);
+  const showDepartmentSelector = canSwitchDirection && auctionDepartments.length > 1;
 
 
   const markAuctionDraftDirty = useCallback(() => {
@@ -4947,7 +5149,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     // не двигает: ответ приходит асинхронно, и позволить ему выбирать значило бы
     // время от времени перекидывать человека обратно на прошлый прогон.
     const canSwitch = Boolean(safe.can_switch_direction);
+    // Прогоны отдела человека и их правила. Ответы действий каталога не несут —
+    // тогда остаётся прежний.
+    const directionsFromServer = normalizeAuctionDirectionCatalog(safe.available_directions);
+    if (directionsFromServer.length) setDirectionCatalog(directionsFromServer);
     if (safe.direction_mode && !canSwitch) setDirection(normalizeAuctionDirection(safe.direction_mode));
+    if (safe.direction_mode && canSwitch && directionsFromServer.length) {
+      // Тумблер управляющего снапшот не двигает — кроме случая, когда на экране
+      // направление НЕ его отдела (выбор прошлого сеанса или «Линия» по умолчанию
+      // у руководства Тез КЦ). Сервер такой запрос всё равно отдал прогоном отдела,
+      // и экран обязан показать именно его. Между своими направлениями запоздавший
+      // ответ человека не перекинет: своё направление в списке есть.
+      const serverDirection = normalizeAuctionDirection(safe.direction_mode);
+      const allowedKeys = directionsFromServer.map((item) => item.key);
+      setDirection((current) => (allowedKeys.includes(current) ? current : serverDirection));
+    }
     // Направление приходит только в снапшоте раздела; ответы действий его не
     // несут и относятся к тому же прогону, что уже на экране.
     if (safe.direction_mode) setSettingsDirection(normalizeAuctionDirection(safe.direction_mode));
@@ -5189,6 +5405,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const handleRealtimeEventRef = useRef(handleRealtimeEvent);
   const buildHeadersRef = useRef(buildHeaders);
   useEffect(() => { fetchSnapshotRef.current = fetchSnapshot; }, [fetchSnapshot]);
+
+  // Файл смен записан: новый период — в список и сразу выбран в форме, чтобы
+  // оставалось задать окно и сохранить. Уже стоящий в аукционе период сервер
+  // пересеял сам — выбирать там нечего.
+  const handleShiftUploadSaved = useCallback(async (result) => {
+    setIsUploadOpen(false);
+    if (!result) return;
+    if (result.saved) {
+      notify(result.lots_reloaded
+        ? `Смены загружены: ${result.shift_count} — аукцион периода обновлён`
+        : `Смены загружены: ${result.shift_count}`);
+    } else {
+      notify('Изменений нет — эти смены уже загружены', 'info');
+    }
+    await fetchSnapshot({ silent: true });
+    if (result.saved && result.plan_id && !result.lots_reloaded) updateDraftSchedulePlanId(result.plan_id);
+  }, [fetchSnapshot, notify, updateDraftSchedulePlanId]);
   useEffect(() => { handleRealtimeEventRef.current = handleRealtimeEvent; }, [handleRealtimeEvent]);
   useEffect(() => { buildHeadersRef.current = buildHeaders; }, [buildHeaders]);
   useEffect(() => () => {
@@ -5469,11 +5702,26 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
 
   // Открыли раздел из планировщика чата — переключаемся на его аукцион до того,
   // как применится неделя: иначе список периодов будет от линии, и неделя не найдётся.
+  // Ровно ОДИН раз на переход: handleSwitchDirection пересоздаётся с каждым
+  // направлением, и у руководства Теза (в его каталоге «Линии» нет — снимок вернёт
+  // его прогон) эффект по зависимости гонял бы «линия → свой прогон» по кругу.
   const requestedDirection = initialPeriod?.direction || '';
+  const requestedDirectionKey = requestedDirection
+    ? `${requestedDirection}|${initialPeriod?.dateFrom || initialPeriod?.date_from || ''}|${initialPeriod?.dateTo || initialPeriod?.date_to || ''}`
+    : '';
+  const appliedRequestedDirectionKeyRef = useRef('');
+  const handleSwitchDirectionRef = useRef(handleSwitchDirection);
+  useEffect(() => { handleSwitchDirectionRef.current = handleSwitchDirection; }, [handleSwitchDirection]);
   useEffect(() => {
-    if (!requestedDirection || !canMonitor) return;
-    handleSwitchDirection(requestedDirection);
-  }, [canMonitor, handleSwitchDirection, requestedDirection]);
+    if (!requestedDirectionKey || !canMonitor) return;
+    if (appliedRequestedDirectionKeyRef.current === requestedDirectionKey) return;
+    appliedRequestedDirectionKeyRef.current = requestedDirectionKey;
+    handleSwitchDirectionRef.current(requestedDirection);
+  }, [canMonitor, requestedDirection, requestedDirectionKey]);
+  // Направление перехода не из прогонов человека (каталог уже от сервера): неделю
+  // чужого прогона искать незачем, и красное «плана нет» было бы неправдой.
+  const requestedDirectionIsForeign = Boolean(requestedDirection)
+    && !directionCatalog.some((item) => item.key === normalizeAuctionDirection(requestedDirection));
 
   const initialPeriodKey = `${initialPeriod?.dateFrom || initialPeriod?.date_from || ''}|${initialPeriod?.dateTo || initialPeriod?.date_to || ''}`;
   useEffect(() => {
@@ -5483,6 +5731,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       String(period?.date_from || '') === dateFrom
       && String(period?.date_to || '') === dateTo
     ));
+    if (!matchedPeriod?.id && requestedDirectionIsForeign) {
+      setAppliedInitialPeriodKey(initialPeriodKey);
+      onInitialPeriodApplied?.();
+      return;
+    }
     if (!matchedPeriod?.id) {
       // Молчать здесь нельзя: раздел останется на ПРОШЛОМ периоде и покажет чужие
       // смены как свои. Именно так выглядел дефект 08.09.2026 — сохранённый график
@@ -5504,7 +5757,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     }
     setAppliedInitialPeriodKey(initialPeriodKey);
     onInitialPeriodApplied?.();
-  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, notify, onInitialPeriodApplied, updateDraftSchedulePlanId]);
+  }, [appliedInitialPeriodKey, availablePeriods, canManage, initialPeriodKey, notify, onInitialPeriodApplied, requestedDirectionIsForeign, updateDraftSchedulePlanId]);
 
   useEffect(() => {
     if (!selectedViewSchedulePlanId || isViewingActivePeriod) {
@@ -6057,11 +6310,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   const myClaimedNightDates = useMemo(
     () => new Set(
       myClaimedLots
-        .filter((lot) => isAuctionNightShift(lot?.start_time, lot?.end_time))
+        .filter((lot) => isAuctionNightShift(lot?.start_time, lot?.end_time, directionNightShifts))
         .map((lot) => lot?.shift_date)
         .filter(Boolean)
     ),
-    [myClaimedLots]
+    [directionNightShifts, myClaimedLots]
   );
 
   const myWorkShiftsByDate = useMemo(() => {
@@ -6076,7 +6329,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   }, [monitoredMyWorkShifts]);
 
   // Разбор смены на части — правило ЧАТА. У линии смена берётся целиком, как и была.
-  const supportsPartialClaim = direction === AUCTION_DIRECTION_CHAT;
+  const supportsPartialClaim = Boolean(directionRules.partial_claims);
   // Недельный потолок по ставке — только для подписи в окне выбора части.
   const weeklyRateHoursLabel = useMemo(() => {
     const hours = auctionWeeklyHoursForRate(userRate);
@@ -6161,7 +6414,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       // Две ночи 20:00–08:00 подряд не даём — правило общее с сервером и
       // действует ДО проверки режима добора: в доборе снят лимит «одна смена в
       // день», но не право на отдых между ночами.
-      if (isAuctionNightShift(lot.start_time, lot.end_time)) {
+      if (isAuctionNightShift(lot.start_time, lot.end_time, directionNightShifts)) {
         const neighbourNight = auctionAdjacentDates(lot.shift_date)
           .find((date) => myClaimedNightDates.has(date));
         if (neighbourNight) {
@@ -6171,10 +6424,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
       // День запирается первой сменой не всегда. Лимит снимают два случая:
       //  - режим добора — там сняты и норма, и календарный лимит;
-      //  - ЧАТ (решение владельца 29.08.2026) — добрать часы в том же дне можно,
-      //    если они не перекрывают уже взятое; норма при этом остаётся, поэтому
-      //    ниже мы НЕ выходим и проверки потолка отрабатывают как обычно.
-      if (isTopupActive || supportsPartialClaim) {
+      //  - направления с несколькими сменами в день: ЧАТ (решение владельца
+      //    29.08.2026) и Тез КЦ (12.11.2026, клетка «11*15 18*20» — две смены) —
+      //    ещё смена в тот же день берётся, если не перекрывает уже взятое; норма
+      //    при этом остаётся, поэтому ниже мы НЕ выходим и потолок проверяется.
+      if (isTopupActive || supportsPartialClaim || allowsSeveralShiftsPerDay) {
         // В чате смену берут частью, поэтому пересечение целого окна — ещё не
         // отказ: отказ, когда свободного куска не осталось вовсе. Свободные куски
         // уже посчитаны с вычетом взятого мной и коллегами.
@@ -6219,7 +6473,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       }
     });
     return reasons;
-  }, [auctionPartialClaimOptionsByLotId, canMonitor, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedIntervals, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, selfScheduleAllowanceMinutes, settings.has_period_history_access, settings.rate_lock_enabled, supportsPartialClaim, userRate]);
+  }, [allowsSeveralShiftsPerDay, auctionPartialClaimOptionsByLotId, canMonitor, directionNightShifts, isTester, isTopupActive, isViewingActivePeriod, monitoredLots, myAuctionWorkload, myBlockedDateMap, myClaimedDateSet, myClaimedIntervals, myClaimedNightDates, postAuctionClaimOptionsByLotId, selectedViewPostAuctionActive, selfScheduleAllowanceMinutes, settings.has_period_history_access, settings.rate_lock_enabled, supportsPartialClaim, userRate]);
 
   useEffect(() => {
     if (!canUseAuction || !lotDates.length || typeof window === 'undefined') return undefined;
@@ -6610,7 +6864,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
       return;
     }
     const confirmed = window.confirm(
-      `Сохранить итоги аукциона «${AUCTION_DIRECTION_LABELS[direction]}» за период ${formatAuctionPeriodLabel(settings.selected_period)} в «Графики работы»?\n\n`
+      `Сохранить итоги аукциона «${directionLabel}» за период ${formatAuctionPeriodLabel(settings.selected_period)} в «Графики работы»?\n\n`
       + `У участников (${settings.selected_operator_ids.length}) смены и выходные за эти дни будут заменены.`
     );
     if (!confirmed) return;
@@ -6629,7 +6883,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     } finally {
       setIsPublishingAuction(false);
     }
-  }, [apiRoot, applySnapshot, buildHeaders, canManage, direction, isPublishingAuction, notify, settings.selected_operator_ids.length, settings.selected_period, settingsDirection, withDirection]);
+  }, [apiRoot, applySnapshot, buildHeaders, canManage, direction, directionLabel, isPublishingAuction, notify, settings.selected_operator_ids.length, settings.selected_period, settingsDirection, withDirection]);
 
   const openAddShiftModal = useCallback((group, date) => {
     if (!group || !date) return;
@@ -7437,7 +7691,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         />
       );
     }
-    if (canManage && typeof onOpenResourceGeneration === 'function') {
+    // Тому же условию, что на компьютере: у направлений со сменами из файла (Тез КЦ)
+    // генерации нет — пункт вёл бы в «Расчёт ресурсов» СЗоВ.
+    if (canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function') {
       links.push(
         <AuctionPhoneLinkRow
           key="generation"
@@ -7455,7 +7711,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
           <div className="min-w-0 flex-1">
             <h1 className="sa-m-title truncate text-slate-900">Аукцион смен</h1>
             {!canSwitchDirection ? (
-              <p className="text-[15px] text-slate-500">{AUCTION_DIRECTION_LABELS[direction]}</p>
+              <p className={`text-[15px] text-slate-500 ${!canMonitor && !settingsDirection ? 'invisible' : ''}`}>{directionLabel}</p>
             ) : null}
           </div>
           <button
@@ -7467,6 +7723,16 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <BookOpen size={19} aria-hidden="true" />
           </button>
         </header>
+        {showDepartmentSelector ? (
+          <IosSegmented
+            value={activeDepartmentCode}
+            onChange={handleSwitchDepartment}
+            stretch
+            size="lg"
+            ariaLabel="Отдел аукциона"
+            options={auctionDepartments.map((item) => ({ value: item.code, label: item.label }))}
+          />
+        ) : null}
         {canSwitchDirection ? (
           <IosSegmented
             value={direction}
@@ -7474,7 +7740,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             stretch
             size="lg"
             ariaLabel="Направление аукциона"
-            options={AUCTION_DIRECTIONS.map((item) => ({ value: item.key, label: item.label }))}
+            options={departmentDirections.map((item) => ({ value: item.key, label: item.label }))}
           />
         ) : null}
         {canUseAuction ? (
@@ -7751,8 +8017,15 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
               />
             );
           }) : (
-            <AuctionPhoneRow title={<span className="font-normal text-slate-500">Нет планов на текущие или будущие даты</span>} />
+            <AuctionPhoneRow
+              title={(
+                <span className="font-normal text-slate-500">
+                  {isUploadDirection ? 'Смен на текущие или будущие даты пока нет' : 'Нет планов на текущие или будущие даты'}
+                </span>
+              )}
+            />
           )}
+          {isUploadDirection ? actionRow('Загрузить смены', () => setIsUploadOpen(true)) : null}
         </AuctionPhoneGroup>
 
         <section>
@@ -8815,8 +9088,8 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 Аукцион смен
                 {/* Направление называем в заголовке всегда — и оператору, у которого
                     тумблера нет: иначе непонятно, чьи смены на экране. */}
-                <span className="ml-2 inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-slate-700 sm:text-xs">
-                  {AUCTION_DIRECTION_LABELS[direction]}
+                <span className={`ml-2 inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-slate-700 sm:text-xs ${!canMonitor && !settingsDirection ? 'invisible' : ''}`}>
+                  {directionLabel}
                 </span>
                 {isTopupActive ? (
                   <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-violet-300 bg-violet-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-violet-800 sm:text-xs">
@@ -8852,13 +9125,39 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:pr-[280px]">
+            {showDepartmentSelector ? (
+              <div
+                role="group"
+                aria-label="Отдел аукциона"
+                className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5 sm:h-10"
+              >
+                {auctionDepartments.map((item) => {
+                  const active = activeDepartmentCode === item.code;
+                  return (
+                    <button
+                      key={item.code}
+                      type="button"
+                      onClick={() => handleSwitchDepartment(item.code)}
+                      aria-pressed={active}
+                      className={`inline-flex h-8 min-w-[72px] items-center justify-center rounded-[7px] px-3 text-xs font-semibold transition sm:h-9 sm:text-sm ${
+                        active
+                          ? 'bg-white text-slate-900 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
             {canSwitchDirection ? (
               <div
                 role="group"
                 aria-label="Направление аукциона"
                 className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5 sm:h-10"
               >
-                {AUCTION_DIRECTIONS.map((item) => {
+                {departmentDirections.map((item) => {
                   const active = direction === item.key;
                   return (
                     <button
@@ -8878,7 +9177,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                 })}
               </div>
             ) : null}
-            {canManage && typeof onOpenResourceGeneration === 'function' ? (
+            {canManage && !isUploadDirection && typeof onOpenResourceGeneration === 'function' ? (
               <button
                 type="button"
                 onClick={onOpenResourceGeneration}
@@ -9775,11 +10074,23 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                         Активная: {formatAuctionPeriodLabel(settings.selected_period)}
                       </p>
                     </div>
-                    {selectedDraftPeriod ? (
-                      <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-slate-700">
-                        {Number(selectedDraftPeriod.shift_count || 0)} смен
-                      </span>
-                    ) : null}
+                    <div className="flex shrink-0 items-center gap-2">
+                      {selectedDraftPeriod ? (
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold tabular-nums text-slate-700">
+                          {Number(selectedDraftPeriod.shift_count || 0)} смен
+                        </span>
+                      ) : null}
+                      {isUploadDirection ? (
+                        <button
+                          type="button"
+                          onClick={() => setIsUploadOpen(true)}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-800 shadow-sm transition hover:bg-slate-50 active:scale-[0.98]"
+                        >
+                          <Upload size={14} />
+                          Загрузить смены
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {restartablePeriods.length ? restartablePeriods.map((period) => {
@@ -9804,7 +10115,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
                       );
                     }) : (
                       <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500 sm:col-span-2">
-                        Нет доступных планов графика на текущие или будущие даты.
+                        {isUploadDirection
+                          ? 'Смен на текущие или будущие даты пока нет — загрузите файл кнопкой «Загрузить смены».'
+                          : 'Нет доступных планов графика на текущие или будущие даты.'}
                       </div>
                     )}
                   </div>
@@ -10756,7 +11069,19 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         role={instructionsRole}
         canSwitchRole={canSwitchInstructionsRole}
         onClose={closeInstructions}
+        uploadDirection={isUploadDirection}
       />
+      {canManage ? (
+        <ShiftAuctionUploadSheet
+          open={isUploadOpen && isUploadDirection}
+          onClose={() => setIsUploadOpen(false)}
+          apiRoot={apiRoot}
+          buildHeaders={buildHeaders}
+          direction={direction}
+          directionLabel={directionLabel}
+          onSaved={handleShiftUploadSaved}
+        />
+      ) : null}
 
       {releaseConfirmLot && !isMobileShell ? (
         <div

@@ -155,23 +155,88 @@ SHIFT_AUCTION_DIRECTION_NAME = 'Основа'
 SHIFT_AUCTION_DEPARTMENT_CODE = 'szov'
 SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS = 'working'
 
-# Аукцион смен идёт на ДВУХ направлениях одного отдела СЗоВ: линия («Основа») и чат
-# («Чат менеджер»). Это два независимых прогона на общих таблицах — они разделены
-# колонкой direction_mode ровно так же, как планы графиков
-# (resource_saved_schedule_plans.direction_mode). У линии режим 'line' стоит по
-# умолчанию, поэтому существующий аукцион миграцией не тронут.
+# Аукцион смен идёт на нескольких направлениях. В СЗоВ их два — линия («Основа») и
+# чат («Чат менеджер»); с задачи #124 к ним добавились две линии отдела Тез КЦ.
+# Каждое направление — независимый прогон на общих таблицах: они разделены колонкой
+# direction_mode ровно так же, как планы графиков (resource_saved_schedule_plans.
+# direction_mode). У линии режим 'line' стоит по умолчанию, поэтому существующий
+# аукцион миграцией не тронут.
 SHIFT_AUCTION_MODE_LINE = 'line'
 SHIFT_AUCTION_MODE_CHAT = 'chat'
-SHIFT_AUCTION_MODES = (SHIFT_AUCTION_MODE_LINE, SHIFT_AUCTION_MODE_CHAT)
+# Тез КЦ (задача #124): «ТП линия» (техподдержка) и «ОП линия» (продажи). Нагрузка у
+# отдела распределена не так, как в СЗоВ, и смены им не генерирует «Расчёт ресурсов»:
+# руководитель загружает готовый график файлом, а каждая линия разыгрывает свои смены
+# отдельным прогоном — у техподдержки и продаж разные люди и разная работа.
+SHIFT_AUCTION_MODE_TEZ_TP = 'tez_tp'
+SHIFT_AUCTION_MODE_TEZ_OP = 'tez_op'
+SHIFT_AUCTION_MODES = (
+    SHIFT_AUCTION_MODE_LINE,
+    SHIFT_AUCTION_MODE_CHAT,
+    SHIFT_AUCTION_MODE_TEZ_TP,
+    SHIFT_AUCTION_MODE_TEZ_OP,
+)
 # Тот же отбор направлений, что в resource_fte/chat.py, НО с границей отдела: в
 # компании есть ещё «ТП чат» отдела Тез, и без dep.code его люди уехали бы в
 # аукцион СЗоВ (см. direction-rename-detaches-operators — имена направлений дублируются).
 SHIFT_AUCTION_CHAT_DIRECTION_PATTERN = '%чат%'
+SHIFT_AUCTION_TEZ_DEPARTMENT_CODE = 'tez'
+# Отдел каждого прогона: граница, без которой одноимённые направления разных отделов
+# смешались бы в одном аукционе.
+SHIFT_AUCTION_MODE_DEPARTMENT_CODE = {
+    SHIFT_AUCTION_MODE_LINE: SHIFT_AUCTION_DEPARTMENT_CODE,
+    SHIFT_AUCTION_MODE_CHAT: SHIFT_AUCTION_DEPARTMENT_CODE,
+    SHIFT_AUCTION_MODE_TEZ_TP: SHIFT_AUCTION_TEZ_DEPARTMENT_CODE,
+    SHIFT_AUCTION_MODE_TEZ_OP: SHIFT_AUCTION_TEZ_DEPARTMENT_CODE,
+}
+# Точное имя направления у прогонов с одним направлением. У чата его нет: там
+# шаблон SHIFT_AUCTION_CHAT_DIRECTION_PATTERN.
+SHIFT_AUCTION_MODE_DIRECTION_NAME = {
+    SHIFT_AUCTION_MODE_LINE: SHIFT_AUCTION_DIRECTION_NAME,
+    SHIFT_AUCTION_MODE_TEZ_TP: 'ТП линия',
+    SHIFT_AUCTION_MODE_TEZ_OP: 'ОП линия',
+}
+SHIFT_AUCTION_MODE_LABELS = {
+    SHIFT_AUCTION_MODE_LINE: 'Линия',
+    SHIFT_AUCTION_MODE_CHAT: 'Чат',
+    SHIFT_AUCTION_MODE_TEZ_TP: 'ТП линия',
+    SHIFT_AUCTION_MODE_TEZ_OP: 'ОП линия',
+}
+# Где смены прогона берутся из файла руководителя, а не из «Расчёта ресурсов».
+SHIFT_AUCTION_UPLOAD_MODES = (SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP)
+# Пилот (решение владельца 12.11.2026): аукцион Тез КЦ пока видят и ведут только
+# суперадмины. Руководство и операторы Теза остаются в аукционе как были — для них
+# этих прогонов нет. Открыть отделу: убрать режимы отсюда и вернуть 'shift_auction'
+# в наборы Теза в src/utils/departmentViews.js.
+SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES = (SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP)
+SHIFT_AUCTION_DEPARTMENT_LABELS = {
+    SHIFT_AUCTION_DEPARTMENT_CODE: 'СЗоВ',
+    SHIFT_AUCTION_TEZ_DEPARTMENT_CODE: 'Тез КЦ',
+}
+# Где день не запирается первой сменой: можно взять ещё смену в тот же день, если
+# она не перекрывает уже взятое (недельная норма при этом действует). Чат — решение
+# владельца 29.08.2026; Тез — 12.11.2026: клетку файла «11*15 18*20» выставляем
+# двумя отдельными сменами, и взять обе должен мочь один человек.
+SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES = (
+    SHIFT_AUCTION_MODE_CHAT,
+    SHIFT_AUCTION_MODE_TEZ_TP,
+    SHIFT_AUCTION_MODE_TEZ_OP,
+)
+# Ночные смены прогона: две такие подряд брать нельзя. В СЗоВ ночь — ровно «20*08»
+# (решение владельца 29.08.2026). У Тез КЦ своя ночь — «21*09»: по графикам
+# октября–ноября 2026 это самая частая смена техподдержки после утренней.
+SHIFT_AUCTION_NIGHT_SHIFTS = {
+    SHIFT_AUCTION_MODE_LINE: (('20:00', '08:00'),),
+    SHIFT_AUCTION_MODE_CHAT: (('20:00', '08:00'),),
+    SHIFT_AUCTION_MODE_TEZ_TP: (('20:00', '08:00'), ('21:00', '09:00')),
+    SHIFT_AUCTION_MODE_TEZ_OP: (('20:00', '08:00'), ('21:00', '09:00')),
+}
 # Настройки каждого направления — своя строка бывшей singleton-таблицы
 # shift_auction_test_access. Строка линии остаётся первой, чат получает вторую.
 SHIFT_AUCTION_SETTINGS_ROW_ID = {
     SHIFT_AUCTION_MODE_LINE: 1,
     SHIFT_AUCTION_MODE_CHAT: 2,
+    SHIFT_AUCTION_MODE_TEZ_TP: 3,
+    SHIFT_AUCTION_MODE_TEZ_OP: 4,
 }
 
 
@@ -182,7 +247,7 @@ def normalize_shift_auction_mode(value):
     а не отказ: иначе опечатка в запросе увела бы оператора в пустой чат-аукцион.
     """
     mode = _normalize_shift_auction_scope_value(value)
-    return SHIFT_AUCTION_MODE_CHAT if mode == SHIFT_AUCTION_MODE_CHAT else SHIFT_AUCTION_MODE_LINE
+    return mode if mode in SHIFT_AUCTION_MODES else SHIFT_AUCTION_MODE_LINE
 
 
 def shift_auction_settings_row_id(direction_mode):
@@ -192,19 +257,21 @@ def shift_auction_settings_row_id(direction_mode):
 def shift_auction_direction_scope_sql(direction_mode, direction_alias='d', department_alias='dep'):
     """Условие «человек принадлежит направлению этого аукциона» + его параметры.
 
-    Отдел один и тот же (СЗоВ), меняется только направление. Возвращаем пару
-    (SQL, params), чтобы ни один вызов не собирал условие строкой у себя.
+    Отдел берётся у прогона (СЗоВ или Тез КЦ), направление — точным именем, а у
+    чата шаблоном. Возвращаем пару (SQL, params), чтобы ни один вызов не собирал
+    условие строкой у себя.
     """
     mode = normalize_shift_auction_mode(direction_mode)
+    department_code = SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode]
     department_clause = f"LOWER(BTRIM(COALESCE({department_alias}.code, ''))) = %s"
     if mode == SHIFT_AUCTION_MODE_CHAT:
         return (
             f"BTRIM(COALESCE({direction_alias}.name, '')) ILIKE %s AND {department_clause}",
-            (SHIFT_AUCTION_CHAT_DIRECTION_PATTERN, SHIFT_AUCTION_DEPARTMENT_CODE),
+            (SHIFT_AUCTION_CHAT_DIRECTION_PATTERN, department_code),
         )
     return (
         f"BTRIM(COALESCE({direction_alias}.name, '')) = %s AND {department_clause}",
-        (SHIFT_AUCTION_DIRECTION_NAME, SHIFT_AUCTION_DEPARTMENT_CODE),
+        (SHIFT_AUCTION_MODE_DIRECTION_NAME[mode], department_code),
     )
 
 
@@ -212,13 +279,58 @@ def shift_auction_mode_matches_direction(direction_name, department_code):
     """Направление человека → режим аукциона, или None, если он вне аукциона вовсе."""
     name = _normalize_shift_auction_scope_value(direction_name)
     department = _normalize_shift_auction_scope_value(department_code)
-    if department != _normalize_shift_auction_scope_value(SHIFT_AUCTION_DEPARTMENT_CODE):
+    if not name:
         return None
-    if name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME):
-        return SHIFT_AUCTION_MODE_LINE
-    if 'чат' in name:
-        return SHIFT_AUCTION_MODE_CHAT
+    for mode in SHIFT_AUCTION_MODES:
+        if department != _normalize_shift_auction_scope_value(SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode]):
+            continue
+        if mode == SHIFT_AUCTION_MODE_CHAT:
+            if 'чат' in name:
+                return mode
+            continue
+        if name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_MODE_DIRECTION_NAME[mode]):
+            return mode
     return None
+
+
+def shift_auction_modes_for_departments(department_codes):
+    """Прогоны аукциона, которые принадлежат этим отделам, в порядке SHIFT_AUCTION_MODES."""
+    codes = {
+        _normalize_shift_auction_scope_value(code)
+        for code in (department_codes or ())
+        if _normalize_shift_auction_scope_value(code)
+    }
+    return tuple(
+        mode for mode in SHIFT_AUCTION_MODES
+        if SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode] in codes
+    )
+
+
+def shift_auction_night_shifts(direction_mode):
+    """Пары (начало, конец) ночных смен прогона — по ним действует «две ночи подряд нельзя»."""
+    return SHIFT_AUCTION_NIGHT_SHIFTS[normalize_shift_auction_mode(direction_mode)]
+
+
+def shift_auction_direction_rules(direction_mode):
+    """Что экрану аукциона нужно знать о направлении: подпись, отдел и правила.
+
+    Фронт не сравнивает режим со словом 'chat' у себя: правила приходят отсюда,
+    поэтому новое направление не требует правок в каждом месте экрана.
+    """
+    mode = normalize_shift_auction_mode(direction_mode)
+    return {
+        "key": mode,
+        "label": SHIFT_AUCTION_MODE_LABELS[mode],
+        "department_code": SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode],
+        "department_label": SHIFT_AUCTION_DEPARTMENT_LABELS.get(SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode], ''),
+        "shift_source": "upload" if mode in SHIFT_AUCTION_UPLOAD_MODES else "plan",
+        "partial_claims": mode == SHIFT_AUCTION_MODE_CHAT,
+        "several_shifts_per_day": mode in SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES,
+        "night_shifts": [
+            {"start": start, "end": end}
+            for start, end in SHIFT_AUCTION_NIGHT_SHIFTS[mode]
+        ],
+    }
 
 # Отдел, чьи менеджеры считаются в обзвоне регионов (задача #159).
 FRONT_OFFICE_DEPARTMENT_CODE = 'front_office'
@@ -248,9 +360,10 @@ def _is_shift_auction_operational_participant_row(row, direction_mode=SHIFT_AUCT
     if _normalize_shift_auction_scope_value(row[3]) != SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS:
         return False
     direction_name = _normalize_shift_auction_scope_value(row[6])
-    if normalize_shift_auction_mode(direction_mode) == SHIFT_AUCTION_MODE_CHAT:
+    mode = normalize_shift_auction_mode(direction_mode)
+    if mode == SHIFT_AUCTION_MODE_CHAT:
         return 'чат' in direction_name
-    return direction_name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_DIRECTION_NAME)
+    return direction_name == _normalize_shift_auction_scope_value(SHIFT_AUCTION_MODE_DIRECTION_NAME[mode])
 
 
 def _coerce_four_you_annotations(value):

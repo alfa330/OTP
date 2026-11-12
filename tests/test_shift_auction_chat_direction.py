@@ -49,24 +49,48 @@ def _module_function_source(name):
     return ast.get_source_segment(DATABASE_SOURCE, function)
 
 
+# Каталог направлений (линия, чат, линии Тез КЦ — задача #124) берём НАСТОЯЩИМ:
+# присваивания исполняются из исходника, подставной набор разошёлся бы с ним молча.
+_REGISTRY_CONSTANTS = (
+    "SHIFT_AUCTION_DIRECTION_NAME",
+    "SHIFT_AUCTION_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_MODE_LINE",
+    "SHIFT_AUCTION_MODE_CHAT",
+    "SHIFT_AUCTION_MODE_TEZ_TP",
+    "SHIFT_AUCTION_MODE_TEZ_OP",
+    "SHIFT_AUCTION_MODES",
+    "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN",
+    "SHIFT_AUCTION_TEZ_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_MODE_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_MODE_DIRECTION_NAME",
+    "SHIFT_AUCTION_MODE_LABELS",
+    "SHIFT_AUCTION_UPLOAD_MODES",
+    "SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES",
+    "SHIFT_AUCTION_NIGHT_SHIFTS",
+    "SHIFT_AUCTION_DEPARTMENT_LABELS",
+    "SHIFT_AUCTION_SETTINGS_ROW_ID",
+)
+
+
 def _exec_module_helpers():
     """Поднять чистые функции направления без импорта всего database.py."""
-    namespace = {
-        "re": re,
-        "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
-        "SHIFT_AUCTION_DEPARTMENT_CODE": "szov",
-        "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN": "%чат%",
-        "SHIFT_AUCTION_MODE_LINE": "line",
-        "SHIFT_AUCTION_MODE_CHAT": "chat",
-        "SHIFT_AUCTION_MODES": ("line", "chat"),
-        "SHIFT_AUCTION_SETTINGS_ROW_ID": {"line": 1, "chat": 2},
-    }
+    namespace = {"re": re}
+    for node in DATABASE_MODULE.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in _REGISTRY_CONSTANTS
+                for target in node.targets):
+            exec(ast.get_source_segment(DATABASE_SOURCE, node), namespace)
+    missing = [name for name in _REGISTRY_CONSTANTS if name not in namespace]
+    assert not missing, f"в исходнике нет констант: {missing}"
     for name in (
         "_normalize_shift_auction_scope_value",
         "normalize_shift_auction_mode",
         "shift_auction_settings_row_id",
         "shift_auction_direction_scope_sql",
         "shift_auction_mode_matches_direction",
+        "shift_auction_modes_for_departments",
+        "shift_auction_night_shifts",
+        "shift_auction_direction_rules",
     ):
         exec(_module_function_source(name), namespace)
     return namespace
@@ -84,7 +108,9 @@ class ShiftAuctionDirectionModeTests(unittest.TestCase):
 
         self.assertEqual(normalize("chat"), "chat")
         self.assertEqual(normalize(" CHAT "), "chat")
-        for value in ("line", "", None, "лиNия", "chatty", 0, [], "post_auction"):
+        self.assertEqual(normalize("tez_tp"), "tez_tp")
+        self.assertEqual(normalize(" TEZ_OP "), "tez_op")
+        for value in ("line", "", None, "лиNия", "chatty", 0, [], "post_auction", "tez", "tez_tp2"):
             with self.subTest(value=value):
                 self.assertEqual(normalize(value), "line")
 
@@ -94,6 +120,9 @@ class ShiftAuctionDirectionModeTests(unittest.TestCase):
         # Линия остаётся первой строкой — это её исторические настройки в проде.
         self.assertEqual(row_id("line"), 1)
         self.assertEqual(row_id("chat"), 2)
+        # Линии Тез КЦ (#124) — свои строки, СЗоВ ими не сдвинут.
+        self.assertEqual(row_id("tez_tp"), 3)
+        self.assertEqual(row_id("tez_op"), 4)
         self.assertEqual(row_id("мусор"), 1)
 
     def test_operator_direction_keeps_the_department_boundary(self):
@@ -110,6 +139,11 @@ class ShiftAuctionDirectionModeTests(unittest.TestCase):
         # Направление вне обоих наборов — тоже не участник.
         self.assertIsNone(match("Основа ОП", "szov"))
         self.assertIsNone(match("", "szov"))
+        # Линии Тез КЦ (#124) — свои прогоны и только в своём отделе.
+        self.assertEqual(match("ТП линия", "tez"), "tez_tp")
+        self.assertEqual(match(" оп  линия ", "TEZ"), "tez_op")
+        self.assertIsNone(match("ТП линия", "szov"))
+        self.assertIsNone(match("ОП линия", "op"))
 
     def test_every_shared_table_is_split_by_direction(self):
         """Таблицы у прогонов общие: без фильтра один затирает данные второго."""
@@ -175,12 +209,21 @@ class ChatPartialClaimTests(unittest.TestCase):
         signature = source.split("\n")[0] + source.split("\n")[1]
         self.assertNotIn("direction_mode", signature)
 
-        resolver_start = BOT_SOURCE.index("def _resolve_shift_auction_direction")
-        # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
-        resolver = BOT_SOURCE[resolver_start:]
-        resolver = resolver[:re.search(r"\n(?=\S)", resolver[1:]).start() + 1]
-        self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", resolver)
+        def _function(name):
+            start = BOT_SOURCE.index(f"def {name}")
+            # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
+            chunk = BOT_SOURCE[start:]
+            return chunk[:re.search(r"\n(?=\S)", chunk[1:]).start() + 1]
+
+        resolver = _function("_resolve_shift_auction_direction")
+        # Параметр направления слушается только у руководителя — и только в пределах
+        # его прогонов; оператору режим всегда из карточки.
+        self.assertIn("staff_modes = _shift_auction_staff_modes(requester_id, role)", resolver)
+        self.assertIn("if mode in staff_modes:\n            return mode", resolver)
+        self.assertIn("return staff_modes[0]", resolver)
         self.assertIn("db.shift_auction_mode_for_operator(requester_id)", resolver)
+        staff = _function("_shift_auction_staff_modes")
+        self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", staff)
 
     def test_lot_stays_open_while_a_free_gap_remains(self):
         """Иначе первый же взявший кусок закрыл бы смену для остальных."""
@@ -293,7 +336,10 @@ class ChatAuctionFrontendTests(unittest.TestCase):
         self.assertGreater(len(calls), 15, "вызовы аукциона не найдены — тест устарел")
 
     def test_partial_claim_modal_is_wired_to_the_chat_direction_only(self):
-        self.assertIn("const supportsPartialClaim = direction === AUCTION_DIRECTION_CHAT;", VIEW_SOURCE)
+        # Правило приходит с сервера (shift_auction_direction_rules: partial_claims только
+        # у чата), экран не сравнивает направление со словом 'chat' сам.
+        self.assertIn("const supportsPartialClaim = Boolean(directionRules.partial_claims);", VIEW_SOURCE)
+        self.assertIn("partial_claims: key === AUCTION_DIRECTION_CHAT,", VIEW_SOURCE)
         self.assertIn("if (supportsPartialClaim && !selection) {", VIEW_SOURCE)
         self.assertIn("auctionPartialClaimOptionsByLotId", VIEW_SOURCE)
         # Кнопка добора у оператора — тоже только в чате.

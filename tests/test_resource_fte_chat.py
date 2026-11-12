@@ -1103,13 +1103,19 @@ class ChatPlannerBoundaryTests(unittest.TestCase):
         параметра попал бы в аукцион линии и разобрал бы чужие смены.
         """
         backend = _read(BACKEND)
-        start = backend.index("def _resolve_shift_auction_direction")
-        # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
-        chunk = backend[start:]
-        chunk = chunk[:re.search(r"\n(?=\S)", chunk[1:]).start() + 1]
-        self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)", chunk)
+
+        def _function(name):
+            start = backend.index(f"def {name}")
+            # До конца функции: соседи в склейке прежними не остались (shift_auction/routes.py).
+            chunk = backend[start:]
+            return chunk[:re.search(r"\n(?=\S)", chunk[1:]).start() + 1]
+
+        chunk = _function("_resolve_shift_auction_direction")
+        self.assertIn("staff_modes = _shift_auction_staff_modes(requester_id, role)", chunk)
         self.assertIn("normalize_shift_auction_mode(requested)", chunk)
         self.assertIn("db.shift_auction_mode_for_operator(requester_id)", chunk)
+        self.assertIn("_is_admin_role(role) or _is_supervisor_role(role)",
+                      _function("_shift_auction_staff_modes"))
 
         view = _read(os.path.join(
             REPO_ROOT, "src", "components", "resources", "ShiftAuctionView.jsx"))

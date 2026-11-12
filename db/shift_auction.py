@@ -2,6 +2,9 @@
 
 Методы класса Database, вынесено из database.py скриптом scripts/split_database_mixins.py, 02.11.2026,
 без изменений тел. Модульные помощники и константы — в db/core.py."""
+import hashlib
+from collections import Counter
+
 from db.core import (  # noqa: F401
     _invalidate_shift_auction_runtime_caches,
     _is_schema_lock_conflict,
@@ -26,9 +29,16 @@ from db.core import (  # noqa: F401
     PatternFill,
     shift_auction_direction_scope_sql,
     SHIFT_AUCTION_MODE_CHAT,
+    SHIFT_AUCTION_MODE_DIRECTION_NAME,
     SHIFT_AUCTION_MODE_LINE,
     shift_auction_mode_matches_direction,
     SHIFT_AUCTION_MODES,
+    SHIFT_AUCTION_DEPARTMENT_CODE,
+    shift_auction_modes_for_departments,
+    shift_auction_night_shifts,
+    SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES,
+    SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES,
+    SHIFT_AUCTION_UPLOAD_MODES,
     SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK,
     SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS,
     shift_auction_settings_row_id,
@@ -1726,7 +1736,9 @@ class ShiftAuctionMixin:
                 "topup_reset": should_reset_topup,
                 "date_from": selected_period_row[1].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[1] else None,
                 "date_to": selected_period_row[2].strftime('%Y-%m-%d') if selected_period_row and selected_period_row[2] else None,
-            })
+            # Событие — своему направлению: без явного режима оно уходило в поток
+            # линии, и экран чата (и Теза) не узнавал о собственных настройках.
+            }, direction_mode=mode)
 
         _invalidate_shift_auction_runtime_caches(include_participants=True, direction_mode=mode)
         return self.get_shift_auction_test_access(current_user_id=updated_by, direction_mode=mode)
@@ -2134,23 +2146,32 @@ class ShiftAuctionMixin:
         return str(value)[:5]
 
     @classmethod
-    def _is_shift_auction_night(cls, start_time, end_time):
-        return (cls._shift_auction_hhmm(start_time) == cls.SHIFT_AUCTION_NIGHT_START_HHMM
-                and cls._shift_auction_hhmm(end_time) == cls.SHIFT_AUCTION_NIGHT_END_HHMM)
+    def _is_shift_auction_night(cls, start_time, end_time, direction_mode=None):
+        """Ночная ли смена. В СЗоВ ночь — ровно «20*08»; у направления, переданного
+        явно, — пары из shift_auction_night_shifts (у Тез КЦ ещё и «21*09»)."""
+        start = cls._shift_auction_hhmm(start_time)
+        end = cls._shift_auction_hhmm(end_time)
+        if start == cls.SHIFT_AUCTION_NIGHT_START_HHMM and end == cls.SHIFT_AUCTION_NIGHT_END_HHMM:
+            return True
+        if direction_mode is None:
+            return False
+        return (start, end) in shift_auction_night_shifts(direction_mode)
 
     @classmethod
-    def _shift_auction_adjacent_night_date(cls, claimed_rows, shift_date, start_time, end_time):
+    def _shift_auction_adjacent_night_date(cls, claimed_rows, shift_date, start_time, end_time,
+                                           direction_mode=None):
         """Дата соседней ночи у того же оператора, иначе None.
 
         Две ночи 20:00–08:00 подряд брать нельзя: первая кончается в 08:00, вторая
         начинается в 20:00 ТОГО ЖЕ дня — двенадцать часов между сменами и двое
         суток без нормального сна. Календарная проверка «день уже занят» этого не
         ловит: у ночей разные даты начала, хвост первой лежит в дне второй.
+        У Тез КЦ то же правило действует и для его ночи «21*09» (direction_mode).
 
         Смотрим обе стороны — и «вчера была ночь», и «на завтра ночь уже взята»:
         смены разбирают в произвольном порядке, и запрет обязан работать одинаково.
         """
-        if not cls._is_shift_auction_night(start_time, end_time):
+        if not cls._is_shift_auction_night(start_time, end_time, direction_mode):
             return None
         try:
             target = datetime.strptime(str(shift_date)[:10], '%Y-%m-%d').date()
@@ -2158,7 +2179,7 @@ class ShiftAuctionMixin:
             return None
         neighbours = {target - timedelta(days=1), target + timedelta(days=1)}
         for row in (claimed_rows or []):
-            if not cls._is_shift_auction_night(row.get('start_time'), row.get('end_time')):
+            if not cls._is_shift_auction_night(row.get('start_time'), row.get('end_time'), direction_mode):
                 continue
             try:
                 other = datetime.strptime(str(row.get('shift_date') or '')[:10], '%Y-%m-%d').date()
@@ -3758,7 +3779,7 @@ class ShiftAuctionMixin:
             "post_auction_active": post_auction_active,
         }
 
-    def shift_auction_mode_for_operator(self, operator_id):
+    def shift_auction_mode_for_operator(self, operator_id, include_pilot=False):
         """Направление аукциона по карточке человека, либо None — он вне аукциона.
 
         Оператор принадлежит ровно одному направлению, поэтому режим НЕ приходит с
@@ -3771,9 +3792,13 @@ class ShiftAuctionMixin:
         if operator_id <= 0:
             return None
         with self._get_cursor() as cursor:
-            return self._shift_auction_mode_for_operator_tx(cursor, operator_id)
+            return self._shift_auction_mode_for_operator_tx(cursor, operator_id, include_pilot=include_pilot)
 
-    def _shift_auction_mode_for_operator_tx(self, cursor, operator_id):
+    def _shift_auction_mode_for_operator_tx(self, cursor, operator_id, include_pilot=False):
+        """Прогон человека по карточке. Прогоны пилота (SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES)
+        для самого оператора — «не в аукционе»: брать, возвращать и отмечать выходные он не
+        может, пока отдел не открыт. include_pilot=True — для действий суперадмина
+        (назначить смену человеку пилотного прогона)."""
         cursor.execute("""
             SELECT BTRIM(COALESCE(d.name, '')), LOWER(BTRIM(COALESCE(dep.code, '')))
             FROM users u
@@ -3784,7 +3809,10 @@ class ShiftAuctionMixin:
         row = cursor.fetchone()
         if not row:
             return None
-        return shift_auction_mode_matches_direction(row[0], row[1])
+        mode = shift_auction_mode_matches_direction(row[0], row[1])
+        if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES and not include_pilot:
+            return None
+        return mode
 
     def _shift_auction_mode_for_plan_tx(self, cursor, plan_id):
         """Направление аукциона по недельному плану — он и есть носитель режима."""
@@ -4092,11 +4120,15 @@ class ShiftAuctionMixin:
                 WHERE event_type = 'lot_claimed'
                   AND NULLIF(payload->'lot'->>'source_schedule_plan_id', '')::INTEGER = %s
             """, (int(period_row[0]),))
+            # Только своего направления: у прогонов разных направлений периоды
+            # совпадают (неделя линии, чата и Теза одна и та же), и без фильтра
+            # перезапуск одного стирал бы журнал выходных другого.
             cursor.execute("""
                 DELETE FROM shift_auction_test_events
                 WHERE event_type IN ('day_off_selected', 'day_off_removed')
                   AND NULLIF(payload->>'date', '')::DATE BETWEEN %s AND %s
-            """, (period_row[1], period_row[2]))
+                  AND COALESCE(direction_mode, 'line') = %s
+            """, (period_row[1], period_row[2], mode))
             # Части смен прошлого прогона надо снять вместе с лотами — иначе они
             # продолжили бы вычитаться из нормы уже в новом.
             cursor.execute("""
@@ -4569,12 +4601,14 @@ class ShiftAuctionMixin:
 
             # Лимит «одна смена в день» снимают два случая, и по разным причинам:
             #  - режим добора — там сняты вообще все потолки, включая норму;
-            #  - ЧАТ (решение владельца 29.08.2026) — человек вправе добрать часы в
-            #    том же дне, лишь бы они не перекрывали уже взятое и не выводили за
-            #    недельную норму. Норма ниже по коду для чата продолжает работать.
+            #  - направления из SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES: ЧАТ (решение
+            #    владельца 29.08.2026) — человек вправе добрать часы в том же дне, и
+            #    Тез КЦ (12.11.2026) — клетка «11*15 18*20» загружается двумя сменами,
+            #    и обе должен мочь взять один человек. Смена не должна перекрывать уже
+            #    взятое, а недельная норма ниже по коду продолжает работать.
             # В обоих случаях жёсткий календарный лимит заменяется точной проверкой
             # пересечения по времени.
-            allows_extra_shifts_per_day = is_topup_mode or mode == SHIFT_AUCTION_MODE_CHAT
+            allows_extra_shifts_per_day = is_topup_mode or mode in SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES
             if allows_extra_shifts_per_day:
                 if self._shift_auction_claim_conflict(
                         claimed_rows_json, lot_date_key,
@@ -4587,7 +4621,7 @@ class ShiftAuctionMixin:
             # Две ночи 20:00–08:00 подряд — нельзя, и в режиме добора тоже: там
             # снят лимит «одна смена в день», но не право на человеческий отдых.
             if self._shift_auction_adjacent_night_date(
-                    claimed_rows_json, lot_date, lot[2], lot[3]):
+                    claimed_rows_json, lot_date, lot[2], lot[3], direction_mode=mode):
                 raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             claimed_rows = [
@@ -4949,9 +4983,9 @@ class ShiftAuctionMixin:
             own_claims = self._get_shift_auction_operator_claimed_intervals_tx(
                 cursor, operator_id, direction_mode=mode
             )
-            # У чата день не запирается первой сменой: можно поставить ещё часы, если
-            # они не перекрывают уже взятое (потолок держит норма ниже по коду).
-            if mode == SHIFT_AUCTION_MODE_CHAT:
+            # У чата и Теза день не запирается первой сменой: можно поставить ещё часы,
+            # если они не перекрывают уже взятое (потолок держит норма ниже по коду).
+            if mode in SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES:
                 if self._shift_auction_claim_conflict(own_claims, date_key, start_min, end_min):
                     raise ValueError("SHIFT_OVERLAPS_EXISTING")
             elif any(str(item.get('shift_date') or '') == date_key for item in own_claims):
@@ -4960,7 +4994,8 @@ class ShiftAuctionMixin:
             # «Свой график» тоже не даёт поставить себе две ночи 20:00–08:00 подряд.
             if self._shift_auction_adjacent_night_date(
                     own_claims, date_obj,
-                    start_obj.strftime('%H:%M'), end_obj.strftime('%H:%M')):
+                    start_obj.strftime('%H:%M'), end_obj.strftime('%H:%M'),
+                    direction_mode=mode):
                 raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             workload = self._get_shift_auction_operator_workload_tx(
@@ -5173,7 +5208,7 @@ class ShiftAuctionMixin:
 
             # Две ночи 20:00–08:00 подряд не даём и в доборе.
             if self._shift_auction_adjacent_night_date(
-                    own_claims, shift_date, start_time, end_time):
+                    own_claims, shift_date, start_time, end_time, direction_mode=mode):
                 raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             cursor.execute("""
@@ -5366,6 +5401,9 @@ class ShiftAuctionMixin:
             # Направление берём с ПЛАНА: пост-аукционный добор идёт по опубликованной
             # неделе, и именно она говорит, чей это аукцион.
             mode = self._shift_auction_mode_for_plan_tx(cursor, schedule_plan_id)
+            # Пилот: смены прогона, открытого пока только суперадминам, оператор не берёт.
+            if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES:
+                raise ValueError("NOT_TEST_PARTICIPANT")
             settings_id = shift_auction_settings_row_id(mode)
             scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
             cursor.execute(
@@ -5503,7 +5541,7 @@ class ShiftAuctionMixin:
                     req_end_min - claim_day_shift * 24 * 60):
                 raise ValueError("SHIFT_OVERLAPS_EXISTING")
             if self._shift_auction_adjacent_night_date(
-                    own_claims, shift_date, start_time, end_time):
+                    own_claims, shift_date, start_time, end_time, direction_mode=mode):
                 raise ValueError("NIGHT_SHIFT_ALREADY_ADJACENT")
 
             cursor.execute("""
@@ -6195,17 +6233,24 @@ class ShiftAuctionMixin:
             if not op_row or normalize_role_value(op_row[1]) != 'operator' or str(op_row[2] or '').strip().lower() in ('fired', 'dismissal'):
                 raise ValueError("OPERATOR_NOT_FOUND")
             operator_name = op_row[0] or f"Operator #{operator_id_int}"
-            # Направление аукциона — по человеку, которому назначают смену.
-            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id_int) or SHIFT_AUCTION_MODE_LINE
+            # Направление аукциона — по человеку, которому назначают смену. Человеку вне
+            # всех прогонов по-прежнему достаётся линия (так было у СЗоВ); чей это прогон
+            # и вправе ли руководитель назначать в нём, сверяет ручка.
+            mode = self._shift_auction_mode_for_operator_tx(
+                cursor, operator_id_int, include_pilot=True) or SHIFT_AUCTION_MODE_LINE
 
             if lot_id_int:
+                # Смена — только из аукциона направления этого человека: иначе смену
+                # Тез КЦ можно было бы назначить оператору СЗоВ (и наоборот), а норма
+                # и публикация считали бы её в чужом прогоне.
                 cursor.execute("""
                     SELECT id, shift_date, start_time, end_time, status, claimed_by,
                            source_schedule_plan_id, source_schedule_shift_id, rate_min, breaks
                     FROM shift_auction_test_lots
                     WHERE id = %s
+                      AND COALESCE(direction_mode, 'line') = %s
                     FOR UPDATE
-                """, (lot_id_int,))
+                """, (lot_id_int, mode))
                 lot = cursor.fetchone()
                 if not lot:
                     raise ValueError("LOT_NOT_FOUND")
@@ -6219,6 +6264,8 @@ class ShiftAuctionMixin:
                     raise ValueError("MISSING_TARGET")
                 resolved_plan_id = plan_id_int
                 resolved_shift_id = shift_id_int
+                if self._shift_auction_mode_for_plan_tx(cursor, resolved_plan_id) != mode:
+                    raise ValueError("SHIFT_NOT_FOUND")
                 cursor.execute("""
                     SELECT shift_date, start_time, end_time
                     FROM resource_saved_schedule_shifts
@@ -6525,11 +6572,23 @@ class ShiftAuctionMixin:
             ),
         }
 
-    def get_admin_post_claim_notify_recipients(self):
-        """Список admin'ов с включённым тумблером уведомлений (id, name, telegram_id)."""
+    def get_admin_post_claim_notify_recipients(self, direction_mode=None):
+        """Список admin'ов с включённым тумблером уведомлений (id, name, telegram_id).
+
+        С направлением — только те, чей это прогон: суперадмину приходит всё, админу —
+        прогоны его отдела и отделов, которые он возглавляет (админам отделов без
+        своего аукциона — СЗоВ, как было до Тез КЦ). Иначе добор оператора Теза будил
+        бы руководство СЗоВ и наоборот.
+        """
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT u.id, u.name, u.telegram_id
+                SELECT u.id, u.name, u.telegram_id, LOWER(COALESCE(u.role, '')),
+                       ARRAY(
+                           SELECT LOWER(BTRIM(COALESCE(dep.code, '')))
+                           FROM departments dep
+                           WHERE dep.id = u.department_id
+                              OR (dep.head_user_id = u.id AND COALESCE(dep.is_active, TRUE) = TRUE)
+                       )
                 FROM admin_profiles ap
                 JOIN users u ON u.id = ap.user_id
                 WHERE COALESCE(ap.auction_post_claim_notify_enabled, FALSE) = TRUE
@@ -6537,11 +6596,20 @@ class ShiftAuctionMixin:
                   AND LOWER(COALESCE(u.role, '')) IN ('admin', 'super_admin')
             """)
             rows = cursor.fetchall() or []
-            return [
-                {"id": int(row[0]), "name": row[1] or '', "telegram_id": int(row[2])}
-                for row in rows
-                if row and row[0] is not None and row[2] is not None
-            ]
+        mode = normalize_shift_auction_mode(direction_mode) if direction_mode else None
+        recipients = []
+        for row in rows:
+            if not row or row[0] is None or row[2] is None:
+                continue
+            if mode is not None and row[3] != 'super_admin':
+                own_modes = (
+                    shift_auction_modes_for_departments(row[4] or [])
+                    or shift_auction_modes_for_departments((SHIFT_AUCTION_DEPARTMENT_CODE,))
+                )
+                if mode not in own_modes:
+                    continue
+            recipients.append({"id": int(row[0]), "name": row[1] or '', "telegram_id": int(row[2])})
+        return recipients
 
     def get_admin_post_claim_notify_setting(self, user_id):
         with self._get_cursor() as cursor:
@@ -6808,3 +6876,555 @@ class ShiftAuctionMixin:
             ))
             row = cursor.fetchone()
             return int(row[0]) if row else None
+
+    # ---- Готовые смены файлом: аукцион Тез КЦ (задача #124) ----------------------------
+    #
+    # Отделу Тез КЦ «Расчёт ресурсов» смены не генерирует: нагрузка распределена не так,
+    # как в СЗоВ. Руководитель загружает тот же Excel, что и в «Графики работы» (первая
+    # строка — даты, в клетках «9*18», «13*19/30», «21*09»), но имена и ставки строк не
+    # учитываются: каждая заполненная клетка — это смена, которую выбирают в аукционе.
+    # Загрузка ложится обычным планом графика (resource_saved_schedule_plans) с режимом
+    # прогона, поэтому дальше работает весь аукцион как есть: список периодов, засев
+    # лотов, норма, добор и публикация в графики.
+
+    SHIFT_AUCTION_UPLOAD_MAX_DAYS = 31
+    SHIFT_AUCTION_UPLOAD_MAX_SHIFTS = 3000
+    SHIFT_AUCTION_UPLOAD_INVALID_PREVIEW_LIMIT = 30
+
+    SHIFT_AUCTION_UPLOAD_MESSAGES = {
+        "AUCTION_UPLOAD_NOT_SUPPORTED": "Для этого направления смены не загружаются файлом",
+        "AUCTION_UPLOAD_EMPTY": "В файле не нашлось ни одной смены",
+        "AUCTION_UPLOAD_PERIOD_PAST": "Все смены файла — сегодня или раньше: аукцион идёт только по будущим дням",
+        "AUCTION_UPLOAD_PERIOD_TOO_LONG": "В файле больше 31 дня — загрузите период не длиннее месяца",
+        "AUCTION_UPLOAD_TOO_MANY_SHIFTS": "В файле больше 3000 смен — разбейте его на периоды",
+        "AUCTION_UPLOAD_PERIOD_PUBLISHED": "Итоги аукциона за этот период уже сохранены в «Графики работы» — смены периода заменить нельзя",
+        "AUCTION_UPLOAD_PERIOD_CLAIMED": "По этому периоду операторы уже выбирают смены. Чтобы заменить файл, сначала перезапустите аукцион — выбор при этом сбросится",
+        "AUCTION_UPLOAD_CHANGED": "Смены периода поменялись, пока шла сверка — загрузите файл ещё раз",
+    }
+
+    def get_shift_auction_staff_department_codes(self, user_id):
+        """Коды отделов человека для прав в аукционе: свой отдел и отделы, которые он возглавляет."""
+        try:
+            user_id = int(user_id)
+        except Exception:
+            return []
+        if user_id <= 0:
+            return []
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT LOWER(BTRIM(COALESCE(dep.code, '')))
+                FROM users u
+                JOIN departments dep ON dep.id = u.department_id
+                WHERE u.id = %s
+                UNION
+                SELECT LOWER(BTRIM(COALESCE(code, '')))
+                FROM departments
+                WHERE head_user_id = %s
+                  AND COALESCE(is_active, TRUE) = TRUE
+            """, (user_id, user_id))
+            return sorted({row[0] for row in (cursor.fetchall() or []) if row and row[0]})
+
+    def shift_auction_mode_for_lot(self, lot_id):
+        """Направление лота аукциона или None, если лота нет."""
+        try:
+            lot_id = int(lot_id)
+        except Exception:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(direction_mode, 'line') FROM shift_auction_test_lots WHERE id = %s",
+                (lot_id,)
+            )
+            row = cursor.fetchone()
+            return normalize_shift_auction_mode(row[0]) if row else None
+
+    def shift_auction_mode_for_plan(self, plan_id):
+        """Направление плана графика или None, если плана нет."""
+        try:
+            plan_id = int(plan_id)
+        except Exception:
+            return None
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "SELECT COALESCE(direction_mode, 'line') FROM resource_saved_schedule_plans WHERE id = %s",
+                (plan_id,)
+            )
+            row = cursor.fetchone()
+            return normalize_shift_auction_mode(row[0]) if row else None
+
+    @staticmethod
+    def _shift_auction_upload_clock(value):
+        """'HH:MM' → минуты суток, иначе None."""
+        try:
+            hours, minutes = str(value or '').strip()[:5].split(':')
+            hours, minutes = int(hours), int(minutes)
+        except Exception:
+            return None
+        if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+            return None
+        return hours * 60 + minutes
+
+    def _shift_auction_upload_direction_tx(self, cursor, mode):
+        """Живое направление прогона: id и имя — по имени берутся правила перерывов."""
+        scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
+        cursor.execute(f"""
+            SELECT d.id, d.name
+            FROM directions d
+            JOIN departments dep ON dep.id = d.department_id
+            WHERE {scope_sql}
+              AND COALESCE(d.is_active, TRUE) = TRUE
+            ORDER BY d.id DESC
+            LIMIT 1
+        """, scope_params)
+        row = cursor.fetchone()
+        if row:
+            return int(row[0]), (row[1] or '').strip()
+        return None, SHIFT_AUCTION_MODE_DIRECTION_NAME.get(mode, '')
+
+    def _shift_auction_upload_state_tx(self, cursor, mode, parsed, lock=False):
+        """Сверка файла с тем, что уже загружено на этот период этого направления.
+
+        Одна функция и для показа сверки, и для записи: запись обязана делать ровно то,
+        что человек увидел и подтвердил.
+        """
+        safe = parsed if isinstance(parsed, dict) else {}
+        direction_id, direction_name = self._shift_auction_upload_direction_tx(cursor, mode)
+        direction_rules = (
+            self._get_work_schedule_break_rules_for_direction_tx(cursor, direction_name)
+            if direction_name else []
+        )
+
+        # Аукцион идёт только по БУДУЩИМ дням. Публикация итогов чистит и переписывает
+        # каждый день периода у участников, а запрет у неё — лишь на целиком прошедший
+        # период: файл текущей недели («График ТП 9-15», загруженный 12-го) стёр бы
+        # уже отработанные смены 9–12-го. Поэтому дни по сегодняшний включительно
+        # сверка пропускает и показывает отдельной строкой.
+        today = self._almaty_now().date()
+        days = {}
+        skipped_past_days = set()
+        skipped_past_shifts = 0
+        for raw_date in (safe.get("dates") or []):
+            try:
+                day = datetime.strptime(str(raw_date)[:10], '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                continue
+            if day <= today:
+                skipped_past_days.add(day)
+                continue
+            days.setdefault(day, [])
+        shifts = []
+        for item in (safe.get("shifts") or []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                day = datetime.strptime(str(item.get("date") or '')[:10], '%Y-%m-%d').date()
+            except (TypeError, ValueError):
+                continue
+            if day <= today:
+                skipped_past_days.add(day)
+                skipped_past_shifts += 1
+                continue
+            start_min = self._shift_auction_upload_clock(item.get("start"))
+            end_min = self._shift_auction_upload_clock(item.get("end"))
+            if start_min is None or end_min is None or start_min == end_min:
+                continue
+            if end_min <= start_min:
+                # «21*09» — ночь: конец уже в следующих сутках, как у планов графика.
+                end_min += 24 * 60
+            duration = end_min - start_min
+            breaks = self._compute_auto_shift_breaks_minutes(
+                start_min, end_min, direction_name=direction_name, direction_rules=direction_rules
+            )
+            break_minutes = sum(max(0, int(b.get("end", 0)) - int(b.get("start", 0))) for b in (breaks or []) if isinstance(b, dict))
+            shift = {
+                "date": day,
+                "start_minute": start_min,
+                "end_minute": end_min,
+                "duration_minutes": duration,
+                "net_minutes": max(0, duration - break_minutes),
+                "cell": str(item.get("cell") or '')[:12],
+            }
+            shifts.append(shift)
+            days.setdefault(day, []).append(shift)
+        for day_shifts in days.values():
+            day_shifts.sort(key=lambda s: (s["start_minute"], s["end_minute"]))
+
+        date_from = min(days) if days else None
+        date_to = max(days) if days else None
+
+        blocked_code = None
+        if mode not in SHIFT_AUCTION_UPLOAD_MODES:
+            blocked_code = "AUCTION_UPLOAD_NOT_SUPPORTED"
+        elif not shifts and skipped_past_shifts:
+            blocked_code = "AUCTION_UPLOAD_PERIOD_PAST"
+        elif not shifts:
+            blocked_code = "AUCTION_UPLOAD_EMPTY"
+        elif (date_to - date_from).days + 1 > self.SHIFT_AUCTION_UPLOAD_MAX_DAYS:
+            blocked_code = "AUCTION_UPLOAD_PERIOD_TOO_LONG"
+        elif len(shifts) > self.SHIFT_AUCTION_UPLOAD_MAX_SHIFTS:
+            blocked_code = "AUCTION_UPLOAD_TOO_MANY_SHIFTS"
+
+        existing = None
+        existing_keys = None
+        settings_id = shift_auction_settings_row_id(mode)
+        # Текущий план прогона — тем же правилом, что у снимка аукциона: выбранный в
+        # настройках, а без него — план лотов направления.
+        cursor.execute("""
+            SELECT COALESCE(
+                s.selected_schedule_plan_id,
+                (
+                    SELECT l.source_schedule_plan_id
+                    FROM shift_auction_test_lots l
+                    WHERE l.source_schedule_plan_id IS NOT NULL
+                      AND COALESCE(l.direction_mode, 'line') = s.direction_mode
+                    ORDER BY l.id
+                    LIMIT 1
+                )
+            )
+            FROM shift_auction_test_access s
+            WHERE s.id = %s
+        """ + (" FOR UPDATE OF s" if lock else ""), (settings_id,))
+        settings_row = cursor.fetchone()
+        active_plan_id = int(settings_row[0]) if settings_row and settings_row[0] is not None else None
+        active_in_auction = False
+        locked_lot_ids = []
+        if date_from and date_to:
+            # Тот же поиск плана, что у записи (_save_resource_saved_schedule_tx):
+            # точная пара дат и направление.
+            cursor.execute("""
+                SELECT p.id, p.meta, p.updated_at, u.name
+                FROM resource_saved_schedule_plans p
+                LEFT JOIN users u ON u.id = p.updated_by
+                WHERE p.date_from = %s
+                  AND p.date_to = %s
+                  AND p.direction_mode = %s
+                  AND p.archived_at IS NULL
+                ORDER BY p.updated_at DESC, p.id DESC
+                LIMIT 1
+            """ + (" FOR UPDATE OF p" if lock else ""), (date_from, date_to, mode))
+            plan_row = cursor.fetchone()
+            if plan_row:
+                plan_id = int(plan_row[0])
+                plan_meta = plan_row[1] if isinstance(plan_row[1], dict) else {}
+                cursor.execute("""
+                    SELECT shift_date, start_minute, end_minute
+                    FROM resource_saved_schedule_shifts
+                    WHERE plan_id = %s
+                      AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
+                """, (plan_id,))
+                existing_keys = [
+                    (row[0], int(row[1] or 0), int(row[2] or 0))
+                    for row in (cursor.fetchall() or [])
+                ]
+                active_in_auction = active_plan_id == plan_id
+                if lock and active_in_auction:
+                    # Записи пересев сотрёт лоты прогона. Блокируем их ДО подсчёта выбора:
+                    # иначе оператор, успевший взять смену между подсчётом и пересевом,
+                    # потерял бы её молча. Его взятие (CAS по status) дождётся загрузки и
+                    # получит отказ, а не исчезнувшую смену.
+                    cursor.execute(
+                        "SELECT id FROM shift_auction_test_lots WHERE COALESCE(direction_mode, 'line') = %s FOR UPDATE",
+                        (mode,)
+                    )
+                    locked_lot_ids = [int(row[0]) for row in (cursor.fetchall() or [])]
+                cursor.execute(
+                    "SELECT 1 FROM shift_auction_published_periods WHERE plan_id = %s",
+                    (plan_id,)
+                )
+                is_published = cursor.fetchone() is not None
+                cursor.execute(
+                    "SELECT COUNT(*)::int FROM shift_auction_historical_claims WHERE plan_id = %s",
+                    (plan_id,)
+                )
+                claims_count = int((cursor.fetchone() or [0])[0] or 0)
+                if active_in_auction:
+                    # Выбор операторов в текущем прогоне: взятые лоты (в том числе «свой
+                    # график») и отмеченные выходные — их сотрёт пересев.
+                    cursor.execute("""
+                        SELECT
+                            (SELECT COUNT(*)::int FROM shift_auction_test_lots
+                              WHERE COALESCE(direction_mode, 'line') = %s
+                                AND (status = 'claimed' OR claimed_by IS NOT NULL)),
+                            (SELECT COUNT(*)::int FROM shift_auction_test_day_offs
+                              WHERE COALESCE(direction_mode, 'line') = %s)
+                    """, (mode, mode))
+                    counts = cursor.fetchone() or (0, 0)
+                    claims_count += int(counts[0] or 0) + int(counts[1] or 0)
+                if blocked_code is None and is_published:
+                    blocked_code = "AUCTION_UPLOAD_PERIOD_PUBLISHED"
+                if blocked_code is None and claims_count > 0:
+                    blocked_code = "AUCTION_UPLOAD_PERIOD_CLAIMED"
+                existing = {
+                    "plan_id": plan_id,
+                    "shift_count": len(existing_keys),
+                    "file_name": str(plan_meta.get("uploadFileName") or ''),
+                    "file_sha256": str(plan_meta.get("uploadFileSha256") or ''),
+                    "uploaded_at": str(plan_meta.get("uploadedAt") or '') or (
+                        plan_row[2].isoformat() if plan_row[2] else ''),
+                    "uploaded_by_name": str(plan_meta.get("uploadedByName") or plan_row[3] or ''),
+                    "is_upload": str(plan_meta.get("source") or '') == 'upload',
+                }
+
+        # Другой период того же прогона, который сейчас в аукционе и пересекается с
+        # файлом: он остаётся как есть (новый файл ляжет отдельным периодом), а переход на
+        # новый период сбросит выбор операторов — об этом сверка обязана сказать.
+        overlaps_active = None
+        if active_plan_id and date_from and date_to and (not existing or existing["plan_id"] != active_plan_id):
+            cursor.execute(
+                "SELECT date_from, date_to FROM resource_saved_schedule_plans WHERE id = %s",
+                (active_plan_id,)
+            )
+            active_row = cursor.fetchone()
+            if active_row and active_row[0] and active_row[1] and active_row[0] <= date_to and date_from <= active_row[1]:
+                overlaps_active = {
+                    "date_from": active_row[0].isoformat(),
+                    "date_to": active_row[1].isoformat(),
+                }
+
+        new_keys = [(s["date"], s["start_minute"], s["end_minute"]) for s in shifts]
+        fingerprint_source = sorted(
+            f"{key[0].isoformat()}|{key[1]}|{key[2]}" for key in (existing_keys or [])
+        )
+        base_fingerprint = hashlib.sha256(
+            ("none" if existing_keys is None else "\n".join(fingerprint_source)).encode('utf-8')
+        ).hexdigest()[:24]
+
+        new_counter = Counter(new_keys)
+        old_counter = Counter(existing_keys or [])
+        added = new_counter - old_counter
+        removed = old_counter - new_counter
+        unchanged = new_counter & old_counter
+        is_unchanged = existing_keys is not None and not added and not removed
+
+        def _clock(minute):
+            minute = int(minute) % (24 * 60)
+            return f"{minute // 60:02d}:{minute % 60:02d}"
+
+        day_rows = []
+        all_days = sorted(set(days) | {key[0] for key in (existing_keys or []) if date_from and date_from <= key[0] <= date_to})
+        has_baseline = existing_keys is not None
+        for day in all_days:
+            day_shifts = days.get(day, [])
+            # Первая загрузка периода сравнивать не с чем: отметка «добавится» на
+            # каждой смене была бы шумом, а не сверкой.
+            day_added = sorted(k for k in added.elements() if k[0] == day) if has_baseline else []
+            day_removed = sorted(k for k in removed.elements() if k[0] == day) if has_baseline else []
+            previous_count = (
+                sum(1 for key in existing_keys if key[0] == day) if existing_keys is not None else None
+            )
+            day_rows.append({
+                "date": day.isoformat(),
+                "count": len(day_shifts),
+                "previous_count": previous_count,
+                "shifts": [
+                    {"start": _clock(s["start_minute"]), "end": _clock(s["end_minute"])}
+                    for s in day_shifts
+                ],
+                "added": [{"start": _clock(k[1]), "end": _clock(k[2])} for k in day_added],
+                "removed": [{"start": _clock(k[1]), "end": _clock(k[2])} for k in day_removed],
+            })
+
+        invalid_cells = [item for item in (safe.get("invalid_cells") or []) if isinstance(item, dict)]
+        return {
+            "direction_mode": mode,
+            "direction_id": direction_id,
+            "direction_name": direction_name,
+            "date_from": date_from,
+            "date_to": date_to,
+            "shifts": shifts,
+            "days": day_rows,
+            "shift_count": len(shifts),
+            "total_minutes": sum(s["duration_minutes"] for s in shifts),
+            "net_minutes": sum(s["net_minutes"] for s in shifts),
+            "day_off_cells": int(safe.get("day_off_cells") or 0),
+            "skipped_past": {
+                "shift_count": skipped_past_shifts,
+                "date_from": min(skipped_past_days).isoformat() if skipped_past_days else None,
+                "date_to": max(skipped_past_days).isoformat() if skipped_past_days else None,
+            } if skipped_past_shifts else None,
+            "invalid_cells": invalid_cells[:self.SHIFT_AUCTION_UPLOAD_INVALID_PREVIEW_LIMIT],
+            "invalid_total": len(invalid_cells),
+            "existing": existing,
+            "changes": {
+                "added": sum(added.values()),
+                "removed": sum(removed.values()),
+                "unchanged": sum(unchanged.values()),
+            } if existing_keys is not None else None,
+            "is_unchanged": is_unchanged,
+            "active_in_auction": active_in_auction,
+            "active_plan_id": active_plan_id,
+            "overlaps_active": overlaps_active,
+            "sheet_name": str(safe.get("sheet_name") or '')[:120],
+            "sheet_count": int(safe.get("sheet_count") or 1),
+            "truncated_after_row": safe.get("truncated_after_row"),
+            "locked_lot_ids": locked_lot_ids,
+            "blocked_code": blocked_code,
+            "base_fingerprint": base_fingerprint,
+        }
+
+    def _serialize_shift_auction_upload_state(self, state, file_name='', file_sha256=''):
+        existing = state.get("existing")
+        blocked_code = state.get("blocked_code")
+        return {
+            "direction_mode": state["direction_mode"],
+            "file_name": str(file_name or '')[:255],
+            "file_sha256": str(file_sha256 or ''),
+            "date_from": state["date_from"].isoformat() if state.get("date_from") else None,
+            "date_to": state["date_to"].isoformat() if state.get("date_to") else None,
+            "days": state["days"],
+            "shift_count": state["shift_count"],
+            "total_minutes": state["total_minutes"],
+            "net_minutes": state["net_minutes"],
+            "day_off_cells": state["day_off_cells"],
+            "skipped_past": state.get("skipped_past"),
+            "invalid_cells": state["invalid_cells"],
+            "invalid_total": state["invalid_total"],
+            "existing": existing,
+            "same_file": bool(existing and file_sha256 and existing.get("file_sha256") == file_sha256),
+            "changes": state["changes"],
+            "is_unchanged": bool(state["is_unchanged"]),
+            "active_in_auction": bool(state["active_in_auction"]),
+            "overlaps_active": state.get("overlaps_active"),
+            "sheet_name": state.get("sheet_name") or '',
+            "sheet_count": state.get("sheet_count") or 1,
+            "truncated_after_row": state.get("truncated_after_row"),
+            "blocked": (
+                {"code": blocked_code, "message": self.SHIFT_AUCTION_UPLOAD_MESSAGES.get(blocked_code, blocked_code)}
+                if blocked_code else None
+            ),
+            "base_fingerprint": state["base_fingerprint"],
+        }
+
+    def preview_shift_auction_upload(self, direction_mode, parsed, file_name='', file_sha256=''):
+        """Сверка загруженного файла смен — ничего не пишет."""
+        mode = normalize_shift_auction_mode(direction_mode)
+        with self._get_cursor() as cursor:
+            state = self._shift_auction_upload_state_tx(cursor, mode, parsed, lock=False)
+        return self._serialize_shift_auction_upload_state(state, file_name=file_name, file_sha256=file_sha256)
+
+    def save_shift_auction_upload(self, direction_mode, parsed, updated_by=None, file_name='',
+                                  file_sha256='', base_fingerprint=None):
+        """Записать подтверждённые смены файла планом периода.
+
+        Пишется только то, что показала сверка: если смены периода поменялись после неё,
+        запись отказывает (AUCTION_UPLOAD_CHANGED). Совпавший файл не пишется вовсе.
+        Если период уже стоит в аукционе и выбора ещё нет, лоты пересеваются тут же —
+        в той же транзакции, что и план.
+        """
+        mode = normalize_shift_auction_mode(direction_mode)
+        with self._get_cursor() as cursor:
+            state = self._shift_auction_upload_state_tx(cursor, mode, parsed, lock=True)
+            if state["blocked_code"]:
+                raise ValueError(state["blocked_code"])
+            if base_fingerprint and str(base_fingerprint) != state["base_fingerprint"]:
+                raise ValueError("AUCTION_UPLOAD_CHANGED")
+            result = self._serialize_shift_auction_upload_state(
+                state, file_name=file_name, file_sha256=file_sha256)
+            if state["is_unchanged"]:
+                result.update({"saved": False, "plan_id": state["existing"]["plan_id"], "lots_reloaded": False})
+                return result
+
+            uploader_name = ''
+            if updated_by is not None:
+                cursor.execute("SELECT name FROM users WHERE id = %s", (updated_by,))
+                name_row = cursor.fetchone()
+                uploader_name = (name_row[0] or '') if name_row else ''
+            days_payload = []
+            shifts_by_day = {}
+            for shift in state["shifts"]:
+                shifts_by_day.setdefault(shift["date"], []).append(shift)
+            for day in sorted(shifts_by_day):
+                days_payload.append({
+                    "date": day.isoformat(),
+                    "shifts": [
+                        {
+                            "id": f"upload-{day.isoformat()}-{index}",
+                            "startMinute": shift["start_minute"],
+                            "endMinute": shift["end_minute"],
+                            "rate": self._shift_auction_lot_rate_bucket(
+                                _minutes_to_time(shift["start_minute"] % (24 * 60)),
+                                _minutes_to_time(shift["end_minute"] % (24 * 60)),
+                            ),
+                            "source": "upload",
+                            "uploadCell": shift["cell"],
+                        }
+                        for index, shift in enumerate(shifts_by_day[day])
+                    ],
+                })
+            uploaded_at = self._almaty_now().isoformat(timespec='seconds')
+            payload = {
+                "date_from": state["date_from"].isoformat(),
+                "date_to": state["date_to"].isoformat(),
+                "title": f"Загружено из файла «{str(file_name or '').strip()[:200]}»" if file_name else "Загружено из файла",
+                "days": days_payload,
+                "capacity": {"selectedDirectionIds": [state["direction_id"]] if state["direction_id"] else []},
+                "meta": {
+                    "source": "upload",
+                    "directionName": state["direction_name"],
+                    "uploadFileName": str(file_name or '')[:255],
+                    "uploadFileSha256": str(file_sha256 or ''),
+                    "uploadedAt": uploaded_at,
+                    "uploadedBy": updated_by,
+                    "uploadedByName": uploader_name,
+                },
+            }
+            saved = self._save_resource_saved_schedule_tx(
+                cursor, payload, updated_by=updated_by, direction_mode=mode)
+            plan_id = int(saved["plan_id"])
+
+            lots_reloaded = False
+            if state["active_plan_id"] == plan_id:
+                # Период уже стоит в аукционе, а выбора ещё нет (иначе сверка бы
+                # отказала): старые лоты меняем на смены файла сразу, без «Перезапустить».
+                # Отмеченных выходных нет по той же проверке, даты периода прежние.
+                cursor.execute("""
+                    SELECT id, shift_date, start_time, end_time, rate_min, breaks
+                    FROM resource_saved_schedule_shifts
+                    WHERE plan_id = %s
+                      AND COALESCE(meta->>'excludeFromAuction', 'false') <> 'true'
+                    ORDER BY shift_date, start_minute, end_minute, id
+                """, (plan_id,))
+                saved_shift_rows = cursor.fetchall() or []
+                # Только лоты, заблокированные сверкой: смена «своего графика», поставленная
+                # оператором после неё, — это его выбор, и пересев её не сотрёт.
+                cursor.execute(
+                    "DELETE FROM shift_auction_test_lots WHERE id = ANY(%s)",
+                    (state["locked_lot_ids"] or [],)
+                )
+                if saved_shift_rows:
+                    execute_values(
+                        cursor,
+                        """
+                        INSERT INTO shift_auction_test_lots (
+                            shift_date, start_time, end_time, rate_min,
+                            breaks, source_schedule_plan_id, source_schedule_shift_id,
+                            direction_mode
+                        )
+                        VALUES %s
+                        """,
+                        [
+                            (
+                                row[1], row[2], row[3], row[4],
+                                Json(row[5] if isinstance(row[5], list) else []),
+                                plan_id, row[0], mode,
+                            )
+                            for row in saved_shift_rows
+                        ],
+                    )
+                self._insert_shift_auction_test_event(cursor, "lots_seeded", {
+                    "count": len(saved_shift_rows),
+                    "plan_id": plan_id,
+                    "source": "upload",
+                    "updated_by": updated_by,
+                }, direction_mode=mode)
+                lots_reloaded = True
+
+            period_row = self._get_shift_auction_period_row_tx(cursor, plan_id, direction_mode=mode)
+
+        result.update({
+            "saved": True,
+            "plan_id": plan_id,
+            "period": self._serialize_shift_auction_period_row(period_row),
+            "lots_reloaded": lots_reloaded,
+        })
+        return result

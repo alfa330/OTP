@@ -35,15 +35,41 @@ def _module_function_source(name):
     return ast.get_source_segment(DATABASE_SOURCE, function)
 
 
+# Каталог направлений аукциона (линия, чат, две линии Тез КЦ — задача #124) живёт
+# словарями в db/core.py. Тест берёт их НАСТОЯЩИМИ, исполняя присваивания из исходника:
+# подставной набор констант разошёлся бы с каталогом молча.
+_REGISTRY_CONSTANTS = (
+    "SHIFT_AUCTION_DIRECTION_NAME",
+    "SHIFT_AUCTION_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS",
+    "SHIFT_AUCTION_MODE_LINE",
+    "SHIFT_AUCTION_MODE_CHAT",
+    "SHIFT_AUCTION_MODE_TEZ_TP",
+    "SHIFT_AUCTION_MODE_TEZ_OP",
+    "SHIFT_AUCTION_MODES",
+    "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN",
+    "SHIFT_AUCTION_TEZ_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_MODE_DEPARTMENT_CODE",
+    "SHIFT_AUCTION_MODE_DIRECTION_NAME",
+    "SHIFT_AUCTION_SETTINGS_ROW_ID",
+)
+
+
+def _registry_namespace():
+    namespace = {"re": re}
+    for node in DATABASE_MODULE.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id in _REGISTRY_CONSTANTS
+                for target in node.targets):
+            exec(ast.get_source_segment(DATABASE_SOURCE, node), namespace)
+    missing = [name for name in _REGISTRY_CONSTANTS if name not in namespace]
+    assert not missing, f"в исходнике нет констант: {missing}"
+    return namespace
+
+
 class ShiftAuctionParticipantScopeTests(unittest.TestCase):
     def _operational_row_predicate(self):
-        namespace = {
-            "re": re,
-            "SHIFT_AUCTION_ACTIVE_OPERATOR_STATUS": "working",
-            "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
-            "SHIFT_AUCTION_MODE_LINE": "line",
-            "SHIFT_AUCTION_MODE_CHAT": "chat",
-        }
+        namespace = _registry_namespace()
         exec(_module_function_source("_normalize_shift_auction_scope_value"), namespace)
         exec(_module_function_source("normalize_shift_auction_mode"), namespace)
         exec(_module_function_source("_is_shift_auction_operational_participant_row"), namespace)
@@ -70,18 +96,17 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
         self.assertFalse(predicate((1, "A", "operator", "working", 1, 69, "Чат менеджер"), "line"))
         # Нераспознанный режим обязан вести на линию, а не открывать чужой прогон.
         self.assertTrue(predicate((1, "A", "operator", "working", 1, 70, "Основа"), "junk"))
+        # Линии Тез КЦ: каждая видит только своё направление.
+        self.assertTrue(predicate((1, "A", "operator", "working", 1, 83, " ТП  линия "), "tez_tp"))
+        self.assertFalse(predicate((1, "A", "operator", "working", 1, 78, "ОП линия"), "tez_tp"))
+        self.assertTrue(predicate((1, "A", "operator", "working", 1, 78, "ОП линия"), "tez_op"))
+        self.assertFalse(predicate((1, "A", "operator", "working", 1, 70, "Основа"), "tez_op"))
+        self.assertFalse(predicate((1, "A", "operator", "bs", 1, 83, "ТП линия"), "tez_tp"))
 
     def test_direction_scope_sql_keeps_the_department_boundary(self):
         # Условие направления собрано в одном месте — проверяем сам генератор, а не
         # каждую его копию по методам.
-        namespace = {
-            "re": re,
-            "SHIFT_AUCTION_DIRECTION_NAME": "Основа",
-            "SHIFT_AUCTION_DEPARTMENT_CODE": "szov",
-            "SHIFT_AUCTION_CHAT_DIRECTION_PATTERN": "%чат%",
-            "SHIFT_AUCTION_MODE_LINE": "line",
-            "SHIFT_AUCTION_MODE_CHAT": "chat",
-        }
+        namespace = _registry_namespace()
         exec(_module_function_source("_normalize_shift_auction_scope_value"), namespace)
         exec(_module_function_source("normalize_shift_auction_mode"), namespace)
         exec(_module_function_source("shift_auction_direction_scope_sql"), namespace)
@@ -103,6 +128,14 @@ class ShiftAuctionParticipantScopeTests(unittest.TestCase):
 
         # Неизвестный режим — линия, а не отсутствие фильтра.
         self.assertEqual(build("junk"), build("line"))
+
+        # Линии Тез КЦ (задача #124): точное имя и СВОЙ отдел — «ТП линия» другого
+        # отдела в аукцион Теза не попадёт, а люди Теза — в аукцион СЗоВ.
+        tp_sql, tp_params = build("tez_tp")
+        self.assertIn("BTRIM(COALESCE(d.name, '')) = %s", tp_sql)
+        self.assertIn("LOWER(BTRIM(COALESCE(dep.code, ''))) = %s", tp_sql)
+        self.assertEqual(tp_params, ("ТП линия", "tez"))
+        self.assertEqual(build("tez_op")[1], ("ОП линия", "tez"))
 
     def test_put_validates_exact_szov_osnova_but_keeps_temporary_statuses(self):
         source = _method_source("update_shift_auction_test_access")

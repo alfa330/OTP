@@ -169,7 +169,7 @@ class MissingPeriodIsNotSilentTests(unittest.TestCase):
 
     def test_unmatched_initial_period_notifies_the_user(self):
         start = VIEW_SOURCE.index("const initialPeriodKey =")
-        end = VIEW_SOURCE.index("onInitialPeriodApplied, updateDraftSchedulePlanId]);", start)
+        end = VIEW_SOURCE.index("onInitialPeriodApplied, requestedDirectionIsForeign, updateDraftSchedulePlanId]);", start)
         block = VIEW_SOURCE[start:end]
         self.assertIn("if (!matchedPeriod?.id) {", block)
         self.assertIn("notify?.(", block)

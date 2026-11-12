@@ -216,7 +216,8 @@ class PublishConfirmTextTests(unittest.TestCase):
 
     def test_confirm_names_direction_period_and_participants(self):
         confirm = self.handler[self.handler.index("window.confirm("):self.handler.index("if (!confirmed) return;")]
-        self.assertIn("AUCTION_DIRECTION_LABELS[direction]", confirm)
+        # Подпись направления — из правил с сервера (у Тез КЦ «ТП линия» / «ОП линия»).
+        self.assertIn("directionLabel", confirm)
         self.assertIn("formatAuctionPeriodLabel(settings.selected_period)", confirm)
         self.assertIn("settings.selected_operator_ids.length", confirm)
 

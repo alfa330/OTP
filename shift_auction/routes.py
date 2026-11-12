@@ -4,11 +4,21 @@
 Зависимости от процесса монолита приходят аргументами build_shift_auction_blueprint,
 как у остальных пакетов репозитория."""
 from flask import Blueprint, Response, g, jsonify, request, send_file, stream_with_context
+from database import SHIFT_AUCTION_DEPARTMENT_CODE
 from database import SHIFT_AUCTION_MODE_CHAT
+from database import SHIFT_AUCTION_MODE_DEPARTMENT_CODE
 from database import SHIFT_AUCTION_MODE_LINE
+from database import SHIFT_AUCTION_MODES
+from database import SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES
 from database import SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL
+from database import SHIFT_AUCTION_UPLOAD_MODES
 from database import db
 from database import normalize_shift_auction_mode
+from database import shift_auction_direction_rules
+from database import shift_auction_modes_for_departments
+from shift_auction.upload import SHIFT_AUCTION_UPLOAD_MAX_BYTES
+from shift_auction.upload import ShiftAuctionUploadError
+from shift_auction.upload import parse_shift_auction_upload
 from datetime import datetime
 import collections
 import hashlib
@@ -99,7 +109,6 @@ def _fetch_shift_auction_events_with_cursor(cursor, after_id, limit=SHIFT_AUCTIO
         for row in (cursor.fetchall() or [])
     ]
 
-SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE = 'szov'
 
 def _requested_shift_auction_direction(payload=None):
     """Направление из запроса: тело (для POST/PUT) или строка запроса."""
@@ -209,7 +218,11 @@ def _shift_auction_test_error_response(error):
         "INVALID_RATE": ("Некорректная ставка смены", 400),
         "INVALID_DATE": ("Некорректная дата смены", 400),
         "DATE_OUT_OF_RANGE": ("Этот день не входит в текущий период аукциона", 409),
+        "DIRECTION_NOT_ALLOWED": ("Это направление аукциона вам недоступно — обновите страницу", 403),
     })
+    upload_messages = getattr(db, 'SHIFT_AUCTION_UPLOAD_MESSAGES', {}) or {}
+    if code in upload_messages and code not in mapping:
+        return jsonify({"error": upload_messages[code], "code": code}), 409
     message, status = mapping.get(code, ("Ошибка аукциона смен", 400))
     return jsonify({"error": message, "code": code}), status
 
@@ -235,6 +248,8 @@ def build_shift_auction_blueprint(
     _is_supervisor_role,
     _normalize_origin,
     _normalize_user_role,
+    _parse_schedule_excel_cell_value,
+    _parse_schedule_excel_header_date,
     _record_elapsed_server_timing,
     _send_telegram_text_message,
     _truncate_for_telegram,
@@ -429,38 +444,95 @@ def build_shift_auction_blueprint(
             listener_thread.start()
             shift_auction_event_listener_started = True
 
-    def _resolve_shift_auction_direction(requester_id, requester_role, requested=None):
-        """Направление аукциона («линия» или «чат») для этого запроса.
+    def _shift_auction_staff_department_codes(requester_id):
+        """Свой отдел и возглавляемые — один запрос на запрос API (кеш в g)."""
+        cached = getattr(g, '_shift_auction_staff_codes', None)
+        if cached is not None and cached[0] == requester_id:
+            return cached[1]
+        try:
+            codes = tuple(db.get_shift_auction_staff_department_codes(requester_id))
+        except Exception:
+            codes = ()
+        g._shift_auction_staff_codes = (requester_id, codes)
+        return codes
 
-    У СВ и выше в разделе есть тумблер, поэтому им параметр направления разрешён.
-    У ОПЕРАТОРА направление жёстко своё — из карточки, что бы ни пришло в запросе:
-    иначе подменённым параметром можно было бы смотреть и разбирать чужой аукцион.
+    def _shift_auction_staff_modes(requester_id, requester_role):
+        """Прогоны аукциона, которые человек видит и ведёт как руководитель.
+
+    Суперадмин — все. Админ и СВ — прогоны своего отдела и отделов, которые он
+    возглавляет: руководство Тез КЦ видит только свои линии (задача #124), СЗоВ —
+    линию и чат. Админам и СВ остальных отделов остаётся аукцион СЗоВ — так было до
+    Теза, и этот круг не сужается. Оператору — пусто: его направление из карточки.
     """
         role = _normalize_user_role(requester_role)
-        if _is_admin_role(role) or _is_supervisor_role(role):
-            return normalize_shift_auction_mode(requested)
+        if role == 'super_admin':
+            return SHIFT_AUCTION_MODES
+        if not (_is_admin_role(role) or _is_supervisor_role(role)):
+            return ()
+        # Прогоны пилота (пока только суперадминам) остальным руководителям не видны:
+        # руководство Теза до открытия отдела остаётся в аукционе как было.
+        modes = tuple(
+            mode for mode in shift_auction_modes_for_departments(_shift_auction_staff_department_codes(requester_id))
+            if mode not in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES
+        )
+        if not modes:
+            modes = shift_auction_modes_for_departments((SHIFT_AUCTION_DEPARTMENT_CODE,))
+        return modes
+
+    def _resolve_shift_auction_direction(requester_id, requester_role, requested=None, strict=False):
+        """Направление аукциона для этого запроса.
+
+    У СВ и выше в разделе есть тумблер, поэтому им параметр направления разрешён —
+    но только в пределах их прогонов (_shift_auction_staff_modes): иначе СВ одного
+    отдела подменой параметра смотрел бы и вёл аукцион другого.
+    У ОПЕРАТОРА направление жёстко своё — из карточки, что бы ни пришло в запросе:
+    иначе подменённым параметром можно было бы смотреть и разбирать чужой аукцион.
+    strict — для ручек, которые МЕНЯЮТ прогон: явно названное чужое направление там
+    отказ (DIRECTION_NOT_ALLOWED), а не тихая подмена своим — иначе «Пауза» или
+    «Опубликовать» с устаревшим направлением на экране сработали бы не над тем прогоном.
+    """
+        role = _normalize_user_role(requester_role)
+        staff_modes = _shift_auction_staff_modes(requester_id, role)
+        if staff_modes:
+            mode = normalize_shift_auction_mode(requested)
+            if mode in staff_modes:
+                return mode
+            if strict and requested not in (None, ''):
+                raise ValueError("DIRECTION_NOT_ALLOWED")
+            return staff_modes[0]
         try:
             own_mode = db.shift_auction_mode_for_operator(requester_id)
         except Exception:
             own_mode = None
         return own_mode or SHIFT_AUCTION_MODE_LINE
 
-    def _is_shift_auction_manager(requester_id, requester_role) -> bool:
-        """Кто может управлять аукционом смен (запуск, контроль, публикация и т.п.).
+    def _is_shift_auction_manager(requester_id, requester_role, direction_mode=None) -> bool:
+        """Кто может управлять прогоном аукциона (запуск, контроль, загрузка, публикация).
 
-    Помимо админов — супервайзеры СЗоВ: им открыты те же действия, что и главе
-    отдела (admin). Соответствует фронтовому ``canManage`` в ShiftAuctionView.
+    Админ — в пределах своих прогонов (_shift_auction_staff_modes). Супервайзер —
+    только прогонов своего отдела: СВ СЗоВ ведут линию и чат, СВ Тез КЦ — свои линии.
+    Соответствует фронтовому ``canManage`` в ShiftAuctionView.
     """
         role = _normalize_user_role(requester_role)
+        if not requester_id:
+            return False
+        mode = normalize_shift_auction_mode(direction_mode)
+        if mode not in _shift_auction_staff_modes(requester_id, role):
+            return False
         if _is_admin_role(role):
             return True
-        if _is_supervisor_role(role) and requester_id:
-            try:
-                _, department_code = db.get_user_department(requester_id)
-            except Exception:
-                department_code = None
-            return str(department_code or '').lower() == SHIFT_AUCTION_MANAGER_DEPARTMENT_CODE
+        if _is_supervisor_role(role):
+            return SHIFT_AUCTION_MODE_DEPARTMENT_CODE[mode] in _shift_auction_staff_department_codes(requester_id)
         return False
+
+    def _shift_auction_direction_payload(requester_id, requester_role, direction_mode):
+        """Направления для тумблера и правила текущего — экран берёт их отсюда."""
+        staff_modes = _shift_auction_staff_modes(requester_id, requester_role)
+        available = staff_modes or (normalize_shift_auction_mode(direction_mode),)
+        return {
+            "available_directions": [shift_auction_direction_rules(mode) for mode in available],
+            "direction_rules": shift_auction_direction_rules(direction_mode),
+        }
 
     def _shift_auction_test_lot_mutation_response(lot_id, action, claim_start_time=None, claim_end_time=None):
         try:
@@ -493,9 +565,9 @@ def build_shift_auction_blueprint(
             logging.error(f"Shift auction claim API error: {error}", exc_info=True)
             return jsonify({"error": "Internal server error"}), 500
 
-    def _notify_admins_post_auction_claim(operator_name, lot_payload):
+    def _notify_admins_post_auction_claim(operator_name, lot_payload, direction_mode=None):
         try:
-            recipients = db.get_admin_post_claim_notify_recipients()
+            recipients = db.get_admin_post_claim_notify_recipients(direction_mode=direction_mode)
         except Exception as error:
             logging.error(f"Failed to load post-auction notify recipients: {error}", exc_info=True)
             return
@@ -571,15 +643,17 @@ def build_shift_auction_blueprint(
                     current_user_id=requester_id, direction_mode=direction_mode
                 )
                 payload["direction_mode"] = direction_mode
+                payload.update(_shift_auction_direction_payload(requester_id, requester_role, direction_mode))
                 return jsonify({"status": "success", "test_access": payload}), 200
-
-            if not _is_shift_auction_manager(requester_id, requester_role):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can manage shift auction test access"}), 403
 
             payload = request.get_json(silent=True) or {}
             direction_mode = _resolve_shift_auction_direction(
-                requester_id, requester_role, _requested_shift_auction_direction(payload)
+                requester_id, requester_role, _requested_shift_auction_direction(payload),
+                strict=True,
             )
+            if not _is_shift_auction_manager(requester_id, requester_role, direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can manage shift auction test access"}), 403
+
             updated = db.update_shift_auction_test_access(
                 enabled=bool(payload.get('enabled')),
                 operator_ids=payload.get('operator_ids') or payload.get('selected_operator_ids') or [],
@@ -592,6 +666,7 @@ def build_shift_auction_blueprint(
                 direction_mode=direction_mode,
             )
             updated["direction_mode"] = direction_mode
+            updated.update(_shift_auction_direction_payload(requester_id, requester_role, direction_mode))
             return jsonify({"status": "success", "test_access": updated}), 200
         except ValueError as error:
             return _shift_auction_test_error_response(error)
@@ -622,9 +697,13 @@ def build_shift_auction_blueprint(
                 direction_mode=direction_mode
             )
             snapshot["direction_mode"] = direction_mode
-            # Тумблер «Линия / Чат» рисуется только тем, кому разрешено переключаться:
-            # у оператора направление одно и приходит с сервера.
-            snapshot["can_switch_direction"] = bool(can_monitor_auction)
+            direction_payload = _shift_auction_direction_payload(requester_id, requester_role, direction_mode)
+            snapshot.update(direction_payload)
+            # Тумблер направлений рисуется только тем, кому разрешено переключаться:
+            # у оператора направление одно и приходит с сервера, у руководителя —
+            # прогоны его отдела (у Тез КЦ «ТП линия / ОП линия», у СЗоВ «Линия / Чат»).
+            snapshot["can_switch_direction"] = bool(can_monitor_auction) and len(
+                direction_payload["available_directions"]) > 1
             has_period_history_access = False
             if not (can_monitor_auction or snapshot.get('is_current_user_tester')):
                 has_period_history_access = db.has_shift_auction_history_access(requester_id)
@@ -707,6 +786,13 @@ def build_shift_auction_blueprint(
             if not (_is_admin_role(requester_role) or _is_supervisor_role(requester_role)):
                 return jsonify({"error": "Not allowed"}), 403
             payload = request.get_json(silent=True) or {}
+            # Снять смену можно только в своих прогонах: по номеру смены СВ одного
+            # отдела иначе снимал бы смены аукциона другого.
+            target_mode = (
+                db.shift_auction_mode_for_lot(payload.get('lot_id')) if payload.get('lot_id') else None
+            ) or db.shift_auction_mode_for_plan(payload.get('plan_id') or payload.get('schedule_plan_id'))
+            if target_mode and target_mode not in _shift_auction_staff_modes(requester_id, requester_role):
+                return jsonify({"error": "Not allowed"}), 403
             result = db.admin_unclaim_shift(
                 admin_id=requester_id,
                 lot_id=payload.get('lot_id'),
@@ -738,6 +824,13 @@ def build_shift_auction_blueprint(
             operator_id = payload.get('operator_id')
             if not operator_id:
                 return jsonify({"error": "operator_id is required"}), 400
+            # Назначать — только людям своих прогонов (направление — по карточке человека,
+            # включая пилот: его прогоны есть только у суперадмина). Человеку вне всех
+            # прогонов метод подставит линию — значит и сверяем как линию: руководитель
+            # одного Теза не назначит через такого человека смену СЗоВ.
+            operator_mode = db.shift_auction_mode_for_operator(operator_id, include_pilot=True) or SHIFT_AUCTION_MODE_LINE
+            if operator_mode not in _shift_auction_staff_modes(requester_id, requester_role):
+                return jsonify({"error": "Not allowed"}), 403
             result = db.admin_claim_shift_for_operator(
                 admin_id=requester_id,
                 operator_id=operator_id,
@@ -775,7 +868,8 @@ def build_shift_auction_blueprint(
                 end_time=payload.get('end_time'),
                 rate_min=payload.get('rate_min'),
                 direction_mode=_resolve_shift_auction_direction(
-                    requester_id, requester_role, _requested_shift_auction_direction(payload)
+                    requester_id, requester_role, _requested_shift_auction_direction(payload),
+                    strict=True,
                 ),
             )
             return jsonify({"status": "success", **result}), 200
@@ -836,7 +930,8 @@ def build_shift_auction_blueprint(
                 start_date=start_date,
                 direction_mode=_resolve_shift_auction_direction(
                     requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(payload)
+                    _requested_shift_auction_direction(payload),
+                    strict=True,
                 ),
             )
             return jsonify({"status": "success", **result}), 200
@@ -857,16 +952,18 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can restart shift auctions"}), 403
             payload = request.get_json(silent=True) or {}
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(payload),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can restart shift auctions"}), 403
             result = db.restart_shift_auction_test(
                 schedule_plan_id=payload.get('schedule_plan_id') or payload.get('plan_id'),
                 updated_by=requester_id,
-                direction_mode=_resolve_shift_auction_direction(
-                    requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(payload)
-                ),
+                direction_mode=direction_mode,
             )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
@@ -886,16 +983,18 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can control shift auctions"}), 403
             payload = request.get_json(silent=True) or {}
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(payload),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can control shift auctions"}), 403
             result = db.control_shift_auction_test(
                 action=payload.get('action'),
                 updated_by=requester_id,
-                direction_mode=_resolve_shift_auction_direction(
-                    requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(payload)
-                ),
+                direction_mode=direction_mode,
             )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
@@ -950,15 +1049,17 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction top-up mode"}), 403
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True)),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can toggle shift auction top-up mode"}), 403
             result = db.set_shift_auction_test_topup(
                 enabled=(request.method == 'POST'),
                 updated_by=requester_id,
-                direction_mode=_resolve_shift_auction_direction(
-                    requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(request.get_json(silent=True))
-                ),
+                direction_mode=direction_mode,
             )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
@@ -978,15 +1079,17 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can toggle shift auction rate lock"}), 403
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True)),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can toggle shift auction rate lock"}), 403
             result = db.set_shift_auction_test_rate_lock(
                 enabled=(request.method == 'POST'),
                 updated_by=requester_id,
-                direction_mode=_resolve_shift_auction_direction(
-                    requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(request.get_json(silent=True))
-                ),
+                direction_mode=direction_mode,
             )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
@@ -1006,16 +1109,17 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can export shift auction reports"}), 403
-
             direction_mode = _resolve_shift_auction_direction(
                 requester_id, _normalize_user_role(requester[3]), _requested_shift_auction_direction()
             )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can export shift auction reports"}), 403
+
             output, start_date_obj, end_date_obj = db.generate_shift_auction_test_excel_report(
                 direction_mode=direction_mode
             )
-            direction_slug = 'chat' if direction_mode == SHIFT_AUCTION_MODE_CHAT else 'line'
+            # Код прогона латиницей: line, chat, tez_tp, tez_op.
+            direction_slug = normalize_shift_auction_mode(direction_mode)
             filename = (
                 f"shift_auction_report_{direction_slug}"
                 f"_{start_date_obj.strftime('%Y%m%d')}_{end_date_obj.strftime('%Y%m%d')}.xlsx"
@@ -1043,15 +1147,17 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can publish shift auctions"}), 403
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, _normalize_user_role(requester[3]),
+                _requested_shift_auction_direction(request.get_json(silent=True)),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester[3], direction_mode):
+                return jsonify({"error": "Only admins and supervisors of the auction department can publish shift auctions"}), 403
 
             result = db.publish_shift_auction_test_to_work_schedules(
                 updated_by=requester_id,
-                direction_mode=_resolve_shift_auction_direction(
-                    requester_id, _normalize_user_role(requester[3]),
-                    _requested_shift_auction_direction(request.get_json(silent=True))
-                ),
+                direction_mode=direction_mode,
             )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
@@ -1102,7 +1208,10 @@ def build_shift_auction_blueprint(
             operator_name = operator_info.get('name') or requester[1]
             lot_payload = result.get('lot') or {}
             try:
-                _notify_admins_post_auction_claim(operator_name, lot_payload)
+                _notify_admins_post_auction_claim(
+                    operator_name, lot_payload,
+                    direction_mode=db.shift_auction_mode_for_operator(requester_id),
+                )
             except Exception as error:
                 logging.error(f"Post-auction claim notification dispatch failed: {error}", exc_info=True)
             return jsonify({"status": "success", **result}), 200
@@ -1171,8 +1280,11 @@ def build_shift_auction_blueprint(
             if auth_error:
                 message, status_code = auth_error
                 return jsonify({"error": message}), status_code
-            if not _is_shift_auction_manager(requester_id, requester[3]):
-                return jsonify({"error": "Only admins and СЗоВ supervisors can change auction notification settings"}), 403
+            if not any(
+                _is_shift_auction_manager(requester_id, requester[3], mode)
+                for mode in _shift_auction_staff_modes(requester_id, requester[3])
+            ):
+                return jsonify({"error": "Only admins and supervisors of the auction department can change auction notification settings"}), 403
 
             if request.method == 'GET':
                 enabled = db.get_admin_post_claim_notify_setting(requester_id)
@@ -1243,7 +1355,12 @@ def build_shift_auction_blueprint(
                 str(payload.get('shift_date') or payload.get('date') or '').strip(),
                 str(payload.get('start_time') or '').strip(),
             )
-            result["snapshot"] = db.get_shift_auction_test_snapshot(current_user_id=requester_id)
+            # Снимок — прогона самого оператора: без направления пришёл бы снимок линии
+            # СЗоВ, и оператор чата или Теза до следующего опроса видел бы чужой аукцион.
+            result["snapshot"] = db.get_shift_auction_test_snapshot(
+                current_user_id=requester_id,
+                direction_mode=db.shift_auction_mode_for_operator(requester_id) or SHIFT_AUCTION_MODE_LINE,
+            )
             return jsonify({"status": "success", **result}), 200
         except ValueError as error:
             return _shift_auction_test_error_response(error)
@@ -1278,6 +1395,85 @@ def build_shift_auction_blueprint(
             return _shift_auction_test_error_response(error)
         except Exception as error:
             logging.error(f"Shift auction day off API error: {error}", exc_info=True)
+            return jsonify({"error": "Internal server error"}), 500
+
+    @bp.route('/shift_auction/upload_shifts', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def api_shift_auction_upload_shifts():
+        """Готовые смены файлом для аукциона Тез КЦ (задача #124).
+
+    Без confirm — сверка: что ляжет в период и что поменяется; ничего не пишется.
+    С confirm=1 — запись ровно сверенного: base_fingerprint из сверки обязан совпасть
+    с тем, что лежит в базе сейчас, иначе отказ «поменялось, пока шла сверка».
+    """
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        try:
+            requester_id, requester, auth_error = _get_authenticated_requester()
+            if auth_error:
+                message, status_code = auth_error
+                return jsonify({"error": message}), status_code
+            requester_role = _normalize_user_role(requester[3])
+            form = request.form.to_dict() if request.form else {}
+            direction_mode = _resolve_shift_auction_direction(
+                requester_id, requester_role, _requested_shift_auction_direction(form),
+                strict=True,
+            )
+            if not _is_shift_auction_manager(requester_id, requester_role, direction_mode):
+                return jsonify({"error": "Загружать смены могут руководители направления", "code": "FORBIDDEN"}), 403
+            if direction_mode not in SHIFT_AUCTION_UPLOAD_MODES:
+                return _shift_auction_test_error_response(ValueError("AUCTION_UPLOAD_NOT_SUPPORTED"))
+            file_storage = request.files.get('file')
+            if not file_storage:
+                return jsonify({"error": "Выберите файл со сменами", "code": "AUCTION_UPLOAD_FILE_REQUIRED"}), 400
+            # Имя — как у человека на диске: secure_filename выбросил бы кириллицу
+            # («График ТП 9-15.xlsx» стал бы «9-15.xlsx»), а показывается оно только текстом.
+            file_name = os.path.basename(str(file_storage.filename or '').replace('\\', '/')).strip()[:200]
+            if not file_name.lower().endswith(('.xlsx', '.xlsm')):
+                return jsonify({"error": "Нужен файл Excel в формате .xlsx", "code": "AUCTION_UPLOAD_BAD_TYPE"}), 400
+            data = file_storage.read(SHIFT_AUCTION_UPLOAD_MAX_BYTES + 1)
+            if len(data) > SHIFT_AUCTION_UPLOAD_MAX_BYTES:
+                return jsonify({"error": "Файл больше 5 МБ", "code": "AUCTION_UPLOAD_TOO_LARGE"}), 413
+            file_sha256 = hashlib.sha256(data).hexdigest()
+            try:
+                parsed = parse_shift_auction_upload(
+                    data, _parse_schedule_excel_header_date, _parse_schedule_excel_cell_value
+                )
+            except ShiftAuctionUploadError as error:
+                return jsonify({"error": error.message, "code": error.code}), 400
+
+            confirm = str(form.get('confirm') or '').strip().lower() in ('1', 'true', 'yes')
+            if confirm:
+                base_fingerprint = str(form.get('base_fingerprint') or '').strip()
+                previewed_sha256 = str(form.get('file_sha256') or '').strip()
+                if not base_fingerprint or not previewed_sha256:
+                    return jsonify({
+                        "error": "Сначала сверьте файл — запись идёт только после сверки",
+                        "code": "AUCTION_UPLOAD_PREVIEW_REQUIRED",
+                    }), 400
+                # Пишется ровно сверенный файл: если его поменяли на диске между сверкой
+                # и «Подтвердить», браузер отправит уже другое содержимое.
+                if previewed_sha256 != file_sha256:
+                    return jsonify({
+                        "error": "Файл изменился после сверки — сверьте его ещё раз",
+                        "code": "AUCTION_UPLOAD_FILE_CHANGED",
+                    }), 409
+                result = db.save_shift_auction_upload(
+                    direction_mode, parsed,
+                    updated_by=requester_id,
+                    file_name=file_name,
+                    file_sha256=file_sha256,
+                    base_fingerprint=base_fingerprint,
+                )
+            else:
+                result = db.preview_shift_auction_upload(
+                    direction_mode, parsed, file_name=file_name, file_sha256=file_sha256
+                )
+            return jsonify({"status": "success", "direction_mode": direction_mode, "upload": result}), 200
+        except ValueError as error:
+            return _shift_auction_test_error_response(error)
+        except Exception as error:
+            logging.error(f"Shift auction upload API error: {error}", exc_info=True)
             return jsonify({"error": "Internal server error"}), 500
 
     @bp.route('/shift_auction/test_events', methods=['GET', 'OPTIONS'])

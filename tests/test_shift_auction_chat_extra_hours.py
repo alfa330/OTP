@@ -117,9 +117,15 @@ class ClaimPathTests(unittest.TestCase):
     def test_claim_lifts_the_daily_limit_for_chat_and_topup(self):
         body = self._method("claim_shift_auction_test_lot")
         self.assertIn(
-            "allows_extra_shifts_per_day = is_topup_mode or mode == SHIFT_AUCTION_MODE_CHAT",
+            "allows_extra_shifts_per_day = is_topup_mode or mode in SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES",
             body,
         )
+        # Набор держит чат (решение 29.08.2026) и линии Тез КЦ (#124) — но не линию СЗоВ.
+        registry = self.source[self.source.index("SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES = ("):]
+        registry = registry[:registry.index(")")]
+        for mode in ("SHIFT_AUCTION_MODE_CHAT", "SHIFT_AUCTION_MODE_TEZ_TP", "SHIFT_AUCTION_MODE_TEZ_OP"):
+            self.assertIn(mode, registry)
+        self.assertNotIn("SHIFT_AUCTION_MODE_LINE", registry)
         self.assertIn("_shift_auction_claim_conflict(", body)
         self.assertIn('raise ValueError("SHIFT_OVERLAPS_EXISTING")', body)
         # Календарный лимит остаётся для линии вне добора.
@@ -137,7 +143,7 @@ class ClaimPathTests(unittest.TestCase):
     def test_self_schedule_follows_the_same_rule(self):
         """«Свой график» — второй путь, которым смена попадает человеку в день."""
         body = self._method("self_schedule_shift_auction_shift")
-        self.assertIn("if mode == SHIFT_AUCTION_MODE_CHAT:", body)
+        self.assertIn("if mode in SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES:", body)
         self.assertIn("_shift_auction_claim_conflict(own_claims, date_key, start_min, end_min)", body)
         self.assertIn('raise ValueError("DAY_ALREADY_HAS_SHIFT")', body)
 
@@ -151,8 +157,11 @@ class FrontendMirrorTests(unittest.TestCase):
         self.region = self.source[start:self.source.index("useEffect(", start)]
 
     def test_daily_lock_is_not_applied_to_chat(self):
-        self.assertIn("if (isTopupActive || supportsPartialClaim) {", self.region)
-        lock = self.region[self.region.index("if (isTopupActive || supportsPartialClaim) {"):]
+        # Несколько смен в день — у чата и у линий Тез КЦ (#124), правило с сервера.
+        opener = "if (isTopupActive || supportsPartialClaim || allowsSeveralShiftsPerDay) {"
+        self.assertIn(opener, self.region)
+        self.assertIn("const allowsSeveralShiftsPerDay = Boolean(directionRules.several_shifts_per_day);", self.source)
+        lock = self.region[self.region.index(opener):]
         lock = lock[:lock.index("const netMinutes")]
         self.assertIn("} else if (lot.shift_date && myClaimedDateSet.has(lot.shift_date)) {", lock)
 

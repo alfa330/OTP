@@ -6,6 +6,21 @@ export const SHIFT_AUCTION_DIRECTION_NAME = 'основа';
 export const SHIFT_AUCTION_CHAT_DIRECTION_TOKEN = 'чат';
 export const SHIFT_AUCTION_MODE_LINE = 'line';
 export const SHIFT_AUCTION_MODE_CHAT = 'chat';
+// Линии Тез КЦ (задача #124) — свои прогоны; имена точные, как у сервера
+// (SHIFT_AUCTION_MODE_DIRECTION_NAME в db/core.py).
+export const SHIFT_AUCTION_MODE_TEZ_TP = 'tez_tp';
+export const SHIFT_AUCTION_MODE_TEZ_OP = 'tez_op';
+const SHIFT_AUCTION_MODES = [
+  SHIFT_AUCTION_MODE_LINE,
+  SHIFT_AUCTION_MODE_CHAT,
+  SHIFT_AUCTION_MODE_TEZ_TP,
+  SHIFT_AUCTION_MODE_TEZ_OP,
+];
+const SHIFT_AUCTION_EXACT_DIRECTION_NAMES = {
+  [SHIFT_AUCTION_MODE_LINE]: SHIFT_AUCTION_DIRECTION_NAME,
+  [SHIFT_AUCTION_MODE_TEZ_TP]: 'тп линия',
+  [SHIFT_AUCTION_MODE_TEZ_OP]: 'оп линия',
+};
 
 const normalizeScopeText = (value) => (
   String(value || '')
@@ -19,11 +34,10 @@ export const normalizeShiftAuctionOperatorId = (value) => {
   return Number.isFinite(id) && id > 0 ? id : null;
 };
 
-export const normalizeShiftAuctionDirectionMode = (value) => (
-  normalizeScopeText(value) === SHIFT_AUCTION_MODE_CHAT
-    ? SHIFT_AUCTION_MODE_CHAT
-    : SHIFT_AUCTION_MODE_LINE
-);
+export const normalizeShiftAuctionDirectionMode = (value) => {
+  const mode = normalizeScopeText(value);
+  return SHIFT_AUCTION_MODES.includes(mode) ? mode : SHIFT_AUCTION_MODE_LINE;
+};
 
 /**
  * Принадлежит ли человек направлению ЭТОГО аукциона.
@@ -36,10 +50,11 @@ export const normalizeShiftAuctionDirectionMode = (value) => (
  */
 export const isShiftAuctionDirection = (value, directionMode = SHIFT_AUCTION_MODE_LINE) => {
   const name = normalizeScopeText(value);
-  if (normalizeShiftAuctionDirectionMode(directionMode) === SHIFT_AUCTION_MODE_CHAT) {
+  const mode = normalizeShiftAuctionDirectionMode(directionMode);
+  if (mode === SHIFT_AUCTION_MODE_CHAT) {
     return name.includes(SHIFT_AUCTION_CHAT_DIRECTION_TOKEN);
   }
-  return name === SHIFT_AUCTION_DIRECTION_NAME;
+  return name === SHIFT_AUCTION_EXACT_DIRECTION_NAMES[mode];
 };
 
 export const isDismissedShiftAuctionOperator = (value) => {

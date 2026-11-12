@@ -60,7 +60,10 @@ class ShiftsMixin:
                 except Exception:
                     continue
                 start_minute = max(0, min(start_minute, (24 * 60) - 1))
-                end_minute = max(start_minute + 1, min(end_minute, 32 * 60))
+                # Смена не длиннее суток. Прежний потолок «08:00 следующего дня» (32*60)
+                # был впору генератору СЗоВ, но резал ночь Тез КЦ «21*09» до 21:00–08:00:
+                # загруженный график терял по часу с каждой ночи (задача #124).
+                end_minute = max(start_minute + 1, min(end_minute, start_minute + 24 * 60))
                 duration_minutes = max(1, end_minute - start_minute)
                 incoming_breaks = shift.get("breaks") if isinstance(shift.get("breaks"), list) else []
                 computed_breaks = self._compute_auto_shift_breaks_minutes(
