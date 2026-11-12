@@ -134,6 +134,8 @@ def public_card(card, now):
         'direction': card['direction'], 'direction_label': rules.DIRECTION_LABELS.get(card['direction']),
         'status': card['status'], 'state': state, 'state_label': rules.STATE_LABELS[state],
         'account_id': card.get('account_id'), 'account_kind': card.get('account_kind'),
+        # Оператор отметил «Аккаунта нет»: экран показывает это вместо пустого места.
+        'no_account': rules.has_no_account(card),
         'city': card.get('city'), 'comment': card.get('comment') or '',
         'parent_id': card.get('parent_id'), 'topics': card.get('topics') or [],
         'wrapup_sec': int(card.get('wrapup_sec') or 0),
@@ -408,6 +410,9 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
         data = _json()
         if str(data.get('link') or '').strip():
             return jsonify(_bundle(ctx, service.attach_link(ctx, card_id, data.get('link'))))
+        # {"none": true} — «Аккаунта нет»: звонивший не зарегистрирован в Тез.
+        if data.get('none') is True:
+            return jsonify(_bundle(ctx, service.mark_no_account(ctx, card_id)))
         account_id = _int(data.get('account_id'))
         if account_id is None and data.get('account_id') is not None:
             return _bad('Аккаунт указан неверно', 'CARD_BAD_ACCOUNT')

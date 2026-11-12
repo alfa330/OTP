@@ -10,7 +10,7 @@ import { History, Search } from 'lucide-react';
 
 import { IosBadge, IosSegmented, iosBtnSecondary, iosCard, iosInput } from '../components/ui/ios';
 import CardDetail from '../components/client_cards/CardDetail';
-import { REQUEST_TONES, accountTitle, errorText, fmtWhen, topicLabel } from '../components/client_cards/cardRules';
+import { NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, errorText, fmtWhen, topicLabel } from '../components/client_cards/cardRules';
 import { EmptyState, Spinner, StateBadge } from '../components/client_cards/ui';
 
 export default function HistoryTab({ api, card, toast, onContinue, onOpenRequest, onCount }) {
@@ -109,6 +109,7 @@ export default function HistoryTab({ api, card, toast, onContinue, onOpenRequest
                             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-slate-400">
                                 <span>{item.operator_name}</span>
                                 {scope === 'all' && item.account && <span>· {item.account.kind_label} {accountTitle(item.account)}</span>}
+                                {scope === 'all' && !item.account && item.no_account && <span>· {NO_ACCOUNT_LABEL}</span>}
                                 {scope === 'all' && <span className="tabular-nums">· {item.phone_text}</span>}
                                 <StateBadge card={item} />
                                 {item.requests.map((request) => (

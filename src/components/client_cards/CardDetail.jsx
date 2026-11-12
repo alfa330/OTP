@@ -7,7 +7,7 @@ import React, { useEffect, useState } from 'react';
 import { ExternalLink, PhoneIncoming, PhoneOutgoing } from 'lucide-react';
 
 import { IosBadge, IosModal, iosBtnPrimary, iosGroupLabel } from '../ui/ios';
-import { REQUEST_TONES, accountTitle, errorText, fmtSeconds, fmtWhen, topicLabel } from './cardRules';
+import { NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, errorText, fmtSeconds, fmtWhen, topicLabel } from './cardRules';
 import { Spinner, StateBadge } from './ui';
 
 const Row = ({ label, children }) => (
@@ -72,7 +72,7 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
                                    className="inline-flex items-center gap-1 text-blue-600 hover:underline">
                                     {account.kind_label} · {accountTitle(account)} <ExternalLink size={12} aria-hidden="true" />
                                 </a>
-                            ) : '—'}
+                            ) : (card.no_account ? NO_ACCOUNT_LABEL : '—')}
                         </Row>
                         {card.city && <Row label="Город">{card.city}</Row>}
                         <Row label="Причина">

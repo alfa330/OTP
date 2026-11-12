@@ -2,7 +2,8 @@
  *
  * Порядок на экране — порядок работы оператора. Аккаунт: то, что уже привязано к номеру
  * (и что нашёл TEZ APP), — выбором; нет ни одного — одно поле «Вставьте ссылку на аккаунт».
- * Причины появляются после выбора аккаунта. Всё, что оператор вносит, сохраняется само
+ * У звонившего аккаунта нет вовсе — строка «Аккаунта нет» (владелец, 12.11.2026).
+ * Причины появляются после выбора аккаунта или этой отметки. Всё, что оператор вносит, сохраняется само
  * (черновик уходит на сервер с паузой 0,7 с), кнопка внизу только заканчивает карточку.
  *
  * Причины и комментарий держатся здесь, а не берутся из ответа сервера на каждое действие:
@@ -17,7 +18,7 @@ import CustomSelect from '../components/ui/CustomSelect';
 import { IosBadge, IosHint, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../components/ui/ios';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    REQUEST_TONES, accountTitle, canAddTopic, errorText, filterCategories, fmtDate, isTopicPicked,
+    NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, canAddTopic, errorText, filterCategories, fmtDate, isTopicPicked,
     looksLikeAccountLink, pickedInCategory, saveLabel, toggleTopic, topicLabel, topicsPayload,
 } from '../components/client_cards/cardRules';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../utils/kazakhstanCities';
@@ -67,6 +68,27 @@ function AccountRow({ account, picked, busy, onPick, onUnlink, onOpen }) {
                     <Unlink size={14} />
                 </button>
             )}
+        </div>
+    );
+}
+
+/* «Аккаунта нет»: звонивший не зарегистрирован в Тез (ошибся номером, спрашивает про
+   регистрацию). Та же строка-выбор, что у аккаунтов: отмечается и снимается одним нажатием. */
+function NoAccountRow({ picked, busy, divided, onPick }) {
+    return (
+        <div className={divided ? 'border-t border-slate-100 pt-1' : ''}>
+            <div className={`flex items-center gap-2 rounded-xl px-2.5 py-2 transition ${picked ? 'bg-blue-50 ring-1 ring-blue-200/80' : 'hover:bg-slate-50'}`}>
+                <button type="button" onClick={onPick} disabled={busy} aria-pressed={picked}
+                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
+                    <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full ring-1 transition ${
+                        picked ? 'bg-blue-600 text-white ring-blue-600' : 'bg-white text-transparent ring-slate-300'}`}>
+                        <Check size={12} strokeWidth={3} />
+                    </span>
+                    <span className="min-w-0 truncate text-[13.5px] font-medium text-slate-900">{NO_ACCOUNT_LABEL}</span>
+                </button>
+                <IosHint align="right" label="Когда отмечать «Аккаунта нет»"
+                         text="У звонившего нет аккаунта в Тез: ошибся номером или спрашивает про регистрацию. Карточка сохранится без аккаунта — причину всё равно выберите. В отчёте такие обращения идут отдельной строкой." />
+            </div>
         </div>
     );
 }
@@ -212,7 +234,10 @@ export default function CallCard({
     ), [city]);
     const total = useMemo(() => (boot.categories || []).reduce(
         (sum, item) => sum + 1 + (item.children?.length || 0), 0), [boot.categories]);
-    const missing = !account ? 'Выберите аккаунт или вставьте ссылку на него'
+    // Оператор отметил «Аккаунта нет» — дальше карточка идёт так же, как с аккаунтом.
+    const noAccount = Boolean(card.no_account) && !account;
+    const personKnown = Boolean(account) || noAccount;
+    const missing = !personKnown ? 'Выберите аккаунт или отметьте «Аккаунта нет»'
         : !topics.length ? 'Выберите причину обращения' : '';
     const cityKnownFromTez = Boolean(account?.known && account?.city);
     const showLinkField = !accounts.length || linkOpen;
@@ -269,6 +294,8 @@ export default function CallCard({
                             <Plus size={14} /> Другой аккаунт
                         </button>
                     )}
+                    <NoAccountRow picked={noAccount} busy={Boolean(busy)} divided
+                                  onPick={() => run('account', () => (noAccount ? api.chooseAccount(cardId, null) : api.noAccount(cardId)))} />
                 </div>
                 <TezNotice tez={bundle.tez} accounts={accounts} />
                 {account && !cityKnownFromTez && (
@@ -283,8 +310,8 @@ export default function CallCard({
                 )}
             </section>
 
-            {/* ── Причина обращения — после выбора аккаунта ─────────────────── */}
-            {account && (
+            {/* ── Причина обращения — после выбора аккаунта (или отметки «Аккаунта нет») ── */}
+            {personKnown && (
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Причина обращения</div>
                     <div className={`${iosCard} space-y-2 p-3`}>
@@ -373,7 +400,7 @@ export default function CallCard({
                 </section>
             )}
 
-            {account && (
+            {personKnown && (
                 <section className="space-y-1.5">
                     <div className={iosGroupLabel}>Комментарий</div>
                     <textarea value={comment} onChange={(event) => edit(setComment)(event.target.value)}
@@ -382,7 +409,7 @@ export default function CallCard({
                 </section>
             )}
 
-            {account && (
+            {personKnown && (
                 <section className="space-y-1.5">
                     {requests.length > 0 && (
                         <ul className="space-y-1">

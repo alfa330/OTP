@@ -41,6 +41,8 @@ export const createCardsApi = (apiBaseUrl, getHeaders = null) => {
         lookup: (cardId) => axios.post(url(`/cards/${cardId}/lookup`), {}, config()),
         chooseAccount: (cardId, accountId) => axios.post(url(`/cards/${cardId}/account`), { account_id: accountId }, config()),
         attachLink: (cardId, link) => axios.post(url(`/cards/${cardId}/account`), { link }, config()),
+        // «Аккаунта нет»: звонивший не зарегистрирован в Тез. Снимается выбором аккаунта.
+        noAccount: (cardId) => axios.post(url(`/cards/${cardId}/account`), { none: true }, config()),
         unlink: (cardId, linkId) => axios.delete(url(`/cards/${cardId}/links/${linkId}`), config()),
         saveCard: (cardId, body) => axios.patch(url(`/cards/${cardId}`), body, config()),
         completeCard: (cardId) => axios.post(url(`/cards/${cardId}/complete`), {}, config()),

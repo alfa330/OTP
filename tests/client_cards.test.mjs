@@ -3,7 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  accountTitle, almatyToday, autoAccountId, canAddTopic, errorText, eventIsForCall, filterCategories, fmtClock,
+  NO_ACCOUNT_LABEL, accountTitle, almatyToday, autoAccountId, canAddTopic, cardAccountText, errorText, eventIsForCall,
+  filterCategories, fmtClock,
   fmtDate, fmtSeconds, fmtShare, fmtSize, fmtTime, fmtWhen, isTopicPicked, looksLikeAccountLink, parseCallMessage,
   periodPreset, pickedInCategory, quoteOf, saveLabel, senderColor, toggleTopic, topicLabel, topicsPayload,
   uploadsProblem, wrapupLeft,
@@ -120,6 +121,36 @@ test('единственный привязанный аккаунт подст�
   assert.equal(autoAccountId({ status: 'open', account_id: 9 }, [{ id: 7 }]), null);
   assert.equal(autoAccountId({ status: 'done', account_id: null }, [{ id: 7 }]), null);
   assert.equal(autoAccountId(null, [{ id: 7 }]), null);
+});
+
+test('«Аккаунта нет»: отметку оператора не перебивает найденный позже аккаунт, в списках она видна', () => {
+  // Оператор сказал «аккаунта нет» — запоздавший ответ TEZ APP с единственным аккаунтом его не подставит.
+  assert.equal(autoAccountId({ status: 'open', account_id: null, no_account: true }, [{ id: 7 }]), null);
+  assert.equal(autoAccountId({ status: 'open', account_id: null, no_account: false }, [{ id: 7 }]), 7);
+  assert.equal(NO_ACCOUNT_LABEL, 'Аккаунта нет');
+  const account = { kind_label: 'Водитель', full_name: 'Иванов Иван', tez_id: 12345 };
+  assert.equal(cardAccountText({ account }), 'Водитель · Иванов Иван · ID 12345');
+  assert.equal(cardAccountText({ account: null, no_account: true }, 'Аккаунт не указан'), 'Аккаунта нет');
+  assert.equal(cardAccountText({ account: null, no_account: false }, 'Аккаунт не указан'), 'Аккаунт не указан');
+  assert.equal(cardAccountText(null), '');
+  // Аккаунт есть — он и показан, даже если отметка почему-то осталась.
+  assert.equal(cardAccountText({ account, no_account: true }), 'Водитель · Иванов Иван · ID 12345');
+});
+
+test('карточка звонка: строка «Аккаунта нет» ведёт к причинам так же, как выбранный аккаунт', () => {
+  const card = readFileSync(new URL('../src/client_card_embed/CallCard.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(card, /function NoAccountRow\(/);
+  assert.match(card, /const noAccount = Boolean\(card\.no_account\) && !account;/);
+  assert.match(card, /const personKnown = Boolean\(account\) \|\| noAccount;/);
+  // Отметка ставится своей ручкой, снимается обычным «снять выбор аккаунта».
+  assert.match(card, /noAccount \? api\.chooseAccount\(cardId, null\) : api\.noAccount\(cardId\)/);
+  // Причины, комментарий и запрос в отдел открываются по personKnown, а не только по аккаунту.
+  assert.equal((card.match(/\{personKnown && \(/g) || []).length, 3);
+  assert.doesNotMatch(card, /\{account && \(\n\s*<section/);
+  // Город — только у аккаунта: у звонившего без аккаунта его нет.
+  assert.match(card, /\{account && !cityKnownFromTez && \(/);
+  const api = readFileSync(new URL('../src/components/client_cards/cardsApi.js', import.meta.url), 'utf8');
+  assert.match(api, /noAccount: \(cardId\) => axios\.post\(url\(`\/cards\/\$\{cardId\}\/account`\), \{ none: true \}, config\(\)\)/);
 });
 
 // ─── Постобработка и кнопка ──────────────────────────────────────────────────

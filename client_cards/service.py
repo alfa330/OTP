@@ -218,6 +218,11 @@ class ClientCardsService:
         with self._cursor() as cursor:
             card = self._card_for(cursor, ctx, card_id, edit=True, for_update=True, live=True)
             if account_id is None:
+                # Заполненная карточка без аккаунта и без отметки «Аккаунта нет» выпала бы из
+                # отчёта: заполненные = водители + клиенты + без аккаунта.
+                if card['status'] == rules.STATUS_DONE:
+                    raise CardError('У заполненной карточки должен остаться аккаунт или отметка «Аккаунта нет»',
+                                    'CARD_INCOMPLETE')
                 queries.update_card(cursor, card_id, {'account_id': None, 'account_kind': None, 'city': None},
                                     now=now)
                 return self._bundle(cursor, card_id)
@@ -229,6 +234,21 @@ class ClientCardsService:
             queries.update_card(cursor, card_id, {
                 'account_id': account['id'], 'account_kind': account['kind'], 'city': account.get('city')},
                 now=now)
+            return self._bundle(cursor, card_id)
+
+    def mark_no_account(self, ctx, card_id):
+        """Оператор отметил: у звонившего нет аккаунта в Тез (решение владельца 12.11.2026).
+
+        Такую карточку можно сохранить без аккаунта — причина всё равно выбирается, а в
+        отчёте эти обращения идут отдельной строкой. Выбранный до этого аккаунт снимается:
+        «нет» и «вот этот» вместе не бывают. Привязки номера остаются как были — отметка
+        говорит об этом звонке, а не о номере.
+        """
+        now = self._now()
+        with self._cursor() as cursor:
+            self._card_for(cursor, ctx, card_id, edit=True, for_update=True, live=True)
+            queries.update_card(cursor, card_id, {
+                'account_id': None, 'account_kind': rules.KIND_NONE, 'city': None}, now=now)
             return self._bundle(cursor, card_id)
 
     def attach_link(self, ctx, card_id, link):

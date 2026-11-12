@@ -10,7 +10,7 @@ import { BarChart3, ChevronDown, Download, Loader2 } from 'lucide-react';
 
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosHint, iosBtnSecondary, iosCard, iosGroupLabel } from '../ui/ios';
-import { almatyToday, errorText, fmtSeconds, fmtShare, periodPreset } from './cardRules';
+import { NO_ACCOUNT_LABEL as NO_ACCOUNT, almatyToday, errorText, fmtSeconds, fmtShare, periodPreset } from './cardRules';
 import { periodPresets } from './JournalTab';
 import { EmptyState, Spinner } from './ui';
 
@@ -111,6 +111,7 @@ export default function ReportTab({ api, departmentId, toast }) {
 
     const totals = data?.totals;
     const done = totals?.done || 0;
+    const noAccount = totals?.no_account || 0;
     const shareHint = `Доля = карточек ÷ заполненных карточек за период (${done}). Не от всех звонков: у незаполненной карточки причины и города нет.`;
 
     return (
@@ -140,7 +141,7 @@ export default function ReportTab({ api, departmentId, toast }) {
                         <Tile label="Звонков" value={totals.calls} sub={`входящих ${totals.incoming} · исходящих ${totals.outgoing}`}
                               hint="Состоявшиеся звонки, по которым телефон открыл карточку. Звонки без разговора и без записи оператора не считаются." />
                         <Tile label="Заполнено" value={done} sub={`${fmtShare(done, totals.calls)} от звонков`}
-                              hint="Оператор выбрал аккаунт и причину и сохранил карточку. Доля = заполнено ÷ звонков." />
+                              hint="Оператор выбрал аккаунт (или отметил «Аккаунта нет») и причину и сохранил карточку. Доля = заполнено ÷ звонков." />
                         <Tile label="Не заполнено" value={totals.pending} warn={totals.pending > 0}
                               sub={totals.pending ? `${fmtShare(totals.pending, totals.calls)} от звонков` : ''}
                               hint="Звонок состоялся, а карточка не сохранена. В разрезах по причинам и городам таких карточек нет." />
@@ -180,12 +181,18 @@ export default function ReportTab({ api, departmentId, toast }) {
                             <div className={iosGroupLabel}>Города</div>
                             <div className={`${iosCard} overflow-hidden`}>
                                 <TableHead first="Город аккаунта" shareHint={`${shareHint} У карточки один город, сумма строк равна числу заполненных.`} />
-                                {!data.cities.length && <p className="px-4 py-4 text-[13px] text-slate-500">Заполненных карточек за период нет.</p>}
+                                {!data.cities.length && !noAccount && <p className="px-4 py-4 text-[13px] text-slate-500">Заполненных карточек за период нет.</p>}
                                 {data.cities.map((city) => (
                                     <div key={city.city || 'none'} className="border-b border-slate-100 last:border-b-0">
                                         <BarRow title={city.city || CITY_UNKNOWN} count={city.count} whole={done} />
                                     </div>
                                 ))}
+                                {/* Обращения без аккаунта — своей строкой: города у них быть не может. */}
+                                {noAccount > 0 && (
+                                    <div className="border-b border-slate-100 last:border-b-0">
+                                        <BarRow title={NO_ACCOUNT} count={noAccount} whole={done} />
+                                    </div>
+                                )}
                             </div>
                         </section>
                     </div>

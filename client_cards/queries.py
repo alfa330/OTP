@@ -1205,7 +1205,8 @@ def report(cursor, department_id, *, date_from, date_to):
                COUNT(*) FILTER (WHERE c.status = 'done' AND c.account_kind = 'client'),
                COUNT(DISTINCT """ + _PERSON + """),
                """ + _WRAPUP_AVG + """,
-               """ + _LATE_COUNT + """
+               """ + _LATE_COUNT + """,
+               COUNT(*) FILTER (WHERE c.status = 'done' AND c.account_id IS NULL AND c.account_kind = 'none')
           FROM client_cards c
     """ + _PERIOD_WHERE, params)
     row = cursor.fetchone()
@@ -1214,6 +1215,9 @@ def report(cursor, department_id, *, date_from, date_to):
         'incoming': int(row[3] or 0), 'outgoing': int(row[4] or 0),
         'drivers': int(row[5] or 0), 'clients': int(row[6] or 0), 'people': int(row[7] or 0),
         'avg_wrapup_sec': _seconds(row[8]), 'late': int(row[9] or 0),
+        # Заполненные карточки с отметкой «Аккаунта нет»: звонивший не зарегистрирован в Тез.
+        # Вместе с водителями и клиентами дают все заполненные.
+        'no_account': int(row[10] or 0),
     }
 
     cursor.execute("""
@@ -1245,10 +1249,15 @@ def report(cursor, department_id, *, date_from, date_to):
             by_category[category_id]['count'] = int(count)
     categories_list.sort(key=lambda node: (-node['count'], node['title'] or ''))
 
+    # Города — по карточкам с аккаунтом: у отметки «Аккаунта нет» города быть не может, и в
+    # строке «город не указан» она сошла бы за аккаунт, которому город забыли поставить.
+    # Такие карточки считает totals['no_account']: строки городов + оно = все заполненные.
     cursor.execute("""
         SELECT COALESCE(c.city, ''), COUNT(*)
           FROM client_cards c
-    """ + _PERIOD_WHERE + " AND c.status = 'done' GROUP BY 1 ORDER BY 2 DESC, 1", params)
+    """ + _PERIOD_WHERE + """ AND c.status = 'done'
+           AND NOT (c.account_id IS NULL AND c.account_kind IS NOT DISTINCT FROM 'none')
+         GROUP BY 1 ORDER BY 2 DESC, 1""", params)
     cities = [{'city': row[0], 'count': int(row[1])} for row in cursor.fetchall()]
 
     cursor.execute("""

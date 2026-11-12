@@ -19,6 +19,8 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from . import rules
+
 HEADER_FILL = PatternFill('solid', fgColor='1F2937')
 HEADER_FONT = Font(bold=True, color='FFFFFF')
 HEADER_ALIGN = Alignment(horizontal='center', vertical='center', wrap_text=True)
@@ -85,24 +87,27 @@ def summary_rows(data):
     return [
         ('А', 'Состоявшихся звонков с карточкой', calls, None,
          'Все звонки периода, по которым телефон открыл карточку. Звонки без разговора и без записи не считаются.'),
-        ('Б', 'Заполнено карточек (из А)', done, None, 'Оператор выбрал аккаунт и причину и сохранил карточку.'),
+        ('Б', 'Заполнено карточек (из А)', done, None,
+         'Оператор выбрал аккаунт (или отметил, что его нет) и причину и сохранил карточку.'),
         ('В', 'Не заполнено карточек (из А)', totals['pending'], None, 'А = Б + В.'),
         ('Г', 'Доля заполненных = Б ÷ А', _share(done, calls), PERCENT, 'От всех состоявшихся звонков.'),
         ('Д', 'Входящих (из А)', totals['incoming'], None, ''),
         ('Е', 'Исходящих (из А)', totals['outgoing'], None, 'А = Д + Е.'),
         ('Ж', 'Обращений водителей (из Б)', totals['drivers'], None, 'По виду выбранного аккаунта.'),
-        ('З', 'Обращений клиентов (из Б)', totals['clients'], None, 'Б = Ж + З.'),
-        ('И', 'Разных людей обратилось', totals['people'], None,
+        ('З', 'Обращений клиентов (из Б)', totals['clients'], None, ''),
+        ('И', 'Обращений без аккаунта (из Б)', totals.get('no_account', 0), None,
+         'Оператор отметил «Аккаунта нет»: звонивший не зарегистрирован в Тез. Б = Ж + З + И.'),
+        ('К', 'Разных людей обратилось', totals['people'], None,
          'По аккаунту, а где его нет — по номеру. Один человек с пятью звонками — один.'),
-        ('К', 'Сохранено позже срока постобработки (из Б)', totals['late'], None,
+        ('Л', 'Сохранено позже срока постобработки (из Б)', totals['late'], None,
          'Карточку сохранили после того, как вышло время постобработки.'),
-        ('Л', 'Доля сохранённых позже срока = К ÷ Б', _share(totals['late'], done), PERCENT,
+        ('М', 'Доля сохранённых позже срока = Л ÷ Б', _share(totals['late'], done), PERCENT,
          'От заполненных карточек, не от всех звонков.'),
-        ('М', 'Среднее время на карточку после звонка', _minutes(totals['avg_wrapup_sec']), None,
+        ('Н', 'Среднее время на карточку после звонка', _minutes(totals['avg_wrapup_sec']), None,
          'От конца звонка до сохранения. Карточки, сохранённые ещё во время разговора, в среднее не входят.'),
-        ('Н', 'Запросов в другие отделы', requests['total'], None, 'Созданы в периоде.'),
-        ('О', 'Из них без решения (из Н)', requests['active'], None, 'Ждут ответа или ответ есть, но запрос не закрыт.'),
-        ('П', 'Среднее время до первого ответа отдела', _minutes(requests['avg_first_reply_sec']), None,
+        ('О', 'Запросов в другие отделы', requests['total'], None, 'Созданы в периоде.'),
+        ('П', 'Из них без решения (из О)', requests['active'], None, 'Ждут ответа или ответ есть, но запрос не закрыт.'),
+        ('Р', 'Среднее время до первого ответа отдела', _minutes(requests['avg_first_reply_sec']), None,
          'По запросам, на которые ответили.'),
     ]
 
@@ -169,8 +174,16 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
         sheet.cell(row=row, column=2, value=city['count'])
         sheet.cell(row=row, column=3, value=_share(city['count'], done)).number_format = PERCENT
         row += 1
+    # Обращения без аккаунта — своей строкой: города у них быть не может.
+    no_account = int(data['totals'].get('no_account') or 0)
+    if no_account:
+        sheet.cell(row=row, column=1, value=rules.NO_ACCOUNT_LABEL)
+        sheet.cell(row=row, column=2, value=no_account)
+        sheet.cell(row=row, column=3, value=_share(no_account, done)).number_format = PERCENT
+        row += 1
     sheet.cell(row=row + 1, column=1, value=(
-        'Город — город аккаунта на момент обращения. Сумма строк = Б (%d): у карточки один город.' % done)
+        'Город — город аккаунта на момент обращения. Сумма строк = Б (%d): у карточки один город, '
+        'у обращения без аккаунта — строка «%s».' % (done, rules.NO_ACCOUNT_LABEL))
     ).font = NOTE_FONT
     sheet.freeze_panes = 'A2'
 
@@ -211,7 +224,9 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
         ('Период', '%s – %s включительно, время Алматы. Звонок относится к дню, когда он начался.'
          % (date_from.strftime('%d.%m.%Y'), date_to.strftime('%d.%m.%Y'))),
         ('Что такое карточка', 'Запись об одном звонке: телефон открывает её, когда звонок поступил или начат. '
-                               'Оператор выбирает аккаунт Тез и причину обращения.'),
+                               'Оператор выбирает аккаунт Тез и причину обращения. У звонившего нет '
+                               'аккаунта — оператор отмечает «Аккаунта нет»; такие обращения идут своей '
+                               'строкой в «Сводке» (И) и в «Городах».'),
         ('Что не считается', 'Звонки, которые не состоялись (не ответили, и оператор ничего не записал), '
                              'в отчёт не входят.'),
         ('Не заполнено', 'Звонок состоялся, а карточка не сохранена: причины у неё нет, поэтому в листах '

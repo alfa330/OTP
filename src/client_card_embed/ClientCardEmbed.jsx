@@ -35,8 +35,8 @@ import { IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, i
 import RequestsPanel from '../components/client_cards/RequestsPanel';
 import { createCardsApi } from '../components/client_cards/cardsApi';
 import {
-    accountTitle, autoAccountId, errorText, eventIsForCall, fmtClock, fmtWhen, parseCallMessage, topicLabel,
-    topicsPayload, wrapupLeft,
+    NO_ACCOUNT_LABEL, accountTitle, autoAccountId, errorText, eventIsForCall, fmtClock, fmtWhen, parseCallMessage,
+    topicLabel, topicsPayload, wrapupLeft,
 } from '../components/client_cards/cardRules';
 import { StateBadge } from '../components/client_cards/ui';
 import QrUnlockPanel from '../embed/QrUnlockPanel';
@@ -146,7 +146,7 @@ function IdleScreen({ boot, busy, onOpenPending, onManual }) {
                                         <span className="block text-[14px] font-medium tabular-nums text-slate-900">{card.phone_text}</span>
                                         <span className="block truncate text-[12px] text-slate-500">
                                             {card.direction_label} · {fmtWhen(card.created_at)}
-                                            {card.account ? ` · ${card.account.kind_label} ${accountTitle(card.account)}` : ''}
+                                            {card.account ? ` · ${card.account.kind_label} ${accountTitle(card.account)}` : (card.no_account ? ` · ${NO_ACCOUNT_LABEL}` : '')}
                                             {card.topics.length ? ` · ${topicLabel(card.topics[0])}` : ''}
                                         </span>
                                     </span>

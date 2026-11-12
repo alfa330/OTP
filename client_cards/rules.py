@@ -81,6 +81,14 @@ KIND_CLIENT = 'client'
 KINDS = (KIND_DRIVER, KIND_CLIENT)
 KIND_LABELS = {KIND_DRIVER: 'Водитель', KIND_CLIENT: 'Клиент'}
 
+# Аккаунта нет вовсе: звонивший не зарегистрирован в Тез (ошибся номером, спрашивает про
+# регистрацию). Оператор отмечает это сам — «Аккаунта нет» (решение владельца 12.11.2026:
+# без отметки такие карточки нельзя было сохранить, и они копились «не заполненными»).
+# Это вид только самой карточки (client_cards.account_kind при пустом account_id): у
+# аккаунтов и привязок такого вида не бывает, поэтому в KINDS его нет.
+KIND_NONE = 'none'
+NO_ACCOUNT_LABEL = 'Аккаунта нет'
+
 # Раздел админки Тез → вид аккаунта (владелец, 12.11.2026):
 #   https://admin.tezapp.org/admin/drivers/12345   — водитель
 #   https://admin.tezapp.org/admin/clients/67890  — клиент
@@ -204,14 +212,21 @@ def void_on_end(card):
     return not card.get('answered_at') and is_untouched(card)
 
 
+def has_no_account(card):
+    """Оператор отметил, что у звонившего нет аккаунта в Тез (см. KIND_NONE)."""
+    return not card.get('account_id') and card.get('account_kind') == KIND_NONE
+
+
 def completion_error(card):
     """Чего не хватает, чтобы сохранить карточку. None — можно сохранять.
 
     Порядок тот же, что на экране: сначала аккаунт, потом причина (задача #335,
     п. 2–3: без аккаунта оператор не продолжает, причины выбираются после него).
+    Аккаунта может не быть вовсе — тогда оператор отмечает это сам («Аккаунта нет»),
+    и карточка сохраняется без него; молча, без отметки, — нельзя.
     """
-    if not card.get('account_id'):
-        return 'Выберите аккаунт или вставьте ссылку на него'
+    if not card.get('account_id') and not has_no_account(card):
+        return 'Выберите аккаунт, вставьте ссылку на него или отметьте «Аккаунта нет»'
     if not card.get('topics'):
         return 'Выберите причину обращения'
     return None

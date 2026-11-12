@@ -12,7 +12,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosBadge, IosSegmented, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import CardDetail from './CardDetail';
-import { REQUEST_TONES, accountTitle, almatyToday, errorText, fmtWhen, periodPreset, topicLabel } from './cardRules';
+import { REQUEST_TONES, almatyToday, cardAccountText, errorText, fmtWhen, periodPreset, topicLabel } from './cardRules';
 import { EmptyState, Spinner, StateBadge } from './ui';
 
 const STATE_OPTIONS = [
@@ -123,7 +123,7 @@ export default function JournalTab({ api, departmentId, categories, toast, onOpe
                             </div>
                             <div className="min-w-0">
                                 <div className="truncate text-[13.5px] font-medium text-slate-900">
-                                    {card.account ? `${card.account.kind_label} · ${accountTitle(card.account)}` : 'Аккаунт не указан'}
+                                    {cardAccountText(card, 'Аккаунт не указан')}
                                 </div>
                                 <div className="truncate text-[12px] tabular-nums text-slate-500">
                                     {card.direction_label} · {card.phone_text}{card.city ? ` · ${card.city}` : ''}

@@ -116,6 +116,51 @@ def test_completion_needs_account_then_topic():
     assert rules.completion_error(_card(account_id=7, topics=[{'category_id': 1}])) is None
 
 
+def test_no_account_mark_stands_for_the_account_but_not_for_the_topic():
+    """«Аккаунта нет» (владелец, 12.11.2026): звонивший не зарегистрирован в Тез."""
+    marked = _card(account_kind=rules.KIND_NONE)
+    assert rules.has_no_account(marked)
+    # Без отметки и без аккаунта карточку не сохранить — и текст говорит, как выйти.
+    assert rules.NO_ACCOUNT_LABEL in rules.completion_error(_card())
+    assert rules.completion_error(marked) == 'Выберите причину обращения'
+    assert rules.completion_error(_card(account_kind=rules.KIND_NONE, topics=[{'category_id': 1}])) is None
+    # Аккаунт выбран — отметки нет, что бы ни лежало в виде.
+    assert not rules.has_no_account(_card(account_id=7, account_kind=rules.KIND_NONE))
+    assert not rules.has_no_account(_card(account_kind=rules.KIND_DRIVER))
+    assert not rules.has_no_account(_card())
+    # Это вид карточки, а не аккаунта: по ссылке и из TEZ APP такой вид не приходит.
+    assert rules.KIND_NONE not in rules.KINDS and rules.KIND_NONE not in rules.KIND_LABELS
+    # Отметка — не запись оператора: недозвон с отметкой всё равно «не состоялся».
+    assert rules.void_on_end(marked)
+
+
+def test_summary_rows_letters_and_formulas_agree():
+    """Буквы строк «Сводки» идут подряд, а формулы в подписях ссылаются на существующие строки."""
+    import re
+
+    from client_cards import report
+    totals = {'calls': 10, 'done': 8, 'pending': 2, 'incoming': 7, 'outgoing': 3, 'drivers': 5, 'clients': 2,
+              'no_account': 1, 'people': 9, 'avg_wrapup_sec': 41.0, 'late': 2}
+    rows = report.summary_rows({'totals': totals, 'requests': {'total': 3, 'active': 1, 'avg_first_reply_sec': 600}})
+    letters = [row[0] for row in rows]
+    assert letters == list('АБВГДЕЖЗИКЛМНОПР')
+    by_letter = {row[0]: row for row in rows}
+    # Ссылки на строки: «(из Б)», «= Б ÷ А», «А = Б + В».
+    refs = re.compile(r'(?:\(из |[=÷+] )([А-Я])(?![А-Яа-яё])|(?:^|\. )([А-Я]) = ')
+    found = 0
+    for letter, label, _value, _format, note in rows:
+        for text in (label, note):
+            for first, second in refs.findall(text):
+                found += 1
+                assert (first or second) in by_letter, (letter, text)
+    assert found >= 15
+    assert by_letter['И'][1:3] == ('Обращений без аккаунта (из Б)', 1)
+    assert by_letter['Ж'][2] + by_letter['З'][2] + by_letter['И'][2] == by_letter['Б'][2]
+    assert 'Б = Ж + З + И' in by_letter['И'][4]
+    assert by_letter['М'][1] == 'Доля сохранённых позже срока = Л ÷ Б' and by_letter['Л'][2] == 2
+    assert by_letter['П'][1] == 'Из них без решения (из О)' and by_letter['О'][2] == 3
+
+
 TREE = {
     1: {'parent_id': None, 'is_active': True, 'has_children': True},
     2: {'parent_id': 1, 'is_active': True, 'has_children': False},

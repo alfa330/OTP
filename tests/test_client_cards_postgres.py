@@ -922,6 +922,76 @@ def test_journal_and_report(world):
         'Карточка клиента Тез КЦ 12.11.2026–12.11.2026.xlsx'
 
 
+def test_no_account_card(world):
+    """«Аккаунта нет» (владелец, 12.11.2026): звонивший не зарегистрирован в Тез — карточка
+    сохраняется без аккаунта, причина всё равно нужна, в отчёте такие обращения отдельно."""
+    w = world
+    anna = w.ctx(ANNA)
+    card_id = w.svc.open_call(anna, phone='77019990011', direction='in', call_key='na1')['card']['id']
+    w.svc.call_event(anna, card_id, 'answered')
+    with pytest.raises(CardError) as failed:
+        w.svc.complete_card(anna, card_id)
+    assert 'Аккаунта нет' in str(failed.value)
+
+    bundle = w.svc.mark_no_account(anna, card_id)
+    assert bundle['card']['account_id'] is None and bundle['card']['account_kind'] == rules.KIND_NONE
+    assert bundle['account'] is None and rules.has_no_account(bundle['card'])
+    # Отметка аккаунт не заменяет причину: без неё карточка по-прежнему не сохраняется.
+    with pytest.raises(CardError) as failed:
+        w.svc.complete_card(anna, card_id)
+    assert str(failed.value) == 'Выберите причину обращения'
+    # Города у обращения без аккаунта нет — и указать его нельзя.
+    with pytest.raises(CardError):
+        w.svc.save_card(anna, card_id, {'city': 'Алматы'})
+
+    # Аккаунт всё-таки нашёлся: выбор аккаунта снимает отметку, отметка — снимает аккаунт.
+    linked = w.svc.attach_link(anna, card_id, 'admin.tezapp.org/admin/drivers/777')
+    assert linked['card']['account_kind'] == rules.KIND_DRIVER and not rules.has_no_account(linked['card'])
+    account_id = linked['card']['account_id']
+    cleared = w.svc.mark_no_account(anna, card_id)
+    assert cleared['card']['account_id'] is None and rules.has_no_account(cleared['card'])
+    # Привязка номера остаётся: отметка говорит о звонке, а не о номере.
+    assert [item['id'] for item in cleared['accounts']] == [account_id]
+    again = w.svc.choose_account(anna, card_id, account_id)
+    assert again['card']['account_id'] == account_id and not rules.has_no_account(again['card'])
+    w.svc.choose_account(anna, card_id, None)
+    w.svc.mark_no_account(anna, card_id)
+
+    w.svc.save_card(anna, card_id, {'topics': [{'category_id': w.money}], 'comment': 'спрашивал про регистрацию'})
+    w.svc.call_event(anna, card_id, 'ended')
+    done = w.svc.complete_card(anna, card_id)
+    assert done['card']['status'] == rules.STATUS_DONE and rules.has_no_account(done['card'])
+    # У заполненной карточки нельзя снять и аккаунт, и отметку: она выпала бы из отчёта.
+    with pytest.raises(CardError) as failed:
+        w.svc.choose_account(anna, card_id, None)
+    assert failed.value.code == 'CARD_INCOMPLETE'
+
+    # Отчёт: обращение без аккаунта — отдельным числом, в города не попадает.
+    _calls(w, ANNA, 2, topic=w.no_orders, start_key=40, city='Алматы')
+    day_start = datetime(2026, 11, 12)
+    with w.db._get_cursor() as cursor:
+        data = queries.report(cursor, TEZ, date_from=day_start, date_to=day_start + timedelta(days=1))
+        journal = queries.journal(cursor, TEZ, search='9990011')[0]
+    totals = data['totals']
+    assert (totals['done'], totals['drivers'], totals['clients'], totals['no_account']) == (3, 2, 0, 1)
+    assert totals['drivers'] + totals['clients'] + totals['no_account'] == totals['done']
+    assert {city['city']: city['count'] for city in data['cities']} == {'Алматы': 2}
+    assert sum(city['count'] for city in data['cities']) + totals['no_account'] == totals['done']
+    # Человек без аккаунта считается по номеру.
+    assert totals['people'] == 3
+    assert [card['account_kind'] for card in journal] == [rules.KIND_NONE]
+
+    from openpyxl import load_workbook
+    book = load_workbook(report.build_workbook(data, department_name='Тез КЦ', date_from=day_start.date(),
+                                               date_to=day_start.date(), generated_at=w.clock()))
+    summary = {row[0]: row for row in book[report.SHEET_SUMMARY].iter_rows(min_row=5, values_only=True)}
+    assert summary['И'][1] == 'Обращений без аккаунта (из Б)' and summary['И'][2] == 1
+    assert summary['Ж'][2] + summary['З'][2] + summary['И'][2] == summary['Б'][2]
+    cities = [row for row in book[report.SHEET_CITIES].iter_rows(min_row=2, values_only=True) if row[1] is not None]
+    assert [(row[0], row[1]) for row in cities] == [('Алматы', 2), (rules.NO_ACCOUNT_LABEL, 1)]
+    assert sum(row[1] for row in cities) == summary['Б'][2]
+
+
 def test_service_module_exports():
     assert service_module.HISTORY_PAGE > 0 and service_module.PENDING_DAYS >= 1
 
@@ -1185,6 +1255,39 @@ def test_api_management(api):
     assert status == 200 and body == {'sent': ['Глава Теза'], 'errors': []}
     assert w.outbox.messages[sent_before]['chat_id'] == 700300
     assert api.post('/alerts/test', json={})[0] == 403
+
+
+def test_api_no_account(api):
+    """«Аккаунта нет» ручкой: карточка отдаёт отметку, сохраняется без аккаунта, снимается выбором."""
+    w = api.w
+    status, bundle = api.post('/phone/calls', json={'phone': '77019990021', 'direction': 'in', 'call_key': 'api-na'})
+    card_id = bundle['card']['id']
+    assert status == 200 and bundle['card']['no_account'] is False
+    assert 'Аккаунта нет' in bundle['completion_error']
+    api.post('/cards/%d/event' % card_id, json={'event': 'answered'})
+
+    status, marked = api.post('/cards/%d/account' % card_id, json={'none': True})
+    assert status == 200 and marked['card']['no_account'] is True and marked['account'] is None
+    assert marked['card']['account_id'] is None and marked['completion_error'] == 'Выберите причину обращения'
+    # Чужую карточку так не отметить.
+    assert api.post('/cards/%d/account' % card_id, user=BORIS, json={'none': True})[0] == 403
+
+    status, cleared = api.post('/cards/%d/account' % card_id, json={'account_id': None})
+    assert status == 200 and cleared['card']['no_account'] is False
+    api.post('/cards/%d/account' % card_id, json={'none': True})
+    api.patch('/cards/%d' % card_id, json={'topics': [{'category_id': w.money}]})
+    api.post('/cards/%d/event' % card_id, json={'event': 'ended'})
+    status, done = api.post('/cards/%d/complete' % card_id)
+    assert status == 200 and done['card']['state'] == 'done' and done['card']['no_account'] is True
+
+    # В журнале и в обращении для чтения отметка видна; в отчёте — отдельным числом.
+    status, journal = api.get('/journal', user=HEAD)
+    row = next(item for item in journal['items'] if item['id'] == card_id)
+    assert row['no_account'] is True and row['account'] is None
+    status, detail = api.get('/cards/%d' % card_id)
+    assert detail['card']['no_account'] is True and detail['account'] is None
+    status, body = api.get('/report?from=2026-11-12&to=2026-11-12', user=HEAD)
+    assert status == 200 and body['totals']['no_account'] == 1 and body['cities'] == []
 
 
 def test_api_journal_and_report(api):

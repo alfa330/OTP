@@ -154,10 +154,21 @@ export const looksLikeAccountLink = (text) => (
     /^(https?:\/\/)?admin\.tezapp\.org\/admin\/(drivers|clients)\/\d{1,12}([/?#].*)?$/i.test(String(text || '').trim())
 );
 
+/** Отметка оператора «у звонившего нет аккаунта в Тез» (client_cards/rules.py: KIND_NONE). */
+export const NO_ACCOUNT_LABEL = 'Аккаунта нет';
+
+/** Аккаунт карточки одной строкой для списков: «Водитель · Иванов Иван · ID 12345»,
+ *  «Аккаунта нет» по отметке оператора, иначе fallback (карточку ещё не заполнили). */
+export const cardAccountText = (card, fallback = '') => {
+    if (card?.account) return `${card.account.kind_label} · ${accountTitle(card.account)}`;
+    return card?.no_account ? NO_ACCOUNT_LABEL : fallback;
+};
+
 /** Какой аккаунт подставить самому: единственный привязанный к номеру. Несколько —
- *  выбирает оператор (задача #335, п. 2), уже выбранный не трогаем. */
+ *  выбирает оператор (задача #335, п. 2), уже выбранный не трогаем. Отметку «Аккаунта нет»
+ *  тоже: оператор сказал своё, и запоздавший ответ TEZ APP не должен её перебить. */
 export const autoAccountId = (card, accounts) => {
-    if (!card || card.account_id || card.status !== 'open') return null;
+    if (!card || card.account_id || card.no_account || card.status !== 'open') return null;
     return (accounts || []).length === 1 ? accounts[0].id : null;
 };
 
