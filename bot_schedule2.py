@@ -31601,10 +31601,42 @@ async def _szov_broadcast_deliver(chat_id, text, media):
             await bot.send_media_group(chat_id, group)
             return
         except Exception as exc:
-            if not text:
+            # Группа стала супергруппой (у ошибки есть новый id чата): текстом в старый id
+            # тоже не уйдёт. Ошибка поднимается к вызывающему — он перенесёт подписки на новый
+            # id и повторит отправку целиком, с картинками (_telegram_follow_migration).
+            if not text or getattr(exc, 'migrate_to_chat_id', None) is not None:
                 raise
             logging.error("Отбивка табло: альбом не ушёл, отправляю текстом: %s", exc)
     await bot.send_message(chat_id, text, parse_mode='HTML')
+
+
+async def _telegram_follow_migration(chat_id, exc, label, send, also_subscribed=()):
+    """Telegram ответил на отправку «группа стала супергруппой» — довести сообщение до неё.
+
+    Обычная группа становится супергруппой, когда ей включают историю для новых участников,
+    ссылку-приглашение или права администраторов. Её id при этом меняется навсегда: на старый
+    Telegram отвечает ошибкой MigrateToChat и называет новый (`exc.migrate_to_chat_id`). Портал
+    же помнит чат по старому id — и отбивка молча перестаёт доходить. Так группе СЗоВ не
+    доходили отбивка линии и отчёт по чатам: в журнале это видно как минимум с 05.11.2026
+    (глубже он не хранится), нашлось 12.11.
+
+    Поэтому: переносим на новый id всё, что портал помнит о чате (получатели отбивок, подписки
+    на отчёты, реестр чатов бота — db.migrate_telegram_chat_id), и шлём то же сообщение туда:
+    `send(новый id)`. also_subscribed — id чатов, которым это сообщение в этом заходе уходит
+    своей строкой подписки: если новый id уже среди них, второй раз не шлём.
+
+    Возвращает id чата, в который сообщение ушло, или None, если оно уйдёт своей строкой."""
+    new_chat_id = int(exc.migrate_to_chat_id)
+    loop = asyncio.get_event_loop()
+    moved = await loop.run_in_executor(
+        executor_pool, functools.partial(db.migrate_telegram_chat_id, chat_id, new_chat_id))
+    logging.warning("%s: группа %s стала супергруппой %s — подписки перенесены на новый id: %s",
+                    label, chat_id, new_chat_id,
+                    ', '.join('%s %s' % item for item in sorted((moved or {}).items())) or 'записей не нашлось')
+    if new_chat_id in {int(item) for item in also_subscribed}:
+        return None
+    await send(new_chat_id)
+    return new_chat_id
 
 
 async def _szov_broadcast_send(chat_id, hour_to=None):
@@ -31701,6 +31733,21 @@ async def _szov_broadcast_run_job(*, direction, label, prepare, deviations, on_d
                                  chat.get('label') or 'чат %s' % chat['chat_id'], chat.get('mode'),
                                  ', группа %s' % group_id if group_id is not None else '')
                 except Exception as exc:
+                    if getattr(exc, 'migrate_to_chat_id', None) is not None:
+                        # Группа стала супергруппой: подписки — на новый id, отбивка — туда же.
+                        try:
+                            moved_to = await _telegram_follow_migration(
+                                chat['chat_id'], exc, label,
+                                lambda target: _szov_broadcast_deliver(target, text, media),
+                                also_subscribed=[item['chat_id'] for item in targets])
+                            if moved_to is not None:
+                                delivered = True
+                                logging.info("%s отправлена — чат %s (%s)%s", label, moved_to,
+                                             chat.get('mode'),
+                                             ', группа %s' % group_id if group_id is not None else '')
+                            continue
+                        except Exception as retry_exc:
+                            exc = retry_exc
                     logging.error("%s: %s не получил сообщение: %s", label,
                                   chat.get('label') or 'чат %s' % chat['chat_id'], exc)
         if delivered and on_delivered is not None:
@@ -32777,6 +32824,10 @@ async def _chat_hourly_deliver(chat_id, data, caption, image):
                                  caption=caption, parse_mode='HTML')
             return
         except Exception as exc:
+            # Группа стала супергруппой — текстом в старый id тоже не уйдёт: вызывающий
+            # перенесёт подписку на новый id и повторит отправку (_telegram_follow_migration).
+            if getattr(exc, 'migrate_to_chat_id', None) is not None:
+                raise
             logging.error("Отчёт по чатам: картинка не ушла, отправляю текстом: %s", exc)
     await bot.send_message(chat_id, _chat_hourly_text(data), parse_mode='HTML')
 
@@ -32817,11 +32868,23 @@ async def chat_hourly_broadcast_job():
     for subscription in subscriptions:
         chat_id = subscription['chat_id']
         try:
-            await _chat_hourly_deliver(chat_id, data, caption, image)
+            try:
+                await _chat_hourly_deliver(chat_id, data, caption, image)
+            except Exception as exc:
+                if getattr(exc, 'migrate_to_chat_id', None) is None:
+                    raise
+                # Группа стала супергруппой: подписка — на новый id, отчёт — туда же.
+                chat_id = await _telegram_follow_migration(
+                    chat_id, exc, "Отчёт по чатам",
+                    lambda target: _chat_hourly_deliver(target, data, caption, image),
+                    also_subscribed=[item['chat_id'] for item in subscriptions])
+                if chat_id is None:
+                    continue
             await loop.run_in_executor(
                 executor_pool, db.mark_chat_hourly_subscription_sent, chat_id)
         except Exception as exc:
-            logging.error("Отчёт по чатам: чат %s не получил сообщение: %s", chat_id, exc)
+            logging.error("Отчёт по чатам: чат %s не получил сообщение: %s",
+                          subscription['chat_id'], exc)
 
 
 
@@ -36980,11 +37043,23 @@ async def amo_leads_broadcast_job():
     for subscription in subscriptions:
         chat_id = subscription['chat_id']
         try:
-            await bot.send_message(chat_id, text, parse_mode='HTML')
+            try:
+                await bot.send_message(chat_id, text, parse_mode='HTML')
+            except Exception as exc:
+                if getattr(exc, 'migrate_to_chat_id', None) is None:
+                    raise
+                # Группа стала супергруппой: подписка — на новый id, отбивка — туда же.
+                chat_id = await _telegram_follow_migration(
+                    chat_id, exc, "Отбивка по лидам",
+                    lambda target: bot.send_message(target, text, parse_mode='HTML'),
+                    also_subscribed=[item['chat_id'] for item in subscriptions])
+                if chat_id is None:
+                    continue
             await loop.run_in_executor(
                 executor_pool, db.mark_amo_lead_subscription_sent, chat_id)
         except Exception as exc:
-            logging.error("Отбивка по лидам: чат %s не получил сообщение: %s", chat_id, exc)
+            logging.error("Отбивка по лидам: чат %s не получил сообщение: %s",
+                          subscription['chat_id'], exc)
 
 
 # --- Обзвон фронт-офиса: утренняя отбивка по плану ----------------------------------------------
@@ -37223,12 +37298,23 @@ async def front_office_calls_broadcast_job():
     for subscription in subscriptions:
         chat_id = subscription['chat_id']
         try:
-            await _front_office_calls_send(chat_id, text, document)
+            try:
+                await _front_office_calls_send(chat_id, text, document)
+            except Exception as exc:
+                if getattr(exc, 'migrate_to_chat_id', None) is None:
+                    raise
+                # Группа стала супергруппой: подписка — на новый id, отбивка — туда же.
+                chat_id = await _telegram_follow_migration(
+                    chat_id, exc, "Обзвон фронт-офиса",
+                    lambda target: _front_office_calls_send(target, text, document),
+                    also_subscribed=[item['chat_id'] for item in subscriptions])
+                if chat_id is None:
+                    continue
             await loop.run_in_executor(
                 executor_pool, db.mark_front_office_call_subscription_sent, chat_id)
         except Exception as exc:
             logging.error("Обзвон фронт-офиса: чат %s не получил сообщение: %s",
-                          chat_id, exc)
+                          subscription['chat_id'], exc)
 
 
 # --- Настройка отбивки: эндпоинты --------------------------------------------------------------

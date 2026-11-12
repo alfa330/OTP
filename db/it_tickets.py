@@ -531,6 +531,74 @@ class ItTicketsMixin:
                 (int(chat_id),),
             )
 
+    # Подписки на отчёты, где чат записан текстом и подписывает себя сам командой бота.
+    _TELEGRAM_SUBSCRIPTION_TABLES = ('amo_lead_subscriptions', 'chat_hourly_subscriptions',
+                                     'front_office_call_subscriptions')
+
+    def migrate_telegram_chat_id(self, old_chat_id, new_chat_id) -> dict:
+        """Группа Telegram стала супергруппой: её id сменился навсегда, на старый сообщения
+        больше не уходят. Переносит на новый id всё, что портал помнит о чате по старому:
+        получателей отбивок табло (все направления), подписки на отчёты (лиды amoCRM, чаты по
+        часам, обзвон фронт-офиса) и строку в реестре чатов бота.
+
+        Если новый id где-то уже записан (группу успели добавить заново), остаётся ЕГО строка,
+        а старая убирается: двух строк на один чат быть не должно — сообщение приходило бы
+        дважды. В реестре чатов старая строка в таком случае не удаляется, а выключается: на
+        неё ссылаются отправленные IT-заявки.
+
+        Одной транзакцией. Возвращает {таблица: сколько строк перенесено или убрано} — только
+        по таблицам, где что-то изменилось; пустой словарь — портал этого чата не знал."""
+        old_id, new_id = int(old_chat_id), int(new_chat_id)
+        if old_id == new_id:
+            return {}
+        changed = {}
+
+        def note(table, count):
+            if count:
+                changed[table] = changed.get(table, 0) + int(count)
+
+        with self._get_cursor() as cursor:
+            # Получатели отбивок: строка на (направление, чат).
+            cursor.execute("""
+                DELETE FROM szov_wallboard_broadcast_chats AS stale
+                USING szov_wallboard_broadcast_chats AS fresh
+                WHERE stale.chat_id = %s AND fresh.chat_id = %s AND fresh.direction = stale.direction
+            """, (old_id, new_id))
+            note('szov_wallboard_broadcast_chats', cursor.rowcount)
+            cursor.execute(
+                "UPDATE szov_wallboard_broadcast_chats SET chat_id = %s WHERE chat_id = %s",
+                (new_id, old_id))
+            note('szov_wallboard_broadcast_chats', cursor.rowcount)
+
+            # Подписки на отчёты: строка на чат, id текстом. Имена таблиц — из списка выше.
+            for table in self._TELEGRAM_SUBSCRIPTION_TABLES:
+                cursor.execute(
+                    f"DELETE FROM {table} WHERE chat_id = %s "
+                    f"AND EXISTS (SELECT 1 FROM {table} WHERE chat_id = %s)",
+                    (str(old_id), str(new_id)))
+                note(table, cursor.rowcount)
+                cursor.execute(
+                    f"UPDATE {table} SET chat_id = %s, chat_type = 'supergroup' WHERE chat_id = %s",
+                    (str(new_id), str(old_id)))
+                note(table, cursor.rowcount)
+
+            # Реестр чатов бота (из него выбирают получателей в интерфейсе).
+            cursor.execute("""
+                UPDATE it_ticket_channels
+                SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = %s AND is_active
+                  AND EXISTS (SELECT 1 FROM it_ticket_channels WHERE chat_id = %s)
+            """, (old_id, new_id))
+            note('it_ticket_channels', cursor.rowcount)
+            cursor.execute("""
+                UPDATE it_ticket_channels
+                SET chat_id = %s, chat_type = 'supergroup', updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = %s
+                  AND NOT EXISTS (SELECT 1 FROM it_ticket_channels WHERE chat_id = %s)
+            """, (new_id, old_id, new_id))
+            note('it_ticket_channels', cursor.rowcount)
+        return changed
+
     def delete_it_ticket_channel(self, channel_id):
         with self._get_cursor() as cursor:
             cursor.execute(
