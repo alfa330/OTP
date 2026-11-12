@@ -142,7 +142,7 @@ def _in_group(memberships, operator_id, day):
 
 def day_staffing(days, *, shifts, intervals_by_operator, memberships, now,
                  adherence_min=ADHERENCE_MIN):
-    """{день: {shifts_plan, shifts_fact, cr, online_seconds, busy_seconds, occ}}.
+    """{день: {shifts_plan, shifts_fact, cr, online_seconds, busy_seconds, occ, shifts}}.
 
     shifts — [{operator_id, day, start_time, end_time, shift_type, breaks}] из графиков;
     intervals_by_operator — {operator_id: online_intervals(...)};
@@ -150,9 +150,14 @@ def day_staffing(days, *, shifts, intervals_by_operator, memberships, now,
     now — «сейчас» местным временем: по нему отсекаются незаконченные смены.
 
     `cr` и `occ` — None, когда делить не на что: смен в графике нет или на линии никого
-    не было. Пустая клетка честнее нуля — ноль значил бы «никто не вышел»."""
+    не было. Пустая клетка честнее нуля — ноль значил бы «никто не вышел».
+
+    `shifts` дня — смены, вошедшие в план, по одной записи: {operator_id, start, end,
+    planned_seconds, online_seconds, adherence, counted}. Без них «3 из 13» не проверить
+    и не понять, чьи смены не засчитаны."""
     wanted = set(days)
-    out = {day: {'shifts_plan': 0, 'shifts_fact': 0, 'online_seconds': 0, 'busy_seconds': 0}
+    out = {day: {'shifts_plan': 0, 'shifts_fact': 0, 'online_seconds': 0, 'busy_seconds': 0,
+                 'shifts': []}
            for day in wanted}
 
     for shift in shifts or ():
@@ -162,14 +167,21 @@ def day_staffing(days, *, shifts, intervals_by_operator, memberships, now,
         operator_id = shift['operator_id']
         if not _in_group(memberships, operator_id, day):
             continue
-        if shift_bounds(shift)[1] > now:
+        start, end = shift_bounds(shift)
+        if end > now:
             continue
-        adherence = shift_adherence(shift, (intervals_by_operator or {}).get(operator_id) or ())
+        intervals = (intervals_by_operator or {}).get(operator_id) or ()
+        adherence = shift_adherence(shift, intervals)
         if adherence is None:
             continue
+        counted = adherence >= adherence_min
         out[day]['shifts_plan'] += 1
-        if adherence >= adherence_min:
-            out[day]['shifts_fact'] += 1
+        out[day]['shifts_fact'] += 1 if counted else 0
+        out[day]['shifts'].append({
+            'operator_id': operator_id, 'start': start, 'end': end,
+            'planned_seconds': planned_seconds(shift),
+            'online_seconds': overlap_seconds(intervals, start, end),
+            'adherence': adherence, 'counted': counted})
 
     for operator_id, intervals in (intervals_by_operator or {}).items():
         for day in wanted:
@@ -181,6 +193,7 @@ def day_staffing(days, *, shifts, intervals_by_operator, memberships, now,
                                                         busy_only=True)
 
     for stats in out.values():
+        stats['shifts'].sort(key=lambda item: (item['start'], item['operator_id']))
         stats['cr'] = (stats['shifts_fact'] / stats['shifts_plan']) if stats['shifts_plan'] else None
         stats['occ'] = (stats['busy_seconds'] / stats['online_seconds']
                         if stats['online_seconds'] else None)

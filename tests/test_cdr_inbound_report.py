@@ -439,6 +439,9 @@ class WorkbookTests(unittest.TestCase):
         self.assertIn('÷ Факт звонки', text)
         self.assertIn('÷ смены, поставленные операторам группы «Основа»', text)
         self.assertIn('не меньше 90 %', text)
+        self.assertIn('на листе «Смены»', text)
+        # Показателей смен в этой книге нет — нет и листа со сменами.
+        self.assertNotIn(R.SHIFTS_SHEET, self.book.sheetnames)
         self.assertIn('÷ всё их время на линии за день', text)
         self.assertIn('Сбросы на ожидании|Непринятые звонки (Факт звонки − Принято)', text)
         self.assertIn('меньше 5 секунд и 5 секунд и больше', text)
@@ -589,6 +592,9 @@ class _Staffing:
     def operator_exts(self, cursor, operator_ids):
         return {operator_id: '61%02d' % operator_id for operator_id in operator_ids}
 
+    def operator_names(self, cursor, operator_ids):
+        return {1: 'Иванова Айгерим', 2: 'Карабек Ержан'}
+
     def scheduled_shifts(self, cursor, operator_ids, day_from, day_to):
         return [{'operator_id': operator_id, 'day': date(2026, 11, 2),
                  'start_time': time(9, 0), 'end_time': time(18, 0),
@@ -661,9 +667,21 @@ class RouteTests(unittest.TestCase):
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
         self.assertNotIn('не посчитаны', notes)
 
+    def test_shifts_sheet_names_whose_shift_counted(self):
+        book = load_workbook(BytesIO(self.get(_Queries()).data))
+        rows = list(book[R.SHIFTS_SHEET].iter_rows(values_only=True))
+        self.assertEqual(rows[0], ('Дата', 'Оператор', 'Смена', 'План на линии, ч', 'На линии, ч',
+                                   'Доля', 'Засчитана'))
+        self.assertEqual(rows[1], (datetime(2026, 11, 2), 'Иванова Айгерим', '09:00–18:00',
+                                   8.0, 8.0, 1.0, 'да'))
+        self.assertEqual(rows[2], (datetime(2026, 11, 2), 'Карабек Ержан', '09:00–18:00',
+                                   8.0, 5.0, 0.625, 'нет'))
+        self.assertEqual(len(rows), 3)
+
     def test_group_without_people_leaves_the_cells_blank(self):
         response = self.get(_Queries(), _Staffing(operator_ids=()))
         book = load_workbook(BytesIO(response.data))
+        self.assertNotIn(R.SHIFTS_SHEET, book.sheetnames)
         self.assertIsNone(cell_of(book['02.11'], 'cr', 3).value)
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
         self.assertNotIn('не посчитаны', notes)
@@ -688,7 +706,7 @@ class RouteTests(unittest.TestCase):
         # План — факт недельной давности: входящие читаются с 26.10, а не с 02.11.
         self.assertEqual(double.asked, (date(2026, 10, 26), date(2026, 11, 3)))
         book = load_workbook(BytesIO(response.data))
-        self.assertEqual(book.sheetnames, ['02.11', '03.11', R.NOTES_SHEET])
+        self.assertEqual(book.sheetnames, ['02.11', '03.11', R.SHIFTS_SHEET, R.NOTES_SHEET])
         sheet = book['02.11']
         jana = queue_row(sheet, '3034')
         self.assertEqual((sheet['E%d' % jana].value, sheet['F%d' % jana].value), (4, 3))

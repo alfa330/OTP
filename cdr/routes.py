@@ -539,6 +539,7 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
                 return {}
             memberships = staffing_queries.memberships(cursor, operator_ids, day_from, day_to)
             exts = staffing_queries.operator_exts(cursor, operator_ids)
+            names = staffing_queries.operator_names(cursor, operator_ids)
             shifts = staffing_queries.scheduled_shifts(cursor, operator_ids, day_from, day_to)
             events = staffing_queries.phone_events(cursor, operator_ids, since, until)
             moments = staffing_queries.human_call_moments(
@@ -547,9 +548,14 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
             operator_id: inbound_staffing.online_intervals(
                 events.get(operator_id) or (), moments.get(exts.get(operator_id)) or ())
             for operator_id in operator_ids}
-        return inbound_staffing.day_staffing(
+        staffing = inbound_staffing.day_staffing(
             sync.days_in_period(day_from, day_to), shifts=shifts,
             intervals_by_operator=intervals, memberships=memberships, now=now)
+        # Лист «Смены» называет человека по имени: по id смену в графике не найти.
+        for stats in staffing.values():
+            for row in stats['shifts']:
+                row['name'] = names.get(row['operator_id']) or ''
+        return staffing
 
     @cdr_route('/reports/inbound')
     def cdr_inbound_report(ctx):

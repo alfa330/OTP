@@ -51,6 +51,12 @@ def operator_exts(cursor, operator_ids):
     return {int(row[0]): str(row[1]) for row in cursor.fetchall() if row[1]}
 
 
+def operator_names(cursor, operator_ids):
+    """{operator_id: ФИО} — для листа «Смены»: чья смена засчитана, а чья нет."""
+    cursor.execute("SELECT id, name FROM users WHERE id = ANY(%s)", (list(operator_ids),))
+    return {int(row[0]): row[1] or '' for row in cursor.fetchall()}
+
+
 def scheduled_shifts(cursor, operator_ids, day_from, day_to):
     """Смены из «Графиков работы» с началом в периоде и их перерывы.
 

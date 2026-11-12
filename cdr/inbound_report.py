@@ -178,6 +178,19 @@ NOTES_SHEET = 'Пояснения'
 # Автор примечаний к клеткам «ОСС» и «CR%».
 COMMENT_AUTHOR = 'iCORE'
 
+# Лист со сменами, из которых сложился «CR%»: (заголовок, ширина, формат).
+SHIFTS_SHEET = 'Смены'
+SHIFT_COLUMNS = (
+    ('Дата', 13.0, 'DD.MM.YYYY'),
+    ('Оператор', 38.0, 'General'),
+    ('Смена', 14.0, 'General'),
+    ('План на линии, ч', 18.0, '0.0'),
+    ('На линии, ч', 14.0, '0.0'),
+    ('Доля', 9.0, '0%'),
+    ('Засчитана', 12.0, 'General'),
+)
+SHIFT_NAME_ALIGN = Alignment(horizontal='left', vertical='center')
+
 # Строка листа за день, когда в очереди не поступило ни одного звонка.
 NO_CALLS_ROW = {'queue': '', 'park': 'Звонков не было', 'numbers': ()}
 
@@ -322,6 +335,10 @@ def build_workbook(touches, *, day_from, day_to, generated_at=None, generated_by
     workbook.remove(workbook.active)
     for table in tables:
         _fill_day(workbook.create_sheet(table['day'].strftime('%d.%m')), table)
+    # Смены, из которых сложился «CR%», — отдельным листом: на листе дня им места нет, а
+    # без списка не узнать, чья смена не засчитана. Смен в периоде нет — нет и листа.
+    if any((table.get('staffing') or {}).get('shifts') for table in tables):
+        _fill_shifts(workbook.create_sheet(SHIFTS_SHEET), tables)
     _fill_notes(workbook.create_sheet(NOTES_SHEET), day_from, day_to, generated_at,
                 generated_by, missing_days, sl_seconds, staffing_failed)
 
@@ -448,6 +465,35 @@ def _fill_day(sheet, table):
         DataBarRule(start_type='min', end_type='max', color=AR_BAR_COLOR))
 
 
+def _fill_shifts(sheet, tables):
+    """Лист «Смены»: по строке на смену, вошедшую в план «CR%»."""
+    sheet.sheet_view.zoomScale = ZOOM
+    sheet.freeze_panes = 'A2'
+    for index, (title, width, _fmt) in enumerate(SHIFT_COLUMNS, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+        cell = sheet.cell(row=1, column=index, value=title)
+        cell.font, cell.alignment, cell.border, cell.fill = FONT, CENTER, GRID, HEADER_FILL
+    row = 1
+    for table in tables:
+        for shift in (table.get('staffing') or {}).get('shifts') or ():
+            row += 1
+            values = (
+                table['day'],
+                shift.get('name') or 'id %s' % shift['operator_id'],
+                '%s–%s' % (shift['start'].strftime('%H:%M'), shift['end'].strftime('%H:%M')),
+                round(shift['planned_seconds'] / 3600.0, 2),
+                round(shift['online_seconds'] / 3600.0, 2),
+                shift['adherence'],
+                'да' if shift['counted'] else 'нет',
+            )
+            for index, (value, (_title, _width, fmt)) in enumerate(zip(values, SHIFT_COLUMNS),
+                                                                   start=1):
+                cell = sheet.cell(row=row, column=index, value=value)
+                cell.font, cell.border, cell.number_format = FONT, GRID, fmt
+                cell.alignment = SHIFT_NAME_ALIGN if index == 2 else CENTER
+    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(SHIFT_COLUMNS)), row)
+
+
 def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_days,
                 sl_seconds, staffing_failed=False):
     sheet.column_dimensions['A'].width = 24
@@ -494,7 +540,8 @@ def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_day
          'на этот день в «Графиках работы». Смена отработана, если время на линии внутри '
          'неё ÷ (длительность смены − перерывы по графику) не меньше %d %%. Не считаются '
          '«Практика в офисе», «Смена на телефонах» и смены, которые ещё не закончились. '
-         'Сколько смен в плане и сколько отработано — в примечании к клетке.'
+         'Сколько смен в плане и сколько отработано — в примечании к клетке, сами смены — '
+         'на листе «Смены».'
          % round(inbound_staffing.ADHERENCE_MIN * 100)),
         ('Вписать вручную',
          '«План часов» и «Факт часов» — портал их не заполняет. «% выработки часов» и '

@@ -128,6 +128,20 @@ class DayStaffingTests(unittest.TestCase):
         self.assertEqual((result['shifts_plan'], result['shifts_fact']), (3, 1))
         self.assertAlmostEqual(result['cr'], 1 / 3)
 
+    def test_every_planned_shift_is_listed_with_its_share(self):
+        rows = self.stats([shift(2), shift(1), shift(3, start='08:00', end='17:00', breaks=())],
+                          {1: full_day_events(), 2: full_day_events(logout='16:00')})[DAY]['shifts']
+        # По началу смены, при равном — по оператору.
+        self.assertEqual([row['operator_id'] for row in rows], [3, 1, 2])
+        first, worked, left_early = rows
+        self.assertEqual((first['start'], first['end']), (at('08:00'), at('17:00')))
+        self.assertEqual((first['planned_seconds'], first['online_seconds'], first['adherence'],
+                          first['counted']), (9 * 3600, 0, 0.0, False))
+        self.assertEqual((worked['planned_seconds'], worked['online_seconds'], worked['adherence'],
+                          worked['counted']), (8 * 3600, 8 * 3600, 1.0, True))
+        self.assertEqual((left_early['online_seconds'], left_early['counted']), (6 * 3600, False))
+        self.assertAlmostEqual(left_early['adherence'], 0.75)
+
     def test_ninety_percent_is_enough(self):
         # Опоздал на 45 минут: 7 ч 15 мин из 8 ч = 90,6 %.
         late = [(at('09:45'), 'готов'), (at('13:00'), 'перерыв'), (at('14:00'), 'готов'),
