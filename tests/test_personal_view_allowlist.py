@@ -276,8 +276,11 @@ class BellTests(unittest.TestCase):
         # «Дисциплина» (#254) — свой круг: главы и СВ СЗоВ, ОП, Теза и операторы.
         # «Коды 2FA» (#373) — свой круг: глава маркетинга и кому он выдал аккаунты.
         # «Воронка найма» (#404) — свой круг: рекрутеры по выдаче, HR, тренеры групп, главы отделов найма.
+        # «Карточка клиента» (#335) — свой круг: руководитель отдела, которому раздел выдан, и
+        # операторы, которым телефон открывает карточку.
         self.assertEqual(set(sources.OWN_CIRCLE_VIEWS),
-                         {'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'hiring'})
+                         {'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'hiring',
+                          'client_cards'})
         # И наоборот: названный в наборе раздел со своим кругом ничего не меняет.
         self.assertEqual(sources.sources_outside_views(('baiga', 'crm_tickets')),
                          sources.sources_outside_views(('baiga',)))
@@ -379,10 +382,10 @@ class BellTests(unittest.TestCase):
             counts, _items, _meta = sources.collect(Cursor(), viewer)
         finally:
             sources._HANDLERS = original
-        # Источники со своим кругом (crm, complaints, payments, discipline, twofa, hiring) набор
-        # не прячет: их гасит собственный периметр раздела — здесь он открыт.
+        # Источники со своим кругом (crm, complaints, payments, discipline, twofa, hiring,
+        # client_cards) набор не прячет: их гасит собственный периметр раздела — здесь он открыт.
         self.assertEqual(set(called), {'birthdays', 'training_plans', 'crm', 'complaints', 'payments', 'discipline',
-                                       'twofa', 'hiring'})
+                                       'twofa', 'hiring', 'client_cards'})
         for name in viewer['hidden_sources']:
             self.assertEqual(counts[name], 0, name)
         self.assertEqual(counts['total'], 3 * len(set(called)))

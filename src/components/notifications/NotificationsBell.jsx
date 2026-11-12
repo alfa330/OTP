@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, Trophy, UserPlus, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, Inbox, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, Trophy, UserPlus, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { bellResumeHeaders, parseBellFrame } from './bellStream.js';
@@ -47,6 +47,8 @@ const SOURCE_META = {
     // Заявки на отпуск, Б/С и больничный (#358, #346): СВ и главе — их шаг, оператору — предложенные даты и решение.
     leave_requests: { label: 'Отпуск, Б/С, больничный', icon: CalendarRange, tint: 'text-sky-600 bg-sky-50' },
     crm: { label: 'Обращения', icon: Headset, tint: 'text-emerald-600 bg-emerald-50' },
+    // «Карточка клиента» (#335): пришёл ответ на запрос оператора в другой отдел.
+    client_cards: { label: 'Запросы в отделы', icon: Inbox, tint: 'text-teal-700 bg-teal-50' },
     complaints: { label: 'Жалобы', icon: MessageSquareWarning, tint: 'text-red-600 bg-red-50' },
     training_plans: { label: 'Тренинги', icon: CalendarCheck, tint: 'text-lime-700 bg-lime-50' },
     discipline: { label: 'Дисциплина', icon: ShieldAlert, tint: 'text-rose-700 bg-rose-50' },

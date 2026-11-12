@@ -5886,6 +5886,7 @@ class SchemaMixin:
             self._init_rental_schema_tx(cursor)
             self._init_hiring_schema_tx(cursor)
             self._init_syntony_window_schema_tx(cursor)
+            self._init_client_cards_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
@@ -6078,6 +6079,15 @@ class SchemaMixin:
                             SELECT d.head_user_id FROM departments d
                              WHERE d.id = NEW.department_id
                                AND d.head_user_id IS NOT NULL);
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'client_card_requests' THEN
+                    -- Запрос оператора в другой отдел («Карточка клиента», #335).
+                    -- Адресат один — автор: это он ждёт ответа из группы отдела.
+                    -- Руководитель видит все запросы в разделе, но звонить ему
+                    -- по чужой переписке было бы шумом — как у обращений.
+                    targets := ARRAY[NEW.created_by];
+                    IF TG_OP = 'UPDATE' THEN
+                        targets := targets || ARRAY[OLD.created_by];
                     END IF;
                 ELSIF TG_TABLE_NAME = 'complaints' THEN
                     -- Жалоба будит двоих: автора (пришёл ответ для водителя или
@@ -6344,6 +6354,19 @@ class SchemaMixin:
             (
                 'trg_bell_crm_tickets_review', 'crm_tickets', 'AFTER INSERT',
                 """WHEN (NEW.review_state IS NOT NULL)""",
+            ),
+            # Запросы «Карточки клиента» (#335). Как у обращений: INSERT не будим —
+            # автор сам только что завёл запрос; WHEN отсекает правки, которых сводка
+            # не видит (каждое исходящее сообщение двигает last_message_at). Счётчик
+            # непрочитанного растёт с ответом группы и гаснет, когда автор открыл запрос.
+            (
+                'trg_bell_client_card_requests',
+                'client_card_requests',
+                'AFTER UPDATE OF author_unread_count, status',
+                """WHEN (
+                    OLD.author_unread_count IS DISTINCT FROM NEW.author_unread_count
+                    OR OLD.status IS DISTINCT FROM NEW.status
+                )""",
             ),
             # Жалобы (задача #297). INSERT будит ответственного сразу: сотрудника
             # мог определить уже оператор, и задача «проведите ОС» появляется в
@@ -8626,6 +8649,30 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT syntony_window_schema")
+
+    def _init_client_cards_schema_tx(self, cursor):
+        """Схема раздела «Карточка клиента» (#335) — своим SAVEPOINT'ом, как у «Аренды авто».
+
+        DDL живёт в пакете client_cards/schema.py; импорт локальный, иначе цикл. Не
+        развернулась — раздел недоступен, телефон карточку не открывает (блок client_card в
+        настройках оператора приходит выключенным), остальное приложение работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT client_cards_schema")
+        try:
+            from client_cards.schema import init_client_cards_schema
+            init_client_cards_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT client_cards_schema")
+            logging.exception(
+                "Схема раздела «Карточка клиента» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT client_cards_schema")
 
     def _init_baiga_schema_tx(self, cursor):
         """Схема раздела «Списки Байги» (#356) — своим SAVEPOINT'ом.

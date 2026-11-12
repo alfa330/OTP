@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ru" translate="no" class="notranslate">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Страница «Карточка клиента» для iCORE Phone (задача #335): карточка звонка
+      техподдержки. Телефон открывает её в своём окне через WebView2 на каждый
+      входящий и исходящий звонок и передаёт номер по мосту; вход страница получает
+      от телефона. Открытая в обычном браузере, она работает при живой сессии портала
+      в этом же браузере — номер тогда вводят руками. Данные водителей и клиентов у
+      рядовых сотрудников закрыты QR-подтверждением — экран QR страница показывает сама.
+      См. src/client_card_embed/.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <!-- См. index.html: перевод страницы браузером ломает React (removeChild). -->
+    <meta name="google" content="notranslate" />
+    <title>Карточка клиента</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+  </head>
+  <body class="bg-slate-50 font-sans antialiased text-slate-900">
+    <div id="root"></div>
+    <script type="module" src="/src/client_card_embed/main.jsx"></script>
+  </body>
+</html>

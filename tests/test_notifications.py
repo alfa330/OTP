@@ -1133,6 +1133,9 @@ class RealtimeTriggersPinnedTest(unittest.TestCase):
                            'tasks', 'task_assignees', 'task_action_reads',
                            'event_reads', 'four_you_reads', 'birthday_reads',
                            'crm_tickets', 'operator_checkpoints',
+                           # «Карточка клиента» (#335): ответ на запрос в другой отдел —
+                           # автору запроса, и гашение, когда он его открыл.
+                           'client_card_requests',
                            'work_shift_change_requests',
                            # Заявки на отпуск и Б/С (#358): шаг СВ, шаг главы,
                            # предложенные даты и решение оператору.

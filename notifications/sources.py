@@ -41,8 +41,8 @@ from leave_requests import access as leave_access
 #
 # «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
 SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'hiring', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'leave_requests', 'crm', 'complaints', 'training_plans', 'discipline', 'lms', 'surveys', 'events',
-           'honor_board', 'four_you', 'birthdays')
+           'leave_requests', 'crm', 'client_cards', 'complaints', 'training_plans', 'discipline', 'lms',
+           'surveys', 'events', 'honor_board', 'four_you', 'birthdays')
 
 # В какие разделы ведут строки источника — все значения поля 'view' его
 # элементов. None — строка никуда не ведёт: день рождения и свой назначенный
@@ -62,6 +62,7 @@ SOURCE_VIEWS = {
     'shift_requests': ('work_schedules',),
     'leave_requests': ('work_schedules',),
     'crm': ('crm_tickets',),
+    'client_cards': ('client_cards',),
     'complaints': ('complaints',),
     'training_plans': ('complaints', None),
     'discipline': ('discipline',),
@@ -79,7 +80,8 @@ SOURCE_VIEWS = {
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
 # «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
 # набор, а _notifications_viewer_context: тому, кто в раздел не входит.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'hiring'})
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa',
+                              'client_cards', 'hiring'})
 
 
 def sources_outside_views(allowed_views):
@@ -577,6 +579,33 @@ def _crm_queries():
     """
     from crm import queries as crm_queries
     return crm_queries
+
+
+# ── Карточка клиента ─────────────────────────────────────────────────────────
+def client_cards(cursor, viewer, limit):
+    """Ответы по запросам в другие отделы, которые автор ещё не открывал (задача #335).
+
+    Адресат один — автор запроса: это он ждёт ответа из группы отдела и передаёт его
+    водителю. Руководитель видит все запросы в разделе, но звонить ему по чужой
+    переписке было бы шумом — как у обращений.
+
+    Гасится открытием запроса, а не колоколом: «вам ответили» нельзя закрыть, просто
+    заглянув в список. Поэтому у источника нет ветки в mark_seen.
+    """
+    from client_cards import queries as client_cards_queries
+
+    total, rows = client_cards_queries.unread_for_bell(cursor, viewer['user_id'], limit)
+    return int(total or 0), [{
+        'source': 'client_cards',
+        'id': row[0],
+        # «Финансы · Выплаты → Не пришла выплата»: куда запрос и о чём он.
+        'title': ' · '.join([part for part in (row[1], row[2]) if part]) or 'Запрос №%s' % row[0],
+        'body': 'Пришёл ответ по запросу',
+        'at': _iso(row[3]),
+        'view': 'client_cards',
+        'target': row[0],
+        'tone': 'default',
+    } for row in rows]
 
 
 # ── Жалобы ───────────────────────────────────────────────────────────────────
@@ -1296,6 +1325,7 @@ _HANDLERS = {
     'shift_requests': shift_requests,
     'leave_requests': leave_requests,
     'crm': crm,
+    'client_cards': client_cards,
     'complaints': complaints,
     'training_plans': training_plans,
     'discipline': discipline,

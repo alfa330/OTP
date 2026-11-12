@@ -32,7 +32,9 @@ export default defineConfig({
         // Страница тренажёров для iCORE Phone (WebView2), см. src/trainers_embed/.
         trainers: resolve(rootDir, 'trainers.html'),
         // «Адреса офисов» для iCORE Phone (WebView2), см. src/offices_embed/.
-        offices: resolve(rootDir, 'offices.html')
+        offices: resolve(rootDir, 'offices.html'),
+        // «Карточка клиента» для iCORE Phone (WebView2), см. src/client_card_embed/.
+        clientCard: resolve(rootDir, 'client_card.html')
       },
       output: {
         // Сюда — только то, что нужно при КАЖДОМ запуске: группа грузится

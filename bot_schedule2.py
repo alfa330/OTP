@@ -519,6 +519,19 @@ try:
     complaints_bot.register(dp, db, crm_pool, types)
 except Exception:
     logging.exception("Раздел «Жалобы»: обработчики бота НЕ подключены")
+
+# ── Обработчик бота для «Карточки клиента» (задача #335) ────────────────────
+# Третьим в той же цепочке и по той же причине: ответ реплаем на запрос оператора в
+# группе другого отдела должен лечь в переписку запроса, а не уйти в личные сценарии
+# ниже по файлу. Сервис раздела собирается намного ниже (рядом с его Blueprint), поэтому
+# обработчик берёт его по требованию; пока раздел не подключён, реплай идёт дальше.
+_CLIENT_CARDS = {'service': None}
+try:
+    import client_cards.bot as client_cards_bot  # noqa: E402
+
+    client_cards_bot.register(dp, lambda: _CLIENT_CARDS.get('service'), crm_pool, types)
+except Exception:
+    logging.exception("Раздел «Карточка клиента»: обработчик бота НЕ подключён")
 auth_maintenance_executor = ThreadPoolExecutor(max_workers=1)
 # Контроль опозданий держит свой пул: опрос Workpace идёт каждые 2 минуты, а
 # отчёт за месяц собирается минутами — в общем пуле из 4 воркеров они бы
@@ -1196,6 +1209,12 @@ def _get_user_payload(user):
     # «Переписка в Syntony» в карточке водителя «Чатов ОП»). Границу держат ручки syntony_window.
     syntony_access, syntony_window_open = _syntony_flags_for(user_id)
 
+    # Открыт ли раздел «Карточка клиента» (#335): руководителю отдела, которому раздел выдан,
+    # и сотруднику, которому телефон открывает карточку (он видит свои запросы и ответы по
+    # ним). Пункт меню экран рисует по флагу (canAccessClientCardsForUser), границу держат
+    # ручки раздела.
+    client_cards_access = _client_cards_section_open_for(user_id)
+
     return {
         "role": role,
         "id": user_id,
@@ -1216,6 +1235,7 @@ def _get_user_payload(user):
         "hr_office_features": hr_office_features,
         "syntony_access": syntony_access,
         "syntony_window": syntony_window_open,
+        "client_cards_access": client_cards_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -21602,6 +21622,10 @@ def operator_sip_settings_endpoint():
                 # рубильник); старый телефон ключ не читает. Сбой расчёта — третье
                 # состояние, см. ниже: регистрацию он не ломает в любом случае.
                 "status_profile": _icore_phone_status_profile(requester_id, provider),
+                # Карточка клиента (#335): открывать ли телефону карточку на каждый звонок
+                # и сколько секунд длится постобработка. Решает отдел в разделе «Карточка
+                # клиента»; старый телефон ключ не читает. Сбой расчёта — выключено.
+                "client_card": _client_cards_phone_settings(requester_id),
             }
         }
         # Набор посчитать не удалось (сбой базы) — ключ не шлём вовсе. null телефон
@@ -53704,6 +53728,92 @@ def _rental_scheduled_report(kind):
         logging.warning("Аренда авто: ночной отчёт не поставлен — раздел не подключён")
         return None
     return service.scheduled(kind)
+
+
+# ── Раздел «Карточка клиента» (карточка звонка техподдержки в iCORE Phone, #335) ──
+# Телефон открывает страницу карточки на каждый звонок; портал находит аккаунты Тез по
+# номеру (client_cards/tez.py), хранит привязки «номер ↔ аккаунт», причины обращений и
+# запросы в другие отделы — они уходят в рабочие Telegram-группы тем же ботом, ответы
+# возвращает обработчик в начале файла (_CLIENT_CARDS). Алерт о росте обращений
+# проверяется после каждой сохранённой карточки, отдельной нитью сервиса.
+def _client_cards_bucket_name():
+    """Бакет файлов запросов (фото и видео оператора). Каскад env тот же, что у «Обращений»:
+    свой -> общий бакет вложений задач; файлы лежат под префиксом client_cards/requests/."""
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_CLIENT_CARDS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+def _client_cards_qr_locked(user_id):
+    """Карточка клиента закрыта до QR — то же правило, что у телефона автообзвона Тез
+    (_dial_list_qr_locked, владелец 06.11.2026): роль требует QR, как у вики и «Обращений»
+    (SENSITIVE_QR_GATED_ROLES), а сессия запроса не подтверждена сканом руководителя.
+    Сбой проверки — закрыто: в карточке аккаунты и телефоны водителей и клиентов."""
+    try:
+        user = db.get_user(id=int(user_id))
+        if not user or _normalize_user_role(user[3]) not in SENSITIVE_QR_GATED_ROLES:
+            return False
+        return not _sensitive_access_granted_for_user(int(user_id))
+    except Exception:
+        logging.exception("client_cards: замок QR для %s не проверен — раздел закрыт", user_id)
+        return True
+
+
+try:
+    from client_cards.routes import build_client_cards_blueprint  # noqa: E402
+    from client_cards.service import ClientCardsService as _ClientCardsService  # noqa: E402
+
+    _CLIENT_CARDS['service'] = _ClientCardsService(
+        cursor_factory=db._get_cursor,
+        gcs={'bucket_name': _client_cards_bucket_name, 'client': get_gcs_client},
+        # Группа отдела стала супергруппой — перенести и то, что о чате помнят другие разделы.
+        migrate_chat=db.migrate_telegram_chat_id,
+    )
+    app.register_blueprint(build_client_cards_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        service=_CLIENT_CARDS['service'],
+        qr_locked=_client_cards_qr_locked,
+    ))
+    logging.info("Раздел «Карточка клиента»: Blueprint подключён на /api/client_cards")
+except Exception:
+    logging.exception("Раздел «Карточка клиента»: Blueprint НЕ подключён")
+
+
+def _client_cards_section_open_for(user_id):
+    """Открыт ли раздел «Карточка клиента» — то же правило, что у его ручек
+    (client_cards/access.py): руководителю выданного отдела и сотруднику, которому телефон
+    открывает карточку. Один запрос профиля; границу всё равно держит каждый роут."""
+    if user_id is None:
+        return False
+    service = _CLIENT_CARDS.get('service')
+    if service is None:
+        return False
+    try:
+        from client_cards import access as client_cards_access
+        ctx = service.context(user_id)
+        return bool(ctx) and client_cards_access.can_open_section(ctx)
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Карточке клиента» пользователя %s", user_id)
+        return False
+
+
+def _client_cards_phone_settings(user_id):
+    """Блок client_card для /api/operator/sip_settings: открывать ли телефону карточку на
+    звонок и сколько секунд постобработки. При любом сбое — выключено: карточка не должна
+    оставить оператора без регистрации на станции."""
+    service = _CLIENT_CARDS.get('service')
+    if service is None:
+        return {"enabled": False}
+    try:
+        return service.phone_settings(user_id)
+    except Exception:
+        logging.exception("client_cards: настройки телефона для %s не посчитаны", user_id)
+        return {"enabled": False}
 
 
 # ── Раздел «Реестр тестовых номеров» ──────────────────────────────────────────
