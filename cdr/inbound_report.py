@@ -34,9 +34,10 @@
 
 Очереди и названия парков — из образца (`QUEUES`); номера линий приходят снаружи
 (`line_numbers`): в этом модуле их нет, таблица номеров компании лежит в конфиге
-линий в bot_schedule2.py. Очередь, которой в образце нет, но звонки в неё за период
-были, дописывается строкой в конец с подписью «Касаний» — иначе её звонки пропали
-бы из «Итого» и отчёт разошёлся бы с табло.
+линий в bot_schedule2.py. На листе дня — только очереди, в которые в этот день
+звонили (владелец, 12.11.2026). Очередь, которой в образце нет, показывается на тех
+же правах, в конце и с подписью «Касаний» — иначе её звонки пропали бы из «Итого» и
+отчёт разошёлся бы с табло.
 
 Модуль чистый: ни сети, ни базы. На вход — касания в виде
 `cdr.queries.incoming_touches_compact`.
@@ -147,6 +148,9 @@ NOTES_WRAP = Alignment(wrap_text=True, vertical='top')
 
 NOTES_SHEET = 'Пояснения'
 
+# Строка листа за день, когда в очереди не поступило ни одного звонка.
+NO_CALLS_ROW = {'queue': '', 'park': 'Звонков не было', 'numbers': ()}
+
 
 # ── расчёт ───────────────────────────────────────────────────────────────────
 
@@ -168,25 +172,21 @@ def _stats(touches, sl_seconds):
 
 
 def _match(fact, plan):
-    """«% совпадения» — факт ÷ план. Плана нет — пусто; звонков не было — ноль, как
-    считала формула образца."""
+    """«% совпадения» — факт ÷ план. Плана нет — пусто."""
     return ((fact or 0) / plan) if plan else None
 
 
-def layout(touches, day_from, day_to, line_numbers=None):
-    """Строки листа: [(очередь, парк, номера)] — очереди образца и те, которых в нём
-    нет, но звонки за период были.
+_TEMPLATE_ORDER = {queue: index for index, (queue, _park) in enumerate(QUEUES)}
+_TEMPLATE_PARKS = dict(QUEUES)
 
-    line_numbers — {очередь: номера линий} из конфига линий компании; очередь без
-    номеров занимает одну строку с пустой клеткой «Номера».
-    Состав один на всю книгу — листы разных дней ложатся строка в строку."""
-    days = {day.isoformat() for day in sync.days_in_period(day_from, day_to)}
-    numbers = line_numbers or {}
-    known = {queue for queue, _park in QUEUES}
-    extra = sorted({lines_mod.first_queue(touch.get('queue')) for touch in touches or []
-                    if touch.get('call_day') in days} - known - {''})
-    blocks = list(QUEUES) + [(queue, lines_mod.park_of_queue(queue)) for queue in extra]
-    return [(queue, park, tuple(numbers.get(queue) or ())) for queue, park in blocks]
+
+def day_queues(queues):
+    """Очереди листа в порядке показа: [(очередь, парк)] — сначала как в образце, за
+    ними те, которых в образце нет, по возрастанию номера (подпись «Касаний»)."""
+    ordered = sorted(set(queues) - {''},
+                     key=lambda queue: (_TEMPLATE_ORDER.get(queue, len(QUEUES)), queue))
+    return [(queue, _TEMPLATE_PARKS.get(queue) or lines_mod.park_of_queue(queue))
+            for queue in ordered]
 
 
 def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=None):
@@ -194,7 +194,17 @@ def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=No
 
     touches — входящие с очередью за период И за неделю до него (план). Звонок с
     двумя очередями (перевод) считается за первой — тем же правилом, каким «Касания»
-    называют его парк, — поэтому сумма строк равна итогу дня."""
+    называют его парк, — поэтому сумма строк равна итогу дня.
+
+    На листе дня — только очереди, в которые за этот день поступил хотя бы один звонок
+    (владелец, 12.11.2026: «чтобы скрывались очереди, по которым не поступали звонки»).
+    Из 22 очередей образца звонки в обычный день идут в десять, и пустые строки с их
+    номерами занимали половину листа. Очередь, которой в образце нет, показывается на
+    тех же правах — иначе её звонки пропали бы из «Итого».
+
+    line_numbers — {очередь: номера линий} из конфига линий компании; очередь без
+    номеров занимает одну строку с пустой клеткой «Номера»."""
+    numbers = line_numbers or {}
     by_cell = defaultdict(list)
     by_day = defaultdict(list)
     for touch in touches or []:
@@ -205,23 +215,24 @@ def day_tables(touches, day_from, day_to, sl_seconds=SL_SECONDS, line_numbers=No
         by_cell[(day, queue)].append(touch)
         by_day[day].append(touch)
 
-    blocks = layout(touches, day_from, day_to, line_numbers)
     tables = []
     for day in sync.days_in_period(day_from, day_to):
         key = day.isoformat()
         week_ago = (day - timedelta(days=PLAN_SHIFT_DAYS)).isoformat()
         rows = []
         plan_total = 0
-        for queue, park, numbers in blocks:
+        for queue, park in day_queues(q for (cell_day, q) in by_cell if cell_day == key):
             row = _stats(by_cell.get((key, queue)), sl_seconds)
             plan = _stats(by_cell.get((week_ago, queue)), sl_seconds)['fact']
             plan_total += plan or 0
-            row.update(queue=queue, park=park, numbers=tuple(numbers), plan=plan,
-                       match=_match(row['fact'], plan))
+            row.update(queue=queue, park=park, numbers=tuple(numbers.get(queue) or ()),
+                       plan=plan, match=_match(row['fact'], plan))
             rows.append(row)
         # Итог дня — по всем его звонкам разом, а не среднее по строкам: очередь с одним
         # звонком весила бы в среднем столько же, сколько очередь с сотней. Так же считает
-        # «Табло ОП», и «Итого» листа сходится с его итогами дня.
+        # «Табло ОП», и «Итого» листа сходится с его итогами дня. План в «Итого» — сумма
+        # показанных строк: план очереди, в которую сегодня не звонили, на листе не виден,
+        # и с ним колонка не сходилась бы со своим итогом.
         total = _stats(by_day.get(key), sl_seconds)
         total.update(plan=plan_total or None, match=_match(total['fact'], plan_total))
         tables.append({'day': day, 'rows': rows, 'total': total})
@@ -284,7 +295,9 @@ def _fill_day(sheet, table):
             _merge(sheet, key, 1, HEADER_ROWS)
 
     row = FIRST_DATA_ROW
-    for block in table['rows']:
+    # День без единого звонка — одна строка со словами, а не лист из одной шапки: дата и
+    # клетки под ручной ввод должны быть на месте и в такой день.
+    for block in table['rows'] or [NO_CALLS_ROW]:
         numbers = block['numbers']
         last = row + max(1, len(numbers)) - 1
         for offset, number in enumerate(numbers):
@@ -292,10 +305,10 @@ def _fill_day(sheet, table):
             # зелёного уголка «число сохранено как текст» при этом нет.
             _put(sheet, row + offset, 'numbers', int(number))
         _put(sheet, row, 'queue', int(block['queue']) if block['queue'].isdigit()
-             else block['queue'])
+             else block['queue'] or None)
         _put(sheet, row, 'park', block['park'])
         for key in QUEUE_VALUES:
-            _put(sheet, row, key, block[key])
+            _put(sheet, row, key, block.get(key))
         for key in _QUEUE_MERGED:
             _merge(sheet, key, row, last)
         row = last + 1
@@ -371,6 +384,8 @@ def _fill_notes(sheet, day_from, day_to, generated_at, generated_by, missing_day
         ('SL/20сек',
          'Принятые не позже %d секунд ожидания в очереди ÷ Факт звонки (все дошедшие до '
          'очереди, включая непринятые). Приветствие в ожидание не входит.' % sl_seconds),
+        ('Очереди', 'На листе дня — только очереди, в которые за этот день поступил хотя бы '
+                    'один звонок; остальные скрыты.'),
         ('Итого', 'AR%, AHT и SL/20сек — по всем звонкам дня разом, а не среднее по строкам.'),
         ('Вписать вручную',
          '«ОСС», «План часов», «Факт часов» и «CR%» — портал их не заполняет. '

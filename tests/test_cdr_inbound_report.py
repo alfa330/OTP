@@ -8,8 +8,8 @@
 * план звонков — факт той же очереди в тот же день недели неделей раньше;
 * «ОСС», часы и «CR%» портал не заполняет: клетки пустые, доли часов — формулами,
   которые молчат, пока часы не вписаны;
-* лист на день, очереди — из образца, очередь не из образца со звонками
-  дописывается, а не теряется;
+* лист на день; на нём только очереди, в которые в этот день звонили (владелец,
+  12.11.2026), в порядке образца; очередь не из образца со звонками не теряется;
 * номеров линий в модуле отчёта нет: репозиторий публичный, таблица номеров компании
   лежит в конфиге линий в bot_schedule2.py и приходит в книгу аргументом.
 
@@ -56,8 +56,8 @@ PREV_MON = '2026-10-26'
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Учебные номера линий: у первой очереди три номера (три строки листа), у Jana один.
-TEST_LINES = {'3000': ('77015550001', '77015550002', '77015550003'), '3034': ('77015550034',)}
+# Учебные номера линий: у iTaxi три номера (три строки листа), у Jana один.
+TEST_LINES = {'3001': ('77015550001', '77015550002', '77015550003'), '3034': ('77015550034',)}
 TEMPLATE_QUEUES = [queue for queue, _park in R.QUEUES]
 
 
@@ -122,8 +122,10 @@ class TemplateTests(unittest.TestCase):
         for number in numbers:
             self.assertRegex(number, r'^7\d{10}$')
         self.assertIn('inbound_line_numbers=_CDR_INBOUND_REPORT_LINES,', source)
-        stream, _days = R.build_workbook([], day_from=date(2026, 11, 2), day_to=date(2026, 11, 2),
-                                         line_numbers=lines)
+        # День, когда звонили во все очереди образца, — лист один в один с образцом.
+        everywhere = [call(MON, queue, talk=30, wait=1) for queue in TEMPLATE_QUEUES]
+        stream, _days = R.build_workbook(everywhere, day_from=date(2026, 11, 2),
+                                         day_to=date(2026, 11, 2), line_numbers=lines)
         sheet = load_workbook(stream)['02.11']
         self.assertEqual([sheet['B%d' % row].value for row in range(3, 47)],
                          [int(number) for number in numbers])
@@ -173,18 +175,20 @@ class DayTablesTests(unittest.TestCase):
         self.assertIsNone(itaxi['plan'])
         self.assertIsNone(itaxi['match'])
 
-    def test_day_without_calls_is_blank_not_zero(self):
-        jana = row_of(self.tuesday, '3034')
-        for key in ('fact', 'answered', 'ar', 'aht', 'sl', 'plan', 'match'):
-            self.assertIsNone(jana[key], key)
+    def test_queues_without_calls_are_hidden(self):
+        # Из 22 очередей образца в понедельник звонили в две — на листе только они,
+        # в порядке образца (3001 раньше 3034).
+        self.assertEqual([row['queue'] for row in self.monday['rows']], ['3001', '3034'])
+        self.assertEqual([row['queue'] for row in self.tuesday['rows']], ['3042'])
+        for row in self.monday['rows'] + self.tuesday['rows']:
+            self.assertGreater(row['fact'], 0)
 
-    def test_plan_without_calls_gives_zero_match(self):
-        tables = R.day_tables(sample_touches(), date(2026, 11, 9), date(2026, 11, 9))
-        jana = row_of(tables[0], '3034')
-        # 09.11 — понедельник: план — факт 02.11, а звонков в этот день в данных нет.
-        self.assertEqual(jana['plan'], 3)
-        self.assertIsNone(jana['fact'])
-        self.assertEqual(jana['match'], 0)
+    def test_queue_with_a_plan_but_no_calls_today_is_hidden_too(self):
+        # 09.11 — понедельник: план есть (факт 02.11), а звонков в этот день нет.
+        table = R.day_tables(sample_touches(), date(2026, 11, 9), date(2026, 11, 9))[0]
+        self.assertEqual(table['rows'], [])
+        self.assertIsNone(table['total']['fact'])
+        self.assertIsNone(table['total']['plan'])
 
     def test_total_is_the_whole_day_not_an_average_of_rows(self):
         total = self.monday['total']
@@ -195,23 +199,31 @@ class DayTablesTests(unittest.TestCase):
         self.assertEqual(total['aht'], 70)
         self.assertEqual(sum(row['fact'] or 0 for row in self.monday['rows']), total['fact'])
 
-    def test_queue_outside_the_sample_is_appended_not_lost(self):
-        for table in self.tables:
-            queues = [row['queue'] for row in table['rows']]
-            self.assertEqual(queues[:22], TEMPLATE_QUEUES)
-            self.assertEqual(queues[22:], ['3042'])
+    def test_total_plan_is_the_sum_of_shown_rows(self):
+        # Неделей раньше звонили ещё и в «Ноль такси», сегодня — нет: очередь скрыта, и её
+        # план в «Итого» не входит, иначе колонка не сходилась бы со своим итогом.
+        touches = sample_touches() + [call(PREV_MON, '3041', talk=20, wait=2)]
+        table = R.day_tables(touches, date(2026, 11, 2), date(2026, 11, 2))[0]
+        self.assertNotIn('3041', [row['queue'] for row in table['rows']])
+        self.assertEqual(table['total']['plan'], 4)
+        self.assertEqual(sum(row['plan'] or 0 for row in table['rows']), table['total']['plan'])
+
+    def test_queue_outside_the_sample_is_shown_after_the_sample_ones(self):
         extra = row_of(self.tuesday, '3042')
         self.assertEqual((extra['fact'], extra['park'], extra['numbers']), (1, 'Достойный', ()))
         self.assertEqual(self.tuesday['total']['fact'], 1)
+        touches = [call(MON, '3042', talk=30, wait=3), call(MON, '2999', talk=30, wait=3),
+                   call(MON, '3077', talk=30, wait=3), call(MON, '3000', talk=30, wait=3)]
+        table = R.day_tables(touches, date(2026, 11, 2), date(2026, 11, 2))[0]
+        self.assertEqual([row['queue'] for row in table['rows']], ['3000', '3077', '2999', '3042'])
 
     def test_line_numbers_come_from_outside(self):
         tables = R.day_tables(sample_touches(), date(2026, 11, 2), date(2026, 11, 2),
                               line_numbers=TEST_LINES)
-        self.assertEqual(row_of(tables[0], '3000')['numbers'], TEST_LINES['3000'])
+        self.assertEqual(row_of(tables[0], '3001')['numbers'], TEST_LINES['3001'])
         self.assertEqual(row_of(tables[0], '3034')['numbers'], TEST_LINES['3034'])
-        # Очередь без номеров в конфиге — строка с пустой клеткой, а не пропуск.
-        self.assertEqual(row_of(tables[0], '3001')['numbers'], ())
-        self.assertEqual(row_of(self.monday, '3000')['numbers'], ())
+        # Без номеров в конфиге — строка с пустой клеткой, а не пропуск очереди.
+        self.assertEqual(row_of(self.monday, '3001')['numbers'], ())
 
     def test_extra_queue_from_the_plan_week_only_is_not_a_row(self):
         touches = sample_touches() + [call(PREV_MON, '3033', talk=5, wait=1)]
@@ -221,8 +233,8 @@ class DayTablesTests(unittest.TestCase):
     def test_transferred_call_belongs_to_its_first_queue(self):
         tables = R.day_tables([call(MON, '3034,3001', talk=20, wait=2)],
                               date(2026, 11, 2), date(2026, 11, 2))
+        self.assertEqual([row['queue'] for row in tables[0]['rows']], ['3034'])
         self.assertEqual(row_of(tables[0], '3034')['fact'], 1)
-        self.assertIsNone(row_of(tables[0], '3001')['fact'])
         self.assertEqual(tables[0]['total']['fact'], 1)
 
 
@@ -235,10 +247,10 @@ class WorkbookTests(unittest.TestCase):
             line_numbers=TEST_LINES)
         self.book = load_workbook(stream)
         self.sheet = self.book['02.11']
-        # 22 очереди образца (у первой три строки номеров) и одна дописанная: строки 3–27.
+        # В понедельник звонили в iTaxi (три строки номеров) и Jana: строки 3–6.
         self.jana = queue_row(self.sheet, '3034')
-        self.last = 27
-        self.total = 28
+        self.last = 6
+        self.total = 7
 
     def test_sheet_per_day_then_notes(self):
         self.assertEqual(self.days, 2)
@@ -256,15 +268,18 @@ class WorkbookTests(unittest.TestCase):
 
     def test_queue_block_spans_its_numbers(self):
         merged = {str(area) for area in self.sheet.merged_cells.ranges}
-        # У 3000 три номера: строки 3–5.
+        # У iTaxi три номера: строки 3–5.
         self.assertEqual([self.sheet['B%d' % row].value for row in (3, 4, 5)],
-                         [int(number) for number in TEST_LINES['3000']])
+                         [int(number) for number in TEST_LINES['3001']])
+        self.assertEqual(self.jana, 6)
         self.assertEqual(self.sheet['B%d' % self.jana].value, int(TEST_LINES['3034'][0]))
-        # Очередь без номеров — одна строка с пустой клеткой.
-        self.assertEqual(queue_row(self.sheet, '3001'), 6)
-        self.assertIsNone(self.sheet['B6'].value)
-        self.assertEqual(self.sheet['C3'].value, 3000)
-        self.assertEqual(self.sheet['D3'].value, 'Честный')
+        # Очередь без номеров (вторник, «Достойный») — одна строка с пустой клеткой.
+        tuesday = self.book['03.11']
+        self.assertEqual(queue_row(tuesday, '3042'), 3)
+        self.assertIsNone(tuesday['B3'].value)
+        self.assertEqual(tuesday['A4'].value, 'Итого')
+        self.assertEqual(self.sheet['C3'].value, 3001)
+        self.assertEqual(self.sheet['D3'].value, 'iTaxi вход')
         for column in 'CDEFGHIOPQ':
             self.assertIn('%s3:%s5' % (column, column), merged)
         # Дата и дневные ручные колонки — одной клеткой на все очереди.
@@ -310,6 +325,17 @@ class WorkbookTests(unittest.TestCase):
     def test_ar_data_bar_covers_queue_rows(self):
         ranges = [str(rule.sqref) for rule in self.sheet.conditional_formatting]
         self.assertEqual(ranges, ['I3:I%d' % self.last])
+
+    def test_day_without_any_call_keeps_the_date_and_manual_cells(self):
+        stream, _days = R.build_workbook(sample_touches(), day_from=date(2026, 11, 9),
+                                         day_to=date(2026, 11, 9), line_numbers=TEST_LINES)
+        sheet = load_workbook(stream)['09.11']
+        self.assertEqual(sheet['A3'].value, datetime(2026, 11, 9))
+        self.assertEqual(sheet['D3'].value, 'Звонков не было')
+        self.assertIsNone(sheet['C3'].value)
+        self.assertEqual(sheet['A4'].value, 'Итого')
+        self.assertIsNone(sheet['F4'].value)
+        self.assertEqual(sheet['M3'].value, '=IF(OR(K3="",L3=""),"",L3/K3)')
 
     def test_notes_explain_what_is_counted(self):
         notes = self.book[R.NOTES_SHEET]
@@ -473,7 +499,7 @@ class RouteTests(unittest.TestCase):
         jana = queue_row(sheet, '3034')
         self.assertEqual((sheet['E%d' % jana].value, sheet['F%d' % jana].value), (4, 3))
         # Номера линий доходят до книги из того, что передано фабрике раздела.
-        self.assertEqual(sheet['B3'].value, int(TEST_LINES['3000'][0]))
+        self.assertEqual(sheet['B3'].value, int(TEST_LINES['3001'][0]))
         # Все сутки на месте — мосту ставить нечего и оговорки в файле нет.
         self.assertEqual(double.enqueued, [])
         notes = '\n'.join(str(row[0] or '') for row in book[R.NOTES_SHEET].iter_rows(values_only=True))
