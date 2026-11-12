@@ -736,6 +736,41 @@ class GroupsMixin:
         """Тело add_operator_to_group внутри чужой транзакции: нужно операциям,
         которые заводят оператора в группу вместе с другими правками (понижение
         СВ до оператора), чтобы всё легло одним коммитом."""
+        # Членство в другой группе, которое к новой дате ещё не началось, не
+        # действовало ни дня. Закрытое «днём раньше новой даты», оно кончилось бы
+        # раньше своего начала («с 09.11 по 08.11»), а такую запись «Учёт часов»
+        # считает частью месяца: человек весь месяц стоял бы лишней строкой в той
+        # группе. Так бывает, когда перевод исправляют в день зачисления (09.11.2026:
+        # заведена в группу с датой приёма, через час переведена в другую и обратно).
+        # Такое членство перевод отменяет. Если за ним уже есть учтённые часы —
+        # закрываем как раньше: часы остаются в группе, где их вели.
+        cursor.execute(
+            """
+            DELETE FROM group_operator_memberships gom
+            WHERE gom.operator_id = %s AND gom.end_date IS NULL AND gom.group_id <> %s
+              AND gom.start_date >= COALESCE(%s::date, CURRENT_DATE)
+              AND NOT EXISTS (
+                  SELECT 1 FROM daily_hours dh
+                  WHERE dh.operator_id = gom.operator_id
+                    AND dh.group_id = gom.group_id
+                    AND dh.day >= gom.start_date
+                    AND (""" + self._DAILY_HOURS_NON_EMPTY + """)
+              )
+            RETURNING gom.group_id, gom.start_date
+            """,
+            (int(operator_id), int(group_id), start_date),
+        )
+        for cancelled_group_id, cancelled_start in cursor.fetchall() or []:
+            # Пустые строки дней так и остались бы за отменённой группой: звонки
+            # дописываются в строку, не меняя её группу, и день пропал бы из «Учёта
+            # часов». Снимаем группу — _stamp_orphan_group_ids_tx ниже отдаст их новой.
+            cursor.execute(
+                """
+                UPDATE daily_hours SET group_id = NULL
+                WHERE operator_id = %s AND group_id = %s AND day >= %s
+                """,
+                (int(operator_id), int(cancelled_group_id), cancelled_start),
+            )
         cursor.execute(
             """
             UPDATE group_operator_memberships

@@ -103,9 +103,9 @@ class _FakeDatabase:
     def __init__(self, cursor):
         self.cursor = cursor
         self.stamped = []
-        self._GROUP_EFFECTIVE_DIRECTION_SQL = _class_attributes(
-            "_GROUP_EFFECTIVE_DIRECTION_SQL"
-        )["_GROUP_EFFECTIVE_DIRECTION_SQL"]
+        constants = _class_attributes("_GROUP_EFFECTIVE_DIRECTION_SQL", "_DAILY_HOURS_NON_EMPTY")
+        self._GROUP_EFFECTIVE_DIRECTION_SQL = constants["_GROUP_EFFECTIVE_DIRECTION_SQL"]
+        self._DAILY_HOURS_NON_EMPTY = constants["_DAILY_HOURS_NON_EMPTY"]
         for name in (
             "add_operator_to_group",
             "_add_operator_to_group_tx",

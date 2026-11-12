@@ -209,6 +209,7 @@ class _FakeDatabase:
         for name, value in DEMOTE_CODES.items():
             setattr(self, name, value)
         self._GROUP_EFFECTIVE_DIRECTION_SQL = _class_string_constant("_GROUP_EFFECTIVE_DIRECTION_SQL")
+        self._DAILY_HOURS_NON_EMPTY = _class_string_constant("_DAILY_HOURS_NON_EMPTY")
         self.demote_supervisor_to_operator = _load_demote().__get__(self, _FakeDatabase)
         for name in (
             "_group_active_supervisor_id_tx",

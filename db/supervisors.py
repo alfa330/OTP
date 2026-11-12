@@ -142,6 +142,17 @@ class SupervisorsMixin:
                     (month, month, supervisor_id),
                 )
             operator_rows = cursor.fetchall()  # list of tuples
+            if group_id is not None:
+                # Состав месяца — люди, а не записи членства. Записей одного человека
+                # в группе за месяц бывает две: ушёл и вернулся, или перевод исправили
+                # в день зачисления (осталась запись «с 09.11 по 08.11»). Строки у них
+                # одинаковые — без этого он шёл бы в «Учёте часов» и в Excel дважды.
+                unique_rows, seen_operator_ids = [], set()
+                for row in operator_rows:
+                    if row[0] not in seen_operator_ids:
+                        seen_operator_ids.add(row[0])
+                        unique_rows.append(row)
+                operator_rows = unique_rows
 
             if not operator_rows:
                 return {"month": month, "days_in_month": days, "operators": []}
