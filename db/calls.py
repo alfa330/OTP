@@ -1662,7 +1662,8 @@ class CallsMixin:
 
         return result
 
-    def get_call_evaluations(self, operator_id, month=None, include_target: bool = False):
+    def get_call_evaluations(self, operator_id, month=None, include_target: bool = False,
+                             include_not_evaluated: bool = True):
         """
         Возвращает оценки звонков (calls) + неоценённые звонки (imported_calls).
         Последняя версия оценки определяется по ключу
@@ -1671,6 +1672,11 @@ class CallsMixin:
 
         Оценки и звонки с номерами «Реестра тестовых номеров» (test_numbers) в журнал не
         идут: средний балл оператора браузер считает по этому же списку.
+
+        include_not_evaluated=False — только оценки, без неоценённых звонков. Те —
+        очередь проверяющих («Журнал оценок»); сотруднику в «Моих оценках» и в боте
+        их не показывают (решение владельца 12.11.2026), и тогда вторая половина
+        запроса не выполняется вовсе.
         """
         from test_numbers import keys as test_keys
         query = """
@@ -1786,7 +1792,8 @@ class CallsMixin:
             params.append(month)
 
         # добавляем неоценённые звонки из imported_calls
-        query += """
+        if include_not_evaluated:
+            query += """
             UNION ALL
             SELECT 
                 ic.id::text AS id,
@@ -1852,12 +1859,12 @@ class CallsMixin:
             WHERE ic.operator_id = %s AND ic.status = 'not_evaluated'
               AND """ + test_keys.sql_not_test(
                   "COALESCE(NULLIF(ic.phone_normalized, ''), ic.phone_number)") + """
-        """
-        params.append(operator_id)
+            """
+            params.append(operator_id)
 
-        if month:
-            query += " AND ic.month = %s"
-            params.append(month)
+            if month:
+                query += " AND ic.month = %s"
+                params.append(month)
 
         query += " ORDER BY created_at DESC"
 

@@ -15852,7 +15852,16 @@ def get_call_evaluations():
         if not _authorize_operator_scope(requester, requester_id, operator_id):
             return jsonify({"error": "Unauthorized to view this operator evaluations"}), 403
 
-        evaluations_payload = db.get_call_evaluations(operator_id, month=month, include_target=True)
+        # Свои оценки («Мои оценки») — без неоценённых звонков: это очередь
+        # проверяющих, а не оценки сотрудника (решение владельца 12.11.2026).
+        # Чужой журнал (СВ, глава, наблюдатель) получает их по-прежнему — по
+        # ним и ставят оценки.
+        evaluations_payload = db.get_call_evaluations(
+            operator_id,
+            month=month,
+            include_target=True,
+            include_not_evaluated=(requester_id != operator_id),
+        )
         evaluations = evaluations_payload.get("evaluations", []) if isinstance(evaluations_payload, dict) else []
         evaluation_target = evaluations_payload.get("evaluation_target") if isinstance(evaluations_payload, dict) else None
         session_id = _current_session_id_from_access_token()
@@ -45574,8 +45583,10 @@ async def show_operator_stats(message: types.Message):
 async def show_operator_evaluations(message: types.Message):
     user = db.get_user(telegram_id=message.from_user.id)
     if user and user[3] == 'operator':
-        evaluations = db.get_call_evaluations(user[0], month=datetime.now().strftime('%Y-%m'))
-        
+        # Как в «Моих оценках» портала: неоценённые звонки сотруднику не показываются.
+        evaluations = db.get_call_evaluations(
+            user[0], month=datetime.now().strftime('%Y-%m'), include_not_evaluated=False)
+
         if not evaluations:
             await bot.send_message(
                 chat_id=message.from_user.id,
