@@ -81,7 +81,7 @@ function makeScreen(env) {
         const computeBreaksForShiftMinutes = () => [];
         const getPlannerBreakRuleRangesForDirection = () => [];
         ${PIECES.join('\n')}
-        const { myScheduleData, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey } = env;
+        const { myScheduleData, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey, plannerOwnDepartmentCode = '' } = env;
         ${OPERATOR}
         ${BUILDER}
         return { getMyStatusTrackForDate, plannerComputeShiftStatusMatchMetrics, buildImportedStatusBarsForDay };
@@ -175,6 +175,17 @@ const cardOf = (segments, shifts = DAY_SHIFT, { today = LATER, days = null, ...e
 }).getMyStatusTrackForDate(DAY);
 
 /* ── Вторая лента: статусы внутри смены ───────────────────────────────────── */
+
+test('цвета статусов — по отделу оператора: у Тез КЦ свои (#416), у остальных прежние', () => {
+    const colors = (env) => Object.fromEntries(cardOf(GOOD_DAY, DAY_SHIFT, env).layout.totals.map((item) => [item.label, item.background]));
+    const tez = colors({ plannerOwnDepartmentCode: 'tez' });
+    // Тез КЦ: «Готов» синий, «Перерыв» оранжевый, разговор — своим цветом.
+    assert.deepEqual(tez, { Готов: '#2563eb', Перерыв: '#f97316', Занят: '#22c55e' });
+    // Оператор СЗоВ (и без отдела) — та же полоса, что до задачи.
+    const general = { Готов: '#0ea5e9', Перерыв: '#f59e0b', Занят: '#0ea5e9' };
+    assert.deepEqual(colors({ plannerOwnDepartmentCode: 'szov' }), general);
+    assert.deepEqual(colors({}), general);
+});
 
 test('вторая лента не выходит за смену: статусы только внутри, сутки «Выключен» не рисуются', () => {
     const { spans, totals } = cardOf(GOOD_DAY).layout;

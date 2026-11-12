@@ -281,7 +281,8 @@ class OperatorStatusTrackTests(unittest.TestCase):
         # поэтому не устаревает между перерисовками и одинаково считается в тесте.
         self.assertNotIn('Date.now()', builder)
         self.assertNotIn('new Date()', builder)
-        self.assertIn('myStatusTrackLive, operatorTodayKey]);', builder)
+        # «Сегодня» — в зависимостях сборки дня (и отдел оператора за ним, #416: от него цвета).
+        self.assertRegex(builder, r'myStatusTrackLive, operatorTodayKey(, \w+)*\]\);')
         # Остальные экраны потолок не передают — у руководителя расчёт прежний.
         self.assertEqual(APP.count('clampEndMin\n'), 2)
         metrics = block(APP, 'const plannerComputeShiftStatusMatchMetrics = (', 'const plannerStatusFormatDuration = (seconds) => {')

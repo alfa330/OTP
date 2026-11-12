@@ -28,7 +28,7 @@ function slice(source, start, end) {
 }
 
 const keys = slice(APP, 'const plannerStatusPad2 = (n) =>', 'const plannerStatusNormalizeOperatorName = (v) =>');
-const tone = slice(APP, 'const getPlannerImportedStatusTone = (statusNameOrKey) => {', 'const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([');
+const tone = slice(APP, 'const getPlannerImportedStatusTone = (', 'const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([');
 const sets = slice(APP, 'const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([', 'const plannerIntervalsTotalMinutes = (arr = []) => (');
 
 const {

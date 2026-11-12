@@ -15061,7 +15061,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }
             return { label: baseName || '—', key: baseKey, baseKey, baseName, kind: 'status' };
             };
-            const getPlannerImportedStatusTone = (statusNameOrKey) => {
+            /* departmentCode — отдел ОПЕРАТОРА, чьи статусы красим: своя палитра пока
+               только у Тез КЦ (задача #416, см. PLANNER_TEZ_STATUS_TONES), остальные
+               отделы и вызов без отдела получают общую палитру ниже. */
+            const getPlannerImportedStatusTone = (statusNameOrKey, departmentCode = '') => {
             const key = plannerStatusNormalizeKey(statusNameOrKey);
             const byKey = (cfg) => ({
                 chip: cfg.chip,
@@ -15069,6 +15072,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 row: cfg.row,
                 bar: cfg.bar
             });
+            const departmentTone = plannerDepartmentStatusTone(key, departmentCode);
+            if (departmentTone) return byKey(departmentTone);
             if (plannerStatusIsTechReasonKey(key)) {
                 return byKey({
                     chip: 'border-violet-200 bg-violet-50 text-violet-700',
@@ -15205,6 +15210,103 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         bar: '#94a3b8'
                     });
             }
+            };
+            /* Тез КЦ, задача #416 (Алчинбаева Анель, 12.11.2026): «Синий — статус
+               «Активный», оранжевый — «Перерыв», остальные статусы — отдельными
+               цветами; сейчас статус видно только при наведении курсора». В общей
+               палитре три рабочих статуса телефона — «Готов» (в телефоне «Активный»),
+               «Занят» (разговор) и «Перезвон» (в телефоне «Исход») — горят одним
+               голубым, а «Исход» и «Перерыв» — почти одним оранжевым, и смена
+               читается сплошной полосой. Своя палитра — только у Тез КЦ: просьба от
+               отдела, а у СЗоВ и ОП те же слова, и их цвета без их просьбы не меняем.
+               Тёплые цвета в полосе — только перерыв: над ней дорожка графика рисует
+               перерывы по плану жёлто-янтарным, и жёлтый «Перезвон» читался бы как
+               перерыв. Поэтому работа — холодными: «Готов» синий, «Соединение»
+               голубой, «Занят» зелёный, «Перезвон» бирюзовый. «Тренинг» и тех. пауза —
+               цветами самого iCORE Phone (фиолетовый и малиновый). Цвета подобраны по
+               различимости (ΔE2000): любые два статуса Тез отличаются не меньше, чем
+               «Готов» от серого «Выключен», а соседние на полосе не слипаются и при
+               красно-зелёной слепоте — поэтому «Занят» ярко-зелёный, а «Тренинг»
+               светло-фиолетовый. «Офлайн» и «Выключен» — общие цвета. */
+            const PLANNER_TEZ_STATUS_TONES = {
+                active: {
+                    chip: 'border-blue-200 bg-blue-50 text-blue-700',
+                    row: 'border-blue-100 bg-blue-50/60 text-blue-800',
+                    bar: '#2563eb'
+                },
+                connecting: {
+                    chip: 'border-sky-200 bg-sky-50 text-sky-700',
+                    row: 'border-sky-100 bg-sky-50/60 text-sky-800',
+                    bar: '#7dd3fc'
+                },
+                talk: {
+                    chip: 'border-green-200 bg-green-50 text-green-700',
+                    row: 'border-green-100 bg-green-50/60 text-green-800',
+                    bar: '#22c55e'
+                },
+                outgoing: {
+                    chip: 'border-teal-200 bg-teal-50 text-teal-700',
+                    row: 'border-teal-100 bg-teal-50/60 text-teal-800',
+                    bar: '#0d9488'
+                },
+                break: {
+                    chip: 'border-orange-200 bg-orange-50 text-orange-700',
+                    row: 'border-orange-100 bg-orange-50/60 text-orange-800',
+                    bar: '#f97316'
+                },
+                // У фиолетового и малинового фон строки плотный: полупрозрачного нет в тёмной теме.
+                training: {
+                    chip: 'border-purple-200 bg-purple-50 text-purple-700',
+                    row: 'border-purple-100 bg-purple-50 text-purple-800',
+                    bar: '#c084fc'
+                },
+                tech: {
+                    chip: 'border-pink-200 bg-pink-50 text-pink-700',
+                    row: 'border-pink-100 bg-pink-50 text-pink-800',
+                    bar: '#be185d'
+                }
+            };
+            const plannerDepartmentStatusTone = (key, departmentCode) => {
+                if (String(departmentCode || '').trim().toLowerCase() !== 'tez') return null;
+                if (plannerStatusIsTechReasonKey(key)) return PLANNER_TEZ_STATUS_TONES.tech;
+                switch (key) {
+                    case 'готов':
+                    // Дни до 11.09.2026 — из выгрузки Binotel: её «Активен» — тот же «Активный».
+                    case 'active':
+                    case 'активен':
+                        return PLANNER_TEZ_STATUS_TONES.active;
+                    case 'соединение':
+                        return PLANNER_TEZ_STATUS_TONES.connecting;
+                    case 'занят':
+                    case 'занята':
+                        return PLANNER_TEZ_STATUS_TONES.talk;
+                    case 'перезвон':
+                    case 'исход':
+                        return PLANNER_TEZ_STATUS_TONES.outgoing;
+                    case 'перерыв':
+                    case 'авто':
+                    case 'break in work':
+                        return PLANNER_TEZ_STATUS_TONES.break;
+                    case 'тренинг':
+                    case 'training':
+                    case 'study':
+                        return PLANNER_TEZ_STATUS_TONES.training;
+                    default:
+                        return null;
+                }
+            };
+            /* Порядок подписей под цветами (расшифровка полосы «ст» в «Графиках работы»):
+               как идёт работа — линия, паузы, выход. Постоянный, а не по длительности:
+               иначе при смене фильтра подписи менялись бы местами. */
+            const PLANNER_STATUS_LEGEND_ORDER = [
+                'готов', 'active', 'активен', 'занят', 'занята', 'соединение', 'перезвон', 'исход',
+                'автодозвон', 'work in crm', 'работа в crm', 'тренинг', 'тех причина',
+                'перерыв', 'break in work', 'офлайн', 'выключен', 'inactive', 'неактивен'
+            ];
+            const plannerStatusLegendRank = (label) => {
+                const key = plannerStatusNormalizeKey(label);
+                const rank = PLANNER_STATUS_LEGEND_ORDER.indexOf(plannerStatusIsTechReasonKey(key) ? 'тех причина' : key);
+                return rank === -1 ? PLANNER_STATUS_LEGEND_ORDER.length : rank;
             };
             const PLANNER_IMPORTED_WORK_STATUS_KEYS = new Set([
             'готов', 'занят', 'занята', 'перезвон',
@@ -18889,6 +18991,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             );
             // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
             const isTezPlanner = plannerScopeDepartmentCode === 'tez';
+            /* Цвета статусов — по отделу ОПЕРАТОРА строки (задача #416: у Тез КЦ своя
+               палитра), а не по отделу в шапке: во «Всех отделах» строка Тез КЦ
+               выглядит так же, как у её руководителя. Строка без известного отдела
+               берёт отдел шапки. */
+            const plannerDepartmentCodeById = useMemo(
+                () => new Map(plannerDepartmentOptions.map(opt => [opt.value, opt.code])),
+                [plannerDepartmentOptions]
+            );
+            const plannerStatusPaletteFor = useCallback((op) => (
+                plannerDepartmentCodeById.get(String(op?.department_id ?? '')) || plannerScopeDepartmentCode
+            ), [plannerDepartmentCodeById, plannerScopeDepartmentCode]);
             // Фронт офисы не используют Oktell/Binotel/Chat2Desk — в меню «⋮»
             // скрыты все кнопки синхронизаций и статусов Chat2Desk.
             // Кадровику — тоже: статусы телефонии нужны руководителю линии, сервер
@@ -19606,6 +19719,37 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                 return map;
             }, [plannerStatusEffectiveAnalysis]);
+            /* Расшифровка цветов полосы «ст» у Тез КЦ (задача #416). Просили узнавать
+               статус без наведения курсора, а незнакомый цвет без подписи пришлось бы
+               узнавать тем же наведением. Подписи — только тех статусов, что есть у
+               показанных операторов в этот день. У остальных отделов палитра общая и
+               расшифровки нет: там цвета не меняли. */
+            const plannerStatusLegendItems = useMemo(() => {
+                if (!plannerStatusSpecialDayViewEnabled || !isTezPlanner) return [];
+                const dayKey = visibleRange[0];
+                if (!dayKey) return [];
+                // Один цвет — один пункт: «Перезвон» и «Исход» у Тез — один статус телефона,
+                // и двумя квадратиками одного цвета они читались бы как разные.
+                const seen = new Set();
+                const byBar = new Map();
+                filteredOperators.forEach(op => {
+                    const paletteCode = plannerStatusPaletteFor(op);
+                    const bars = importedStatusTimelineByOperatorDateKey.get(`${plannerStatusNormalizeOperatorName(op?.name)}|${dayKey}`) || [];
+                    bars.forEach(seg => {
+                        const label = String(seg?.stateName || seg?.stateKey || '').trim();
+                        if (!label || seen.has(`${paletteCode}|${label}`)) return;
+                        seen.add(`${paletteCode}|${label}`);
+                        const bar = getPlannerImportedStatusTone(label, paletteCode).bar;
+                        const labels = byBar.get(bar) || [];
+                        if (!labels.includes(label)) labels.push(label);
+                        byBar.set(bar, labels);
+                    });
+                });
+                const byRank = (a, b) => (plannerStatusLegendRank(a) - plannerStatusLegendRank(b)) || a.localeCompare(b, 'ru');
+                return Array.from(byBar, ([bar, labels]) => ({ bar, labels: [...labels].sort(byRank) }))
+                    .sort((a, b) => byRank(a.labels[0], b.labels[0]))
+                    .map(item => ({ bar: item.bar, label: item.labels.join(' / ') }));
+            }, [plannerStatusSpecialDayViewEnabled, isTezPlanner, visibleRange, filteredOperators, importedStatusTimelineByOperatorDateKey, plannerStatusPaletteFor]);
             const getImportedStatusBarsForShiftContext = useCallback((operatorNameRaw, dateKeyRaw) => {
                 const operatorNameKey = plannerStatusNormalizeOperatorName(operatorNameRaw);
                 const dateKey = String(dateKeyRaw || '').trim();
@@ -25600,7 +25744,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             startMin: seg.startMin,
                             endMin: seg.endMin,
                             label,
-                            background: getPlannerImportedStatusTone(label).bar
+                            // Цвета — те же, что у руководителя в «Графиках работы»: по отделу оператора.
+                            background: getPlannerImportedStatusTone(label, plannerOwnDepartmentCode).bar
                         };
                     }),
                     dayMetrics,
@@ -25633,7 +25778,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     // Перечитать статусы можно только там, где они приезжают сразу.
                     canRefresh: liveChannelHere
                 };
-            }, [myTimelineOperator, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey]);
+            }, [myTimelineOperator, plannerTrainingsByOperator, myStatusTrackLive, operatorTodayKey, plannerOwnDepartmentCode]);
             const myCurrentDayStatusTrack = useMemo(
                 () => getMyStatusTrackForDate(myCurrentDayCard?.date),
                 [getMyStatusTrackForDate, myCurrentDayCard?.date]
@@ -35239,7 +35384,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 вместе с линейкой часов раньше стояла на z-[50] и, будучи позже
                                 сайдбара в разметке, накрывала его выпадающие плашки. */}
                             <div className="flex items-start border-b pb-2 mb-2 sticky top-0 z-30 bg-white">
-                                <div className="w-64 sticky left-0 top-0 z-10 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }} />
+                                <div className="w-64 sticky left-0 top-0 z-10 bg-white pr-2 border-r" style={{ minWidth: '256px', boxShadow: '2px 0 4px rgba(0,0,0,0.05)' }}>
+                                    {/* Угол над колонкой ФИО всё равно пустой: расшифровка цветов
+                                        встаёт сюда и не отнимает у сетки ни строчки. */}
+                                    {plannerStatusLegendItems.length > 0 && (
+                                        <div className="flex flex-wrap gap-x-3 gap-y-1 px-1 pt-1 text-[11px] leading-4 text-slate-600" aria-label="Цвета статусов">
+                                            {plannerStatusLegendItems.map(item => (
+                                                <span key={item.label} className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                                                    <span className="h-2.5 w-2.5 shrink-0 rounded-[3px]" style={{ background: item.bar }} />
+                                                    {item.label}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
                                 <div className="flex-1" style={{ overflow: 'visible' }}>
                                 <div className="flex gap-2" style={{ whiteSpace: 'nowrap' }}>
                                     {visibleRange.map(d => {
@@ -35972,7 +36130,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                             />
                                                                         )}
                                                                         {specialTimelineStatusBars.map((seg, segIdx) => {
-                                                                            const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                            const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey, plannerStatusPaletteFor(op));
                                                                             return (
                                                                                 <div
                                                                                     key={`special-status-${segIdx}`}
@@ -38063,7 +38221,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         </div>
                                     )}
                                     {journalRows.map((seg, idx) => {
-                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey, plannerStatusPaletteFor(journalOp));
                                         const segDurationMin = Math.max(0, Number(seg?.endMin || 0) - Number(seg?.startMin || 0));
                                         const rowFocusKey = buildEditTimelineStatusFocusKey(seg, idx);
                                         const isFocusedRow = rowFocusKey === editTimelineFocusedStatusKey;
@@ -38303,7 +38461,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         {previewStatusTotalsInShift.length > 0 ? (
                                             <div className="flex flex-wrap gap-1.5">
                                                 {previewStatusTotalsInShift.map((item, idx) => {
-                                                    const tone = getPlannerImportedStatusTone(item.label || item.key);
+                                                    const tone = getPlannerImportedStatusTone(item.label || item.key, plannerStatusPaletteFor(modalPreviewOp));
                                                     return (
                                                         <span key={`modal-sheet-status-total-${item.key}-${idx}`} className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] ${tone.pill}`}>
                                                             <span className="font-medium">{item.label}</span>
@@ -38415,7 +38573,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         ))}
                                                     </div>
                                                     {previewStatusBars.map((seg, segIdx) => {
-                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey, plannerStatusPaletteFor(modalPreviewOp));
                                                         const segFocusKey = buildEditTimelineStatusFocusKey(seg, segIdx);
                                                         const isFocusedSeg = segFocusKey === editTimelineFocusedStatusKey;
                                                         return (
@@ -39701,7 +39859,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             const isPlannedScope = expandedScope === 'planned';
                                                             const tone = isPlannedScope
                                                                 ? { pill: 'border-blue-200 bg-blue-50 text-blue-700' }
-                                                                : getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '');
+                                                                : getPlannerImportedStatusTone(item?.statusLabel || item?.statusKey || '', plannerStatusPaletteFor(operatorsById.get(Number(item?.operatorId))));
                                                             return (
                                                                 <div key={`group-op-${idx}-${item?.operatorId || item?.operatorName}`} className="rounded-md border border-slate-200 px-2 py-1.5 text-xs">
                                                                     <div className="flex items-start justify-between gap-2">
@@ -40228,7 +40386,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                                 <div className="flex flex-wrap gap-1 max-w-full">
                                                                                     {(op.statusTotalsEntries || []).map(([stateName, seconds], stIdx) => (
                                                                                         (() => {
-                                                                                            const tone = getPlannerImportedStatusTone(stateName);
+                                                                                            const tone = getPlannerImportedStatusTone(stateName, plannerStatusPaletteFor(matchedPlannerOperator));
                                                                                             return (
                                                                                         <span
                                                                                             key={`anomaly-op-total-${stIdx}`}
@@ -40350,7 +40508,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                                                     ))}
                                                                                                 </div>
                                                                                                 {statusTimelineBars.map((seg, segIdx) => {
-                                                                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                                                    const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey, plannerStatusPaletteFor(matchedPlannerOperator));
                                                                                                     return (
                                                                                                         <div
                                                                                                             key={`anomaly-status-bar-${segIdx}`}
@@ -40403,7 +40561,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                                             <div className="mt-3 space-y-1.5">
                                                                                 {timelineList.map((seg, segIdx) => (
                                                                                     (() => {
-                                                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey);
+                                                                                        const tone = getPlannerImportedStatusTone(seg.stateName || seg.stateKey, plannerStatusPaletteFor(matchedPlannerOperator));
                                                                                         const rowClass = seg.isNoPhoneAnomalyInShift
                                                                                             ? 'border-rose-200 bg-rose-50 text-rose-900'
                                                                                             : tone.row;
