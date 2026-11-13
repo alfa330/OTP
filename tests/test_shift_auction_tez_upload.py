@@ -16,6 +16,7 @@ Excel, что и в «Графики работы», а операторы ТП 
 """
 import ast
 import re
+import textwrap
 import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -370,7 +371,7 @@ class RouteWiringTests(unittest.TestCase):
         self.assertIn("SHIFT_AUCTION_UPLOAD_MAX_BYTES + 1", route)
 
     def test_admin_lot_actions_stay_in_own_runs(self):
-        for marker in ("db.shift_auction_mode_for_lot(", "db.shift_auction_mode_for_operator(operator_id, include_pilot=True)"):
+        for marker in ("db.shift_auction_mode_for_lot(", "db.shift_auction_mode_for_operator(operator_id) or SHIFT_AUCTION_MODE_LINE"):
             with self.subTest(marker=marker):
                 start = ROUTES_SOURCE.index(marker)
                 self.assertIn("_shift_auction_staff_modes(requester_id, requester_role)", ROUTES_SOURCE[start:start + 600])
@@ -406,14 +407,15 @@ class FrontendWiringTests(unittest.TestCase):
         # Пояснение формата — под «i», а не строкой в окне.
         self.assertIn("<InfoHint", SHEET_SOURCE)
 
-    def test_tez_people_do_not_get_the_section_during_the_pilot(self):
-        """Пилот (12.11.2026): аукцион Теза пока только у суперадминов — меню Теза прежнее."""
+    def test_tez_people_get_the_section(self):
+        """13.11.2026 отдел открыт: пункт «Аукцион смен» в наборах Теза (поведение —
+        в tests/shift_auction_tez_upload.test.mjs)."""
         operator = DEPARTMENT_VIEWS_SOURCE[DEPARTMENT_VIEWS_SOURCE.index("const TEZ_OPERATOR_VIEWS = "):]
         operator = operator[:operator.index("];")]
         manager = DEPARTMENT_VIEWS_SOURCE[DEPARTMENT_VIEWS_SOURCE.index("const TEZ_MANAGER_VIEWS = ["):]
         manager = manager[:manager.index("];")]
-        self.assertNotIn("'shift_auction'", operator)
-        self.assertNotIn("'shift_auction'", manager)
+        self.assertIn("'work_schedules', 'shift_auction',", operator)
+        self.assertIn("'shift_auction'", manager)
         # Суперадмину с выбранным в меню «Тез КЦ» пункт нужен на месте.
         self.assertIn("shift_auction: ['szov', 'tez'],", APP_SOURCE)
 
@@ -592,32 +594,108 @@ class ReviewFixesWiringTests(unittest.TestCase):
 
 
 
-class PilotAndDepartmentSelectorTests(unittest.TestCase):
-    """Пилот только для суперадминов и выбор отдела «СЗоВ / Тез КЦ» (12.11.2026)."""
+def _staff_rules(department_codes):
+    """Настоящие _shift_auction_staff_modes и _is_shift_auction_manager из блюпринта.
+    Подставлены только роли и отделы человека (свой + возглавляемые) по его id."""
+    ns = _registry()
+    ns.update({
+        "_normalize_user_role": lambda role: str(role or "").strip().lower(),
+        "_is_admin_role": lambda role: role in ("admin", "super_admin"),
+        "_is_supervisor_role": lambda role: role == "sv",
+        "_shift_auction_staff_department_codes": lambda requester_id: tuple(department_codes.get(requester_id, ())),
+    })
+    for node in ast.walk(ast.parse(ROUTES_SOURCE)):
+        if isinstance(node, ast.FunctionDef) and node.name in ("_shift_auction_staff_modes", "_is_shift_auction_manager"):
+            exec(textwrap.dedent(ast.get_source_segment(ROUTES_SOURCE, node, padded=True)), ns)
+    return ns["_shift_auction_staff_modes"], ns["_is_shift_auction_manager"]
 
-    def test_tez_runs_are_super_admin_only(self):
-        ns = _registry()
-        exec(next(ast.get_source_segment(DATABASE_SOURCE, node) for node in DATABASE_MODULE.body
-                  if isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES"
-                                                          for target in node.targets)), ns)
-        self.assertEqual(ns["SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES"], ("tez_tp", "tez_op"))
-        staff = ROUTES_SOURCE[ROUTES_SOURCE.index("    def _shift_auction_staff_modes("):]
-        staff = staff[:staff.index("\n    def ")]
-        self.assertIn("if role == 'super_admin':\n            return SHIFT_AUCTION_MODES", staff)
-        self.assertIn("if mode not in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES", staff)
 
-    def test_operator_of_a_pilot_run_is_not_in_the_auction(self):
-        body = _method("_shift_auction_mode_for_operator_tx")
-        self.assertIn("if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES and not include_pilot:\n            return None", body)
-        # Назначить смену человеку пилота может только суперадмин — там пилот виден.
-        self.assertIn("include_pilot=True) or SHIFT_AUCTION_MODE_LINE", _method("admin_claim_shift_for_operator"))
-        self.assertIn("if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES:\n                raise ValueError(\"NOT_TEST_PARTICIPANT\")",
-                      _method("post_auction_claim_saved_shift"))
+def _operator_mode_rule():
+    """Настоящий Database._shift_auction_mode_for_operator_tx: прогон по карточке."""
+    ns = _registry()
+    database = next(n for n in DATABASE_MODULE.body if isinstance(n, ast.ClassDef) and n.name == "Database")
+    nodes = [n for n in DATABASE_MODULE.body
+             if isinstance(n, ast.FunctionDef) and n.name == "shift_auction_mode_matches_direction"]
+    nodes += [n for n in database.body
+              if isinstance(n, ast.FunctionDef) and n.name == "_shift_auction_mode_for_operator_tx"]
+    for node in nodes:
+        exec(textwrap.dedent(ast.get_source_segment(DATABASE_SOURCE, node, padded=True)), ns)
+    return ns["_shift_auction_mode_for_operator_tx"], ns
+
+
+class _CardCursor:
+    """Ответ на запрос карточки: (имя направления, код отдела направления) или None."""
+
+    def __init__(self, row):
+        self.row = row
+
+    def execute(self, sql, params=None):
+        self.params = params
+
+    def fetchone(self):
+        return self.row
+
+
+class TezOpenedAndDepartmentSelectorTests(unittest.TestCase):
+    """Тез КЦ открыт отделу (13.11.2026, после пилота у суперадминов с 12.11) и выбор
+    отдела «СЗоВ / Тез КЦ» у суперадмина."""
+
+    def test_pilot_switch_is_gone(self):
+        for name, source in (("database", DATABASE_SOURCE), ("routes", ROUTES_SOURCE)):
+            with self.subTest(source=name):
+                self.assertNotIn("SUPER_ADMIN_ONLY_MODES", source)
+                self.assertNotIn("include_pilot", source)
+
+    def test_tez_management_leads_tez_and_szov_keeps_its_runs(self):
+        staff_modes, is_manager = _staff_rules({
+            1: ("tez",),           # глава Тез КЦ (админ)
+            2: ("tez",),           # СВ Тез КЦ
+            3: ("szov",),          # руководство СЗоВ
+            4: ("szov",),
+            5: ("it",),            # админ другого отдела
+            6: ("tez",),           # оператор Теза
+            7: ("szov", "tez"),    # человек СЗоВ, возглавляющий Тез
+        })
+        tez, szov = ("tez_tp", "tez_op"), ("line", "chat")
+        self.assertEqual(tuple(staff_modes(1, "admin")), tez)
+        self.assertEqual(tuple(staff_modes(2, "sv")), tez)
+        self.assertEqual(tuple(staff_modes(3, "admin")), szov)
+        self.assertEqual(tuple(staff_modes(4, "sv")), szov)
+        # Админам прочих отделов — аукцион СЗоВ, как было до Теза.
+        self.assertEqual(tuple(staff_modes(5, "admin")), szov)
+        # Оператору руководительских прогонов нет — его прогон по карточке.
+        self.assertEqual(tuple(staff_modes(6, "operator")), ())
+        self.assertEqual(tuple(staff_modes(7, "admin")), szov + tez)
+        self.assertEqual(tuple(staff_modes(99, "super_admin")), szov + tez)
+        for mode in tez:
+            with self.subTest(mode=mode):
+                self.assertTrue(is_manager(1, "admin", mode))
+                self.assertTrue(is_manager(2, "sv", mode))
+                self.assertFalse(is_manager(3, "admin", mode))
+                self.assertFalse(is_manager(4, "sv", mode))
+        # СВ Теза не ведёт линию СЗоВ, а СВ СЗоВ — свою ведёт.
+        self.assertFalse(is_manager(2, "sv", "line"))
+        self.assertTrue(is_manager(4, "sv", "line"))
+
+    def test_tez_operator_is_in_own_run(self):
+        """Оператор Теза — в прогоне своей линии по карточке, а не «вне аукциона»."""
+        rule, ns = _operator_mode_rule()
+        cases = (
+            (("ТП линия", "tez"), "tez_tp"),
+            (("ОП линия", "tez"), "tez_op"),
+            ((ns["SHIFT_AUCTION_DIRECTION_NAME"], "szov"), "line"),
+            (("ТП линия", "szov"), None),
+            (None, None),
+        )
+        for row, expected in cases:
+            with self.subTest(row=row):
+                self.assertEqual(rule(None, _CardCursor(row), 9001), expected)
 
     def test_szov_assign_keeps_the_line_fallback(self):
         """СЗоВ не задет: человеку вне прогонов метод по-прежнему подставляет линию."""
-        self.assertIn("db.shift_auction_mode_for_operator(operator_id, include_pilot=True) or SHIFT_AUCTION_MODE_LINE",
-                      ROUTES_SOURCE)
+        self.assertIn("db.shift_auction_mode_for_operator(operator_id) or SHIFT_AUCTION_MODE_LINE", ROUTES_SOURCE)
+        self.assertIn("self._shift_auction_mode_for_operator_tx(cursor, operator_id_int) or SHIFT_AUCTION_MODE_LINE",
+                      _method("admin_claim_shift_for_operator"))
 
     def test_department_is_chosen_in_the_sidebar_menu(self):
         """13.11.2026 владелец: выбор «СЗоВ / Тез КЦ» — меню пункта сайдбара, как линия и

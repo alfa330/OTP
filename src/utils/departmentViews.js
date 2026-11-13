@@ -3,11 +3,9 @@
 // разрешает (Vite разрешает и так, поэтому сборка не замечает разницы).
 import { isAdminLikeRole, isDepartmentHead, normalizeRole } from './roles.js';
 
-// «Аукцион смен» Тез КЦ (задача #124) — пока пилот только у суперадминов (решение
-// владельца 12.11.2026): в наборы Теза раздел не входит. Открыть отделу — вернуть
-// 'shift_auction' в TEZ_OPERATOR_VIEWS (после 'work_schedules') и TEZ_MANAGER_VIEWS
-// и убрать прогоны Теза из SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES (db/core.py).
-const TEZ_OPERATOR_VIEWS = ['profile', 'evaluation', 'hours', 'work_schedules', 'surveys', 'salary'];
+// «Аукцион смен» у Тез КЦ — свои прогоны «ТП линия» и «ОП линия» со сменами из файла
+// руководителя (задача #124, отделу открыт 13.11.2026).
+const TEZ_OPERATOR_VIEWS = ['profile', 'evaluation', 'hours', 'work_schedules', 'shift_auction', 'surveys', 'salary'];
 const TEZ_MANAGER_VIEWS = [
     'manage_operators',
     'qr_access',
@@ -15,6 +13,7 @@ const TEZ_MANAGER_VIEWS = [
     'call_division',
     'monitoring_scale',
     'work_schedules',
+    'shift_auction',
     'sv_hours',
     'tasks',
     'salary',

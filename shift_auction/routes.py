@@ -9,7 +9,6 @@ from database import SHIFT_AUCTION_MODE_CHAT
 from database import SHIFT_AUCTION_MODE_DEPARTMENT_CODE
 from database import SHIFT_AUCTION_MODE_LINE
 from database import SHIFT_AUCTION_MODES
-from database import SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES
 from database import SHIFT_AUCTION_TEST_EVENT_NOTIFY_CHANNEL
 from database import SHIFT_AUCTION_UPLOAD_MODES
 from database import db
@@ -469,12 +468,7 @@ def build_shift_auction_blueprint(
             return SHIFT_AUCTION_MODES
         if not (_is_admin_role(role) or _is_supervisor_role(role)):
             return ()
-        # Прогоны пилота (пока только суперадминам) остальным руководителям не видны:
-        # руководство Теза до открытия отдела остаётся в аукционе как было.
-        modes = tuple(
-            mode for mode in shift_auction_modes_for_departments(_shift_auction_staff_department_codes(requester_id))
-            if mode not in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES
-        )
+        modes = shift_auction_modes_for_departments(_shift_auction_staff_department_codes(requester_id))
         if not modes:
             modes = shift_auction_modes_for_departments((SHIFT_AUCTION_DEPARTMENT_CODE,))
         return modes
@@ -824,11 +818,10 @@ def build_shift_auction_blueprint(
             operator_id = payload.get('operator_id')
             if not operator_id:
                 return jsonify({"error": "operator_id is required"}), 400
-            # Назначать — только людям своих прогонов (направление — по карточке человека,
-            # включая пилот: его прогоны есть только у суперадмина). Человеку вне всех
-            # прогонов метод подставит линию — значит и сверяем как линию: руководитель
-            # одного Теза не назначит через такого человека смену СЗоВ.
-            operator_mode = db.shift_auction_mode_for_operator(operator_id, include_pilot=True) or SHIFT_AUCTION_MODE_LINE
+            # Назначать — только людям своих прогонов (направление — по карточке человека).
+            # Человеку вне всех прогонов метод подставит линию — значит и сверяем как
+            # линию: руководитель одного Теза не назначит через такого человека смену СЗоВ.
+            operator_mode = db.shift_auction_mode_for_operator(operator_id) or SHIFT_AUCTION_MODE_LINE
             if operator_mode not in _shift_auction_staff_modes(requester_id, requester_role):
                 return jsonify({"error": "Not allowed"}), 403
             result = db.admin_claim_shift_for_operator(

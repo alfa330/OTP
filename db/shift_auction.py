@@ -37,7 +37,6 @@ from db.core import (  # noqa: F401
     shift_auction_modes_for_departments,
     shift_auction_night_shifts,
     SHIFT_AUCTION_SEVERAL_SHIFTS_PER_DAY_MODES,
-    SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES,
     SHIFT_AUCTION_UPLOAD_MODES,
     SHIFT_AUCTION_PARTICIPANT_CACHE_LOCK,
     SHIFT_AUCTION_PARTICIPANT_CACHE_TTL_SECONDS,
@@ -3779,7 +3778,7 @@ class ShiftAuctionMixin:
             "post_auction_active": post_auction_active,
         }
 
-    def shift_auction_mode_for_operator(self, operator_id, include_pilot=False):
+    def shift_auction_mode_for_operator(self, operator_id):
         """Направление аукциона по карточке человека, либо None — он вне аукциона.
 
         Оператор принадлежит ровно одному направлению, поэтому режим НЕ приходит с
@@ -3792,13 +3791,10 @@ class ShiftAuctionMixin:
         if operator_id <= 0:
             return None
         with self._get_cursor() as cursor:
-            return self._shift_auction_mode_for_operator_tx(cursor, operator_id, include_pilot=include_pilot)
+            return self._shift_auction_mode_for_operator_tx(cursor, operator_id)
 
-    def _shift_auction_mode_for_operator_tx(self, cursor, operator_id, include_pilot=False):
-        """Прогон человека по карточке. Прогоны пилота (SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES)
-        для самого оператора — «не в аукционе»: брать, возвращать и отмечать выходные он не
-        может, пока отдел не открыт. include_pilot=True — для действий суперадмина
-        (назначить смену человеку пилотного прогона)."""
+    def _shift_auction_mode_for_operator_tx(self, cursor, operator_id):
+        """Прогон человека по карточке: направление и отдел направления."""
         cursor.execute("""
             SELECT BTRIM(COALESCE(d.name, '')), LOWER(BTRIM(COALESCE(dep.code, '')))
             FROM users u
@@ -3809,10 +3805,7 @@ class ShiftAuctionMixin:
         row = cursor.fetchone()
         if not row:
             return None
-        mode = shift_auction_mode_matches_direction(row[0], row[1])
-        if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES and not include_pilot:
-            return None
-        return mode
+        return shift_auction_mode_matches_direction(row[0], row[1])
 
     def _shift_auction_mode_for_plan_tx(self, cursor, plan_id):
         """Направление аукциона по недельному плану — он и есть носитель режима."""
@@ -5401,9 +5394,6 @@ class ShiftAuctionMixin:
             # Направление берём с ПЛАНА: пост-аукционный добор идёт по опубликованной
             # неделе, и именно она говорит, чей это аукцион.
             mode = self._shift_auction_mode_for_plan_tx(cursor, schedule_plan_id)
-            # Пилот: смены прогона, открытого пока только суперадминам, оператор не берёт.
-            if mode in SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES:
-                raise ValueError("NOT_TEST_PARTICIPANT")
             settings_id = shift_auction_settings_row_id(mode)
             scope_sql, scope_params = shift_auction_direction_scope_sql(mode)
             cursor.execute(
@@ -6236,8 +6226,7 @@ class ShiftAuctionMixin:
             # Направление аукциона — по человеку, которому назначают смену. Человеку вне
             # всех прогонов по-прежнему достаётся линия (так было у СЗоВ); чей это прогон
             # и вправе ли руководитель назначать в нём, сверяет ручка.
-            mode = self._shift_auction_mode_for_operator_tx(
-                cursor, operator_id_int, include_pilot=True) or SHIFT_AUCTION_MODE_LINE
+            mode = self._shift_auction_mode_for_operator_tx(cursor, operator_id_int) or SHIFT_AUCTION_MODE_LINE
 
             if lot_id_int:
                 # Смена — только из аукциона направления этого человека: иначе смену

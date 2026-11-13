@@ -203,11 +203,6 @@ SHIFT_AUCTION_MODE_LABELS = {
 }
 # Где смены прогона берутся из файла руководителя, а не из «Расчёта ресурсов».
 SHIFT_AUCTION_UPLOAD_MODES = (SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP)
-# Пилот (решение владельца 12.11.2026): аукцион Тез КЦ пока видят и ведут только
-# суперадмины. Руководство и операторы Теза остаются в аукционе как были — для них
-# этих прогонов нет. Открыть отделу: убрать режимы отсюда и вернуть 'shift_auction'
-# в наборы Теза в src/utils/departmentViews.js.
-SHIFT_AUCTION_SUPER_ADMIN_ONLY_MODES = (SHIFT_AUCTION_MODE_TEZ_TP, SHIFT_AUCTION_MODE_TEZ_OP)
 SHIFT_AUCTION_DEPARTMENT_LABELS = {
     SHIFT_AUCTION_DEPARTMENT_CODE: 'СЗоВ',
     SHIFT_AUCTION_TEZ_DEPARTMENT_CODE: 'Тез КЦ',

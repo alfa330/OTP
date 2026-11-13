@@ -23,8 +23,22 @@ import {
   readStoredAuctionDirection,
   storeAuctionDirection,
 } from '../src/components/resources/shiftAuctionDirectionMemory.js';
+import { departmentAllowsView, firstAllowedView } from '../src/utils/departmentViews.js';
 
 // Аукцион Тез КЦ (задача #124): люди выдуманы.
+
+test('«Аукцион смен» открыт Тез КЦ: операторам, СВ и главе отдела', () => {
+  const operator = { id: 9001, role: 'operator', department_code: 'tez' };
+  const supervisor = { id: 9002, role: 'sv', department_code: 'tez' };
+  const head = { id: 9003, role: 'admin', department_code: 'tez', headed_department_id: 560 };
+  for (const user of [operator, supervisor, head]) {
+    assert.equal(departmentAllowsView(user, 'shift_auction'), true, user.role);
+  }
+  // Раздел, который оператор Теза видит первым при входе, прежний.
+  assert.equal(firstAllowedView(operator), 'profile');
+  // Остальным отделам с картой разделов пункт не добавился.
+  assert.equal(departmentAllowsView({ id: 9004, role: 'operator', department_code: 'op' }, 'shift_auction'), false);
+});
 
 test('линии Тез КЦ — свои прогоны: кандидаты только своего направления', () => {
   const people = [
