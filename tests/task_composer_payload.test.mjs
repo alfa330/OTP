@@ -15,7 +15,7 @@ import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { buildSync } = require('esbuild');
+const { build } = require('esbuild');
 
 const stubNode = () => ({
   setAttribute() {}, appendChild() {}, style: {}, dataset: {}, classList: { add() {}, remove() {} },
@@ -31,13 +31,26 @@ globalThis.document = globalThis.document || {
 const dir = join(process.cwd(), 'node_modules', '.cache', 'otp-tests');
 mkdirSync(dir, { recursive: true });
 const outfile = join(dir, 'tasks_TasksView_payload.mjs');
-buildSync({
+await build({
   entryPoints: [fileURLToPath(new URL('../src/components/tasks/TasksView.jsx', import.meta.url))],
   bundle: true, format: 'esm', platform: 'node', target: 'node18', outfile,
   packages: 'external', loader: { '.js': 'jsx', '.jsx': 'jsx', '.css': 'empty' },
   logLevel: 'silent',
   // Помощники формы не экспортируются из модуля раздела — достаём их в сборке теста.
   footer: { js: 'export { buildTaskJsonPayload as __payload, taskToTaskForm as __toForm, buildEmptyTaskForm as __empty };' },
+  // PDF.js просмотра вложений грузится лениво, но esbuild всё равно кладёт его в
+  // бандл, а его импорт воркера с «?url» понимает только Vite — node падал бы на
+  // загрузке модуля раздела. Форме задачи PDF не нужен: подменяем пустышкой.
+  plugins: [{
+    name: 'stub-pdf-runtime',
+    setup(stub) {
+      stub.onResolve({ filter: /\/pdfRuntime$/ }, () => ({ path: 'pdfRuntime', namespace: 'stub' }));
+      stub.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
+        contents: 'export const getDocument = () => { throw new Error("pdf.js в тесте не нужен"); }; export class TextLayer {}',
+        loader: 'js',
+      }));
+    },
+  }],
 });
 const { __payload: payloadOf, __toForm: toForm, __empty: emptyForm } = await import(`file://${outfile.replace(/\\/g, '/')}`);
 

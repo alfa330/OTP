@@ -1,0 +1,794 @@
+/* Окно просмотра файла (FilePreviewSheet) — как Quick Look и «Просмотр» macOS:
+   серое полотно, на нём лист документа, лента страниц PDF или таблица.
+
+   Цвета — токенами .tfv-screen. Тёмный слой портала (theme-dark.css) знает
+   только утилиты Tailwind, поэтому тёмные значения заданы здесь же, под
+   атрибутом темы, из его палитры (полотно #17191e, карточка #1e2127). */
+
+/* Слой над карточкой задачи (z-index 111/125), окнами действий и закреплённым
+   виджетом (130) и над боковым меню портала: просмотр занимает весь экран. */
+.tfv-layer {
+    position: relative;
+    z-index: 140;
+}
+
+/* Полноэкранный просмотр: панель сверху на всю ширину, слева — список файлов
+   блока (если их больше одного), справа — сам файл. Человек остаётся на той
+   же странице: это слой поверх портала, Esc или крестик возвращают обратно. */
+.tfv-screen {
+    --tfv-canvas: #f2f2f7;
+    --tfv-paper: #ffffff;
+    --tfv-ink: #1d1d1f;
+    --tfv-ink-2: #3c3c43;
+    --tfv-ink-3: #8a8a8e;
+    --tfv-line: #e5e5ea;
+    --tfv-line-strong: #d1d1d6;
+    --tfv-head: #f6f7f9;
+    --tfv-accent: #2563eb;
+    --tfv-bar: rgba(255, 255, 255, 0.86);
+    --tfv-side: #fbfbfd;
+    --tfv-hover: rgba(120, 120, 128, 0.12);
+    --tfv-select: #e8f0fe;
+    --tfv-select-ink: #1d4ed8;
+    --tfv-pill: rgba(255, 255, 255, 0.92);
+    --tfv-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 6px 20px rgba(15, 23, 42, 0.07);
+    position: fixed;
+    inset: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    background: var(--tfv-canvas);
+    color: var(--tfv-ink);
+    outline: none;
+    animation: tfv-screen-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.tfv-screen.has-side {
+    grid-template-columns: 272px minmax(0, 1fr);
+}
+.tfv-screen.is-leaving {
+    pointer-events: none;
+    animation: tfv-screen-out 0.16s ease-in both;
+}
+@keyframes tfv-screen-in {
+    from { opacity: 0; transform: scale(0.992); }
+    to { opacity: 1; transform: none; }
+}
+@keyframes tfv-screen-out {
+    from { opacity: 1; transform: none; }
+    to { opacity: 0; transform: scale(0.992); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .tfv-screen,
+    .tfv-screen.is-leaving { animation: none; }
+}
+
+html[data-otp-theme="dark"] .tfv-screen {
+    --tfv-canvas: #17191e;
+    --tfv-paper: #1e2127;
+    --tfv-ink: #e8ecf2;
+    --tfv-ink-2: #c1c8d3;
+    --tfv-ink-3: #7d8695;
+    --tfv-line: #2e333c;
+    --tfv-line-strong: #3a414b;
+    --tfv-head: #22262d;
+    --tfv-accent: #60a5fa;
+    --tfv-bar: rgba(30, 33, 39, 0.86);
+    --tfv-side: #1b1e23;
+    --tfv-hover: rgba(255, 255, 255, 0.08);
+    --tfv-select: rgba(59, 130, 246, 0.2);
+    --tfv-select-ink: #93c5fd;
+    --tfv-pill: rgba(34, 38, 45, 0.92);
+    --tfv-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+/* ── Панель сверху ── */
+.tfv-bar {
+    position: relative;
+    z-index: 3;
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 56px;
+    padding: env(safe-area-inset-top) 12px 0 12px;
+    background: var(--tfv-bar);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid var(--tfv-line);
+}
+.tfv-bar-lead {
+    display: flex;
+    flex: 1 1 0;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+.tfv-bar-title { min-width: 0; }
+.tfv-bar-title h2 {
+    margin: 0;
+    overflow: hidden;
+    color: var(--tfv-ink);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tfv-bar-title p {
+    margin: 1px 0 0;
+    overflow: hidden;
+    color: var(--tfv-ink-3);
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tfv-bar-center {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 10px;
+}
+.tfv-bar-actions {
+    display: flex;
+    flex: 1 1 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+}
+.tfv-bar-sep {
+    width: 1px;
+    height: 20px;
+    margin: 0 6px;
+    background: var(--tfv-line-strong);
+}
+.tfv-icon-btn {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    color: var(--tfv-ink-2);
+    transition: background-color 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+.tfv-icon-btn:hover { background: var(--tfv-hover); color: var(--tfv-ink); }
+.tfv-icon-btn:active { transform: scale(0.94); }
+.tfv-icon-btn:disabled { opacity: 0.32; pointer-events: none; }
+.tfv-icon-btn.is-on { background: var(--tfv-select); color: var(--tfv-select-ink); }
+.tfv-icon-btn.is-close { border-radius: 999px; background: var(--tfv-hover); }
+.tfv-icon-btn.is-back { width: 38px; margin-left: -4px; color: var(--tfv-accent); }
+.tfv-icon-btn.is-back:hover { background: transparent; }
+.tfv-done { color: var(--tfv-accent); }
+.tfv-nav {
+    display: flex;
+    align-items: center;
+    margin-right: 4px;
+}
+.tfv-nav-count {
+    min-width: 54px;
+    color: var(--tfv-ink-3);
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Цветная метка типа файла — как значки в Finder и на Диске. */
+.tfv-badge {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+/* ── Список файлов слева ── */
+.tfv-side {
+    grid-row: 2;
+    grid-column: 1;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: 12px 8px 24px;
+    border-right: 1px solid var(--tfv-line);
+    background: var(--tfv-side);
+}
+.tfv-side-title {
+    margin: 2px 10px 8px;
+    color: var(--tfv-ink-3);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+.tfv-side ul {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.tfv-side-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 10px;
+    color: var(--tfv-ink);
+    text-align: left;
+    transition: background-color 0.12s ease;
+}
+.tfv-side-item:hover { background: var(--tfv-hover); }
+.tfv-side-item.is-active { background: var(--tfv-select); }
+.tfv-side-item.is-active .tfv-side-name { color: var(--tfv-select-ink); }
+.tfv-side-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.tfv-side-name {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.3;
+    word-break: break-word;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+.tfv-side-meta {
+    margin-top: 2px;
+    overflow: hidden;
+    color: var(--tfv-ink-3);
+    font-size: 11.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Файл ── */
+.tfv-main {
+    position: relative;
+    grid-row: 2;
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+.tfv-screen.has-side .tfv-main { grid-column: 2; }
+
+/* Узкое окно на компьютере: список прячется, файлу нужна вся ширина. */
+@media (max-width: 900px) {
+    .tfv-screen.has-side { grid-template-columns: minmax(0, 1fr); }
+    .tfv-screen.has-side .tfv-side { display: none; }
+    .tfv-screen.has-side .tfv-main { grid-column: 1 / -1; }
+    .tfv-bar-center { display: none; }
+}
+
+/* Телефон: панель — как навигационная панель iOS. */
+body.mobile-shell .tfv-bar {
+    gap: 6px;
+    min-height: 52px;
+    padding-left: 4px;
+    padding-right: 8px;
+}
+/* На телефоне место в шапке — названию: тип файла и так виден в подписи под ним. */
+body.mobile-shell .tfv-bar .tfv-badge { display: none; }
+
+.tfv-scroll {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+
+/* ── Лист документа: Word, текст, Markdown ── */
+.tfv-paper {
+    box-sizing: border-box;
+    max-width: 820px;
+    margin: 24px auto 48px;
+    padding: 44px 56px 52px;
+    border-radius: 12px;
+    background: var(--tfv-paper);
+    box-shadow: var(--tfv-shadow);
+    color: var(--tfv-ink);
+    font-size: 15px;
+    line-height: 1.62;
+    overflow-wrap: anywhere;
+    user-select: text;
+}
+
+@media (max-width: 860px) {
+    .tfv-paper {
+        margin: 12px;
+        padding: 24px 20px 28px;
+    }
+}
+
+body.mobile-shell .tfv-paper {
+    margin: 0;
+    min-height: 100%;
+    border-radius: 0;
+    box-shadow: none;
+    padding: 18px 16px 32px;
+}
+
+.tfv-text {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font: inherit;
+    font-size: 14.5px;
+    line-height: 1.6;
+    tab-size: 4;
+}
+
+.tfv-text.is-mono {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.tfv-muted {
+    margin: 0;
+    color: var(--tfv-ink-3);
+    font-size: 13.5px;
+}
+
+.tfv-cut {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--tfv-line);
+}
+
+.tfv-doc > :first-child { margin-top: 0; }
+.tfv-doc p { margin: 0 0 10px; white-space: pre-wrap; tab-size: 4; }
+.tfv-doc h1, .tfv-doc h2, .tfv-doc h3, .tfv-doc h4 {
+    margin: 24px 0 10px;
+    color: var(--tfv-ink);
+    line-height: 1.3;
+    white-space: pre-wrap;
+}
+.tfv-doc h1 { font-size: 21px; font-weight: 700; letter-spacing: -0.01em; }
+.tfv-doc h2 { font-size: 18px; font-weight: 650; }
+.tfv-doc h3 { font-size: 16px; font-weight: 650; }
+.tfv-doc h4 { font-size: 15px; font-weight: 650; }
+.tfv-doc h1.tfv-title { margin: 0 0 18px; font-size: 26px; letter-spacing: -0.02em; }
+.tfv-doc .tfv-gap { height: 10px; }
+.tfv-doc a { color: var(--tfv-accent); text-decoration: underline; text-underline-offset: 2px; }
+.tfv-doc strong { font-weight: 650; }
+.tfv-doc ul, .tfv-doc ol { margin: 0 0 10px; padding-left: 1.4em; }
+/* Tailwind (preflight) снимает маркеры у всех списков — в документе они нужны. */
+.tfv-doc ul { list-style: disc; }
+.tfv-doc ol { list-style: decimal; }
+.tfv-doc li::marker { color: var(--tfv-ink-3); }
+.tfv-doc li { margin: 0 0 4px; }
+.tfv-doc blockquote {
+    margin: 0 0 10px;
+    padding: 2px 0 2px 14px;
+    border-left: 3px solid var(--tfv-line-strong);
+    color: var(--tfv-ink-2);
+}
+.tfv-doc code {
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--tfv-head);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.88em;
+}
+.tfv-doc pre {
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--tfv-head);
+    overflow-x: auto;
+}
+.tfv-doc pre code { padding: 0; background: none; }
+.tfv-doc hr { border: 0; border-top: 1px solid var(--tfv-line); margin: 18px 0; }
+
+/* Пункт списка: метка в своей колонке, текст переносится под текст, а не под метку. */
+.tfv-li {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 6px;
+    padding-left: calc(var(--lvl, 0) * 24px + 2px);
+}
+.tfv-li > p { margin: 0; flex: 1 1 auto; min-width: 0; }
+.tfv-li-mark {
+    flex: none;
+    min-width: 14px;
+    color: var(--tfv-ink-3);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.tfv-li.is-ordered .tfv-li-mark { min-width: 20px; color: var(--tfv-ink-2); }
+
+.tfv-doc-img {
+    display: inline-block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    vertical-align: middle;
+}
+
+.tfv-doc-ph {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 6px;
+    background: var(--tfv-head);
+    color: var(--tfv-ink-3);
+    font-size: 12px;
+}
+
+.tfv-doc-table {
+    margin: 12px 0 16px;
+    overflow-x: auto;
+}
+.tfv-doc-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+    line-height: 1.5;
+}
+.tfv-doc-table td {
+    padding: 6px 10px;
+    border: 1px solid var(--tfv-line-strong);
+    vertical-align: top;
+}
+.tfv-doc-table td > p:last-child,
+.tfv-doc-table td > .tfv-li:last-child { margin-bottom: 0; }
+.tfv-doc-table tr.is-header td { background: var(--tfv-head); font-weight: 600; }
+
+/* Таблицы Markdown */
+.tfv-doc table { border-collapse: collapse; margin: 0 0 12px; font-size: 14px; }
+.tfv-doc th, .tfv-doc td { padding: 6px 10px; border: 1px solid var(--tfv-line-strong); text-align: left; }
+.tfv-doc th { background: var(--tfv-head); font-weight: 600; }
+
+/* ── Слайды PowerPoint ── */
+.tfv-slides {
+    max-width: 860px;
+    margin: 24px auto 48px;
+    padding: 0 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.tfv-slide {
+    padding: 22px 32px 28px;
+    border-radius: 14px;
+    background: var(--tfv-paper);
+    box-shadow: var(--tfv-shadow);
+    color: var(--tfv-ink);
+    user-select: text;
+}
+.tfv-slide.is-hidden { opacity: 0.6; }
+.tfv-slide-num {
+    margin-bottom: 10px;
+    color: var(--tfv-ink-3);
+    font-size: 11.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.tfv-slide h2 { margin: 0 0 12px; font-size: 21px; font-weight: 700; line-height: 1.28; letter-spacing: -0.01em; }
+.tfv-slide-sub p { margin: 0 0 8px; color: var(--tfv-ink-2); font-size: 16px; }
+.tfv-slide-text p {
+    position: relative;
+    margin: 0 0 6px;
+    padding-left: calc(var(--lvl, 0) * 22px);
+    font-size: 15px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+}
+.tfv-slide-text p.is-bullet { padding-left: calc(var(--lvl, 0) * 22px + 16px); }
+.tfv-slide-text p.is-bullet::before {
+    content: '•';
+    position: absolute;
+    left: calc(var(--lvl, 0) * 22px + 2px);
+    color: var(--tfv-ink-3);
+}
+.tfv-slide img {
+    display: block;
+    max-width: 100%;
+    max-height: 420px;
+    margin: 12px auto;
+    border-radius: 8px;
+}
+
+body.mobile-shell .tfv-slides { margin: 12px auto 24px; padding: 0 12px; }
+body.mobile-shell .tfv-slide { padding: 16px 16px 20px; }
+
+/* ── Таблицы Excel и CSV ── */
+.tfv-sheets {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.tfv-tabs {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--tfv-line);
+    background: var(--tfv-paper);
+    overflow-x: auto;
+}
+.tfv-tabs-note {
+    color: var(--tfv-ink-3);
+    font-size: 12px;
+    white-space: nowrap;
+}
+.tfv-grid-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    background: var(--tfv-paper);
+}
+.tfv-grid {
+    border-collapse: separate;
+    border-spacing: 0;
+    min-width: 100%;
+    color: var(--tfv-ink);
+    font-size: 13px;
+    line-height: 1.45;
+    user-select: text;
+}
+/* Как в Numbers: короткое значение в строку (таблица листается вбок, а не
+   ломает «Алматы» на «Алма/ты»), переносится только длинный текст — по словам. */
+.tfv-grid td {
+    min-width: 56px;
+    padding: 5px 9px;
+    border-right: 1px solid var(--tfv-line);
+    border-bottom: 1px solid var(--tfv-line);
+    background: var(--tfv-paper);
+    vertical-align: top;
+    white-space: pre;
+}
+.tfv-grid td.is-long {
+    min-width: 14rem;
+    max-width: 26rem;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+.tfv-grid td.is-num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tfv-grid td.is-bold { font-weight: 600; }
+.tfv-grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding: 4px 9px;
+    border-right: 1px solid var(--tfv-line);
+    border-bottom: 1px solid var(--tfv-line-strong);
+    background: var(--tfv-head);
+    color: var(--tfv-ink-3);
+    font-size: 11.5px;
+    font-weight: 500;
+    text-align: center;
+    white-space: nowrap;
+}
+.tfv-grid thead th.is-label {
+    padding: 6px 9px;
+    color: var(--tfv-ink);
+    font-size: 12.5px;
+    font-weight: 600;
+    text-align: left;
+    white-space: pre;
+}
+.tfv-grid thead th.is-label.is-long { min-width: 14rem; max-width: 26rem; white-space: pre-wrap; }
+.tfv-grid tbody th {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    min-width: 40px;
+    padding: 5px 8px;
+    border-right: 1px solid var(--tfv-line-strong);
+    border-bottom: 1px solid var(--tfv-line);
+    background: var(--tfv-head);
+    color: var(--tfv-ink-3);
+    font-size: 11.5px;
+    font-weight: 500;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.tfv-grid thead th.tfv-corner { left: 0; z-index: 3; }
+.tfv-grid-foot {
+    position: sticky;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: min(100%, 100vw);
+    padding: 14px 16px 18px;
+    color: var(--tfv-ink-3);
+    font-size: 12.5px;
+}
+
+/* ── Макет HTML: страница на всю ширину окна или в ширину телефона ── */
+.tfv-html {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.tfv-html-stage {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.tfv-html-frame {
+    display: block;
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    border: 0;
+    /* Пока страница грузится и если у неё нет своего фона — белый лист, как в браузере. */
+    background: #fff;
+}
+.tfv-html-stage[hidden] { display: none; }
+.tfv-html-stage.is-phone {
+    align-items: flex-start;
+    justify-content: center;
+    padding: 20px 16px;
+    overflow: auto;
+}
+/* Экран телефона: ширина iPhone 14/15 (390 CSS px), высота — до 844 или по окну. */
+.tfv-html-stage.is-phone .tfv-html-frame {
+    flex: none;
+    width: 390px;
+    height: 844px;
+    max-height: 100%;
+    border-radius: 28px;
+    box-shadow: var(--tfv-shadow), 0 0 0 1px var(--tfv-line-strong);
+}
+
+/* ── PDF ── */
+.tfv-pdf {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: max-content;
+    min-width: 100%;
+    box-sizing: border-box;
+    padding: 20px 16px 76px;
+}
+.tfv-pdf-page {
+    position: relative;
+    flex: none;
+    background: #fff;
+    box-shadow: var(--tfv-shadow);
+}
+.tfv-pdf-canvas canvas {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.tfv-pdf-text {
+    position: absolute;
+    inset: 0;
+}
+
+/* ── Картинка, видео, звук ── */
+.tfv-image {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    overflow: auto;
+    padding: 16px;
+}
+.tfv-image img {
+    display: block;
+    flex: none;
+    margin: auto;
+    max-width: none;
+    border-radius: 4px;
+    box-shadow: var(--tfv-shadow);
+    user-select: none;
+}
+.tfv-media {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+}
+.tfv-media video {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+}
+.tfv-audio { width: min(420px, 100%); margin-top: 6px; }
+
+/* ── Загрузка, ошибка, формат без просмотра ── */
+.tfv-state {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 32px 24px;
+    color: var(--tfv-ink-3);
+    font-size: 13.5px;
+    text-align: center;
+}
+.tfv-state-title {
+    max-width: 520px;
+    margin: 6px 0 0;
+    color: var(--tfv-ink);
+    font-size: 15px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.tfv-state-text { max-width: 440px; margin: 0; line-height: 1.5; }
+.tfv-state-actions { display: flex; gap: 8px; margin-top: 8px; }
+.tfv-state-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.tfv-glyph-page { fill: var(--tfv-paper); stroke: var(--tfv-line-strong); stroke-width: 1.5; }
+.tfv-glyph-fold { fill: var(--tfv-head); stroke: var(--tfv-line-strong); stroke-width: 1.5; stroke-linejoin: round; }
+
+/* ── Плашка масштаба и подсказки — поверх содержимого, как в «Просмотре» ── */
+.tfv-pill,
+.tfv-toast {
+    position: absolute;
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    z-index: 5;
+    border-radius: 999px;
+    background: var(--tfv-pill);
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(15, 23, 42, 0.06);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+}
+.tfv-pill {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    color: var(--tfv-ink-2);
+    font-size: 12.5px;
+}
+.tfv-pill button {
+    display: grid;
+    place-items: center;
+    height: 28px;
+    min-width: 28px;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--tfv-ink-2);
+    transition: background-color 0.12s ease;
+}
+.tfv-pill button:hover { background: rgba(120, 120, 128, 0.14); }
+.tfv-pill button:disabled { opacity: 0.35; pointer-events: none; }
+.tfv-pill-value { min-width: 52px !important; font-variant-numeric: tabular-nums; font-weight: 500; }
+.tfv-pill-sep { width: 1px; height: 16px; margin: 0 4px; background: var(--tfv-line-strong); }
+.tfv-pill-page { padding: 0 10px 0 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tfv-toast {
+    bottom: max(64px, calc(env(safe-area-inset-bottom) + 48px));
+    width: max-content;
+    max-width: min(520px, calc(100% - 32px));
+    padding: 8px 14px;
+    color: var(--tfv-ink);
+    font-size: 13px;
+    line-height: 1.4;
+    text-align: center;
+}
+/* Узкий экран: подсказка переносится, а не обрезается многоточием. */
+body.mobile-shell .tfv-toast { border-radius: 16px; }

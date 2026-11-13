@@ -98,6 +98,8 @@ import {
 import { IosLightbox } from '../ui/ios';
 import { isPreviewablePhoto, splitTaskFiles } from './taskPhotos';
 import useTaskPhotoPreviews from './useTaskPhotoPreviews';
+import FilePreviewSheet, { saveBlobAs } from '../file_preview/FilePreviewSheet';
+import { previewCache } from '../file_preview/previewCache.js';
 
 /* Шрифты Google разделу больше не нужны: он набран системным шрифтом Apple, как
    весь сайт. Syne и DM Sans подключают только «Курсы» (common/sectionFonts.js). */
@@ -1229,6 +1231,11 @@ styleTag.textContent = `
     max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .tv-file-btn:hover { background: var(--border); color: var(--ink); }
+  /* Длинное имя — с многоточием, значок файла не сжимается до нуля: в кнопке-flex
+     текст не обрезается сам, а svg уступал ему всё место. Полное имя — в подсказке
+     и в шапке окна просмотра. */
+  .tv-file-btn > svg { flex: none; }
+  .tv-file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Картинки во вложениях — квадратные плитки с обрезкой по центру, как в
      «Сообщениях». Пока адрес не пришёл, плитка стоит пустой: место занято, и
      кнопки файлов ниже не прыгают. Без мерцания-«скелета» — оно было бы шумом
@@ -3752,11 +3759,14 @@ const FileIcon = () => (
   </svg>
 );
 /* Файлы одного блока карточки: картинки — плитками, как вложения в «Сообщениях»
-   (щелчок открывает снимок во весь экран), остальное — прежними кнопками
-   «скачать». Картинка, для которой адреса нет, остаётся кнопкой (splitTaskFiles).
+   (щелчок открывает снимок во весь экран), остальное — кнопками с именем файла.
+   Кнопка открывает файл в окне просмотра (onOpenFile → FilePreviewSheet): его
+   читают, не скачивая (просьба владельца 13.11.2026); листается окно внутри
+   этого же блока. Без onOpenFile — прежнее скачивание. Картинка, для которой
+   адреса нет, остаётся кнопкой (splitTaskFiles).
    Имени у плитки нет намеренно: «photo.webp» под каждой картинкой — шум, а
    имя файла видно в просмотре по кнопке «Скачать». */
-const TaskFileGroup = ({ attachments, photoState, onOpenPhoto, onDownload, fileBtnStyle }) => {
+const TaskFileGroup = ({ attachments, photoState, onOpenPhoto, onOpenFile, onDownload, fileBtnStyle }) => {
   const { photos, files } = splitTaskFiles(
     attachments,
     photoState?.previews,
@@ -3795,8 +3805,9 @@ const TaskFileGroup = ({ attachments, photoState, onOpenPhoto, onDownload, fileB
         <div className="tv-file-list">
           {files.map((att) => (
             <button key={att.id} type="button" className="tv-file-btn" style={fileBtnStyle}
-              onClick={() => onDownload?.(att)}>
-              <FileIcon />{att.file_name}
+              title={att.file_name}
+              onClick={() => (onOpenFile ? onOpenFile(files, files.indexOf(att)) : onDownload?.(att))}>
+              <FileIcon /><span className="tv-file-name">{att.file_name}</span>
             </button>
           ))}
         </div>
@@ -3805,6 +3816,9 @@ const TaskFileGroup = ({ attachments, photoState, onOpenPhoto, onDownload, fileB
   );
 };
 const RESULT_FILE_BTN_STYLE = { background: '#e0e7ff', borderColor: '#c7d2fe', color: '#3730a3' };
+/* Ключ файла задачи в памяти просмотра: тот же файл из карточки, из виджета и
+   по «Скачать» берётся без второго запроса. */
+const taskFileKey = (att) => `task-attachment:${Number(att?.id || 0)}`;
 const ChevronRight = () => (
   <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
     <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
@@ -5596,6 +5610,7 @@ const TaskClarificationsBlock = ({
   downloadAttachment,
   photoState,
   onOpenPhoto,
+  onOpenFile,
 }) => {
   const [composerKind, setComposerKind] = useState('');
   const [draftBody, setDraftBody] = useState('');
@@ -5697,6 +5712,7 @@ const TaskClarificationsBlock = ({
                         attachments={message.attachments}
                         photoState={photoState}
                         onOpenPhoto={onOpenPhoto}
+                        onOpenFile={onOpenFile}
                         onDownload={downloadAttachment}
                       />
                     )}
@@ -5790,7 +5806,7 @@ const scoreHintOf = (task) => {
 
 const TaskDrawer = React.memo(({
   task, onClose, actionLoadingKey,
-  getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment,
+  getActionButtons, openCompleteModal, openStatusModal, updateStatus, downloadAttachment, loadAttachmentFile = null,
   onEditTask, onDeleteTask, onTogglePinTask, onCopyTaskLink, onMoveToBacklog, onToggleChecklistItem, onSaveChecklistNote,
   isPinned, currentUserId, currentUserRole, onSubmitReport, onPatchReport, onRemoveReport,
   onSubmitTaskMessage, onWithdrawInfoRequest, isMobileShell = false, loadTaskPhotos, onOpenProduction = null,
@@ -5843,8 +5859,18 @@ const TaskDrawer = React.memo(({
     if (Array.isArray(items) && index >= 0 && index < items.length) setPhotoView({ items, index });
   }, []);
   const closePhoto = useCallback(() => setPhotoView(null), []);
-  // Другая задача в той же карточке — снимок прежней не должен остаться поверх.
-  useEffect(() => { setPhotoView(null); }, [task?.id]);
+  /* Остальные файлы — в окне просмотра (FilePreviewSheet), без скачивания.
+     Листается, как и снимки, внутри своего блока. Без загрузчика файла
+     (карточку открыли не из раздела) кнопки по-прежнему скачивают. */
+  const [fileView, setFileView] = useState(null);
+  const openFile = useCallback((items, index) => {
+    if (Array.isArray(items) && index >= 0 && index < items.length) setFileView({ items, index });
+  }, []);
+  const closeFile = useCallback(() => setFileView(null), []);
+  const stepFile = useCallback((index) => setFileView((prev) => (prev ? { ...prev, index } : prev)), []);
+  const canPreviewFiles = typeof loadAttachmentFile === 'function';
+  // Другая задача в той же карточке — снимок и файл прежней не должны остаться поверх.
+  useEffect(() => { setPhotoView(null); setFileView(null); }, [task?.id]);
   const viewedPhoto = photoView ? photoView.items[photoView.index] : null;
   const viewedPhotoUrl = viewedPhoto ? photoState.previews[Number(viewedPhoto.id)]?.url || '' : '';
   const photoCount = photoView ? photoView.items.length : 0;
@@ -6176,6 +6202,7 @@ const TaskDrawer = React.memo(({
                   attachments={attachments}
                   photoState={photoState}
                   onOpenPhoto={openPhoto}
+                  onOpenFile={canPreviewFiles ? openFile : undefined}
                   onDownload={downloadAttachment}
                 />
               </div>
@@ -6193,6 +6220,7 @@ const TaskDrawer = React.memo(({
             downloadAttachment={downloadAttachment}
             photoState={photoState}
             onOpenPhoto={openPhoto}
+            onOpenFile={canPreviewFiles ? openFile : undefined}
           />
 
           {checklist.length > 0 && (
@@ -6261,6 +6289,7 @@ const TaskDrawer = React.memo(({
                     attachments={compAttachments}
                     photoState={photoState}
                     onOpenPhoto={openPhoto}
+                    onOpenFile={canPreviewFiles ? openFile : undefined}
                     onDownload={downloadAttachment}
                     fileBtnStyle={RESULT_FILE_BTN_STYLE}
                   />
@@ -6333,6 +6362,16 @@ const TaskDrawer = React.memo(({
              один раз (useTaskPhotoPreviews.refresh), и снимок подменяется сам. */
           onError={photoState.refresh}
         />
+        {canPreviewFiles && (
+          <FilePreviewSheet
+            files={fileView ? fileView.items : []}
+            index={fileView ? fileView.index : -1}
+            onIndexChange={stepFile}
+            onClose={closeFile}
+            loadFile={loadAttachmentFile}
+            cacheKey={taskFileKey}
+          />
+        )}
       </>
   );
 
@@ -6416,6 +6455,18 @@ export const PinnedTaskWidget = React.memo(({
     buildHeaders: buildNoteHeaders,
     notify: notifyNote,
   });
+  /* Файлы задачи открываются в окне просмотра, как в карточке. Виджет в окне
+     «картинка в картинке» (Chrome) — исключение: окно просмотра в нём не
+     помещается, а в окне портала его не видно, если тот свёрнут, — там файл
+     по-прежнему скачивается. */
+  const [fileView, setFileView] = useState(null);
+  const loadPinnedFile = useCallback(async (att, signal) => {
+    const res = await axios.get(
+      `${apiBaseUrl}/api/tasks/attachments/${att.id}/download`,
+      { headers: buildNoteHeaders(), responseType: 'blob', signal }
+    );
+    return res.data;
+  }, [apiBaseUrl, buildNoteHeaders]);
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
     try {
@@ -6427,6 +6478,16 @@ export const PinnedTaskWidget = React.memo(({
   const [selectedMenuPersonKey, setSelectedMenuPersonKey] = useState(null);
   const [pipContainer, setPipContainer] = useState(null);
   const [pipWindow, setPipWindow] = useState(null);
+  const openPinnedFile = (items, att) => {
+    if (pipWindow) {
+      onDownloadAttachment?.(att);
+      return;
+    }
+    const index = items.indexOf(att);
+    if (index >= 0) setFileView({ items, index });
+  };
+  // Другая задача в виджете или виджет ушёл в отдельное окно — просмотр закрывается.
+  useEffect(() => { setFileView(null); }, [task?.id, pipWindow]);
   const [isDragging, setIsDragging] = useState(false);
   const widgetRef = useRef(null);
   const dragStateRef = useRef(null);
@@ -6974,10 +7035,11 @@ export const PinnedTaskWidget = React.memo(({
                 key={att.id}
                 type="button"
                 className="tv-file-btn"
-                onClick={() => onDownloadAttachment?.(att)}
+                title={att.file_name}
+                onClick={() => openPinnedFile(attachments, att)}
               >
                 <FileIcon />
-                {att.file_name}
+                <span className="tv-file-name">{att.file_name}</span>
               </button>
             ))}
           </div>
@@ -7314,10 +7376,11 @@ export const PinnedTaskWidget = React.memo(({
                               key={att.id}
                               type="button"
                               className="tv-file-btn"
-                              onClick={() => onDownloadAttachment?.(att)}
+                              title={att.file_name}
+                              onClick={() => openPinnedFile(attachments, att)}
                             >
                               <FileIcon />
-                              {att.file_name}
+                              <span className="tv-file-name">{att.file_name}</span>
                             </button>
                           ))}
                         </div>
@@ -7332,10 +7395,11 @@ export const PinnedTaskWidget = React.memo(({
                               key={att.id}
                               type="button"
                               className="tv-file-btn"
-                              onClick={() => onDownloadAttachment?.(att)}
+                              title={att.file_name}
+                              onClick={() => openPinnedFile(compAttachments, att)}
                             >
                               <FileIcon />
-                              {att.file_name}
+                              <span className="tv-file-name">{att.file_name}</span>
                             </button>
                           ))}
                         </div>
@@ -7443,7 +7507,20 @@ export const PinnedTaskWidget = React.memo(({
   );
 
   if (pipContainer) return createPortal(widgetMarkup, pipContainer);
-  return canUseDocumentPictureInPicture ? null : widgetMarkup;
+  if (canUseDocumentPictureInPicture) return null;
+  return (
+    <>
+      {widgetMarkup}
+      <FilePreviewSheet
+        files={fileView ? fileView.items : []}
+        index={fileView ? fileView.index : -1}
+        onIndexChange={(index) => setFileView((prev) => (prev ? { ...prev, index } : prev))}
+        onClose={() => setFileView(null)}
+        loadFile={loadPinnedFile}
+        cacheKey={taskFileKey}
+      />
+    </>
+  );
 });
 
 /* ─── Уведомления: задачи, которые ждут действия пользователя ─── */
@@ -8828,23 +8905,31 @@ const TasksView = ({
     if (ok) closeStatusModal();
   }, [statusModal, statusComment, statusFiles, updateStatus, closeStatusModal]);
 
-  /* ── Download ── */
+  /* ── Файлы вложений ── */
+  /* Один запрос на файл и для просмотра, и для скачивания: скачанный файл
+     остаётся в памяти вкладки (previewCache), и «Скачать» после просмотра
+     не тянет его с сервера ещё раз. */
+  const loadAttachmentFile = useCallback(async (att, signal) => {
+    const res = await axios.get(
+      `${apiBaseUrl}/api/tasks/attachments/${att.id}/download`,
+      { headers: buildHeaders(), responseType: 'blob', signal }
+    );
+    return res.data;
+  }, [apiBaseUrl, buildHeaders]);
+
   const downloadAttachment = useCallback(async (att) => {
+    const key = taskFileKey(att);
     try {
-      const res = await axios.get(
-        `${apiBaseUrl}/api/tasks/attachments/${att.id}/download`,
-        { headers: buildHeaders(), responseType: 'blob' }
-      );
-      const blob = new Blob([res.data], { type: att.content_type || 'application/octet-stream' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url; a.download = att.file_name || `attachment-${att.id}`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
+      let blob = previewCache.get(key);
+      if (!blob) {
+        blob = await loadAttachmentFile(att);
+        previewCache.put(key, blob);
+      }
+      saveBlobAs(blob, att.file_name || `attachment-${att.id}`);
     } catch (e) {
       notify(e?.response?.data?.error || 'Не удалось скачать файл', 'error');
     }
-  }, [apiBaseUrl, buildHeaders, notify]);
+  }, [loadAttachmentFile, notify]);
 
   /* Адреса картинок карточки — один запрос на карточку (useTaskPhotoPreviews). */
   const loadTaskPhotos = useCallback(async (taskId) => {
@@ -9477,6 +9562,7 @@ const TasksView = ({
           openStatusModal={openStatusModal}
           updateStatus={updateStatus}
           downloadAttachment={downloadAttachment}
+          loadAttachmentFile={loadAttachmentFile}
           loadTaskPhotos={loadTaskPhotos}
           onOpenProduction={onOpenProduction}
           projects={projects}
