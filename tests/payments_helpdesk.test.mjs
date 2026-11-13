@@ -80,20 +80,25 @@ test('«Есть в наличии»: что выдают — строкой с�
 // Товар или услуга, категория учёта и способ оплаты — тоже Helpdesk IT (владелец 06.11.2026).
 const PAID = { object_type: 'goods', accounting_category: 'asset', payment_method: 'invoice' };
 
+/* Счёт поставщика у оплаты счётом прикладывает Helpdesk IT (13.11.2026): в проверках ниже он уже приложен —
+   его отсутствие проверяет отдельный тест. */
+const withInvoice = (draft, options) => helpdeskIssues({ invoice_number: 'СЧ-1', invoice_date: '2026-11-13', ...draft },
+    { hasInvoice: true, ...options });
+
 test('«Нет в наличии»: поставщики по правилам инициатора, цены — по рекомендуемому', () => {
     const draft = { ...PAID, offers: THREE, items: [item('x', 'Ноутбук', 1, 0)], supplier_choice_reason: 'Дешевле' };
-    assert.deepEqual(helpdeskIssues(draft, { inStock: false }).map((issue) => [issue.key, issue.part]), [['items', 'price']]);
-    const wrong = helpdeskIssues({ ...draft, items: [item('x', 'Ноутбук', 1, 300000)] }, { inStock: false });
+    assert.deepEqual(withInvoice(draft, { inStock: false }).map((issue) => [issue.key, issue.part]), [['items', 'price']]);
+    const wrong = withInvoice({ ...draft, items: [item('x', 'Ноутбук', 1, 300000)] }, { inStock: false });
     assert.equal(wrong.length, 1);
     assert.equal(wrong[0].text, `сумма позиций — ${fmtMoney(300000)}, а у рекомендуемого поставщика — ${fmtMoney(450000)}: поставьте цены по нему`);
-    assert.deepEqual(helpdeskIssues({ ...draft, items: [item('x', 'Ноутбук', 2, 200000), item('y', 'Сумка', 1, 50000)] }, { inStock: false }), []);
+    assert.deepEqual(withInvoice({ ...draft, items: [item('x', 'Ноутбук', 2, 200000), item('y', 'Сумка', 1, 50000)] }, { inStock: false }), []);
     // Вариантов меньше настройки — тот же пункт, что у инициатора.
-    const few = helpdeskIssues({ ...draft, offers: THREE.slice(0, 1), items: [item('x', 'Ноутбук', 1, 450000)] }, { inStock: false });
+    const few = withInvoice({ ...draft, offers: THREE.slice(0, 1), items: [item('x', 'Ноутбук', 1, 450000)] }, { inStock: false });
     assert.deepEqual(few.map((issue) => [issue.key, issue.part]), [['offers', 'count']]);
     // «Альтернатив нет»: один поставщик, причина обязательна, рекомендуемый — он сам.
     const alone = { ...PAID, offers: [offer('a', 'Microsoft', 120000)], no_alternatives: true, items: [item('x', 'Лицензия', 1, 120000)] };
-    assert.deepEqual(helpdeskIssues(alone, { inStock: false }).map((issue) => issue.key), ['no_alternatives_reason']);
-    assert.deepEqual(helpdeskIssues({ ...alone, no_alternatives_reason: 'license_renewal' }, { inStock: false }), []);
+    assert.deepEqual(withInvoice(alone, { inStock: false }).map((issue) => issue.key), ['no_alternatives_reason']);
+    assert.deepEqual(withInvoice({ ...alone, no_alternatives_reason: 'license_renewal' }, { inStock: false }), []);
     assert.equal(recommendedOffer(alone).supplier_name, 'Microsoft');
 });
 
@@ -122,23 +127,36 @@ const DRAFT = {
 
 test('«Нет в наличии»: товар или услугу, категорию учёта и способ оплаты выбирает Helpdesk IT', () => {
     const base = { offers: THREE, items: [item('x', 'Ноутбук', 1, 450000)], supplier_choice_reason: 'Дешевле' };
-    assert.deepEqual(helpdeskIssues(base, { inStock: false }).map((issue) => issue.key), ['object_type', 'payment_method']);
-    assert.deepEqual(helpdeskIssues({ ...base, object_type: 'goods', payment_method: 'invoice' }, { inStock: false })
+    assert.deepEqual(withInvoice(base, { inStock: false }).map((issue) => issue.key), ['object_type', 'payment_method']);
+    assert.deepEqual(withInvoice({ ...base, object_type: 'goods', payment_method: 'invoice' }, { inStock: false })
         .map((issue) => issue.key), ['accounting_category']);
-    assert.deepEqual(helpdeskIssues({ ...base, object_type: 'service', payment_method: 'invoice' }, { inStock: false }), []);
+    assert.deepEqual(withInvoice({ ...base, object_type: 'service', payment_method: 'invoice' }, { inStock: false }), []);
     // Карта — как у инициатора: получатель, владелец, номер, назначение.
     const card = { ...base, ...PAID, payment_method: 'card' };
-    assert.deepEqual(helpdeskIssues(card, { inStock: false }).map((issue) => issue.key), ['card_recipient', 'card_number', 'payment_purpose']);
+    assert.deepEqual(withInvoice(card, { inStock: false }).map((issue) => issue.key), ['card_recipient', 'card_number', 'payment_purpose']);
     const supplier = { ...card, card_recipient: 'supplier', card_holder_name: 'ИП Алсер', card_number: '4400430212345678', payment_purpose: 'Ноутбук' };
-    assert.deepEqual(helpdeskIssues(supplier, { inStock: false }), []);
+    assert.deepEqual(withInvoice(supplier, { inStock: false }), []);
     // Номер, что уже лежит в заявке, годится (hasCard), — вводить его заново не нужно.
-    assert.deepEqual(helpdeskIssues({ ...supplier, card_number: '' }, { inStock: false, hasCard: true }), []);
-    assert.deepEqual(helpdeskIssues({ ...supplier, card_number: '' }, { inStock: false }).map((issue) => issue.key), ['card_number']);
+    assert.deepEqual(withInvoice({ ...supplier, card_number: '' }, { inStock: false, hasCard: true }), []);
+    assert.deepEqual(withInvoice({ ...supplier, card_number: '' }, { inStock: false }).map((issue) => issue.key), ['card_number']);
     // Те же правила — общими функциями формы заявки и этапа.
     assert.deepEqual(objectIssues({ object_type: 'goods', accounting_category: 'asset' }, { staffed: { asset_keeper: false } })
         .map((issue) => [issue.key, issue.text]), [['accounting_category', UNSTAFFED.asset_keeper]]);
     assert.deepEqual(cardIssues({ payment_method: 'invoice' }), []);
 });
+test('«Нет в наличии» и оплата счётом: счёт, номер и дату прикладывает Helpdesk IT', () => {
+    const draft = { ...PAID, payment_method: 'invoice', object_type: 'service', offers: [offer('a', 'Sulpak', 450000)],
+        no_alternatives: true, no_alternatives_reason: 'single_supplier', items: [item('x', 'Ноутбук', 1, 450000)] };
+    assert.deepEqual(helpdeskIssues(draft, { inStock: false }).map((issue) => issue.key),
+        ['invoice_file', 'invoice_number', 'invoice_date']);
+    assert.deepEqual(helpdeskIssues({ ...draft, invoice_number: 'СЧ-9', invoice_date: '2026-11-13' },
+        { inStock: false, hasInvoice: true }), []);
+    // Карта — счёт не нужен.
+    const card = { ...draft, payment_method: 'card', card_recipient: 'supplier', card_holder_name: 'ИП Алсер',
+        card_number: '4400430212345678', payment_purpose: 'Ноутбук' };
+    assert.deepEqual(helpdeskIssues(card, { inStock: false }), []);
+});
+
 
 /* ── Форма заявки: инициатор IT-закупа ───────────────────────────────────────── */
 
@@ -293,7 +311,14 @@ test('этап, справочник, стол и окно заявки знаю
     assert.ok(stage.includes("if (kind === 'it_review') {"));
     assert.ok(stage.includes('axios.get(`${apiBaseUrl}/api/payments/stock?${params}`'));
     assert.ok(stage.includes("action: 'it_offers'") && stage.includes("action: 'it_stock'"));
-    assert.ok(stage.includes("files: sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean)"));
+    assert.ok(stage.includes("...sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean),"));
+    // Счёт поставщика — от Helpdesk IT вместе с поставщиком (13.11.2026): файл, номер и дата уходят с действием.
+    assert.ok(stage.includes("...(draft.payment_method === 'invoice' ? invoiceFiles.map((item) => ({ file: item.file, kind: 'invoice' })) : []),"));
+    assert.ok(stage.includes("invoice_number: draft.invoice_number.trim(), invoice_date: draft.invoice_date || null,"));
+    for (const anchor of ['invoice_file', 'invoice_number', 'invoice_date']) {
+        assert.ok(stage.includes(`anchor="${anchor}" issue={issueOf('${anchor}')}`), anchor);
+    }
+    assert.ok(!stage.includes('Счёт приложат после утверждения'), 'старая подпись «счёт попросят перед оплатой» убрана');
     // Проверка видит то же, что уйдёт: при «альтернатив нет» — один вариант (разбор 04.11.2026).
     assert.ok(stage.includes('helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },'));
     // Товар или услуга, учёт и способ оплаты — на этапе Helpdesk IT (06.11.2026); карта — общим блоком с формой заявки.

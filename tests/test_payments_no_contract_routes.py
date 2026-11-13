@@ -175,7 +175,10 @@ class HelpdeskRouteTests(_Routes):
            'offers': [{'counterparty_id': OUR, 'amount': 450000, 'is_recommended': True}]}
 
     def act(self, body):
-        client = self.client(purchase(it_purchase=True, payment_method=None, counterparty_id=None))
+        client = self.client(purchase(it_purchase=True, payment_method=None, counterparty_id=None,
+                                      invoice_number='СЧ-1', invoice_date=date(2026, 11, 13)))
+        # Счёт поставщика уже у этапа Helpdesk IT (13.11.2026): первый опрос вложений — проверка ручки.
+        self.queries.list_attachments.side_effect = [[{'kind': 'invoice', 'subtask_kind': wf.KIND_IT}]] + [[] for _ in range(8)]
         step = {'id': 77, 'kind': wf.KIND_IT, 'state': 'open', 'role_code': 'asset_keeper', 'assignee_id': None}
         acted = []
         with mock.patch.object(flow, 'load_for_action', return_value=(dict(self.row), step)), \

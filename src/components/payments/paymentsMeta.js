@@ -1801,7 +1801,7 @@ export const recommendedOffer = (draft) => {
    совпасть с его стоимостью — по ней выберут утверждающего и её же оплатят. С 06.11.2026 —
    и товар или услуга, категория учёта и способ оплаты: инициатор IT-закупа их не выбирает.
    `hasCard` — номер карты уже лежит в заявке и годится для этого получателя. */
-export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null, hasCard = false, staffed = {} } = {}) => {
+export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null, hasCard = false, hasInvoice = false, staffed = {} } = {}) => {
     const issues = [];
     const add = (key, text, extra) => issues.push(issueOf(key, text, extra));
     if (inStock === null) {
@@ -1834,6 +1834,12 @@ export const helpdeskIssues = (draft, { minSuppliers = 3, inStock = null, hasCar
     issues.push(...objectIssues(draft, { staffed }));
     if (!draft.payment_method) add('payment_method', 'выберите способ оплаты');
     else issues.push(...cardIssues(draft, { hasCard, staffed }));
+    if (draft.payment_method === 'invoice') {
+        // Счёт поставщика прикладывает Helpdesk IT (владелец 13.11.2026) — как сервер (workflow.missing_for_action).
+        if (!hasInvoice) add('invoice_file', 'приложите счёт поставщика');
+        if (!String(draft.invoice_number || '').trim()) add('invoice_number', 'укажите номер счёта');
+        if (!draft.invoice_date) add('invoice_date', 'укажите дату счёта');
+    }
     return issues;
 };
 

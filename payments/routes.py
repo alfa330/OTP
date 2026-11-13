@@ -1064,6 +1064,11 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                                         'no_alternatives_comment') if alone else None
         if 'supplier_choice_reason' in data:
             fields['supplier_choice_reason'] = as_text(data.get('supplier_choice_reason'), 'supplier_choice_reason')
+        if 'invoice_number' in data:
+            # Счёт поставщика от Helpdesk IT вместе с поставщиками (владелец 13.11.2026).
+            fields['invoice_number'] = as_text(data.get('invoice_number'), 'invoice_number')
+        if 'invoice_date' in data:
+            fields['invoice_date'] = as_date(data.get('invoice_date'), 'Дата счёта')
         if 'supplier_vat' in data:
             # П. 8: НДС поставщика, которого бухгалтер указывает вместе с «Оплачено» (09.11.2026).
             fields['supplier_vat'] = None if data.get('supplier_vat') in (None, '') else as_bool(data.get('supplier_vat'))
@@ -1186,7 +1191,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             if action == 'it_offers':
                 # Коммерческие предложения привязаны к вариантам — файлы ложатся, когда у вариантов
                 # уже есть номера (та же транзакция).
-                result = flow.act(cursor, request_id, kind, action, actor, fields=fields, outbox=outbox,
+                result = flow.act(cursor, request_id, kind, action, actor, fields=fields,
+                                  new_file_kinds=[k for _s, k, _o in uploads], outbox=outbox,
                                   base_url=web_app_base_url)
                 _store_files(cursor, request_id, uploads, actor, subtask_kind=kind, offer_ids=result.get('offer_ids'))
             else:

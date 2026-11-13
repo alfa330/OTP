@@ -42,6 +42,7 @@ def purchase(**overrides):
         'justification': 'Старый не тянет 1С', 'due_on': date(2026, 11, 20), 'initiator_id': INITIATOR['id'],
         'initiator_name': INITIATOR['name'], 'manager_id': MANAGER['id'], 'it_purchase': True,
         'category_helpdesk': True, 'no_alternatives': False, 'counterparty_id': None, 'legacy_step': None,
+        'invoice_number': 'СЧ-77', 'invoice_date': date(2026, 11, 13),
     }
     row.update(overrides)
     return row
@@ -152,7 +153,8 @@ class SubmitTests(unittest.TestCase):
 
 class ActionTests(unittest.TestCase):
     def missing(self, action, **fields):
-        return wf.missing_for_action(wf.KIND_IT, action, request=purchase(), fields=fields, settings={})
+        return wf.missing_for_action(wf.KIND_IT, action, request=purchase(), fields=fields, settings={},
+                                     file_kinds=('invoice',))
 
     def test_actions_of_the_stage(self):
         self.assertEqual(wf.ACTIONS[wf.KIND_IT], ('it_offers', 'it_stock', 'return'))
@@ -185,6 +187,21 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(self.missing('it_offers', **dict(fields, no_alternatives_reason=None)),
                          ['Выберите причину отсутствия альтернатив'])
 
+    def test_helpdesk_attaches_the_invoice_when_paying_by_invoice(self):
+        """Владелец 13.11.2026: счёт поставщика прикладывает Helpdesk IT вместе с поставщиком — иначе после
+        утверждения заявка возвращалась инициатору «Счёт не приложен», а он с поставщиком не работал."""
+        bare = purchase(invoice_number=None, invoice_date=None)
+        fields = dict(items=items('450000'), offers=offers('450000', '470000', '455000'), supplier_choice_reason='Дешевле',
+                      counterparty_id=100)
+        missing = wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=fields, settings={})
+        self.assertEqual(missing, ['Приложите счёт на оплату', 'Укажите номер счёта', 'Укажите дату счёта'])
+        sent = dict(fields, invoice_number='СЧ-9', invoice_date=date(2026, 11, 13))
+        self.assertEqual(wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=sent, settings={},
+                                               file_kinds=('invoice',)), [])
+        card = dict(fields, payment={'payment_method': 'card', 'card_recipient': 'supplier', 'card_holder_name': 'ИП Алсер',
+                                     'payment_purpose': 'Ноутбук'}, card_number_ok=True)
+        self.assertEqual(wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=card, settings={}), [])
+
     def test_helpdesk_chooses_object_and_payment(self):
         """Владелец 06.11.2026: товар или услугу, категорию учёта и способ оплаты выбирает Helpdesk IT
         вместе с поставщиком — по тем же правилам, что у инициатора обычного закупа."""
@@ -193,7 +210,8 @@ class ActionTests(unittest.TestCase):
                       counterparty_id=100)
 
         def missing(**extra):
-            return wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=dict(fields, **extra), settings={})
+            return wf.missing_for_action(wf.KIND_IT, 'it_offers', request=bare, fields=dict(fields, **extra), settings={},
+                                         file_kinds=('invoice',))
 
         self.assertEqual(missing(), ['Выберите тип объекта: товар или услуга', wf.PAYMENT_METHOD_MISSING])
         self.assertEqual(missing(payment={'object_type': 'goods', 'payment_method': 'invoice'}),
@@ -206,7 +224,8 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(missing(payment=card, card_number_ok=False), ['Укажите полный номер карты'])
         self.assertEqual(missing(payment=card, card_number_ok=True), [])
         # Что Helpdesk не прислал — берётся из заявки: на втором проходе выбор уже лежит в ней.
-        self.assertEqual(wf.missing_for_action(wf.KIND_IT, 'it_offers', request=purchase(), fields=fields, settings={}), [])
+        self.assertEqual(wf.missing_for_action(wf.KIND_IT, 'it_offers', request=purchase(), fields=fields, settings={},
+                                               file_kinds=('invoice',)), [])
 
     def test_issue_from_stock_needs_what_or_a_word(self):
         self.assertEqual(self.missing('it_stock'), ['Выберите, что выдаёте из наличия, или напишите об этом в комментарии'])
@@ -359,7 +378,7 @@ class _FlowBase(unittest.TestCase):
         queries.read_subtask.side_effect = lambda cursor, request_id, kind: next(
             (dict(item) for item in self.steps if item['kind'] == kind), None)
         queries.list_subtasks.side_effect = lambda cursor, request_id: [dict(item) for item in self.steps]
-        queries.list_attachments.return_value = []
+        queries.list_attachments.return_value = [{'kind': 'invoice', 'subtask_kind': wf.KIND_IT}]
         queries.list_events.return_value = [{'id': 1, 'kind': 'submitted', 'payload': {}}]
         queries.role_member_ids.return_value = {'approver': {30, 31}, 'accounting': {6}, 'asset_keeper': {HELPDESK['id'], 5}}
         queries.user_brief.side_effect = lambda cursor, user_id: {'id': user_id, 'name': 'Утвердова Ульяна', 'fired': False}
@@ -670,6 +689,7 @@ class WiringTests(unittest.TestCase):
         step = dict(_FlowBase.step(wf.KIND_IT, None), state='open')
         order = []
         self.card_answers(purchase())
+        self.queries.list_attachments.side_effect = [[{'kind': 'invoice', 'subtask_kind': wf.KIND_IT}]] + [[] for _ in range(8)]
         self.queries.role_member_ids.return_value = {}
         self.directory.read_counterparty.side_effect = lambda cursor, cid: {'id': cid, 'name': 'Sulpak'}
         with mock.patch.object(flow, 'load_for_action', return_value=(purchase(), step)), \
@@ -804,6 +824,7 @@ class WiringTests(unittest.TestCase):
     def test_three_suppliers_with_a_reason_pass_the_handler(self):
         """Главный путь R3 — через ручку и настоящие правила missing_for_action, не в обход разбора."""
         client = self.acting()
+        self.queries.list_attachments.side_effect = [[{'kind': 'invoice', 'subtask_kind': wf.KIND_IT}]] + [[] for _ in range(8)]
         self.directory.read_counterparty.side_effect = lambda cursor, cid: {'id': cid, 'name': 'Поставщик %s' % cid}
         payload = {'kind': 'it_review', 'action': 'it_offers', 'no_alternatives': False,
                    'supplier_choice_reason': 'Дешевле и доставка завтра',

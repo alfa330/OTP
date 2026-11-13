@@ -720,6 +720,10 @@ def _it_offers(cursor, request, subtask, actor, fields, comment, *, outbox=None,
     # Товар или услуга, категория учёта и способ оплаты с картой — тоже выбор Helpdesk IT
     # (владелец 06.11.2026): инициатор IT-закупа их не указывает.
     changes.update(fields.get('payment') or {})
+    # Счёт поставщика — тоже от Helpdesk IT (владелец 13.11.2026): файл ручка кладёт следом.
+    for key in ('invoice_number', 'invoice_date'):
+        if fields.get(key):
+            changes[key] = fields[key]
     queries.update_request_fields(cursor, request_id, changes)
     apply_card(cursor, request_id, card)
     refreshed, basis, route, passed = _replan(cursor, request_id, workflow.KIND_IT)

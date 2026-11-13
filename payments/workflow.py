@@ -1689,6 +1689,11 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
         if chosen.get('payment_method') not in PAYMENT_METHOD_LABELS:
             missing.append(PAYMENT_METHOD_MISSING)
         missing += card_missing(chosen, card_number_ok=fields.get('card_number_ok', True))
+        if chosen.get('payment_method') == METHOD_INVOICE:
+            # Счёт поставщика прикладывает Helpdesk IT — он выбрал поставщика и цену (владелец 13.11.2026).
+            # Раньше счёт просили после утверждения у инициатора, а он с поставщиком IT-закупа не работает.
+            missing += _invoice_missing({'invoice_number': fields.get('invoice_number') or request.get('invoice_number'),
+                                         'invoice_date': fields.get('invoice_date') or request.get('invoice_date')}, kinds)
     if action == 'it_stock' and not fields.get('stock_assets') and not comment:
         missing.append('Выберите, что выдаёте из наличия, или напишите об этом в комментарии')
     if action == 'docs_close' and CLOSING_DOC_ORDER.get(request.get('closing_docs_status'), 0) < CLOSING_DOC_ORDER[DOCS_SCAN]:

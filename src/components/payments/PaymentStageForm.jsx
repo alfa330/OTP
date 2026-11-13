@@ -185,7 +185,8 @@ const ReasonPanel = ({ mode, busy, reasons = [], onSubmit, onCancel }) => {
 const STOCK_SEARCH_MS = 300;
 // Порядок полей сверху вниз — по нему стрелки «Не хватает» ходят от поля к полю.
 const HELPDESK_FIELDS = ['in_stock', 'stock_ids', 'no_alternatives_reason', 'no_alternatives_comment', 'offers',
-    'supplier_choice_reason', 'items', 'object_type', 'accounting_category', 'payment_method', 'card_recipient',
+    'supplier_choice_reason', 'items', 'object_type', 'accounting_category', 'payment_method', 'invoice_file',
+    'invoice_number', 'invoice_date', 'card_recipient',
     'card_holder_user_id', 'card_holder_name', 'card_number', 'payment_purpose'];
 
 // Позиции заявки — строками редактора, как в форме заявки: количество так, как его набирают.
@@ -227,6 +228,9 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
             contract_id: request.contract_id ?? null,
             no_contract: Boolean(request.no_contract),
             no_contract_for: chosenFor,
+            // Счёт поставщика — тоже от Helpdesk IT (владелец 13.11.2026): поставщика выбрал он.
+            invoice_number: request.invoice_number || '',
+            invoice_date: request.invoice_date || '',
             card_recipient: request.card_recipient ?? null,
             card_holder_user_id: request.card_holder_user_id ?? null,
             card_holder_name: request.card_holder_name || '',
@@ -237,6 +241,8 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
         };
     });
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
+    const [invoiceFiles, setInvoiceFiles] = useState([]);
+    const savedInvoice = (data.attachments || []).some((item) => item.kind === 'invoice');
     // Что выдают из наличия: строки склада целиком — выбранное видно и после нового поиска.
     const [chosen, setChosen] = useState([]);
     const [mode, setMode] = useState(null);                 // 'return'
@@ -282,7 +288,7 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
     });
     // Проверка видит то же, что на экране и уйдёт на сервер: при «альтернатив нет» — один вариант.
     const issues = helpdeskIssues({ ...draft, offers: offersShown, stock_ids: chosen.map((item) => item.id) },
-        { minSuppliers, inStock, hasCard: cardKept });
+        { minSuppliers, inStock, hasCard: cardKept, hasInvoice: savedInvoice || invoiceFiles.length > 0 });
     const byKey = issuesByKey(issues);
     const keys = issueKeys(issues, HELPDESK_FIELDS);
     const nav = useIssueNav(formRef, keys);
@@ -359,7 +365,10 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                 object_type: draft.object_type,
                 accounting_category: draft.object_type === 'goods' ? draft.accounting_category : null,
                 payment_method: draft.payment_method,
-                ...(draft.payment_method === 'invoice' ? { contract_id: contractId, no_contract: noContract } : {}),
+                ...(draft.payment_method === 'invoice' ? {
+                    contract_id: contractId, no_contract: noContract,
+                    invoice_number: draft.invoice_number.trim(), invoice_date: draft.invoice_date || null,
+                } : {}),
                 ...(draft.payment_method === 'card' ? {
                     card_recipient: draft.card_recipient,
                     card_holder_user_id: draft.card_recipient === 'employee' ? draft.card_holder_user_id : null,
@@ -369,7 +378,10 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                 } : {}),
             },
             // Коммерческие предложения — к своим вариантам: номер варианта среди отправленных.
-            files: sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean),
+            files: [
+                ...sent.map((offer, index) => (offer.file ? { file: offer.file, kind: 'offer', offerIndex: index } : null)).filter(Boolean),
+                ...(draft.payment_method === 'invoice' ? invoiceFiles.map((item) => ({ file: item.file, kind: 'invoice' })) : []),
+            ],
         });
     };
     const issueStock = async () => {
@@ -561,7 +573,19 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                                         Сумма выше {fmtMoney(threshold)}: выберите договор или «{NO_CONTRACT_LABEL}», иначе после утверждения заявка вернётся инициатору.
                                     </div>
                                 )}
-                                <div className="px-1 text-[12.5px] text-slate-500">Счёт приложат после утверждения — раздел попросит его перед оплатой.</div>
+                                {/* Счёт поставщика — от Helpdesk IT (владелец 13.11.2026): инициатор IT-закупа с поставщиком не работает. */}
+                                <div className="grid gap-3 sm:grid-cols-3">
+                                    <Field as="div" label="Счёт поставщика" required optionalMark={false} anchor="invoice_file" issue={issueOf('invoice_file')}>
+                                        <FilePicker files={invoiceFiles} onChange={setInvoiceFiles} kinds={[{ value: 'invoice', label: 'Счёт на оплату' }]}
+                                            label={savedInvoice ? 'Добавить счёт' : 'Приложить счёт'} />
+                                    </Field>
+                                    <Field label="Номер счёта" required optionalMark={false} anchor="invoice_number" issue={issueOf('invoice_number')}>
+                                        <FormInput value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} />
+                                    </Field>
+                                    <Field as="div" label="Дата счёта" required optionalMark={false} anchor="invoice_date" issue={issueOf('invoice_date')}>
+                                        <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
+                                    </Field>
+                                </div>
                             </>
                         )}
                         {draft.payment_method === 'card' && (

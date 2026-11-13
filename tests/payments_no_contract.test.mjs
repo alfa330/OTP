@@ -266,7 +266,7 @@ test('Helpdesk IT выбирает договор вместе с оплатой
     assert.ok(stage.includes('no_contract: Boolean(request.no_contract),') && stage.includes('no_contract_for: chosenFor,'));
     assert.ok(stage.includes('const { contractId, noContract } = contractChoice(draft, contractOptions, supplierKey);'));
     assert.ok(stage.includes('onChange={(value) => setDraft((prev) => ({ ...prev, ...contractPick(value, supplierKey) }))}'));
-    assert.ok(stage.includes("...(draft.payment_method === 'invoice' ? { contract_id: contractId, no_contract: noContract } : {}),"));
+    assert.ok(stage.includes("...(draft.payment_method === 'invoice' ? {\n                    contract_id: contractId, no_contract: noContract,"));
     assert.ok(stage.includes('options={[{ value: NO_CONTRACT, label: NO_CONTRACT_LABEL }, ...contractOptions]}'));
     assert.ok(stage.includes('hint={HINTS.helpdeskContract}'));
 });
