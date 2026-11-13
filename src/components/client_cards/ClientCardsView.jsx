@@ -111,8 +111,10 @@ export default function ClientCardsView({ apiBaseUrl, withAccessTokenHeader, sho
         }
     };
 
+    // Раздел занимает всю ширину экрана (владелец, 13.11.2026: «сжатым… лучше на всю ширину»):
+    // потолка ширины нет, широкий экран разбирают сами вкладки — колонками.
     const shell = (children) => (
-        <div className="relative mx-auto min-h-screen w-full max-w-[1400px] bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0"
+        <div className="relative min-h-screen w-full bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0"
              style={{ fontFamily: APPLE_FONT }}>
             {children}
         </div>

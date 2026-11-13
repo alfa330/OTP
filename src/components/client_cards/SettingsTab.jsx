@@ -177,7 +177,11 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
         .map((item) => ({ value: String(item.id), label: item.name }));
 
     return (
-        <div className="mx-auto w-full max-w-3xl space-y-5">
+        // На всю ширину (владелец, 13.11.2026). Одна колонка растянула бы подпись и её поле по
+        // разным краям экрана, поэтому на широком экране колонок две: слева — что видит оператор
+        // (карточка и причины), справа — куда уходят запросы и алерты.
+        <div className="grid w-full grid-cols-1 items-start gap-5 xl:grid-cols-2">
+            <div className="min-w-0 space-y-5">
             {/* ── Карточка в телефоне ───────────────────────────────────────── */}
             <Section title="Карточка в iCORE Phone"
                      hint="Когда включено, телефон оператора сам открывает карточку на каждый входящий и исходящий звонок: номер уже подставлен, аккаунты найдены.">
@@ -236,7 +240,9 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
                 <AddLine placeholder="Новая категория — или вставьте список, по строке на категорию" busy={Boolean(busy)}
                          onAdd={(titles) => run('category', () => api.createCategory({ department_id: departmentId, titles }), categoriesApply)} />
             </Section>
+            </div>
 
+            <div className="min-w-0 space-y-5">
             {/* ── Отделы для запросов ───────────────────────────────────────── */}
             <Section title="Отделы для запросов"
                      hint="Куда оператор отправляет запрос из карточки. Запрос уходит сообщением бота в Telegram-группу отдела; ответ реплаем на него возвращается в карточку. Группы нет в списке — добавьте в неё бота портала.">
@@ -342,6 +348,7 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
                     </div>
                 </Section>
             )}
+            </div>
         </div>
     );
 }

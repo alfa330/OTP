@@ -116,7 +116,7 @@ export default function JournalTab({ api, departmentId, categories, toast, onOpe
                 <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                     {data.items.map((card) => (
                         <button key={card.id} type="button" onClick={() => setOpenId(card.id)}
-                                className="grid w-full grid-cols-1 gap-x-4 gap-y-1 px-4 py-3 text-left transition hover:bg-slate-50 md:grid-cols-[150px_minmax(0,1fr)_minmax(0,1.2fr)_auto] md:items-center">
+                                className="grid w-full grid-cols-1 gap-x-4 gap-y-1 px-4 py-3 text-left transition hover:bg-slate-50 md:grid-cols-[150px_minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,0.6fr)] md:items-center">
                             <div className="text-[12.5px] text-slate-500">
                                 <div className="tabular-nums text-slate-800">{fmtWhen(card.created_at)}</div>
                                 {!data.own_only && <div className="truncate">{card.operator_name}</div>}
