@@ -165,7 +165,7 @@ async function buildPreview(file, blob) {
     case 'xlsx': {
         const { parseXlsx, sheetToTsv } = await import('./xlsxParse.js');
         const book = await parseXlsx(bytes, { maxRows: TABLE_MAX_ROWS });
-        return { kind: 'sheets', sheets: book.sheets, sheetText: (index) => sheetToTsv(book.sheets[index]) };
+        return { kind: 'sheets', sheets: book.sheets, active: book.active || 0, sheetText: (index) => sheetToTsv(book.sheets[index]) };
     }
     case 'docx': case 'pptx': {
         const parsed = kind === 'docx'
@@ -480,6 +480,188 @@ function SheetTable({ sheet }) {
     );
 }
 
+/* Лист Excel с видом из файла: ширины столбцов и высоты строк, заливки,
+   шрифт, рамки, выравнивание, перенос и цвета условного форматирования
+   (xlsxParse). Скрытые строки и столбцы не показываются, номера строк — как в
+   Excel (1, 3, 5…). Лист — белый, как в самом Excel, и в тёмной теме. */
+const ROW_HEADER_PX = 44;
+const SPILL_MAX_COLS = 12;
+const SPILL_BEYOND_PX = 640;
+
+/* Ширина текста в пикселях — чтобы число или дата не обрезались по краю ячейки.
+   Excel в таком случае рисует «###», обрезанное же число читается как другое
+   (01.11.2026 → «01.11.202»): столбец с числами расширяется до самого широкого. */
+let measureContext = null;
+const measureText = (text, font) => {
+    if (typeof document === 'undefined') return 0;
+    if (!measureContext) measureContext = document.createElement('canvas').getContext('2d');
+    if (!measureContext) return 0;
+    measureContext.font = font;
+    return measureContext.measureText(text).width;
+};
+const FIT_ROWS = 3000;
+
+const hexAlpha = (hex, alpha) => {
+    const value = parseInt(String(hex).slice(1), 16);
+    return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
+};
+
+function StyledSheetTable({ sheet }) {
+    const [limit, setLimit] = useState(ROWS_STEP);
+    const { visibleRows = [], visibleCols = [] } = sheet;
+    const numberWidths = useMemo(() => {
+        const widths = new Map();
+        const spanned = new Set();
+        sheet.merges.forEach((merge) => {
+            if (merge.colSpan < 2) return;
+            for (let row = merge.row; row < merge.row + merge.rowSpan; row += 1) spanned.add(`${row}:${merge.col}`);
+        });
+        visibleRows.slice(0, FIT_ROWS).forEach((row) => {
+            const cells = sheet.rows[row];
+            if (!cells) return;
+            visibleCols.forEach((col) => {
+                const cell = cells[col];
+                if (!cell?.text || (typeof cell.v !== 'number' && !cell.err) || cell.look?.wrap || spanned.has(`${row}:${col}`)) return;
+                const look = cell.look || {};
+                const font = `${look.bold ? '700 ' : ''}${Math.round(13 * (look.size || 1) * 10) / 10}px ${APPLE_FONT}`;
+                const need = Math.ceil(measureText(cell.text, font)) + 14 + (look.indent ? look.indent * 9 : 0);
+                if (need > (widths.get(col) || 0)) widths.set(col, need);
+            });
+        });
+        return widths;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sheet]);
+    const widthOf = (col) => Math.max(sheet.colWidths?.[col] || sheet.defaultColWidth || 64, numberWidths.get(col) || 0);
+    const mergeInfo = useMemo(() => {
+        const map = new Map();
+        sheet.merges.forEach((merge) => {
+            const rowsIn = visibleRows.filter((row) => row >= merge.row && row < merge.row + merge.rowSpan);
+            const colsIn = visibleCols.filter((col) => col >= merge.col && col < merge.col + merge.colSpan);
+            if (!rowsIn.length || !colsIn.length) return;
+            rowsIn.forEach((row) => colsIn.forEach((col) => map.set(`${row}:${col}`, 'covered')));
+            map.set(`${rowsIn[0]}:${colsIn[0]}`, {
+                rowSpan: rowsIn.length,
+                colSpan: colsIn.length,
+                lastRow: rowsIn[rowsIn.length - 1],
+                lastCol: colsIn[colsIn.length - 1],
+                source: [merge.row, merge.col],
+                width: colsIn.reduce((sum, col) => sum + widthOf(col), 0),
+            });
+        });
+        return map;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [sheet, numberWidths]);
+    if (sheet.note) return <CenterState><span>{sheet.note}</span></CenterState>;
+    if (!visibleRows.length || !visibleCols.length) return <CenterState><span>Лист пустой.</span></CenterState>;
+
+    const tableWidth = ROW_HEADER_PX + visibleCols.reduce((sum, col) => sum + widthOf(col), 0);
+    const shownRows = visibleRows.slice(0, limit);
+    const hidden = visibleRows.length - shownRows.length;
+    const emptyAt = (row, col) => {
+        if (mergeInfo.has(`${row}:${col}`)) return false;
+        const cell = sheet.rows[row]?.[col];
+        return !cell || cell.text === '';
+    };
+
+    const renderCell = (row, col, position) => {
+        const key = `${row}:${col}`;
+        const merge = mergeInfo.get(key);
+        if (merge === 'covered') return null;
+        const [srcRow, srcCol] = merge ? merge.source : [row, col];
+        const cell = sheet.rows[srcRow]?.[srcCol];
+        const look = cell?.look || {};
+        const edges = sheet.borders?.get(key) || {};
+        const right = merge ? sheet.borders?.get(`${row}:${merge.lastCol}`)?.right : edges.right;
+        const bottom = merge ? sheet.borders?.get(`${merge.lastRow}:${col}`)?.bottom : edges.bottom;
+        const decoration = [look.underline && 'underline', look.strike && 'line-through'].filter(Boolean).join(' ');
+        const style = {
+            background: look.bg || undefined,
+            color: look.color || undefined,
+            fontWeight: look.bold ? 700 : undefined,
+            fontStyle: look.italic ? 'italic' : undefined,
+            textDecoration: decoration || undefined,
+            fontSize: look.size ? `${Math.round(13 * look.size * 10) / 10}px` : undefined,
+            textAlign: look.align || undefined,
+            verticalAlign: look.vAlign || 'bottom',
+            borderRight: right?.css,
+            borderBottom: bottom?.css,
+            borderLeft: edges.left?.css,
+            borderTop: edges.top?.css,
+            paddingLeft: look.indent ? 6 + look.indent * 9 : undefined,
+            backgroundImage: look.bar
+                ? `linear-gradient(90deg, ${hexAlpha(look.bar.color, 0.5)} ${Math.round(look.bar.share * 100)}%, transparent ${Math.round(look.bar.share * 100)}%)`
+                : undefined,
+        };
+        /* Текст длиннее ячейки переливается в пустые ячейки справа, как в Excel,
+           и обрезается на первой занятой. */
+        let content = cell?.text ?? '';
+        let spill = false;
+        if (content && !merge && !look.wrap && typeof cell.v === 'string' && (!look.align || look.align === 'left')) {
+            let width = widthOf(col);
+            let next = position + 1;
+            for (; next < Math.min(visibleCols.length, position + 1 + SPILL_MAX_COLS); next += 1) {
+                if (!emptyAt(row, visibleCols[next])) break;
+                width += widthOf(visibleCols[next]);
+            }
+            // Справа от таблицы — пустые столбцы листа: текст идёт и туда, как в Excel.
+            if (next === visibleCols.length) width += SPILL_BEYOND_PX;
+            if (width > widthOf(col)) {
+                spill = true;
+                content = <span className="tfv-spill" style={{ width: width - 12 }}>{content}</span>;
+            }
+        }
+        return (
+            <td
+                key={col}
+                className={[look.wrap ? 'is-wrap' : '', spill ? 'is-spill' : ''].filter(Boolean).join(' ') || undefined}
+                style={style}
+                colSpan={merge?.colSpan > 1 ? merge.colSpan : undefined}
+                rowSpan={merge?.rowSpan > 1 ? merge.rowSpan : undefined}
+            >
+                {content}
+            </td>
+        );
+    };
+
+    return (
+        <div className="tfv-grid-wrap is-sheet thin-scroll">
+            <table className={`tfv-grid is-sheet${sheet.gridLines === false ? ' no-grid' : ''}`} style={{ width: tableWidth }}>
+                <colgroup>
+                    <col style={{ width: ROW_HEADER_PX }} />
+                    {visibleCols.map((col) => <col key={col} style={{ width: widthOf(col) }} />)}
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th className="tfv-corner" aria-hidden="true" />
+                        {visibleCols.map((col) => <th key={col} scope="col">{columnName(col)}</th>)}
+                    </tr>
+                </thead>
+                <tbody>
+                    {shownRows.map((row) => (
+                        <tr key={row} style={{ height: sheet.rowHeights?.[row] || sheet.defaultRowHeight || undefined }}>
+                            <th scope="row">{row + 1}</th>
+                            {visibleCols.map((col, position) => renderCell(row, col, position))}
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            {(hidden > 0 || sheet.truncatedRows || sheet.truncatedCols) && (
+                <div className="tfv-grid-foot">
+                    {hidden > 0 && (
+                        <button type="button" className={iosBtnSecondary} onClick={() => setLimit((value) => value + ROWS_STEP * 3)}>
+                            Показать ещё {Math.min(hidden, ROWS_STEP * 3)} {plural(Math.min(hidden, ROWS_STEP * 3), 'строку', 'строки', 'строк')}
+                        </button>
+                    )}
+                    {hidden <= 0 && sheet.truncatedRows && (
+                        <span>Показаны первые {sheet.rowCount} строк{sheet.totalRows > sheet.rowCount ? ` из ${sheet.totalRows}` : ''} — весь файл в «Скачать».</span>
+                    )}
+                    {hidden <= 0 && !sheet.truncatedRows && sheet.truncatedCols && <span>Показаны первые {sheet.colCount} столбцов — весь файл в «Скачать».</span>}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function SheetsView({ sheets, active, onActive }) {
     const sheet = sheets[active] || sheets[0];
     return (
@@ -496,7 +678,7 @@ function SheetsView({ sheets, active, onActive }) {
                     />
                 </div>
             )}
-            <SheetTable key={active} sheet={sheet} />
+            {sheet.styled ? <StyledSheetTable key={active} sheet={sheet} /> : <SheetTable key={active} sheet={sheet} />}
         </div>
     );
 }
@@ -738,6 +920,7 @@ export default function FilePreviewSheet({
                 return;
             }
             setView({ key: fileKey, status: 'ready', preview: built });
+            if (built.active) setSheetIndex(built.active);
         })().catch(async (error) => {
             if (cancelled) return;
             const message = await describeError(error);

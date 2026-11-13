@@ -16,10 +16,15 @@ import { attr, child, findAll, parseXml, textContent } from '../src/components/f
 import {
     columnName, excelSerialToParts, formatCell, formatDateValue, formatNumber, isDateFormat,
 } from '../src/components/file_preview/xlsxFormat.js';
-import { parseXlsx, readSheet, sheetToTsv } from '../src/components/file_preview/xlsxParse.js';
+import { CHAR_PX, parseXlsx, readSheet, sheetToTsv } from '../src/components/file_preview/xlsxParse.js';
 import { formatListNumber, parseDocx } from '../src/components/file_preview/docxParse.js';
 import { parsePptx } from '../src/components/file_preview/pptxParse.js';
 import { createPreviewCache } from '../src/components/file_preview/previewCache.js';
+import {
+    DEFAULT_THEME, INDEXED_COLORS, applyTint, readBookStyles, readThemeColors, resolveColor, strongerBorder,
+} from '../src/components/file_preview/xlsxStyle.js';
+import { applyConditionalRules, readConditionalRules } from '../src/components/file_preview/xlsxConditional.js';
+import { UnsupportedFormula, compileFormula, compareValues } from '../src/components/file_preview/xlsxFormula.js';
 import {
     MOCKUP_CSP, MOCKUP_ESCAPE_MESSAGE, MOCKUP_SANDBOX, acceptMockupEscape, buildHtmlPreview, createLeaveWatch,
     htmlViewModes, prepareMockupHtml, shownHtmlMode,
@@ -192,6 +197,7 @@ const SHEET = `<worksheet><dimension ref="A1:D9"/><sheetData>
 test('книга Excel: листы по порядку, скрытый пропущен, значения как в Excel', async () => {
     const book = await parseXlsx(await workbookPackage(SHEET));
     assert.deepEqual(book.sheets.map((sheet) => sheet.name), ['План', 'Второй']);
+    assert.equal(book.active, 0, 'без bookViews — первый лист');
     const [plan, second] = book.sheets;
     assert.equal(plan.rows[0][0].text, 'Дата');
     assert.equal(plan.rows[0][0].bold, true);
@@ -218,6 +224,15 @@ test('длинный лист читается до предела строк и
     assert.equal(sheet.rowCount, 10);
     assert.equal(sheet.truncatedRows, true);
     assert.equal(sheet.totalRows, 50);
+});
+
+test('книга открывается на активном листе, скрытые листы не сбивают счёт', async () => {
+    const pkg = await workbookPackage(SHEET);
+    const zip = await JSZip.loadAsync(pkg);
+    const workbook = (await zip.file('xl/workbook.xml').async('string')).replace('<workbookPr/>', '<workbookPr/><bookViews><workbookView activeTab="2"/></bookViews>');
+    zip.file('xl/workbook.xml', workbook);
+    const book = await parseXlsx(await zip.generateAsync({ type: 'uint8array' }));
+    assert.equal(book.sheets[book.active].name, 'Второй', 'activeTab 2 — третий лист книги, второй видимый');
 });
 
 test('книга 1904 года и битый файл', async () => {
@@ -560,3 +575,239 @@ test('макет: открытый вне клетки (верхней вкла�
     }
 });
 
+/* ── Excel: цвета, рамки, скрытое, условное форматирование (снимок «2026.xlsx», 13.11) ── */
+
+const channelsClose = (actual, expected, tolerance = 3) => {
+    const a = [1, 3, 5].map((at) => parseInt(actual.slice(at, at + 2), 16));
+    const b = [1, 3, 5].map((at) => parseInt(expected.slice(at, at + 2), 16));
+    return a.every((value, index) => Math.abs(value - b[index]) <= tolerance);
+};
+
+test('цвета Excel: тема с оттенком, старая палитра, прямой код, «авто»', () => {
+    // «Синий, акцент 1, светлее 80 %» и «темнее 25 %» из палитры Office — эталоны самого Excel.
+    assert.ok(channelsClose(applyTint('#4472C4', 0.7999816888943144), '#DAE3F3'), applyTint('#4472C4', 0.7999816888943144));
+    assert.ok(channelsClose(applyTint('#4472C4', -0.249977111117893), '#2F5597'), applyTint('#4472C4', -0.249977111117893));
+    assert.equal(applyTint('#FFFF00', 0), '#FFFF00');
+    const palette = { theme: DEFAULT_THEME, indexed: INDEXED_COLORS };
+    const node = (attrs) => ({ name: 'color', local: 'color', attrs, children: [] });
+    assert.equal(resolveColor(node({ rgb: 'FFFFFF00' }), palette), '#FFFF00');
+    assert.equal(resolveColor(node({ theme: '0' }), palette), '#FFFFFF', 'theme 0 — фон (lt1), не текст');
+    assert.equal(resolveColor(node({ theme: '1' }), palette), '#000000', 'theme 1 — текст (dk1)');
+    assert.equal(resolveColor(node({ indexed: '5' }), palette), '#FFFF00');
+    assert.equal(resolveColor(node({ indexed: '64' }), palette), null, 'системный цвет — по умолчанию');
+    assert.equal(resolveColor(node({ auto: '1' }), palette), null);
+    const theme = readThemeColors(parseXml(`<a:theme xmlns:a="x"><a:themeElements><a:clrScheme name="t">
+        <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+        <a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+        <a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+        <a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+        <a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6>
+        <a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+    </a:clrScheme></a:themeElements></a:theme>`));
+    assert.deepEqual(theme.slice(0, 5), ['#FFFFFF', '#000000', '#EEECE1', '#1F497D', '#4F81BD']);
+});
+
+const STYLES_XML = `<styleSheet>
+  <numFmts count="1"><numFmt numFmtId="164" formatCode="0.0"/></numFmts>
+  <fonts>
+    <font><sz val="11"/><color theme="1"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color theme="1"/></font>
+    <font><i/><u/><sz val="14"/><color rgb="FFC00000"/></font>
+  </fonts>
+  <fills>
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"><fgColor rgb="FF808080"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor theme="4" tint="0.79998168889431442"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders>
+    <border><left/><right/><top/><bottom/></border>
+    <border><left style="thin"><color indexed="64"/></left><right style="thin"><color indexed="64"/></right><top style="thin"><color indexed="64"/></top><bottom style="thin"><color indexed="64"/></bottom></border>
+    <border><left/><right style="thick"><color rgb="FF000000"/></right><top/><bottom style="mediumDashed"><color rgb="FFFF0000"/></bottom></border>
+  </borders>
+  <cellXfs>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" applyFill="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="164" fontId="0" fillId="0" borderId="1"><alignment horizontal="center"/></xf>
+    <xf numFmtId="9" fontId="2" fillId="3" borderId="2"><alignment horizontal="left" indent="2"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="1" borderId="0"/>
+  </cellXfs>
+  <dxfs>
+    <dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+    <dxf><font><b/><color rgb="FFFFFFFF"/></font></dxf>
+    <dxf><fill><patternFill><bgColor rgb="FFC6EFCE"/></patternFill></fill></dxf>
+  </dxfs>
+</styleSheet>`;
+
+test('стили книги: заливки, шрифты, рамки, выравнивание, форматы условного форматирования', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    const [plain, header, number, accent, gray] = book.xfs;
+    assert.equal(plain.fill, null);
+    assert.equal(plain.border, null);
+    assert.equal(header.fill, '#FFFF00');
+    assert.equal(header.bold, true);
+    assert.deepEqual([header.align, header.vAlign, header.wrap], ['center', 'middle', true]);
+    assert.equal(header.border.left.css, '1px solid #000000');
+    assert.equal(number.code, '0.0');
+    assert.ok(channelsClose(accent.fill, '#DAE3F3'), 'тема + оттенок');
+    assert.deepEqual([accent.font.italic, accent.font.underline, accent.font.size, accent.font.color], [true, true, 14, '#C00000']);
+    assert.equal(accent.indent, 2);
+    assert.equal(accent.border.right.css, '3px solid #000000');
+    assert.equal(accent.border.bottom.css, '2px dashed #FF0000');
+    assert.equal(gray.fill, null, 'gray125 — служебная заливка, не цвет');
+    assert.deepEqual(book.dxfs[0], { fill: '#FFC7CE', color: '#9C0006', bold: null, italic: null, underline: null, strike: null });
+    assert.equal(book.dxfs[1].bold, true);
+    assert.equal(book.dxfs[1].color, '#FFFFFF');
+    assert.equal(book.dxfs[2].fill, '#C6EFCE');
+    assert.equal(strongerBorder(header.border.right, accent.border.right), accent.border.right, 'жирная побеждает тонкую');
+});
+
+const cellXml = (ref, value, style = 0, type = '') => (value === null
+    ? `<c r="${ref}" s="${style}"/>`
+    : `<c r="${ref}" s="${style}"${type ? ` t="${type}"` : ''}><v>${value}</v></c>`);
+
+test('лист: скрытые строки и столбцы, ширины, высоты, сетка, пустые ячейки с оформлением', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    const xml = `<worksheet><sheetViews><sheetView showGridLines="0" workbookViewId="0"/></sheetViews>
+      <sheetFormatPr baseColWidth="10" defaultRowHeight="16"/>
+      <cols><col min="1" max="1" width="12.5" customWidth="1"/><col min="3" max="3" width="9" hidden="1"/><col min="4" max="5" width="20" customWidth="1"/></cols>
+      <sheetData>
+        <row r="1" ht="45" customHeight="1">${cellXml('A1', 'Смена', 1, 'str')}${cellXml('B1', null, 1)}${cellXml('C1', 'скрыт', 1, 'str')}</row>
+        <row r="2" hidden="1">${cellXml('A2', 'Аман', 0, 'str')}${cellXml('B2', '#DIV/0!', 0, 'e')}</row>
+        <row r="3">${cellXml('A3', 'Алуа', 2, 'str')}${cellXml('B3', '16.25', 2)}${cellXml('D3', 'TRUE', 0, 'str')}${cellXml('E3', '1', 0, 'b')}</row>
+        <row r="4">${cellXml('A4', null, 0)}${cellXml('B4', null, 4)}</row>
+      </sheetData></worksheet>`;
+    const sheet = readSheet(xml, { styles: book });
+    assert.equal(sheet.gridLines, false);
+    assert.deepEqual(sheet.visibleRows, [0, 2], 'скрытая строка 2 и строка без оформления не видны');
+    assert.deepEqual(sheet.visibleCols, [0, 1, 3, 4], 'скрытый столбец C пропущен');
+    assert.equal(sheet.colWidths[0], Math.round(12.5 * CHAR_PX));
+    assert.equal(sheet.colWidths[3], Math.round(20 * CHAR_PX));
+    assert.equal(sheet.rowHeights[0], 60, '45 пунктов = 60 px');
+    assert.equal(sheet.defaultRowHeight, Math.round(16 * 4 / 3));
+    assert.ok(sheet.rows[0][1], 'пустая ячейка с заливкой видна');
+    assert.equal(sheet.rows[0][1].look.bg, '#FFFF00');
+    assert.equal(sheet.rows[3], undefined, 'пустая ячейка без оформления не создаёт строку');
+    const number = sheet.rows[2][1];
+    assert.equal(number.text, '16,3');
+    assert.equal(number.look.align, 'center', 'своё выравнивание у числа сильнее «числа вправо»');
+    assert.equal(sheet.rows[2][4].look.align, 'center', 'логическое без выравнивания — по центру, как в Excel');
+    assert.equal(sheet.rows[0][0].look.vAlign, 'middle');
+    assert.equal(sheet.rows[2][3].look.vAlign, 'bottom', 'по умолчанию в Excel — по нижнему краю');
+    assert.equal(sheetToTsv(sheet), 'Смена\nАлуа\t16,3\tTRUE\tИСТИНА', 'копия — без скрытых строки и столбца');
+});
+
+test('лист: рамка на стыке рисуется один раз, побеждает более заметная', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    const xml = `<worksheet><sheetData>
+        <row r="1">${cellXml('A1', '1', 1)}${cellXml('B1', '2', 3)}${cellXml('C1', '3', 1)}</row>
+        <row r="2">${cellXml('A2', '4', 1)}${cellXml('B2', '5', 0)}</row>
+      </sheetData></worksheet>`;
+    const sheet = readSheet(xml, { styles: book });
+    const edge = (row, col, side) => sheet.borders.get(`${row}:${col}`)?.[side]?.css;
+    assert.equal(edge(0, 0, 'left'), '1px solid #000000', 'у первого столбца левая линия — своя');
+    assert.equal(edge(0, 0, 'top'), '1px solid #000000');
+    assert.equal(edge(0, 1, 'right'), '3px solid #000000', 'толстая правая B1 сильнее тонкой левой C1');
+    assert.equal(edge(0, 1, 'bottom'), '2px dashed #FF0000');
+    assert.equal(edge(0, 0, 'bottom'), '1px solid #000000', 'верх A2 стал низом A1');
+    assert.equal(edge(1, 0, 'top'), undefined);
+});
+
+test('условное форматирование: цветовая шкала с процентилем и обратная шкала', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    const values = [10, 20, 30, 40, 50];
+    const rows = values.map((value, index) => `<row r="${index + 3}">${cellXml(`H${index + 3}`, value)}${cellXml(`J${index + 3}`, value)}</row>`).join('');
+    const xml = `<worksheet><sheetData>${rows}<row r="8">${cellXml('H8', '#DIV/0!', 0, 'e')}</row></sheetData>
+      <conditionalFormatting sqref="H3:H8"><cfRule type="colorScale" priority="2"><colorScale>
+        <cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+        <color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="J3:J7"><cfRule type="colorScale" priority="1"><colorScale>
+        <cfvo type="min"/><cfvo type="max"/><color rgb="FF63BE7B"/><color rgb="FFF8696B"/></colorScale></cfRule></conditionalFormatting>
+    </worksheet>`;
+    const sheet = readSheet(xml, { styles: book });
+    const bg = (row, col) => sheet.rows[row][col].look.bg;
+    assert.equal(bg(2, 7), '#F8696B', 'минимум — красный');
+    assert.equal(bg(4, 7), '#FFEB84', 'медиана — жёлтый');
+    assert.equal(bg(6, 7), '#63BE7B', 'максимум — зелёный');
+    assert.ok(channelsClose(bg(3, 7), '#FCAA78', 2), `между красным и жёлтым: ${bg(3, 7)}`);
+    assert.equal(sheet.rows[7][7].look.bg, null, 'ошибка шкалой не красится');
+    assert.equal(bg(2, 9), '#63BE7B', 'обратная шкала: меньше — лучше');
+    assert.equal(bg(6, 9), '#F8696B');
+});
+
+test('условное форматирование: процентиль — по рангу, а не по размаху; старшее правило побеждает в каждом свойстве', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    // 1, 2, 3, 4, 100: 50-й процентиль — 3 (жёлтый), а «50 % размаха» было бы 50,5.
+    const values = [1, 2, 3, 4, 100];
+    const rows = values.map((value, index) => `<row r="${index + 1}">${cellXml(`A${index + 1}`, value)}${cellXml(`B${index + 1}`, value)}</row>`).join('');
+    const xml = `<worksheet><sheetData>${rows}</sheetData>
+      <conditionalFormatting sqref="A1:A5"><cfRule type="colorScale" priority="9"><colorScale>
+        <cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+        <color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="B1:B5"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>2</formula></cfRule>
+        <cfRule type="cellIs" dxfId="2" priority="2" operator="greaterThan"><formula>0</formula></cfRule>
+        <cfRule type="cellIs" dxfId="1" priority="3" operator="greaterThan"><formula>50</formula></cfRule></conditionalFormatting>
+    </worksheet>`;
+    const sheet = readSheet(xml, { styles: book });
+    assert.equal(sheet.rows[2][0].look.bg, '#FFEB84', 'значение 3 — медиана');
+    const b = (row) => sheet.rows[row][1].look;
+    assert.equal(b(0).bg, '#C6EFCE', '1: только младшее правило — его заливка');
+    assert.equal(b(3).bg, '#FFC7CE', '4: оба правила, заливка старшего');
+    assert.equal(b(3).color, '#9C0006');
+    assert.deepEqual([b(4).bg, b(4).color, b(4).bold], ['#FFC7CE', '#9C0006', true],
+        '100: заливка и цвет — от старшего, жирный — от третьего (старшие его не задают)');
+});
+
+test('условное форматирование: «значение ячейки», формулы со ссылками, ошибки, первые N, гистограмма, stopIfTrue', () => {
+    const book = readBookStyles(parseXml(STYLES_XML), DEFAULT_THEME);
+    const xml = `<worksheet><sheetData>
+        <row r="3">${cellXml('B3', '-0.25')}${cellXml('C3', '150')}${cellXml('D3', '#DIV/0!', 0, 'e')}${cellXml('E3', '5')}</row>
+        <row r="4">${cellXml('B4', '0.33')}${cellXml('C4', '90')}${cellXml('D4', '7')}${cellXml('E4', '9')}</row>
+        <row r="5">${cellXml('B5', '0.05')}${cellXml('C5', '120')}${cellXml('D5', '8')}${cellXml('E5', '1')}</row>
+        <row r="20">${cellXml('D20', '120')}</row>
+      </sheetData>
+      <conditionalFormatting sqref="B3:B5"><cfRule type="cellIs" dxfId="0" priority="1" operator="lessThan"><formula>0</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="C3:C5"><cfRule type="cellIs" dxfId="2" priority="2" stopIfTrue="1" operator="greaterThan"><formula>$D$20</formula></cfRule>
+        <cfRule type="expression" dxfId="0" priority="3"><formula>$C3&lt;100</formula></cfRule>
+        <cfRule type="cellIs" dxfId="1" priority="4" operator="between"><formula>100</formula><formula>200</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="D3:D5"><cfRule type="containsErrors" dxfId="1" priority="5"><formula>ISERROR(D3)</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="E3:E5"><cfRule type="top10" dxfId="2" priority="6" rank="1"/><cfRule type="dataBar" priority="7"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="B3:B5"><cfRule type="expression" dxfId="2" priority="8"><formula>Лист2!A1&gt;0</formula></cfRule></conditionalFormatting>
+    </worksheet>`;
+    const sheet = readSheet(xml, { styles: book });
+    const look = (row, col) => sheet.rows[row][col].look;
+    assert.deepEqual([look(2, 1).bg, look(2, 1).color], ['#FFC7CE', '#9C0006'], 'отрицательное — красным');
+    assert.equal(look(3, 1).bg, null);
+    assert.equal(look(2, 2).bg, '#C6EFCE', '150 > $D$20 (120)');
+    assert.equal(look(2, 2).bold, false, 'stopIfTrue: младшее правило (between → жирный) не применяется');
+    assert.equal(look(3, 2).bg, '#FFC7CE', '$C4<100 — относительная строка правила');
+    assert.equal(look(4, 2).bold, true, '120 — между 100 и 200, правило 4');
+    assert.equal(look(4, 2).bg, null);
+    assert.equal(look(2, 3).color, '#FFFFFF', 'ошибка «спрятана» белым — как в файле');
+    assert.equal(look(3, 3).color, '#000000', 'без ошибки — свой цвет шрифта из стиля (theme 1, чёрный)');
+    assert.equal(look(3, 4).bg, '#C6EFCE', 'первый по величине');
+    assert.equal(look(2, 4).bar.share, 0.5);
+    assert.equal(look(4, 4).bar.share, 0);
+    assert.equal(look(3, 4).bar.color, '#638EC6');
+});
+
+test('формулы правил: ссылки со сдвигом, функции, сравнение по правилам Excel, неизвестное — отказ', () => {
+    const grid = { '0:0': 5, '0:1': 'Да', '1:0': 15, '1:1': null, '2:0': { error: '#N/A' } };
+    const value = (row, col) => (`${row}:${col}` in grid ? grid[`${row}:${col}`] : null);
+    const run = (formula, rowOffset = 0, colOffset = 0) => compileFormula(formula)({ value, rowOffset, colOffset });
+    assert.equal(run('A1*2+1'), 11);
+    assert.equal(run('A1>10', 1), true, 'относительная строка сдвинута на 1');
+    assert.equal(run('$A$1>10', 1), false, 'абсолютная — нет');
+    assert.equal(run('AND(A1>1,B1="да")'), true, 'текст без учёта регистра');
+    assert.equal(run('OR(ISBLANK(B2),A1=0)'), true);
+    assert.equal(run('AVERAGE($A$1:$A$2)'), 10);
+    assert.equal(run('IF(A1>3,"много","мало")'), 'много');
+    assert.equal(run('ISERROR(A3)'), true);
+    assert.deepEqual(run('A3+1'), { error: '#N/A' }, 'ошибка проходит насквозь');
+    assert.equal(run('-A1^2'), 25, 'унарный минус старше степени, как в Excel');
+    assert.equal(run('10%'), 0.1);
+    assert.equal(compareValues(5, 'a') < 0, true, 'число меньше текста');
+    assert.equal(compareValues(null, 0), 0, 'пусто = 0');
+    assert.throws(() => compileFormula('Лист2!A1>0'), UnsupportedFormula);
+    assert.throws(() => compileFormula('VLOOKUP(A1,B:C,2,0)'), UnsupportedFormula);
+});
