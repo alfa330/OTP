@@ -271,6 +271,33 @@ def completion_error(card):
     return None
 
 
+def call_end(card, now):
+    """Когда кончился звонок карточки. None — он ещё идёт.
+
+    Телефон мог не донести конец звонка (упал, пропала сеть) — тогда концом считается
+    предел длины звонка (CALL_MAX_HOURS), как только он прошёл: карточка не числится
+    «в разговоре» вечно (см. card_state), и её запись можно искать.
+    """
+    if card.get('ended_at'):
+        return card['ended_at']
+    started = card.get('created_at')
+    limit = started + timedelta(hours=CALL_MAX_HOURS) if started else None
+    return limit if limit and now > limit else None
+
+
+def record_problem(card, now):
+    """Почему у карточки нет записи разговора. None — запись у АТС должна быть.
+
+    Запись появляется после конца разговора: пока звонок идёт, её ещё нет, а у звонка
+    без ответа не бывает вовсе.
+    """
+    if card.get('status') == STATUS_VOID or not card.get('answered_at'):
+        return 'Разговора не было — записи нет'
+    if call_end(card, now) is None:
+        return 'Запись появится, когда звонок закончится'
+    return None
+
+
 # ─── Дерево причин ───────────────────────────────────────────────────────────
 #
 # Причины — дерево (владелец, 13.11.2026): основная причина («Запрос», «Консультация»,

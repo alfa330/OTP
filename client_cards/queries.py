@@ -445,7 +445,7 @@ def account_phones(cursor, account_id):
 
 _CARD_COLUMNS = ('id', 'department_id', 'operator_id', 'operator_name', 'phone', 'direction', 'call_key',
                  'status', 'account_id', 'account_kind', 'city', 'comment', 'parent_id', 'wrapup_sec',
-                 'created_at', 'answered_at', 'ended_at', 'completed_at')
+                 'created_at', 'answered_at', 'ended_at', 'completed_at', 'operator_sip', 'record_call_id')
 _CARD_SELECT = ', '.join('c.' + column for column in _CARD_COLUMNS)
 
 
@@ -518,14 +518,18 @@ def open_card(cursor, *, department_id, operator_id, operator_name, phone, direc
         row = cursor.fetchone()
         if row:
             return int(row[0]), False
+    # operator_sip — внутренний номер оператора СЕЙЧАС: по нему потом ищется запись разговора,
+    # а номер со временем закрепляют за другим человеком.
     cursor.execute("""
         INSERT INTO client_cards (department_id, operator_id, operator_name, phone, direction, call_key,
-                                  wrapup_sec, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                  wrapup_sec, operator_sip, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s,
+                (SELECT NULLIF(btrim(COALESCE(u.sip_number, '')), '') FROM users u WHERE u.id = %s),
+                %s, %s)
         ON CONFLICT (operator_id, call_key) WHERE call_key IS NOT NULL DO NOTHING
         RETURNING id
     """, (int(department_id), int(operator_id), operator_name, phone, direction, call_key or None,
-          int(wrapup_sec), now, now))
+          int(wrapup_sec), int(operator_id), now, now))
     row = cursor.fetchone()
     if row:
         return int(row[0]), True
@@ -555,6 +559,26 @@ def update_card(cursor, card_id, fields, *, now):
             params.append(fields[key])
     params.extend([now, int(card_id)])
     cursor.execute("UPDATE client_cards SET " + ', '.join(sets + ['updated_at = %s']) + " WHERE id = %s", params)
+
+
+def set_record_call(cursor, card_id, call_id):
+    """Номер звонка у АТС, найденный для карточки (records.py), — чтобы не искать его заново.
+    Это не правка оператора: updated_at не трогаем."""
+    cursor.execute("UPDATE client_cards SET record_call_id = %s WHERE id = %s", (str(call_id), int(card_id)))
+
+
+def operator_sip(cursor, user_id):
+    """Внутренний номер сотрудника на АТС сейчас (users.sip_number) или None."""
+    cursor.execute("SELECT NULLIF(btrim(COALESCE(sip_number, '')), '') FROM users WHERE id = %s", (int(user_id),))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def department_code(cursor, department_id):
+    """Код отдела строчными ('tez') или ''. По нему выбирается АТС отдела (records.py)."""
+    cursor.execute("SELECT lower(COALESCE(code, '')) FROM departments WHERE id = %s", (int(department_id),))
+    row = cursor.fetchone()
+    return row[0] if row else ''
 
 
 def set_topics(cursor, card_id, topics):

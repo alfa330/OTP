@@ -13,7 +13,7 @@ import logging
 import threading
 from datetime import timedelta
 
-from . import access, files, queries, rules, telegram, transport
+from . import access, files, queries, records, rules, telegram, transport
 from .tez import SOURCE_ACCOUNTS, TezAccounts
 
 log = logging.getLogger(__name__)
@@ -22,8 +22,10 @@ log = logging.getLogger(__name__)
 ACCOUNT_FRESH_HOURS = 24
 # За один звонок обновляем не больше стольких привязанных аккаунтов: запросы идут подряд.
 ACCOUNT_REFRESH_LIMIT = 3
-# «Мои незаполненные» — карточки не старше этого: вчерашнюю ещё доделывают, недельную — нет.
-PENDING_DAYS = 2
+# Черновики оператора — незаполненные карточки не старше этого. Неделя: карточку, не
+# заполненную перед выходными, оператор дозаполняет, вернувшись на смену (владелец,
+# 13.11.2026: незаполненная карточка остаётся в черновиках «для последующего заполнения»).
+PENDING_DAYS = 7
 HISTORY_PAGE = 30
 REQUESTS_PAGE = 40
 JOURNAL_PAGE = 50
@@ -46,9 +48,11 @@ def _spawn_thread(work):
 class ClientCardsService:
 
     def __init__(self, *, cursor_factory, tez=None, gcs=None, now=rules.now_almaty, spawn=_spawn_thread,
-                 migrate_chat=None):
+                 migrate_chat=None, record_sources=None):
         self._cursor = cursor_factory
         self._tez = tez or TezAccounts()
+        # Откуда брать записи разговоров: {код отдела: источник} (records.py).
+        self._records = records.default_sources() if record_sources is None else record_sources
         self._gcs = gcs or {}
         self._now = now
         self._spawn = spawn
@@ -400,8 +404,53 @@ class ClientCardsService:
         self._spawn(lambda: self.check_alerts(department_id))
         return bundle
 
+    def has_records(self, department_code):
+        """Подключены ли записи разговоров отделу — показывать ли проигрыватель в карточке."""
+        return str(department_code or '').lower() in self._records
+
+    def card_record(self, ctx, card_id):
+        """Запись разговора карточки — ссылка для проигрывателя (подписанная, живёт недолго).
+
+        Владелец, 13.11.2026: карточка, которую оператор не успел заполнить, остаётся в
+        черновиках «вместе с аудио» — он слушает разговор и дозаполняет причину. Слушать
+        может оператор звонка и руководитель отдела: это запись чужого разговора, история
+        обращений её остальным операторам не открывает.
+
+        Звонок у АТС ищется один раз (records.py) и запоминается в карточке; ссылка
+        берётся заново при каждом прослушивании. К АТС ходим без открытого соединения с базой.
+        """
+        with self._cursor() as cursor:
+            card = self._card_for(cursor, ctx, card_id, edit=True)
+            source = self._records.get(queries.department_code(cursor, card['department_id']))
+            sip = card.get('operator_sip') or queries.operator_sip(cursor, card['operator_id'])
+        if source is None:
+            raise CardError('Записи разговоров этому отделу не подключены', 'RECORD_UNSUPPORTED', 404)
+        now = self._now()
+        problem = rules.record_problem(card, now)
+        if problem:
+            raise CardError(problem, 'RECORD_NONE', 404)
+        call_id = card.get('record_call_id')
+        try:
+            if not call_id:
+                if not sip:
+                    raise CardError('У оператора не указан внутренний номер — запись не найти',
+                                    'RECORD_NO_SIP', 409)
+                call_id = source.find(sip=sip, phone=card['phone'], started_at=card['created_at'],
+                                      answered_at=card['answered_at'], ended_at=rules.call_end(card, now))
+                if not call_id:
+                    raise CardError('АТС пока не показывает этот звонок. Попробуйте через минуту',
+                                    'RECORD_NOT_READY', 404)
+                with self._cursor() as cursor:
+                    queries.set_record_call(cursor, card_id, call_id)
+            url = source.url(call_id)
+        except records.RecordError as error:
+            raise CardError(str(error), error.code, error.status)
+        if not url:
+            raise CardError('Запись ещё не готова у АТС. Попробуйте через минуту', 'RECORD_NOT_READY', 404)
+        return {'card_id': card['id'], 'url': url}
+
     def pending(self, ctx):
-        """Карточки оператора, которые он ещё не заполнил."""
+        """Черновики оператора: карточки, которые он ещё не заполнил."""
         since = self._now() - timedelta(days=PENDING_DAYS)
         with self._cursor() as cursor:
             cards = queries.operator_pending(cursor, ctx['user_id'], since=since)
@@ -437,8 +486,13 @@ class ClientCardsService:
             account = queries.get_account(cursor, card['account_id']) if card['account_id'] else None
             requests = queries.card_requests(cursor, [card_id]).get(card_id, [])
             parent = queries.get_card(cursor, card['parent_id']) if card['parent_id'] else None
+            code = queries.department_code(cursor, card['department_id'])
+        can_edit = access.can_edit_card(ctx, card)
         return {'card': card, 'account': account, 'requests': requests, 'parent': parent,
-                'can_edit': access.can_edit_card(ctx, card)}
+                'can_edit': can_edit,
+                # Запись разговора слушают оператор звонка и руководитель (см. card_record).
+                'can_listen': (can_edit and self.has_records(code)
+                               and rules.record_problem(card, self._now()) is None)}
 
     # ─── Запросы в другие отделы ─────────────────────────────────────────────
 

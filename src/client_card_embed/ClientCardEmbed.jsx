@@ -31,7 +31,9 @@ import {
     Check, Copy, Loader2, LogIn, PhoneCall, PhoneIncoming, PhoneOutgoing, RefreshCw, ShieldOff, WifiOff, X,
 } from 'lucide-react';
 
-import { IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../components/ui/ios';
+import {
+    IosHint, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
+} from '../components/ui/ios';
 import RequestsPanel from '../components/client_cards/RequestsPanel';
 import { createCardsApi } from '../components/client_cards/cardsApi';
 import {
@@ -127,7 +129,8 @@ function CallStrip({ card, talkStartedAt, receivedAt, nowMs, onClose, onCopy }) 
     );
 }
 
-/* Пока звонка нет: незаполненные карточки и открытие карточки по номеру руками. */
+/* Пока звонка нет: черновики (карточки, которые оператор не успел заполнить) и открытие
+   карточки по номеру руками. */
 function IdleScreen({ boot, busy, onOpenPending, onManual }) {
     const [phone, setPhone] = useState('');
     const [direction, setDirection] = useState('in');
@@ -136,7 +139,11 @@ function IdleScreen({ boot, busy, onOpenPending, onManual }) {
         <div className="space-y-5 pb-6">
             {boot.pending.length > 0 && (
                 <section className="space-y-1.5">
-                    <div className={iosGroupLabel}>Не заполнены · {boot.pending.length}</div>
+                    <div className="flex items-center gap-1.5">
+                        <div className={iosGroupLabel}>Черновики · {boot.pending.length}</div>
+                        <IosHint label="Что такое черновики"
+                                 text={`Карточки звонков, которые вы не успели заполнить: постобработка вышла или поступил следующий звонок. Откройте черновик${boot.records ? ', прослушайте разговор' : ''} и дозаполните причину. В списке — черновики за последние ${boot.pending_days || 7} дней.`} />
+                    </div>
                     <ul className="space-y-1.5">
                         {boot.pending.map((card) => (
                             <li key={card.id}>
@@ -365,12 +372,18 @@ export default function ClientCardEmbed() {
 
     const openCall = useCallback(async ({ phone, direction, callKey, manual = false }) => {
         setBusy(true);
+        // Карточка, которая сейчас на экране: новый звонок её сменит.
+        const replaced = currentRef.current?.bundle?.card;
         try {
             const { data } = await api.openCall({ phone, direction, call_key: callKey || undefined });
             if (callKey) callCardsRef.current.set(callKey, data.card.id);
             setHistoryCount(null);
             setTab('card');
             applyBundle(data, { replace: true, callKey: callKey || null, talkStartedAt: null });
+            // Оператор не успел её заполнить — она не пропала: говорим, где её искать.
+            if (replaced && replaced.id !== data.card.id && replaced.status === 'open' && replaced.ended_at) {
+                toast('Прошлая карточка не заполнена — она осталась в черновиках', 'info');
+            }
             let latest = await autoPick(data);
             // Руками открытая карточка событий звонка не получит: считаем, что разговор идёт.
             if (manual && latest.card.state === 'ringing') {

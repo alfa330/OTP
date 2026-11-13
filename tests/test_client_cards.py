@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from client_cards import access, files, rules, telegram, tez, transport
+from client_cards import access, files, records, rules, telegram, tez, transport
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 11, 12, 10, 0, 0)
@@ -332,6 +332,109 @@ def test_report_reasons_sheet_rows():
     assert report.reason_rows([]) == []
     assert [report.reason_level_title(level) for level in (1, 2, 3)] == [
         'Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня']
+
+
+# ─── Запись разговора ────────────────────────────────────────────────────────
+
+def test_record_exists_only_after_a_finished_talk():
+    moment = datetime(2026, 11, 12, 10, 0)
+    later = moment + timedelta(minutes=5)
+    assert rules.record_problem({'status': 'open', 'created_at': moment}, later) == 'Разговора не было — записи нет'
+    assert rules.record_problem({'status': 'void', 'created_at': moment, 'answered_at': moment, 'ended_at': moment},
+                                later) == 'Разговора не было — записи нет'
+    talking = {'status': 'open', 'created_at': moment, 'answered_at': moment}
+    assert rules.record_problem(talking, later) == 'Запись появится, когда звонок закончится'
+    for status in ('open', 'done'):
+        assert rules.record_problem({'status': status, 'created_at': moment, 'answered_at': moment,
+                                     'ended_at': later}, later) is None
+    # Телефон не донёс конец звонка: дольше предела разговор идти не может — запись можно искать.
+    limit = moment + timedelta(hours=rules.CALL_MAX_HOURS)
+    assert rules.call_end(talking, limit) is None and rules.record_problem(talking, limit) is not None
+    assert rules.call_end(talking, limit + timedelta(seconds=1)) == limit
+    assert rules.record_problem(talking, limit + timedelta(seconds=1)) is None
+    assert rules.call_end(dict(talking, ended_at=later), later) == later
+
+
+def _pbx_call(call_id, number, start, waitsec=10, billsec=120):
+    return {'general_call_id': call_id, 'external_number': number, 'start_time': start, 'waitsec': waitsec,
+            'billsec': billsec}
+
+
+def test_card_is_matched_to_the_pbx_call_by_number_and_answer_time():
+    # 12.11.2026 10:00:00 по Алматы (UTC+5) — в секундах, которыми считает АТС.
+    answered = records.to_unix(datetime(2026, 11, 12, 10, 0, 0))
+    assert answered == 1794459600
+    find = lambda calls, phone='77012345678': (records.match_call(calls, phone=phone, answered_ts=answered) or {}).get(
+        'general_call_id')
+    # Ответ у АТС — начало звонка плюс ожидание; код страны АТС и портал пишут по-разному.
+    assert find([_pbx_call('a', '87012345678', answered - 40, waitsec=38)]) == 'a'
+    assert find([_pbx_call('a', '+7 (701) 234-56-78', answered - 5, waitsec=4)]) == 'a'
+    assert find([_pbx_call('a', '7012345678', answered - 5, waitsec=4)]) == 'a'
+    # Чужой номер, звонок без разговора, звонок без номера у АТС — не наш.
+    assert find([_pbx_call('a', '77019999999', answered - 5)]) is None
+    assert find([_pbx_call('a', '77012345678', answered - 5, billsec=0)]) is None
+    assert find([_pbx_call('', '77012345678', answered - 5)]) is None
+    # Тот же человек звонил оператору дважды за час — берётся разговор, ответ которого ближе.
+    earlier = _pbx_call('early', '77012345678', answered - 1800, waitsec=5)
+    ours = _pbx_call('ours', '77012345678', answered - 20, waitsec=15)
+    later = _pbx_call('late', '77012345678', answered + 200, waitsec=10)
+    assert find([earlier, ours, later]) == 'ours' and find([later, earlier]) == 'late'
+    # Дальше допуска — уже другой разговор.
+    assert find([_pbx_call('far', '77012345678', answered + records.MATCH_WINDOW_SEC + 1, waitsec=0)]) is None
+    assert find([_pbx_call('edge', '77012345678', answered - records.MATCH_WINDOW_SEC, waitsec=0)]) == 'edge'
+    # Неполный номер и пустой список.
+    assert find([_pbx_call('a', '77012345678', answered)], phone='12345') is None
+    assert find([]) is None and find(None) is None
+
+
+class _FakePbxClient:
+    def __init__(self, calls=(), link='https://pbx.example/rec.mp3', error=None):
+        self.calls, self.link, self.error, self.asked = list(calls), link, error, []
+
+    def list_calls_by_internal_number(self, sip, start_ts, stop_ts, max_wait=None):
+        self.asked.append(('list', sip, start_ts, stop_ts, max_wait))
+        if self.error:
+            raise self.error
+        return self.calls
+
+    def get_call_record_url(self, call_id, max_wait=None):
+        self.asked.append(('url', call_id, max_wait))
+        if self.error:
+            raise self.error
+        return self.link
+
+
+def test_binotel_source_finds_the_call_and_gives_the_link():
+    from binotel.client import RateLimited
+    started, answered, ended = (datetime(2026, 11, 12, 9, 58), datetime(2026, 11, 12, 10, 0),
+                                datetime(2026, 11, 12, 10, 4))
+    client = _FakePbxClient([_pbx_call(777, '87012345678', records.to_unix(answered) - 30, waitsec=28)])
+    source = records.BinotelRecords(lambda: client)
+    asked = dict(sip='930', phone='77012345678', started_at=started, answered_at=answered, ended_at=ended)
+    assert source.find(**asked) == '777'
+    # Окно запроса шире карточки: входящий у АТС начинается раньше — пока стоит в очереди.
+    kind, sip, start_ts, stop_ts, max_wait = client.asked[0]
+    assert (kind, sip, max_wait) == ('list', '930', records.LOOKUP_MAX_WAIT_SEC)
+    assert start_ts == records.to_unix(started) - records.LOOKUP_BEFORE_SEC
+    assert stop_ts == records.to_unix(ended) + records.LOOKUP_AFTER_SEC
+    assert source.url('777') == 'https://pbx.example/rec.mp3' and client.asked[1] == ('url', '777', records.URL_MAX_WAIT_SEC)
+    # АТС звонка не знает; запись ещё не выложена.
+    assert records.BinotelRecords(lambda: _FakePbxClient()).find(**asked) is None
+    assert records.BinotelRecords(lambda: _FakePbxClient(link=None)).url('777') is None
+
+    # Очередь к АТС занята, АТС не ответила, ключей кабинета нет — понятная ошибка, а не падение.
+    for error, code, status in ((RateLimited('too frequent'), 'RECORD_BUSY', 503),
+                                (RuntimeError('boom'), 'RECORD_UNAVAILABLE', 502)):
+        broken = records.BinotelRecords(lambda error=error: _FakePbxClient(error=error))
+        for action in (lambda: broken.find(**asked), lambda: broken.url('777')):
+            with pytest.raises(records.RecordError) as caught:
+                action()
+            assert (caught.value.code, caught.value.status) == (code, status)
+    with pytest.raises(records.RecordError) as caught:
+        records.BinotelRecords(lambda: None).url('777')
+    assert (caught.value.code, caught.value.status) == ('RECORD_UNAVAILABLE', 503)
+    # Записи подключены отделу с кодом tez (Binotel его кабинета).
+    assert list(records.default_sources()) == ['tez']
 
 
 # ─── Настройки ───────────────────────────────────────────────────────────────

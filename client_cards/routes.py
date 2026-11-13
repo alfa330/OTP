@@ -53,7 +53,7 @@ from io import BytesIO
 from flask import Blueprint, jsonify, request, send_file
 
 from . import access, queries, report as report_xlsx, rules
-from .service import CardError
+from .service import PENDING_DAYS, CardError
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 # Отчёт дольше года одним запросом не считаем: это уже не «рост обращений», а архив.
@@ -369,6 +369,7 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
             categories = queries.categories(cursor, department_id)
             destinations = queries.destinations(cursor, department_id)
             unread = queries.unread_total(cursor, ctx['user_id'])
+            records_on = service.has_records(queries.department_code(cursor, department_id))
         pending = []
         for card in cards:
             item = public_card(card, now)
@@ -382,6 +383,10 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
             'categories': categories,
             'destinations': [public_destination(item, manage=False) for item in destinations],
             'pending': pending,
+            # Подключены ли отделу записи разговоров: карточка тогда предлагает прослушать звонок.
+            'records': records_on,
+            # За сколько дней показаны черновики — экран говорит это оператору.
+            'pending_days': PENDING_DAYS,
             'unread_requests': unread,
             'user': {'id': ctx['user_id'], 'name': ctx['name']},
             'tez': {'source': service.tez_source(), 'admin_url': admin_url},
@@ -439,8 +444,13 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
             'account': public_account(detail['account'], service.admin_url()),
             'requests': [public_card_request(item) for item in detail['requests']],
             'parent': public_card(detail['parent'], now) if detail['parent'] else None,
-            'can_edit': detail['can_edit'],
+            'can_edit': detail['can_edit'], 'can_listen': detail['can_listen'],
         })
+
+    @cards_route('/cards/<int:card_id>/record')
+    def client_cards_card_record(card_id, ctx):
+        """Запись разговора карточки: ссылка для проигрывателя."""
+        return jsonify(service.card_record(ctx, card_id))
 
     @cards_route('/cards/<int:card_id>/complete', methods=('POST',))
     def client_cards_card_complete(card_id, ctx):

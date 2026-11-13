@@ -18,7 +18,9 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from client_cards import access, queries, report, routes, rules, schema, service as service_module, transport
+from client_cards import (
+    access, queries, records, report, routes, rules, schema, service as service_module, transport,
+)
 from client_cards.service import CardError, ClientCardsService
 from client_cards.tez import SOURCE_ACCOUNTS, SOURCE_FIRST_ORDERS
 
@@ -36,7 +38,8 @@ BASE_DDL = '''
     CREATE TABLE departments (id integer PRIMARY KEY, code text UNIQUE, name text NOT NULL,
                               head_user_id integer, is_active boolean DEFAULT TRUE);
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, role text NOT NULL,
-                        status text DEFAULT 'working', department_id integer, telegram_id bigint);
+                        status text DEFAULT 'working', department_id integer, telegram_id bigint,
+                        sip_number text);
     CREATE TABLE groups (id integer PRIMARY KEY, name text NOT NULL, department_id integer,
                          status text NOT NULL DEFAULT 'active');
     CREATE TABLE group_operator_memberships (id serial PRIMARY KEY, group_id integer NOT NULL,
@@ -54,6 +57,8 @@ BASE_DDL = '''
         (31, 'Борис Оператор', 'operator', 'working', 560, NULL),
         (40, 'Продавец Теза', 'operator', 'working', 560, NULL),
         (50, 'Чужой Оператор', 'operator', 'working', 367, NULL);
+    UPDATE users SET sip_number = ' 930 ' WHERE id = 30;
+    UPDATE users SET sip_number = '931' WHERE id = 31;
     INSERT INTO groups (id, name, department_id) VALUES
         (34, 'Тез КЦ - Тех поддержка', 560), (35, 'Tez КЦ - Отдел продаж', 560);
     INSERT INTO group_operator_memberships (group_id, operator_id, start_date) VALUES
@@ -196,6 +201,28 @@ class Outbox:
         return {'message_id': message_id, 'document': {'file_id': 'tg-file-%d' % message_id}}, None
 
 
+class FakeRecords:
+    """Подставная АТС с записями разговоров: помнит, о чём её спросили, отдаёт, что велено."""
+
+    def __init__(self):
+        self.asked = []
+        self.call_id = 'bn-1001'
+        self.link = 'https://records.example/bn-1001.mp3'
+        self.error = None
+
+    def find(self, **kwargs):
+        self.asked.append(('find', kwargs))
+        if self.error:
+            raise self.error
+        return self.call_id
+
+    def url(self, call_id):
+        self.asked.append(('url', call_id))
+        if self.error:
+            raise self.error
+        return self.link
+
+
 class FakeStorage:
     """Подставное хранилище файлов: gs://-ссылки на байты в памяти."""
 
@@ -246,9 +273,11 @@ def world(db, monkeypatch):
     clock = Clock(datetime(2026, 11, 12, 10, 0, 0))
     tez = FakeTez()
     migrated = []
+    call_records = FakeRecords()
     svc = ClientCardsService(cursor_factory=db._get_cursor, tez=tez, gcs=storage.gcs(), now=clock,
                              spawn=lambda work: work(),
-                             migrate_chat=lambda old, new: migrated.append((old, new)))
+                             migrate_chat=lambda old, new: migrated.append((old, new)),
+                             record_sources={'tez': call_records})
     with db._get_cursor() as cursor:
         queries.save_settings(cursor, TEZ, {'enabled': True, 'group_ids': [GROUP_TP], 'wrapup_sec': 60},
                               by=HEAD, by_name='Глава Теза', now=clock())
@@ -268,6 +297,7 @@ def world(db, monkeypatch):
 
     w = World()
     w.db, w.svc, w.tez, w.clock, w.outbox, w.storage, w.migrated = db, svc, tez, clock, outbox, storage, migrated
+    w.records = call_records
     w.orders, w.no_orders, w.cancel, w.money = orders, no_orders, cancel, money
     w.finance, w.no_chat = finance, no_chat
     w.ctx = lambda user_id: svc.context(user_id)
@@ -540,6 +570,146 @@ def test_wrapup_state_and_pending_list(world):
     done = w.svc.complete_card(ctx, card_id)
     assert routes.public_card(done['card'], w.clock())['late'] is True
     assert w.svc.pending(ctx)[0] == []
+
+
+def test_unfilled_card_stays_in_drafts_with_the_call_record(world):
+    """Владелец, 13.11.2026: оператор не успел заполнить причину даже за постобработку, ему
+    поступил следующий звонок — карточка остаётся в черновиках «для последующего
+    заполнения вместе с аудио»."""
+    w = world
+    anna = w.ctx(ANNA)
+    card_id = w.svc.open_call(anna, phone=PHONE, direction='in', call_key='d1')['card']['id']
+    with w.db._get_cursor() as cursor:
+        # Внутренний номер оператора запомнен на момент звонка: потом его отдадут другому.
+        assert queries.get_card(cursor, card_id)['operator_sip'] == '930'
+
+    def refused(ctx=anna, target=None):
+        with pytest.raises(CardError) as error:
+            w.svc.card_record(ctx, target or card_id)
+        return error.value
+
+    # Пока звонит и пока идёт разговор — записи ещё нет, АТС не беспокоим.
+    assert (refused().code, str(refused())) == ('RECORD_NONE', 'Разговора не было — записи нет')
+    w.svc.call_event(anna, card_id, 'answered')
+    answered_at = w.clock()
+    assert str(refused()) == 'Запись появится, когда звонок закончится'
+    w.clock.tick(minutes=4)
+    w.svc.call_event(anna, card_id, 'ended')
+    ended_at = w.clock()
+    assert w.records.asked == []
+
+    # Постобработка вышла, поступил следующий звонок — первая карточка осталась в черновиках.
+    w.clock.tick(seconds=90)
+    second = w.svc.open_call(anna, phone=OTHER_PHONE, direction='in', call_key='d2')['card']['id']
+    w.svc.call_event(anna, second, 'answered')
+    w.clock.tick(minutes=2)
+    w.svc.call_event(anna, second, 'ended')
+    _fill(w, anna, second)
+    w.svc.complete_card(anna, second)
+    assert [card['id'] for card in w.svc.pending(anna)[0]] == [card_id]
+
+    # Оператор открыл черновик и слушает разговор: звонок у АТС ищется по его внутреннему
+    # номеру, номеру собеседника и времени — и запоминается в карточке.
+    assert w.svc.card_record(anna, card_id) == {'card_id': card_id, 'url': w.records.link}
+    kind, asked = w.records.asked[0]
+    assert kind == 'find' and asked == {'sip': '930', 'phone': PHONE, 'started_at': asked['started_at'],
+                                        'answered_at': answered_at, 'ended_at': ended_at}
+    assert asked['started_at'] <= answered_at and w.records.asked[1] == ('url', 'bn-1001')
+    with w.db._get_cursor() as cursor:
+        assert queries.get_card(cursor, card_id)['record_call_id'] == 'bn-1001'
+    # Второе прослушивание: звонок уже известен, спрашиваем только свежую ссылку.
+    w.records.asked.clear()
+    w.records.link = 'https://records.example/bn-1001-again.mp3'
+    assert w.svc.card_record(anna, card_id)['url'].endswith('again.mp3')
+    assert w.records.asked == [('url', 'bn-1001')]
+
+    # Слушают оператор звонка и руководитель; коллега по линии обращение видит, запись — нет.
+    assert w.svc.card_record(w.ctx(HEAD), card_id)['url']
+    assert refused(w.ctx(BORIS)).code == 'CARD_FORBIDDEN'
+    assert w.svc.card_detail(anna, card_id)['can_listen'] is True
+    assert w.svc.card_detail(w.ctx(BORIS), card_id)['can_listen'] is False
+    # Публичный вид карточки внутренний номер и номер звонка АТС наружу не отдаёт.
+    assert not {'operator_sip', 'record_call_id'} & set(routes.public_card(w.svc.bundle(anna, card_id)['card'], w.clock()))
+
+    # АТС ещё не выложила запись; АТС занята — оператору понятный текст, карточка цела.
+    w.records.link = None
+    assert (refused().code, refused().status) == ('RECORD_NOT_READY', 404)
+    w.records.error = records.RecordError('АТС сейчас занята. Попробуйте через минуту', 'RECORD_BUSY', 503)
+    assert (refused().code, refused().status, str(refused())) == (
+        'RECORD_BUSY', 503, 'АТС сейчас занята. Попробуйте через минуту')
+    w.records.error, w.records.link = None, 'https://records.example/x.mp3'
+
+    # Черновик дозаполняют позже — и после выходных: он в списке неделю.
+    w.clock.tick(days=6)
+    assert [card['id'] for card in w.svc.pending(anna)[0]] == [card_id]
+    _fill(w, anna, card_id)
+    assert w.svc.complete_card(anna, card_id)['card']['status'] == rules.STATUS_DONE
+    assert w.svc.pending(anna)[0] == []
+    # Заполненную карточку тоже можно переслушать.
+    assert w.svc.card_record(anna, card_id)['url']
+
+
+def test_record_needs_a_call_the_pbx_knows(world):
+    w = world
+    boris = w.ctx(BORIS)
+
+    def ended_card(ctx, key, phone=PHONE):
+        card_id = w.svc.open_call(ctx, phone=phone, direction='out', call_key=key)['card']['id']
+        w.svc.call_event(ctx, card_id, 'answered')
+        w.clock.tick(minutes=1)
+        w.svc.call_event(ctx, card_id, 'ended')
+        return card_id
+
+    # АТС такого звонка (пока) не знает — запоминать нечего, в следующий раз ищем снова.
+    card_id = ended_card(boris, 'r1')
+    w.records.call_id = None
+    with pytest.raises(CardError) as error:
+        w.svc.card_record(boris, card_id)
+    assert error.value.code == 'RECORD_NOT_READY' and 'пока не показывает этот звонок' in str(error.value)
+    w.records.call_id = 'bn-2002'
+    assert w.svc.card_record(boris, card_id)['url']
+    assert [kind for kind, _ in w.records.asked] == ['find', 'find', 'url']
+
+    # Номер оператора на момент звонка не был указан — берётся нынешний; нет и его — так и сказано.
+    with w.db._get_cursor() as cursor:
+        cursor.execute("UPDATE users SET sip_number = NULL WHERE id = %s", (BORIS,))
+    other = ended_card(boris, 'r2', phone=OTHER_PHONE)
+    with pytest.raises(CardError) as error:
+        w.svc.card_record(boris, other)
+    assert error.value.code == 'RECORD_NO_SIP'
+    with w.db._get_cursor() as cursor:
+        cursor.execute("UPDATE users SET sip_number = '955' WHERE id = %s", (BORIS,))
+    w.records.asked.clear()
+    assert w.svc.card_record(boris, other)['url'] and w.records.asked[0][1]['sip'] == '955'
+
+    # Отделу записи не подключены — проигрывателя нет вовсе.
+    assert w.svc.has_records('tez') and w.svc.has_records('TEZ') and not w.svc.has_records('op')
+    plain = ClientCardsService(cursor_factory=w.db._get_cursor, tez=w.tez, now=w.clock, record_sources={})
+    with pytest.raises(CardError) as error:
+        plain.card_record(boris, other)
+    assert error.value.code == 'RECORD_UNSUPPORTED'
+    assert plain.card_detail(boris, other)['can_listen'] is False
+    # Несостоявшийся звонок: записи нет и быть не может.
+    missed = w.svc.open_call(boris, phone='77019990003', direction='in', call_key='r3')['card']['id']
+    w.svc.call_event(boris, missed, 'ended')
+    with pytest.raises(CardError) as error:
+        w.svc.card_record(boris, missed)
+    assert error.value.code == 'RECORD_NONE'
+
+    # Телефон не донёс конец звонка (упал): пока разговор мог идти — записи нет; дольше
+    # предела он идти не может — запись ищется, концом считается предел длины звонка.
+    lost = w.svc.open_call(boris, phone='77019990004', direction='in', call_key='r4')['card']['id']
+    started = w.clock()
+    w.svc.call_event(boris, lost, 'answered')
+    w.clock.tick(hours=1)
+    with pytest.raises(CardError) as error:
+        w.svc.card_record(boris, lost)
+    assert str(error.value) == 'Запись появится, когда звонок закончится'
+    assert w.svc.card_detail(boris, lost)['can_listen'] is False
+    w.clock.tick(hours=rules.CALL_MAX_HOURS)
+    w.records.asked.clear()
+    assert w.svc.card_record(boris, lost)['url'] and w.svc.card_detail(boris, lost)['can_listen'] is True
+    assert w.records.asked[0][1]['ended_at'] == started + timedelta(hours=rules.CALL_MAX_HOURS)
 
 
 def test_history_follows_account_across_phones(world):
@@ -1118,9 +1288,16 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
         old = queries.create_category(cursor, TEZ, title='Старая причина', parent_id=None, by=HEAD,
                                       now=datetime(2026, 11, 12, 10, 0))
         cursor.execute('ALTER TABLE client_card_categories DROP COLUMN audience')
+        cursor.execute('ALTER TABLE client_cards DROP COLUMN operator_sip, DROP COLUMN record_call_id')
         schema.init_client_cards_schema(cursor)
         schema.init_client_cards_schema(cursor)
         assert queries.category_index(cursor, TEZ)[old]['audience'] == rules.KIND_DRIVER
+        # Столбцы записи разговора тоже на месте — карточка заводится и читается.
+        card_id, created = queries.open_card(cursor, department_id=TEZ, operator_id=ANNA, operator_name='Анна',
+                                             phone=PHONE, direction='in', call_key='m1', wrapup_sec=60,
+                                             now=datetime(2026, 11, 12, 10, 0))
+        card = queries.get_card(cursor, card_id)
+        assert created and (card['operator_sip'], card['record_call_id']) == ('930', None)
         cursor.execute("""SELECT is_nullable, column_default FROM information_schema.columns
                            WHERE table_schema = current_schema() AND table_name = 'client_card_categories'
                              AND column_name = 'audience'""")
@@ -1360,6 +1537,8 @@ def test_api_phone_card_flow(api):
         {'id': w.finance, 'title': 'Финансы', 'is_active': True, 'is_ready': True, 'chat_title': 'Тез · Финансы'},
         {'id': w.no_chat, 'title': 'Модерация', 'is_active': True, 'is_ready': False, 'chat_title': None}]
     assert state['pending'] == [] and state['user'] == {'id': ANNA, 'name': 'Анна Оператор'}
+    # Черновики: за сколько дней они в списке и есть ли у отдела записи разговоров.
+    assert state['records'] is True and state['pending_days'] == service_module.PENDING_DAYS == 7
     assert state['link_example'] == 'https://admin.tezapp.org/admin/drivers/12345'
 
     status, bundle = api.post('/phone/calls', json={'phone': '+7 (701) 234-56-78', 'direction': 'in',
@@ -1582,6 +1761,24 @@ def test_api_management(api):
     assert status == 200 and body == {'sent': ['Глава Теза'], 'errors': []}
     assert w.outbox.messages[sent_before]['chat_id'] == 700300
     assert api.post('/alerts/test', json={})[0] == 403
+
+
+def test_api_card_record(api):
+    w = api.w
+    card_id = api.post('/phone/calls', json={'phone': PHONE, 'direction': 'in', 'call_key': 'rec-1'})[1]['card']['id']
+    status, body = api.get('/cards/%d/record' % card_id)
+    assert status == 404 and body['code'] == 'RECORD_NONE'
+    api.post('/cards/%d/event' % card_id, json={'event': 'answered'})
+    api.post('/cards/%d/event' % card_id, json={'event': 'ended'})
+    status, body = api.get('/cards/%d/record' % card_id)
+    assert status == 200 and body == {'card_id': card_id, 'url': w.records.link}
+    # Коллега по линии запись чужого разговора не получает, руководитель — получает.
+    assert api.get('/cards/%d/record' % card_id, user=BORIS)[1]['code'] == 'CARD_FORBIDDEN'
+    assert api.get('/cards/%d/record' % card_id, user=HEAD)[0] == 200
+    assert api.get('/cards/%d' % card_id)[1]['can_listen'] is True
+    assert api.get('/cards/%d' % card_id, user=BORIS)[1]['can_listen'] is False
+    # В черновиках оператора карточка есть: она не заполнена.
+    assert [item['id'] for item in api.get('/phone/state')[1]['pending']] == [card_id]
 
 
 def test_api_no_account(api):

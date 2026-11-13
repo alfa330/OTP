@@ -47,6 +47,8 @@ export const createCardsApi = (apiBaseUrl, getHeaders = null) => {
         saveCard: (cardId, body) => axios.patch(url(`/cards/${cardId}`), body, config()),
         completeCard: (cardId) => axios.post(url(`/cards/${cardId}/complete`), {}, config()),
         card: (cardId) => axios.get(url(`/cards/${cardId}`), config()),
+        // Запись разговора: ссылка для проигрывателя (подписанная, живёт недолго).
+        cardRecord: (cardId) => axios.get(url(`/cards/${cardId}/record`), config()),
         cardBundle: (cardId) => axios.get(url(`/cards/${cardId}`), config({ params: { bundle: 1 } })),
         history: (params) => axios.get(url('/history'), config({ params })),
         // Запросы в другие отделы

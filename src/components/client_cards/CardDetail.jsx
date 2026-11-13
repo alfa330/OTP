@@ -7,6 +7,7 @@ import React, { useEffect, useState } from 'react';
 import { ExternalLink, PhoneIncoming, PhoneOutgoing } from 'lucide-react';
 
 import { IosBadge, IosModal, iosBtnPrimary, iosGroupLabel } from '../ui/ios';
+import CardRecord from './CardRecord';
 import { NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, errorText, fmtSeconds, fmtWhen, topicLabel } from './cardRules';
 import { Spinner, StateBadge } from './ui';
 
@@ -86,6 +87,13 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
                         )}
                         {spent !== null && <Row label="На карточку">{fmtSeconds(spent)} после звонка</Row>}
                     </div>
+                    {/* Запись разговора — оператору звонка и руководителю (решает сервер). */}
+                    {detail.can_listen && (
+                        <div className="space-y-1.5">
+                            <div className={iosGroupLabel}>Запись разговора</div>
+                            <CardRecord api={api} cardId={card.id} />
+                        </div>
+                    )}
                     {detail.requests.length > 0 && (
                         <div className="space-y-1.5">
                             <div className={iosGroupLabel}>Запросы в отделы</div>

@@ -18,6 +18,7 @@ import CustomSelect from '../components/ui/CustomSelect';
 import {
     IosBadge, IosHint, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
 } from '../components/ui/ios';
+import CardRecord from '../components/client_cards/CardRecord';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
     AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
@@ -343,6 +344,17 @@ export default function CallCard({
 
     return (
         <div className="space-y-4 pb-24">
+            {/* ── Запись разговора: звонок кончился — его можно переслушать и по нему дозаполнить
+                карточку. Ради этого незаполненная карточка и лежит в черновиках. ── */}
+            {boot.records && card.answered_at && (card.ended_at || card.state === 'overdue') && (
+                <section className="space-y-1.5">
+                    <div className={iosGroupLabel}>Запись разговора</div>
+                    <div className={`${iosCard} p-3`}>
+                        <CardRecord api={api} cardId={cardId} />
+                    </div>
+                </section>
+            )}
+
             {/* ── Аккаунт ─────────────────────────────────────────────────────── */}
             <section className="space-y-1.5">
                 <div className="flex items-center justify-between">

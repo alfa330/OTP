@@ -26,6 +26,11 @@
 * **У водителей, клиентов и третьих лиц свои причины** (владелец, 13.11.2026): audience
   у причины — 'driver', 'client' или 'third'. Он записан в каждой строке дерева (подтема
   копирует его у родителя), чтобы ветку причины не приходилось выяснять подъёмом по дереву.
+* **Карточка помнит, как найти запись разговора** (владелец, 13.11.2026: незаполненная
+  карточка остаётся в черновиках «вместе с аудио»). operator_sip — внутренний номер
+  оператора на момент звонка: номер со временем отдают другому человеку, а запись ищут
+  и через неделю. record_call_id — номер звонка у АТС, найденный при первом прослушивании:
+  искать его заново дорого (records.py).
 * **Файл запроса лежит у нас** (file_ref = gs://…), а не только в Telegram: бот отдаёт
   обратно файлы до 20 МБ, а видео оператора бывает больше. Файл из группы — наоборот,
   file_id Telegram: его прислали туда, а не нам.
@@ -129,6 +134,8 @@ _STATEMENTS = [
         comment        TEXT,
         parent_id      INTEGER REFERENCES client_cards(id) ON DELETE SET NULL,
         wrapup_sec     INTEGER NOT NULL DEFAULT 0,
+        operator_sip   VARCHAR(32),
+        record_call_id VARCHAR(64),
         created_at     TIMESTAMP NOT NULL,
         answered_at    TIMESTAMP,
         ended_at       TIMESTAMP,
@@ -309,6 +316,8 @@ _SEED_DEPARTMENT_CODES = ('tez',)
 # В CREATE TABLE выше они тоже есть — это для базы, где таблица уже создана без них.
 _ADDED_COLUMNS = [
     ('client_card_categories', 'audience', "VARCHAR(16) NOT NULL DEFAULT 'driver'"),
+    ('client_cards', 'operator_sip', 'VARCHAR(32)'),
+    ('client_cards', 'record_call_id', 'VARCHAR(64)'),
 ]
 
 
