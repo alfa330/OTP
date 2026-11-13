@@ -7,6 +7,7 @@ import {
 import useIsMobileShell from '../common/useIsMobileShell';
 import DressCodeCamera from './DressCodeCamera';
 import { employeeStatus, fmtDay, fmtTime } from './dressCode';
+import { releaseFaceDetector, warmFaceDetector } from './faceDetector';
 
 /*
  * «Дресс-код» сотрудника (ТЗ #418): фото после отметки прихода в Workpace.
@@ -86,6 +87,11 @@ export default function DressCodeView({ apiBaseUrl, withAccessTokenHeader, showT
     }, [base, headers]);
 
     useEffect(() => { load(); }, [load]);
+
+    // Нейросеть автопроверки кадра грузится заранее — к открытию камеры она уже готова.
+    const canCapture = Boolean(state?.required && state?.can_capture);
+    useEffect(() => { if (canCapture) warmFaceDetector(); }, [canCapture]);
+    useEffect(() => releaseFaceDetector, []);
 
     const openCamera = () => setCamera({ attempt: 1, hint: '', retakeOf: state?.retake_for || null });
 
