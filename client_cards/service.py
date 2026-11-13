@@ -234,7 +234,27 @@ class ClientCardsService:
             queries.update_card(cursor, card_id, {
                 'account_id': account['id'], 'account_kind': account['kind'], 'city': account.get('city')},
                 now=now)
+            self._fit_topics(cursor, card, account['kind'], now)
             return self._bundle(cursor, card_id)
+
+    def _fit_topics(self, cursor, card, kind, now):
+        """У карточки теперь аккаунт вида kind — причины из чужой ветки с неё уходят.
+
+        У водителей и клиентов свои причины (rules.AUDIENCES): причина водителя в карточке
+        клиента попала бы в отчёт не той ветки. Причины «Третьего лица» остаются — они
+        подходят любому аккаунту. Если причин не осталось, сохранённая карточка снова
+        «не заполнена» — оператор выбирает причину из ветки нового аккаунта.
+        """
+        topics = card.get('topics') or []
+        audiences = rules.account_audiences(kind)
+        if not topics or not audiences:
+            return
+        kept = rules.topics_of_audiences(topics, queries.category_index(cursor, card['department_id']), audiences)
+        if len(kept) == len(topics):
+            return
+        queries.set_topics(cursor, card['id'], kept)
+        if not kept and card['status'] == rules.STATUS_DONE:
+            queries.update_card(cursor, card['id'], {'status': rules.STATUS_OPEN, 'completed_at': None}, now=now)
 
     def mark_no_account(self, ctx, card_id):
         """Оператор отметил: у звонившего нет аккаунта в Тез (решение владельца 12.11.2026).
@@ -280,6 +300,7 @@ class ClientCardsService:
             saved = queries.get_account(cursor, account_id)
             queries.update_card(cursor, card_id, {
                 'account_id': account_id, 'account_kind': saved['kind'], 'city': saved.get('city')}, now=now)
+            self._fit_topics(cursor, queries.get_card(cursor, card_id, for_update=True), saved['kind'], now)
             bundle = self._bundle(cursor, card_id)
         self._tez.forget(card['phone'])
         return bundle
@@ -320,7 +341,8 @@ class ClientCardsService:
             if 'topics' in data:
                 try:
                     topics = rules.normalize_topics(data.get('topics'),
-                                                    queries.category_index(cursor, card['department_id']))
+                                                    queries.category_index(cursor, card['department_id']),
+                                                    audiences=rules.card_audiences(card))
                 except ValueError as error:
                     raise CardError(str(error), 'CARD_BAD_TOPICS')
                 if card['status'] == rules.STATUS_DONE and not topics:
@@ -842,6 +864,7 @@ class ClientCardsService:
                 'id': node_id, 'parent_id': index[node_id]['parent_id'], 'ancestors': path[-2::-1],
                 'count': count, 'baseline': baseline.get(node_id, 0.0),
                 'title': titles[-1], 'parent_title': rules.PATH_SEPARATOR.join(titles[:-1]) or None,
+                'audience': index[node_id].get('audience'),
                 'last': {'at': previous.get('at'), 'count': previous.get('count')} if previous else None,
                 'sent_today': previous.get('sent_today') or 0})
         return rules.pick_alerts(nodes, now=now, settings=alerts)

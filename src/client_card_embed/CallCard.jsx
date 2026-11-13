@@ -15,11 +15,14 @@ import {
 } from 'lucide-react';
 
 import CustomSelect from '../components/ui/CustomSelect';
-import { IosBadge, IosHint, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../components/ui/ios';
+import {
+    IosBadge, IosHint, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
+} from '../components/ui/ios';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, canAddTopic, countReasons, errorText, filterCategories, fmtDate,
-    isTopicPicked, looksLikeAccountLink, pickedInBranch, saveLabel, toggleTopic, topicLabel, topicsPayload,
+    AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
+    errorText, filterCategories, fmtDate, isTopicPicked, looksLikeAccountLink, pickedInBranch, reasonsOfAudience,
+    saveLabel, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
 } from '../components/client_cards/cardRules';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../utils/kazakhstanCities';
 
@@ -193,6 +196,9 @@ export default function CallCard({
     const [query, setQuery] = useState('');
     // Раскрытая ветка причин: id по уровням, [основная, подтема 1-го уровня, …].
     const [openPath, setOpenPath] = useState([]);
+    // Кто звонит, если это называет оператор: при «Аккаунта нет» — водитель, клиент или
+    // третье лицо; при выбранном аккаунте — «звонит не он сам, а третье лицо». '' — не называл.
+    const [callerKind, setCallerKind] = useState('');
     const [composer, setComposer] = useState(false);
 
     const draftRef = useRef({ topics, comment });
@@ -210,6 +216,7 @@ export default function CallCard({
         setLinkOpen(false);
         setQuery('');
         setOpenPath([]);
+        setCallerKind('');
         dirtyRef.current = false;
         // Только смена карточки: правки сервера в той же карточке черновик не перезаписывают.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -293,13 +300,35 @@ export default function CallCard({
         if (await flush()) setComposer(true);
     };
 
-    const categories = useMemo(() => filterCategories(boot.categories, query), [boot.categories, query]);
+    // У водителей, клиентов и третьих лиц свои причины. Карточка открывает ветку выбранного
+    // аккаунта; звонит не он сам — оператор переключает на «Третье лицо». При «Аккаунта нет»
+    // звонящего называет оператор. Переключателя нет, когда выбирать не из чего.
+    const accountKind = account?.kind || '';
+    const whoOptions = useMemo(() => callerOptions(boot.categories, accountKind), [boot.categories, accountKind]);
+    const audience = cardAudience({
+        options: whoOptions, picked: callerKind, topics, categories: boot.categories, accountKind });
+    const reasons = useMemo(() => reasonsOfAudience(boot.categories, audience), [boot.categories, audience]);
+    const categories = useMemo(() => filterCategories(reasons, query), [reasons, query]);
+    // Аккаунт сменили с водителя на клиента (или наоборот) — причины чужой ветки уходят и с
+    // экрана: сервер снял их с карточки в том же действии.
+    useEffect(() => {
+        if (!accountKind) return;
+        setTopics((prev) => {
+            const own = topicsOfAudience(prev, boot.categories, accountKind);
+            return own.length === prev.length ? prev : own;
+        });
+    }, [accountKind, boot.categories]);
+    // Названный оператором звонящий — заново только при смене вида аккаунта. От справочника
+    // причин сброс зависеть не должен: страница перечитывает его в фоне раз в 45 секунд, и
+    // выбранное «Третье лицо» само возвращалось бы к ветке аккаунта.
+    useEffect(() => { setCallerKind(''); }, [accountKind]);
+    useEffect(() => { setOpenPath([]); }, [audience]);
     // Город, записанный раньше и не входящий в справочник, остаётся в списке — иначе он бы пропал с экрана.
     const cityOptions = useMemo(() => (
         city && !KAZAKHSTAN_CITY_OPTIONS.some((option) => option.value === city)
             ? [{ value: city, label: city }, ...KAZAKHSTAN_CITY_OPTIONS] : KAZAKHSTAN_CITY_OPTIONS
     ), [city]);
-    const total = useMemo(() => countReasons(boot.categories), [boot.categories]);
+    const total = useMemo(() => countReasons(reasons), [reasons]);
     // Нажали на ветку: открытую — свернуть, другую — открыть вместо соседней на этом уровне.
     const openBranch = (depth, id) => setOpenPath((prev) => (
         prev[depth] === id ? prev.slice(0, depth) : [...prev.slice(0, depth), id]));
@@ -382,7 +411,19 @@ export default function CallCard({
             {/* ── Причина обращения — после выбора аккаунта (или отметки «Аккаунта нет») ── */}
             {personKnown && (
                 <section className="space-y-1.5">
-                    <div className={iosGroupLabel}>Причина обращения</div>
+                    <div className="flex items-center justify-between gap-2">
+                        <div className={iosGroupLabel}>Причина обращения</div>
+                        {/* Кто звонит: от этого зависит ветка причин. С аккаунтом — он сам или третье
+                            лицо; без аккаунта подсказать некому — называет оператор. */}
+                        {whoOptions.length > 1 && (
+                            <span className="flex items-center gap-1.5">
+                                <IosSegmented size="xs" value={audience} options={whoOptions} onChange={setCallerKind}
+                                              ariaLabel="Кто звонит" />
+                                <IosHint align="right" label="Зачем выбирать, кто звонит"
+                                         text="У водителей, клиентов и третьих лиц свои причины обращений. Третье лицо — звонит не сам водитель или клиент: родственник, очевидец, другая служба." />
+                            </span>
+                        )}
+                    </div>
                     <div className={`${iosCard} space-y-2 p-3`}>
                         {topics.length > 0 && (
                             <div className="flex flex-wrap gap-1.5">
@@ -411,7 +452,15 @@ export default function CallCard({
                                 Причины ещё не заведены — их добавляет руководитель в разделе «Карточка клиента» → «Настройки».
                             </p>
                         )}
-                        {boot.categories?.length > 0 && !categories.length && (
+                        {boot.categories?.length > 0 && !audience && (
+                            <p className="text-[12.5px] text-slate-500">Выберите, кто звонит, — у каждого свои причины.</p>
+                        )}
+                        {boot.categories?.length > 0 && audience && !reasons.length && (
+                            <p className="text-[12.5px] text-slate-500">
+                                Причины для {AUDIENCES.find((item) => item.value === audience)?.many} ещё не заведены — их добавляет руководитель в разделе «Карточка клиента» → «Настройки».
+                            </p>
+                        )}
+                        {reasons.length > 0 && !categories.length && (
                             <p className="text-[12.5px] text-slate-500">Такой причины нет.</p>
                         )}
                         <ReasonLevel nodes={categories} openPath={openPath} searching={Boolean(query)} topics={topics}

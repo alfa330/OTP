@@ -3,11 +3,13 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  NO_ACCOUNT_LABEL, accountTitle, almatyToday, autoAccountId, branchIds, canAddTopic, cardAccountText, countReasons,
+  AUDIENCES, NO_ACCOUNT_LABEL, accountTitle, almatyToday, audienceLabel, audienceOfTopics, autoAccountId, branchIds,
+  callerOptions, canAddTopic, cardAccountText, cardAudience, countReasons,
   errorText, eventIsForCall, filterCategories, flattenReasons, fmtClock,
   fmtDate, fmtSeconds, fmtShare, fmtSize, fmtTime, fmtWhen, isTopicPicked, looksLikeAccountLink, parseCallMessage,
-  periodPreset, pickedInBranch, quoteOf, reasonLevelTitle, reportReasonRows, saveLabel, senderColor, toggleTopic,
-  topicLabel, topicsPayload,
+  periodPreset, pickedInBranch, quoteOf, reasonAudiences, reasonFilterOptions, reasonLevelTitle, reasonsOfAudience,
+  reportReasonGroups, reportReasonRows, saveLabel, senderColor, toggleTopic,
+  topicLabel, topicsOfAudience, topicsPayload,
   uploadsProblem, wrapupLeft,
 } from '../src/components/client_cards/cardRules.js';
 
@@ -147,6 +149,105 @@ test('дерево причин списком для фильтра журна�
     [2, 'Выплаты', 1]]);
   assert.deepEqual(flattenReasons(undefined), []);
   assert.deepEqual([1, 2, 3].map(reasonLevelTitle), ['Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня']);
+});
+
+// Владелец, 13.11.2026: «разделение по причинам обращений — Клиент/Водитель… собственную ветку
+// для каждой», и следом: «в ветку Клиент, Водитель нужно добавить 3 лицо».
+const TRIP = { id: 5, title: 'Поездка', audience: 'client', children: [{ id: 51, title: 'Забыл вещи', audience: 'client', children: [] }] };
+const CLIENT_ORDERS = { id: 6, title: 'Заказы', audience: 'client', children: [] };
+const DRIVER_ORDERS = { ...ORDERS, audience: 'driver' };
+const FOUND = { id: 8, title: 'Нашёл чужую вещь', audience: 'third', children: [] };
+// MONEY без признака — из ответа сервера, который веток ещё не знает: ветка водителей.
+const BRANCHES = [DRIVER_ORDERS, TRIP, MONEY, CLIENT_ORDERS, FOUND];
+
+test('у водителей, клиентов и третьих лиц свои ветки причин', () => {
+  assert.deepEqual(AUDIENCES.map((item) => [item.value, item.label]),
+    [['driver', 'Водитель'], ['client', 'Клиент'], ['third', 'Третье лицо']]);
+  assert.deepEqual(AUDIENCES.map((item) => `${item.whose} / ${item.many}`),
+    ['водителя / водителей', 'клиента / клиентов', 'третьего лица / третьих лиц']);
+  assert.equal(audienceLabel('client'), 'Клиент');
+  assert.equal(audienceLabel('third'), 'Третье лицо');
+  assert.equal(audienceLabel('none'), '');
+  assert.deepEqual(reasonsOfAudience(BRANCHES, 'driver').map((item) => item.title), ['Заказы', 'Выплаты']);
+  assert.deepEqual(reasonsOfAudience(BRANCHES, 'client').map((item) => item.title), ['Поездка', 'Заказы']);
+  assert.deepEqual(reasonsOfAudience(BRANCHES, 'third').map((item) => item.title), ['Нашёл чужую вещь']);
+  assert.deepEqual(reasonsOfAudience(BRANCHES, ''), []);
+  assert.deepEqual(reasonsOfAudience(null, 'driver'), []);
+  assert.deepEqual(reasonAudiences(BRANCHES), ['driver', 'client', 'third']);
+  assert.deepEqual(reasonAudiences([TRIP]), ['client']);
+  assert.deepEqual(reasonAudiences([]), []);
+
+  // Аккаунт сменили — причины чужой ветки уходят. Остаются своя ветка, «Третье лицо» (оно
+  // звонит по любому аккаунту) и причина, которой в справочнике уже нет.
+  const picked = [
+    { category_id: 1, subcategory_id: 11 }, { category_id: 5, subcategory_id: 51 }, { category_id: 8, subcategory_id: null },
+    { category_id: 77, subcategory_id: null }];
+  assert.deepEqual(topicsOfAudience(picked, BRANCHES, 'client').map((item) => item.category_id), [5, 8, 77]);
+  assert.deepEqual(topicsOfAudience(picked, BRANCHES, 'driver').map((item) => item.category_id), [1, 8, 77]);
+  assert.deepEqual(topicsOfAudience(null, BRANCHES, 'driver'), []);
+  assert.equal(audienceOfTopics([{ category_id: 5, subcategory_id: 51 }], BRANCHES), 'client');
+  assert.equal(audienceOfTopics([{ category_id: 2, subcategory_id: null }], BRANCHES), 'driver');
+  assert.equal(audienceOfTopics([{ category_id: 8 }], BRANCHES), 'third');
+  assert.equal(audienceOfTopics([], BRANCHES), '');
+  assert.equal(audienceOfTopics([{ category_id: 77 }], BRANCHES), '');
+
+  // Фильтр журнала: названия в ветках повторяются («Заказы» есть в двух) — в подписи сказано, чья.
+  assert.deepEqual(reasonFilterOptions(BRANCHES).map((item) => [item.id, item.label]), [
+    [1, 'Водитель · Заказы'], [11, 'Водитель · Заказы → Не приходят заказы'], [12, 'Водитель · Заказы → Отмена заказа'],
+    [2, 'Водитель · Выплаты'],
+    [5, 'Клиент · Поездка'], [51, 'Клиент · Поездка → Забыл вещи'], [6, 'Клиент · Заказы'],
+    [8, 'Третье лицо · Нашёл чужую вещь']]);
+  // Причины только в одной ветке — подпись без приставки.
+  assert.deepEqual(reasonFilterOptions([DRIVER_ORDERS]).map((item) => item.label),
+    ['Заказы', 'Заказы → Не приходят заказы', 'Заказы → Отмена заказа']);
+  assert.deepEqual(reasonFilterOptions(undefined), []);
+
+  // Отчёт: ветки своими группами в постоянном порядке; ветки без обращений в отчёте нет.
+  const report = [
+    { id: 5, title: 'Поездка', audience: 'client', count: 9, own: 9, children: [] },
+    { id: 8, title: 'Нашёл чужую вещь', audience: 'third', count: 5, own: 5, children: [] },
+    { id: 1, title: 'Заказы', audience: 'driver', count: 4, own: 4, children: [] },
+    { id: 6, title: 'Заказы', audience: 'client', count: 2, own: 2, children: [] }];
+  assert.deepEqual(reportReasonGroups(report).map((group) => [group.label, group.categories.map((item) => item.id)]),
+    [['Водитель', [1]], ['Клиент', [5, 6]], ['Третье лицо', [8]]]);
+  assert.deepEqual(reportReasonGroups([report[0]]).map((group) => group.audience), ['client']);
+  assert.deepEqual(reportReasonGroups(null), []);
+});
+
+test('кто звонит: ветка аккаунта, третье лицо по чужому аккаунту, выбор оператора без аккаунта', () => {
+  const values = (options) => options.map((item) => item.value);
+  // С аккаунтом — он сам или третье лицо; чужая ветка (клиент у водителя) не предлагается.
+  assert.deepEqual(values(callerOptions(BRANCHES, 'driver')), ['driver', 'third']);
+  assert.deepEqual(values(callerOptions(BRANCHES, 'client')), ['client', 'third']);
+  // У третьих лиц причин не заведено — выбирать не из чего, переключателя не будет.
+  const noThird = BRANCHES.filter((node) => node.audience !== 'third');
+  assert.deepEqual(values(callerOptions(noThird, 'driver')), ['driver']);
+  // Ветка аккаунта предлагается, даже если причин в ней ещё нет: оператор увидит, что их не завели.
+  assert.deepEqual(values(callerOptions([TRIP, FOUND], 'driver')), ['driver', 'third']);
+  // «Аккаунта нет» — любая ветка, где причины есть.
+  assert.deepEqual(values(callerOptions(BRANCHES)), ['driver', 'client', 'third']);
+  assert.deepEqual(values(callerOptions(noThird, '')), ['driver', 'client']);
+  assert.deepEqual(values(callerOptions([TRIP])), ['client']);
+  assert.deepEqual(callerOptions(null), []);
+
+  const audience = (accountKind, extra = {}) => cardAudience({
+    options: callerOptions(BRANCHES, accountKind), categories: BRANCHES, accountKind, topics: [], ...extra });
+  // Аккаунт выбран — открыта его ветка; оператор переключил — открыта «Третье лицо».
+  assert.equal(audience('driver'), 'driver');
+  assert.equal(audience('client'), 'client');
+  assert.equal(audience('driver', { picked: 'third' }), 'third');
+  // Названный звонящий, которого этому аккаунту не предлагают, не считается.
+  assert.equal(audience('driver', { picked: 'client' }), 'driver');
+  // Карточку открыли снова: ветка — по уже выбранной причине.
+  assert.equal(audience('driver', { topics: [{ category_id: 8, subcategory_id: null }] }), 'third');
+  assert.equal(audience('driver', { topics: [{ category_id: 8 }], picked: 'driver' }), 'driver');
+  // «Аккаунта нет»: пока оператор не назвал, кто звонит, ветки нет — заранее ничего не выбрано.
+  assert.equal(audience(''), '');
+  assert.equal(audience('', { picked: 'client' }), 'client');
+  assert.equal(audience('', { topics: [{ category_id: 5, subcategory_id: 51 }] }), 'client');
+  // Причины заведены в одной ветке — она и открыта, спрашивать не о чем.
+  assert.equal(cardAudience({ options: callerOptions([TRIP]), categories: [TRIP], topics: [] }), 'client');
+  assert.equal(cardAudience({ options: [], categories: [], topics: [] }), '');
 });
 
 test('отчёт по причинам: ветка раскрывается уровень за уровнем, «без подтемы» — своей строкой', () => {

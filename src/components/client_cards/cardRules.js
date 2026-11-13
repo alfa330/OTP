@@ -171,6 +171,92 @@ export const flattenReasons = (categories, parents = []) => (
     })
 );
 
+// У водителей, клиентов и третьих лиц свои причины (владелец, 13.11.2026: «разделение по
+// причинам обращений — Клиент/Водитель… собственную ветку для каждой», и следом: «в ветку
+// Клиент, Водитель нужно добавить 3 лицо»). Основная причина несёт audience — 'driver',
+// 'client' или 'third', подтемы — тот же.
+//
+// Третье лицо — звонит не сам водитель и не сам клиент: родственник, очевидец, другая
+// служба. Своего аккаунта у него нет, но звонить он может по чужому — поэтому его ветка
+// доступна и при выбранном аккаунте, и при отметке «Аккаунта нет».
+export const AUDIENCE_THIRD = 'third';
+// whose / many — падежи для подписей: «причина водителя», «причины для водителей».
+export const AUDIENCES = [
+    { value: 'driver', label: 'Водитель', whose: 'водителя', many: 'водителей' },
+    { value: 'client', label: 'Клиент', whose: 'клиента', many: 'клиентов' },
+    { value: AUDIENCE_THIRD, label: 'Третье лицо', whose: 'третьего лица', many: 'третьих лиц' },
+];
+
+export const audienceLabel = (value) => AUDIENCES.find((item) => item.value === value)?.label || '';
+
+// Причина без признака — из ответа сервера, который веток ещё не знает: это ветка водителей.
+const audienceOf = (node) => node?.audience || 'driver';
+
+/** Основные причины одной ветки, в порядке справочника. */
+export const reasonsOfAudience = (categories, audience) => (
+    (categories || []).filter((node) => audienceOf(node) === audience)
+);
+
+/** В каких ветках есть причины — в постоянном порядке: водитель, клиент, третье лицо. */
+export const reasonAudiences = (categories) => (
+    AUDIENCES.map((item) => item.value).filter((value) => reasonsOfAudience(categories, value).length > 0)
+);
+
+/** Причины карточки без тех, что аккаунту вида kind не подходят: аккаунт сменили с
+ *  водителя на клиента (или наоборот). Остаются причины его ветки и ветки «Третье лицо»;
+ *  причина, которой в справочнике уже нет (скрыта), остаётся как была. */
+export const topicsOfAudience = (topics, categories, kind) => {
+    const foreign = new Set((categories || [])
+        .filter((node) => audienceOf(node) !== kind && audienceOf(node) !== AUDIENCE_THIRD)
+        .map((node) => node.id));
+    return (topics || []).filter((topic) => !foreign.has(topic.category_id));
+};
+
+/** Чья ветка у выбранных причин — по первой из них; '' — причин нет или ветка неизвестна. */
+export const audienceOfTopics = (topics, categories) => {
+    const first = (topics || [])[0];
+    const main = first ? (categories || []).find((node) => node.id === first.category_id) : null;
+    return main ? audienceOf(main) : '';
+};
+
+/** Кого оператор может назвать звонящим — варианты переключателя «Кто звонит».
+ *  С аккаунтом: он сам (водитель или клиент) либо третье лицо, если у третьих лиц заведены
+ *  причины. Без аккаунта («Аккаунта нет»): любая ветка, в которой причины есть. */
+export const callerOptions = (categories, accountKind = '') => {
+    const filled = reasonAudiences(categories);
+    return AUDIENCES.filter((item) => (accountKind
+        ? item.value === accountKind || (item.value === AUDIENCE_THIRD && filled.includes(AUDIENCE_THIRD))
+        : filled.includes(item.value)));
+};
+
+/** Чья ветка причин открыта в карточке: кого назвал оператор (picked; '' — ещё не называл),
+ *  иначе ветка уже выбранной причины, иначе ветка аккаунта, иначе единственная возможная.
+ *  '' — оператору ещё предстоит назвать, кто звонит. */
+export const cardAudience = ({ options, picked = '', topics, categories, accountKind = '' }) => {
+    const allowed = (options || []).map((item) => item.value);
+    const byTopics = audienceOfTopics(topics, categories);
+    if (allowed.includes(picked)) return picked;
+    if (allowed.includes(byTopics)) return byTopics;
+    if (accountKind) return accountKind;
+    return allowed.length === 1 ? allowed[0] : '';
+};
+
+/** Причины для фильтра журнала: [{id, label}] — ветки подряд. Когда причины есть не в
+ *  одной ветке, подпись начинается с «Водитель ·» / «Клиент ·»: названия в них повторяются. */
+export const reasonFilterOptions = (categories) => {
+    const named = reasonAudiences(categories).length > 1;
+    return AUDIENCES.flatMap(({ value, label }) => (
+        flattenReasons(reasonsOfAudience(categories, value))
+            .map((item) => ({ id: item.id, label: named ? `${label} · ${item.label}` : item.label }))
+    ));
+};
+
+/** Причины отчёта по веткам: [{audience, label, categories}] — только ветки с обращениями. */
+export const reportReasonGroups = (categories) => (
+    AUDIENCES.map(({ value, label }) => ({ audience: value, label, categories: reasonsOfAudience(categories, value) }))
+        .filter((group) => group.categories.length > 0)
+);
+
 /** Подпись уровня дерева: 1 — основная причина, дальше — подтемы по уровням. */
 export const reasonLevelTitle = (level) => (
     level <= 1 ? 'Основная причина' : `Подтема ${level - 1}-го уровня`

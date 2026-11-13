@@ -89,6 +89,45 @@ KIND_LABELS = {KIND_DRIVER: 'Водитель', KIND_CLIENT: 'Клиент'}
 KIND_NONE = 'none'
 NO_ACCOUNT_LABEL = 'Аккаунта нет'
 
+# У водителей, клиентов и третьих лиц — свои причины обращений (владелец, 13.11.2026:
+# «разделение по причинам обращений — Клиент/Водитель… собственную ветку для каждой», и
+# следом: «в ветку Клиент, Водитель нужно добавить 3 лицо»). Ветка — признак причины
+# (client_card_categories.audience); подтема берёт его у своей основной причины.
+#
+# Третье лицо — звонит не сам водитель и не сам клиент: родственник, очевидец, другая
+# служба. Своего аккаунта в Тез у него нет, но звонить он может по чужому, поэтому его
+# ветка подходит карточке всегда — и с выбранным аккаунтом, и с отметкой «Аккаунта нет».
+#
+# С выбранным аккаунтом карточке подходят причины его ветки и ветки «Третье лицо». Без
+# аккаунта («Аккаунта нет») кто звонит, называет оператор — причина из любой ветки.
+AUDIENCE_THIRD = 'third'
+AUDIENCES = (KIND_DRIVER, KIND_CLIENT, AUDIENCE_THIRD)
+AUDIENCE_LABELS = {KIND_DRIVER: 'Водитель', KIND_CLIENT: 'Клиент', AUDIENCE_THIRD: 'Третье лицо'}
+AUDIENCE_DEFAULT = KIND_DRIVER
+
+
+def normalize_audience(value):
+    """Ветка причин из запроса: 'driver' | 'client' | 'third'. Не прислали — ветка водителей."""
+    if value in (None, ''):
+        return AUDIENCE_DEFAULT
+    if value not in AUDIENCES:
+        raise ValueError('Ветка причин указана неверно: нужен водитель, клиент или третье лицо')
+    return value
+
+
+def account_audiences(kind):
+    """Ветки причин, подходящие аккаунту вида kind: его собственная и «Третье лицо»."""
+    return (kind, AUDIENCE_THIRD) if kind in KINDS else None
+
+
+def card_audiences(card):
+    """Из каких веток карточке подходят причины (см. account_audiences).
+
+    None — аккаунт ещё не выбран или отмечено «Аккаунта нет»: подходит любая ветка.
+    """
+    return account_audiences(card.get('account_kind')) if card.get('account_id') else None
+
+
 # Раздел админки Тез → вид аккаунта (владелец, 12.11.2026):
 #   https://admin.tezapp.org/admin/drivers/12345   — водитель
 #   https://admin.tezapp.org/admin/clients/67890  — клиент
@@ -328,14 +367,29 @@ def rollup_people(rows, index):
     return people
 
 
-def normalize_topics(raw, tree):
+_AUDIENCE_PICKED = {KIND_DRIVER: 'выбран водитель', KIND_CLIENT: 'выбран клиент'}
+
+
+def topics_of_audiences(topics, tree, audiences):
+    """Причины карточки из веток audiences: [(category_id, subcategory_id | None)].
+
+    Остальные — из чужой ветки: аккаунт карточки сменили с водителя на клиента (или
+    наоборот), и прежние причины ему больше не подходят.
+    """
+    return [(topic['category_id'], topic.get('subcategory_id')) for topic in topics or ()
+            if (tree.get(topic['category_id']) or {}).get('audience') in audiences]
+
+
+def normalize_topics(raw, tree, audiences=None):
     """Выбранные причины → [(category_id, subcategory_id | None)] без повторов.
 
-    tree — {id: {'parent_id', 'is_active', 'has_children'}}: справочник отдела.
+    tree — {id: {'parent_id', 'is_active', 'has_children', 'audience'}}: справочник отдела.
     category_id — основная причина, subcategory_id — выбранная подтема любого уровня.
-    ValueError — причины нет в справочнике, она (или уровень над ней) скрыта, подтема не
-    из этой ветки или у выбранного узла есть видимые подтемы: выбирается самый глубокий
-    уровень. Скрытую причину нельзя выбрать заново, но в старой карточке она остаётся.
+    audiences — из каких веток карточке подходят причины (card_audiences); None — из любых.
+    ValueError — причины нет в справочнике, она (или уровень над ней) скрыта, она из
+    чужой ветки, подтема не из этой ветки или у выбранного узла есть видимые подтемы:
+    выбирается самый глубокий уровень. Скрытую причину нельзя выбрать заново, но в
+    старой карточке она остаётся.
     """
     result, seen = [], set()
     for item in raw or ():
@@ -348,6 +402,9 @@ def normalize_topics(raw, tree):
         category = tree.get(category_id)
         if not category or category.get('parent_id') is not None or not category.get('is_active'):
             raise ValueError('Такой причины нет в справочнике — обновите карточку')
+        if audiences and category.get('audience') not in audiences:
+            raise ValueError('В карточке %s — причина из ветки «%s» сюда не подходит'
+                             % (_AUDIENCE_PICKED[audiences[0]], AUDIENCE_LABELS.get(category.get('audience'), '?')))
         if subcategory_id is None:
             if category.get('has_children'):
                 raise ValueError('У этой причины есть подтемы — выберите одну из них')

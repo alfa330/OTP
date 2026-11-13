@@ -13,7 +13,7 @@ import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosBadge, IosSegmented, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import CardDetail from './CardDetail';
 import {
-    REQUEST_TONES, almatyToday, cardAccountText, errorText, flattenReasons, fmtWhen, periodPreset, topicLabel,
+    REQUEST_TONES, almatyToday, cardAccountText, errorText, fmtWhen, periodPreset, reasonFilterOptions, topicLabel,
 } from './cardRules';
 import { EmptyState, Spinner, StateBadge } from './ui';
 
@@ -82,9 +82,10 @@ export default function JournalTab({ api, departmentId, categories, toast, onOpe
     };
 
     // Причина любого уровня дерева: выбрали «Запрос» — в журнале и карточки всех его подтем.
+    // У водителей, клиентов и третьих лиц причины свои — в подписи сказано, чья.
     const categoryOptions = useMemo(() => [
         { value: '', label: 'Все причины' },
-        ...flattenReasons(categories).map((item) => ({ value: String(item.id), label: item.label })),
+        ...reasonFilterOptions(categories).map((item) => ({ value: String(item.id), label: item.label })),
     ], [categories]);
 
     return (

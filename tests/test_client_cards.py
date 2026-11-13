@@ -259,21 +259,76 @@ def test_topic_path_text_fits_the_column():
     assert rules.topic_path_text(['Г' * 500], limit=40) == 'Г' * 40
 
 
+def test_drivers_clients_and_third_parties_have_their_own_reasons():
+    """Владелец, 13.11.2026: у водителя и клиента — собственная ветка причин, и следом:
+    «в ветку Клиент, Водитель нужно добавить 3 лицо»."""
+    tree = {
+        1: {'parent_id': None, 'is_active': True, 'has_children': True, 'audience': 'driver'},
+        2: {'parent_id': 1, 'is_active': True, 'has_children': False, 'audience': 'driver'},
+        3: {'parent_id': None, 'is_active': True, 'has_children': False, 'audience': 'client'},
+        4: {'parent_id': None, 'is_active': True, 'has_children': False, 'audience': 'third'},
+    }
+    driver, client, third = [{'category_id': 1, 'subcategory_id': 2}], [{'category_id': 3}], [{'category_id': 4}]
+    for_driver, for_client = rules.account_audiences(rules.KIND_DRIVER), rules.account_audiences(rules.KIND_CLIENT)
+    assert for_driver == (rules.KIND_DRIVER, rules.AUDIENCE_THIRD) and for_client == (rules.KIND_CLIENT, rules.AUDIENCE_THIRD)
+    assert rules.account_audiences(rules.KIND_NONE) is None and rules.account_audiences(None) is None
+    assert rules.normalize_topics(driver, tree, audiences=for_driver) == [(1, 2)]
+    assert rules.normalize_topics(client, tree, audiences=for_client) == [(3, None)]
+    with pytest.raises(ValueError) as error:
+        rules.normalize_topics(client, tree, audiences=for_driver)
+    assert str(error.value) == 'В карточке выбран водитель — причина из ветки «Клиент» сюда не подходит'
+    with pytest.raises(ValueError) as error:
+        rules.normalize_topics(driver + client, tree, audiences=for_client)
+    assert 'выбран клиент' in str(error.value) and '«Водитель»' in str(error.value)
+    # Третье лицо звонит и по чужому аккаунту — его причины подходят карточке с любым аккаунтом.
+    assert rules.normalize_topics(driver + third, tree, audiences=for_driver) == [(1, 2), (4, None)]
+    assert rules.normalize_topics(third, tree, audiences=for_client) == [(4, None)]
+    # Аккаунта нет — кто звонит, называет оператор: подходит любая ветка.
+    assert rules.normalize_topics(driver + client + third, tree) == [(1, 2), (3, None), (4, None)]
+
+    # Какие ветки подходят карточке — по выбранному аккаунту; без аккаунта — любые.
+    assert rules.card_audiences({'account_id': 7, 'account_kind': 'driver'}) == for_driver
+    assert rules.card_audiences({'account_id': 8, 'account_kind': 'client'}) == for_client
+    assert rules.card_audiences({'account_id': None, 'account_kind': rules.KIND_NONE}) is None
+    assert rules.card_audiences({'account_id': None, 'account_kind': None}) is None and rules.card_audiences({}) is None
+
+    # Аккаунт сменили — остаются причины его ветки и «Третьего лица».
+    picked = [{'category_id': 1, 'subcategory_id': 2}, {'category_id': 3, 'subcategory_id': None},
+              {'category_id': 4, 'subcategory_id': None}, {'category_id': 99, 'subcategory_id': None}]
+    assert rules.topics_of_audiences(picked, tree, for_driver) == [(1, 2), (4, None)]
+    assert rules.topics_of_audiences(picked, tree, for_client) == [(3, None), (4, None)]
+    assert rules.topics_of_audiences(None, tree, for_client) == []
+
+    assert [rules.normalize_audience(value) for value in ('driver', 'client', 'third')] == list(rules.AUDIENCES)
+    assert rules.normalize_audience(None) == rules.KIND_DRIVER and rules.normalize_audience('') == rules.KIND_DRIVER
+    for bad in ('none', 'partner', 5):
+        with pytest.raises(ValueError):
+            rules.normalize_audience(bad)
+    assert rules.AUDIENCES == (rules.KIND_DRIVER, rules.KIND_CLIENT, rules.AUDIENCE_THIRD)
+    assert [rules.AUDIENCE_LABELS[value] for value in rules.AUDIENCES] == ['Водитель', 'Клиент', 'Третье лицо']
+
+
 def test_report_reasons_sheet_rows():
     from client_cards import report
-    leaf = lambda title, count: {'title': title, 'count': count, 'own': count, 'children': []}
-    tree = [{'title': 'Запрос', 'count': 9, 'own': 0, 'children': [
-        {'title': 'Проблема с заказом', 'count': 7, 'own': 2,
-         'children': [leaf('Не может завершить заказ', 4), leaf('Не может отменить заказ', 1)]},
-        leaf('Вопрос по оплате', 3)]}, leaf('Жалоба', 1)]
+    leaf = lambda title, count, **extra: dict({'title': title, 'count': count, 'own': count, 'children': []}, **extra)
+    # В отчёте ветки идут вперемешку (по числу карточек) — на листе сначала водители, потом
+    # клиенты, потом третьи лица.
+    tree = [leaf('Нашёл чужую вещь', 2, audience='third'), leaf('Поездка', 12, audience='client'),
+            {'title': 'Запрос', 'audience': 'driver', 'count': 9, 'own': 0, 'children': [
+                {'title': 'Проблема с заказом', 'count': 7, 'own': 2,
+                 'children': [leaf('Не может завершить заказ', 4), leaf('Не может отменить заказ', 1)]},
+                leaf('Вопрос по оплате', 3)]},
+            leaf('Жалоба', 1, audience='driver')]
     assert report.reason_rows(tree) == [
-        (['Запрос'], report.ALL_SUBTOPICS, 9),
-        (['Запрос', 'Проблема с заказом'], report.ALL_SUBTOPICS, 7),
-        (['Запрос', 'Проблема с заказом', 'Не может завершить заказ'], None, 4),
-        (['Запрос', 'Проблема с заказом', 'Не может отменить заказ'], None, 1),
-        (['Запрос', 'Проблема с заказом'], report.NO_SUBTOPIC, 2),
-        (['Запрос', 'Вопрос по оплате'], None, 3),
-        (['Жалоба'], None, 1)]
+        ('Водитель', ['Запрос'], report.ALL_SUBTOPICS, 9),
+        ('Водитель', ['Запрос', 'Проблема с заказом'], report.ALL_SUBTOPICS, 7),
+        ('Водитель', ['Запрос', 'Проблема с заказом', 'Не может завершить заказ'], None, 4),
+        ('Водитель', ['Запрос', 'Проблема с заказом', 'Не может отменить заказ'], None, 1),
+        ('Водитель', ['Запрос', 'Проблема с заказом'], report.NO_SUBTOPIC, 2),
+        ('Водитель', ['Запрос', 'Вопрос по оплате'], None, 3),
+        ('Водитель', ['Жалоба'], None, 1),
+        ('Клиент', ['Поездка'], None, 12),
+        ('Третье лицо', ['Нашёл чужую вещь'], None, 2)]
     assert report.reason_rows([]) == []
     assert [report.reason_level_title(level) for level in (1, 2, 3)] == [
         'Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня']

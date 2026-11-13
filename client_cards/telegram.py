@@ -178,9 +178,10 @@ def _people(count):
 def build_alert_message(*, department_name, items, window_min):
     """Одно сообщение руководителю обо всех причинах, по которым обращений стало больше.
 
-    items — [{'kind', 'title', 'parent_title', 'count', 'baseline', 'cities', 'subtopics'}];
-    parent_title — путь до причины по дереву («Запрос → Проблема с заказом»), subtopics —
-    её следующий уровень.
+    items — [{'kind', 'title', 'parent_title', 'audience', 'count', 'baseline', 'cities',
+    'subtopics'}]; parent_title — путь до причины по дереву («Запрос → Проблема с заказом»),
+    subtopics — её следующий уровень, audience — чья причина: у водителей, клиентов и
+    третьих лиц свои ветки, и одинаково названные причины в них — разные.
     Несколько причин — одним сообщением: общий сбой поднимает сразу несколько, и
     пять сообщений подряд об одном и том же — тот самый спам, которого быть не должно.
     """
@@ -191,8 +192,9 @@ def build_alert_message(*, department_name, items, window_min):
     window = _window_text(window_min)
     for item in items:
         path = item['title'] if not item.get('parent_title') else '%s → %s' % (item['parent_title'], item['title'])
+        audience = rules.AUDIENCE_LABELS.get(item.get('audience'))
         lines.append('')
-        lines.append('<b>%s</b>' % html.escape(_clip(path, 300)))
+        lines.append('%s<b>%s</b>' % ('%s · ' % audience if audience else '', html.escape(_clip(path, 300))))
         lines.append('%s %s, %s' % (_people(item['count']), window, _usual_text(item['baseline'])))
         subtopics = item.get('subtopics') or []
         if subtopics:

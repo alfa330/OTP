@@ -964,17 +964,17 @@ def test_reasons_tree_of_any_depth(world):
                                                date_to=day.date(), generated_by='Глава Теза',
                                                generated_at=w.clock()))
     rows = list(book[report.SHEET_REASONS].iter_rows(values_only=True))
-    assert rows[0] == ('Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня', 'Карточек',
-                       'Доля = карточек ÷ Б')
-    assert [row[:4] for row in rows[1:8]] == [
-        ('Запрос', report.ALL_SUBTOPICS, None, 3),
-        ('Запрос', 'Проблема с заказом', report.ALL_SUBTOPICS, 3),
-        ('Запрос', 'Проблема с заказом', 'Не может завершить заказ', 1),
-        ('Запрос', 'Проблема с заказом', 'Не может отменить заказ', 1),
-        ('Запрос', 'Проблема с заказом', report.NO_SUBTOPIC, 1),
-        ('Запрос', 'Вопрос по оплате', None, 1),
-        (None, None, None, None)]
-    assert rows[1][4] == pytest.approx(1.0)
+    assert rows[0] == (report.REASON_WHO, 'Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня',
+                       'Карточек', 'Доля = карточек ÷ Б')
+    assert [row[:5] for row in rows[1:8]] == [
+        ('Водитель', 'Запрос', report.ALL_SUBTOPICS, None, 3),
+        ('Водитель', 'Запрос', 'Проблема с заказом', report.ALL_SUBTOPICS, 3),
+        ('Водитель', 'Запрос', 'Проблема с заказом', 'Не может завершить заказ', 1),
+        ('Водитель', 'Запрос', 'Проблема с заказом', 'Не может отменить заказ', 1),
+        ('Водитель', 'Запрос', 'Проблема с заказом', report.NO_SUBTOPIC, 1),
+        ('Водитель', 'Запрос', 'Вопрос по оплате', None, 1),
+        (None, None, None, None, None)]
+    assert rows[1][5] == pytest.approx(1.0)
 
 
 def test_alert_goes_to_the_deepest_level_of_the_wave(world):
@@ -1008,17 +1008,144 @@ def test_alert_goes_to_the_deepest_level_of_the_wave(world):
         assert part in text, part
 
 
+def test_drivers_clients_and_third_parties_have_their_own_reasons(world):
+    """Владелец, 13.11.2026: «разделение по причинам обращений — Клиент/Водитель… собственную
+    ветку для каждой», и следом: «в ветку Клиент, Водитель нужно добавить 3 лицо». Карточка
+    берёт причины из ветки выбранного аккаунта и из ветки «Третье лицо»."""
+    w = world
+    ctx = w.ctx(ANNA)
+    with w.db._get_cursor() as cursor:
+        trip = queries.create_category(cursor, TEZ, title='Поездка', parent_id=None, audience=rules.KIND_CLIENT,
+                                       by=HEAD, now=w.clock())
+        # Подтема берёт ветку у причины над собой, что бы ни прислали.
+        lost = queries.create_category(cursor, TEZ, title='Забыл вещи', parent_id=trip, audience=rules.KIND_DRIVER,
+                                       by=HEAD, now=w.clock())
+        found = queries.create_category(cursor, TEZ, title='Нашёл чужую вещь', parent_id=None,
+                                        audience=rules.AUDIENCE_THIRD, by=HEAD, now=w.clock())
+        tree = queries.categories(cursor, TEZ)
+        assert {node['title']: node['audience'] for node in tree} == {
+            'Заказы': rules.KIND_DRIVER, 'Выплаты': rules.KIND_DRIVER, 'Поездка': rules.KIND_CLIENT,
+            'Нашёл чужую вещь': rules.AUDIENCE_THIRD}
+        assert next(node for node in tree if node['id'] == trip)['children'][0]['audience'] == rules.KIND_CLIENT
+        index = queries.category_index(cursor, TEZ)
+        assert (index[w.no_orders]['audience'], index[lost]['audience']) == (rules.KIND_DRIVER, rules.KIND_CLIENT)
+    driver_topic = {'category_id': w.orders, 'subcategory_id': w.no_orders}
+    client_topic = {'category_id': trip, 'subcategory_id': lost}
+    third_topic = {'category_id': found}
+
+    # Водитель: причина клиента не проходит, своя — проходит.
+    card_id = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='a1')['card']['id']
+    w.svc.call_event(ctx, card_id, 'answered')
+    w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/drivers/12345')
+    with pytest.raises(CardError) as error:
+        w.svc.save_card(ctx, card_id, {'topics': [client_topic]})
+    assert error.value.code == 'CARD_BAD_TOPICS' and 'выбран водитель' in str(error.value) and 'Клиент' in str(error.value)
+    # Звонит не сам водитель, а третье лицо по его аккаунту — причина из ветки «Третье лицо» подходит.
+    assert len(w.svc.save_card(ctx, card_id, {'topics': [driver_topic, {'category_id': w.money},
+                                                         third_topic]})['card']['topics']) == 3
+    # Другой водитель на том же звонке — причины остаются: ветка та же.
+    assert len(w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/drivers/777')['card']['topics']) == 3
+    # Оказалось, аккаунт клиента: причины водителя с карточки уходят, «Третье лицо» остаётся.
+    switched = w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/clients/67890')
+    assert switched['card']['account_kind'] == rules.KIND_CLIENT
+    assert [t['title'] for t in switched['card']['topics']] == ['Нашёл чужую вещь']
+    with pytest.raises(CardError):
+        w.svc.save_card(ctx, card_id, {'topics': [driver_topic]})
+    assert [t['path'] for t in w.svc.save_card(ctx, card_id, {'topics': [client_topic]})['card']['topics']] == [
+        ['Поездка', 'Забыл вещи']]
+    w.svc.call_event(ctx, card_id, 'ended')
+    assert w.svc.complete_card(ctx, card_id)['card']['status'] == rules.STATUS_DONE
+
+    # Сохранённая карточка, а аккаунт сменили на водителя (выбором из привязанных к номеру):
+    # причин не осталось — карточка снова не заполнена, пока не выбрана причина водителя.
+    w.clock.tick(seconds=5)
+    driver_id = next(a['id'] for a in w.svc.bundle(ctx, card_id)['accounts'] if a['tez_id'] == 12345)
+    reopened = w.svc.choose_account(ctx, card_id, driver_id)['card']
+    assert (reopened['status'], reopened['topics'], reopened['completed_at']) == (rules.STATUS_OPEN, [], None)
+    with pytest.raises(CardError) as error:
+        w.svc.complete_card(ctx, card_id)
+    assert error.value.code == 'CARD_INCOMPLETE'
+    w.svc.save_card(ctx, card_id, {'topics': [driver_topic]})
+    assert w.svc.complete_card(ctx, card_id)['card']['status'] == rules.STATUS_DONE
+
+    # «Аккаунта нет»: оператор сам называет, кто звонит, — причина из любой ветки.
+    other = w.svc.open_call(ctx, phone=OTHER_PHONE, direction='in', call_key='a2')['card']['id']
+    w.svc.call_event(ctx, other, 'answered')
+    w.svc.mark_no_account(ctx, other)
+    assert len(w.svc.save_card(ctx, other, {'topics': [client_topic]})['card']['topics']) == 1
+    assert len(w.svc.save_card(ctx, other, {'topics': [third_topic]})['card']['topics']) == 1
+    assert len(w.svc.save_card(ctx, other, {'topics': [driver_topic]})['card']['topics']) == 1
+    # Отметку сменили на аккаунт клиента — причина водителя уходит.
+    assert w.svc.attach_link(ctx, other, 'admin.tezapp.org/admin/clients/67890')['card']['topics'] == []
+
+    # Отчёт и лист «Причины»: три ветки по порядку — водитель, клиент, третье лицо.
+    w.svc.save_card(ctx, other, {'topics': [client_topic, third_topic]})
+    w.svc.call_event(ctx, other, 'ended')
+    w.svc.complete_card(ctx, other)
+    day = datetime(2026, 11, 12)
+    with w.db._get_cursor() as cursor:
+        data = queries.report(cursor, TEZ, date_from=day, date_to=day + timedelta(days=1))
+    assert {node['title']: node['audience'] for node in data['categories']} == {
+        'Заказы': rules.KIND_DRIVER, 'Поездка': rules.KIND_CLIENT, 'Нашёл чужую вещь': rules.AUDIENCE_THIRD}
+    assert [row[0] for row in report.reason_rows(data['categories'])] == [
+        'Водитель', 'Водитель', 'Клиент', 'Клиент', 'Третье лицо']
+
+
+def test_client_wave_is_named_in_the_alert(world):
+    """У водителей и клиентов причины могут называться одинаково — алерт говорит, чья."""
+    w = world
+    with w.db._get_cursor() as cursor:
+        orders = queries.create_category(cursor, TEZ, title='Заказы', parent_id=None, audience=rules.KIND_CLIENT,
+                                         by=HEAD, now=w.clock())
+    ctx = w.ctx(ANNA)
+    for index in range(5):
+        card_id = w.svc.open_call(ctx, phone='7703%07d' % index, direction='in', call_key='c-%d' % index)['card']['id']
+        w.svc.call_event(ctx, card_id, 'answered')
+        w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/clients/%d' % (500 + index))
+        w.svc.save_card(ctx, card_id, {'topics': [{'category_id': orders}]})
+        w.svc.call_event(ctx, card_id, 'ended')
+        w.svc.complete_card(ctx, card_id)
+        w.clock.tick(minutes=1)
+    log = _alerts(w)
+    assert [(a['title'], a['audience'], a['count']) for a in log] == [('Заказы', rules.KIND_CLIENT, 5)]
+    assert 'Клиент · <b>Заказы</b>' in w.outbox.messages[0]['text']
+
+
+def test_audience_column_is_added_to_a_deployed_schema(db):
+    """На базе, где раздел уже развёрнут без столбца audience, старт добавляет его сам;
+    причины, заведённые раньше, остаются в ветке водителей."""
+    with db._get_cursor() as cursor:
+        old = queries.create_category(cursor, TEZ, title='Старая причина', parent_id=None, by=HEAD,
+                                      now=datetime(2026, 11, 12, 10, 0))
+        cursor.execute('ALTER TABLE client_card_categories DROP COLUMN audience')
+        schema.init_client_cards_schema(cursor)
+        schema.init_client_cards_schema(cursor)
+        assert queries.category_index(cursor, TEZ)[old]['audience'] == rules.KIND_DRIVER
+        cursor.execute("""SELECT is_nullable, column_default FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'client_card_categories'
+                             AND column_name = 'audience'""")
+        nullable, default = cursor.fetchone()
+        assert nullable == 'NO' and "'driver'" in default
+
+
 def test_journal_and_report(world):
     w = world
     anna, boris = w.ctx(ANNA), w.ctx(BORIS)
     _calls(w, ANNA, 3, topic=w.no_orders, start_key=0, city='Алматы')
     _calls(w, BORIS, 2, topic=w.cancel, start_key=10, city='Астана')
-    # Карточка с двумя причинами, клиент, без города; одна незаполненная; один несостоявшийся звонок.
+    # Карточка с двумя причинами, клиент (у клиентов своя ветка причин), без города; одна
+    # незаполненная; один несостоявшийся звонок.
+    with w.db._get_cursor() as cursor:
+        trip = queries.create_category(cursor, TEZ, title='Поездка', parent_id=None, audience=rules.KIND_CLIENT,
+                                       by=HEAD, now=w.clock())
+        lost = queries.create_category(cursor, TEZ, title='Забыл вещи', parent_id=trip, by=HEAD, now=w.clock())
+        refund = queries.create_category(cursor, TEZ, title='Возврат оплаты', parent_id=None,
+                                         audience=rules.KIND_CLIENT, by=HEAD, now=w.clock())
     both = w.svc.open_call(anna, phone='77019990001', direction='out', call_key='j1')['card']['id']
     w.svc.call_event(anna, both, 'answered')
     w.svc.attach_link(anna, both, 'admin.tezapp.org/admin/clients/900')
-    w.svc.save_card(anna, both, {'topics': [{'category_id': w.orders, 'subcategory_id': w.cancel},
-                                            {'category_id': w.money}]})
+    w.svc.save_card(anna, both, {'topics': [{'category_id': trip, 'subcategory_id': lost},
+                                            {'category_id': refund}]})
     w.svc.call_event(anna, both, 'ended')
     w.clock.tick(seconds=90)
     w.svc.complete_card(anna, both)
@@ -1035,8 +1162,9 @@ def test_journal_and_report(world):
         assert len(cards) == 7 and not has_more and missed not in [card['id'] for card in cards]
         assert [c['id'] for c in queries.journal(cursor, TEZ, state='pending')[0]] == [pending]
         assert len(queries.journal(cursor, TEZ, operator_id=BORIS)[0]) == 3
-        assert len(queries.journal(cursor, TEZ, category_id=w.cancel)[0]) == 3
-        assert len(queries.journal(cursor, TEZ, category_id=w.orders)[0]) == 6
+        assert len(queries.journal(cursor, TEZ, category_id=w.cancel)[0]) == 2
+        assert len(queries.journal(cursor, TEZ, category_id=w.orders)[0]) == 5
+        assert [c['id'] for c in queries.journal(cursor, TEZ, category_id=trip)[0]] == [both]
         assert [c['id'] for c in queries.journal(cursor, TEZ, search='9990001')[0]] == [both]
         page, more = queries.journal(cursor, TEZ, limit=3)
         assert len(page) == 3 and more is True
@@ -1050,11 +1178,13 @@ def test_journal_and_report(world):
     assert (totals['incoming'], totals['outgoing'], totals['drivers'], totals['clients']) == (6, 1, 5, 1)
     assert totals['people'] == 7 and totals['late'] == 1
     by_title = {node['title']: node for node in data['categories']}
-    # «Заказы» — шесть карточек: карточка с двумя причинами считается один раз.
-    assert by_title['Заказы']['count'] == 6 and by_title['Выплаты']['count'] == 1
+    # Причины водителей и клиентов — своими ветками; «Выплаты» за период никто не называл.
+    assert by_title['Заказы']['count'] == 5 and 'Выплаты' not in by_title
     assert {sub['title']: sub['count'] for sub in by_title['Заказы']['children']} == {
-        'Не приходят заказы': 3, 'Отмена заказа': 3}
-    assert by_title['Заказы']['own'] == 0 and by_title['Выплаты']['own'] == 1
+        'Не приходят заказы': 3, 'Отмена заказа': 2}
+    assert by_title['Заказы']['own'] == 0 and by_title['Возврат оплаты']['own'] == 1
+    assert {title: node['audience'] for title, node in by_title.items()} == {
+        'Заказы': rules.KIND_DRIVER, 'Поездка': rules.KIND_CLIENT, 'Возврат оплаты': rules.KIND_CLIENT}
     assert data['categories'][0]['title'] == 'Заказы'
     assert {city['city']: city['count'] for city in data['cities']} == {'Алматы': 3, 'Астана': 2, '': 1}
     assert data['days'] == [{'date': day_start.date(), 'calls': 7, 'done': 6}]
@@ -1076,10 +1206,16 @@ def test_journal_and_report(world):
     cities = [row for row in book[report.SHEET_CITIES].iter_rows(min_row=2, values_only=True) if row[1] is not None]
     assert sum(row[1] for row in cities) == 6 and report.CITY_UNKNOWN in [row[0] for row in cities]
     reasons = list(book[report.SHEET_REASONS].iter_rows(min_row=2, values_only=True))
-    assert [row[0] for row in book[report.SHEET_REASONS].iter_rows(max_row=1, values_only=True)][0] == 'Основная причина'
-    assert reasons[0][:3] == ('Заказы', report.ALL_SUBTOPICS, 6)
-    assert reasons[1][:3] in (('Заказы', 'Не приходят заказы', 3), ('Заказы', 'Отмена заказа', 3))
-    assert reasons[3][:3] == ('Выплаты', None, 1)
+    assert next(book[report.SHEET_REASONS].iter_rows(max_row=1, values_only=True))[:3] == (
+        report.REASON_WHO, 'Основная причина', 'Подтема 1-го уровня')
+    # Сначала причины водителей, потом клиентов — колонка «Кто обращается».
+    assert [row[:4] for row in reasons[:6]] == [
+        ('Водитель', 'Заказы', report.ALL_SUBTOPICS, 5),
+        ('Водитель', 'Заказы', 'Не приходят заказы', 3),
+        ('Водитель', 'Заказы', 'Отмена заказа', 2),
+        ('Клиент', 'Возврат оплаты', None, 1),
+        ('Клиент', 'Поездка', report.ALL_SUBTOPICS, 1),
+        ('Клиент', 'Поездка', 'Забыл вещи', 1)]
     assert report.report_filename('Тез КЦ', day_start.date(), day_start.date()) == \
         'Карточка клиента Тез КЦ 12.11.2026–12.11.2026.xlsx'
 
@@ -1399,8 +1535,22 @@ def test_api_management(api):
     status, body = api.patch('/categories/%d' % sub_id, user=HEAD, json={'title': 'Блокировка аккаунта',
                                                                        'is_active': False})
     node = next(node for node in body['categories'] if node['id'] == account_id)
-    assert node['children'][0] == {'id': sub_id, 'title': 'Блокировка аккаунта', 'is_active': False,
-                                   'position': 1, 'used': 0, 'children': []}
+    assert node['children'][0] == {'id': sub_id, 'title': 'Блокировка аккаунта', 'audience': rules.KIND_DRIVER,
+                                   'is_active': False, 'position': 1, 'used': 0, 'children': []}
+    # Ветка клиентов: основная причина заводится со своим признаком, подтема берёт его у неё.
+    status, body = api.post('/categories', user=HEAD, json={'title': 'Поездка', 'audience': rules.KIND_CLIENT})
+    trip = body['categories'][-1]
+    assert status == 201 and (trip['title'], trip['audience']) == ('Поездка', rules.KIND_CLIENT)
+    status, body = api.post('/categories', user=HEAD, json={'title': 'Забыл вещи', 'parent_id': trip['id'],
+                                                            'audience': rules.KIND_DRIVER})
+    assert next(node for node in body['categories'] if node['id'] == trip['id'])['children'][0]['audience'] == \
+        rules.KIND_CLIENT
+    status, body = api.post('/categories', user=HEAD, json={'title': 'Нашёл вещь', 'audience': rules.AUDIENCE_THIRD})
+    assert status == 201 and body['categories'][-1]['audience'] == rules.AUDIENCE_THIRD
+    assert api.delete('/categories/%d' % body['categories'][-1]['id'], user=HEAD)[0] == 200
+    assert api.post('/categories', user=HEAD, json={'title': 'X', 'audience': 'partner'})[1]['code'] == \
+        'CLIENT_CARDS_BAD_AUDIENCE'
+    assert api.delete('/categories/%d' % trip['id'], user=HEAD)[0] == 200
     status, body = api.post('/categories/reorder', user=HEAD, json={'ids': [account_id, w.money, w.orders]})
     assert [node['id'] for node in body['categories']][:3] == [account_id, w.money, w.orders]
     card_id = _ready_card(w, w.ctx(ANNA), key='m1')

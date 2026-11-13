@@ -36,7 +36,7 @@ import RequestsPanel from '../components/client_cards/RequestsPanel';
 import { createCardsApi } from '../components/client_cards/cardsApi';
 import {
     NO_ACCOUNT_LABEL, accountTitle, autoAccountId, errorText, eventIsForCall, fmtClock, fmtWhen, parseCallMessage,
-    topicLabel, topicsPayload, wrapupLeft,
+    topicLabel, topicsOfAudience, topicsPayload, wrapupLeft,
 } from '../components/client_cards/cardRules';
 import { StateBadge } from '../components/client_cards/ui';
 import QrUnlockPanel from '../embed/QrUnlockPanel';
@@ -547,7 +547,12 @@ export default function ClientCardEmbed() {
         const now = currentRef.current;
         if (!now) return;
         const body = { parent_id: picked.id };
-        if (!now.bundle.card.topics.length && picked.topics.length) body.topics = topicsPayload(picked.topics);
+        // Причины прошлого обращения подходят, только если они из ветки нынешнего аккаунта
+        // (или «Третьего лица»): у водителей и клиентов они свои, а с одного номера звонят
+        // и те и другие.
+        const kind = now.bundle.account?.kind;
+        const inherited = kind ? topicsOfAudience(picked.topics, boot?.categories, kind) : picked.topics;
+        if (!now.bundle.card.topics.length && inherited.length) body.topics = topicsPayload(inherited);
         try {
             const { data } = await api.saveCard(now.bundle.card.id, body);
             applyBundle(data, { remount: true });
@@ -556,7 +561,7 @@ export default function ClientCardEmbed() {
         } catch (error) {
             toast(errorText(error), 'error');
         }
-    }, [api, applyBundle, toast]);
+    }, [api, applyBundle, boot?.categories, toast]);
 
     const copyPhone = useCallback(() => {
         if (!card) return;

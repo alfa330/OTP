@@ -40,6 +40,7 @@ SHEET_NOTES = 'Пояснения'
 CITY_UNKNOWN = 'Город не указан'
 NO_SUBTOPIC = 'без подтемы'
 ALL_SUBTOPICS = 'все подтемы'
+REASON_WHO = 'Кто обращается'
 
 
 def report_filename(department_name, date_from, date_to):
@@ -57,27 +58,30 @@ def reason_level_title(level):
 
 
 def reason_rows(categories):
-    """Дерево причин отчёта → строки листа «Причины»: [(путь названий, пометка, карточек)].
+    """Дерево причин отчёта → строки листа «Причины»: [(кто, путь названий, пометка, карточек)].
 
-    Строка — на причину каждого уровня. У причины с подтемами строка — итог её ветки
-    (пометка «все подтемы»), под ней её подтемы и, если выбирали её саму, строка
-    «без подтемы». У причины без подтем пометки нет.
+    Сначала причины водителей, потом клиентов, потом третьих лиц (rules.AUDIENCES): у них
+    свои ветки, и «кто» стоит первой колонкой. Строка — на причину каждого уровня. У причины с подтемами
+    строка — итог её ветки (пометка «все подтемы»), под ней её подтемы и, если выбирали
+    её саму, строка «без подтемы». У причины без подтем пометки нет.
     """
     rows = []
 
-    def walk(node, parents):
+    def walk(node, who, parents):
         path = parents + [node['title']]
         if not node['children']:
-            rows.append((path, None, node['count']))
+            rows.append((who, path, None, node['count']))
             return
-        rows.append((path, ALL_SUBTOPICS, node['count']))
+        rows.append((who, path, ALL_SUBTOPICS, node['count']))
         for child in node['children']:
-            walk(child, path)
+            walk(child, who, path)
         if node['own']:
-            rows.append((path, NO_SUBTOPIC, node['own']))
+            rows.append((who, path, NO_SUBTOPIC, node['own']))
 
-    for category in categories:
-        walk(category, [])
+    for audience in rules.AUDIENCES:
+        for category in categories:
+            if category.get('audience', rules.AUDIENCE_DEFAULT) == audience:
+                walk(category, rules.AUDIENCE_LABELS[audience], [])
     return rows
 
 
@@ -171,23 +175,24 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
     # Колонка на уровень дерева: основная причина, подтема 1-го уровня, 2-го… — сколько
     # уровней в данных, столько и колонок (не меньше двух: лист не меняет вид, пока подтем нет).
     reasons = reason_rows(data['categories'])
-    depth = max([2] + [len(titles) + (1 if note else 0) for titles, note, _count in reasons])
+    depth = max([2] + [len(titles) + (1 if note else 0) for _who, titles, note, _count in reasons])
     sheet = workbook.create_sheet(SHEET_REASONS)
-    _widths(sheet, (40,) * depth + (14, 22))
-    _header(sheet, 1, tuple(reason_level_title(level) for level in range(1, depth + 1))
+    _widths(sheet, (16,) + (40,) * depth + (14, 22))
+    _header(sheet, 1, (REASON_WHO,) + tuple(reason_level_title(level) for level in range(1, depth + 1))
             + ('Карточек', 'Доля = карточек ÷ Б'))
     row = 2
-    for titles, note, count in reasons:
+    for who, titles, note, count in reasons:
         # Жирным — основная причина целиком: по ней глаз находит начало ветки.
         font = BOLD if len(titles) == 1 and note != NO_SUBTOPIC else None
-        for column, title in enumerate(titles, start=1):
+        sheet.cell(row=row, column=1, value=who)
+        for column, title in enumerate(titles, start=2):
             cell = sheet.cell(row=row, column=column, value=_clean(title))
-            if font and column == 1:
+            if font and column == 2:
                 cell.font = font
         if note:
-            sheet.cell(row=row, column=len(titles) + 1, value=note).font = NOTE_FONT
-        number = sheet.cell(row=row, column=depth + 1, value=count)
-        share = sheet.cell(row=row, column=depth + 2, value=_share(count, done))
+            sheet.cell(row=row, column=len(titles) + 2, value=note).font = NOTE_FONT
+        number = sheet.cell(row=row, column=depth + 2, value=count)
+        share = sheet.cell(row=row, column=depth + 3, value=_share(count, done))
         share.number_format = PERCENT
         if font:
             number.font = share.font = font
@@ -195,9 +200,10 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
     sheet.cell(row=row + 1, column=1, value=(
         'Б — заполнено карточек за период: %d (лист «Сводка»). Карточка с двумя причинами входит в строки обеих, '
         'поэтому доли в сумме бывают больше 100 %%. Число в строке «все подтемы» — карточки с любой подтемой '
-        'этой причины, без двойного счёта.' % done)).font = NOTE_FONT
+        'этой причины, без двойного счёта. У водителей, клиентов и третьих лиц свои причины: колонка «%s».'
+        % (done, REASON_WHO))).font = NOTE_FONT
     sheet.freeze_panes = 'A2'
-    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(depth + 2), max(row - 1, 1))
+    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(depth + 3), max(row - 1, 1))
 
     # ── Города ───────────────────────────────────────────────────────────────
     sheet = workbook.create_sheet(SHEET_CITIES)

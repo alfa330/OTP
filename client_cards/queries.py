@@ -156,7 +156,10 @@ def user_department_id(cursor, user_id):
 # ─── Причины обращения ───────────────────────────────────────────────────────
 
 def categories(cursor, department_id, *, include_inactive=False):
-    """Справочник причин деревом любой глубины: [{id, title, is_active, used, children: [...]}].
+    """Справочник причин деревом любой глубины: [{id, title, audience, is_active, used, children}].
+
+    audience — чья причина: водителя, клиента или третьего лица (rules.AUDIENCES); ветки
+    приходят одним списком, основные причины каждой — в своём порядке.
 
     used — в скольких обращениях стоит причина или любая её подтема: такую нельзя
     удалить, только скрыть, и редактор говорит это до нажатия, а не ошибкой после.
@@ -166,15 +169,17 @@ def categories(cursor, department_id, *, include_inactive=False):
         SELECT c.id, c.parent_id, c.title, c.is_active, c.position,
                (SELECT COUNT(*) FROM client_card_topics t WHERE t.subcategory_id = c.id)
                + (SELECT COUNT(*) FROM client_card_topics t
-                   WHERE t.category_id = c.id AND t.subcategory_id IS NULL)
+                   WHERE t.category_id = c.id AND t.subcategory_id IS NULL),
+               c.audience
           FROM client_card_categories c
          WHERE c.department_id = %s
          ORDER BY c.position, c.id
     """, (int(department_id),))
     nodes, parents = {}, []
-    for cat_id, parent_id, title, is_active, position, used in cursor.fetchall():
-        nodes[int(cat_id)] = {'id': int(cat_id), 'title': title, 'is_active': bool(is_active),
-                              'position': int(position), 'used': int(used or 0), 'children': []}
+    for cat_id, parent_id, title, is_active, position, used, audience in cursor.fetchall():
+        nodes[int(cat_id)] = {'id': int(cat_id), 'title': title, 'audience': audience,
+                              'is_active': bool(is_active), 'position': int(position),
+                              'used': int(used or 0), 'children': []}
         parents.append((int(cat_id), int(parent_id) if parent_id is not None else None))
     roots = []
     for cat_id, parent_id in parents:
@@ -196,7 +201,8 @@ def categories(cursor, department_id, *, include_inactive=False):
 
 
 def category_index(cursor, department_id):
-    """{id: {'parent_id', 'is_active', 'has_children', 'title'}} — для проверки выбора причин.
+    """{id: {'parent_id', 'is_active', 'has_children', 'title', 'audience'}} — для проверки
+    выбора причин.
 
     Причины всех уровней одним словарём: путь и ветку по нему строит rules
     (category_path, category_subtree). has_children считает только видимые подтемы:
@@ -205,12 +211,14 @@ def category_index(cursor, department_id):
     cursor.execute("""
         SELECT c.id, c.parent_id, c.is_active, c.title,
                EXISTS (SELECT 1 FROM client_card_categories k
-                        WHERE k.parent_id = c.id AND k.is_active)
+                        WHERE k.parent_id = c.id AND k.is_active),
+               c.audience
           FROM client_card_categories c
          WHERE c.department_id = %s
     """, (int(department_id),))
     return {int(row[0]): {'parent_id': int(row[1]) if row[1] is not None else None,
-                          'is_active': bool(row[2]), 'title': row[3], 'has_children': bool(row[4])}
+                          'is_active': bool(row[2]), 'title': row[3], 'has_children': bool(row[4]),
+                          'audience': row[5]}
             for row in cursor.fetchall()}
 
 
@@ -227,17 +235,23 @@ def get_category(cursor, category_id):
             'title': row[3], 'is_active': bool(row[4]), 'position': int(row[5])}
 
 
-def create_category(cursor, department_id, *, title, parent_id, by, now):
-    """Новая причина — в конец своего уровня."""
+def create_category(cursor, department_id, *, title, parent_id, by, now, audience=rules.AUDIENCE_DEFAULT):
+    """Новая причина — в конец своего уровня.
+
+    audience — чья причина (rules.AUDIENCES); у подтемы он всегда тот же, что у причины
+    над ней, присланное значение для неё не читается.
+    """
     cursor.execute("""
-        INSERT INTO client_card_categories (department_id, parent_id, title, position, created_by,
-                                            created_at, updated_at)
+        INSERT INTO client_card_categories (department_id, parent_id, title, audience, position,
+                                            created_by, created_at, updated_at)
         VALUES (%(dep)s, %(parent)s, %(title)s,
+                COALESCE((SELECT audience FROM client_card_categories WHERE id = %(parent)s), %(audience)s),
                 (SELECT COALESCE(MAX(position), 0) + 1 FROM client_card_categories
                   WHERE department_id = %(dep)s AND parent_id IS NOT DISTINCT FROM %(parent)s),
                 %(by)s, %(now)s, %(now)s)
         RETURNING id
-    """, {'dep': int(department_id), 'parent': parent_id, 'title': title, 'by': by, 'now': now})
+    """, {'dep': int(department_id), 'parent': parent_id, 'title': title, 'audience': audience,
+          'by': by, 'now': now})
     return int(cursor.fetchone()[0])
 
 
@@ -1222,7 +1236,8 @@ def alerts_log(cursor, department_id, limit=30):
         result.append({'id': int(row[0]), 'kind': row[1], 'count': int(row[2]), 'baseline': float(row[3] or 0),
                        'threshold': int(row[4]), 'window_min': int(row[5]), 'sent_at': row[6],
                        'delivered': bool(row[7]), 'title': titles[-1],
-                       'parent_title': rules.PATH_SEPARATOR.join(titles[:-1]) or None})
+                       'parent_title': rules.PATH_SEPARATOR.join(titles[:-1]) or None,
+                       'audience': (index.get(int(row[8])) or {}).get('audience')})
     return result
 
 
@@ -1248,7 +1263,8 @@ def _seconds(value):
 def reason_tree(rows, index):
     """[(id выбранной причины, id карточки)] → дерево причин с числом карточек.
 
-    [{id, title, count, own, children: [...]}] на любую глубину. count — карточки с этой
+    [{id, title, audience, count, own, children: [...]}] на любую глубину; audience — чья
+    причина (rules.AUDIENCES), список у всех веток общий. count — карточки с этой
     причиной или ЛЮБОЙ её подтемой, без двойного счёта; own — из них карточки, где выбрана
     она сама (подтем у неё тогда не было или они были скрыты). Ветки без обращений в
     дерево не попадают; на каждом уровне — от частых причин к редким.
@@ -1260,7 +1276,8 @@ def reason_tree(rows, index):
     children = rules.category_children(index)
 
     def level(parent_id):
-        nodes = [{'id': node_id, 'title': index[node_id].get('title'), 'count': len(cards[node_id]),
+        nodes = [{'id': node_id, 'title': index[node_id].get('title'),
+                  'audience': index[node_id].get('audience'), 'count': len(cards[node_id]),
                   'own': own.get(node_id, 0), 'children': level(node_id)}
                  for node_id in children.get(parent_id, ()) if node_id in cards]
         nodes.sort(key=lambda node: (-node['count'], node['title'] or '', node['id']))

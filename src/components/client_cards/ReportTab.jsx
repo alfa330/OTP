@@ -12,7 +12,8 @@ import { BarChart3, ChevronDown, Download, Loader2 } from 'lucide-react';
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosHint, iosBtnSecondary, iosCard, iosGroupLabel } from '../ui/ios';
 import {
-    NO_ACCOUNT_LABEL as NO_ACCOUNT, almatyToday, errorText, fmtSeconds, fmtShare, periodPreset, reportReasonRows,
+    NO_ACCOUNT_LABEL as NO_ACCOUNT, almatyToday, errorText, fmtSeconds, fmtShare, periodPreset, reportReasonGroups,
+    reportReasonRows,
 } from './cardRules';
 import { periodPresets } from './JournalTab';
 import { EmptyState, Spinner } from './ui';
@@ -167,13 +168,21 @@ export default function ReportTab({ api, departmentId, toast }) {
                                 <TableHead first="Причина и подтемы"
                                            shareHint={`${shareHint} Карточка с двумя причинами входит в строки обеих, поэтому доли в сумме бывают больше 100 %. Число у причины с подтемами — карточки с любой её подтемой, без двойного счёта.`} />
                                 {!data.categories.length && <p className="px-4 py-4 text-[13px] text-slate-500">Заполненных карточек за период нет.</p>}
-                                {/* Дерево причин: ветка раскрывается нажатием, уровень за уровнем. */}
-                                {data.categories.map((category) => (
-                                    <div key={category.id} className="border-b border-slate-100 last:border-b-0">
-                                        {reportReasonRows([category], (id) => open.has(id)).map((row) => (
-                                            <BarRow key={row.key} tree title={row.title} count={row.count} whole={done} depth={row.depth}
-                                                    bold={row.depth === 0} muted={row.muted} open={row.open}
-                                                    onToggle={row.hasChildren ? () => toggle(row.id) : null} />
+                                {/* У водителей, клиентов и третьих лиц свои причины — каждая ветка под своим заголовком.
+                                    Внутри — дерево: причина раскрывается нажатием, уровень за уровнем. */}
+                                {reportReasonGroups(data.categories).map((group) => (
+                                    <div key={group.audience} className="border-b border-slate-100 last:border-b-0">
+                                        <div className="border-b border-slate-100 bg-slate-50/70 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                                            {group.label}
+                                        </div>
+                                        {group.categories.map((category) => (
+                                            <div key={category.id} className="border-b border-slate-100 last:border-b-0">
+                                                {reportReasonRows([category], (id) => open.has(id)).map((row) => (
+                                                    <BarRow key={row.key} tree title={row.title} count={row.count} whole={done} depth={row.depth}
+                                                            bold={row.depth === 0} muted={row.muted} open={row.open}
+                                                            onToggle={row.hasChildren ? () => toggle(row.id) : null} />
+                                                ))}
+                                            </div>
                                         ))}
                                     </div>
                                 ))}

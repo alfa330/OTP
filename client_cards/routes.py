@@ -602,6 +602,12 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
         if len(titles) > BULK_TITLES_LIMIT:
             return _bad('За один раз — не больше %d причин' % BULK_TITLES_LIMIT, 'CLIENT_CARDS_TOO_MANY')
         parent_id = _int(data.get('parent_id'))
+        # Чья причина — водителя, клиента или третьего лица. Нужна основной причине;
+        # подтема берёт ветку у причины над собой.
+        try:
+            audience = rules.normalize_audience(data.get('audience'))
+        except ValueError as error:
+            return _bad(str(error), 'CLIENT_CARDS_BAD_AUDIENCE')
         now = rules.now_almaty()
         with db._get_cursor() as cursor:
             if parent_id is not None:
@@ -614,7 +620,7 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
                                 'CLIENT_CARDS_TOO_DEEP')
             for title in titles:
                 queries.create_category(cursor, department_id, title=title, parent_id=parent_id,
-                                        by=ctx['user_id'], now=now)
+                                        audience=audience, by=ctx['user_id'], now=now)
             return jsonify(_categories_payload(cursor, department_id)), 201
 
     @cards_route('/categories/<int:category_id>', methods=('PATCH', 'DELETE'))

@@ -1,7 +1,8 @@
 /* Настройки раздела «Карточка клиента» — руководителю отдела (задача #335, п. 3, 5, 6, 9).
  *
  *   Карточка в телефоне   включить операторам, каким группам, время постобработки
- *   Причины обращений     дерево «основная причина → подтема → подтема подтемы…», которое видит оператор
+ *   Причины обращений     дерево «основная причина → подтема → подтема подтемы…», которое видит оператор;
+ *                         у водителей, клиентов и третьих лиц оно своё
  *   Отделы для запросов   куда уходит запрос из карточки: название и Telegram-группа
  *   Алерты                когда писать руководителю о росте обращений и куда
  *
@@ -16,7 +17,7 @@ import {
 
 import CustomSelect from '../ui/CustomSelect';
 import { IosBadge, IosHint, IosSegmented, IosToggle, iosBtnGhost, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../ui/ios';
-import { errorText, fmtWhen } from './cardRules';
+import { AUDIENCES, audienceLabel, errorText, fmtWhen, reasonsOfAudience } from './cardRules';
 
 const Section = ({ title, hint = '', right = null, children }) => (
     <section className="space-y-1.5">
@@ -183,6 +184,8 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
     const [busy, setBusy] = useState('');
     // Раскрытые ветки дерева причин: в редакторе их может быть открыто несколько сразу.
     const [opened, setOpened] = useState(() => new Set());
+    // Чьи причины открыты в редакторе: у водителей, клиентов и третьих лиц свои ветки.
+    const [audience, setAudience] = useState(AUDIENCES[0].value);
     const [provideId, setProvideId] = useState('');
 
     const run = async (name, work, apply) => {
@@ -226,6 +229,7 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
         move,
     };
     const reasonDepth = boot.limits?.category_depth || 5;
+    const reasons = reasonsOfAudience(boot.categories, audience);
 
     const chatOptions = [{ value: '', label: 'Группа не выбрана' },
         ...(boot.chats || []).map((chat) => ({ value: String(chat.chat_id), label: chat.title }))];
@@ -262,14 +266,16 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
 
             {/* ── Причины обращений ─────────────────────────────────────────── */}
             <Section title="Причины обращений"
-                     hint={`Дерево причин, которое оператор проходит в карточке: основная причина (например, «Запрос», «Консультация», «Жалоба», «Предложение») → подтема → подтема подтемы, до ${reasonDepth} уровней. Оператор выбирает последний уровень своей ветки. По причинам строятся отчёт и алерты. Скрытую причину оператор не видит вместе с её подтемами, но в прошлых обращениях она остаётся.`}>
-                {boot.categories.map((category, index) => (
-                    <ReasonNode key={category.id} node={category} siblings={boot.categories} index={index} depth={0}
+                     hint={`У водителей, клиентов и третьих лиц свои причины — переключатель справа. Оператор видит причины того, чей аккаунт выбран в карточке; если звонит не сам водитель или клиент, переключает на «Третье лицо»; если отмечено «Аккаунта нет», сам называет, кто звонит. Причины — дерево: основная причина (например, «Запрос», «Консультация», «Жалоба», «Предложение») → подтема → подтема подтемы, до ${reasonDepth} уровней; оператор выбирает последний уровень своей ветки. По причинам строятся отчёт и алерты. Скрытую причину оператор не видит вместе с её подтемами, но в прошлых обращениях она остаётся.`}
+                     right={<IosSegmented size="xs" value={audience} options={AUDIENCES} onChange={setAudience} ariaLabel="Чьи причины" />}>
+                {reasons.map((category, index) => (
+                    <ReasonNode key={category.id} node={category} siblings={reasons} index={index} depth={0}
                                 parentId={null} maxDepth={reasonDepth} busy={Boolean(busy)} opened={opened}
                                 onOpen={toggleOpened} actions={reasonActions} />
                 ))}
-                <AddLine placeholder="Новая основная причина — или вставьте список, по строке на причину" busy={Boolean(busy)}
-                         onAdd={(titles) => run('category', () => api.createCategory({ department_id: departmentId, titles }), categoriesApply)} />
+                <AddLine key={audience} busy={Boolean(busy)}
+                         placeholder={`Новая основная причина ${AUDIENCES.find((item) => item.value === audience)?.whose} — или вставьте список, по строке на причину`}
+                         onAdd={(titles) => run('category', () => api.createCategory({ department_id: departmentId, audience, titles }), categoriesApply)} />
             </Section>
             </div>
 
@@ -348,7 +354,7 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
                             {boot.alerts_log.slice(0, 8).map((item) => (
                                 <li key={item.id} className="flex items-center justify-between gap-3">
                                     <span className="min-w-0 truncate">
-                                        {item.parent_title ? `${item.parent_title} → ` : ''}{item.title}
+                                        {item.audience ? `${audienceLabel(item.audience)} · ` : ''}{item.parent_title ? `${item.parent_title} → ` : ''}{item.title}
                                         <span className="text-slate-400"> · {item.count} чел., обычно {Math.round(item.baseline)}</span>
                                     </span>
                                     <span className="flex shrink-0 items-center gap-2 tabular-nums text-slate-400">

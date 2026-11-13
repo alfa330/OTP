@@ -23,6 +23,9 @@
   алерты, а причин у звонка бывает несколько.
 * **Причину с обращениями нельзя удалить** (ON DELETE RESTRICT у причин) — её скрывают
   (is_active): иначе отчёт за прошлые месяцы потерял бы строки.
+* **У водителей, клиентов и третьих лиц свои причины** (владелец, 13.11.2026): audience
+  у причины — 'driver', 'client' или 'third'. Он записан в каждой строке дерева (подтема
+  копирует его у родителя), чтобы ветку причины не приходилось выяснять подъёмом по дереву.
 * **Файл запроса лежит у нас** (file_ref = gs://…), а не только в Telegram: бот отдаёт
   обратно файлы до 20 МБ, а видео оператора бывает больше. Файл из группы — наоборот,
   file_id Telegram: его прислали туда, а не нам.
@@ -52,12 +55,14 @@ _STATEMENTS = [
 
     # Причины обращения — дерево любой глубины: parent_id IS NULL — основная причина,
     # иначе подтема причины parent_id (потолок глубины — rules.CATEGORY_MAX_DEPTH).
+    # audience — чья это причина: водителя, клиента или третьего лица (rules.AUDIENCES).
     """
     CREATE TABLE IF NOT EXISTS client_card_categories (
         id             SERIAL PRIMARY KEY,
         department_id  INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
         parent_id      INTEGER REFERENCES client_card_categories(id) ON DELETE CASCADE,
         title          VARCHAR(160) NOT NULL,
+        audience       VARCHAR(16) NOT NULL DEFAULT 'driver',
         position       INTEGER NOT NULL DEFAULT 0,
         is_active      BOOLEAN NOT NULL DEFAULT TRUE,
         created_by     INTEGER,
@@ -300,8 +305,32 @@ _STATEMENTS = [
 _SEED_DEPARTMENT_CODES = ('tez',)
 
 
+# Столбцы, появившиеся после первой выкладки раздела: (таблица, столбец, определение).
+# В CREATE TABLE выше они тоже есть — это для базы, где таблица уже создана без них.
+_ADDED_COLUMNS = [
+    ('client_card_categories', 'audience', "VARCHAR(16) NOT NULL DEFAULT 'driver'"),
+]
+
+
 def _is_table(statement):
     return 'CREATE TABLE' in statement.upper()
+
+
+def _add_missing_columns(cursor):
+    """Добавляет столбцы из _ADDED_COLUMNS, которых в базе ещё нет.
+
+    ALTER TABLE берёт на таблицу исключительный замок до конца транзакции старта, поэтому
+    зовётся, только когда столбца правда нет: на развёрнутой базе каждый следующий старт
+    читает один каталог и ничего не запирает. Столбец с постоянным DEFAULT добавляется
+    без перезаписи таблицы.
+    """
+    for table, column, definition in _ADDED_COLUMNS:
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s
+        """, (table, column))
+        if not cursor.fetchone():
+            cursor.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, column, definition))
 
 
 def init_client_cards_schema(cursor):
@@ -314,6 +343,7 @@ def init_client_cards_schema(cursor):
     for statement in _STATEMENTS:
         if _is_table(statement):
             cursor.execute(statement)
+    _add_missing_columns(cursor)
     for statement in _STATEMENTS:
         if not _is_table(statement):
             cursor.execute(statement)
