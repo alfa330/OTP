@@ -212,8 +212,6 @@ export default function DressCodeView({ apiBaseUrl, withAccessTokenHeader, showT
                 onCapture={upload}
                 busy={sending}
                 hint={camera?.hint || ''}
-                attempt={camera?.attempt || 1}
-                attempts={state?.attempts || 2}
             />
             <IosLightbox url={photo} alt="Фото для дресс-кода" onClose={() => setPhoto(null)} />
         </div>

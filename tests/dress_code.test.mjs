@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 
 import {
     AI_LABELS, DECISION_LABELS, EMPLOYEE_STATUS, FRAME, QUALITY_LABELS, REVIEW_FILTERS, TOO_DARK_LUMA,
-    aiTone, decisionTone, employeeStatus, filterParams, fmtDay, fmtDayFull, fmtTime, meanLuma, ofTotal,
+    aiTone, decisionTone, employeeStatus, filterParams, fmtDay, fmtDayFull, fmtTime, frameRegion, meanLuma, ofTotal,
 } from '../src/components/dress_code/dressCode.js';
 
 const backend = readFileSync(new URL('../dress_code/__init__.py', import.meta.url), 'utf8');
@@ -62,10 +62,41 @@ test('яркость кадра: тёмный ниже порога, светл�
     assert.equal(meanLuma(new Uint8ClampedArray(0)), 0);
 });
 
-test('рамка: верх у макушки, низ выше пояса, по центру', () => {
-    assert.ok(FRAME.top > 0 && FRAME.top < 0.15);
-    assert.ok(FRAME.bottom > 0.8 && FRAME.bottom < 1);
-    assert.ok(FRAME.width > 0.5 && FRAME.width < 1);
+test('рамка почти на весь экран: сверху и снизу — только место под кнопки', () => {
+    // Владелец 13.11.2026: «очень большие поля снизу и сверху» — на телефоне 844 px высотой
+    // рамка занимает больше трёх четвертей экрана и почти всю ширину.
+    assert.ok(FRAME.top <= 72 && FRAME.bottom <= 128);
+    assert.ok((844 - FRAME.top - FRAME.bottom) / 844 > 0.75);
+    assert.ok(FRAME.sideShare >= 0.9 && FRAME.sideShare < 1);
+    assert.ok(FRAME.maxAspect < 1);          // и на компьютере рамка портретная
+});
+
+test('на фото попадает ровно то, что в рамке', () => {
+    // Телефон 390×844, кадр камеры 720×1280: видео растянуто на экран и обрезано по бокам.
+    const box = { left: 0, top: 0, width: 390, height: 844 };
+    const rect = { left: 16, top: 64, width: 358, height: 662 };
+    const [sx, sy, sw, sh] = frameRegion(720, 1280, box, rect);
+    const scale = 844 / 1280;
+    assert.ok(Math.abs(sw - 358 / scale) < 0.01 && Math.abs(sh - 662 / scale) < 0.01);
+    assert.ok(Math.abs(sy - 64 / scale) < 0.01);
+    assert.ok(Math.abs(sx - ((720 - 390 / scale) / 2 + 16 / scale)) < 0.01);
+    // Пропорции фото — как у рамки на экране.
+    assert.ok(Math.abs(sw / sh - 358 / 662) < 0.001);
+    // Рамка по центру: зеркальное превью фронтальной камеры даёт ту же область.
+    assert.deepEqual(frameRegion(720, 1280, box, rect, true).map(Math.round), [sx, sy, sw, sh].map(Math.round));
+    // Рамка не по центру — у зеркального превью область берётся с другой стороны кадра.
+    const shifted = { left: 0, top: 64, width: 200, height: 662 };
+    const plain = frameRegion(720, 1280, box, shifted);
+    const flipped = frameRegion(720, 1280, box, shifted, true);
+    assert.ok(flipped[0] > plain[0]);
+    assert.ok(Math.abs((plain[0] + plain[2] / 2) + (flipped[0] + flipped[2] / 2) - 720) < 0.01);
+});
+
+test('область фото не выходит за кадр, а без размеров отдаётся весь кадр', () => {
+    const [sx, sy, sw, sh] = frameRegion(640, 480, { left: 0, top: 0, width: 390, height: 844 },
+        { left: -50, top: -50, width: 600, height: 1200 });
+    assert.ok(sx >= 0 && sy >= 0 && sx + sw <= 640 && sy + sh <= 480);
+    assert.deepEqual(frameRegion(640, 480, { left: 0, top: 0, width: 0, height: 0 }, {}), [0, 0, 640, 480]);
 });
 
 test('камера: галереи нет — только живой кадр, запасной вход — системная камера', () => {

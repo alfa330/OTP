@@ -95,6 +95,33 @@ export const meanLuma = (rgba) => {
     return count ? sum / count : 0;
 };
 
-/* Рамка видоискателя (ТЗ п. 10): доли кадра. Верх — у макушки, низ — чуть выше пояса,
-   по центру. Силуэт внутри — ориентир «голова и плечи», а не граница. */
-export const FRAME = Object.freeze({ top: 0.06, bottom: 0.9, width: 0.74 });
+/* Рамка видоискателя (ТЗ п. 10): почти на весь экран, по центру. Верх — у макушки, низ —
+   у пояса. На фото попадает РОВНО то, что в рамке (владелец 13.11.2026: «не совсем понятно,
+   снимается ли всё») — поэтому всё вне рамки затемнено, а после снимка в ней же стоит фото.
+   top/bottom — отступы от краёв экрана в пикселях (сверху — кнопка закрытия и подсказка,
+   снизу — кнопка снимка), ширина — не больше maxWidth и не шире maxAspect от высоты:
+   на компьютере и при повороте телефона рамка остаётся портретной. */
+export const FRAME = Object.freeze({ top: 64, bottom: 118, sideShare: 0.92, maxWidth: 520, maxAspect: 0.8 });
+
+/* Какая часть кадра камеры попадает на фото: [sx, sy, sw, sh] в пикселях кадра.
+   Видео растянуто на экран как object-cover (обрезано по краям), рамка — прямоугольник
+   поверх него: `box` и `rect` — их положения на экране. `mirrored` — превью зеркальное
+   (фронтальная камера): по горизонтали кадр отсчитывается с другой стороны. */
+export const frameRegion = (videoWidth, videoHeight, box, rect, mirrored = false) => {
+    if (!videoWidth || !videoHeight || !box?.width || !box?.height || !rect?.width || !rect?.height) {
+        return [0, 0, videoWidth || 0, videoHeight || 0];
+    }
+    const scale = Math.max(box.width / videoWidth, box.height / videoHeight);
+    const offsetX = (videoWidth - box.width / scale) / 2;
+    const offsetY = (videoHeight - box.height / scale) / 2;
+    const left = mirrored ? (box.left + box.width) - (rect.left + rect.width) : rect.left - box.left;
+    let sx = offsetX + left / scale;
+    let sy = offsetY + (rect.top - box.top) / scale;
+    let sw = rect.width / scale;
+    let sh = rect.height / scale;
+    sx = Math.min(Math.max(0, sx), videoWidth - 1);
+    sy = Math.min(Math.max(0, sy), videoHeight - 1);
+    sw = Math.max(1, Math.min(sw, videoWidth - sx));
+    sh = Math.max(1, Math.min(sh, videoHeight - sy));
+    return [sx, sy, sw, sh];
+};

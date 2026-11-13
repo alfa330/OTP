@@ -50,7 +50,14 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(result['quality'], 'too_dark')
         self.assertEqual(result['verdict'], AI_UNCLEAR)
         self.assertEqual(result['violations'], [])
-        self.assertEqual(result['note'], QUALITY_HINTS['too_dark'])
+        # Заметка — руководителю (что не так с кадром), а не совет сотруднику.
+        self.assertEqual(result['note'], 'Плохой кадр: темно')
+
+    def test_hints_for_the_employee_fit_one_line_on_a_phone(self):
+        # Владелец 13.11.2026: «более короткими словами… голова не влезает в кадр».
+        for key, text in QUALITY_HINTS.items():
+            self.assertLessEqual(len(text), 28, key)
+            self.assertFalse(text.endswith('.'), key)
 
     def test_unknown_quality_is_not_a_good_frame_verdict(self):
         result = ai.normalize(_raw(quality='sideways', verdict='ok'))

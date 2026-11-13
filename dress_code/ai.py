@@ -17,7 +17,7 @@ import time
 
 import httpx
 
-from . import AI_OK, AI_UNCLEAR, AI_VIOLATION, QUALITY_HINTS, QUALITY_OK
+from . import AI_OK, AI_UNCLEAR, AI_VIOLATION, QUALITY_HINTS, QUALITY_LABELS, QUALITY_OK
 from .rules import FIXED_LIMITS
 
 log = logging.getLogger(__name__)
@@ -132,8 +132,10 @@ def normalize(raw):
                       note=result['note'] or 'ИИ не оценил качество кадра')
         return result
     if quality != QUALITY_OK:
-        # Плохой кадр не оценивает одежду: вывод по нему — не вывод.
-        result.update(verdict=AI_UNCLEAR, violations=[], note=QUALITY_HINTS[quality])
+        # Плохой кадр не оценивает одежду: вывод по нему — не вывод. Заметка — для
+        # руководителя (что не так с кадром); сотруднику уходит своя короткая подсказка.
+        result.update(verdict=AI_UNCLEAR, violations=[],
+                      note='Плохой кадр: %s' % QUALITY_LABELS.get(quality, quality).lower())
         return result
     if verdict not in (AI_OK, AI_VIOLATION, AI_UNCLEAR):
         result.update(verdict=AI_UNCLEAR, note=result['note'] or 'ИИ не дал вывода')
