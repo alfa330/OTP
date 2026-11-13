@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { FileSpreadsheet, Loader2, Search, Settings2, Shirt } from 'lucide-react';
+import { FileSpreadsheet, Loader2, Search, Settings2, Shirt, SlidersHorizontal, Trash2 } from 'lucide-react';
 import {
     IosBadge, IosHint, IosLightbox, IosModal, IosSegmented,
     iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput,
@@ -20,7 +20,14 @@ import {
  * По умолчанию — очередь «ждут решения»: ради неё сюда и заходят. Предварительный
  * вывод ИИ и итог руководителя — разными бейджами и разными числами сводки (ТЗ п. 5,
  * 7: не смешивать). Каждое решение пишется в журнал, вывод ИИ при этом не меняется.
+ *
+ * Суперадмину сверх этого (сервер говорит is_super_admin): «Стенд камеры» — проверить и
+ * настроить автоснимок (DressCodeStand.jsx), и «Удалить» в карточке фото — убрать пробные
+ * снимки совсем.
  */
+
+// Стенд тянет за собой камеру и нейросеть — грузится, только когда его открыли.
+const DressCodeStand = lazy(() => import('./DressCodeStand'));
 
 const errText = (error, fallback) => error?.response?.data?.error || error?.message || fallback;
 const asArray = (value) => (Array.isArray(value) ? value : []);
@@ -66,6 +73,9 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
     const [photo, setPhoto] = useState(null);
     const [settings, setSettings] = useState(null);
     const [exporting, setExporting] = useState(false);
+    const [stand, setStand] = useState(false);
+    const [confirmDelete, setConfirmDelete] = useState(false);
+    const [deleting, setDeleting] = useState(false);
     const request = useRef(0);
     const searchTimer = useRef(null);
 
@@ -90,6 +100,7 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
         axios.get(`${base}/checks/${checkId}`, { headers: headers() })
             .then((r) => {
                 setDetail(r.data.check);
+                setConfirmDelete(false);
                 setDecision({ value: r.data.check.decision || '', comment: r.data.check.decision_comment || '' });
             })
             .catch((e) => showToast?.(errText(e, 'Фото не найдено'), 'error'));
@@ -115,6 +126,23 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
             showToast?.(errText(e, 'Не удалось сохранить решение'), 'error');
         } finally {
             setSaving(false);
+        }
+    };
+
+    /* Суперадмин убирает пробное фото совсем: строку, повторные к ней, журнал и файлы. */
+    const deleteCheck = async () => {
+        if (!detail) return;
+        setDeleting(true);
+        try {
+            await axios.delete(`${base}/checks/${detail.id}`, { headers: headers() });
+            setDetail(null);
+            setConfirmDelete(false);
+            showToast?.('Фото удалено', 'success');
+            load();
+        } catch (e) {
+            showToast?.(errText(e, 'Не удалось удалить фото'), 'error');
+        } finally {
+            setDeleting(false);
         }
     };
 
@@ -208,6 +236,12 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
                 <button type="button" onClick={openSettings} className={iosBtnGhost} title="Правила и кто снимает фото">
                     <Settings2 size={15} /> Правила
                 </button>
+                {data?.is_super_admin && (
+                    <button type="button" onClick={() => setStand(true)} className={iosBtnGhost}
+                            title="Проверить камеру и настроить автоснимок — ничего не сохраняется">
+                        <SlidersHorizontal size={15} /> Стенд камеры
+                    </button>
+                )}
             </div>
 
             {data && (
@@ -298,6 +332,23 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
                 subtitle={detail ? `${detail.employee} · ${fmtDayFull(detail.day)}` : ''}
                 footer={detail ? (
                     <>
+                        {data?.is_super_admin && (confirmDelete ? (
+                            <span className="mr-auto flex items-center gap-2">
+                                <span className="text-[13px] text-slate-600">Удалить фото совсем?</span>
+                                <button type="button" onClick={deleteCheck} disabled={deleting}
+                                        className={`${iosBtnSecondary} !text-rose-600`}>
+                                    {deleting && <Loader2 size={14} className="animate-spin" />} Удалить
+                                </button>
+                                <button type="button" onClick={() => setConfirmDelete(false)} disabled={deleting} className={iosBtnGhost}>
+                                    Отмена
+                                </button>
+                            </span>
+                        ) : (
+                            <button type="button" onClick={() => setConfirmDelete(true)} className={`${iosBtnGhost} mr-auto !text-rose-600`}
+                                    title="Убрать пробный снимок: фото, повторные к нему и журнал">
+                                <Trash2 size={15} /> Удалить
+                            </button>
+                        ))}
                         <button type="button" onClick={() => setDetail(null)} className={iosBtnSecondary}>Закрыть</button>
                         <button type="button" onClick={saveDecision} className={iosBtnPrimary}
                                 disabled={saving || !decision.value
@@ -451,6 +502,11 @@ export default function DressCodeReviewTab({ apiBaseUrl, headers, showToast, foc
             </IosModal>
 
             <IosLightbox url={photo} alt="Фото для дресс-кода" onClose={() => setPhoto(null)} />
+            {stand && (
+                <Suspense fallback={null}>
+                    <DressCodeStand open onClose={() => setStand(false)} base={base} headers={headers} showToast={showToast} />
+                </Suspense>
+            )}
         </div>
     );
 }

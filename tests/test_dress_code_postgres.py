@@ -4,7 +4,8 @@
 Настоящие схема и запросы, сценарии сервиса и ручек поверх них: приём фото (годный кадр,
 плохой кадр и вторая попытка, ИИ недоступен и повтор фоном), одно первое фото в день,
 решения руководителя с журналом, повторное нарушение за 10 дней, «Ознакомлен», граница
-отдела, «не прислали фото», чистка через месяц. ИИ, бакет и Telegram подставные.
+отдела, «не прислали фото», чистка через месяц; суперадмин — правила камеры, стенд без
+записи и удаление пробных фото. ИИ, бакет и Telegram подставные.
 
 Ни боевых учёток, ни импорта приложения: только 127.0.0.1, своя схема со случайным именем,
 в конце она удаляется. Люди выдуманы.
@@ -20,7 +21,9 @@ from datetime import date, datetime, time as dt_time, timedelta
 
 import pytest
 
-from dress_code import AI_OK, AI_PENDING, AI_UNCLEAR, AI_VIOLATION, QUALITY_HINTS, report, schema
+from dress_code import (
+    AI_OK, AI_PENDING, AI_UNCLEAR, AI_VIOLATION, CAMERA_DEFAULTS, CAMERA_LIMITS, QUALITY_HINTS, photos, report, schema,
+)
 from dress_code import routes as dc_routes
 from dress_code import service
 from dress_code.ai import DressCodeAIError
@@ -125,6 +128,13 @@ def _jpeg(width=480, height=640):
     from PIL import Image
     out = io.BytesIO()
     Image.new('RGB', (width, height), (90, 110, 140)).save(out, 'JPEG')
+    return out.getvalue()
+
+
+def _png(width=480, height=640):
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new('RGB', (width, height), (90, 110, 140)).save(out, 'PNG')
     return out.getvalue()
 
 
@@ -490,9 +500,141 @@ def test_excel_has_photos_missing_and_summary(db, gcs):
     assert photos_sheet['S2'].value.startswith('https://portal/?view=group_late_bot&dc_check=')
 
 
+# ── Суперадмин: правила камеры, стенд, удаление ─────────────────────────────
+
+def test_camera_rules_default_then_saved_within_limits(db, gcs):
+    with db._get_cursor() as cursor:
+        before = service.load_settings(cursor)
+        assert before['camera'] == CAMERA_DEFAULTS
+        saved = service.save_settings(cursor, SUPER, camera={'waist': 3.6, 'hold_ms': 99999, 'min_face': 'x', 'junk': 1})
+    assert saved['camera'] == {**CAMERA_DEFAULTS, 'waist': 3.6, 'hold_ms': CAMERA_LIMITS['hold_ms'][1]}
+    # Правила камеры — не версия положения и не круг снимающих.
+    assert saved['rules']['version'] == before['rules']['version']
+    assert saved['department_ids'] == [FRONT] and saved['roles'] == ['operator', 'trainee']
+    with db._get_cursor() as cursor:
+        assert service.my_state(cursor, gcs.as_factory(), ANNA)['camera']['waist'] == 3.6
+        # Правка положения правила камеры не трогает; пустой набор — сброс к значениям по умолчанию.
+        assert service.save_settings(cursor, SUPER, rules_body='Только деловой стиль.')['camera']['waist'] == 3.6
+        assert service.save_settings(cursor, SUPER, camera={})['camera'] == CAMERA_DEFAULTS
+
+
+def test_camera_rules_survive_a_schema_without_the_column(db):
+    # Новая версия уже работает, а колонка ещё не докатилась: раздел не падает, правила — по умолчанию.
+    _sql(db, 'ALTER TABLE dress_code_settings DROP COLUMN camera')
+    with db._get_cursor() as cursor:
+        assert service.load_settings(cursor)['camera'] == CAMERA_DEFAULTS
+        schema.init_dress_code_schema(cursor)
+        assert service.save_settings(cursor, SUPER, camera={'waist': 4})['camera']['waist'] == 4.0
+
+
+def test_stand_frame_goes_through_the_same_ai_and_tells_what_employee_would_see(db, gcs):
+    bad = service.stand_analyze(_jpeg(), 'Правила', analyze=FakeAI(_ai(quality='body_cropped', verdict=AI_UNCLEAR)))
+    assert bad['employee'] == 'retake' and bad['hint'] == QUALITY_HINTS['body_cropped']
+    assert (bad['width'], bad['height']) == (480, 640)
+    assert service.stand_analyze(_jpeg(), 'Правила', analyze=FakeAI(_ai()))['employee'] == 'ok'
+    disputed = service.stand_analyze(
+        _jpeg(), 'Правила', analyze=FakeAI(_ai(verdict=AI_VIOLATION, violations=[{'sign': 'майка'}])))
+    assert disputed['employee'] == 'review' and disputed['violations'] == [{'sign': 'майка'}]
+    seen = []
+
+    def spy(data, rules):
+        seen.append((data[:2], rules))
+        return _ai()
+
+    service.stand_analyze(_png(), 'Текст положения', analyze=spy)
+    assert seen == [(b'\xff\xd8', 'Текст положения')]            # ИИ получает подготовленный JPEG, а не файл как есть
+    with pytest.raises(service.DressCodeError) as down:
+        service.stand_analyze(_jpeg(), 'Правила', analyze=FakeAI(DressCodeAIError('перегрузка')))
+    assert down.value.status == 503
+    with pytest.raises(photos.PhotoError):
+        service.stand_analyze(b'not an image', 'Правила', analyze=FakeAI(_ai()))
+
+
+def _retake_pair(db, gcs):
+    first = _submit(db, gcs, ANNA, FakeAI(_ai(verdict=AI_VIOLATION, violations=[{'sign': 'майка'}])))['check']['id']
+    _decide(db, first, 'retake', 'Переснимите')
+    second = _submit(db, gcs, ANNA, retake_of=first)['check']['id']
+    return first, second
+
+
+def test_delete_removes_photo_its_retake_journal_and_files(db, gcs):
+    first, second = _retake_pair(db, gcs)
+    other = _submit(db, gcs, BORIS)['check']['id']
+    assert len(gcs.store) == 3
+    assert service.delete_check(db, gcs.as_factory(), first) == [first, second]
+    assert [r[0] for r in _sql(db, 'SELECT id FROM dress_code_checks')] == [other]
+    assert _sql(db, 'SELECT COUNT(*) FROM dress_code_decisions')[0][0] == 0
+    assert len(gcs.store) == 1                                   # чужое фото и его файл на месте
+    with db._get_cursor() as cursor:                             # день снова свободен
+        assert service.my_state(cursor, gcs.as_factory(), ANNA)['can_capture'] is True
+    with pytest.raises(service.DressCodeError) as missing:
+        service.delete_check(db, gcs.as_factory(), first)
+    assert missing.value.status == 404 and len(gcs.store) == 1
+
+
+def test_delete_of_a_retake_keeps_the_original(db, gcs):
+    first, second = _retake_pair(db, gcs)
+    assert service.delete_check(db, gcs.as_factory(), second) == [second]
+    assert [r[0] for r in _sql(db, 'SELECT id FROM dress_code_checks')] == [first]
+    assert len(gcs.store) == 1
+    with db._get_cursor() as cursor:                             # повторное можно прислать заново
+        state = service.my_state(cursor, gcs.as_factory(), ANNA)
+    assert state['can_capture'] is True and state['retake_for'] == first
+
+
+def test_repeat_flag_is_recounted_when_the_earlier_violation_goes_away(db, gcs):
+    early = _insert_check(db, ANNA, TODAY - timedelta(days=3))
+    late = _insert_check(db, ANNA, TODAY)
+    stranger = _insert_check(db, BORIS, TODAY - timedelta(days=3), decision='confirmed')
+
+    def repeat(check_id=late):
+        return _sql(db, 'SELECT is_repeat FROM dress_code_checks WHERE id = %s', (check_id,))[0][0]
+
+    _decide(db, early, 'confirmed')
+    _decide(db, late, 'confirmed')
+    assert repeat() is True
+    _decide(db, early, 'no_violation')                           # раннее нарушение отменили
+    assert repeat() is False
+    _decide(db, early, 'confirmed')
+    assert repeat() is True
+    service.delete_check(db, gcs.as_factory(), early)            # …или удалили как пробное
+    assert repeat() is False
+    assert repeat(stranger) is False                             # чужие нарушения на счёт не влияют
+
+
+def test_recount_keeps_the_same_rule_as_the_decision(db, gcs):
+    """Пересчёт «повторного» — то же правило, что при решении: нарушение за 10 дней ДО дня фото.
+    Фото того же дня (первое и повторное) друг друга повторными не делают, давнее — тоже."""
+    def repeat(check_id):
+        return _sql(db, 'SELECT is_repeat FROM dress_code_checks WHERE id = %s', (check_id,))[0][0]
+
+    # Анна: нарушение три дня назад, сегодня — первое фото и повторное, оба подтверждены.
+    early = _insert_check(db, ANNA, TODAY - timedelta(days=3), decision='confirmed')
+    first = _insert_check(db, ANNA, TODAY)
+    second = _sql(db, """
+        INSERT INTO dress_code_checks (user_id, department_id, day, photo_bucket, photo_path, ai_status,
+                                       ai_reasons, retake_of)
+        VALUES (%s, 909, %s, 'test-bucket', 'old/second.jpg', 'violation', '[{"sign": "майка"}]', %s)
+        RETURNING id
+    """, (ANNA, TODAY, first))[0][0]
+    _decide(db, first, 'confirmed')
+    _decide(db, second, 'confirmed')
+    assert repeat(first) is True and repeat(second) is True
+    _decide(db, early, 'no_violation')
+    assert repeat(first) is False and repeat(second) is False
+    # Борис: нарушения 20 и 11 дней назад и сегодняшнее; отмена самого давнего сегодняшнее
+    # повторным не делает — 11 дней уже за окном.
+    oldest = _insert_check(db, BORIS, TODAY - timedelta(days=20), decision='confirmed')
+    _insert_check(db, BORIS, TODAY - timedelta(days=11), decision='confirmed')
+    today = _insert_check(db, BORIS, TODAY)
+    assert _decide(db, today, 'confirmed')['check']['is_repeat'] is False
+    _decide(db, oldest, 'no_violation')
+    assert repeat(today) is False
+
+
 # ── Ручки ───────────────────────────────────────────────────────────────────
 
-def _client(db, gcs, *, requester=ANNA, reviewer=(HEAD, [FRONT]), analyze=None, sent=None):
+def _client(db, gcs, *, requester=ANNA, reviewer=(HEAD, [FRONT]), analyze=None, sent=None, is_super_admin=None):
     from flask import Flask, jsonify
     app = Flask(__name__)
 
@@ -505,7 +647,8 @@ def _client(db, gcs, *, requester=ANNA, reviewer=(HEAD, [FRONT]), analyze=None, 
         db=db, require_api_key=lambda f: f, build_cors_preflight_response=lambda: ('', 204),
         resolve_requester=lambda: (requester, None, None), reviewer_access=reviewer_access,
         send_telegram=lambda chat, text, reply_markup=None: (sent.append((chat, text)) if sent is not None else None),
-        web_app_base_url='https://portal', gcs=gcs.as_factory(), analyze=analyze or FakeAI(_ai()))
+        web_app_base_url='https://portal', gcs=gcs.as_factory(), analyze=analyze or FakeAI(_ai()),
+        is_super_admin=is_super_admin)
     app.register_blueprint(bp)
     return app.test_client()
 
@@ -552,3 +695,73 @@ def test_routes_bad_period_and_unknown_decision(db, gcs):
     assert head.get('/api/dress_code/checks?date_from=2026-01-01&date_to=2026-12-31').status_code == 400
     check_id = _submit(db, gcs, ANNA)['check']['id']
     assert head.post('/api/dress_code/checks/%d/decision' % check_id, json={'decision': 'maybe'}).status_code == 400
+
+
+def _photo_form():
+    return {'photo': (io.BytesIO(_jpeg()), 'p.jpg')}
+
+
+def test_routes_stand_and_camera_rules_only_for_super_admin(db, gcs):
+    ai = FakeAI(_ai(quality='body_cropped', verdict=AI_UNCLEAR))
+    boss = _client(db, gcs, reviewer=(SUPER, None), analyze=ai)
+    head = _client(db, gcs)
+    # Стенд: тот же ИИ, но ни строки в базе, ни файла в бакете.
+    answer = boss.post('/api/dress_code/stand/analyze', data=_photo_form(), content_type='multipart/form-data')
+    assert answer.status_code == 200 and answer.get_json()['result']['employee'] == 'retake'
+    assert ai.calls == 1
+    seen = []
+
+    def spy(data, rules):
+        seen.append(rules)
+        return _ai()
+
+    _client(db, gcs, reviewer=(SUPER, None), analyze=spy).post(
+        '/api/dress_code/stand/analyze', data=_photo_form(), content_type='multipart/form-data')
+    assert len(seen) == 1 and 'фирменные худи' in seen[0]       # ИИ стенда судит по действующему положению
+    assert _sql(db, 'SELECT COUNT(*) FROM dress_code_checks')[0][0] == 0 and gcs.store == {}
+    assert boss.post('/api/dress_code/stand/analyze').status_code == 400
+    refused = head.post('/api/dress_code/stand/analyze', data=_photo_form(), content_type='multipart/form-data')
+    assert refused.status_code == 403 and refused.get_json()['code'] == 'DRESS_CODE_SUPER_ONLY'
+    assert ai.calls == 1                                         # до ИИ чужой кадр не доходит
+    # Правила камеры: суперадмин сохраняет, глава отдела — нет; сотрудник получает их в /me.
+    assert boss.get('/api/dress_code/settings').get_json()['is_super_admin'] is True
+    assert head.get('/api/dress_code/settings').get_json()['is_super_admin'] is False
+    assert head.put('/api/dress_code/settings', json={'camera': {'waist': 2}}).status_code == 403
+    saved = boss.put('/api/dress_code/settings', json={'camera': {'waist': 3.8, 'hold_ms': 2000}})
+    assert saved.status_code == 200 and saved.get_json()['settings']['camera']['waist'] == 3.8
+    assert _client(db, gcs).get('/api/dress_code/me').get_json()['camera'] == {
+        **CAMERA_DEFAULTS, 'waist': 3.8, 'hold_ms': 2000}
+    # Глава по-прежнему правит положение — правила камеры при этом не сбрасываются.
+    edited = head.put('/api/dress_code/settings', json={'rules_body': 'Новые правила'})
+    assert edited.status_code == 200 and edited.get_json()['settings']['camera']['waist'] == 3.8
+    assert boss.get('/api/dress_code/checks').get_json()['is_super_admin'] is True
+    assert head.get('/api/dress_code/checks').get_json()['is_super_admin'] is False
+    # Полный доступ (администратор, отдел кадров) — ещё не суперадмин: стенда и правил камеры нет.
+    admin = _client(db, gcs, reviewer=(HEAD, None))
+    assert admin.get('/api/dress_code/settings').get_json()['can_edit_scope'] is True
+    assert admin.get('/api/dress_code/settings').get_json()['is_super_admin'] is False
+    assert admin.get('/api/dress_code/checks').get_json()['is_super_admin'] is False
+    assert admin.put('/api/dress_code/settings', json={'camera': {'waist': 2}}).status_code == 403
+    assert admin.post('/api/dress_code/stand/analyze', data=_photo_form(),
+                      content_type='multipart/form-data').status_code == 403
+    assert boss.get('/api/dress_code/settings').get_json()['settings']['camera']['waist'] == 3.8
+
+
+def test_routes_delete_only_for_super_admin(db, gcs):
+    check_id = _submit(db, gcs, ANNA)['check']['id']
+    head = _client(db, gcs)
+    assert head.delete('/api/dress_code/checks/%d' % check_id).status_code == 403
+    assert len(gcs.store) == 1
+    boss = _client(db, gcs, reviewer=(SUPER, None))
+    gone = boss.delete('/api/dress_code/checks/%d' % check_id)
+    assert gone.status_code == 200 and gone.get_json()['deleted'] == [check_id]
+    assert gcs.store == {} and _sql(db, 'SELECT COUNT(*) FROM dress_code_checks')[0][0] == 0
+    assert boss.delete('/api/dress_code/checks/%d' % check_id).status_code == 404
+    # GET по тому же адресу остался карточкой фото.
+    other = _submit(db, gcs, BORIS)['check']['id']
+    assert head.get('/api/dress_code/checks/%d' % other).status_code == 200
+    # Кто суперадмин, решает правило приложения (is_super_admin), а не строка роли.
+    promoted = _client(db, gcs, is_super_admin=lambda role: role == 'admin')
+    assert promoted.delete('/api/dress_code/checks/%d' % other).status_code == 200
+    demoted = _client(db, gcs, reviewer=(SUPER, None), is_super_admin=lambda role: False)
+    assert demoted.put('/api/dress_code/settings', json={'camera': {}}).status_code == 403

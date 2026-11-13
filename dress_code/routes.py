@@ -7,6 +7,11 @@
   тот же, что у самих «Отметок» (`reviewer_access` — гард раздела, а не его копия):
   глобальные админы и отдел кадров видят все отделы, глава отдела — свой.
 
+Суперадмину сверх этого — стенд камеры (владелец 13.11.2026: «добавь суперадмину тестовый
+стенд, чтобы я проверял и корректировал»): правила автопроверки кадра (PUT /settings с
+camera), пробный кадр через тот же ИИ без записи (/stand/analyze) и удаление пробных фото
+(DELETE /checks/<id>).
+
 Telegram уходит после фиксации транзакции; залитое в бакет стирается, если строка не
 записалась (service.submit).
 """
@@ -89,10 +94,18 @@ def _period():
 
 def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester,
                                reviewer_access, send_telegram=None, web_app_base_url=None, gcs=None,
-                               analyze=None):
+                               analyze=None, is_super_admin=None):
     bp = Blueprint('dress_code', __name__, url_prefix='/api/dress_code')
 
-    def route(rule, methods=('GET',), reviewer=False):
+    def _is_super(cursor, user_id):
+        """Суперадмин — по роли из базы тем же правилом, что во всём портале (is_super_admin
+        приходит из приложения); без него — точное имя роли."""
+        role = (service.user_row(cursor, user_id) or {}).get('role')
+        if is_super_admin is not None:
+            return bool(is_super_admin(role))
+        return str(role or '').strip().lower() == 'super_admin'
+
+    def route(rule, methods=('GET',), reviewer=False, super_only=False):
         all_methods = tuple(methods) + ('OPTIONS',)
 
         def decorator(handler):
@@ -117,6 +130,9 @@ def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_resp
                         if not schema.schema_is_ready(cursor):
                             return jsonify({'error': 'Раздел «Дресс-код» ещё не развёрнут',
                                             'code': 'DRESS_CODE_NOT_READY'}), 503
+                        if super_only and not _is_super(cursor, requester_id):
+                            return jsonify({'error': 'Доступно только суперадмину',
+                                            'code': 'DRESS_CODE_SUPER_ONLY'}), 403
                     kwargs['requester_id'] = int(requester_id)
                     if reviewer:
                         kwargs['department_ids'] = department_ids
@@ -224,9 +240,10 @@ def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_resp
                  ORDER BY city
             """, (list(scope if scope is not None else settings['department_ids']),))
             cities = [row[0] for row in cursor.fetchall()]
+            is_super = _is_super(cursor, requester_id)
         return jsonify({
             'status': 'success', **listing, 'missing': missing['rows'], 'shifts': missing['shifts'],
-            'cities': cities, 'full_access': department_ids is None,
+            'cities': cities, 'full_access': department_ids is None, 'is_super_admin': is_super,
             'date_from': filters['date_from'].isoformat(), 'date_to': filters['date_to'].isoformat(),
         }), 200
 
@@ -237,6 +254,13 @@ def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_resp
         if not detail:
             return jsonify({'error': 'Фото не найдено'}), 404
         return jsonify({'status': 'success', 'check': detail}), 200
+
+    @route('/checks/<int:check_id>', methods=('DELETE',), reviewer=True, super_only=True)
+    def dress_code_check_delete(check_id, requester_id, department_ids):
+        """Суперадмин убирает пробные фото: строка, повторные к ней, журнал и файлы."""
+        deleted = service.delete_check(db, gcs, check_id)
+        log.info('Дресс-код: суперадмин %s удалил фото %s', requester_id, deleted)
+        return jsonify({'status': 'success', 'deleted': deleted}), 200
 
     @route('/checks/<int:check_id>/decision', methods=('POST',), reviewer=True)
     def dress_code_decision(check_id, requester_id, department_ids):
@@ -285,18 +309,23 @@ def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_resp
     def dress_code_settings(requester_id, department_ids):
         """Правила меняет любой проверяющий (ТЗ п. 8: «администратор»); кто снимает
         фото (отделы и роли) — только полный доступ: глава отдела не назначает фото
-        чужим отделам."""
+        чужим отделам; правила камеры (camera) — только суперадмин, со стенда."""
         full = department_ids is None
         with db._get_cursor() as cursor:
+            is_super = _is_super(cursor, requester_id)
             if request.method == 'PUT':
                 payload = request.get_json(silent=True) or {}
                 if not full and ('department_ids' in payload or 'roles' in payload):
                     return jsonify({'error': 'Кто снимает фото, меняют администраторы и отдел кадров'}), 403
+                if 'camera' in payload and not is_super:
+                    return jsonify({'error': 'Правила камеры меняет только суперадмин',
+                                    'code': 'DRESS_CODE_SUPER_ONLY'}), 403
                 try:
                     service.save_settings(
                         cursor, requester_id, rules_body=payload.get('rules_body'),
                         department_ids=payload.get('department_ids') if full else None,
-                        roles=payload.get('roles') if full else None)
+                        roles=payload.get('roles') if full else None,
+                        camera=payload.get('camera') if 'camera' in payload else None)
                 except ValueError as exc:
                     return jsonify({'error': str(exc)}), 400
                 forget_settings_cache()
@@ -304,7 +333,21 @@ def build_dress_code_blueprint(*, db, require_api_key, build_cors_preflight_resp
             departments = service.department_choices(cursor) if full else []
         return jsonify({'status': 'success', 'settings': settings, 'departments': departments,
                         'roles': [{'value': key, 'label': label} for key, label in ROLE_LABELS.items()],
-                        'can_edit_scope': full}), 200
+                        'can_edit_scope': full, 'is_super_admin': is_super}), 200
+
+    @route('/stand/analyze', methods=('POST',), reviewer=True, super_only=True)
+    def dress_code_stand_analyze(requester_id, department_ids):
+        """Стенд камеры: пробный кадр проверяет тот же ИИ по действующим правилам, но ничего
+        не сохраняется — ни в базе, ни в бакете."""
+        if (request.content_length or 0) > UPLOAD_LIMIT:
+            return jsonify({'error': 'Фото больше 8 МБ'}), 413
+        upload = request.files.get('photo')
+        if upload is None:
+            return jsonify({'error': 'Фото не пришло'}), 400
+        with db._get_cursor() as cursor:
+            rules_text = service.load_settings(cursor)['rules']['body']
+        result = service.stand_analyze(upload.read(), rules_text, analyze=analyze)
+        return jsonify({'status': 'success', 'result': result}), 200
 
     return bp
 

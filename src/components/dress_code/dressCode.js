@@ -95,33 +95,45 @@ export const meanLuma = (rgba) => {
     return count ? sum / count : 0;
 };
 
-/* Рамка видоискателя (ТЗ п. 10): почти на весь экран, по центру. Верх — у макушки, низ —
-   у пояса. На фото попадает РОВНО то, что в рамке (владелец 13.11.2026: «не совсем понятно,
-   снимается ли всё») — поэтому всё вне рамки затемнено, а после снимка в ней же стоит фото.
-   top/bottom — отступы от краёв экрана в пикселях (сверху — кнопка закрытия и подсказка,
-   снизу — кнопка снимка), ширина — не больше maxWidth и не шире maxAspect от высоты:
-   на компьютере и при повороте телефона рамка остаётся портретной. */
-export const FRAME = Object.freeze({ top: 64, bottom: 118, sideShare: 0.92, maxWidth: 520, maxAspect: 0.8 });
+/* Пропорции снимка (ширина / высота) — по месту на экране между строкой подсказки и
+   кнопками: кадр занимает его целиком, без чёрных полос сверху и снизу (владелец 13.11.2026:
+   «очень большие поля снизу и сверху»). Не шире 3:4 (весь сенсор камеры в портрете) и не
+   уже 9:16 (высокий телефон: от сенсора отрезаются только бока). */
+export const PHOTO_ASPECT = Object.freeze({ min: 9 / 16, max: 3 / 4 });
 
-/* Какая часть кадра камеры попадает на фото: [sx, sy, sw, sh] в пикселях кадра.
-   Видео растянуто на экран как object-cover (обрезано по краям), рамка — прямоугольник
-   поверх него: `box` и `rect` — их положения на экране. `mirrored` — превью зеркальное
-   (фронтальная камера): по горизонтали кадр отсчитывается с другой стороны. */
-export const frameRegion = (videoWidth, videoHeight, box, rect, mirrored = false) => {
-    if (!videoWidth || !videoHeight || !box?.width || !box?.height || !rect?.width || !rect?.height) {
-        return [0, 0, videoWidth || 0, videoHeight || 0];
-    }
-    const scale = Math.max(box.width / videoWidth, box.height / videoHeight);
-    const offsetX = (videoWidth - box.width / scale) / 2;
-    const offsetY = (videoHeight - box.height / scale) / 2;
-    const left = mirrored ? (box.left + box.width) - (rect.left + rect.width) : rect.left - box.left;
-    let sx = offsetX + left / scale;
-    let sy = offsetY + (rect.top - box.top) / scale;
-    let sw = rect.width / scale;
-    let sh = rect.height / scale;
-    sx = Math.min(Math.max(0, sx), videoWidth - 1);
-    sy = Math.min(Math.max(0, sy), videoHeight - 1);
-    sw = Math.max(1, Math.min(sw, videoWidth - sx));
-    sh = Math.max(1, Math.min(sh, videoHeight - sy));
-    return [sx, sy, sw, sh];
+export const photoAspect = (stageWidth, stageHeight) => {
+    if (!(stageWidth > 0 && stageHeight > 0)) return PHOTO_ASPECT.max;
+    return Math.min(PHOTO_ASPECT.max, Math.max(PHOTO_ASPECT.min, stageWidth / stageHeight));
+};
+
+/* Что из кадра камеры попадает на фото: [sx, sy, sw, sh] в пикселях кадра.
+   На экране показывается РОВНО эта часть и ничего больше — что видно, то и снято (владелец:
+   «не совсем понятно, снимается ли всё»). ВЫСОТА КАДРА НЕ РЕЖЕТСЯ НИКОГДА: камера на
+   вытянутой руке видит человека едва до пояса, и любая обрезка сверху или снизу делает «фото
+   по пояс» недостижимым — из-за неё автоснимок когда-то и пришлось разрешить по грудь. Если
+   кадр шире, чем нужно (`aspect` — из photoAspect), отрезаются бока: по сторонам от человека
+   на фото делать нечего. Кадр уже нужного берётся весь. */
+export const photoRegion = (videoWidth, videoHeight, aspect = PHOTO_ASPECT.max) => {
+    if (!(videoWidth > 0 && videoHeight > 0)) return [0, 0, 0, 0];
+    if (videoWidth <= videoHeight * aspect) return [0, 0, videoWidth, videoHeight];
+    const width = Math.round(videoHeight * aspect);
+    return [Math.round((videoWidth - width) / 2), 0, width, videoHeight];
+};
+
+/* Где на экране стоит снимаемая часть: вписана целиком, без обрезки, в место между верхней
+   строкой (закрыть, подсказка) и кнопками снизу. → { width, height } в пикселях экрана. */
+export const fitStage = (regionWidth, regionHeight, stageWidth, stageHeight) => {
+    if (!(regionWidth > 0 && regionHeight > 0 && stageWidth > 0 && stageHeight > 0)) return { width: 0, height: 0 };
+    const scale = Math.min(stageWidth / regionWidth, stageHeight / regionHeight);
+    return { width: Math.floor(regionWidth * scale), height: Math.floor(regionHeight * scale) };
+};
+
+/* Высота строк камеры на экране, px: сверху — закрыть и подсказка, снизу — кнопка снимка.
+   Всё остальное — кадр (владелец: «очень большие поля снизу и сверху»). */
+export const CAMERA_BARS = Object.freeze({ top: 56, bottom: 108 });
+
+/* Доля → проценты для стенда: 0.234 → «23 %», −0.031 → «−3 %» (минус, а не дефис). */
+export const pct = (value) => {
+    const rounded = Math.round((Number(value) || 0) * 100);
+    return `${rounded < 0 ? '−' : ''}${Math.abs(rounded)} %`;
 };

@@ -16,6 +16,7 @@ from psycopg2.extras import Json
 
 from . import (
     AI_OK, AI_PENDING, AI_RETRY_LIMIT, AI_UNCLEAR, AI_VIOLATION,
+    CAMERA_DEFAULTS, CAMERA_LIMITS,
     DECISION_CONFIRMED, DECISION_RETAKE, DECISIONS,
     QUALITY_ATTEMPTS, QUALITY_HINTS, QUALITY_OK, REPEAT_WINDOW_DAYS, RETENTION_DAYS,
 )
@@ -58,8 +59,31 @@ def _iso(value):
 
 # ── Настройка ───────────────────────────────────────────────────────────────
 
+def clean_camera(raw):
+    """Правила автопроверки кадра: известные ключи, числа в пределах CAMERA_LIMITS; всё
+    остальное — значение по умолчанию. Камера сотрудника получает только такой набор."""
+    out = dict(CAMERA_DEFAULTS)
+    if not isinstance(raw, dict):
+        return out
+    for key, (low, high) in CAMERA_LIMITS.items():
+        value = raw.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        value = float(value)
+        if value != value or value in (float('inf'), float('-inf')):
+            continue
+        value = max(low, min(high, value))
+        out[key] = int(round(value)) if key == 'hold_ms' else round(value, 3)
+    return out
+
+
 def load_settings(cursor):
-    cursor.execute("SELECT department_ids, roles, updated_at FROM dress_code_settings WHERE id = 1")
+    # camera — через to_jsonb строки: пока колонки нет (схема не докатилась), это NULL,
+    # и камера работает на значениях по умолчанию, а не падает весь раздел.
+    cursor.execute("""
+        SELECT s.department_ids, s.roles, s.updated_at, to_jsonb(s) -> 'camera'
+          FROM dress_code_settings s WHERE s.id = 1
+    """)
     row = cursor.fetchone()
     cursor.execute("""
         SELECT r.id, r.body, r.created_at, u.name
@@ -73,6 +97,7 @@ def load_settings(cursor):
         'department_ids': sorted(int(x) for x in (row[0] if row else None) or []),
         'roles': [str(x) for x in (row[1] if row else None) or []],
         'updated_at': _iso(row[2]) if row else None,
+        'camera': clean_camera(row[3] if row else None),
         'rules': {
             'version': int(rule[0]) if rule else None,
             'body': rule[1] if rule else dc_rules.DEFAULT_RULES,
@@ -82,9 +107,17 @@ def load_settings(cursor):
     }
 
 
-def save_settings(cursor, actor_id, *, rules_body=None, department_ids=None, roles=None):
-    """Новая версия правил — только если текст правда изменился; отделы и роли — целиком."""
+def save_settings(cursor, actor_id, *, rules_body=None, department_ids=None, roles=None, camera=None):
+    """Новая версия правил — только если текст правда изменился; отделы и роли — целиком;
+    правила камеры (стенд суперадмина) — целиком, в пределах CAMERA_LIMITS."""
     current = load_settings(cursor)
+    if camera is not None:
+        cursor.execute("""
+            UPDATE dress_code_settings
+               SET camera = %s, updated_by = %s,
+                   updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+             WHERE id = 1
+        """, (Json(clean_camera(camera)), actor_id))
     if rules_body is not None:
         body = dc_rules.clean_body(rules_body)
         if body != (current['rules']['body'] or '').strip():
@@ -248,6 +281,7 @@ def my_state(cursor, gcs, user_id):
         'can_capture': bool(required and (primary_today is None or request is not None)),
         'retake_for': request['id'] if (primary_today and request) else None,
         'attempts': QUALITY_ATTEMPTS,
+        'camera': settings['camera'],
         'today': [employee_view(gcs, c) for c in checks if c['day'] == today.isoformat()],
         'history': [employee_view(gcs, c) for c in checks if c['day'] != today.isoformat()],
     }
@@ -610,6 +644,9 @@ def decide(cursor, check_id, *, department_ids, actor_id, actor_name, decision, 
         """, (check['user_id'], check['id'], day, day + timedelta(days=REPEAT_WINDOW_DAYS)))
     else:
         cursor.execute("UPDATE dress_code_checks SET is_repeat = FALSE WHERE id = %s", (check['id'],))
+        if previous == DECISION_CONFIRMED:
+            # Нарушение отменили: более поздние нарушения могли считаться повторными из-за него.
+            recount_repeats(cursor, [check['user_id']])
 
     updated = fetch_check(cursor, check['id'])
     events = []
@@ -618,6 +655,73 @@ def decide(cursor, check_id, *, department_ids, actor_id, actor_name, decision, 
     if decision == DECISION_CONFIRMED and decision != previous and repeat_of:
         events.append({'kind': 'repeat', 'check': updated, 'previous': repeat_of})
     return {'check': updated, 'events': events}
+
+
+def recount_repeats(cursor, user_ids):
+    """«Повторное нарушение» у подтверждённых фото людей — заново по тому же правилу, что в
+    decide: есть другое подтверждённое нарушение за REPEAT_WINDOW_DAYS до дня фото."""
+    ids = sorted({int(x) for x in user_ids or []})
+    if not ids:
+        return
+    cursor.execute("""
+        UPDATE dress_code_checks c
+           SET is_repeat = EXISTS (
+                SELECT 1 FROM dress_code_checks p
+                 WHERE p.user_id = c.user_id AND p.decision = 'confirmed' AND p.id <> c.id
+                   AND p.day >= c.day - %s AND p.day < c.day)
+         WHERE c.user_id = ANY(%s) AND c.decision = 'confirmed'
+    """, (REPEAT_WINDOW_DAYS, ids))
+
+
+# ── Стенд суперадмина ───────────────────────────────────────────────────────
+
+def stand_analyze(raw_bytes, rules_text, *, analyze=None):
+    """Пробный кадр со стенда: та же подготовка и тот же ИИ, что у фото сотрудника, но
+    БЕЗ записи — ни строки в базе, ни файла в бакете. `employee` — что увидел бы сотрудник:
+    retake — просьба переснять с подсказкой, ok — «Соответствует», review — «проверит
+    руководитель»."""
+    analyze = analyze or dc_ai.analyze
+    prepared = photos.prepare(raw_bytes)
+    try:
+        result = analyze(prepared['data'], rules_text)
+    except dc_ai.DressCodeAIError as exc:
+        raise DressCodeError('ИИ сейчас недоступен: %s' % exc, 503, 'DRESS_CODE_AI_DOWN')
+    quality = result['quality']
+    if quality != QUALITY_OK:
+        employee = 'retake'
+    elif result['verdict'] == AI_OK:
+        employee = 'ok'
+    else:
+        employee = 'review'
+    return {
+        'width': prepared['width'], 'height': prepared['height'],
+        'quality': quality, 'hint': QUALITY_HINTS.get(quality),
+        'verdict': result['verdict'], 'visible': result['visible'], 'violations': result['violations'],
+        'remarks': result['remarks'], 'note': result.get('note') or None, 'model': result.get('model'),
+        'employee': employee,
+    }
+
+
+def delete_check(db, gcs, check_id):
+    """Удалить фото совсем (суперадмин убирает пробные снимки): само фото, присланные к нему
+    повторные и журнал решений (каскадом). Файлы в бакете — после фиксации: строка, оставшаяся
+    без файла, хуже файла, оставшегося без строки. Возвращает номера удалённых фото."""
+    with db._get_cursor() as cursor:
+        cursor.execute("""
+            WITH RECURSIVE tree AS (
+                SELECT id FROM dress_code_checks WHERE id = %s
+                UNION ALL
+                SELECT c.id FROM dress_code_checks c JOIN tree t ON c.retake_of = t.id
+            )
+            DELETE FROM dress_code_checks WHERE id IN (SELECT id FROM tree)
+            RETURNING id, user_id, photo_bucket, photo_path
+        """, (int(check_id),))
+        rows = cursor.fetchall()
+        if not rows:
+            raise DressCodeError('Фото не найдено', 404, 'DRESS_CODE_NOT_FOUND')
+        recount_repeats(cursor, [r[1] for r in rows])
+    photos.drop(gcs, [(r[2], r[3]) for r in rows])
+    return sorted(int(r[0]) for r in rows)
 
 
 # ── Чистка ──────────────────────────────────────────────────────────────────

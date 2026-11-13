@@ -43,6 +43,8 @@ _STATEMENTS = [
            ARRAY['operator', 'trainee']
     ON CONFLICT (id) DO NOTHING
     """,
+    # Правила автопроверки кадра в камере (стенд суперадмина): пусто — значения по умолчанию.
+    "ALTER TABLE dress_code_settings ADD COLUMN IF NOT EXISTS camera JSONB NOT NULL DEFAULT '{}'::jsonb",
     """
     CREATE TABLE IF NOT EXISTS dress_code_rules (
         id          SERIAL PRIMARY KEY,

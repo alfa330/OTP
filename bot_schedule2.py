@@ -53904,6 +53904,7 @@ try:
         send_telegram=_send_telegram_text_message,
         web_app_base_url=TASK_WEB_APP_BASE_URL,
         gcs=_DRESS_CODE['gcs'],
+        is_super_admin=_is_super_admin_role,
     )
     app.register_blueprint(_DRESS_CODE['bp'])
     logging.info("Раздел «Дресс-код»: Blueprint подключён на /api/dress_code")

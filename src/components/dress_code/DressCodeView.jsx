@@ -146,7 +146,7 @@ export default function DressCodeView({ apiBaseUrl, withAccessTokenHeader, showT
                     <h2 className="truncate text-[19px] font-bold leading-tight tracking-tight text-slate-900">Дресс-код</h2>
                     <IosHint
                         label="О разделе"
-                        text="Каждое утро после отметки прихода в Workpace сделайте здесь фото: голова и одежда до пояса — внутри рамки. ИИ проверит кадр сразу, а спорные фото посмотрит руководитель."
+                        text="Каждое утро после отметки прихода в Workpace сделайте здесь фото: в кадре — вы от головы до пояса. Камера сама снимет, когда вы встали как надо. ИИ проверит кадр сразу, а спорные фото посмотрит руководитель."
                     />
                 </div>
             </div>
@@ -177,7 +177,7 @@ export default function DressCodeView({ apiBaseUrl, withAccessTokenHeader, showT
                                 </div>
                                 <div className="text-[13px] text-slate-500">
                                     {retake ? 'Сделайте фото ещё раз — так, как просил руководитель.'
-                                        : 'Сфотографируйтесь после отметки прихода: голова и одежда до пояса — внутри рамки.'}
+                                        : 'Сфотографируйтесь после отметки прихода: в кадре — вы от головы до пояса.'}
                                 </div>
                             </div>
                             <button type="button" onClick={openCamera} className={iosBtnPrimary}>
@@ -218,6 +218,7 @@ export default function DressCodeView({ apiBaseUrl, withAccessTokenHeader, showT
                 onCapture={upload}
                 busy={sending}
                 hint={camera?.hint || ''}
+                rules={state?.camera || null}
             />
             <IosLightbox url={photo} alt="Фото для дресс-кода" onClose={() => setPhoto(null)} />
         </div>
