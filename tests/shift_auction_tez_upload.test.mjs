@@ -16,6 +16,13 @@ import {
   uploadDayChanged,
   uploadDayShiftTones,
 } from '../src/components/resources/shiftAuctionUpload.js';
+import {
+  AUCTION_DEPARTMENTS,
+  auctionDepartmentOfDirection,
+  auctionDirectionForDepartment,
+  readStoredAuctionDirection,
+  storeAuctionDirection,
+} from '../src/components/resources/shiftAuctionDirectionMemory.js';
 
 // Аукцион Тез КЦ (задача #124): люди выдуманы.
 
@@ -65,4 +72,73 @@ test('«добавится» отмечается поштучно, а не по
   assert.deepEqual(uploadDayShiftTones(day).map((item) => item.tone), ['added', 'plain', 'plain']);
   assert.equal(uploadDayChanged(day), true);
   assert.equal(uploadDayChanged({ shifts: day.shifts, added: [], removed: [] }), false);
+});
+
+// Память выбора управляющего: хранилище браузера подменяем словарём.
+const withStorage = (run, { broken = false } = {}) => {
+  const previous = globalThis.window;
+  const data = new Map();
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => {
+        if (broken) throw new Error('blocked');
+        return data.has(key) ? data.get(key) : null;
+      },
+      setItem: (key, value) => {
+        if (broken) throw new Error('blocked');
+        data.set(key, String(value));
+      },
+    },
+  };
+  try {
+    run(data);
+  } finally {
+    globalThis.window = previous;
+  }
+};
+
+test('меню «Аукцион смен»: СЗоВ и Тез КЦ со своими прогонами', () => {
+  assert.deepEqual(AUCTION_DEPARTMENTS.map((item) => [item.code, item.label]), [['szov', 'СЗоВ'], ['tez', 'Тез КЦ']]);
+  assert.equal(auctionDepartmentOfDirection('chat'), 'szov');
+  assert.equal(auctionDepartmentOfDirection('tez_op'), 'tez');
+  // Неизвестное — линия, как у сервера.
+  assert.equal(auctionDepartmentOfDirection('что-то'), 'szov');
+});
+
+test('отдел открывается на своём последнем направлении', () => {
+  withStorage(() => {
+    assert.equal(auctionDirectionForDepartment('szov'), 'line');
+    assert.equal(auctionDirectionForDepartment('tez'), 'tez_tp');
+    storeAuctionDirection('chat');
+    storeAuctionDirection('tez_op');
+    // Последнее общее — Тез КЦ, но СЗоВ помнит свой чат.
+    assert.equal(readStoredAuctionDirection(), 'tez_op');
+    assert.equal(auctionDirectionForDepartment('szov'), 'chat');
+    assert.equal(auctionDirectionForDepartment(' TEZ '), 'tez_op');
+    // Сервер прислал прогоны отдела без запомненного — берём первый из них.
+    assert.equal(auctionDirectionForDepartment('tez', ['tez_tp']), 'tez_tp');
+    assert.equal(auctionDirectionForDepartment('hr'), '');
+    assert.equal(auctionDirectionForDepartment(''), '');
+  });
+});
+
+test('закрытое хранилище не ломает выбор отдела', () => {
+  withStorage(() => {
+    storeAuctionDirection('chat');
+    assert.equal(readStoredAuctionDirection(), 'line');
+    assert.equal(auctionDirectionForDepartment('tez'), 'tez_tp');
+  }, { broken: true });
+});
+
+test('испорченная запись памяти — как пустая', () => {
+  withStorage((data) => {
+    data.set('otp_shift_auction_department_direction_v1', '[1,2]');
+    assert.equal(auctionDirectionForDepartment('szov'), 'line');
+    data.set('otp_shift_auction_department_direction_v1', '{"szov":"tez_op"}');
+    // Чужой прогон в памяти отдела не открывается.
+    assert.equal(auctionDirectionForDepartment('szov'), 'line');
+    data.set('otp_shift_auction_department_direction_v1', 'не json');
+    storeAuctionDirection('chat');
+    assert.equal(data.get('otp_shift_auction_department_direction_v1'), '{"szov":"chat"}');
+  });
 });

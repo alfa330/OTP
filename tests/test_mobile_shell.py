@@ -354,9 +354,10 @@ class SheetLooksTests(unittest.TestCase):
         занимает треть экрана всегда."""
         self.assertIn('overflow-y: auto;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar > div {', 400))
         self.assertIn('overflow: visible !important;', css_block(SHELL_CSS, 'body.mobile-shell .sidebar-menu-scroll {', 300))
-        # Подменю позиционируются посчитанными координатами и обязаны ехать следом.
-        self.assertEqual(APP.count("sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });"), 2)
-        self.assertEqual(APP.count("sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);"), 2)
+        # Подменю позиционируются посчитанными координатами и обязаны ехать следом:
+        # «Учет сотрудников», «Расчет ресурсов» и «Аукцион смен» суперадмина (#124).
+        self.assertEqual(APP.count("sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });"), 3)
+        self.assertEqual(APP.count("sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);"), 3)
 
     def test_every_row_gets_the_same_chevron(self):
         """Собственная стрелка есть только у пунктов с подменю, и рисуется она
@@ -619,7 +620,7 @@ class SubmenuTests(unittest.TestCase):
         """В шторке пункт занимает ВСЮ ширину экрана, и привычное «вправо от
         пункта» уводит панель за край: снаружи это выглядит как «нажал, а
         ничего не открылось» — с этого и началась правка."""
-        for ref in ('sidebarEmployeesRef', 'sidebarResourceRef'):
+        for ref in ('sidebarEmployeesRef', 'sidebarResourceRef', 'sidebarAuctionRef'):
             at = APP.index(f'const rect = {ref}.current?.getBoundingClientRect();')
             block = APP[at:at + 700]
             self.assertIn('const nextTop = isMobileShell ? rect.bottom + 4 : rect.top;', block, ref)
@@ -630,6 +631,7 @@ class SubmenuTests(unittest.TestCase):
         координатам — за краем экрана."""
         self.assertIn('}, [showSidebarEmployeesDropdown, isEmployeesClosing, isMobileShell]);', APP)
         self.assertIn('}, [showSidebarResourceDropdown, isResourceClosing, isMobileShell]);', APP)
+        self.assertIn('}, [showSidebarAuctionDropdown, isAuctionClosing, isMobileShell]);', APP)
 
     def test_submenu_width_is_freed_in_the_shell(self):
         """В разметке у панели фиксированные 14rem — размер под выпадение сбоку

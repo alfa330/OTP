@@ -84,6 +84,11 @@ import { MyShiftsTimeline } from '../schedule/MyShiftsMobile';
 import useIsMobileShell from '../common/useIsMobileShell';
 import MobileActionSheet from '../common/MobileActionSheet';
 import ShiftAuctionUploadSheet from './ShiftAuctionUploadSheet';
+import {
+  auctionDirectionForDepartment,
+  readStoredAuctionDirection,
+  storeAuctionDirection,
+} from './shiftAuctionDirectionMemory';
 import './shift-auction-mobile.css';
 
 // Аукцион идёт на нескольких направлениях — независимых прогонах одного раздела:
@@ -109,8 +114,6 @@ const AUCTION_DIRECTION_LABELS = {
   [AUCTION_DIRECTION_TEZ_OP]: 'ОП линия',
 };
 const AUCTION_DEPARTMENT_LABELS = { szov: 'СЗоВ', tez: 'Тез КЦ' };
-// Ключ выбора направления у управляющего: раздел переоткрывается там же, где закрыли.
-const AUCTION_DIRECTION_STORAGE_KEY = 'otp_shift_auction_direction_v1';
 
 const normalizeAuctionDirection = (value) => {
   const key = String(value || '').trim().toLowerCase();
@@ -168,24 +171,6 @@ const normalizeAuctionDirectionCatalog = (raw) => {
       };
     })
     .filter(Boolean);
-};
-
-const readStoredAuctionDirection = () => {
-  if (typeof window === 'undefined') return AUCTION_DIRECTION_LINE;
-  try {
-    return normalizeAuctionDirection(window.localStorage.getItem(AUCTION_DIRECTION_STORAGE_KEY));
-  } catch {
-    return AUCTION_DIRECTION_LINE;
-  }
-};
-
-const storeAuctionDirection = (value) => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(AUCTION_DIRECTION_STORAGE_KEY, normalizeAuctionDirection(value));
-  } catch {
-    /* приватный режим — выбор просто не переживёт перезагрузку */
-  }
 };
 
 // Недельный потолок часов по ставке. Совпадает с серверной нормой
@@ -4653,7 +4638,7 @@ const ShiftAuctionShiftsTable = ({
   );
 };
 
-const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null }) => {
+const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHeader, showToast, onOpenResourceGeneration, initialPeriod = null, onInitialPeriodApplied = null, onDepartmentShown = null }) => {
   const role = normalizeRole(user?.role);
   const departmentCode = String(user?.department_code ?? user?.departmentCode ?? '').toLowerCase();
   // Супервайзеры СЗоВ и Тез КЦ (задача #124) управляют аукционом своего отдела
@@ -4793,6 +4778,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // перезагрузку), оператору его назначает сервер снапшотом.
   const [direction, setDirection] = useState(() => {
     if (!canMonitor) return AUCTION_DIRECTION_LINE;
+    // Пришли из меню сайдбара «Аукцион смен → СЗоВ / Тез КЦ» — сразу прогон этого
+    // отдела: иначе первый кадр показал бы прошлый отдел и тут же перескочил.
+    const requestedDepartmentDirection = auctionDirectionForDepartment(initialPeriod?.department);
+    if (requestedDepartmentDirection) return requestedDepartmentDirection;
     const stored = readStoredAuctionDirection();
     const storedIsTez = stored === AUCTION_DIRECTION_TEZ_TP || stored === AUCTION_DIRECTION_TEZ_OP;
     // Руководству Тез КЦ (#124) с «Линией» по умолчанию сразу его прогон: иначе до
@@ -4823,8 +4812,9 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
   // берётся, если не пересекается с уже взятым; потолок держит норма.
   const allowsSeveralShiftsPerDay = Boolean(directionRules.several_shifts_per_day);
   // Прогоны по отделам. Отделов больше одного — у суперадмина (СЗоВ и пилот Тез КЦ):
-  // сначала он выбирает отдел, тумблер показывает направления только этого отдела.
-  // У руководства СЗоВ отдел один — селектора нет, тумблер прежний «Линия / Чат».
+  // отдел он выбирает в сайдбаре меню «Аукцион смен» (как линию и чат в «Расчете
+  // ресурсов»), тумблер показывает направления только этого отдела. У руководства
+  // СЗоВ отдел один — меню нет, тумблер прежний «Линия / Чат».
   const auctionDepartments = useMemo(() => {
     const byCode = new Map();
     directionCatalog.forEach((item) => {
@@ -4963,12 +4953,11 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     if (canSwitchDirection) storeAuctionDirection(direction);
   }, [canSwitchDirection, direction]);
 
-  // Последнее направление каждого отдела: вернулся в «СЗоВ» — снова на «Чате», если
-  // уходил с него, а не на первой кнопке.
-  const lastDirectionByDepartmentRef = useRef({});
+  // Сайдбар отмечает в меню «Аукцион смен» отдел, который сейчас на экране.
   useEffect(() => {
-    if (activeDepartmentCode) lastDirectionByDepartmentRef.current[activeDepartmentCode] = direction;
-  }, [activeDepartmentCode, direction]);
+    onDepartmentShown?.(activeDepartmentCode);
+  }, [activeDepartmentCode, onDepartmentShown]);
+  useEffect(() => () => onDepartmentShown?.(''), [onDepartmentShown]);
 
   const handleSwitchDirection = useCallback((nextDirection) => {
     const normalized = normalizeAuctionDirection(nextDirection);
@@ -5007,15 +4996,24 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     setIsLoading(true);
   }, [direction]);
 
+  // Отдел открывается на своём последнем направлении: вернулся в «СЗоВ» — снова на
+  // «Чате», если уходил с него, а не на первой кнопке (память — shiftAuctionDirectionMemory).
+  // Прогоны отдела — из ответа сервера, а до него из справочника: меню сайдбара
+  // переключает отдел и тогда, когда раздел ещё грузит прошлый.
   const handleSwitchDepartment = useCallback((departmentCode) => {
-    if (!departmentCode || departmentCode === activeDepartmentCode) return;
-    const target = auctionDepartments.find((item) => item.code === departmentCode);
-    if (!target || !target.directions.length) return;
-    const remembered = lastDirectionByDepartmentRef.current[departmentCode];
-    const next = target.directions.some((item) => item.key === remembered) ? remembered : target.directions[0].key;
-    handleSwitchDirection(next);
+    const code = String(departmentCode || '').trim().toLowerCase();
+    if (!code || code === activeDepartmentCode) return;
+    const serverDirections = auctionDepartments.find((item) => item.code === code)?.directions || [];
+    const next = auctionDirectionForDepartment(code, serverDirections.map((item) => item.key));
+    if (next) handleSwitchDirection(next);
   }, [activeDepartmentCode, auctionDepartments, handleSwitchDirection]);
-  const showDepartmentSelector = canSwitchDirection && auctionDepartments.length > 1;
+  // Отделов несколько (суперадмин) — заголовок называет открытый: тумблер внутри
+  // показывает только его направления. Суперадмину это известно до ответа
+  // сервера, и подпись не появляется в заголовке рывком.
+  const showsDepartmentTitle = role === 'super_admin' || auctionDepartments.length > 1;
+  const departmentTitle = showsDepartmentTitle
+    ? (directionRules.department_label || AUCTION_DEPARTMENT_LABELS[activeDepartmentCode] || '')
+    : '';
 
 
   const markAuctionDraftDirty = useCallback(() => {
@@ -5718,6 +5716,21 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
     appliedRequestedDirectionKeyRef.current = requestedDirectionKey;
     handleSwitchDirectionRef.current(requestedDirection);
   }, [canMonitor, requestedDirection, requestedDirectionKey]);
+  // Отдел из меню сайдбара, когда раздел уже открыт (свежий раздел берёт его сразу
+  // в начальном направлении). Каждое нажатие — новая просьба с nonce, поэтому
+  // повторный выбор того же отдела не мешает: на своём отделе переключение молчит.
+  const requestedDepartment = String(initialPeriod?.department || '').trim().toLowerCase();
+  const requestedDepartmentKey = requestedDepartment ? `${requestedDepartment}|${initialPeriod?.nonce ?? ''}` : '';
+  const appliedRequestedDepartmentKeyRef = useRef('');
+  const handleSwitchDepartmentRef = useRef(handleSwitchDepartment);
+  useEffect(() => { handleSwitchDepartmentRef.current = handleSwitchDepartment; }, [handleSwitchDepartment]);
+  useEffect(() => {
+    if (!requestedDepartmentKey || !canMonitor) return;
+    if (appliedRequestedDepartmentKeyRef.current === requestedDepartmentKey) return;
+    appliedRequestedDepartmentKeyRef.current = requestedDepartmentKey;
+    handleSwitchDepartmentRef.current(requestedDepartment);
+    onInitialPeriodApplied?.();
+  }, [canMonitor, onInitialPeriodApplied, requestedDepartment, requestedDepartmentKey]);
   // Направление перехода не из прогонов человека (каталог уже от сервера): неделю
   // чужого прогона искать незачем, и красное «плана нет» было бы неправдой.
   const requestedDirectionIsForeign = Boolean(requestedDirection)
@@ -7710,7 +7723,10 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
         <header className="flex items-center gap-3 pt-1">
           <div className="min-w-0 flex-1">
             <h1 className="sa-m-title truncate text-slate-900">Аукцион смен</h1>
-            {!canSwitchDirection ? (
+            {departmentTitle ? (
+              <p className="text-[15px] text-slate-500">{departmentTitle}</p>
+            ) : null}
+            {!departmentTitle && !canSwitchDirection ? (
               <p className={`text-[15px] text-slate-500 ${!canMonitor && !settingsDirection ? 'invisible' : ''}`}>{directionLabel}</p>
             ) : null}
           </div>
@@ -7723,16 +7739,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             <BookOpen size={19} aria-hidden="true" />
           </button>
         </header>
-        {showDepartmentSelector ? (
-          <IosSegmented
-            value={activeDepartmentCode}
-            onChange={handleSwitchDepartment}
-            stretch
-            size="lg"
-            ariaLabel="Отдел аукциона"
-            options={auctionDepartments.map((item) => ({ value: item.code, label: item.label }))}
-          />
-        ) : null}
         {canSwitchDirection ? (
           <IosSegmented
             value={direction}
@@ -9085,7 +9091,7 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
             <div className="min-w-0">
               <h1 className="text-xl font-semibold text-slate-950 sm:text-2xl">
-                Аукцион смен
+                {departmentTitle ? `Аукцион смен · ${departmentTitle}` : 'Аукцион смен'}
                 {/* Направление называем в заголовке всегда — и оператору, у которого
                     тумблера нет: иначе непонятно, чьи смены на экране. */}
                 <span className={`ml-2 inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[11px] font-semibold text-slate-700 sm:text-xs ${!canMonitor && !settingsDirection ? 'invisible' : ''}`}>
@@ -9125,32 +9131,6 @@ const ShiftAuctionView = ({ user, operators = [], apiBaseUrl, withAccessTokenHea
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:pr-[280px]">
-            {showDepartmentSelector ? (
-              <div
-                role="group"
-                aria-label="Отдел аукциона"
-                className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5 sm:h-10"
-              >
-                {auctionDepartments.map((item) => {
-                  const active = activeDepartmentCode === item.code;
-                  return (
-                    <button
-                      key={item.code}
-                      type="button"
-                      onClick={() => handleSwitchDepartment(item.code)}
-                      aria-pressed={active}
-                      className={`inline-flex h-8 min-w-[72px] items-center justify-center rounded-[7px] px-3 text-xs font-semibold transition sm:h-9 sm:text-sm ${
-                        active
-                          ? 'bg-white text-slate-900 shadow-sm'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : null}
             {canSwitchDirection ? (
               <div
                 role="group"

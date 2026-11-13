@@ -619,11 +619,63 @@ class PilotAndDepartmentSelectorTests(unittest.TestCase):
         self.assertIn("db.shift_auction_mode_for_operator(operator_id, include_pilot=True) or SHIFT_AUCTION_MODE_LINE",
                       ROUTES_SOURCE)
 
-    def test_department_selector_only_for_several_departments(self):
-        self.assertIn("const showDepartmentSelector = canSwitchDirection && auctionDepartments.length > 1;", VIEW_SOURCE)
-        self.assertIn('aria-label="Отдел аукциона"', VIEW_SOURCE)
-        self.assertIn('ariaLabel="Отдел аукциона"', VIEW_SOURCE)
-        self.assertIn("lastDirectionByDepartmentRef.current[departmentCode]", VIEW_SOURCE)
+    def test_department_is_chosen_in_the_sidebar_menu(self):
+        """13.11.2026 владелец: выбор «СЗоВ / Тез КЦ» — меню пункта сайдбара, как линия и
+        чат у «Расчета ресурсов», а не переключатель внутри раздела."""
+        start = APP_SOURCE.index('<SidebarDeptScope section="shift_auction" activeCode={activeDeptCode}>')
+        item = APP_SOURCE[start:APP_SOURCE.index("</SidebarDeptScope>", start)]
+        # Меню — только у суперадмина; у админов пункт прежний и ведёт в раздел сразу.
+        self.assertIn("{isSuperAdmin ? (", item)
+        self.assertIn("aria-expanded={showSidebarAuctionDropdown}", item)
+        self.assertIn('aria-label="Отдел аукциона"', item)
+        self.assertIn("{AUCTION_DEPARTMENTS.map((department, index) => (", item)
+        self.assertIn("openShiftAuctionDepartment(e, department.code);", item)
+        self.assertIn("onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}", item)
+        # Ветки СВ, оператора и главы отдела меню не получили.
+        self.assertEqual(APP_SOURCE.count("aria-expanded={showSidebarAuctionDropdown}"), 1)
+        # Внутри раздела второго переключателя отдела нет — только подпись открытого.
+        self.assertNotIn("Отдел аукциона", VIEW_SOURCE)
+        self.assertIn("{departmentTitle ? `Аукцион смен · ${departmentTitle}` : 'Аукцион смен'}", VIEW_SOURCE)
+        self.assertIn("const showsDepartmentTitle = role === 'super_admin' || auctionDepartments.length > 1;", VIEW_SOURCE)
+
+    def test_auction_menu_never_hangs_open_with_another_one(self):
+        """Иначе два меню сайдбара висят открытыми одновременно и накладываются."""
+        block = APP_SOURCE[APP_SOURCE.index("const handleToggleAuctionDropdown"):]
+        block = block[:block.index("};")]
+        for setter in ("setShowSidebarAccountDropdown(false)", "setShowSidebarEmployeesDropdown(false)",
+                       "setShowSidebarResourceDropdown(false)", "setShowSidebarDeptFilter(false)"):
+            with self.subTest(setter=setter):
+                self.assertIn(setter, block)
+        for other in ("handleToggleDropdown", "handleToggleEmployeesDropdown",
+                      "handleToggleResourceDropdown", "handleToggleDeptFilterDropdown"):
+            other_block = APP_SOURCE[APP_SOURCE.index(f"const {other} = "):]
+            other_block = other_block[:other_block.index("};")]
+            with self.subTest(other=other):
+                self.assertIn("setShowSidebarAuctionDropdown(false)", other_block)
+        self.assertIn("if (sidebarAuctionRef.current && !sidebarAuctionRef.current.contains(e.target)) {", APP_SOURCE)
+
+    def test_sidebar_request_switches_an_open_section_once(self):
+        handler = APP_SOURCE[APP_SOURCE.index("const openShiftAuctionDepartment = useCallback("):]
+        handler = handler[:handler.index("}, [navigateToView, openAppViewInNewTab]);")]
+        self.assertIn("setShiftAuctionInitialPeriod({ department: code, nonce: Date.now() });", handler)
+        # Ctrl-клик: новая вкладка откроется на сохранённом направлении выбранного отдела.
+        self.assertIn("if (direction) storeAuctionDirection(direction);", handler)
+        # Свежий раздел сразу на выбранном отделе — без кадра прошлого.
+        self.assertIn("const requestedDepartmentDirection = auctionDirectionForDepartment(initialPeriod?.department);", VIEW_SOURCE)
+        self.assertIn("if (appliedRequestedDepartmentKeyRef.current === requestedDepartmentKey) return;", VIEW_SOURCE)
+        self.assertIn("handleSwitchDepartmentRef.current(requestedDepartment);", VIEW_SOURCE)
+        self.assertIn("onDepartmentShown={setShiftAuctionDepartmentShown}", APP_SOURCE)
+
+    def test_menu_departments_match_the_server_registry(self):
+        """Пункты меню и их прогоны — те же пары, что SHIFT_AUCTION_MODE_DEPARTMENT_CODE."""
+        memory = (ROOT / "src" / "components" / "resources" / "shiftAuctionDirectionMemory.js").read_text(encoding="utf-8")
+        js_pairs = {}
+        for code, label, directions in re.findall(
+                r"\{ code: '(\w+)', label: '([^']+)', directions: \[([^\]]+)\] \}", memory):
+            for constant in re.findall(r"SHIFT_AUCTION_MODE_\w+", directions):
+                js_pairs[_registry()[constant]] = code
+            self.assertEqual(_registry()["SHIFT_AUCTION_DEPARTMENT_LABELS"][code], label)
+        self.assertEqual(js_pairs, dict(_registry()["SHIFT_AUCTION_MODE_DEPARTMENT_CODE"]))
         rules = _registry()["shift_auction_direction_rules"]
         self.assertEqual(rules("line")["department_label"], "СЗоВ")
         self.assertEqual(rules("tez_op")["department_label"], "Тез КЦ")

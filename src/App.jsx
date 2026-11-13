@@ -179,6 +179,7 @@ import { stripPaymentsParams } from './components/payments/paymentsLink';
 import { stripAiQaParams } from './components/call_qa/evalLink';
 import { parseUserAgent, addressWord, personWord, plural as pluralRu, sessionWord } from './components/sessions/userAgent';
 import lazyWithRetry from './utils/lazyWithRetry';
+import { AUCTION_DEPARTMENTS, auctionDirectionForDepartment, storeAuctionDirection } from './components/resources/shiftAuctionDirectionMemory';
 import { recoverFromStaleBundle } from './staleBundleRecovery';
 
 const PINNED_TASK_STORAGE_KEY_PREFIX = 'otp_pinned_task';
@@ -44990,6 +44991,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [taskRefreshToken, setTaskRefreshToken] = useState(0);
             const [resourceFteInitialView, setResourceFteInitialView] = useState('');
             const [shiftAuctionInitialPeriod, setShiftAuctionInitialPeriod] = useState(null);
+            // Отдел, который аукцион смен показывает сейчас: его пункт отмечен в меню сайдбара.
+            const [shiftAuctionDepartmentShown, setShiftAuctionDepartmentShown] = useState('');
             const [pendingSurveysBadgeCount, setPendingSurveysBadgeCount] = useState(0);
             // Бейдж «Задачи»: сколько задач ждут действия лично от пользователя.
             const [tasksActionRequiredCount, setTasksActionRequiredCount] = useState(0);
@@ -45634,6 +45637,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, []);
             const [showSidebarEmployeesDropdown, setShowSidebarEmployeesDropdown] = useState(false);
             const [showSidebarResourceDropdown, setShowSidebarResourceDropdown] = useState(false);
+            // Меню «Аукцион смен» у суперадмина: отдел — «СЗоВ» или «Тез КЦ» (#124).
+            const [showSidebarAuctionDropdown, setShowSidebarAuctionDropdown] = useState(false);
             // Селектор отдела над меню (только у админов). Пустая строка —
             // «Все отделы», то есть поведение сайдбара как до селектора.
             const [showSidebarDeptFilter, setShowSidebarDeptFilter] = useState(false);
@@ -45699,6 +45704,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const sidebarAccountRef = useRef(null);
             const sidebarEmployeesRef = useRef(null);
             const sidebarResourceRef = useRef(null);
+            const sidebarAuctionRef = useRef(null);
             const sidebarDeptFilterRef = useRef(null);
             const sidebarMenuScrollRef = useRef(null);
             /* Поиск по разделам — рядом с колоколом, как просил владелец.
@@ -45712,10 +45718,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const sidebarMenuEmptyRef = useRef(null);
             const [employeesDropdownPos, setEmployeesDropdownPos] = useState({ top: 0, left: 0 });
             const [resourceDropdownPos, setResourceDropdownPos] = useState({ top: 0, left: 0 });
+            const [auctionDropdownPos, setAuctionDropdownPos] = useState({ top: 0, left: 0 });
             const [modalError, setModalError] = useState("");
             const [isClosing, setIsClosing] = useState(false);
             const [isEmployeesClosing, setIsEmployeesClosing] = useState(false);
             const [isResourceClosing, setIsResourceClosing] = useState(false);
+            const [isAuctionClosing, setIsAuctionClosing] = useState(false);
             const [activeTab, setActiveTab] = useState("active");
             const [activeUserTab, setActiveUserTab] = useState("active");
             const [activeAdminTab, setActiveAdminTab] = useState("active");
@@ -46873,6 +46881,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setIsResourceClosing(false);
                 setShowSidebarDeptFilter(false);
                 setIsDeptFilterClosing(false);
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
                 setShowSidebarAccountDropdown(true);
             }
             };
@@ -46900,6 +46910,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setIsResourceClosing(false);
                 setShowSidebarDeptFilter(false);
                 setIsDeptFilterClosing(false);
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
                 setShowSidebarEmployeesDropdown(true);
             }
             };
@@ -46929,7 +46941,40 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setIsEmployeesClosing(false);
                 setShowSidebarDeptFilter(false);
                 setIsDeptFilterClosing(false);
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
                 setShowSidebarResourceDropdown(true);
+            }
+            };
+
+            // «Аукцион смен» у суперадмина открывает выбор отдела — СЗоВ или Тез КЦ (#124),
+            // тем же выпадающим меню, что «Расчет ресурсов» с линией и чатом.
+            const handleToggleAuctionDropdown = (forceClose = null) => {
+            if (forceClose === true) {
+                setIsAuctionClosing(true);
+                setTimeout(() => {
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
+                }, 200);
+                return;
+            }
+
+            if (showSidebarAuctionDropdown) {
+                setIsAuctionClosing(true);
+                setTimeout(() => {
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
+                }, 200);
+            } else {
+                setShowSidebarAccountDropdown(false);
+                setIsClosing(false);
+                setShowSidebarEmployeesDropdown(false);
+                setIsEmployeesClosing(false);
+                setShowSidebarResourceDropdown(false);
+                setIsResourceClosing(false);
+                setShowSidebarDeptFilter(false);
+                setIsDeptFilterClosing(false);
+                setShowSidebarAuctionDropdown(true);
             }
             };
 
@@ -46962,6 +47007,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setIsEmployeesClosing(false);
                 setShowSidebarResourceDropdown(false);
                 setIsResourceClosing(false);
+                setShowSidebarAuctionDropdown(false);
+                setIsAuctionClosing(false);
                 setShowSidebarDeptFilter(true);
             }
             };
@@ -47647,6 +47694,26 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setShiftAuctionInitialPeriod(null);
             }, []);
 
+            /* Пункт меню «Аукцион смен → СЗоВ / Тез КЦ» у суперадмина (#124). Просьба
+               несёт nonce: раздел, уже открытый на другом отделе, переключится, а свежий
+               откроется сразу на выбранном. Новая вкладка просьбы не получит — она
+               откроется на сохранённом направлении, поэтому туда и кладём направление
+               выбранного отдела. */
+            const openShiftAuctionDepartment = useCallback((event, departmentCode) => {
+                const code = String(departmentCode || '').trim().toLowerCase();
+                if (!code) return;
+                if (isNewTabNavigationEvent(event)) {
+                    event?.preventDefault?.();
+                    event?.stopPropagation?.();
+                    const direction = auctionDirectionForDepartment(code);
+                    if (direction) storeAuctionDirection(direction);
+                    openAppViewInNewTab('shift_auction');
+                    return;
+                }
+                setShiftAuctionInitialPeriod({ department: code, nonce: Date.now() });
+                navigateToView('shift_auction');
+            }, [navigateToView, openAppViewInNewTab]);
+
             useEffect(() => {
                 if (view !== 'shift_auction' && shiftAuctionInitialPeriod) {
                     setShiftAuctionInitialPeriod(null);
@@ -47699,10 +47766,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     handleToggleDeptFilterDropdown(true);
                 }
                 }
+                if (sidebarAuctionRef.current && !sidebarAuctionRef.current.contains(e.target)) {
+                if (showSidebarAuctionDropdown) {
+                    handleToggleAuctionDropdown(true);
+                }
+                }
             }
             document.addEventListener("mousedown", handleClickOutside);
             return () => document.removeEventListener("mousedown", handleClickOutside);
-            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown, showSidebarResourceDropdown, showSidebarDeptFilter]);
+            }, [showSidebarAccountDropdown, showSidebarEmployeesDropdown, showSidebarResourceDropdown, showSidebarDeptFilter, showSidebarAuctionDropdown]);
 
             useEffect(() => {
                 if (!showSidebarEmployeesDropdown && !isEmployeesClosing) return;
@@ -47812,6 +47884,57 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     ro?.disconnect();
                 };
             }, [showSidebarResourceDropdown, isResourceClosing, isMobileShell]);
+
+            // Меню «Аукцион смен» — тот же position:fixed, что у «Расчета ресурсов»:
+            // координаты пересчитываются при скролле меню, ресайзе и сворачивании сайдбара.
+            useEffect(() => {
+                if (!showSidebarAuctionDropdown && !isAuctionClosing) return;
+
+                let rafId = null;
+                const updatePos = () => {
+                    const rect = sidebarAuctionRef.current?.getBoundingClientRect();
+                    if (!rect) return;
+                    // То же, что у «Учета сотрудников»: в шторке — вниз под пункт.
+                    const nextTop = isMobileShell ? rect.bottom + 4 : rect.top;
+                    const nextLeft = isMobileShell ? rect.left : rect.right + 8;
+                    setAuctionDropdownPos((prev) => {
+                        if (prev.top === nextTop && prev.left === nextLeft) return prev;
+                        return { top: nextTop, left: nextLeft };
+                    });
+                };
+
+                const scheduleUpdatePos = () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    rafId = requestAnimationFrame(updatePos);
+                };
+
+                scheduleUpdatePos();
+
+                const scrollEl = sidebarMenuScrollRef.current;
+                scrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                // В шторке прокручивается весь лист, а не список разделов.
+                const sheetScrollEl = scrollEl?.parentElement;
+                sheetScrollEl?.addEventListener('scroll', scheduleUpdatePos, { passive: true });
+                window.addEventListener('resize', scheduleUpdatePos);
+
+                const sidebarEl = sidebarAuctionRef.current?.closest('.sidebar');
+                sidebarEl?.addEventListener('transitionend', scheduleUpdatePos);
+
+                let ro = null;
+                if (typeof ResizeObserver !== 'undefined') {
+                    ro = new ResizeObserver(scheduleUpdatePos);
+                    if (sidebarAuctionRef.current) ro.observe(sidebarAuctionRef.current);
+                }
+
+                return () => {
+                    if (rafId) cancelAnimationFrame(rafId);
+                    scrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    sheetScrollEl?.removeEventListener('scroll', scheduleUpdatePos);
+                    window.removeEventListener('resize', scheduleUpdatePos);
+                    sidebarEl?.removeEventListener('transitionend', scheduleUpdatePos);
+                    ro?.disconnect();
+                };
+            }, [showSidebarAuctionDropdown, isAuctionClosing, isMobileShell]);
 
             function TrainingModal({
                 isOpen,
@@ -55254,6 +55377,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 handleToggleDropdown,
                 handleToggleEmployeesDropdown,
                 handleToggleResourceDropdown,
+                handleToggleAuctionDropdown,
                 handleToggleDeptFilterDropdown,
                 handleSelectSidebarDept,
                 handleLogout,
@@ -55270,6 +55394,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const stableSidebarHandleToggleDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleDropdown(arg), []);
             const stableSidebarHandleToggleEmployeesDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleEmployeesDropdown(arg), []);
             const stableSidebarHandleToggleResourceDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleResourceDropdown(arg), []);
+            const stableSidebarHandleToggleAuctionDropdown = useCallback((arg) => sidebarLatestRef.current.handleToggleAuctionDropdown(arg), []);
             const stableSidebarHandleToggleDeptFilter = useCallback((arg) => sidebarLatestRef.current.handleToggleDeptFilterDropdown(arg), []);
             const stableSidebarSelectDept = useCallback((code) => sidebarLatestRef.current.handleSelectSidebarDept(code), []);
             const stableSidebarHandleLogout = useCallback(() => sidebarLatestRef.current.handleLogout(), []);
@@ -56617,6 +56742,49 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </SidebarDeptScope>
                                             )}
                                             <SidebarDeptScope section="shift_auction" activeCode={activeDeptCode}>
+                                                {/* У суперадмина аукционов два — СЗоВ и Тез КЦ (#124): пункт открывает
+                                                    выбор отдела, как «Расчет ресурсов» — линию и чат. У админов отдел
+                                                    один, и пункт ведёт в раздел сразу, как раньше. */}
+                                                {isSuperAdmin ? (
+                                                <li className="relative" ref={sidebarAuctionRef}>
+                                                    <button
+                                                        onClick={stableSidebarHandleToggleAuctionDropdown}
+                                                        className={`group w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 relative ${view === 'shift_auction' ? 'bg-blue-700' : ''}`}
+                                                        aria-expanded={showSidebarAuctionDropdown}
+                                                        aria-haspopup="menu"
+                                                    >
+                                                        <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
+                                                        <FaIcon className="fas fa-chevron-right ml-auto opacity-0 transform translate-x-2 transition-all duration-300 group-hover:opacity-100 group-hover:translate-x-0 sidebar-text"></FaIcon>
+                                                    </button>
+
+                                                    {(showSidebarAuctionDropdown || isAuctionClosing) && (
+                                                        <div
+                                                            role="menu"
+                                                            aria-label="Отдел аукциона"
+                                                            className={`origin-top bg-white/95 text-black backdrop-blur-sm rounded-md shadow-lg border border-gray-200
+                                                            w-56
+                                                            ${showSidebarAuctionDropdown && !isAuctionClosing ? "animate-dropdown" : "animate-dropdown-reverse"}`}
+                                                            style={{ position: 'fixed', top: auctionDropdownPos.top, left: auctionDropdownPos.left, zIndex: 9999 }}
+                                                        >
+                                                            {AUCTION_DEPARTMENTS.map((department, index) => (
+                                                                <React.Fragment key={department.code}>
+                                                                    {index > 0 ? <div className="border-t border-gray-200" /> : null}
+                                                                    <button
+                                                                        role="menuitem"
+                                                                        onClick={(e) => {
+                                                                            openShiftAuctionDepartment(e, department.code);
+                                                                            stableSidebarHandleToggleAuctionDropdown(true);
+                                                                        }}
+                                                                        className={`w-full text-left px-4 py-2 hover:bg-gray-100 text-black ${view === 'shift_auction' && shiftAuctionDepartmentShown === department.code ? 'bg-gray-100 font-medium' : ''}`}
+                                                                    >
+                                                                        <FaIcon className="fas fa-building mr-2"></FaIcon> {department.label}
+                                                                    </button>
+                                                                </React.Fragment>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </li>
+                                                ) : (
                                                 <li>
                                                     <button
                                                         onClick={(e) => handleSidebarViewNavigation(e, 'shift_auction')}
@@ -56625,6 +56793,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         <FaIcon className="fas fa-gavel" /> <span className="sidebar-text">Аукцион смен</span>
                                                     </button>
                                                 </li>
+                                                )}
                                             </SidebarDeptScope>
                                             <SidebarDeptScope section="trainings" activeCode={activeDeptCode}>
                                                 <li>
@@ -58052,10 +58221,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 showSidebarAccountDropdown,
                 showSidebarEmployeesDropdown,
                 showSidebarResourceDropdown,
+                showSidebarAuctionDropdown,
                 showSidebarDeptFilter,
                 isClosing,
                 isEmployeesClosing,
                 isResourceClosing,
+                isAuctionClosing,
                 isDeptFilterClosing,
                 // Селектор отдела: список отделов и выбранный код решают,
                 // какие пункты меню вообще отрисованы.
@@ -58063,6 +58234,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 sidebarDeptFilter,
                 employeesDropdownPos,
                 resourceDropdownPos,
+                auctionDropdownPos,
+                shiftAuctionDepartmentShown,
+                openShiftAuctionDepartment,
                 pendingSurveysBadgeCount,
                 tasksActionRequiredCount,
                 eventsUnreadCount,
@@ -58093,6 +58267,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 stableSidebarHandleToggleDropdown,
                 stableSidebarHandleToggleEmployeesDropdown,
                 stableSidebarHandleToggleResourceDropdown,
+                stableSidebarHandleToggleAuctionDropdown,
                 stableSidebarHandleToggleDeptFilter,
                 stableSidebarSelectDept,
                 stableSidebarHandleLogout,
@@ -58874,6 +59049,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     onOpenResourceGeneration={openResourceScheduleGeneration}
                                     initialPeriod={shiftAuctionInitialPeriod}
                                     onInitialPeriodApplied={clearShiftAuctionInitialPeriod}
+                                    onDepartmentShown={setShiftAuctionDepartmentShown}
                                 />
                             </Suspense>
                         ))}
