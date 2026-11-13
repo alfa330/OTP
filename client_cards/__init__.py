@@ -15,7 +15,7 @@
     привязка       номер телефона ↔ аккаунт, многие ко многим (client_card_phone_links)
     обращение      заполненная карточка одного звонка (client_cards) с причинами
                    (client_card_topics)
-    причина        двухуровневый справочник отдела: категория → подтема
+    причина        дерево причин отдела: основная причина → подтема → подтема подтемы…
                    (client_card_categories)
     запрос         обращение в другой отдел с перепиской (client_card_requests,
                    client_card_request_messages); адресаты — client_card_destinations

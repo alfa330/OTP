@@ -12,7 +12,9 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosBadge, IosSegmented, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import CardDetail from './CardDetail';
-import { REQUEST_TONES, almatyToday, cardAccountText, errorText, fmtWhen, periodPreset, topicLabel } from './cardRules';
+import {
+    REQUEST_TONES, almatyToday, cardAccountText, errorText, flattenReasons, fmtWhen, periodPreset, topicLabel,
+} from './cardRules';
 import { EmptyState, Spinner, StateBadge } from './ui';
 
 const STATE_OPTIONS = [
@@ -79,12 +81,10 @@ export default function JournalTab({ api, departmentId, categories, toast, onOpe
         }
     };
 
+    // Причина любого уровня дерева: выбрали «Запрос» — в журнале и карточки всех его подтем.
     const categoryOptions = useMemo(() => [
         { value: '', label: 'Все причины' },
-        ...(categories || []).flatMap((category) => [
-            { value: String(category.id), label: category.title },
-            ...(category.children || []).map((sub) => ({ value: String(sub.id), label: `${category.title} → ${sub.title}` })),
-        ]),
+        ...flattenReasons(categories).map((item) => ({ value: String(item.id), label: item.label })),
     ], [categories]);
 
     return (

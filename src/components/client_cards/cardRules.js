@@ -81,63 +81,118 @@ export const fmtSize = (bytes) => {
 
 // ─── Причины обращения ───────────────────────────────────────────────────────
 
-/** «Заказы → Не приходят заказы» или просто «Выплаты». */
-export const topicLabel = (topic) => (
-    topic?.sub_title ? `${topic.title} → ${topic.sub_title}` : (topic?.title || '')
-);
+// Причины — дерево любой глубины: основная причина → подтема 1-го уровня → подтема 2-го
+// уровня → … (владелец, 13.11.2026). Оператор выбирает самый глубокий уровень своей ветки.
+// Ветка здесь — массив узлов от основной причины до выбранной: [основная, …, выбранная].
+// В карточке причина хранится парой: category_id — основная, subcategory_id — выбранная
+// подтема любого уровня (null — выбрана сама основная причина, у которой подтем нет).
+
+export const PATH_SEPARATOR = ' → ';
+
+/** «Запрос → Проблема с заказом → Не может завершить заказ» или просто «Выплаты». */
+export const topicLabel = (topic) => {
+    if (Array.isArray(topic?.path) && topic.path.length) return topic.path.join(PATH_SEPARATOR);
+    return topic?.sub_title ? `${topic.title}${PATH_SEPARATOR}${topic.sub_title}` : (topic?.title || '');
+};
 
 const sameTopic = (a, b) => (
     Number(a.category_id) === Number(b.category_id)
     && (a.subcategory_id ?? null) === (b.subcategory_id ?? null)
 );
 
+/** Ветка → причина карточки: идентификаторы для сервера и названия для экрана. */
+export const branchTopic = (branch) => {
+    const titles = branch.map((node) => node.title);
+    return {
+        category_id: branch[0].id,
+        subcategory_id: branch.length > 1 ? branch[branch.length - 1].id : null,
+        title: titles[0],
+        sub_title: titles.slice(1).join(PATH_SEPARATOR) || null,
+        path: titles,
+    };
+};
+
 /** Выбрать причину или снять её повторным нажатием. Возвращает НОВЫЙ список; сверх
  *  предела причина не добавляется (кнопки при этом гаснут — см. canAddTopic). */
-export const toggleTopic = (topics, category, sub = null, limit = 5) => {
-    const next = {
-        category_id: category.id,
-        subcategory_id: sub ? sub.id : null,
-        title: category.title,
-        sub_title: sub ? sub.title : null,
-    };
+export const toggleTopic = (topics, branch, limit = 5) => {
+    const next = branchTopic(branch);
     const list = topics || [];
     if (list.some((item) => sameTopic(item, next))) return list.filter((item) => !sameTopic(item, next));
     return list.length >= limit ? list : [...list, next];
 };
 
-export const isTopicPicked = (topics, categoryId, subId = null) => (
-    (topics || []).some((item) => sameTopic(item, { category_id: categoryId, subcategory_id: subId }))
-);
+export const isTopicPicked = (topics, branch) => {
+    const next = branchTopic(branch);
+    return (topics || []).some((item) => sameTopic(item, next));
+};
 
 export const canAddTopic = (topics, limit = 5) => (topics || []).length < limit;
 
-/** Сколько причин выбрано в категории — цифра на её строке, пока она свёрнута. */
-export const pickedInCategory = (topics, categoryId) => (
-    (topics || []).filter((item) => Number(item.category_id) === Number(categoryId)).length
+/** id причины и всех её подтем любого уровня. */
+export const branchIds = (node) => (
+    [node.id, ...(node.children || []).flatMap(branchIds)]
 );
+
+/** Сколько причин выбрано в ветке — цифра на её строке, пока она свёрнута. */
+export const pickedInBranch = (topics, node) => {
+    const ids = new Set(branchIds(node));
+    return (topics || []).filter((item) => ids.has(item.subcategory_id ?? item.category_id)).length;
+};
 
 /** То, что уходит серверу: только идентификаторы. */
 export const topicsPayload = (topics) => (
     (topics || []).map((item) => ({ category_id: item.category_id, subcategory_id: item.subcategory_id ?? null }))
 );
 
-/** Причины по строке поиска: категория подходит названием (тогда со всеми подтемами)
- *  или хотя бы одной подтемой (тогда только с подходящими). */
+/** Причины по строке поиска: причина подходит названием (тогда со всей своей веткой)
+ *  или чем-то в ветке (тогда только с подходящими подтемами). */
 export const filterCategories = (categories, query) => {
     const needle = String(query || '').trim().toLowerCase();
     if (!needle) return categories || [];
-    const result = [];
-    (categories || []).forEach((category) => {
-        const children = category.children || [];
-        if (String(category.title || '').toLowerCase().includes(needle)) {
-            result.push(category);
-            return;
-        }
-        const matched = children.filter((child) => String(child.title || '').toLowerCase().includes(needle));
-        if (matched.length) result.push({ ...category, children: matched });
+    const pick = (nodes) => (nodes || []).flatMap((node) => {
+        if (String(node.title || '').toLowerCase().includes(needle)) return [node];
+        const children = pick(node.children);
+        return children.length ? [{ ...node, children }] : [];
     });
-    return result;
+    return pick(categories);
 };
+
+/** Сколько всего причин в дереве — всех уровней. */
+export const countReasons = (categories) => (
+    (categories || []).reduce((sum, node) => sum + 1 + countReasons(node.children), 0)
+);
+
+/** Дерево причин плоским списком для фильтра: [{id, label: полный путь, depth}]. */
+export const flattenReasons = (categories, parents = []) => (
+    (categories || []).flatMap((node) => {
+        const titles = [...parents, node.title];
+        return [{ id: node.id, label: titles.join(PATH_SEPARATOR), depth: titles.length },
+            ...flattenReasons(node.children, titles)];
+    })
+);
+
+/** Подпись уровня дерева: 1 — основная причина, дальше — подтемы по уровням. */
+export const reasonLevelTitle = (level) => (
+    level <= 1 ? 'Основная причина' : `Подтема ${level - 1}-го уровня`
+);
+
+/** Дерево причин отчёта → строки таблицы: [{key, title, count, depth, note, hasChildren, parentKey}].
+ *  У причины с подтемами под ней идут её подтемы и, если выбирали её саму, строка
+ *  «без подтемы» (own) — иначе числа подтем не сходились бы с числом причины. */
+export const reportReasonRows = (categories, isOpen, depth = 0) => (
+    (categories || []).flatMap((node) => {
+        const children = node.children || [];
+        const row = { key: String(node.id), id: node.id, title: node.title, count: node.count, depth,
+            hasChildren: children.length > 0, open: children.length > 0 && isOpen(node.id) };
+        if (!row.open) return [row];
+        const rows = [row, ...reportReasonRows(children, isOpen, depth + 1)];
+        if (node.own > 0) {
+            rows.push({ key: `${node.id}:own`, id: null, title: 'без подтемы', count: node.own, depth: depth + 1,
+                hasChildren: false, open: false, muted: true });
+        }
+        return rows;
+    })
+);
 
 // ─── Аккаунт ─────────────────────────────────────────────────────────────────
 

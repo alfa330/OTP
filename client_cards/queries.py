@@ -156,42 +156,51 @@ def user_department_id(cursor, user_id):
 # ─── Причины обращения ───────────────────────────────────────────────────────
 
 def categories(cursor, department_id, *, include_inactive=False):
-    """Справочник причин деревом: [{id, title, is_active, children: [...]}].
+    """Справочник причин деревом любой глубины: [{id, title, is_active, used, children: [...]}].
 
-    used — в скольких обращениях причина стоит: скрытую с обращениями удалить
-    нельзя, и редактор говорит это до нажатия, а не ошибкой после.
+    used — в скольких обращениях стоит причина или любая её подтема: такую нельзя
+    удалить, только скрыть, и редактор говорит это до нажатия, а не ошибкой после.
+    Без include_inactive (оператору) скрытая причина выпадает вместе со всей веткой.
     """
     cursor.execute("""
         SELECT c.id, c.parent_id, c.title, c.is_active, c.position,
-               (SELECT COUNT(*) FROM client_card_topics t
-                 WHERE t.category_id = c.id OR t.subcategory_id = c.id)
+               (SELECT COUNT(*) FROM client_card_topics t WHERE t.subcategory_id = c.id)
+               + (SELECT COUNT(*) FROM client_card_topics t
+                   WHERE t.category_id = c.id AND t.subcategory_id IS NULL)
           FROM client_card_categories c
-         WHERE c.department_id = %s AND (%s OR c.is_active)
+         WHERE c.department_id = %s
          ORDER BY c.position, c.id
-    """, (int(department_id), bool(include_inactive)))
-    roots, by_id, children = [], {}, []
+    """, (int(department_id),))
+    nodes, parents = {}, []
     for cat_id, parent_id, title, is_active, position, used in cursor.fetchall():
-        node = {'id': int(cat_id), 'title': title, 'is_active': bool(is_active),
-                'position': int(position), 'used': int(used or 0)}
+        nodes[int(cat_id)] = {'id': int(cat_id), 'title': title, 'is_active': bool(is_active),
+                              'position': int(position), 'used': int(used or 0), 'children': []}
+        parents.append((int(cat_id), int(parent_id) if parent_id is not None else None))
+    roots = []
+    for cat_id, parent_id in parents:
         if parent_id is None:
-            node['children'] = []
-            by_id[node['id']] = node
-            roots.append(node)
-        else:
-            children.append((int(parent_id), node))
-    for parent_id, node in children:
-        parent = by_id.get(parent_id)
-        # Подтема скрытой категории оператору не нужна; в редакторе категория есть всегда.
-        if parent is not None:
-            parent['children'].append(node)
-    return roots
+            roots.append(nodes[cat_id])
+        elif parent_id in nodes:
+            nodes[parent_id]['children'].append(nodes[cat_id])
+
+    def total(node):
+        node['used'] += sum(total(child) for child in node['children'])
+        return node['used']
+
+    def visible(level):
+        return [dict(node, children=visible(node['children'])) for node in level if node['is_active']]
+
+    for root in roots:
+        total(root)
+    return roots if include_inactive else visible(roots)
 
 
 def category_index(cursor, department_id):
     """{id: {'parent_id', 'is_active', 'has_children', 'title'}} — для проверки выбора причин.
 
-    has_children считает только видимые подтемы: категорию, у которой все подтемы
-    скрыты, выбирают саму.
+    Причины всех уровней одним словарём: путь и ветку по нему строит rules
+    (category_path, category_subtree). has_children считает только видимые подтемы:
+    причину, у которой все подтемы скрыты, выбирают саму.
     """
     cursor.execute("""
         SELECT c.id, c.parent_id, c.is_active, c.title,
@@ -245,14 +254,30 @@ def update_category(cursor, category_id, fields, *, now):
                    params)
 
 
+# Причина и все её подтемы любого уровня — строками tree(id); параметр %(node)s.
+_SUBTREE_SQL = """
+    WITH RECURSIVE tree AS (
+        SELECT id FROM client_card_categories WHERE id = %(node)s
+        UNION ALL
+        SELECT k.id FROM client_card_categories k JOIN tree ON k.parent_id = tree.id
+    )
+"""
+
+
+def category_subtree_ids(cursor, category_id):
+    """id причины и всех её подтем любого уровня."""
+    cursor.execute(_SUBTREE_SQL + "SELECT id FROM tree", {'node': int(category_id)})
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
 def category_in_use(cursor, category_id):
-    """Стоит ли причина (или её подтема) хоть в одном обращении."""
-    cursor.execute("""
+    """Стоит ли причина (или её подтема любого уровня) хоть в одном обращении."""
+    cursor.execute(_SUBTREE_SQL + """
         SELECT EXISTS (
             SELECT 1 FROM client_card_topics t
-             WHERE t.category_id = %(id)s OR t.subcategory_id = %(id)s
-                OR t.subcategory_id IN (SELECT id FROM client_card_categories WHERE parent_id = %(id)s))
-    """, {'id': int(category_id)})
+             WHERE t.category_id IN (SELECT id FROM tree)
+                OR t.subcategory_id IN (SELECT id FROM tree))
+    """, {'node': int(category_id)})
     return bool(cursor.fetchone()[0])
 
 
@@ -416,27 +441,56 @@ def _card(row):
     return item
 
 
+def _category_paths(cursor, node_ids):
+    """{id причины: [названия от основной причины до неё]} — одним запросом на все причины."""
+    ids = sorted(node_ids)
+    if not ids:
+        return {}
+    cursor.execute("""
+        WITH RECURSIVE up AS (
+            SELECT k.id AS node, k.parent_id, k.title, 0 AS height
+              FROM client_card_categories k WHERE k.id = ANY(%s)
+            UNION ALL
+            SELECT up.node, p.parent_id, p.title, up.height + 1
+              FROM up JOIN client_card_categories p ON p.id = up.parent_id
+        )
+        SELECT node, title FROM up ORDER BY node, height DESC
+    """, (ids,))
+    paths = {}
+    for node, title in cursor.fetchall():
+        paths.setdefault(int(node), []).append(title)
+    return paths
+
+
 def _attach_topics(cursor, cards):
-    """Причины карточек — одним запросом на все: [{category_id, subcategory_id, title, sub_title}]."""
+    """Причины карточек — одним запросом на все.
+
+    [{category_id, subcategory_id, title, sub_title, path}]: path — названия от основной
+    причины до выбранной подтемы; title — основная причина, sub_title — всё, что под ней,
+    одной строкой («Проблема с заказом → Не может завершить заказ») или None.
+    """
     ids = [card['id'] for card in cards]
     for card in cards:
         card['topics'] = []
     if not ids:
         return cards
     cursor.execute("""
-        SELECT t.card_id, t.category_id, t.subcategory_id, c.title, s.title
+        SELECT t.card_id, t.category_id, t.subcategory_id
           FROM client_card_topics t
-          JOIN client_card_categories c ON c.id = t.category_id
-          LEFT JOIN client_card_categories s ON s.id = t.subcategory_id
          WHERE t.card_id = ANY(%s)
          ORDER BY t.card_id, t.position, t.id
     """, (ids,))
+    rows = cursor.fetchall()
+    paths = _category_paths(cursor, {int(row[2] if row[2] is not None else row[1]) for row in rows})
     by_card = {card['id']: card for card in cards}
-    for card_id, category_id, subcategory_id, title, sub_title in cursor.fetchall():
+    for card_id, category_id, subcategory_id in rows:
+        titles = paths.get(int(subcategory_id if subcategory_id is not None else category_id)) or []
         by_card[int(card_id)]['topics'].append({
             'category_id': int(category_id),
             'subcategory_id': int(subcategory_id) if subcategory_id is not None else None,
-            'title': title, 'sub_title': sub_title,
+            'title': titles[0] if titles else None,
+            'sub_title': rules.PATH_SEPARATOR.join(titles[1:]) or None,
+            'path': titles,
         })
     return cards
 
@@ -523,7 +577,10 @@ def account_names(cursor, account_ids):
 
 def _search_clause(search, params):
     """Условие поиска по обращениям: цифры — номер телефона или ID аккаунта, слова —
-    комментарий, причина, имя аккаунта и оператора."""
+    комментарий, причина, имя аккаунта и оператора.
+
+    Причина ищется по названию любого уровня: «проблема с заказом» найдёт и карточки с её
+    подтемами. Запросу нужен %(dep)s — отдел, чей справочник причин смотреть."""
     text = str(search or '').strip()
     if not text:
         return ''
@@ -540,9 +597,15 @@ def _search_clause(search, params):
                     OR EXISTS (SELECT 1 FROM client_card_accounts sa
                                 WHERE sa.id = c.account_id AND sa.full_name ILIKE %(search_text)s)
                     OR EXISTS (SELECT 1 FROM client_card_topics st
-                                 JOIN client_card_categories sc
-                                   ON sc.id IN (st.category_id, st.subcategory_id)
-                                WHERE st.card_id = c.id AND sc.title ILIKE %(search_text)s))"""
+                                WHERE st.card_id = c.id
+                                  AND COALESCE(st.subcategory_id, st.category_id) IN (
+                                      WITH RECURSIVE hit AS (
+                                          SELECT sc.id FROM client_card_categories sc
+                                           WHERE sc.department_id = %(dep)s AND sc.title ILIKE %(search_text)s
+                                          UNION
+                                          SELECT k.id FROM client_card_categories k
+                                            JOIN hit ON k.parent_id = hit.id)
+                                      SELECT id FROM hit)))"""
 
 
 def history(cursor, department_id, *, account_id=None, phone=None, search=None, exclude_id=None,
@@ -583,6 +646,7 @@ def journal(cursor, department_id, *, operator_id=None, date_from=None, date_to=
     """Журнал обращений отдела для портала. operator_id — «только мои» у оператора.
 
     state: done — заполненные, pending — не заполненные (звонок кончился или завис).
+    category_id — причина любого уровня: в журнал попадают и карточки с её подтемами.
     """
     params = {'dep': int(department_id), 'limit': int(limit) + 1}
     where = ["c.department_id = %(dep)s", "c.status <> 'void'"]
@@ -596,10 +660,10 @@ def journal(cursor, department_id, *, operator_id=None, date_from=None, date_to=
         params['date_to'] = date_to
         where.append("c.created_at < %(date_to)s")
     if category_id:
-        params['category'] = int(category_id)
+        params['nodes'] = category_subtree_ids(cursor, category_id)
         where.append("""EXISTS (SELECT 1 FROM client_card_topics jt
                                  WHERE jt.card_id = c.id
-                                   AND %(category)s IN (jt.category_id, jt.subcategory_id))""")
+                                   AND COALESCE(jt.subcategory_id, jt.category_id) = ANY(%(nodes)s))""")
     if state == 'done':
         where.append("c.status = 'done'")
     elif state == 'pending':
@@ -980,6 +1044,8 @@ ALERT_LOCK_NAMESPACE = 'client_cards:alerts'
 # «Один человек» в счёте обращений: аккаунт, а без него — номер. Пять звонков одного
 # водителя — один человек, и волной это не считается.
 _PERSON = "COALESCE('a' || c.account_id::text, 'p' || c.phone)"
+# Причина, выбранная в карточке: подтема любого уровня, а без неё — сама основная причина.
+_CHOSEN = "COALESCE(t.subcategory_id, t.category_id)"
 
 
 def lock_alerts(cursor, department_id):
@@ -988,72 +1054,50 @@ def lock_alerts(cursor, department_id):
     cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s), %s)", (ALERT_LOCK_NAMESPACE, int(department_id)))
 
 
-def alert_counts(cursor, department_id, *, since, until):
-    """Сколько РАЗНЫХ людей обратилось по каждой причине за окно.
+def alert_counts(cursor, department_id, index, *, since, until):
+    """Сколько РАЗНЫХ людей обратилось по каждой причине за окно: {id причины: число}.
 
     Человек — аккаунт, а без него номер: пять звонков одного водителя — один человек.
-    Возвращает {(category_id, subcategory_id | None): count} по подтемам и {category_id:
-    count} по категориям целиком (разные люди на всю категорию, а не сумма подтем).
-    Считаются заполненные карточки: у незаполненной причины ещё нет.
+    Причины — всех уровней (index — category_index отдела): у подтемы её люди, у причины
+    над ней — разные люди на всю ветку, а не сумма подтем. Считаются заполненные
+    карточки: у незаполненной причины ещё нет.
     """
-    params = {'dep': int(department_id), 'since': since, 'until': until}
-    # GROUPING(...) = 1 у строки-итога по категории: её не спутать со строкой «категория
-    # выбрана без подтемы», где подтема тоже NULL.
     cursor.execute("""
-        SELECT t.category_id, t.subcategory_id, GROUPING(t.subcategory_id),
-               COUNT(DISTINCT """ + _PERSON + """)
+        SELECT DISTINCT """ + _CHOSEN + """, """ + _PERSON + """
           FROM client_cards c
           JOIN client_card_topics t ON t.card_id = c.id
          WHERE c.department_id = %(dep)s AND c.status = 'done'
            AND c.created_at >= %(since)s AND c.created_at <= %(until)s
-         GROUP BY GROUPING SETS ((t.category_id, t.subcategory_id), (t.category_id))
-    """, params)
-    leaves, roots = {}, {}
-    for category_id, subcategory_id, is_total, count in cursor.fetchall():
-        if is_total:
-            roots[int(category_id)] = int(count)
-        elif subcategory_id is not None:
-            leaves[(int(category_id), int(subcategory_id))] = int(count)
-    return leaves, roots
+    """, {'dep': int(department_id), 'since': since, 'until': until})
+    people = rules.rollup_people([(int(node), person) for node, person in cursor.fetchall()], index)
+    return {node: len(group) for node, group in people.items()}
 
 
-def alert_baseline(cursor, department_id, *, until, window_min, days):
-    """Сколько людей обычно обращается по причине в то же окно часов.
+def alert_baseline(cursor, department_id, index, *, until, window_min, days):
+    """Сколько людей обычно обращается по причине в то же окно часов: {id причины: среднее}.
 
     Среднее по `days` прошлым дням: окно той же длины, кончающееся в тот же час и
     минуту. Дни без обращений считаются нулём — причина, по которой звонят раз в
-    неделю, не должна выглядеть «обычно по пять». Тот же вид ответа, что у
-    alert_counts: (по подтемам, по категориям).
+    неделю, не должна выглядеть «обычно по пять». Уровни — как у alert_counts.
     """
-    params = {'dep': int(department_id), 'until': until, 'window': int(window_min), 'days': int(days)}
     cursor.execute("""
-        WITH slots AS (
-            SELECT %(until)s::timestamp - (g * interval '1 day') AS slot_until
-              FROM generate_series(1, %(days)s) AS g
-        ),
-        per_slot AS (
-            SELECT t.category_id, t.subcategory_id, GROUPING(t.subcategory_id) AS is_total,
-                   COUNT(DISTINCT """ + _PERSON + """) AS people
-              FROM slots s
-              JOIN client_cards c
-                ON c.department_id = %(dep)s AND c.status = 'done'
-               AND c.created_at >= s.slot_until - (%(window)s * interval '1 minute')
-               AND c.created_at < s.slot_until
-              JOIN client_card_topics t ON t.card_id = c.id
-             GROUP BY GROUPING SETS ((s.slot_until, t.category_id, t.subcategory_id),
-                                     (s.slot_until, t.category_id))
-        )
-        SELECT category_id, subcategory_id, is_total, SUM(people)::float / %(days)s
-          FROM per_slot
-         GROUP BY category_id, subcategory_id, is_total
-    """, params)
-    leaves, roots = {}, {}
-    for category_id, subcategory_id, is_total, average in cursor.fetchall():
-        if is_total:
-            roots[int(category_id)] = float(average or 0)
-        elif subcategory_id is not None:
-            leaves[(int(category_id), int(subcategory_id))] = float(average or 0)
-    return leaves, roots
+        SELECT DISTINCT g, """ + _CHOSEN + """, """ + _PERSON + """
+          FROM generate_series(1, %(days)s) AS g
+          JOIN client_cards c
+            ON c.department_id = %(dep)s AND c.status = 'done'
+           AND c.created_at >= %(until)s::timestamp - (g * interval '1 day')
+                               - (%(window)s * interval '1 minute')
+           AND c.created_at < %(until)s::timestamp - (g * interval '1 day')
+          JOIN client_card_topics t ON t.card_id = c.id
+    """, {'dep': int(department_id), 'until': until, 'window': int(window_min), 'days': int(days)})
+    slots = {}
+    for slot, node, person in cursor.fetchall():
+        slots.setdefault(slot, []).append((int(node), person))
+    totals = {}
+    for rows in slots.values():
+        for node, group in rules.rollup_people(rows, index).items():
+            totals[node] = totals.get(node, 0) + len(group)
+    return {node: total / float(days) for node, total in totals.items()}
 
 
 def last_alerts(cursor, department_id, *, day_start):
@@ -1071,32 +1115,43 @@ def last_alerts(cursor, department_id, *, day_start):
             for row in cursor.fetchall()}
 
 
-def alert_breakdown(cursor, department_id, node_id, *, since, until):
-    """Города и подтемы волны — подробности для сообщения руководителю."""
-    params = {'dep': int(department_id), 'node': int(node_id), 'since': since, 'until': until}
+ALERT_BREAKDOWN_LIMIT = 5
+
+
+def alert_breakdown(cursor, department_id, node_id, index, *, since, until):
+    """Города и подтемы волны — подробности для сообщения руководителю.
+
+    Города — по всей ветке причины; подтемы — её следующий уровень, у каждой люди всей
+    её ветки. У причины без подтем список подтем пуст.
+    """
+    children = rules.category_children(index)
+    node_id = int(node_id)
     cursor.execute("""
-        SELECT NULLIF(c.city, ''), COUNT(DISTINCT """ + _PERSON + """) AS people
+        SELECT DISTINCT """ + _CHOSEN + """, """ + _PERSON + """, NULLIF(c.city, '')
           FROM client_cards c
           JOIN client_card_topics t ON t.card_id = c.id
          WHERE c.department_id = %(dep)s AND c.status = 'done'
            AND c.created_at >= %(since)s AND c.created_at <= %(until)s
-           AND %(node)s IN (t.category_id, t.subcategory_id)
-         GROUP BY 1 ORDER BY people DESC, 1 LIMIT 5
-    """, params)
-    cities = [{'city': row[0], 'count': int(row[1])} for row in cursor.fetchall()]
-    # Подтемы — только когда узел сам категория: у подтемы их нет.
-    cursor.execute("""
-        SELECT s.title, COUNT(DISTINCT """ + _PERSON + """) AS people
-          FROM client_cards c
-          JOIN client_card_topics t ON t.card_id = c.id
-          JOIN client_card_categories s ON s.id = t.subcategory_id
-         WHERE c.department_id = %(dep)s AND c.status = 'done'
-           AND c.created_at >= %(since)s AND c.created_at <= %(until)s
-           AND t.category_id = %(node)s
-         GROUP BY 1 ORDER BY people DESC, 1 LIMIT 5
-    """, params)
-    subtopics = [{'title': row[0], 'count': int(row[1])} for row in cursor.fetchall()]
-    return {'cities': cities, 'subtopics': subtopics}
+           AND """ + _CHOSEN + """ = ANY(%(nodes)s)
+    """, {'dep': int(department_id), 'since': since, 'until': until,
+          'nodes': sorted(rules.category_subtree(index, node_id, children))})
+    rows = [(int(node), person, city) for node, person, city in cursor.fetchall()]
+
+    by_city = {}
+    for _node, person, city in rows:
+        by_city.setdefault(city, set()).add(person)
+    # Город не указан — в конец своего числа, как NULL в сортировке базы.
+    cities = sorted(({'city': city, 'count': len(group)} for city, group in by_city.items()),
+                    key=lambda item: (-item['count'], item['city'] is None, item['city'] or ''))
+
+    subtopics = []
+    for child in children.get(node_id, ()):
+        branch = rules.category_subtree(index, child, children)
+        people = {person for node, person, _city in rows if node in branch}
+        if people:
+            subtopics.append({'title': index[child].get('title'), 'count': len(people)})
+    subtopics.sort(key=lambda item: (-item['count'], item['title'] or ''))
+    return {'cities': cities[:ALERT_BREAKDOWN_LIMIT], 'subtopics': subtopics[:ALERT_BREAKDOWN_LIMIT]}
 
 
 def insert_alert(cursor, department_id, node, *, window_min, details, now):
@@ -1150,19 +1205,25 @@ def department_head(cursor, department_id):
 
 
 def alerts_log(cursor, department_id, limit=30):
+    """Последние алерты отдела. title — причина, parent_title — путь до неё («Запрос →
+    Проблема с заказом») или None у основной причины."""
+    index = category_index(cursor, department_id)
     cursor.execute("""
         SELECT a.id, a.kind, a.count, a.baseline, a.threshold, a.window_min, a.sent_at, a.delivered,
-               c.title, p.title
+               a.category_id
           FROM client_card_alerts a
-          JOIN client_card_categories c ON c.id = a.category_id
-          LEFT JOIN client_card_categories p ON p.id = c.parent_id
          WHERE a.department_id = %s
          ORDER BY a.sent_at DESC, a.id DESC
          LIMIT %s
     """, (int(department_id), int(limit)))
-    return [{'id': int(row[0]), 'kind': row[1], 'count': int(row[2]), 'baseline': float(row[3] or 0),
-             'threshold': int(row[4]), 'window_min': int(row[5]), 'sent_at': row[6], 'delivered': bool(row[7]),
-             'title': row[8], 'parent_title': row[9]} for row in cursor.fetchall()]
+    result = []
+    for row in cursor.fetchall():
+        titles = rules.category_titles(index, int(row[8]))
+        result.append({'id': int(row[0]), 'kind': row[1], 'count': int(row[2]), 'baseline': float(row[3] or 0),
+                       'threshold': int(row[4]), 'window_min': int(row[5]), 'sent_at': row[6],
+                       'delivered': bool(row[7]), 'title': titles[-1],
+                       'parent_title': rules.PATH_SEPARATOR.join(titles[:-1]) or None})
+    return result
 
 
 # ─── Отчёт ───────────────────────────────────────────────────────────────────
@@ -1184,14 +1245,38 @@ def _seconds(value):
     return round(float(value), 1) if value is not None else None
 
 
+def reason_tree(rows, index):
+    """[(id выбранной причины, id карточки)] → дерево причин с числом карточек.
+
+    [{id, title, count, own, children: [...]}] на любую глубину. count — карточки с этой
+    причиной или ЛЮБОЙ её подтемой, без двойного счёта; own — из них карточки, где выбрана
+    она сама (подтем у неё тогда не было или они были скрыты). Ветки без обращений в
+    дерево не попадают; на каждом уровне — от частых причин к редким.
+    """
+    cards = rules.rollup_people(rows, index)
+    own = {}
+    for node, _card in set(rows):
+        own[node] = own.get(node, 0) + 1
+    children = rules.category_children(index)
+
+    def level(parent_id):
+        nodes = [{'id': node_id, 'title': index[node_id].get('title'), 'count': len(cards[node_id]),
+                  'own': own.get(node_id, 0), 'children': level(node_id)}
+                 for node_id in children.get(parent_id, ()) if node_id in cards]
+        nodes.sort(key=lambda node: (-node['count'], node['title'] or '', node['id']))
+        return nodes
+
+    return level(None)
+
+
 def report(cursor, department_id, *, date_from, date_to):
-    """Отчёт по обращениям за период [date_from, date_to) — причины, подтемы, города.
+    """Отчёт по обращениям за период [date_from, date_to) — причины всех уровней, города.
 
     Считаются звонки, которые состоялись (не void). В разрезах по причинам и городам —
     заполненные карточки: у незаполненной причины нет, она идёт отдельным числом.
     Карточка с двумя причинами входит в строки обеих, поэтому сумма строк бывает больше
-    числа карточек; число по категории при этом — карточки с ЛЮБОЙ её подтемой, без
-    двойного счёта.
+    числа карточек; число у причины с подтемами при этом — карточки с ЛЮБОЙ её подтемой,
+    без двойного счёта (reason_tree).
     """
     params = {'dep': int(department_id), 'from': date_from, 'to': date_to}
 
@@ -1221,33 +1306,12 @@ def report(cursor, department_id, *, date_from, date_to):
     }
 
     cursor.execute("""
-        SELECT k.id, k.title, s.id, s.title, COUNT(DISTINCT c.id)
+        SELECT DISTINCT """ + _CHOSEN + """, c.id
           FROM client_cards c
           JOIN client_card_topics t ON t.card_id = c.id
-          JOIN client_card_categories k ON k.id = t.category_id
-          LEFT JOIN client_card_categories s ON s.id = t.subcategory_id
-    """ + _PERIOD_WHERE + """ AND c.status = 'done'
-         GROUP BY k.id, k.title, s.id, s.title
-         ORDER BY 5 DESC, s.title NULLS LAST
-    """, params)
-    by_category, categories_list = {}, []
-    for category_id, title, sub_id, sub_title, count in cursor.fetchall():
-        node = by_category.get(category_id)
-        if node is None:
-            node = {'id': int(category_id), 'title': title, 'count': 0, 'subtopics': []}
-            by_category[category_id] = node
-            categories_list.append(node)
-        node['subtopics'].append({'id': int(sub_id) if sub_id is not None else None,
-                                  'title': sub_title, 'count': int(count)})
-    cursor.execute("""
-        SELECT t.category_id, COUNT(DISTINCT c.id)
-          FROM client_cards c
-          JOIN client_card_topics t ON t.card_id = c.id
-    """ + _PERIOD_WHERE + " AND c.status = 'done' GROUP BY t.category_id", params)
-    for category_id, count in cursor.fetchall():
-        if category_id in by_category:
-            by_category[category_id]['count'] = int(count)
-    categories_list.sort(key=lambda node: (-node['count'], node['title'] or ''))
+    """ + _PERIOD_WHERE + " AND c.status = 'done'", params)
+    chosen = [(int(node), int(card)) for node, card in cursor.fetchall()]
+    categories_list = reason_tree(chosen, category_index(cursor, department_id))
 
     # Города — по карточкам с аккаунтом: у отметки «Аккаунта нет» города быть не может, и в
     # строке «город не указан» она сошла бы за аккаунт, которому город забыли поставить.

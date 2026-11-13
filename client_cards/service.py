@@ -468,9 +468,8 @@ class ClientCardsService:
         stored = self._store_uploads(uploads)
         now = self._now()
         topic = card['topics'][0] if card['topics'] else None
-        topic_title = None
-        if topic:
-            topic_title = topic['title'] if not topic['sub_title'] else '%s → %s' % (topic['title'], topic['sub_title'])
+        # Причина в запросе — полным путём: «Запрос → Проблема с заказом → Не может завершить заказ».
+        topic_title = (rules.topic_path_text(topic['path']) or None) if topic else None
         try:
             with self._cursor() as cursor:
                 request_id = queries.create_request(
@@ -789,10 +788,10 @@ class ClientCardsService:
                     return []
                 window = settings['alerts']['window_min']
                 since = now - timedelta(minutes=window)
+                index = queries.category_index(cursor, department_id)
                 for node in picked:
-                    details = queries.alert_breakdown(cursor, department_id, node['id'], since=since, until=now)
-                    if node.get('parent_id') is not None:
-                        details['subtopics'] = []
+                    details = queries.alert_breakdown(cursor, department_id, node['id'], index,
+                                                      since=since, until=now)
                     node.update(details)
                     node['alert_id'] = queries.insert_alert(cursor, department_id, node, window_min=window,
                                                             details=details, now=now)
@@ -822,28 +821,29 @@ class ClientCardsService:
     def _pick_alerts(self, cursor, department_id, alerts, now):
         window = alerts['window_min']
         since = now - timedelta(minutes=window)
-        leaves, roots = queries.alert_counts(cursor, department_id, since=since, until=now)
-        if not leaves and not roots:
+        index = queries.category_index(cursor, department_id)
+        counts = queries.alert_counts(cursor, department_id, index, since=since, until=now)
+        if not counts:
             return []
-        base_leaves, base_roots = queries.alert_baseline(
-            cursor, department_id, until=now, window_min=window, days=rules.ALERT_BASELINE_DAYS)
+        baseline = queries.alert_baseline(
+            cursor, department_id, index, until=now, window_min=window, days=rules.ALERT_BASELINE_DAYS)
         last = queries.last_alerts(cursor, department_id,
                                    day_start=now.replace(hour=0, minute=0, second=0, microsecond=0))
-        index = queries.category_index(cursor, department_id)
-
-        def node(node_id, parent_id, count, baseline):
+        nodes = []
+        # Узлы — причины всех уровней: подтема, причина над ней и так до основной. Внутри
+        # уровня — от большей волны к меньшей: так они и встанут в сообщении.
+        for node_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+            path = rules.category_path(index, node_id)
+            if not path:
+                continue
+            titles = rules.category_titles(index, node_id)
             previous = last.get(node_id) or {}
-            title = (index.get(node_id) or {}).get('title') or 'Причина %s' % node_id
-            parent_title = (index.get(parent_id) or {}).get('title') if parent_id else None
-            return {'id': node_id, 'parent_id': parent_id, 'count': count, 'baseline': baseline,
-                    'title': title, 'parent_title': parent_title,
-                    'last': {'at': previous.get('at'), 'count': previous.get('count')} if previous else None,
-                    'sent_today': previous.get('sent_today') or 0}
-
-        nodes = [node(sub_id, category_id, count, base_leaves.get((category_id, sub_id), 0.0))
-                 for (category_id, sub_id), count in leaves.items()]
-        nodes += [node(category_id, None, count, base_roots.get(category_id, 0.0))
-                  for category_id, count in roots.items()]
+            nodes.append({
+                'id': node_id, 'parent_id': index[node_id]['parent_id'], 'ancestors': path[-2::-1],
+                'count': count, 'baseline': baseline.get(node_id, 0.0),
+                'title': titles[-1], 'parent_title': rules.PATH_SEPARATOR.join(titles[:-1]) or None,
+                'last': {'at': previous.get('at'), 'count': previous.get('count')} if previous else None,
+                'sent_today': previous.get('sent_today') or 0})
         return rules.pick_alerts(nodes, now=now, settings=alerts)
 
     def send_test_alert(self, ctx, department_id):

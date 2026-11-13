@@ -188,6 +188,97 @@ def test_topics_are_checked_against_the_tree():
         rules.normalize_topics([{'category_id': index} for index in range(1, rules.TOPICS_LIMIT + 2)], many)
 
 
+# Дерево из просьбы владельца (13.11.2026): основная причина → подтема 1-го уровня →
+# подтема 2-го уровня. 10 «Запрос» → 11 «Проблема с заказом» → 111, 112; 10 → 12; 20 «Жалоба».
+def _deep(**changes):
+    tree = {
+        10: {'parent_id': None, 'is_active': True, 'has_children': True, 'title': 'Запрос'},
+        11: {'parent_id': 10, 'is_active': True, 'has_children': True, 'title': 'Проблема с заказом'},
+        111: {'parent_id': 11, 'is_active': True, 'has_children': False, 'title': 'Не может завершить заказ'},
+        112: {'parent_id': 11, 'is_active': True, 'has_children': False, 'title': 'Не может отменить заказ'},
+        12: {'parent_id': 10, 'is_active': True, 'has_children': False, 'title': 'Вопрос по оплате'},
+        20: {'parent_id': None, 'is_active': True, 'has_children': False, 'title': 'Жалоба'},
+    }
+    for node_id, fields in changes.items():
+        tree[int(node_id[1:])].update(fields)
+    return tree
+
+
+def test_tree_paths_and_branches():
+    tree = _deep()
+    assert rules.category_path(tree, 111) == [10, 11, 111] and rules.category_path(tree, 20) == [20]
+    assert rules.category_path(tree, 999) is None
+    # Оборванная цепочка и петля — не путь: такую причину выбрать нельзя.
+    assert rules.category_path({1: {'parent_id': 2}}, 1) is None
+    assert rules.category_path({1: {'parent_id': 2}, 2: {'parent_id': 1}}, 1) is None
+    assert rules.category_titles(tree, 111) == ['Запрос', 'Проблема с заказом', 'Не может завершить заказ']
+    assert rules.category_titles(tree, 999) == ['Причина 999']
+    children = rules.category_children(tree)
+    assert sorted(children[None]) == [10, 20] and sorted(children[11]) == [111, 112]
+    assert rules.category_subtree(tree, 10) == {10, 11, 111, 112, 12}
+    assert rules.category_subtree(tree, 11, children) == {11, 111, 112} and rules.category_subtree(tree, 20) == {20}
+
+
+def test_topic_is_the_deepest_level_of_its_branch():
+    tree = _deep()
+    assert rules.normalize_topics([{'category_id': 10, 'subcategory_id': 111}, {'category_id': 10, 'subcategory_id': 12},
+                                   {'category_id': 20}], tree) == [(10, 111), (10, 12), (20, None)]
+    for bad in ([{'category_id': 10}],                         # у основной причины есть подтемы
+                [{'category_id': 10, 'subcategory_id': 11}],   # у подтемы есть свои подтемы
+                [{'category_id': 20, 'subcategory_id': 111}],  # подтема из чужой ветки
+                [{'category_id': 11, 'subcategory_id': 111}],  # ветка названа не с основной причины
+                [{'category_id': 10, 'subcategory_id': 10}]):  # основная причина вместо подтемы
+        with pytest.raises(ValueError):
+            rules.normalize_topics(bad, tree)
+    # Скрыта середина ветки — её подтемы тоже не выбрать.
+    with pytest.raises(ValueError):
+        rules.normalize_topics([{'category_id': 10, 'subcategory_id': 111}], _deep(n11={'is_active': False}))
+    # У причины скрыты все подтемы (has_children считает видимые) — выбирают её саму.
+    assert rules.normalize_topics([{'category_id': 10, 'subcategory_id': 11}],
+                                  _deep(n11={'has_children': False})) == [(10, 11)]
+
+
+def test_people_roll_up_the_branch_once():
+    tree = _deep()
+    people = rules.rollup_people([(111, 'a1'), (112, 'a1'), (112, 'p7'), (12, 'a2'), (20, 'a1')], tree)
+    # Человек с двумя подтемами одной ветки считается у причины над ними один раз.
+    assert {node: len(group) for node, group in people.items()} == {111: 1, 112: 2, 11: 2, 12: 1, 10: 3, 20: 1}
+    assert rules.rollup_people([], tree) == {}
+    # Причины нет в справочнике — считается сама по себе, ничего не роняя.
+    assert rules.rollup_people([(999, 'a1')], tree) == {999: {'a1'}}
+
+
+def test_topic_path_text_fits_the_column():
+    assert rules.topic_path_text(['Запрос', 'Проблема с заказом', 'Не может завершить заказ']) == \
+        'Запрос → Проблема с заказом → Не может завершить заказ'
+    assert rules.topic_path_text(['Выплаты']) == 'Выплаты' and rules.topic_path_text([]) == ''
+    # Не влезает — уходят верхние уровни: самое точное название в конце пути.
+    long = ['А' * 160, 'Б' * 160, 'В' * 160]
+    text = rules.topic_path_text(long)
+    assert len(text) <= rules.REQUEST_TOPIC_LIMIT and text == '… → ' + 'Б' * 160 + ' → ' + 'В' * 160
+    assert rules.topic_path_text(['Г' * 500], limit=40) == 'Г' * 40
+
+
+def test_report_reasons_sheet_rows():
+    from client_cards import report
+    leaf = lambda title, count: {'title': title, 'count': count, 'own': count, 'children': []}
+    tree = [{'title': 'Запрос', 'count': 9, 'own': 0, 'children': [
+        {'title': 'Проблема с заказом', 'count': 7, 'own': 2,
+         'children': [leaf('Не может завершить заказ', 4), leaf('Не может отменить заказ', 1)]},
+        leaf('Вопрос по оплате', 3)]}, leaf('Жалоба', 1)]
+    assert report.reason_rows(tree) == [
+        (['Запрос'], report.ALL_SUBTOPICS, 9),
+        (['Запрос', 'Проблема с заказом'], report.ALL_SUBTOPICS, 7),
+        (['Запрос', 'Проблема с заказом', 'Не может завершить заказ'], None, 4),
+        (['Запрос', 'Проблема с заказом', 'Не может отменить заказ'], None, 1),
+        (['Запрос', 'Проблема с заказом'], report.NO_SUBTOPIC, 2),
+        (['Запрос', 'Вопрос по оплате'], None, 3),
+        (['Жалоба'], None, 1)]
+    assert report.reason_rows([]) == []
+    assert [report.reason_level_title(level) for level in (1, 2, 3)] == [
+        'Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня']
+
+
 # ─── Настройки ───────────────────────────────────────────────────────────────
 
 def test_settings_are_clamped():
@@ -260,6 +351,32 @@ def test_one_wave_is_one_line_in_one_message():
     picked = rules.pick_alerts([_node(2, None, 9), _node(1, None, 6), _node(11, 1, 6)], now=NOW, settings=SETTINGS)
     assert [item['id'] for item in picked] == [11, 2]
     assert rules.pick_alerts([], now=NOW, settings=SETTINGS) == []
+
+
+def test_wave_is_reported_at_its_deepest_level():
+    """Дерево причин любой глубины: о волне пишем один раз — о самом глубоком её уровне."""
+    def node(node_id, ancestors, count, **extra):
+        return dict(_node(node_id, ancestors[0] if ancestors else None, count, **extra), ancestors=ancestors)
+
+    # Волна по подтеме 2-го уровня поднимает и подтему над ней, и основную причину.
+    picked = rules.pick_alerts([node(10, [], 6), node(11, [10], 6), node(111, [11, 10], 6)], now=NOW, settings=SETTINGS)
+    assert [item['id'] for item in picked] == [111]
+    # Рост размазан по подтемам 2-го уровня — пишем о причине над ними, но не об основной.
+    picked = rules.pick_alerts([node(10, [], 6), node(11, [10], 6), node(111, [11, 10], 3), node(112, [11, 10], 3)],
+                               now=NOW, settings=SETTINGS)
+    assert [item['id'] for item in picked] == [11]
+    # Рост размазан по двум веткам — только основная причина.
+    picked = rules.pick_alerts([node(10, [], 6), node(11, [10], 3), node(111, [11, 10], 3), node(12, [10], 3)],
+                               now=NOW, settings=SETTINGS)
+    assert [item['id'] for item in picked] == [10]
+    # По подтеме 2-го уровня идёт пауза — молчит вся цепочка над ней.
+    recent = {'at': NOW - timedelta(minutes=20), 'count': 5}
+    assert rules.pick_alerts([node(10, [], 7), node(11, [10], 7), node(111, [11, 10], 6, last=recent)],
+                             now=NOW, settings=SETTINGS) == []
+    # Соседняя ветка от этой паузы не зависит; самые глубокие — первыми.
+    picked = rules.pick_alerts([node(20, [], 9), node(10, [], 7), node(11, [10], 7),
+                                node(111, [11, 10], 6, last=recent), node(21, [20], 9)], now=NOW, settings=SETTINGS)
+    assert [item['id'] for item in picked] == [21]
 
 
 # ─── Права ───────────────────────────────────────────────────────────────────

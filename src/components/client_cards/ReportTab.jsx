@@ -1,5 +1,6 @@
-/* Отчёт «Карточки клиента» (задача #335, п. 11): причины обращений, подтемы, города,
- * дни и операторы за период — из заполненных карточек, без ручного сбора.
+/* Отчёт «Карточки клиента» (задача #335, п. 11): причины обращений деревом (основная
+ * причина → подтемы всех уровней), города, дни и операторы за период — из заполненных
+ * карточек, без ручного сбора.
  *
  * Каждая доля подписана: от чего она считается, видно в заголовке колонки и под «i».
  * Карточка с двумя причинами входит в строки обеих, поэтому доли причин в сумме бывают
@@ -10,7 +11,9 @@ import { BarChart3, ChevronDown, Download, Loader2 } from 'lucide-react';
 
 import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosHint, iosBtnSecondary, iosCard, iosGroupLabel } from '../ui/ios';
-import { NO_ACCOUNT_LABEL as NO_ACCOUNT, almatyToday, errorText, fmtSeconds, fmtShare, periodPreset } from './cardRules';
+import {
+    NO_ACCOUNT_LABEL as NO_ACCOUNT, almatyToday, errorText, fmtSeconds, fmtShare, periodPreset, reportReasonRows,
+} from './cardRules';
 import { periodPresets } from './JournalTab';
 import { EmptyState, Spinner } from './ui';
 
@@ -29,13 +32,16 @@ const Tile = ({ label, value, sub = '', hint = '', warn = false }) => (
 
 /* Строка разреза: название, число, доля и тонкая полоса доли. Полоса одного цвета —
    это длина, а не оценка. */
-const BarRow = ({ title, count, whole, bold = false, indent = false, onToggle = null, open = false }) => {
+const BarRow = ({ title, count, whole, bold = false, depth = 0, muted = false, tree = false, onToggle = null, open = false }) => {
     const share = whole ? Math.min(100, (count / whole) * 100) : 0;
     const body = (
         <>
-            <span className={`flex min-w-0 items-center gap-1.5 ${indent ? 'pl-5' : ''}`}>
+            {/* Уровень дерева причин — отступом: подтема стоит под своей причиной. */}
+            <span className="flex min-w-0 items-center gap-1.5" style={depth ? { paddingLeft: depth * 20 } : undefined}>
                 {onToggle && <ChevronDown size={14} className={`shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />}
-                <span className={`min-w-0 truncate ${bold ? 'font-medium text-slate-900' : 'text-slate-700'}`}>{title}</span>
+                {/* В дереве причина без подтем держит место стрелки: названия уровня стоят в одну линию. */}
+                {tree && !onToggle && <span className="w-3.5 shrink-0" aria-hidden="true" />}
+                <span className={`min-w-0 truncate ${bold ? 'font-medium text-slate-900' : muted ? 'text-slate-500' : 'text-slate-700'}`}>{title}</span>
             </span>
             <span className="hidden h-1.5 overflow-hidden rounded-full bg-slate-100 sm:block">
                 <span className="block h-full rounded-full bg-slate-400" style={{ width: `${share}%` }} />
@@ -158,22 +164,19 @@ export default function ReportTab({ api, departmentId, toast }) {
                         <section className="space-y-1.5">
                             <div className={iosGroupLabel}>Причины обращений</div>
                             <div className={`${iosCard} overflow-hidden`}>
-                                <TableHead first="Категория и подтема"
-                                           shareHint={`${shareHint} Карточка с двумя причинами входит в строки обеих, поэтому доли в сумме бывают больше 100 %.`} />
+                                <TableHead first="Причина и подтемы"
+                                           shareHint={`${shareHint} Карточка с двумя причинами входит в строки обеих, поэтому доли в сумме бывают больше 100 %. Число у причины с подтемами — карточки с любой её подтемой, без двойного счёта.`} />
                                 {!data.categories.length && <p className="px-4 py-4 text-[13px] text-slate-500">Заполненных карточек за период нет.</p>}
-                                {data.categories.map((category) => {
-                                    const subtopics = category.subtopics.filter((sub) => sub.id !== null || category.subtopics.length > 1);
-                                    const expanded = open.has(category.id);
-                                    return (
-                                        <div key={category.id} className="border-b border-slate-100 last:border-b-0">
-                                            <BarRow title={category.title} count={category.count} whole={done} bold
-                                                    onToggle={subtopics.length ? () => toggle(category.id) : null} open={expanded} />
-                                            {expanded && subtopics.map((sub) => (
-                                                <BarRow key={sub.id ?? 'none'} title={sub.title || 'без подтемы'} count={sub.count} whole={done} indent />
-                                            ))}
-                                        </div>
-                                    );
-                                })}
+                                {/* Дерево причин: ветка раскрывается нажатием, уровень за уровнем. */}
+                                {data.categories.map((category) => (
+                                    <div key={category.id} className="border-b border-slate-100 last:border-b-0">
+                                        {reportReasonRows([category], (id) => open.has(id)).map((row) => (
+                                            <BarRow key={row.key} tree title={row.title} count={row.count} whole={done} depth={row.depth}
+                                                    bold={row.depth === 0} muted={row.muted} open={row.open}
+                                                    onToggle={row.hasChildren ? () => toggle(row.id) : null} />
+                                        ))}
+                                    </div>
+                                ))}
                             </div>
                         </section>
 

@@ -178,7 +178,9 @@ def _people(count):
 def build_alert_message(*, department_name, items, window_min):
     """Одно сообщение руководителю обо всех причинах, по которым обращений стало больше.
 
-    items — [{'kind', 'title', 'parent_title', 'count', 'baseline', 'cities', 'subtopics'}].
+    items — [{'kind', 'title', 'parent_title', 'count', 'baseline', 'cities', 'subtopics'}];
+    parent_title — путь до причины по дереву («Запрос → Проблема с заказом»), subtopics —
+    её следующий уровень.
     Несколько причин — одним сообщением: общий сбой поднимает сразу несколько, и
     пять сообщений подряд об одном и том же — тот самый спам, которого быть не должно.
     """

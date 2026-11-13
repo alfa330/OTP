@@ -18,14 +18,80 @@ import CustomSelect from '../components/ui/CustomSelect';
 import { IosBadge, IosHint, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput } from '../components/ui/ios';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, canAddTopic, errorText, filterCategories, fmtDate, isTopicPicked,
-    looksLikeAccountLink, pickedInCategory, saveLabel, toggleTopic, topicLabel, topicsPayload,
+    NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, canAddTopic, countReasons, errorText, filterCategories, fmtDate,
+    isTopicPicked, looksLikeAccountLink, pickedInBranch, saveLabel, toggleTopic, topicLabel, topicsPayload,
 } from '../components/client_cards/cardRules';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../utils/kazakhstanCities';
 
 const AUTOSAVE_MS = 700;
 // С какого числа причин показывать поиск по ним: короткий список видно и так.
 const SEARCH_FROM = 9;
+
+/* Уровень дерева причин (владелец, 13.11.2026: основная причина → подтема 1-го уровня →
+   подтема 2-го уровня → …). Последний уровень ветки — плитками: их видно разом, выбор в
+   одно нажатие. Уровень, где у причин есть свои подтемы, — строками: ветка раскрывается,
+   причина без подтем отмечается галочкой. На уровне открыта одна ветка; при поиске — все.
+   branch — узлы от основной причины до родителя этого уровня. */
+function ReasonLevel({ nodes, branch = [], openPath, searching, topics, limit, onOpen, onToggle }) {
+    const depth = branch.length;
+    const full = !canAddTopic(topics, limit);
+    if (depth > 0 && nodes.every((node) => !(node.children || []).length)) {
+        return (
+            <div className="flex flex-wrap gap-1.5 px-2.5 pb-2 pt-1">
+                {nodes.map((node) => {
+                    const picked = isTopicPicked(topics, [...branch, node]);
+                    return (
+                        <button key={node.id} type="button" aria-pressed={picked} disabled={!picked && full}
+                                onClick={() => onToggle([...branch, node])}
+                                className={`rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition active:scale-[0.98] disabled:opacity-40 ${
+                                    picked ? 'bg-blue-600 font-medium text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+                            {node.title}
+                        </button>
+                    );
+                })}
+            </div>
+        );
+    }
+    return (
+        <ul className={depth ? 'mb-1 ml-3 space-y-0.5 border-l border-slate-200 pl-1.5' : 'space-y-0.5'}>
+            {nodes.map((node) => {
+                const children = node.children || [];
+                const path = [...branch, node];
+                if (!children.length) {
+                    const picked = isTopicPicked(topics, path);
+                    return (
+                        <li key={node.id}>
+                            <button type="button" aria-pressed={picked} disabled={!picked && full} onClick={() => onToggle(path)}
+                                    className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition disabled:opacity-40 ${
+                                        picked ? 'bg-blue-50 font-medium text-blue-800' : 'text-slate-800 hover:bg-slate-50'}`}>
+                                <span className="min-w-0 truncate">{node.title}</span>
+                                {picked && <Check size={15} className="shrink-0 text-blue-600" />}
+                            </button>
+                        </li>
+                    );
+                }
+                const open = searching || openPath[depth] === node.id;
+                const count = pickedInBranch(topics, node);
+                return (
+                    <li key={node.id}>
+                        <button type="button" aria-expanded={open} onClick={() => onOpen(depth, node.id)}
+                                className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13.5px] text-slate-800 hover:bg-slate-50">
+                            <span className="min-w-0 truncate">{node.title}</span>
+                            <span className="flex shrink-0 items-center gap-1.5">
+                                {count > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] font-semibold tabular-nums text-white">{count}</span>}
+                                <ChevronDown size={15} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+                            </span>
+                        </button>
+                        {open && (
+                            <ReasonLevel nodes={children} branch={path} openPath={openPath} searching={searching}
+                                         topics={topics} limit={limit} onOpen={onOpen} onToggle={onToggle} />
+                        )}
+                    </li>
+                );
+            })}
+        </ul>
+    );
+}
 
 const ORIGIN_HINTS = {
     tez: 'Найден в Тез по этому номеру',
@@ -125,7 +191,8 @@ export default function CallCard({
     const [linkOpen, setLinkOpen] = useState(false);
     const [busy, setBusy] = useState('');
     const [query, setQuery] = useState('');
-    const [expanded, setExpanded] = useState(null);
+    // Раскрытая ветка причин: id по уровням, [основная, подтема 1-го уровня, …].
+    const [openPath, setOpenPath] = useState([]);
     const [composer, setComposer] = useState(false);
 
     const draftRef = useRef({ topics, comment });
@@ -142,7 +209,7 @@ export default function CallCard({
         setLink('');
         setLinkOpen(false);
         setQuery('');
-        setExpanded(null);
+        setOpenPath([]);
         dirtyRef.current = false;
         // Только смена карточки: правки сервера в той же карточке черновик не перезаписывают.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -232,8 +299,10 @@ export default function CallCard({
         city && !KAZAKHSTAN_CITY_OPTIONS.some((option) => option.value === city)
             ? [{ value: city, label: city }, ...KAZAKHSTAN_CITY_OPTIONS] : KAZAKHSTAN_CITY_OPTIONS
     ), [city]);
-    const total = useMemo(() => (boot.categories || []).reduce(
-        (sum, item) => sum + 1 + (item.children?.length || 0), 0), [boot.categories]);
+    const total = useMemo(() => countReasons(boot.categories), [boot.categories]);
+    // Нажали на ветку: открытую — свернуть, другую — открыть вместо соседней на этом уровне.
+    const openBranch = (depth, id) => setOpenPath((prev) => (
+        prev[depth] === id ? prev.slice(0, depth) : [...prev.slice(0, depth), id]));
     // Оператор отметил «Аккаунта нет» — дальше карточка идёт так же, как с аккаунтом.
     const noAccount = Boolean(card.no_account) && !account;
     const personKnown = Boolean(account) || noAccount;
@@ -345,57 +414,9 @@ export default function CallCard({
                         {boot.categories?.length > 0 && !categories.length && (
                             <p className="text-[12.5px] text-slate-500">Такой причины нет.</p>
                         )}
-                        <ul className="space-y-0.5">
-                            {categories.map((category) => {
-                                const children = category.children || [];
-                                const open = Boolean(query) || expanded === category.id;
-                                const count = pickedInCategory(topics, category.id);
-                                if (!children.length) {
-                                    const picked = isTopicPicked(topics, category.id);
-                                    return (
-                                        <li key={category.id}>
-                                            <button type="button" aria-pressed={picked}
-                                                    disabled={!picked && !canAddTopic(topics, topicsLimit)}
-                                                    onClick={() => edit(setTopics)(toggleTopic(topics, category, null, topicsLimit))}
-                                                    className={`flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13.5px] transition disabled:opacity-40 ${
-                                                        picked ? 'bg-blue-50 font-medium text-blue-800' : 'text-slate-800 hover:bg-slate-50'}`}>
-                                                <span className="min-w-0 truncate">{category.title}</span>
-                                                {picked && <Check size={15} className="shrink-0 text-blue-600" />}
-                                            </button>
-                                        </li>
-                                    );
-                                }
-                                return (
-                                    <li key={category.id}>
-                                        <button type="button" aria-expanded={open}
-                                                onClick={() => setExpanded(open && !query ? null : category.id)}
-                                                className="flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-[13.5px] text-slate-800 hover:bg-slate-50">
-                                            <span className="min-w-0 truncate">{category.title}</span>
-                                            <span className="flex shrink-0 items-center gap-1.5">
-                                                {count > 0 && <span className="rounded-full bg-blue-600 px-1.5 text-[11px] font-semibold tabular-nums text-white">{count}</span>}
-                                                <ChevronDown size={15} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
-                                            </span>
-                                        </button>
-                                        {open && (
-                                            <div className="flex flex-wrap gap-1.5 px-2.5 pb-2 pt-1">
-                                                {children.map((sub) => {
-                                                    const picked = isTopicPicked(topics, category.id, sub.id);
-                                                    return (
-                                                        <button key={sub.id} type="button" aria-pressed={picked}
-                                                                disabled={!picked && !canAddTopic(topics, topicsLimit)}
-                                                                onClick={() => edit(setTopics)(toggleTopic(topics, category, sub, topicsLimit))}
-                                                                className={`rounded-lg px-2.5 py-1.5 text-left text-[12.5px] transition active:scale-[0.98] disabled:opacity-40 ${
-                                                                    picked ? 'bg-blue-600 font-medium text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
-                                                            {sub.title}
-                                                        </button>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                    </li>
-                                );
-                            })}
-                        </ul>
+                        <ReasonLevel nodes={categories} openPath={openPath} searching={Boolean(query)} topics={topics}
+                                     limit={topicsLimit} onOpen={openBranch}
+                                     onToggle={(branch) => edit(setTopics)(toggleTopic(topics, branch, topicsLimit))} />
                     </div>
                 </section>
             )}

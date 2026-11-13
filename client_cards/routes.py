@@ -347,7 +347,8 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
                 payload['head'] = queries.department_head(cursor, department_id)
                 payload['alerts_log'] = [dict(item, sent_at=_iso(item['sent_at']))
                                          for item in queries.alerts_log(cursor, department_id)]
-                payload['limits'] = {'wrapup_max_sec': rules.WRAPUP_MAX_SEC}
+                payload['limits'] = {'wrapup_max_sec': rules.WRAPUP_MAX_SEC,
+                                     'category_depth': rules.CATEGORY_MAX_DEPTH}
             if access.is_global_admin(ctx):
                 payload['all_departments'] = queries.all_departments(cursor)
         return jsonify(payload)
@@ -604,9 +605,13 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
         now = rules.now_almaty()
         with db._get_cursor() as cursor:
             if parent_id is not None:
-                parent = queries.get_category(cursor, parent_id)
-                if not parent or parent['department_id'] != department_id or parent['parent_id'] is not None:
-                    return _bad('Категория для подтемы не найдена', 'CLIENT_CARDS_NOT_FOUND', 404)
+                # Подтема встаёт под причину любого уровня — до потолка глубины дерева.
+                branch = rules.category_path(queries.category_index(cursor, department_id), parent_id)
+                if not branch:
+                    return _bad('Причина для подтемы не найдена', 'CLIENT_CARDS_NOT_FOUND', 404)
+                if len(branch) >= rules.CATEGORY_MAX_DEPTH:
+                    return _bad('Глубже %d уровней причины не вкладываются' % rules.CATEGORY_MAX_DEPTH,
+                                'CLIENT_CARDS_TOO_DEEP')
             for title in titles:
                 queries.create_category(cursor, department_id, title=title, parent_id=parent_id,
                                         by=ctx['user_id'], now=now)

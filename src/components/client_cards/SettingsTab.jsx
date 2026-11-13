@@ -1,7 +1,7 @@
 /* Настройки раздела «Карточка клиента» — руководителю отдела (задача #335, п. 3, 5, 6, 9).
  *
  *   Карточка в телефоне   включить операторам, каким группам, время постобработки
- *   Причины обращений     справочник «категория → подтема», который видит оператор
+ *   Причины обращений     дерево «основная причина → подтема → подтема подтемы…», которое видит оператор
  *   Отделы для запросов   куда уходит запрос из карточки: название и Telegram-группа
  *   Алерты                когда писать руководителю о росте обращений и куда
  *
@@ -63,8 +63,13 @@ function NumberField({ value, onCommit, min, max, step = 1, suffix = '', width =
     );
 }
 
-/* Строка справочника: название (правится на месте), порядок, скрыть, удалить. */
-function NameRow({ item, busy, sub = false, first, last, onRename, onMove, onToggle, onDelete, children = null }) {
+// Отступ уровня в дереве причин: подтема стоит под своей причиной.
+const LEVEL_INDENT = 24;
+const levelPad = (depth) => ({ paddingLeft: 12 + depth * LEVEL_INDENT });
+
+/* Строка справочника: название (правится на месте), порядок, скрыть, удалить.
+   depth — уровень в дереве причин: 0 — основная причина. */
+function NameRow({ item, busy, depth = 0, first, last, onRename, onMove, onToggle, onDelete, children = null }) {
     const [editing, setEditing] = useState(false);
     const [text, setText] = useState(item.title);
     const save = () => {
@@ -74,7 +79,7 @@ function NameRow({ item, busy, sub = false, first, last, onRename, onMove, onTog
     };
     const iconBtn = 'grid h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-30';
     return (
-        <div className={`flex items-center gap-1.5 py-2 pr-2 ${sub ? 'pl-9' : 'pl-3'}`}>
+        <div className="flex items-center gap-1.5 py-2 pr-2" style={levelPad(depth)}>
             {children}
             {editing ? (
                 <input value={text} autoFocus onChange={(event) => setText(event.target.value)} onBlur={save}
@@ -84,7 +89,7 @@ function NameRow({ item, busy, sub = false, first, last, onRename, onMove, onTog
                        }}
                        className={`${iosInput} min-w-0 flex-1 py-1.5`} aria-label="Название" />
             ) : (
-                <span className={`min-w-0 flex-1 truncate text-[13.5px] ${item.is_active ? (sub ? 'text-slate-700' : 'font-medium text-slate-900') : 'text-slate-400 line-through'}`}>
+                <span className={`min-w-0 flex-1 truncate text-[13.5px] ${item.is_active ? (depth ? 'text-slate-700' : 'font-medium text-slate-900') : 'text-slate-400 line-through'}`}>
                     {item.title}
                 </span>
             )}
@@ -102,14 +107,15 @@ function NameRow({ item, busy, sub = false, first, last, onRename, onMove, onTog
             {/* С обращениями причину удалить нельзя — только скрыть: отчёт за прошлые месяцы потерял бы строки. */}
             <button type="button" className={`${iconBtn} hover:!bg-rose-50 hover:!text-rose-600`} disabled={busy || item.used > 0}
                     onClick={onDelete} aria-label={`Удалить «${item.title}»`}
-                    title={item.used > 0 ? `По причине есть обращения (${item.used}) — её можно только скрыть` : 'Удалить'}>
+                    title={item.used > 0 ? `По причине или её подтемам есть обращения (${item.used}) — её можно только скрыть`
+                        : item.children?.length ? 'Удалить вместе с подтемами' : 'Удалить'}>
                 <Trash2 size={13} />
             </button>
         </div>
     );
 }
 
-function AddLine({ placeholder, busy, onAdd, sub = false }) {
+function AddLine({ placeholder, busy, onAdd, depth = 0 }) {
     const [text, setText] = useState('');
     const submit = () => {
         // Вставленный список — по строке на название.
@@ -118,13 +124,51 @@ function AddLine({ placeholder, busy, onAdd, sub = false }) {
         onAdd(titles).then((ok) => { if (ok) setText(''); });
     };
     return (
-        <div className={`flex items-start gap-2 py-2 pr-3 ${sub ? 'pl-9' : 'pl-3'}`}>
+        <div className="flex items-start gap-2 py-2 pr-3" style={levelPad(depth)}>
             <textarea value={text} rows={1} onChange={(event) => setText(event.target.value)} placeholder={placeholder}
                       onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit(); } }}
                       className={`${iosInput} min-h-[36px] flex-1 resize-none py-1.5`} />
             <button type="button" onClick={submit} disabled={busy || !text.trim()} className={`${iosBtnSecondary} py-1.5`}>
                 <Plus size={14} /> Добавить
             </button>
+        </div>
+    );
+}
+
+/* Причина со своей веткой в редакторе: строка, под ней — подтемы и поле «новая подтема».
+   Подтема добавляется под причину любого уровня, пока не достигнут потолок глубины
+   (maxDepth уровней; на последнем раскрывать нечего). */
+function ReasonNode({ node, siblings, index, depth, parentId, maxDepth, busy, opened, onOpen, actions }) {
+    const children = node.children || [];
+    const canNest = depth + 1 < maxDepth;
+    const open = canNest && opened.has(node.id);
+    return (
+        <div>
+            <NameRow item={node} depth={depth} busy={busy} first={index === 0} last={index === siblings.length - 1}
+                     onRename={(title) => actions.update(node.id, { title })}
+                     onMove={(delta) => actions.move(siblings, index, delta, parentId)}
+                     onToggle={() => actions.update(node.id, { is_active: !node.is_active })}
+                     onDelete={() => actions.remove(node.id)}>
+                {canNest && (
+                    <button type="button" onClick={() => onOpen(node.id)} aria-expanded={open}
+                            aria-label={`Подтемы причины «${node.title}»`}
+                            className="flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[12px] tabular-nums text-slate-500 hover:bg-slate-100">
+                        <ChevronDown size={14} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
+                        {children.length}
+                    </button>
+                )}
+            </NameRow>
+            {open && (
+                <div className="border-t border-slate-100 bg-slate-50/60">
+                    {children.map((child, childIndex) => (
+                        <ReasonNode key={child.id} node={child} siblings={children} index={childIndex} depth={depth + 1}
+                                    parentId={node.id} maxDepth={maxDepth} busy={busy} opened={opened} onOpen={onOpen}
+                                    actions={actions} />
+                    ))}
+                    <AddLine depth={depth + 1} placeholder={`Новая подтема в «${node.title}»`} busy={busy}
+                             onAdd={(titles) => actions.add(node.id, titles)} />
+                </div>
+            )}
         </div>
     );
 }
@@ -137,7 +181,8 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
     const departmentId = boot.department_id;
     const settings = boot.settings;
     const [busy, setBusy] = useState('');
-    const [expanded, setExpanded] = useState(null);
+    // Раскрытые ветки дерева причин: в редакторе их может быть открыто несколько сразу.
+    const [opened, setOpened] = useState(() => new Set());
     const [provideId, setProvideId] = useState('');
 
     const run = async (name, work, apply) => {
@@ -167,6 +212,20 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
         run('reorder', () => api.reorderCategories({ department_id: departmentId, parent_id: parentId, ids: next.map((item) => item.id) }),
             categoriesApply);
     };
+
+    const toggleOpened = (id) => setOpened((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+    });
+    const reasonActions = {
+        update: (id, body) => run('category', () => api.updateCategory(id, body), categoriesApply),
+        remove: (id) => run('category', () => api.deleteCategory(id), categoriesApply),
+        add: (parentId, titles) => run('category', () => api.createCategory(
+            { department_id: departmentId, parent_id: parentId, titles }), categoriesApply),
+        move,
+    };
+    const reasonDepth = boot.limits?.category_depth || 5;
 
     const chatOptions = [{ value: '', label: 'Группа не выбрана' },
         ...(boot.chats || []).map((chat) => ({ value: String(chat.chat_id), label: chat.title }))];
@@ -203,41 +262,13 @@ export default function SettingsTab({ api, boot, toast, onBoot, onReload }) {
 
             {/* ── Причины обращений ─────────────────────────────────────────── */}
             <Section title="Причины обращений"
-                     hint="Категории и подтемы, которые оператор выбирает в карточке. По ним строятся отчёт и алерты. Скрытую причину оператор не видит, но в прошлых обращениях она остаётся.">
-                {boot.categories.map((category, index) => {
-                    const open = expanded === category.id;
-                    return (
-                        <div key={category.id}>
-                            <NameRow item={category} busy={Boolean(busy)} first={index === 0} last={index === boot.categories.length - 1}
-                                     onRename={(title) => run('category', () => api.updateCategory(category.id, { title }), categoriesApply)}
-                                     onMove={(delta) => move(boot.categories, index, delta, null)}
-                                     onToggle={() => run('category', () => api.updateCategory(category.id, { is_active: !category.is_active }), categoriesApply)}
-                                     onDelete={() => run('category', () => api.deleteCategory(category.id), categoriesApply)}>
-                                <button type="button" onClick={() => setExpanded(open ? null : category.id)} aria-expanded={open}
-                                        aria-label={`Подтемы категории «${category.title}»`}
-                                        className="flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-[12px] tabular-nums text-slate-500 hover:bg-slate-100">
-                                    <ChevronDown size={14} className={`transition-transform ${open ? 'rotate-180' : ''}`} />
-                                    {category.children.length}
-                                </button>
-                            </NameRow>
-                            {open && (
-                                <div className="border-t border-slate-100 bg-slate-50/60">
-                                    {category.children.map((sub, subIndex) => (
-                                        <NameRow key={sub.id} item={sub} sub busy={Boolean(busy)} first={subIndex === 0}
-                                                 last={subIndex === category.children.length - 1}
-                                                 onRename={(title) => run('category', () => api.updateCategory(sub.id, { title }), categoriesApply)}
-                                                 onMove={(delta) => move(category.children, subIndex, delta, category.id)}
-                                                 onToggle={() => run('category', () => api.updateCategory(sub.id, { is_active: !sub.is_active }), categoriesApply)}
-                                                 onDelete={() => run('category', () => api.deleteCategory(sub.id), categoriesApply)} />
-                                    ))}
-                                    <AddLine sub placeholder="Новая подтема" busy={Boolean(busy)}
-                                             onAdd={(titles) => run('category', () => api.createCategory({ department_id: departmentId, parent_id: category.id, titles }), categoriesApply)} />
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-                <AddLine placeholder="Новая категория — или вставьте список, по строке на категорию" busy={Boolean(busy)}
+                     hint={`Дерево причин, которое оператор проходит в карточке: основная причина (например, «Запрос», «Консультация», «Жалоба», «Предложение») → подтема → подтема подтемы, до ${reasonDepth} уровней. Оператор выбирает последний уровень своей ветки. По причинам строятся отчёт и алерты. Скрытую причину оператор не видит вместе с её подтемами, но в прошлых обращениях она остаётся.`}>
+                {boot.categories.map((category, index) => (
+                    <ReasonNode key={category.id} node={category} siblings={boot.categories} index={index} depth={0}
+                                parentId={null} maxDepth={reasonDepth} busy={Boolean(busy)} opened={opened}
+                                onOpen={toggleOpened} actions={reasonActions} />
+                ))}
+                <AddLine placeholder="Новая основная причина — или вставьте список, по строке на причину" busy={Boolean(busy)}
                          onAdd={(titles) => run('category', () => api.createCategory({ department_id: departmentId, titles }), categoriesApply)} />
             </Section>
             </div>

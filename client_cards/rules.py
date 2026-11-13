@@ -232,13 +232,110 @@ def completion_error(card):
     return None
 
 
+# ─── Дерево причин ───────────────────────────────────────────────────────────
+#
+# Причины — дерево (владелец, 13.11.2026): основная причина («Запрос», «Консультация»,
+# «Жалоба», «Предложение») → подтема 1-го уровня («Проблема с заказом») → подтема 2-го
+# уровня («Не может завершить заказ») → и глубже, если отделу понадобится. Оператор
+# выбирает самый глубокий уровень своей ветки.
+#
+# В карточке причина хранится парой: основная причина (category_id) и выбранная подтема
+# ЛЮБОГО уровня (subcategory_id; пусто — выбрана сама основная причина, у которой подтем
+# нет). Промежуточные уровни восстанавливаются по справочнику — category_path.
+#
+# Потолок глубины — чтобы дерево оставалось деревом: в окне карточки шириной с телефон
+# шестой уровень отступов уже не читается. Понадобится глубже — меняется это число.
+CATEGORY_MAX_DEPTH = 5
+
+
+def category_path(index, node_id):
+    """Путь от основной причины до узла: [id основной, …, id узла].
+
+    index — {id: {'parent_id', …}}. None — узла нет или цепочка родителей оборвана.
+    """
+    path, seen = [], set()
+    current = node_id
+    while current is not None:
+        node = index.get(current)
+        if node is None or current in seen:
+            return None
+        seen.add(current)
+        path.append(current)
+        current = node.get('parent_id')
+    path.reverse()
+    return path
+
+
+def category_children(index):
+    """{id родителя (None — основные причины): [id подтем]} — одним проходом по справочнику."""
+    children = {}
+    for node_id, node in index.items():
+        children.setdefault(node.get('parent_id'), []).append(node_id)
+    return children
+
+
+def category_subtree(index, node_id, children=None):
+    """Сам узел и все его подтемы любого уровня — множеством id."""
+    children = children if children is not None else category_children(index)
+    result, stack = set(), [node_id]
+    while stack:
+        current = stack.pop()
+        if current in result:
+            continue
+        result.add(current)
+        stack.extend(children.get(current, ()))
+    return result
+
+
+def category_titles(index, node_id):
+    """Названия по пути от основной причины до узла: ['Запрос', 'Проблема с заказом', …]."""
+    path = category_path(index, node_id) or [node_id]
+    return [str((index.get(item) or {}).get('title') or 'Причина %s' % item) for item in path]
+
+
+PATH_SEPARATOR = ' → '
+# Длина причины в запросе: client_card_requests.topic_title VARCHAR(400).
+REQUEST_TOPIC_LIMIT = 400
+
+
+def topic_path_text(titles, limit=REQUEST_TOPIC_LIMIT):
+    """Причина одной строкой по пути: «Запрос → Проблема с заказом → Не может завершить заказ».
+
+    Не влезает в limit — уходят верхние уровни: самое точное название стоит в конце пути.
+    """
+    parts = [str(title) for title in titles or () if title]
+    text = PATH_SEPARATOR.join(parts)
+    while len(text) > limit and len(parts) > 1:
+        parts = parts[1:]
+        text = '…' + PATH_SEPARATOR + PATH_SEPARATOR.join(parts)
+    return text[:limit]
+
+
+def rollup_people(rows, index):
+    """[(id выбранной причины, человек)] → {id узла: множество людей} по всем уровням.
+
+    Человек, обратившийся по подтеме, считается и у каждого её предка — по одному разу,
+    сколько бы подтем этой ветки он ни назвал. Отсюда и число «по причине целиком»: это
+    разные люди на всю ветку, а не сумма её подтем.
+    """
+    people, paths = {}, {}
+    for node_id, person in rows:
+        path = paths.get(node_id)
+        if path is None:
+            path = paths[node_id] = category_path(index, node_id) or [node_id]
+        for item in path:
+            people.setdefault(item, set()).add(person)
+    return people
+
+
 def normalize_topics(raw, tree):
     """Выбранные причины → [(category_id, subcategory_id | None)] без повторов.
 
     tree — {id: {'parent_id', 'is_active', 'has_children'}}: справочник отдела.
-    ValueError — причины нет в справочнике, она скрыта, подтема не из этой
-    категории или у категории есть подтемы, а выбрана она сама. Скрытую причину
-    нельзя выбрать заново, но в старой карточке она остаётся.
+    category_id — основная причина, subcategory_id — выбранная подтема любого уровня.
+    ValueError — причины нет в справочнике, она (или уровень над ней) скрыта, подтема не
+    из этой ветки или у выбранного узла есть видимые подтемы: выбирается самый глубокий
+    уровень. Скрытую причину нельзя выбрать заново, но в старой карточке она остаётся.
     """
     result, seen = [], set()
     for item in raw or ():
@@ -250,14 +347,17 @@ def normalize_topics(raw, tree):
             raise ValueError('Причина обращения указана неверно')
         category = tree.get(category_id)
         if not category or category.get('parent_id') is not None or not category.get('is_active'):
-            raise ValueError('Такой категории нет в справочнике — обновите карточку')
+            raise ValueError('Такой причины нет в справочнике — обновите карточку')
         if subcategory_id is None:
             if category.get('has_children'):
-                raise ValueError('Выберите подтему категории')
+                raise ValueError('У этой причины есть подтемы — выберите одну из них')
         else:
-            sub = tree.get(subcategory_id)
-            if not sub or sub.get('parent_id') != category_id or not sub.get('is_active'):
+            branch = category_path(tree, subcategory_id)
+            if (not branch or len(branch) < 2 or branch[0] != category_id
+                    or not all(tree[node_id].get('is_active') for node_id in branch)):
                 raise ValueError('Такой подтемы нет в справочнике — обновите карточку')
+            if tree[subcategory_id].get('has_children'):
+                raise ValueError('У этой подтемы есть свои подтемы — выберите одну из них')
         key = (category_id, subcategory_id)
         if key in seen:
             continue
@@ -393,37 +493,42 @@ def alert_decision(*, count, baseline, last, sent_today, now, settings):
 def pick_alerts(nodes, *, now, settings):
     """Какие причины попадут в одно сообщение руководителю.
 
-    nodes — [{'id', 'parent_id', 'count', 'baseline', 'last', 'sent_today', …}] по
-    подтемам и по категориям целиком. Волна по одной подтеме поднимает и её
-    категорию; два сообщения об одном и том же — шум, поэтому:
+    nodes — [{'id', 'parent_id', 'ancestors', 'count', 'baseline', 'last', 'sent_today', …}]
+    по узлам дерева причин всех уровней; у каждого — число людей на всю его ветку.
+    ancestors — id предков от родителя до основной причины (нет ключа — берётся один
+    parent_id). Волна по одной подтеме поднимает и всё, что над ней; два сообщения об
+    одном и том же — шум, поэтому идём от самых глубоких уровней к основным причинам:
 
-      * сработала подтема — категорию в этом же заходе не шлём;
-      * по категории шлём, только когда рост размазан по подтемам (ни одна сама
-        порога не взяла) и ни по одной её подтеме не идёт пауза.
+      * сработала подтема — уровни над ней в этом же заходе не шлём;
+      * по подтеме идёт пауза (о ней уже писали) — уровни над ней тоже молчат;
+      * по узлу с подтемами шлём, только когда рост размазан по ним: ни одна сама порога
+        не взяла и ни по одной не идёт пауза.
 
-    Возвращает узлы с добавленными 'kind' и 'threshold', подтемы первыми.
+    Возвращает узлы с добавленными 'kind' и 'threshold', самые глубокие первыми.
     """
     cooldown = timedelta(minutes=int(settings['cooldown_min']))
-    picked, busy_parents = [], set()
+    picked, busy = [], set()
+
+    def ancestors(node):
+        chain = node.get('ancestors')
+        if chain is None:
+            chain = [node['parent_id']] if node.get('parent_id') is not None else []
+        return chain
 
     def decide(node):
         return alert_decision(count=node['count'], baseline=node['baseline'], last=node.get('last'),
                               sent_today=node.get('sent_today') or 0, now=now, settings=settings)
 
-    for node in nodes:
-        if node.get('parent_id') is None:
-            continue
+    # Устойчивая сортировка: внутри уровня порядок узлов остаётся каким пришёл.
+    for node in sorted(nodes, key=lambda item: -len(ancestors(item))):
+        chain = ancestors(node)
         last = node.get('last')
-        if last and last.get('at') and now - last['at'] < cooldown:
-            busy_parents.add(node['parent_id'])
-        decision = decide(node)
-        if decision:
-            picked.append({**node, **decision})
-            busy_parents.add(node['parent_id'])
-    for node in nodes:
-        if node.get('parent_id') is not None or node['id'] in busy_parents:
+        if chain and last and last.get('at') and now - last['at'] < cooldown:
+            busy.update(chain)
+        if node['id'] in busy:
             continue
         decision = decide(node)
         if decision:
             picked.append({**node, **decision})
+            busy.update(chain)
     return picked

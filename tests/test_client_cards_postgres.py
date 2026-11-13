@@ -790,9 +790,10 @@ def test_usual_volume_is_not_an_alert(world):
     with w.db._get_cursor() as cursor:
         queries.save_settings(cursor, TEZ, {'alerts': rules.normalize_alerts(None)}, by=HEAD, by_name='Глава',
                               now=w.clock())
-        leaves, roots = queries.alert_baseline(cursor, TEZ, until=start + timedelta(minutes=20), window_min=60,
-                                               days=rules.ALERT_BASELINE_DAYS)
-    assert leaves[(w.orders, w.cancel)] == pytest.approx(6.0) and roots[w.orders] == pytest.approx(6.0)
+        usual = queries.alert_baseline(cursor, TEZ, queries.category_index(cursor, TEZ),
+                                       until=start + timedelta(minutes=20), window_min=60,
+                                       days=rules.ALERT_BASELINE_DAYS)
+    assert usual[w.cancel] == pytest.approx(6.0) and usual[w.orders] == pytest.approx(6.0)
     # Сегодня — восемь: больше пяти, но не вдвое больше обычного.
     _calls(w, ANNA, 8, topic=w.cancel, start_key=5000)
     assert _alerts(w) == []
@@ -850,6 +851,163 @@ def test_categories_tree_and_protection(world):
     assert w.svc.save_card(ctx, card_id, {'topics': [{'category_id': w.orders}]})['card']['topics'][0]['sub_title'] is None
 
 
+def _deep_tree(w):
+    """Дерево из просьбы владельца: Запрос → Проблема с заказом → Не может завершить заказ."""
+    with w.db._get_cursor() as cursor:
+        def add(title, parent_id):
+            return queries.create_category(cursor, TEZ, title=title, parent_id=parent_id, by=HEAD, now=w.clock())
+        ask = add('Запрос', None)
+        order = add('Проблема с заказом', ask)
+        finish = add('Не может завершить заказ', order)
+        abort = add('Не может отменить заказ', order)
+        pay = add('Вопрос по оплате', ask)
+    return ask, order, finish, abort, pay
+
+
+def _deep_call(w, operator_id, key, topic, *, root, city='Алматы'):
+    """Заполненная карточка нового человека по причине topic ветки root."""
+    ctx = w.ctx(operator_id)
+    card_id = w.svc.open_call(ctx, phone='7702%07d' % key, direction='in', call_key='d-%d' % key)['card']['id']
+    w.svc.call_event(ctx, card_id, 'answered')
+    w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/drivers/%d' % (200000 + key))
+    w.svc.save_card(ctx, card_id, {'topics': [{'category_id': root, 'subcategory_id': topic}], 'city': city})
+    w.svc.call_event(ctx, card_id, 'ended')
+    w.svc.complete_card(ctx, card_id)
+    w.clock.tick(minutes=1)
+    return card_id
+
+
+def test_reasons_tree_of_any_depth(world):
+    """Причины — дерево (владелец, 13.11.2026): основная причина → подтема 1-го уровня →
+    подтема 2-го уровня → …; оператор выбирает самый глубокий уровень своей ветки."""
+    w = world
+    ctx = w.ctx(ANNA)
+    ask, order, finish, abort, pay = _deep_tree(w)
+    with w.db._get_cursor() as cursor:
+        tree = queries.categories(cursor, TEZ)
+        node = next(item for item in tree if item['id'] == ask)
+        assert [(child['title'], [leaf['title'] for leaf in child['children']]) for child in node['children']] == [
+            ('Проблема с заказом', ['Не может завершить заказ', 'Не может отменить заказ']),
+            ('Вопрос по оплате', [])]
+
+    card_id = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='t1')['card']['id']
+    w.svc.call_event(ctx, card_id, 'answered')
+    w.svc.attach_link(ctx, card_id, 'https://admin.tezapp.org/admin/drivers/12345')
+    # Середину ветки выбрать нельзя — только её последний уровень; чужая ветка тоже не проходит.
+    for wrong in ({'category_id': ask}, {'category_id': ask, 'subcategory_id': order},
+                  {'category_id': w.orders, 'subcategory_id': finish}, {'category_id': order, 'subcategory_id': finish}):
+        with pytest.raises(CardError) as error:
+            w.svc.save_card(ctx, card_id, {'topics': [wrong]})
+        assert error.value.code == 'CARD_BAD_TOPICS', wrong
+    topics = w.svc.save_card(ctx, card_id, {'topics': [{'category_id': ask, 'subcategory_id': finish},
+                                                       {'category_id': ask, 'subcategory_id': pay}]})['card']['topics']
+    assert [(t['title'], t['sub_title'], t['path']) for t in topics] == [
+        ('Запрос', 'Проблема с заказом → Не может завершить заказ',
+         ['Запрос', 'Проблема с заказом', 'Не может завершить заказ']),
+        ('Запрос', 'Вопрос по оплате', ['Запрос', 'Вопрос по оплате'])]
+    w.svc.call_event(ctx, card_id, 'ended')
+    w.svc.complete_card(ctx, card_id)
+    # Запрос в другой отдел несёт причину полным путём.
+    detail, _error = _request(w, ctx, card_id)
+    assert detail['request']['topic_title'] == 'Запрос → Проблема с заказом → Не может завершить заказ'
+    assert 'Запрос → Проблема с заказом → Не может завершить заказ' in w.outbox.messages[0]['text']
+
+    second = _deep_call(w, BORIS, 1, abort, root=ask, city='Астана')
+    with w.db._get_cursor() as cursor:
+        # Справочник: «в обращениях» — по всей ветке; удалить занятую ветку нельзя с любого уровня.
+        node = next(item for item in queries.categories(cursor, TEZ, include_inactive=True) if item['id'] == ask)
+        assert (node['used'], node['children'][0]['used'], node['children'][0]['children'][0]['used']) == (3, 2, 1)
+        assert all(queries.category_in_use(cursor, item) for item in (ask, order, finish, abort, pay))
+        # Журнал: причина любого уровня показывает и карточки своих подтем.
+        ids = lambda **kwargs: sorted(card['id'] for card in queries.journal(cursor, TEZ, **kwargs)[0])
+        assert ids(category_id=ask) == ids(category_id=order) == [card_id, second]
+        assert ids(category_id=finish) == [card_id] and ids(category_id=abort) == [second]
+        assert ids(category_id=pay) == [card_id] and ids(category_id=w.orders) == []
+        # Поиск по названию любого уровня.
+        assert ids(search='проблема с заказ') == [card_id, second] and ids(search='отменить') == [second]
+        # Отчёт: число у причины — карточки всей ветки без двойного счёта.
+        day = datetime(2026, 11, 12)
+        data = queries.report(cursor, TEZ, date_from=day, date_to=day + timedelta(days=1))
+        root = next(item for item in data['categories'] if item['id'] == ask)
+        assert (root['count'], root['own']) == (2, 0)
+        assert [(child['title'], child['count']) for child in root['children']] == [
+            ('Проблема с заказом', 2), ('Вопрос по оплате', 1)]
+        assert [(leaf['title'], leaf['count']) for leaf in root['children'][0]['children']] == [
+            ('Не может завершить заказ', 1), ('Не может отменить заказ', 1)]
+
+        # Скрыли середину ветки — оператору её нет вместе с подтемами, в старой карточке она осталась.
+        queries.update_category(cursor, order, {'is_active': False}, now=w.clock())
+        shown = next(item for item in queries.categories(cursor, TEZ) if item['id'] == ask)
+        assert [child['title'] for child in shown['children']] == ['Вопрос по оплате']
+        assert queries.get_card(cursor, card_id)['topics'][0]['path'][-1] == 'Не может завершить заказ'
+    third = w.svc.open_call(ctx, phone='77019990077', direction='in', call_key='t3')['card']['id']
+    w.svc.call_event(ctx, third, 'answered')
+    with pytest.raises(CardError):
+        w.svc.save_card(ctx, third, {'topics': [{'category_id': ask, 'subcategory_id': finish}]})
+    # У причины скрыты все подтемы — её выбирают саму, и в отчёте это строка «без подтемы».
+    with w.db._get_cursor() as cursor:
+        queries.update_category(cursor, order, {'is_active': True}, now=w.clock())
+        queries.update_category(cursor, finish, {'is_active': False}, now=w.clock())
+        queries.update_category(cursor, abort, {'is_active': False}, now=w.clock())
+    w.svc.attach_link(ctx, third, 'admin.tezapp.org/admin/drivers/777')
+    saved = w.svc.save_card(ctx, third, {'topics': [{'category_id': ask, 'subcategory_id': order}]})['card']
+    assert saved['topics'][0]['sub_title'] == 'Проблема с заказом'
+    w.svc.call_event(ctx, third, 'ended')
+    w.svc.complete_card(ctx, third)
+    with w.db._get_cursor() as cursor:
+        data = queries.report(cursor, TEZ, date_from=day, date_to=day + timedelta(days=1))
+    middle = next(item for item in data['categories'] if item['id'] == ask)['children'][0]
+    assert (middle['title'], middle['count'], middle['own']) == ('Проблема с заказом', 3, 1)
+
+    from openpyxl import load_workbook
+    book = load_workbook(report.build_workbook(data, department_name='Тез КЦ', date_from=day.date(),
+                                               date_to=day.date(), generated_by='Глава Теза',
+                                               generated_at=w.clock()))
+    rows = list(book[report.SHEET_REASONS].iter_rows(values_only=True))
+    assert rows[0] == ('Основная причина', 'Подтема 1-го уровня', 'Подтема 2-го уровня', 'Карточек',
+                       'Доля = карточек ÷ Б')
+    assert [row[:4] for row in rows[1:8]] == [
+        ('Запрос', report.ALL_SUBTOPICS, None, 3),
+        ('Запрос', 'Проблема с заказом', report.ALL_SUBTOPICS, 3),
+        ('Запрос', 'Проблема с заказом', 'Не может завершить заказ', 1),
+        ('Запрос', 'Проблема с заказом', 'Не может отменить заказ', 1),
+        ('Запрос', 'Проблема с заказом', report.NO_SUBTOPIC, 1),
+        ('Запрос', 'Вопрос по оплате', None, 1),
+        (None, None, None, None)]
+    assert rows[1][4] == pytest.approx(1.0)
+
+
+def test_alert_goes_to_the_deepest_level_of_the_wave(world):
+    """Волна по подтеме 2-го уровня поднимает и всё, что над ней: пишем об одном —
+    о самом глубоком уровне. Размазанный по подтемам рост — о причине над ними."""
+    w = world
+    ask, order, finish, abort, pay = _deep_tree(w)
+    for key in range(5):
+        _deep_call(w, ANNA, key, finish, root=ask)
+    log = _alerts(w)
+    assert [(a['title'], a['parent_title'], a['count']) for a in log] == [
+        ('Не может завершить заказ', 'Запрос → Проблема с заказом', 5)]
+    assert 'Запрос → Проблема с заказом → Не может завершить заказ' in w.outbox.messages[0]['text']
+    # Пока о подтеме уже написано, причины над ней молчат, даже если к ним добавились люди.
+    _deep_call(w, ANNA, 10, abort, root=ask)
+    _deep_call(w, ANNA, 11, pay, root=ask)
+    assert len(_alerts(w)) == 1
+
+    # Другой день: рост размазан по двум подтемам (3 + 2) — ни одна порог не взяла, взяла
+    # причина над ними. Основная причина при этом не дублируется.
+    w.clock.tick(days=1)
+    for key in range(20, 23):
+        _deep_call(w, BORIS, key, finish, root=ask)
+    for key in range(30, 32):
+        _deep_call(w, BORIS, key, abort, root=ask, city='Астана')
+    log = _alerts(w)
+    assert [(a['title'], a['parent_title'], a['count']) for a in log[:-1]] == [('Проблема с заказом', 'Запрос', 5)]
+    text = w.outbox.messages[-1]['text']
+    for part in ('Запрос → Проблема с заказом', 'Подтемы: Не может завершить заказ — 3, Не может отменить заказ — 2',
+                 'Алматы — 3', 'Астана — 2'):
+        assert part in text, part
+
+
 def test_journal_and_report(world):
     w = world
     anna, boris = w.ctx(ANNA), w.ctx(BORIS)
@@ -894,8 +1052,9 @@ def test_journal_and_report(world):
     by_title = {node['title']: node for node in data['categories']}
     # «Заказы» — шесть карточек: карточка с двумя причинами считается один раз.
     assert by_title['Заказы']['count'] == 6 and by_title['Выплаты']['count'] == 1
-    assert {sub['title']: sub['count'] for sub in by_title['Заказы']['subtopics']} == {
+    assert {sub['title']: sub['count'] for sub in by_title['Заказы']['children']} == {
         'Не приходят заказы': 3, 'Отмена заказа': 3}
+    assert by_title['Заказы']['own'] == 0 and by_title['Выплаты']['own'] == 1
     assert data['categories'][0]['title'] == 'Заказы'
     assert {city['city']: city['count'] for city in data['cities']} == {'Алматы': 3, 'Астана': 2, '': 1}
     assert data['days'] == [{'date': day_start.date(), 'calls': 7, 'done': 6}]
@@ -917,7 +1076,10 @@ def test_journal_and_report(world):
     cities = [row for row in book[report.SHEET_CITIES].iter_rows(min_row=2, values_only=True) if row[1] is not None]
     assert sum(row[1] for row in cities) == 6 and report.CITY_UNKNOWN in [row[0] for row in cities]
     reasons = list(book[report.SHEET_REASONS].iter_rows(min_row=2, values_only=True))
-    assert reasons[0][:3] == ('Заказы', 'вся категория', 6)
+    assert [row[0] for row in book[report.SHEET_REASONS].iter_rows(max_row=1, values_only=True)][0] == 'Основная причина'
+    assert reasons[0][:3] == ('Заказы', report.ALL_SUBTOPICS, 6)
+    assert reasons[1][:3] in (('Заказы', 'Не приходят заказы', 3), ('Заказы', 'Отмена заказа', 3))
+    assert reasons[3][:3] == ('Выплаты', None, 1)
     assert report.report_filename('Тез КЦ', day_start.date(), day_start.date()) == \
         'Карточка клиента Тез КЦ 12.11.2026–12.11.2026.xlsx'
 
@@ -1217,13 +1379,28 @@ def test_api_management(api):
     account_id = body['categories'][-2]['id']
     status, body = api.post('/categories', user=HEAD, json={'title': 'Блокировка', 'parent_id': account_id})
     sub_id = next(node for node in body['categories'] if node['id'] == account_id)['children'][0]['id']
-    assert api.post('/categories', user=HEAD, json={'title': 'X', 'parent_id': sub_id})[0] == 404  # два уровня
+    # Подтема встаёт под причину любого уровня — до потолка глубины; под чужую и под
+    # несуществующую — нет.
+    parent, deepest = sub_id, []
+    for level in range(3, rules.CATEGORY_MAX_DEPTH + 1):
+        status, body = api.post('/categories', user=HEAD, json={'title': 'Уровень %d' % level, 'parent_id': parent})
+        assert status == 201, level
+        with w.db._get_cursor() as cursor:
+            parent = max(queries.category_subtree_ids(cursor, parent))
+        deepest.append(parent)
+    assert api.post('/categories', user=HEAD, json={'title': 'X', 'parent_id': parent})[1]['code'] == 'CLIENT_CARDS_TOO_DEEP'
+    assert api.post('/categories', user=HEAD, json={'title': 'X', 'parent_id': 999999})[0] == 404
+    assert api.get('', user=HEAD)[1]['limits']['category_depth'] == rules.CATEGORY_MAX_DEPTH
+    # Удаление причины уносит всю её ветку.
+    assert api.delete('/categories/%d' % deepest[0], user=HEAD)[0] == 200
+    with w.db._get_cursor() as cursor:
+        assert queries.category_subtree_ids(cursor, sub_id) == [sub_id]
     assert api.post('/categories', user=HEAD, json={'title': '  '})[1]['code'] == 'CLIENT_CARDS_EMPTY_TITLE'
     status, body = api.patch('/categories/%d' % sub_id, user=HEAD, json={'title': 'Блокировка аккаунта',
                                                                        'is_active': False})
     node = next(node for node in body['categories'] if node['id'] == account_id)
     assert node['children'][0] == {'id': sub_id, 'title': 'Блокировка аккаунта', 'is_active': False,
-                                   'position': 1, 'used': 0}
+                                   'position': 1, 'used': 0, 'children': []}
     status, body = api.post('/categories/reorder', user=HEAD, json={'ids': [account_id, w.money, w.orders]})
     assert [node['id'] for node in body['categories']][:3] == [account_id, w.money, w.orders]
     card_id = _ready_card(w, w.ctx(ANNA), key='m1')

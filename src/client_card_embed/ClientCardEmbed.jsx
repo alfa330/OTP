@@ -261,10 +261,16 @@ export default function ClientCardEmbed() {
 
     const reload = useCallback(() => setNonce((value) => value + 1), []);
 
+    /* Состояние страницы запрашивается из нескольких мест (конец звонка, сохранение, таймер).
+       На экран идёт ответ только последнего запроса: ответ более раннего, пришедший позже,
+       на миг вернул бы в «не заполнены» карточку, которую только что сохранили. */
+    const bootSeqRef = useRef(0);
     const loadBoot = useCallback(async () => {
+        bootSeqRef.current += 1;
+        const seq = bootSeqRef.current;
         const { data } = await api.phoneState();
         if (!data.enabled) { setAccess('disabled'); return null; }
-        setBoot(data);
+        if (seq === bootSeqRef.current) setBoot(data);
         return data;
     }, [api]);
 

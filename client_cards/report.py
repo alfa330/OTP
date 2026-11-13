@@ -39,6 +39,7 @@ SHEET_NOTES = 'Пояснения'
 
 CITY_UNKNOWN = 'Город не указан'
 NO_SUBTOPIC = 'без подтемы'
+ALL_SUBTOPICS = 'все подтемы'
 
 
 def report_filename(department_name, date_from, date_to):
@@ -48,6 +49,36 @@ def report_filename(department_name, date_from, date_to):
         name = name.replace(char, ' ')
     return 'Карточка клиента %s %s–%s.xlsx' % (
         name, date_from.strftime('%d.%m.%Y'), date_to.strftime('%d.%m.%Y'))
+
+
+def reason_level_title(level):
+    """Заголовок колонки уровня причин: 1 — основная причина, дальше — подтемы по уровням."""
+    return 'Основная причина' if level == 1 else 'Подтема %d-го уровня' % (level - 1)
+
+
+def reason_rows(categories):
+    """Дерево причин отчёта → строки листа «Причины»: [(путь названий, пометка, карточек)].
+
+    Строка — на причину каждого уровня. У причины с подтемами строка — итог её ветки
+    (пометка «все подтемы»), под ней её подтемы и, если выбирали её саму, строка
+    «без подтемы». У причины без подтем пометки нет.
+    """
+    rows = []
+
+    def walk(node, parents):
+        path = parents + [node['title']]
+        if not node['children']:
+            rows.append((path, None, node['count']))
+            return
+        rows.append((path, ALL_SUBTOPICS, node['count']))
+        for child in node['children']:
+            walk(child, path)
+        if node['own']:
+            rows.append((path, NO_SUBTOPIC, node['own']))
+
+    for category in categories:
+        walk(category, [])
+    return rows
 
 
 def _clean(value):
@@ -137,32 +168,36 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
     sheet.freeze_panes = 'A5'
 
     # ── Причины ──────────────────────────────────────────────────────────────
+    # Колонка на уровень дерева: основная причина, подтема 1-го уровня, 2-го… — сколько
+    # уровней в данных, столько и колонок (не меньше двух: лист не меняет вид, пока подтем нет).
+    reasons = reason_rows(data['categories'])
+    depth = max([2] + [len(titles) + (1 if note else 0) for titles, note, _count in reasons])
     sheet = workbook.create_sheet(SHEET_REASONS)
-    _widths(sheet, (44, 44, 14, 22))
-    _header(sheet, 1, ('Категория', 'Подтема', 'Карточек', 'Доля = карточек ÷ Б'))
+    _widths(sheet, (40,) * depth + (14, 22))
+    _header(sheet, 1, tuple(reason_level_title(level) for level in range(1, depth + 1))
+            + ('Карточек', 'Доля = карточек ÷ Б'))
     row = 2
-    for category in data['categories']:
-        sheet.cell(row=row, column=1, value=_clean(category['title'])).font = BOLD
-        sheet.cell(row=row, column=2, value='вся категория').font = NOTE_FONT
-        sheet.cell(row=row, column=3, value=category['count']).font = BOLD
-        cell = sheet.cell(row=row, column=4, value=_share(category['count'], done))
-        cell.number_format = PERCENT
-        cell.font = BOLD
+    for titles, note, count in reasons:
+        # Жирным — основная причина целиком: по ней глаз находит начало ветки.
+        font = BOLD if len(titles) == 1 and note != NO_SUBTOPIC else None
+        for column, title in enumerate(titles, start=1):
+            cell = sheet.cell(row=row, column=column, value=_clean(title))
+            if font and column == 1:
+                cell.font = font
+        if note:
+            sheet.cell(row=row, column=len(titles) + 1, value=note).font = NOTE_FONT
+        number = sheet.cell(row=row, column=depth + 1, value=count)
+        share = sheet.cell(row=row, column=depth + 2, value=_share(count, done))
+        share.number_format = PERCENT
+        if font:
+            number.font = share.font = font
         row += 1
-        for sub in category['subtopics']:
-            if sub['id'] is None and len(category['subtopics']) == 1:
-                continue  # у категории нет подтем — строка повторила бы саму категорию
-            sheet.cell(row=row, column=1, value=_clean(category['title']))
-            sheet.cell(row=row, column=2, value=_clean(sub['title']) if sub['id'] is not None else NO_SUBTOPIC)
-            sheet.cell(row=row, column=3, value=sub['count'])
-            sheet.cell(row=row, column=4, value=_share(sub['count'], done)).number_format = PERCENT
-            row += 1
     sheet.cell(row=row + 1, column=1, value=(
         'Б — заполнено карточек за период: %d (лист «Сводка»). Карточка с двумя причинами входит в строки обеих, '
-        'поэтому доли в сумме бывают больше 100 %%. Число у категории — карточки с любой её подтемой, '
-        'без двойного счёта.' % done)).font = NOTE_FONT
+        'поэтому доли в сумме бывают больше 100 %%. Число в строке «все подтемы» — карточки с любой подтемой '
+        'этой причины, без двойного счёта.' % done)).font = NOTE_FONT
     sheet.freeze_panes = 'A2'
-    sheet.auto_filter.ref = 'A1:D%d' % max(row - 1, 1)
+    sheet.auto_filter.ref = 'A1:%s%d' % (get_column_letter(depth + 2), max(row - 1, 1))
 
     # ── Города ───────────────────────────────────────────────────────────────
     sheet = workbook.create_sheet(SHEET_CITIES)
@@ -220,7 +255,7 @@ def build_workbook(data, *, department_name, date_from, date_to, generated_by=''
     sheet = workbook.create_sheet(SHEET_NOTES)
     _widths(sheet, (30, 110))
     lines = [
-        ('Что в файле', 'Отчёт по карточкам клиента: причины обращений, подтемы, города, дни и операторы.'),
+        ('Что в файле', 'Отчёт по карточкам клиента: причины обращений и их подтемы всех уровней, города, дни и операторы.'),
         ('Период', '%s – %s включительно, время Алматы. Звонок относится к дню, когда он начался.'
          % (date_from.strftime('%d.%m.%Y'), date_to.strftime('%d.%m.%Y'))),
         ('Что такое карточка', 'Запись об одном звонке: телефон открывает её, когда звонок поступил или начат. '
