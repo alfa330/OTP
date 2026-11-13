@@ -314,6 +314,7 @@ const SyntonyView = lazyWithRetry(() => import('./components/syntony/SyntonyView
 const RentalView = lazyWithRetry(() => import('./components/rental/RentalView'));
 const HiringView = lazyWithRetry(() => import('./components/hiring/HiringView'));
 const ClientCardsView = lazyWithRetry(() => import('./components/client_cards/ClientCardsView'));
+const DressCodeView = lazyWithRetry(() => import('./components/dress_code/DressCodeView'));
 const HrOfficeView = lazyWithRetry(() => import('./components/hr_office/HrOfficeView'));
 const MailView = lazyWithRetry(() => import('./components/mail/MailView'));
 const SzovWallboardView = lazyWithRetry(() => import('./components/monitoring/SzovWallboardView'));
@@ -771,6 +772,8 @@ const MOBILE_TAB_SECTIONS = [
     { view: 'qr_access', label: 'QR', icon: 'fas fa-qrcode', allowed: (access) => access.qrAccess },
     { view: 'hours', label: 'Часы', icon: 'fas fa-clock', personal: true, allowed: (access) => access.myHours },
     { view: 'work_schedules', label: 'Смены', icon: 'fas fa-calendar-alt', personal: true, allowed: (access) => access.myShifts },
+    /* «Дресс-код» (#418): фото каждое утро после отметки прихода — личный ежедневный раздел. */
+    { view: 'dress_code', label: 'Фото', icon: 'fas fa-camera', personal: true, allowed: (access) => access.dressCode },
     { view: 'shift_auction', label: 'Аукцион', icon: 'fas fa-gavel', personal: true, allowed: (access) => access.myShiftAuction },
     { view: 'evaluation', label: 'Оценки', icon: 'fas fa-chart-bar', personal: true, allowed: (access) => access.myEvaluations },
     { view: 'wiki', label: 'Вики', icon: 'fas fa-book', allowed: (access) => access.wiki },
@@ -2677,6 +2680,13 @@ const canAccessHiringSectionForUser = (userLike) => userLike?.hiring_access === 
    профиль без поля (старый кэш) — не доступ. */
 const canAccessClientCardsForUser = (userLike) => userLike?.client_cards_access === true;
 
+/* «Дресс-код» (#418): фото сотрудника после отметки прихода в Workpace. Раздел открыт тому, кому
+   фото положено (отделы и роли — настройка раздела). Круг считает сервер (bot_schedule2.py:
+   _dress_code_section_open_for — то же правило, что у ручки /api/dress_code/photo) и отдаёт
+   флагом в профиле. Строго true: профиль без поля (старый кэш) — не доступ. Проверяют фото
+   во вкладке «Дресс-код» раздела «Отметки». */
+const canAccessDressCodeForUser = (userLike) => userLike?.dress_code_access === true;
+
 /* ТЗ HR «iCore 4» (10.11.2026) — три раздела, как в ТЗ: «Прием» (п. 1) и «Табель учета рабочего
    времени» (п. 6) — отделу кадров и суперадминам; «АВР» (п. 11) — ещё главам отделов и
    супервайзерам, каждому на своих. Круг считает сервер (bot_schedule2.py: _hr_office_flags_for) и
@@ -3446,6 +3456,8 @@ const buildAppViewUrl = (nextView) => {
         }
         /* И вкладка «Почты» (mail_tab=…, MailView.jsx). */
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
+        /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
+        if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3520,6 +3532,8 @@ const syncAppViewWithUrl = (nextView) => {
         /* И вкладка «Почты» (mail_tab=…, MailView.jsx): условие «не mail», иначе обновление
            страницы теряло бы открытую вкладку раздела. */
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
+        /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
+        if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {
@@ -44917,6 +44931,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const canAccessRentalSection = canAccessRentalSectionForUser(user);
             const canAccessHiringSection = canAccessHiringSectionForUser(user);
             const canAccessClientCardsSection = canAccessClientCardsForUser(user);
+            const canAccessDressCodeSection = canAccessDressCodeForUser(user);
             // «Кадры»: вкладки «Прием» и «Табель…» — отделу кадров, «АВР» — ещё главам и СВ.
             const canAccessHrOfficeSection = canAccessHrOfficeForUser(user);
             // «Почта» — свой круг: «Участники» раздела и суперадмины.
@@ -45042,6 +45057,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     lms: canAccessLmsSection && departmentAllowsView(user, 'lms'),
                     events: eventsSectionShown,
                     groupLate: canAccessGroupLateBotSection,
+                    dressCode: canAccessDressCodeSection,
                     tasks: isAdminLikeRole
                         || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'tasks'))
                         || isPlainTrainer
@@ -45060,7 +45076,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 user, wikiSectionEnabled, eventsSectionShown, canAccessLmsSection, canAccessGroupLateBotSection,
                 isAdminLikeRole, isDepartmentManager, isPlainTrainer, currentUserRole,
                 isScopedDepartmentHead, isEmployeeAccountingManager, eventsUnreadCount, tasksActionRequiredCount,
-                pendingSurveysBadgeCount,
+                pendingSurveysBadgeCount, canAccessDressCodeSection,
             ]);
             /* «Обращения». Бейдж — непрочитанные ответы из Telegram-групп.
                crmRealtimePulse — счётчик «тычков» колокола: раздел перечитывает
@@ -48727,6 +48743,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     (requestedViewFromUrl !== 'hiring' || canAccessHiringSection) &&
                     // «Карточка клиента»: ссылка из группы отдела и колокола — ?view=client_cards&cc_request=<id>.
                     (requestedViewFromUrl !== 'client_cards' || canAccessClientCardsSection) &&
+                    // «Дресс-код»: ссылка из Telegram сотруднику ведёт на ?view=dress_code.
+                    (requestedViewFromUrl !== 'dress_code' || canAccessDressCodeSection) &&
                     (requestedViewFromUrl !== 'hr_office' || canAccessHrOfficeSection) &&
                     (requestedViewFromUrl !== 'mail' || canAccessMailSection) &&
                     (requestedViewFromUrl !== 'touches' || canAccessTouchesSection) &&
@@ -48752,7 +48770,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
                 else if (isSupervisorRole(user?.role)) redirectToView('operators');
                 else redirectToView('hours');
-            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessHrOfficeSection, canAccessMailSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
+            }, [user, user?.id, user?.role, isAdminLikeRole, isPlainTrainer, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessFourYouSection, canAccessFleetEdm, canAccessOktellGuard, canAccessTezAutodialSection, canAccessDriverMailings, canAccessTouchesSection, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessComplaintsSection, canAccessCrmSection, canAccessLibrarySection, canAccessDisciplineSection, requestedViewFromLocation]);
 
             useEffect(() => {
                 if (!user?.id || requestedViewFromLocation !== 'tasks') return;
@@ -48938,6 +48956,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
+                // «Дресс-код» — свой круг (кому положено фото): ссылка у того, кому раздел не открыт,
+                // оставила бы пустой экран.
+                if (view === 'dress_code' && !canAccessDressCodeSection) {
+                    if (isAdminLikeRole) redirectToView('sv_list');
+                    else if (isDepartmentHead(user) && departmentRestrictsViews(user)) redirectToView(departmentAllowsView(user, 'manage_operators') ? 'manage_users' : firstAllowedView(user, []) || 'salary');
+                    else if (isSupervisorRole(user?.role)) redirectToView('operators');
+                    else if (isPlainTrainer) redirectToView('surveys');
+                    else redirectToView('hours');
+                }
                 // «Карточка клиента» — свой круг (руководитель выданного отдела и сотрудники, которым
                 // телефон открывает карточку): ссылка у того, кому раздел не открыт, оставила бы пустой экран.
                 if (view === 'client_cards' && !canAccessClientCardsSection) {
@@ -48966,7 +48993,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     else if (isPlainTrainer) redirectToView('surveys');
                     else redirectToView('hours');
                 }
-            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFourYouSection]);
+            }, [isAuthInitializing, user, user?.role, isAdminLikeRole, isPlainTrainer, view, canAccessLmsSection, canAccessResourceFteSection, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessGroupLateBotSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessBaigaSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, canAccessFourYouSection]);
 
             useEffect(() => {
                 // Only mirror `view` into the URL after authentication has
@@ -55016,6 +55043,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // «Карточка клиента» — свой круг: у Тез КЦ есть набор разделов, без этой строки
                 // проверка ниже выбросила бы оператора и руководителя из раздела.
                 if (view === 'client_cards' && canAccessClientCardsSection) return;
+                // «Дресс-код» — свой круг: у фронт-офиса набор разделов, без этой строки проверка
+                // ниже выбросила бы сотрудника из раздела.
+                if (view === 'dress_code' && canAccessDressCodeSection) return;
                 // «Кадры» — свой круг: у отдела кадров и у отделов глав/СВ есть allowlist, без этой
                 // строки проверка ниже выбросила бы их.
                 if (view === 'hr_office' && canAccessHrOfficeSection) return;
@@ -55083,7 +55113,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessHrOfficeSection, canAccessMailSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -55862,6 +55892,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     || canAccessRentalSection
                     || canAccessHiringSection
                     || canAccessClientCardsSection
+                    || canAccessDressCodeSection
                     || canAccessHrOfficeSection
                     || canAccessMailSection
                     || (canAccessLmsSection && departmentAllowsView(user, 'lms'))
@@ -56622,6 +56653,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'client_cards' ? 'bg-blue-700' : ''}`}
                                         >
                                             <FaIcon className="fas fa-id-card"></FaIcon> <span className="sidebar-text">Карточка клиента</span>
+                                        </button>
+                                    </li>
+                                    )}
+                                    {/* «Дресс-код» (#418) — тоже один раз на все роли: круг — те, кому положено фото
+                                        при приходе (отделы и роли из настройки раздела). */}
+                                    {canAccessDressCodeSection && (
+                                    <li>
+                                        <button
+                                            type="button"
+                                            onClick={(e) => handleSidebarViewNavigation(e, 'dress_code')}
+                                            className={`relative w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dress_code' ? 'bg-blue-700' : ''}`}
+                                        >
+                                            <FaIcon className="fas fa-camera"></FaIcon> <span className="sidebar-text">Дресс-код</span>
                                         </button>
                                     </li>
                                     )}
@@ -60713,6 +60757,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 />
                             </Suspense>
                         ))}
+                        {/* «Дресс-код» (#418): фото сотрудника с рамкой и его статус. Проверяют фото во
+                            вкладке «Дресс-код» раздела «Отметки». */}
+                        {view === 'dress_code' && canAccessDressCodeSection && (
+                            <Suspense fallback={<div className="flex min-h-[240px] items-center justify-center text-sm text-slate-500">Загрузка раздела…</div>}>
+                                <DressCodeView
+                                    apiBaseUrl={API_BASE_URL}
+                                    withAccessTokenHeader={withAccessTokenHeader}
+                                    showToast={showToast}
+                                />
+                            </Suspense>
+                        )}
                         {/* «Кадры» (ТЗ HR «iCore 4»): вкладки «Прием», «Табель учета рабочего времени», «АВР».
                             ИИН и суммы договоров сервер отдаёт только отделу кадров (hr_office/service.py). */}
                         {view === 'hr_office' && canAccessHrOfficeSection && (

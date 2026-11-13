@@ -5893,6 +5893,7 @@ class SchemaMixin:
             self._init_syntony_window_schema_tx(cursor)
             self._init_client_cards_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
+            self._init_dress_code_schema_tx(cursor)
             self._backfill_shift_auction_history_tables_tx(cursor)
             self._backfill_user_profiles_tx(cursor)
             self._backfill_work_hours_rate_from_history_tx(cursor)
@@ -8672,6 +8673,29 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT syntony_window_schema")
+
+    def _init_dress_code_schema_tx(self, cursor):
+        """Схема раздела «Дресс-код» (#418) — своим SAVEPOINT'ом, как у «Карточки клиента».
+
+        DDL живёт в пакете dress_code/schema.py; импорт локальный, иначе цикл. Не
+        развернулась — раздел отвечает «ещё не развёрнут», остальное приложение работает.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT dress_code_schema")
+        try:
+            from dress_code.schema import init_dress_code_schema
+            init_dress_code_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT dress_code_schema")
+            logging.exception(
+                "Схема раздела «Дресс-код» не применилась — раздел будет недоступен, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT dress_code_schema")
 
     def _init_client_cards_schema_tx(self, cursor):
         """Схема раздела «Карточка клиента» (#335) — своим SAVEPOINT'ом, как у «Аренды авто».

@@ -966,6 +966,8 @@ class ProfileCarriesHeadedDepartmentsTests(unittest.TestCase):
             '_hiring_section_open_for': lambda _user_id: False,
             # Флаг раздела «Карточка клиента» (#335) — тоже часть профиля.
             '_client_cards_section_open_for': lambda _user_id: False,
+            # Флаг раздела «Дресс-код» (#418) — тоже часть профиля.
+            '_dress_code_section_open_for': lambda _user_id: False,
             # Флаги разделов «Прием», «Табель учета рабочего времени» и «АВР» — тоже часть профиля.
             '_hr_office_flags_for': lambda _user_id, _role=None, _headed=None: (False, False),
             '_hr_office_features_for': lambda _user_id, _role=None: False,

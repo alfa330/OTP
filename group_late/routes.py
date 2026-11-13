@@ -1002,10 +1002,25 @@ def build_group_late_blueprint(
         except Exception:
             logging.exception("group_late_bot mark photo failed")
             return jsonify({"error": "Не удалось получить фото"}), 500
-        response = send_file(BytesIO(data), mimetype=content_type)
-        # Фото лица — персональные данные: только в браузере смотрящего, не в общих кэшах.
-        response.headers['Cache-Control'] = 'private, max-age=3600'
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        return response
+        # Кэш браузера не просим: всё под /api/ сервер отдаёт с no-store (данные сотрудников),
+        # повторный показ держит память процесса (mark_photos.PHOTO_CACHE_ITEMS).
+        return send_file(BytesIO(data), mimetype=content_type)
+
+    def _group_late_reviewer_access():
+        """Граница вкладки «Дресс-код» в «Отметках» (#418): тот же вход, что у раздела.
+
+    (requester_id, department_ids, err): у полного доступа department_ids — None, у главы
+    отдела — id наших отделов, которым соответствует его отдел Workpace."""
+        requester_id, scope, err = _group_late_bot_guard()
+        if err:
+            return None, None, err
+        if not scope:
+            return requester_id, None, None
+        department_ids = sorted(
+            department_id for department_id, name in _group_late_bot_scope_by_department_id().items()
+            if str(name).casefold() == str(scope).casefold())
+        return requester_id, department_ids, None
+
+    bp.reviewer_access = _group_late_reviewer_access
 
     return bp

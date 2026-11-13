@@ -1219,6 +1219,10 @@ def _get_user_payload(user):
     # вкладку «Участники». Пункт меню экран рисует по флагу (canAccessMailForUser), границу держат
     # ручки раздела (mail/access.py).
     mail_access = _mail_section_open_for(user_id, role)
+    # «Дресс-код» (#418): человеку положено фото при приходе — отдел и роль из настройки
+    # раздела. Пункт меню экран рисует по флагу (canAccessDressCodeForUser), границу держит
+    # ручка /api/dress_code/photo тем же правилом.
+    dress_code_access = _dress_code_section_open_for(user_id) if user_id is not None else False
 
     return {
         "role": role,
@@ -1242,6 +1246,7 @@ def _get_user_payload(user):
         "syntony_window": syntony_window_open,
         "client_cards_access": client_cards_access,
         "mail_access": mail_access,
+        "dress_code_access": dress_code_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -53864,6 +53869,81 @@ def _client_cards_section_open_for(user_id):
         return False
 
 
+# ── «Дресс-код» (#418) ───────────────────────────────────────────────────────
+# Сотрудник фронт-офиса после отметки в Workpace делает фото в iCore своей камерой с
+# рамкой, ИИ проверяет кадр и одежду, руководитель решает во вкладке «Дресс-код»
+# раздела «Отметки» — вход туда тот же, что у самих «Отметок» (гард раздела).
+def _dress_code_bucket_name():
+    return (
+        (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_DRESS_CODE') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS') or '').strip()
+        or (os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET') or '').strip()
+    )
+
+
+_DRESS_CODE = {'gcs': {'bucket_name': _dress_code_bucket_name, 'client': get_gcs_client}, 'bp': None}
+
+
+def _dress_code_reviewer_access():
+    """Гард вкладки «Дресс-код» — гард раздела «Отметки» (group_late/routes.py)."""
+    group_late_bp = app.blueprints.get('group_late')
+    if group_late_bp is None or not hasattr(group_late_bp, 'reviewer_access'):
+        return None, None, (jsonify({"error": "Раздел «Отметки» не подключён"}), 503)
+    return group_late_bp.reviewer_access()
+
+
+try:
+    from dress_code.routes import build_dress_code_blueprint  # noqa: E402
+
+    _DRESS_CODE['bp'] = build_dress_code_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        reviewer_access=_dress_code_reviewer_access,
+        send_telegram=_send_telegram_text_message,
+        web_app_base_url=TASK_WEB_APP_BASE_URL,
+        gcs=_DRESS_CODE['gcs'],
+    )
+    app.register_blueprint(_DRESS_CODE['bp'])
+    logging.info("Раздел «Дресс-код»: Blueprint подключён на /api/dress_code")
+except Exception:
+    logging.exception("Раздел «Дресс-код»: Blueprint НЕ подключён")
+
+
+def _dress_code_section_open_for(user_id):
+    """Положено ли человеку фото дресс-кода — то же правило, что у ручки /api/dress_code/photo."""
+    try:
+        from dress_code.routes import section_open_for as _dress_code_open
+        return _dress_code_open(db, user_id)
+    except Exception:
+        logging.exception("Не удалось определить «Дресс-код» пользователя %s", user_id)
+        return False
+
+
+def dress_code_pending_job():
+    """Фото «Ожидает анализа»: ИИ смотрит их повторно (ТЗ п. 9), спорные — руководителю."""
+    try:
+        from dress_code.routes import run_pending
+        bp = _DRESS_CODE.get('bp')
+        done = run_pending(db, _DRESS_CODE['gcs'], getattr(bp, 'notify_reviewers', None))
+        if done:
+            logging.info("Дресс-код: после повторной проверки ИИ на решение руководителю — %s", done)
+    except Exception:
+        logging.exception("Дресс-код: повторная проверка ИИ не удалась")
+
+
+def dress_code_cleanup_job():
+    """История — месяц (ТЗ п. 8): старые фото и решения удаляются."""
+    try:
+        from dress_code.service import cleanup
+        removed = cleanup(db, _DRESS_CODE['gcs'])
+        if removed:
+            logging.info("Дресс-код: удалено фото старше месяца — %s", removed)
+    except Exception:
+        logging.exception("Дресс-код: чистка не удалась")
+
+
 def _client_cards_phone_settings(user_id):
     """Блок client_card для /api/operator/sip_settings: открывать ли телефону карточку на
     звонок и сколько секунд постобработки. При любом сбое — выключено: карточка не должна
@@ -59374,6 +59454,25 @@ if __name__ == '__main__':
         logging.info("⏰ Отметки: ночной досбор кэша и состава в 03:20")
     else:
         logging.warning("⏰ Контроль опозданий выключен: не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD")
+
+    # «Дресс-код» (#418): фото, на которые ИИ не ответил, — повтор раз в 5 минут; история
+    # старше месяца — ночью. От Workpace не зависит: фото снимают в iCore.
+    scheduler.add_job(
+        dress_code_pending_job,
+        CronTrigger(minute='*/5'),
+        id='dress_code_pending',
+        misfire_grace_time=120,
+        max_instances=1,
+        coalesce=True
+    )
+    scheduler.add_job(
+        dress_code_cleanup_job,
+        CronTrigger(hour=3, minute=45, timezone=ZoneInfo('Asia/Almaty')),
+        id='dress_code_cleanup',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
 
     # Отбивка показателей «Табло СЗоВ»: по одной джобе на каждое время из настройки.
     for _hour, _minute in _szov_broadcast_send_times():

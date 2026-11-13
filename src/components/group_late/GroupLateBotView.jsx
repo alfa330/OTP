@@ -6,7 +6,7 @@ import {
     Activity, AlertCircle, AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Bell, BellOff, Building2,
     CalendarClock, CalendarRange, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Clock, Download, FileSpreadsheet,
     Loader2, Link2, LogOut, MapPin, MessageSquare, Moon, Plus, RefreshCw, Search, Send,
-    ShieldAlert, Timer, Trash2, User, Users, UserX, X, Zap,
+    ShieldAlert, Shirt, Timer, Trash2, User, Users, UserX, X, Zap,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
@@ -17,6 +17,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate } from '../ui/DateRangePicker';
 import IosTimePicker from '../ui/TimePicker';
 import useIsMobileShell from '../common/useIsMobileShell';
+import DressCodeReviewTab from '../dress_code/DressCodeReviewTab';
 
 /* Раздел «Бот опозданий» — контроль отметок Workpace: наш бот следит за
  * нарушениями графика и шлёт их в рабочие чаты Telegram.
@@ -189,6 +190,8 @@ const UNLINKED_REASONS = {
 
 const TABS = [
     { key: 'attendance', label: 'Отметки', icon: Clock },
+    // Фото сотрудников и решения по дресс-коду (#418, ТЗ п. 6: «Отметки → Фото»).
+    { key: 'dress_code', label: 'Дресс-код', icon: Shirt },
     { key: 'overview', label: 'Обзор', icon: Activity },
     { key: 'employees', label: 'Сотрудники', icon: Users },
     { key: 'plan', label: 'Графики', icon: CalendarRange },
@@ -875,8 +878,30 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     useEffect(() => { hrHeadersRef.current = headers; }, [headers]);
     const hrApi = useMemo(() => createHrApi(apiBaseUrl, hrHeadersRef), [apiBaseUrl]);
 
+    /* Ссылка из Telegram «Дресс-код: нужна проверка» (?dc_check=<id>) открывает вкладку
+       «Дресс-код» и сразу это фото. Метку из адреса убираем, чтобы обновление страницы
+       не открывало фото снова. */
+    const [dressCodeFocus, setDressCodeFocus] = useState(() => {
+        try {
+            const value = new URLSearchParams(window.location.search).get('dc_check');
+            return /^\d+$/.test(value || '') ? Number(value) : null;
+        } catch (error) {
+            return null;
+        }
+    });
+    const clearDressCodeFocus = useCallback(() => {
+        setDressCodeFocus(null);
+        try {
+            const url = new URL(window.location.href);
+            if (url.searchParams.has('dc_check')) {
+                url.searchParams.delete('dc_check');
+                window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+            }
+        } catch (error) { /* адрес не трогаем — фото всё равно уже открыто */ }
+    }, []);
+
     // «Отметки» — то, ради чего в раздел заходят чаще всего, поэтому они и открываются.
-    const [tab, setTab] = useState('attendance');
+    const [tab, setTab] = useState(() => (dressCodeFocus ? 'dress_code' : 'attendance'));
 
     const [overview, setOverview] = useState(null);
     const [overviewError, setOverviewError] = useState(null);
@@ -3270,6 +3295,10 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             )}
 
             {tab === 'attendance' && renderAttendance()}
+            {tab === 'dress_code' && (
+                <DressCodeReviewTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                    focusCheckId={dressCodeFocus} onFocusHandled={clearDressCodeFocus} />
+            )}
             {tab === 'overview' && renderOverview()}
             {tab === 'employees' && renderEmployees()}
             {tab === 'plan' && renderPlanRules()}
