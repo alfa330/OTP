@@ -166,5 +166,48 @@ class WorkpaceClient:
             ]),
         })
 
+    # ----------------------------------------------------------- фото отметки
+    #
+    # Проверено на боевом 13.11.2026: в СПИСКЕ отметок ссылки на фото нет, и
+    # добавить её туда `select`-ом нельзя (500). Она есть только в карточке
+    # отметки (`fileId`), а сам снимок отдаёт отдельная ручка. Фото есть у
+    # отметок с общих планшетов в офисах; у личных телефонов — только когда
+    # в Workpace включено «фото при отметке».
+
+    def get_mark_card(self, mark_id: str) -> dict:
+        """Карточка одной отметки: `fileId`, причины подозрения, координаты."""
+        return self._get(f"/domain-api/mark/{_uuid(mark_id)}", {})
+
+    def download_photo(self, file_id: str) -> tuple[bytes, str]:
+        """Снимок по `fileId` карточки: (байты, тип). Больше PHOTO_MAX_BYTES не берём."""
+        token = self._valid_token()
+        url = f"{config.WORKPACE_BASE_URL}/api/Photo/download/{_uuid(file_id)}"
+        try:
+            response = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                                    timeout=REQUEST_TIMEOUT, stream=True)
+            response.raise_for_status()
+            chunks, size = [], 0
+            for chunk in response.iter_content(64 * 1024):
+                size += len(chunk)
+                if size > PHOTO_MAX_BYTES:
+                    raise WorkpaceError("Workpace: фото больше допустимого размера")
+                chunks.append(chunk)
+        except requests.RequestException as exc:
+            raise WorkpaceError(f"Workpace фото: {exc}") from exc
+        content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        return b"".join(chunks), content_type
+
+
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _uuid(value) -> str:
+    """Идентификатор Workpace идёт в путь запроса — только настоящий UUID."""
+    import uuid as _uuid_mod
+    try:
+        return str(_uuid_mod.UUID(str(value or "").strip()))
+    except (ValueError, AttributeError, TypeError):
+        raise WorkpaceError("Некорректный идентификатор Workpace")
+
 
 workpace_client = WorkpaceClient()

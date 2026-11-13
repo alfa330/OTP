@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel,
-    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosMenu, IosModal, IosPager,
+    iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosLightbox, IosMenu, IosModal, IosPager,
     IosSegmented, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -919,6 +919,12 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
     const [attendanceSearch, setAttendanceSearch] = useState('');
     const [attendanceCounts, setAttendanceCounts] = useState(null);
     const [attendanceDetail, setAttendanceDetail] = useState(null);
+    /* Фото отметок Workpace в окне дня (13.11.2026): у Workpace снимок есть не у
+       всех отметок (у планшетов в офисах есть, у телефонов — если включено «фото
+       при отметке»), поэтому миниатюра стоит только там, где фото пришло.
+       {номер отметки в окне: адрес картинки} и номер открытой в просмотре. */
+    const [markPhotos, setMarkPhotos] = useState({});
+    const [markPhotoOpen, setMarkPhotoOpen] = useState(null);
     const [attendancePage, setAttendancePage] = useState(1);
     const [attendancePageSize, setAttendancePageSize] = useState(ATTENDANCE_PAGE_SIZES[0]);
     const [attendancePending, setAttendancePending] = useState([]);
@@ -1300,6 +1306,58 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
         }
         return () => clearInterval(reportPoll.current);
     }, [reports, tab, loadReports]);
+
+    /* Фото отметок открытого дня: сначала одним запросом — у каких отметок
+       Workpace снимок есть, потом сами снимки. Картинка идёт запросом с
+       заголовком авторизации, а не адресом в <img>: на телефоне кука до ручки
+       картинки не доезжает. Закрыли окно — адреса картинок освобождаем. */
+    useEffect(() => {
+        setMarkPhotos({});
+        setMarkPhotoOpen(null);
+        const row = attendanceDetail;
+        if (!row) return undefined;
+        const wanted = asArray(row.marks)
+            .map((mark, index) => ({ mark, index }))
+            .filter(({ mark }) => (mark.system || 'workpace') === 'workpace' && (mark.id || mark.at));
+        if (!wanted.length) return undefined;
+        let cancelled = false;
+        const urls = [];
+        axios.post(`${base}/mark_photos`, {
+            date: row.date,
+            marks: wanted.map(({ mark, index }) => ({
+                key: String(index),
+                id: mark.id || null,
+                at: mark.id ? null : mark.at,
+                employee_id: row.employee_id || null,
+                employee: row.employee || null,
+            })),
+        }, { headers: headers() })
+            .then(({ data }) => Promise.all(asArray(data?.items)
+                .filter((item) => item.has_photo)
+                .map((item) => axios.get(`${base}/mark_photos/${encodeURIComponent(item.mark_id)}`, {
+                    headers: headers(), responseType: 'blob',
+                })
+                    .then((response) => {
+                        if (cancelled) return;
+                        const url = URL.createObjectURL(response.data);
+                        urls.push(url);
+                        setMarkPhotos((prev) => ({ ...prev, [item.key]: url }));
+                    })
+                    // Снимок не пришёл — строка просто остаётся без миниатюры.
+                    .catch(() => {}))))
+            .catch(() => {});
+        return () => {
+            cancelled = true;
+            urls.forEach((url) => URL.revokeObjectURL(url));
+        };
+    }, [attendanceDetail, base, headers]);
+
+    // Снимки дня по порядку отметок — для листания в просмотре.
+    const markPhotoOrder = useMemo(() => asArray(attendanceDetail?.marks)
+        .map((mark, index) => ({ mark, index, url: markPhotos[String(index)] }))
+        .filter((item) => item.url), [attendanceDetail, markPhotos]);
+    const markPhotoAt = markPhotoOrder.findIndex((item) => item.index === markPhotoOpen);
+    const markPhotoShown = markPhotoAt >= 0 ? markPhotoOrder[markPhotoAt] : null;
 
     useEffect(() => () => {
         clearTimeout(searchDebounce.current);
@@ -2157,6 +2215,15 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
                                             </div>
                                         )}
                                     </div>
+                                    {markPhotos[String(index)] && (
+                                        <button type="button"
+                                                onClick={() => setMarkPhotoOpen(index)}
+                                                aria-label={`Фото отметки ${fmtFactTime(mark.at, row.date)}`}
+                                                className="shrink-0 overflow-hidden rounded-lg ring-1 ring-slate-200/70 transition active:scale-[0.97]">
+                                            <img src={markPhotos[String(index)]} alt=""
+                                                 className="h-10 w-10 object-cover" />
+                                        </button>
+                                    )}
                                     <span className="shrink-0 text-[14px] font-medium tabular-nums text-slate-900">
                                         {fmtFactTime(mark.at, row.date)}
                                     </span>
@@ -3594,6 +3661,17 @@ export default function GroupLateBotView({ apiBaseUrl, withAccessTokenHeader, sh
             >
                 {attendanceDetail && renderAttendanceDetail(attendanceDetail)}
             </IosModal>
+            <IosLightbox
+                url={markPhotoShown?.url || null}
+                alt={markPhotoShown
+                    ? `${markPhotoShown.mark.kind === 'in' ? 'Вход' : 'Выход'} ${fmtFactTime(markPhotoShown.mark.at, attendanceDetail?.date)}`
+                    : ''}
+                onClose={() => setMarkPhotoOpen(null)}
+                onPrev={markPhotoAt > 0 ? () => setMarkPhotoOpen(markPhotoOrder[markPhotoAt - 1].index) : undefined}
+                onNext={markPhotoAt >= 0 && markPhotoAt < markPhotoOrder.length - 1
+                    ? () => setMarkPhotoOpen(markPhotoOrder[markPhotoAt + 1].index) : undefined}
+                counter={markPhotoOrder.length > 1 && markPhotoAt >= 0 ? `${markPhotoAt + 1} из ${markPhotoOrder.length}` : ''}
+            />
 
             <IosModal
                 open={Boolean(planRuleModal)}

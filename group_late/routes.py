@@ -947,4 +947,65 @@ def build_group_late_blueprint(
             return jsonify({"error": result.get('error') or 'Опрос не удался'}), 502
         return jsonify({"status": "success", **result}), 200
 
+    @bp.route('/group_late_bot/mark_photos', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def api_group_late_bot_mark_photos():
+        """Какие отметки окна «Отметки за день» с фото (13.11.2026).
+
+    Тело: {date, marks: [{key, id?, at?, employee_id?, employee?}]} — отметки
+    Workpace одного дня. Отдаются только найденные и только в границах отдела
+    запрашивающего; фото у Workpace есть не у всех отметок."""
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        _, scope, err = _group_late_bot_guard()
+        if err:
+            return err
+        if not group_late.is_configured():
+            return jsonify({"error": "Не заданы WORKPACE_LOGIN / WORKPACE_PASSWORD",
+                            "code": "WORKPACE_NOT_CONFIGURED"}), 503
+        payload = request.get_json(silent=True) or {}
+        try:
+            from group_late import mark_photos as _mark_photos
+            from group_late.workpace import WorkpaceError
+            try:
+                result = _mark_photos.lookup(db, payload.get('date'), payload.get('marks'), scope=scope)
+            except WorkpaceError as error:
+                logging.warning("Отметки: фото отметок — Workpace не ответил: %s", error)
+                return jsonify({"error": "Workpace сейчас не отвечает"}), 502
+            return jsonify({"status": "success", **result}), 200
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        except Exception:
+            logging.exception("group_late_bot mark photos failed")
+            return jsonify({"error": "Не удалось получить фото отметок"}), 500
+
+    @bp.route('/group_late_bot/mark_photos/<mark_id>', methods=['GET', 'OPTIONS'])
+    @require_api_key
+    def api_group_late_bot_mark_photo(mark_id):
+        """Снимок одной отметки Workpace — только той, что уже нашёл поиск выше
+    в границах отдела запрашивающего."""
+        if request.method == 'OPTIONS':
+            return _build_cors_preflight_response()
+        _, scope, err = _group_late_bot_guard()
+        if err:
+            return err
+        try:
+            from group_late import mark_photos as _mark_photos
+            from group_late.workpace import WorkpaceError
+            try:
+                data, content_type = _mark_photos.photo(db, mark_id, scope=scope)
+            except LookupError:
+                return jsonify({"error": "Фото нет"}), 404
+            except WorkpaceError as error:
+                logging.warning("Отметки: фото отметки — Workpace не ответил: %s", error)
+                return jsonify({"error": "Workpace сейчас не отвечает"}), 502
+        except Exception:
+            logging.exception("group_late_bot mark photo failed")
+            return jsonify({"error": "Не удалось получить фото"}), 500
+        response = send_file(BytesIO(data), mimetype=content_type)
+        # Фото лица — персональные данные: только в браузере смотрящего, не в общих кэшах.
+        response.headers['Cache-Control'] = 'private, max-age=3600'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
     return bp

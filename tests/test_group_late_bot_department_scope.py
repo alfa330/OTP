@@ -243,6 +243,9 @@ class EndpointScopeTests(unittest.TestCase):
         "api_group_late_bot_employees": ["department=scope or request.args.get('department')"],
         "api_group_late_bot_reports": ["department=scope", "scope or str(payload.get('department')"],
         "api_group_late_bot_report_file": ["department=scope"],
+        # Фото отметок (13.11.2026): поиск и сам снимок — в границах отдела отметки.
+        "api_group_late_bot_mark_photos": ["scope=scope"],
+        "api_group_late_bot_mark_photo": ["scope=scope"],
     }
 
     # Общие для компании и ничего об отделах не раскрывают.

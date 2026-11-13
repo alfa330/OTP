@@ -424,6 +424,9 @@ def _mark_out(mark) -> dict:
         # Что назвал терминал — его читают часы СВ (#352): их правило пар
         # построено на типе терминала, и роль по порядку его бы подменила.
         out["terminal_kind"] = "in" if mark.get("markType") == 0 else "out"
+    if out["system"] == WORKPACE_SYSTEM and mark.get("id"):
+        # Номер отметки Workpace — по нему окно дня находит её фото (13.11.2026).
+        out["id"] = str(mark["id"])
     return out
 
 

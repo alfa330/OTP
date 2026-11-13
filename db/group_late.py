@@ -2720,6 +2720,7 @@ class GroupLateMixin:
             cursor.execute("DELETE FROM glb_attendance_rows WHERE day < %s", (edge,))
             removed = cursor.rowcount or 0
             cursor.execute("DELETE FROM glb_attendance_days WHERE day < %s", (edge,))
+            cursor.execute("DELETE FROM glb_mark_photos WHERE mark_at < %s", (edge,))
         return removed
 
     def glb_attendance_directory(self, department=None):
@@ -3005,3 +3006,51 @@ class GroupLateMixin:
                      result['messages'], result['chats'], result['episodes_deleted'],
                      len(result['episodes_kept']), result['outside_episodes'])
         return result
+
+    # ------------------------------------------------------------------
+    # Фото отметок Workpace (13.11.2026): есть ли у отметки снимок.
+
+    def glb_mark_photo_rows(self, mark_ids):
+        """{номер отметки: {'file_id', 'department_name'}} по тем, что уже спрашивали."""
+        ids = sorted({str(value).strip()[:64] for value in (mark_ids or []) if str(value or '').strip()})
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT mark_id, file_id, department_name
+                  FROM glb_mark_photos
+                 WHERE mark_id = ANY(%s)
+            """, (ids,))
+            return {row[0]: {'file_id': row[1], 'department_name': row[2]} for row in cursor.fetchall()}
+
+    def glb_store_mark_photos(self, rows):
+        """Запомнить ответ карточки Workpace. Фото у отметки не меняется, поэтому
+        повторная запись только освежает отдел (его могли переименовать)."""
+        payload = []
+        for row in rows or []:
+            mark_id = str(row.get('mark_id') or '').strip()[:64]
+            if not mark_id:
+                continue
+            origin = row.get('origin')
+            payload.append((
+                mark_id,
+                (str(row.get('employee_id') or '').strip()[:128] or None),
+                (str(row.get('employee_name') or '').strip()[:200] or None),
+                (str(row.get('department_name') or '').strip()[:200] or None),
+                row.get('mark_at'),
+                int(origin) if isinstance(origin, int) else None,
+                (str(row.get('file_id') or '').strip()[:64] or None),
+            ))
+        if not payload:
+            return 0
+        with self._get_cursor() as cursor:
+            execute_values(cursor, """
+                INSERT INTO glb_mark_photos
+                    (mark_id, employee_id, employee_name, department_name, mark_at, origin, file_id)
+                VALUES %s
+                ON CONFLICT (mark_id) DO UPDATE SET
+                    department_name = EXCLUDED.department_name,
+                    file_id = COALESCE(EXCLUDED.file_id, glb_mark_photos.file_id),
+                    checked_at = NOW()
+            """, payload)
+        return len(payload)

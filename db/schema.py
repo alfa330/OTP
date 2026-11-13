@@ -7776,6 +7776,24 @@ class SchemaMixin:
             CREATE INDEX IF NOT EXISTS idx_glb_plan_rules_target
                 ON glb_plan_rules(scope, lower(target)) WHERE enabled;
         """)
+        # Фото отметок Workpace (13.11.2026). Отдельным блоком — правка двух машин.
+        cursor.execute("""
+            -- Есть ли у отметки снимок. Ссылка на фото у Workpace только в карточке
+            -- отметки (запрос на каждую), а у отметки она не меняется — поэтому
+            -- ответ запоминаем. Отдел — из самой отметки: по нему держится граница
+            -- главы отдела, когда фото потом запрашивают по номеру отметки.
+            CREATE TABLE IF NOT EXISTS glb_mark_photos (
+                mark_id         TEXT PRIMARY KEY,
+                employee_id     TEXT,
+                employee_name   TEXT,
+                department_name TEXT,
+                mark_at         TIMESTAMPTZ,
+                origin          SMALLINT,
+                file_id         TEXT,
+                checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_glb_mark_photos_at ON glb_mark_photos(mark_at);
+        """)
 
     def _backfill_null_group_id_tx(self, cursor):
         """Стартовый прогон _stamp_orphan_group_ids_tx по всем операторам."""
