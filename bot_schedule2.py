@@ -1215,6 +1215,11 @@ def _get_user_payload(user):
     # ручки раздела.
     client_cards_access = _client_cards_section_open_for(user_id)
 
+    # Открыт ли раздел «Почта» (#417): суперадмину и тем, кого администратор раздела добавил во
+    # вкладку «Участники». Пункт меню экран рисует по флагу (canAccessMailForUser), границу держат
+    # ручки раздела (mail/access.py).
+    mail_access = _mail_section_open_for(user_id, role)
+
     return {
         "role": role,
         "id": user_id,
@@ -1236,6 +1241,7 @@ def _get_user_payload(user):
         "syntony_access": syntony_access,
         "syntony_window": syntony_window_open,
         "client_cards_access": client_cards_access,
+        "mail_access": mail_access,
         "wazzup_chat_operator": wazzup_chat_operator,
         "wazzup_chat_potok": wazzup_chat_potok,
         "wazzup_chat_crm": wazzup_chat_crm,
@@ -54055,6 +54061,55 @@ try:
     logging.info("Раздел «Оплата счетов»: Blueprint подключён на /api/payments")
 except Exception:
     logging.exception("Раздел «Оплата счетов»: Blueprint НЕ подключён")
+
+
+# ── Раздел «Почта» (задача #417): курьерские отправления между офисами ──────
+# Кто что видит — вкладка «Участники» самого раздела (mail/access.py). Таблицы раздел заводит
+# сам при подключении (mail/schema.py: ensure), справочник офисов — тот же, что у «Посылок»,
+# юрлица-плательщики — справочник «Оплаты счетов». Файлы (накладные, подтверждения, фото
+# расхождений) — в бакет: свой env или общий бакет вложений задач.
+def _mail_bucket_name():
+    return (
+        os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_MAIL')
+        or os.getenv('GOOGLE_CLOUD_STORAGE_BUCKET_TASKS')
+        or ''
+    ).strip()
+
+
+# Раздел поднялся — только тогда профиль спрашивает «Участников»: без таблиц флаг
+# просто ложный, и пункта меню нет.
+_MAIL_SECTION = {'ready': False}
+
+
+def _mail_section_open_for(user_id, role):
+    """Открыт ли раздел «Почта» — то же правило, что у его ручек (mail/access.can_open):
+    суперадмин или участник раздела. Сбой не роняет вход: без флага пункта меню нет."""
+    if user_id is None or not _MAIL_SECTION['ready']:
+        return False
+    try:
+        from mail import queries as mail_queries
+        with db._get_cursor() as cursor:
+            return bool(mail_queries.section_open_for(cursor, user_id, role))
+    except Exception:
+        logging.exception("Не удалось определить доступ к «Почте» пользователя %s", user_id)
+        return False
+
+
+try:
+    from mail.routes import build_mail_blueprint  # noqa: E402
+
+    app.register_blueprint(build_mail_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+        excel_text_warning=_excel_suppress_number_as_text_warning,
+        gcs={'bucket_name': _mail_bucket_name, 'client': get_gcs_client},
+    ))
+    _MAIL_SECTION['ready'] = True
+    logging.info("Раздел «Почта»: Blueprint подключён на /api/mail")
+except Exception:
+    logging.exception("Раздел «Почта»: Blueprint НЕ подключён")
 
 
 # ── Раздел «Продакшн» (задача #316): материалы задач продакшна (#354) ──

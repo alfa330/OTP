@@ -971,6 +971,8 @@ class ProfileCarriesHeadedDepartmentsTests(unittest.TestCase):
             '_hr_office_features_for': lambda _user_id, _role=None: False,
             # Флаги окна Syntony (разделы и само окно, список доступа в разделе) — тоже часть профиля.
             '_syntony_flags_for': lambda _user_id: (False, False),
+            # Флаг раздела «Почта» (#417) — тоже часть профиля.
+            '_mail_section_open_for': lambda _user_id, _role=None: False,
             # Флаг окна «Чатов ОП» в CRM читает сессию запроса из flask.g; вне окна он пуст.
             'g': SimpleNamespace(),
         }
