@@ -1,10 +1,14 @@
 Модель src/components/dress_code/yunet-320.onnx — YuNet (face_detection_yunet_2023mar.onnx) из OpenCV Zoo:
 https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 Веса не менялись; заявленный размер входа изменён с 640x640 на 320x320 (сеть свёрточная).
+Текст лицензии ниже — как в исходном файле LICENSE модели:
+https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/LICENSE
+В строке об авторских правах оставлены имя правообладателя и год; почтовый адрес автора
+опущен (в этом репозитории личные почтовые адреса не хранятся) — он есть по ссылке выше.
 
 MIT License
 
-Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
+Copyright (c) 2020 Shiqi Yu
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
