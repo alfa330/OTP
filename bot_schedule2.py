@@ -54830,7 +54830,10 @@ except Exception:
 # Раз в минуту сверяет статус телефона оператора Тез КЦ с кабинетом и линией Binotel, а по вебхуку
 # «API Call Completed» отмечает звонки, которые очередь или группа не отдали готовому оператору.
 # Найденное пишет в журнал binotel_line_watch. Чинит сам только виды из TEZ_LINE_WATCH_HEAL
-# (через запятую; пусто — только журнал). TEZ_LINE_WATCH=0 выключает сторож целиком.
+# (через запятую; пустая строка — только журнал). По умолчанию — cabinet_stale: телефон
+# выключен дольше 10 минут, а в кабинете не «Неактивен» — сторож ставит «Неактивен» учёткой
+# самого сотрудника (разрешение владельца 16.11.2026; проверено записью на одной линии).
+# TEZ_LINE_WATCH=0 выключает сторож целиком.
 _line_watch_service = None
 _line_watch_client_holder = {}
 
@@ -54877,7 +54880,8 @@ try:
             read_lines=_line_watch_read_lines,
             account_for=db.get_binotel_account,
             queue_states=_line_watch_queue_states,
-            heal_kinds=[k.strip() for k in str(os.getenv('TEZ_LINE_WATCH_HEAL', '')).split(',') if k.strip()],
+            heal_kinds=[k.strip() for k in str(os.getenv('TEZ_LINE_WATCH_HEAL', 'cabinet_stale')).split(',')
+                        if k.strip()],
         )
         if _dial_list_service is not None:
             _dial_list_service.call_observers.append(_line_watch_service.on_binotel_call)

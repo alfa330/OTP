@@ -180,7 +180,11 @@ def test_new_process_sees_only_open_cases(db):
     open_id = journal.open(rules.KIND_CABINET_STALE, '929', snap(operator_id=3), {}, NOW, NOW)
     closed_id = journal.open(rules.KIND_CABINET_CLOSED, '915', snap(), {}, NOW, NOW)
     journal.close(closed_id, NOW + 10)
-    assert journal.load_open() == [(open_id, '929', rules.KIND_CABINET_STALE)]
+    assert journal.load_open() == [(open_id, '929', rules.KIND_CABINET_STALE, None, None)]
+    # Починка оставляет в строке момент и итог — по ним новый процесс не повторяет отказ.
+    journal.heal(open_id, 'set:inactive', 'отказ: кабинет Binotel не принял пароль сотрудника', NOW + 30)
+    assert journal.load_open() == [(open_id, '929', rules.KIND_CABINET_STALE, float(NOW + 30),
+                                    'отказ: кабинет Binotel не принял пароль сотрудника')]
 
 
 def test_cleanup_removes_only_old_closed(db):

@@ -19,8 +19,9 @@
 import unittest
 
 from line_watch import binotel, rules
-from line_watch.service import (ALIVE_SECONDS, CALL_SETTLE_SECONDS, HEAL_MAX_TRIES,
-                                HEAL_RETRY_SECONDS, TOUCH_SECONDS, LineWatchService, heal_plan)
+from line_watch.service import (ALIVE_SECONDS, CALL_SETTLE_SECONDS, HEAL_DENIED_RETRY_SECONDS,
+                                HEAL_MAX_TRIES, HEAL_RETRY_SECONDS, TOUCH_SECONDS, LineWatchService,
+                                heal_plan)
 
 NOW = 1_794_500_000          # условное «сейчас», unix
 
@@ -313,12 +314,15 @@ class CabinetPresenceTests(unittest.TestCase):
         self.assertEqual(fake.presence, 'inactive')
 
     def test_refusals_are_errors(self):
+        # Непринятый пароль — отдельный вид отказа: по нему сторож не повторяет вход часами.
         _, cabinet = self.cabinet(bad_password=True)
-        with self.assertRaises(binotel.CabinetError):
+        with self.assertRaises(binotel.CabinetDenied):
             cabinet.set('active')
+        # Неподтверждённая запись — обычная ошибка, её повторяют.
         _, cabinet = self.cabinet(presence='inactive', save_status='error')
-        with self.assertRaises(binotel.CabinetError):
+        with self.assertRaises(binotel.CabinetError) as caught:
             cabinet.set('active')
+        self.assertNotIsInstance(caught.exception, binotel.CabinetDenied)
         _, cabinet = self.cabinet()
         with self.assertRaises(binotel.CabinetError):
             cabinet.set('vacation')
@@ -335,15 +339,20 @@ class _Journal(object):
         self.next_id = 100
         self.events = []
         self.cleanups = 0
-        for line, kind in open_rows:
-            self.rows[self.next_id] = {'line': line, 'kind': kind, 'ended': None, 'touched': 0, 'heal': None}
+        # open_rows: (линия, вид) либо (линия, вид, когда чинили, итог) — строка с прошлой починкой.
+        for item in open_rows:
+            line, kind = item[0], item[1]
+            self.rows[self.next_id] = {'line': line, 'kind': kind, 'ended': None, 'touched': 0, 'heal': None,
+                                       'heal_at': item[2] if len(item) > 2 else None,
+                                       'heal_result': item[3] if len(item) > 3 else None}
             self.next_id += 1
 
     def ready(self):
         return self.is_ready
 
     def load_open(self):
-        return [(i, r['line'], r['kind']) for i, r in self.rows.items() if r['ended'] is None]
+        return [(i, r['line'], r['kind'], r.get('heal_at'), r.get('heal_result'))
+                for i, r in self.rows.items() if r['ended'] is None]
 
     def open(self, kind, line, snap, details, started, now):
         self.rows[self.next_id] = {'line': line, 'kind': kind, 'ended': None, 'touched': 0, 'heal': None,
@@ -423,6 +432,8 @@ class _World(object):
         class Writer(object):
             def set(self, presence):
                 world.writes.append((login, presence))
+                if login == 'c@example.kz' and world.deny_writes:
+                    raise binotel.CabinetDenied('кабинет Binotel не принял пароль сотрудника')
                 if login == 'c@example.kz' and world.fail_writes:
                     raise binotel.CabinetError('кабинет не подтвердил')
                 return True
@@ -430,6 +441,7 @@ class _World(object):
         return Writer()
 
     fail_writes = False
+    deny_writes = False
 
     def service(self, journal=None, heal_kinds=()):
         self.journal = journal or _Journal()
@@ -545,7 +557,67 @@ class HealTests(unittest.TestCase):
         service = world.service(heal_kinds=[rules.KIND_CABINET_STALE])
         service.tick()
         self.assertEqual(world.writes, [])
-        self.assertEqual(world.journal.rows[100]['heal'], ('set:inactive', 'учётки кабинета у сотрудника нет'))
+        self.assertEqual(world.journal.rows[100]['heal'],
+                         ('set:inactive', 'отказ: учётки кабинета у сотрудника нет'))
+
+    def test_rejected_password_is_not_hammered(self):
+        """Кабинет не принял пароль сотрудника: вторая попытка с теми же данными — это ещё один
+        неудачный вход в чужой кабинет. Следующая — не раньше чем через шесть часов."""
+        world = _World()
+        world.deny_writes = True
+        world.line('929', 'active', 90000, sip='offline')
+        world.phone(3, 'выключен', 80000)
+        service = world.service(heal_kinds=[rules.KIND_CABINET_STALE])
+        service.tick()
+        self.assertEqual(world.journal.rows[100]['heal'],
+                         ('set:inactive', 'отказ: кабинет Binotel не принял пароль сотрудника'))
+        for _ in range(8):
+            world.now += HEAL_RETRY_SECONDS
+            service.tick()
+        self.assertEqual(len(world.writes), 1)
+        world.now += HEAL_DENIED_RETRY_SECONDS
+        service.tick()
+        self.assertEqual(len(world.writes), 2)
+
+    def test_restart_does_not_forget_a_rejection(self):
+        """Сервер перезапускается при каждом деплое — по нескольку раз в день. Момент отказа
+        лежит в журнале, и новый процесс ждёт остаток срока, а не входит в кабинет заново."""
+        world = _World()
+        world.deny_writes = True
+        world.line('929', 'active', 90000, sip='offline')
+        world.phone(3, 'выключен', 80000)
+        journal = _Journal(open_rows=[('929', rules.KIND_CABINET_STALE, world.now - 3600,
+                                       'отказ: кабинет Binotel не принял пароль сотрудника')])
+        service = world.service(journal, heal_kinds=[rules.KIND_CABINET_STALE])
+        service.tick()
+        self.assertEqual(world.writes, [])
+        world.now += HEAL_DENIED_RETRY_SECONDS - 3600 - 120
+        service.tick()
+        self.assertEqual(world.writes, [])
+        world.now += 180
+        service.tick()
+        self.assertEqual(len(world.writes), 1)
+
+    def test_restart_retries_a_plain_failure_and_old_journals_still_load(self):
+        """«Не вышло» (сеть, кабинет не подтвердил) — не отказ: новый процесс пробует сразу.
+        Журнал прежнего вида, без момента и итога починки, читается как раньше."""
+        world = _World()
+        world.line('929', 'active', 90000, sip='offline')
+        world.phone(3, 'выключен', 80000)
+        journal = _Journal(open_rows=[('929', rules.KIND_CABINET_STALE, world.now - 60,
+                                       'не вышло: кабинет не подтвердил')])
+        service = world.service(journal, heal_kinds=[rules.KIND_CABINET_STALE])
+        service.tick()
+        self.assertEqual(world.writes, [('c@example.kz', 'inactive')])
+
+        world = _World()
+        world.line('929', 'active', 90000, sip='offline')
+        world.phone(3, 'выключен', 80000)
+        journal = _Journal(open_rows=[('929', rules.KIND_CABINET_STALE)])
+        journal.load_open = lambda: [(100, '929', rules.KIND_CABINET_STALE)]
+        service = world.service(journal, heal_kinds=[rules.KIND_CABINET_STALE])
+        service.tick()
+        self.assertEqual(world.writes, [('c@example.kz', 'inactive')])
 
 
 class CallEventTests(unittest.TestCase):

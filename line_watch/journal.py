@@ -27,13 +27,18 @@ class Journal(object):
             return schema.schema_is_ready(cursor)
 
     def load_open(self):
-        """Незакрытые расхождения состояния: [(id, линия, вид)] — их продолжает новый процесс."""
+        """Незакрытые расхождения состояния — их продолжает новый процесс:
+        [(id, линия, вид, когда чинили (unix-секунды или None), итог починки или None)].
+        Момент и итог прошлой починки нужны, чтобы перезапуск не начинал попытки заново."""
         with self._cursor() as cursor:
             cursor.execute("""
-                SELECT id, line, kind FROM binotel_line_watch
+                SELECT id, line, kind, EXTRACT(EPOCH FROM heal_at), heal_result
+                FROM binotel_line_watch
                 WHERE ended_at IS NULL AND general_call_id IS NULL
             """)
-            return [(row[0], str(row[1]), str(row[2])) for row in cursor.fetchall()]
+            return [(row[0], str(row[1]), str(row[2]),
+                     float(row[3]) if row[3] is not None else None, row[4])
+                    for row in cursor.fetchall()]
 
     def open(self, kind, line, snap, details, started, now):
         """Открыть расхождение; если такое у линии уже открыто — продолжить его. Возвращает id."""

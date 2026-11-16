@@ -83,6 +83,11 @@ class CabinetError(RuntimeError):
     """Кабинет не дал сменить presence: не вошли, нет карточки, не подтвердил запись."""
 
 
+class CabinetDenied(CabinetError):
+    """Кабинет не принял учётку сотрудника. Повторять с теми же логином и паролем бесполезно —
+    пока учётку не поправят в «Настройках SIP», статус этого сотрудника не меняет и его телефон."""
+
+
 class CabinetPresence(object):
     """Presence одного сотрудника в кабинете Binotel — его собственной учёткой.
 
@@ -116,7 +121,7 @@ class CabinetPresence(object):
         # При отказе кабинет уводит на /?action=badPassword — признак надёжный; по разметке
         # страницы не судим: проверкой входа служит сама карточка.
         if 'action=badPassword' in (response.url or '') or 'action=badPassword' in (response.text or ''):
-            raise CabinetError('кабинет Binotel не принял пароль сотрудника')
+            raise CabinetDenied('кабинет Binotel не принял пароль сотрудника')
         self._logged_in = True
 
     def record(self):

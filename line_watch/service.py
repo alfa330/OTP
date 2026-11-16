@@ -39,6 +39,11 @@ READY_MARGIN_SECONDS = 5
 # Починка: не чаще раза в столько секунд на случай и не больше стольких попыток.
 HEAL_RETRY_SECONDS = 600
 HEAL_MAX_TRIES = 3
+# Отказ — кабинет не принял учётку сотрудника или её нет вовсе: с теми же данными выйдет то же
+# самое, а каждая попытка — это неудачный вход в чужой кабинет. Повтор не раньше чем через
+# столько секунд, и перезапуск сервера этот срок не обнуляет (момент отказа лежит в журнале).
+HEAL_DENIED_RETRY_SECONDS = 6 * 3600
+DENIED_PREFIX = 'отказ: '
 # Признак «человек работает» для возврата «Активен»: звонок по линии или событие телефона не
 # старше стольких секунд. Телефон, забытый включённым на спящем компьютере, сам шлёт «готов» при
 # пробуждении — без этого признака сторож вернул бы в очередь пустое рабочее место.
@@ -223,14 +228,20 @@ class LineWatchService(object):
 
     def _sync(self, found, now):
         if self._open is None:
-            self._open = {(line, kind): {'id': row_id, 'written': 0.0, 'tries': 0, 'heal_at': 0.0}
-                          for row_id, line, kind in self.journal.load_open()}
+            self._open = {}
+            for row in self.journal.load_open():
+                row_id, line, kind = row[0], row[1], row[2]
+                heal_at = float(row[3]) if len(row) > 3 and row[3] else 0.0
+                denied = len(row) > 4 and str(row[4] or '').startswith(DENIED_PREFIX)
+                self._open[(line, kind)] = {'id': row_id, 'written': 0.0, 'tries': 0, 'heal_at': heal_at,
+                                            'denied_at': heal_at if denied else 0.0}
         for key, snap in found.items():
             line, kind = key
             entry = self._open.get(key)
             if entry is None:
                 row_id = self.journal.open(kind, line, snap, self._details(kind, snap), snap['started'], now)
-                self._open[key] = {'id': row_id, 'written': now, 'tries': 0, 'heal_at': 0.0}
+                self._open[key] = {'id': row_id, 'written': now, 'tries': 0, 'heal_at': 0.0,
+                                   'denied_at': 0.0}
                 log.info('line_watch: линия %s — %s (телефон «%s», кабинет «%s», линия %s)',
                          line, kind, snap['phone'] or '—', snap['presence'], snap['sip'] or '?')
             elif now - entry['written'] >= TOUCH_SECONDS:
@@ -251,7 +262,8 @@ class LineWatchService(object):
                 continue
             entry = (self._open or {}).get(key)
             if (not entry or entry['tries'] >= HEAL_MAX_TRIES
-                    or (entry['tries'] and now - entry['heal_at'] < HEAL_RETRY_SECONDS)):
+                    or (entry['tries'] and now - entry['heal_at'] < HEAL_RETRY_SECONDS)
+                    or (entry['denied_at'] and now - entry['denied_at'] < HEAL_DENIED_RETRY_SECONDS)):
                 continue
             target = heal_plan(kind, snap)
             if target is None:
@@ -259,6 +271,8 @@ class LineWatchService(object):
             entry['tries'] += 1
             entry['heal_at'] = now
             result = self.apply_presence(snap['operator_id'], target)
+            if result.startswith(DENIED_PREFIX):
+                entry['denied_at'] = now
             self.journal.heal(entry['id'], 'set:%s' % target, result, now)
             log.info('line_watch: линия %s — %s, в кабинет ставим «%s»: %s', line, kind, target, result)
 
@@ -267,10 +281,12 @@ class LineWatchService(object):
         try:
             account = self._account_for(operator_id) if self._account_for else None
             if not account or not account.get('cabinet_login') or not account.get('cabinet_password'):
-                return 'учётки кабинета у сотрудника нет'
+                return DENIED_PREFIX + 'учётки кабинета у сотрудника нет'
             cabinet = self._presence_factory(account.get('cabinet_url'), account.get('cabinet_login'),
                                              account.get('cabinet_password'))
             return 'записано' if cabinet.set(presence) else 'уже стояло'
+        except binotel.CabinetDenied as exc:
+            return DENIED_PREFIX + str(exc)
         except binotel.CabinetError as exc:
             return 'не вышло: %s' % exc
         except Exception as exc:  # noqa: BLE001 — починка не должна ронять сверку
