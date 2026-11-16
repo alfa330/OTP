@@ -155,13 +155,10 @@ def split_episodes(messages, gap_seconds=EPISODE_GAP_SECONDS):
 
 
 def _new_episode(key, at):
-    # replies — каждый ответ диалога по порядку: (кто, когда, задержка, первый ли). Табло хватает
-    # сумм в people; отчёт «Смены» «Чатов ОП» (wazzup/shift_report.py) по ним относит ответ к
-    # смене, в которую он дан, — диалог на стыке двух смен делится между ними честно.
     return {'channel_id': key[0], 'chat_id': key[1], 'start': at, 'end': at,
             'pending': None, 'first_done': False, 'first_by': None,
             'incoming': 0, 'has_verifier': False, 'has_other': False,
-            'last_human': None, 'people': {}, 'replies': []}
+            'last_human': None, 'people': {}}
 
 
 def _feed_episode(episode, message):
@@ -186,12 +183,10 @@ def _feed_episode(episode, message):
     delta = max(0.0, (at - episode['pending']).total_seconds())
     person['replies'] += 1
     person['total'] += delta
-    first = not episode['first_done']
-    if first:
+    if not episode['first_done']:
         episode['first_done'] = True
         episode['first_by'] = user_id
         person['first'] = delta
-    episode['replies'].append((user_id, at, delta, first))
     episode['pending'] = None
 
 

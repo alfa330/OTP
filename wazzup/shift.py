@@ -47,7 +47,6 @@ WRITE_LOCKED_MESSAGE = 'Писать клиентам можно только в
 LOGOUT_KEY = 'выключен'
 # Состояния «не на смене» других источников, если человек ими пользуется.
 _OFF_SHIFT_KEYS = frozenset({LOGOUT_KEY, 'logout', 'offline', 'отключен', 'отключена'})
-OFF_SHIFT_KEYS = _OFF_SHIFT_KEYS
 
 # Метка событий раздела в operator_status_events.client_event_id. По ней сторож
 # отличает смену, открытую здесь, от статусов телефона: закрывать чужую смену
@@ -77,11 +76,6 @@ def normalize_key(value):
 
 def is_on_shift_key(key):
     return normalize_key(key) in ON_SHIFT_KEYS
-
-
-def is_off_shift_key(key):
-    """Конец смены: «выключен» раздела и телефона или их синонимы из других источников."""
-    return normalize_key(key) in _OFF_SHIFT_KEYS
 
 
 def writes_allowed(event):

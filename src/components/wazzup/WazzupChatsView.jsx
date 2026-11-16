@@ -5,7 +5,7 @@ import {
     Search, RefreshCw, Loader2, AlertCircle, MessageSquare, ExternalLink,
     ChevronDown, ChevronUp, FileText, MapPin, Ban, Users, Bot, Wand2, Link2,
     Contact2, PhoneMissed, BarChart3, Download, Timer, ArrowUpDown, Clock3, Reply, MessageSquareText, FilePen,
-    IdCard, LogOut, Palette, CalendarClock,
+    IdCard, LogOut, Palette,
 } from 'lucide-react';
 import {
     APPLE_FONT, iosCard, iosInput, iosGroupLabel, iosBtnGhost,
@@ -950,44 +950,23 @@ function AuthorsTab({ apiBaseUrl, headers, showToast, account }) {
     );
 }
 
-// «Смены» (кто когда работал и как обрабатывал чаты) открывают руководители, а не верификаторы:
-// код вкладки грузится по первому открытию.
-const ChatShiftReport = lazyWithRetry(() => import('./ChatShiftReport'));
-
 /* Подраздел «Операторы»: аналитика открывается первой — привязка нужна реже,
  * это разовая настройка. */
-function OperatorsTab({ apiBaseUrl, headers, showToast, account, themeScope }) {
+function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
     const [subTab, setSubTab] = useState('analytics');
-    const goToMapping = () => setSubTab('mapping');
     return (
         <div className="space-y-3">
             <div className="flex w-fit rounded-xl bg-slate-100 p-1">
                 <SegButton active={subTab === 'analytics'} onClick={() => setSubTab('analytics')}
                            icon={BarChart3}>Аналитика</SegButton>
-                <SegButton active={subTab === 'shifts'} onClick={() => setSubTab('shifts')}
-                           icon={CalendarClock}>Смены</SegButton>
-                <SegButton active={subTab === 'mapping'} onClick={goToMapping}
+                <SegButton active={subTab === 'mapping'} onClick={() => setSubTab('mapping')}
                            icon={Link2}>Привязка</SegButton>
             </div>
-            {subTab === 'analytics' && (
-                <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                              account={account} onGoToMapping={goToMapping} />
-            )}
-            {subTab === 'shifts' && (
-                <Suspense fallback={(
-                    <div className={`${iosCard} flex items-center justify-center gap-2 py-12 text-[13px] text-slate-400`}>
-                        <Loader2 size={15} className="animate-spin" /> Загрузка…
-                    </div>
-                )}>
-                    <ChatShiftReport apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                                     account={account} onGoToMapping={goToMapping} downloadCsv={downloadCsv}
-                                     themeScope={themeScope} />
-                </Suspense>
-            )}
-            {subTab === 'mapping' && (
-                <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                            account={account} />
-            )}
+            {subTab === 'analytics'
+                ? <AnalyticsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                                account={account} onGoToMapping={() => setSubTab('mapping')} />
+                : <AuthorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
+                              account={account} />}
         </div>
     );
 }
@@ -2077,8 +2056,7 @@ function ChatsWorkspace(props) {
             {mainTab === 'authors' && (
                 <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                     <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                                  account={account}
-                                  themeScope={themed ? { id: chatTheme.applied.id, style: chatThemeStyle(chatTheme.applied) } : null} />
+                                  account={account} />
                 </div>
             )}
 
