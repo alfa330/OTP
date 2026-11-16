@@ -313,7 +313,8 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         with db._get_cursor() as cursor:
             card = queries.get_card(cursor, card_id)
             rows = queries.card_photos(cursor, [card_id]).get(card['id'], []) if card else []
-        return public_card(card, {}, access.can_edit_cards(ctx), tariffs.book(), rows) if card else None
+            book = tariffs.book(cursor)
+        return public_card(card, {}, access.can_edit_cards(ctx), book, rows) if card else None
 
     def public_direction(item):
         return {
@@ -346,8 +347,10 @@ def build_rental_blueprint(*, db, require_api_key, build_cors_preflight_response
         except Exception:  # noqa: BLE001 — экран показывает прежний снимок, а не 500
             logging.exception('rental: не поставилось обновление снимка Yume')
         caps = access.capabilities(ctx)
-        book = tariffs.book()
         with db._get_cursor() as cursor:
+            # Книга — со слепком из базы: после ночной сверки классификатора
+            # тарифы карточек обновляются без перезапуска.
+            book = tariffs.book(cursor)
             cards = queries.cards(cursor)
             sync = queries.fleet_sync(cursor)
             parks = queries.sales_parks(cursor) if caps['send'] else []

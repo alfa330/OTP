@@ -1959,6 +1959,28 @@ _CLASSIFIER_STATEMENTS = [
     """,
 ]
 
+# Справочник классификатора — слепком базы знаний Яндекс Про по всем городам
+# (wiki/classifier_store.py). Одна строка: справочник читается целиком, а
+# история изменений живёт в журнале сверки, а не в копиях по 400 КБ.
+_CLASSIFIER_SNAPSHOT_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS wiki_classifier_snapshot (
+        id              SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+        data            JSONB NOT NULL,
+        -- Отпечаток СОДЕРЖИМОГО (classifier_source.fingerprint), без времени
+        -- проверки: по нему кэш книги понимает, что справочник сменился.
+        digest          CHAR(64) NOT NULL,
+        -- «2 нояб 2026» — дата правки, как её пишет страница Алматы.
+        source_updated  VARCHAR(64),
+        checked_at      TIMESTAMP NOT NULL DEFAULT %(now)s,
+        changed_at      TIMESTAMP NOT NULL DEFAULT %(now)s,
+        -- Причина последней неудачной сверки; данные при этом прежние.
+        error           TEXT,
+        warnings        JSONB
+    );
+    """,
+]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ОТДЕЛ И УРОВЕНЬ ДОЛЖНОСТИ В ДЕРЕВЕ РАЗДЕЛОВ
@@ -3016,6 +3038,8 @@ def init_wiki_schema(cursor):
     _row = cursor.fetchone()
     if _row:
         _refresh_aliases(cursor, _row[0])
+    for statement in _CLASSIFIER_SNAPSHOT_STATEMENTS:
+        cursor.execute(statement.replace('%(now)s', _NOW))
 
     # ── Разовая заливка внутренних ссылок ────────────────────────────────
     # Таблица wiki_article_links лежит в схеме с первого дня раздела, и всё это

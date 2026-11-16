@@ -58363,6 +58363,38 @@ async def run_wiki_city_tariffs_sync_async():
     except Exception:
         logging.exception("wiki city tariffs sync job failed")
 
+
+def wiki_classifier_sync_job():
+    """«Классификатор авто» — сверка с базой знаний Яндекс Про по всем городам.
+
+    25 страниц auto-list (по одной на город) качаются без открытого соединения,
+    справочник пишется одной строкой слепка (wiki/classifier_store.sync) и сразу
+    становится виден калькулятору, помощнику и «Наличию авто». Прогон идёт,
+    только когда слепку пора (classifier_store.is_due): догоняющий запуск после
+    каждого деплоя не перекачивает Яндекс, если ночная сверка уже была.
+    """
+    try:
+        from wiki import classifier as wiki_classifier
+        from wiki import classifier_store as wiki_classifier_store
+        with db._get_cursor() as cursor:
+            if not wiki_classifier_store.is_due(cursor):
+                return None
+        summary = wiki_classifier_store.sync(db, on_change=wiki_classifier.invalidate)
+        logging.info("Wiki «Классификатор авто»: сверка %s", summary)
+        return summary
+    except Exception:
+        logging.exception("wiki classifier sync job failed")
+        return None
+
+
+async def run_wiki_classifier_sync_async():
+    loop = asyncio.get_event_loop()
+    try:
+        # Пул тот же, что у двух сверок выше: все трое ходят к Яндексу.
+        return await loop.run_in_executor(yandex_pro_pool, wiki_classifier_sync_job)
+    except Exception:
+        logging.exception("wiki classifier sync job failed")
+
 # === Главный запуск =============================================================================================
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('reject_reval:'))
 async def handle_reject_reval(callback_query: types.CallbackQuery, state: FSMContext):
@@ -59373,6 +59405,19 @@ if __name__ == '__main__':
         max_instances=1,
         coalesce=True,
         next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=3)
+    )
+
+    # «Классификатор авто» — в 05:40, после двух сверок выше, и догоняющий прогон
+    # через шесть минут после старта: свежая база получает справочник Яндекса в
+    # первый же час, а не утром. Сам прогон решает, пора ли (раз в 20 часов).
+    scheduler.add_job(
+        run_wiki_classifier_sync_async,
+        CronTrigger(hour=5, minute=40, timezone=ZoneInfo('Asia/Almaty')),
+        id='wiki_classifier_sync_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(ZoneInfo('Asia/Almaty')) + timedelta(minutes=6)
     )
 
     # Тесты в «Опросах»: раз в минуту добираем попытки, у которых истекло

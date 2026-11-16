@@ -5,14 +5,17 @@ import { fileURLToPath } from 'node:url';
 
 import { carKey, matchBrand, matchCar } from '../src/components/wiki/carMatch.js';
 
-/* Матчинг идёт по НАСТОЯЩЕМУ справочнику (1502 машины), а не по фикстуре:
- * все три бага, которые здесь закреплены, воспроизводились только на нём —
- * побеждала не самая точная машина, а самая ранняя в файле. */
+/* Матчинг идёт по НАСТОЯЩЕМУ справочнику (~1650 машин базы знаний Яндекс Про),
+ * а не по фикстуре: все три бага, которые здесь закреплены, воспроизводились
+ * только на нём — побеждала не самая точная машина, а самая ранняя в файле.
+ * Справочник — серверный файл (wiki/data/classifier-data.json, тот же, что
+ * отдаёт /api/wiki/classifier); указатель машин в нём — пары [марка, модель],
+ * экран превращает их в { brand, model } (classifierData.carsOf). */
 const DATA = JSON.parse(readFileSync(
-    fileURLToPath(new URL('../src/components/classifier/classifier-data.json', import.meta.url)),
+    fileURLToPath(new URL('../wiki/data/classifier-data.json', import.meta.url)),
     'utf-8',
 ));
-const CARS = DATA.cars;
+const CARS = DATA.cars.map(([brand, model], index) => ({ index, brand, model }));
 
 const name = (car) => (car ? `${car.brand} ${car.model}` : null);
 

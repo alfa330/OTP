@@ -13,14 +13,19 @@
   * доступ — как у статьи: вне периметра помощника классификатор молчит, и
     база не тронута, пока вопрос не про машину.
 
-Без базы и без файла экрана: данные синтетические, той же формы, что
-src/components/classifier/classifier-data.json. Настоящий файл проверяется
-отдельно и только на то, что от его содержания не зависит (DataFileTest).
+Без базы и без сети: данные синтетические. Они записаны в прежней форме Wiki 2.0
+(годы модели + поправка города), потому что сотни ожиданий ниже — её числа, и
+переводятся в форму 2 (у каждого города своя таблица с готовыми годами) одним
+местом — tests/classifier_fixture.py. Книга видит только явные годы по
+городам, как в настоящем справочнике. Настоящий файл (wiki/data/
+classifier-data.json — слепок базы знаний Яндекс Про) проверяется отдельно и
+только на то, что от его чисел не зависит (DataFileTest).
 """
 
 import ast
 import json
 import re
+import sys
 import unittest
 from datetime import date
 from pathlib import Path
@@ -31,6 +36,9 @@ from wiki import routes_ai
 from wiki.ai import answer as ai_answer
 from wiki.ai import currency
 from wiki.ai import store as ai_store
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classifier_fixture import v2_from_legacy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 TODAY = date(2026, 10, 12)
@@ -146,7 +154,12 @@ DATA = {
     ],
 }
 
-BOOK = classifier.build_book(DATA)
+def legacy_book(data):
+    """Книга из синтетики прежней формы — через перевод в форму 2."""
+    return classifier.build_book(v2_from_legacy(data))
+
+
+BOOK = legacy_book(DATA)
 
 
 def analyze(question, context=None, *, history=None):
@@ -173,8 +186,16 @@ def text(question, context=None):
     return found[0]['text'] if found else ''
 
 
-class FormulaTest(unittest.TestCase):
-    """Расчёт — двойник калькулятора на экране."""
+def required_year(car, city, key):
+    """Год тарифа города для машины; None — тарифа в городе нет или модели нет в таблице."""
+    req = classifier.requirement(car, city, key)
+    if req is None or req['kind'] == 'absent':
+        return None
+    return req['year']
+
+
+class RequirementTest(unittest.TestCase):
+    """Год берётся из таблицы ГОРОДА — никакой «поправки» к Алматы в книге нет."""
 
     def city(self, city_id):
         return next(item for item in BOOK['cities'] if item['id'] == city_id)
@@ -182,35 +203,36 @@ class FormulaTest(unittest.TestCase):
     def car(self, name):
         return next(item for item in BOOK['cars'] if item['name'] == name)
 
-    def test_city_shifts_the_base_year(self):
+    def test_each_city_has_its_own_year(self):
         camry = self.car('Toyota Camry')
-        self.assertEqual(classifier.required_year(camry, self.city('almaty'), 'comfort'), 2014)
-        self.assertEqual(classifier.required_year(camry, self.city('astana'), 'comfort'), 2015)
-        self.assertEqual(classifier.required_year(camry, self.city('shymkent'), 'comfort'), 2013)
-        self.assertEqual(classifier.required_year(camry, self.city('turkestan'), 'comfort'), 2011)
-
-    def test_floor_is_1980(self):
-        audi = self.car('Audi 80')                                    # 1982 − 3 = 1979
-        self.assertEqual(classifier.required_year(audi, self.city('turkestan'), 'econom'), 1980)
-        self.assertEqual(classifier.required_year(audi, self.city('taraz'), 'econom'), 1980)
-        self.assertEqual(classifier.required_year(audi, self.city('almaty'), 'econom'), 1982)
+        self.assertEqual(required_year(camry, self.city('almaty'), 'comfort'), 2014)
+        self.assertEqual(required_year(camry, self.city('astana'), 'comfort'), 2015)
+        self.assertEqual(required_year(camry, self.city('shymkent'), 'comfort'), 2013)
+        self.assertEqual(required_year(camry, self.city('turkestan'), 'comfort'), 2011)
 
     def test_no_tariff_for_the_model_or_in_the_city(self):
         camry = self.car('Toyota Camry')
-        self.assertIsNone(classifier.required_year(camry, self.city('almaty'), 'ultima'))
-        # У модели «Бизнес» есть, в Таразе такого тарифа нет.
-        self.assertIsNone(classifier.required_year(camry, self.city('taraz'), 'business'))
+        # Таблица Ultima в Алматы есть, а Camry в ней нет.
+        self.assertEqual(classifier.requirement(camry, self.city('almaty'), 'ultima')['kind'],
+                         'absent')
+        # В Таразе тарифа «Бизнес» нет вовсе.
+        self.assertIsNone(classifier.requirement(camry, self.city('taraz'), 'business'))
 
-    def test_the_screen_counts_the_same_way(self):
-        """Формула и пол года — те же, что в ClassifierView.jsx: разойдутся — и
-        помощник назовёт год, которого нет на экране."""
+    def test_the_screen_counts_with_the_twin_of_this_module(self):
+        """Экран считает тем же правилом (classifierData.js — двойник requirement и
+        verdict) по данным с сервера, а не своим файлом с «поправкой города»:
+        разойдутся — и помощник назовёт год, которого нет на экране."""
         view = (ROOT / 'src' / 'components' / 'classifier' / 'ClassifierView.jsx').read_text(
             encoding='utf-8')
-        self.assertIn('const YEAR_FLOOR = %s;' % classifier.YEAR_FLOOR, view)
-        self.assertRegex(view, r'Math\.max\(YEAR_FLOOR, baseYear \+ cityOffset\)')
-        # Тариф показывается, только когда он есть и у города, и у модели.
-        self.assertIn('(city.tariffs || [])', view)
-        self.assertIn('base === undefined', view)
+        twin = (ROOT / 'src' / 'components' / 'classifier' / 'classifierData.js').read_text(
+            encoding='utf-8')
+        self.assertIn("from './classifierData'", view)
+        for name in ('requirementOf', 'verdictOf', 'loadClassifier'):
+            self.assertIn('export function %s' % name, twin)
+        for source in (view, twin):
+            # «Поправки города» больше нет ни в данных, ни в расчёте.
+            for word in ('city.offset', 'cityOffset', 'YEAR_FLOOR', 'baseYear'):
+                self.assertNotIn(word, source)
 
 
 class DataFileTest(unittest.TestCase):
@@ -221,23 +243,46 @@ class DataFileTest(unittest.TestCase):
         cls.data = classifier.read_data()
         cls.book = classifier.build_book(cls.data)
 
-    def test_the_assistant_reads_the_file_of_the_screen(self):
+    def test_the_screen_and_the_assistant_read_one_source(self):
+        """Файл справочника — серверный (запасной к слепку в базе), а экран берёт
+        данные у сервера: тот же справочник, что у помощника. Статический файл в
+        бандле фронта разошёлся бы с ночной сверкой в первую же ночь."""
         path = Path(classifier.DATA_PATH)
-        self.assertEqual(path, ROOT / 'src' / 'components' / 'classifier' / 'classifier-data.json')
+        self.assertEqual(path, ROOT / 'wiki' / 'data' / 'classifier-data.json')
+        self.assertFalse((ROOT / 'src' / 'components' / 'classifier' / 'classifier-data.json').exists())
         for name in ('classifier/ClassifierView.jsx', 'wiki/WikiSearch.jsx'):
             source = (ROOT / 'src' / 'components' / name).read_text(encoding='utf-8')
-            self.assertIn('classifier-data.json', source, name)
+            self.assertNotIn('classifier-data.json', source, name)
+            self.assertIn('loadClassifier', source, name)
 
     def test_shape(self):
+        data = self.data
+        self.assertEqual(data['version'], 2)
         self.assertGreater(len(self.book['cars']), 1000)
-        self.assertGreaterEqual(len(self.book['cities']), 20)
-        keys = {item['key'] for item in self.book['tariffs']}
-        for city in self.book['cities']:
-            self.assertTrue(set(city['tariffs']) <= keys, city['name'])
-            self.assertIsInstance(city['offset'], int)
-        for item in self.book['cars']:
-            self.assertTrue(set(item['years']) <= keys, item['name'])
-            self.assertTrue(set(item['warnings']) <= set(item['years']), item['name'])
+        ids = [city['id'] for city in data['cities']]
+        self.assertGreaterEqual(len(ids), 25)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertTrue({'almaty', 'astana', 'rudny', 'petropavlovsk', 'aksay'} <= set(ids))
+        keys = [item['key'] for item in data['tariffs']]
+        self.assertEqual(keys, ['econom', 'intercity', 'comfort', 'comfort_plus', 'business',
+                                'electro', 'ultima'])
+        cars, lists = len(data['cars']), len(data['lists'])
+        for city in data['cities']:
+            self.assertTrue(city['tariffs'], city['name'])
+            self.assertTrue(set(city['tariffs']) <= set(keys), city['name'])
+            for key, entry in city['tariffs'].items():
+                self.assertTrue(('list' in entry) != ('any' in entry), (city['name'], key))
+                if 'list' in entry:
+                    self.assertLess(entry['list'], lists)
+                for index in entry.get('notes') or ():
+                    self.assertLess(index, len(data['notes']))
+        for table in data['lists']:
+            for row in table['rows']:
+                self.assertLess(row[0], cars)
+                if len(row) > 2:
+                    self.assertLess(row[2], len(data['reqs']))
+        almaty = self.book['cities'][0]
+        self.assertEqual((almaty['id'], almaty['tariffs']), ('almaty', keys))
 
     def test_every_car_is_found_by_its_own_name(self):
         """Имя как в классификаторе плюс марка — находится любая из полутора
@@ -344,21 +389,34 @@ class BookTest(unittest.TestCase):
     def test_leftover_rows_are_not_cars(self):
         listed = [item['name'] for item in BOOK['cars']]
         self.assertFalse([name for name in listed if 'кроме' in name or 'Другие' in name])
-        self.assertEqual(set(BOOK['catch_all']), {'Lada (VAZ)', 'ГАЗ'})
-        self.assertEqual(BOOK['other']['years'], {'intercity': 1999})
 
-    def test_twin_row_with_a_cyrillic_letter_is_folded_into_the_full_one(self):
+    def test_leftover_rows_become_rules_of_the_table(self):
+        """«Другие модели» и «ГАЗ (кроме указанных моделей)» — правила таблицы
+        тарифа, а не машины: машине, которой в таблице нет, отвечают они."""
+        almaty = next(item for item in BOOK['cities'] if item['id'] == 'almaty')
+        table = almaty['entries']['intercity']['list']
+        self.assertEqual(table['other']['year'], 1999)
+        self.assertEqual(table['brands']['ГАЗ']['year'], 0)
+        volga = next(item for item in BOOK['cars'] if item['name'] == 'ГАЗ 3102 «Волга»')
+        self.assertEqual(classifier.requirement(volga, almaty, 'intercity')['kind'], 'brand')
+        click = next(item for item in BOOK['cars'] if item['name'] == 'Hyundai Click')
+        other = classifier.requirement(click, almaty, 'intercity')
+        self.assertEqual((other['kind'], other['year']), ('other', 1999))
+
+    def test_twin_row_with_a_cyrillic_letter_is_one_car(self):
         jetour = [item for item in BOOK['cars'] if item['brand'] == 'Jetour']
-        self.assertEqual([(item['model'], item['years']) for item in jetour],
-                         [('X70', {'comfort': 2018, 'comfort_plus': 2023})])
-
-    def test_conflicting_twins_are_both_kept(self):
-        data = dict(DATA, cars=[car('Jetour', 'X70', comfort=2018), car('Jetour', 'Х70', comfort=2020)])
-        self.assertEqual(len(classifier.build_book(data)['cars']), 2)
+        self.assertEqual([item['model'] for item in jetour], ['X70'])
 
     def test_unknown_tariff_keys_are_dropped(self):
-        data = dict(DATA, cars=[car('Toyota', 'Camry', comfort=2014, kids=2020)])
-        self.assertEqual(classifier.build_book(data)['cars'][0]['years'], {'comfort': 2014})
+        data = v2_from_legacy(DATA)
+        data['cities'][0]['tariffs']['kids'] = {'any': 2020}
+        city = classifier.build_book(data)['cities'][0]
+        self.assertNotIn('kids', city['tariffs'])
+        self.assertNotIn('kids', city['entries'])
+
+    def test_old_form_is_refused(self):
+        with self.assertRaises(ValueError):
+            classifier.build_book(DATA)
 
 
 class RecognitionTest(unittest.TestCase):
@@ -551,7 +609,7 @@ class TypoTest(unittest.TestCase):
         self.assertEqual(names(question), ['Toyota Camry'])
         lines = text(question).splitlines()
         self.assertIn('Toyota Camry, Алматы, тариф Комфорт: от 2014 года выпуска.', lines)
-        self.assertIn('Toyota Camry, Алматы: в тарифы Электро, Ultima (Premier) модель не внесена.',
+        self.assertIn('Toyota Camry, Алматы: в тарифы Электро, Ultima (Premier) не допускается.',
                       lines)
 
     def test_a_instead_of_o_in_the_brand_is_the_brand(self):
@@ -583,8 +641,8 @@ class TypoTest(unittest.TestCase):
         self.assertEqual(names('через камри в комфорт'), ['Toyota Camry'])
 
     def small_book(self, *cars):
-        return classifier.build_book(dict(DATA, cars=[car(brand, model, comfort=2015)
-                                                      for brand, model in cars]))
+        return legacy_book(dict(DATA, cars=[car(brand, model, comfort=2015)
+                                            for brand, model in cars]))
 
     def test_no_guessing_between_two_brands(self):
         # Две марки, равные с точностью до «а/о», и опечатка, равноудалённая от
@@ -781,7 +839,7 @@ class PlanTest(unittest.TestCase):
     def test_no_more_than_four_cars(self):
         data = dict(DATA, cars=[car(brand, 'E5', comfort=2020)
                                 for brand in ('BYD', 'Chery', 'Kaiyi', 'Weltmeister', 'Zotye')])
-        book = classifier.build_book(data)
+        book = legacy_book(data)
         with patch.object(currency, 'today', return_value=TODAY):
             analysis = classifier.analyze('е5 2021 комфорт', book)
             decision = classifier.plan(analysis)
@@ -955,14 +1013,14 @@ class CarTextTest(unittest.TestCase):
 
     def test_named_city(self):
         self.assertEqual(text('подходит ли тойота камри 2015 в комфорт в алматы').splitlines(), [
-            'Toyota Camry — данные «Классификатора авто», город Алматы. '
+            'Toyota Camry — данные «Классификатора авто» (база знаний Яндекс Про), город Алматы. '
             'Год выпуска «от N» значит «N и новее».',
             'Toyota Camry, Алматы, тариф Комфорт: от 2014 года выпуска — машина 2015 года подходит.',
             'Toyota Camry, Алматы, тариф Эконом: от 1985 года выпуска — машина 2015 года подходит.',
             'Toyota Camry, Алматы, тариф Межгород: от 1985 года выпуска — машина 2015 года подходит.',
             'Toyota Camry, Алматы, тариф Комфорт+: от 2021 года выпуска — машина 2015 года не подходит.',
             'Toyota Camry, Алматы, тариф Бизнес: от 2023 года выпуска — машина 2015 года не подходит.',
-            'Toyota Camry, Алматы: в тарифы Электро, Ultima (Premier) модель не внесена.',
+            'Toyota Camry, Алматы: в тарифы Электро, Ultima (Premier) не допускается.',
         ])
 
     def test_boundary_year_fits(self):
@@ -973,7 +1031,7 @@ class CarTextTest(unittest.TestCase):
 
     def test_asked_tariff_goes_first_even_when_the_model_is_not_in_it(self):
         lines = text('солярис в бизнес в алматы подходит?').splitlines()
-        self.assertEqual(lines[1], 'Hyundai Solaris, Алматы, тариф Бизнес: модель в этот тариф не внесена.')
+        self.assertEqual(lines[1], 'Hyundai Solaris, Алматы, тариф Бизнес: модели нет в списке тарифа.')
         self.assertIn('Hyundai Solaris, Алматы, тариф Комфорт: от 2021 года выпуска.', lines)
 
     def test_tariff_missing_in_the_city(self):
@@ -994,8 +1052,9 @@ class CarTextTest(unittest.TestCase):
 
     def test_no_city_groups_cities_by_year(self):
         lines = text('камри 2015 года проходит в комфорт?').splitlines()
-        self.assertEqual(lines[0], 'Toyota Camry — данные «Классификатора авто». Требуемый год '
-                                   'выпуска зависит от города. Год выпуска «от N» значит «N и новее».')
+        self.assertEqual(lines[0], 'Toyota Camry — данные «Классификатора авто» (база знаний Яндекс '
+                                   'Про). У каждого города свои требования. Год выпуска «от N» '
+                                   'значит «N и новее».')
         self.assertEqual(lines[1], 'Toyota Camry, тариф Комфорт: Астана — от 2015; Алматы — от 2014; '
                                    'Шымкент, Усть-Каменогорск — от 2013; Тараз — от 2012; '
                                    'Туркестан — от 2011. Во всех этих городах машина 2015 года подходит.')
@@ -1020,23 +1079,35 @@ class CarTextTest(unittest.TestCase):
         camry = next(item for item in BOOK['cars'] if item['name'] == 'Toyota Camry')
         for city in BOOK['cities']:
             for key in city['tariffs']:
-                required = classifier.required_year(camry, city, key)
+                required = required_year(camry, city, key)
                 if required is not None:
                     self.assertIn('от %s' % required, body)
 
     def test_warning_is_verbatim_and_next_to_its_tariff(self):
+        """Текст ячейки — дословно и только у своего тарифа; год города при этом
+        стоит в строке буквально (сверка чисел ответа)."""
         lines = text('кобальт 2024 комфорт астана').splitlines()
-        self.assertEqual(lines[1], 'Chevrolet Cobalt, Астана, тариф Комфорт: от 2025 года выпуска — '
-                                   'машина 2024 года не подходит. Оговорка классификатора: %s.'
-                         % COBALT_NOTE)
-        self.assertNotIn('Оговорка', lines[2])
+        self.assertEqual(lines[1], 'Chevrolet Cobalt, Астана, тариф Комфорт: от 2025 года выпуска '
+                                   '(в таблице: «%s») — машина 2024 года не подходит.' % COBALT_NOTE)
+        self.assertNotIn(COBALT_NOTE, lines[2])
         grouped = text('кобальт комфорт').splitlines()[1]
-        self.assertTrue(grouped.endswith('Оговорка классификатора: %s.' % COBALT_NOTE))
+        self.assertIn('Астана — от 2025 («%s»)' % COBALT_NOTE, grouped)
 
     def test_model_in_no_tariff(self):
-        self.assertEqual(text('альфард 2016 комфорт+ подходит'),
-                         'Toyota Alphard: модель есть в «Классификаторе авто», но ни в один тариф '
+        """Ни одна таблица ни одного города модель не берёт — короткий ответ."""
+        volga = next(item for item in BOOK['cars'] if item['name'] == 'ГАЗ 3102 «Волга»')
+        analysis = analyze('камри 2016 комфорт+ подходит')
+        self.assertEqual(classifier.car_text(BOOK, volga, analysis),
+                         'ГАЗ 3102 «Волга»: модель есть в «Классификаторе авто», но ни в один тариф '
                          'не внесена — тарифами не поддерживается.')
+
+    def test_other_models_row_admits_a_car_missing_from_the_table(self):
+        """Alphard нет ни в одной таблице, но Межгород берёт «Другие модели» — и
+        ответ говорит именно это, а не «тарифами не поддерживается»."""
+        body = text('альфард 2016 межгород алматы')
+        self.assertIn('Toyota Alphard, Алматы, тариф Межгород: модели нет в таблице тарифа, '
+                      'действует строка «Другие модели»: от 1999 года выпуска — машина 2016 года '
+                      'подходит.', body)
 
     def test_city_that_is_not_in_the_classifier(self):
         lines = text('камри 2015 в комфорт в петропавловске').splitlines()
@@ -1051,21 +1122,21 @@ class CarTextTest(unittest.TestCase):
 
     def test_three_cities_line_by_line(self):
         body = text('нексия 2010 года алматы астана туркестан эконом')
-        for line in ('Chevrolet Nexia: модель есть в «Классификаторе авто»',):
-            self.assertIn(line, body)
+        for city in ('Алматы', 'Астана', 'Туркестан'):
+            self.assertIn('Chevrolet Nexia, %s, тариф Эконом: модели нет в списке тарифа — машина '
+                          '2010 года не подходит.' % city, body)
         daewoo = rows('нексия 2010 года алматы астана туркестан эконом')[1]['text']
-        self.assertIn('Daewoo Nexia — данные «Классификатора авто», города Алматы, Астана, Туркестан.',
-                      daewoo)
+        self.assertIn('Daewoo Nexia — данные «Классификатора авто» (база знаний Яндекс Про), города '
+                      'Алматы, Астана, Туркестан.', daewoo)
         self.assertIn('Daewoo Nexia, Туркестан, тариф Эконом: от 1999 года выпуска', daewoo)
-        self.assertIn('Daewoo Nexia, Туркестан: в тариф Комфорт модель не внесена.', daewoo)
+        self.assertIn('Daewoo Nexia, Туркестан: в тариф Комфорт не допускается.', daewoo)
 
 
 class ListTextTest(unittest.TestCase):
     def test_brand_list_preserves_the_model_tariff_warning(self):
         body = text('Какие Chevrolet 2025 года проходят в комфорт в Алматы?')
         line = next(line for line in body.splitlines() if line.startswith('Chevrolet Cobalt:'))
-        self.assertIn('Комфорт от 2024', line)
-        self.assertIn('Оговорка классификатора: ' + COBALT_NOTE, line)
+        self.assertIn('Комфорт от 2024 («%s»)' % COBALT_NOTE, line)
         self.assertEqual(body.count(COBALT_NOTE), 1)
         self.assertNotIn(COBALT_NOTE, text('Какие Chevrolet проходят в эконом в Алматы?'))
 
@@ -1076,14 +1147,14 @@ class ListTextTest(unittest.TestCase):
             'Год выпуска «от N» значит «N и новее».',
             'Kia K5: Комфорт+ от 2020.',
             'Kia Sportage: Комфорт+ от 2022.',
-            "Не внесены в тариф Комфорт+: Kia Rio, Kia Cee'd.",
+            "Не допускаются в тариф Комфорт+: Kia Rio, Kia Cee'd.",
         ])
 
     def test_brand_list_without_a_city_says_whose_years_these_are(self):
         lines = text('киа комфорт').splitlines()
         self.assertEqual(lines[0], 'Kia — модели в «Классификаторе авто», тариф Комфорт, годы для '
-                                   'города Алматы; в других городах год другой — для точного года '
-                                   'назовите город. Год выпуска «от N» значит «N и новее».')
+                                   'города Алматы; в других городах требования свои — для точного '
+                                   'года назовите город. Год выпуска «от N» значит «N и новее».')
         self.assertIn('Kia Rio: Комфорт от 2021.', lines)
 
     def test_brand_list_with_every_tariff_and_a_year(self):
@@ -1094,9 +1165,15 @@ class ListTextTest(unittest.TestCase):
         self.assertIn('Kia K5: Комфорт от 2015 (машина 2019 года подходит).', lines)
 
     def test_brand_leftover_models(self):
-        body = text('какие лада подходят в эконом')
-        self.assertIn('Lada (VAZ) 2114: Эконом от 1996.', body)
-        self.assertIn('Остальные модели Lada (VAZ), которых нет в этом списке, в тарифы не внесены.', body)
+        """Строка-остаток «LADA (кроме указанных моделей)» — правило таблицы, где
+        она стоит (Межгород), а не всех тарифов сразу."""
+        body = text('какие лада подходят в межгород')
+        self.assertIn('Lada (VAZ) 2114: Межгород от 2001.', body)
+        self.assertIn('Остальные модели Lada (VAZ), которых нет в таблице тарифа Межгород: '
+                      'не допускается.', body)
+        econom = text('какие лада подходят в эконом')
+        self.assertIn('Lada (VAZ) 2114: Эконом от 1996.', econom)
+        self.assertNotIn('Остальные модели', econom)
 
     def test_brand_tariff_missing_in_the_city(self):
         body = text('какие киа в бизнес в таразе')
@@ -1113,11 +1190,15 @@ class ListTextTest(unittest.TestCase):
     def test_long_tariff_is_a_count_and_a_request(self):
         with patch.object(classifier, 'MAX_TARIFF_LIST', 5):
             body = text('какие машины подходят в комфорт')
-        self.assertTrue(body.startswith('В тарифе Комфорт в «Классификаторе авто» '))
+        self.assertTrue(body.startswith('В тарифе Комфорт, годы для города Алматы; в других '
+                                        'городах требования свои — для точного года назовите '
+                                        'город, в «Классификаторе авто» '))
         self.assertIn('Назовите марку или модель', body)
         self.assertNotIn('Toyota Camry', body)
         count = re.search(r'авто» (\d+) модел', body).group(1)
-        self.assertEqual(int(count), sum(1 for item in BOOK['cars'] if 'comfort' in item['years']))
+        almaty = next(item for item in BOOK['cities'] if item['id'] == 'almaty')
+        rows = almaty['entries']['comfort']['list']['rows']
+        self.assertEqual(int(count), sum(1 for req in rows.values() if classifier.admitted(req)))
 
     def test_tariff_missing_in_the_city(self):
         self.assertEqual(text('какие машины подходят в бизнес в таразе'),
@@ -1127,14 +1208,16 @@ class ListTextTest(unittest.TestCase):
         lines = text('что такое классификатор авто').splitlines()
         self.assertIn('Тарифы классификатора: Эконом, Межгород, Комфорт, Комфорт+, Бизнес, Электро, '
                       'Ultima (Premier).', lines[0])
-        self.assertIn('Алматы: Эконом, Межгород, Комфорт, Комфорт+, Бизнес, Электро, Ultima (Premier) '
-                      '— базовые требования.', lines)
-        self.assertIn('Астана: Эконом, Межгород, Комфорт, Комфорт+, Бизнес, Электро, Ultima (Premier) '
-                      '— требования на 1 год строже, чем в Алматы.', lines)
-        self.assertIn('Туркестан: Эконом, Межгород, Комфорт — требования на 3 года мягче, чем в Алматы.',
-                      lines)
-        self.assertIn('Строка «Другие модели» (те, которых в классификаторе нет), город Алматы: '
-                      'Межгород от 1999.', lines)
+        self.assertIn('Требования у каждого города свои: чтобы получить год, назовите марку и '
+                      'модель автомобиля, тариф и город.', lines)
+        almaty = next(line for line in lines if line.startswith('Алматы: '))
+        self.assertTrue(almaty.startswith('Алматы: Эконом — таблица, '), almaty)
+        self.assertIn('Межгород — таблица, 22 модели, остальные от 1999', almaty)
+        turkestan = next(line for line in lines if line.startswith('Туркестан: '))
+        self.assertIn('Межгород — таблица, 22 модели, остальные от 1996', turkestan)
+        self.assertNotIn('Бизнес', turkestan)
+        # Поправок к Алматы больше нет — и слов о них тоже.
+        self.assertFalse([line for line in lines if 'строже' in line or 'мягче' in line])
         self.assertEqual(lines[-1], 'В классификаторе %s, %s.' % (
             classifier._count(len(BOOK['cars']), 'модель', 'модели', 'моделей'),
             classifier._count(len(BOOK['by_brand']), 'марка', 'марки', 'марок')))
@@ -1290,9 +1373,9 @@ class AnswerPipelineTest(unittest.TestCase):
         self.assertEqual(rows('камри в бизнес в таразе')[0]['evidence'],
                          'Toyota Camry: в городе Тараз тарифа Бизнес в классификаторе нет.')
         self.assertEqual(rows('солярис в бизнес в алматы подходит?')[0]['evidence'],
-                         'Hyundai Solaris, Алматы, тариф Бизнес: модель в этот тариф не внесена.')
+                         'Hyundai Solaris, Алматы, тариф Бизнес: модели нет в списке тарифа.')
         # Тариф не спросили — опоры нет, цитата выбирается из всего текста.
-        for question in ('камри 2015 алматы', 'альфард 2016 комфорт+ подходит',
+        for question in ('камри 2015 алматы', 'альфард 2016 года подходит?',
                          'гранта 2018 в доставку подходит?', 'какие киа проходят в комфорт+'):
             with self.subTest(question=question):
                 self.assertIsNone(rows(question)[0]['evidence'])
@@ -1564,7 +1647,8 @@ class RouteWiringTest(unittest.TestCase):
 
     def test_json_file_is_valid_for_both_sides(self):
         data = json.loads(Path(classifier.DATA_PATH).read_text(encoding='utf-8'))
-        self.assertEqual(sorted(data), ['cars', 'cities', 'tariffs'])
+        self.assertEqual(sorted(data), ['cars', 'cities', 'lists', 'notes', 'reqs', 'source',
+                                        'tariffs', 'version'])
 
 
 if __name__ == '__main__':

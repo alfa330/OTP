@@ -1,11 +1,16 @@
 """User-facing edge cases found while reviewing classifier mutation coverage."""
 
+import sys
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 from wiki import classifier
 from wiki.ai import answer, currency
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classifier_fixture import v2_from_legacy  # noqa: E402
 
 
 TODAY = date(2026, 10, 12)
@@ -32,7 +37,8 @@ DATA = {
         )
     ],
 }
-BOOK = classifier.build_book(DATA)
+# Синтетика прежней формы — в форму 2 одним местом (tests/classifier_fixture.py).
+BOOK = classifier.build_book(v2_from_legacy(DATA))
 
 
 def analyze(question):

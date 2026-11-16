@@ -8,16 +8,20 @@
 
 Устроено по образцу справочников (wiki/directory.py): данные не индексируются, а
 приходят к вопросу готовым фрагментом. Причина та же, что у комиссий: ответ — это
-ЧИСЛО, и число посчитанное. Требуемый год зависит от города
-(max(1980, базовый год модели + поправка города), ровно как в калькуляторе —
-src/components/classifier/ClassifierView.jsx), а сверка чисел ответа
-(answer.ungrounded_numbers) пропускает только те, что стоят в тексте фрагмента
-буквально. Дай модели базовый год и поправку — она сложит сама, и верный ответ
-уйдёт в отказ как выдуманный. Поэтому годы по городам и «подходит / не подходит»
-считает код, а модель их пересказывает.
+ЧИСЛО, и сверка чисел ответа (answer.ungrounded_numbers) пропускает только те, что
+стоят в тексте фрагмента буквально. Поэтому год тарифа в городе и «подходит / не
+подходит» считает код (requirement, verdict), а модель их пересказывает.
 
-Данные читаются из ТОГО ЖЕ файла, что и экран (classifier-data.json): вторая
-копия разошлась бы с первой при первой же правке годов.
+ДАННЫЕ — СЛЕПОК БАЗЫ ЗНАНИЙ ЯНДЕКС ПРО ПО ВСЕМ ГОРОДАМ (wiki/classifier_source.py,
+16.11.2026). У каждого города своя страница auto-list и свои таблицы; прежний
+справочник из Wiki 2.0 знал только алматинские годы и «поправку города», и на
+трети пар «машина × город × тариф» называл неверный год. Теперь у тарифа города
+либо таблица (строка машины, правило марки «LADA (кроме указанных моделей)»,
+строка «Другие модели»), либо правило «любой марки, не старше N года».
+
+Книга строится из того же справочника, что видит экран (wiki/classifier_store.py:
+слепок в базе, а без него — файл wiki/data/classifier-data.json); вторая копия
+разошлась бы с первой при первой же сверке.
 
 ДОСТУП — как у самой статьи: фрагменты отдаются, только пока статья-классификатор
 лежит в периметре помощника этого человека (wiki/perimeter.py). Значит, работают
@@ -41,12 +45,14 @@ Navigator («навигатор»), Chery Bonus, Peugeot Partner, Hyundai Click 
 """
 
 import itertools
-import json
 import logging
-import os
 import re
+import threading
+import time
 from functools import lru_cache
 
+from . import classifier_source
+from . import classifier_store
 from . import directory as wiki_directory
 from . import schema
 from . import text as wiki_text
@@ -63,10 +69,9 @@ BRANCH = wiki_directory.DIRECTORY_BRANCH
 # диапазона: в одном ответе встречаются все три.
 _CHUNK_BASE = 2000
 
-DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         'src', 'components', 'classifier', 'classifier-data.json')
+DATA_PATH = classifier_store.DATA_PATH
 
-# Двойник YEAR_FLOOR из ClassifierView.jsx.
+# Нижняя граница года в вопросе: «1985» — год машины, «1950» — нет.
 YEAR_FLOOR = 1980
 
 # Сколько машин уходит помощнику разом: «матиз» — это Daewoo, Chevrolet и Ravon.
@@ -74,8 +79,8 @@ MAX_CARS = 4
 # Городов в вопросе, по которым фрагмент пишется построчно; больше — сводкой.
 MAX_CITIES = 3
 MAX_YEARS = 3
-# Строк в списке моделей марки или тарифа. У самой большой марки 124 модели,
-# в «Бизнесе» 56; «Комфорт» на 494 строки в ответ не пересказать.
+# Строк в списке моделей марки или тарифа. У самой большой марки 131 модель,
+# в «Бизнесе» 56; «Комфорт» на сотни строк в ответ не пересказать.
 MAX_LIST = 130
 MAX_TARIFF_LIST = 80
 
@@ -113,11 +118,6 @@ def _name_key(value):
 _QUALIFIERS = frozenset(('northamerica', 'hr', '4x4'))
 _BRACKETS = re.compile(r'\(([^)]*)\)|«([^»]*)»')
 
-# Строки-остатки: «Lada (VAZ) — (кроме указанных моделей)», «Москвич — (все модели)».
-_CATCH_ALL = re.compile(r'кроме указанных|все модели')
-OTHER_BRAND = 'Другие модели'
-
-
 def _name_parts(model):
     """Название модели → (основное имя, вторые имена из скобок, уточнение ли)."""
     inner = [first or second for first, second in _BRACKETS.findall(model)]
@@ -132,68 +132,88 @@ def _name_parts(model):
     return outer, alternatives, qualified
 
 
-def _subset(left, right):
-    return all(right.get(key) == year for key, year in left.items())
-
-
 def read_data(path=None):
-    with open(path or DATA_PATH, encoding='utf-8') as handle:
-        return json.load(handle)
+    """Справочник из файла репозитория (wiki/data/classifier-data.json)."""
+    return classifier_store.read_bundled(path)
+
+
+def _requirement(entry, reqs):
+    """[год, номер требования?] из справочника → {'year', 'text', 'except'}."""
+    extra = reqs[entry[1]] if len(entry) > 1 and 0 <= entry[1] < len(reqs) else {}
+    exception = extra.get('except')
+    return {'year': entry[0], 'text': extra.get('text'),
+            'except': tuple(exception) if exception else None}
 
 
 def build_book(data):
-    """Справочник классификатора с индексами имён. Чистая функция — для тестов."""
+    """Справочник (форма classifier_source.VERSION) с индексами имён. Чистая функция.
+
+    Город: {'id', 'name', 'tariffs': [ключи по порядку], 'entries': {ключ: тариф}},
+    тариф: {'list': таблица или None, 'any': год правила «любой марки» или None,
+    'notes': [условия текстом], 'next': такой же тариф с 'from' — новые правила,
+    которые ещё не вступили}. Таблица: {'rows': {номер машины: требование},
+    'other': требование строки «Другие модели» или None, 'brands': {марка: требование}}.
+    """
+    if int(data.get('version') or 0) < 2:
+        raise ValueError('Справочник старой формы: нужен classifier_source.VERSION')
     tariffs = [{'key': item['key'], 'name': item['name']} for item in data['tariffs']]
     tariff_names = {item['key']: item['name'] for item in tariffs}
-    cities = [{'id': item['id'], 'name': item['name'], 'offset': int(item.get('offset') or 0),
-               'tariffs': [key for key in item.get('tariffs') or [] if key in tariff_names]}
-              for item in data['cities']]
+    order = [item['key'] for item in tariffs]
+    reqs, notes = data.get('reqs') or [], data.get('notes') or []
 
-    cars, catch_all, other = [], {}, None
-    for raw in data['cars']:
-        brand, model = str(raw.get('brand') or '').strip(), str(raw.get('model') or '').strip()
-        years = {key: int(year) for key, year in (raw.get('years') or {}).items()
-                 if key in tariff_names}
-        warnings = {key: str(note).strip() for key, note in (raw.get('warnings') or {}).items()
-                    if key in years and str(note).strip()}
-        if brand == OTHER_BRAND:
-            other = {'brand': brand, 'model': model, 'years': years, 'warnings': warnings}
-            continue
-        if _CATCH_ALL.search(model):
-            catch_all[brand] = years
-            continue
+    lists = []
+    for item in data.get('lists') or []:
+        lists.append({
+            'rows': {row[0]: _requirement(row[1:], reqs) for row in item.get('rows') or []},
+            'other': _requirement(item['other'], reqs) if item.get('other') else None,
+            'brands': {brand: _requirement(entry, reqs)
+                       for brand, entry in (item.get('brands') or {}).items()},
+        })
+
+    def entry_of(raw):
+        listed = raw.get('list')
+        return {'list': lists[listed] if isinstance(listed, int) and listed < len(lists) else None,
+                'any': raw.get('any'),
+                'notes': [notes[index] for index in raw.get('notes') or ()
+                          if 0 <= index < len(notes)]}
+
+    cities = []
+    for item in data.get('cities') or []:
+        entries = {}
+        for key, raw in (item.get('tariffs') or {}).items():
+            if key not in tariff_names:
+                continue
+            entry = entry_of(raw)
+            if entry['list'] is None and entry['any'] is None:
+                continue
+            if raw.get('next'):
+                upcoming = entry_of(raw['next'])
+                upcoming['from'] = raw['next'].get('from')
+                entry['next'] = upcoming
+            entries[key] = entry
+        cities.append({'id': item['id'], 'name': item['name'], 'code': item.get('code'),
+                       'url': item.get('url'), 'updated': item.get('updated'),
+                       'tariffs': [key for key in order if key in entries],
+                       'entries': entries})
+
+    cars = []
+    for index, pair in enumerate(data.get('cars') or []):
+        brand, model = str(pair[0] or '').strip(), str(pair[1] or '').strip()
         if not brand or not model:
             continue
         main, alternatives, qualified = _name_parts(model)
-        cars.append({'order': len(cars), 'brand': brand, 'model': model,
-                     'name': '%s %s' % (brand, model),
-                     'years': years, 'warnings': warnings, 'main': main,
+        cars.append({'order': len(cars), 'index': index, 'brand': brand, 'model': model,
+                     'name': '%s %s' % (brand, model), 'main': main,
                      'alternatives': alternatives, 'qualified': qualified,
                      'key': _name_key(main)})
-
-    # Одна модель двумя строками («Jetour X70» латиницей и «Jetour Х70» с русской
-    # «Х», вторая — подмножество первой): остаётся полная. Строки, которые друг
-    # другу противоречат, остаются обе — расхождение прятать нельзя.
-    kept, seen = [], {}
-    for car in cars:
-        twin = seen.get((car['brand'], car['key'], car['qualified']))
-        if twin is not None and not car['alternatives'] and not twin['alternatives']:
-            if _subset(car['years'], twin['years']) and not car['warnings']:
-                continue
-            if _subset(twin['years'], car['years']) and not twin['warnings']:
-                kept[kept.index(twin)] = car
-                seen[(car['brand'], car['key'], car['qualified'])] = car
-                continue
-        seen.setdefault((car['brand'], car['key'], car['qualified']), car)
-        kept.append(car)
-    cars = kept
 
     by_brand = {}
     for car in cars:
         by_brand.setdefault(car['brand'], []).append(car)
 
     book = {'tariffs': tariffs, 'tariff_names': tariff_names, 'cities': cities,
-            'cars': cars, 'by_brand': by_brand, 'catch_all': catch_all, 'other': other,
+            'cars': cars, 'by_brand': by_brand, 'lists': lists,
+            'source': data.get('source') or {},
             'models_total': len(cars), 'brands_total': len(by_brand)}
     _index_models(book)
     _index_brands(book)
@@ -202,22 +222,82 @@ def build_book(data):
     return book
 
 
+# Книга живёт в процессе: строится раз и перестраивается, только когда сменился
+# отпечаток слепка в базе. Отпечаток спрашивается не чаще раза в минуту — это
+# один короткий SELECT, а сама книга (1,6 тыс. машин, 36 тыс. строк) строится
+# за доли секунды, но не на каждый вопрос.
 _STATE = {}
+_LOCK = threading.Lock()
+RECHECK_SECONDS = 60
 
 
-def book():
-    """Справочник из файла экрана или None — тогда помощник отвечает без него.
+def invalidate():
+    """Забыть книгу: следующий вызов book() перечитает справочник. Зовёт сверка."""
+    with _LOCK:
+        _STATE.clear()
 
-    Читается один раз на процесс. Сбой тоже запоминается: файл приезжает с
-    выкладкой, а она процесс перезапускает, — и трейсбек на каждый вопрос про
-    машину в лог не пишется."""
-    if 'book' not in _STATE:
-        try:
-            _STATE['book'] = build_book(read_data())
-        except Exception:                                # noqa: BLE001
-            logging.exception('Помощник: файл классификатора авто не прочитан')
-            _STATE['book'] = None
-    return _STATE['book']
+
+def _snapshot_book(cursor):
+    """Книга из слепка базы, если его отпечаток не тот, что у книги в памяти.
+
+    Под савпоинтом: курсор чужой, и упавший запрос не должен ронять транзакцию
+    того, кто спросил (помощник, партнёрский API, «Наличие авто»)."""
+    cursor.execute('SAVEPOINT classifier_book')
+    digest = None
+    try:
+        state = classifier_store.snapshot_state(cursor)
+        digest = state['digest'] if state else None
+        if state and digest != _STATE.get('digest') and digest != _STATE.get('broken'):
+            snapshot = classifier_store.load_snapshot(cursor)
+            if snapshot and snapshot.get('data'):
+                built = build_book(snapshot['data'])
+                _STATE.update(book=built, data=snapshot['data'], digest=digest,
+                              origin='snapshot', state=state)
+        elif state:
+            _STATE['state'] = state
+    except Exception:                                    # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT classifier_book')
+        logging.exception('Классификатор авто: слепок из базы не прочитан')
+        # Битый слепок не пересобирается каждую минуту: ждём следующего отпечатка,
+        # а пока работает прежняя книга (или файл).
+        if digest:
+            _STATE['broken'] = digest
+    else:
+        cursor.execute('RELEASE SAVEPOINT classifier_book')
+
+
+def book(cursor=None):
+    """Книга справочника или None — тогда помощник отвечает без неё.
+
+    С курсором — слепок из базы (свежий, после ночной сверки); без курсора или
+    пока слепка нет — то, что уже в памяти, а в самый первый раз — файл
+    репозитория. Сбой файла запоминается: файл приезжает с выкладкой, а она
+    процесс перезапускает, — трейсбек на каждый вопрос в лог не пишется."""
+    with _LOCK:
+        now = time.monotonic()
+        if cursor is not None and now - _STATE.get('checked', -RECHECK_SECONDS) >= RECHECK_SECONDS:
+            _STATE['checked'] = now
+            _snapshot_book(cursor)
+        if 'book' not in _STATE:
+            try:
+                data = read_data()
+                _STATE.update(book=build_book(data), data=data, origin='file',
+                              digest=classifier_source.fingerprint(data))
+            except Exception:                            # noqa: BLE001
+                logging.exception('Классификатор авто: файл справочника не прочитан')
+                _STATE.update(book=None, data=None, digest=None, origin=None)
+        return _STATE['book']
+
+
+def current(cursor=None):
+    """(книга, справочник, отпечаток, откуда, состояние слепка) — для экрана.
+
+    Справочник — тот же словарь, из которого собрана книга: экран и помощник
+    не могут разойтись даже на минуту между ночной сверкой и перечитыванием."""
+    built = book(cursor)
+    with _LOCK:
+        return (built, _STATE.get('data'), _STATE.get('digest'), _STATE.get('origin'),
+                _STATE.get('state'))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -482,7 +562,8 @@ _BRAND_NAMES = {
     'Wuling': 'вулинг улинг',
     'Buick': 'бьюик',
     'Genesis': 'дженезис генезис',
-    'Lada (VAZ)': 'lada vaz лада ваз жигули',
+    'LADA (ВАЗ)': 'lada vaz лада ваз жигули',
+    'Lynk & Co': 'lynkco линк линкко линкенко',
     'Rolls-Royce': 'роллсройс ролсройс',
     'Bentley': 'бентли',
     'Dodge': 'додж',
@@ -521,6 +602,18 @@ _AMBIGUOUS_BRANDS = frozenset((
 ))
 
 
+def _brand_id(brand):
+    """Марка для сравнения со словарями: без регистра и знаков, а все написания LADA —
+    одна марка. Яндекс пишет «LADA (ВАЗ)», Wiki 2.0 писала «Lada (VAZ)», и словарь,
+    привязанный к одному написанию, молча перестал бы работать на другом."""
+    key = _key(brand)
+    return 'lada' if key.startswith('lada') else key
+
+
+_BRAND_NAMES_BY_ID = {_brand_id(brand): names for brand, names in _BRAND_NAMES.items()}
+_AMBIGUOUS_IDS = frozenset(_brand_id(brand) for brand in _AMBIGUOUS_BRANDS)
+
+
 def _index_brands(book):
     exact, sound = {}, {}
     for brand in book['by_brand']:
@@ -529,7 +622,7 @@ def _index_brands(book):
         for value in _joined([_sounds(word) for word in _words(brand)]):
             if len(value) >= 3:
                 sound.setdefault(value, brand)
-        for name in (_BRAND_NAMES.get(brand) or '').split():
+        for name in (_BRAND_NAMES_BY_ID.get(_brand_id(brand)) or '').split():
             exact.setdefault(_key(name), brand)
     book['brand_exact'], book['brand_sound'] = exact, sound
 
@@ -564,9 +657,9 @@ _MODEL_NAMES = (
     ('лачетти|ласетти', None, 'Lacetti'),
     ('трейлблейзер', 'Chevrolet', 'TrailBlazer'),
     ('нива', 'Chevrolet', 'Niva'),
-    ('нива', 'Lada (VAZ)', '2121 (4x4)'),
-    ('иксрей|икс рей|хрей|x ray', 'Lada (VAZ)', 'XRAY'),
-    ('нива тревел|нива трэвел', 'Lada (VAZ)', 'Niva Travel'),
+    ('нива', 'LADA (ВАЗ)', '2121 (4x4)'),
+    ('иксрей|икс рей|хрей|x ray', 'LADA (ВАЗ)', 'XRAY'),
+    ('нива тревел|нива трэвел', 'LADA (ВАЗ)', 'Niva Travel'),
     ('дастер', None, 'Duster'),
     ('жук|джук', 'Nissan', 'Juke'),
     ('ноут|нот', 'Nissan', 'Note'),
@@ -668,7 +761,7 @@ def _index_aliases(book):
     for names, brand, model in _MODEL_NAMES:
         key = _name_key(_name_parts(model)[0])
         cars = [car for car in book['model_exact'].get(key, ())
-                if (brand is None or car['brand'] == brand)
+                if (brand is None or _brand_id(car['brand']) == _brand_id(brand))
                 and (brand is None or car['model'] == model)]
         for name in names.split('|'):
             add(name, cars)
@@ -701,7 +794,7 @@ def _index_brand_typos(book):
     """
     names = {}
     for key, brand in book['brand_exact'].items():
-        if brand not in _AMBIGUOUS_BRANDS and re.fullmatch(r'[a-zа-я]{4,}', key):
+        if _brand_id(brand) not in _AMBIGUOUS_IDS and re.fullmatch(r'[a-zа-я]{4,}', key):
             names.setdefault(brand, set()).add(key)
     folded, near = {}, []
     for brand in sorted(names):
@@ -814,8 +907,10 @@ _FILLER = frozenset((
     'бар жок керек туралы бойынша жыл жылы жылгы жылдын'
 ).split())
 
-# Города Казахстана, которых в классификаторе нет: вопрос «в Петропавловске»
-# обязан получить «такого города в классификаторе нет», а не годы всех остальных.
+# Города Казахстана, которых в классификаторе нет: вопрос «в Балхаше» обязан
+# получить «такого города в классификаторе нет», а не годы всех остальных. Город,
+# который есть в справочнике, из этого списка выпадает сам (analyze): Яндекс
+# заводит страницы новым городам, и вчерашний «чужой» город становится своим.
 _OTHER_CITIES = (
     'Петропавловск', 'Жезказган', 'Балхаш', 'Кентау', 'Каскелен', 'Конаев', 'Капшагай',
     'Сатпаев', 'Степногорск', 'Риддер', 'Щучинск', 'Талгар', 'Есик', 'Жанаозен', 'Аксай',
@@ -1091,7 +1186,7 @@ def _unanchored(book, tokens, start, size):
         # Номерные модели ВАЗ («2114», «21099») — годом им не быть, а вот суммой
         # («заказ на 2114 тенге») — вполне: без марки это слабое имя.
         cars = [car for car in book['model_exact'].get(raw, ())
-                if car['brand'] == 'Lada (VAZ)' and len(raw) >= 4]
+                if _brand_id(car['brand']) == 'lada' and len(raw) >= 4]
         return (cars, PROBABLE) if cars else ([], None)
     elif not re.search(r'[а-я]', raw):
         # Латиницей: имя машины, набранное как в классификаторе.
@@ -1237,7 +1332,7 @@ def _find_cars(book, tokens):
         # Имя марки, совпавшее с моделью другой марки, сначала пробуем моделью:
         # «джетта» — Volkswagen Jetta, а не марка Jetta без модели. Опечатка на
         # буквы, а не на «а/о», без модели рядом маркой не считается вовсе.
-        if hit['brand'] in _AMBIGUOUS_BRANDS or hit['typo'] == 'near':
+        if _brand_id(hit['brand']) in _AMBIGUOUS_IDS or hit['typo'] == 'near':
             continue
         _take(hit['window'], 'brand')
         loose.append(hit['brand'])
@@ -1269,7 +1364,8 @@ def analyze(question, book):
     tokens = _tokens(base)
     city_names = [city['name'] for city in book['cities']]
     cities = _find_cities(base, tokens, city_names, 'city')
-    other_cities = _find_cities(base, tokens, _OTHER_CITIES, 'other_city')
+    other_cities = _find_cities(base, tokens, [name for name in _OTHER_CITIES
+                                                if name not in city_names], 'other_city')
 
     tariffs = []
     for key, pattern in _TARIFF_PATTERNS:
@@ -1498,24 +1594,148 @@ def analyze_question(question, search_query, book, *, history=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Расчёт: тот же, что у калькулятора
+# Расчёт: требование тарифа города к машине
 # ─────────────────────────────────────────────────────────────────────────────
 
-def required_year(car, city, key):
-    """С какого года модель берут в тариф в городе; None — тарифа у модели или
-    в городе нет. Двойник requiredYear из ClassifierView.jsx."""
-    base = car['years'].get(key)
-    if base is None or key not in city['tariffs']:
+def requirement(car, city, key):
+    """Что тариф города требует от машины: dict или None — тарифа в городе нет.
+
+    kind: 'row' — строка таблицы города; 'brand' — правило марки («LADA (кроме
+    указанных моделей)»); 'other' — строка «Другие модели» (машины в таблице нет,
+    а остальным модели разрешены с года N); 'absent' — таблица есть, машины в
+    ней нет, и остальным модели не разрешены; 'any' — у тарифа не таблица, а
+    правило «любой марки, не старше N года выпуска».
+    year: с какого года; 0 — не допускается; None — требование не разобрано, см. text.
+    text: исходная ячейка, когда в ней есть оговорка сверх года.
+    except: (с года, по год, 'ГГГГ-ММ-ДД') — машины этих лет, зарегистрированные
+    в сервисе не позднее даты, работать могут, хотя по правилу не подходят.
+    """
+    entry = city['entries'].get(key)
+    if entry is None:
         return None
-    return max(YEAR_FLOOR, base + city['offset'])
+    if entry['list'] is None:
+        return {'kind': 'any', 'year': entry['any'], 'text': None, 'except': None}
+    table = entry['list']
+    found = table['rows'].get(car['index']) if car is not None else None
+    if found is not None:
+        return dict(found, kind='row')
+    found = table['brands'].get(car['brand']) if car is not None else None
+    if found is not None:
+        return dict(found, kind='brand')
+    if table['other'] is not None:
+        return dict(table['other'], kind='other')
+    return {'kind': 'absent', 'year': 0, 'text': None, 'except': None}
 
 
-def _verdict(required, years):
+def verdict(req, year):
+    """Машина такого года в тариф: 'fits' — подходит; 'except' — только если уже
+    зарегистрирована в сервисе до даты исключения; 'old' — нужен год новее;
+    'no' — не допускается; 'unknown' — требование не разобрано; None — тарифа нет."""
+    if req is None:
+        return None
+    if req['year'] is None:
+        return 'unknown'
+    if req['year'] and year >= req['year']:
+        return 'fits'
+    exception = req.get('except')
+    if exception and exception[0] <= year <= exception[1]:
+        return 'except'
+    return 'old' if req['year'] else 'no'
+
+
+def allows(req):
+    """Берёт ли тариф эту модель хоть какого-то года (с оговорками)."""
+    return bool(req) and (req['year'] is None or req['year'] > 0 or bool(req.get('except')))
+
+
+def admitted(req):
+    """Допущена ли модель для НОВЫХ подключений — год «от N» или требование
+    текстом. «Не допускается, кроме машин, зарегистрированных до даты» сюда не
+    входит. По этому правилу считаются модели тарифа (экран — admitted в
+    classifierData.js, сервер — count в routes_classifier.city_payload)."""
+    return bool(req) and (req['year'] is None or req['year'] > 0)
+
+
+_MONTH_WORDS = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
+                'сентября', 'октября', 'ноября', 'декабря')
+
+
+def _date_words(iso):
+    """'2026-06-30' → «30 июня 2026» — так дату пишет и сама таблица."""
+    try:
+        year, month, day = (int(part) for part in str(iso).split('-'))
+        return '%d %s %d' % (day, _MONTH_WORDS[month - 1], year)
+    except (ValueError, IndexError):
+        return str(iso)
+
+
+def _with_text(own, short, text):
+    """Требование с текстом ячейки. Ячейка Яндекса сама начинается с требования
+    («от 2024 (а также машины 2023 года…)», «не допускается (кроме машин…)») —
+    тогда она и есть ответ; иначе год ставится перед ней, чтобы число стояло в
+    тексте буквально (answer.ungrounded_numbers)."""
+    if not text:
+        return own
+    if short and text.lower().startswith(short.lower()):
+        return 'в таблице: «%s»' % text
+    return '%s (в таблице: «%s»)' % (own, text)
+
+
+def _req_text(req, car=None):
+    """Требование словами. Год стоит буквально — его сверяет answer.ungrounded_numbers."""
+    kind, year = req['kind'], req['year']
+    if kind == 'any':
+        return 'любая модель не старше %s года выпуска (правило тарифа в городе)' % year
+    if year is None:
+        own = 'в таблице: «%s»' % req['text'] if req.get('text') else 'требование не указано'
+    elif year:
+        own = _with_text('от %s года выпуска' % year, 'от %s' % year, req.get('text'))
+    else:
+        own = _with_text('не допускается', 'не допускается', req.get('text'))
+    if kind == 'other':
+        return 'модели нет в таблице тарифа, действует строка «Другие модели»: %s' % own
+    if kind == 'brand':
+        return '%s (правило для остальных моделей марки %s)' % (
+            own, car['brand'] if car else 'этой марки')
+    if kind == 'absent':
+        return 'модели нет в списке тарифа'
+    return own
+
+
+def _short(req):
+    """Требование коротко — для сводки по городам: «от 2014», «не допускается»."""
+    kind, year = req['kind'], req['year']
+    if kind == 'any':
+        return 'любая модель от %s' % year
+    if kind == 'absent':
+        return 'нет в списке тарифа'
+    if year is None:
+        return '«%s»' % req['text'] if req.get('text') else 'требование не указано'
+    own = 'от %s' % year if year else 'не допускается'
+    text = req.get('text')
+    if text:
+        own = text if text.lower().startswith(own.lower()) else '%s («%s»)' % (own, text)
+    if kind == 'other':
+        return 'по строке «Другие модели» %s' % own
+    return own
+
+
+def _verdict(req, years):
     """«машина 2015 года подходит» — по каждому году из вопроса."""
     if not years:
         return ''
-    parts = ['%s года %s' % (year, 'подходит' if year >= required else 'не подходит')
-             for year in years]
+    parts = []
+    for year in years:
+        state = verdict(req, year)
+        if state == 'fits':
+            parts.append('%s года подходит' % year)
+        elif state == 'except':
+            parts.append('%s года — только если зарегистрирована в сервисе не позднее %s'
+                         % (year, _date_words(req['except'][2])))
+        elif state == 'unknown':
+            parts.append('%s года — сверьте с текстом таблицы' % year)
+        else:
+            parts.append('%s года не подходит' % year)
     return 'машина ' + ', '.join(parts)
 
 
@@ -1538,68 +1758,111 @@ def _tariff_order(book, asked):
     return [key for key in asked if key in keys] + [key for key in keys if key not in asked]
 
 
-def _warning(car, key):
-    note = car['warnings'].get(key)
-    return ' Оговорка классификатора: %s.' % note.rstrip('.') if note else ''
+def _conditions(city, key, limit=400):
+    """Условия тарифа города текстом (минивены, цвет, ГБО) — одной строкой."""
+    entry = city['entries'].get(key) or {}
+    text = ' '.join(note.replace('\n', ' ') for note in entry.get('notes') or ())
+    text = re.sub(r'\s+', ' ', text).strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(' ', 1)[0] + '…'
+    return text
+
+
+def _upcoming(book, car, city, key):
+    """Новые правила, которые ещё не вступили: « С 1 декабря 2026: от 2016»."""
+    entry = city['entries'].get(key) or {}
+    upcoming = entry.get('next')
+    if not upcoming or not upcoming.get('from'):
+        return ''
+    fake = {'entries': {key: upcoming}}
+    req = requirement(car, fake, key)
+    if req is None:
+        return ''
+    return ' С %s действуют новые правила: %s.' % (_date_words(upcoming['from']), _short(req))
 
 
 _HEAD_RULE = 'Год выпуска «от N» значит «N и новее».'
 
 
+def _blocked(req):
+    """Не допускается без всяких оговорок."""
+    return req['year'] == 0 and not req.get('except') and not req.get('text')
+
+
 def _car_city_lines(book, car, city, asked, years):
     names = book['tariff_names']
-    lines, absent = [], []
+    lines, closed = [], []
     for key in _tariff_order(book, asked):
         label = '%s, %s, тариф %s' % (car['name'], city['name'], names[key])
-        if key not in city['tariffs']:
+        req = requirement(car, city, key)
+        if req is None:
             if key in asked:
                 lines.append('%s: в городе %s тарифа %s в классификаторе нет.' % (
                     car['name'], city['name'], names[key]))
             continue
-        required = required_year(car, city, key)
-        if required is None:
-            if key in asked:
-                lines.append('%s: модель в этот тариф не внесена.' % label)
-            else:
-                absent.append(names[key])
+        if _blocked(req) and key not in asked:
+            closed.append(names[key])
             continue
-        verdict = _verdict(required, years)
-        lines.append('%s: от %s года выпуска%s.%s' % (
-            label, required, ' — ' + verdict if verdict else '', _warning(car, key)))
-    if absent:
-        lines.append('%s, %s: в %s %s модель не внесена.' % (
-            car['name'], city['name'], 'тариф' if len(absent) == 1 else 'тарифы', _listed(absent)))
+        verdict_text = _verdict(req, years)
+        line = '%s: %s%s.' % (label, _req_text(req, car),
+                              ' — ' + verdict_text if verdict_text else '')
+        line += _upcoming(book, car, city, key)
+        conditions = _conditions(city, key) if (key in asked or req['kind'] in ('any', 'other')) else ''
+        if conditions:
+            line += ' Условия тарифа: %s' % conditions
+        lines.append(line)
+    if closed:
+        lines.append('%s, %s: в %s %s не допускается.' % (
+            car['name'], city['name'], 'тариф' if len(closed) == 1 else 'тарифы', _listed(closed)))
     return lines
 
 
+def _group_key(req):
+    """Требования, которые в сводке по городам звучат одинаково."""
+    return (req['kind'] if req['kind'] in ('any', 'other') else 'own',
+            req['year'], req.get('text'), req.get('except'))
+
+
+def _group_rank(req):
+    """Порядок групп: строже — раньше; «не допускается» — в конце."""
+    year = req['year'] if req['year'] else 0
+    return (0 if allows(req) else 1, -year)
+
+
 def _car_all_cities_lines(book, car, asked, years):
-    """Город не назван: по тарифу — города, сгруппированные по требуемому году."""
+    """Город не назван: по тарифу — города, сгруппированные по требованию."""
     names = book['tariff_names']
-    lines, absent = [], []
+    lines, closed = [], []
     for key in _tariff_order(book, asked):
-        if key not in car['years']:
-            if key in asked:
-                lines.append('%s, тариф %s: модель в этот тариф не внесена.' % (
-                    car['name'], names[key]))
-            else:
-                absent.append(names[key])
-            continue
-        groups, without = {}, []
+        groups, order, without = {}, [], []
         for city in book['cities']:
-            required = required_year(car, city, key)
-            if required is None:
+            req = requirement(car, city, key)
+            if req is None:
                 without.append(city['name'])
-            else:
-                groups.setdefault(required, []).append(city['name'])
-        ordered = sorted(groups, reverse=True)
-        verdicts = {_verdict(required, years) for required in ordered}
-        # Вердикт один на все города — пишем его один раз, а не при каждом годе.
-        same = len(verdicts) == 1 and len(ordered) > 1
+                continue
+            token = _group_key(req)
+            if token not in groups:
+                groups[token] = (req, [])
+                order.append(token)
+            groups[token][1].append(city['name'])
+        if not groups:
+            if key in asked:
+                lines.append('%s, тариф %s: тарифа нет ни в одном городе классификатора.' % (
+                    car['name'], names[key]))
+            continue
+        if not any(allows(groups[token][0]) for token in order) and key not in asked:
+            closed.append(names[key])
+            continue
+        order.sort(key=lambda token: _group_rank(groups[token][0]))
+        verdicts = {_verdict(groups[token][0], years) for token in order}
+        # Вердикт один на все города — пишем его один раз, а не при каждой группе.
+        same = len(verdicts) == 1 and len(order) > 1
         parts = []
-        for required in ordered:
-            verdict = '' if same else _verdict(required, years)
-            parts.append('%s — от %s%s' % (_listed(groups[required]), required,
-                                           ' (%s)' % verdict if verdict else ''))
+        for token in order:
+            req, cities = groups[token]
+            verdict_text = '' if same else _verdict(req, years)
+            parts.append('%s — %s%s' % (_listed(cities), _short(req),
+                                         ' (%s)' % verdict_text if verdict_text else ''))
         line = '%s, тариф %s: %s.' % (car['name'], names[key], '; '.join(parts))
         if same and years:
             line += ' Во всех этих городах %s.' % verdicts.pop()
@@ -1608,10 +1871,10 @@ def _car_all_cities_lines(book, car, asked, years):
                      if len(without) > len(book['cities']) / 2
                      else ' В городах %s тарифа %s в классификаторе нет.' % (
                          _listed(without), names[key]))
-        lines.append(line + _warning(car, key))
-    if absent:
-        lines.append('%s: в %s %s модель не внесена.' % (
-            car['name'], 'тариф' if len(absent) == 1 else 'тарифы', _listed(absent)))
+        lines.append(line)
+    if closed:
+        lines.append('%s: в %s %s не допускается ни в одном городе.' % (
+            car['name'], 'тариф' if len(closed) == 1 else 'тарифы', _listed(closed)))
     return lines
 
 
@@ -1651,15 +1914,18 @@ def car_fragment(book, car, analysis):
     cities = _cities_of(book, analysis)
     asked, years = analysis['tariffs'], analysis['years']
     notes = _notes(book, analysis)
-    if not car['years']:
+    if not any(allows(requirement(car, city, key))
+               for city in book['cities'] for key in city['tariffs']):
+        # Ни одна таблица ни одного города модель не берёт, и правил «любой
+        # марки» её городам нет: короткий ответ честнее двадцати строк «нет».
         lines = ['%s: модель есть в «Классификаторе авто», но ни в один тариф не внесена — '
                  'тарифами не поддерживается.' % car['name']]
         return '\n'.join(lines + notes), None
     # Спрошенный тариф даёт ровно одну строку на город, и такие строки идут
-    # первыми (_tariff_order): год, «не внесена» или «тарифа в городе нет».
+    # первыми (_tariff_order): год, «не допускается» или «тарифа в городе нет».
     count = len([key for key in asked if key in book['tariff_names']])
     if cities:
-        lines = ['%s — данные «Классификатора авто», %s %s. %s' % (
+        lines = ['%s — данные «Классификатора авто» (база знаний Яндекс Про), %s %s. %s' % (
             car['name'], 'город' if len(cities) == 1 else 'города',
             _listed([city['name'] for city in cities]), _HEAD_RULE)]
         lines += notes
@@ -1669,8 +1935,8 @@ def car_fragment(book, car, analysis):
             lines += own
             focus += own[:count]
     else:
-        lines = ['%s — данные «Классификатора авто». Требуемый год выпуска зависит от города. %s'
-                 % (car['name'], _HEAD_RULE)]
+        lines = ['%s — данные «Классификатора авто» (база знаний Яндекс Про). У каждого '
+                 'города свои требования. %s' % (car['name'], _HEAD_RULE)]
         lines += notes
         own = _car_all_cities_lines(book, car, asked, years)
         lines += own
@@ -1684,27 +1950,25 @@ def car_text(book, car, analysis):
 
 
 def _scope(book, analysis):
-    """Город списка: названный, иначе Алматы — базовый, как на экране."""
+    """Город списка: названный, иначе первый в справочнике (Алматы) — как на экране."""
     cities = _cities_of(book, analysis)
     if cities:
         return cities[0], 'город %s' % cities[0]['name']
-    base = next((city for city in book['cities'] if city['offset'] == 0), book['cities'][0])
-    return base, ('годы для города %s; в других городах год другой — для точного года '
-                  'назовите город' % base['name'])
+    base = book['cities'][0]
+    return base, ('годы для города %s; в других городах требования свои — для точного '
+                  'года назовите город' % base['name'])
 
 
 def _model_line(book, car, city, keys, years):
     names = book['tariff_names']
     parts = []
     for key in keys:
-        required = required_year(car, city, key)
-        if required is None:
+        req = requirement(car, city, key)
+        if req is None or req['kind'] in ('any', 'absent') or not allows(req):
             continue
-        verdict = _verdict(required, years)
-        warning = _warning(car, key)
-        parts.append('%s от %s%s%s' % (
-            names[key], required, ' (%s)' % verdict if verdict else '',
-            '.' + warning.rstrip('.') if warning else ''))
+        verdict_text = _verdict(req, years)
+        parts.append('%s %s%s' % (names[key], _short(req),
+                                  ' (%s)' % verdict_text if verdict_text else ''))
     return parts
 
 
@@ -1727,16 +1991,24 @@ def brand_text(book, brand, analysis):
             lines.append('%s: %s.' % (car['name'], ', '.join(parts)))
         else:
             absent.append(car['name'])
+    rules = [key for key in keys if (city['entries'][key]['list'] is None)]
+    for key in rules:
+        lines.append('В тарифе %s в городе %s таблицы нет: любая модель не старше %s года '
+                     'выпуска.' % (names[key], city['name'], city['entries'][key]['any']))
     if absent:
         where = ('в %s %s' % ('тариф' if len(asked) == 1 else 'тарифы',
                               _listed([names[key] for key in asked]))
-                 if asked else 'ни в один тариф города %s' % city['name'])
-        lines.append('Не внесены %s: %s.' % (where, _listed(absent)))
+                 if asked else 'ни в один тариф города %s по таблицам' % city['name'])
+        lines.append('Не допускаются %s: %s.' % (where, _listed(absent)))
     if len(cars) > MAX_LIST:
         lines.append('Показаны первые %s из %s — назовите модель.' % (
             MAX_LIST, _count(len(cars), 'модели', 'моделей', 'моделей')))
-    if brand in book['catch_all'] and not book['catch_all'][brand]:
-        lines.append('Остальные модели %s, которых нет в этом списке, в тарифы не внесены.' % brand)
+    for key in keys:
+        table = city['entries'][key]['list']
+        rule = table['brands'].get(brand) if table else None
+        if rule is not None:
+            lines.append('Остальные модели %s, которых нет в таблице тарифа %s: %s.' % (
+                brand, names[key], _short(dict(rule, kind='brand'))))
     missing = [names[key] for key in analysis['tariffs'] if key not in city['tariffs']]
     if missing:
         lines.append('В городе %s %s %s в классификаторе нет.' % (
@@ -1746,7 +2018,7 @@ def brand_text(book, brand, analysis):
 
 def tariff_text(book, analysis):
     """Модели тарифа. Короткий тариф («Бизнес», «Электро») — списком, длинный —
-    числом и просьбой назвать марку: 494 строки ответом не пересказать."""
+    числом и просьбой назвать марку: сотни строк ответом не пересказать."""
     names = book['tariff_names']
     city, scope = _scope(book, analysis)
     lines = []
@@ -1754,55 +2026,70 @@ def tariff_text(book, analysis):
         if key not in city['tariffs']:
             lines.append('В городе %s тарифа %s в классификаторе нет.' % (city['name'], names[key]))
             continue
-        cars = [car for car in book['cars'] if key in car['years']]
+        entry = city['entries'][key]
+        conditions = _conditions(city, key, limit=900)
+        if entry['list'] is None:
+            lines.append('В городе %s в тариф %s берут любую модель не старше %s года '
+                         'выпуска — отдельной таблицы моделей нет.%s' % (
+                             city['name'], names[key], entry['any'],
+                             ' Условия тарифа: %s' % conditions if conditions else ''))
+            continue
+        cars = [car for car in book['cars']
+                if car['index'] in entry['list']['rows']
+                and admitted(entry['list']['rows'][car['index']])]
+        other = entry['list']['other']
         if len(cars) > MAX_TARIFF_LIST:
-            lines.append('В тарифе %s в «Классификаторе авто» %s — такой список в ответ '
+            lines.append('В тарифе %s, %s, в «Классификаторе авто» %s — такой список в ответ '
                          'не помещается. Назовите марку или модель: год для неё есть в '
                          'классификаторе. Полный список — в статье «Классификатор авто», блок '
-                         '«Списки по тарифам».' % (
-                             names[key], _count(len(cars), 'модель', 'модели', 'моделей')))
+                         '«Списки по тарифам».%s%s' % (
+                             names[key], scope, _count(len(cars), 'модель', 'модели', 'моделей'),
+                             ' Остальные модели — по строке «Другие модели»: %s.' % _short(
+                                 dict(other, kind='own')) if other else '',
+                             ' Условия тарифа: %s' % conditions if conditions else ''))
             continue
         lines.append('Модели тарифа %s в «Классификаторе авто», %s. %s' % (
             names[key], scope, _HEAD_RULE))
+        if conditions:
+            lines.append('Условия тарифа: %s' % conditions)
         for car in sorted(cars, key=lambda item: item['name'].lower()):
-            required = required_year(car, city, key)
-            verdict = _verdict(required, analysis['years'])
-            lines.append('%s, тариф %s: от %s%s.%s' % (
-                car['name'], names[key], required, ' (%s)' % verdict if verdict else '',
-                _warning(car, key)))
+            req = requirement(car, city, key)
+            verdict_text = _verdict(req, analysis['years'])
+            lines.append('%s, тариф %s: %s%s.' % (
+                car['name'], names[key], _short(req), ' (%s)' % verdict_text if verdict_text else ''))
     return '\n'.join(lines + _notes(book, analysis))
 
 
-def _shift_text(offset):
-    if not offset:
-        return 'базовые требования'
-    years = abs(offset)
-    word = 'год' if years == 1 else 'года' if years < 5 else 'лет'
-    return 'требования на %s %s %s, чем в Алматы' % (years, word, 'строже' if offset > 0 else 'мягче')
+def _tariff_summary(book, city, key):
+    entry = city['entries'][key]
+    name = book['tariff_names'][key]
+    if entry['list'] is None:
+        return '%s — любая модель от %s' % (name, entry['any'])
+    rows = entry['list']['rows'].values()
+    allowed = sum(1 for req in rows if admitted(req))
+    text = '%s — таблица, %s' % (name, _count(allowed, 'модель', 'модели', 'моделей'))
+    if entry['list']['other'] is not None:
+        text += ', остальные %s' % _short(dict(entry['list']['other'], kind='own'))
+    return text
 
 
 def general_text(book, analysis):
     """Города, тарифы и правило — когда машина в вопросе не названа."""
-    names = book['tariff_names']
+    source = book.get('source') or {}
     lines = [
-        '«Классификатор авто» показывает по марке, модели, городу и году выпуска, в какие '
-        'тарифы допускается автомобиль. Тарифы классификатора: %s.'
-        % _listed([item['name'] for item in book['tariffs']]),
-        'Требуемый год выпуска зависит от модели и от города: чтобы получить год, назовите '
-        'марку и модель автомобиля, тариф и город.',
-        'Города и тарифы классификатора:',
+        '«Классификатор авто» — данные базы знаний Яндекс Про по городам: по марке, '
+        'модели, городу и году выпуска видно, в какие тарифы допускается автомобиль. '
+        'Тарифы классификатора: %s.' % _listed([item['name'] for item in book['tariffs']]),
+        'Требования у каждого города свои: чтобы получить год, назовите марку и модель '
+        'автомобиля, тариф и город.',
     ]
+    if source.get('updated'):
+        lines.append('Данные Яндекса обновлены %s.' % source['updated'])
+    lines.append('Города и тарифы классификатора:')
     chosen = _cities_of(book, analysis) or book['cities']
     for city in chosen:
-        lines.append('%s: %s — %s.' % (city['name'], _listed([names[key] for key in city['tariffs']]),
-                                       _shift_text(city['offset'])))
-    if book['other'] and book['other']['years']:
-        base = next((city for city in book['cities'] if city['offset'] == 0), book['cities'][0])
-        parts = ['%s от %s' % (names[key], required_year(book['other'], base, key))
-                 for key in _tariff_order(book, []) if required_year(book['other'], base, key)]
-        if parts:
-            lines.append('Строка «Другие модели» (те, которых в классификаторе нет), город %s: %s.'
-                         % (base['name'], ', '.join(parts)))
+        lines.append('%s: %s.' % (city['name'], '; '.join(
+            _tariff_summary(book, city, key) for key in city['tariffs'])))
     lines.append('В классификаторе %s, %s.' % (
         _count(book['models_total'], 'модель', 'модели', 'моделей'),
         _count(book['brands_total'], 'марка', 'марки', 'марок')))
@@ -1896,12 +2183,22 @@ def ai_rows(cursor, question, *, article_ids, search_query=None, history=None):
     черновиков, строгого режима и статей с рубильником «не для ИИ», уже суженный
     до пространства. База спрашивается, только когда вопрос вообще про машину.
     """
+    # Вопрос разбирается по книге В ПАМЯТИ: база не трогается, пока вопрос не про
+    # машину (помощник зовёт классификатор на каждый вопрос, о чём бы он ни был).
     data = book()
     if data is None:
         return []
     analysis = analyze_question(question, search_query, data, history=history)
     if not plan(analysis):
         return []
+    # Про машину — тогда сверяемся со слепком в базе (не чаще раза в минуту) и,
+    # если ночная сверка его сменила, разбираем вопрос по свежей книге.
+    fresh = book(cursor)
+    if fresh is not None and fresh is not data:
+        data = fresh
+        analysis = analyze_question(question, search_query, data, history=history)
+        if not plan(analysis):
+            return []
     article = readable_article(cursor, article_ids)
     if article is None:
         return []

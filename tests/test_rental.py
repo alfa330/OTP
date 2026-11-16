@@ -655,8 +655,14 @@ class TariffTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from classifier_fixture import car, v2_from_legacy
         from wiki import classifier
-        cls.book = classifier.build_book({
+        # Синтетика прежней формы (годы модели + поправка города) — в форму 2, где у
+        # каждого города своя таблица с готовыми годами (tests/classifier_fixture.py).
+        cls.book = classifier.build_book(v2_from_legacy({
             'tariffs': [{'key': 'econom', 'name': 'Эконом'}, {'key': 'intercity', 'name': 'Межгород'},
                         {'key': 'comfort', 'name': 'Комфорт'}, {'key': 'comfort_plus', 'name': 'Комфорт+'},
                         {'key': 'business', 'name': 'Бизнес'}, {'key': 'electro', 'name': 'Электро'},
@@ -665,20 +671,20 @@ class TariffTests(unittest.TestCase):
                         'tariffs': ['econom', 'intercity', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima']},
                        {'id': 'astana', 'name': 'Астана', 'offset': 2, 'tariffs': ['econom', 'comfort', 'business']}],
             'cars': [
-                {'brand': 'Toyota', 'model': 'Camry',
-                 'years': {'econom': 1985, 'comfort': 2014, 'comfort_plus': 2021, 'business': 2023}},
-                {'brand': 'Hongqi', 'model': 'E-QM5',
-                 'years': {'comfort': 2021, 'comfort_plus': 2021, 'electro': 2021, 'business': 2021}},
-                {'brand': 'Hongqi', 'model': 'H5', 'years': {'comfort': 2017, 'business': 2023, 'ultima': 2023}},
-                {'brand': 'BYD', 'model': 'Qin', 'years': {'comfort': 2018, 'comfort_plus': 2024}},
-                {'brand': 'BYD', 'model': 'Qin Plus', 'years': {'comfort': 2018, 'electro': 2022}},
+                car('Toyota', 'Camry', econom=1985, comfort=2014, comfort_plus=2021, business=2023),
+                car('Hongqi', 'E-QM5', comfort=2021, comfort_plus=2021, electro=2021, business=2021),
+                car('Hongqi', 'H5', comfort=2017, business=2023, ultima=2023),
+                car('BYD', 'Qin', comfort=2018, comfort_plus=2024),
+                car('BYD', 'Qin Plus', comfort=2018, electro=2022),
             ],
-        })
+        }))
 
     def test_city_tariffs_in_classifier_order(self):
         from rental import tariffs
+        # Межгорода у синтетической Алматы нет ни строки — и тарифа у города нет:
+        # без таблицы и без правила «любая модель» тариф в справочник не попадает.
         self.assertEqual([t['key'] for t in tariffs.city_tariffs(self.book)],
-                         ['econom', 'intercity', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima'])
+                         ['econom', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima'])
         self.assertEqual(tariffs.city_tariffs(None), [])
 
     def test_model_found_by_title_prefix_and_without_first_word(self):
@@ -705,7 +711,7 @@ class TariffTests(unittest.TestCase):
         self.assertEqual([t['key'] for t in eqm5['shown']], ['business', 'electro'])
         self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, {'title': 'FAW HONGQI H5', 'year': 2024})['shown']],
                          ['ultima'])
-        # Поправка города: в Астане (+2) Camry 2023 до «Бизнеса» не дотягивает.
+        # Год — из таблицы города: в Астане «Бизнес» для Camry с 2025, и Camry 2023 до него не дотягивает.
         camry_2023 = {'title': 'Toyota Camry', 'year': '2023'}
         self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, camry_2023)['shown']], ['business'])
         self.assertEqual([t['key'] for t in tariffs.card_tariffs(self.book, camry_2023, 'astana')['shown']], ['comfort'])
@@ -713,14 +719,28 @@ class TariffTests(unittest.TestCase):
         self.assertEqual(tariffs.card_tariffs(self.book, {'title': 'Toyota Camry', 'year': ''})['fits'], [])
         self.assertEqual(tariffs.card_tariffs(None, camry_2023), {'fits': [], 'shown': [], 'model': None})
 
+    def test_exception_rows_are_not_counted_as_fitting(self):
+        """«Не допускается, кроме машин, зарегистрированных до даты» — про машину
+        аренды справочник не знает, зарегистрирована ли она: в подходящие не идёт."""
+        from rental import tariffs
+        from wiki import classifier
+        book = classifier.build_book(classifier.read_data())
+        cobalt = tariffs.card_tariffs(book, {'title': 'Chevrolet Cobalt', 'year': '2025'})
+        self.assertNotIn('comfort', [t['key'] for t in cobalt['fits']])
+        camry = tariffs.card_tariffs(book, {'title': 'Toyota Camry', 'year': '2015'})
+        self.assertIn('comfort', [t['key'] for t in camry['fits']])
+        self.assertEqual([t['key'] for t in tariffs.city_tariffs(book)],
+                         ['econom', 'intercity', 'comfort', 'comfort_plus', 'business', 'electro', 'ultima'])
+
     def test_real_file_knows_the_mockup_cards(self):
-        """Файл классификатора из репозитория знает все карточки макета, кроме Kia Soluto —
-        ей сотрудник аренды впишет имя модели в карточку."""
+        """Справочник базы знаний Яндекс Про знает все карточки макета. В файле из
+        Wiki 2.0 не было Kia Soluto (ей вписывали имя модели в карточку руками), в
+        таблицах Яндекса 16.11.2026 она есть."""
         from rental import catalog, tariffs
         from wiki import classifier
         book = classifier.build_book(classifier.read_data())
         missing = [card['title'] for card in catalog.seed_cards() if not tariffs.find_car(book, card['title'])]
-        self.assertEqual(missing, ['Kia Soluto'])
+        self.assertEqual(missing, [])
 
 
 class PhotoTests(unittest.TestCase):

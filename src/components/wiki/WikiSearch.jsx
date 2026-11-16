@@ -16,6 +16,10 @@ import {
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { matchBrand, matchCar } from './carMatch';
+import {
+    carsOf, cityTariffs, conditionOf, dateWords, loadClassifier, requirementOf, shortRequirement,
+    verdictOf,
+} from '../classifier/classifierData';
 import { STATUS_LABELS, STATUS_TONES } from './articleTypes';
 import AiClosedBadge from './AiClosedBadge';
 import { AskAssistantEmpty, AskAssistantRow } from './WikiAskAssistant';
@@ -52,27 +56,15 @@ import {
  * такая же строка выдачи, как статья: он входит в rows, ходится стрелками и
  * открывается по Enter.
  *
- * Справочник классификатора (106 КБ) грузится динамическим import при первом
- * обращении и кэшируется на модуль — в бандл вики он не входит.
+ * Справочник классификатора приходит с сервера (GET /api/wiki/classifier,
+ * wiki/routes_classifier.py) при первом обращении и кэшируется на модуль по
+ * городу (classifierData.js). Это тот же справочник базы знаний Яндекс Про по
+ * городам, что у калькулятора в статье и у помощника. Кому статья-классификатор
+ * не видна, тому сервер отвечает 404 — и бара машины в поиске просто нет.
  */
 
-const YEAR_FLOOR = 1980;
 const CURRENT_YEAR = new Date().getFullYear();
 const MOBILE_WIDTH = 640;
-const requiredYear = (baseYear, cityOffset) => Math.max(YEAR_FLOOR, baseYear + cityOffset);
-
-let classifierDataPromise = null;
-const loadClassifierData = () => {
-    if (!classifierDataPromise) {
-        classifierDataPromise = import('../classifier/classifier-data.json')
-            .then((module) => module.default || module)
-            // Кэшируется ПРОМИС, поэтому отказ без сброса залипал бы навсегда:
-            // один сбой сети (или протухший чанк после выката на Pages) — и
-            // распознавание машин выключено до перезагрузки вкладки.
-            .catch((error) => { classifierDataPromise = null; throw error; });
-    }
-    return classifierDataPromise;
-};
 
 /* Сниппет приходит с сервера: ts_headline над plain-текстом, единственный
    допустимый тег — <mark>. Всё прочее вычищается, mark пересобирается руками —
@@ -122,38 +114,64 @@ const isTextSelection = () => {
     return !!selection && !selection.isCollapsed && !!selection.toString().trim();
 };
 
-/** Бар машины: город, год и вердикты по тарифам. */
-function CarWidget({ data, car, onOpenClassifier }) {
-    const [cityId, setCityId] = useState('almaty');
-    const [year, setYear] = useState(String(CURRENT_YEAR - 5));
+/* Бейдж тарифа в баре машины: тон и слова. Год не введён целиком — бейдж
+   показывает само требование («от 2014»), без «подходит / не подходит». */
+function carBadge(req, state) {
+    if (state === null) return { tone: 'slate', text: shortRequirement(req) };
+    if (state === 'fits') return conditionOf(req) ? { tone: 'amber', text: 'с оговоркой' } : { tone: 'green', text: 'подходит' };
+    if (state === 'except') return { tone: 'amber', text: 'если уже зарегистрирована' };
+    if (state === 'unknown') return { tone: 'amber', text: 'уточните' };
+    if (state === 'old') return { tone: 'red', text: `от ${req.year} г.` };
+    return { tone: 'red', text: req.kind === 'absent' ? 'нет в списке' : 'не допускается' };
+}
 
-    const city = useMemo(
-        () => (data.cities || []).find((c) => c.id === cityId) || data.cities[0],
-        [data, cityId],
-    );
+/* Строка пояснения под тарифом — только когда без неё ответ непонятен:
+   оговорка таблицы, дата регистрации, правило «любая модель» или «Другие модели». */
+function carNote(req, state) {
+    if (state === 'except') {
+        return `Подходит, только если машина зарегистрирована в сервисе не позднее ${dateWords(req.except[2])}`;
+    }
+    if (state === 'fits' && conditionOf(req)) return `Только ${conditionOf(req).replace(/^только\s+/i, '')}`;
+    if (state === 'unknown') return req.text || '';
+    if (state === 'fits' && req.kind === 'any') return `Любая модель от ${req.year} года`;
+    if (state === 'fits' && req.kind === 'other') return 'По строке «Другие модели» таблицы тарифа';
+    return '';
+}
+
+/** Бар машины: город, год и вердикты по тарифам — из справочника выбранного города. */
+function CarWidget({ data, car, base, headers, onOpenClassifier }) {
+    const [cityId, setCityId] = useState(data?.city?.id || 'almaty');
+    const [year, setYear] = useState(String(CURRENT_YEAR - 5));
+    // Справочник выбранного города: первый уже пришёл с поиском, остальные
+    // догружаются при выборе (classifierData.js держит их в кэше).
+    const [cityData, setCityData] = useState(data);
+    const [cityFailed, setCityFailed] = useState(false);
+
+    useEffect(() => {
+        if (cityData?.city?.id === cityId) return undefined;
+        let cancelled = false;
+        setCityFailed(false);
+        loadClassifier({ base, headers, city: cityId })
+            .then((payload) => { if (!cancelled) setCityData(payload); })
+            .catch(() => { if (!cancelled) setCityFailed(true); });
+        return () => { cancelled = true; };
+    }, [base, headers, cityId, cityData]);
+
     const cityOptions = useMemo(
         () => (data.cities || []).map((c) => ({ value: c.id, label: c.name })),
         [data],
     );
-
-    const numericYear = Number(year);
+    const cityName = (data.cities || []).find((c) => c.id === cityId)?.name || '';
+    const ready = cityData?.city?.id === cityId;
+    const numericYear = /^\d{4}$/.test(year) ? Number(year) : null;
     const verdicts = useMemo(() => {
-        if (!car || !city) return [];
-        return (city.tariffs || [])
-            .map((key) => {
-                const tariff = (data.tariffs || []).find((t) => t.key === key);
-                const base = car.years?.[key];
-                if (!tariff || base === undefined) return null;
-                const minYear = requiredYear(base, city.offset);
-                return {
-                    tariff,
-                    fits: Number.isFinite(numericYear) && numericYear >= minYear,
-                    minYear,
-                    warning: car.warnings?.[key],
-                };
-            })
-            .filter(Boolean);
-    }, [data, car, city, numericYear]);
+        if (!car || !ready) return [];
+        return cityTariffs(cityData).map(({ key, name }) => {
+            const req = requirementOf(cityData, car, key);
+            const state = numericYear === null ? null : verdictOf(req, numericYear);
+            return { key, name, badge: carBadge(req, state), note: carNote(req, state) };
+        });
+    }, [cityData, ready, car, numericYear]);
 
     return (
         <div className="flex min-h-0 flex-col rounded-xl bg-slate-50 p-3">
@@ -192,28 +210,38 @@ function CarWidget({ data, car, onOpenClassifier }) {
             </div>
 
             <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-0.5">
-                {verdicts.length === 0 && (
-                    <div className="rounded-lg bg-white px-3 py-4 text-center text-[12px] text-slate-400">
-                        Автомобиль не поддерживается тарифами в г. {city?.name}
+                {!ready && !cityFailed && (
+                    <div className="flex items-center justify-center gap-2 rounded-lg bg-white px-3 py-4 text-[12px] text-slate-400">
+                        <Loader2 size={13} className="animate-spin" /> Загружаем {cityName}…
                     </div>
                 )}
-                {verdicts.map(({ tariff, fits, minYear, warning }) => (
-                    <div key={tariff.key} className="rounded-lg bg-white px-2.5 py-2">
+                {cityFailed && (
+                    <div className="rounded-lg bg-white px-3 py-4 text-center text-[12px] text-slate-400">
+                        Справочник города не загрузился
+                    </div>
+                )}
+                {ready && verdicts.length === 0 && (
+                    <div className="rounded-lg bg-white px-3 py-4 text-center text-[12px] text-slate-400">
+                        В г. {cityName} классификатор не ведёт ни одного тарифа
+                    </div>
+                )}
+                {verdicts.map(({ key, name, badge, note }) => (
+                    <div key={key} className="rounded-lg bg-white px-2.5 py-2">
                         <div className="flex items-center justify-between gap-2">
                             <span className="truncate text-[12.5px] font-medium text-slate-800">
-                                {tariff.name}
+                                {name}
                             </span>
-                            {warning ? (
-                                <IosBadge tone="amber"><AlertTriangle size={10} /> внимание</IosBadge>
-                            ) : fits ? (
-                                <IosBadge tone="green"><Check size={10} /> подходит</IosBadge>
-                            ) : (
-                                <IosBadge tone="red">от {minYear} г.</IosBadge>
-                            )}
+                            <IosBadge tone={badge.tone}>
+                                {badge.tone === 'green' && <Check size={10} />}
+                                {badge.tone === 'amber' && <AlertTriangle size={10} />}
+                                {' '}{badge.text}
+                            </IosBadge>
                         </div>
-                        {warning && (
-                            <div className="mt-1 rounded-md bg-amber-50 px-2 py-1 text-[11px] leading-relaxed text-amber-800">
-                                {warning}
+                        {note && (
+                            <div className={`mt-1 text-[11px] leading-relaxed ${
+                                badge.tone === 'amber' ? 'rounded-md bg-amber-50 px-2 py-1 text-amber-800' : 'text-slate-400'
+                            }`}>
+                                {note}
                             </div>
                         )}
                     </div>
@@ -577,6 +605,7 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const [selectedIndex, setSelectedIndex] = useState(0);
     const [classifier, setClassifier] = useState(null);
     const [classifierFailed, setClassifierFailed] = useState(false);
+    const [classifierHidden, setClassifierHidden] = useState(false);
     const [pickedCar, setPickedCar] = useState(null);
     // Сдвиг выпадашки, если центрирование увело её за край экрана.
     const [shift, setShift] = useState(0);
@@ -619,15 +648,20 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
     const term = query.trim();
     const active = focused || sheetOpen;
 
-    // Справочник машин подгружается при первом обращении к поиску.
+    // Справочник машин подгружается при первом обращении к поиску. Ответ 404
+    // (статья-классификатор человеку не видна) — бара машины нет, и это не сбой.
     useEffect(() => {
-        if (!active || classifier) return undefined;
+        if (!active || classifier || classifierHidden) return undefined;
         let cancelled = false;
-        loadClassifierData()
+        loadClassifier({ base, headers, city: 'almaty' })
             .then((data) => { if (!cancelled) { setClassifier(data); setClassifierFailed(false); } })
-            .catch(() => { if (!cancelled) setClassifierFailed(true); });
+            .catch((error) => {
+                if (cancelled) return;
+                if (error?.hidden) setClassifierHidden(true);
+                else setClassifierFailed(true);
+            });
         return () => { cancelled = true; };
-    }, [active, classifier]);
+    }, [active, classifier, classifierHidden, base, headers]);
 
     /* Создатели грузятся по требованию — когда панель фильтров раскрыли впервые.
        Список стоит обхода периметра, а раскрывает панель меньшинство: запрос на
@@ -717,18 +751,20 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
            рендер, и в зависимостях он гонял бы запрос по кругу. */
     }, [active, term, base, headers, retryTick, spaceId, filtersKey(filters)]);
 
+    // Указатель машин справочника: [{ index, brand, model }] — его и ищет carMatch.
+    const classifierCars = useMemo(() => carsOf(classifier), [classifier]);
     const matchedCar = useMemo(
-        () => (classifier ? matchCar(classifier.cars, term) : null),
-        [classifier, term],
+        () => (classifier ? matchCar(classifierCars, term) : null),
+        [classifier, classifierCars, term],
     );
     const matchedBrand = useMemo(
-        () => (classifier ? matchBrand(classifier.cars, term) : null),
-        [classifier, term],
+        () => (classifier ? matchBrand(classifierCars, term) : null),
+        [classifier, classifierCars, term],
     );
     const brandModels = useMemo(() => {
         if (!classifier || !matchedBrand) return [];
-        return classifier.cars.filter((c) => c.brand === matchedBrand);
-    }, [classifier, matchedBrand]);
+        return classifierCars.filter((c) => c.brand === matchedBrand);
+    }, [classifier, classifierCars, matchedBrand]);
 
     // Клик по модели из списка марки перекрывает автоматический матч.
     useEffect(() => { setPickedCar(null); }, [term]);
@@ -954,6 +990,8 @@ export default function WikiSearch({ base, headers, onOpenArticle, onOpenClassif
         <CarWidget
             data={classifier}
             car={activeCar}
+            base={base}
+            headers={headers}
             onOpenClassifier={onOpenClassifier ? (prefill) => {
                 close();
                 openClassifier(prefill);

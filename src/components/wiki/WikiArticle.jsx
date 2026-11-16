@@ -1096,7 +1096,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
                                     <span className="text-[13px]">Загружаем справочник…</span>
                                 </div>
                             )}>
-                                <ClassifierView prefill={classifierPrefill} embedded />
+                                <ClassifierView prefill={classifierPrefill} embedded base={base} headers={headers} />
                             </Suspense>
                         </div>
                     ) : (

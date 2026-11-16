@@ -367,6 +367,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
     from . import routes_cities
     routes_cities.register(bp, wiki_route, db, _ip)
 
+    # «Классификатор авто» — справочник Яндекс Про по городам для калькулятора
+    # статьи и бара машины в поиске (данные — те же, что у помощника).
+    from . import routes_classifier
+    routes_classifier.register(bp, wiki_route, db, _ip)
+
     from . import routes_ai
     routes_ai.register(bp, wiki_route, db, _ip, sensitive_access_granted)
 
