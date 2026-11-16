@@ -5864,6 +5864,7 @@ class SchemaMixin:
             self._init_sign_links_schema_tx(cursor)
             self._init_partner_keys_schema_tx(cursor)
             self._init_calls_api_schema_tx(cursor)
+            self._init_line_watch_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
             self._init_fleet_edm_schema_tx(cursor)
             self._init_driver_mailings_schema_tx(cursor)
@@ -7031,6 +7032,25 @@ class SchemaMixin:
             logging.exception("Схема «Звонков Binotel» не применилась — ручки /api/calls недоступны")
         else:
             cursor.execute("RELEASE SAVEPOINT calls_api_schema")
+
+    def _init_line_watch_schema_tx(self, cursor):
+        """Журнал сторожа линий Binotel (line_watch/schema.py): расхождения «телефон оператора ↔
+        кабинет и линия Binotel» и звонки, не отданные готовому оператору. Внешний ключ — на users.
+        Под своим савпоинтом: при отказе сторож не ведёт журнал, телефония и остальное приложение
+        работают штатно."""
+        import logging
+
+        cursor.execute("SAVEPOINT line_watch_schema")
+        try:
+            from line_watch.schema import init_line_watch_schema
+            init_line_watch_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT line_watch_schema")
+            logging.exception("Журнал сторожа линий Binotel не создан — сверка линий не ведётся")
+        else:
+            cursor.execute("RELEASE SAVEPOINT line_watch_schema")
 
     def _init_olx_amo_schema_tx(self, cursor):
         """Схема робота «Лиды OLX» (таблицы olx_accounts/threads/journal/poll_runs).

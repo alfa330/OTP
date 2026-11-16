@@ -54838,6 +54838,81 @@ except Exception:
     logging.exception("Звонки Binotel для партнёров: вход НЕ подключён")
 
 
+# ── Сторож линий Binotel (line_watch, 16.11.2026) ────────────────────────────────────────────
+# Раз в минуту сверяет статус телефона оператора Тез КЦ с кабинетом и линией Binotel, а по вебхуку
+# «API Call Completed» отмечает звонки, которые очередь или группа не отдали готовому оператору.
+# Найденное пишет в журнал binotel_line_watch. Чинит сам только виды из TEZ_LINE_WATCH_HEAL
+# (через запятую; пусто — только журнал). TEZ_LINE_WATCH=0 выключает сторож целиком.
+_line_watch_service = None
+_line_watch_client_holder = {}
+
+
+def _line_watch_roster():
+    """Состав Тез КЦ для сторожа: ТП (очередь) и ОП (группа) с линиями — тот же, что у табло."""
+    people = _tez_wallboard_people()
+    return [{'id': row.get('id'), 'sip_number': row.get('sip_number'), 'direction': direction}
+            for direction in ('tp', 'op') for row in (people.get(direction) or [])]
+
+
+def _line_watch_read_lines():
+    """Состояние линий кабинета Тез одним запросом официального API (лёгкая ручка)."""
+    from line_watch import binotel as line_watch_binotel
+    from tez import binotel_calls as tez_binotel_calls
+    client = _line_watch_client_holder.get('client')
+    if client is None:
+        cfg = tez_binotel_calls.get_config()
+        if not tez_binotel_calls.api_ready(cfg):
+            return {}
+        client = tez_binotel_calls.BinotelApiClient.from_config(cfg)
+        _line_watch_client_holder['client'] = client
+    return line_watch_binotel.read_lines(client)
+
+
+def _line_watch_queue_states():
+    """{линия: статус оператора на странице очереди кабинета} — той же сессией, что у табло Тез."""
+    from tez import wallboard_source as tez_source
+    if not tez_source.is_configured():
+        return {}
+    session = _tez_wallboard_session()
+    html = session.get_text(tez_source.QUEUE_PATH.format(queue_id=session.queue_id()))
+    rows = tez_source.parse_queue_page(html).get('operators') or []
+    return {str(row.get('number')): row.get('status_text') for row in rows if row.get('number')}
+
+
+try:
+    if str(os.getenv('TEZ_LINE_WATCH', '1')).strip().lower() not in ('0', 'false', 'off', 'no'):
+        from line_watch.service import LineWatchService  # noqa: E402
+
+        _line_watch_service = LineWatchService(
+            db,
+            roster=_line_watch_roster,
+            read_lines=_line_watch_read_lines,
+            account_for=db.get_binotel_account,
+            queue_states=_line_watch_queue_states,
+            heal_kinds=[k.strip() for k in str(os.getenv('TEZ_LINE_WATCH_HEAL', '')).split(',') if k.strip()],
+        )
+        if _dial_list_service is not None:
+            _dial_list_service.call_observers.append(_line_watch_service.on_binotel_call)
+        logging.info("Сторож линий Binotel: подключён (чинит сам: %s)",
+                     ', '.join(sorted(_line_watch_service.heal_kinds)) or 'ничего, только журнал')
+except Exception:
+    _line_watch_service = None
+    logging.exception("Сторож линий Binotel: НЕ подключён")
+
+
+def _line_watch_start():
+    """Поток сторожа. Свой, не из общего пула бота: шаг ходит в Binotel и не должен занимать
+    место, которого ждут отбивки и ответы людям. Без ключа API Тез сторожу нечего читать."""
+    if _line_watch_service is None:
+        return False
+    from tez import binotel_calls as tez_binotel_calls
+    if not tez_binotel_calls.api_ready(tez_binotel_calls.get_config()):
+        logging.info("Сторож линий Binotel: ключа API Тез нет — сверка не запущена")
+        return False
+    threading.Thread(target=_line_watch_service.run, name='binotel-line-watch', daemon=True).start()
+    return True
+
+
 def _calls_api_job(name):
     """Задача планировщика «Звонков Binotel»: sync — сверка с историей, cleanup — срок хранения."""
     if _calls_api_service is None:
@@ -59848,6 +59923,13 @@ if __name__ == '__main__':
     _calls_api_start_timer.daemon = True
     _calls_api_start_timer.start()
     logging.info("⏰ Звонки Binotel для партнёров: сверка раз в 10 минут и ночная чистка поставлены")
+
+    # Сторож линий Binotel — своим потоком, с первой сверкой сразу после старта.
+    try:
+        if _line_watch_start():
+            logging.info("⏰ Сторож линий Binotel: сверка телефона с кабинетом раз в минуту запущена")
+    except Exception:
+        logging.exception("Сторож линий Binotel: поток не запущен")
 
     scheduler.start()
 
