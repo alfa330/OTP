@@ -270,24 +270,42 @@ test('оператор линии видит только свои раздел�
     );
 });
 
-test('«Задачи» рядовому — только в отделах с ограничениями', () => {
+test('«Задачи» рядовому — одним предикатом во всех местах', () => {
     const menu = rankMenuBranch();
     assert.ok(
-        menu.includes("{departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && ("),
-        'пункт «Задачи» в ветке рядового снова гейтится одним departmentAllowsView — оператор линии '
-        + 'получит пункт, ведущий в отказ бэкенда',
+        menu.includes('{rankAndFileTasksAllowed(user) && ('),
+        'пункт «Задачи» в ветке рядового гейтится не rankAndFileTasksAllowed — одним '
+        + 'departmentAllowsView оператор линии получит пункт, ведущий в отказ бэкенда',
     );
-    // Гейт пункта, гейт раздела и гейт закреплённой задачи — три копии одного
-    // правила; расходятся они молча, поэтому сверяем их между собой.
+    // Пункт меню, телефонное меню, закреплённая задача, «есть ли разделы» и
+    // гейт самого раздела — пять мест одного правила; расходятся они молча,
+    // поэтому все обязаны звать один предикат, а не держать свою копию.
     assert.ok(
-        source.includes("|| (isRankAndFileRole(currentUserRole) && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));"),
+        source.includes('|| (isRankAndFileRole(currentUserRole) && rankAndFileTasksAllowed(user));'),
         'canUsePinnedTasks разошёлся с пунктом меню',
+    );
+    assert.match(
+        source,
+        /\n\s*tasks: isAdminLikeRole\n[\s\S]{0,400}?&& !isScopedDepartmentHead\n\s*&& rankAndFileTasksAllowed\(user\)\),\n/,
+        'флаг «Задач» в телефонном меню разошёлся с пунктом меню',
+    );
+    assert.ok(
+        source.includes("departmentAllowsView(user, 'surveys')\n                        || rankAndFileTasksAllowed(user)\n"),
+        '«есть ли у человека разделы» считает «Задачи» не тем правилом',
     );
     const tasksView = readLf('src/components/tasks/TasksView.jsx');
     assert.ok(
-        tasksView.includes("|| (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));"),
+        tasksView.includes('    || rankAndFileTasksAllowed(user);'),
         'гейт самого раздела «Задачи» разошёлся с пунктом меню',
     );
+    // Старой двойной копии не осталось нигде: забытая, она снова закрыла бы
+    // раздел рядовому IT в одном из мест.
+    for (const [name, text] of [['App.jsx', source], ['TasksView.jsx', tasksView]]) {
+        assert.ok(
+            !text.includes("departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks')"),
+            `в ${name} осталась своя копия правила «Задач» рядового`,
+        );
+    }
 });
 
 test('оператор линии проходит departmentAllowsView, но не departmentRestrictsViews', () => {

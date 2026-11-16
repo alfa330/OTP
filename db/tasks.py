@@ -3,6 +3,7 @@
 Методы класса Database, вынесено из database.py скриптом scripts/split_database_mixins.py, 02.11.2026,
 без изменений тел. Модульные помощники и константы — в db/core.py."""
 from db.core import (  # noqa: F401
+    _TASK_EMPLOYEE_SQL,
     _TASK_RECIPIENT_ROLES_SQL,
     _UNSET,
     calendar,
@@ -96,11 +97,20 @@ class TasksMixin:
         return [int(row[0]) for row in cursor.fetchall()]
 
     def _task_assignee_scope_tx(self, cursor, task_id):
-        """Исполнители с ролью и СВ — всё, что нужно для проверки видимости."""
-        cursor.execute("""
-            SELECT ta.user_id, u.role, u.supervisor_id
+        """Исполнители с ролью и СВ — всё, что нужно для проверки видимости.
+
+        У рядового IT (_TASK_EMPLOYEE_SQL) СВ не отдаём. Его задачи живут по
+        правилам рядового бэк-офиса — их видят участники, доска и админ, — а путь
+        «СВ видит задачу своего оператора» (_task_visible_for_requester) его не
+        касается: роль у него 'operator', и без этой оговорки СВ из его карточки,
+        в том числе СВ чужого отдела, открывал бы и принимал IT-задачу по ссылке.
+        """
+        cursor.execute(f"""
+            SELECT ta.user_id, u.role,
+                   CASE WHEN {_TASK_EMPLOYEE_SQL} THEN NULL ELSE u.supervisor_id END
               FROM task_assignees ta
               JOIN users u ON u.id = ta.user_id
+              LEFT JOIN departments d ON d.id = u.department_id
              WHERE ta.task_id = %s
              ORDER BY ta.position, ta.user_id
         """, (int(task_id),))
@@ -228,7 +238,8 @@ class TasksMixin:
                     LEFT JOIN departments d ON d.id = u.department_id
                     WHERE COALESCE(u.status, 'working') <> 'fired'
                       AND (
-                          (u.role IN ({_TASK_RECIPIENT_ROLES_SQL}) {scope_filter})
+                          ((u.role IN ({_TASK_RECIPIENT_ROLES_SQL})
+                            OR {_TASK_EMPLOYEE_SQL}) {scope_filter})
                           OR u.id = %s
                       )
                     ORDER BY CASE WHEN u.role IN ('super_admin', 'admin') THEN 0 ELSE 1 END, u.name
@@ -587,6 +598,7 @@ class TasksMixin:
                       LEFT JOIN departments d ON d.id = u.department_id
                      WHERE COALESCE(u.status, 'working') <> 'fired'
                        AND (u.role IN ({_TASK_RECIPIENT_ROLES_SQL}, 'trainer')
+                            OR {_TASK_EMPLOYEE_SQL}
                             OR EXISTS (SELECT 1 FROM departments hd
                                         WHERE hd.head_user_id = u.id AND hd.is_active))
                      ORDER BY u.name, u.id

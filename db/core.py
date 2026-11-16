@@ -701,6 +701,18 @@ ROLE_HIERARCHY = {
 # стоило бы правки десятка мест ради одного слова.
 BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager', 'marketing_manager'})
 
+# Отделы без собственной должности, где «Задачи» выданы рядовому — 'operator' или
+# 'trainee' (TASK_EMPLOYEE_ROLES). IT — решение владельца 16.11.2026: «для IT
+# открыть доступ к разделу задачи». Охват у такого рядового личный, как у
+# бэк-офиса, и ему можно поручить задачу (_TASK_EMPLOYEE_SQL ниже).
+# Роль у него та же строка, что у оператора линии, поэтому в раздел пускает
+# гард по ОТДЕЛУ (_back_office_task_employee_role в bot_schedule2.py), а здесь
+# отдел сверяет _TASK_EMPLOYEE_SQL: получатели, кандидаты на доску и состав
+# исполнителей для проверки доступа. Зеркалит одноимённый набор в
+# bot_schedule2.py и TASK_EMPLOYEE_DEPARTMENTS в src/utils/departmentViews.js.
+TASK_EMPLOYEE_DEPARTMENT_CODES = frozenset({'it'})
+TASK_EMPLOYEE_ROLES = frozenset({'operator', 'trainee'})
+
 # Роли с ЛИЧНЫМ охватом задач: человек видит только то, где он сам постановщик,
 # поручитель или исполнитель, и не принимает работу за других. Набор один на три
 # места (_task_scope_filters, get_task_recipients, get_task_board_people) — до
@@ -709,7 +721,10 @@ BACK_OFFICE_EMPLOYEE_ROLES = frozenset({'hr_manager', 'accounting_manager', 'mar
 # Зеркалит _can_access_tasks в bot_schedule2.py: тот решает, пускать ли в раздел
 # вообще, этот — что человек в разделе увидит. Разъедься они, раздел откроется и
 # молча покажет ноль задач вместо отказа. Совпадение держит тест.
-TASK_PERSONAL_SCOPE_ROLES = frozenset({'sv', 'trainer'}) | BACK_OFFICE_EMPLOYEE_ROLES
+# 'operator' и 'trainee' здесь — ради рядового IT: оператора линии гард в раздел
+# не пускает, и с этой ролью сюда доходит только рядовой из
+# TASK_EMPLOYEE_DEPARTMENT_CODES.
+TASK_PERSONAL_SCOPE_ROLES = frozenset({'sv', 'trainer'}) | BACK_OFFICE_EMPLOYEE_ROLES | TASK_EMPLOYEE_ROLES
 
 # Кого вообще можно поставить исполнителем задачи. Рядовой бэк-офиса здесь не
 # ради своей доски, а чтобы задачу можно было поручить ЕМУ: без этой строки
@@ -720,6 +735,17 @@ TASK_RECIPIENT_ROLES = ('super_admin', 'admin', 'sv', *sorted(BACK_OFFICE_EMPLOY
 # как литералы, отдельными плейсхолдерами их не сделать (список ролей меняет
 # длину, а параметры этого запроса считаются по позициям).
 _TASK_RECIPIENT_ROLES_SQL = ", ".join(f"'{role}'" for role in TASK_RECIPIENT_ROLES)
+# «u — рядовой отдела из TASK_EMPLOYEE_DEPARTMENT_CODES» — по РОЛИ И ОТДЕЛУ сразу:
+# роль у него та же, что у оператора линии, которому задачи не поручают. Стоит в
+# получателях задач, в кандидатах на доску и в составе исполнителей
+# (_task_assignee_scope_tx). Тоже литерал из констант модуля; в выборке, куда он
+# подставляется, departments присоединена как d. Код отдела — как его читает
+# гард: без регистра и пробелов по краям.
+_TASK_EMPLOYEE_SQL = (
+    "(u.role IN (" + ", ".join(f"'{role}'" for role in sorted(TASK_EMPLOYEE_ROLES)) + ")"
+    " AND LOWER(BTRIM(d.code)) IN ("
+    + ", ".join(f"'{code}'" for code in sorted(TASK_EMPLOYEE_DEPARTMENT_CODES)) + "))"
+)
 
 # Типы задачи («Тип» в форме). Один список на CHECK, создание, правку и фильтр
 # списка: до «Продакшна» он был переписан литералом в четырёх местах, и новый

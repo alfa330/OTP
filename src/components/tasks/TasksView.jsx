@@ -26,7 +26,7 @@ import {
   StickyNote,
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
-import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';
+import { rankAndFileTasksAllowed } from '../../utils/departmentViews';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
@@ -3050,6 +3050,27 @@ const ROLE_LABELS = {
   accounting_manager: 'Бухгалтерия',
   marketing_manager: 'Маркетинг',
 };
+/* Рядовой IT в получателях — «оператор» или «стажёр» (своей должности у отдела
+   нет), и подпись по роли читалась бы как линия. Его подписываем отделом, как
+   бэк-офис: «Иванов (IT)». Отдел приходит в списке получателей
+   (department_code); у исполнителя, взятого из самой задачи, его может не быть —
+   тогда «Сотрудник», но не сырое «operator». */
+const RECIPIENT_DEPARTMENT_LABELS = {
+  it: 'IT',
+  // Старые учётки бэк-офиса на 'operator' (заведены до своих должностей) —
+  // тем же словом, что их коллеги по должности в ROLE_LABELS.
+  hr: 'HR',
+  accounting: 'Бухгалтерия',
+  marketing: 'Маркетинг',
+};
+const recipientRoleLabel = (person) => {
+  const role = String(person?.role || '').trim().toLowerCase();
+  if (role === 'operator' || role === 'trainee') {
+    const departmentCode = String(person?.department_code || '').trim().toLowerCase();
+    return RECIPIENT_DEPARTMENT_LABELS[departmentCode] || 'Сотрудник';
+  }
+  return ROLE_LABELS[role] || role;
+};
 const TASKS_PAGE_SIZE = 20;
 
 /** «3ч», «1д 2ч», «90», «2h30m» → минуты. Пусто/мусор → 0. */
@@ -4851,7 +4872,7 @@ const TaskComposerForm = ({
     () => recipients.map((person) => ({
       value: String(person.id),
       label: person.role
-        ? `${person.name} (${ROLE_LABELS[person.role] || person.role})`
+        ? `${person.name} (${recipientRoleLabel(person)})`
         : person.name,
     })),
     [recipients]
@@ -6536,7 +6557,7 @@ export const PinnedTaskWidget = React.memo(({
     () => recipientOptions.map((person) => ({
       value: String(person.id),
       label: person.role
-        ? `${person.name} (${ROLE_LABELS[person.role] || person.role})`
+        ? `${person.name} (${recipientRoleLabel(person)})`
         : person.name,
     })),
     [recipientOptions]
@@ -7691,15 +7712,15 @@ const TasksView = ({
   onOpenProduction = null,
 }) => {
   const currentUserRole = normalizeRole(user?.role);
-  /* Гейт раздела. Кроме управленческих ролей сюда попадает тот, кому раздел
-     выдала карта отдела, — рядовой сотрудник бэк-офиса. Спрашиваем именно карту,
-     а не список ролей: у оператора HR и у оператора линии роль одна и та же
-     строка, и различает их только отдел. departmentRestrictsViews обязателен —
-     без него departmentAllowsView пропустил бы отделы вообще без ограничений.
+  /* Гейт раздела. Кроме управленческих ролей сюда попадает рядовой, которому
+     раздел выдан: бэк-офису — картой отдела, IT — своим набором. Спрашиваем
+     отдел, а не список ролей: у оператора IT и у оператора линии роль одна и та
+     же строка, и различает их только отдел. Правило то же, что у пункта меню, —
+     rankAndFileTasksAllowed (departmentViews.js).
      От этого флага зависит не только рендер, но и ВСЕ загрузки раздела ниже:
      оставив его узким, получим открытый экран, в который не приехали данные. */
   const canAccessTasks = isAdminLikeRole(currentUserRole) || isSupervisorRole(currentUserRole) || currentUserRole === 'trainer'
-    || (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));
+    || rankAndFileTasksAllowed(user);
   const [tasks,               setTasks]               = useState([]);
   /* Список «моих задач» хотя бы раз загрузился. До этого счётчик уведомлений
      наружу не репортится: на маунте tasks=[] даёт транзиентный ноль, который

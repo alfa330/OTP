@@ -235,6 +235,15 @@ const SectionRow = ({ section, index, total, onRename, onMove, onRemove, disable
   </li>
 );
 
+/* Подпись кандидата в «Добавить участника»: должность, а у рядового без своей
+   должности (специалист IT заведён 'operator') — отдел, как в строке состава
+   (MemberRow). Иначе в списке, где у всех стоит «(HR)» или «(СВ)», он один
+   оставался бы без подписи. */
+const candidateLabel = (person, roleLabels) => {
+  const tag = roleLabels?.[person.role] || person.department;
+  return tag ? `${person.name} (${tag})` : person.name;
+};
+
 const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, departments, saving }) => {
   const [newSection, setNewSection] = useState('');
   const memberIds = useMemo(() => new Set(draft.members.map((person) => Number(person.id))), [draft.members]);
@@ -247,7 +256,7 @@ const ProjectEditor = ({ draft, setDraft, isCreate, issues, people, roleLabels, 
     .filter((person) => !memberIds.has(Number(person.id)))
     .map((person) => ({
       value: String(person.id),
-      label: roleLabels?.[person.role] ? `${person.name} (${roleLabels[person.role]})` : person.name,
+      label: candidateLabel(person, roleLabels),
     })), [people, memberIds, roleLabels]);
   const departmentOptions = useMemo(() => [
     { value: '', label: 'Без отдела' },

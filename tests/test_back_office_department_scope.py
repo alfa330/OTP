@@ -55,6 +55,18 @@ def _function_source(path, function_name):
     return textwrap.dedent(ast.get_source_segment(source, function_node))
 
 
+def _assignment_source(path, name):
+    """Присваивание верхнего уровня целиком — константа, как она стоит в коде."""
+    source = _read(path)
+    module = source_cache.parse(source)
+    node = next(
+        node for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+    )
+    return ast.get_source_segment(source, node)
+
+
 class BackOfficeViewAllowlistRuntimeTests(unittest.TestCase):
     """Карта разделов — литералы: опечатка в ключе роли не ломает синтаксис,
     она молча снимает ограничение. Поэтому карту гоняем настоящим Node."""
@@ -1319,6 +1331,12 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
             def get_user_department_id(self, user_id):
                 return user_departments.get(int(user_id))
 
+            def get_user_department(self, user_id):
+                # Как db.get_user_department: (id отдела, его код) одним запросом.
+                department_id = user_departments.get(int(user_id))
+                department = departments.get(int(department_id)) if department_id is not None else None
+                return department_id, (department or {}).get("code")
+
         namespace = {
             "db": _Db(),
             "ROLE_HIERARCHY": {
@@ -1333,6 +1351,7 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
              "BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.values())", namespace)
         exec("BACK_OFFICE_TASK_EMPLOYEE_ROLES = "
              "BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'trainee'}", namespace)
+        exec(_assignment_source(BOT_PATH, "TASK_EMPLOYEE_DEPARTMENT_CODES"), namespace)
         for name in ("_normalize_user_role", "_get_role_level", "_has_min_role",
                      "_is_admin_role", "_back_office_employee_role",
                      "_back_office_task_employee_role", "_can_access_tasks"):
@@ -1363,6 +1382,20 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         # ровно как в add_user, где роль сверяется с отделом.
         self.assertFalse(can("hr_manager", 30))
 
+    def test_it_rank_and_file_gets_in_by_department(self):
+        # IT (решение владельца 16.11.2026): своей должности у отдела нет, и
+        # рядовой там 'operator'/'trainee' — та же строка, что у оператора
+        # линии. Пускает ОТДЕЛ, а не роль.
+        departments = {1: {"code": "szov"}, 1933: {"code": "it"}, 7: {"code": " IT "}}
+        can = self._can_access_tasks(departments, {80: 1933, 81: 1, 82: 7}, heads={})
+        self.assertTrue(can("operator", 80))
+        self.assertTrue(can("trainee", 80))
+        self.assertTrue(can("operator", 82), "код отдела сверяется без регистра и пробелов")
+        self.assertFalse(can("operator", 81), "оператор линии")
+        # Должность бэк-офиса в IT раздела не даёт — как и в любом чужом отделе.
+        self.assertFalse(can("hr_manager", 80))
+        self.assertFalse(can("marketing_manager", 80))
+
     def test_managers_and_department_heads_still_get_in(self):
         can = self._can_access_tasks({1: {"code": "szov"}}, {50: 1, 60: 1, 70: 1}, heads={50: 1})
         self.assertTrue(can("admin", 50))   # глава отдела
@@ -1382,7 +1415,8 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
     def test_data_layer_shares_one_list_of_personally_scoped_roles(self):
         source = _read(DATABASE_PATH)
         namespace = {}
-        for name in ("BACK_OFFICE_EMPLOYEE_ROLES", "TASK_PERSONAL_SCOPE_ROLES",
+        for name in ("BACK_OFFICE_EMPLOYEE_ROLES", "TASK_EMPLOYEE_DEPARTMENT_CODES",
+                     "TASK_EMPLOYEE_ROLES", "TASK_PERSONAL_SCOPE_ROLES",
                      "TASK_RECIPIENT_ROLES"):
             line = next(row for row in source.splitlines() if row.startswith(f"{name} = "))
             exec(line, namespace)
@@ -1390,8 +1424,13 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         self.assertEqual({"hr_manager", "accounting_manager", "marketing_manager"},
                          set(namespace["BACK_OFFICE_EMPLOYEE_ROLES"]))
         # Охват личный: постановщик / поручитель / исполнитель — тот же, что у СВ.
-        self.assertEqual({"sv", "trainer", "hr_manager", "accounting_manager", "marketing_manager"},
+        # 'operator' и 'trainee' — ради рядового IT: оператора линии гард в
+        # раздел не пускает (_can_access_tasks), и с этой ролью сюда доходит
+        # только рядовой из TASK_EMPLOYEE_DEPARTMENT_CODES.
+        self.assertEqual({"sv", "trainer", "hr_manager", "accounting_manager", "marketing_manager",
+                          "operator", "trainee"},
                          set(namespace["TASK_PERSONAL_SCOPE_ROLES"]))
+        self.assertEqual({"operator", "trainee"}, set(namespace["TASK_EMPLOYEE_ROLES"]))
         # Рядовой отдела без линии обязан быть и в ПОЛУЧАТЕЛЯХ: иначе задачу ему
         # не поручит ни глава отдела, ни админ, и раздел покажет только своё.
         # Порядок значим — он попадает в SQL-литерал _TASK_RECIPIENT_ROLES_SQL.
@@ -1402,7 +1441,10 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         # Три места, где список ролей раньше был переписан заново.
         self.assertIn("elif role in TASK_PERSONAL_SCOPE_ROLES:", source)
         self.assertIn("if role_has_min(role, 'admin') or role in TASK_PERSONAL_SCOPE_ROLES:", source)
-        self.assertIn("(u.role IN ({_TASK_RECIPIENT_ROLES_SQL}) {scope_filter})", source)
+        # Рядовой IT в получателях — по роли И отделу, внутри той же границы
+        # отдела, что и роли из списка.
+        self.assertIn("((u.role IN ({_TASK_RECIPIENT_ROLES_SQL})\n"
+                      "                            OR {_TASK_EMPLOYEE_SQL}) {scope_filter})", source)
 
     def test_personal_scope_has_no_default_department(self):
         # Отдел задачи — это отдел ПОСТАНОВЩИКА. Подставив рядовому его
@@ -1421,30 +1463,24 @@ class TasksSectionForBackOfficeTests(unittest.TestCase):
         self.assertEqual(2, app.count(marker))
         menu_branch = app.split(marker, 1)[1]
         screen_branch = app.split(marker, 2)[2]
-        # Гейт пункта — ДВОЙНОЙ. Одного departmentAllowsView мало: у отдела без
-        # ограничений (СЗоВ) allowlist'а нет вовсе, и departmentAllowsView
-        # возвращает true на любой ключ — оператор линии получал пункт «Задачи»,
-        # который сам раздел (canAccessTasks в TasksView.jsx) и бэкенд
-        # (_can_access_tasks) ему закрывают. Тот же двойной гейт стоит у
-        # «Журнала оценок» и «Деления звонков» в этой же ветке.
-        self.assertIn(
-            "{departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && (",
-            menu_branch,
-        )
+        # Гейт пункта — общий предикат rankAndFileTasksAllowed (departmentViews.js).
+        # Одного departmentAllowsView мало: у отдела без ограничений (СЗоВ)
+        # allowlist'а нет вовсе, и departmentAllowsView возвращает true на любой
+        # ключ — оператор линии получал пункт «Задачи», который сам раздел
+        # (canAccessTasks в TasksView.jsx) и бэкенд (_can_access_tasks) ему
+        # закрывают. Поведение предиката гоняет sidebar_department_filter.test.mjs.
+        self.assertIn("{rankAndFileTasksAllowed(user) && (", menu_branch)
         self.assertIn("{renderTasksSidebarButtonInner()}", menu_branch)
         self.assertIn('{( view === "tasks" && (', screen_branch)
         self.assertIn("<TasksView", screen_branch)
 
     def test_section_gate_asks_the_map_not_a_list_of_roles(self):
         view = _read(ROOT / "src" / "components" / "tasks" / "TasksView.jsx")
+        # То же правило, что у пункта меню: карта отдела (бэк-офис) или набор
+        # TASK_EMPLOYEE_DEPARTMENTS (IT) — одним предикатом, а не своей копией.
+        self.assertIn("    || rankAndFileTasksAllowed(user);", view)
         self.assertIn(
-            "|| (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));",
-            view,
-        )
-        # departmentRestrictsViews обязателен: у отдела без ограничений
-        # departmentAllowsView возвращает true всем подряд.
-        self.assertIn(
-            "import { departmentAllowsView, departmentRestrictsViews } from '../../utils/departmentViews';",
+            "import { rankAndFileTasksAllowed } from '../../utils/departmentViews';",
             view,
         )
         # Сырой код роли в выпадашке исполнителей — тот самый шум, который

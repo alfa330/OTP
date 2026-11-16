@@ -26,6 +26,7 @@ GUARD_CHAIN = (
     "BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE",
     "BACK_OFFICE_EMPLOYEE_ROLES",
     "BACK_OFFICE_TASK_EMPLOYEE_ROLES",
+    "TASK_EMPLOYEE_DEPARTMENT_CODES",
     "TASKS_FULL_ACCESS_USER_IDS",
     "_normalize_user_role",
     "_get_role_level",
@@ -76,6 +77,10 @@ class _Db:
 
     def get_department_by_id(self, department_id):
         return DEPARTMENTS.get(int(department_id))
+
+    def get_user_department(self, user_id):
+        department_id = self._user_departments.get(int(user_id))
+        return department_id, (DEPARTMENTS.get(department_id) or {}).get("code")
 
 
 def _make_guard(users, heads, full_access_ids=None):

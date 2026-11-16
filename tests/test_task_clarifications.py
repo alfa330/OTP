@@ -149,7 +149,9 @@ def _build_database():
         "List": List,
     }
     for source in _module_members(
-        ["normalize_role_value", "role_has_min", "ROLE_ALIASES", "ROLE_HIERARCHY"]
+        ["normalize_role_value", "role_has_min", "ROLE_ALIASES", "ROLE_HIERARCHY",
+         # Состав исполнителей узнаёт рядового IT (_task_assignee_scope_tx).
+         "TASK_EMPLOYEE_DEPARTMENT_CODES", "TASK_EMPLOYEE_ROLES", "_TASK_EMPLOYEE_SQL"]
     ).values():
         exec(source, namespace)
 

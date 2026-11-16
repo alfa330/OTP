@@ -82,7 +82,7 @@ def _build_database():
     module = source_cache.parse(DATABASE_SOURCE)
     namespace = {'Optional': Optional, 'List': List, 'task_projects': task_projects}
     wanted = {'normalize_role_value', 'role_has_min', 'ROLE_ALIASES', 'ROLE_HIERARCHY', '_UNSET',
-              'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_PERSONAL_SCOPE_ROLES'}
+              'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_ROLES', 'TASK_PERSONAL_SCOPE_ROLES'}
     for node in module.body:
         names = ([node.name] if isinstance(node, ast.FunctionDef)
                  else [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)])

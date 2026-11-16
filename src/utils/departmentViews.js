@@ -826,6 +826,33 @@ export const departmentAllowsView = (user, viewKey) => {
     return Boolean(alias && isDepartmentHead(user) && allow.includes(alias));
 };
 
+/* Отделы без собственной должности, рядовому которых ('operator', 'trainee')
+   выданы «Задачи». IT — решение владельца 16.11.2026: «для IT открыть доступ к
+   разделу задачи». Карта разделов IT не ограничивает (отдела нет в
+   DEPARTMENT_VIEW_ALLOWLIST), и прочее меню у людей отдела прежнее: прибавляется
+   один пункт. Охват у такого рядового личный, как у бэк-офиса, — свои задачи и
+   доски, в состав которых его добавили. Зеркало — TASK_EMPLOYEE_DEPARTMENT_CODES
+   в bot_schedule2.py (пускает в раздел) и в db/core.py (охват и получатели). */
+const TASK_EMPLOYEE_DEPARTMENTS = new Set(['it']);
+const TASK_EMPLOYEE_ROLES = ['operator', 'trainee'];
+
+/* Есть ли у РЯДОВОГО пункт «Задачи» и сам раздел. Одно правило на App.jsx
+   (пункт меню, телефонное меню, закреплённая задача, «есть ли разделы») и гейт
+   TasksView.jsx — до 16.11.2026 оно было переписано в каждом месте. Два пути:
+     - карта разделов отдела (бэк-офис, «Маркетинг»). departmentRestrictsViews
+       обязателен: у отдела без ограничений (СЗоВ) allowlist'а нет вовсе, и
+       departmentAllowsView отвечает true на любой ключ — оператор линии получил
+       бы пункт, который бэкенд ему закрывает (_can_access_tasks);
+     - отдел из TASK_EMPLOYEE_DEPARTMENTS: карта его не ограничивает, и раздел
+       выдаёт набор выше — рядовому, как и на сервере.
+   Набор «только это» сильнее обоих путей: раздела в нём нет — нет и пункта. */
+export const rankAndFileTasksAllowed = (user) => {
+    if (!departmentAllowsView(user, 'tasks')) return false;
+    if (departmentRestrictsViews(user)) return true;
+    return TASK_EMPLOYEE_DEPARTMENTS.has(normalizeDepartmentCodeValue(departmentCodeOf(user)))
+        && TASK_EMPLOYEE_ROLES.includes(normalizeRole(user?.role));
+};
+
 // Первый разрешённый раздел: сначала из переданных кандидатов, иначе — первый из allowlist.
 export const firstAllowedView = (user, candidates = []) => {
     const allow = allowlistFor(user);

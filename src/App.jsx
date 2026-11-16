@@ -141,7 +141,7 @@ import IosDatePicker from './components/ui/DatePicker';
 import CustomSelect from './components/ui/CustomSelect';
 import MonthPicker from './components/trainings/MonthPicker';
 import { normalizeRole, isAdminLikeRole as isAdminLikeRoleFn, isSupervisorRole, isDepartmentHead, headedDepartmentId, headedDepartmentsOf } from './utils/roles';
-import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting, personalViewsAllow } from './utils/departmentViews';
+import { BACK_OFFICE_EMPLOYEE_ROLES, departmentAllowsView, departmentCodeEmployeeRole, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSip, departmentCodeHidesEmployeeSupervisor, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeUsesEmployeeJobTitle, departmentEmployeeRole, departmentHidesColleagueSchedules, departmentHidesEmployeeDirection, departmentHidesEmployeeInternship, departmentHidesEmployeeSip, departmentHidesEmployeeSupervisor, departmentHidesEmployeeTaxiproId, departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews, departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle, departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole, managesEmployeeAccounting, personalViewsAllow, rankAndFileTasksAllowed } from './utils/departmentViews';
 // Отдельной строкой: общий импорт выше тесты держат дословно.
 import { departmentHasSupervisorHours, headsSupervisorHoursDepartment } from './utils/departmentViews';
 import SupervisorDayMarksModal from './components/hours/SupervisorDayMarksModal';
@@ -44772,10 +44772,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // кому раздел выдан, флаг обязан быть true: иначе клик кладёт задачу в
             // state, а виджет не рисуется — кнопка без эффекта и без объяснения.
             // Условие то же, по которому пункт «Задачи» попадает в меню рядового:
-            // departmentRestrictsViews отсекает операторов линии — у их отделов
-            // (СЗоВ) ограничений нет вовсе, и departmentAllowsView вернул бы им true.
+            // rankAndFileTasksAllowed (departmentViews.js) — операторов линии оно
+            // отсекает, рядовых бэк-офиса и IT пропускает.
             const canUsePinnedTasks = isAdminLikeRole || isDepartmentManager || isPlainTrainer
-                || (isRankAndFileRole(currentUserRole) && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'));
+                || (isRankAndFileRole(currentUserRole) && rankAndFileTasksAllowed(user));
             const canAccessLmsSection = canAccessLmsSectionForUser(user);
             const canAccessResourceFteSection = canAccessResourceFteSectionForUser(user);
             const canAccessAiQaSection = canAccessAiQaForUser(user);
@@ -45062,7 +45062,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         || (isDepartmentManager && !isAdminLikeRole && departmentAllowsView(user, 'tasks'))
                         || isPlainTrainer
                         || (isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
-                            && departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks')),
+                            && rankAndFileTasksAllowed(user)),
                     workSchedules: isAdminLikeRole || isPlainTrainer || departmentAllowsView(user, 'work_schedules'),
                     surveys: isAdminLikeRole || isDepartmentManager || isPlainTrainer
                         || departmentAllowsView(user, 'surveys'),
@@ -55904,7 +55904,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     ))
                     || (isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (
                         departmentAllowsView(user, 'surveys')
-                        || (departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'))
+                        || rankAndFileTasksAllowed(user)
                     )),
                 );
                 const sidebarDeptOptions = (Array.isArray(departments) ? departments : [])
@@ -57293,18 +57293,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                             )}
-                                            {/* «Задачи» рядовому — ТОЛЬКО в отделах с ограничениями
-                                                (бэк-офис, «Маркетинг»): departmentRestrictsViews здесь
-                                                обязателен и один только departmentAllowsView не годится.
-                                                У отдела без ограничений (СЗоВ) allowlist'а нет вовсе, и
-                                                departmentAllowsView возвращает true на ЛЮБОЙ ключ —
-                                                оператор линии получал пункт меню, а раздел и бэкенд ему
+                                            {/* «Задачи» рядовому — бэк-офису и «Маркетингу» по карте
+                                                разделов, IT — своим набором (rankAndFileTasksAllowed в
+                                                departmentViews.js). Один только departmentAllowsView не
+                                                годится: у отдела без ограничений (СЗоВ) allowlist'а нет
+                                                вовсе, и он возвращает true на ЛЮБОЙ ключ — оператор
+                                                линии получал пункт меню, а раздел и бэкенд ему
                                                 отказывали (_can_access_tasks в bot_schedule2.py).
-                                                Тот же двойной гейт стоит у самого раздела
-                                                (canAccessTasks в TasksView.jsx) и у закреплённой
-                                                задачи (canUsePinnedTasks выше) — расходиться им нельзя,
-                                                это сверяет tests/sidebar_department_filter.test.mjs. */}
-                                            {departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks') && (
+                                                То же правило стоит у самого раздела (canAccessTasks в
+                                                TasksView.jsx) и у закреплённой задачи (canUsePinnedTasks
+                                                выше) — расходиться им нельзя, это сверяет
+                                                tests/sidebar_department_filter.test.mjs. */}
+                                            {rankAndFileTasksAllowed(user) && (
                                             <li>
                                                 {renderTasksSidebarButtonInner()}
                                             </li>
@@ -61660,7 +61660,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 {/* Раздел объявлен и здесь, в ветке рядовых: пункт меню и экран
                                     живут в РАЗНЫХ ветках, и без этой строки «Задачи» открывались
                                     бы в пустую область — ни ошибки, ни заглушки. Кому раздел
-                                    выдан, решает departmentAllowsView в меню и бэкенд. */}
+                                    выдан, решают rankAndFileTasksAllowed (departmentViews.js) в
+                                    меню и _can_access_tasks на сервере. */}
                                 {( view === "tasks" && (
                                     <TasksView
                                         user={user}

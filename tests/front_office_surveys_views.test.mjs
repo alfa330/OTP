@@ -22,6 +22,7 @@ import {
     departmentRestrictsViews,
     departmentUsesSimpleEmployeeAccounting,
     firstAllowedView,
+    rankAndFileTasksAllowed,
 } from '../src/utils/departmentViews.js';
 import {
     headedDepartmentId, isAdminLikeRole, isDepartmentHead, isSupervisorRole, normalizeRole,
@@ -213,6 +214,7 @@ const personFlags = (user) => ({
     isRankAndFileRole: (value) => RANK_AND_FILE.includes(normalizeRole(value)),
     departmentAllowsView,
     departmentRestrictsViews,
+    rankAndFileTasksAllowed,
 });
 
 test('флаги человека из App.jsx: глава — руководитель отдела, а не админ; сотрудник — рядовой', () => {

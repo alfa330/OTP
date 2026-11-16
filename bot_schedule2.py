@@ -4116,10 +4116,27 @@ def _back_office_task_employee_role(requester_id, role):
 
     Обратная сторона той же проверки: 'hr_manager' в чужом отделе раздела не
     получает — как и в add_user, где роль сверяется с отделом.
+
+    У IT (TASK_EMPLOYEE_DEPARTMENT_CODES) своей должности нет: рядовой там так и
+    остаётся 'operator' или 'trainee', и под этой же ролью слой данных его знает
+    (TASK_PERSONAL_SCOPE_ROLES в db/core.py) — она и возвращается.
+
+    Отдел и его код — одним запросом: функцию зовёт и колокол каждого рядового,
+    а раньше это были два (id отдела, затем сам отдел).
     """
     if role not in BACK_OFFICE_TASK_EMPLOYEE_ROLES:
         return None
-    return _back_office_employee_role(db.get_user_department_id(requester_id))
+    try:
+        _department_id, code = db.get_user_department(requester_id)
+    except Exception:
+        return None
+    code = str(code or '').strip().lower()
+    own_role = BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.get(code)
+    if own_role is not None:
+        return own_role
+    if role in ('operator', 'trainee') and code in TASK_EMPLOYEE_DEPARTMENT_CODES:
+        return role
+    return None
 
 
 def _can_access_tasks(role, requester_id):
@@ -4177,7 +4194,8 @@ def _task_route_guard():
     g.effective_task_role = _effective_scoped_manager_role(requester_role, requester_id)
     # Рядовой бэк-офиса идёт в слой данных под ролью СВОЕГО ОТДЕЛА: отдела там
     # не видно, а охват у него личный — задачи, где он постановщик, поручитель
-    # или исполнитель (database.TASK_PERSONAL_SCOPE_ROLES). Глава сюда не
+    # или исполнитель (database.TASK_PERSONAL_SCOPE_ROLES). У рядового IT своей
+    # должности нет — он идёт под своей 'operator'/'trainee'. Глава сюда не
     # попадает: _effective_scoped_manager_role уже сделал его 'sv'.
     back_office_role = _back_office_task_employee_role(requester_id, g.effective_task_role)
     g.task_scope_is_personal = back_office_role is not None
@@ -21442,6 +21460,19 @@ BACK_OFFICE_EMPLOYEE_ROLES = frozenset(BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_C
 # Пропуск в раздел «Задачи» такой роли даёт только вместе с отделом — см.
 # _back_office_task_employee_role.
 BACK_OFFICE_TASK_EMPLOYEE_ROLES = BACK_OFFICE_EMPLOYEE_ROLES | {'operator', 'trainee'}
+
+# Отделы без собственной должности, рядовому которых ('operator', 'trainee')
+# «Задачи» выданы так же, как рядовому бэк-офиса: личный охват — свои задачи и
+# доски, в состав которых его добавили, — и ему можно поручить задачу. IT —
+# решение владельца 16.11.2026: «для IT открыть доступ к разделу задачи».
+# Карта разделов IT не ограничивает, и прочее меню у людей отдела не меняется.
+# Оператора линии набор не касается: роль у него та же строка, различает их
+# только отдел.
+# Зеркалит TASK_EMPLOYEE_DEPARTMENT_CODES в db/core.py (охват и получатели
+# задач) и TASK_EMPLOYEE_DEPARTMENTS в src/utils/departmentViews.js (пункт меню
+# и сам раздел); совпадение держит tests/test_it_department_tasks_access.py
+# (ItDepartmentMirrorTests).
+TASK_EMPLOYEE_DEPARTMENT_CODES = frozenset({'it'})
 
 
 def _back_office_employee_role(department_id):

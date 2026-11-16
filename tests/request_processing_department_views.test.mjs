@@ -20,6 +20,7 @@ import {
     departmentHidesEmployeeTaxiproId,
     departmentRestrictsViews,
     firstAllowedView,
+    rankAndFileTasksAllowed,
 } from '../src/utils/departmentViews.js';
 
 /* ООЗ — отдел обработки запросов (задача #359). Сотрудник заводится
@@ -291,7 +292,7 @@ test('бар телефона: названным — «Смены», остал
         lms: false,
         events: departmentAllowsView(user, 'events'),
         groupLate: false,
-        tasks: departmentRestrictsViews(user) && departmentAllowsView(user, 'tasks'),
+        tasks: rankAndFileTasksAllowed(user),
         workSchedules: departmentAllowsView(user, 'work_schedules'),
         surveys: departmentAllowsView(user, 'surveys'),
     }, {}).map((tab) => tab.view);

@@ -391,7 +391,8 @@ class FrontOfficeMyShiftsFrontendTests(unittest.TestCase):
             " departmentHidesFrontOfficeTraining, departmentHidesOperatorFields, departmentRestrictsViews,"
             " departmentUsesEmployeeCity, departmentUsesEmployeeJobTitle,"
             " departmentUsesSimpleEmployeeAccounting, firstAllowedView, isBackOfficeEmployeeRole,"
-            " managesEmployeeAccounting, personalViewsAllow } from './utils/departmentViews';",
+            " managesEmployeeAccounting, personalViewsAllow, rankAndFileTasksAllowed }"
+            " from './utils/departmentViews';",
             source,
         )
         self.assertIn(
