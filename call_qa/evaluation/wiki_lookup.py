@@ -19,6 +19,22 @@
    (evaluator.build_eval_body) с подписью статьи, раздела и даты; архивные и
    просроченные — с пометкой (wiki.ai.currency), как у помощника.
 
+3. КОНТАКТЫ ПАРКА. Когда план ищет контакт парка — телефон, номер, техподдержку,
+   офис, адрес (``CONTACT_INTENT``) — и называет парк, оценщик получает из
+   справочника «Парки» пространств отдела его телефоны и офисы (``park_cards_for``,
+   текст — park_cards.card_text помощника вики). Владелец 16.11.2026, «Да,
+   подключи»: в статье «Номера телефонов» у «Ноль такси» один номер, а в карточке
+   парка — два, и оценщик штрафовал оператора за верный номер техподдержки
+   (imported_call-15650), пока модератор не поправила его трижды.
+   Почему только контакты и только на поиск контакта — замерено повтором боевых
+   прогонов на GLM-5.3-Flash: полная карточка (комиссия, акции, описание) на любой
+   названный парк ослабляла проверку акций — на звонках, где модератор штрафовала
+   за неозвученную акцию, ИИ сохранял штраф в 7 из 14 повторов против 10 из 14 без
+   карточки, а на 15441 — 0 из 10 против 3 из 4 («акций у парка в базе нет»), и
+   оговорки в подписи этого не лечили. Комиссия и акции остаются за статьями.
+   Парк берётся из запросов плана, а не из всего разговора: приветствие «центр
+   регистрации» приносило бы карточку в каждый звонок ОП.
+
 Почему не инструмент (tool calling) внутри вызова модели: оценка идёт через трёх
 провайдеров с разной поддержкой инструментов и через замороженные тела пакета
 (batch_eval), а каждый дополнительный ход модели — ещё 60–90 с «мышления» GLM.
@@ -34,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import time
 
 from wiki.perimeter import AI_SECTION_GATE_SQL
@@ -41,7 +58,9 @@ from wiki.perimeter import AI_SECTION_GATE_SQL
 from .. import config
 from .. import llm
 
-VERSION = "wiki-search-v1"
+# Входит в отпечаток оценки (model_config.wiki_search). v2: телефоны и офисы парка из
+# справочника «Парки» вслед за выдержками статей, когда план ищет контакт (park_cards_for).
+VERSION = "wiki-search-v2"
 
 # Потолки. Запросов — чтобы план не превратился в опрос всей вики; кусков и
 # знаков — чтобы справка не вытеснила из контекста сам разговор (кусок помощника
@@ -55,6 +74,28 @@ MAX_TITLES = 200
 # тратил бы на него столько же, сколько на саму оценку.
 PLANNER_EFFORT = config.env("AI_QA_WIKI_PLANNER_EFFORT", "low")
 ENABLED = str(config.env("AI_QA_WIKI_SEARCH", "1")).strip().lower() in {"1", "true", "yes", "on"}
+# Карточек парков на разговор — как у помощника (park_cards.MAX_CARDS) — и знаков на
+# карточку: у крупного парка офисов с номерами десятки, и список не должен вытеснить
+# сам разговор.
+MAX_PARK_CARDS = int(config.env("AI_QA_WIKI_MAX_PARK_CARDS", "3"))
+PARK_CARD_CHARS = int(config.env("AI_QA_WIKI_PARK_CARD_CHARS", "3000"))
+
+# Запрос плана ищет контакт парка. Без «WhatsApp» отдельно: «регистрация через
+# WhatsApp-шаблон» — про порядок регистрации, а не про номер парка (сверено по
+# запросам плана 607 проверенных людьми оценок, 02–16.11.2026).
+CONTACT_INTENT = re.compile(
+    r"(?<![а-яёa-z0-9])(?:телефон|номер|контакт|позвон|звонить|связат|офис|адрес|техподдерж"
+    r"|поддержк|горяч\w* лини|колл.?центр|call.?cent)", re.IGNORECASE)
+
+# Пространства отдела — та же связь, что у периметра статей; включена ли в них
+# вкладка «Парки», решает wiki.schema.space_features (как у помощника вики).
+_SPACES_SQL = """
+SELECT DISTINCT sp.id, sp.features
+  FROM wiki_space_departments sd
+  JOIN departments d ON d.id = sd.department_id AND lower(d.code) = %(code)s
+  JOIN wiki_spaces sp ON sp.id = sd.space_id AND sp.status = 'active'
+ ORDER BY sp.id
+"""
 
 _PERIMETER_SQL = """
 SELECT DISTINCT a.id, a.title
@@ -124,7 +165,7 @@ _PLAN_USER = ("КРИТЕРИИ ОЦЕНКИ:\n{criteria}\n\n"
 
 
 def empty_trace(status: str, **extra) -> dict:
-    return {"version": VERSION, "status": status, "queries": [], "chunks": [],
+    return {"version": VERSION, "status": status, "queries": [], "chunks": [], "parks": [],
             "perimeter": {"articles": 0}, "errors": [], "latency_ms": 0, **extra}
 
 
@@ -249,6 +290,70 @@ def search(cur, *, article_ids: list[int], queries: list[dict], vectors=None) ->
     return {"chunks": chunks}
 
 
+def _clip(text: str, limit: int) -> str:
+    """Карточка не длиннее limit знаков — по границе строки: номера без офиса стоят в её
+    начале (park_cards.card_text), длинным бывает только список офисов."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    head = text[:limit].rsplit("\n", 1)[0]
+    return f"{head}\n…"
+
+
+def park_cards_for(cur, department, queries: list[dict]) -> list[dict]:
+    """Ход 3: телефоны и офисы парков, названных в запросах плана, которые ищут контакт
+    (CONTACT_INTENT), — из справочника «Парки» пространств отдела, где вкладка включена.
+
+    Парк узнаётся так же, как в вопросе помощнику (park_cards.named_parks: «iTaxi и iTaxi
+    VIP» — два парка, парк с именем из обычного слова — только рядом с «парк»/«такси»).
+    Текст — park_cards.card_text помощника по парку без комиссии, описания и сайта и без
+    акций: в карточке только то, ради чего её искали (почему — шапка модуля, п. 3). Не
+    больше MAX_PARK_CARDS, в порядке запросов.
+
+    Возвращает [{park_id, name, slug, space_id, criterion_idx, query, text}]."""
+    from wiki import offices as wiki_offices
+    from wiki import park_cards
+    from wiki import parks as wiki_parks
+    from wiki import schema as wiki_schema
+    code = str(department or "").strip().lower()
+    texts = [(query, str(query.get("query") or "")) for query in queries or ()]
+    texts = [(query, text) for query, text in texts if text and CONTACT_INTENT.search(text)]
+    if not code or not texts or MAX_PARK_CARDS <= 0:
+        return []
+    cur.execute(_SPACES_SQL, {"code": code})
+    spaces = [int(space_id) for space_id, features in cur.fetchall()
+              if wiki_schema.space_features(features).get("parks")]
+    cards = []
+    for space_id in spaces:
+        parks = wiki_parks.list_parks(cur, space_id=space_id)
+        if not parks:
+            continue
+        named, origin = [], {}
+        for query, text in texts:
+            for park in park_cards.named_parks(park_cards.analyze(text), parks):
+                if park["id"] not in origin:
+                    origin[park["id"]] = query
+                    named.append(park)
+        named = named[:MAX_PARK_CARDS - len(cards)]
+        if not named:
+            continue
+        ids = [park["id"] for park in named]
+        offices = wiki_offices.offices_by_park(cur, ids, space_id=space_id)
+        phones = wiki_offices.phones_by_park(cur, ids, space_id=space_id)
+        for park in named:
+            contacts = {**park, "commission": None, "description": None, "website": None}
+            text = park_cards.card_text(contacts, offices=offices.get(park["id"]),
+                                        phones=phones.get(park["id"]), promotions=())
+            query = origin[park["id"]]
+            cards.append({"park_id": int(park["id"]), "name": park.get("name") or "",
+                          "slug": park.get("slug") or "", "space_id": space_id,
+                          "criterion_idx": query.get("criterion_idx"), "query": query.get("query"),
+                          "text": _clip(text, PARK_CARD_CHARS)})
+        if len(cards) >= MAX_PARK_CARDS:
+            break
+    return cards
+
+
 def _date(value) -> str:
     raw = str(value or "")[:10]
     return ".".join(reversed(raw.split("-"))) if len(raw) == 10 and raw[4] == "-" else ""
@@ -269,6 +374,25 @@ def render(chunks: list[dict]) -> str:
             label = f"⚠ {chunk['stale_note']}. {label}"
         parts.append(f"[{number}; к критерию {chunk.get('criterion_idx')}; {label}]\n{chunk.get('text') or ''}")
     return "\n\n".join(parts)
+
+
+def render_parks(cards: list[dict], *, start: int = 1) -> str:
+    """Контакты парков — вслед за выдержками статей, со сквозной нумерацией. Без «к
+    критерию»: номер парка нужен любому критерию, где о нём речь. Подпись называет, что
+    в карточке есть, — телефоны и офисы, и только."""
+    return "\n\n".join(
+        f"[{number}; справочник «Парки»: телефоны и офисы таксопарка «{card.get('name')}»]\n"
+        f"{card.get('text') or ''}"
+        for number, card in enumerate(cards, start=start))
+
+
+def park_sources(cards: list[dict]) -> list[dict]:
+    """Строки карточек парков для «ИИ читал в вики» (kind=park: у вкладки «Парки» нет
+    адреса страницы, карточка показывается без ссылки)."""
+    return [{"kind": "park", "park_id": card["park_id"], "article_id": None,
+             "title": card.get("name") or "", "slug": "", "updated_at": None,
+             "headings": [], "criterion_idxs": [card.get("criterion_idx")], "stale": False}
+            for card in cards]
 
 
 def sources(chunks: list[dict]) -> list[dict]:
@@ -327,16 +451,26 @@ def prepare(*, criteria: list[dict], transcript: str, subject_kind: str, departm
             return {"wiki_text": "", "trace": trace, "sources": []}
         embedded = embed_queries(planned["queries"])
         trace["errors"] = embedded["errors"]
+        cards = []
         with _reading(connect) as cur:
             found = search(cur, article_ids=scope["article_ids"], queries=planned["queries"],
                            vectors=embedded["vectors"])
+            try:
+                cards = park_cards_for(cur, department, planned["queries"])
+            except Exception as exc:  # noqa: BLE001 — без карточек справка остаётся
+                logging.exception("ai-qa: карточки парков для оценки не прочитаны")
+                trace["errors"] = [*trace["errors"],
+                                   f"parks: {type(exc).__name__}: {str(exc)[:200]}"]
         trace["chunks"] = found["chunks"]
+        trace["parks"] = cards
         if embedded["degraded"]:
             trace["status"] = "degraded"
-        elif not found["chunks"]:
+        elif not found["chunks"] and not cards:
             trace["status"] = "no_match"
-        return {"wiki_text": render(found["chunks"]), "trace": trace,
-                "sources": sources(found["chunks"])}
+        text = "\n\n".join(part for part in (
+            render(found["chunks"]), render_parks(cards, start=len(found["chunks"]) + 1)) if part)
+        return {"wiki_text": text, "trace": trace,
+                "sources": sources(found["chunks"]) + park_sources(cards)}
     except Exception as exc:  # noqa: BLE001 — справка не должна ронять оценку
         logging.exception("ai-qa: поиск по вики для оценки не удался")
         trace["status"] = "failed"

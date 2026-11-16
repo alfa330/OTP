@@ -113,6 +113,22 @@ test('прочитанные оценщиком статьи вики — стр
   assert.doesNotMatch(evaluationDetails({ wiki_status: 'no_queries', wiki_queries: 0 }), /запросов в вики/);
 });
 
+test('контакты парка из справочника «Парки» — строкой без ссылки, рядом со статьями', () => {
+  // Оценщик сверяет номер парка по справочнику (16.11.2026, звонок 15650): модератор
+  // видит, откуда ИИ взял номер. У вкладки «Парки» нет адреса страницы.
+  const html = card({
+    wiki_sources: [
+      { article_id: 8, title: 'Номера телефонов', slug: 'callcenter', headings: [], stale: false },
+      { kind: 'park', park_id: 16, article_id: null, title: 'Ноль такси', slug: '', headings: [], stale: false },
+      { kind: 'park', park_id: 1, article_id: null, title: 'iTaxi', slug: '', headings: [], stale: false },
+    ],
+  });
+  assert.match(html, /href="\?view=wiki&amp;article=callcenter"[^>]*>«Номера телефонов»<\/a>/);
+  assert.match(html, /<span class="text-slate-700">контакты парка «Ноль такси»<\/span>/);
+  assert.match(html, /контакты парка «iTaxi»/);
+  assert.doesNotMatch(html, /контакты парка «Ноль такси»<\/a>/);
+});
+
 test('без статей из вики строки нет', () => {
   const html = card({ wiki_sources: [], evaluation: { wiki_status: 'no_queries', wiki_queries: 0 } });
   assert.doesNotMatch(html, /ИИ читал в вики/);

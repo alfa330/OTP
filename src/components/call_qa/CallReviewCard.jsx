@@ -189,7 +189,9 @@ export const evaluationDetails = (evaluation) => {
 };
 
 /* Статьи вики, которые оценщик прочитал перед вердиктом (call.wiki_sources). Ссылка
- * ведёт на статью в разделе «Вики»; несвежая (архив или истёкший срок) помечена. */
+ * ведёт на статью в разделе «Вики»; несвежая (архив или истёкший срок) помечена.
+ * Телефоны и офисы парка из справочника «Парки» (kind: 'park') — без ссылки: у вкладки
+ * нет адреса страницы. */
 function WikiSources({ sources }) {
     const items = Array.isArray(sources) ? sources.filter((item) => item && item.title) : [];
     if (!items.length) return null;
@@ -199,14 +201,16 @@ function WikiSources({ sources }) {
             <BookOpen size={13} className="shrink-0 text-slate-400" aria-hidden="true" />
             <span>ИИ читал в вики:</span>
             {items.map((item, index) => {
+                const park = item.kind === 'park';
                 // Относительный адрес, как в теле статей вики: открывается с любого хоста портала.
-                const href = item.slug ? buildRelativeArticleLink(item.slug) : '';
-                const label = `«${item.title}»`;
+                const href = !park && item.slug ? buildRelativeArticleLink(item.slug) : '';
+                const label = park ? `контакты парка «${item.title}»` : `«${item.title}»`;
                 const body = href
                     ? <a href={href} target="_blank" rel="noopener noreferrer" className="text-slate-700 underline decoration-slate-300 underline-offset-2 hover:text-blue-700">{label}</a>
                     : <span className="text-slate-700">{label}</span>;
                 return (
-                    <span key={item.article_id ?? item.slug ?? index} className="inline-flex items-center gap-1">
+                    <span key={park ? `park-${item.park_id ?? index}` : (item.article_id ?? item.slug ?? index)}
+                          className="inline-flex items-center gap-1">
                         {body}
                         {item.stale && <span className="font-medium text-amber-700" title="Архив или истёкший срок — сведения могут не действовать">несвежая</span>}
                         {index < items.length - 1 ? <span aria-hidden="true">·</span> : null}
