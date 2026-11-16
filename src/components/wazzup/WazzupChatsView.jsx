@@ -956,7 +956,7 @@ const ChatShiftReport = lazyWithRetry(() => import('./ChatShiftReport'));
 
 /* Подраздел «Операторы»: аналитика открывается первой — привязка нужна реже,
  * это разовая настройка. */
-function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
+function OperatorsTab({ apiBaseUrl, headers, showToast, account, themeScope }) {
     const [subTab, setSubTab] = useState('analytics');
     const goToMapping = () => setSubTab('mapping');
     return (
@@ -980,7 +980,8 @@ function OperatorsTab({ apiBaseUrl, headers, showToast, account }) {
                     </div>
                 )}>
                     <ChatShiftReport apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                                     account={account} onGoToMapping={goToMapping} downloadCsv={downloadCsv} />
+                                     account={account} onGoToMapping={goToMapping} downloadCsv={downloadCsv}
+                                     themeScope={themeScope} />
                 </Suspense>
             )}
             {subTab === 'mapping' && (
@@ -2076,7 +2077,8 @@ function ChatsWorkspace(props) {
             {mainTab === 'authors' && (
                 <div className="wazzup-scrollbar min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
                     <OperatorsTab apiBaseUrl={apiBaseUrl} headers={headers} showToast={showToast}
-                                  account={account} />
+                                  account={account}
+                                  themeScope={themed ? { id: chatTheme.applied.id, style: chatThemeStyle(chatTheme.applied) } : null} />
                 </div>
             )}
 

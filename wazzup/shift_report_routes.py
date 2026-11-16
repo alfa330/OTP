@@ -167,6 +167,29 @@ def load_events(cursor, user_ids, since, until):
     return out
 
 
+def load_outside_offs(cursor, user_ids, since, until):
+    """{user_id: [моменты]} — выходы других живых источников (iCORE Phone): раздел считает их своим
+    статусом, а «Закончить смену» после них база отбрасывает как повтор (см. shift_report.build_shifts)."""
+    ids = _ids(user_ids)
+    if not ids:
+        return {}
+    cursor.execute("""
+        SELECT operator_id, event_at
+          FROM operator_status_events
+         WHERE operator_id = ANY(%s)
+           AND client_event_id IS NOT NULL
+           AND client_event_id NOT LIKE %s
+           AND LOWER(TRIM(status_key)) = ANY(%s)
+           AND event_at >= %s AND event_at < %s
+           AND COALESCE(event_kind, 'status') <> 'action'
+         ORDER BY operator_id, event_at
+    """, (ids, shift_mod.CLIENT_EVENT_PREFIX + '%', sorted(shift_mod.OFF_SHIFT_KEYS), since, until))
+    out = {}
+    for operator_id, event_at in cursor.fetchall():
+        out.setdefault(int(operator_id), []).append(event_at)
+    return out
+
+
 def load_models(cursor, user_ids, day_from, day_to):
     """{(user_id, дата): модель группы} — членство на каждую дату, при пересечении — с самым
     поздним началом (та же лестница, что у табло и учёта часов)."""
@@ -254,16 +277,20 @@ def build_shift_report_blueprint(*, db, require_api_key, preflight, guard, accou
             roster = load_roster(cursor, day_from - timedelta(days=1), day_to) if include_shifts else set()
             events = (load_events(cursor, roster | writers, start - EVENTS_BEFORE, until)
                       if include_shifts else {})
+            outside_offs = (load_outside_offs(cursor, set(events), start - EVENTS_BEFORE, until)
+                            if events else {})
             people = roster | writers | set(events)
             models = load_models(cursor, people, day_from, day_to)
             names = load_names(cursor, people)
             plans = load_plans(cursor, people, day_from - timedelta(days=1), day_to)
-            lateness = load_lateness(cursor, people, day_from, day_to)
+            # С днём до периода: ночная смена графика накануне опаздывает на первый день периода.
+            lateness = load_lateness(cursor, people, day_from - timedelta(days=1), day_to)
         # Расчёт — после того как соединение вернулось в пул: месяц переписки считается секунды,
         # и держать ради этого соединение слабой базы незачем.
         report = shift_report.build_report(
             day_from=day_from, day_to=day_to, now=moment, rows=rows, events=events, plans=plans,
-            models=models, names=names, lateness=lateness, include_shifts=include_shifts)
+            models=models, names=names, lateness=lateness, include_shifts=include_shifts,
+            outside_offs=outside_offs)
         return {
             'status': 'success',
             'account': account,
@@ -281,7 +308,8 @@ def build_shift_report_blueprint(*, db, require_api_key, preflight, guard, accou
     def cached_report(account, day_from, day_to):
         today = _now().date()
         key = (account, day_from, day_to)
-        ttl = TODAY_TTL_SECONDS if day_to >= today else PAST_TTL_SECONDS
+        # Вчерашний день ещё живой: его ночная смена идёт до утра сегодняшнего.
+        ttl = TODAY_TTL_SECONDS if day_to >= today - timedelta(days=1) else PAST_TTL_SECONDS
         entry = cache.get(key)
         if entry and time_mod.time() - entry[0] < ttl:
             return entry[1]

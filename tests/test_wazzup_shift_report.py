@@ -12,6 +12,7 @@ import pytest
 from op_wallboard import chat as chat_mod
 from wazzup import shift as shift_mod
 from wazzup import shift_report as R
+from wazzup import shift_report_routes as routes
 
 DAY = date(2026, 11, 12)
 NOW = datetime(2026, 11, 16, 10, 0)
@@ -152,6 +153,59 @@ class TestBuildShifts:
     def test_status_keys_come_from_the_shift_menu(self):
         assert set(R.STATUS_KINDS) == shift_mod.ON_SHIFT_KEYS
 
+    def test_return_clears_the_end_note_of_a_running_shift(self):
+        events = {ANNA: [ev('09:00', 'готов'), ev('12:00', 'выключен', shift_mod.AUTO_LOGOUT_NOTE),
+                         ev('12:40', 'готов')]}
+        row = rows_of(report(events=events, now=at('15:00')), R.ROW_SHIFT, ANNA)[0]
+        assert (row['endNote'], row['open'], row['offline']) == (None, True, 40 * 60)
+        assert [segment['note'] for segment in row['segments']] == [None, R.END_PORTAL, None]
+
+
+# ── выход iCORE Phone, «съевший» выход раздела ──────────────────────────────
+
+class TestPhoneLogout:
+    LATER = datetime.combine(DAY + timedelta(days=2), time(12, 0))
+
+    def test_swallowed_section_logout_ends_on_the_phone_logout(self):
+        shifts = R.build_shifts([ev('09:00', 'готов')], self.LATER,
+                                outside_offs=[at('18:00')], activity=[at('10:00'), at('17:50')])
+        assert (shifts[0]['end'], shifts[0]['end_note'], shifts[0]['open']) == (at('18:00'), R.END_PHONE, False)
+        assert R.durations(shifts[0]['segments'])['active'] == 9 * 3600
+
+    def test_phone_logout_before_his_last_message_is_not_the_end(self):
+        shifts = R.build_shifts([ev('09:00', 'готов')], self.LATER,
+                                outside_offs=[at('12:00')], activity=[at('17:00')])
+        assert (shifts[0]['end'], shifts[0]['end_note']) == (at('09:00') + timedelta(hours=16), R.END_LONG)
+
+    def test_phone_logout_inside_a_shift_that_went_on_changes_nothing(self):
+        events = [ev('09:00', 'готов'), ev('12:00:05', 'готов'), ev('18:00', 'выключен')]
+        shifts = R.build_shifts(events, self.LATER, outside_offs=[at('12:00')], activity=[at('13:00')])
+        assert (shifts[0]['end'], shifts[0]['end_note']) == (at('18:00'), None)
+
+    def test_stale_status_with_phone_logout_does_not_glue_the_night(self):
+        next_day = DAY + timedelta(days=1)
+        events = [ev('09:00', 'готов'), ev('09:00', 'готов', day=next_day), ev('18:00', 'выключен', day=next_day)]
+        shifts = R.build_shifts(events, self.LATER, outside_offs=[at('18:00')], activity=[at('17:00')])
+        assert [(s['start'], s['end'], s['end_note']) for s in shifts] == [
+            (at('09:00'), at('18:00'), R.END_PHONE), (at('09:00', next_day), at('18:00', next_day), None)]
+
+    def test_open_shift_ends_on_phone_logout_after_four_hours_of_silence(self):
+        args = dict(outside_offs=[at('18:00')], activity=[at('17:50')])
+        quiet = R.build_shifts([ev('09:00', 'готов')], at('22:00'), **args)
+        assert (quiet[0]['end'], quiet[0]['end_note'], quiet[0]['open']) == (at('18:00'), R.END_PHONE, False)
+        recent = R.build_shifts([ev('09:00', 'готов')], at('21:59'), **args)
+        assert (recent[0]['end'], recent[0]['open']) == (at('21:59'), True)
+
+    def test_report_passes_phone_logouts_and_messages_through(self):
+        rows = [client('c1', '17:40'), reply(ANNA, 'c1', '17:50')]
+        result = report(rows, {ANNA: [ev('09:00', 'готов')]}, now=self.LATER)
+        assert rows_of(result, R.ROW_SHIFT, ANNA)[0]['endNote'] == R.END_LONG
+        result = R.build_report(day_from=DAY, day_to=DAY, now=self.LATER, rows=rows,
+                                events={ANNA: [ev('09:00', 'готов')]}, plans={}, models=MODELS,
+                                names=NAMES, outside_offs={ANNA: [at('18:00')]})
+        row = rows_of(result, R.ROW_SHIFT, ANNA)[0]
+        assert (row['end'][11:16], row['endNote'], row['messages']) == ('18:00', R.END_PHONE, 1)
+
 
 # ── сообщения и ответы ──────────────────────────────────────────────────────
 
@@ -202,6 +256,40 @@ class TestWork:
         assert rows_of(result, R.ROW_SHIFT, ANNA)[0]['messages'] == 1
         loose = rows_of(result, R.ROW_NO_SHIFT, ANNA)
         assert len(loose) == 1 and loose[0]['messages'] == 1 and loose[0]['start'].endswith('13:30:00')
+
+    @pytest.mark.parametrize('hhmmss, in_shift', [
+        ('08:58:59', False), ('08:59:01', True),     # минута до начала
+        ('13:04:59', True), ('13:05:01', False),     # пять минут после выхода
+    ])
+    def test_attach_window_edges(self, hhmmss, in_shift):
+        events = {ANNA: [ev('09:00', 'готов'), ev('13:00', 'выключен')]}
+        result = report([reply(ANNA, 'c1', hhmmss)], events)
+        assert rows_of(result, R.ROW_SHIFT, ANNA)[0]['messages'] == (1 if in_shift else 0)
+        assert len(rows_of(result, R.ROW_NO_SHIFT, ANNA)) == (0 if in_shift else 1)
+
+    def test_no_shift_work_outside_the_period_is_not_shown(self):
+        rows = [reply(OSNOVA, 'c1', '23:00', DAY - timedelta(days=1)),
+                reply(OSNOVA, 'c2', '01:00', DAY + timedelta(days=1)),
+                reply(OSNOVA, 'c3', '12:00')]
+        loose = rows_of(report(rows), R.ROW_NO_SHIFT, OSNOVA)
+        assert [row['date'] for row in loose] == [DAY.isoformat()]
+
+    def test_hours_chart_covers_messages_in_the_attach_margins(self):
+        events = {ANNA: [ev('10:00:30', 'готов'), ev('17:58', 'выключен')]}
+        rows = [reply(ANNA, 'c1', '09:59:50'), reply(ANNA, 'c2', '12:00'), reply(ANNA, 'c3', '18:02')]
+        row = rows_of(report(rows, events), R.ROW_SHIFT, ANNA)[0]
+        assert row['messages'] == 3
+        assert sum(hour['messages'] for hour in row['hours']) == 3
+        assert (row['hours'][0]['hour'][11:13], row['hours'][-1]['hour'][11:13]) == ('09', '18')
+
+    def test_chats_per_hour_divides_by_active_only(self):
+        # Смена 8 часов, из них 2 часа перерыва и тренинга: 12 чатов за 6 часов «Активного» — 2,0.
+        events = {ANNA: [ev('09:00', 'готов'), ev('12:00', 'перерыв'), ev('13:00', 'тренинг'),
+                         ev('14:00', 'готов'), ev('17:00', 'выключен')]}
+        rows = [reply(ANNA, f'c{index}', f'{9 + index // 4:02d}:{(index % 4) * 10:02d}') for index in range(12)]
+        row = rows_of(report(rows, events), R.ROW_SHIFT, ANNA)[0]
+        assert (row['chats'], row['active'], row['breakTime'], row['training']) == (12, 6 * 3600, 3600, 3600)
+        assert row['chatsPerHour'] == 2.0
 
     def test_writer_without_shift_gets_a_day_row(self):
         rows = [client('c1', '10:00'), reply(OSNOVA, 'c1', '10:01', author_id='wz-77'),
@@ -268,19 +356,46 @@ class TestPlan:
             {'start': '09:00', 'end': '18:00', 'nextDay': False, 'type': None}]
         assert rows_of(result, R.ROW_SHIFT, BORIS)[0]['plan'] == []
 
-    def test_lateness_from_hours_accounting_goes_to_first_and_last_shift(self):
+    def test_lateness_from_hours_accounting_goes_to_first_and_last_shift_of_the_plan(self):
         events = {ANNA: [ev('09:20', 'готов'), ev('12:00', 'выключен'),
                          ev('17:00', 'готов'), ev('20:30', 'выключен')]}
-        result = report(events=events, lateness={(ANNA, DAY): (1200, 1800)})
+        result = report(events=events, plans={ANNA: [plan('09:00', '21:00')]},
+                        lateness={(ANNA, DAY): (1200, 1800)})
         morning, evening = sorted(rows_of(result, R.ROW_SHIFT, ANNA), key=lambda row: row['start'])
         assert (morning['lateSeconds'], morning['earlySeconds']) == (1200, 0)
         assert (evening['lateSeconds'], evening['earlySeconds']) == (0, 1800)
 
+    def test_lateness_follows_the_plan_date_of_a_late_night_shift(self):
+        # Ночная смена графика 12-го с 21:00 начата в 00:30 13-го: строка 13-го, а опоздание — 12-го.
+        next_day = DAY + timedelta(days=1)
+        third = DAY + timedelta(days=2)
+        events = {ANNA: [ev('00:30', 'готов', day=next_day), ev('09:00', 'выключен', day=next_day),
+                         ev('21:10', 'готов', day=next_day), ev('09:00', 'выключен', day=third)]}
+        plans = {ANNA: [plan('21:00', '09:00'), plan('21:00', '09:00', day=next_day)]}
+        result = report(events=events, plans=plans, day_from=DAY, day_to=next_day,
+                        lateness={(ANNA, DAY): (12600, 0), (ANNA, next_day): (600, 0)})
+        late_night, evening = sorted(rows_of(result, R.ROW_SHIFT, ANNA), key=lambda row: row['start'])
+        assert (late_night['date'], late_night['lateSeconds']) == (next_day.isoformat(), 12600)
+        assert (evening['date'], evening['lateSeconds']) == (next_day.isoformat(), 600)
+
+    def test_shift_out_of_schedule_has_no_lateness(self):
+        events = {ANNA: [ev('14:00', 'готов'), ev('18:00', 'выключен')]}
+        row = rows_of(report(events=events, lateness={(ANNA, DAY): (3600, 0)}), R.ROW_SHIFT, ANNA)[0]
+        assert (row['plan'], row['lateSeconds']) == ([], 0)
+
     def test_open_shift_has_no_early_leave(self):
         events = {ANNA: [ev('09:00', 'готов')]}
-        result = report(events=events, lateness={(ANNA, DAY): (0, 3600)}, now=at('15:00'))
+        result = report(events=events, plans={ANNA: [plan('09:00', '18:00')]},
+                        lateness={(ANNA, DAY): (0, 3600)}, now=at('15:00'))
         row = rows_of(result, R.ROW_SHIFT, ANNA)[0]
         assert row['open'] is True and row['earlySeconds'] == 0
+
+    def test_plan_worked_at_other_hours_is_absent_plus_shift_out_of_schedule(self):
+        # Так задумано: смена в другие часы того же дня смену графика не закрывает.
+        result = report(events={VERA: [ev('14:00', 'готов'), ev('18:00', 'выключен')]},
+                        plans={VERA: [plan('09:00', '13:00')]})
+        assert sorted((row['kind'], row['start'][11:16]) for row in rows_of(result, user=VERA)) == [
+            (R.ROW_ABSENT, '09:00'), (R.ROW_SHIFT, '14:00')]
 
     def test_absent_verifier(self):
         plans = {VERA: [plan('09:00', '18:00')], OSNOVA: [plan('09:00', '18:00')]}
@@ -348,3 +463,41 @@ def test_wallboard_episode_keeps_replies_in_order():
 def test_off_shift_keys(key):
     assert shift_mod.is_off_shift_key(key)
     assert not shift_mod.is_off_shift_key('готов')
+
+
+# ── период ручки (чистая часть shift_report_routes; SQL-тест в CI не идёт) ──
+
+class TestParsePeriod:
+    TODAY = date(2026, 11, 16)
+
+    def parse(self, start, end, **kwargs):
+        return routes.parse_period(start, end, self.TODAY, **kwargs)
+
+    def test_empty_is_the_last_seven_days(self):
+        assert self.parse('', '') == (date(2026, 11, 10), self.TODAY)
+
+    def test_one_side_is_one_day_and_reversed_is_swapped(self):
+        assert self.parse('2026-11-12', '') == (date(2026, 11, 12), date(2026, 11, 12))
+        assert self.parse('2026-11-16', '2026-11-10') == (date(2026, 11, 10), self.TODAY)
+
+    def test_future_tail_is_cut_and_future_start_refused(self):
+        assert self.parse('2026-11-14', '2026-11-20') == (date(2026, 11, 14), self.TODAY)
+        with pytest.raises(ValueError, match='в будущем'):
+            self.parse('2026-11-17', '2026-11-18')
+
+    def test_thirty_one_days_pass_thirty_two_do_not(self):
+        assert self.parse('2026-10-17', '2026-11-16') == (date(2026, 10, 17), self.TODAY)
+        with pytest.raises(ValueError, match='31 суток'):
+            self.parse('2026-10-16', '2026-11-16')
+        assert self.parse('2026-11-14', '2026-11-16', max_days=3)
+        with pytest.raises(ValueError, match='3 суток'):
+            self.parse('2026-11-13', '2026-11-16', max_days=3)
+
+    def test_retention_edge(self):
+        assert self.parse('2026-10-03', '2026-10-05')[0] == date(2026, 10, 3)
+        with pytest.raises(ValueError, match='45 суток'):
+            self.parse('2026-10-02', '2026-10-05')
+
+    def test_bad_format(self):
+        with pytest.raises(ValueError, match='ГГГГ-ММ-ДД'):
+            self.parse('16.11.2026', '')

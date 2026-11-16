@@ -23,6 +23,8 @@ export const ROW_ABSENT = 'absent';
 // значение, это — запас на первый кадр.
 export const RATE_MIN_ACTIVE_SECONDS = 15 * 60;
 export const DEFAULT_NORMS = { firstReplySeconds: 60, innerReplySeconds: 240 };
+// Потолок периода до первого ответа сервера (дальше — его maxDays, WAZZUP_SHIFT_REPORT_MAX_DAYS).
+export const MAX_DAYS_FALLBACK = 31;
 
 const isBlank = (value) => value === null || value === undefined || value === '';
 const pad = (n) => String(n).padStart(2, '0');
@@ -103,8 +105,10 @@ export const formatReply = (seconds) => {
         const minutes = Math.floor(total / 60);
         return total % 60 ? `${minutes} м ${total % 60} с` : `${minutes} м`;
     }
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.round((total % 3600) / 60);
+    // Сначала до минут, потом на часы: иначе 1 ч 59 м 30 с округлялось в «1 ч 60 м».
+    const rounded = Math.round(total / 60);
+    const hours = Math.floor(rounded / 60);
+    const minutes = rounded % 60;
     return minutes ? `${hours} ч ${minutes} м` : `${hours} ч`;
 };
 
@@ -145,17 +149,25 @@ export const spanOf = (row) => ({
 const END_NOTES = {
     portal: 'портал закрыт',
     long: 'смену не закрыли',
+    phone: 'по выходу из телефона',
 };
 
-/** Пометка конца смены: закрыл её не сам человек, а раздел. */
+/** Пометка конца смены: закрыл её не сам человек, а раздел (или выход телефона). */
 export const endNote = (row) => END_NOTES[row?.endNote] || '';
 
-/** «вне раздела 56 м» — посреди смены портал был закрыт; меньше минуты — не повод писать. */
+/** «вне смены 56 м» — смену закончили (сами или закрытием портала) и начали снова; меньше минуты —
+ *  не повод писать. */
 export const offlineNote = (row) => (
-    row?.kind === ROW_SHIFT && Number(row.offline) >= 60 ? `вне раздела ${formatDuration(row.offline)}` : '');
+    row?.kind === ROW_SHIFT && Number(row.offline) >= 60 ? `вне смены ${formatDuration(row.offline)}` : '');
+
+/** Минуты опоздания и раннего ухода — вверх, как показывает «Учёт часов» (20 с — это 1 мин, а не 0). */
+export const lateMinutes = (seconds) => {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    return total ? Math.ceil(total / 60) : 0;
+};
 
 export const minutesLabel = (seconds) => {
-    const minutes = Math.round(Number(seconds || 0) / 60);
+    const minutes = lateMinutes(seconds);
     if (minutes < 60) return `${minutes} мин`;
     const hours = Math.floor(minutes / 60);
     return minutes % 60 ? `${hours} ч ${minutes % 60} мин` : `${hours} ч`;
@@ -190,10 +202,10 @@ export const shiftColumns = (norms = DEFAULT_NORMS) => [
     { key: 'date', label: 'Дата', hint: 'Дата начала смены: ночная смена целиком относится к вечеру, с которого началась.' },
     { key: 'name', label: 'Менеджер' },
     { key: 'plan', label: 'График', hint: 'Смена из «Графиков работы», которая пересекается со сменой в разделе. «Вне графика» — такой смены по графику не было.' },
-    { key: 'shift', label: 'Смена', hint: 'Начало и конец смены в «Чатах ОП» по кнопке смены. Опоздание и ранний уход — те же, что в «Учёте часов». «Портал закрыт» — смену закрыл раздел: портал закрыли, не нажав «Закончить смену». «Вне раздела» — посреди смены портал закрыли и открыли снова меньше чем через 4 часа: это время не работа и не перерыв.' },
+    { key: 'shift', label: 'Смена', hint: 'Начало и конец смены в «Чатах ОП» по кнопке смены. Опоздание и ранний уход — те же, что в «Учёте часов» за эту смену графика. «Портал закрыт» — смену закрыл раздел: портал закрыли, не нажав «Закончить смену». «Вне смены» — смену закончили (сами или закрытием портала) и начали снова меньше чем через 4 часа: это время не работа и не перерыв. «По выходу из телефона» — перед «Закончить смену» вышел iCORE Phone, и раздел свой выход не записал.' },
     { key: 'active', label: 'Активный', numeric: true, hint: 'Время в статусе «Активный» — только в нём можно писать клиентам.' },
     { key: 'breakTime', label: 'Перерыв', numeric: true, hint: 'Время в статусе «Перерыв».' },
-    { key: 'training', label: 'Тренинг', numeric: true, hint: '«Тренинг» вместе с «Тех. паузой»; по отдельности — в журнале смены.' },
+    { key: 'training', label: 'Тренинг', numeric: true, hint: 'Время в статусе «Тренинг». «Тех. пауза», если была, — строкой под ним.' },
     { key: 'chats', label: 'Чаты', numeric: true, hint: 'Разные чаты, где он писал клиенту в эту смену. Под числом — сколько он отправил сообщений.' },
     { key: 'chatsPerHour', label: 'Чатов в час', numeric: true, hint: 'Чаты ÷ часы в «Активном». Меньше 15 минут «Активного» — не считается.' },
     { key: 'firstReply', label: 'Первый ответ', numeric: true, hint: `Среднее время первого ответа в диалогах, где он ответил клиенту первым. Норма — ${normText(norms.firstReplySeconds)}, как на «Табло ОП · Чат».` },
@@ -202,10 +214,10 @@ export const shiftColumns = (norms = DEFAULT_NORMS) => [
 
 export const peopleColumns = (norms = DEFAULT_NORMS) => [
     { key: 'name', label: 'Менеджер' },
-    { key: 'shifts', label: 'Смены', numeric: true, hint: 'Смены в разделе за период. Ниже — дни, когда писал без смены, и смены по графику, на которые не вышел.' },
+    { key: 'shifts', label: 'Смены', numeric: true, hint: 'Смены в разделе за период. Ниже — опоздания и ранние уходы (сколько раз и сколько всего минут, как в «Учёте часов»), дни, когда писал без смены, и смены по графику, на которые не вышел.' },
     { key: 'active', label: 'Активный', numeric: true, hint: 'Время в статусе «Активный» за все смены периода.' },
     { key: 'breakTime', label: 'Перерыв', numeric: true, hint: 'Время в статусе «Перерыв» за период.' },
-    { key: 'training', label: 'Тренинг', numeric: true, hint: '«Тренинг» вместе с «Тех. паузой» за период.' },
+    { key: 'training', label: 'Тренинг', numeric: true, hint: 'Время в статусе «Тренинг» за период. «Тех. пауза», если была, — строкой под ним.' },
     { key: 'chats', label: 'Чаты', numeric: true, hint: 'Сумма по сменам и дням без смены: чат, который он вёл в двух сменах, считается в каждой — как «Диалоги» в «Аналитике». Под числом — его сообщения за период.' },
     { key: 'chatsPerHour', label: 'Чатов в час', numeric: true, hint: 'Чаты в сменах ÷ часы в «Активном» за период. Чаты без смены сюда не входят — для них нет часов.' },
     { key: 'firstReply', label: 'Первый ответ', numeric: true, hint: `Среднее по всем диалогам периода, где он ответил первым. Норма — ${normText(norms.firstReplySeconds)}.` },
@@ -215,8 +227,8 @@ export const peopleColumns = (norms = DEFAULT_NORMS) => [
 /* ── группы, фильтры, люди ─────────────────────────────────────────────── */
 
 /** Группы для переключателя с числом строк при текущем поиске: видно, куда переключаться. */
-export const groupOptions = (groups, rows, query = '') => {
-    const shown = filterRows(rows, { group: GROUP_ALL, query });
+export const groupOptions = (groups, rows, query = '', personId = null) => {
+    const shown = filterRows(rows, { group: GROUP_ALL, query, personId });
     const counts = new Map();
     for (const row of shown) counts.set(row.groupKey, (counts.get(row.groupKey) || 0) + 1);
     return [
@@ -225,39 +237,51 @@ export const groupOptions = (groups, rows, query = '') => {
     ];
 };
 
-export const filterRows = (rows, { group = GROUP_ALL, query = '' } = {}) => {
+/** Строки группы и поиска; personId — переход «человек → его смены»: по id, а не по подстроке ФИО,
+ *  иначе однофамильцы и «Сотрудник 12» / «Сотрудник 123» попадали бы вместе. */
+export const filterRows = (rows, { group = GROUP_ALL, query = '', personId = null } = {}) => {
     const needle = String(query || '').trim().toLowerCase();
     return (rows || []).filter((row) => (
         (!group || group === GROUP_ALL || row.groupKey === group)
+        && (personId === null || personId === undefined || row.userId === personId)
         && (!needle || String(row.name || '').toLowerCase().includes(needle))
     ));
 };
 
 const SUM_FIELDS = ['active', 'breakTime', 'training', 'tech', 'offline', 'chats', 'messages',
     'firstSum', 'firstCount', 'innerSum', 'innerCount'];
+// Опоздания и ранние уходы человека за период: сколько раз и сколько минут (каждый раз — вверх,
+// как в «Учёте часов»). В строке человека они уже сложены — складываем как есть.
+const COUNT_FIELDS = ['shifts', 'noShiftDays', 'absent', 'shiftChats', 'lateCount', 'lateMinutes',
+    'earlyCount', 'earlyMinutes'];
 
-const emptySums = () => Object.fromEntries(SUM_FIELDS.map((field) => [field, 0]));
+const emptySums = () => Object.fromEntries([...SUM_FIELDS, ...COUNT_FIELDS].map((field) => [field, 0]));
 
 /** Сумма строк: длительности, чаты, суммы ответа и счётчики видов строк. */
 export const sumRows = (rows, minActive = RATE_MIN_ACTIVE_SECONDS) => {
-    const total = { ...emptySums(), shifts: 0, noShiftDays: 0, absent: 0, shiftChats: 0, shiftActive: 0 };
+    const total = emptySums();
     for (const row of rows || []) {
         if (row.kind === ROW_ABSENT) {
-            total.absent += row.absent ?? 1;
+            total.absent += 1;
             continue;
         }
         for (const field of SUM_FIELDS) total[field] += Number(row[field]) || 0;
         if (row.kind === ROW_SHIFT) {
             total.shifts += 1;
             total.shiftChats += Number(row.chats) || 0;
+            if (row.lateSeconds > 0) {
+                total.lateCount += 1;
+                total.lateMinutes += lateMinutes(row.lateSeconds);
+            }
+            if (row.earlySeconds > 0) {
+                total.earlyCount += 1;
+                total.earlyMinutes += lateMinutes(row.earlySeconds);
+            }
         } else if (row.kind === ROW_NO_SHIFT) {
             total.noShiftDays += 1;
         } else {
             // строка человека из peopleRows — уже сумма
-            total.shifts += row.shifts || 0;
-            total.noShiftDays += row.noShiftDays || 0;
-            total.absent += row.absent || 0;
-            total.shiftChats += row.shiftChats || 0;
+            for (const field of COUNT_FIELDS) total[field] += Number(row[field]) || 0;
         }
     }
     total.chatsPerHour = chatsPerHour(total.shiftChats, total.active, minActive);
@@ -289,12 +313,19 @@ export const peopleRows = (rows, minActive = RATE_MIN_ACTIVE_SECONDS) => {
 
 /* ── сортировка ─────────────────────────────────────────────────────────── */
 
+// Статусы есть только у смены: у строк «без смены» и «не вышел» там прочерк, и при сортировке по
+// возрастанию они не должны вставать наверх нулями. Строки людей («person») — суммы, их не трогаем.
+const statusValue = (field) => (row) => (
+    row.kind === ROW_NO_SHIFT || row.kind === ROW_ABSENT ? null : Number(row[field]) || 0);
+
 const SORT_VALUE = {
     date: (row) => row.date,
     name: (row) => String(row.name || ''),
     plan: (row) => (row.plan?.length ? row.plan[0].start : null),
     shift: (row) => (row.kind === ROW_SHIFT ? row.start : null),
-    training: (row) => (Number(row.training) || 0) + (Number(row.tech) || 0),
+    active: statusValue('active'),
+    breakTime: statusValue('breakTime'),
+    training: statusValue('training'),
     firstReply,
     innerReply,
     chatsPerHour: (row) => (isBlank(row.chatsPerHour) ? null : row.chatsPerHour),
@@ -342,7 +373,7 @@ export const SEGMENT_LABELS = {
     break: 'Перерыв',
     training: 'Тренинг',
     tech: 'Тех. пауза',
-    offline: 'Не в разделе',
+    offline: 'Вне смены',
 };
 
 // Тона — те же, что у статуса смены в шапке раздела (workspaceStatus.js).
@@ -419,45 +450,94 @@ const KIND_LABELS = { [ROW_SHIFT]: 'Смена', [ROW_NO_SHIFT]: 'Без сме�
 
 const replySeconds = (value) => (isBlank(value) ? '' : Math.round(value));
 
-/** Строки CSV вида «По сменам» — те же, что на экране, со всеми полями. */
-export const shiftCsv = (rows) => [
-    ['Дата', 'Менеджер', 'Группа', 'Строка', 'График', 'Начало', 'Конец', 'Опоздание, мин',
-        'Ранний уход, мин', 'Активный', 'Перерыв', 'Тренинг', 'Тех. пауза', 'Не в разделе', 'Чаты',
-        'Сообщения', 'Чатов в час', 'Первых ответов', 'Первый ответ, с', 'Ответ в чате, с'],
-    ...(rows || []).map((row) => {
+/*
+ * Выгрузка — колонками {заголовок: значение строки}: заголовок и значение живут в одной паре, и
+ * переставить одно без другого нельзя (тест сверяет каждую колонку по заголовку).
+ */
+const SHIFT_CSV = [
+    ['Дата', (row) => row.date],
+    ['Менеджер', (row) => row.name],
+    ['Группа', (row) => row.groupLabel],
+    ['Строка', (row) => KIND_LABELS[row.kind] || ''],
+    ['График', (row) => planLabel(row.plan)],
+    ['Начало', (row) => (row.kind === ROW_ABSENT ? '' : spanOf(row).start)],
+    ['Конец', (row) => {
+        if (row.kind === ROW_ABSENT) return '';
         const span = spanOf(row);
-        const worked = row.kind !== ROW_ABSENT;
-        return [
-            row.date, row.name, row.groupLabel, KIND_LABELS[row.kind] || '', planLabel(row.plan),
-            row.kind === ROW_ABSENT ? '' : span.start,
-            row.kind === ROW_ABSENT ? '' : `${span.end}${span.nextDay ? ' (+1)' : ''}`,
-            row.lateSeconds ? Math.round(row.lateSeconds / 60) : '',
-            row.earlySeconds ? Math.round(row.earlySeconds / 60) : '',
-            row.kind === ROW_SHIFT ? formatHms(row.active) : '',
-            row.kind === ROW_SHIFT ? formatHms(row.breakTime) : '',
-            row.kind === ROW_SHIFT ? formatHms(row.training) : '',
-            row.kind === ROW_SHIFT ? formatHms(row.tech) : '',
-            row.kind === ROW_SHIFT ? formatHms(row.offline) : '',
-            worked ? row.chats : '', worked ? row.messages : '',
-            isBlank(row.chatsPerHour) ? '' : formatRate(row.chatsPerHour),
-            worked ? row.firstCount : '', replySeconds(firstReply(row)), replySeconds(innerReply(row)),
-        ];
-    }),
+        return `${span.end}${span.nextDay ? ' (+1)' : ''}`;
+    }],
+    ['Опоздание, мин', (row) => (row.lateSeconds > 0 ? lateMinutes(row.lateSeconds) : '')],
+    ['Ранний уход, мин', (row) => (row.earlySeconds > 0 ? lateMinutes(row.earlySeconds) : '')],
+    ['Конец смены', (row) => endNote(row)],
+    ['Активный', (row) => (row.kind === ROW_SHIFT ? formatHms(row.active) : '')],
+    ['Перерыв', (row) => (row.kind === ROW_SHIFT ? formatHms(row.breakTime) : '')],
+    ['Тренинг', (row) => (row.kind === ROW_SHIFT ? formatHms(row.training) : '')],
+    ['Тех. пауза', (row) => (row.kind === ROW_SHIFT ? formatHms(row.tech) : '')],
+    ['Вне смены', (row) => (row.kind === ROW_SHIFT ? formatHms(row.offline) : '')],
+    ['Чаты', (row) => (row.kind === ROW_ABSENT ? '' : row.chats)],
+    ['Сообщения', (row) => (row.kind === ROW_ABSENT ? '' : row.messages)],
+    ['Чатов в час', (row) => (isBlank(row.chatsPerHour) ? '' : formatRate(row.chatsPerHour))],
+    ['Первых ответов', (row) => (row.kind === ROW_ABSENT ? '' : row.firstCount)],
+    ['Первый ответ, с', (row) => replySeconds(firstReply(row))],
+    ['Ответ в чате, с', (row) => replySeconds(innerReply(row))],
 ];
 
-/** Строки CSV вида «По сотрудникам». */
-export const peopleCsv = (rows) => [
-    ['Менеджер', 'Группа', 'Смен', 'Дней без смены', 'Не вышел', 'Активный', 'Перерыв', 'Тренинг',
-        'Тех. пауза', 'Не в разделе', 'Чаты', 'Сообщения', 'Чатов в час', 'Первых ответов',
-        'Первый ответ, с', 'Ответ в чате, с'],
-    ...(rows || []).map((row) => [
-        row.name, row.groupLabel, row.shifts, row.noShiftDays, row.absent,
-        formatHms(row.active), formatHms(row.breakTime), formatHms(row.training), formatHms(row.tech),
-        formatHms(row.offline), row.chats, row.messages,
-        isBlank(row.chatsPerHour) ? '' : formatRate(row.chatsPerHour),
-        row.firstCount, replySeconds(firstReply(row)), replySeconds(innerReply(row)),
-    ]),
+const PEOPLE_CSV = [
+    ['Менеджер', (row) => row.name],
+    ['Группа', (row) => row.groupLabel],
+    ['Смен', (row) => row.shifts],
+    ['Опозданий', (row) => row.lateCount],
+    ['Опоздания всего, мин', (row) => row.lateMinutes],
+    ['Ранних уходов', (row) => row.earlyCount],
+    ['Ранние уходы всего, мин', (row) => row.earlyMinutes],
+    ['Дней без смены', (row) => row.noShiftDays],
+    ['Не вышел', (row) => row.absent],
+    ['Активный', (row) => formatHms(row.active)],
+    ['Перерыв', (row) => formatHms(row.breakTime)],
+    ['Тренинг', (row) => formatHms(row.training)],
+    ['Тех. пауза', (row) => formatHms(row.tech)],
+    ['Вне смены', (row) => formatHms(row.offline)],
+    ['Чаты', (row) => row.chats],
+    ['Сообщения', (row) => row.messages],
+    ['Чатов в час', (row) => (isBlank(row.chatsPerHour) ? '' : formatRate(row.chatsPerHour))],
+    ['Первых ответов', (row) => row.firstCount],
+    ['Первый ответ, с', (row) => replySeconds(firstReply(row))],
+    ['Ответ в чате, с', (row) => replySeconds(innerReply(row))],
 ];
+
+const toCsv = (columns, rows) => [
+    columns.map(([title]) => title),
+    ...(rows || []).map((row) => columns.map(([, value]) => value(row))),
+];
+
+/** Строки CSV вида «По сменам» — те же, что на экране, со всеми полями. */
+export const shiftCsv = (rows) => toCsv(SHIFT_CSV, rows);
+
+/** Строки CSV вида «По сотрудникам». */
+export const peopleCsv = (rows) => toCsv(PEOPLE_CSV, rows);
+
+/** Плашка о непривязанных авторах — с согласованием: «1 автор не привязан… 1 сообщение не вошло». */
+export const unlinkedText = (unlinked) => {
+    const authors = Number(unlinked?.authors) || 0;
+    const messages = Number(unlinked?.messages) || 0;
+    return `${authors} ${plural(authors, 'автор', 'автора', 'авторов')} Wazzup не `
+        + `${plural(authors, 'привязан', 'привязаны', 'привязаны')} к сотрудникам — ${messages} `
+        + `${plural(messages, 'сообщение', 'сообщения', 'сообщений')} не `
+        + `${plural(messages, 'вошло', 'вошли', 'вошли')} в отчёт.`;
+};
+
+/** Период не длиннее предела сервера: календарь его не знает, а отказ после выбора — лишний круг.
+ *  Берём последние maxDays суток выбранного (конец важнее: чаще смотрят свежее). */
+export const clampRange = (range, maxDays) => {
+    const limit = Number(maxDays);
+    if (!range?.from || !range?.to || !Number.isFinite(limit) || limit < 1) return { range, clipped: false };
+    const from = new Date(`${range.from}T00:00:00Z`);
+    const to = new Date(`${range.to}T00:00:00Z`);
+    const days = Math.round((to - from) / 86400000) + 1;
+    if (days <= limit) return { range, clipped: false };
+    const start = new Date(to.getTime() - (limit - 1) * 86400000);
+    return { range: { from: start.toISOString().slice(0, 10), to: range.to }, clipped: true };
+};
 
 /** Имя файла — ASCII: не все корпоративные почтовики и диски переживают кириллицу. */
 export const csvFileName = (view, range) => `chat_shifts_${view === VIEW_PEOPLE ? 'people' : 'shifts'}_${range?.from || ''}_${range?.to || ''}.csv`;

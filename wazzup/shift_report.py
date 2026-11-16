@@ -16,11 +16,12 @@ tests/test_wazzup_shift_report.py.
 (замер 16.11.2026) — это работа на линии, а не смена в чатах.
 
   * смена начинается любым статусом смены после выхода и кончается выходом;
-  * статус меньше чем через 4 часа после выхода — та же смена (портал закрылся и открылся снова):
-    промежуток идёт отрезком «Не в разделе», в «Активный» он не входит. Четыре часа — та же пауза,
-    что рвёт смену в «Отчёте по сменам» линии (op_wallboard/activity.py);
+  * статус меньше чем через 4 часа после выхода — та же смена (закончили сами или закрыли портал и
+    начали снова): промежуток идёт отрезком «Вне смены», в «Активный» он не входит. Четыре часа —
+    та же пауза, что рвёт смену в «Отчёте по сменам» линии (op_wallboard/activity.py);
   * смена относится к дате своего начала: ночная 21:00–09:00 целиком лежит в вечере;
-  * незакрытая смена идёт до «сейчас» и помечена идущей.
+  * незакрытая смена идёт до «сейчас» и помечена идущей;
+  * выход iCORE Phone, «съевший» выход раздела, — см. build_shifts.
 
 Как обрабатывал чаты
 --------------------
@@ -44,9 +45,12 @@ tests/test_wazzup_shift_report.py.
 График
 ------
 Смена из «Графиков работы» (work_shifts), которая пересекается со сменой в разделе; опоздание и
-ранний уход — цифры «Учёта часов» (daily_hours), своего правила опоздания здесь нет. Верификатор,
-у которого смена по графику началась больше получаса назад, а в разделе его не было и сообщений
-нет, — строка «не вышел».
+ранний уход — цифры «Учёта часов» (daily_hours) по дате этой смены графика, своего правила
+опоздания здесь нет. Смена графика, с которой не пересеклась ни одна смена в разделе, у
+верификатора, если она началась больше получаса назад и за этот день у него нет сообщений вне
+смен, — строка «не вышел»: смена в другие часы того же дня её не закрывает (по графику 09–13 и
+работа 14–18 — это «не вышел» на 09–13 и смена вне графика, как и пропущенная половина
+разорванной смены).
 """
 
 from bisect import bisect_right
@@ -82,6 +86,7 @@ STATUS_KINDS = {item['key']: _TONE_KINDS[item['tone']] for item in shift_mod.STA
 
 END_PORTAL = 'portal'
 END_LONG = 'long'
+END_PHONE = 'phone'
 _AUTO_ENDS = {shift_mod.AUTO_LOGOUT_NOTE: END_PORTAL, shift_mod.LONG_SHIFT_NOTE: END_LONG}
 
 # Смена графика не «чатовая»: в «Телефонную смену» и «Офисную практику» в чатах не ждут.
@@ -115,14 +120,39 @@ def group_key(model):
 
 # ── Смена из событий раздела ────────────────────────────────────────────────
 
-def build_shifts(events, now, *, gap=SESSION_GAP, max_open=MAX_OPEN):
+def build_shifts(events, now, *, gap=SESSION_GAP, max_open=MAX_OPEN, outside_offs=(), activity=()):
     """Смены одного человека: [{start, end, open, end_note, segments}] по времени.
 
     events — [(время, ключ статуса, пометка)] событий раздела по возрастанию времени. Отрезки
-    смены — {kind, start, end, note}: статусы и «Не в разделе» между выходом и возвратом (note —
+    смены — {kind, start, end, note}: статусы и «Вне смены» между выходом и возвратом (note —
     почему вышел: 'portal' — закрыл портал, 'long' — статус висел 16 часов, None — сам).
     Незнакомый ключ пропускается: в событиях раздела его быть не должно, а угадывать, работа это
-    или пауза, хуже, чем не заметить."""
+    или пауза, хуже, чем не заметить.
+
+    outside_offs — моменты выхода из iCORE Phone, activity — моменты его сообщений; оба по
+    возрастанию. Раздел считает своим последний статус ЛЮБОГО источника, и «Закончить смену»
+    сразу после выхода телефона база отбрасывает как повтор того же статуса: выхода раздела нет,
+    сторож его не пишет (последнее событие не раздела), и смена дошла бы до предела 16 часов.
+    Поэтому там, где иначе сработал бы предел, смена кончается на первом выходе телефона после
+    последнего сообщения человека. Обычных смен это не касается: за 30 дней до 16.11.2026
+    выход телефона внутри смены был у двух человек 12 раз, и каждый раз смена в разделе шла дальше."""
+    offs = sorted(moment for moment in outside_offs or () if moment is not None)
+    seen = sorted(moment for moment in activity or () if moment is not None)
+
+    def phone_end(since, limit):
+        """Первый выход телефона после последнего сообщения человека — не позже limit."""
+        position = bisect_right(seen, limit) - 1
+        last_seen = max(since, seen[position]) if position >= 0 else since
+        position = bisect_right(offs, last_seen)
+        if position < len(offs) and offs[position] <= limit:
+            return offs[position]
+        return None
+
+    def capped_end(since):
+        cap = since + max_open
+        phone = phone_end(since, cap)
+        return (phone, END_PHONE) if phone is not None else (cap, END_LONG)
+
     shifts = []
     current = None
     running = None   # (вид, с какого момента) — идущий отрезок; None — человек вышел
@@ -134,9 +164,10 @@ def build_shifts(events, now, *, gap=SESSION_GAP, max_open=MAX_OPEN):
         if running is not None and at - running[1] > max_open:
             # Статус висел дольше предела, а выхода сторож не записал: смена кончилась на
             # пределе, как кончил бы её сторож, — следующие сутки к ней не прилипают.
-            _close_segment(current, running, running[1] + max_open)
+            end, end_note = capped_end(running[1])
+            _close_segment(current, running, end)
             running = None
-            current['end_note'] = END_LONG
+            current['end_note'] = end_note
         if kind is None:
             if running is not None and shift_mod.is_off_shift_key(key):
                 _close_segment(current, running, at)
@@ -162,11 +193,19 @@ def build_shifts(events, now, *, gap=SESSION_GAP, max_open=MAX_OPEN):
         # Сторож закрывает статус, не менявшийся 16 часов, ровно на этом пределе; если его
         # проход ещё не случился, отчёт ставит тот же предел сам, а не тянет смену до «сейчас».
         cap = running[1] + max_open
-        _close_segment(current, running, min(max(now, running[1]), cap))
-        if now < cap:
+        phone = phone_end(running[1], now) if now < cap else None
+        if phone is not None and now - phone >= gap:
+            # Телефон вышел после последнего сообщения, и с тех пор тишина дольше паузы, рвущей
+            # смену: человек ушёл, а его «Закончить смену» база отбросила как повтор.
+            _close_segment(current, running, phone)
+            current['end_note'] = END_PHONE
+        elif now < cap:
+            _close_segment(current, running, max(now, running[1]))
             current['open'] = True
         else:
-            current['end_note'] = END_LONG
+            end, end_note = capped_end(running[1])
+            _close_segment(current, running, end)
+            current['end_note'] = end_note
     return shifts
 
 
@@ -292,7 +331,7 @@ def chats_per_hour(chats, active_seconds, min_active_seconds=RATE_MIN_ACTIVE_SEC
 # ── Отчёт ───────────────────────────────────────────────────────────────────
 
 def build_report(*, day_from, day_to, now, rows, events, plans, models, names, lateness=None,
-                 include_shifts=True):
+                 include_shifts=True, outside_offs=None):
     """Строки отчёта за [day_from, day_to] (даты Алматы).
 
     rows — сообщения аккаунта в формате `chat.classify` (наивное время Алматы) с запасом до
@@ -301,9 +340,11 @@ def build_report(*, day_from, day_to, now, rows, events, plans, models, names, l
     plans — {user_id: [(начало, конец, вид смены)]} — смены графика;
     models — {(user_id, дата): модель группы на дату};
     names — {user_id: ФИО};
-    lateness — {(user_id, дата): (опоздание, ранний уход)} в секундах — из «Учёта часов»;
+    lateness — {(user_id, дата смены графика): (опоздание, ранний уход)} в секундах — из «Учёта
+      часов», с днём до периода (ночная смена графика накануне);
     include_shifts — смены раздела есть только у аккаунта верификаторов: в «Потоке» строк смен
-      и «не вышел» нет, только работа без смены.
+      и «не вышел» нет, только работа без смены;
+    outside_offs — {user_id: [моменты выхода из iCORE Phone]}, см. build_shifts.
 
     Возвращает {'rows': [...], 'groups': [...], 'unlinked': {...}}."""
     lateness = lateness or {}
@@ -311,11 +352,16 @@ def build_report(*, day_from, day_to, now, rows, events, plans, models, names, l
                if row.get('is_echo') and row.get('user_id') is not None and not row.get('is_bot')}
     messages = chat_mod.classify(rows, writers)
     episodes = chat_mod.split_episodes(messages)
+    activity = defaultdict(list)
+    for message in messages:
+        if message['kind'] == chat_mod.KIND_VERIFIER:
+            activity[message['user_id']].append(message['at'])
 
     shifts_by_user = {}
     if include_shifts:
         for user_id, user_events in (events or {}).items():
-            built = build_shifts(user_events, now)
+            built = build_shifts(user_events, now, outside_offs=(outside_offs or {}).get(user_id),
+                                 activity=activity.get(int(user_id)))
             if built:
                 shifts_by_user[int(user_id)] = built
     locator = _Locator(shifts_by_user, day_from, day_to)
@@ -342,12 +388,16 @@ def build_report(*, day_from, day_to, now, rows, events, plans, models, names, l
             slot[1] += 1
 
     out = []
+    planned = []
     for user_id, shifts in shifts_by_user.items():
         for shift in shifts:
             day = shift['start'].date()
             if day_from <= day <= day_to:
-                out.append(_shift_row(user_id, shift, plans.get(user_id), names, models))
-    _attach_lateness(out, lateness)
+                overlapping = _overlapping(plans.get(user_id), shift['start'], shift['end'])
+                row = _shift_row(user_id, shift, overlapping, names, models)
+                out.append(row)
+                planned.append((row, overlapping))
+    _attach_lateness(planned, lateness)
 
     for (user_id, day), work in locator.loose.items():
         out.append(_loose_row(user_id, day, work, plans.get(user_id), names, models))
@@ -370,7 +420,9 @@ def build_report(*, day_from, day_to, now, rows, events, plans, models, names, l
 def _base_row(kind, user_id, day, names, models, start, end):
     key = group_key(models.get((user_id, day)))
     return {
-        'key': f'{kind}:{user_id}:{stamp(start) or day.isoformat()}',
+        # Начало и конец: у человека бывают две смены графика с одним началом (UNIQUE в work_shifts —
+        # по началу И концу), а одинаковый key у соседних строк React оставляет сиротами в DOM.
+        'key': f'{kind}:{user_id}:{stamp(start) or day.isoformat()}:{stamp(end) or ""}',
         'kind': kind,
         'userId': user_id,
         'name': names.get(user_id) or f'Сотрудник {user_id}',
@@ -391,16 +443,18 @@ def _base_row(kind, user_id, day, names, models, start, end):
     }
 
 
-def _shift_row(user_id, shift, plans, names, models):
+def _shift_row(user_id, shift, overlapping, names, models):
     row = _base_row(ROW_SHIFT, user_id, shift['start'].date(), names, models,
                     shift['start'], shift['end'])
     totals = durations(shift['segments'])
     work = shift.get('work')
     row.update(_work_fields(work))
+    first_at = (work or {}).get('first_at')
+    last_at = (work or {}).get('last_at')
     row.update({
         'open': shift['open'],
         'endNote': shift['end_note'],
-        'plan': [_plan_view(plan) for plan in _overlapping(plans, shift['start'], shift['end'])],
+        'plan': [_plan_view(plan) for plan in overlapping],
         'active': round(totals[KIND_ACTIVE]),
         'breakTime': round(totals[KIND_BREAK]),
         'training': round(totals[KIND_TRAINING]),
@@ -409,7 +463,10 @@ def _shift_row(user_id, shift, plans, names, models):
         'segments': [{'kind': segment['kind'], 'start': stamp(segment['start']),
                       'end': stamp(segment['end']), 'note': segment['note']}
                      for segment in shift['segments']],
-        'hours': _hours(work, shift['start'], shift['end']),
+        # Часы — с запасом привязки: сообщение за минуту до начала или в пять минут после конца
+        # засчитано смене и обязано быть видно и на графике, иначе он не сходится со строкой.
+        'hours': _hours(work, min(shift['start'], first_at or shift['start']),
+                        max(shift['end'], last_at or shift['end'])),
     })
     row['chatsPerHour'] = chats_per_hour(row['chats'], row['active'])
     return row
@@ -446,18 +503,25 @@ def _absent_rows(plans, shifts_by_user, loose, models, names, day_from, day_to, 
     return out
 
 
-def _attach_lateness(rows, lateness):
-    """Опоздание дня — первой смене дня, ранний уход — последней, если она закончилась."""
-    by_day = defaultdict(list)
-    for row in rows:
-        if row['kind'] == ROW_SHIFT:
-            by_day[(row['userId'], row['date'])].append(row)
-    for (user_id, day), day_rows in by_day.items():
-        late, early = lateness.get((user_id, datetime.strptime(day, '%Y-%m-%d').date()), (0, 0))
-        day_rows.sort(key=lambda row: row['start'])
-        day_rows[0]['lateSeconds'] = int(late or 0)
-        if not day_rows[-1]['open']:
-            day_rows[-1]['earlySeconds'] = int(early or 0)
+def _attach_lateness(planned, lateness):
+    """Опоздание и ранний уход «Учёта часов» — по смене графика, к которой они посчитаны (её дате):
+    опоздание — первой смене раздела, пересёкшей эту смену графика, ранний уход — последней, если
+    она закончилась. По дате начала смены раздела нельзя: ночная смена графика 21:00, начатая с
+    опозданием после полуночи, иначе получила бы опоздание следующего вечера. Смене вне графика
+    опаздывать некуда.
+
+    planned — [(строка смены, пересекающиеся смены графика)]."""
+    by_plan = defaultdict(list)
+    for row, plans in planned:
+        for plan_day in sorted({plan[0].date() for plan in plans}):
+            by_plan[(row['userId'], plan_day)].append(row)
+    for key, plan_rows in by_plan.items():
+        late, early = lateness.get(key, (0, 0))
+        plan_rows.sort(key=lambda row: row['start'])
+        if late:
+            plan_rows[0]['lateSeconds'] += int(late)
+        if early and not plan_rows[-1]['open']:
+            plan_rows[-1]['earlySeconds'] += int(early)
 
 
 def _unlinked(rows, day_from, day_to):

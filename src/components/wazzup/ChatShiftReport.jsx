@@ -8,12 +8,13 @@ import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { statusDotClass } from './workspaceStatus';
 import {
-    DEFAULT_NORMS, DEFAULT_SORT, GROUP_ALL, PERIOD_PRESETS, RATE_MIN_ACTIVE_SECONDS, ROW_ABSENT,
-    ROW_NO_SHIFT, ROW_SHIFT, SHIFT_REPORT_PATH, VIEW_PEOPLE, VIEW_SHIFTS, activePreset, clock,
-    csvFileName, earliestDay, endNote, filterRows, firstReply, formatDay, formatDuration, formatRate,
-    formatReply, groupOptions, hourBars, innerReply, isoDay, journalBar, journalSegments,
-    journalTotals, minutesLabel, nextSort, offlineNote, overNorm, peopleColumns, peopleCsv, peopleRows,
-    planLabel, presetRange, shiftColumns, shiftCsv, sortRows, spanOf, sumRows,
+    DEFAULT_NORMS, DEFAULT_SORT, GROUP_ALL, MAX_DAYS_FALLBACK, PERIOD_PRESETS, RATE_MIN_ACTIVE_SECONDS,
+    ROW_ABSENT, ROW_NO_SHIFT, ROW_SHIFT, SHIFT_REPORT_PATH, VIEW_PEOPLE, VIEW_SHIFTS, activePreset,
+    clampRange, clock, csvFileName, earliestDay, endNote, filterRows, firstReply, formatDay,
+    formatDuration, formatRate, formatReply, groupOptions, hourBars, innerReply, isoDay, journalBar,
+    journalSegments, journalTotals, minutesLabel, nextSort, offlineNote, overNorm, peopleColumns,
+    peopleCsv, peopleRows, planLabel, presetRange, shiftColumns, shiftCsv, sortRows, spanOf, sumRows,
+    unlinkedText,
 } from './shiftReportShared';
 
 /*
@@ -94,13 +95,27 @@ function PersonName({ row, showGroup }) {
     );
 }
 
-function ShiftCell({ row }) {
+/* Тренинг — своим числом, тех. пауза — строкой под ним, только когда была: она редкая, а сложенная с
+   тренингом выдавала бы паузу за обучение. */
+function TrainingCell({ training, tech }) {
+    return (
+        <>
+            <div>{durationCell(training)}</div>
+            {tech >= 60 && <div className="text-[11px] text-slate-400">тех. пауза {formatDuration(tech)}</div>}
+        </>
+    );
+}
+
+function ShiftCell({ row, withShifts }) {
     if (row.kind === ROW_ABSENT) return <span className="font-medium text-rose-600">не вышел</span>;
     if (row.kind === ROW_NO_SHIFT) {
+        // В аккаунте без смен «без смены» — не отклонение, а единственный вид работы: только часы.
         return (
             <div className="whitespace-nowrap">
-                <div className="text-slate-500">без смены</div>
-                <div className="text-[11px] tabular-nums text-slate-400">писал {clock(row.start)}–{clock(row.end)}</div>
+                {withShifts && <div className="text-slate-500">без смены</div>}
+                <div className={withShifts ? 'text-[11px] tabular-nums text-slate-400' : 'tabular-nums text-slate-600'}>
+                    писал {clock(row.start)}–{clock(row.end)}
+                </div>
             </div>
         );
     }
@@ -120,7 +135,7 @@ function ShiftCell({ row }) {
     );
 }
 
-function ShiftRow({ row, selected, onOpen, norms, showGroup }) {
+function ShiftRow({ row, selected, onOpen, norms, showGroup, withShifts }) {
     const worked = row.kind !== ROW_ABSENT;
     const shift = row.kind === ROW_SHIFT;
     return (
@@ -132,10 +147,10 @@ function ShiftRow({ row, selected, onOpen, norms, showGroup }) {
             <td className={`${CELL} whitespace-nowrap tabular-nums text-slate-600`}>
                 {planLabel(row.plan) || (shift ? <span className="text-slate-400">вне графика</span> : <Dash />)}
             </td>
-            <td className={CELL}><ShiftCell row={row} /></td>
+            <td className={CELL}><ShiftCell row={row} withShifts={withShifts} /></td>
             <td className={`${NUM} text-slate-900`}>{shift ? durationCell(row.active) : <Dash />}</td>
             <td className={`${NUM} text-slate-600`}>{shift ? durationCell(row.breakTime) : <Dash />}</td>
-            <td className={`${NUM} text-slate-600`}>{shift ? durationCell(row.training + row.tech) : <Dash />}</td>
+            <td className={`${NUM} text-slate-600`}>{shift ? <TrainingCell training={row.training} tech={row.tech} /> : <Dash />}</td>
             <td className={NUM}>{worked ? <ChatsCell chats={row.chats} messages={row.messages} /> : <Dash />}</td>
             <td className={`${NUM} text-slate-900`}>{shift && row.chatsPerHour !== null ? formatRate(row.chatsPerHour) : <Dash />}</td>
             <td className={NUM}><ReplyCell seconds={firstReply(row)} norm={norms.firstReplySeconds} /></td>
@@ -151,12 +166,18 @@ function PersonRow({ row, onOpen, norms, showGroup }) {
             <td className={`${CELL} max-w-[240px]`}><PersonName row={row} showGroup={showGroup} /></td>
             <td className={NUM}>
                 <div className="font-semibold text-slate-900">{row.shifts || <Dash />}</div>
+                {row.lateCount > 0 && (
+                    <div className="text-[11px] text-rose-600">опоздания: {row.lateCount} · {minutesLabel(row.lateMinutes * 60)}</div>
+                )}
+                {row.earlyCount > 0 && (
+                    <div className="text-[11px] text-rose-600">ранний уход: {row.earlyCount} · {minutesLabel(row.earlyMinutes * 60)}</div>
+                )}
                 {row.noShiftDays > 0 && <div className="text-[11px] text-slate-400">без смены: {row.noShiftDays} дн.</div>}
                 {row.absent > 0 && <div className="text-[11px] text-rose-600">не вышел: {row.absent}</div>}
             </td>
             <td className={`${NUM} text-slate-900`}>{durationCell(row.active)}</td>
             <td className={`${NUM} text-slate-600`}>{durationCell(row.breakTime)}</td>
-            <td className={`${NUM} text-slate-600`}>{durationCell(row.training + row.tech)}</td>
+            <td className={`${NUM} text-slate-600`}><TrainingCell training={row.training} tech={row.tech} /></td>
             <td className={NUM}><ChatsCell chats={row.chats} messages={row.messages} /></td>
             <td className={`${NUM} text-slate-900`}>{row.chatsPerHour !== null ? formatRate(row.chatsPerHour) : <Dash />}</td>
             <td className={NUM}><ReplyCell seconds={firstReply(row)} norm={norms.firstReplySeconds} /></td>
@@ -174,7 +195,7 @@ function TotalRow({ total, view, norms, label }) {
             {view === VIEW_PEOPLE && <td className={cell}>{total.shifts || <Dash />}</td>}
             <td className={cell}>{durationCell(total.active)}</td>
             <td className={cell}>{durationCell(total.breakTime)}</td>
-            <td className={cell}>{durationCell(total.training + total.tech)}</td>
+            <td className={cell}><TrainingCell training={total.training} tech={total.tech} /></td>
             <td className={cell}><ChatsCell chats={total.chats} messages={total.messages} /></td>
             <td className={cell}>{total.chatsPerHour !== null ? formatRate(total.chatsPerHour) : <Dash />}</td>
             <td className={cell}><ReplyCell seconds={firstReply(total)} norm={norms.firstReplySeconds} /></td>
@@ -192,11 +213,14 @@ const pluralRu = (n, one, few, many) => {
     return many;
 };
 
-function totalLabel(view, total, people) {
+function totalLabel(view, total, people, withShifts) {
     if (view === VIEW_PEOPLE) return `Итого · ${people} ${pluralRu(people, 'сотрудник', 'сотрудника', 'сотрудников')}`;
     const parts = [];
     if (total.shifts) parts.push(`${total.shifts} ${pluralRu(total.shifts, 'смена', 'смены', 'смен')}`);
-    if (total.noShiftDays) parts.push(`${total.noShiftDays} без смены`);
+    if (total.noShiftDays) {
+        parts.push(withShifts ? `${total.noShiftDays} без смены`
+            : `${total.noShiftDays} ${pluralRu(total.noShiftDays, 'день', 'дня', 'дней')} работы`);
+    }
     if (total.absent) parts.push(`${total.absent} не ${pluralRu(total.absent, 'вышел', 'вышли', 'вышли')}`);
     return parts.length ? `Итого · ${parts.join(' · ')}` : 'Итого';
 }
@@ -241,7 +265,7 @@ function HourChart({ row }) {
     );
 }
 
-function ShiftJournal({ row, onClose, norms }) {
+function ShiftJournal({ row, onClose, norms, withShifts, themeScope }) {
     const open = Boolean(row);
     const isNarrow = useIsMobileShell();
     useScreenBackGesture(isNarrow && open, onClose);
@@ -262,20 +286,27 @@ function ShiftJournal({ row, onClose, norms }) {
     const totals = journalTotals(row);
     const segments = journalSegments(row);
 
+    // Панель — в портале, вне окна раздела, поэтому тему окна («Ночь», «Роза», «Вишня») она несёт
+    // сама: тот же класс и атрибут, что у окна, и его переменные — иначе над тёмным окном встала
+    // бы светлая панель, второй вид на одном экране. Слой темы красит ПОТОМКОВ окна, поэтому фон
+    // панели — на вложенном блоке, а не на самой обёртке.
     return createPortal(
-        <aside role="dialog" aria-label="Журнал смены"
-            className="fixed inset-y-0 right-0 z-[85] flex w-full animate-push-in flex-col border-l border-slate-200/80 bg-slate-50/95 shadow-[-12px_0_32px_rgba(15,23,42,0.10)] backdrop-blur-xl sm:w-[420px]"
-            style={{ fontFamily: APPLE_FONT }}>
+        <aside role="dialog" aria-label="Журнал смены" data-chat-theme={themeScope?.id}
+            className={`${themeScope ? 'wz-workspace ' : ''}fixed inset-y-0 right-0 z-[85] w-full animate-push-in sm:w-[420px]`}
+            style={{ fontFamily: APPLE_FONT, ...(themeScope?.style || {}) }}>
+          <div className="flex h-full flex-col border-l border-slate-200/80 bg-slate-50/95 shadow-[-12px_0_32px_rgba(15,23,42,0.10)] backdrop-blur-xl">
             <div className="border-b border-slate-200/70 bg-white/80 px-5 pb-3.5 pt-4">
                 <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                        <div className="text-[17px] font-semibold text-slate-900">{shift ? 'Журнал смены' : 'Без смены'}</div>
+                        <div className="text-[17px] font-semibold text-slate-900">
+                            {shift ? 'Журнал смены' : (withShifts ? 'Без смены' : 'Работа за день')}
+                        </div>
                         <div className="truncate text-[13px] text-slate-500">
                             {row.name}{row.groupLabel ? ` · ${row.groupLabel}` : ''} · {formatDay(row.date)}
                         </div>
                         <div className="mt-0.5 text-[12.5px] tabular-nums text-slate-400">
                             {shift ? `Смена ${span.start} — ${span.end}${span.nextDay ? ' следующего дня' : ''}`
-                                : `Писал ${clock(row.start)} — ${clock(row.end)}, смены в разделе не было`}
+                                : `Писал ${clock(row.start)} — ${clock(row.end)}${withShifts ? ', смены в разделе не было' : ''}`}
                             {plan ? ` · по графику ${plan}` : (shift ? ' · вне графика' : '')}
                         </div>
                     </div>
@@ -341,6 +372,7 @@ function ShiftJournal({ row, onClose, norms }) {
                     </section>
                 )}
             </div>
+          </div>
         </aside>,
         document.body,
     );
@@ -348,15 +380,20 @@ function ShiftJournal({ row, onClose, norms }) {
 
 /* ── вкладка ───────────────────────────────────────────────────────────── */
 
-export default function ChatShiftReport({ apiBaseUrl, headers, showToast, account, onGoToMapping, downloadCsv }) {
+export default function ChatShiftReport({ apiBaseUrl, headers, showToast, account, onGoToMapping, downloadCsv,
+    themeScope = null }) {
     const [range, setRange] = useState(() => presetRange('week'));
     const [view, setView] = useState(VIEW_SHIFTS);
     const [group, setGroup] = useState(GROUP_ALL);
     const [query, setQuery] = useState('');
     const [sorts, setSorts] = useState(DEFAULT_SORT);
     const [selectedKey, setSelectedKey] = useState(null);
+    // Переход «человек → его смены»: по id, чипом с крестиком, а не подменой поиска.
+    const [person, setPerson] = useState(null);
     const [state, setState] = useState({ data: null, error: null, loading: true });
     const requestRef = useRef(0);
+    const shownRef = useRef(null);
+    shownRef.current = state.data;
     const headersRef = useRef(headers);
     headersRef.current = headers;
 
@@ -370,33 +407,48 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
             params: { from: next.from, to: next.to, account },
         }).then((response) => {
             if (requestId !== requestRef.current) return;
-            setState({ data: response.data, error: null, loading: false });
+            const data = response.data || {};
+            // Период на экране — тот, что посчитал сервер: пустой выбор он заменяет неделей, а хвост
+            // в будущем обрезает сегодняшним днём; иначе календарь и таблица говорили бы о разном.
+            if (data.from && data.to && (data.from !== next.from || data.to !== next.to)) {
+                setRange({ from: data.from, to: data.to });
+            }
+            setState({ data, error: null, loading: false });
         }).catch((error) => {
             if (requestId !== requestRef.current) return;
-            setState((prev) => ({
-                data: prev.data,
-                error: error?.response?.data?.error || 'Не удалось загрузить смены',
-                loading: false,
-            }));
+            // Не удалось — на экране остаётся прежний период того же аккаунта, и календарь
+            // возвращается к нему: иначе под датами нового периода стояли бы строки старого, а
+            // «Выгрузить» сохранил бы их под чужим именем. Данные другого аккаунта не показываем.
+            const shown = shownRef.current;
+            const keep = shown && shown.account === account ? shown : null;
+            if (keep?.from && keep?.to) setRange({ from: keep.from, to: keep.to });
+            setState({ data: keep, error: error?.response?.data?.error || 'Не удалось загрузить смены',
+                loading: false });
         });
     }, [apiBaseUrl, account]);
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => { load(range); }, [load]);
 
+    const maxDays = state.data?.maxDays || MAX_DAYS_FALLBACK;
     const changeRange = (next) => {
-        setRange(next);
-        load(next);
+        const { range: limited, clipped } = clampRange(next, maxDays);
+        if (clipped) showToast?.(`Период — не больше ${maxDays} суток: показаны последние ${maxDays}`, 'info');
+        setRange(limited);
+        load(limited);
     };
 
     const data = state.data;
+    const withShifts = data?.withShifts !== false;
     const norms = data?.norms || DEFAULT_NORMS;
     const minActive = data?.rateMinActiveSeconds ?? RATE_MIN_ACTIVE_SECONDS;
     const rows = useMemo(() => data?.rows || [], [data]);
-    const options = useMemo(() => groupOptions(data?.groups, rows, query), [data, rows, query]);
+    const personId = person?.id ?? null;
+    const options = useMemo(() => groupOptions(data?.groups, rows, query, personId), [data, rows, query, personId]);
     // Группа, которой в новом периоде нет, не оставляет таблицу пустой без объяснения.
     const activeGroup = options.some((option) => option.value === group) ? group : GROUP_ALL;
-    const filtered = useMemo(() => filterRows(rows, { group: activeGroup, query }), [rows, activeGroup, query]);
+    const filtered = useMemo(() => filterRows(rows, { group: activeGroup, query, personId }),
+        [rows, activeGroup, query, personId]);
     const people = useMemo(() => peopleRows(filtered, minActive), [filtered, minActive]);
     const sort = sorts[view];
     const shown = useMemo(() => sortRows(view === VIEW_PEOPLE ? people : filtered, sort),
@@ -418,19 +470,21 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
         setView(next);
     };
 
-    const openPerson = (person) => {
-        setQuery(person.name);
+    const openPerson = (row) => {
+        setPerson({ id: row.userId, name: row.name });
         changeView(VIEW_SHIFTS);
     };
 
     const exportCsv = () => {
-        if (!shown.length || !downloadCsv) return;
-        downloadCsv(csvFileName(view, range), view === VIEW_PEOPLE ? peopleCsv(shown) : shiftCsv(shown));
+        if (!shown.length || !downloadCsv || state.loading) return;
+        // Имя файла — по периоду строк, а не календаря: это одно и то же, пока ничего не грузится.
+        downloadCsv(csvFileName(view, { from: data?.from, to: data?.to }),
+            view === VIEW_PEOPLE ? peopleCsv(shown) : shiftCsv(shown));
         showToast?.(`Выгружено ${shown.length} строк`, 'success');
     };
 
-    let emptyText = 'За выбранный период смен и сообщений нет';
-    if (query.trim()) emptyText = 'Никого не найдено';
+    let emptyText = withShifts ? 'За выбранный период смен и сообщений нет' : 'За выбранный период сообщений нет';
+    if (query.trim() || personId !== null) emptyText = 'Никого не найдено';
     else if (activeGroup !== GROUP_ALL) {
         const label = options.find((option) => option.value === activeGroup)?.label;
         emptyText = `В группе «${label}» за период ничего нет`;
@@ -459,7 +513,8 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
                             </button>
                         )}
                     </div>
-                    <button type="button" onClick={exportCsv} disabled={!shown.length} className={iosBtnGhost}>
+                    <button type="button" onClick={exportCsv} disabled={!shown.length || state.loading}
+                        className={iosBtnGhost}>
                         <Download size={13} /> Выгрузить
                     </button>
                     <button type="button" onClick={() => load(range)} className={iosBtnGhost}>
@@ -471,8 +526,21 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
             <div className="flex flex-wrap items-center gap-2">
                 <IosSegmented value={view} ariaLabel="Вид отчёта" onChange={changeView}
                     options={[{ value: VIEW_SHIFTS, label: 'По сменам' }, { value: VIEW_PEOPLE, label: 'По сотрудникам' }]} />
+                {/* Групп бывает пять, а сегменты не переносятся: на телефоне ряд листается сам, а не
+                    растягивает раздел вбок. */}
                 {(data?.groups || []).length > 1 && (
-                    <IosSegmented value={activeGroup} ariaLabel="Группа" onChange={setGroup} options={options} />
+                    <div className="max-w-full overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                        <IosSegmented value={activeGroup} ariaLabel="Группа" onChange={setGroup} options={options} />
+                    </div>
+                )}
+                {person && (
+                    <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-blue-50 py-1 pl-3 pr-1 text-[12.5px] font-medium text-blue-700 ring-1 ring-blue-100">
+                        <span className="truncate">{person.name}</span>
+                        <button type="button" onClick={() => setPerson(null)} aria-label="Показать всех"
+                            className="rounded-full p-1 text-blue-500 hover:bg-blue-100 hover:text-blue-700">
+                            <X size={12} />
+                        </button>
+                    </span>
                 )}
             </div>
 
@@ -487,11 +555,7 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
             {unlinked?.messages > 0 && (
                 <div className={`${iosCard} flex flex-wrap items-center gap-2 px-4 py-3 text-[12.5px] text-slate-600`}>
                     <AlertCircle size={14} className="text-amber-500" />
-                    <span>
-                        {unlinked.authors} {pluralRu(unlinked.authors, 'автор', 'автора', 'авторов')} Wazzup
-                        не {unlinked.authors === 1 ? 'привязан' : 'привязаны'} к сотрудникам — {unlinked.messages}{' '}
-                        {pluralRu(unlinked.messages, 'сообщение', 'сообщения', 'сообщений')} не вошли в отчёт.
-                    </span>
+                    <span>{unlinkedText(unlinked)}</span>
                     {onGoToMapping && (
                         <button type="button" onClick={onGoToMapping} className="font-semibold text-blue-600 hover:underline">
                             Привязать
@@ -509,7 +573,9 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
             {data && (
                 <div className={`${iosCard} overflow-hidden transition-opacity duration-200 ${state.loading ? 'opacity-60' : ''}`}
                     aria-busy={state.loading}>
-                    <div className="max-h-[calc(100vh-300px)] overflow-auto">
+                    {/* Высота не меньше самой длинной подсказки «i»: пузырёк живёт внутри прокрутки и при
+                        одной-двух строках обрезался бы её краем. */}
+                    <div className="max-h-[calc(100vh-300px)] min-h-[240px] overflow-auto">
                         <table className="w-full border-collapse text-[13px]">
                             <thead className="sticky top-0 z-10 bg-white/90 backdrop-blur-xl">
                                 <tr className="border-b border-slate-200/70">
@@ -533,13 +599,14 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
                                     ))
                                     : shown.map((row) => (
                                         <ShiftRow key={row.key} row={row} selected={row.key === selectedKey}
-                                            onOpen={setSelectedKey} norms={norms} showGroup={showGroup} />
+                                            onOpen={setSelectedKey} norms={norms} showGroup={showGroup}
+                                            withShifts={withShifts} />
                                     ))}
                             </tbody>
                             {shown.length > 0 && (
                                 <tfoot className="sticky bottom-0 bg-slate-50/90 backdrop-blur-xl">
                                     <TotalRow total={total} view={view} norms={norms}
-                                        label={totalLabel(view, total, people.length)} />
+                                        label={totalLabel(view, total, people.length, withShifts)} />
                                 </tfoot>
                             )}
                         </table>
@@ -547,7 +614,8 @@ export default function ChatShiftReport({ apiBaseUrl, headers, showToast, accoun
                 </div>
             )}
 
-            <ShiftJournal row={view === VIEW_SHIFTS ? selected : null} onClose={closeJournal} norms={norms} />
+            <ShiftJournal row={view === VIEW_SHIFTS ? selected : null} onClose={closeJournal} norms={norms}
+                withShifts={withShifts} themeScope={themeScope} />
         </div>
     );
 }
