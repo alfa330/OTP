@@ -320,9 +320,19 @@ const PaymentRequestForm = ({
         ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
     /* Отделы внутри выбранного проекта (справочник «Проекты и отделы», 16.11.2026). У проекта без отделов
        поля нет вовсе — заблокированный список, в котором нечего выбрать, только отвлекает. */
-    const projectDepartmentOptions = useMemo(() => (dictionaries?.project_departments || [])
-        .filter((item) => draft.project_id && item.project_id === draft.project_id)
-        .map((item) => ({ value: item.id, label: item.name })), [dictionaries, draft.project_id]);
+    const projectDepartmentOptions = useMemo(() => {
+        const list = (dictionaries?.project_departments || [])
+            .filter((item) => draft.project_id && item.project_id === draft.project_id)
+            .map((item) => ({ value: item.id, label: item.name }));
+        // Отдел уже стоит в заявке, а в справочнике его потом скрыли: в списке он есть с пометкой, а не
+        // «Без отдела» при сохранённом значении (разбор 16.11.2026). Заново скрытый отдел сервер не примет.
+        const saved = request?.project_department_id;
+        if (saved && request?.project_id === draft.project_id && request?.project_department_name
+            && !list.some((item) => item.value === saved)) {
+            list.push({ value: saved, label: `${request.project_department_name} · скрыт` });
+        }
+        return list;
+    }, [dictionaries, draft.project_id, request]);
     const pickProject = (value) => setDraft((prev) => ({
         ...prev, project_id: value,
         // Отдел прежнего проекта к новому не относится.
@@ -515,6 +525,9 @@ const PaymentRequestForm = ({
         setExtras((prev) => prev.filter((item) => item !== key));
         if (key === 'files') setFiles([]);
         else if (key === 'observer_ids') set('observer_ids', []);
+        // Убрали проект — уходит и его отдел: иначе сервер ответит «Отдел не относится к выбранному проекту»,
+        // а поля отдела на экране уже нет (разбор 16.11.2026).
+        else if (key === 'project_id') pickProject(null);
         else set(key, key.endsWith('_id') ? null : '');
     };
 

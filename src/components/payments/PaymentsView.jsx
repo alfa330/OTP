@@ -376,14 +376,23 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     const closeCard = useCallback(() => setOpenedId(null), []);
 
     /* Из окна заявки открывают другую — прошлый закуп, прошлую оплату, дубль счёта (владелец 16.11.2026,
-       пп. 1, 2). Окно то же, а шеврон в шапке возвращает к заявке, с которой пришли: номера — стопкой. */
+       пп. 1, 2). Окна — стопкой: прежнее не закрывается, а прячется под новым целиком, вместе с набранным
+       в форме этапа (дата, сумма, приложенное поручение) — разбор 16.11.2026. Шеврон, крестик и жест
+       «назад» верхнего окна возвращают к нему; номера стопки — cardTrail, верхнее окно — openedId. */
     const [cardTrail, setCardTrail] = useState([]);
     const openFromCard = useCallback((id) => {
         const next = Number(id) || null;
         if (!next || next === openedId) return;
+        const below = cardTrail.indexOf(next);
+        if (below >= 0) {
+            // Эта заявка уже лежит в стопке — возвращаемся к ней, а не открываем второе такое же окно.
+            setCardTrail(cardTrail.slice(0, below));
+            setOpenedId(next);
+            return;
+        }
         if (openedId) setCardTrail((prev) => [...prev, openedId]);
         setOpenedId(next);
-    }, [openedId]);
+    }, [openedId, cardTrail]);
     const backFromCard = useCallback(() => {
         const back = cardTrail[cardTrail.length - 1];
         if (!back) return;
@@ -931,24 +940,31 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 showToast={showToast}
             />
 
-            <PaymentRequestCard
-                open={Boolean(openedId)}
-                onClose={closeCard}
-                requestId={openedId}
-                apiBaseUrl={apiBaseUrl}
-                headers={headers}
-                dictionaries={dictionaries}
-                users={users}
-                me={ping?.me}
-                meta={meta}
-                onChanged={applyChanged}
-                // Из задачи инициатора «Доработать заявку» — форма сразу показывает, чего не хватает.
-                onEdit={(data, options) => { setOpenedId(null); setEditing(data); setRevealIssues(Boolean(options?.reveal)); setFormOpen(true); }}
-                onOpenRequest={openFromCard}
-                backTo={cardTrail[cardTrail.length - 1] || null}
-                onBackTo={backFromCard}
-                showToast={showToast}
-            />
+            {/* Нижнее окно стопки — то, с чего начали: оно же уходит с анимацией, когда окно закрывают
+                совсем. Над ним — открытые из окна заявки; видно только верхнее, остальные спрятаны
+                целиком (не размонтированы), чтобы набранное в них дождалось возврата. */}
+            {[cardTrail[0] ?? openedId, ...cardTrail.slice(1), ...(cardTrail.length ? [openedId] : [])].map((id, depth, stack) => (
+                <div key={depth ? `${depth}:${id}` : 'base'} hidden={depth !== stack.length - 1}>
+                    <PaymentRequestCard
+                        open={depth ? true : Boolean(openedId)}
+                        onClose={depth ? backFromCard : closeCard}
+                        requestId={id}
+                        apiBaseUrl={apiBaseUrl}
+                        headers={headers}
+                        dictionaries={dictionaries}
+                        users={users}
+                        me={ping?.me}
+                        meta={meta}
+                        onChanged={applyChanged}
+                        // Из задачи инициатора «Доработать заявку» — форма сразу показывает, чего не хватает.
+                        onEdit={(data, options) => { setOpenedId(null); setEditing(data); setRevealIssues(Boolean(options?.reveal)); setFormOpen(true); }}
+                        onOpenRequest={openFromCard}
+                        backTo={depth ? stack[depth - 1] : null}
+                        onBackTo={depth ? backFromCard : null}
+                        showToast={showToast}
+                    />
+                </div>
+            ))}
         </div>
     );
 };

@@ -6,7 +6,7 @@ import IosDatePicker from '../ui/DatePicker';
 import useIsMobileShell from '../common/useIsMobileShell';
 import PaymentStageForm, { DocsUploadTask } from './PaymentStageForm';
 import {
-    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, CONTRACT_THRESHOLD, DOCS_STATUS_META, HINTS,
+    ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, CLOSING_DOC_KINDS, CONTRACT_THRESHOLD, DOCS_STATUS_META, HINTS,
     MAX_OBSERVERS, OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, deletedLine,
     contractSummary, describeEvent, amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty,
     historySummary, isClosed, isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel,
@@ -391,7 +391,9 @@ const PaymentRequestCard = ({
         if (permissions.can_delete) return true;
         const stage = attachment.subtask_kind ? subtaskByKind[attachment.subtask_kind] : null;
         const stageOpen = !attachment.subtask_kind || ['open', 'waiting'].includes(stage?.state);
-        return attachment.uploaded_by === me?.id && active && stageOpen;
+        // Заявку закрыли раньше документов (16.11.2026): свой закрывающий документ в ней снимают, как в идущей.
+        const alive = active || (tail && CLOSING_DOC_KINDS.includes(attachment.kind));
+        return attachment.uploaded_by === me?.id && alive && stageOpen;
     };
 
     const offerFiles = useMemo(() => {
@@ -517,8 +519,8 @@ const PaymentRequestCard = ({
     const view = recordView({ data, error, loading });
     const shownId = request?.id ?? requestId;
 
-    /* Инициатора просят приложить закрывающие документы — «Документы» раскрыты
-       сами: плашка над разделами отправляет его именно туда. */
+    /* Инициатора просят приложить закрывающие документы — «Документы» раскрыты сами: там видно,
+       что уже приложено. Приложить — его задача «Приложить закрывающие документы» (DocsUploadTask). */
     const docsWanted = Boolean(active && !permissions.can_act && request?.initiator_id === me?.id
         && current?.kind === 'closing_docs' && request?.closing_docs_status === 'none');
     const foldOpen = (key) => folds[key] ?? (key === 'files' && docsWanted);

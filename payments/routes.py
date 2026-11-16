@@ -572,11 +572,18 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 project_id = fields.get('project_id', current.get('project_id'))
                 department_id = (as_int(data.get('project_department_id'), 'project_department_id')
                                  if has('project_department_id') else current.get('project_department_id'))
+                if not project_id:
+                    # Проект убрали — уходит и отдел: без проекта ему не к чему относиться (разбор 16.11.2026).
+                    department_id = None
                 if department_id:
                     department = directory.read_project_department(cursor, department_id)
                     if not department or department['project_id'] != project_id:
                         if has('project_department_id'):
                             errors.append('Отдел не относится к выбранному проекту')
+                        department_id = None
+                    elif not department['is_active'] and department_id != current.get('project_department_id'):
+                        # Скрытый в справочнике отдел заново не ставят; уже стоящий в заявке — остаётся.
+                        errors.append('Этот отдел скрыт в справочнике — выберите другой')
                         department_id = None
                 fields['project_department_id'] = department_id
             if creating or has('no_contract'):
@@ -1434,7 +1441,11 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # документ пройденного этапа — основание уже принятого решения.
             subtask = queries.read_subtask(cursor, request_id, item['subtask_kind']) if item.get('subtask_kind') else None
             stage_open = bool(subtask and subtask['state'] in ('open', 'waiting')) or not item.get('subtask_kind')
-            own_open = (item.get('uploaded_by') == ctx['user_id'] and current['status'] == 'active' and stage_open)
+            # Заявку закрыли раньше закрывающих документов (16.11.2026): свой закрывающий документ в ней
+            # снять можно, как в идущей, — приложенный по ошибке не должен ждать администратора.
+            alive = current['status'] == 'active' or (workflow.docs_tail(current)
+                                                      and item['kind'] in workflow.CLOSING_DOC_KINDS)
+            own_open = (item.get('uploaded_by') == ctx['user_id'] and alive and stage_open)
             if not (access.is_section_admin(ctx) or own_open):
                 raise ApiError('Снять можно только свой файл на незавершённом этапе',
                                code='PAYMENTS_FORBIDDEN', status=403)

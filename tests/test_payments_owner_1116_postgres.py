@@ -454,3 +454,67 @@ def test_paid_slice_counts_paid_requests_still_going(db):
         counters = queries.state_counters(cur)
         assert counters['paid'] == 1, 'закрытая — в «Закрыты», неоплаченная — не в срезе'
         assert [item['id'] for item in queries.list_requests(cur, state='paid')[1]] == [going]
+
+
+# ── Разбор выложенного 16.11.2026 ────────────────────────────────────────────
+
+def test_new_docs_deadline_replaces_the_old_one_in_the_bell(db):
+    """Срок перенесли — в колоколе не остаётся «просрочено» и прежних дат: задача инициатора та же строка
+    с новой датой, прежнее «срок — до …» гаснет, напоминания по новому сроку придут в свой день."""
+    with db.cursor() as cur:
+        ids = seed(cur)
+        rid = new_purchase(cur, ids)
+        to_closing(cur, rid)
+        today = queries.today_almaty()
+        late = today - timedelta(days=2)
+        queries.update_request_fields(cur, rid, {'docs_due_on': late})
+        assert flow.remind_deadlines(cur, today=today) > 0
+        overdue = ('docs_overdue',)
+        assert notices_of(cur, INITIATOR, rid, kinds=overdue) and notices_of(cur, ACCOUNTANT, rid, kinds=overdue)
+        new_due = today + timedelta(days=20)
+        act(cur, rid, workflow.KIND_CLOSING, 'docs_due', ACCOUNTANT, docs_due_on=new_due)
+        assert notices_of(cur, INITIATOR, rid, kinds=overdue) == [] and notices_of(cur, ACCOUNTANT, rid, kinds=overdue) == []
+        until = workflow.fmt_date(new_due)
+        assert notices_of(cur, INITIATOR, rid, kinds=('docs_needed', 'docs_due')) == [
+            ('docs_needed', 'Приложите закрывающие документы до %s' % until, True),
+            ('docs_due', 'Срок закрывающих документов — до %s' % until, False)]
+        # Ещё раз — снова одна строка «срок» и одна задача, без накопления.
+        newer = new_due + timedelta(days=5)
+        act(cur, rid, workflow.KIND_CLOSING, 'docs_due', ACCOUNTANT, docs_due_on=newer)
+        assert [title for _k, title, _a in notices_of(cur, INITIATOR, rid, kinds=('docs_needed', 'docs_due'))] == [
+            'Приложите закрывающие документы до %s' % workflow.fmt_date(newer),
+            'Срок закрывающих документов — до %s' % workflow.fmt_date(newer)]
+
+
+def test_deferred_request_waits_only_on_the_accounting_board(db):
+    """Закрытая раньше документов заявка стоит у бухгалтерии в «Ожидаются закрывающие документы», сколько бы
+    дней ни прошло, а с чужих досок уходит, как любая закрытая."""
+    with db.cursor() as cur:
+        ids = seed(cur)
+        rid = new_purchase(cur, ids)
+        to_closing(cur, rid)
+        act(cur, rid, workflow.KIND_CLOSING, 'docs_defer', ACCOUNTANT,
+            docs_due_on=queries.today_almaty() + timedelta(days=60))
+        cur.execute("UPDATE payment_requests SET closed_at = closed_at - interval '90 days' WHERE id = %s", (rid,))
+        on = {code: [item['id'] for item, _steps in queries.board_requests(cur, code)]
+              for code in ('approval', 'accounting', 'finance')}
+        assert on == {'approval': [], 'accounting': [rid], 'finance': []}
+
+
+def test_past_purchases_are_seen_by_the_request_people_and_ignore_extra_spaces(db):
+    with db.cursor() as cur:
+        ids = seed(cur)
+        past = new_purchase(cur, ids, name='Мышь  Logitech')
+        to_closing(cur, past)
+        current = new_purchase(cur, ids, name='Мышь Logitech M185 беспроводная')
+        row, items = queries.read_request(cur, current), queries.list_items(cur, current)
+
+        def seen(user_id, roles):
+            return [item['request_id'] for item in queries.similar_purchases(
+                cur, row, items, visible_to=user_id, visible_roles=roles)]
+        # Лишний пробел в прошлом названии не прячет его: нынешнее название содержит прошлое.
+        assert seen(INITIATOR, set()) == [past]
+        assert seen(APPROVER, {'approver'}) == [past], 'утверждающий — исполнитель пройденного этапа'
+        assert seen(FINANCE, {'finance'}) == [], 'у счёта этапа финотдела нет'
+        cur.execute("INSERT INTO payment_request_observers (request_id, user_id) VALUES (%s, %s)", (past, OUTSIDER))
+        assert seen(OUTSIDER, set()) == [past], 'наблюдатель прошлой заявки'

@@ -74,6 +74,19 @@ def clear_kind(cursor, request_id, kind):
     return _mark_read(cursor, "request_id = %s AND kind = %s", (int(request_id), kind))
 
 
+def retitle_kind(cursor, request_id, kind, title, user_ids):
+    """Непрочитанные строки одного вида по заявке у этих людей получают новый заголовок — когда в
+    заголовке дата, а она сменилась (срок закрывающих документов, 16.11.2026): задача остаётся той же
+    строкой, без второй такой же в колоколе."""
+    ids = sorted({int(x) for x in (user_ids or ()) if x})
+    if not ids:
+        return 0
+    cursor.execute(
+        "UPDATE payment_notifications SET title = %s WHERE read_at IS NULL AND request_id = %s AND kind = %s "
+        "AND user_id = ANY(%s)", (str(title or '')[:MAX_TITLE], int(request_id), kind, ids))
+    return cursor.rowcount
+
+
 def clear_request(cursor, request_id):
     """Заявка закрыта, отклонена или отменена — действий по ней больше ни от кого не ждут:
     гаснут и «ждут вас», и копии наблюдателей «заявка ждёт инициатора» (привязаны к подзадаче)."""

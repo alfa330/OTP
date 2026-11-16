@@ -687,8 +687,16 @@ def _docs_due(cursor, request, subtask, actor, due_on, comment, *, outbox=None, 
     queries.update_request_fields(cursor, request_id, {'docs_due_on': due_on})
     queries.log_event(cursor, request_id, 'docs_due', actor, comment=comment,
                       payload={'kind': subtask['kind'], 'from': before, 'to': due_on})
+    # Строки колокола со старым сроком гаснут: «скоро срок» и «просрочено» — у всех, прежнее «срок — до …»
+    # тоже; иначе рядом висят «просрочено» и три разные даты (разбор 16.11.2026). Напоминания по новому
+    # сроку придут в свой день (их dedupe_key — по дате).
+    for kind in STAGE_REMINDER_KINDS[workflow.KIND_CLOSING] + ('docs_due',):
+        notices.clear_kind(cursor, request_id, kind)
     if (request.get('closing_docs_status') or workflow.DOCS_NONE) == workflow.DOCS_NONE:
         refreshed = queries.read_request(cursor, request_id)
+        # Задача инициатора «Приложите … до <срок>» остаётся той же строкой — с новой датой в заголовке.
+        task = notify.docs_deferred(refreshed, due_on) if workflow.docs_tail(refreshed) else notify.docs_needed(refreshed, due_on)
+        notices.retitle_kind(cursor, request_id, 'docs_needed', task['title'], [refreshed.get('initiator_id')])
         _notify_initiator(cursor, refreshed, notify.docs_due(refreshed, due_on), outbox=outbox, base_url=base_url,
                           actor=actor)
     return {'next': subtask['kind']}

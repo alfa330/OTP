@@ -1101,13 +1101,22 @@ const PaymentsDictionaries = ({
                 );
             case 'projects':
                 if (editKind === 'department') {
+                    /* Проект у заведённого отдела не меняется (сервер тоже не даст): отдел уже бывает в
+                       заявках своего проекта. Отдел для другого проекта заводят в нём. */
+                    const parent = rows.find((item) => item.id === draft.project_id);
                     return (
                         <>
-                            <Field label="Проект" required optionalMark={false} hint="В каком проекте этот отдел. Отдел выбирают в заявке после проекта.">
-                                <FormSelect value={draft.project_id} onChange={(v) => set('project_id', v || null)}
-                                    options={rows.map((item) => ({ value: item.id, label: item.name }))} placeholder="Выберите проект"
-                                    searchable={rows.length > 8} ariaLabel="Проект" />
-                            </Field>
+                            {isNew ? (
+                                <Field label="Проект" required optionalMark={false} hint="В каком проекте этот отдел. Отдел выбирают в заявке после проекта.">
+                                    <FormSelect value={draft.project_id} onChange={(v) => set('project_id', v || null)}
+                                        options={rows.map((item) => ({ value: item.id, label: item.name }))} placeholder="Выберите проект"
+                                        searchable={rows.length > 8} ariaLabel="Проект" />
+                                </Field>
+                            ) : (
+                                <Field as="div" label="Проект" hint="Проект у отдела не меняется: он уже бывает в заявках этого проекта. Отдел для другого проекта заведите в нём.">
+                                    <div data-department-project className="rounded-xl bg-slate-100 px-3 py-2.5 text-[14px] text-slate-800">{parent?.name || '—'}</div>
+                                </Field>
+                            )}
                             <Field label="Название отдела" required optionalMark={false}>{text('name', { maxLength: 200, placeholder: 'Например: Колл-центр' })}</Field>
                         </>
                     );

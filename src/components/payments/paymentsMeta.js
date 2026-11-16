@@ -211,6 +211,8 @@ export const FILE_KINDS = {
     asset_registration: ['handover_act', 'other'],
     closing_docs: ['act', 'waybill', 'receipt', 'other'],
 };
+/* Закрывающие документы — те же виды, что у сервера (workflow.CLOSING_DOC_KINDS): по ним ставится «скан получен». */
+export const CLOSING_DOC_KINDS = ['act', 'waybill', 'receipt'];
 export const fileKindOptions = (place) => (FILE_KINDS[place] || Object.keys(ATTACHMENT_LABELS))
     .map((value) => ({ value, label: ATTACHMENT_LABELS[value] || value }));
 

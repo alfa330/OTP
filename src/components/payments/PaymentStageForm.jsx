@@ -740,8 +740,10 @@ const PaymentStageForm = ({
     const formRef = useRef(null);
     /* Срок закрывающих документов (владелец 16.11.2026, п. 5): от бухгалтера, а пока его не ставили — по
        настройке (сервер присылает его в `stage_deadline`). */
-    const [docsDue, setDocsDue] = useState(() => (data.stage_deadline?.kind === 'closing_docs'
-        ? String(data.stage_deadline.due_on || '').slice(0, 10) : ''));
+    const serverDue = data.stage_deadline?.kind === 'closing_docs' ? String(data.stage_deadline.due_on || '').slice(0, 10) : '';
+    const [docsDue, setDocsDue] = useState(serverDue);
+    // Заявку перечитали (срок поменяли в другом окне, сервер пересчитал) — поле показывает срок сервера.
+    useEffect(() => { setDocsDue(serverDue); }, [serverDue]);
 
     const kinds = new Set([...own.map((item) => item.kind), ...files.map((entry) => entry.kind)]);
     const issues = stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length, entityId });
@@ -1156,17 +1158,19 @@ const PaymentStageForm = ({
         const allowed = permissions.actions || [];
         const shownDue = data.stage_deadline?.kind === 'closing_docs' ? data.stage_deadline.due_on : null;
         /* Срок (п. 5) сохраняется сразу, как его выбрали: инициатор узнаёт новый срок, напоминания идут к нему. */
-        const changeDue = (value) => {
+        const changeDue = async (value) => {
             setDocsDue(value || '');
-            if (value && value !== String(shownDue || '').slice(0, 10)) {
-                onAct({ action: 'docs_due', fields: { docs_due_on: value }, files: [] });
+            if (value && value !== serverDue) {
+                // Сервер не принял — в поле снова сохранённый срок, а не выбранный (разбор 16.11.2026).
+                if (!await onAct({ action: 'docs_due', fields: { docs_due_on: value }, files: [] })) setDocsDue(serverDue);
             }
         };
         return wrap(
             <>
+                {/* Срок стоит полем ниже — в плашке его второй раз нет (разбор 16.11.2026). */}
                 {tail && (
-                    <NoticeBox tone="slate" text={`Заявка закрыта ${fmtDate(request.closed_at)} раньше закрывающих документов — `
-                        + `${shownDue ? `их ждём до ${fmtDate(shownDue)}` : 'их ещё ждём'}.`} />
+                    <NoticeBox tone="slate" text={`Заявка закрыта ${fmtDate(request.closed_at)} раньше закрывающих документов`
+                        + (allowed.includes('docs_due') ? '.' : ` — ${shownDue ? `их ждём до ${fmtDate(shownDue)}` : 'их ещё ждём'}.`)} />
                 )}
                 <div className="flex flex-wrap items-center gap-2">
                     <TonePill tone={docsMeta.tone}>{docsMeta.label}</TonePill>

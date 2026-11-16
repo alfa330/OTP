@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
-    HINTS, PAYMENT_ORDER_OPTIONS, PAYMENT_PROOFS, POWER_OF_ATTORNEY_OPTIONS, STATE_FILTERS, TRANSFER_PROOF_OPTIONS,
+    CLOSING_DOC_KINDS, HINTS, PAYMENT_ORDER_OPTIONS, PAYMENT_PROOFS, POWER_OF_ATTORNEY_OPTIONS, STATE_FILTERS, TRANSFER_PROOF_OPTIONS,
     describeEvent, docsDueChip, expenseSubline, projectLine, proofsAsked, similarSummary,
 } from '../src/components/payments/paymentsMeta.js';
 
@@ -205,7 +205,8 @@ test('прошлые оплаты, история оплат и дубль сч�
     assert.ok(form.includes('data-open-request={row.request_id} onClick={() => onOpenRequest(row.request_id)}'));
     const view = source('src/components/payments/PaymentsView.jsx');
     assert.ok(view.includes('onOpenRequest={openFromCard}'));
-    assert.ok(view.includes('backTo={cardTrail[cardTrail.length - 1] || null}'));
+    // Шеврон окна стопки ведёт к окну под ним (окна стопкой — разбор 16.11.2026).
+    assert.ok(view.includes('backTo={depth ? stack[depth - 1] : null}'));
     assert.ok(view.includes('useEffect(() => { if (!openedId) setCardTrail([]); }, [openedId]);'));
 });
 
@@ -229,4 +230,59 @@ test('у бухгалтерии в задаче и в колонке закры�
     assert.match(desk, /\(task\.task === 'docs_needed' \|\| task\.task === 'closing_docs'\) && task\.docs_due_on/);
     const board = source('src/components/payments/PaymentsBoard.jsx');
     assert.match(board, /<DueChip request=\{card\} soonDays=\{soonDays\} docsDueOn=\{card\.column === 'awaiting_docs' \? card\.docs_due_on : null\} \/>/);
+});
+
+/* ── Разбор выложенного 16.11.2026 ──────────────────────────────────────────── */
+
+test('форма бухгалтерии по закрытой заявке: срок — полем, в плашке его второй раз нет', async () => {
+    const stage = await bundle('src/components/payments/PaymentStageForm.jsx', 'stage-review');
+    const PaymentStageForm = stage.default;
+    const request = { id: 5, status: 'done', docs_tail: true, closed_at: '2026-11-16T10:00:00', closing_docs_status: 'none',
+        payment_method: 'invoice', request_kind: 'purchase', initiator_id: 10 };
+    const subtask = { id: 1, kind: 'closing_docs', state: 'open', status: null, title: 'Закрывающие документы' };
+    const data = { request, items: [], attachments: [], subtasks: [subtask],
+        stage_deadline: { kind: 'closing_docs', due_on: '2026-11-26', days_left: 10 } };
+    const props = (actions) => ({ data, subtask, dictionaries: {}, users: [], meta: {}, apiBaseUrl: '', headers: () => ({}),
+        busy: false, showToast: () => {}, permissions: { actions }, onAct: () => {}, onTake: () => {}, onEdit: () => {},
+        onReply: () => {}, onAttach: () => {} });
+    const html = renderToStaticMarkup(h(PaymentStageForm, props(['docs_original', 'docs_close', 'docs_due'])));
+    assert.match(html, /Заявка закрыта 16\.11\.2026 раньше закрывающих документов\./);
+    assert.equal((html.match(/26\.11\.2026/g) || []).length, 1, 'дата срока — только в поле');
+    // Поля срока нет (не бухгалтер) — срок остаётся в плашке.
+    const readOnly = renderToStaticMarkup(h(PaymentStageForm, props(['docs_original', 'docs_close'])));
+    assert.match(readOnly, /их ждём до 26\.11\.2026/);
+    const source_ = source('src/components/payments/PaymentStageForm.jsx');
+    assert.match(source_, /if \(!await onAct\(\{ action: 'docs_due', fields: \{ docs_due_on: value \}, files: \[\] \}\)\) setDocsDue\(serverDue\);/,
+        'сервер не принял срок — в поле снова сохранённый');
+    assert.match(source_, /useEffect\(\(\) => \{ setDocsDue\(serverDue\); \}, \[serverDue\]\);/, 'перечитали заявку — поле со сроком сервера');
+});
+
+test('закрывающие документы в интерфейсе — те же виды, что у сервера', () => {
+    const server = source('payments/workflow.py').match(/^CLOSING_DOC_KINDS = \(([^)]*)\)/m)[1].match(/'([a-z_]+)'/g)
+        .map((item) => item.slice(1, -1));
+    assert.deepEqual(CLOSING_DOC_KINDS, server);
+    const card = source('src/components/payments/PaymentRequestCard.jsx');
+    assert.match(card, /const alive = active \|\| \(tail && CLOSING_DOC_KINDS\.includes\(attachment\.kind\)\);/,
+        'свой закрывающий документ закрытой раньше документов заявки снимается, как в идущей');
+});
+
+test('окна заявок — стопкой: открытая из окна заявка не размонтирует прежнюю', () => {
+    const view = source('src/components/payments/PaymentsView.jsx');
+    assert.match(view, /\[cardTrail\[0\] \?\? openedId, \.\.\.cardTrail\.slice\(1\), \.\.\.\(cardTrail\.length \? \[openedId\] : \[\]\)\]\.map\(\(id, depth, stack\) =>/);
+    assert.match(view, /<div key=\{depth \? `\$\{depth\}:\$\{id\}` : 'base'\} hidden=\{depth !== stack\.length - 1\}>/,
+        'нижние окна спрятаны, а не сняты: набранное в форме этапа дожидается возврата');
+    assert.match(view, /onClose=\{depth \? backFromCard : closeCard\}/, 'крестик и жест «назад» верхнего окна — к прежнему');
+    assert.match(view, /const below = cardTrail\.indexOf\(next\);/, 'заявка уже в стопке — возврат к ней, без второго окна');
+});
+
+test('форма заявки: крестик у «Проекта» убирает и отдел; скрытый отдел заявки виден с пометкой', () => {
+    const form = source('src/components/payments/PaymentRequestForm.jsx');
+    assert.match(form, /else if \(key === 'project_id'\) pickProject\(null\);/);
+    assert.match(form, /list\.push\(\{ value: saved, label: `\$\{request\.project_department_name\} · скрыт` \}\);/);
+});
+
+test('справочник: проект у заведённого отдела только для чтения', () => {
+    const dict = source('src/components/payments/PaymentsDictionaries.jsx');
+    assert.match(dict, /\{isNew \? \(\s*<Field label="Проект" required/);
+    assert.match(dict, /<div data-department-project className="[^"]*">\{parent\?\.name \|\| '—'\}<\/div>/);
 });

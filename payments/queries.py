@@ -1272,10 +1272,12 @@ def board_requests(cursor, board_code, *, own_user_id=None, own_roles=(), **filt
     exists = ("EXISTS (SELECT 1 FROM payment_subtasks bs WHERE bs.request_id = r.id "
               "AND bs.kind = ANY(%(kinds)s) AND bs.state IN ('open', 'waiting', 'done')" + scope + ")")
     # Заявка, закрытая раньше закрывающих документов (16.11.2026), стоит на доске бухгалтерии в
-    # «Ожидаются закрывающие документы», пока их не закроют, — сколько бы дней ни прошло.
+    # «Ожидаются закрывающие документы», пока их не закроют, — сколько бы дней ни прошло. На чужих
+    # досках (согласование, финотдел, Helpdesk) она уходит, как любая закрытая, — там ждать нечего.
+    tail = (" OR (r.docs_deferred_at IS NOT NULL AND r.closing_docs_status <> 'closed')"
+            if board_code == workflow.BOARD_ACCOUNTING else "")
     recent = ("(r.status = 'active' OR r.closed_at IS NULL "
-              "OR r.closed_at >= %s - make_interval(days => %%(closed_days)s) "
-              "OR (r.docs_deferred_at IS NOT NULL AND r.closing_docs_status <> 'closed'))" % _NOW)
+              "OR r.closed_at >= %s - make_interval(days => %%(closed_days)s)" % _NOW) + tail + ")"
     where = (where + ' AND ' if where else ' WHERE ') + exists + ' AND ' + recent
     params['board_limit'] = BOARD_MAX_REQUESTS
     # Живые заявки — первыми: предел выборки не должен вытеснить с доски старую незакрытую.
@@ -1682,10 +1684,13 @@ def similar_purchases(cursor, request, items=(), *, limit=5, visible_to=None, vi
     # Совпадение в обе стороны: прошлое название содержит нынешнее (ILIKE) либо нынешнее —
     # прошлое (position); у прошлого — не короче четырёх знаков, иначе «Мышь» в «Мышь
     # беспроводная» и «ПО» в чём угодно были бы одним и тем же.
-    item_hit = ("(i.name ILIKE w.pat OR (length(btrim(i.name)) >= 4 "
-                "AND position(lower(btrim(i.name)) IN w.v) > 0))")
-    name_hit = ("(r.expense_name ILIKE w.pat OR (length(btrim(r.expense_name)) >= 4 "
-                "AND position(lower(btrim(r.expense_name)) IN w.v) > 0))")
+    # Пробелы внутри прошлого названия схлопываются так же, как у нынешнего (purchase_names): «Мышь  Logitech»,
+    # набранная с лишним пробелом, — та же «Мышь Logitech» (разбор 16.11.2026).
+    def hit(column):
+        norm = "regexp_replace(btrim(%s), '[[:space:]]+', ' ', 'g')" % column
+        return "(%s ILIKE w.pat OR (length(%s) >= 4 AND position(lower(%s) IN w.v) > 0))" % (norm, norm, norm)
+    item_hit = hit('i.name')
+    name_hit = hit('r.expense_name')
     cursor.execute(
         """
         WITH wanted (v, pat) AS (SELECT * FROM unnest(%(lowers)s::text[], %(likes)s::text[])),

@@ -419,6 +419,15 @@ def register(api):
         if not project_id or not any(item['id'] == project_id
                                      for item in directory.list_projects(cursor, include_inactive=True)):
             raise ApiError('Выберите проект, в котором этот отдел', extra={'field': 'project_id'})
+        if row_id:
+            current = directory.read_project_department(cursor, row_id)
+            if not current:
+                raise ApiError('Отдел не найден', status=404)
+            # Проект у отдела не меняется: отдел уже бывает в заявках своего проекта, и перенос дал бы
+            # им пару «проект А → отдел проекта Б» — в карточке, реестре, отборе и Excel (разбор 16.11.2026).
+            if int(current['project_id']) != project_id:
+                raise ApiError('Проект у отдела не меняется — заведите отдел в нужном проекте, а этот скройте',
+                               code='PAYMENTS_DEPARTMENT_PROJECT_FIXED', status=409, extra={'field': 'project_id'})
         return directory.upsert_project_department(
             cursor, department_id=row_id, project_id=project_id,
             name=as_text(data.get('name'), 'Название', required=True, limit=200),
