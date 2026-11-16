@@ -276,6 +276,13 @@ class OperatorStatusMixin:
     # Тез — до 27.07.2026): без этой границы после каждого «выключен» телефона у них
     # всплывал бы статус трёхмесячной давности. 16 часов — длиннее любой смены.
     LIVE_STATUS_RESUME_MAX_AGE_SECONDS = 16 * 3600
+    # «Офлайн» телефона — простой: телефон жив, но человек в нём не работает (выброс за простой
+    # без звонков — группы отдела продаж, а с 16.11.2026 и обзвон удалённого КЦ: 3 минуты в
+    # «Исходе» без звонка). Время оператора у выгрузки такой статус не забирает: работает человек
+    # в эту минуту в Oktell — считается Oktell. Иначе оператор СЗоВ, вернувшийся с обзвона на
+    # линию и не закрывший телефон, после выброса терял бы до часа работы (порог молчания) —
+    # до выбросов этот час шёл ему «перезвоном».
+    LIVE_STATUS_YIELD_KEYS = frozenset({'офлайн'})
 
     def _overlay_live_status_sessions(self, events):
         """Свести события двух источников в один ряд: живой источник поверх выгрузки.
@@ -298,7 +305,12 @@ class OperatorStatusMixin:
           событие выгрузки (не «Выключен» и не «Без телефона»), пришедшее позже порога
           молчания, означает, что человек работает в Oktell: с момента «последнее
           событие телефона + порог» ряд снова идёт по выгрузке. Пока таких событий нет,
-          статус телефона стоит — долгий «Тренинг» в телефоне сам сессию не рвёт.
+          статус телефона стоит — долгий «Тренинг» в телефоне сам сессию не рвёт;
+        - «офлайн» телефона (LIVE_STATUS_YIELD_KEYS) сессию не закрывает, но время у выгрузки
+          не забирает. Выгрузка на этот момент в рабочем состоянии (и оно свежее) — ряд с этой
+          же секунды идёт по ней. Иначе в ряду стоит «офлайн», пока в выгрузке не появится
+          рабочее событие: с него ряд идёт по выгрузке, не дожидаясь порога молчания.
+          Следующее событие телефона открывает его сессию заново.
         """
         events = list(events or [])
         if not (any(event.get('live') for event in events)
@@ -309,6 +321,8 @@ class OperatorStatusMixin:
         resume_max_age = timedelta(seconds=int(self.LIVE_STATUS_RESUME_MAX_AGE_SECONDS))
         merged = []
         session_open = False
+        # Сессия открыта, но телефон стоит в «офлайн»: рабочее событие выгрузки её закрывает.
+        yielding = False
         last_live_at = None
         last_imported = None
 
@@ -316,27 +330,41 @@ class OperatorStatusMixin:
             """Состояние выгрузки на этот момент — событием в ряд (если оно ещё свежее)."""
             if last_imported is not None and moment - last_imported.get('event_at') <= resume_max_age:
                 merged.append(dict(last_imported, event_at=moment))
+                return True
+            return False
 
         for event in events:
             event_at = event.get('event_at')
             if event.get('live'):
                 merged.append(event)
-                if event.get('status_key') in self.LIVE_STATUS_OFF_KEYS:
+                status_key = event.get('status_key')
+                if status_key in self.LIVE_STATUS_OFF_KEYS:
                     # Тем же моментом возвращаем состояние выгрузки: из двух событий с
                     # одним временем ряд оставляет последнее (см. канонизацию выше).
                     session_open = False
+                    yielding = False
                     resume_imported(event_at)
                 else:
                     session_open = True
                     last_live_at = event_at
+                    yielding = status_key in self.LIVE_STATUS_YIELD_KEYS
+                    # Человек в эту секунду работает в Oktell — ряд сразу идёт по выгрузке
+                    # (тем же приёмом, что у «выключен»: событие выгрузки тем же моментом).
+                    if (yielding and last_imported is not None
+                            and last_imported.get('status_key') not in self.LIVE_STATUS_IDLE_IMPORT_KEYS
+                            and resume_imported(event_at)):
+                        session_open = False
                 continue
             if session_open:
-                if (event_at - last_live_at <= silence_limit
-                        or event.get('status_key') in self.LIVE_STATUS_IDLE_IMPORT_KEYS):
+                idle_import = event.get('status_key') in self.LIVE_STATUS_IDLE_IMPORT_KEYS
+                if yielding and not idle_import:
+                    session_open = False
+                elif event_at - last_live_at <= silence_limit or idle_import:
                     last_imported = event
                     continue
-                session_open = False
-                resume_imported(last_live_at + silence_limit)
+                else:
+                    session_open = False
+                    resume_imported(last_live_at + silence_limit)
             last_imported = event
             merged.append(event)
         return merged

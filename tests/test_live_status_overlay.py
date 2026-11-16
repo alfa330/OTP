@@ -33,7 +33,7 @@ def _mixin(namespace_extra=None):
     node = next(n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "OperatorStatusMixin")
     wanted = {
         "LIVE_STATUS_OFF_KEYS", "LIVE_STATUS_SILENCE_LIMIT_SECONDS", "LIVE_STATUS_IDLE_IMPORT_KEYS",
-        "LIVE_STATUS_RESUME_MAX_AGE_SECONDS",
+        "LIVE_STATUS_RESUME_MAX_AGE_SECONDS", "LIVE_STATUS_YIELD_KEYS",
         "_overlay_live_status_sessions", "_status_transition_signature",
         "_canonicalize_status_transition_events", "_split_status_segment_datetimes_by_day",
         "_status_import_event_kind_from_key", "_rebuild_operator_status_segments_tx",
@@ -258,6 +258,121 @@ class OverlayRuleTests(unittest.TestCase):
         ]
         self.assertEqual(timeline(events), [
             (at(10), "готов"), (at(12, 30), "перерыв"), (at(13), "занят")])
+
+    # ── «Офлайн» телефона: выброс за простой (удалённый КЦ — 3 минуты в «Исходе» без звонка) ──
+
+    def test_kicked_phone_stays_offline_while_oktell_is_closed(self):
+        """Обзвон в телефоне, сессию Oktell закрыли при входе. Выброс в 12:03 — «офлайн» стоит,
+        пока оператор не выберет «Исход»: «Выключен» и «Без телефона» в Oktell его не подменяют."""
+        events = [
+            ev(1, at(9), "готов", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(10, 0, 5), "выключен", False),
+            ev(4, at(12), "перезвон", True),
+            ev(5, at(12, 3), "офлайн", True, "простой"),
+            ev(6, at(12, 10), "без телефона", False),
+            ev(7, at(12, 11), "выключен", False),
+            ev(8, at(14), "без телефона", False),          # и позже порога молчания
+            ev(9, at(14, 30), "перезвон", True),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "готов"), (at(10), "перезвон"), (at(12, 3), "офлайн"), (at(14, 30), "перезвон")])
+
+    def test_kicked_phone_gives_way_to_oktell_work_at_once(self):
+        """Оператор закончил обзвон, телефон не закрыл и в 12:05 вернулся на линию в Oktell.
+        Раньше «перезвон» телефона прятал Oktell ещё час; «офлайн» не прячет ни минуты."""
+        events = [
+            ev(1, at(9), "выключен", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(12, 3), "офлайн", True, "простой"),
+            ev(4, at(12, 5), "готов", False),
+            ev(5, at(12, 20), "занят", False),
+            ev(6, at(12, 25), "готов", False),
+            ev(7, at(13), "выключен", False),              # дальше день идёт по Oktell целиком
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "выключен"), (at(10), "перезвон"), (at(12, 3), "офлайн"), (at(12, 5), "готов"),
+            (at(12, 20), "занят"), (at(12, 25), "готов"), (at(13), "выключен")])
+
+    def test_kick_while_already_working_in_oktell(self):
+        """Обычный порядок: сначала открыл Oktell (12:01, «Готов»), а телефон выбросило через
+        три минуты после последнего звонка. С секунды выброса ряд идёт по Oktell — «офлайн»
+        в ряд не попадает, ни одной оплачиваемой минуты не пропало."""
+        events = [
+            ev(1, at(9), "выключен", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(12), "перезвон", True),
+            ev(4, at(12, 1), "готов", False),
+            ev(5, at(12, 3), "офлайн", True, "простой"),
+            ev(6, at(12, 40), "занят", False),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "выключен"), (at(10), "перезвон"), (at(12, 3), "готов"), (at(12, 40), "занят")])
+
+    def test_kick_resumes_oktell_break_too(self):
+        """На момент выброса в Oktell перерыв — сессия Oktell жива, действует её состояние."""
+        events = [
+            ev(1, at(9), "выключен", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(11, 55), "занят", True),
+            ev(4, at(12), "перезвон", True),
+            ev(5, at(12, 1), "перерыв", False),
+            ev(6, at(12, 3), "офлайн", True, "простой"),
+            ev(7, at(12, 30), "готов", False),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "выключен"), (at(10), "перезвон"), (at(11, 55), "занят"), (at(12), "перезвон"),
+            (at(12, 3), "перерыв"), (at(12, 30), "готов")])
+
+    def test_phone_takes_the_time_back_after_a_kick(self):
+        """Вернулся в телефон и выбрал «Исход» — снова считается телефон, Oktell внутри не виден."""
+        events = [
+            ev(1, at(9), "выключен", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(12, 3), "офлайн", True, "простой"),
+            ev(4, at(12, 5), "готов", False),
+            ev(5, at(13), "перезвон", True),
+            ev(6, at(13, 10), "перерыв", False),
+            ev(7, at(13, 20), "занят", True),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "выключен"), (at(10), "перезвон"), (at(12, 3), "офлайн"), (at(12, 5), "готов"),
+            (at(13), "перезвон"), (at(13, 20), "занят")])
+
+    def test_restored_offline_without_a_note_yields_too(self):
+        """Телефон обновился в «Офлайн» и после перезапуска прислал «офлайн» без пометки —
+        правило то же: решает ключ статуса, а не пометка."""
+        events = [
+            ev(1, at(9), "выключен", False),
+            ev(2, at(10), "перезвон", True),
+            ev(3, at(12, 3), "офлайн", True, "простой"),
+            ev(4, at(12, 4), "выключен", True),
+            ev(5, at(12, 4, 30), "офлайн", True),
+            ev(6, at(12, 10), "готов", False),
+        ]
+        self.assertEqual(timeline(events), [
+            (at(9), "выключен"), (at(10), "перезвон"), (at(12, 3), "офлайн"), (at(12, 4), "выключен"),
+            (at(12, 4, 30), "офлайн"), (at(12, 10), "готов")])
+
+    def test_stale_oktell_state_is_not_resumed_by_a_kick(self):
+        """У отдела продаж в базе лежат выгрузки трёхмесячной давности, а выбросы в «офлайн»
+        (пометка «авто») у них идут каждый день: ряд остаётся рядом телефона, как до правки."""
+        old = datetime.combine(DAY - timedelta(days=100), dt_time(18))
+        live_day = [ev(2, at(9), "исход", True), ev(3, at(9, 5), "офлайн", True, "авто"),
+                    ev(4, at(9, 30), "исход", True), ev(5, at(9, 31), "соединение", True),
+                    ev(6, at(9, 32), "занят", True), ev(7, at(9, 40), "исход", True),
+                    ev(8, at(18), "выключен", True)]
+        db = _Db()
+        for stale_key in ("готов", "active", "online", "выключен", "inactive"):
+            with_stale = [ev(1, old, stale_key, False)] + live_day
+            self.assertEqual(db._overlay_live_status_sessions(with_stale), with_stale, stale_key)
+
+    def test_yield_keys(self):
+        self.assertEqual(_Db.LIVE_STATUS_YIELD_KEYS, frozenset({"офлайн"}))
+        # «Офлайн» — не рабочее время ни в одной модели: уступив выгрузке, он ничего не отнимает.
+        core = (ROOT / "db" / "core.py").read_text(encoding="utf-8-sig")
+        work = core[core.index("SCHEDULE_AUTO_WORK_STATUS_KEYS = {"):core.index("SCHEDULE_AUTO_TALK_STATUS_KEYS")]
+        self.assertNotIn("офлайн", work)
 
     def test_silence_limit_is_an_hour_by_default(self):
         self.assertEqual(_Db.LIVE_STATUS_SILENCE_LIMIT_SECONDS, 3600)

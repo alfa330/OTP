@@ -586,6 +586,61 @@ def oktell_logout_enabled():
     return (os.getenv(OKTELL_LOGOUT_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+# Удалённый КЦ: «Офлайн» за простой и набор статусов без «Активного» (владелец 16.11.2026: «в
+# удалённом КЦ операторов выкинуло за 3 минуты без звонков, и у этого направления не должно быть
+# активного, а только исход»). В обзвоне удалённого КЦ звонит сам оператор — кнопкой «Позвонить»;
+# «Активный» там ничего не включает, а «Исход» оплачивается как работа, сколько бы человек в нём
+# ни простоял: за 11–16.11.2026 у 42 операторов из 304 часов «Исхода» 174 часа пришлись на простой
+# дольше трёх минут без звонка. Телефон (3.22.55+) по этим ключам блока dial_list:
+#   no_active             — убирает «Активный» из меню статусов (рабочий статус один — «Исход»);
+#   idle_offline_sec      — сам ставит «Офлайн» (ключ «офлайн» с пометкой «простой» — не рабочее
+#                           время), когда оператор простоял в «Исходе» столько секунд без звонка;
+#                           вернуться в работу — выбрать «Исход». 0 — не выбрасывать;
+#   idle_offline_warn_sec — за сколько секунд до выброса предупреждает (отсчёт на пилюле, балун).
+# Только профиль remote_cc и только тем, у кого обзвон включён: у автообзвона Тез «Активный» —
+# статус автоцикла, и «Офлайн» там свой, за итог, не заполненный в срок. Телефон старше 3.22.55
+# ключей не знает и работает как раньше. Рубильники читаются на каждый запрос настроек (телефон
+# перечитывает их раз в 10 минут и применяет без перезапуска): REMOTE_CC_IDLE_OFFLINE_SEC — срок
+# в секундах (0 — выключить), REMOTE_CC_IDLE_OFFLINE_WARN_SEC, REMOTE_CC_NO_ACTIVE=0 — вернуть
+# «Активный».
+IDLE_OFFLINE_ENV = "REMOTE_CC_IDLE_OFFLINE_SEC"
+IDLE_OFFLINE_DEFAULT_SEC = 180
+IDLE_OFFLINE_MAX_SEC = 3600
+IDLE_OFFLINE_WARN_ENV = "REMOTE_CC_IDLE_OFFLINE_WARN_SEC"
+IDLE_OFFLINE_WARN_DEFAULT_SEC = 30
+NO_ACTIVE_ENV = "REMOTE_CC_NO_ACTIVE"
+
+
+def _env_seconds(name, default, maximum):
+    """Секунды из переменной окружения: пусто или не число — default; границы 0..maximum."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return max(0, min(int(default), int(maximum)))
+    try:
+        value = int(raw)
+    except ValueError:
+        value = int(default)
+    return max(0, min(value, int(maximum)))
+
+
+def idle_offline_seconds():
+    """Срок простоя в «Исходе» до «Офлайн» у удалённого КЦ, секунды; 0 — правило выключено."""
+    return _env_seconds(IDLE_OFFLINE_ENV, IDLE_OFFLINE_DEFAULT_SEC, IDLE_OFFLINE_MAX_SEC)
+
+
+def idle_offline_warn_seconds(limit):
+    """За сколько секунд до «Офлайн» телефон предупреждает: всегда меньше срока; 0 — без
+    предупреждения (и при выключенном правиле)."""
+    limit = int(limit or 0)
+    if limit <= 0:
+        return 0
+    return _env_seconds(IDLE_OFFLINE_WARN_ENV, IDLE_OFFLINE_WARN_DEFAULT_SEC, limit - 1)
+
+
+def no_active_enabled():
+    return (os.getenv(NO_ACTIVE_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 # Звонки из телефона — в «Звонки» «Учёта часов» (задача SZOV-4; владелец 10.11.2026: «все звонки
 # нужно учитывать»). Время оператора СЗоВ на обзвоне с 10.11 считается по телефону, а «Звонки» дня
 # писал только синк Oktell: часы у человека на обзвоне росли, звонки нет, и «звонков в час» — до
@@ -2640,6 +2695,9 @@ class DialListService:
         enabled = resolve_enabled(self.user_setting(user_id), dept["enabled"] if dept["configured"] else None)
         # Свой отдел сидящего на чужой линии: в карточке раздела он подменён отделом линии.
         own_code = self._own_department_code(user_id) if operator.get("line_member") else ""
+        # Правила статусов удалённого КЦ (IDLE_OFFLINE_ENV): тем, у кого обзвон включён, и не Тез.
+        remote_cc_rules = bool(enabled and not is_tez(dept))
+        idle_offline_sec = idle_offline_seconds() if remote_cc_rules else 0
         return {
             "enabled": enabled,
             # Телефон показывает переключатель «Удалённый КЦ» в меню статуса (3.22.45+).
@@ -2649,6 +2707,11 @@ class DialListService:
             # обычного телефона человек к обзвону не подключается.
             "oktell_logout": bool(enabled and own_code in OKTELL_LOGOUT_DEPARTMENT_CODES
                                   and oktell_logout_enabled()),
+            # Удалённый КЦ (3.22.55+): «Офлайн» за простой в «Исходе» без звонка и меню статусов
+            # без «Активного». Ключи есть всегда: 0 и false — «правила нет».
+            "idle_offline_sec": idle_offline_sec,
+            "idle_offline_warn_sec": idle_offline_warn_seconds(idle_offline_sec),
+            "no_active": bool(remote_cc_rules and no_active_enabled()),
             "portion_size": dept["portion_size"],
             "leg_timeout_sec": LEG_TIMEOUT_SEC,
             # Телефон в этом режиме прячет номера везде: история, окно звонка,
