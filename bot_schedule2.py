@@ -54905,6 +54905,50 @@ def _line_watch_start():
     return True
 
 
+# ── Пульс телефона (phone_liveness, 16.11.2026) ──────────────────────────────────────────────
+# iCORE Phone сообщает «выключен» только при обычном выходе. Выключили компьютер, пропала сеть —
+# и последний статус висит на сервере часами и сутками: оператор числится на линии, часы идут
+# (08.11.2026 «готов» одного оператора провисел 73 часа). Сервер сам закрывает статус, когда
+# телефон не выходит на связь 30 минут (решение владельца 16.11.2026), и продолжает его, когда
+# телефон появляется снова. Пульс — активность сессии телефона (user_sessions.last_seen_at).
+#   PHONE_LIVENESS_DEPARTMENTS  коды отделов через запятую, '*' — все (по умолчанию op,tez)
+#   PHONE_LIVENESS_SILENCE_MIN  сколько минут молчания закрывает статус (30)
+#   PHONE_LIVENESS=0            выключает обход целиком
+_phone_liveness_service = None
+try:
+    if not _env_bool('PHONE_LIVENESS', True):
+        logging.info("Пульс телефона: выключен переменной PHONE_LIVENESS")
+    elif JWT_SESSION_TOUCH_INTERVAL_SECONDS > 600:
+        # Пульс — это last_seen_at сессии. Если его отмечают реже, чем телефон выходит на связь
+        # (раз в 10 минут), молчание живого телефона неотличимо от мёртвого — обход не запускаем.
+        logging.warning("Пульс телефона: выключен — активность сессий отмечается реже раза в 10 минут "
+                        "(JWT_SESSION_TOUCH_INTERVAL_SECONDS=%s)", JWT_SESSION_TOUCH_INTERVAL_SECONDS)
+    else:
+        from phone_liveness.service import PhoneLivenessService  # noqa: E402
+
+        _phone_liveness_service = PhoneLivenessService(
+            db,
+            department_codes=[code.strip() for code in
+                              str(os.getenv('PHONE_LIVENESS_DEPARTMENTS', 'op,tez')).split(',') if code.strip()],
+            silence_seconds=_env_int('PHONE_LIVENESS_SILENCE_MIN', 30, minimum=10, maximum=24 * 60) * 60,
+        )
+        logging.info("Пульс телефона: подключён (отделы: %s, молчание %d мин)",
+                     ', '.join(_phone_liveness_service.department_codes),
+                     _phone_liveness_service.silence_seconds // 60)
+except Exception:
+    _phone_liveness_service = None
+    logging.exception("Пульс телефона: НЕ подключён")
+
+
+def _phone_liveness_start():
+    """Поток пульса телефона. Свой, не из общего пула бота: обход пишет события статусов и не
+    должен занимать место, которого ждут отбивки и ответы людям."""
+    if _phone_liveness_service is None:
+        return False
+    threading.Thread(target=_phone_liveness_service.run, name='phone-liveness', daemon=True).start()
+    return True
+
+
 def _calls_api_job(name):
     """Задача планировщика «Звонков Binotel»: sync — сверка с историей, cleanup — срок хранения."""
     if _calls_api_service is None:
@@ -59972,6 +60016,13 @@ if __name__ == '__main__':
             logging.info("⏰ Сторож линий Binotel: сверка телефона с кабинетом раз в минуту запущена")
     except Exception:
         logging.exception("Сторож линий Binotel: поток не запущен")
+
+    # Пульс телефона — своим потоком; первые 15 минут после старта он только смотрит.
+    try:
+        if _phone_liveness_start():
+            logging.info("⏰ Пульс телефона: обход раз в две минуты запущен")
+    except Exception:
+        logging.exception("Пульс телефона: поток не запущен")
 
     scheduler.start()
 

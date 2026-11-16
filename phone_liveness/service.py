@@ -1,0 +1,150 @@
+# -*- coding: utf-8 -*-
+"""Обход пульса телефона: раз в две минуты закрывает статусы молчащих телефонов и продолжает
+статус тех, кто вернулся. Свой поток: в общий пул бота (4 места) не ходит.
+
+Событие пишется штатным db.append_operator_status_event — с тем же замком оператора, пересборкой
+отрезков и пересчётом часов, что и у события самого телефона. Закрытие — «выключен» с пометкой
+«нет связи с телефоном», возврат — прежний статус с пометкой «связь восстановлена»: в ленте
+статусов видно, что это сделал сервер, а не оператор.
+
+Возврат ставится через секунду после закрытия, то есть закрытие отменяется: телефон, вернувшийся
+без нового события статуса, всё это время работал, пропадала только связь. Выключенный телефон
+при запуске сам присылает стартовый статус, и его закрытие остаётся как есть.
+"""
+import logging
+import time
+from datetime import datetime, timedelta
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None
+
+from . import rules, store
+
+log = logging.getLogger(__name__)
+
+SWEEP_SECONDS = 120
+ERROR_LOG_EVERY_SECONDS = 1800
+
+
+def almaty_now():
+    """Наивное «сейчас» по Алмате — в этих часах лежат и события статусов, и активность сессий."""
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo('Asia/Almaty')).replace(tzinfo=None)
+        except Exception:  # noqa: BLE001 — нет базы поясов: ниже то же смещение числом
+            pass
+    return datetime.utcnow() + timedelta(hours=5)
+
+
+class PhoneLivenessService(object):
+    """db — база (нужны _get_cursor и append_operator_status_event);
+    department_codes — коды отделов, за чьими телефонами следим ('*' — все);
+    rebuild_days(operator_id, с, по) — пересобрать дни после давнего закрытия (необязателен)."""
+
+    def __init__(self, db, department_codes, append_event=None, rebuild_days=None, now=None,
+                 monotonic=None, interval=SWEEP_SECONDS, silence_seconds=rules.SILENCE_SECONDS):
+        self.db = db
+        self.department_codes = [str(code).strip().lower() for code in (department_codes or [])
+                                 if str(code).strip()]
+        self._append = append_event or db.append_operator_status_event
+        self._rebuild = rebuild_days or getattr(db, 'rebuild_operator_status_days', None)
+        self._now = now or almaty_now
+        self._monotonic = monotonic or time.monotonic
+        self._started = self._monotonic()
+        self.interval = max(30, int(interval or SWEEP_SECONDS))
+        self.silence_seconds = max(600, int(silence_seconds or rules.SILENCE_SECONDS))
+        self._error_logged = {}
+
+    def _complain(self, key, text, exc=False):
+        """Одна и та же беда — в журнал сервера не чаще раза в полчаса."""
+        mark = self._monotonic()
+        if mark - self._error_logged.get(key, -ERROR_LOG_EVERY_SECONDS) < ERROR_LOG_EVERY_SECONDS:
+            return
+        self._error_logged[key] = mark
+        if exc:
+            log.exception('phone_liveness: %s', text)
+        else:
+            log.warning('phone_liveness: %s', text)
+
+    def sweep(self):
+        """Один обход. Возвращает {'closed': n, 'restored': n, 'held': причина или None}."""
+        if not self.department_codes:
+            return {'closed': 0, 'restored': 0, 'held': None}
+        now = self._now()
+        with self.db._get_cursor() as cursor:
+            rows = store.load_rows(cursor, self.department_codes, now)
+            freshest = store.freshest_pulse(cursor, now)
+        decision = rules.plan(rows, now, freshest, self._monotonic() - self._started, self.silence_seconds)
+        if decision['held'] == 'pulse_stale':
+            self._complain('pulse_stale', 'активность сессий телефонов не обновляется — '
+                           'молчащие телефоны не закрываем (ждут: %d)' % decision['candidates'])
+        elif decision['held'] == 'mass_silence':
+            self._complain('mass_silence', 'молчит слишком много телефонов разом (%d) — похоже на сбой, '
+                           'статусы не закрываем' % decision['candidates'])
+        closed = sum(1 for row in decision['close'] if self._close(row, now))
+        restored = sum(1 for row in decision['restore'] if self._restore(row))
+        return {'closed': closed, 'restored': restored, 'held': decision['held']}
+
+    def _close(self, row, now):
+        moment = rules.close_moment(row, now)
+        try:
+            result = self._append(operator_id=row['operator_id'], event_at=moment,
+                                  status_key=rules.OFF_KEY, state_note=rules.CLOSE_NOTE,
+                                  client_event_id=rules.close_event_id(row)) or {}
+        except Exception:  # noqa: BLE001 — один оператор не должен остановить обход
+            self._complain('close', 'статус оператора %s закрыть не удалось' % row['operator_id'], exc=True)
+            return False
+        if result.get('duplicate') or result.get('noop'):
+            return False
+        log.info('phone_liveness: оператор %s — «%s» закрыт моментом %s: телефон молчит с %s',
+                 row['operator_id'], row['key'], moment.strftime('%d.%m %H:%M'),
+                 rules.last_sign(row).strftime('%d.%m %H:%M'))
+        self._rebuild_after(row['operator_id'], moment)
+        return True
+
+    def _restore(self, row):
+        try:
+            with self.db._get_cursor() as cursor:
+                key = store.previous_status(cursor, row)
+            if not key:
+                return False
+            moment = rules.restore_moment(row)
+            result = self._append(operator_id=row['operator_id'], event_at=moment, status_key=key,
+                                  state_note=rules.RESTORE_NOTE,
+                                  client_event_id=rules.restore_event_id(row)) or {}
+        except Exception:  # noqa: BLE001
+            self._complain('restore', 'статус оператора %s продолжить не удалось' % row['operator_id'],
+                           exc=True)
+            return False
+        if result.get('duplicate') or result.get('noop'):
+            return False
+        log.info('phone_liveness: оператор %s — телефон снова на связи с %s и статус не менял: '
+                 '«%s» продолжен с момента закрытия %s',
+                 row['operator_id'], row['pulse'].strftime('%d.%m %H:%M'), key, moment.strftime('%d.%m %H:%M'))
+        self._rebuild_after(row['operator_id'], moment)
+        return True
+
+    def _rebuild_after(self, operator_id, moment):
+        """Событие само пересобирает свой день и соседние; если оно легло в прошлое дальше, дни
+        после них остались с прежней картиной — пересобираем их до сегодняшнего."""
+        first, last = moment.date() + timedelta(days=2), self._now().date()
+        if self._rebuild is None or first > last:
+            return
+        try:
+            self._rebuild(operator_id, first, last)
+        except Exception:  # noqa: BLE001
+            self._complain('rebuild', 'дни после события у оператора %s не пересобраны' % operator_id, exc=True)
+
+    def run(self, stop=None):
+        """Цикл обхода. stop — threading.Event для остановки (в проде поток живёт с процессом)."""
+        while not (stop is not None and stop.is_set()):
+            try:
+                self.sweep()
+            except Exception:  # noqa: BLE001 — база не ответила: ждём следующий обход
+                self._complain('sweep', 'обход не удался', exc=True)
+            if stop is not None:
+                stop.wait(self.interval)
+            else:
+                time.sleep(self.interval)

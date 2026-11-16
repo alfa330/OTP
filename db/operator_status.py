@@ -1783,3 +1783,35 @@ class OperatorStatusMixin:
                 'seconds': seconds,
             }
         return out
+
+    def rebuild_operator_status_days(self, operator_id, start_date, end_date):
+        """Пересобрать отрезки статусов и дневные часы одного оператора за дни [start_date, end_date].
+
+        Событие статуса само пересобирает свой день и соседние (append_operator_status_event).
+        Этого мало, когда событие ложится в прошлое дальше суток: «выключен», которым сервер
+        закрывает статус телефона, умершего три дня назад, обязан снять «висящий» статус и со
+        всех дней после — их и пересобирает этот метод. Не больше 14 дней за вызов: дальше
+        пересборка одного оператора держала бы его замок слишком долго."""
+        operator_id = int(operator_id)
+        start_obj = start_date.date() if isinstance(start_date, datetime) else start_date
+        end_obj = end_date.date() if isinstance(end_date, datetime) else end_date
+        if end_obj < start_obj:
+            return {'segments_saved': 0, 'days': 0}
+        if (end_obj - start_obj).days > 13:
+            start_obj = end_obj - timedelta(days=13)
+        with self._get_cursor() as cursor:
+            rebuilt = self._rebuild_operator_status_segments_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start_obj,
+                end_date=end_obj,
+                imported_by=None
+            )
+            self._recalculate_auto_daily_hours_tx(
+                cursor=cursor,
+                operator_ids=[operator_id],
+                start_date=start_obj,
+                end_date=end_obj
+            )
+        return {'segments_saved': int((rebuilt or {}).get('segments_saved') or 0),
+                'days': (end_obj - start_obj).days + 1}
