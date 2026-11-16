@@ -565,7 +565,11 @@ export const departmentUsesEmployeeJobTitle = (user) => departmentCodeUsesEmploy
 // фронт-офисы не вписаны намеренно — тот набор ещё и меняет списки (подпись
 // строки, дни рождения, колонка «Должность») на должность вместо направления, а
 // у фронт-офисов людей различают направлением.
-const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = new Set(['front_office']);
+// СЗоВ, ОП, IT и финаналитика — решение владельца 16.11.2026: должности по его
+// «Списку работников» записаны всем, а у этих отделов поля в карточке не было —
+// руководителю, тренеру, сисадмину и аналитику должность было не поправить.
+// Тоже только форма: списки этих отделов остаются при направлении.
+const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = new Set(['front_office', 'szov', 'op', 'it', 'analytik']);
 
 export const departmentCodeAsksEmployeeJobTitle = (code) => {
     const normalized = normalizeDepartmentCodeValue(code);
@@ -573,6 +577,19 @@ export const departmentCodeAsksEmployeeJobTitle = (code) => {
         EMPLOYEE_JOB_TITLE_DEPARTMENTS.has(normalized) || EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS.has(normalized)
     );
 };
+
+// Пример в пустом поле «Должность» — из жизни отдела сотрудника: бухгалтерский
+// пример в карточке тренера или сисадмина читался бы как ошибка формы.
+const EMPLOYEE_JOB_TITLE_PLACEHOLDERS = {
+    front_office: 'Например, менеджер',
+    szov: 'Например, тренер',
+    op: 'Например, руководитель ОП',
+    it: 'Например, системный администратор',
+    analytik: 'Например, финансовый аналитик',
+};
+
+export const departmentCodeEmployeeJobTitlePlaceholder = (code) =>
+    EMPLOYEE_JOB_TITLE_PLACEHOLDERS[normalizeDepartmentCodeValue(code)] || 'Например, бухгалтер по расчётам';
 
 // Отделы, у сотрудников которых не спрашиваем «Был во фронт офисе на обучении»:
 // сотрудники фронт-офисов и есть фронт офис, отметка для них бессмысленна, а

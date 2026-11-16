@@ -498,7 +498,7 @@ class FrontOfficeEmployeeCardFieldsTests(unittest.TestCase):
             " departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId,"
             " departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields,"
             " departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle,"
-            " managesEmployeeAccounting }"
+            " departmentCodeEmployeeJobTitlePlaceholder, managesEmployeeAccounting }"
             " from '../../utils/departmentViews';",
             modal,
         )

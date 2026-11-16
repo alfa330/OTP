@@ -482,7 +482,13 @@ class EmployeeJobTitleFieldTests(unittest.TestCase):
         # Форма спрашивает должность ещё и у фронт-офисов (колонка табеля,
         # 06.11.2026) — отдельным признаком, списки по-прежнему на наборе выше.
         self.assertIn("export const departmentCodeAsksEmployeeJobTitle = (code) => {", views)
-        self.assertIn("const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = new Set(['front_office']);", views)
+        # С 16.11.2026 — ещё СЗоВ, ОП, IT и финаналитика: должности по «Списку
+        # работников» владельца записаны всем, а поправить их в карточке было негде.
+        self.assertIn(
+            "const EMPLOYEE_JOB_TITLE_FORM_ONLY_DEPARTMENTS = "
+            "new Set(['front_office', 'szov', 'op', 'it', 'analytik']);",
+            views,
+        )
         modal = _read(MODAL_PATH)
         self.assertIn(
             "const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);",

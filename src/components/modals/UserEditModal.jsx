@@ -4,7 +4,7 @@ import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
 import useScreenBackGesture from '../common/useScreenBackGesture';
 import { headedDepartmentsOf, isAdminLikeRole as isAdminLikeRoleFn, normalizeRole } from '../../utils/roles';
-import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle, managesEmployeeAccounting } from '../../utils/departmentViews';
+import { departmentCodeHasOptionalEmployeeDirection, departmentCodeHasOptionalEmployeeGroup, departmentCodeHidesEmployeeDirection, departmentCodeHidesEmployeeInternship, departmentCodeHidesEmployeeSipInput, departmentCodeHidesEmployeeTaxiproId, departmentCodeHidesFrontOfficeTraining, departmentCodeHidesOperatorFields, departmentCodeUsesEmployeeCity, departmentCodeAsksEmployeeJobTitle, departmentCodeEmployeeJobTitlePlaceholder, managesEmployeeAccounting } from '../../utils/departmentViews';
 import { employeeRoleForDepartmentCode } from '../../utils/departmentViews';
 import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kazakhstanCities';
 import { directionForPickedGroup } from '../../utils/groupDirection';
@@ -388,7 +388,8 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // «Должность» — у бэк-офиса взамен направления и группы: там людей
     // различают именно ею. Свободный ввод, а не справочник: перечня
     // должностей в системе нет и заводить его владелец не просил. У
-    // фронт-офисов поле есть ради колонки «Должность» табеля (06.11.2026).
+    // фронт-офисов поле есть ради колонки «Должность» табеля (06.11.2026); у СЗоВ,
+    // ОП, IT и финаналитики — с 16.11.2026 (должности по «Списку работников»).
     const showEmployeeJobTitle = departmentCodeAsksEmployeeJobTitle(effectiveDeptCode);
     // «Прием», ТЗ п. 2–3: данные для документов новой учётки и умолчание оформления её отдела.
     const intake = editedUser?.hr_intake || {};
@@ -400,9 +401,7 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     const statusOptions = hrFeatures
         ? employmentStatusOptions(editedUser?.employment_type, editedUser?.status, { withFired: true })
         : LEGACY_STATUS_OPTIONS;
-    const employeeJobTitlePlaceholder = String(effectiveDeptCode || '').toLowerCase() === 'front_office'
-        ? 'Например, менеджер'
-        : 'Например, бухгалтер по расчётам';
+    const employeeJobTitlePlaceholder = departmentCodeEmployeeJobTitlePlaceholder(effectiveDeptCode);
     const showFrontOfficeTraining = !departmentCodeHidesFrontOfficeTraining(effectiveDeptCode);
     // Группа, направление и SIP-номер — поля человека НА ЛИНИИ. У бэк-офиса
     // (Бухгалтерия, HR) ни групп, ни направлений, ни телефонии нет: выпадашки
