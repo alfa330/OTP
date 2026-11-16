@@ -78,6 +78,11 @@ def is_on_shift_key(key):
     return normalize_key(key) in ON_SHIFT_KEYS
 
 
+def is_off_shift_key(key):
+    """Конец смены: «выключен» раздела и телефона или их синонимы из других источников."""
+    return normalize_key(key) in _OFF_SHIFT_KEYS
+
+
 def writes_allowed(event):
     """Можно ли писать клиентам при этом последнем событии статуса: только в «Активном».
 

@@ -8612,6 +8612,22 @@ try:
 except Exception:
     logging.exception("Чаты ОП: рабочее место НЕ подключено")
 
+# «Операторы → Смены» в «Чатах ОП» (wazzup/shift_report.py): кто из чат-менеджеров когда работал
+# и как обрабатывал чаты. Допуск — как у «Аналитики» раздела; нормы ответа — те же переменные,
+# что у «Табло ОП · Чат», чтобы отчёт и табло судили по одной цифре. Аккаунт — лямбдой: функция
+# объявлена ниже по файлу.
+from wazzup import shift_report_routes as wazzup_shift_report_routes  # noqa: E402
+
+app.register_blueprint(wazzup_shift_report_routes.build_shift_report_blueprint(
+    db=db, require_api_key=require_api_key, preflight=_build_cors_preflight_response,
+    guard=_verifier_chats_guard, account_arg=lambda: _wazzup_account_arg(),
+    max_days=_env_int('WAZZUP_SHIFT_REPORT_MAX_DAYS', 31, minimum=1, maximum=45),
+    first_target_seconds=_env_int('OP_CHAT_WALLBOARD_FIRST_TARGET_SECONDS', 60,
+                                  minimum=10, maximum=3600),
+    inner_target_seconds=_env_int('OP_CHAT_WALLBOARD_INNER_TARGET_SECONDS', 240,
+                                  minimum=10, maximum=3600),
+))
+
 
 def _wazzup_account_arg():
     """Аккаунт Wazzup из ?account=… (пусто — «op»). None — незнакомое значение:
