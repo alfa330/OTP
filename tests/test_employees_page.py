@@ -60,7 +60,7 @@ class ProjectionMatchesFullListsTests(unittest.TestCase):
         self.assertEqual(_columns(rows.USERS_SQL, 'WHERE u.id = ANY'), _columns(legacy, 'WHERE u.role = ANY'))
 
     def test_users_row_has_every_field_of_get_admin_users(self):
-        built = rows.user_row([None] * 8 + [1.0] + [None] * 45, avatar_url=lambda *_: None, proxy_labels={})
+        built = rows.user_row([None] * 8 + [1.0] + [None] * 46, avatar_url=lambda *_: None, proxy_labels={})
         self.assertEqual(list(built), _dict_keys(_function('get_admin_users'), 'users'))
 
     def test_supervisors_select_is_the_full_profile_of_get_sv_list(self):
@@ -69,7 +69,7 @@ class ProjectionMatchesFullListsTests(unittest.TestCase):
                          _columns(legacy, "WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')"))
 
     def test_supervisors_row_has_every_field_of_the_full_profile(self):
-        built = rows.supervisor_row([None] * 43, avatar_url=lambda *_: None, proxy_labels={},
+        built = rows.supervisor_row([None] * 44, avatar_url=lambda *_: None, proxy_labels={},
                                     normalize_role=lambda value: value)
         self.assertEqual(list(built), _dict_keys(_function('get_sv_list'), 'sv_data'))
 

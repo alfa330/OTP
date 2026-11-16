@@ -394,6 +394,12 @@ html[data-ecp-nav="swap"]::view-transition-new(ecp-field) {
     color: var(--ecp-label-strong);
 }
 
+/* Ник выделяется одним щелчком целиком — логин копируют, чтобы передать человеку. */
+.ecp-nick {
+    user-select: all;
+    -webkit-user-select: all;
+}
+
 .ecp-actions {
     flex: none;
     display: flex;

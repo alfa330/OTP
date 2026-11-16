@@ -72,7 +72,7 @@ SCHEMA = '''
         card_number text, internship_in_company boolean, front_office_training boolean,
         front_office_training_date date, taxipro_id text, study_completed boolean, study_completion_year integer,
         department_id integer, direction_id integer, supervisor_id integer, city text, job_title text,
-        study_specialty text, hours_table_url text
+        study_specialty text, hours_table_url text, login text
     );
     CREATE TABLE group_operator_memberships (
         id serial PRIMARY KEY, group_id integer, operator_id integer, start_date date, end_date date

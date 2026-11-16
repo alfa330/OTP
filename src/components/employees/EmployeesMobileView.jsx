@@ -284,6 +284,8 @@ export default function EmployeesMobileView({
                     <Photo person={employee} Avatar={Avatar} className="emp-card-photo" />
                     <div className="emp-card-name" role="heading" aria-level={2}>{employee?.name || '—'}</div>
                     <div className="emp-card-sub">
+                        {/* Логин — ником «@логин», как на странице сотрудника на компьютере. */}
+                        {String(employee?.login || '').trim() && <span>@{String(employee.login).trim()}</span>}
                         {subtitle && <span>{subtitle}</span>}
                         <span className={code === 'working' ? undefined : (danger ? 'is-danger' : 'is-warn')}>
                             {statusLabelOf(employee?.status)}{isBlacklist(employee) ? ' · ЧС' : ''}

@@ -206,8 +206,8 @@ class TargetAccessTests(unittest.TestCase):
 # ─────────────────────── Список сотрудников ───────────────────────
 
 def _admin_users_row(user_id, *, role, department_id):
-    """Строка ответа /api/admin/users — 54 колонки, читаются по индексам."""
-    row = [None] * 54
+    """Строка ответа /api/admin/users — 55 колонок (последняя — логин), читаются по индексам."""
+    row = [None] * 55
     row[0] = user_id
     row[1] = f"User {user_id}"
     row[6] = role

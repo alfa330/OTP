@@ -667,6 +667,9 @@ export default function EmployeeCardPage({
         .split(' · ')
         .filter((part) => part && !fieldTexts.has(part))
         .join(' · ');
+    /* Логин — под ФИО ником «@логин» (просьба владельца 16.11.2026): по нему
+       человека ищут в журналах и называют при входе. */
+    const nick = String(person?.login || '').trim();
     const summary = summaryOf ? summaryOf(person) : [];
     const contactActions = contactActionsOf ? contactActionsOf(person) : [];
 
@@ -690,7 +693,13 @@ export default function EmployeeCardPage({
             <Photo person={person} Avatar={Avatar} />
             <div className="ecp-head-main">
                 <h1 ref={setHeading} className="ecp-name" tabIndex={-1}>{person?.name || '—'}</h1>
-                {subtitle && <div className="ecp-sub">{subtitle}</div>}
+                {(nick || subtitle) && (
+                    <div className="ecp-sub">
+                        {nick && <span className="ecp-nick" title="Логин для входа">@{nick}</span>}
+                        {nick && subtitle && ' · '}
+                        {subtitle}
+                    </div>
+                )}
             </div>
             {mode === 'view' && headActions.length > 0 && (
                 <div className="ecp-actions">

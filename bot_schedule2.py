@@ -13875,7 +13875,10 @@ def get_admin_users():
                         -- «Наименование специальности» дописано в конец по той же
                         -- причине, что «Город» и «Должность»: ответ читается по
                         -- позиционным индексам row[N]
-                        u.study_specialty
+                        u.study_specialty,
+                        -- Логин — в конец по той же причине: в карточке сотрудника он стоит
+                        -- под ФИО как ник
+                        u.login
                     FROM users u
                     LEFT JOIN directions d ON u.direction_id = d.id
                     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -13974,7 +13977,8 @@ def get_admin_users():
                         "group_name": row[50] or "",
                         "city": row[51] or "",
                         "job_title": row[52] or "",
-                        "study_specialty": row[53] or ""
+                        "study_specialty": row[53] or "",
+                        "login": row[54] or ""
                     })
         # Изоляция отделов: супервайзер и глава отдела видят сотрудников только своего отдела.
         # Супер-админ, админы и тренер видят все отделы.
@@ -15532,7 +15536,9 @@ def get_sv_list():
                         job_title,
                         -- «Наименование специальности» — в конец: индексы выше
                         -- уже заняты фильтром отделов и сборкой ответа
-                        study_specialty
+                        study_specialty,
+                        -- Логин — в конец: в карточке сотрудника он стоит под ФИО как ник
+                        login
                     FROM users
                     WHERE LOWER(COALESCE(role, '')) IN ('sv', 'supervisor')
                     ORDER BY name
@@ -15593,7 +15599,8 @@ def get_sv_list():
                         "department_id": sv[39],
                         "city": sv[40] or "",
                         "job_title": sv[41] or "",
-                        "study_specialty": sv[42] or ""
+                        "study_specialty": sv[42] or "",
+                        "login": sv[43] or ""
                     })
             else:
                 # Супервайзер видит только супервайзеров СВОЕГО отдела

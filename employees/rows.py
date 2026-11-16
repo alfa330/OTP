@@ -64,7 +64,8 @@ USERS_SQL = """
         grp.group_name,
         u.city,
         u.job_title,
-        u.study_specialty
+        u.study_specialty,
+        u.login
     FROM users u
     LEFT JOIN directions d ON u.direction_id = d.id
     LEFT JOIN users s ON u.supervisor_id = s.id
@@ -165,6 +166,7 @@ def user_row(row, *, avatar_url, proxy_labels):
         "city": row[51] or "",
         "job_title": row[52] or "",
         "study_specialty": row[53] or "",
+        "login": row[54] or "",
     }
 
 
@@ -212,7 +214,8 @@ SUPERVISORS_SQL = """
         department_id,
         city,
         job_title,
-        study_specialty
+        study_specialty,
+        login
     FROM users
     WHERE id = ANY(%(ids)s)
 """
@@ -263,6 +266,7 @@ def supervisor_row(sv, *, avatar_url, proxy_labels, normalize_role):
         "city": sv[40] or "",
         "job_title": sv[41] or "",
         "study_specialty": sv[42] or "",
+        "login": sv[43] or "",
     }
 
 
