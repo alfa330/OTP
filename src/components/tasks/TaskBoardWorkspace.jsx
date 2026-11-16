@@ -61,9 +61,12 @@ const PRIORITY_DOT = {
 
 const BOARD_PRIORITY_ORDER = { critical: 0, urgent: 1, normal: 2 };
 
+// «Сначала новые» и «Сначала важные» — бывшие «По свежести» и «По важности» (#401, Зарина и
+// владелец 16.11.2026). Порядок прежний: по дате создания, новые сверху / срочность, затем новые;
+// value прежние — их понимают сервер (sort=freshness|importance) и boardQuery.js.
 export const BOARD_SORT_OPTIONS = [
-  { value: 'freshness', label: 'По свежести' },
-  { value: 'importance', label: 'По важности' },
+  { value: 'freshness', label: 'Сначала новые' },
+  { value: 'importance', label: 'Сначала важные' },
 ];
 
 const TAG_LABEL = { task: 'Задача', problem: 'Проблема', suggestion: 'Предложение', production: 'Продакшн' };

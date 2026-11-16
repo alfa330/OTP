@@ -268,6 +268,15 @@ class WorkspaceFrontendTests(unittest.TestCase):
         self.assertIn("rightCreatedAt - leftCreatedAt", block)
         self.assertIn("Number(right?.id || 0) - Number(left?.id || 0)", block)
 
+    def test_board_sort_labels_read_newest_and_important_first(self):
+        # #401, возврат Зарины 16.11.2026: «По свежести» → «Сначала новые», и в пару ей
+        # «По важности» → «Сначала важные» (владелец). Значения те же — их понимают сервер
+        # (sort=freshness|importance) и boardQuery.js.
+        self.assertIn("{ value: 'freshness', label: 'Сначала новые' },", self.src)
+        self.assertIn("{ value: 'importance', label: 'Сначала важные' },", self.src)
+        self.assertNotIn("label: 'По свежести'", self.src)
+        self.assertNotIn("label: 'По важности'", self.src)
+
     def test_every_kanban_column_uses_selected_sort(self):
         start = self.src.index("const tasksByColumn = useMemo(() => {")
         block = self.src[start:self.src.index("}, [scopedTasks, dropContext, boardSort]);", start)]
