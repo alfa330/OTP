@@ -190,7 +190,7 @@ _ROLE_WITHOUT_PEOPLE = {
 # Этапы, которые роль выполняет помимо главного дела: уточнить компанию — тоже бухгалтерии,
 # но «оплатить счёт некому» сказало бы о другом.
 _KIND_WITHOUT_PEOPLE = {
-    workflow.KIND_ENTITY: 'Уточнить компанию некому: в роли «Бухгалтерия» нет участников',
+    workflow.KIND_ENTITY: 'Выбрать юр. лицо некому: в роли «Бухгалтерия» нет участников',
     workflow.KIND_IT: 'Проверить IT-закуп некому: в роли «Helpdesk IT и учёт имущества» нет участников',
 }
 
@@ -347,10 +347,12 @@ def advance(cursor, request_id, actor, *, outbox=None, base_url=None):
         # Чек и получение — задачи самого инициатора: наблюдатель знает, что заявка ждёт его.
         _notify_observers(cursor, request, task, actor=actor, subtask_id=opened['id'])
     if kind == workflow.KIND_CLOSING and request.get('closing_docs_status') == workflow.DOCS_NONE:
-        # П. 17: инициатору — «необходимо приложить закрывающие документы».
-        _notify(cursor, request, notify.docs_needed(request), [request.get('initiator_id')],
+        # П. 17: инициатору — «необходимо приложить закрывающие документы», со сроком (16.11.2026).
+        event = notify.docs_needed(request, workflow.docs_deadline(
+            request, queries.list_subtasks(cursor, request_id), directory.get_settings(cursor)))
+        _notify(cursor, request, event, [request.get('initiator_id')],
                 outbox=outbox, base_url=base_url, subtask_id=None, actionable=True)
-        _notify_observers(cursor, request, notify.docs_needed(request), actor=actor, subtask_id=opened['id'])
+        _notify_observers(cursor, request, event, actor=actor, subtask_id=opened['id'])
     return kind
 
 
@@ -366,6 +368,13 @@ def _finish(cursor, request, subtasks, actor, *, outbox=None, base_url=None):
     queries.close_request(cursor, request['id'], 'done', actor)
     notices.clear_request(cursor, request['id'])
     closed = queries.read_request(cursor, request['id'])
+    if workflow.docs_tail(closed):
+        # Бухгалтер закрыл заявку раньше закрывающих документов (владелец 16.11.2026, п. 6):
+        # инициатору — что их ждут и до какого числа; пока скана нет — это его задача.
+        waiting_scan = (closed.get('closing_docs_status') or workflow.DOCS_NONE) == workflow.DOCS_NONE
+        _notify_initiator(cursor, closed, notify.docs_deferred(closed, closed.get('docs_due_on')),
+                          outbox=outbox, base_url=base_url, actor=actor, actionable=waiting_scan)
+        return
     _notify_initiator(cursor, closed, notify.closed(closed), outbox=outbox, base_url=base_url, actor=actor)
 
 
@@ -449,14 +458,20 @@ def submit(cursor, request_id, actor, *, comment=None, outbox=None, base_url=Non
 
 # ─── Действия подзадач ───────────────────────────────────────────────────────
 
-def load_for_action(cursor, request_id, kind):
-    """Заявка (под блокировкой) и её подзадача, готовая к действию."""
+def load_for_action(cursor, request_id, kind, action=None):
+    """Заявка (под блокировкой) и её подзадача, готовая к действию.
+
+    Закрытая заявка действий не принимает — кроме закрывающих документов заявки, которую
+    бухгалтер закрыл раньше них (владелец 16.11.2026, workflow.docs_tail): по ним
+    бухгалтерия отмечает оригинал, закрывает документы и меняет их срок."""
     request = queries.read_request(cursor, request_id, lock=True)
     if not request:
         raise FlowError('Заявка не найдена', code='PAYMENT_REQUEST_NOT_FOUND', status=404)
     if access.is_deleted(request):
         raise FlowError('Заявка удалена — действия по ней недоступны', code='PAYMENT_REQUEST_DELETED', status=409)
-    if request['status'] != 'active':
+    tail = (workflow.docs_tail(request) and kind == workflow.KIND_CLOSING
+            and action in workflow.TAIL_ACTIONS)
+    if request['status'] != 'active' and not tail:
         raise FlowError('Заявка уже закрыта', code='PAYMENT_REQUEST_CLOSED', status=409)
     subtask = queries.read_subtask(cursor, request_id, kind)
     if not subtask or subtask['state'] != 'open':
@@ -488,7 +503,7 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
     """
     fields = dict(fields or {})
     comment = str(fields.get('comment') or '').strip() or None
-    request, subtask = load_for_action(cursor, request_id, kind)
+    request, subtask = load_for_action(cursor, request_id, kind, action)
     if action not in workflow.ACTIONS.get(kind, ()) or action == 'submit':
         raise FlowError('У этого этапа нет такого действия', code='PAYMENT_ACTION_UNKNOWN', status=400)
 
@@ -498,7 +513,8 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
                  if item.get('subtask_kind') == kind} | set(new_file_kinds or ())
     missing = workflow.missing_for_action(kind, action, request=request, fields=fields,
                                           file_kinds=own_kinds, assets=assets or (),
-                                          settings=directory.get_settings(cursor) if action == 'it_offers' else None)
+                                          settings=directory.get_settings(cursor) if action == 'it_offers' else None,
+                                          today=queries.today_almaty())
     if missing:
         _fail_missing(missing, code='PAYMENT_ACTION_INCOMPLETE')
 
@@ -625,7 +641,16 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
         for reminder in STAGE_REMINDER_KINDS[workflow.KIND_CLOSING]:
             notices.clear_kind(cursor, request_id, reminder)
         queries.complete_subtask(cursor, subtask['id'], actor, outcome='closed', comment=comment)
+        if request['status'] != 'active':
+            # Заявку закрыли раньше документов (16.11.2026): закрыты и они — закрывать ещё раз нечего.
+            return {'next': None}
         return {'next': advance(cursor, request_id, actor, **done)}
+
+    if action == 'docs_due':
+        return _docs_due(cursor, request, subtask, actor, fields['docs_due_on'], comment, **done)
+
+    if action == 'docs_defer':
+        return _docs_defer(cursor, request, subtask, actor, fields['docs_due_on'], comment, **done)
 
     raise FlowError('Действие не поддерживается', code='PAYMENT_ACTION_UNKNOWN', status=400)
 
@@ -647,6 +672,43 @@ def _settle_supplier_vat(cursor, request, actor, vat_payer, kind):
     queries.log_event(cursor, request['id'], 'supplier_vat', actor, payload={
         'kind': kind, 'counterparty_id': counterparty_id, 'counterparty_name': request.get('counterparty_name'),
         'vat_payer': bool(vat_payer)})
+
+
+def _docs_due(cursor, request, subtask, actor, due_on, comment, *, outbox=None, base_url=None):
+    """Бухгалтер поставил срок закрывающих документов (владелец 16.11.2026, п. 5: «добавить
+    дедлайн на предоставление документов»). До этого срок шёл по настройке — подтверждение
+    получения + дни; поставленный бухгалтером важнее. Напоминания идут уже к нему. Инициатор,
+    от которого документов ещё ждут, узнаёт новый срок из колокола."""
+    request_id = request['id']
+    due_on = workflow._as_date(due_on)
+    before = workflow.docs_deadline(request, queries.list_subtasks(cursor, request_id), directory.get_settings(cursor))
+    if before == due_on and request.get('docs_due_on'):
+        return {'next': subtask['kind']}
+    queries.update_request_fields(cursor, request_id, {'docs_due_on': due_on})
+    queries.log_event(cursor, request_id, 'docs_due', actor, comment=comment,
+                      payload={'kind': subtask['kind'], 'from': before, 'to': due_on})
+    if (request.get('closing_docs_status') or workflow.DOCS_NONE) == workflow.DOCS_NONE:
+        refreshed = queries.read_request(cursor, request_id)
+        _notify_initiator(cursor, refreshed, notify.docs_due(refreshed, due_on), outbox=outbox, base_url=base_url,
+                          actor=actor)
+    return {'next': subtask['kind']}
+
+
+def _docs_defer(cursor, request, subtask, actor, due_on, comment, *, outbox=None, base_url=None):
+    """Бухгалтер закрывает заявку раньше закрывающих документов (владелец 16.11.2026, п. 6:
+    «либо закрыть заявку — запрос закрывающих документов с дедлайном»). Заявка закрывается
+    (условия п. 15 — без документов: их ждут, это решение бухгалтера), а этап документов
+    остаётся открытым: инициатор досылает их в закрытую заявку, бухгалтерия отмечает оригинал
+    и закрывает документы (workflow.docs_tail). Напоминания о сроке идут, пока их не закроют."""
+    request_id = request['id']
+    due_on = workflow._as_date(due_on)
+    queries.defer_docs(cursor, request_id, due_on, actor)
+    queries.log_event(cursor, request_id, 'docs_deferred', actor, comment=comment,
+                      payload={'kind': subtask['kind'], 'docs_due_on': due_on,
+                               'docs_status': request.get('closing_docs_status') or workflow.DOCS_NONE})
+    # Задачу бухгалтерии «проверить документы» гасит закрытие заявки (_finish → clear_request);
+    # сам этап открыт — по нему заявка стоит на доске в «Ожидаются закрывающие документы».
+    return {'next': advance(cursor, request_id, actor, outbox=outbox, base_url=base_url)}
 
 
 def _set_entity(cursor, request, subtask, actor, entity_id, comment, *, outbox=None, base_url=None):
@@ -892,7 +954,7 @@ def _docs_received(cursor, request_id, actor):
     return False
 
 
-def files_added(cursor, request_id, kinds, actor):
+def files_added(cursor, request_id, kinds, actor, *, outbox=None, base_url=None):
     """К заявке приложили файлы вне действия подзадачи. Накладная, акт или чек
     после получения — это закрывающий документ: его статус сдвигается сам."""
     if not set(workflow.CLOSING_DOC_KINDS) & set(kinds or ()):
@@ -902,7 +964,24 @@ def files_added(cursor, request_id, kinds, actor):
     # приложенная к заявке до оплаты, ещё ничего не закрывает.
     if not receiving or receiving['state'] != 'done':
         return False
-    return _docs_received(cursor, request_id, actor)
+    if not _docs_received(cursor, request_id, actor):
+        return False
+    request = queries.read_request(cursor, request_id)
+    if workflow.docs_tail(request):
+        _announce_tail_docs(cursor, request, actor, outbox=outbox, base_url=base_url)
+    return True
+
+
+def _announce_tail_docs(cursor, request, actor, *, outbox, base_url):
+    """Документы пришли в заявку, закрытую раньше них (16.11.2026, п. 6): бухгалтерии она снова в
+    «Моих задачах» (queries._WAITS_FOR_ME_SQL) — и в колоколе, иначе о скане узнали бы только с
+    доски. Строка гаснет, когда документы закроют (notices.clear_subtask в «Закрыть документы»)."""
+    subtask = queries.read_subtask(cursor, request['id'], workflow.KIND_CLOSING)
+    if not subtask or subtask['state'] != 'open':
+        return
+    _notify(cursor, request, notify.docs_arrived(request),
+            subtask_user_ids(subtask, queries.role_member_ids(cursor)), outbox=outbox, base_url=base_url,
+            subtask_id=subtask['id'], actionable=True, exclude=[(actor or {}).get('id')])
 
 
 def cancel(cursor, request_id, actor, comment=None, *, base_url=None):
@@ -1055,7 +1134,8 @@ def _remind_stage_deadlines(cursor, today, members):
     for request, stage, received_at in rows:
         kind, opened_at = stage['kind'], stage.get('opened_at')
         due_on = workflow.stage_due_on(
-            kind, workflow.stage_deadline_start(kind, opened_at=opened_at, received_at=received_at), settings)
+            kind, workflow.stage_deadline_start(kind, opened_at=opened_at, received_at=received_at), settings,
+            explicit=request.get('docs_due_on'))
         mark = workflow.deadline_mark(due_on, today, opened_on=opened_at)
         if not mark:
             continue

@@ -18,7 +18,10 @@ from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_d
 
 # Справочник → как его читать списком.
 _READERS = {
-    'projects': lambda cursor, args: directory.list_projects(cursor, include_inactive=True),
+    # «Проекты и отделы» (16.11.2026): у проекта — его отделы, экран рисует их деревом.
+    'projects': lambda cursor, args: directory.list_projects(cursor, include_inactive=True, with_departments=True),
+    'project_departments': lambda cursor, args: directory.list_project_departments(
+        cursor, include_inactive=True, project_id=as_int(args.get('project_id'))),
     'categories': lambda cursor, args: directory.list_categories(cursor, include_inactive=True),
     'asset_categories': lambda cursor, args: directory.list_asset_categories(cursor, include_inactive=True),
     'legal_entities': lambda cursor, args: directory.list_legal_entities(cursor, include_inactive=True),
@@ -113,6 +116,8 @@ def register(api):
         with db._get_cursor() as cursor:
             bundle = {
                 'projects': directory.list_projects(cursor),
+                # Отделы проекта для формы заявки и фильтров реестра — действующие (16.11.2026).
+                'project_departments': directory.list_project_departments(cursor),
                 'categories': directory.list_categories(cursor),
                 'asset_categories': directory.list_asset_categories(cursor),
                 'legal_entities': directory.list_legal_entities(cursor),
@@ -408,7 +413,19 @@ def register(api):
             'note': as_text(data.get('note'), 'Примечание', limit=2000),
         }, actor_id=ctx['user_id'])
 
+    def _save_project_department(cursor, data, row_id, ctx):
+        """Отдел внутри проекта (владелец 16.11.2026): проект и название."""
+        project_id = as_int(data.get('project_id'), 'project_id')
+        if not project_id or not any(item['id'] == project_id
+                                     for item in directory.list_projects(cursor, include_inactive=True)):
+            raise ApiError('Выберите проект, в котором этот отдел', extra={'field': 'project_id'})
+        return directory.upsert_project_department(
+            cursor, department_id=row_id, project_id=project_id,
+            name=as_text(data.get('name'), 'Название', required=True, limit=200),
+            is_active=as_bool(data.get('is_active', True)), actor_id=ctx['user_id'])
+
     _SAVERS = {
+        'project_departments': _save_project_department,
         'counterparties': _save_counterparty,
         'counterparty_accounts': _save_account, 'contracts': _save_contract, 'cards': _save_card,
         'limits': _save_limit, 'routes': _save_route, 'counterparty_emails': _save_counterparty_email,
@@ -433,7 +450,8 @@ def register(api):
         with db._get_cursor() as cursor:
             duplicate = directory.find_duplicate_name(
                 cursor, str(data.get('name') or '').strip(), dictionary=name, row_id=row_id,
-                parent_id=as_int(data.get('parent_id'), 'parent_id'))
+                parent_id=as_int(data.get('project_id' if name == 'project_departments' else 'parent_id'),
+                                 'parent_id'))
             if duplicate:
                 raise ApiError('«%s» уже есть в справочнике' % duplicate[1],
                                code='PAYMENTS_DUPLICATE', status=409, extra={'id': duplicate[0]})

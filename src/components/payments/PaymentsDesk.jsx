@@ -84,7 +84,10 @@ const DeskRow = ({ task, first, soonDays, onOpen }) => {
     /* Сумма и срок стоят справа от текста; на телефоне они забирали бы у него половину
        ширины (название заявки обрезалось до двух слов), поэтому там уходят под текст. */
     const amount = <span className="text-[14px] font-semibold tabular-nums text-slate-900">{amountLabel(task, task.amount)}</span>;
-    const due = dueChip(task) ? <DueChip request={task} soonDays={soonDays} /> : null;
+    // Закрывающие документы — и «приложите» у инициатора, и «проверьте» у бухгалтерии: срок документов.
+    const due = (task.task === 'docs_needed' || task.task === 'closing_docs') && task.docs_due_on
+        ? <DueChip request={task} soonDays={soonDays} docsDueOn={task.docs_due_on} />
+        : (dueChip(task) ? <DueChip request={task} soonDays={soonDays} /> : null);
     return (
         <button
             type="button"

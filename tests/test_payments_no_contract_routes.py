@@ -46,7 +46,7 @@ class _Routes(unittest.TestCase):
         self.queries.list_subtasks.return_value = []
         self.queries.role_member_ids.return_value = {}
         self.queries.today_almaty.return_value = date(2026, 11, 10)
-        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
+        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history', 'similar_purchases',
                      'find_duplicates', 'list_observers'):
             getattr(self.queries, name).return_value = []
         self.directory = mock.MagicMock()

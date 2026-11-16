@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Компанию не знает инициатор — её указывает бухгалтерия (просьба владельца 15.10.2026).
+"""Согласование с бухгалтерией — выбор юр. лица (просьбы владельца 15.10.2026 и 16.11.2026).
 
-«В разделе «Оплата счетов» при создании заявки, если инициатор знает, для какой
-компании закуп, — указывает компанию; если нет — создаётся дополнительный шаг: заявка
-уходит в бухгалтерию, и там уточняют, для какой компании закуп».
+15.10.2026: «если инициатор знает, для какой компании закуп, — указывает компанию; если нет —
+создаётся дополнительный шаг: заявка уходит в бухгалтерию, и там уточняют, для какой компании
+закуп». 16.11.2026 (п. 7): «после согласования надо добавить этап согласования с бухгалтерией,
+этап выбора юр. лица» — на вопрос с вариантами владелец выбрал «всегда, после руководителя»:
+этап есть у каждого нового закупа, а компания, которую указал инициатор, — подсказка
+бухгалтеру (он её подтверждает или меняет).
 
 Правила шага — в workflow.py (их проверяет test_payments_workflow.EntityStepTests).
 Здесь — проводка, которой человек пользуется на самом деле: отправка заявки строит
@@ -149,8 +152,10 @@ class SetEntityTests(unittest.TestCase):
         route_call = self.queries.write_route.call_args
         self.assertEqual(route_call.kwargs, {'keep': (wf.KIND_ENTITY,)})
         route = route_call.args[2]
+        # Этап бухгалтерии в маршруте есть (он у каждого нового закупа), но `keep` его не трогает.
         self.assertEqual([entry['kind'] for entry in route], [
-            'initiation', 'manager_approval', 'approval', 'invoice_payment', 'receiving', 'closing_docs'])
+            'initiation', 'manager_approval', 'entity_clarify', 'approval', 'invoice_payment', 'receiving',
+            'closing_docs'])
         approval = next(entry for entry in route if entry['kind'] == wf.KIND_APPROVAL)
         self.assertEqual(approval['assignee_id'], 30, 'лимит на компанию «Север» — утверждает Сауле')
         manager = next(entry for entry in route if entry['kind'] == wf.KIND_MANAGER)
@@ -298,36 +303,42 @@ class SubmitWithoutCompanyTests(unittest.TestCase):
         snapshot = queries.mark_submitted.call_args.kwargs['snapshot']
         self.assertIsNone(snapshot['legal_entity_id'], 'условия на момент отправки — без компании')
 
-    def test_known_company_skips_the_step(self):
+    def test_company_named_by_the_initiator_still_goes_to_accounting(self):
+        # 16.11.2026 (владелец, п. 7): юр. лицо выбирает бухгалтерия у каждого нового закупа; компания
+        # инициатора — подсказка, бухгалтер её подтверждает или меняет.
         queries, _result = self.submit(legal_entity_id=2)
-        self.assertNotIn('entity_clarify', [entry['kind'] for entry in queries.write_route.call_args.args[2]])
+        route = [entry['kind'] for entry in queries.write_route.call_args.args[2]]
+        self.assertEqual(route[:4], ['initiation', 'manager_approval', 'entity_clarify', 'approval'])
         self.assertEqual(queries.write_route.call_args.kwargs, {'keep': ()})
+        snapshot = queries.mark_submitted.call_args.kwargs['snapshot']
+        self.assertEqual(snapshot['legal_entity_id'], 2, 'подсказка инициатора — в условиях на момент отправки')
 
     def test_history_says_where_the_request_went(self):
-        queries, _result = self.submit()
-        event = next(call for call in queries.log_event.call_args_list if call.args[2] == 'submitted')
-        self.assertTrue(event.kwargs['payload']['entity_step'])
-        queries, _result = self.submit(legal_entity_id=2)
-        event = next(call for call in queries.log_event.call_args_list if call.args[2] == 'submitted')
-        self.assertFalse(event.kwargs['payload']['entity_step'])
+        for company in (None, 2):
+            with self.subTest(company=company):
+                queries, _result = self.submit(legal_entity_id=company)
+                event = next(call for call in queries.log_event.call_args_list if call.args[2] == 'submitted')
+                self.assertTrue(event.kwargs['payload']['entity_step'])
 
     def test_empty_company_directory_does_not_strand_the_request(self):
-        # Бухгалтерии не из чего выбрать — заявка без компании не уходит, а не застревает у неё.
-        with self.assertRaises(flow.FlowError) as caught:
-            self.submit(entities=())
-        self.assertEqual(caught.exception.code, 'PAYMENTS_ROLES_NOT_CONFIGURED')
-        self.assertIn('Реквизиты компаний', str(caught.exception))
-        self.submit(entities=(), legal_entity_id=2)  # с компанией справочник не нужен — уходит
+        # Бухгалтерии не из чего выбрать — заявка не уходит, а не застревает у неё. С 16.11.2026 и с
+        # компанией инициатора: выбирает всё равно бухгалтерия, из справочника.
+        for company in (None, 2):
+            with self.subTest(company=company), self.assertRaises(flow.FlowError) as caught:
+                self.submit(entities=(), legal_entity_id=company)
+            self.assertEqual(caught.exception.code, 'PAYMENTS_ROLES_NOT_CONFIGURED')
+            self.assertIn('Реквизиты компаний', str(caught.exception))
 
-    def test_resent_after_rework_keeps_the_clarification_done(self):
-        # Бухгалтерия указала компанию, потом инициатор на доработке сменил сумму — согласование
-        # заново, а этап уточнения в «Ходе заявки» остаётся выполненным, а не «не требуется».
+    def test_resent_after_rework_goes_through_accounting_again(self):
+        # Бухгалтерия выбрала юр. лицо, потом инициатор на доработке сменил сумму — согласование заново,
+        # и согласование с бухгалтерией тоже (16.11.2026: это этап согласования, а не справка).
         sent = purchase_row(legal_entity_id=2)
         queries, result = self.submit(
             clarified=dict(entity_subtask('done'), outcome='entity_set'), legal_entity_id=2,
             submitted_at='2026-10-15T10:00:00', submitted_snapshot=wf.essentials(sent), amount=Decimal('900000'))
         self.assertTrue(result['rerouted'])
-        self.assertEqual(queries.write_route.call_args.kwargs, {'keep': (wf.KIND_ENTITY,)})
+        self.assertEqual(queries.write_route.call_args.kwargs, {'keep': ()})
+        self.assertIn(wf.KIND_ENTITY, [entry['kind'] for entry in queries.write_route.call_args.args[2]])
 
     def test_company_cleared_on_rework_sends_it_to_accounting_again(self):
         sent = purchase_row(legal_entity_id=2)
@@ -374,15 +385,16 @@ class PrivacyTests(unittest.TestCase):
 
 class TextsTests(unittest.TestCase):
     def test_task_and_notice_say_what_to_do(self):
-        self.assertEqual(notify.TASK_TITLES[wf.KIND_ENTITY], 'Уточните компанию')
+        self.assertEqual(notify.TASK_TITLES[wf.KIND_ENTITY], 'Выберите юр. лицо')
+        self.assertEqual(wf.subtask_title(wf.KIND_ENTITY), 'Согласование с бухгалтерией')
         notice = notify.entity_set(purchase_row(legal_entity_name=NORTH['name']))
-        self.assertEqual(notice['title'], 'Компания указана')
+        self.assertEqual(notice['title'], 'Бухгалтерия выбрала юр. лицо')
         self.assertIn(NORTH['name'], notice['body'])
         self.assertIn(NORTH['name'], notice['telegram'])
 
     def test_excel_says_what_the_accounting_does_on_approval(self):
         row = report.enrich(purchase_row(current_kind=wf.KIND_ENTITY), [])
-        self.assertEqual(row['stage_text'], 'Согласование — уточнение компании')
+        self.assertEqual(row['stage_text'], 'Согласование — бухгалтерия, выбор юр. лица')
         self.assertEqual(report.enrich(purchase_row(current_kind=wf.KIND_APPROVAL), [])['stage_text'], 'Согласование')
 
 
@@ -417,10 +429,12 @@ class RouteSqlTests(unittest.TestCase):
     def test_without_keep_old_steps_outside_the_route_are_skipped(self):
         from payments import queries
         cursor = RecordingCursor()
-        route = wf.build_route(purchase_row(legal_entity_id=2), initiator=INITIATOR, manager=None)
+        # Регулярный платёж: компанию задаёт справочник, этапа бухгалтерии у него нет.
+        route = wf.build_route(purchase_row(legal_entity_id=2, request_kind=wf.KIND_REGULAR), initiator=INITIATOR,
+                               manager=None)
         queries.write_route(cursor, REQUEST_ID, route)
         _sql, params = cursor.calls[-1]
-        self.assertNotIn(wf.KIND_ENTITY, params[3], 'компанию указал инициатор — этап уточнения не нужен')
+        self.assertNotIn(wf.KIND_ENTITY, params[3], 'у регулярного платежа этапа выбора юр. лица нет')
 
     def test_route_basis_is_written_with_its_approver_and_limit(self):
         from payments import queries
@@ -459,7 +473,7 @@ class ActRouteTests(unittest.TestCase):
         queries.role_member_ids.return_value = {'accounting': {ACCOUNTANT['id']}}
         queries.list_subtasks.return_value = [entity_subtask()]
         queries.today_almaty.return_value = date(2026, 10, 15)
-        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
+        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history', 'similar_purchases',
                      'find_duplicates', 'list_observers'):
             getattr(queries, name).return_value = []
         directory = mock.MagicMock()
@@ -553,7 +567,7 @@ class AccountingBoardTests(unittest.TestCase):
     def test_request_without_company_is_the_first_column(self):
         body = self.board(self.pairs())
         first = body['columns'][0]
-        self.assertEqual((first['key'], first['label'], first['count']), ('entity', 'Уточнение компании', 1))
+        self.assertEqual((first['key'], first['label'], first['count']), ('entity', 'Согласование с бухгалтерией', 1))
         card = first['cards'][0]
         self.assertEqual(card['id'], REQUEST_ID)
         self.assertIsNone(card['legal_entity_name'])
@@ -571,7 +585,7 @@ class AccountingBoardTests(unittest.TestCase):
     def test_empty_column_says_what_lands_in_it(self):
         body = self.board([])
         self.assertEqual(body['columns'][0]['key'], 'entity')
-        self.assertEqual(body['columns'][0]['caption'], 'Инициатор не указал компанию')
+        self.assertEqual(body['columns'][0]['caption'], 'Выбор юр. лица после руководителя')
         self.assertEqual(body['columns'][0]['cards'], [])
 
     def test_column_window_lists_the_column(self):
@@ -620,8 +634,10 @@ class RoutePreviewTests(unittest.TestCase):
     def test_purchase_without_company_starts_with_accounting(self):
         self.assertTrue(self.preview('amount=106000&request_kind=purchase')['entity_step'])
 
-    def test_company_given_or_regular_payment_has_no_such_step(self):
-        self.assertFalse(self.preview('amount=106000&request_kind=purchase&legal_entity_id=2')['entity_step'])
+    def test_company_given_still_goes_to_accounting_regular_payment_does_not(self):
+        # 16.11.2026: юр. лицо выбирает бухгалтерия у каждого нового закупа; у регулярного платежа его
+        # задаёт справочник.
+        self.assertTrue(self.preview('amount=106000&request_kind=purchase&legal_entity_id=2')['entity_step'])
         self.assertFalse(self.preview('amount=200000&request_kind=regular')['entity_step'])
 
 
@@ -639,4 +655,4 @@ class RouteOrderInFormTests(unittest.TestCase):
         block = form.split('Маршрут согласования <FieldHint', 1)[1].split('</IosModal>', 1)[0]
         self.assertLess(block.index('{route.managerStep && ('), block.index('{entityStep && ('))
         meta = (root / 'src' / 'components' / 'payments' / 'paymentsMeta.js').read_text(encoding='utf-8-sig')
-        self.assertIn('после руководителя компанию укажет бухгалтерия, и потом заявка уйдёт на утверждение', meta)
+        self.assertIn('после руководителя юр. лицо выберет бухгалтерия, и потом заявка уйдёт на утверждение', meta)

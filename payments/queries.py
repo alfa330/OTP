@@ -248,12 +248,17 @@ _REQUEST_FIELDS = (
     'submitted_at', 'submitted_snapshot', 'approved_at', 'approved_by', 'approved_by_name',
     'amount_approved', 'step_changed_at', 'closed_at', 'rejected_reason', 'legacy_step', 'it_purchase',
     'deleted_at', 'deleted_by', 'deleted_by_name', 'deleted_comment',
+    # 16.11.2026: отдел проекта, документы оплаты «только если требуется», срок закрывающих
+    # документов и заявка, закрытая раньше них.
+    'project_department_id', 'needs_payment_order', 'needs_power_of_attorney', 'needs_transfer_proof',
+    'docs_due_on', 'docs_deferred_at', 'docs_deferred_by', 'docs_deferred_by_name',
 )
 _REQUEST_EXTRA = ('project_name', 'category_name', 'subcategory_name', 'counterparty_name',
                   'counterparty_bin', 'counterparty_vat', 'legal_entity_name', 'contract_number',
                   'template_name', 'current_kind', 'current_status', 'current_state',
                   'clarify_reason', 'clarify_comment', 'clarify_by_name', 'clarify_from',
-                  'has_card', 'attachments_count', 'category_helpdesk', 'issued_from_stock')
+                  'has_card', 'attachments_count', 'category_helpdesk', 'issued_from_stock',
+                  'project_department_name')
 _REQUEST_SQL = """
     SELECT %s,
            p.name, c1.name, c2.name, cp.name, cp.bin, cp.vat_payer, le.name, ct.number, ft.name,
@@ -262,9 +267,11 @@ _REQUEST_SQL = """
            (SELECT COUNT(*) FROM payment_attachments a WHERE a.request_id = r.id),
            COALESCE(c1.via_helpdesk, FALSE),
            EXISTS (SELECT 1 FROM payment_subtasks st WHERE st.request_id = r.id AND st.kind = 'it_review'
-                   AND st.state = 'done' AND st.outcome = 'from_stock')
+                   AND st.state = 'done' AND st.outcome = 'from_stock'),
+           pd.name
       FROM payment_requests r
       LEFT JOIN payment_projects p ON p.id = r.project_id
+      LEFT JOIN payment_project_departments pd ON pd.id = r.project_department_id
       LEFT JOIN payment_categories c1 ON c1.id = r.category_id
       LEFT JOIN payment_categories c2 ON c2.id = r.subcategory_id
       LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
@@ -278,18 +285,22 @@ _REQUEST_SQL = """
 # исполнитель) сюда не входят — их двигает только маршрут; руководителя система
 # определяет сама (п. 4.1).
 EDITABLE_FIELDS = (
-    'request_kind', 'department_id', 'project_id', 'branch', 'expense_name', 'justification',
+    'request_kind', 'department_id', 'project_id', 'project_department_id', 'branch', 'expense_name', 'justification',
     'category_id', 'subcategory_id', 'counterparty_id', 'counterparty_account_id', 'legal_entity_id',
     'contract_id', 'no_contract', 'payment_period', 'payment_method', 'payment_purpose', 'card_recipient',
     'card_holder_name', 'card_holder_user_id', 'card_id', 'object_type', 'accounting_category',
     'no_alternatives', 'no_alternatives_reason', 'no_alternatives_comment', 'supplier_choice_reason',
     'notes', 'due_on', 'invoice_number', 'invoice_date', 'invoice_description', 'fixed_template_id',
+    # Нужны ли платёжное поручение, доверенность, подтверждение перевода (16.11.2026, пп. 3, 4, 10).
+    'needs_payment_order', 'needs_power_of_attorney', 'needs_transfer_proof',
 )
 # Поля, которые пишут действия подзадач и сам маршрут.
 PROCESS_FIELDS = (
     'department_name', 'manager_id', 'manager_name', 'paid_on', 'paid_amount', 'paid_comment',
     'refund_on', 'refund_amount', 'received_on', 'received_quantity', 'closing_docs_status',
     'supplier_kind', 'supplier_vat', 'it_purchase',
+    # Срок закрывающих документов — его ставит бухгалтер (16.11.2026, п. 5).
+    'docs_due_on',
 )
 
 
@@ -302,6 +313,10 @@ def _request_row(row):
     item['it_purchase'] = bool(item.get('it_purchase'))
     item['category_helpdesk'] = bool(item.get('category_helpdesk'))
     item['issued_from_stock'] = bool(item.get('issued_from_stock'))
+    for flag in workflow.PROOF_FLAGS:
+        item[flag] = bool(item.get(flag))
+    # Заявку закрыли раньше закрывающих документов — их ещё ждут (16.11.2026, п. 6).
+    item['docs_tail'] = workflow.docs_tail(item)
     # Архив «Удалённые» (п. 18): заявка не стёрта, а убрана из работы.
     item['deleted'] = item.get('deleted_at') is not None
     item['card_mask'] = cards.mask(item.get('card_last4'))
@@ -420,7 +435,8 @@ _VISIBLE_SQL = (
     "OR (vs.assignee_id IS NULL AND vs.role_code = ANY(%(visible_roles)s)))) OR EXISTS ("
     "SELECT 1 FROM payment_request_observers vo WHERE vo.request_id = r.id AND vo.user_id = %(visible_to)s))")
 
-_FILTER_KEYS = ('query', 'state', 'legal_entity_id', 'department_id', 'initiator_id', 'assignee_id',
+_FILTER_KEYS = ('query', 'state', 'legal_entity_id', 'department_id', 'project_id', 'project_department_id',
+                'initiator_id', 'assignee_id',
                 'assignee_roles', 'approver_id', 'counterparty_id', 'request_kind', 'payment_method',
                 'amount_from', 'amount_to', 'date_from', 'date_to', 'overdue', 'mine',
                 'viewer_id', 'viewer_roles', 'viewer_approves_own', 'visible_to', 'visible_roles',
@@ -447,9 +463,13 @@ _MINE_SQL = (
 _WATCHING_SQL = ("r.status = 'active' AND EXISTS (SELECT 1 FROM payment_request_observers wo "
                  "WHERE wo.request_id = r.id AND wo.user_id = %(viewer_id)s)")
 
+# Срез «Оплачено» (владелец 16.11.2026, п. 13): деньги ушли, а заявка ещё идёт — ждёт
+# получения, учёта имущества или закрывающих документов. Закрытые — в «Закрыты».
+_PAID_SQL = "r.status = 'active' AND r.paid_on IS NOT NULL"
+
 
 def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, department_id=None,
-                   initiator_id=None, assignee_id=None, assignee_roles=(), approver_id=None,
+                   project_id=None, project_department_id=None, initiator_id=None, assignee_id=None, assignee_roles=(), approver_id=None,
                    counterparty_id=None, request_kind=None, payment_method=None,
                    amount_from=None, amount_to=None, date_from=None, date_to=None,
                    overdue=False, mine=False, viewer_id=None, viewer_roles=(), viewer_approves_own=False,
@@ -497,11 +517,16 @@ def _filter_clause(params, *, query=None, state=None, legal_entity_id=None, depa
         clauses.append("r.status = %(state)s")
     elif state == 'closed':
         clauses.append("r.status IN ('done', 'rejected', 'cancelled')")
+    elif state == 'paid':
+        clauses.append(_PAID_SQL)
     if overdue:
         clauses.append(overdue_sql)
     for key, column, value in (
         ('legal_entity_id', 'r.legal_entity_id', legal_entity_id),
         ('department_id', 'r.department_id', department_id),
+        # Проект и его отдел (справочник «Проекты и отделы», 16.11.2026).
+        ('project_id', 'r.project_id', project_id),
+        ('project_department_id', 'r.project_department_id', project_department_id),
         ('initiator_id', 'r.initiator_id', initiator_id),
         ('counterparty_id', 'r.counterparty_id', counterparty_id),
     ):
@@ -590,16 +615,18 @@ def state_counters(cursor, **filters):
                COUNT(*) FILTER (WHERE """ + live + """r.status = 'rejected') AS rejected,
                COUNT(*) FILTER (WHERE """ + live + """r.status = 'cancelled') AS cancelled,
                COUNT(*) FILTER (WHERE """ + live + _WATCHING_SQL + """) AS watching,
-               COUNT(*) FILTER (WHERE r.deleted_at IS NOT NULL) AS deleted
+               COUNT(*) FILTER (WHERE r.deleted_at IS NOT NULL) AS deleted,
+               COUNT(*) FILTER (WHERE """ + live + _PAID_SQL + """) AS paid
           FROM payment_requests r
           LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
         """ + where,
         params,
     )
-    row = cursor.fetchone() or (0,) * 10
+    row = cursor.fetchone() or (0,) * 11
     counters = {'all': int(row[0] or 0), 'open': int(row[1] or 0), 'mine': int(row[2] or 0),
                 'clarification': int(row[3] or 0), 'overdue': int(row[4] or 0), 'done': int(row[5] or 0),
-                'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0), 'watching': int(row[8] or 0)}
+                'rejected': int(row[6] or 0), 'cancelled': int(row[7] or 0), 'watching': int(row[8] or 0),
+                'paid': int(row[10] or 0)}
     if deleted_visible:
         counters['deleted'] = int(row[9] or 0)
     return counters
@@ -971,6 +998,8 @@ def create_request(cursor, *, fields, items, actor, initiator, system_comment=No
         values[col] = fields.get(col)
     values['no_alternatives'] = bool(values.get('no_alternatives'))
     values['no_contract'] = bool(values.get('no_contract')) and not values.get('contract_id')
+    for flag in workflow.PROOF_FLAGS:
+        values[flag] = bool(values.get(flag))
     for extra in ('department_name', 'supplier_kind', 'supplier_vat'):
         if fields.get(extra) is not None:
             cols.append(extra)
@@ -1071,6 +1100,15 @@ def close_request(cursor, request_id, status, actor, comment=None):
         "WHERE id = %%s" % (_NOW, _NOW),
         (status, comment if status != 'done' else None, status, status, int(request_id)))
     log_event(cursor, request_id, 'closed' if status == 'done' else status, actor, comment=comment)
+
+
+def defer_docs(cursor, request_id, due_on, actor):
+    """Бухгалтер закрывает заявку раньше закрывающих документов (16.11.2026, п. 6): срок, к
+    которому их ждут, и кто так решил. Саму заявку закрывает маршрут (flow._finish)."""
+    cursor.execute(
+        "UPDATE payment_requests SET docs_due_on = %%s, docs_deferred_at = %s, docs_deferred_by = %%s, "
+        "docs_deferred_by_name = %%s, updated_at = %s WHERE id = %%s" % (_NOW, _NOW),
+        (due_on, (actor or {}).get('id'), (actor or {}).get('name'), int(request_id)))
 
 
 def mark_deleted(cursor, request_id, actor, comment=None):
@@ -1233,8 +1271,11 @@ def board_requests(cursor, board_code, *, own_user_id=None, own_roles=(), **filt
                  "AND r.initiator_id IS DISTINCT FROM %(own_user_id)s))")
     exists = ("EXISTS (SELECT 1 FROM payment_subtasks bs WHERE bs.request_id = r.id "
               "AND bs.kind = ANY(%(kinds)s) AND bs.state IN ('open', 'waiting', 'done')" + scope + ")")
+    # Заявка, закрытая раньше закрывающих документов (16.11.2026), стоит на доске бухгалтерии в
+    # «Ожидаются закрывающие документы», пока их не закроют, — сколько бы дней ни прошло.
     recent = ("(r.status = 'active' OR r.closed_at IS NULL "
-              "OR r.closed_at >= %s - make_interval(days => %%(closed_days)s))" % _NOW)
+              "OR r.closed_at >= %s - make_interval(days => %%(closed_days)s) "
+              "OR (r.docs_deferred_at IS NOT NULL AND r.closing_docs_status <> 'closed'))" % _NOW)
     where = (where + ' AND ' if where else ' WHERE ') + exists + ' AND ' + recent
     params['board_limit'] = BOARD_MAX_REQUESTS
     # Живые заявки — первыми: предел выборки не должен вытеснить с доски старую незакрытую.
@@ -1249,11 +1290,23 @@ def board_requests(cursor, board_code, *, own_user_id=None, own_roles=(), **filt
 # СВОЕЙ заявки у роли целиком его не ждёт — её утверждают другие (п. 16: «только
 # те задачи, по которым от него требуется действие»); `approves_own` — исключение
 # для администратора раздела, который на пилоте проходит маршрут за все роли.
+# Заявку, закрытую раньше закрывающих документов (16.11.2026, п. 6), этап документов снова ставит
+# в задачи бухгалтерии, когда документы пришли (скан или оригинал): их осталось проверить и закрыть.
+# Пока документов нет, ждут инициатора — у бухгалтерии она только на доске, в «Ожидаются …».
 _WAITS_FOR_ME_SQL = (
-    "r.status = 'active' AND r.deleted_at IS NULL AND s.state = 'open' AND (s.assignee_id = %(user_id)s "
+    "(r.status = 'active' OR (r.status = 'done' AND r.docs_deferred_at IS NOT NULL AND s.kind = %(closing)s "
+    "AND r.closing_docs_status <> 'none')) "
+    "AND r.deleted_at IS NULL AND s.state = 'open' AND (s.assignee_id = %(user_id)s "
     "OR (s.assignee_id IS NULL AND s.role_code = ANY(%(roles)s) "
     "AND (%(approves_own)s OR s.kind <> ALL(%(approval_kinds)s) "
     "OR r.initiator_id IS DISTINCT FROM %(user_id)s)))")
+
+
+# Закрывающие документы ждут от инициатора: этап документов открыт, скана ещё нет. Заявка идёт —
+# либо закрыта раньше документов (16.11.2026, п. 6): тогда документы ждут и у закрытой.
+_DOCS_WANTED_SQL = (
+    "(r.status = 'active' OR (r.status = 'done' AND r.docs_deferred_at IS NOT NULL)) "
+    "AND r.deleted_at IS NULL AND r.initiator_id = %(user_id)s AND r.closing_docs_status = 'none'")
 
 
 def _desk_params(user_id, roles, approves_own):
@@ -1308,8 +1361,7 @@ def desk_count(cursor, user_id, roles, approves_own=False):
                  WHERE """ + _WAITS_FOR_ME_SQL + """)
              + (SELECT COUNT(*) FROM payment_requests r
                   JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %(closing)s AND s.state = 'open'
-                 WHERE r.status = 'active' AND r.deleted_at IS NULL AND r.initiator_id = %(user_id)s
-                   AND r.closing_docs_status = 'none')
+                 WHERE """ + _DOCS_WANTED_SQL + """)
         """,
         _desk_params(user_id, roles, approves_own))
     return int(cursor.fetchone()[0] or 0)
@@ -1351,16 +1403,16 @@ def own_open_count(cursor, user_id, roles, approves_own=False):
 
 def docs_wanted_ids(cursor, user_id):
     """Заявки инициатора, по которым бухгалтерия ждёт закрывающие документы,
-    а он их ещё не приложил (п. 17: «необходимость приложить закрывающие документы»)."""
+    а он их ещё не приложил (п. 17: «необходимость приложить закрывающие документы»). С
+    16.11.2026 — и закрытые раньше документов (п. 6): документы по ним всё ещё ждут."""
     cursor.execute(
         """
         SELECT r.id FROM payment_requests r
-          JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %s AND s.state = 'open'
-         WHERE r.status = 'active' AND r.deleted_at IS NULL AND r.initiator_id = %s
-           AND r.closing_docs_status = 'none'
+          JOIN payment_subtasks s ON s.request_id = r.id AND s.kind = %(closing)s AND s.state = 'open'
+         WHERE """ + _DOCS_WANTED_SQL + """
          ORDER BY r.id
         """,
-        (workflow.KIND_CLOSING, int(user_id)))
+        {'closing': workflow.KIND_CLOSING, 'user_id': int(user_id)})
     return [row[0] for row in cursor.fetchall()]
 
 
@@ -1494,8 +1546,8 @@ def stage_deadline_rows(cursor):
           FROM payment_subtasks s
           JOIN payment_requests r ON r.id = s.request_id
           LEFT JOIN payment_subtasks rc ON rc.request_id = s.request_id AND rc.kind = %(receiving)s
-         WHERE r.status = 'active' AND r.deleted_at IS NULL
-           AND s.state = 'open' AND s.kind = ANY(%(kinds)s)
+         WHERE (r.status = 'active' OR (r.status = 'done' AND r.docs_deferred_at IS NOT NULL))
+           AND r.deleted_at IS NULL AND s.state = 'open' AND s.kind = ANY(%(kinds)s)
          ORDER BY s.request_id, s.kind
         """,
         {'receiving': workflow.KIND_RECEIVING, 'kinds': sorted(workflow.STAGE_DEADLINE_SETTINGS)})
@@ -1577,3 +1629,99 @@ def payment_history(cursor, *, counterparty_id=None, category_id=None, subcatego
             'quantity': row[11], 'matched': matched,
         })
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Прошлые закупы того же товара или услуги (владелец 16.11.2026, п. 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Сколько названий заявки (наименование и позиции) сравнивать с прошлыми закупами: заявка в
+# десятки позиций иначе собирала бы запрос на сотню подстрок, а суть видна по первым.
+SIMILAR_NAMES_MAX = 12
+# Короче — не название, а обрывок («А4», «ПО»): по нему «совпало» бы что угодно.
+SIMILAR_NAME_MIN = 3
+
+
+def purchase_names(request, items=()):
+    """Чем заявка называет то, что покупает: наименование закупа и позиции — без повторов и
+    обрывков, в нижнем регистре и с одним пробелом между словами."""
+    names = []
+    for value in [(request or {}).get('expense_name')] + [(item or {}).get('name') for item in items or ()]:
+        text = ' '.join(str(value or '').split()).lower()
+        if len(text) >= SIMILAR_NAME_MIN and text not in names:
+            names.append(text)
+    return names[:SIMILAR_NAMES_MAX]
+
+
+def similar_purchases(cursor, request, items=(), *, limit=5, visible_to=None, visible_roles=()):
+    """Прошлые закупы того же товара или услуги — для окна заявки (п. 1 списка правок
+    владельца 16.11.2026: «связь по прошлому товару или услуге»; на вопрос с вариантами он
+    выбрал «подбирать само, без выбора инициатором»).
+
+    Оплаченные заявки (как в справке «История оплат»), у которых наименование или позиция
+    совпадает с наименованием или позицией этой заявки — одно содержит другое («Картридж HP
+    85A» и «Картридж HP 85A чёрный»), — и заявки той же подкатегории. Сначала совпавшие по
+    названию в той же категории, потом остальные по названию, потом по подкатегории; внутри —
+    новые сверху. У каждой — совпавшая позиция (иначе первая) с количеством и ценой: по ним
+    сравнивают цену. `visible_to` — граница видимости, как в реестре.
+    """
+    names = purchase_names(request, items)
+    subcategory_id = (request or {}).get('subcategory_id')
+    if not (request or {}).get('id') or (not names and not subcategory_id):
+        return []
+    params = {
+        'exclude': int(request['id']), 'limit': int(limit),
+        'lowers': names, 'likes': [like_pattern(name) for name in names],
+        'sub': int(subcategory_id) if subcategory_id else None,
+        'cat': int(request['category_id']) if request.get('category_id') else None,
+    }
+    visible = ''
+    if visible_to:
+        params.update({'visible_to': int(visible_to), 'visible_roles': sorted(visible_roles or [])})
+        visible = ' AND ' + _VISIBLE_SQL
+    # Совпадение в обе стороны: прошлое название содержит нынешнее (ILIKE) либо нынешнее —
+    # прошлое (position); у прошлого — не короче четырёх знаков, иначе «Мышь» в «Мышь
+    # беспроводная» и «ПО» в чём угодно были бы одним и тем же.
+    item_hit = ("(i.name ILIKE w.pat OR (length(btrim(i.name)) >= 4 "
+                "AND position(lower(btrim(i.name)) IN w.v) > 0))")
+    name_hit = ("(r.expense_name ILIKE w.pat OR (length(btrim(r.expense_name)) >= 4 "
+                "AND position(lower(btrim(r.expense_name)) IN w.v) > 0))")
+    cursor.execute(
+        """
+        WITH wanted (v, pat) AS (SELECT * FROM unnest(%(lowers)s::text[], %(likes)s::text[])),
+        found AS (
+            SELECT r.id,
+                   (SELECT i.id FROM payment_request_items i, wanted w
+                     WHERE i.request_id = r.id AND """ + item_hit + """
+                     ORDER BY i.position, i.id LIMIT 1) AS item_id,
+                   EXISTS (SELECT 1 FROM wanted w WHERE """ + name_hit + """) AS name_match
+              FROM payment_requests r
+             WHERE r.id <> %(exclude)s AND r.paid_on IS NOT NULL AND r.status IN ('active', 'done')
+               AND r.deleted_at IS NULL""" + visible + """
+        )
+        SELECT r.id, r.expense_name, r.paid_on, r.paid_amount, r.amount, cp.name,
+               COALESCE(mi.name, fi.name), COALESCE(mi.quantity, fi.quantity),
+               COALESCE(mi.unit_price, fi.unit_price), COALESCE(mi.unit, fi.unit),
+               (f.item_id IS NOT NULL), f.name_match, (r.category_id = %(cat)s)
+          FROM found f
+          JOIN payment_requests r ON r.id = f.id
+          LEFT JOIN payment_counterparties cp ON cp.id = r.counterparty_id
+          LEFT JOIN payment_request_items mi ON mi.id = f.item_id
+          LEFT JOIN LATERAL (SELECT i.name, i.quantity, i.unit_price, i.unit FROM payment_request_items i
+                              WHERE i.request_id = r.id ORDER BY i.position, i.id LIMIT 1) fi ON TRUE
+         WHERE f.item_id IS NOT NULL OR f.name_match
+               OR (%(sub)s::int IS NOT NULL AND r.subcategory_id = %(sub)s::int)
+         ORDER BY CASE WHEN (f.item_id IS NOT NULL OR f.name_match) AND r.category_id = %(cat)s THEN 0
+                       WHEN f.item_id IS NOT NULL OR f.name_match THEN 1 ELSE 2 END,
+                  r.paid_on DESC, r.id DESC
+         LIMIT %(limit)s
+        """,
+        params)
+    return [{
+        'request_id': row[0], 'expense_name': row[1], 'paid_on': row[2], 'paid_amount': row[3],
+        'amount': row[4], 'counterparty_name': row[5], 'item_name': row[6], 'quantity': row[7],
+        'unit_price': row[8], 'unit': row[9],
+        # Чем совпала: позицией, наименованием или только подкатегорией.
+        'match': 'item' if row[10] else ('name' if row[11] else 'subcategory'),
+        'same_category': bool(row[12]),
+    } for row in cursor.fetchall()]

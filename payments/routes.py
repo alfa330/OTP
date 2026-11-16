@@ -55,11 +55,16 @@ PHOTO_RETRY_SECONDS = 120
 STOCK_PAGE_MAX = 30
 # Сколько прошлых оплат поставщику показывать бухгалтеру в окне оплаты счёта (п. 8).
 SUPPLIER_HISTORY_LIMIT = 3
+# Сколько прошлых закупов того же товара или услуги показывать в окне заявки (16.11.2026, п. 1).
+SIMILAR_LIMIT = 5
 # Что Helpdesk IT выбирает вместе с поставщиком (владелец 06.11.2026) — поля формы заявки.
 HELPDESK_PAYMENT_KEYS = ('object_type', 'accounting_category', 'payment_method', 'card_recipient',
                          'card_holder_user_id', 'card_holder_name', 'card_id', 'card_number', 'payment_purpose',
                          # Договор с подобранным поставщиком или «Без договора» (10.11.2026) — тоже его.
-                         'contract_id', 'no_contract')
+                         'contract_id', 'no_contract',
+                         # Нужны ли платёжное поручение, доверенность, подтверждение перевода (16.11.2026):
+                         # способ оплаты IT-закупа выбирает Helpdesk IT — он и отмечает.
+                         'needs_payment_order', 'needs_power_of_attorney', 'needs_transfer_proof')
 
 _LINK_RE = re.compile(r'^https?://', re.IGNORECASE)
 
@@ -265,9 +270,17 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
 
     def _permissions(ctx, request_row, subtasks, members):
         active = request_row.get('status') == 'active'
-        current = next((s for s in subtasks if s['state'] == 'open'), None) if active else None
+        # Заявку закрыли раньше закрывающих документов (16.11.2026, п. 6): этап документов у неё
+        # открыт — по нему бухгалтерия отмечает оригинал, закрывает документы и меняет их срок.
+        tail = workflow.docs_tail(request_row) and not access.is_deleted(request_row)
+        current = next((s for s in subtasks if s['state'] == 'open'), None) if (active or tail) else None
+        if tail and current and current['kind'] != workflow.KIND_CLOSING:
+            current = None
         can_act = bool(current and access.can_act_on_subtask(ctx, current, members, request_row))
         directly = bool(current and access.acts_directly(ctx, current, members))
+        actions = list(workflow.ACTIONS.get(current['kind'], ())) if can_act else []
+        if tail:
+            actions = [action for action in actions if action in workflow.TAIL_ACTIONS]
         return {
             'can_act': can_act,
             'acting_as_admin': bool(can_act and not directly),
@@ -286,7 +299,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'can_set_vat': bool(can_act and current['kind'] == workflow.KIND_INVOICE
                                 and workflow.supplier_vat_unknown(request_row)),
             'current_kind': current['kind'] if current else None,
-            'actions': list(workflow.ACTIONS.get(current['kind'], ())) if can_act else [],
+            'actions': actions,
+            # Своя задача инициатора — приложить закрывающие документы (16.11.2026, п. 6: «чтобы
+            # инициатор тоже мог закидывать доки»): этап документов открыт, скана ещё нет.
+            'can_upload_docs': access.can_upload_docs(ctx, request_row, subtasks),
         }
 
     def _full(cursor, request_id, ctx, request_row=None):
@@ -306,14 +322,13 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         asset_rows = assets_sql.for_request(cursor, request_id)
         permissions = _permissions(ctx, request_row, subtasks, members)
         # IT-закуп (владелец 04.11.2026): что уже числится за сотрудником — Helpdesk IT проверяет
-        # по этому, руководитель и утверждающий решают, нужен ли закуп. Без стоимости. Тот, кому
-        # администратор лично передал проверку или утверждение, видит его так же, как роль.
-        staged = any(item['kind'] in (workflow.KIND_IT, workflow.KIND_APPROVAL)
-                     and ctx['user_id'] in (item.get('assignee_id'), item.get('done_by')) for item in subtasks)
+        # по этому. Без стоимости. С 16.11.2026 (владелец, п. 9) — только Helpdesk IT и только пока
+        # идёт его проверка: руководителю это не нужно и занимало место.
+        it_step = next((item for item in subtasks if item['kind'] == workflow.KIND_IT), None)
         initiator_assets = ([{key: row.get(key) for key in _INITIATOR_ASSET_KEYS}
                              for row in assets_sql.of_user(cursor, request_row['initiator_id'])]
                             if (request_row.get('it_purchase') and request_row.get('initiator_id')
-                                and access.sees_initiator_assets(ctx, request_row, ctx['roles'], participant=staged))
+                                and access.sees_initiator_assets(ctx, request_row, it_step, members))
                             else None)
         current_kind = permissions['current_kind']
         observers = queries.list_observers(cursor, request_id)
@@ -321,14 +336,17 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # Наблюдателю вне периметра раздела заявка не откроется — инициатор узнаёт
             # об этом из списка, а не из «мне ничего не приходит» (как в «Участниках»).
             person['section_open'] = access.can_open_section({'user_id': person['user_id']})
-        # Свой срок у открытого этапа «чек» или «закрывающие документы» (п. 17, 09.11.2026).
-        deadline = (workflow.stage_deadline(subtasks, directory.get_settings(cursor), queries.today_almaty())
+        # Свой срок у открытого этапа «чек» или «закрывающие документы» (п. 17, 09.11.2026); срок
+        # документов, который поставил бухгалтер (16.11.2026), важнее настройки.
+        deadline = (workflow.stage_deadline(subtasks, directory.get_settings(cursor), queries.today_almaty(),
+                                            request=request_row)
                     if any(item['kind'] in workflow.STAGE_DEADLINE_SETTINGS and item['state'] == 'open'
                            for item in subtasks) else None)
+        items = queries.list_items(cursor, request_id)
         full = {
             'request': request_row,
             'stage_deadline': deadline,
-            'items': queries.list_items(cursor, request_id),
+            'items': items,
             'offers': queries.list_offers(cursor, request_id),
             'subtasks': subtasks,
             'lifecycle': workflow.lifecycle(request_row, subtasks),
@@ -345,6 +363,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'supplier_history': queries.payment_history(
                 cursor, counterparty_id=request_row.get('counterparty_id'), exclude_request_id=request_id,
                 limit=SUPPLIER_HISTORY_LIMIT, **_history_scope(ctx)) if request_row.get('counterparty_id') else [],
+            # Прошлые закупы того же товара или услуги (владелец 16.11.2026, п. 1) — подбирает раздел
+            # сам, по названию и подкатегории; видно то, что видно и в реестре.
+            'similar': queries.similar_purchases(cursor, request_row, items, limit=SIMILAR_LIMIT,
+                                                 **_history_scope(ctx)),
             # Возможный дубль счёта (п. 8): бухгалтерии — по всем заявкам, остальным —
             # только среди тех, что они видят и в реестре.
             'duplicates': queries.find_duplicates(cursor, request_row, **_history_scope(ctx)),
@@ -544,6 +566,19 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                         'counterparty_account_id'):
                 if creating or has(key):
                     fields[key] = as_int(data.get(key), key)
+            if creating or has('project_department_id') or has('project_id'):
+                # Отдел внутри проекта (16.11.2026): только из отделов выбранного проекта. Проект
+                # сменили, а отдел не прислали — отдел прежнего проекта к новому не относится.
+                project_id = fields.get('project_id', current.get('project_id'))
+                department_id = (as_int(data.get('project_department_id'), 'project_department_id')
+                                 if has('project_department_id') else current.get('project_department_id'))
+                if department_id:
+                    department = directory.read_project_department(cursor, department_id)
+                    if not department or department['project_id'] != project_id:
+                        if has('project_department_id'):
+                            errors.append('Отдел не относится к выбранному проекту')
+                        department_id = None
+                fields['project_department_id'] = department_id
             if creating or has('no_contract'):
                 # «Без договора» — осознанный выбор инициатора (10.11.2026), а не пустое поле:
                 # с ним счёт уходит в оплату любой суммы (workflow.contract_gate).
@@ -680,6 +715,15 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                'card_id': None})
                 card['clear'] = True
 
+        # Платёжное поручение, доверенность, подтверждение перевода — «только если требуется»
+        # (владелец 16.11.2026, пп. 3, 4, 10): нужны ли они, отмечает инициатор. Отметка чужого
+        # способа оплаты снимается: у карты нет поручения и доверенности, у счёта — подтверждения.
+        if creating or has('payment_method') or any(has(flag) for flag in workflow.PROOF_FLAGS):
+            method = (workflow.METHOD_INVOICE if kind == workflow.KIND_REGULAR
+                      else fields.get('payment_method', current.get('payment_method')))
+            fields.update(workflow.proof_flags_for(method, {
+                flag: as_bool(data.get(flag)) if has(flag) else current.get(flag) for flag in workflow.PROOF_FLAGS}))
+
         legal_entity_id = fields.get('legal_entity_id')
         if legal_entity_id and not directory.read_legal_entity(cursor, legal_entity_id):
             errors.append('Компания не найдена в справочнике')
@@ -804,6 +848,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'state': (args.get('state') or '').strip() or None,
             'legal_entity_id': as_int(args.get('legal_entity_id'), 'legal_entity_id'),
             'department_id': as_int(args.get('department_id'), 'department_id'),
+            # Проект и отдел внутри него (справочник «Проекты и отделы», 16.11.2026).
+            'project_id': as_int(args.get('project_id'), 'project_id'),
+            'project_department_id': as_int(args.get('project_department_id'), 'project_department_id'),
             'initiator_id': as_int(args.get('initiator_id'), 'initiator_id'),
             'assignee_id': as_int(args.get('assignee_id'), 'assignee_id'),
             'approver_id': as_int(args.get('approver_id'), 'approver_id'),
@@ -1072,6 +1119,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         if 'supplier_vat' in data:
             # П. 8: НДС поставщика, которого бухгалтер указывает вместе с «Оплачено» (09.11.2026).
             fields['supplier_vat'] = None if data.get('supplier_vat') in (None, '') else as_bool(data.get('supplier_vat'))
+        if 'docs_due_on' in data:
+            # Срок закрывающих документов от бухгалтера (16.11.2026, пп. 5, 6).
+            fields['docs_due_on'] = as_date(data.get('docs_due_on'), 'Срок документов')
         return fields
 
     def _helpdesk_payment(cursor, data, ctx, request_row, fields):
@@ -1126,12 +1176,14 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                                code='PAYMENT_STOCK_GONE', status=409)
         return sorted(issued, key=lambda item: ids.index(item['id']))
 
-    def _guard_subtask(cursor, ctx, request_id, kind):
-        """Заявка под блокировкой и открытая подзадача, на которую у человека есть право."""
+    def _guard_subtask(cursor, ctx, request_id, kind, action=None):
+        """Заявка под блокировкой и открытая подзадача, на которую у человека есть право.
+        `action` — что с ней делают: у закрытой заявки разрешены только действия с её
+        закрывающими документами, если их ещё ждут (workflow.TAIL_ACTIONS)."""
         if kind not in workflow.SUBTASK_BY_KIND or kind == workflow.KIND_INITIATION:
             raise ApiError('Нет такого этапа', code='PAYMENT_ACTION_UNKNOWN')
         try:
-            request_row, subtask = flow.load_for_action(cursor, request_id, kind)
+            request_row, subtask = flow.load_for_action(cursor, request_id, kind, action)
         except flow.FlowError as exc:
             # Заявка в архиве «Удалённые» (п. 18) для всех, кроме администратора раздела, —
             # как несуществующая: отказ «удалена» подтверждал бы, что такой номер был.
@@ -1161,7 +1213,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         action = str(data.get('action') or '').strip()
         outbox = []
         with db._get_cursor() as cursor:
-            request_row, subtask = _guard_subtask(cursor, ctx, request_id, kind)
+            request_row, subtask = _guard_subtask(cursor, ctx, request_id, kind, action)
             if action not in workflow.ACTIONS.get(kind, ()):
                 raise ApiError('У этого этапа нет такого действия', code='PAYMENT_ACTION_UNKNOWN')
             fields = _action_fields(data)
@@ -1185,7 +1237,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                          if item.get('subtask_kind') == kind} | {k for _s, k, _o in uploads}
             missing = workflow.missing_for_action(kind, action, request=request_row, fields=fields,
                                                   file_kinds=own_kinds, assets=asset_rows or (),
-                                                  settings=directory.get_settings(cursor) if action == 'it_offers' else None)
+                                                  settings=directory.get_settings(cursor) if action == 'it_offers' else None,
+                                                  today=queries.today_almaty())
             if missing:
                 raise ApiError('; '.join(missing), code='PAYMENT_ACTION_INCOMPLETE', extra={'missing': missing})
             if action == 'it_offers':
@@ -1347,6 +1400,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         if not uploads:
             raise ApiError('Файлы не переданы', code='PAYMENT_FILES_MISSING')
         actor = _actor(ctx)
+        outbox = []
         with db._get_cursor() as cursor:
             current = _load_visible(cursor, ctx, request_id, lock=True)
             subtasks = queries.list_subtasks(cursor, request_id)
@@ -1359,9 +1413,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             # Файл относится к этапу, на котором заявка сейчас: так он подписан в карточке.
             kinds = _store_files(cursor, request_id, uploads, actor,
                                  subtask_kind=(opened or {}).get('kind') if can_act else None)
-            flow.files_added(cursor, request_id, kinds, actor)
+            # Документы в закрытую раньше них заявку — бухгалтерии задача и сообщение (16.11.2026).
+            flow.files_added(cursor, request_id, kinds, actor, outbox=outbox, base_url=web_app_base_url)
             full = _full(cursor, request_id, ctx)
-        full['status'] = 'success'
+        full.update({'status': 'success', 'warnings': _flush(outbox)})
         return _reply_card(full)
 
     @payments_route('/requests/<int:request_id>/attachments/<int:attachment_id>', methods=('DELETE',))
@@ -1478,9 +1533,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             card['subtask']['done_by_photo'] = faces['done_by']
         return card
 
-    def _card(request_row, focus, column, ctx, members, *, duplicate=False, card_number=None):
+    def _card(request_row, focus, column, ctx, members, *, duplicate=False, card_number=None, docs_due_on=None):
         """Карточка доски. Набор полей — пп. 7 и 9 ТЗ. Номер карты — маской; полный
-        (`card_number`) — только на доске финансового отдела тому, кому он положен."""
+        (`card_number`) — только на доске финансового отдела тому, кому он положен.
+        `docs_due_on` — срок закрывающих документов у карточки колонки документов."""
         return {
             'id': request_row['id'],
             'column': column,
@@ -1508,6 +1564,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'paid_on': request_row.get('paid_on'),
             'paid_amount': request_row.get('paid_amount'),
             'closing_docs_status': request_row.get('closing_docs_status'),
+            # Закрыта раньше закрывающих документов (16.11.2026, п. 6) — метка на доске бухгалтерии.
+            'docs_tail': bool(request_row.get('docs_tail')),
+            'docs_due_on': docs_due_on,
             'card_recipient': request_row.get('card_recipient'),
             'card_holder_name': request_row.get('card_holder_name'),
             'card_mask': request_row.get('card_mask'),
@@ -1563,6 +1622,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             members = queries.role_member_ids(cursor)
             placed = {key: [] for key in keys}
             hide_people = not access.sees_department_people(ctx, ctx['roles'])
+            # В колонке закрывающих документов срок на карточке — срок документов (16.11.2026, п. 5),
+            # а не дата оплаты: оплата к этому этапу давно позади.
+            docs_due = {}
+            settings = directory.get_settings(cursor) if 'awaiting_docs' in keys else None
             for request_row, subtasks in pairs:
                 if hide_people:
                     privacy.hide_in_row(request_row)
@@ -1574,6 +1637,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                     focus_kind=focus['kind'] if code == workflow.BOARD_APPROVAL else None)
                 if column in placed:
                     placed[column].append((request_row, focus))
+                if column == 'awaiting_docs':
+                    docs_due[request_row['id']] = workflow.docs_deadline(request_row, subtasks, settings)
             shown = {key: placed[key][offset:offset + limit] for key in keys if not only or key == only}
             duplicates = (queries.duplicate_request_ids(cursor, [row['id'] for items in shown.values() for row, _f in items])
                           if code == workflow.BOARD_ACCOUNTING else set())
@@ -1602,13 +1667,17 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 'key': key, 'label': label, 'caption': workflow.column_caption(code, key),
                 'count': len(placed[key]),
                 'cards': [_with_faces(_card(row, focus, key, ctx, members, duplicate=row['id'] in duplicates,
-                                            card_number=card_numbers.get(row['id'])),
+                                            card_number=card_numbers.get(row['id']),
+                                            docs_due_on=docs_due.get(row['id'])),
                                       row, focus, photos, hide_people)
                           for row, focus in shown[key]],
             } for key, label in board['columns'] if key in shown],
         })
 
     def _desk_title(request_row, subtask):
+        # Закрытая раньше документов заявка снова на столе бухгалтерии — документы пришли (16.11.2026).
+        if subtask['kind'] == workflow.KIND_CLOSING and request_row.get('docs_tail'):
+            return notify.TAIL_DOCS_TITLE
         if subtask['kind'] != workflow.KIND_INITIATION:
             return notify.TASK_TITLES.get(subtask['kind']) or subtask['title']
         if subtask.get('status') == 'rework':
@@ -1665,6 +1734,12 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             docs_ids = [pair[0] for pair in page if not pair[1]]
             docs_by_id = {item['id']: item for item in queries.requests_by_ids(cursor, docs_ids)}
             docs = [docs_by_id[request_id] for request_id in docs_ids if request_id in docs_by_id]
+            # Срок закрывающих документов — на карточке задачи (16.11.2026): от бухгалтера либо по
+            # настройке. И у инициатора («приложите»), и у бухгалтерии («проверьте»): обоим он важнее
+            # даты оплаты, которая к этому этапу давно прошла.
+            closing_ids = [row['id'] for row, subtask in rows if subtask['kind'] == workflow.KIND_CLOSING]
+            docs_steps = queries.subtasks_for_requests(cursor, docs_ids + closing_ids) if docs_ids or closing_ids else {}
+            settings = directory.get_settings(cursor) if docs_ids or closing_ids else None
             members = queries.role_member_ids(cursor)
             own_total, own_rows = queries.own_requests(
                 cursor, ctx['user_id'], ctx['roles'], access.can_act_for_anyone(ctx), limit=OWN_ON_DESK)
@@ -1677,10 +1752,12 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                 privacy.hide_in_row(request_row)
             mine.append(_own_card(request_row, own_subtasks.get(request_row['id'], [])))
         for request_row, subtask in rows:
+            docs_due_on = (workflow.docs_deadline(request_row, docs_steps.get(request_row['id'], []), settings)
+                           if subtask['kind'] == workflow.KIND_CLOSING else None)
             if hide_people:
                 privacy.hide_in_row(request_row)
                 privacy.hide_in_subtask(subtask, request_row.get('payment_method'))
-            card = _card(request_row, subtask, None, ctx, members)
+            card = _card(request_row, subtask, None, ctx, members, docs_due_on=docs_due_on)
             card.update({'task': subtask['kind'], 'title': _desk_title(request_row, subtask),
                          'brief': subtask.get('brief'), 'opened_at': subtask.get('opened_at'),
                          'clarify_label': subtask.get('clarify_label'),
@@ -1690,12 +1767,14 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                          'own': request_row.get('initiator_id') == ctx['user_id']})
             tasks.append(card)
         for request_row in docs:
+            docs_due_on = workflow.docs_deadline(request_row, docs_steps.get(request_row['id'], []), settings)
             if hide_people:
                 privacy.hide_in_row(request_row)
             card = _card(request_row, None, None, ctx, members)
             card.update({'task': 'docs_needed', 'title': 'Приложите закрывающие документы',
-                         'brief': 'Накладная, акт или чек. Оригиналы передайте в бухгалтерию.',
-                         'opened_at': None, 'own': True})
+                         'brief': ('Заявка закрыта, документы ждут. ' if request_row.get('docs_tail') else '')
+                                  + 'Накладная, акт или чек. Оригиналы передайте в бухгалтерию.',
+                         'docs_due_on': docs_due_on, 'opened_at': None, 'own': True})
             tasks.append(card)
         return jsonify({'tasks': tasks, 'total': total, 'limit': limit, 'offset': offset,
                         'mine': {'items': mine, 'total': own_total}})
@@ -1773,8 +1852,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
         return jsonify({
             'route': basis,
             'manager': manager,
-            # Компания не указана — после руководителя заявку получит бухгалтерия: укажет
-            # компанию, и утверждающего выберут заново, уже с ней (владелец 15.10 и 03.11.2026).
+            # После руководителя заявку получит бухгалтерия: выберет юр. лицо, и утверждающего
+            # выберут уже с ним (владелец 15.10 и 03.11.2026; с 16.11.2026 — у каждого нового закупа).
             'entity_step': workflow.needs_entity_step(draft),
             # IT-категория — после руководителя заявку получит Helpdesk IT: подберёт поставщиков и
             # цены, и утверждающего выберут уже по этой сумме (владелец 04.11.2026).

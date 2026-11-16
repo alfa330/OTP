@@ -274,12 +274,16 @@ def test_observer_follows_the_route_and_the_bell_cleans_up(db, monkeypatch):
     with db.cursor() as cur:
         rid = submitted_invoice_request(cur, [WATCHER])
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
+        # Согласование с бухгалтерией (16.11.2026): юр. лицо инициатора она подтверждает.
+        act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT,
+            legal_entity_id=queries.read_request(cur, rid)['legal_entity_id'])
         act(cur, rid, workflow.KIND_APPROVAL, 'approve', APPROVER)
         act(cur, rid, workflow.KIND_INVOICE, 'pay', ACCOUNTANT, paid_on='2026-10-15', paid_amount=10000,
             files=['payment_order'])
         assert unread(cur, WATCHER, rid) == [
-            ('watching', 'Вас добавили наблюдателем заявки'), ('approved', 'Заявка согласована'),
-            ('paid', 'Счёт оплачен'), ('waits_initiator', 'Заявка ждёт подтверждения получения от инициатора')]
+            ('watching', 'Вас добавили наблюдателем заявки'), ('entity_set', 'Бухгалтерия выбрала юр. лицо'),
+            ('approved', 'Заявка согласована'), ('paid', 'Счёт оплачен'),
+            ('waits_initiator', 'Заявка ждёт подтверждения получения от инициатора')]
         act(cur, rid, workflow.KIND_RECEIVING, 'confirm', INITIATOR, received_on='2026-10-16', received_quantity='1')
         kinds = [kind for kind, _title in unread(cur, WATCHER, rid)]
         assert 'waits_initiator' not in kinds, 'получение подтвердили — ждать нечего'
@@ -313,7 +317,7 @@ def test_company_clarified_by_accounting_reaches_observers(db, monkeypatch):
         assert [kind for kind, _title in unread(cur, WATCHER, rid)] == ['watching']
         cur.execute("INSERT INTO payment_legal_entities (name) VALUES ('ТОО «Уточнённая»') RETURNING id")
         act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=cur.fetchone()[0])
-        assert ('entity_set', 'Компания указана') in unread(cur, WATCHER, rid)
+        assert ('entity_set', 'Бухгалтерия выбрала юр. лицо') in unread(cur, WATCHER, rid)
         # Пересборка маршрута после компании согласование руководителя не сбрасывает.
         assert queries.read_subtask(cur, rid, workflow.KIND_MANAGER)['state'] == 'done'
         assert queries.read_subtask(cur, rid, workflow.KIND_APPROVAL)['state'] == 'open'

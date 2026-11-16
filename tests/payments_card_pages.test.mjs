@@ -339,8 +339,11 @@ test('статус задачи — кнопкой следующей ступе
     assert.ok(footer.length > 800, 'нижняя панель не найдена');
     assert.doesNotMatch(card, /StageStatusSwitch|statusOptions/);
     // Кнопка ступени — только тому, чья задача, только на странице задачи и только пока ступени есть.
-    assert.ok(card.includes('const step = hasTask ? stageStep(current.kind, current.status) : null;'));
-    assert.ok(card.includes('const hasTask = Boolean(current && permissions.can_act);'));
+    assert.ok(card.includes('const step = stageTask ? stageStep(current.kind, current.status) : null;'));
+    assert.ok(card.includes('const stageTask = Boolean(current && permissions.can_act);'));
+    // Задача — этап, который человек вправе выполнить, либо у инициатора — закрывающие документы (16.11.2026).
+    assert.ok(card.includes('const docsTask = Boolean(permissions.can_upload_docs) && !stageTask;'));
+    assert.ok(card.includes('const hasTask = stageTask || docsTask;'));
     assert.match(footer, /\{onTask && step && \(\s*<button\s+type="button"\s+data-card-step=\{step\.to\}\s+className=\{`\$\{iosBtnPrimary\} max-sm:order-first max-sm:w-full`\}\s+disabled=\{busy\}\s+onClick=\{\(\) => move\(step\.to\)\}/);
     // На странице задачи синяя в панели — она, крайняя справа (после «Готово»).
     assert.ok(footer.indexOf('{onTask && step && (') > footer.indexOf('>Готово</button>'));
@@ -367,11 +370,16 @@ test('сводка закреплена над страницами, стран�
     assert.ok(card.includes("const CARD_SCROLL = 'thin-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 sm:px-5 [@media(max-height:559px)]:flex-none [@media(max-height:559px)]:overflow-visible';"));
     // Страница задачи есть только у того, чья задача, но в разметке она сразу и при перелистывании
     // прячется, а не снимается: набранное в форме не теряется.
-    assert.match(card, /\{hasTask && \(\s*<div data-card-page="task" hidden=\{!onTask\}/);
+    // Страниц задачи две по виду, а на экране одна: этап — формой этапа, у инициатора закрывающие
+    // документы (16.11.2026, п. 6) — своей формой; задача документов бывает только без своего этапа.
+    assert.match(card, /\{stageTask && \(\s*<div data-card-page="task" hidden=\{!onTask\}/);
+    assert.match(card, /\{docsTask && \(\s*<div data-card-page="task" hidden=\{!onTask\}/);
     assert.ok(card.indexOf('<PaymentStageForm', taskPage) > taskPage);
     assert.equal(card.split('<PaymentStageForm').length - 1, 1);
-    // Чужая задача — страница заявки говорит, у кого заявка; своей задачи над заявкой больше нет.
-    assert.ok(card.includes('{current && !hasTask && ('));
+    assert.equal(card.split('<DocsUploadTask').length - 1, 1);
+    // Чужая задача — страница заявки говорит, у кого заявка; своей задачи над заявкой больше нет. У закрытой
+    // раньше документов заявки «сейчас» нет.
+    assert.ok(card.includes('{current && !hasTask && active && ('));
     assert.ok(card.includes('<SectionTitle>Сейчас · {current.title}</SectionTitle>'));
     assert.ok(card.includes('>Ваша задача · {current.title}</SectionTitle>'));
     // Отказ сервера и панели редких действий — над обеими страницами и пустыми не рисуются.
@@ -398,7 +406,8 @@ test('страницы листаются кнопкой в нижней пан�
     // «Доработать» — действие над заявкой: на странице задачи его в панели нет.
     assert.ok(footer.includes('{request && permissions.can_edit && !onTask && ('));
     // Шеврон в шапке на странице задачи ведёт к заявке, а не закрывает окно.
-    assert.ok(card.includes('onBack={onTask ? goRequest : null}'));
+    // Без задачи шеврон возвращает к заявке, из которой сюда перешли (прошлый закуп, 16.11.2026), если такая есть.
+    assert.ok(card.includes('onBack={onTask ? goRequest : (backTo && onBackTo ? onBackTo : null)}'));
     // Окно открывается на заявке; задачу выполнили или она ушла — возвращается к заявке, к её началу.
     assert.ok(card.includes("const [page, setPage] = useState('request');"));
     assert.match(card, /setFolds\(\{\}\);\s*\/\/[^\n]*\n\s*setPage\('request'\);\s*setPageMotion\(PAGE_APPEAR\);\s*requestScroll\.current = 0;/);

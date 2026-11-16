@@ -115,7 +115,10 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                'it_offers', 'it_stock',
                # 09.11.2026: заявка ушла в архив «Удалённые» (п. 18); бухгалтер указал НДС
                # поставщика, вписанного инициатором названием (п. 8)
-               'deleted', 'supplier_vat')
+               'deleted', 'supplier_vat',
+               # 16.11.2026: бухгалтер поставил срок закрывающих документов (п. 5) и закрыл
+               # заявку раньше них — документы ждут до срока (п. 6)
+               'docs_due', 'docs_deferred')
 
 _STATEMENTS = [
 
@@ -1120,6 +1123,53 @@ _STATEMENTS = [
     END $$
     """,
 
+    # ── Правки владельца 16.11.2026 ────────────────────────────────────────
+    #
+    # * Справочник «Проекты и отделы» (пп. 8, 11, 12): у проекта свои отделы, заявка
+    #   относится к проекту и его отделу (`project_department_id`).
+    # * Платёжное поручение, доверенность и подтверждение перевода — «только если
+    #   требуется» (пп. 3, 4, 10): нужны ли они, отмечает инициатор (у IT-закупа —
+    #   Helpdesk IT). Флаги поручения и доверенности остались в таблице от первой
+    #   версии раздела; подтверждения перевода — новый.
+    # * Закрывающие документы (пп. 5, 6): срок ставит бухгалтер (`docs_due_on`; пусто —
+    #   срок по настройке «дней на документы»), а заявку можно закрыть раньше документов —
+    #   тогда они остаются запросом инициатору со сроком (`docs_deferred_*`).
+    # Без внешних ключей на users (кто завёл отдел, кто закрыл заявку без документов) — как у
+    # архива «Удалённые»: ссылка на users в первом старте брала бы блокировку таблицы
+    # пользователей. Колонки заявки — под проверкой наличия: ALTER берёт блокировку таблицы
+    # даже с IF NOT EXISTS, а на старте рядом может работать прежний экземпляр (55P03).
+    """
+    CREATE TABLE IF NOT EXISTS payment_project_departments (
+        id          SERIAL PRIMARY KEY,
+        project_id  INTEGER NOT NULL REFERENCES payment_projects(id) ON DELETE CASCADE,
+        name        VARCHAR(200) NOT NULL,
+        is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at  TIMESTAMP NOT NULL DEFAULT %(now)s,
+        created_by  INTEGER
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_project_departments_name "
+    "ON payment_project_departments (project_id, lower(name))",
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_requests'
+                          AND column_name = 'docs_deferred_by_name') THEN
+            ALTER TABLE payment_requests
+                ADD COLUMN IF NOT EXISTS project_department_id INTEGER
+                    REFERENCES payment_project_departments(id) ON DELETE SET NULL,
+                ADD COLUMN IF NOT EXISTS needs_payment_order BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS needs_power_of_attorney BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS needs_transfer_proof BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS docs_due_on DATE,
+                ADD COLUMN IF NOT EXISTS docs_deferred_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS docs_deferred_by INTEGER,
+                ADD COLUMN IF NOT EXISTS docs_deferred_by_name VARCHAR(200);
+        END IF;
+    END $$
+    """,
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
@@ -1182,6 +1232,8 @@ TABLES = (
     # Почта поставщиков: письма о смене реквизитов
     'payment_requisites_mailings', 'payment_requisites_mail_recipients',
     'payment_counterparty_emails', 'payment_entity_mailboxes',
+    # Отделы внутри проекта (16.11.2026)
+    'payment_project_departments',
 )
 
 

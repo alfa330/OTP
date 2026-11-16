@@ -10,6 +10,7 @@ import PaymentCardFields, { useSavedCards } from './PaymentCardFields';
 import {
     ACCOUNTING_CATEGORY_OPTIONS, ALTERNATIVES_OPTIONS, ASSET_STATUS_META, CARD_RECIPIENT_LABELS, CONTRACT_THRESHOLD,
     DOCS_STATUS_META, HINTS, NO_CONTRACT, NO_CONTRACT_LABEL, OBJECT_TYPE_OPTIONS, PAYMENT_METHOD_OPTIONS, STOCK_OPTIONS, VAT_OPTIONS, cardDigits, fileKindOptions, fmtDate, fmtMoney,
+    PAYMENT_ORDER_OPTIONS, POWER_OF_ATTORNEY_OPTIONS, TRANSFER_PROOF_OPTIONS, proofsAsked, stageDeadlineLabel,
     helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount,
     pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO, vatLabel,
     contractChoice, contractPick, supplierKeyOf,
@@ -67,7 +68,7 @@ export const stageIssues = (kind, { request = {}, paid = {}, received = {}, asse
     const issues = [];
     const add = (key, text) => issues.push({ key, text });
     if (kind === 'entity_clarify') {
-        if (!entityId) add('legal_entity_id', 'выберите компанию');
+        if (!entityId) add('legal_entity_id', 'выберите юр. лицо');
     } else if (kind === 'invoice_payment') {
         // П. 8: бухгалтер проверяет «НДС/без НДС» — у поставщика, вписанного названием, его выбирают здесь,
         // и выбор уходит вместе с «Оплачено».
@@ -76,11 +77,17 @@ export const stageIssues = (kind, { request = {}, paid = {}, received = {}, asse
         }
         if (!paid.paid_on) add('paid_on', 'укажите дату оплаты');
         if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите фактическую сумму');
-        if (!kinds.has('payment_order')) add('files', 'приложите платёжное поручение');
+        // Платёжное поручение и доверенность — только если их просят в заявке (владелец 16.11.2026, пп. 3, 4).
+        proofsAsked(request, 'invoice').forEach((item) => {
+            if (!kinds.has(item.kind)) add('files', `приложите ${item.label} — просят в заявке`);
+        });
     } else if (kind === 'card_topup') {
         if (!paid.paid_on) add('paid_on', 'укажите дату перевода');
         if (!(parseAmount(paid.paid_amount) > 0)) add('paid_amount', 'укажите сумму');
-        if (!kinds.has('transfer_proof')) add('files', 'приложите подтверждение перевода');
+        // Подтверждение перевода — только если его просят в заявке (владелец 16.11.2026, п. 10).
+        proofsAsked(request, 'card').forEach((item) => {
+            if (!kinds.has(item.kind)) add('files', `приложите ${item.label} — просят в заявке`);
+        });
     } else if (kind === 'receipt_confirm') {
         if (!kinds.has('receipt')) add('files', 'приложите чек или другое подтверждение расхода');
     } else if (kind === 'receiving') {
@@ -231,6 +238,10 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
             // Счёт поставщика — тоже от Helpdesk IT (владелец 13.11.2026): поставщика выбрал он.
             invoice_number: request.invoice_number || '',
             invoice_date: request.invoice_date || '',
+            // Документы к оплате «только если требуется» (16.11.2026): способ оплаты IT-закупа выбирает он — и их отмечает.
+            needs_payment_order: Boolean(request.needs_payment_order),
+            needs_power_of_attorney: Boolean(request.needs_power_of_attorney),
+            needs_transfer_proof: Boolean(request.needs_transfer_proof),
             card_recipient: request.card_recipient ?? null,
             card_holder_user_id: request.card_holder_user_id ?? null,
             card_holder_name: request.card_holder_name || '',
@@ -365,6 +376,10 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                 object_type: draft.object_type,
                 accounting_category: draft.object_type === 'goods' ? draft.accounting_category : null,
                 payment_method: draft.payment_method,
+                // Отметку чужого способа оплаты сервер снимет сам (workflow.proof_flags_for).
+                needs_payment_order: Boolean(draft.needs_payment_order),
+                needs_power_of_attorney: Boolean(draft.needs_power_of_attorney),
+                needs_transfer_proof: Boolean(draft.needs_transfer_proof),
                 ...(draft.payment_method === 'invoice' ? {
                     contract_id: contractId, no_contract: noContract,
                     invoice_number: draft.invoice_number.trim(), invoice_date: draft.invoice_date || null,
@@ -586,6 +601,17 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                                         <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
                                     </Field>
                                 </div>
+                                {/* Документы к оплате «только если требуется» (16.11.2026, пп. 3, 4). */}
+                                <div className="flex flex-wrap gap-x-6 gap-y-3" data-form-proofs>
+                                    <Field as="div" label="Платёжное поручение" optionalMark={false} hint={HINTS.paymentOrder}>
+                                        <Choice value={Boolean(draft.needs_payment_order)} options={PAYMENT_ORDER_OPTIONS}
+                                            onChange={(value) => set('needs_payment_order', value)} ariaLabel="Платёжное поручение" />
+                                    </Field>
+                                    <Field as="div" label="Доверенность" optionalMark={false} hint={HINTS.powerOfAttorney}>
+                                        <Choice value={Boolean(draft.needs_power_of_attorney)} options={POWER_OF_ATTORNEY_OPTIONS}
+                                            onChange={(value) => set('needs_power_of_attorney', value)} ariaLabel="Доверенность" />
+                                    </Field>
+                                </div>
                             </>
                         )}
                         {draft.payment_method === 'card' && (
@@ -599,6 +625,13 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
                                 cardOptions={cardOptions}
                                 digitsRange={meta?.card_digits}
                             />
+                        )}
+                        {/* Подтверждение перевода — по требованию (16.11.2026, п. 10). */}
+                        {draft.payment_method === 'card' && (
+                            <Field as="div" label="Подтверждение перевода" optionalMark={false} hint={HINTS.transferProof}>
+                                <Choice value={Boolean(draft.needs_transfer_proof)} options={TRANSFER_PROOF_OPTIONS}
+                                    onChange={(value) => set('needs_transfer_proof', value)} ariaLabel="Подтверждение перевода" />
+                            </Field>
                         )}
                     </>
                 )}
@@ -641,11 +674,48 @@ const HelpdeskStage = ({ data, subtask, dictionaries, users, meta, apiBaseUrl, h
     );
 };
 
+/* ── Задача инициатора: приложить закрывающие документы (владелец 16.11.2026, п. 6) ──────────
+   «Чтобы инициатор тоже мог закидывать доки, если требуются закрывающие доки»: этап документов
+   у бухгалтерии, а у инициатора — своя задача со сроком (на рабочем столе — «Приложите закрывающие
+   документы»). Файл ложится в «Документы» заявки, и статус сам становится «Скан получен» — тогда
+   задача гаснет. Заявку могли закрыть раньше документов — задача та же. */
+const DOCS_UPLOAD_KINDS = fileKindOptions('closing_docs').filter((option) => option.value !== 'other');
+
+export const DocsUploadTask = ({ data, busy, onAttach }) => {
+    const request = data.request;
+    const [files, setFiles] = useState([]);
+    const [reveal, setReveal] = useState(false);
+    const due = data.stage_deadline?.kind === 'closing_docs' ? data.stage_deadline : null;
+    // Срок — словами в первой строке; красная метка — только когда он прошёл (иначе это та же дата второй раз).
+    const overdue = Boolean(due?.due_on) && Number(due.days_left) < 0;
+    const send = async () => {
+        if (busy) return;
+        if (!files.length) { setReveal(true); return; }
+        if (await onAttach(files)) { setFiles([]); setReveal(false); }
+    };
+    return (
+        <div data-stage-form="docs_upload" className="space-y-3 rounded-2xl bg-white p-3.5 ring-1 ring-blue-100">
+            <div className="text-[12.5px] text-slate-600">
+                {request.docs_tail ? 'Заявка закрыта, а закрывающие документы бухгалтерия ещё ждёт. ' : ''}
+                Приложите накладную, акт или чек{due?.due_on && !overdue ? ` — до ${fmtDate(due.due_on)}` : ''}. Оригиналы передайте в бухгалтерию.
+            </div>
+            {overdue && <div><TonePill tone="overdue">{stageDeadlineLabel(due)}</TonePill></div>}
+            <Field as="div" label="Закрывающие документы" required optionalMark={false} anchor="files"
+                issue={reveal && !files.length ? 'приложите накладную, акт или чек' : ''}>
+                <FilePicker files={files} onChange={setFiles} kinds={DOCS_UPLOAD_KINDS} label="Приложить документ" />
+            </Field>
+            <button type="button" className={iosBtnPrimary} disabled={busy} onClick={send}>
+                {busy && <Loader2 size={14} className="animate-spin" />} Отправить в бухгалтерию
+            </button>
+        </div>
+    );
+};
+
 /* issueSlot — место в нижней панели окна заявки для «Не хватает: N ⌃ ⌄»: кнопка этапа —
    внизу формы, а после нажатия человек уже наверху, у первого пустого поля. */
 const PaymentStageForm = ({
     data, subtask, dictionaries, users, meta, apiBaseUrl, headers, busy, showToast, permissions,
-    onAct, onTake, onEdit, onReply, onAttach, loadCard, issueSlot = null,
+    onAct, onTake, onEdit, onReply, onAttach, loadCard, issueSlot = null, onOpenRequest = null,
 }) => {
     const request = data.request;
     const kind = subtask.kind;
@@ -660,10 +730,18 @@ const PaymentStageForm = ({
         received_on: todayISO(), received_quantity: request.object_type === 'goods' ? quantityText(data.items) : '',
     });
     const [assets, setAssets] = useState(() => assetsFromRequest(request, data.items));
-    const [entityId, setEntityId] = useState(null);
+    /* Согласование с бухгалтерией (16.11.2026, п. 7): компания, которую указал инициатор, подставлена —
+       бухгалтер подтверждает её или меняет. Скрытую или удалённую из справочника не подставляем. */
+    const [entityId, setEntityId] = useState(() => (kind === 'entity_clarify'
+        && (dictionaries?.legal_entities || []).some((item) => item.id === request.legal_entity_id)
+        ? request.legal_entity_id : null));
     // Нажали кнопку этапа, а чего-то не хватало: с этого момента пустые поля красные.
     const [reveal, setReveal] = useState(false);
     const formRef = useRef(null);
+    /* Срок закрывающих документов (владелец 16.11.2026, п. 5): от бухгалтера, а пока его не ставили — по
+       настройке (сервер присылает его в `stage_deadline`). */
+    const [docsDue, setDocsDue] = useState(() => (data.stage_deadline?.kind === 'closing_docs'
+        ? String(data.stage_deadline.due_on || '').slice(0, 10) : ''));
 
     const kinds = new Set([...own.map((item) => item.kind), ...files.map((entry) => entry.kind)]);
     const issues = stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length, entityId });
@@ -686,6 +764,9 @@ const PaymentStageForm = ({
         action, fields: { comment: comment.trim(), ...fields }, files: withFiles ? files : [],
     });
     const invoiceFiles = all.filter((item) => item.kind === 'invoice');
+    // Документы оплаты, которые просят в заявке (16.11.2026, пп. 3, 4, 10): без отметки — по желанию.
+    const invoiceProofs = proofsAsked(request, 'invoice');
+    const cardProofs = proofsAsked(request, 'card');
     const closingFiles = all.filter((item) => (meta?.closing_doc_kinds || ['act', 'waybill', 'receipt']).includes(item.kind));
     const counterparty = (dictionaries?.counterparties || []).find((item) => item.id === request.counterparty_id) || null;
     const chips = (label, list) => (
@@ -765,20 +846,21 @@ const PaymentStageForm = ({
         );
     }
 
-    // ── Бухгалтерия: компания, которой не знал инициатор (просьба владельца 15.10.2026) ──
+    // ── Бухгалтерия: согласование — выбор юр. лица (15.10.2026; с 16.11.2026 — у каждого нового закупа) ──
     // Под рукой — то, по чему решают, чья это покупка: подразделение, инициатор, проект и
     // филиал. Что закупают и у кого — в сводке над страницами.
     if (kind === 'entity_clarify') {
         const entityOptions = (dictionaries?.legal_entities || []).map((item) => ({ value: item.id, label: item.name }));
+        const suggested = request.legal_entity_id ? request.legal_entity_name : '';
         return wrap(
             <>
                 <div className="rounded-xl bg-slate-50 px-3 py-1.5">
                     <Row label="Подразделение">{request.department_name}</Row>
                     <Row label="Инициатор">{request.initiator_name}</Row>
-                    <Row label="Проект">{request.project_name}</Row>
+                    <Row label="Проект">{[request.project_name, request.project_department_name].filter(Boolean).join(' → ')}</Row>
                     <Row label="Филиал / регион">{request.branch}</Row>
                 </div>
-                <Field label="Компания" required optionalMark={false} hint={HINTS.entityClarify} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
+                <Field label="Юр. лицо" required optionalMark={false} hint={HINTS.entityClarify} anchor="legal_entity_id" issue={issueOf('legal_entity_id')}>
                     <FormSelect
                         value={entityId}
                         onChange={(value) => setEntityId(value || null)}
@@ -786,12 +868,16 @@ const PaymentStageForm = ({
                         placeholder={entityOptions.length ? 'Выберите компанию' : 'Справочник компаний пуст'}
                         disabled={!entityOptions.length}
                         searchable={entityOptions.length > 8}
-                        ariaLabel="Компания"
+                        ariaLabel="Юр. лицо"
                     />
+                    {/* Что предложил инициатор — видно и после того, как бухгалтер выбрал другое. */}
+                    <span className="block px-1 text-[12.5px] text-slate-500" data-entity-suggested>
+                        {suggested ? `Инициатор указал: ${suggested}` : 'Инициатор компанию не указал'}
+                    </span>
                 </Field>
                 <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />
                 <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('set_entity', { legal_entity_id: entityId }, false))}>
-                    {busy && <Loader2 size={14} className="animate-spin" />} Указать компанию
+                    {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Согласовать
                 </button>
             </>,
         );
@@ -842,7 +928,10 @@ const PaymentStageForm = ({
                         {' '}Тот же поставщик, номер счёта, сумма и дата:
                         {data.duplicates.map((item) => (
                             <div key={item.id}>
-                                заявка №{item.id} «{item.expense_name}»{item.paid_on ? ` — оплачена ${fmtDate(item.paid_on)}, ${fmtMoney(item.paid_amount ?? item.amount)}` : ` — ${item.stage_label || 'в работе'}`}
+                                {onOpenRequest ? (
+                                    <button type="button" data-open-request={item.id} onClick={() => onOpenRequest(item.id)}
+                                        className="font-medium underline decoration-amber-300 underline-offset-2 hover:decoration-amber-600">заявка №{item.id}</button>
+                                ) : `заявка №${item.id}`} «{item.expense_name}»{item.paid_on ? ` — оплачена ${fmtDate(item.paid_on)}, ${fmtMoney(item.paid_amount ?? item.amount)}` : ` — ${item.stage_label || 'в работе'}`}
                             </div>
                         ))}
                     </NoticeBox>
@@ -884,9 +973,15 @@ const PaymentStageForm = ({
                         {contractValue(request, check.threshold, 'не указан')}
                         {check.applies && !check.ok && <div className="text-amber-700">{check.reason}</div>}
                     </Row>
+                    {/* Прошлые оплаты — номером-ссылкой: заявка открывается здесь же (владелец 16.11.2026, п. 2). */}
                     <Row label="Прошлые оплаты">
                         {lastPayments.length ? lastPayments.map((row) => (
-                            <div key={row.request_id}>№{row.request_id} · {fmtDate(row.paid_on)} · {fmtMoney(row.paid_amount ?? row.amount)}</div>
+                            <div key={row.request_id}>
+                                {onOpenRequest ? (
+                                    <button type="button" data-open-request={row.request_id} onClick={() => onOpenRequest(row.request_id)}
+                                        className="font-medium text-blue-600 underline-offset-2 hover:underline">№{row.request_id}</button>
+                                ) : `№${row.request_id}`} · {fmtDate(row.paid_on)} · {fmtMoney(row.paid_amount ?? row.amount)}
+                            </div>
                         )) : 'этому поставщику в разделе ещё не платили'}
                     </Row>
                 </div>
@@ -902,8 +997,17 @@ const PaymentStageForm = ({
                                 <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Фактическая сумма" />
                             </Field>
                         </div>
-                        <Field as="div" label="Платёжное поручение" required optionalMark={false} anchor="files" issue={issueOf('files')}>
-                            <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('invoice_payment')} label="Приложить платёжное поручение" />
+                        {/* Платёжное поручение и доверенность — только если их просят в заявке (владелец 16.11.2026,
+                            пп. 3, 4): тогда поле обязательно и сказано, что именно просят; иначе — по желанию. */}
+                        <Field as="div" label={invoiceProofs.length ? 'Документы к оплате' : 'Платёжное поручение'} required={invoiceProofs.length > 0}
+                            hint={invoiceProofs.length ? null : HINTS.paymentOrder} anchor="files" issue={issueOf('files')}>
+                            {invoiceProofs.length > 0 && (
+                                <span className="block px-1 text-[12.5px] text-slate-600" data-proofs-asked>
+                                    В заявке просят: {invoiceProofs.map((item) => item.label).join(', ')}.
+                                </span>
+                            )}
+                            <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('invoice_payment')}
+                                label={invoiceProofs.length ? 'Приложить документ' : 'Приложить платёжное поручение'} />
                         </Field>
                         <Comment value={comment} onChange={setComment} placeholder="Комментарий к оплате (необязательно)" />
                     </>
@@ -951,7 +1055,13 @@ const PaymentStageForm = ({
                                 <AmountInput value={paid.paid_amount} onChange={(value) => setPaid((prev) => ({ ...prev, paid_amount: value }))} ariaLabel="Сумма перевода" />
                             </Field>
                         </div>
-                        <Field as="div" label="Подтверждение перевода" required optionalMark={false} anchor="files" issue={issueOf('files')}>
+                        {/* Подтверждение перевода — по требованию (владелец 16.11.2026, п. 10): обязательно, только
+                            если его просят в заявке. */}
+                        <Field as="div" label="Подтверждение перевода" required={cardProofs.length > 0}
+                            hint={cardProofs.length ? null : HINTS.transferProof} anchor="files" issue={issueOf('files')}>
+                            {cardProofs.length > 0 && (
+                                <span className="block px-1 text-[12.5px] text-slate-600" data-proofs-asked>В заявке просят подтверждение перевода.</span>
+                            )}
                             <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('card_topup')} label="Приложить подтверждение" />
                         </Field>
                         <Comment value={comment} onChange={setComment} placeholder="Комментарий к переводу (необязательно)" />
@@ -1041,13 +1151,35 @@ const PaymentStageForm = ({
         const status = request.closing_docs_status || 'none';
         const docsMeta = DOCS_STATUS_META[status] || DOCS_STATUS_META.none;
         const received_ = status !== 'none';
+        // Заявку закрыли раньше документов (16.11.2026, п. 6): по ней остались только документы.
+        const tail = Boolean(request.docs_tail);
+        const allowed = permissions.actions || [];
+        const shownDue = data.stage_deadline?.kind === 'closing_docs' ? data.stage_deadline.due_on : null;
+        /* Срок (п. 5) сохраняется сразу, как его выбрали: инициатор узнаёт новый срок, напоминания идут к нему. */
+        const changeDue = (value) => {
+            setDocsDue(value || '');
+            if (value && value !== String(shownDue || '').slice(0, 10)) {
+                onAct({ action: 'docs_due', fields: { docs_due_on: value }, files: [] });
+            }
+        };
         return wrap(
             <>
+                {tail && (
+                    <NoticeBox tone="slate" text={`Заявка закрыта ${fmtDate(request.closed_at)} раньше закрывающих документов — `
+                        + `${shownDue ? `их ждём до ${fmtDate(shownDue)}` : 'их ещё ждём'}.`} />
+                )}
                 <div className="flex flex-wrap items-center gap-2">
                     <TonePill tone={docsMeta.tone}>{docsMeta.label}</TonePill>
                     {!received_ && <span className="text-[12.5px] text-slate-500">Инициатору отправлено напоминание приложить документы.</span>}
                 </div>
                 {chips('Документы:', closingFiles)}
+                {allowed.includes('docs_due') && (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <Field label="Срок документов" optionalMark={false} hint={HINTS.docsDue}>
+                            <FormDate value={docsDue} onChange={changeDue} allowEmpty={false} ariaLabel="Срок закрывающих документов" />
+                        </Field>
+                    </div>
+                )}
                 <Field as="div" label="Добавить скан" hint="Если скан или оригинал пришёл к вам, а не через инициатора, — приложите его сами." anchor="files" issue={issueOf('files')}>
                     {/* Скан выбран, но не загружен — красной рамкой обведена «Загрузить», а не выбор файла. */}
                     <FilePicker files={files} onChange={setFiles} kinds={fileKindOptions('closing_docs')} label="Приложить документ" invalid={files.length > 0 ? false : undefined} />
@@ -1067,7 +1199,31 @@ const PaymentStageForm = ({
                     <button type="button" className={iosBtnPrimary} disabled={busy} onClick={attempt(() => act('docs_close', {}, false))}>
                         {busy && <Loader2 size={14} className="animate-spin" />} Закрыть документы
                     </button>
+                    {/* П. 6: «либо закрыть заявку — запрос закрывающих документов с дедлайном». */}
+                    {allowed.includes('docs_defer') && (
+                        <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('docs_defer')} data-docs-defer>
+                            Закрыть заявку, документы — позже
+                        </button>
+                    )}
                 </div>
+                {mode === 'docs_defer' && (
+                    <div className="space-y-2 rounded-xl bg-slate-50 p-3 motion-safe:animate-reveal" data-docs-defer-panel>
+                        <div className="flex items-start gap-1.5 text-[12.5px] text-slate-600">
+                            <span className="min-w-0 grow basis-0">
+                                Заявка закроется, а закрывающие документы останутся запросом инициатору
+                                {docsDue ? ` до ${fmtDate(docsDue)}` : ''} — срок выше. Напоминания будут приходить, пока документы не закроете.
+                            </span>
+                            <FieldHint hint={HINTS.docsDefer} />
+                        </div>
+                        <div className="flex gap-2">
+                            <button type="button" className={iosBtnPrimary} disabled={busy || !docsDue}
+                                onClick={() => act('docs_defer', { docs_due_on: docsDue }, false)}>
+                                {busy && <Loader2 size={14} className="animate-spin" />} Закрыть заявку
+                            </button>
+                            <button type="button" className={iosBtnSecondary} onClick={() => setMode(null)}>Отмена</button>
+                        </div>
+                    </div>
+                )}
             </>,
         );
     }

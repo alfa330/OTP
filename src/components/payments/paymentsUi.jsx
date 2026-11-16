@@ -12,7 +12,7 @@ import { windowResizeMotion } from '../../utils/windowResize';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, REQUEST_FORMS, approvalSummary, cardNumberLabel, contractSummary, dueChip, edgeFade,
+    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, REQUEST_FORMS, approvalSummary, cardNumberLabel, contractSummary, docsDueChip, dueChip, edgeFade,
     fileSizeLabel, fmtMoney, initialsOf,
     issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText,
     shortPersonName, stateMeta, toneEdge, tonePill, toneRow,
@@ -285,9 +285,12 @@ const FlagIcon = () => (
     </svg>
 );
 
-/* Срок заявки; у оплаченной — день оплаты. Нет срока — нет и метки. */
-export const DueChip = ({ request, soonDays }) => {
-    const chip = dueChip(request, soonDays ? { soonDays } : undefined);
+/* Срок заявки; у оплаченной — день оплаты. Нет срока — нет и метки. `withWord` — у оплаченной
+   «Оплачено 12.11» словом (реестр, владелец 16.11.2026, п. 13), а не одной датой с галочкой. */
+export const DueChip = ({ request, soonDays, withWord = false, docsDueOn = null }) => {
+    // Задача «приложите закрывающие документы» — со сроком документов, а не с датой оплаты (16.11.2026).
+    const chip = docsDueOn ? docsDueChip(docsDueOn, soonDays ? { soonDays } : undefined)
+        : dueChip(request, { ...(soonDays ? { soonDays } : {}), withWord });
     if (!chip) return null;
     return (
         <MetaChip tone={chip.tone} title={chip.title}>

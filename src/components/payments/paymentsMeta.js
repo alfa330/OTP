@@ -44,6 +44,8 @@ export const STATE_FILTERS = [
     { key: 'open', label: 'В работе', counter: 'open', tone: null },
     { key: 'clarification', label: 'Требуют уточнения', counter: 'clarification', tone: 'blocked' },
     { key: 'overdue', label: 'Просрочены', counter: 'overdue', tone: 'overdue' },
+    // Деньги ушли, а заявка ещё идёт: ждёт получения, учёта или документов (владелец 16.11.2026, п. 13).
+    { key: 'paid', label: 'Оплачено', counter: 'paid', tone: null },
     { key: 'done', label: 'Закрыты', counter: 'done', tone: 'done' },
     { key: 'rejected', label: 'Отклонены', counter: 'rejected', tone: 'rejected' },
     { key: 'cancelled', label: 'Отменены', counter: 'cancelled', tone: 'rejected' },
@@ -124,6 +126,22 @@ export const STOCK_OPTIONS = [
     { value: false, label: 'Нет' },
     { value: true, label: 'Есть' },
 ];
+
+/* Документы оплаты «только если требуется» (владелец 16.11.2026, пп. 3, 4, 10): нужны ли платёжное
+   поручение, доверенность и подтверждение перевода, отмечает инициатор (у IT-закупа — Helpdesk IT,
+   он выбирает способ оплаты). Обязательно прикладывают только отмеченное. «Не нужно» выбрано
+   сразу: это обычный случай, а не пропущенный выбор (так было и в первой версии раздела). */
+export const PAYMENT_ORDER_OPTIONS = [{ value: false, label: 'Не нужно' }, { value: true, label: 'Нужно' }];
+export const POWER_OF_ATTORNEY_OPTIONS = [{ value: false, label: 'Не нужна' }, { value: true, label: 'Нужна' }];
+export const TRANSFER_PROOF_OPTIONS = [{ value: false, label: 'Не нужно' }, { value: true, label: 'Нужно' }];
+export const PAYMENT_PROOFS = [
+    { flag: 'needs_payment_order', kind: 'payment_order', method: 'invoice', label: 'платёжное поручение' },
+    { flag: 'needs_power_of_attorney', kind: 'power_of_attorney', method: 'invoice', label: 'доверенность' },
+    { flag: 'needs_transfer_proof', kind: 'transfer_proof', method: 'card', label: 'подтверждение перевода' },
+];
+/** Документы оплаты, которые просят в заявке, — для её способа оплаты (отметка чужого не считается). */
+export const proofsAsked = (request, method = request?.payment_method) => PAYMENT_PROOFS
+    .filter((item) => item.method === method && Boolean(request?.[item.flag]));
 
 export const MANAGER_STEP_OPTIONS = [
     { value: 'auto', label: 'По умолчанию' },
@@ -279,11 +297,13 @@ export const HINTS = {
             ['Карта', 'только пополнение банковской карты'],
         ],
     },
+    // С 16.11.2026 (владелец, п. 7) юр. лицо после руководителя выбирает бухгалтерия у каждого нового
+    // закупа — компания инициатора для неё подсказка.
     legalEntity: {
         intro: 'Наша компания, с которой уйдёт оплата и на которую поставщик выставит счёт.',
         options: [
-            ['Знаете компанию', 'выберите её — реквизиты появятся под полем, их можно скопировать и переслать поставщику'],
-            ['Не знаете', 'оставьте «Не знаю»: после руководителя компанию укажет бухгалтерия, и потом заявка уйдёт на утверждение'],
+            ['Знаете компанию', 'выберите её — реквизиты появятся под полем; после руководителя бухгалтерия её подтвердит или заменит'],
+            ['Не знаете', 'оставьте «Не знаю»: после руководителя юр. лицо выберет бухгалтерия, и потом заявка уйдёт на утверждение'],
         ],
     },
     // Заявка первой версии: она уже согласована, компания нужна для оплаты — «Не знаю» у неё нет.
@@ -291,10 +311,45 @@ export const HINTS = {
         intro: 'Наша компания, с которой уйдёт оплата и на которую поставщик выставит счёт.',
         outro: 'Реквизиты компании появятся под полем — их можно скопировать и переслать поставщику.',
     },
-    // Бухгалтерия указывает компанию, которой не знал инициатор (просьба владельца 15.10.2026).
+    // Согласование с бухгалтерией: юр. лицо (15.10.2026; с 16.11.2026 — у каждого нового закупа).
     entityClarify: {
         intro: 'Для какой компании закуп: с её счёта уйдёт оплата, на неё поставщик выставит счёт.',
-        outro: 'Инициатор увидит выбранную компанию в заявке, а согласующего раздел выберет уже с её учётом.',
+        outro: 'Компанию, которую указал инициатор, проверьте — подтвердите или замените. Инициатор увидит выбранную компанию в заявке, а согласующего раздел выберет уже с её учётом.',
+    },
+    // Документы оплаты «только если требуется» (владелец 16.11.2026, пп. 3, 4, 10).
+    paymentOrder: {
+        intro: 'Платёжное поручение — отметка банка о том, что оплата ушла. Обычно не нужно: просят, когда поставщик отгружает только после подтверждения оплаты.',
+        options: [
+            ['Не нужно', 'бухгалтерия приложит его, только если захочет'],
+            ['Нужно', 'без него бухгалтерия не отметит счёт оплаченным'],
+        ],
+    },
+    powerOfAttorney: {
+        intro: 'Доверенность — документ, по которому сотрудник забирает товар у поставщика от имени компании.',
+        options: [
+            ['Не нужна', 'товар привезут сами или забирать его не нужно'],
+            ['Нужна', 'бухгалтерия приложит её вместе с оплатой счёта'],
+        ],
+    },
+    transferProof: {
+        intro: 'Подтверждение перевода — квитанция банка о пополнении карты. Обычно не нужно: деньги и так видно на карте.',
+        options: [
+            ['Не нужно', 'финансовый отдел приложит его, только если захочет'],
+            ['Нужно', 'без него финансовый отдел не отметит карту пополненной'],
+        ],
+    },
+    // Срок закрывающих документов и закрытие заявки раньше них (владелец 16.11.2026, пп. 5, 6).
+    docsDue: {
+        intro: 'До какого числа инициатор приложит закрывающие документы — накладную, акт или чек.',
+        outro: 'Пока срок не меняли — дни из «Настроек» после подтверждения получения. За день до срока и когда он прошёл, напоминание приходит инициатору, бухгалтерии и наблюдателям.',
+    },
+    docsDefer: {
+        intro: 'Заявку можно закрыть, не дожидаясь закрывающих документов: они останутся запросом инициатору до срока.',
+        outro: 'Инициатор приложит документы уже в закрытую заявку, а оригинал и «Закрыть документы» бухгалтерия отметит там же. На доске заявка стоит в «Ожидаются закрывающие документы», пока документы не закрыты.',
+    },
+    // Отделы внутри проекта (владелец 16.11.2026, пп. 8, 11, 12).
+    projectDepartment: {
+        intro: 'Отдел внутри выбранного проекта. Список отделов ведёт администратор раздела: «Справочники → Проекты и отделы».',
     },
     department: { intro: 'Подразделение, для которого делается закуп. По умолчанию — ваше.' },
     category: {
@@ -926,11 +981,13 @@ export const isOverdue = (request, today = todayISO()) => {
    шлёт напоминание о сроке), серый — всё спокойно. Подробности — в подсказке.
    У оплаченной вместо срока — галочка и день оплаты. null — показывать нечего:
    срока нет либо заявка закрыта без оплаты. */
-export const dueChip = (request, { soonDays = 3, today = todayISO() } = {}) => {
+export const dueChip = (request, { soonDays = 3, today = todayISO(), withWord = false } = {}) => {
     // Заявка в архиве «Удалённые» (п. 18) срока уже не держит — ни флажка, ни красного.
     if (!request || request.deleted) return null;
     if (request.paid_on) {
-        return { tone: 'done', icon: 'check', label: fmtDateShort(request.paid_on), title: `${paidWord(request)} ${fmtDate(request.paid_on)}` };
+        // `withWord` — «Оплачено 12.11» словом, а не одной датой (реестр, владелец 16.11.2026, п. 13).
+        const label = withWord ? `${paidWord(request)} ${fmtDateShort(request.paid_on)}` : fmtDateShort(request.paid_on);
+        return { tone: 'done', icon: 'check', label, title: `${paidWord(request)} ${fmtDate(request.paid_on)}` };
     }
     if (!request.due_on || (request.status && request.status !== 'active')) return null;
     const days = daysUntil(request.due_on, today);
@@ -940,6 +997,19 @@ export const dueChip = (request, { soonDays = 3, today = todayISO() } = {}) => {
     if (days < 0) return { tone: 'overdue', icon: 'flag', label, title: `Срок оплаты ${date} — просрочен на ${pluralDays(days)}` };
     if (days === 0) return { tone: 'soon', icon: 'flag', label, title: `Срок оплаты — сегодня, ${date}` };
     return { tone: days <= soonDays ? 'soon' : 'normal', icon: 'flag', label, title: `Срок оплаты ${date} — через ${pluralDays(days)}` };
+};
+
+/* Срок закрывающих документов на задаче инициатора в «Моих задачах» (владелец 16.11.2026, п. 5):
+   флажок с датой — как у срока оплаты, но про документы; оплата у такой заявки уже прошла. */
+export const docsDueChip = (dueOn, { soonDays = 3, today = todayISO() } = {}) => {
+    if (!dueOn) return null;
+    const days = daysUntil(dueOn, today);
+    const label = fmtDateShort(dueOn);
+    const date = fmtDate(dueOn);
+    if (days === null) return { tone: 'normal', icon: 'flag', label, title: `Документы — до ${date}` };
+    if (days < 0) return { tone: 'overdue', icon: 'flag', label, title: `Документы — срок ${date} прошёл ${pluralDays(days)} назад` };
+    if (days === 0) return { tone: 'soon', icon: 'flag', label, title: `Документы — срок сегодня, ${date}` };
+    return { tone: days <= soonDays ? 'soon' : 'normal', icon: 'flag', label, title: `Документы — до ${date}, через ${pluralDays(days)}` };
 };
 
 /* «оплачено 09.10» / «пополнено 09.10» — для строки срока в карточке заявки и в реестре. */
@@ -1422,7 +1492,7 @@ export const stageLine = (request) => {
    называться одинаково — дважды одно слово не печатаем. */
 /* Этапы на ступени «Согласование», которые сами не согласование: бухгалтерия уточняет компанию,
    Helpdesk IT проверяет IT-закуп (владелец 04.11.2026). Где заявка — их словами, а не «Согласование». */
-export const CURRENT_KIND_LABELS = { entity_clarify: 'Уточнение компании', it_review: 'Проверка Helpdesk IT' };
+export const CURRENT_KIND_LABELS = { entity_clarify: 'Согласование с бухгалтерией', it_review: 'Проверка Helpdesk IT' };
 
 export const registryWhere = (request) => {
     const live = request?.status === 'active' && !request?.deleted;
@@ -1557,9 +1627,24 @@ export const registryTableMinWidth = (keys) => REGISTRY_COLUMNS
    стоят своей колонкой, чтобы одно и то же не печаталось дважды. */
 export const expenseSubline = (request, keys = []) => [
     keys.includes('category') ? null : request?.category_name,
-    keys.includes('project') ? null : request?.project_name,
+    keys.includes('project') ? null : projectLine(request),
     request?.department_name,
 ].filter(Boolean).join(' · ');
+
+/* Проект заявки и отдел внутри него (справочник «Проекты и отделы», владелец 16.11.2026). */
+export const projectLine = (request) => [request?.project_name, request?.project_department_name]
+    .filter(Boolean).join(' → ');
+
+/* «Прошлые закупы» того же товара или услуги (владелец 16.11.2026, п. 1) — сутью для свёрнутой
+   строки окна заявки: последний закуп с ценой за единицу и сколько их всего. */
+export const similarSummary = (rows = []) => {
+    const list = rows || [];
+    if (!list.length) return '';
+    const last = list.reduce((best, row) => (String(row.paid_on || '') > String(best.paid_on || '') ? row : best), list[0]);
+    const price = parseAmount(last.unit_price) > 0 ? `${fmtMoney(last.unit_price)}/ед.` : fmtMoney(last.paid_amount ?? last.amount);
+    const head = `№${last.request_id} · ${fmtDateShort(last.paid_on)} · ${price}`;
+    return list.length > 1 ? `${head} · ещё ${list.length - 1}` : head;
+};
 
 /* ── Согласование (п. 6) ───────────────────────────────────────────────────────
    Маршрут определяет система; человеку показываем, кто согласует и почему. */
@@ -1984,6 +2069,7 @@ const FIELD_LABELS = {
     expense_name: 'Наименование закупа',
     justification: 'Описание и обоснование',
     project_id: 'Проект',
+    project_department_id: 'Отдел проекта',
     branch: 'Филиал / регион',
     category_id: 'Категория закупа',
     subcategory_id: 'Подкатегория',
@@ -2020,6 +2106,10 @@ const FIELD_LABELS = {
     paid_amount: 'Оплачено',
     refund_on: 'Дата возврата',
     refund_amount: 'Сумма возврата',
+    needs_payment_order: 'Платёжное поручение',
+    needs_power_of_attorney: 'Доверенность',
+    needs_transfer_proof: 'Подтверждение перевода',
+    docs_due_on: 'Срок закрывающих документов',
 };
 
 const unique = (list) => list.filter((value, index) => value && list.indexOf(value) === index);
@@ -2037,20 +2127,20 @@ export const describeEvent = (event, titleOf = () => '') => {
         case 'migrated': return 'Переведена на этапы';
         case 'submitted': {
             const changed = (payload.changed || []).join(', ');
-            // Компанию не указали — сначала заявка у бухгалтерии (просьба владельца 15.10.2026).
-            if (payload.entity_step) {
-                if (payload.first) return 'Отправлена: компанию уточнит бухгалтерия';
-                return changed
-                    ? `Отправлена заново: изменено — ${changed}; компанию уточнит бухгалтерия`
-                    : 'Отправлена заново: компанию уточнит бухгалтерия';
-            }
+            // Согласование с бухгалтерией (выбор юр. лица) с 16.11.2026 — у каждого нового закупа, отдельной
+            // строкой о нём история больше не говорит: этап виден в «Ходе заявки».
             if (payload.first) return 'Отправлена на согласование';
             return changed
                 ? `Отправлена на согласование заново: изменено — ${changed}`
                 : 'Отправлена на согласование заново';
         }
         case 'clarified': return `Инициатор ответил${of}`;
-        case 'entity_set': return payload.legal_entity_name ? `Указана компания: ${payload.legal_entity_name}` : 'Указана компания';
+        case 'entity_set': return payload.legal_entity_name ? `Бухгалтерия выбрала юр. лицо: ${payload.legal_entity_name}` : 'Бухгалтерия выбрала юр. лицо';
+        // Срок закрывающих документов и закрытие заявки раньше них (владелец 16.11.2026, пп. 5, 6).
+        case 'docs_due': return payload.to ? `Срок закрывающих документов — до ${fmtDate(payload.to)}` : 'Изменён срок закрывающих документов';
+        case 'docs_deferred': return payload.docs_due_on
+            ? `Заявка закрыта раньше закрывающих документов — ждём их до ${fmtDate(payload.docs_due_on)}`
+            : 'Заявка закрыта раньше закрывающих документов';
         // Helpdesk IT (просьба владельца 04.11.2026): подобрал поставщиков либо выдал из наличия.
         case 'it_offers': return payload.recommended
             ? `Helpdesk IT подобрал поставщиков: рекомендуемый — ${payload.recommended}${parseAmount(payload.amount) > 0 ? `, ${fmtMoney(payload.amount)}` : ''}`
@@ -2138,6 +2228,8 @@ export const canDropTo = (board, card, columnKey) => Boolean(
 /* Фильтры досок и реестра (п. 19) → параметры запроса. Пустое не уходит. */
 export const EMPTY_FILTERS = {
     legal_entity_id: null, department_id: null, initiator_id: null, assignee_id: null, approver_id: null,
+    // Проект и отдел внутри него (справочник «Проекты и отделы», 16.11.2026).
+    project_id: null, project_department_id: null,
     counterparty_id: null, request_kind: '', payment_method: '', state: '', amount_from: '', amount_to: '',
     date_from: '', date_to: '', overdue: false, mine: false,
 };

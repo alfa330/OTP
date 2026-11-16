@@ -72,6 +72,10 @@ const PaymentsFilters = ({ search, onSearch, filters, onChange, dictionaries, us
     const entityOptions = useMemo(() => [{ value: '', label: 'Все компании' }, ...(dictionaries?.legal_entities || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
     const departmentOptions = useMemo(() => [{ value: '', label: 'Все отделы' }, ...(dictionaries?.departments || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
     const supplierOptions = useMemo(() => [{ value: '', label: 'Все поставщики' }, ...(dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
+    // Проект и отдел внутри него (16.11.2026): отделы — только выбранного проекта.
+    const projectOptions = useMemo(() => [{ value: '', label: 'Все проекты' }, ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
+    const projectDepartmentOptions = useMemo(() => [{ value: '', label: 'Все отделы проекта' }, ...(dictionaries?.project_departments || [])
+        .filter((item) => item.project_id === filters.project_id).map((item) => ({ value: item.id, label: item.name }))], [dictionaries, filters.project_id]);
 
     const chips = useMemo(() => {
         const list = [];
@@ -79,6 +83,10 @@ const PaymentsFilters = ({ search, onSearch, filters, onChange, dictionaries, us
         const add = (key, name, label, patch) => list.push({ key, name, label, patch });
         if (filters.legal_entity_id) add('legal_entity_id', 'Компания', nameOf(entityOptions, filters.legal_entity_id), { legal_entity_id: null });
         if (filters.department_id) add('department_id', 'Отдел', nameOf(departmentOptions, filters.department_id), { department_id: null });
+        if (filters.project_id) add('project_id', 'Проект', nameOf(projectOptions, filters.project_id), { project_id: null, project_department_id: null });
+        if (filters.project_department_id) {
+            add('project_department_id', 'Отдел проекта', nameOf(projectDepartmentOptions, filters.project_department_id), { project_department_id: null });
+        }
         if (filters.initiator_id) add('initiator_id', 'Инициатор', nameOf(userOptions, filters.initiator_id), { initiator_id: null });
         if (filters.assignee_id) add('assignee_id', 'Исполнитель', nameOf(userOptions, filters.assignee_id), { assignee_id: null });
         if (filters.approver_id) add('approver_id', 'Согласующий', nameOf(userOptions, filters.approver_id), { approver_id: null });
@@ -95,7 +103,7 @@ const PaymentsFilters = ({ search, onSearch, filters, onChange, dictionaries, us
         if (filters.overdue) add('overdue', 'Только', 'просроченные', { overdue: false });
         if (filters.mine) add('mine', 'Только', 'мои', { mine: false });
         return list;
-    }, [filters, entityOptions, departmentOptions, userOptions, supplierOptions]);
+    }, [filters, entityOptions, departmentOptions, userOptions, supplierOptions, projectOptions, projectDepartmentOptions]);
 
     return (
         <div>
@@ -155,6 +163,19 @@ const PaymentsFilters = ({ search, onSearch, filters, onChange, dictionaries, us
                                 <Field label="Отдел" optionalMark={false}>
                                     <CustomSelect value={filters.department_id} onChange={(value) => set({ department_id: value || null })} options={departmentOptions} placeholder="Все отделы" variant="ios" ariaLabel="Отдел" />
                                 </Field>
+                                {/* Проекты есть — есть и отбор по ним; отдел проекта — когда у выбранного проекта есть отделы. */}
+                                {projectOptions.length > 1 && (
+                                    <Field label="Проект" optionalMark={false}>
+                                        <CustomSelect value={filters.project_id} onChange={(value) => set({ project_id: value || null, project_department_id: null })}
+                                            options={projectOptions} placeholder="Все проекты" variant="ios" searchable={projectOptions.length > 9} ariaLabel="Проект" />
+                                    </Field>
+                                )}
+                                {projectDepartmentOptions.length > 1 && (
+                                    <Field label="Отдел проекта" optionalMark={false}>
+                                        <CustomSelect value={filters.project_department_id} onChange={(value) => set({ project_department_id: value || null })}
+                                            options={projectDepartmentOptions} placeholder="Все отделы проекта" variant="ios" ariaLabel="Отдел проекта" />
+                                    </Field>
+                                )}
                                 <Field label="Инициатор" optionalMark={false}>
                                     <CustomSelect value={filters.initiator_id} onChange={(value) => set({ initiator_id: value || null })} options={userOptions} placeholder="Все" variant="ios" searchable ariaLabel="Инициатор" />
                                 </Field>

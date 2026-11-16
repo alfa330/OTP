@@ -21,7 +21,7 @@ MAX_TITLE = 160
 
 # Что сделать исполнителю — заголовок уведомления о новой задаче.
 TASK_TITLES = {
-    workflow.KIND_ENTITY: 'Уточните компанию',
+    workflow.KIND_ENTITY: 'Выберите юр. лицо',
     workflow.KIND_IT: 'Проверьте IT-закуп',
     workflow.KIND_MANAGER: 'Согласуйте закуп',
     workflow.KIND_APPROVAL: 'Утвердите закуп',
@@ -147,15 +147,16 @@ def clarification(request, *, reason_label, comment, by_label):
 
 
 def entity_set(request):
-    """Бухгалтерия указала компанию, которой инициатор не знал (просьба владельца 15.10.2026):
-    теперь он знает, на какую компанию просить счёт у поставщика."""
+    """Бухгалтерия согласовала заявку и выбрала юр. лицо (просьба владельца 15.10.2026, с
+    16.11.2026 — у каждого нового закупа): инициатор знает, на какую компанию просить счёт у
+    поставщика."""
     entity = request.get('legal_entity_name') or 'компания из справочника'
     return {
         'kind': 'entity_set',
-        'title': 'Компания указана',
+        'title': 'Бухгалтерия выбрала юр. лицо',
         'body': '%s — %s' % (brief(request), _cut(entity, 120)),
-        'telegram': _message('🏢 Оплата счетов — компания указана', request, [
-            'Компания: %s' % _esc(entity, MAX_TITLE),
+        'telegram': _message('🏢 Оплата счетов — бухгалтерия выбрала юр. лицо', request, [
+            'Юр. лицо: %s' % _esc(entity, MAX_TITLE),
         ]),
     }
 
@@ -292,14 +293,65 @@ def for_observer(event):
     return dict(event, title=title) if title else event
 
 
-def docs_needed(request):
-    """Инициатору: приложите закрывающие документы (п. 17)."""
+def _until(due_on):
+    return ' до %s' % workflow.fmt_date(due_on) if due_on else ''
+
+
+def docs_needed(request, due_on=None):
+    """Инициатору: приложите закрывающие документы (п. 17) — до срока, если он есть (16.11.2026)."""
     return {
         'kind': 'docs_needed',
-        'title': 'Приложите закрывающие документы',
+        'title': 'Приложите закрывающие документы%s' % _until(due_on),
         'body': brief(request),
         'telegram': _message('📎 Оплата счетов — нужны закрывающие документы', request, [
-            'Приложите в заявке накладную, акт или чек. Оригиналы передайте в бухгалтерию.',
+            'Приложите в заявке накладную, акт или чек%s. Оригиналы передайте в бухгалтерию.' % _until(due_on),
+        ]),
+    }
+
+
+def docs_due(request, due_on):
+    """Бухгалтер поставил срок закрывающих документов (владелец 16.11.2026, п. 5) — инициатору
+    к сведению: сама задача «приложите документы» у него уже есть."""
+    return {
+        'kind': 'docs_due',
+        'title': 'Срок закрывающих документов — до %s' % workflow.fmt_date(due_on),
+        'body': brief(request),
+    }
+
+
+def docs_deferred(request, due_on):
+    """Бухгалтер закрыл заявку раньше закрывающих документов (владелец 16.11.2026, п. 6): заявка
+    закрыта, а документы ждут до срока. Документов ещё нет — это задача инициатору (тот же вид,
+    что «приложите документы»: строка гаснет, когда скан приложат); скан уже есть — к сведению:
+    осталось передать оригиналы."""
+    waiting_scan = (request.get('closing_docs_status') or workflow.DOCS_NONE) == workflow.DOCS_NONE
+    action = ('Приложите в заявке накладную, акт или чек%s. Оригиналы передайте в бухгалтерию.' if waiting_scan
+              else 'Оригиналы закрывающих документов передайте в бухгалтерию%s.') % _until(due_on)
+    return {
+        'kind': 'docs_needed' if waiting_scan else 'closed',
+        'title': ('Заявка закрыта — приложите закрывающие документы%s' if waiting_scan
+                  else 'Заявка закрыта — оригиналы документов%s') % _until(due_on),
+        'body': brief(request),
+        'telegram': _message('📎 Оплата счетов — заявка закрыта, ждём закрывающие документы', request, [action]),
+    }
+
+
+TAIL_DOCS_TITLE = 'Проверьте документы закрытой заявки'
+
+
+def docs_arrived(request):
+    """Бухгалтерии: инициатор приложил закрывающие документы к заявке, закрытой раньше них
+    (владелец 16.11.2026, п. 6) — она снова в «Моих задачах»: проверить, отметить оригинал, закрыть."""
+    return {
+        'kind': 'task',
+        'subtask': workflow.KIND_CLOSING,
+        'title': TAIL_DOCS_TITLE,
+        'body': brief(request),
+        'telegram': _message('📎 Оплата счетов — пришли закрывающие документы', request, [
+            '<b>%s</b>' % TAIL_DOCS_TITLE,
+            'Заявку закрыли раньше документов — инициатор их приложил. Проверьте, отметьте оригинал и закройте документы.',
+            '',
+            _who(request),
         ]),
     }
 

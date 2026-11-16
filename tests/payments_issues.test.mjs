@@ -214,12 +214,21 @@ test('стрелка: по кругу; от исправленного поля 
 test('этапы: пункты у полей формы — дата, сумма, файл, количество, имущество', async () => {
     const { stageIssues } = await bundle('src/components/payments/PaymentStageForm.jsx', 'stage');
     const none = new Set();
-    assert.deepEqual(keysOf(stageIssues('invoice_payment', { paid: { paid_on: '', paid_amount: 0 }, kinds: none })), ['paid_on', 'paid_amount', 'files']);
-    assert.deepEqual(stageIssues('invoice_payment', { paid: { paid_on: '2026-10-14', paid_amount: 100 }, kinds: new Set(['payment_order']) }), []);
-    assert.deepEqual(stageIssues('invoice_payment', { paid: { paid_on: '2026-10-14', paid_amount: 100 }, kinds: none }),
-        [{ key: 'files', text: 'приложите платёжное поручение' }]);
-    assert.deepEqual(keysOf(stageIssues('card_topup', { paid: { paid_on: '', paid_amount: 0 }, kinds: none })), ['paid_on', 'paid_amount', 'files']);
-    assert.deepEqual(stageIssues('card_topup', { paid: { paid_on: '2026-10-14', paid_amount: 1 }, kinds: new Set(['transfer_proof']) }), []);
+    // Платёжное поручение, доверенность, подтверждение перевода — только если их просят в заявке (16.11.2026,
+    // пп. 3, 4, 10): без отметки оплату записывают датой и суммой.
+    assert.deepEqual(keysOf(stageIssues('invoice_payment', { paid: { paid_on: '', paid_amount: 0 }, kinds: none })), ['paid_on', 'paid_amount']);
+    assert.deepEqual(stageIssues('invoice_payment', { paid: { paid_on: '2026-10-14', paid_amount: 100 }, kinds: none }), []);
+    const asked = { payment_method: 'invoice', needs_payment_order: true, needs_power_of_attorney: true, needs_transfer_proof: true };
+    assert.deepEqual(stageIssues('invoice_payment', { request: asked, paid: { paid_on: '2026-10-14', paid_amount: 100 }, kinds: none }),
+        [{ key: 'files', text: 'приложите платёжное поручение — просят в заявке' },
+            { key: 'files', text: 'приложите доверенность — просят в заявке' }]);
+    assert.deepEqual(stageIssues('invoice_payment', { request: asked, paid: { paid_on: '2026-10-14', paid_amount: 100 },
+        kinds: new Set(['payment_order', 'power_of_attorney']) }), []);
+    assert.deepEqual(keysOf(stageIssues('card_topup', { paid: { paid_on: '', paid_amount: 0 }, kinds: none })), ['paid_on', 'paid_amount']);
+    const card = { payment_method: 'card', needs_transfer_proof: true, needs_payment_order: true };
+    assert.deepEqual(stageIssues('card_topup', { request: card, paid: { paid_on: '2026-10-14', paid_amount: 1 }, kinds: none }),
+        [{ key: 'files', text: 'приложите подтверждение перевода — просят в заявке' }], 'поручения у карты не просят');
+    assert.deepEqual(stageIssues('card_topup', { request: card, paid: { paid_on: '2026-10-14', paid_amount: 1 }, kinds: new Set(['transfer_proof']) }), []);
     assert.deepEqual(keysOf(stageIssues('receipt_confirm', { kinds: none })), ['files']);
     assert.deepEqual(stageIssues('receipt_confirm', { kinds: new Set(['receipt']) }), []);
     // Количество — только у товара.
@@ -233,8 +242,8 @@ test('этапы: пункты у полей формы — дата, сумма
     assert.deepEqual(stageIssues('closing_docs', { request: { closing_docs_status: 'scan' } }), []);
     // У согласования обязательного в форме нет — пунктов нет.
     assert.deepEqual(stageIssues('approval', {}), []);
-    // Бухгалтерия уточняет компанию (просьба владельца 15.10.2026): без компании этап не закрыть.
-    assert.deepEqual(stageIssues('entity_clarify', {}), [{ key: 'legal_entity_id', text: 'выберите компанию' }]);
+    // Бухгалтерия выбирает юр. лицо (15.10.2026, с 16.11.2026 — у каждого нового закупа): без него этап не закрыть.
+    assert.deepEqual(stageIssues('entity_clarify', {}), [{ key: 'legal_entity_id', text: 'выберите юр. лицо' }]);
     assert.deepEqual(stageIssues('entity_clarify', { entityId: 2 }), []);
 });
 
@@ -243,28 +252,29 @@ test('компанию не знает инициатор: поле необяз
     const form = source('src/components/payments/PaymentRequestForm.jsx');
     assert.ok(form.includes('const entityOptional = kind === \'purchase\' && !legacy;'));
     assert.ok(form.includes('<Field label="Компания" required={!entityOptional} hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired} anchor="legal_entity_id" issue={issueOf(\'legal_entity_id\')}>'));
-    assert.ok(form.includes("const ENTITY_UNKNOWN = 'Не знаю — уточнит бухгалтерия';"));
+    assert.ok(form.includes("const ENTITY_UNKNOWN = 'Не знаю — выберет бухгалтерия';"));
     assert.ok(form.includes('[{ value: null, label: ENTITY_UNKNOWN }, ...legalEntityOptions]'));
     assert.ok(form.includes('onChange={(value) => set(\'legal_entity_id\', value || null)}'));
     // Маршрут под формой называет бухгалтерию первой, а сообщение после отправки — что компанию уточнят.
     assert.ok(form.includes('{entityStep && ('));
-    assert.ok(form.includes("body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — компанию уточнит бухгалтерия'"));
+    assert.ok(form.includes("body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — юр. лицо выберет бухгалтерия'"));
     // Форма этапа бухгалтерии: выбор компании с якорем пункта и кнопка через attempt — пустое поле краснеет.
     const stage = source('src/components/payments/PaymentStageForm.jsx');
     assert.ok(stage.includes("if (kind === 'entity_clarify') {"));
     assert.ok(stage.includes('anchor="legal_entity_id" issue={issueOf(\'legal_entity_id\')}'));
     assert.ok(stage.includes("disabled={busy} onClick={attempt(() => act('set_entity', { legal_entity_id: entityId }, false))}"));
     assert.ok(stage.includes('stageIssues(kind, { request, paid, received, assets, kinds, queued: files.length, entityId })'));
-    // Окно заявки: пока компанию уточняют — строка «Компания» говорит, кто её укажет.
-    const card = source('src/components/payments/PaymentRequestCard.jsx');
-    assert.ok(card.includes("const entityPending = ['pending', 'open'].includes(subtaskByKind.entity_clarify?.state);"));
-    assert.ok(card.includes('{request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}'));
-    assert.ok(card.includes("set_entity: 'Компания указана'"));
+    // Окно заявки: пока бухгалтерия не согласовала — строка «Компания» говорит, кто её выберет или подтвердит.
+    const cardSource = source('src/components/payments/PaymentRequestCard.jsx');
+    assert.ok(cardSource.includes("const entityPending = ['pending', 'open'].includes(subtaskByKind.entity_clarify?.state);"));
+    assert.ok(cardSource.includes('{entityPending && <span className="text-slate-500"> · подтвердит бухгалтерия</span>}'));
+    assert.ok(cardSource.includes('(entityPending ? <span className="text-slate-500">выберет бухгалтерия</span> : null)'));
+    assert.ok(cardSource.includes("set_entity: 'Согласовано — юр. лицо выбрано'"));
     // Реестр: бухгалтерия на «Согласовании» подписана — это уточнение компании (и Helpdesk IT — проверка
     // IT-закупа, 04.11.2026); на столе — свой значок.
     const view = source('src/components/payments/PaymentsView.jsx');
     assert.ok(view.includes("{CURRENT_KIND_LABELS[request.current_kind] && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{CURRENT_KIND_LABELS[request.current_kind].toLowerCase()}</div>}"));
-    assert.equal(CURRENT_KIND_LABELS.entity_clarify, 'Уточнение компании');
+    assert.equal(CURRENT_KIND_LABELS.entity_clarify, 'Согласование с бухгалтерией');
     assert.equal(CURRENT_KIND_LABELS.it_review, 'Проверка Helpdesk IT');
     const desk = source('src/components/payments/PaymentsDesk.jsx');
     assert.ok(desk.includes('    entity_clarify: Landmark,\n'));
@@ -282,13 +292,13 @@ test('компанию не знает инициатор: поле необяз
     assert.ok(form.includes("{itStep || entityStep ? <span className=\"text-slate-500\">{itStep ? 'согласующего выберут по сумме поставщика' : 'согласующего выберут по компании'}</span> : ("));
     assert.ok(form.includes('{route.basisText && !entityStep && !itStep && <div'));
     assert.ok(form.includes('hint={entityOptional ? HINTS.legalEntity : HINTS.legalEntityRequired}'));
-    assert.ok(card.includes("return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');"));
-    assert.ok(card.includes("if (event.kind === 'submitted') return false;"));
-    assert.ok(card.includes('const approverPending = (entityPending || itPending) && !approvalReassigned;'));
-    assert.ok(card.includes("const approverPendingText = itPending ? 'после Helpdesk IT' : 'после выбора компании';"));
-    assert.ok(card.includes("right = item.kind === 'approval' && approverPending ? approverPendingText : who;"));
+    assert.ok(cardSource.includes("return manual || (event.kind === 'reassigned' && event.payload?.kind === 'approval');"));
+    assert.ok(cardSource.includes("if (event.kind === 'submitted') return false;"));
+    assert.ok(cardSource.includes('const approverPending = (entityPending || itPending) && !approvalReassigned;'));
+    assert.ok(cardSource.includes("const approverPendingText = itPending ? 'после Helpdesk IT' : 'после бухгалтерии';"));
+    assert.ok(cardSource.includes("right = item.kind === 'approval' && approverPending ? approverPendingText : who;"));
     // Утверждения не было вовсе (Helpdesk IT выдал из наличия) — строки «Согласует» нет.
-    assert.ok(card.includes("{subtaskByKind.approval?.state === 'skipped' ? null : approverPending ? <span className=\"text-slate-500\">определят {approverPendingText}</span> : approval ? ("));
+    assert.ok(cardSource.includes("{subtaskByKind.approval?.state === 'skipped' ? null : approverPending ? <span className=\"text-slate-500\">определят {approverPendingText}</span> : approval ? ("));
 });
 
 test('имущество: по пункту на пустое поле каждой карточки, повтор инвентарного — у обеих', async () => {

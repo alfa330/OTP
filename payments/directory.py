@@ -17,12 +17,64 @@ from .sqlutil import NOW_SQL, columns, like_pattern, row_map
 
 # ─── Проекты ─────────────────────────────────────────────────────────────────
 
-def list_projects(cursor, include_inactive=False):
+def list_projects(cursor, include_inactive=False, with_departments=False):
+    """Проекты. `with_departments` — у каждого его отделы списком `departments` (справочник
+    «Проекты и отделы», владелец 16.11.2026): экран справочника рисует их деревом."""
     cursor.execute(
         "SELECT id, name, is_active FROM payment_projects %s ORDER BY name"
         % ('' if include_inactive else 'WHERE is_active')
     )
-    return [{'id': r[0], 'name': r[1], 'is_active': r[2]} for r in cursor.fetchall()]
+    rows = [{'id': r[0], 'name': r[1], 'is_active': r[2]} for r in cursor.fetchall()]
+    if with_departments:
+        by_project = {}
+        for item in list_project_departments(cursor, include_inactive=include_inactive):
+            by_project.setdefault(item['project_id'], []).append(item)
+        for row in rows:
+            row['departments'] = by_project.get(row['id'], [])
+    return rows
+
+
+# ─── Отделы внутри проекта (владелец 16.11.2026, пп. 8, 11, 12) ──────────────
+#
+# «В справочниках добавить Проекты и Отделы внутри проекта»: у проекта свой список отделов
+# (как подкатегории у категории), заявка относится к проекту и его отделу. Это не отделы
+# портала («Подразделение» заявки) — их заводит администратор раздела по проекту.
+
+def list_project_departments(cursor, include_inactive=False, project_id=None):
+    """Отделы проектов по проекту и названию. Без `include_inactive` — только действующие
+    отделы действующих проектов: из них выбирают в новой заявке."""
+    clauses, params = [], []
+    if not include_inactive:
+        clauses.append('d.is_active AND p.is_active')
+    if project_id:
+        clauses.append('d.project_id = %s')
+        params.append(int(project_id))
+    cursor.execute(
+        "SELECT d.id, d.project_id, d.name, d.is_active, p.name FROM payment_project_departments d "
+        "JOIN payment_projects p ON p.id = d.project_id%s ORDER BY lower(p.name), lower(d.name), d.id"
+        % (' WHERE ' + ' AND '.join(clauses) if clauses else ''), params)
+    return [{'id': r[0], 'project_id': r[1], 'name': r[2], 'is_active': r[3], 'project_name': r[4]}
+            for r in cursor.fetchall()]
+
+
+def read_project_department(cursor, department_id):
+    if not department_id:
+        return None
+    cursor.execute("SELECT id, project_id, name, is_active FROM payment_project_departments WHERE id = %s",
+                   (int(department_id),))
+    row = cursor.fetchone()
+    return {'id': row[0], 'project_id': row[1], 'name': row[2], 'is_active': row[3]} if row else None
+
+
+def upsert_project_department(cursor, *, department_id=None, project_id, name, is_active=True, actor_id=None):
+    if department_id:
+        cursor.execute("UPDATE payment_project_departments SET project_id = %s, name = %s, is_active = %s "
+                       "WHERE id = %s RETURNING id", (int(project_id), name, bool(is_active), int(department_id)))
+    else:
+        cursor.execute("INSERT INTO payment_project_departments (project_id, name, is_active, created_by) "
+                       "VALUES (%s, %s, %s, %s) RETURNING id", (int(project_id), name, bool(is_active), actor_id))
+    row = cursor.fetchone()
+    return row[0] if row else None
 
 
 def upsert_project(cursor, *, project_id=None, name, is_active=True, actor_id=None):
@@ -885,14 +937,16 @@ def delete_template(cursor, template_id):
 # ─── Общее ───────────────────────────────────────────────────────────────────
 
 _NAMED_TABLES = {
-    'projects': 'payment_projects', 'legal_entities': 'payment_legal_entities',
+    'projects': 'payment_projects', 'project_departments': 'payment_project_departments',
+    'legal_entities': 'payment_legal_entities',
     'counterparties': 'payment_counterparties', 'categories': 'payment_categories',
     'asset_categories': 'payment_asset_categories',
 }
 
 # Справочник → таблица: что вообще можно удалять строкой. Белый список.
 _DELETABLE = {
-    'projects': 'payment_projects', 'categories': 'payment_categories',
+    'projects': 'payment_projects', 'project_departments': 'payment_project_departments',
+    'categories': 'payment_categories',
     'legal_entities': 'payment_legal_entities', 'counterparties': 'payment_counterparties',
     'counterparty_accounts': 'payment_counterparty_accounts', 'contracts': 'payment_contracts',
     'cards': 'payment_cards', 'limits': 'payment_approval_orders', 'routes': 'payment_approval_routes',
@@ -906,7 +960,8 @@ def find_duplicate_name(cursor, name, *, dictionary, row_id=None, parent_id=None
 
     Названия уникальны индексом; проверка ДО записи нужна, чтобы ответить
     «уже есть» словами, а не упасть на нарушении индекса посреди транзакции.
-    У категорий уникальность — внутри родителя.
+    У категорий уникальность — внутри родителя, у отделов проекта — внутри проекта
+    (`parent_id` — проект).
     """
     table = _NAMED_TABLES.get(dictionary)
     if not table or not name:
@@ -915,6 +970,9 @@ def find_duplicate_name(cursor, name, *, dictionary, row_id=None, parent_id=None
     params = [name, int(row_id or 0)]
     if dictionary == 'categories':
         sql += " AND COALESCE(parent_id, 0) = %s"
+        params.append(int(parent_id or 0))
+    elif dictionary == 'project_departments':
+        sql += " AND project_id = %s"
         params.append(int(parent_id or 0))
     cursor.execute(sql + " LIMIT 1", params)
     row = cursor.fetchone()
@@ -974,6 +1032,12 @@ _USED_BY = {
         ('payment_requests', 'project_id', 'в заявках'),
         ('payment_fixed_templates', 'project_id', 'в регулярных платежах'),
         ('payment_order_projects', 'project_id', 'в лимитах согласования'),
+        # Отделы проекта уходят вместе с ним (CASCADE), а заявки с ними молча потеряли бы
+        # отдел: сначала удаляют (или скрывают) отделы.
+        ('payment_project_departments', 'project_id', 'в отделах проекта'),
+    ),
+    'project_departments': (
+        ('payment_requests', 'project_department_id', 'в заявках'),
     ),
     'limits': (
         ('payment_requests', 'approval_order_id', 'в заявках'),

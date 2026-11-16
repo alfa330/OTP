@@ -218,18 +218,20 @@ SUBTASKS = (
                  'приложите варианты поставщиков, поставьте цены позиций по рекомендуемому и выберите '
                  'способ оплаты.',
     },
-    # Просьба владельца 15.10.2026: компанию в новом закупе инициатор указывает, если знает.
-    # Не знает — оставляет поле пустым, и компанию указывает бухгалтерия. С 03.11.2026 (тоже
-    # владелец) — ПОСЛЕ руководителя: сначала руководитель согласует сам закуп, потом бухгалтерия
-    # указывает компанию, и только потом утверждающий — матрица (п. 6) выбирает его уже с
-    # компанией, а счёт выставляется на неё. Этап стоит на ступени «Согласование»: «Инициация»
-    # значила бы «заявка у инициатора» и открыла бы ему правку. На доске бухгалтерии такая
-    # заявка стоит первой колонкой (см. BOARDS).
+    # Согласование с бухгалтерией — выбор юр. лица. Просьба владельца 15.10.2026: компанию в новом
+    # закупе инициатор указывает, если знает, а не знает — её указывает бухгалтерия. С 03.11.2026
+    # (тоже владелец) — ПОСЛЕ руководителя: сначала руководитель согласует сам закуп, потом
+    # бухгалтерия указывает компанию, и только потом утверждающий — матрица (п. 6) выбирает его уже
+    # с компанией, а счёт выставляется на неё. С 16.11.2026 (владелец, п. 7: «после согласования
+    # надо добавить этап согласования с бухгалтерией, этап выбора юр. лица») этап есть у КАЖДОГО
+    # нового закупа: компания, которую указал инициатор, — подсказка бухгалтеру, он её подтверждает
+    # или меняет. Этап стоит на ступени «Согласование»: «Инициация» значила бы «заявка у
+    # инициатора» и открыла бы ему правку. На доске бухгалтерии — первой колонкой (см. BOARDS).
     {
         'kind': KIND_ENTITY, 'position': 15, 'stage': STAGE_APPROVAL, 'role': ROLE_ACCOUNTING,
-        'title': 'Уточнение компании', 'board': BOARD_ACCOUNTING, 'statuses': ('new',),
-        'brief': 'Инициатор не знает, для какой компании закуп. Выберите компанию — после этого '
-                 'заявка уйдёт на утверждение.',
+        'title': 'Согласование с бухгалтерией', 'board': BOARD_ACCOUNTING, 'statuses': ('new',),
+        'brief': 'Выберите юр. лицо — компанию, на которую поставщик выставит счёт. Если инициатор её '
+                 'указал — проверьте: подтвердите или замените. После этого заявка уйдёт на утверждение.',
     },
     {
         'kind': KIND_APPROVAL, 'position': 20, 'stage': STAGE_APPROVAL, 'role': ROLE_APPROVER,
@@ -307,12 +309,12 @@ def can_move(kind, to_status):
 # Доска — не процесс, а вид на подзадачи исполнителя (п. 2). Колонки — дословно
 # «рекомендуемые» из ТЗ. `work` — колонки-статусы открытой подзадачи.
 #
-# Сверх ТЗ у бухгалтерии одна колонка — первая, «Уточнение компании» (KIND_ENTITY,
-# этап из просьбы владельца 15.10.2026). Сначала этап шёл без доски: только «Мои
-# задачи», колокол и Telegram, — и 22.10.2026 владелец не нашёл свою заявку без
-# компании на доске бухгалтерии. Колонка стоит всегда, как остальные (выбор владельца).
-# В рабочие она не входит: карточку из неё не перетаскивают — компанию выбирают в
-# окне заявки.
+# Сверх ТЗ у бухгалтерии одна колонка — первая, «Согласование с бухгалтерией» (KIND_ENTITY:
+# выбор юр. лица; до 16.11.2026 — «Уточнение компании», этап из просьбы владельца 15.10.2026).
+# Сначала этап шёл без доски: только «Мои задачи», колокол и Telegram, — и 22.10.2026
+# владелец не нашёл свою заявку без компании на доске бухгалтерии. Колонка стоит всегда,
+# как остальные (выбор владельца). В рабочие она не входит: карточку из неё не
+# перетаскивают — юр. лицо выбирают в окне заявки.
 #
 # Доска Helpdesk IT — тоже сверх ТЗ (04.11.2026): этап, назначенный списку людей, стоит и
 # на их доске — урок 22.10.2026 («только в Моих задачах» читается как «заявка пропала»).
@@ -335,7 +337,7 @@ BOARDS = (
         'code': BOARD_ACCOUNTING, 'title': 'Бухгалтерия / Оплата счетов', 'short': 'Бухгалтерия',
         'kinds': (KIND_ENTITY, KIND_INVOICE, KIND_CLOSING), 'roles': (ROLE_ACCOUNTING,),
         'columns': (
-            ('entity', 'Уточнение компании'),
+            ('entity', 'Согласование с бухгалтерией'),
             ('new', 'Новые счета'),
             ('checking', 'Проверка'),
             ('clarification', 'Требуется уточнение'),
@@ -389,7 +391,7 @@ COLUMN_CAPTIONS = {
         'rejected': 'За последние 30 дней',
     },
     BOARD_ACCOUNTING: {
-        'entity': 'Инициатор не указал компанию',
+        'entity': 'Выбор юр. лица после руководителя',
         'new': 'Согласованные счета',
         'checking': 'Бухгалтерия сверяет счёт',
         'clarification': 'Ждут ответа инициатора',
@@ -472,13 +474,15 @@ def board_column(board_code, request, subtasks, focus_kind=None):
         return None
 
     if board_code == BOARD_ACCOUNTING:
-        # Компанию ещё не выбрали — заявка ждёт бухгалтерию между руководителем и утверждением.
+        # Юр. лицо ещё не выбрано — заявка ждёт бухгалтерию между руководителем и утверждением.
         # После выбора этап закрыт, и до согласованного счёта заявки на этой доске снова нет.
         if (by_kind.get(KIND_ENTITY) or {}).get('state') == 'open':
             return 'entity'
         closing = by_kind.get(KIND_CLOSING) or {}
         if closing.get('state') == 'done':
             return 'closed'
+        # Закрывающих документов ждут и у заявки, которую бухгалтер закрыл раньше них
+        # (16.11.2026, docs_tail): этап документов у неё открыт, пока их не закроют.
         if closing.get('state') in ('open', 'waiting'):
             return 'awaiting_docs'
         invoice = by_kind.get(KIND_INVOICE) or {}
@@ -605,6 +609,35 @@ ATTACHMENT_LABELS = {
 }
 # Закрывающие документы (п. 14): накладная, акт, чек.
 CLOSING_DOC_KINDS = ('act', 'waybill', 'receipt')
+
+# Документы оплаты «только если требуется» (владелец 16.11.2026, пп. 3, 4, 10): платёжное
+# поручение и доверенность к оплате счёта, подтверждение перевода к пополнению карты
+# обязательны, только если их отметили в заявке — инициатор, а у IT-закупа Helpdesk IT
+# (он выбирает способ оплаты). Без отметки исполнитель прикладывает их по желанию. Так было
+# и в первой версии раздела: «если просили платёжное поручение или доверенность — приложите».
+PAYMENT_PROOFS = (
+    # (флаг заявки, вид файла, способ оплаты, чего не хватает исполнителю)
+    ('needs_payment_order', 'payment_order', METHOD_INVOICE, 'Приложите платёжное поручение — его просят в заявке'),
+    ('needs_power_of_attorney', 'power_of_attorney', METHOD_INVOICE, 'Приложите доверенность — её просят в заявке'),
+    ('needs_transfer_proof', 'transfer_proof', METHOD_CARD, 'Приложите подтверждение перевода — его просят в заявке'),
+)
+PROOF_FLAGS = tuple(item[0] for item in PAYMENT_PROOFS)
+
+
+def proofs_needed(request, method=None):
+    """Документы оплаты, которые просят в заявке, — для её способа оплаты: [(вид файла, чего не хватает)]."""
+    request = request or {}
+    method = method or request.get('payment_method')
+    return [(kind, text) for flag, kind, proof_method, text in PAYMENT_PROOFS
+            if proof_method == method and request.get(flag)]
+
+
+def proof_flags_for(method, flags):
+    """Все флаги документов оплаты под способ оплаты: отметка чужого способа снимается (у карты
+    нет платёжного поручения и доверенности, у счёта — подтверждения перевода). `flags` — что
+    в заявке после правки (присланное поверх сохранённого)."""
+    return {flag: bool((flags or {}).get(flag)) and proof_method == method
+            for flag, _kind, proof_method, _text in PAYMENT_PROOFS}
 
 # Форма поставщика — те же коды, что у контрагентов в справочнике.
 SUPPLIER_KIND_LABELS = {'too': 'ТОО', 'ip': 'ИП', 'other': 'Другое'}
@@ -1121,11 +1154,12 @@ def needs_asset_registration(request):
 
 
 def needs_entity_step(request):
-    """Компанию заявки уточняет бухгалтерия: инициатор нового закупа её не указал —
-    не знает, для какой компании закуп. Заявке первой версии и регулярному платежу
-    компания нужна при отправке (missing_for_submit) — этапа у них не бывает."""
-    return (request.get('request_kind') == KIND_PURCHASE and not request.get('legal_entity_id')
-            and not accepted_before(request))
+    """Согласование с бухгалтерией — выбор юр. лица — у каждого нового закупа (владелец
+    16.11.2026, п. 7). До этого этап был только у заявки, где инициатор компанию не указал
+    (15.10.2026); теперь компания инициатора — подсказка бухгалтеру, а выбирает её бухгалтерия.
+    Заявке первой версии и регулярному платежу компания нужна при отправке
+    (missing_for_submit) — этапа у них не бывает."""
+    return request.get('request_kind') == KIND_PURCHASE and not accepted_before(request)
 
 
 def needs_receipt(request):
@@ -1180,9 +1214,9 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
       * проверка Helpdesk IT — после руководителя, у IT-закупа (владелец
         04.11.2026, needs_it_step); после неё маршрут строится заново — с
         поставщиком и настоящей суммой (flow.act, действие `it_offers`);
-      * уточнение компании бухгалтерией — после руководителя (владелец
-        03.11.2026), если инициатор нового закупа компанию не указал
-        (needs_entity_step); после него маршрут строится заново, уже с
+      * согласование с бухгалтерией (выбор юр. лица) — после руководителя
+        (владелец 03.11.2026), у каждого нового закупа (16.11.2026,
+        needs_entity_step); после него маршрут строится заново, уже с
         компанией (flow.act, действие `set_entity`);
       * оплата — счёт (бухгалтерия) либо карта (финансовый отдел);
       * чек — только после пополнения карты сотрудника;
@@ -1295,13 +1329,40 @@ def stage_deadline_start(kind, *, opened_at=None, received_at=None):
     return None
 
 
-def stage_due_on(kind, start, settings=None):
-    """Срок этапа: день начала + дни из настроек. None — у этапа своего срока нет."""
+def stage_due_on(kind, start, settings=None, explicit=None):
+    """Срок этапа: день начала + дни из настроек. Срок закрывающих документов может поставить
+    бухгалтер (`explicit` — `docs_due_on` заявки, владелец 16.11.2026, п. 5) — тогда он, а не
+    настройка. None — у этапа своего срока нет."""
     key = STAGE_DEADLINE_SETTINGS.get(kind)
+    if not key:
+        return None
+    if kind == KIND_CLOSING and _as_date(explicit):
+        return _as_date(explicit)
     start = _as_date(start)
-    if not key or start is None:
+    if start is None:
         return None
     return start + timedelta(days=setting(settings, key))
+
+
+def docs_deadline(request, subtasks, settings=None):
+    """Срок закрывающих документов заявки: поставленный бухгалтером, иначе по настройке —
+    подтверждение получения + дни (п. 17). None — этапа документов у заявки ещё нет."""
+    by_kind = {item.get('kind'): item for item in subtasks or []}
+    closing = by_kind.get(KIND_CLOSING)
+    if not closing or closing.get('state') in ('pending', 'skipped'):
+        return _as_date((request or {}).get('docs_due_on'))
+    start = stage_deadline_start(KIND_CLOSING, opened_at=closing.get('opened_at'),
+                                 received_at=(by_kind.get(KIND_RECEIVING) or {}).get('done_at'))
+    return stage_due_on(KIND_CLOSING, start, settings, explicit=(request or {}).get('docs_due_on'))
+
+
+def docs_tail(request):
+    """Заявку закрыли раньше закрывающих документов (владелец 16.11.2026, п. 6: «либо закрыть
+    заявку — запрос закрывающих документов с дедлайном»): она закрыта, а документы ещё ждут —
+    инициатор досылает их в закрытую заявку, бухгалтерия отмечает оригинал и закрывает их."""
+    request = request or {}
+    return bool(request.get('status') == 'done' and request.get('docs_deferred_at')
+                and (request.get('closing_docs_status') or DOCS_NONE) != DOCS_CLOSED)
 
 
 def deadline_mark(due_on, today, *, opened_on=None):
@@ -1320,9 +1381,10 @@ def deadline_mark(due_on, today, *, opened_on=None):
     return None
 
 
-def stage_deadline(subtasks, settings=None, today=None):
+def stage_deadline(subtasks, settings=None, today=None, request=None):
     """Срок открытого этапа «чек» или «закрывающие документы» для карточки заявки:
-    {'kind', 'due_on', 'days_left'} либо None."""
+    {'kind', 'due_on', 'days_left'} либо None. `request` — заявка: срок документов, который
+    поставил бухгалтер (`docs_due_on`), важнее настройки."""
     by_kind = {item.get('kind'): item for item in subtasks or []}
     for kind in (KIND_RECEIPT, KIND_CLOSING):
         item = by_kind.get(kind)
@@ -1330,7 +1392,7 @@ def stage_deadline(subtasks, settings=None, today=None):
             continue
         start = stage_deadline_start(kind, opened_at=item.get('opened_at'),
                                      received_at=(by_kind.get(KIND_RECEIVING) or {}).get('done_at'))
-        due_on = stage_due_on(kind, start, settings)
+        due_on = stage_due_on(kind, start, settings, explicit=(request or {}).get('docs_due_on'))
         if due_on is None:
             return None
         return {'kind': kind, 'due_on': due_on,
@@ -1557,13 +1619,20 @@ ACTIONS = {
     KIND_RECEIPT: ('provide',),
     KIND_RECEIVING: ('confirm',),
     KIND_ASSETS: ('register',),
-    KIND_CLOSING: ('docs_original', 'docs_close'),
+    # Закрывающие документы (п. 14). С 16.11.2026 (владелец, пп. 5, 6) бухгалтер ставит им срок
+    # (`docs_due`) и может закрыть заявку раньше документов (`docs_defer`): они остаются
+    # запросом инициатору со сроком, а этап — открытым, пока их не закроют.
+    KIND_CLOSING: ('docs_original', 'docs_close', 'docs_due', 'docs_defer'),
 }
+# Что бухгалтерия делает с документами заявки, закрытой раньше них (docs_tail): закрыть
+# заявку второй раз нечего.
+TAIL_ACTIONS = ('docs_original', 'docs_close', 'docs_due')
 ACTION_LABELS = {
     'submit': 'Отправить', 'approve': 'Согласовать', 'return': 'Вернуть на доработку',
     'reject': 'Отклонить', 'pay': 'Оплачено', 'top_up': 'Пополнено', 'request_info': 'Запросить информацию',
     'provide': 'Отправить чек', 'confirm': 'Подтвердить получение', 'register': 'Поставить на учёт',
-    'docs_original': 'Оригинал получен', 'docs_close': 'Закрыть документы', 'set_entity': 'Указать компанию',
+    'docs_original': 'Оригинал получен', 'docs_close': 'Закрыть документы', 'set_entity': 'Согласовать',
+    'docs_due': 'Срок документов', 'docs_defer': 'Закрыть заявку, документы — позже',
     'it_offers': 'Передать на утверждение', 'it_stock': 'Выдать из наличия',
 }
 
@@ -1605,13 +1674,14 @@ def supplier_vat_unknown(request):
     return bool(request and request.get('counterparty_id') and request.get('counterparty_vat') is None)
 
 
-def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), assets=(), settings=None):
+def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), assets=(), settings=None, today=None):
     """Чего не хватает, чтобы выполнить действие подзадачи. Пустой список — можно.
 
     `fields` — то, что прислал исполнитель вместе с действием; `file_kinds` —
     виды файлов, уже лежащих в заявке и приложенных сейчас; `assets` — карточки
     имущества заявки (для постановки на учёт); `settings` — настройки процесса
-    (минимум поставщиков у Helpdesk IT тот же, что у инициатора).
+    (минимум поставщиков у Helpdesk IT тот же, что у инициатора); `today` — сегодня
+    по Алматы: срок закрывающих документов не ставят в прошлое.
     """
     fields = fields or {}
     kinds = set(file_kinds or ())
@@ -1630,16 +1700,16 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
         elif reason == 'other' and not comment:
             missing.append('Опишите, какая информация нужна')
     if action in ('pay', 'top_up'):
-        # П. 8 и п. 5.3: после оплаты фиксируются дата, фактическая сумма и
-        # платёжное поручение (подтверждение перевода); комментарий — по желанию.
+        # П. 8 и п. 5.3: после оплаты фиксируются дата и фактическая сумма; комментарий — по
+        # желанию. Платёжное поручение, доверенность и подтверждение перевода — только те, что
+        # просят в заявке (владелец 16.11.2026, пп. 3, 4, 10); остальные — по желанию.
         if not fields.get('paid_on'):
             missing.append('Укажите дату оплаты' if action == 'pay' else 'Укажите дату перевода')
         if to_decimal(fields.get('paid_amount')) <= 0:
             missing.append('Укажите фактическую сумму')
-        proof = 'payment_order' if action == 'pay' else 'transfer_proof'
-        if proof not in kinds:
-            missing.append('Приложите платёжное поручение' if action == 'pay'
-                           else 'Приложите подтверждение перевода')
+        for proof, text in proofs_needed(request, METHOD_INVOICE if action == 'pay' else METHOD_CARD):
+            if proof not in kinds:
+                missing.append(text)
     if action == 'pay' and supplier_vat_unknown(request) and fields.get('supplier_vat') is None:
         # П. 8: бухгалтер проверяет «НДС/без НДС». У поставщика, которого инициатор вписал
         # названием, НДС не указан — бухгалтер выбирает его в окне оплаты, и выбор уходит вместе
@@ -1698,6 +1768,14 @@ def missing_for_action(kind, action, *, request, fields=None, file_kinds=(), ass
         missing.append('Выберите, что выдаёте из наличия, или напишите об этом в комментарии')
     if action == 'docs_close' and CLOSING_DOC_ORDER.get(request.get('closing_docs_status'), 0) < CLOSING_DOC_ORDER[DOCS_SCAN]:
         missing.append('Закрывающие документы ещё не получены — нужен скан или оригинал')
+    if action in ('docs_due', 'docs_defer'):
+        # Срок закрывающих документов ставит бухгалтер (владелец 16.11.2026, п. 5); закрывая
+        # заявку раньше них — тоже со сроком: до него инициатор их досылает (п. 6).
+        due = _as_date(fields.get('docs_due_on'))
+        if due is None:
+            missing.append('Укажите срок закрывающих документов')
+        elif today is not None and due < _as_date(today):
+            missing.append('Срок закрывающих документов не может быть раньше сегодняшнего дня')
     return missing
 
 
@@ -1755,8 +1833,15 @@ def closing_conditions(request, subtasks, *, assets=(), has_handover_act=False):
              'ok': bool(assets) and all(str(a.get('city') or '').strip() and a.get('department_id')
                                         and a.get('responsible_user_id') for a in assets)},
         ]
-    conditions.append({'label': 'Закрывающие документы получены',
-                       'ok': request.get('closing_docs_status') == DOCS_CLOSED})
+    if request.get('closing_docs_status') != DOCS_CLOSED and request.get('docs_deferred_at'):
+        # Бухгалтер закрыл заявку раньше документов (владелец 16.11.2026, п. 6): документы
+        # остаются запросом со сроком — это его решение, а не невыполненное условие.
+        due = _as_date(request.get('docs_due_on'))
+        conditions.append({'label': 'Закрывающие документы запрошены%s' % (' до %s' % fmt_date(due) if due else ''),
+                           'ok': True})
+    else:
+        conditions.append({'label': 'Закрывающие документы получены',
+                           'ok': request.get('closing_docs_status') == DOCS_CLOSED})
     return conditions
 
 

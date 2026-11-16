@@ -89,9 +89,10 @@ class SpecificationListsTests(unittest.TestCase):
         columns = {board['code']: [label for _key, label in board['columns']] for board in wf.BOARDS}
         self.assertEqual(columns['approval'], [
             'Новые', 'На рассмотрении', 'Требуется уточнение', 'Согласовано', 'Отклонено'])
-        # Первая колонка бухгалтерии — сверх ТЗ: заявки, где компанию выбирает она (22.10.2026).
+        # Первая колонка бухгалтерии — сверх ТЗ: согласование с бухгалтерией, выбор юр. лица (22.10.2026,
+        # с 16.11.2026 — у каждого нового закупа).
         self.assertEqual(columns['accounting'], [
-            'Уточнение компании',
+            'Согласование с бухгалтерией',
             'Новые счета', 'Проверка', 'Требуется уточнение', 'Готово к оплате', 'На оплате', 'Оплачено',
             'Ожидаются закрывающие документы', 'Закрыто'])
         self.assertEqual(columns['finance'], [
@@ -152,8 +153,9 @@ class SpecificationListsTests(unittest.TestCase):
 class RouteTests(unittest.TestCase):
     def test_invoice_for_a_service_goes_to_accounting(self):
         route = wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)
-        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'approval', 'invoice_payment',
-                                        'receiving', 'closing_docs'])
+        # Согласование с бухгалтерией (выбор юр. лица) — у каждого нового закупа (владелец 16.11.2026, п. 7).
+        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'entity_clarify', 'approval',
+                                        'invoice_payment', 'receiving', 'closing_docs'])
         by_kind = {entry['kind']: entry for entry in route}
         # П. 2 и п. 9: исполнитель оплаты — подразделение, а не человек.
         self.assertIsNone(by_kind['invoice_payment']['assignee_id'])
@@ -166,7 +168,7 @@ class RouteTests(unittest.TestCase):
         request = purchase(payment_method='card', card_recipient='employee', object_type='goods',
                            accounting_category='consumable')
         route = wf.build_route(request, initiator=INITIATOR, manager=MANAGER)
-        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'approval', 'card_topup',
+        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'entity_clarify', 'approval', 'card_topup',
                                         'receipt_confirm', 'receiving', 'closing_docs'])
         by_kind = {entry['kind']: entry for entry in route}
         self.assertEqual(by_kind['card_topup']['role_code'], 'finance')
@@ -178,7 +180,7 @@ class RouteTests(unittest.TestCase):
                            accounting_category='asset')
         route = wf.build_route(request, initiator=INITIATOR, manager=MANAGER,
                                approver={'id': 3, 'name': 'Утверждающий'})
-        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'approval', 'card_topup',
+        self.assertEqual(kinds(route), ['initiation', 'manager_approval', 'entity_clarify', 'approval', 'card_topup',
                                         'receiving', 'asset_registration', 'closing_docs'])
         by_kind = {entry['kind']: entry for entry in route}
         self.assertEqual(by_kind['approval']['assignee_id'], 3)
@@ -511,8 +513,12 @@ class EntityStepTests(unittest.TestCase):
         self.assertEqual(kinds(card)[:3], ['initiation', 'manager_approval', 'entity_clarify'])
         self.assertEqual(card[1]['state'], 'skipped', 'руководителя нет — этап пропущен, компания всё равно нужна')
 
-    def test_known_company_goes_straight_to_approval(self):
-        self.assertNotIn('entity_clarify', kinds(wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)))
+    def test_known_company_still_goes_through_accounting(self):
+        # 16.11.2026 (владелец, п. 7): юр. лицо выбирает бухгалтерия и тогда, когда компанию указал инициатор.
+        self.assertTrue(purchase().get('legal_entity_id'))
+        self.assertTrue(wf.needs_entity_step(purchase()))
+        self.assertIn('entity_clarify', kinds(wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)))
+        self.assertFalse(wf.needs_entity_step(purchase(request_kind='regular')), 'у регулярного — из справочника')
 
     def test_old_requests_never_get_the_step(self):
         accepted = purchase(legal_entity_id=None, legacy_step=7)
@@ -525,10 +531,11 @@ class EntityStepTests(unittest.TestCase):
 
     def test_the_step_is_accountings_and_has_one_action(self):
         step = wf.subtask('entity_clarify')
-        self.assertEqual((step['title'], step['role'], step['board']), ('Уточнение компании', 'accounting', 'accounting'))
+        self.assertEqual((step['title'], step['role'], step['board']),
+                         ('Согласование с бухгалтерией', 'accounting', 'accounting'))
         accounting = wf.board('accounting')
         self.assertIn('entity_clarify', accounting['kinds'])
-        self.assertEqual(accounting['columns'][0], ('entity', 'Уточнение компании'))
+        self.assertEqual(accounting['columns'][0], ('entity', 'Согласование с бухгалтерией'))
         self.assertNotIn('entity', accounting['work'], 'компанию выбирают в окне заявки, а не перетаскиванием')
         positions = {item['kind']: item['position'] for item in wf.SUBTASKS}
         # Подзадачи идут по позиции (list_subtasks: ORDER BY position) — так advance и открывает их.
@@ -536,7 +543,7 @@ class EntityStepTests(unittest.TestCase):
         self.assertLess(positions['manager_approval'], positions['entity_clarify'])
         self.assertLess(positions['entity_clarify'], positions['approval'])
         self.assertEqual(wf.ACTIONS['entity_clarify'], ('set_entity',))
-        self.assertEqual(wf.ACTION_LABELS['set_entity'], 'Указать компанию')
+        self.assertEqual(wf.ACTION_LABELS['set_entity'], 'Согласовать')
         self.assertFalse(wf.can_move('entity_clarify', 'review'), 'ступеней у этапа нет')
         self.assertEqual(wf.clarify_reasons_for('entity_clarify'), [])
 
@@ -645,7 +652,7 @@ class RouteExecutorsTests(unittest.TestCase):
         # Компанию указывает та же бухгалтерия: строка одна — о первом её этапе.
         gaps = self.gaps({'approver': {3}}, legal_entity_id=None)
         accounting = [text for text in gaps if 'Бухгалтерия' in text]
-        self.assertEqual(accounting, ['Уточнить компанию некому: в роли «Бухгалтерия» нет участников'])
+        self.assertEqual(accounting, ['Выбрать юр. лицо некому: в роли «Бухгалтерия» нет участников'])
         self.assertEqual(self.gaps(legal_entity_id=None), [], 'бухгалтерия есть — заявку уточнят')
 
     def test_initiator_is_not_their_own_approver(self):
@@ -717,14 +724,40 @@ class ActionRequirementsTests(unittest.TestCase):
         self.assertFalse(wf.supplier_vat_unknown(purchase()))
         self.assertFalse(wf.supplier_vat_unknown(None))
 
-    def test_payment_records_date_amount_and_the_payment_order(self):
+    def test_payment_records_date_and_amount_proofs_only_when_asked(self):
+        # Платёжное поручение и подтверждение перевода — «только если требуется» (владелец 16.11.2026,
+        # пп. 3, 10): без отметки в заявке оплату записывают датой и суммой.
         texts = self.missing('invoice_payment', 'pay', fields={})
-        self.assertEqual(len(texts), 3)
+        self.assertEqual(texts, ['Укажите дату оплаты', 'Укажите фактическую сумму'])
         ready = {'paid_on': TODAY, 'paid_amount': 106000}
-        self.assertTrue(self.missing('invoice_payment', 'pay', fields=ready, file_kinds={'invoice'}))
-        self.assertEqual(self.missing('invoice_payment', 'pay', fields=ready, file_kinds={'payment_order'}), [])
-        self.assertTrue(self.missing('card_topup', 'top_up', fields=ready, file_kinds={'payment_order'}))
-        self.assertEqual(self.missing('card_topup', 'top_up', fields=ready, file_kinds={'transfer_proof'}), [])
+        self.assertEqual(self.missing('invoice_payment', 'pay', fields=ready), [])
+        self.assertEqual(self.missing('card_topup', 'top_up', fields=ready), [])
+
+    def test_marked_proofs_are_required(self):
+        # Отметили в заявке — без файла этого вида оплату не записать (пп. 3, 4, 10).
+        ready = {'paid_on': TODAY, 'paid_amount': 106000}
+        asked = purchase(needs_payment_order=True, needs_power_of_attorney=True)
+        self.assertEqual(self.missing('invoice_payment', 'pay', request=asked, fields=ready, file_kinds={'invoice'}),
+                         ['Приложите платёжное поручение — его просят в заявке',
+                          'Приложите доверенность — её просят в заявке'])
+        self.assertEqual(self.missing('invoice_payment', 'pay', request=asked, fields=ready,
+                                      file_kinds={'payment_order', 'power_of_attorney'}), [])
+        card = purchase(payment_method='card', needs_transfer_proof=True)
+        self.assertEqual(self.missing('card_topup', 'top_up', request=card, fields=ready, file_kinds={'payment_order'}),
+                         ['Приложите подтверждение перевода — его просят в заявке'])
+        self.assertEqual(self.missing('card_topup', 'top_up', request=card, fields=ready,
+                                      file_kinds={'transfer_proof'}), [])
+        # Отметка чужого способа оплаты ничего не требует: у карты нет поручения, у счёта — подтверждения.
+        self.assertEqual(self.missing('card_topup', 'top_up', request=dict(card, needs_payment_order=True),
+                                      fields=ready, file_kinds={'transfer_proof'}), [])
+
+    def test_proof_flags_follow_the_payment_method(self):
+        flags = {'needs_payment_order': True, 'needs_power_of_attorney': True, 'needs_transfer_proof': True}
+        self.assertEqual(wf.proof_flags_for('invoice', flags), {
+            'needs_payment_order': True, 'needs_power_of_attorney': True, 'needs_transfer_proof': False})
+        self.assertEqual(wf.proof_flags_for('card', flags), {
+            'needs_payment_order': False, 'needs_power_of_attorney': False, 'needs_transfer_proof': True})
+        self.assertEqual(wf.proof_flags_for(None, flags), dict.fromkeys(flags, False), 'способа нет — и отметок')
 
     def test_receipt_and_receiving(self):
         self.assertTrue(self.missing('receipt_confirm', 'provide'))

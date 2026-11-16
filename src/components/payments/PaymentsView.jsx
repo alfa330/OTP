@@ -14,8 +14,8 @@ import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
     REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, deletedLine, dueLabel, expenseSubline,
     CURRENT_KIND_LABELS, amountLabel, exportFileName, filtersToParams, fmtDate, fmtDateShort, fmtMoney, normalizeRegistryColumns, pageRange,
-    paidLabel, registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
-    tonePill, toneText,
+    registryTableMinWidth, registryWhere, requestState, requestType, responsibleLines, rowTone, stageLine,
+    tonePill, toneText, projectLine,
 } from './paymentsMeta';
 import {
     Bone, CARD_ROW, CARD_TABLE, CARD_TH, ColumnsMenu, DueChip, GroupDivider, NoticeBox, Pager, SECTION_COLUMN, StatePill,
@@ -375,6 +375,24 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
     // Номер закрытой заявки из адреса уберёт эффект адреса выше.
     const closeCard = useCallback(() => setOpenedId(null), []);
 
+    /* Из окна заявки открывают другую — прошлый закуп, прошлую оплату, дубль счёта (владелец 16.11.2026,
+       пп. 1, 2). Окно то же, а шеврон в шапке возвращает к заявке, с которой пришли: номера — стопкой. */
+    const [cardTrail, setCardTrail] = useState([]);
+    const openFromCard = useCallback((id) => {
+        const next = Number(id) || null;
+        if (!next || next === openedId) return;
+        if (openedId) setCardTrail((prev) => [...prev, openedId]);
+        setOpenedId(next);
+    }, [openedId]);
+    const backFromCard = useCallback(() => {
+        const back = cardTrail[cardTrail.length - 1];
+        if (!back) return;
+        setCardTrail(cardTrail.slice(0, -1));
+        setOpenedId(back);
+    }, [cardTrail]);
+    // Окно закрыли — стопка возвратов уходит вместе с ним: следующая заявка откроется с чистого листа.
+    useEffect(() => { if (!openedId) setCardTrail([]); }, [openedId]);
+
     const exportXlsx = useCallback(async () => {
         setDownloading(true);
         try {
@@ -435,7 +453,13 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             }
             case 'kind': return <div className={`truncate ${text.main}`}>{optionLabel(REQUEST_KIND_OPTIONS, request.request_kind) || '—'}</div>;
             case 'entity': return request.legal_entity_name ? <div className={`truncate ${text.main}`}>{request.legal_entity_name}</div> : muted('—');
-            case 'project': return request.project_name ? <div className={`truncate ${text.main}`}>{request.project_name}</div> : muted('—');
+            case 'project': return request.project_name ? (
+                <>
+                    <div className={`truncate ${text.main}`}>{request.project_name}</div>
+                    {/* Отдел внутри проекта (справочник «Проекты и отделы», 16.11.2026). */}
+                    {request.project_department_name && <div className={`truncate text-[12px] leading-4 ${text.meta}`}>{request.project_department_name}</div>}
+                </>
+            ) : muted('—');
             case 'category':
                 return request.category_name ? (
                     <>
@@ -508,8 +532,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         </div>
                     );
                 }
+                // Оплаченная — заметной меткой «Оплачено 12.11» (владелец 16.11.2026, п. 13), как на карточках досок.
                 return request.paid_on && !columnKeys.includes('paid')
-                    ? <div className={`whitespace-nowrap text-[12.5px] tabular-nums ${text.body}`}>{paidLabel(request)}</div>
+                    ? <DueChip request={request} soonDays={soonDays} withWord />
                     : muted('—');
             case 'paid': return request.paid_on ? <div className={`tabular-nums ${text.main}`}>{fmtDate(request.paid_on)}</div> : muted('—');
             case 'invoice':
@@ -784,7 +809,7 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                                             <TypePill request={request} />
                                             <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">№{request.id}</span>
                                         </span>
-                                        <DueChip request={request} soonDays={soonDays} />
+                                        <DueChip request={request} soonDays={soonDays} withWord />
                                     </span>
                                     {/* Без `block`: рядом с line-clamp он отменил бы обрезку. */}
                                     <span className="mt-1 text-[14px] font-semibold leading-snug text-slate-900 line-clamp-2">{request.expense_name}</span>
@@ -900,6 +925,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                     loadDictionaries();
                     if (body?.request?.id) setOpenedId(body.request.id);
                 }}
+                // «История оплат» в форме — номером-ссылкой (16.11.2026, п. 2): заявка открывается поверх формы,
+                // закрыли её — форма с введённым на месте.
+                onOpenRequest={setOpenedId}
                 showToast={showToast}
             />
 
@@ -916,6 +944,9 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                 onChanged={applyChanged}
                 // Из задачи инициатора «Доработать заявку» — форма сразу показывает, чего не хватает.
                 onEdit={(data, options) => { setOpenedId(null); setEditing(data); setRevealIssues(Boolean(options?.reveal)); setFormOpen(true); }}
+                onOpenRequest={openFromCard}
+                backTo={cardTrail[cardTrail.length - 1] || null}
+                onBackTo={backFromCard}
                 showToast={showToast}
             />
         </div>

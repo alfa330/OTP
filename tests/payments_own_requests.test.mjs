@@ -56,9 +56,9 @@ test('строка своей заявки: этап и у кого — имя �
     const [atApprover, atAccounting] = SAMPLE.mine.items;
     assert.deepEqual(ownRequestStatus(atApprover), { label: 'Согласование', who: 'Утвердова Ульяна' });
     assert.deepEqual(ownRequestStatus(atAccounting), { label: 'Оплата', who: 'Бухгалтерия' });
-    // Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
+    // Бухгалтерия на «Согласовании» — согласование с бухгалтерией: выбор юр. лица (16.11.2026).
     const entity = { ...atAccounting, stage: 'approval', stage_label: 'Согласование', current_kind: 'entity_clarify', current_assignee_name: null };
-    assert.deepEqual(ownRequestStatus(entity), { label: 'Уточнение компании', who: 'Бухгалтерия' });
+    assert.deepEqual(ownRequestStatus(entity), { label: 'Согласование с бухгалтерией', who: 'Бухгалтерия' });
     // Исполнителя нет — только этап, без «· —»; роль, названная как этап, дважды не пишется.
     assert.deepEqual(ownRequestStatus({ ...atApprover, current_role: null, current_assignee_name: null }), { label: 'Согласование', who: '' });
     assert.deepEqual(ownRequestStatus({ ...atAccounting, stage_label: 'Бухгалтерия' }), { label: 'Бухгалтерия', who: '' });

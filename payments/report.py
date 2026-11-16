@@ -66,6 +66,7 @@ COLUMNS = (
     ('Подразделение', 'department_name', 'plain'),
     ('Компания-плательщик', 'legal_entity_name', 'plain'),
     ('Проект', 'project_name', 'plain'),
+    ('Отдел проекта', 'project_department_name', 'plain'),
     ('Таксопарк / филиал / регион', 'branch', 'plain'),
     ('Наименование закупа', 'expense_name', 'plain'),
     ('Описание и обоснование', 'justification', 'plain'),
@@ -167,8 +168,8 @@ def enrich(request, items, offers=()):
     row['stage_text'] = (workflow.STAGE_LABELS.get(request.get('stage'), '')
                          if request.get('status') == 'active' and not request.get('deleted_at') else '')
     if row['stage_text'] and request.get('current_kind') == workflow.KIND_ENTITY:
-        # Бухгалтерия на «Согласовании» — это уточнение компании, а не согласование.
-        row['stage_text'] += ' — уточнение компании'
+        # Бухгалтерия на «Согласовании» выбирает юр. лицо (согласование с бухгалтерией, 16.11.2026).
+        row['stage_text'] += ' — бухгалтерия, выбор юр. лица'
     if row['stage_text'] and request.get('current_kind') == workflow.KIND_IT:
         # Helpdesk IT на «Согласовании» — проверка IT-закупа (владелец 04.11.2026).
         row['stage_text'] += ' — проверка Helpdesk IT'

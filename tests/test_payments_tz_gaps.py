@@ -151,16 +151,21 @@ class ArchiveSqlIsWrittenTests(unittest.TestCase):
 
     def test_boards_desk_and_reminders(self):
         self.assertIn('(r.deleted_at IS NULL)', self.sql_of(real_queries.board_requests, 'approval'))
-        self.assertIn("r.status = 'active' AND r.deleted_at IS NULL AND s.state = 'open'",
-                      self.sql_of(real_queries.desk_pairs, 1, set()))
+        desk_pairs = self.sql_of(real_queries.desk_pairs, 1, set())
+        self.assertIn("AND r.deleted_at IS NULL AND s.state = 'open'", desk_pairs)
+        # Идущая заявка — либо закрытая раньше документов, когда они пришли (16.11.2026): её этап документов.
+        self.assertIn("(r.status = 'active' OR (r.status = 'done' AND r.docs_deferred_at IS NOT NULL "
+                      "AND s.kind = %(closing)s AND r.closing_docs_status <> 'none'))", desk_pairs)
         desk = self.sql_of(real_queries.desk_count, 1, set())
         self.assertEqual(desk.count('r.deleted_at IS NULL'), 2, 'и задачи, и «приложите документы»')
         self.assertIn('r.deleted_at IS NULL', self.sql_of(real_queries.docs_wanted_ids, 1))
         self.assertIn('r.deleted_at IS NULL', self.sql_of(real_queries.own_open_count, 1, set()))
         self.assertIn('r.deleted_at IS NULL', self.sql_of(real_queries.role_backlog, 'approver'))
         self.assertIn("WHERE status = 'active' AND deleted_at IS NULL", self.sql_of(real_queries.due_requests, date(2026, 11, 9), 2))
-        self.assertIn("WHERE r.status = 'active' AND r.deleted_at IS NULL AND s.state = 'open'",
-                      self.sql_of(real_queries.stage_deadline_rows))
+        stage_rows = self.sql_of(real_queries.stage_deadline_rows)
+        self.assertIn("AND r.deleted_at IS NULL AND s.state = 'open'", stage_rows)
+        # Заявка, закрытая раньше закрывающих документов (16.11.2026), — напоминает о них, пока их ждут.
+        self.assertIn("(r.status = 'active' OR (r.status = 'done' AND r.docs_deferred_at IS NOT NULL))", stage_rows)
 
     def test_payment_references(self):
         request = {'id': 1, 'counterparty_id': 2, 'invoice_number': '7', 'invoice_date': date(2026, 11, 1), 'amount': 10}
@@ -487,7 +492,7 @@ class SupplierVatWithPaymentTests(_GapRoutes):
         self.queries.list_subtasks.return_value = [open_subtask('invoice_payment')]
         self.queries.list_attachments.return_value = [{'kind': 'payment_order', 'subtask_kind': 'invoice_payment'}]
         self.queries.public_attachment.side_effect = lambda item: item
-        load = mock.patch.object(flow, 'load_for_action', side_effect=lambda _c, _rid, kind: (self.row, open_subtask(kind)))
+        load = mock.patch.object(flow, 'load_for_action', side_effect=lambda _c, _rid, kind, _action=None: (self.row, open_subtask(kind)))
         load.start()
         self.addCleanup(load.stop)
         self.flow_act = mock.patch.object(flow, 'act', return_value={'next': 'receiving'}).start()

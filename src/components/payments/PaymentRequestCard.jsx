@@ -4,13 +4,14 @@ import { Ban, Check, ChevronLeft, ChevronRight, Circle, ExternalLink, Loader2, M
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
 import useIsMobileShell from '../common/useIsMobileShell';
-import PaymentStageForm from './PaymentStageForm';
+import PaymentStageForm, { DocsUploadTask } from './PaymentStageForm';
 import {
     ACCOUNTING_CATEGORY_LABELS, ASSET_STATUS_META, CARD_FOLDS, CARD_RECIPIENT_LABELS, CONTRACT_THRESHOLD, DOCS_STATUS_META, HINTS,
     MAX_OBSERVERS, OBJECT_TYPE_LABELS, PAYMENT_METHOD_LABELS, REQUEST_KIND_LABELS, REQUEST_SKELETON, approvalSummary, deletedLine,
     contractSummary, describeEvent, amountLabel, dueLabel, fileKindOptions, filesSummary, fmtDate, fmtDateTime, fmtMoney, fmtQty,
     historySummary, isClosed, isOverdue, issuedFromStock, itPriceMissing, observersClosedLine, observersSummary, paidLabel,
     paidWord, parseAmount, recordView, requestState, routeSummary, stageDeadlineLabel, stageStatusLabel, stageStep, tonePill,
+    projectLine, proofsAsked, similarSummary,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FieldHint, FilePicker, Fold,
@@ -91,8 +92,44 @@ const StateDot = ({ state }) => {
     return <span className="h-5 w-5 shrink-0 rounded-full bg-white ring-1 ring-slate-200" />;
 };
 
+/* Номер другой заявки — ссылкой: она открывается в этом же окне, шеврон в шапке ведёт назад
+   (владелец 16.11.2026, п. 2: «прошлые оплаты кликабельные»). Без обработчика — просто текст. */
+export const RequestLink = ({ id, onOpen, children, className = '' }) => (onOpen ? (
+    <button type="button" data-open-request={id} onClick={() => onOpen(id)}
+        className={`font-medium text-blue-600 underline-offset-2 hover:underline ${className}`}>{children}</button>
+) : <span className={className}>{children}</span>);
+
+/* Прошлый закуп того же товара или услуги (п. 1): что, у кого, когда и почём — цена за единицу
+   рядом, по ней сравнивают. Нажатие открывает ту заявку. */
+const PastPurchase = ({ row, onOpen }) => {
+    const priced = parseAmount(row.unit_price) > 0;
+    const right = [fmtDate(row.paid_on), priced
+        ? `${fmtQty(row.quantity)}${row.unit ? ` ${row.unit}` : ''} × ${fmtMoney(row.unit_price)}`
+        : fmtMoney(row.paid_amount ?? row.amount)].filter(Boolean).join(' · ');
+    const body = (
+        <>
+            <span className="min-w-0 grow basis-0">
+                <span className="block truncate text-[13.5px] text-slate-900">№{row.request_id} · {row.item_name || row.expense_name}</span>
+                <span className="block truncate text-[12px] text-slate-500">
+                    {[row.counterparty_name, row.match === 'subcategory' ? 'та же подкатегория' : null].filter(Boolean).join(' · ')}
+                </span>
+            </span>
+            <span className="shrink-0 text-right text-[12.5px] tabular-nums text-slate-600">{right}</span>
+            {onOpen && <ChevronRight size={14} className="shrink-0 text-slate-300" aria-hidden="true" />}
+        </>
+    );
+    return onOpen ? (
+        <button type="button" data-open-request={row.request_id} onClick={() => onOpen(row.request_id)}
+            className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition hover:bg-slate-50">{body}</button>
+    ) : <div className="flex items-center gap-3 px-2.5 py-2">{body}</div>;
+};
+
+/* onOpenRequest — открыть другую заявку в этом же окне (прошлый закуп, прошлая оплата, дубль счёта;
+   владелец 16.11.2026, пп. 1, 2); backTo — номер заявки, с которой сюда пришли: шеврон в шапке
+   возвращает к ней (onBackTo). */
 const PaymentRequestCard = ({
     open, onClose, requestId, apiBaseUrl, headers, dictionaries, users, me, meta, onChanged, onEdit, showToast,
+    onOpenRequest = null, backTo = null, onBackTo = null,
 }) => {
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(false);
@@ -195,10 +232,14 @@ const PaymentRequestCard = ({
     const permissions = data?.permissions || {};
     // Заявка в архиве «Удалённые» (п. 18) не в работе, какой бы статус у неё ни стоял.
     const active = request?.status === 'active' && !request?.deleted;
-    const current = useMemo(() => (active ? subtasks.find((item) => item.state === 'open') : null), [subtasks, active]);
+    /* Заявку закрыли раньше закрывающих документов (владелец 16.11.2026, п. 6): она закрыта, а этап
+       документов открыт — по нему бухгалтерия ещё работает, а инициатор досылает документы. */
+    const tail = Boolean(request?.docs_tail) && !request?.deleted;
+    const current = useMemo(() => ((active || tail) ? subtasks.find((item) => item.state === 'open') : null),
+        [subtasks, active, tail]);
     const state = requestState(request);
-    // Срок открытого этапа «чек» или «закрывающие документы» (п. 17) — с сервера.
-    const stageDue = active ? (data?.stage_deadline || null) : null;
+    // Срок открытого этапа «чек» или «закрывающие документы» (п. 17) — с сервера; у закрытой раньше документов — тоже.
+    const stageDue = (active || tail) ? (data?.stage_deadline || null) : null;
     /* Договор (10.11.2026): порог — с сервера. Пока счёт не оплачен, а сумма больше порога, пустое
        поле видно предупреждением: без договора или «Без договора» заявка вернётся инициатору. */
     const contractThreshold = data?.contract_check?.threshold || CONTRACT_THRESHOLD;
@@ -242,8 +283,9 @@ const PaymentRequestCard = ({
         approve: 'Согласовано', return: 'Заявка возвращена на доработку', reject: 'Заявка отклонена',
         request_info: 'Запрос отправлен инициатору', pay: 'Оплата записана', top_up: 'Пополнение записано',
         provide: 'Чек отправлен', confirm: 'Получение подтверждено', register: 'Имущество поставлено на учёт',
-        docs_original: 'Отмечено: оригинал получен', docs_close: 'Документы закрыты', set_entity: 'Компания указана',
+        docs_original: 'Отмечено: оригинал получен', docs_close: 'Документы закрыты', set_entity: 'Согласовано — юр. лицо выбрано',
         it_offers: 'Передано на утверждение', it_stock: 'Выдано из наличия — заявка закрыта',
+        docs_due: 'Срок документов изменён', docs_defer: 'Заявка закрыта — документы ждём до срока',
     };
 
     const act = ({ action, fields, files }) => run(() => axios.post(
@@ -261,6 +303,11 @@ const PaymentRequestCard = ({
     const attach = (files) => run(() => axios.post(
         `${base}/attachments`, multipart({}, files), { headers: headers() },
     ), 'Файлы добавлены');
+
+    // Задача инициатора — закрывающие документы (16.11.2026, п. 6): те же файлы заявки, но о сделанном словами задачи.
+    const sendDocs = (files) => run(() => axios.post(
+        `${base}/attachments`, multipart({}, files), { headers: headers() },
+    ), 'Документы отправлены в бухгалтерию');
 
     const cancel = () => run(() => axios.post(`${base}/cancel`, { comment }, { headers: headers() }), 'Заявка отменена');
 
@@ -339,11 +386,7 @@ const PaymentRequestCard = ({
     const itPending = ['pending', 'open', 'waiting'].includes(itStep?.state);
     const itRequest = request?.request_kind === 'purchase' && Boolean(request?.it_purchase || request?.category_helpdesk);
     const approverPending = (entityPending || itPending) && !approvalReassigned;
-    const approverPendingText = itPending ? 'после Helpdesk IT' : 'после выбора компании';
-    const stockIssued = useMemo(() => {
-        const event = [...(data?.events || [])].reverse().find((item) => item.kind === 'it_stock');
-        return event?.payload?.assets || [];
-    }, [data]);
+    const approverPendingText = itPending ? 'после Helpdesk IT' : 'после бухгалтерии';
     const canRemoveAttachment = (attachment) => {
         if (permissions.can_delete) return true;
         const stage = attachment.subtask_kind ? subtaskByKind[attachment.subtask_kind] : null;
@@ -367,8 +410,11 @@ const PaymentRequestCard = ({
     ] : [];
 
     /* Есть ли у человека задача по этой заявке — от этого зависит, из одной страницы окно
-       или из двух. */
-    const hasTask = Boolean(current && permissions.can_act);
+       или из двух. Задача — этап, который он вправе выполнить, либо у инициатора — закрывающие
+       документы (16.11.2026, п. 6): этап у бухгалтерии, а приложить их может и он. */
+    const stageTask = Boolean(current && permissions.can_act);
+    const docsTask = Boolean(permissions.can_upload_docs) && !stageTask;
+    const hasTask = stageTask || docsTask;
     const onTask = hasTask && page === 'task';
 
     /* Смену страницы сопровождает смена роста окна (sizeKey): пока рамка едет, страница
@@ -398,7 +444,7 @@ const PaymentRequestCard = ({
 
     /* Задачу выполнили (этап сменился) или она ушла к другому — окно возвращается к заявке, к
        её началу: там итог — новый этап в сводке и у кого заявка теперь. */
-    const taskKind = hasTask ? current.kind : null;
+    const taskKind = stageTask ? current.kind : (docsTask ? 'docs_upload' : null);
     const seenTask = useRef(taskKind);
     useEffect(() => {
         if (seenTask.current === taskKind) return;
@@ -418,8 +464,8 @@ const PaymentRequestCard = ({
     /* Статус своей задачи исполнитель двигает кнопкой следующей ступени (STAGE_STEPS):
        она стоит в нижней панели страницы задачи. Ступеней дальше нет — дальше ведёт
        итоговое действие самой формы этапа. */
-    const step = hasTask ? stageStep(current.kind, current.status) : null;
-    const stepLabel = hasTask ? stageStatusLabel(meta, current.kind, current.status) : '';
+    const step = stageTask ? stageStep(current.kind, current.status) : null;
+    const stepLabel = stageTask ? stageStatusLabel(meta, current.kind, current.status) : '';
 
     /* Подвал стоит с первого кадра, одной кнопкой «Готово»: появляясь вместе с
        заявкой, он добавлял окну высоты уже после открытия. Остальное встаёт в тот же
@@ -574,7 +620,7 @@ const PaymentRequestCard = ({
             open={open}
             onClose={onClose}
             // На странице задачи шеврон в шапке ведёт обратно к заявке, а не закрывает окно.
-            onBack={onTask ? goRequest : null}
+            onBack={onTask ? goRequest : (backTo && onBackTo ? onBackTo : null)}
             /* Номер известен до ответа сервера, строка под ним — нет: её место
                держит полоса, иначе шапка подрастала бы вместе с заявкой. */
             title={shownId ? `Заявка №${shownId}` : 'Заявка'}
@@ -709,8 +755,9 @@ const PaymentRequestCard = ({
 
                             {/* Страница «Заявка»: сама заявка — что закупаем, у кого, как платим, ход и история. */}
                             <div data-card-page="request" hidden={onTask} className={`space-y-4 ${onTask ? '' : pageMotion}`}>
-                                {/* Чужая задача — у кого заявка сейчас. Свою задачу человек открывает кнопкой внизу. */}
-                                {current && !hasTask && (
+                                {/* Чужая задача — у кого заявка сейчас. Свою задачу человек открывает кнопкой внизу.
+                                    У закрытой раньше документов заявки «сейчас» нет: она закрыта, срок документов — в сводке. */}
+                                {current && !hasTask && active && (
                                     <section className="space-y-1.5">
                                         <SectionTitle>Сейчас · {current.title}</SectionTitle>
                                         <div className={`${iosCard} px-4 py-3 text-[13px] text-slate-700`}>
@@ -727,18 +774,17 @@ const PaymentRequestCard = ({
                                 {/* Заявку вернули — причина видна сразу, не только на странице задачи. */}
                                 {hasTask && current.kind === 'initiation' && <ReturnNotice request={request} subtask={current} />}
 
-                                {/* Чужая задача — а закрывающие документы от инициатора всё равно нужны. */}
-                                {active && !permissions.can_act && request.initiator_id === me?.id && current?.kind === 'closing_docs'
-                                    && request.closing_docs_status === 'none' && (
-                                    <NoticeBox text="Бухгалтерия ждёт закрывающие документы: приложите накладную, акт или чек в разделе «Документы» ниже. Оригиналы передайте в бухгалтерию." />
-                                )}
-
                                 {/* Бухгалтеру тот же дубль подробно показывает форма оплаты — но она теперь на другой
                                     странице, поэтому короткое предупреждение стоит в заявке у всех. */}
                                 {(data.duplicates || []).length > 0 && !request.paid_on && active && (
                                     <NoticeBox text="">
                                         <span className="font-medium">Возможный дубль счёта.</span> Тот же поставщик, номер, сумма и дата:
-                                        {' '}{data.duplicates.map((item) => `заявка №${item.id}`).join(', ')}.
+                                        {' '}{data.duplicates.map((item, index) => (
+                                            <React.Fragment key={item.id}>
+                                                {index > 0 && ', '}
+                                                <RequestLink id={item.id} onOpen={onOpenRequest}>заявка №{item.id}</RequestLink>
+                                            </React.Fragment>
+                                        ))}.
                                     </NoticeBox>
                                 )}
 
@@ -769,11 +815,15 @@ const PaymentRequestCard = ({
                                                 || (itPending ? <span className="text-slate-500">выберет Helpdesk IT</span> : null)}
                                         </Row>
                                         <Row label="Категория закупа" wide>{[request.category_name, request.subcategory_name].filter(Boolean).join(' → ')}</Row>
+                                        {/* Юр. лицо выбирает бухгалтерия после руководителя (16.11.2026, п. 7): указанное
+                                            инициатором — подсказка, пока этап не пройден. */}
                                         <Row label="Компания" wide>
-                                            {request.legal_entity_name || (entityPending ? <span className="text-slate-500">уточнит бухгалтерия</span> : null)}
+                                            {request.legal_entity_name
+                                                ? <>{request.legal_entity_name}{entityPending && <span className="text-slate-500"> · подтвердит бухгалтерия</span>}</>
+                                                : (entityPending ? <span className="text-slate-500">выберет бухгалтерия</span> : null)}
                                         </Row>
                                         <Row label="Подразделение" wide>{request.department_name}</Row>
-                                        <Row label="Проект" wide>{request.project_name}</Row>
+                                        <Row label="Проект" wide>{projectLine(request)}</Row>
                                         <Row label="Филиал / регион" wide>{request.branch}</Row>
                                         <Row label="Период оплаты" wide>{request.payment_period}</Row>
                                         <Row label="Регулярный платёж" wide>{request.template_name}</Row>
@@ -782,21 +832,14 @@ const PaymentRequestCard = ({
                                     {permissions.can_edit && <RequisitesBox entity={data.legal_entity} />}
                                 </section>
 
-                                {/* IT-закуп (владелец 04.11.2026): что решил Helpdesk IT и что уже числится за
-                                    сотрудником — основание для руководителя и утверждающего. Пустым не рисуется. */}
-                                {itStep && (itStep.state === 'done' || (data.initiator_assets || []).length > 0) && (
+                                {/* IT-закуп (владелец 04.11.2026): что уже числится за сотрудником. С 16.11.2026 (владелец,
+                                    п. 9: «руководителю видны вещи на учёте — ему это не нужно и занимает место, пусть
+                                    отображается только у хелпдеск-менеджера») — только тому, кто проверяет заявку в Helpdesk
+                                    IT, и только пока проверка идёт: сервер больше никому этих вещей не присылает. */}
+                                {(data.initiator_assets || []).length > 0 && (
                                     <section className="space-y-1.5" data-card-helpdesk>
                                         <SectionTitle>Helpdesk IT</SectionTitle>
                                         <div className={`${iosCard} px-4 py-2`}>
-                                            {itStep.state === 'done' && (
-                                                <Row label="Проверка" wide>
-                                                    {issuedFromStock(subtasks)
-                                                        ? `Выдано из наличия${stockIssued.length ? `: ${stockIssued.map((item) => [item.name, item.inventory_number && `инв. ${item.inventory_number}`].filter(Boolean).join(', ')).join('; ')}` : ''}`
-                                                        : 'В наличии нет — подобраны поставщики'}
-                                                    <div className="text-[12.5px] text-slate-500">{[itStep.done_by_name, itStep.done_at && fmtDateTime(itStep.done_at)].filter(Boolean).join(' · ')}</div>
-                                                    {itStep.comment && <div className="text-[12.5px] text-slate-600">{itStep.comment}</div>}
-                                                </Row>
-                                            )}
                                             {(data.initiator_assets || []).length > 0 && (
                                                 <Row label="Числится за сотрудником" wide>
                                                     <div className="space-y-1">
@@ -884,6 +927,8 @@ const PaymentRequestCard = ({
                                                 <Row label="Назначение платежа" wide>{request.payment_purpose}</Row>
                                             </>
                                         )}
+                                        {/* Документы оплаты, которые просит инициатор (16.11.2026, пп. 3, 4, 10). Пустым не рисуется. */}
+                                        <Row label="Документы к оплате" wide>{proofsAsked(request).map((item) => item.label).join(', ') || null}</Row>
                                         <Row label="Руководитель" wide>{request.manager_name}</Row>
                                         <Row label="Согласует" wide>
                                             {/* Утверждения не было (выдали из наличия) — и называть некого. */}
@@ -961,6 +1006,19 @@ const PaymentRequestCard = ({
                                             <ol>{subtasks.filter((item) => item.kind !== 'initiation').map((item, index, list) => renderSubtask(item, index === list.length - 1))}</ol>
                                         </div>
                                     </Fold>
+
+                                    {/* Прошлые закупы того же товара или услуги (владелец 16.11.2026, п. 1: «связь по прошлому
+                                        товару или услуге» — раздел подбирает сам, по названию и подкатегории). Каждый
+                                        открывается здесь же (п. 2: «прошлые оплаты кликабельные»). Нет таких — строки нет. */}
+                                    {(data.similar || []).length > 0 && (
+                                        <Fold id="similar" title="Прошлые закупы" summary={similarSummary(data.similar)} open={foldOpen('similar')} onToggle={() => toggleFold('similar')}>
+                                            <div className="divide-y divide-slate-100 px-1.5 py-1" data-card-similar>
+                                                {data.similar.map((row) => (
+                                                    <PastPurchase key={row.request_id} row={row} onOpen={onOpenRequest} />
+                                                ))}
+                                            </div>
+                                        </Fold>
+                                    )}
 
                                     {/* Наблюдатели (просьба владельца 15.10.2026): кто следит за ходом заявки,
                                         например пока инициатор в отпуске. Добавить и снять — инициатору,
@@ -1079,7 +1137,15 @@ const PaymentRequestCard = ({
                             {/* Страница «Ваша задача»: действия человека по текущему этапу. В разметке она с момента
                                 загрузки заявки и при перелистывании только прячется — набранное в форме (дата,
                                 сумма, приложенный файл, комментарий) не теряется, пока человек сверяется с заявкой. */}
-                            {hasTask && (
+                            {docsTask && (
+                                <div data-card-page="task" hidden={!onTask} className={`space-y-4 ${onTask ? pageMotion : ''}`}>
+                                    <section className="space-y-1.5">
+                                        <SectionTitle>Ваша задача · Приложить закрывающие документы</SectionTitle>
+                                        <DocsUploadTask data={data} busy={busy} onAttach={sendDocs} />
+                                    </section>
+                                </div>
+                            )}
+                            {stageTask && (
                                 <div data-card-page="task" hidden={!onTask} className={`space-y-4 ${onTask ? pageMotion : ''}`}>
                                     <section className="space-y-1.5">
                                         {/* Ступень, на которой задача сейчас, — как колонка на доске. */}
@@ -1101,6 +1167,7 @@ const PaymentRequestCard = ({
                                             onEdit={(options) => onEdit?.(data, options)}
                                             onReply={reply}
                                             onAttach={attach}
+                                            onOpenRequest={onOpenRequest}
                                             loadCard={loadCard}
                                             issueSlot={issueSlot}
                                         />

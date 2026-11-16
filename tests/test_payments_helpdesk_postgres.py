@@ -148,8 +148,14 @@ def state(cur, rid):
     return {item['kind']: item['state'] for item in queries.list_subtasks(cur, rid)}
 
 
-def act(cur, rid, kind, action, who, **fields):
-    return flow.act(cur, rid, kind, action, person(cur, who), fields=fields, outbox=[], base_url=None)
+def act(cur, rid, kind, action, who, files=(), **fields):
+    return flow.act(cur, rid, kind, action, person(cur, who), fields=fields, new_file_kinds=files, outbox=[],
+                    base_url=None)
+
+
+# Счёт поставщика у IT-закупа с оплатой счётом прикладывает Helpdesk IT вместе с поставщиками
+# (владелец 13.11.2026, ecb35447): файл — видом вложения, номер и дата — полями.
+INVOICE = {'files': ('invoice',), 'invoice_number': 'СЧ-17', 'invoice_date': '2026-11-10'}
 
 
 def offers_fields(ids, *amounts, recommended=0):
@@ -176,9 +182,10 @@ def test_it_purchase_goes_manager_helpdesk_approver(db):
         flow.submit(cur, rid, person(cur, INITIATOR), outbox=[], base_url=None)
         request = queries.read_request(cur, rid)
         assert request['it_purchase'] is True and request['category_helpdesk'] is True
+        # С 16.11.2026 за Helpdesk IT — согласование с бухгалтерией (выбор юр. лица), у каждого нового закупа.
         assert state(cur, rid) == {'initiation': 'done', 'manager_approval': 'open', 'it_review': 'pending',
-                                   'approval': 'pending', 'invoice_payment': 'pending', 'receiving': 'pending',
-                                   'closing_docs': 'pending'}
+                                   'entity_clarify': 'pending', 'approval': 'pending', 'invoice_payment': 'pending',
+                                   'receiving': 'pending', 'closing_docs': 'pending'}
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         assert state(cur, rid)['it_review'] == 'open'
         # Задача — каждому из Helpdesk IT: на столе и на их доске, в «Новых».
@@ -190,7 +197,7 @@ def test_it_purchase_goes_manager_helpdesk_approver(db):
 
         fields = dict(offers_fields(ids, '450000', '470000', '455000'), comment='Модель — ThinkPad E14',
                       items=[{'name': 'Ноутбук Lenovo ThinkPad E14', 'quantity': Decimal('1'), 'unit': 'шт',
-                              'unit_price': Decimal('450000')}])
+                              'unit_price': Decimal('450000')}], **INVOICE)
         result = act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK, **fields)
         assert len(result['offer_ids']) == 3
         request = queries.read_request(cur, rid)
@@ -207,13 +214,19 @@ def test_it_purchase_goes_manager_helpdesk_approver(db):
         assert (steps['it_review']['state'], steps['it_review']['outcome'], steps['it_review']['done_by']) == (
             'done', 'offers', HELPDESK)
         assert steps['it_review']['comment'] == 'Модель — ThinkPad E14'
+        # Дальше — бухгалтерия: выбирает юр. лицо (16.11.2026), утверждение ждёт её.
+        assert (steps['entity_clarify']['state'], steps['approval']['state']) == ('open', 'pending')
+        assert board(cur, 'accounting', ACCOUNTANT, {'accounting'}) == {rid: 'entity'}
+        act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=ids['entity'])
+        request = queries.read_request(cur, rid)
+        steps = {item['kind']: item for item in queries.list_subtasks(cur, rid)}
         assert (steps['approval']['state'], steps['approval']['assignee_id']) == ('open', APPROVER)
         assert request['route_basis']['source'] == 'limit'
         assert request['submitted_snapshot']['amount'] == '450000.00'
         assert board(cur, 'helpdesk', HELPDESK, {'asset_keeper'}) == {rid: 'offers'}
         assert board(cur, 'approval', APPROVER, {'approver'}) == {rid: 'new'}
         events = [event['kind'] for event in queries.list_events(cur, rid)]
-        assert events[-1] == 'it_offers'
+        assert events[-2:] == ['it_offers', 'entity_set']
         cur.execute("SELECT kind FROM payment_notifications WHERE user_id = %s AND request_id = %s ORDER BY id",
                     (INITIATOR, rid))
         assert 'it_offers' in [row[0] for row in cur.fetchall()], 'инициатор узнаёт, у кого предлагают купить'
@@ -312,7 +325,7 @@ def test_company_clarified_after_helpdesk_keeps_its_check(db):
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK,
             items=[{'name': 'Ноутбук', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('450000')}],
-            **offers_fields(ids, '450000', '470000', '455000'))
+            **offers_fields(ids, '450000', '470000', '455000'), **INVOICE)
         assert state(cur, rid)['entity_clarify'] == 'open'
         act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=ids['entity'])
         steps = {item['kind']: item for item in queries.list_subtasks(cur, rid)}
@@ -335,7 +348,7 @@ def test_helpdesk_role_emptied_after_the_check_blocks_nothing(db):
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK,
             items=[{'name': 'Ноутбук', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('450000')}],
-            **offers_fields(ids, '450000', '470000', '455000'))
+            **offers_fields(ids, '450000', '470000', '455000'), **INVOICE)
         assert queries.role_backlog(cur, 'asset_keeper') == 0, 'по пройденному этапу роль убрать можно'
         queries.remove_role_member(cur, 'asset_keeper', HELPDESK)
         queries.remove_role_member(cur, 'asset_keeper', KEEPER)
@@ -356,10 +369,13 @@ def test_step_given_to_someone_outside_the_emptied_role(db):
         queries.remove_role_member(cur, 'asset_keeper', KEEPER)
         act(cur, rid, workflow.KIND_IT, 'it_offers', ACCOUNTANT,
             items=[{'name': 'Ноутбук', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('450000')}],
-            **offers_fields(ids, '450000', '470000', '455000'))
+            **offers_fields(ids, '450000', '470000', '455000'), **INVOICE)
         steps = {item['kind']: item for item in queries.list_subtasks(cur, rid)}
         assert (steps['it_review']['state'], steps['it_review']['done_by']) == ('done', ACCOUNTANT)
-        assert steps['approval']['state'] == 'open'
+        # Дальше — согласование с бухгалтерией (16.11.2026), потом утверждение.
+        assert steps['entity_clarify']['state'] == 'open'
+        act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT, legal_entity_id=ids['entity'])
+        assert state(cur, rid)['approval'] == 'open'
 
 
 def test_route_without_manager_still_starts_with_the_manager(db):
@@ -387,7 +403,7 @@ def test_price_over_the_limit_goes_to_the_whole_role(db):
         act(cur, rid, workflow.KIND_MANAGER, 'approve', MANAGER)
         act(cur, rid, workflow.KIND_IT, 'it_offers', HELPDESK,
             items=[{'name': 'Сервер', 'quantity': Decimal('1'), 'unit': 'шт', 'unit_price': Decimal('900000')}],
-            **offers_fields(ids, '900000', '950000', '990000'))
+            **offers_fields(ids, '900000', '950000', '990000'), **INVOICE)
         assert queries.read_subtask(cur, rid, workflow.KIND_APPROVAL)['assignee_id'] is None
         assert queries.read_request(cur, rid)['route_basis']['source'] == 'role'
 

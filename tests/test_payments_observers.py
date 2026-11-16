@@ -354,7 +354,7 @@ class _RoutesBase(WiderPerimeter):
         self.queries.list_observers.return_value = [
             {'user_id': WATCHER, 'name': 'Наблюдаев Нурлан', 'department_name': 'IT', 'fired': False},
             {'user_id': OUTSIDER, 'name': 'Закрытов Захар', 'department_name': None, 'fired': False}]
-        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
+        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history', 'similar_purchases',
                      'find_duplicates', 'list_subtasks'):
             getattr(self.queries, name).return_value = []
         self.queries.avatar_refs.return_value = {WATCHER: ('bucket', 'avatars/20.jpg')}
@@ -598,7 +598,9 @@ class RegistrySqlTests(unittest.TestCase):
 
     def test_state_counters_have_the_watching_slice(self):
         cursor = mock.MagicMock()
-        cursor.fetchone.return_value = (9, 5, 1, 0, 0, 2, 1, 1, 3)
+        # Колонки: все, в работе, ждут меня, уточнение, просрочены, закрыты, отклонены, отменены,
+        # наблюдаю, удалённые, оплачено (срез «Оплачено» — 16.11.2026).
+        cursor.fetchone.return_value = (9, 5, 1, 0, 0, 2, 1, 1, 3, 0, 4)
         counters = real_queries.state_counters(cursor, viewer_id=WATCHER, state='watching')
         self.assertEqual(counters['watching'], 3)
         sql, params = cursor.execute.call_args.args

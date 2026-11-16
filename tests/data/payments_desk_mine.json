@@ -136,6 +136,8 @@
       "created_at": "2026-10-12T09:30:00",
       "current_assignee_name": "Инициаторова Ирина",
       "department_name": "IT-отдел",
+      "docs_due_on": null,
+      "docs_tail": false,
       "due_on": "2026-10-30",
       "duplicate": false,
       "expense_name": "Стулья",

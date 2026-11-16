@@ -140,7 +140,7 @@ test('п. 8: «Оплачено» без НДС поставщика красн�
     assert.deepEqual(stageIssues('invoice_payment', { ...ready, request: { counterparty_id: 7, counterparty_vat: false } }), []);
     assert.deepEqual(stageIssues('invoice_payment', { ...ready, request: { counterparty_id: null, counterparty_vat: null } }), []);
     assert.deepEqual(keysOf(stageIssues('invoice_payment', { paid: { paid_on: '', paid_amount: 0 }, kinds: new Set(), request: { counterparty_id: 7 } })),
-        ['vat', 'paid_on', 'paid_amount', 'files'], 'НДС — первым: он выше полей оплаты');
+        ['vat', 'paid_on', 'paid_amount'], 'НДС — первым: он выше полей оплаты; платёжное поручение не просили (16.11.2026)');
     const form = source('src/components/payments/PaymentStageForm.jsx');
     assert.ok(form.includes('const lastPayments = data.supplier_history'), '«Прошлые оплаты» — выборкой по поставщику');
     assert.ok(form.includes('<Choice value={paid.supplier_vat} options={VAT_OPTIONS} onChange={(value) => setPaid((prev) => ({ ...prev, supplier_vat: value }))}'),

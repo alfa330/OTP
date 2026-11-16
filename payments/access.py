@@ -31,6 +31,10 @@
    видит только те задачи, по которым от него требуется действие.
 """
 
+# Правила процесса — чистый модуль без базы и Flask: заявка, закрытая раньше закрывающих
+# документов (16.11.2026), и статусы документов определяются там.
+from . import workflow
+
 # Кому открыт раздел. 2 — Ядигаров Руслан (владелец), 448 — соисполнитель #179,
 # 242 — постановщик ТЗ #381 (директор по развитию), 214 — учредитель. С 03.11.2026
 # без администрирования: 467 — главный бухгалтер, 455 — сотрудник СЗоВ, 603 —
@@ -333,10 +337,12 @@ def can_refund(ctx, request, roles=()):
 
 def can_attach(ctx, request, roles=(), can_act=False):
     """Приложить файл к заявке: инициатор — пока заявка живая, исполнитель
-    текущей подзадачи, бухгалтерия (закрывающие документы приходят и к ней)."""
+    текущей подзадачи, бухгалтерия (закрывающие документы приходят и к ней).
+    Заявку, закрытую раньше закрывающих документов (16.11.2026, workflow.docs_tail),
+    они дополняют так же: документы по ней всё ещё ждут."""
     if is_deleted(request):
         return False
-    if not request or request.get('status') != 'active':
+    if not request or (request.get('status') != 'active' and not workflow.docs_tail(request)):
         return is_section_admin(ctx)
     if is_section_admin(ctx) or can_act or ROLE_ACCOUNTING in _roles(roles):
         return True
@@ -385,23 +391,40 @@ def can_check_stock(ctx, roles=()):
     return can_view_assets(ctx, roles)
 
 
-def sees_initiator_assets(ctx, request, roles=(), participant=False):
+def sees_initiator_assets(ctx, request, it_step, role_members=None):
     """Имущество, которое числится за инициатором IT-закупа, — в окне заявки.
 
-    Helpdesk IT проверяет по нему, что у сотрудника уже есть (владелец 04.11.2026);
-    руководитель и утверждающий решают, нужен ли закуп, — им это тоже основание. Ведущие
-    реестр видят его и так, инициатор — своё. `participant` — человек исполняет или
-    исполнял проверку Helpdesk IT либо утверждение этой заявки (администратор мог передать
-    этап тому, кто не в роли; утверждающего называет и лимит). Наблюдателю и финансовому
-    отделу не нужно: их дело — ход заявки и перевод."""
-    if not request:
+    Helpdesk IT проверяет по нему, что у сотрудника уже есть (владелец 04.11.2026). С
+    16.11.2026 (владелец, п. 9: «руководителю видны вещи на учёте — ему это не нужно и
+    занимает много места, пусть отображается только у хелпдеск-менеджера») — только тому,
+    кто проверяет заявку в Helpdesk IT, и только пока проверка идёт (`it_step` открыт или
+    ждёт ответа инициатора): участнику роли либо человеку, которому этап передали лично.
+    Руководителю, утверждающему, бухгалтерии и самому инициатору — нет, и администратору
+    раздела тоже: на пилоте руководитель почти каждого инициатора — администратор раздела
+    (стенд 16.11.2026 показал: исключение для администратора возвращало ему этот блок)."""
+    if not request or is_deleted(request) or not it_step or it_step.get('state') not in ('open', 'waiting'):
         return False
-    if participant:
-        return True
-    if is_section_admin(ctx) or _roles(roles) & {ROLE_APPROVER, ROLE_ASSET_KEEPER, ROLE_ACCOUNTING}:
-        return True
     me = user_id(ctx)
-    return me is not None and me in (_int(request.get('initiator_id')), _int(request.get('manager_id')))
+    if me is None:
+        return False
+    assignee = it_step.get('assignee_id')
+    if assignee is not None:
+        return int(assignee) == me
+    return me in {int(x) for x in (role_members or {}).get(ROLE_ASSET_KEEPER) or ()}
+
+
+def can_upload_docs(ctx, request, subtasks):
+    """Своя задача инициатора — приложить закрывающие документы (владелец 16.11.2026, п. 6:
+    «чтобы инициатор тоже мог закидывать доки, если требуются закрывающие доки»): этап
+    документов открыт — заявка идёт или её закрыли раньше документов, — а скана ещё нет."""
+    me = user_id(ctx)
+    if me is None or not request or is_deleted(request) or _int(request.get('initiator_id')) != me:
+        return False
+    if (request.get('closing_docs_status') or workflow.DOCS_NONE) != workflow.DOCS_NONE:
+        return False
+    if request.get('status') != 'active' and not workflow.docs_tail(request):
+        return False
+    return any(item.get('kind') == workflow.KIND_CLOSING and item.get('state') == 'open' for item in subtasks or ())
 
 
 # ─── Справочники ─────────────────────────────────────────────────────────────

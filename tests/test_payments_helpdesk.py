@@ -64,8 +64,10 @@ def items(*prices):
 
 class RouteTests(unittest.TestCase):
     def test_it_purchase_goes_through_helpdesk_after_the_manager(self):
+        # С 16.11.2026 (владелец, п. 7) за Helpdesk IT — согласование с бухгалтерией (выбор юр. лица),
+        # даже когда компанию указал инициатор; потом утверждение.
         route = wf.build_route(purchase(), initiator=INITIATOR, manager=MANAGER)
-        self.assertEqual(kinds(route)[:4], ['initiation', 'manager_approval', 'it_review', 'approval'])
+        self.assertEqual(kinds(route)[:5], ['initiation', 'manager_approval', 'it_review', 'entity_clarify', 'approval'])
         step = next(entry for entry in route if entry['kind'] == wf.KIND_IT)
         # Задача списку «Helpdesk IT и учёт имущества», как бухгалтерии: исполнителя-человека у неё нет.
         # Отдельной роли Helpdesk IT с 06.11.2026 нет — это тот же человек, что ставит имущество на учёт.
@@ -306,19 +308,39 @@ class AccessTests(unittest.TestCase):
         self.assertFalse(access.can_check_stock(self.ctx(INITIATOR['id']), set()))
         self.assertTrue(access.can_check_stock(self.ctx(ADMIN), set()))
 
+    MEMBERS = {'asset_keeper': {HELPDESK['id'], 5}, 'approver': {30}, 'accounting': {6}, 'finance': {40}}
+
+    @staticmethod
+    def it_step(state='open', assignee_id=None):
+        return {'kind': wf.KIND_IT, 'role_code': 'asset_keeper', 'state': state, 'assignee_id': assignee_id}
+
     def test_assets_for_the_one_who_holds_the_step(self):
-        """Проверку Helpdesk IT или утверждение администратор мог передать человеку не из роли."""
-        self.assertFalse(access.sees_initiator_assets(self.ctx(41), purchase(), set()))
-        self.assertTrue(access.sees_initiator_assets(self.ctx(41), purchase(), set(), participant=True))
-        self.assertFalse(access.sees_initiator_assets(self.ctx(41), None, set(), participant=True))
+        """Проверку Helpdesk IT администратор мог передать человеку не из роли — ему и видно."""
+        self.assertFalse(access.sees_initiator_assets(self.ctx(41), purchase(), self.it_step(), self.MEMBERS))
+        self.assertTrue(access.sees_initiator_assets(self.ctx(41), purchase(), self.it_step(assignee_id=41), self.MEMBERS))
+        self.assertFalse(access.sees_initiator_assets(self.ctx(HELPDESK['id']), purchase(), self.it_step(assignee_id=41),
+                                                      self.MEMBERS), 'этап передан лично — роли он больше не виден')
+        self.assertFalse(access.sees_initiator_assets(self.ctx(41), None, self.it_step(assignee_id=41), self.MEMBERS))
 
     def test_who_sees_the_employees_assets(self):
+        """Владелец 16.11.2026, п. 9: «руководителю видны вещи на учёте — ему это не нужно, пусть
+        отображается только у хелпдеск-менеджера» — и только пока идёт проверка («в первых этапах»)."""
         request = purchase()
-        for user_id, roles in ((HELPDESK['id'], {'asset_keeper'}), (30, {'approver'}), (5, {'asset_keeper'}),
-                               (6, {'accounting'}), (INITIATOR['id'], set()), (MANAGER['id'], set()), (ADMIN, set())):
-            self.assertTrue(access.sees_initiator_assets(self.ctx(user_id), request, roles), user_id)
-        for user_id, roles in ((40, {'finance'}), (41, set())):
-            self.assertFalse(access.sees_initiator_assets(self.ctx(user_id), request, roles), user_id)
+        for user_id in (HELPDESK['id'], 5):
+            self.assertTrue(access.sees_initiator_assets(self.ctx(user_id), request, self.it_step(), self.MEMBERS), user_id)
+            self.assertTrue(access.sees_initiator_assets(self.ctx(user_id), request, self.it_step('waiting'), self.MEMBERS),
+                            'заявку вернули инициатору с проверки — проверка ещё идёт')
+        # Администратор раздела — нет: на пилоте он же руководитель почти каждого инициатора (стенд 16.11.2026).
+        for user_id in (30, 6, INITIATOR['id'], MANAGER['id'], 40, 41, ADMIN):
+            self.assertFalse(access.sees_initiator_assets(self.ctx(user_id), request, self.it_step(), self.MEMBERS), user_id)
+        self.assertTrue(access.sees_initiator_assets(self.ctx(ADMIN), request, self.it_step(),
+                                                     dict(self.MEMBERS, asset_keeper={ADMIN})),
+                        'администратор в роли Helpdesk IT видит — как участник роли')
+        for state in ('pending', 'done', 'skipped'):
+            self.assertFalse(access.sees_initiator_assets(self.ctx(HELPDESK['id']), request, self.it_step(state), self.MEMBERS),
+                             'до проверки и после неё — не видно никому: %s' % state)
+        self.assertFalse(access.sees_initiator_assets(self.ctx(HELPDESK['id']), request, None, self.MEMBERS),
+                         'заявка без проверки Helpdesk IT')
 
 
 class NotifyTests(unittest.TestCase):
@@ -676,7 +698,7 @@ class WiringTests(unittest.TestCase):
         """Что нужно ручке, чтобы собрать карточку заявки в ответ (_full)."""
         self.queries.read_request.return_value = row
         self.queries.list_subtasks.return_value = []
-        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history',
+        for name in ('list_attachments', 'list_items', 'list_offers', 'list_events', 'payment_history', 'similar_purchases',
                      'find_duplicates', 'list_observers'):
             getattr(self.queries, name).return_value = []
         for name in ('read_contract', 'read_legal_entity', 'read_account'):
@@ -769,7 +791,10 @@ class WiringTests(unittest.TestCase):
         fields = self.acted[0]
         self.assertEqual(fields['payment'], {'object_type': 'goods', 'accounting_category': 'asset', 'payment_method': 'card',
                                              'card_recipient': 'supplier', 'card_holder_name': 'ИП Алсер',
-                                             'payment_purpose': 'Ноутбук', 'card_id': None},
+                                             'payment_purpose': 'Ноутбук', 'card_id': None,
+                                             # Документы оплаты «только если требуется» (16.11.2026) — не отмечены.
+                                             'needs_payment_order': False, 'needs_power_of_attorney': False,
+                                             'needs_transfer_proof': False},
                          'только поля Helpdesk IT; новый номер снимает карту из справочника')
         self.assertEqual((fields['card']['number'], fields['card_number_ok']), ('4111111111111111', True))
         # Без способа оплаты этап не закрыть — сервер скажет, чего не хватает.
@@ -844,6 +869,8 @@ class WiringTests(unittest.TestCase):
         client = self.client(user_id=HELPDESK['id'], roles={'asset_keeper'})
         with mock.patch.object(access, 'SECTION_ALLOWED_USER_IDS', (HELPDESK['id'],)):
             self.card_answers(purchase())
+            # Проверка Helpdesk IT идёт — имущество сотрудника видно тому, кто проверяет (16.11.2026, п. 9).
+            self.queries.list_subtasks.return_value = [dict(_FlowBase.step(wf.KIND_IT, None), state='open')]
             self.queries.participates.return_value = True
             self.queries.role_member_ids.return_value = {'asset_keeper': {HELPDESK['id']}}
             self.assets_sql.of_user.return_value = [{'id': 1, 'name': 'Монитор Dell', 'inventory_number': 'IT-7',

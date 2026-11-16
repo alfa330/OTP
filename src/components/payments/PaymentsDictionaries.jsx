@@ -14,7 +14,7 @@ import {
     CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HELPDESK_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
     DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, addressLetterState, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel,
-    fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails, vatLabel,
+    fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails, plural, vatLabel,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormInput, FormSelect,
@@ -65,7 +65,8 @@ const SECTIONS = [
     { value: 'mailings', label: 'Письма поставщикам', icon: Mail, group: 'pay', need: 'is_admin', about: 'Письма о смене реквизитов наших компаний: кому ушли, кому нет и само письмо.' },
     { value: 'categories', label: 'Категории закупа', icon: Tags, group: 'lists', about: 'По категориям группируются затраты и выбирается согласующий.' },
     { value: 'asset_categories', label: 'Категории имущества', icon: Boxes, group: 'lists', about: 'Виды имущества для постановки на учёт: техника, мебель, оборудование.' },
-    { value: 'projects', label: 'Проекты', icon: FolderKanban, group: 'lists', about: 'Проекты, к которым относят расходы.' },
+    // «Проекты и отделы внутри проекта» (владелец 16.11.2026, пп. 8, 11, 12): у проекта — свои отделы.
+    { value: 'projects', label: 'Проекты и отделы', icon: FolderKanban, group: 'lists', about: 'Проекты, к которым относят расходы, и отделы внутри каждого проекта.' },
     { value: 'settings', label: 'Настройки', icon: SlidersHorizontal, group: 'rules', need: 'is_admin', about: 'Общие правила процесса.' },
 ];
 
@@ -100,6 +101,8 @@ const toDraft = (name, row = {}) => {
     switch (name) {
         case 'categories':
             return { ...base, parent_id: row.parent_id ?? null, position: row.position ?? 0, via_helpdesk: Boolean(row.via_helpdesk) };
+        case 'project_departments':
+            return { id: row.id ?? null, project_id: row.project_id ?? null, name: row.name || '', is_active: row.is_active ?? true };
         case 'legal_entities':
             return {
                 ...base, bin: row.bin || '', kind: row.kind || null, vat_payer: Boolean(row.vat_payer),
@@ -438,6 +441,10 @@ const PaymentsDictionaries = ({
     const [loading, setLoading] = useState(false);
     const [filter, setFilter] = useState('');
     const [editing, setEditing] = useState(null);   // строка справочника; {} — новая запись
+    // «Проекты и отделы»: правится отдел проекта, а не сам проект (своя таблица и ручка — project_departments).
+    const [editKind, setEditKind] = useState(null);
+    // Фильтр проектов (16.11.2026, п. 11): какой проект показать с его отделами; '' — все.
+    const [projectFilter, setProjectFilter] = useState('');
     const [draft, setDraft] = useState({});
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
@@ -470,7 +477,7 @@ const PaymentsDictionaries = ({
 
     /* Строки предыдущего справочника сбрасываются ДО загрузки нового: иначе
        один кадр строки поставщиков рисуются отрисовщиком лимитов. */
-    useEffect(() => { setRows([]); setFilter(''); setCanEdit(false); load(); }, [load]);
+    useEffect(() => { setRows([]); setFilter(''); setProjectFilter(''); setCanEdit(false); load(); }, [load]);
 
     const categoryRoots = useMemo(() => (name === 'categories' ? rows : dictionaries?.categories || []).filter((item) => !item.parent_id), [rows, name, dictionaries]);
     const counterpartyOptions = useMemo(() => (dictionaries?.counterparties || []).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
@@ -480,7 +487,10 @@ const PaymentsDictionaries = ({
     const categoryOptions = useMemo(() => (dictionaries?.categories || []).filter((item) => !item.parent_id).map((item) => ({ value: item.id, label: item.name })), [dictionaries]);
     const anyOf = (options, label) => [{ value: '', label }, ...options];
 
+    // Справочник, в который пишет открытое окно: у отдела проекта — свой.
+    const target = editKind === 'department' ? 'project_departments' : name;
     const openEditor = (row) => {
+        setEditKind(row?._department ? 'department' : null);
         setError('');
         setConfirmDelete(false);
         setContractFile(null);
@@ -491,8 +501,10 @@ const PaymentsDictionaries = ({
         setLettersTried(false);
         setLettersRefused('');
         setEditing(row || {});
-        setDraft(toDraft(name, row || {}));
+        setDraft(toDraft(row?._department ? 'project_departments' : name, row || {}));
     };
+    /* Новый отдел — в проекте, у которого нажали «Добавить отдел» (или в выбранном фильтром). */
+    const openDepartment = (projectId) => openEditor({ _department: true, project_id: projectId || null, is_active: true });
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
     const changed = async () => { await load(); onDictionariesChanged?.(); };
 
@@ -534,7 +546,7 @@ const PaymentsDictionaries = ({
         setSaving(true);
         setError('');
         try {
-            const response = await axios.post(`${apiBaseUrl}/api/payments/dictionaries/${name}`, toPayload(name, draft), { headers: headers() });
+            const response = await axios.post(`${apiBaseUrl}/api/payments/dictionaries/${target}`, toPayload(target, draft), { headers: headers() });
             // Запись уже есть: если дальше не загрузится файл, повторное «Сохранить»
             // должно править её же, а не заводить вторую такую же.
             if (response.data?.id && !draft.id) {
@@ -581,7 +593,7 @@ const PaymentsDictionaries = ({
         if (!draft.id) return;
         setSaving(true);
         try {
-            await axios.delete(`${apiBaseUrl}/api/payments/dictionaries/${name}/${draft.id}`, { headers: headers() });
+            await axios.delete(`${apiBaseUrl}/api/payments/dictionaries/${target}/${draft.id}`, { headers: headers() });
             toastRef.current?.('Удалено', 'success');
             setEditing(null);
             await changed();
@@ -704,24 +716,49 @@ const PaymentsDictionaries = ({
                     sub: row.via_helpdesk ? 'через Helpdesk IT' : '',
                     side: <Hidden active={row.is_active} />,
                 };
+            case 'projects':
+                // Отдел внутри проекта — строкой в карточке проекта; у проекта — сколько отделов.
+                if (row._department) return { title: row.name, sub: '', side: <Hidden active={row.is_active} /> };
+                return {
+                    title: row.name,
+                    sub: (row.departments || []).length ? plural((row.departments || []).length, ['отдел', 'отдела', 'отделов']) : 'без отделов',
+                    side: <Hidden active={row.is_active} />,
+                };
             default:
                 return { title: row.name, sub: '', side: <Hidden active={row.is_active} /> };
         }
     };
 
+    /* «Проекты и отделы»: проект — карточкой, его отделы — строками в ней. Фильтр — один проект; поиск
+       находит и проект, и отдел: совпал проект — видны все его отделы, совпал отдел — только он. */
+    const projectGroups = useMemo(() => {
+        if (name !== 'projects') return null;
+        const needle = filter.trim().toLowerCase();
+        return rows
+            .filter((project) => !projectFilter || project.id === Number(projectFilter))
+            .map((project) => {
+                const departments = (project.departments || []).map((item) => ({ ...item, _department: true }));
+                if (!needle || String(project.name || '').toLowerCase().includes(needle)) return { root: project, children: departments };
+                const matched = departments.filter((item) => String(item.name || '').toLowerCase().includes(needle));
+                return matched.length ? { root: project, children: matched } : null;
+            })
+            .filter(Boolean);
+    }, [name, rows, filter, projectFilter]);
+
     const grouped = useMemo(() => {
+        if (name === 'projects') return projectGroups;
         if (name !== 'categories') return null;
         const roots = shown.filter((item) => !item.parent_id);
         const orphans = shown.filter((item) => item.parent_id && !roots.some((root) => root.id === item.parent_id));
         return [...roots.map((root) => ({ root, children: shown.filter((item) => item.parent_id === root.id) })),
             ...orphans.map((root) => ({ root, children: [] }))];
-    }, [shown, name]);
+    }, [shown, name, projectGroups]);
 
     /* Список — страницами по двадцать, как списки раздела «Задачи». Справочник
        приходит целиком, листаем на месте. Номер страницы помнится вместе со
        справочником и поиском: другой список или новый запрос — с первой страницы.
        Категории листаются группами: подкатегория не уезжает от своей категории. */
-    const listKey = `${name}|${filter.trim().toLowerCase()}`;
+    const listKey = `${name}|${filter.trim().toLowerCase()}|${projectFilter}`;
     const [listPaging, setListPaging] = useState({ key: '', page: 1 });
     const listItems = grouped || shown;
     const listRange = pageRange(listPaging.key === listKey ? listPaging.page : 1, DICTIONARY_PAGE_SIZE, listItems.length);
@@ -1062,6 +1099,20 @@ const PaymentsDictionaries = ({
                         <Field label="Примечание">{text('note', { maxLength: 2000 })}</Field>
                     </>
                 );
+            case 'projects':
+                if (editKind === 'department') {
+                    return (
+                        <>
+                            <Field label="Проект" required optionalMark={false} hint="В каком проекте этот отдел. Отдел выбирают в заявке после проекта.">
+                                <FormSelect value={draft.project_id} onChange={(v) => set('project_id', v || null)}
+                                    options={rows.map((item) => ({ value: item.id, label: item.name }))} placeholder="Выберите проект"
+                                    searchable={rows.length > 8} ariaLabel="Проект" />
+                            </Field>
+                            <Field label="Название отдела" required optionalMark={false}>{text('name', { maxLength: 200, placeholder: 'Например: Колл-центр' })}</Field>
+                        </>
+                    );
+                }
+                return <Field label="Название проекта" required optionalMark={false}>{text('name', { maxLength: 200 })}</Field>;
             default:
                 return <Field label="Название" required optionalMark={false}>{text('name', { maxLength: 200 })}</Field>;
         }
@@ -1111,6 +1162,13 @@ const PaymentsDictionaries = ({
             <div key={item.id} data-record={item.id} className={`overflow-hidden rounded-xl border ${idle(item) ? 'border-slate-200 bg-slate-50' : 'border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.06)]'}`}>
                 {line(item)}
                 {children.map((child) => line(child, { inner: true }))}
+                {/* «Проекты и отделы» (16.11.2026, п. 12): отдел добавляют прямо в проект — строкой в его карточке. */}
+                {name === 'projects' && canEdit && (
+                    <button type="button" data-add-department={item.id} onClick={() => openDepartment(item.id)}
+                        className="flex w-full items-center gap-1.5 border-t border-slate-100 py-2 pl-7 pr-3.5 text-left text-[13px] font-medium text-blue-600 transition hover:bg-slate-50">
+                        <Plus size={14} /> Добавить отдел
+                    </button>
+                )}
             </div>
         );
     };
@@ -1171,7 +1229,7 @@ const PaymentsDictionaries = ({
                     </div>
                     {!ownScreen && canEdit && (
                         <button type="button" className={`${iosBtnPrimary} shrink-0`} onClick={() => openEditor(null)}>
-                            <Plus size={15} /> Добавить
+                            <Plus size={15} /> {name === 'projects' ? 'Добавить проект' : 'Добавить'}
                         </button>
                     )}
                 </div>
@@ -1196,7 +1254,19 @@ const PaymentsDictionaries = ({
                 )}
                 {!ownScreen && (
                     <>
-                        {rows.length >= SEARCH_FROM && (
+                        {/* «Проекты и отделы» (16.11.2026, п. 11): фильтр по проекту и поиск по проектам и отделам —
+                            с двух проектов; у остальных справочников поиск — с девяти записей, как было. */}
+                        {name === 'projects' ? rows.length > 1 && (
+                            <div className="grid gap-2 sm:grid-cols-[minmax(0,240px)_minmax(0,1fr)]" data-project-filter>
+                                <FormSelect value={projectFilter} onChange={(v) => setProjectFilter(v || '')}
+                                    options={[{ value: '', label: 'Все проекты' }, ...rows.map((item) => ({ value: String(item.id), label: item.name }))]}
+                                    searchable={rows.length > 8} ariaLabel="Проект" />
+                                <div className="relative">
+                                    <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <input type="search" className={`${iosInput} pl-9`} placeholder="Поиск по проектам и отделам" aria-label="Поиск по проектам и отделам" value={filter} onChange={(event) => setFilter(event.target.value)} />
+                                </div>
+                            </div>
+                        ) : rows.length >= SEARCH_FROM && (
                             <div className="relative">
                                 <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                                 <input type="search" className={`${iosInput} pl-9`} placeholder="Поиск по справочнику" aria-label="Поиск по справочнику" value={filter} onChange={(event) => setFilter(event.target.value)} />
@@ -1205,7 +1275,7 @@ const PaymentsDictionaries = ({
                         {loading && !rows.length && (
                             <div className={`${iosCard} flex items-center justify-center gap-2 py-10 text-[13px] text-slate-500`}><Loader2 size={15} className="animate-spin" /> Загружаем…</div>
                         )}
-                        {!loading && !shown.length && (
+                        {!loading && !(grouped || shown).length && (
                             <div className={`${iosCard} px-4 py-10 text-center text-[13.5px] text-slate-500`}>
                                 {rows.length ? 'Ничего не нашлось' : `Пока пусто${canEdit ? ' — добавьте первую запись' : ''}`}
                             </div>
@@ -1269,7 +1339,7 @@ const PaymentsDictionaries = ({
             <IosModal
                 open={Boolean(editing)}
                 onClose={() => setEditing(null)}
-                title={`${current.label}: ${isNew ? 'новая запись' : (canEdit ? 'правка' : 'просмотр')}`}
+                title={`${editKind === 'department' ? 'Отдел проекта' : current.label}: ${isNew ? 'новая запись' : (canEdit ? 'правка' : 'просмотр')}`}
                 maxWidth="max-w-2xl"
                 footer={canEdit ? (
                     <>

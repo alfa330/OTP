@@ -158,7 +158,11 @@ const BoardCard = ({ card, board, draggable = false, dragging = false, soonDays,
                 (доска делит между колонками ширину экрана) — тогда семизначная сумма
                 не встаёт рядом со сроком и уходит строкой ниже, а не наезжает на срок. */}
             <div className="mt-auto flex flex-wrap items-center gap-x-1.5 gap-y-1 pt-2">
-                <DueChip request={card} soonDays={soonDays} />
+                {/* В колонке закрывающих документов — их срок (16.11.2026, п. 5), а не давно прошедшая оплата. */}
+                <DueChip request={card} soonDays={soonDays} docsDueOn={card.column === 'awaiting_docs' ? card.docs_due_on : null} />
+                {/* Заявку закрыли раньше закрывающих документов (16.11.2026, п. 6): в колонке документов она
+                    стоит рядом с живыми — метка говорит, что сама заявка уже закрыта. */}
+                {card.docs_tail && <MetaChip title="Заявка закрыта, закрывающие документы ещё ждут">заявка закрыта</MetaChip>}
                 <span className="ml-auto shrink-0 text-[13px] font-semibold tabular-nums text-slate-900" title="Сумма заявки">{amountLabel(card, card.amount)}</span>
             </div>
         </article>

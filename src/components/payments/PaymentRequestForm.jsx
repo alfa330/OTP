@@ -11,6 +11,7 @@ import {
     fileKindOptions, fileSizeLabel, fmtDate, fmtMoney, isBlankItem, isBlankOffer,
     issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTitle, itemsTotal, legacyIssues, observersClosedLine, observersPatch,
     parseAmount, priceTrend, purchaseIssues, regularIssues, trendLabel, contractChoice, contractPick, supplierKeyOf,
+    PAYMENT_ORDER_OPTIONS, POWER_OF_ATTORNEY_OPTIONS, TRANSFER_PROOF_OPTIONS,
 } from './paymentsMeta';
 import {
     AmountInput, ApprovalHint, Choice, ErrorBox, Field, FieldHint, FilePicker, FormDate, FormInput, FormSelect, FormText,
@@ -58,7 +59,7 @@ const HISTORY_DEBOUNCE_MS = 400;
    говорят о том, что в этом поле можно сделать. */
 const LEGACY_METHOD_ISSUE = 'выберите способ оплаты: для оплаты счёта понадобятся сам счёт, его номер и дата';
 const TEMPLATE_ENTITY_ISSUE = 'в справочнике у платежа не указана компания — попросите администратора дополнить';
-const ENTITY_UNKNOWN = 'Не знаю — уточнит бухгалтерия';
+const ENTITY_UNKNOWN = 'Не знаю — выберет бухгалтерия';
 const PREVIEW_DEBOUNCE_MS = 350;
 
 const EXTRA_FIELDS = [
@@ -85,7 +86,7 @@ const quantityInput = (value) => {
 
 const emptyDraft = (me, kind = null) => ({
     request_kind: kind,
-    legal_entity_id: null, department_id: me?.department_id || null, project_id: null, branch: '',
+    legal_entity_id: null, department_id: me?.department_id || null, project_id: null, project_department_id: null, branch: '',
     expense_name: '', justification: '', category_id: null, subcategory_id: null, due_on: '',
     object_type: null, accounting_category: null, payment_method: null,
     items: [newItem()],
@@ -96,6 +97,8 @@ const emptyDraft = (me, kind = null) => ({
     card_recipient: null, card_holder_user_id: me?.id || null, card_holder_name: '', card_id: null,
     card_number: '', payment_purpose: '', notes: '',
     fixed_template_id: null, amount: 0, payment_period: '',
+    // Документы оплаты «только если требуется» (16.11.2026, пп. 3, 4, 10): по умолчанию не нужны.
+    needs_payment_order: false, needs_power_of_attorney: false, needs_transfer_proof: false,
     // Наблюдатели — номерами строками, как их отдаёт список выбора нескольких сотрудников.
     observer_ids: [],
 });
@@ -122,6 +125,7 @@ const draftFromData = (data, me) => {
         legal_entity_id: request.legal_entity_id ?? null,
         department_id: request.department_id ?? null,
         project_id: request.project_id ?? null,
+        project_department_id: request.project_department_id ?? null,
         branch: request.branch || '',
         expense_name: request.expense_name || '',
         justification: request.justification || '',
@@ -152,6 +156,9 @@ const draftFromData = (data, me) => {
         fixed_template_id: request.fixed_template_id ?? null,
         amount: parseAmount(request.amount),
         payment_period: request.payment_period || '',
+        needs_payment_order: Boolean(request.needs_payment_order),
+        needs_power_of_attorney: Boolean(request.needs_power_of_attorney),
+        needs_transfer_proof: Boolean(request.needs_transfer_proof),
         // Уволенного в списке выбора нет (его не снять и не увидеть) — в форму он не попадает,
         // а разница, которую форма шлёт, его не касается: снимают его в окне заявки.
         observer_ids: (data.observers || []).filter((person) => !person.fired).map((person) => String(person.user_id)),
@@ -205,9 +212,10 @@ const fingerprint = (draft) => JSON.stringify({ ...draft, request_kind: null });
 /* revealIssues — окно открыли, чтобы дописать недостающее (кнопка «Доработать заявку»
    в задаче инициатора, над ней уже названо, чего не хватает): поля красные сразу, и
    окно подводит к первому, не дожидаясь нажатия «Отправить». */
+/* onOpenRequest — открыть прошлую заявку из «Истории оплат» поверх формы (16.11.2026, п. 2). */
 const PaymentRequestForm = ({
     open, onClose, apiBaseUrl, headers, dictionaries, users, me, meta, settings, staffed, data = null, onSaved, showToast,
-    revealIssues = false,
+    revealIssues = false, onOpenRequest = null,
 }) => {
     const editing = Boolean(data?.request);
     const request = data?.request || null;
@@ -310,6 +318,17 @@ const PaymentRequestForm = ({
         .map((item) => ({ value: item.id, label: item.bin ? `${item.name} · БИН ${item.bin}` : item.name })), [dictionaries]);
     const projectOptions = useMemo(() => [{ value: null, label: 'Без проекта' },
         ...(dictionaries?.projects || []).map((item) => ({ value: item.id, label: item.name }))], [dictionaries]);
+    /* Отделы внутри выбранного проекта (справочник «Проекты и отделы», 16.11.2026). У проекта без отделов
+       поля нет вовсе — заблокированный список, в котором нечего выбрать, только отвлекает. */
+    const projectDepartmentOptions = useMemo(() => (dictionaries?.project_departments || [])
+        .filter((item) => draft.project_id && item.project_id === draft.project_id)
+        .map((item) => ({ value: item.id, label: item.name })), [dictionaries, draft.project_id]);
+    const pickProject = (value) => setDraft((prev) => ({
+        ...prev, project_id: value,
+        // Отдел прежнего проекта к новому не относится.
+        project_department_id: (dictionaries?.project_departments || [])
+            .some((item) => item.id === prev.project_department_id && item.project_id === value) ? prev.project_department_id : null,
+    }));
     const legalEntities = dictionaries?.legal_entities || [];
     const legalEntityOptions = useMemo(() => legalEntities.map((item) => ({ value: item.id, label: item.name })), [legalEntities]);
     /* Компания нового закупа необязательна (просьба владельца 15.10.2026): не знает её
@@ -530,6 +549,8 @@ const PaymentRequestForm = ({
                 due_on: draft.due_on || null, invoice_number: draft.invoice_number.trim(),
                 invoice_date: draft.invoice_date || null, notes: draft.notes.trim(),
                 replace_invoice: Boolean(invoiceFile), submit,
+                needs_payment_order: Boolean(draft.needs_payment_order),
+                needs_power_of_attorney: Boolean(draft.needs_power_of_attorney),
                 ...observersPayload(),
             };
         }
@@ -545,7 +566,8 @@ const PaymentRequestForm = ({
             const title = itemsTitle(draft.items);
             return {
                 request_kind: 'purchase',
-                department_id: draft.department_id, project_id: draft.project_id, branch: draft.branch.trim(),
+                department_id: draft.department_id, project_id: draft.project_id,
+                project_department_id: draft.project_department_id, branch: draft.branch.trim(),
                 ...(title ? { expense_name: title } : {}), justification: draft.justification.trim(),
                 category_id: draft.category_id, subcategory_id: draft.subcategory_id, due_on: draft.due_on || null,
                 items, notes: draft.notes.trim(),
@@ -563,6 +585,7 @@ const PaymentRequestForm = ({
         return {
             request_kind: 'purchase',
             legal_entity_id: draft.legal_entity_id, department_id: draft.department_id, project_id: draft.project_id,
+            project_department_id: draft.project_department_id,
             branch: draft.branch.trim(), expense_name: draft.expense_name.trim(), justification: draft.justification.trim(),
             category_id: draft.category_id, subcategory_id: draft.subcategory_id, due_on: draft.due_on || null,
             object_type: draft.object_type, accounting_category: draft.accounting_category,
@@ -586,6 +609,10 @@ const PaymentRequestForm = ({
             card_holder_user_id: draft.card_recipient === 'employee' ? draft.card_holder_user_id : null,
             card_holder_name: draft.card_recipient === 'supplier' ? draft.card_holder_name.trim() : '',
             payment_purpose: draft.payment_purpose.trim(), notes: draft.notes.trim(),
+            // Документы оплаты, которые нужны инициатору (16.11.2026): отметку чужого способа сервер снимет сам.
+            needs_payment_order: Boolean(draft.needs_payment_order),
+            needs_power_of_attorney: Boolean(draft.needs_power_of_attorney),
+            needs_transfer_proof: Boolean(draft.needs_transfer_proof),
             ...card,
             ...observersPayload(),
             submit,
@@ -629,8 +656,8 @@ const PaymentRequestForm = ({
             if (body.warnings?.length) toastRef.current?.(body.warnings.join('. '), 'info');
             let text = 'Заявка сохранена';
             if (body.submitted) text = body.rerouted ? 'Условия изменились — заявка ушла на согласование заново' : 'Заявка отправлена';
-            // Компанию не указали — заявка сначала у бухгалтерии, а не у согласующего.
-            if (body.submitted && body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — компанию уточнит бухгалтерия';
+            // Руководителя нет — заявка сразу у бухгалтерии: она выбирает юр. лицо (16.11.2026, п. 7).
+            if (body.submitted && body.request?.current_kind === 'entity_clarify') text = 'Заявка отправлена — юр. лицо выберет бухгалтерия';
             toastRef.current?.(text, 'success');
             onSaved?.(body);
             onClose?.();
@@ -670,6 +697,27 @@ const PaymentRequestForm = ({
     ) : null;
     const clarifyLabel = (data?.subtasks || []).find((item) => item.kind === 'initiation')?.clarify_label;
 
+    /* Документы к оплате «только если требуется» (владелец 16.11.2026, пп. 3, 4, 10): что отметили —
+       исполнитель оплаты приложит обязательно, остальное — по желанию. Сегменты с «i», «Не нужно» выбрано. */
+    const invoiceProofFields = (
+        <div className="flex flex-wrap gap-x-6 gap-y-3" data-form-proofs>
+            <Field as="div" label="Платёжное поручение" optionalMark={false} hint={HINTS.paymentOrder}>
+                <Choice value={Boolean(draft.needs_payment_order)} options={PAYMENT_ORDER_OPTIONS}
+                    onChange={(value) => set('needs_payment_order', value)} ariaLabel="Платёжное поручение" />
+            </Field>
+            <Field as="div" label="Доверенность" optionalMark={false} hint={HINTS.powerOfAttorney}>
+                <Choice value={Boolean(draft.needs_power_of_attorney)} options={POWER_OF_ATTORNEY_OPTIONS}
+                    onChange={(value) => set('needs_power_of_attorney', value)} ariaLabel="Доверенность" />
+            </Field>
+        </div>
+    );
+    const cardProofField = (
+        <Field as="div" label="Подтверждение перевода" optionalMark={false} hint={HINTS.transferProof}>
+            <Choice value={Boolean(draft.needs_transfer_proof)} options={TRANSFER_PROOF_OPTIONS}
+                onChange={(value) => set('needs_transfer_proof', value)} ariaLabel="Подтверждение перевода" />
+        </Field>
+    );
+
     const route = approvalSummary(preview?.route);
     const entityStep = entityOptional && Boolean(preview?.entity_step);
     // IT-закуп: после руководителя — Helpdesk IT, согласующего выберут по сумме его поставщика.
@@ -695,9 +743,18 @@ const PaymentRequestForm = ({
                     <div key={key} className="flex items-start gap-2">
                         <div className="min-w-0 grow basis-0">
                             {key === 'project_id' && (
-                                <Field label={meta_.label} hint={HINTS.project}>
-                                    <FormSelect value={draft.project_id} onChange={(value) => set('project_id', value)} options={projectOptions} placeholder="Без проекта" ariaLabel="Проект" searchable={projectOptions.length > 8} />
-                                </Field>
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <Field label={meta_.label} hint={HINTS.project}>
+                                        <FormSelect value={draft.project_id} onChange={pickProject} options={projectOptions} placeholder="Без проекта" ariaLabel="Проект" searchable={projectOptions.length > 8} />
+                                    </Field>
+                                    {projectDepartmentOptions.length > 0 && (
+                                        <Field label="Отдел проекта" hint={HINTS.projectDepartment}>
+                                            <FormSelect value={draft.project_department_id} onChange={(value) => set('project_department_id', value || null)}
+                                                options={[{ value: null, label: 'Без отдела' }, ...projectDepartmentOptions]} placeholder="Без отдела"
+                                                searchable={projectDepartmentOptions.length > 8} ariaLabel="Отдел проекта" />
+                                        </Field>
+                                    )}
+                                </div>
                             )}
                             {key === 'branch' && (
                                 <Field label={meta_.label} hint="Таксопарк (город), филиал или регион — в зависимости от проекта.">
@@ -894,6 +951,7 @@ const PaymentRequestForm = ({
                             <Field as="div" label="Счёт" required optionalMark={false} anchor="invoice_file" issue={issueOf('invoice_file')}>
                                 <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
                             </Field>
+                            {invoiceProofFields}
                             <div className="grid gap-3 sm:grid-cols-2">
                                 <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
                                     <FormSelect value={draft.department_id} onChange={(value) => set('department_id', value)} options={departmentOptions} placeholder="Подразделение" ariaLabel="Подразделение" />
@@ -1083,7 +1141,11 @@ const PaymentRequestForm = ({
                                         {history.slice(0, 3).map((row) => (
                                             <div key={row.request_id} className="flex flex-wrap items-baseline justify-between gap-x-3 text-[12.5px]">
                                                 <span className="min-w-0 flex-1 truncate text-blue-900">
-                                                    №{row.request_id} · {row.expense_name}{row.counterparty_name ? ` · ${row.counterparty_name}` : ''}
+                                                    {/* Прошлая оплата — номером-ссылкой: заявка откроется поверх формы (16.11.2026, п. 2). */}
+                                                    {onOpenRequest ? (
+                                                        <button type="button" data-open-request={row.request_id} onClick={() => onOpenRequest(row.request_id)}
+                                                            className="font-medium underline decoration-blue-300 underline-offset-2 hover:decoration-blue-700">№{row.request_id}</button>
+                                                    ) : `№${row.request_id}`} · {row.expense_name}{row.counterparty_name ? ` · ${row.counterparty_name}` : ''}
                                                 </span>
                                                 <span className="tabular-nums text-blue-900/80">
                                                     {fmtDate(row.paid_on)} · {fmtMoney(row.paid_amount ?? row.amount)}
@@ -1122,6 +1184,7 @@ const PaymentRequestForm = ({
                                         )}
                                     </div>
                                     {contractNotice}
+                                    {invoiceProofFields}
                                     {invoiceOpen ? (
                                         <>
                                             <div className="grid gap-3 sm:grid-cols-2">
@@ -1158,6 +1221,7 @@ const PaymentRequestForm = ({
                                     digitsRange={meta?.card_digits}
                                 />
                             )}
+                            {draft.payment_method === 'card' && cardProofField}
                         </IosSection>
                         )}
 
@@ -1201,7 +1265,7 @@ const PaymentRequestForm = ({
                                 заранее нельзя. Заявке первой версии компания нужна при отправке — этапа у неё не будет. */}
                             {entityStep && (
                                 <>
-                                    <span>Бухгалтерия <span className="text-slate-500">· уточнит компанию</span></span>
+                                    <span>Бухгалтерия <span className="text-slate-500">· выберет юр. лицо</span></span>
                                     <ArrowRight size={13} className="text-slate-400" />
                                 </>
                             )}

@@ -178,7 +178,8 @@ test('«Заявки» помнят первую страницу без отб�
 
 test('срезы реестра и имущества — те же, что были отбором', () => {
     // «Удалённые» (п. 18, 09.11.2026) — плитка администратора: только его ответ несёт её счётчик.
-    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled', 'deleted']);
+    // «Оплачено» (16.11.2026, п. 13) — оплаченные, ещё не закрытые: перед «Закрыты».
+    assert.deepEqual(STATE_FILTERS.map((item) => item.key), ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'paid', 'done', 'rejected', 'cancelled', 'deleted']);
     const view = source('src/components/payments/PaymentsView.jsx');
     // Состояние без заявок плиткой не рисуется, пока его не выбрали: пустая плитка — шум.
     assert.ok(view.includes(".filter((item) => ['all', 'mine', 'open'].includes(item.key) || counters[item.counter] || state === item.key)"));
@@ -306,7 +307,7 @@ test('справочники слева стоят группами под по�
     assert.deepEqual(labels, [
         'Поставщики', 'Договоры', 'Реквизиты компаний', 'Банковские реквизиты поставщиков',
         'Банковские карты сотрудников/поставщиков', 'Регулярные платежи', 'Почта поставщиков', 'Письма поставщикам', 'Лимиты согласования',
-        'Маршруты согласования', 'Категории закупа', 'Категории имущества', 'Проекты', 'Настройки']);
+        'Маршруты согласования', 'Категории закупа', 'Категории имущества', 'Проекты и отделы', 'Настройки']);
     // Кто в какой группе: рядом стоит то, что относится к одному делу.
     const members = Object.fromEntries(nav.split('data-nav-group="').slice(1).map((part) => [
         part.slice(0, part.indexOf('"')),
@@ -315,7 +316,7 @@ test('справочники слева стоят группами под по�
     assert.deepEqual(members.pay, ['Поставщики', 'Договоры', 'Реквизиты компаний', 'Банковские реквизиты поставщиков',
         'Банковские карты сотрудников/поставщиков', 'Регулярные платежи', 'Почта поставщиков', 'Письма поставщикам']);
     assert.deepEqual(members.approval, ['Лимиты согласования', 'Маршруты согласования']);
-    assert.deepEqual(members.lists, ['Категории закупа', 'Категории имущества', 'Проекты']);
+    assert.deepEqual(members.lists, ['Категории закупа', 'Категории имущества', 'Проекты и отделы']);
     assert.deepEqual(members.rules, ['Настройки']);
     assert.equal((nav.match(/<svg/g) || []).length, 14, 'у каждого справочника свой значок');
     assert.equal((nav.match(/aria-current="page"/g) || []).length, 1);

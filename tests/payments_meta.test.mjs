@@ -138,7 +138,9 @@ test('состояние берётся с сервера, а без него �
 test('легенда реестра и фильтр «Статус» досок покрывают все состояния', () => {
   // «Удалённые» — архив администратора раздела (п. 18, 09.11.2026): последней плиткой.
   assert.deepEqual(STATE_FILTERS.map((item) => item.key),
-    ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'done', 'rejected', 'cancelled', 'deleted']);
+    ['all', 'mine', 'watching', 'open', 'clarification', 'overdue', 'paid', 'done', 'rejected', 'cancelled', 'deleted']);
+  // «Оплачено» (16.11.2026, п. 13) — срез, а не цвет строки: оплаченная заявка в работе не красится.
+  assert.deepEqual(STATE_FILTERS.find((item) => item.key === 'paid'), { key: 'paid', label: 'Оплачено', counter: 'paid', tone: null });
   // «Наблюдаю» — срез по смотрящему, как «Ждут меня», а не состояние: без кружка, счётчик — свой.
   const watching = STATE_FILTERS.find((item) => item.key === 'watching');
   assert.deepEqual(watching, { key: 'watching', label: 'Наблюдаю', counter: 'watching', tone: null });
@@ -479,12 +481,13 @@ test('в запрос уходят только выбранные фильтр�
   assert.equal(activeFilterCount(filters), 6);
 });
 
-test('набор фильтров — тринадцать из п. 19', () => {
+test('набор фильтров — тринадцать из п. 19 и проект с отделом', () => {
   // компания, отдел, инициатор, исполнитель, согласующий, поставщик, тип заявки,
-  // способ оплаты, статус, сумма (от/до), дата (с/по), просрочено, только мои
+  // способ оплаты, статус, сумма (от/до), дата (с/по), просрочено, только мои; с 16.11.2026 —
+  // проект и отдел внутри проекта (справочник «Проекты и отделы»)
   assert.deepEqual(Object.keys(EMPTY_FILTERS).sort(), ['amount_from', 'amount_to', 'approver_id', 'assignee_id',
     'counterparty_id', 'date_from', 'date_to', 'department_id', 'initiator_id', 'legal_entity_id', 'mine', 'overdue',
-    'payment_method', 'request_kind', 'state'].sort());
+    'payment_method', 'project_department_id', 'project_id', 'request_kind', 'state'].sort());
 });
 
 /* ── Реестр ────────────────────────────────────────────────────────────────── */
@@ -569,9 +572,12 @@ test('перевод на карту раздел называет пополн�
   assert.equal(paidWord({ payment_method: 'invoice' }), 'Оплачено');
   assert.equal(paidWord({}), 'Оплачено');
   assert.equal(paidWord(null), 'Оплачено');
-  // Ячейка срока в реестре: слово берётся из paidLabel, в разметку оно не вписано.
+  // Реестр (16.11.2026, п. 13): у оплаченной — заметная метка со словом, «Пополнено» у карты.
+  assert.equal(dueChip({ payment_method: 'card', paid_on: '2026-11-12' }, { withWord: true, today: '2026-11-16' }).label, 'Пополнено 12.11');
+  assert.equal(dueChip({ payment_method: 'invoice', paid_on: '2026-11-12' }, { withWord: true, today: '2026-11-16' }).label, 'Оплачено 12.11');
+  assert.equal(dueChip({ payment_method: 'invoice', paid_on: '2026-11-12' }, { today: '2026-11-16' }).label, '12.11', 'на досках — как было');
   const registry = readFileSync(new URL('../src/components/payments/PaymentsView.jsx', import.meta.url), 'utf8');
-  assert.match(registry, /\{paidLabel\(request\)\}/);
+  assert.equal(registry.split('<DueChip request={request} soonDays={soonDays} withWord />').length - 1, 2, 'строка и карточка реестра');
   assert.doesNotMatch(registry, /оплачено \{/);
 });
 
@@ -680,7 +686,7 @@ test('карточка реестра на телефоне: этап и у ко
   assert.equal(registryWhere(null), '');
   // Бухгалтерия на «Согласовании» уточняет компанию — телефон говорит то же, что таблица.
   assert.equal(registryWhere({ ...active, stage_label: 'Согласование', current_role: 'accounting', current_kind: 'entity_clarify' }),
-    'Уточнение компании · Бухгалтерия');
+    'Согласование с бухгалтерией · Бухгалтерия');
 });
 
 test('имя файла выгрузки', () => {
@@ -757,14 +763,18 @@ test('история читается словами, а не кодами', () 
   assert.equal(describeEvent({ kind: 'step_done', step_no: 7 }), 'Шаг 7 — отписка');
   assert.equal(describeEvent({ kind: 'migrated' }), 'Переведена на этапы');
   // Бухгалтерия указала компанию, которой не знал инициатор (15.10.2026).
-  assert.equal(describeEvent({ kind: 'entity_set', payload: { legal_entity_name: 'ТОО «Север»' } }), 'Указана компания: ТОО «Север»');
-  assert.equal(describeEvent({ kind: 'entity_set', payload: {} }), 'Указана компания');
-  // Без компании заявка сначала у бухгалтерии — так и записано в истории.
-  assert.equal(describeEvent({ kind: 'submitted', payload: { first: true, entity_step: true } }), 'Отправлена: компанию уточнит бухгалтерия');
+  // Согласование с бухгалтерией (16.11.2026, п. 7): она выбирает юр. лицо у каждого нового закупа.
+  assert.equal(describeEvent({ kind: 'entity_set', payload: { legal_entity_name: 'ТОО «Север»' } }), 'Бухгалтерия выбрала юр. лицо: ТОО «Север»');
+  assert.equal(describeEvent({ kind: 'entity_set', payload: {} }), 'Бухгалтерия выбрала юр. лицо');
+  // Этап бухгалтерии теперь у каждого нового закупа — отдельной оговорки в строке отправки нет.
+  assert.equal(describeEvent({ kind: 'submitted', payload: { first: true, entity_step: true } }), 'Отправлена на согласование');
   assert.equal(describeEvent({ kind: 'submitted', payload: { first: false, entity_step: true, changed: ['компания'] } }),
-    'Отправлена заново: изменено — компания; компанию уточнит бухгалтерия');
-  assert.equal(describeEvent({ kind: 'submitted', payload: { first: false, entity_step: true } }), 'Отправлена заново: компанию уточнит бухгалтерия');
+    'Отправлена на согласование заново: изменено — компания');
   assert.equal(describeEvent({ kind: 'submitted', payload: { first: true, entity_step: false } }), 'Отправлена на согласование');
+  // Срок закрывающих документов и закрытие заявки раньше них (16.11.2026, пп. 5, 6).
+  assert.equal(describeEvent({ kind: 'docs_due', payload: { from: '2026-11-24', to: '2026-11-30' } }), 'Срок закрывающих документов — до 30.11.2026');
+  assert.equal(describeEvent({ kind: 'docs_deferred', payload: { docs_due_on: '2026-11-30' } }),
+    'Заявка закрыта раньше закрывающих документов — ждём их до 30.11.2026');
   // Подсказка обязательного поля (заявка первой версии) не обещает «Не знаю».
   assert.ok(!HINTS.legalEntityRequired.options && !/Не знаю/.test(JSON.stringify(HINTS.legalEntityRequired)));
   assert.ok(HINTS.legalEntity.options.some(([name]) => name === 'Не знаете'));

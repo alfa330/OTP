@@ -159,11 +159,20 @@ def act(cur, rid, kind, action, who, **fields):
                     outbox=[], base_url=None)
 
 
+def accounting_picks(cur, rid):
+    """Согласование с бухгалтерией (16.11.2026): у каждого нового закупа после руководителя бухгалтерия
+    выбирает юр. лицо — здесь подтверждает то, что указал инициатор."""
+    assert state(cur, rid, workflow.KIND_ENTITY) == 'open'
+    act(cur, rid, workflow.KIND_ENTITY, 'set_entity', ACCOUNTANT,
+        legal_entity_id=queries.read_request(cur, rid)['legal_entity_id'])
+
+
 def test_empty_field_returns_the_invoice_and_no_contract_answers_it(db):
     with db.cursor() as cur:
         rid = new_purchase(cur, amount=900000)
         assert queries.read_request(cur, rid)['no_contract'] is False, 'не выбрано — не «Без договора»'
         submit(cur, rid)
+        accounting_picks(cur, rid)
         assert state(cur, rid, workflow.KIND_APPROVAL) == 'open'
         act(cur, rid, workflow.KIND_APPROVAL, 'approve', APPROVER)
 
@@ -190,6 +199,7 @@ def test_no_contract_chosen_upfront_goes_straight_to_accounting(db):
     with db.cursor() as cur:
         rid = new_purchase(cur, amount=900000, no_contract=True)
         submit(cur, rid)
+        accounting_picks(cur, rid)
         act(cur, rid, workflow.KIND_APPROVAL, 'approve', APPROVER)
         assert state(cur, rid, workflow.KIND_INVOICE) == 'open'
         assert state(cur, rid, workflow.KIND_INITIATION) == 'done', 'возврата инициатору не было'
@@ -271,6 +281,7 @@ def test_accountant_asking_for_a_contract_breaks_the_loop(db):
     with db.cursor() as cur:
         rid = new_purchase(cur, amount=900000, no_contract=True)
         submit(cur, rid)
+        accounting_picks(cur, rid)
         act(cur, rid, workflow.KIND_APPROVAL, 'approve', APPROVER)
         act(cur, rid, workflow.KIND_INVOICE, 'request_info', ACCOUNTANT, reason='contract_required')
         row = queries.read_request(cur, rid)
