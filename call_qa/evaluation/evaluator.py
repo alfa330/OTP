@@ -254,7 +254,11 @@ def _rule_date(hit: dict) -> str:
 
 
 def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) -> tuple[str, dict]:
-    """Render one frozen retrieval result globally and per criterion."""
+    """Render one frozen retrieval result globally and per criterion.
+
+    Правила из разборов САМОГО оцениваемого разговора (own_rule) сюда не входят:
+    это не прецеденты из других разговоров, а решения по этому, и они идут
+    отдельным блоком (_render_own_decisions)."""
     fallback = ("(retrieval недоступен; не применяй никакие правила из памяти)"
                 if status == "degraded" else
                 "(подходящих правил выше порога релевантности нет)")
@@ -262,6 +266,8 @@ def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) ->
     for criterion in criteria:
         chunks = []
         for hit in hits_by_idx.get(criterion["idx"]) or []:
+            if hit.get("own_rule"):
+                continue
             date = _rule_date(hit)
             chunk = (f"[критерий {criterion['idx']}; правило {hit.get('rule_id')}; "
                      f"сходство {float(hit.get('similarity') or 0):.3f}"
@@ -277,6 +283,57 @@ def _render_rag_context(criteria: list[dict], hits_by_idx: dict, status: str) ->
         by_criterion[str(criterion["idx"])] = "\n\n".join(chunks) if chunks else fallback
         all_chunks.extend(chunks)
     return ("\n\n".join(all_chunks) if all_chunks else fallback), by_criterion
+
+
+# Решения модератора по самому оцениваемому разговору — правила, сделанные из его же
+# разборов (store._OWN_RULES_SQL). Среди прецедентов РАЗБОРЫ они проигрывали: правило
+# промпта «прецедент — ТОЛЬКО к его критерию» и справка из вики («действующие данные»)
+# весили для модели больше короткой фразы модератора без пометки, что она про этот
+# самый разговор. Звонок imported_call-15650 (13.11.2026): модератор трижды подтвердила,
+# что продиктованный номер — номер техподдержки «Ноль такси», а ИИ на каждой
+# переоценке снимал штраф с исправленного критерия и ставил то же замечание по номеру
+# («не совпадает с вики») в соседний — 17 → 15 → 17 → 15. Поэтому решения — отдельным
+# блоком после разговора, по всем критериям сразу (факт, подтверждённый по одному
+# критерию, верен и для остальных). Блок — в сообщении, а не в системном промпте:
+# prompt_hash не меняется, отпечаток оценки меняет версия конвейера (store.PIPELINE_VERSION).
+_OWN_HEADER = (
+    "РЕШЕНИЯ МОДЕРАТОРА ПО ЭТОМУ РАЗГОВОРУ (человек уже проверил именно этот разговор и "
+    "исправил оценку ИИ; это не прецеденты из других разговоров, а окончательные решения "
+    "по этому). По названному критерию ставь вердикт, который решил модератор. То, что "
+    "модератор подтвердил о разговоре (например, что продиктованный номер или озвученная "
+    "информация верны), считай установленным фактом для ВСЕХ критериев: не опровергай его "
+    "выдержками из вики, разборами или своим прочтением транскрипта и не переноси то же "
+    "замечание в другой критерий. Если решения по одному критерию расходятся — действует "
+    "более позднее:")
+
+
+def _render_own_decisions(criteria: list[dict], hits_by_idx: dict) -> str:
+    """Решения модератора по этому разговору (хиты с own_rule) — по всем критериям
+    оценки одним текстом; пусто — разборов этого разговора нет. Без «правило НЕ
+    оправдывает»: те границы пишутся для чужих разговоров, а по этому модератор уже
+    решил — сомнение «а вдруг здесь как раз исключение» и было бы спором с решением."""
+    chunks = []
+    for criterion in criteria:
+        for hit in hits_by_idx.get(criterion["idx"]) or []:
+            if not hit.get("own_rule"):
+                continue
+            label = f"критерий {criterion['idx']}"
+            name = str(criterion.get("name") or hit.get("criterion_name") or "").strip()
+            if name:
+                label += f" «{name}»"
+            date = _rule_date(hit)
+            if date:
+                label += f"; решение от {date}"
+            reason = str(hit.get("reason") or "").strip()
+            chunk = f"[{label}]\nправильно: {hit['correct_verdict']} — потому что: {reason or '—'}"
+            situation = str(hit.get("situation") or "").strip()
+            if situation and situation != reason:
+                chunk += f"\n  ситуация: {situation}"
+            excerpt = str(hit.get("excerpt") or "").strip()
+            if excerpt:
+                chunk += f"\n  фрагмент разговора, на который сослался модератор: «{excerpt}»"
+            chunks.append(chunk)
+    return "\n\n".join(chunks)
 
 
 def _prepare_rag(direction_id: int, criteria: list[dict], transcript: str,
@@ -328,6 +385,7 @@ def prepare_rag_context(direction: dict, criteria: list[dict], transcript: str, 
         matched = sorted(int(idx) for idx, hits in hits_by_idx.items() if hits)
         _, rag_text_by_criterion = _render_rag_context(
             criteria, hits_by_idx, trace.get("status") or "ok")
+        own_text = _render_own_decisions(criteria, hits_by_idx)
     else:
         rag_text = "(RAG отключён для этого варианта оценки)"
         trace = {
@@ -342,9 +400,14 @@ def prepare_rag_context(direction: dict, criteria: list[dict], transcript: str, 
         rag_text_by_criterion = {
             str(c["idx"]): "(RAG отключён для этого варианта оценки)" for c in criteria
         }
+        own_text = ""
+    # own_text — решения модератора по этому разговору (_OWN_HEADER). Повтор части
+    # критериев (недостающие, HARD-модель) получает его ЦЕЛИКОМ, а не срез по своим
+    # критериям: подтверждённый модератором факт касается всех критериев.
     return {"rag_text": rag_text, "retrieval_trace": trace,
             "matched_criterion_idxs": matched,
-            "rag_text_by_criterion": rag_text_by_criterion}
+            "rag_text_by_criterion": rag_text_by_criterion,
+            "own_text": own_text}
 
 
 def _subset_rag_text(prepared_rag: dict | None, criteria: list[dict], fallback: str) -> str:
@@ -382,7 +445,7 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
                     rag_text=None, knowledge_snapshot_id=None, retrieval_trace_out=None,
                     subject_kind=config.SUBJECT_CALL, cache_ttl=None,
                     department=None, call_end_party=None, subject_id=None,
-                    wiki_text=None, call_end_timeline=None) -> dict:
+                    wiki_text=None, call_end_timeline=None, own_text=None) -> dict:
     """Тело запроса оценки (для синхронного вызова и для Batch API).
 
     cache_ttl прокидывается в prompt-cache системного блока. Интерактивная оценка
@@ -396,11 +459,17 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     (call_end.timeline): по нему модель видит, успевал ли оператор что-то сказать.
 
     wiki_text — выдержки из вики, найденные по запросам оценщика (prepare_wiki_context);
-    пусто — блока нет, сообщение прежнее."""
+    пусто — блока нет, сообщение прежнее.
+
+    own_text — решения модератора по этому разговору (prepare_rag_context → own_text):
+    блок после разговора, перед просьбой оценить. Пусто — блока нет, сообщение прежнее
+    байт в байт. Когда разборы ищутся здесь же (rag_text не передан), блок собирается
+    из того же поиска."""
     if use_rag and rag_text is None:
-        rag, trace, _ = _prepare_rag(direction["id"], criteria, transcript,
-                                     knowledge_snapshot_id=knowledge_snapshot_id,
-                                     subject_kind=subject_kind, subject_id=subject_id)
+        rag, trace, hits_by_idx = _prepare_rag(direction["id"], criteria, transcript,
+                                               knowledge_snapshot_id=knowledge_snapshot_id,
+                                               subject_kind=subject_kind, subject_id=subject_id)
+        own_text = _render_own_decisions(criteria, hits_by_idx)
         if retrieval_trace_out is not None:
             retrieval_trace_out.update(trace)
     else:
@@ -411,8 +480,11 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
     end = (call_end.prompt_block(call_end_party, call_end_timeline)
            if subject_kind in config.AUDIO_SUBJECT_KINDS else "")
     wiki = f"{_WIKI_SEARCH_HEADER}\n{wiki_text}\n\n" if str(wiki_text or "").strip() else ""
+    # Без RAG разборов нет вовсе — и решений по разговору тоже (вариант «без базы»).
+    own = (f"\n\n{_OWN_HEADER}\n{own_text}"
+           if use_rag and str(own_text or "").strip() else "")
     user = (f"{_RAG_HEADER}\n{rag}\n\n{wiki}"
-            f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}\n\nОцени по всем перечисленным критериям.")
+            f"{_TRANSCRIPT_LABEL.get(subject_kind, 'ТРАНСКРИПТ ЗВОНКА')}:\n{transcript}{low}{end}{own}\n\nОцени по всем перечисленным критериям.")
     # Указания направления — в системный блок, как и критерии: это правила шкалы, а не
     # данные звонка, и GLM кэширует системный блок сам. Тот же текст обязан получить
     # отпечаток (api._evaluation_identity), иначе каждая такая оценка — «устарела».
@@ -428,13 +500,13 @@ def build_eval_body(transcript, direction, criteria, *, asr_low_spans=None, use_
 def _claude_eval(transcript, direction, criteria, *, asr_low_spans, use_rag, model,
                  rag_text=None, stage="primary", subject_kind=config.SUBJECT_CALL,
                  department=None, call_end_party=None, wiki_text=None,
-                 call_end_timeline=None) -> dict:
+                 call_end_timeline=None, own_text=None) -> dict:
     """Оценка подмножества (transcript) критериев моделью `model`."""
     body = build_eval_body(transcript, direction, criteria, asr_low_spans=asr_low_spans,
                            use_rag=use_rag, model=model, rag_text=rag_text,
                            subject_kind=subject_kind, department=department,
                            call_end_party=call_end_party, wiki_text=wiki_text,
-                           call_end_timeline=call_end_timeline)
+                           call_end_timeline=call_end_timeline, own_text=own_text)
     result = llm.post_body(body, timeout=120.0, include_meta=True)
     if result.get("_llm_meta") is not None:
         result["_llm_meta"]["stage"] = stage
@@ -550,6 +622,9 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
                           "retrieved_count": 0, "included_count": 0} for c in t_crits],
             "candidates": [], "errors": [], "latency_ms": 0,
         }
+    # Решения модератора по этому разговору — во ВСЕ проходы целиком (prepare_rag_context).
+    # У манифеста пакета, собранного до этого поля, его нет — блока нет и в добивке.
+    own_text = (prepared_rag or {}).get("own_text") or ""
     llm_calls = []
 
     # 1) первый проход
@@ -558,7 +633,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
                         use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                         rag_text=rag_text, stage="bulk", subject_kind=subject_kind, department=department,
                         call_end_party=call_end_party, wiki_text=wiki_text,
-                        call_end_timeline=call_end_timeline)
+                        call_end_timeline=call_end_timeline, own_text=own_text)
            if t_crits else {"per_criterion": [], "overall_comment": ""}))
     if primary_llm_meta and not ai.get("_llm_meta"):
         llm_calls.append(primary_llm_meta)
@@ -576,7 +651,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
                              use_rag=use_rag, model=config.CLAUDE_MODEL_BULK,
                              rag_text=retry_rag_text, stage="bulk_retry", subject_kind=subject_kind, department=department,
                              call_end_party=call_end_party, wiki_text=wiki_text,
-                             call_end_timeline=call_end_timeline)
+                             call_end_timeline=call_end_timeline, own_text=own_text)
         if retry.get("_llm_meta"):
             llm_calls.append(retry["_llm_meta"])
         for idx, v in _collect_verdicts(retry.get("per_criterion")).items():
@@ -600,7 +675,7 @@ def evaluate(transcript: str, direction: dict, *, asr_low_spans=None, use_rag=Tr
                                use_rag=use_rag, model=config.CLAUDE_MODEL_HARD,
                                rag_text=hard_rag_text, stage="hard", subject_kind=subject_kind, department=department,
                                call_end_party=call_end_party, wiki_text=wiki_text,
-                               call_end_timeline=call_end_timeline)
+                               call_end_timeline=call_end_timeline, own_text=own_text)
             if ai2.get("_llm_meta"):
                 llm_calls.append(ai2["_llm_meta"])
             for idx, v in _collect_verdicts(ai2.get("per_criterion")).items():

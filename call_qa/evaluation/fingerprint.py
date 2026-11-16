@@ -15,7 +15,8 @@ FINGERPRINT_VERSION = 2
 # То же значение, что rag.store.PIPELINE_VERSION (отсюда store не импортировать —
 # цикл через rag.similar; равенство сверяет тест). semantic-own-v3: правила по
 # смыслу, без копий, правила самого разговора — всегда, даты у прецедентов.
-RETRIEVAL_PIPELINE_VERSION = "semantic-own-v3"
+# semantic-own-v4: правила самого разговора — отдельным блоком решений модератора.
+RETRIEVAL_PIPELINE_VERSION = "semantic-own-v4"
 
 
 def canonical_json(value: Any) -> str:

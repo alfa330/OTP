@@ -801,6 +801,7 @@ def submit_batch(calls: list[dict], transcripts: dict, workdir: str, get_dir) ->
                 rec["asm"]["text"], info["direction"], info["t_crits"],
                 asr_low_spans=rec["asm"]["low_conf_spans"], use_rag=True,
                 model=config.CLAUDE_MODEL_BULK, rag_text=prepared["rag_text"],
+                own_text=prepared.get("own_text"),
                 subject_kind=subject_kind, department=department_code,
                 cache_ttl=config.CLAUDE_CACHE_TTL_BATCH,
                 call_end_party=components["call_end_party"],

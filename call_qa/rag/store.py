@@ -535,7 +535,9 @@ def _empty_batch_result(criteria: list[dict], *, status: str, query_batch: dict,
 # Версия конвейера поиска. Входит в конфигурацию поиска (трасса, api._retrieval_config)
 # и в отпечаток оценки (fingerprint.RETRIEVAL_PIPELINE_VERSION): другой порядок
 # правил — другой промпт, и прежний кэш оценок не должен выдаваться за новый.
-PIPELINE_VERSION = "semantic-own-v3"
+# semantic-own-v4 (16.11.2026): правила самого разговора — не прецеденты в РАЗБОРАХ,
+# а блок «РЕШЕНИЯ МОДЕРАТОРА ПО ЭТОМУ РАЗГОВОРУ» (evaluator._OWN_HEADER).
+PIPELINE_VERSION = "semantic-own-v4"
 
 
 def _float_or_none(value):
