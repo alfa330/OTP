@@ -327,6 +327,7 @@ class SipSettingsStatusProfileTests(unittest.TestCase):
             '_dial_list_line_account': lambda user_id: line_account,
             '_dial_list_phone_settings': lambda user_id: {'enabled': bool(line_account)},
             '_client_cards_phone_settings': lambda user_id: {'enabled': False},
+            '_icore_phone_outbound_return': lambda user_id, provider: None,
             'SIP_AUTO_ANSWER_DELAY_DEFAULT': 3,
             '_ICORE_PHONE_PROFILE_UNKNOWN': unknown,
             '_icore_phone_status_profile': status_profile,

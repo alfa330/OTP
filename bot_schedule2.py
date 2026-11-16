@@ -21698,6 +21698,10 @@ def operator_sip_settings_endpoint():
                 # и сколько секунд длится постобработка. Решает отдел в разделе «Карточка
                 # клиента»; старый телефон ключ не читает. Сбой расчёта — выключено.
                 "client_card": _client_cards_phone_settings(requester_id),
+                # Возврат из «Исхода» в «Активный» (техподдержка Тез КЦ, 16.11.2026): через
+                # сколько секунд без набора и разговора телефон сам ставит «Активный».
+                # null — правила нет; телефон до 3.22.54 ключ не читает. Сбой расчёта — null.
+                "outbound_return": _icore_phone_outbound_return(requester_id, provider),
             }
         }
         # Набор посчитать не удалось (сбой базы) — ключ не шлём вовсе. null телефон
@@ -55080,6 +55084,56 @@ def _icore_phone_status_profile(user_id, provider):
     except Exception:
         logging.exception("iCORE Phone: не удалось собрать набор статусов для %s", user_id)
         return _ICORE_PHONE_PROFILE_UNKNOWN
+
+
+# ── iCORE Phone: возврат из «Исхода» в «Активный» (техподдержка Тез КЦ, 16.11.2026) ──────────
+# Телефон без группы статусов стартует в «Исходе», а в «Исходе» входящие не идут: в кабинете
+# Binotel стоит «Работа в CRM», и очередь оператора не видит. За 1–15.11.2026 техподдержка Тез
+# провела так 37 часов, из них 32,5 — без единого звонка, пока клиенты ждали в очереди.
+# Решение владельца 16.11.2026: 3 минуты в «Исходе» без набора и разговора — телефон сам
+# ставит «Активный». Правило живёт на сервере: срок и состав меняются без выпуска телефона
+# (читает его телефон 3.22.54+, прежние ключ не знают):
+#   TEZ_OUTBOUND_RETURN_SEC           срок, секунд (180; 0 — правило выключено)
+#   TEZ_OUTBOUND_RETURN_WARN_SEC      за сколько секунд до возврата телефон предупреждает (30)
+#   TEZ_OUTBOUND_RETURN_PRESENCE_SEC  окно присутствия: «Активный» ставится, только если мышь
+#       или клавиатуру трогали не раньше стольких секунд назад (60; 0 — не проверять).
+#       У техподдержки включён автоприём: «Активный» у пустого стола сам снял бы трубку, и
+#       клиент услышал бы тишину. Так и было бы: за 1–15.11 телефон одной из линий восемь
+#       раз стоял в «Исходе» по 2–10 часов подряд на включённом компьютере, пока оператора
+#       на смене не было, в том числе ночью. Без оператора телефон ждёт и ставит «Активный»,
+#       когда тот вернётся к компьютеру.
+ICORE_PHONE_OUTBOUND_RETURN_MAX_SECONDS = 3600
+ICORE_PHONE_OUTBOUND_RETURN_PRESENCE_SECONDS = 60
+
+
+def _icore_phone_outbound_return(user_id, provider):
+    """Блок outbound_return для /api/operator/sip_settings: dict — правило, None — правила нет.
+
+    Правило получает только техподдержка Тез КЦ — состав тот же, что у табло Тез (модель
+    расчёта tez_line). У отдела продаж Тез «Исход» — рабочий режим обзвона, его не трогаем;
+    у локальной АТС свои правила (группы статусов, автоофлайн).
+    Любой сбой — None: телефон без правила работает как раньше, а без регистрации — нет."""
+    try:
+        if (provider or 'asterisk') != 'binotel':
+            return None
+        seconds = _env_int('TEZ_OUTBOUND_RETURN_SEC', 180, minimum=0,
+                           maximum=ICORE_PHONE_OUTBOUND_RETURN_MAX_SECONDS)
+        if seconds <= 0:
+            return None
+        user_id = int(user_id)
+        support = _tez_wallboard_people().get('tp') or []
+        if not any(int(row.get('id') or 0) == user_id for row in support):
+            return None
+        return {
+            "seconds": seconds,
+            "warn_seconds": _env_int('TEZ_OUTBOUND_RETURN_WARN_SEC', 30, minimum=0, maximum=seconds),
+            "presence_seconds": _env_int('TEZ_OUTBOUND_RETURN_PRESENCE_SEC',
+                                         ICORE_PHONE_OUTBOUND_RETURN_PRESENCE_SECONDS, minimum=0,
+                                         maximum=ICORE_PHONE_OUTBOUND_RETURN_MAX_SECONDS),
+        }
+    except Exception:
+        logging.exception("iCORE Phone: правило возврата из «Исхода» для %s не посчитано", user_id)
+        return None
 
 
 def _record_icore_phone_idle_kick(user_id, event_at, client_event_id):
