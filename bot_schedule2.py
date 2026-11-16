@@ -54911,7 +54911,9 @@ def _line_watch_start():
 # (08.11.2026 «готов» одного оператора провисел 73 часа). Сервер сам закрывает статус, когда
 # телефон не выходит на связь 30 минут (решение владельца 16.11.2026), и продолжает его, когда
 # телефон появляется снова. Пульс — активность сессии телефона (user_sessions.last_seen_at).
-#   PHONE_LIVENESS_DEPARTMENTS  коды отделов через запятую, '*' — все (по умолчанию op,tez)
+#   PHONE_LIVENESS_DEPARTMENTS  коды отделов через запятую, '*' — все. По умолчанию все: владелец
+#                               16.11.2026 сначала назвал отдел продаж и Тез КЦ, а в тот же день
+#                               разрешил остальные — у СЗоВ «перезвон» уже висел 15 часов
 #   PHONE_LIVENESS_SILENCE_MIN  сколько минут молчания закрывает статус (30)
 #   PHONE_LIVENESS=0            выключает обход целиком
 _phone_liveness_service = None
@@ -54929,7 +54931,7 @@ try:
         _phone_liveness_service = PhoneLivenessService(
             db,
             department_codes=[code.strip() for code in
-                              str(os.getenv('PHONE_LIVENESS_DEPARTMENTS', 'op,tez')).split(',') if code.strip()],
+                              str(os.getenv('PHONE_LIVENESS_DEPARTMENTS', '*')).split(',') if code.strip()],
             silence_seconds=_env_int('PHONE_LIVENESS_SILENCE_MIN', 30, minimum=10, maximum=24 * 60) * 60,
         )
         logging.info("Пульс телефона: подключён (отделы: %s, молчание %d мин)",
@@ -54938,6 +54940,21 @@ try:
 except Exception:
     _phone_liveness_service = None
     logging.exception("Пульс телефона: НЕ подключён")
+
+# Закрытие уже случившегося зависания — рукой супер-админа (обход застаёт только текущие).
+try:
+    if _phone_liveness_service is not None:
+        from phone_liveness.routes import build_phone_liveness_blueprint  # noqa: E402
+
+        app.register_blueprint(build_phone_liveness_blueprint(
+            service=_phone_liveness_service,
+            require_api_key=require_api_key,
+            build_cors_preflight_response=_build_cors_preflight_response,
+            resolve_requester=_resolve_requester,
+            is_super_admin=lambda requester_id, requester: _is_super_admin_role(requester[3]),
+        ))
+except Exception:
+    logging.exception("Пульс телефона: роут закрытия зависаний НЕ подключён")
 
 
 def _phone_liveness_start():

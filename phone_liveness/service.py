@@ -25,6 +25,8 @@ from . import rules, store
 log = logging.getLogger(__name__)
 
 SWEEP_SECONDS = 120
+# db.rebuild_operator_status_days берёт не больше двух недель за вызов.
+REBUILD_CHUNK_DAYS = 14
 ERROR_LOG_EVERY_SECONDS = 1800
 
 
@@ -126,16 +128,62 @@ class PhoneLivenessService(object):
         self._rebuild_after(row['operator_id'], moment)
         return True
 
-    def _rebuild_after(self, operator_id, moment):
+    def _rebuild_after(self, operator_id, moment, until=None):
         """Событие само пересобирает свой день и соседние; если оно легло в прошлое дальше, дни
-        после них остались с прежней картиной — пересобираем их до сегодняшнего."""
-        first, last = moment.date() + timedelta(days=2), self._now().date()
+        после них остались с прежней картиной — пересобираем их до сегодняшнего (или до until).
+        Пересборка идёт кусками по две недели: дольше держать замок оператора нельзя."""
+        first, last = moment.date() + timedelta(days=2), (until or self._now()).date()
         if self._rebuild is None or first > last:
             return
         try:
-            self._rebuild(operator_id, first, last)
+            while first <= last:
+                chunk_end = min(last, first + timedelta(days=REBUILD_CHUNK_DAYS - 1))
+                self._rebuild(operator_id, first, chunk_end)
+                first = chunk_end + timedelta(days=1)
         except Exception:  # noqa: BLE001
             self._complain('rebuild', 'дни после события у оператора %s не пересобраны' % operator_id, exc=True)
+
+    def close_hang(self, operator_id, around):
+        """Закрыть уже случившееся зависание — то, что обход не застал (телефон успели запустить
+        снова, или отдел подключили к обходу позже). around — любой момент внутри зависшего
+        отрезка, наивное время Алматы.
+
+        Закрывает только настоящую тишину: между последним событием телефона до этого момента и
+        следующим после должно пройти не меньше срока молчания, и события в этом промежутке
+        отсутствуют по построению. Момент закрытия — тот же, что у обхода без пульса: последнее
+        событие + 10 минут.
+
+        Срезается всё до следующего события. Если телефон потом запустили в тот же статус, сервер
+        этот запуск мог не сохранить (повтор статуса), и следующим событием окажется первое
+        действие оператора после запуска — минуты между запуском и этим действием уйдут вместе
+        с зависанием. Для зависаний на десятки часов это погрешность, но смотреть ленту перед
+        закрытием — дело того, кто закрывает.
+        Ошибки условий — ValueError с текстом для человека."""
+        operator_id = int(operator_id)
+        with self.db._get_cursor() as cursor:
+            last, following = store.hang_window(cursor, operator_id, around)
+        if last is None:
+            raise ValueError('у сотрудника нет событий телефона до этого момента')
+        if last['key'] == rules.OFF_KEY:
+            raise ValueError('в этот момент статус уже «выключен» — закрывать нечего')
+        now = self._now()
+        end = following['event_at'] if following else now
+        silent = (end - last['event_at']).total_seconds()
+        if silent < self.silence_seconds + rules.CLOSE_LAG_SECONDS:
+            raise ValueError('между событиями телефона %d мин — это не зависание' % (silent // 60))
+        row = {'operator_id': operator_id, 'event_id': last['event_id'], 'key': last['key'], 'note': None,
+               'event_at': last['event_at'], 'pulse': None, 'seen': None}
+        moment = rules.close_moment(row, end - timedelta(seconds=1))
+        result = self._append(operator_id=operator_id, event_at=moment, status_key=rules.OFF_KEY,
+                              state_note=rules.CLOSE_NOTE, client_event_id=rules.close_event_id(row)) or {}
+        if result.get('duplicate') or result.get('noop'):
+            return {'closed': False, 'reason': 'это зависание уже закрыто'}
+        self._rebuild_after(operator_id, moment, until=end + timedelta(days=1))
+        log.info('phone_liveness: оператор %s — зависший «%s» закрыт вручную моментом %s (висел до %s)',
+                 operator_id, last['key'], moment.strftime('%d.%m %H:%M'), end.strftime('%d.%m %H:%M'))
+        return {'closed': True, 'status_key': last['key'], 'closed_at': moment.isoformat(sep=' '),
+                'hang_until': end.isoformat(sep=' '),
+                'hours_removed': round((end - moment).total_seconds() / 3600.0, 1)}
 
     def run(self, stop=None):
         """Цикл обхода. stop — threading.Event для остановки (в проде поток живёт с процессом)."""

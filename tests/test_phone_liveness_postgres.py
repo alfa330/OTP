@@ -264,6 +264,38 @@ def test_full_circle_dead_phone_closed_then_continued(db):
     assert db.rows("SELECT COUNT(*) FROM operator_status_events WHERE operator_id = 12") == [(1,)]
 
 
+def test_hang_window_is_the_gap_between_two_phone_events(db):
+    db.event(11, 600, 'перезвон')
+    db.event(11, 500, 'Готов')
+    db.event(11, 300, 'Выключен', live=False)        # выгрузка внутри отрезка — не событие телефона
+    db.event(11, 60, 'перезвон')
+    with db._get_cursor() as cur:
+        last, following = store.hang_window(cur, 11, NOW - timedelta(minutes=200))
+        assert (last['key'], last['event_at']) == ('готов', NOW - timedelta(minutes=500))
+        assert (following['key'], following['event_at']) == ('перезвон', NOW - timedelta(minutes=60))
+        # После последнего события следующего нет; до первого — нет ничего.
+        last, following = store.hang_window(cur, 11, NOW)
+        assert (last['key'], following) == ('перезвон', None)
+        assert store.hang_window(cur, 11, NOW - timedelta(minutes=700)) == (None, None)
+        assert store.hang_window(cur, 12, NOW) == (None, None)
+
+
+def test_past_hang_is_closed_by_hand_once(db):
+    service = PhoneLivenessService(db, ['*'], now=lambda: NOW, monotonic=lambda: 0.0)
+    db.event(11, 600, 'готов')
+    db.event(11, 60, 'перезвон')                     # телефон запустили снова
+    result = service.close_hang(11, NOW - timedelta(minutes=300))
+    assert result['closed'] and result['hours_removed'] == 8.8
+    events = db.rows("SELECT status_key, state_note, event_at FROM operator_status_events "
+                     "WHERE operator_id = 11 ORDER BY event_at, id")
+    assert events[1] == ('выключен', rules.CLOSE_NOTE, NOW - timedelta(minutes=590))
+    assert len(events) == 3
+    # Повтор находит между событиями уже закрытый отрезок — закрывать нечего.
+    with pytest.raises(ValueError):
+        service.close_hang(11, NOW - timedelta(minutes=300))
+    assert db.rows("SELECT COUNT(*) FROM operator_status_events WHERE operator_id = 11") == [(3,)]
+
+
 def test_phone_restart_needs_no_restore(db):
     """Телефон запустили заново — он сам прислал статус: серверу продолжать нечего."""
     service = PhoneLivenessService(db, ['op'], now=lambda: NOW, monotonic=lambda: 3600.0)

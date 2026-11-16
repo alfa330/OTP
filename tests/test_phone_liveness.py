@@ -303,5 +303,153 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(service.silence_seconds, 600)
 
 
+class CloseHangTests(unittest.TestCase):
+    """Зависание, которое обход не застал: телефон умер молча, а потом его запустили снова."""
+
+    def service(self, last, following, now=NOW):
+        self.db = _Db()
+        fake_store = mock.Mock()
+        fake_store.hang_window.return_value = (last, following)
+        patcher = mock.patch.object(liveness_service, 'store', fake_store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.store = fake_store
+        return PhoneLivenessService(self.db, ['*'], now=lambda: now, monotonic=lambda: 0.0)
+
+    @staticmethod
+    def event(key, at, event_id=10):
+        return {'event_id': event_id, 'key': key, 'event_at': at}
+
+    def test_closes_ten_minutes_after_the_last_event_and_rebuilds_the_days(self):
+        died = datetime(2026, 11, 8, 13, 56, 26)
+        restarted = datetime(2026, 11, 11, 15, 22, 0)
+        service = self.service(self.event('готов', died), self.event('перезвон', restarted, 11))
+        result = service.close_hang(529, datetime(2026, 11, 9, 12, 0))
+        self.assertEqual(self.store.hang_window.call_args[0][1:], (529, datetime(2026, 11, 9, 12, 0)))
+        operator_id, event_at, key, note, event_id = self.db.appended[0]
+        self.assertEqual((operator_id, event_at, key, note),
+                         (529, datetime(2026, 11, 8, 14, 6, 26), 'выключен', rules.CLOSE_NOTE))
+        self.assertEqual(event_id, rules.CLOSE_ID_PREFIX + '20261108135626')
+        # Событие пересобрало 7–9.11 само; остальные дни до запуска телефона — отдельно.
+        self.assertEqual(self.db.rebuilt, [(529, date(2026, 11, 10), date(2026, 11, 12))])
+        self.assertEqual(result, {'closed': True, 'status_key': 'готов', 'closed_at': '2026-11-08 14:06:26',
+                                  'hang_until': '2026-11-11 15:22:00', 'hours_removed': 73.3})
+
+    def test_refuses_what_is_not_a_hang(self):
+        cases = [
+            (None, None, 'нет событий'),
+            (self.event('выключен', NOW - minutes(600)), None, 'уже «выключен»'),
+            # Между событиями 39 минут: срок молчания (30) + запас (10) не набран.
+            (self.event('готов', NOW - minutes(600)), self.event('перерыв', NOW - minutes(561)), 'не зависание'),
+        ]
+        for last, following, reason in cases:
+            service = self.service(last, following)
+            with self.assertRaises(ValueError) as caught:
+                service.close_hang(7, NOW - minutes(300))
+            self.assertIn(reason, str(caught.exception))
+            self.assertEqual(self.db.appended, [])
+
+    def test_restart_into_the_same_status_is_still_a_hang(self):
+        """У СЗоВ телефон после зависания стартует в тот же «перезвон», и это событие сохранено:
+        между ними лежит выгрузка Oktell. Такое зависание закрывается как любое другое."""
+        service = self.service(self.event('перезвон', NOW - minutes(5000)), self.event('перезвон', NOW - minutes(60)))
+        self.assertTrue(service.close_hang(7, NOW - minutes(300))['closed'])
+        self.assertEqual(self.db.appended[0][1:3], (NOW - minutes(4990), 'выключен'))
+
+    def test_still_hanging_status_is_closed_up_to_now(self):
+        service = self.service(self.event('перезвон', NOW - minutes(900)), None)
+        result = service.close_hang(7, NOW - minutes(100))
+        self.assertEqual(self.db.appended[0][1], NOW - minutes(890))
+        self.assertTrue(result['closed'])
+        self.assertEqual(result['hours_removed'], 14.8)
+
+    def test_second_close_of_the_same_hang_changes_nothing(self):
+        service = self.service(self.event('готов', NOW - minutes(900)), self.event('перезвон', NOW - minutes(60)))
+        self.db.duplicate_for.add(7)
+        self.assertEqual(service.close_hang(7, NOW - minutes(300)),
+                         {'closed': False, 'reason': 'это зависание уже закрыто'})
+        self.assertEqual(self.db.rebuilt, [])
+
+    def test_long_hang_is_rebuilt_in_two_week_chunks(self):
+        died = NOW - timedelta(days=40)
+        service = self.service(self.event('готов', died), self.event('перезвон', NOW - timedelta(days=2)))
+        service.close_hang(7, NOW - timedelta(days=20))
+        days = [(b - a).days + 1 for _, a, b in self.db.rebuilt]
+        self.assertTrue(all(n <= liveness_service.REBUILD_CHUNK_DAYS for n in days))
+        self.assertEqual(self.db.rebuilt[0][1], (died + minutes(10)).date() + timedelta(days=2))
+        self.assertEqual(self.db.rebuilt[-1][2], (NOW - timedelta(days=1)).date())
+        for (_, _, end), (_, start, _) in zip(self.db.rebuilt, self.db.rebuilt[1:]):
+            self.assertEqual(start, end + timedelta(days=1))
+
+
+class CloseHangRouteTests(unittest.TestCase):
+    def client(self, role='super_admin', result=None, error=None):
+        from flask import Flask
+        from phone_liveness.routes import build_phone_liveness_blueprint
+
+        calls = []
+
+        class _Service(object):
+            def close_hang(self, operator_id, around):
+                calls.append((operator_id, around))
+                if error:
+                    raise error
+                return result or {'closed': True}
+
+        app = Flask(__name__)
+        app.register_blueprint(build_phone_liveness_blueprint(
+            service=_Service(),
+            require_api_key=lambda f: f,
+            build_cors_preflight_response=lambda: ('', 204),
+            resolve_requester=lambda: (1, (1, 'x', 'y', role), None),
+            is_super_admin=lambda requester_id, requester: requester[3] == 'super_admin',
+        ))
+        return app.test_client(), calls
+
+    def test_super_admin_closes_a_hang(self):
+        client, calls = self.client(result={'closed': True, 'hours_removed': 73.3})
+        response = client.post('/api/admin/phone-liveness/close-hang',
+                               json={'operator_id': '529', 'at': '2026-11-09 12:00'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {'status': 'success', 'result': {'closed': True, 'hours_removed': 73.3}})
+        self.assertEqual(calls, [(529, datetime(2026, 11, 9, 12, 0))])
+
+    def test_nobody_else_can(self):
+        for role in ('admin', 'sv', 'operator'):
+            client, calls = self.client(role=role)
+            response = client.post('/api/admin/phone-liveness/close-hang',
+                                   json={'operator_id': 529, 'at': '2026-11-09 12:00'})
+            self.assertEqual(response.status_code, 403, role)
+            self.assertEqual(calls, [])
+
+    def test_bad_input_and_refusals_are_400_with_the_reason(self):
+        client, calls = self.client()
+        for body in ({}, {'operator_id': 'x', 'at': '2026-11-09 12:00'}, {'operator_id': 5, 'at': 'вчера'},
+                     {'operator_id': 5, 'at': '2026-11-09T12:00:00+05:00'}):
+            self.assertEqual(client.post('/api/admin/phone-liveness/close-hang', json=body).status_code, 400, body)
+        self.assertEqual(calls, [])
+        client, _ = self.client(error=ValueError('между событиями телефона 12 мин — это не зависание'))
+        response = client.post('/api/admin/phone-liveness/close-hang', json={'operator_id': 5, 'at': '2026-11-09 12:00'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('не зависание', response.get_json()['error'])
+
+    def test_unexpected_failure_is_500_without_details(self):
+        client, _ = self.client(error=RuntimeError('секрет базы'))
+        with self.assertLogs('phone_liveness.routes', level='ERROR'):
+            response = client.post('/api/admin/phone-liveness/close-hang',
+                                   json={'operator_id': 5, 'at': '2026-11-09 12:00'})
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn('секрет', response.get_data(as_text=True))
+
+
+class WiringTests(unittest.TestCase):
+    def test_all_departments_by_default_and_the_route_is_registered(self):
+        from tests import source_cache
+        source = source_cache.read(source_cache.monolith_flat_path())
+        self.assertIn("os.getenv('PHONE_LIVENESS_DEPARTMENTS', '*')", source)
+        self.assertIn('build_phone_liveness_blueprint(', source)
+        self.assertIn('is_super_admin=lambda requester_id, requester: _is_super_admin_role(requester[3])', source)
+
+
 if __name__ == '__main__':
     unittest.main()

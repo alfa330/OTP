@@ -70,6 +70,32 @@ def freshest_pulse(cursor, now):
     return row[0] if row else None
 
 
+def hang_window(cursor, operator_id, around):
+    """Отрезок вокруг момента: последнее живое событие статуса не позже него и следующее после.
+
+    Возвращает (последнее, следующее): {'event_id', 'key', 'event_at'} либо None."""
+    def one(sql, params):
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        return {'event_id': int(row[0]), 'key': _key(row[1]), 'event_at': row[2]} if row else None
+
+    last = one(
+        """
+        SELECT id, status_key, event_at FROM operator_status_events
+        WHERE operator_id = %s AND client_event_id IS NOT NULL AND event_at <= %s
+        ORDER BY event_at DESC, id DESC LIMIT 1
+        """, (int(operator_id), around))
+    if last is None:
+        return None, None
+    following = one(
+        """
+        SELECT id, status_key, event_at FROM operator_status_events
+        WHERE operator_id = %s AND client_event_id IS NOT NULL AND (event_at, id) > (%s, %s)
+        ORDER BY event_at, id LIMIT 1
+        """, (int(operator_id), last['event_at'], last['event_id']))
+    return last, following
+
+
 def previous_status(cursor, row):
     """Статус, который стоял перед закрытием: его сервер и продолжит. None — продолжать нечего."""
     cursor.execute(
