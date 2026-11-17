@@ -4156,6 +4156,52 @@ def _can_access_tasks(role, requester_id):
     return _back_office_task_employee_role(requester_id, role) is not None
 
 
+def _task_access_for_people(role_by_id):
+    """Кому из людей задач открыт раздел «Задачи»: {id: роль} → множество id.
+
+    Решение то же, что у _can_access_tasks, и ветки в том же порядке, но пакетом:
+    отдел и «глава ли» — одним запросом на всех (db.get_task_access_facts), а не
+    двумя на человека; у списка задач людей десятки. Нужен ленте «Моих задач»:
+    владелец не хочет видеть там тех, кому раздел не открыт (17.11.2026), —
+    человек есть в чужих задачах, но сам в раздел не попадает.
+    Совпадение с _can_access_tasks держит tests/test_task_people_access.py.
+
+    None — фактов узнать не удалось; тогда лента никого не прячет.
+    """
+    ids = []
+    for raw_id in (role_by_id or {}):
+        try:
+            ids.append(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+    if not ids:
+        return set()
+    try:
+        facts = db.get_task_access_facts(ids)
+    except Exception:
+        logging.exception("Не удалось узнать, кому открыт раздел «Задачи»")
+        return None
+    allowed = set()
+    for person_id in ids:
+        role = _normalize_user_role(role_by_id.get(person_id))
+        department_code, heads_department = facts.get(person_id, (None, False))
+        if _is_admin_role(role) or role in ('sv', 'trainer'):
+            allowed.add(person_id)
+            continue
+        if heads_department:
+            allowed.add(person_id)
+            continue
+        # Как _back_office_task_employee_role, только код отдела уже на руках.
+        if role not in BACK_OFFICE_TASK_EMPLOYEE_ROLES:
+            continue
+        code = str(department_code or '').strip().lower()
+        if BACK_OFFICE_EMPLOYEE_ROLE_BY_DEPARTMENT_CODE.get(code) is not None:
+            allowed.add(person_id)
+        elif role in ('operator', 'trainee') and code in TASK_EMPLOYEE_DEPARTMENT_CODES:
+            allowed.add(person_id)
+    return allowed
+
+
 # Поимённый доступ ко ВСЕМ задачам раздела — сверх границы главы отдела.
 # Админ, возглавляющий отдел, идёт в «Задачи» под 'sv' (_effective_scoped_manager_role)
 # и видит только задачи, где он участник, плюс задачи СВ своего отдела. Человек
@@ -18855,6 +18901,7 @@ app.register_blueprint(build_tasks_blueprint(
         _get_telegram_error_text=_get_telegram_error_text,
         _normalize_user_role=_normalize_user_role,
         _send_telegram_text_message=_send_telegram_text_message,
+        _task_access_for_people=_task_access_for_people,
         _task_route_guard=_task_route_guard,
         _telegram_exception_text=_telegram_exception_text,
         _truncate_for_telegram=_truncate_for_telegram,

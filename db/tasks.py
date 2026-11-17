@@ -805,6 +805,15 @@ class TasksMixin:
     def _task_dt_to_iso(self, value):
         return value.isoformat() if hasattr(value, 'isoformat') else value
 
+    # Уволенные — и «уволен», и «увольнение»: так их считает вкладка «Уволенные»
+    # в группах. Раздел «Задачи» по этому признаку убирает человека из ленты
+    # «Моих задач» (владелец, 17.11.2026); сами задачи остаются видны.
+    _TASK_FIRED_STATUSES = frozenset({'fired', 'dismissal'})
+
+    @classmethod
+    def _task_person_is_fired(cls, status):
+        return str(status or '').strip().lower() in cls._TASK_FIRED_STATUSES
+
     def _split_task_deadline(self, deadline_minutes):
         if deadline_minutes is None:
             return {"days": 0, "hours": 0, "minutes": 0, "total_minutes": None}
@@ -3334,7 +3343,8 @@ class TasksMixin:
                     t.info_request_id, t.production_brief,
                     t.project_id, t.project_number, project.code, project.name,
                     section.id, section.name,
-                    t.priority_score
+                    t.priority_score,
+                    creator.status, assignee.status
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -3391,7 +3401,7 @@ class TasksMixin:
                 cursor.execute("""
                     SELECT
                         ta.task_id, u.id, u.name, u.role, u.supervisor_id,
-                        u.avatar_bucket, u.avatar_blob_path
+                        u.avatar_bucket, u.avatar_blob_path, u.status
                     FROM task_assignees ta
                     JOIN users u ON u.id = ta.user_id
                     WHERE ta.task_id = ANY(%s)
@@ -3501,7 +3511,8 @@ class TasksMixin:
                 "role": row[3],
                 "supervisor_id": row[4],
                 "avatar_bucket": row[5],
-                "avatar_blob_path": row[6]
+                "avatar_blob_path": row[6],
+                "is_fired": self._task_person_is_fired(row[7])
             })
 
         watcher_map = defaultdict(list)
@@ -3566,7 +3577,8 @@ class TasksMixin:
                     "role": row[22],
                     "supervisor_id": row[23],
                     "avatar_bucket": row[24],
-                    "avatar_blob_path": row[25]
+                    "avatar_blob_path": row[25],
+                    "is_fired": self._task_person_is_fired(row[52])
                 } if row[20] else None,
                 # Полный состав по порядку показа. Права у исполнителей равные,
                 # первый в списке — просто первый.
@@ -3580,7 +3592,8 @@ class TasksMixin:
                     "name": row[27],
                     "role": row[28],
                     "avatar_bucket": row[29],
-                    "avatar_blob_path": row[30]
+                    "avatar_blob_path": row[30],
+                    "is_fired": self._task_person_is_fired(row[51])
                 } if row[26] else None,
                 "is_backlog": bool(row[31]),
                 "backlog_rank": float(row[32]) if row[32] is not None else None,

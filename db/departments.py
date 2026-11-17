@@ -231,6 +231,36 @@ class DepartmentsMixin:
             r = cursor.fetchone()
             return r[0] if r else None
 
+    def get_task_access_facts(self, user_ids):
+        """Отдел и «глава ли» для многих людей сразу: {id: (код отдела, глава ли)}.
+
+        Факты, по которым гард решает, открыт ли человеку раздел «Задачи»
+        (_task_access_for_people в bot_schedule2.py), — одним запросом на всех.
+        Условия те же, что у headed_department_id_for_user (активный отдел, где он
+        глава) и get_user_department (код его отдела): разъедься они — лента
+        «Моих задач» и сам раздел разошлись бы во мнении, кому раздел открыт.
+        """
+        ids = sorted({int(user_id) for user_id in (user_ids or []) if user_id})
+        if not ids:
+            return {}
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    u.id,
+                    d.code,
+                    EXISTS (
+                        SELECT 1
+                        FROM departments headed
+                        WHERE headed.head_user_id = u.id
+                          AND COALESCE(headed.is_active, TRUE) = TRUE
+                    )
+                FROM users u
+                LEFT JOIN departments d ON d.id = u.department_id
+                WHERE u.id = ANY(%s)
+            """, (ids,))
+            rows = cursor.fetchall() or []
+        return {int(row[0]): (row[1], bool(row[2])) for row in rows if row and row[0] is not None}
+
     def get_user_department(self, user_id):
         """Вернуть (department_id, department_code) пользователя одним запросом."""
         if not user_id:

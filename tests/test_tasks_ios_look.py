@@ -178,6 +178,42 @@ class OverviewTests(unittest.TestCase):
         self.assertIn("{pluralRu(selectedTotal, 'задача', 'задачи', 'задач')}", GROUPED)
 
 
+class FiredPeopleTests(unittest.TestCase):
+    """«Здесь не нужно отображать уволенных» (владелец, 17.11): в ленте «Моих
+    задач» только работающие; задачи уволенных остаются во «Всех задачах»."""
+
+    DB_TASKS = (ROOT / 'db' / 'tasks.py').read_text(encoding='utf-8')
+
+    def test_fired_statuses(self):
+        """Уволенные — и «уволен», и «увольнение», как во вкладке «Уволенные» групп;
+        отпуск, больничный и Б/С — работающие."""
+        from db.tasks import TasksMixin
+        for status in ('fired', 'dismissal', ' FIRED '):
+            self.assertTrue(TasksMixin._task_person_is_fired(status), status)
+        for status in ('working', 'bs', 'sick_leave', 'annual_leave', 'unpaid_leave', '', None):
+            self.assertFalse(TasksMixin._task_person_is_fired(status), status)
+
+    def test_api_marks_creator_and_assignees(self):
+        """Статусы постановщика и первого исполнителя — в конце главного запроса
+        (номера прежних колонок не сдвигаются), исполнителей — в их пакетном запросе."""
+        listing = self.DB_TASKS[self.DB_TASKS.index('    def get_tasks_for_requester('):self.DB_TASKS.index('    def get_tasks_for_export(')]
+        self.assertIn('t.priority_score,\n                    creator.status, assignee.status\n                FROM tasks t', listing)
+        creator = listing[listing.index('"creator": {'):]
+        self.assertIn('"is_fired": self._task_person_is_fired(row[51])', creator[:400])
+        assignee = listing[listing.index('"assignee": {'):]
+        self.assertIn('"is_fired": self._task_person_is_fired(row[52])', assignee[:400])
+        self.assertIn('u.avatar_bucket, u.avatar_blob_path, u.status\n                    FROM task_assignees ta', listing)
+        self.assertIn('"is_fired": self._task_person_is_fired(row[7])', listing)
+
+    def test_strip_skips_fired_people(self):
+        """Уволенный не попадает в ленту (доступ к разделу — test_task_people_access.py);
+        задача, где спрятаны все, не падает в группу «без имени»."""
+        grouping = VIEW[VIEW.index('const groupTasksByPerson = '):VIEW.index('/* ─── Icons ─── */')]
+        self.assertIn('!person?.is_fired', grouping)
+        self.assertIn('if (people.length && !visible.length) return;', grouping)
+        self.assertIn('(visible.length ? visible : [{}]).forEach(', grouping)
+
+
 class TaskCardTests(unittest.TestCase):
     def test_card_grid(self):
         """Задачи — карточками в сетке; сверху кружок и статус, посередине тема и

@@ -335,6 +335,7 @@ def build_tasks_blueprint(
     _get_telegram_error_text,
     _normalize_user_role,
     _send_telegram_text_message,
+    _task_access_for_people,
     _task_route_guard,
     _telegram_exception_text,
     _truncate_for_telegram,
@@ -1658,7 +1659,21 @@ def build_tasks_blueprint(
                     raise
 
                 tasks = payload.get("tasks") or []
+                # Кому из людей этих задач открыт раздел — один пакет на ответ, а
+                # не запрос на человека: лента «Моих задач» показывает только их
+                # (владелец, 17.11.2026). None — не узнали; тогда признака нет и
+                # лента никого не прячет.
+                task_people_roles = {}
                 for task in tasks:
+                    for person in [task.get("creator"), task.get("assignee"), *(task.get("assignees") or [])]:
+                        if isinstance(person, dict) and person.get("id"):
+                            task_people_roles[int(person["id"])] = person.get("role")
+                people_with_access = _task_access_for_people(task_people_roles) if task_people_roles else set()
+                for task in tasks:
+                    if people_with_access is not None:
+                        for person in [task.get("creator"), task.get("assignee"), *(task.get("assignees") or [])]:
+                            if isinstance(person, dict) and person.get("id"):
+                                person["has_tasks_access"] = int(person["id"]) in people_with_access
                     # Первый исполнитель и весь состав: у карточки на доске лицо одно,
                     # в списке — стопка. Подписанные ссылки кешируются по (бакет, путь),
                     # поэтому десять исполнителей на страницу не стоят десяти подписей.

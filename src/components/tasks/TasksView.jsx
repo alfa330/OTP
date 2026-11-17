@@ -4923,7 +4923,14 @@ const groupTasksByPerson = (list, getPeople) => {
   list.forEach((task) => {
     const picked = getPeople(task);
     const people = (Array.isArray(picked) ? picked : [picked]).filter(Boolean);
-    (people.length ? people : [{}]).forEach((person) => {
+    /* В «Моих задачах» — только те, кому раздел «Задачи» открыт, и не уволенные
+       (владелец, 17.11): человек бывает в чужих задачах, сам в раздел не попадая.
+       Их задачи остаются во «Всех задачах». Признака доступа нет (сервер не узнал)
+       — не прячем. Задача, где спрятаны все, в людях не появляется и не падает в
+       группу «без имени». */
+    const visible = people.filter((person) => !person?.is_fired && person?.has_tasks_access !== false);
+    if (people.length && !visible.length) return;
+    (visible.length ? visible : [{}]).forEach((person) => {
     const idNum = Number(person?.id || 0);
     const name = (person?.name || '-').trim() || '-';
     const avatarUrl = (person?.avatar_url || '').trim();
