@@ -3458,6 +3458,9 @@ const buildAppViewUrl = (nextView) => {
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
         /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
         if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
+        /* И вкладка «Кадров» (hr_tab=…, HrOfficeView). Своя метка, а не «tab»: «tab» — вкладка вики,
+           и её снятие выше стирало вкладку «Кадров» при каждой загрузке страницы. */
+        if (nextView !== 'hr_office') url.searchParams.delete('hr_tab');
         return url.toString();
     } catch (error) {
         console.warn('Failed to build app view URL', error);
@@ -3534,6 +3537,9 @@ const syncAppViewWithUrl = (nextView) => {
         if (nextView !== 'mail') url.searchParams.delete('mail_tab');
         /* И метка фото «Дресс-кода» (dc_check=… — ссылка из Telegram на вкладку в «Отметках»). */
         if (nextView !== 'group_late_bot') url.searchParams.delete('dc_check');
+        /* И вкладка «Кадров» (hr_tab=…, HrOfficeView). Своя метка, а не «tab»: «tab» — вкладка вики,
+           и её снятие выше стирало вкладку «Кадров» при каждой загрузке страницы. */
+        if (nextView !== 'hr_office') url.searchParams.delete('hr_tab');
         const nextUrl = `${url.pathname}${url.search}${url.hash}`;
         window.history.replaceState(window.history.state, '', nextUrl);
     } catch (error) {

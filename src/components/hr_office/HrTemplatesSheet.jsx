@@ -82,7 +82,7 @@ export default function HrTemplatesSheet({ open = true, api, toast, onClose }) {
                     <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
                         {templates.map((item) => (
                             <div key={item.kind} className="flex flex-wrap items-center gap-3 px-4 py-3">
-                                <div className="min-w-0 flex-1">
+                                <div className="min-w-0 grow basis-0">
                                     <div className="truncate text-[14px] font-medium text-slate-900">{item.title}</div>
                                     <div className="truncate text-[12.5px] text-slate-500">
                                         {item.custom

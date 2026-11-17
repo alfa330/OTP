@@ -240,6 +240,112 @@ def list_people(cursor, ctx, *, query='', project='', department_id=None, scope=
     return out
 
 
+# ── Страницы списков (просьба владельца 12.11.2026: «нормальная пагинация») ────────
+# Как в «Учете сотрудников»: сервер отдаёт страницу, всего и счётчики; экран листает IosPager.
+PAGE_SIZE = 50
+PAGE_SIZE_MAX = 200
+HIRING_VIEWS = ('all', 'new', 'data')
+
+
+def page_bounds(offset, limit):
+    """(offset, limit) из строки запроса: мусор — первая страница по 50, больше 200 за раз не отдаём."""
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(limit or PAGE_SIZE)
+    except (TypeError, ValueError):
+        limit = PAGE_SIZE
+    return offset, max(1, min(PAGE_SIZE_MAX, limit))
+
+
+def _hiring_view(people, view):
+    """«Ждут оформления» — договора ещё нет; «Не хватает данных» — договор есть, документы выйдут с пропусками."""
+    if view == 'new':
+        rows = [person for person in people if not person['has_contract']]
+        # Ждущие оформления — сначала недавно принятые: их и оформляют первыми.
+        rows.sort(key=lambda person: (person.get('hire_date') or ''), reverse=True)
+        return rows
+    if view == 'data':
+        return [person for person in people if person['has_contract'] and person['missing']]
+    return people
+
+
+def hiring_people(cursor, ctx, *, query='', project='', view='all'):
+    """Люди «Приема» под отбор экрана — для страницы и для выгрузки списка (один и тот же отбор)."""
+    require(ctx, 'hiring')
+    people = list_people(cursor, ctx, query=query, project=project)
+    return _hiring_view(people, view if view in HIRING_VIEWS else 'all')
+
+
+def hiring_page(cursor, ctx, *, query='', project='', view='all', offset=0, limit=PAGE_SIZE):
+    """Страница «Приема»: люди, всего под отбор и счётчики вкладок. Счётчики — по проекту, без поиска
+    (как статусы в «Учете сотрудников»): число на вкладке не скачет, пока печатают ФИО."""
+    require(ctx, 'hiring')
+    by_project = list_people(cursor, ctx, project=project)
+    counts = {'all': len(by_project),
+              'new': sum(1 for person in by_project if not person['has_contract']),
+              'data': sum(1 for person in by_project if person['has_contract'] and person['missing'])}
+    rows = _hiring_view(list_people(cursor, ctx, query=query, project=project) if query else by_project,
+                        view if view in HIRING_VIEWS else 'all')
+    return {'people': rows[offset:offset + limit], 'total': len(rows), 'counts': counts,
+            'offset': offset, 'limit': limit}
+
+
+def companies_groups(people):
+    """Люди «Приема» → группы «Списка по компаниям»: проекты в порядке справочника, внутри — по ФИО."""
+    order = {name: index for index, name in enumerate(rules.PROJECTS)}
+    groups = {}
+    for person in people:
+        groups.setdefault(person.get('project') or '', []).append({
+            'name': person['name'], 'job_title': person.get('job_title') or '',
+            'label': ' '.join(part for part in (rules.EMPLOYMENT_SHORT.get(person.get('employment_type'), ''),
+                                                person.get('company') or '') if part),
+        })
+    ordered = sorted(groups, key=lambda name: (name == '', order.get(name, len(order)), name.casefold()))
+    return [(name, sorted(groups[name], key=lambda item: item['name'].casefold())) for name in ordered]
+
+
+def acts_page(cursor, ctx, *, project='', department_id=None, query='', offset=0, limit=PAGE_SIZE):
+    """Страница «АВР»: люди охвата под отбор, всего, отделы охвата для выбора и выборка всех
+    подходящих (id и сумма) — «Выбрать всех» и «итого» считают и тех, кто на других страницах."""
+    require(ctx, 'acts')
+    scope = list_people(cursor, ctx, scope='acts')
+    departments = {}
+    for person in scope:
+        if person.get('department_id'):
+            departments[person['department_id']] = person.get('department') or ''
+    try:
+        department_id = int(department_id) if department_id not in (None, '') else None
+    except (TypeError, ValueError):
+        department_id = None
+    needle = importer.name_tokens(query)
+    rows = []
+    for person in scope:
+        if project and person['project'] != project:
+            continue
+        if department_id and person.get('department_id') != department_id:
+            continue
+        if needle:
+            tokens = set(importer.name_tokens(person['name']))
+            if not all(any(token.startswith(part) for token in tokens) for part in needle):
+                continue
+        rows.append(person)
+    page = rows[offset:offset + limit]
+    last = queries.last_acts(cursor, [person['user_id'] for person in page])
+    for person in page:
+        act = last.get(person['user_id'])
+        person['last_act'] = {key: _iso(value) for key, value in act.items()} if act else None
+        person['work_name'] = rules.act_work_name(person['job_title']) if person['job_title'] else ''
+    return {
+        'people': page, 'total': len(rows), 'offset': offset, 'limit': limit,
+        'departments': [{'value': key, 'label': name}
+                        for key, name in sorted(departments.items(), key=lambda item: item[1].casefold())],
+        'selection': [{'user_id': person['user_id'], 'amount': person['amount']} for person in rows],
+    }
+
+
 def active_period(cursor, user_id, today):
     """(период на сегодня, ближайший будущий) — с id: «Вернуть «Работает»» удаляет
     будущий период или закрывает текущий вчерашним днём через ручку «Графиков работы»."""

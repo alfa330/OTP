@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Download, History, Loader2, Search } from 'lucide-react';
 import InfoHint from '../common/InfoHint';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
-import { IosSegmented, iosCard } from '../ui/ios';
-import { blobErrorText, dateText, errorText, moneyText } from './hrOffice';
-import { Empty, Loading, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, useSheetState } from './hrUi';
+import { IosPager, IosSegmented, iosCard } from '../ui/ios';
+import { blobErrorText, dateText, moneyText } from './hrOffice';
+import { Empty, Loading, PAGE_SIZE, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, pagerProps, useNarrowScreen, useServerPage, useSheetState } from './hrUi';
 import HrJournalSheet from './HrJournalSheet';
 
 /*
@@ -28,37 +28,50 @@ function actAmount(person, override) {
     return raw === undefined || String(raw).trim() === '' ? person.amount : raw;
 }
 
+/* Строка и шапка — flex, а не сетка с долями: оболочка телефона (mobile-shell.css) схлопывает любые
+   grid-cols-[…] в одну колонку, и на планшете и телефоне боком галочка вставала отдельной строкой.
+   На телефоне (уже 640 px): галочка с именем — одна строка и одна мишень (label), поля — под ними. */
+const COL_PERSON = 'min-w-0 sm:basis-0 sm:grow-[1.2]';
+const COL_WORK = 'sm:basis-0 sm:grow-[1.4]';
+const COL_AMOUNT = 'w-28 shrink-0 sm:w-36';
+const CHECKBOX = 'h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500 sm:h-4 sm:w-4';
+const ROW_INPUT = 'rounded-lg border-0 bg-slate-100 px-2.5 py-2 text-[14px] text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70 sm:py-1.5 sm:text-[13px]';
+
 function PersonRow({ person, checked, onToggle, override, onOverride }) {
     const warn = [];
     if (!person.company_id) warn.push('нет компании');
     if (!person.contract_number) warn.push('нет номера договора');
     if (person.amount === null && !override.amount) warn.push('нет суммы');
     return (
-        <div className={`grid gap-2 px-4 py-3 sm:grid-cols-[auto_minmax(0,1.2fr)_minmax(0,1.4fr)_9rem] sm:items-center sm:gap-3 ${checked ? '' : 'opacity-70'}`}>
-            <input type="checkbox" checked={checked} onChange={() => onToggle(person.user_id)}
-                   className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" aria-label={person.name} />
-            <div className="min-w-0">
-                <div className="truncate text-[14px] font-medium text-slate-900">{person.name}</div>
-                <div className="truncate text-[12px] text-slate-500">
-                    {[person.company, person.contract_number && `№ ${person.contract_number}`].filter(Boolean).join(' · ') || person.department}
-                </div>
-                {warn.length > 0 && (
-                    <div className={`truncate text-[12px] ${checked ? 'text-amber-700' : 'text-slate-400'}`}>{warn.join(', ')}</div>
-                )}
-                {person.last_act && (
-                    <div className="truncate text-[11.5px] text-slate-400">
-                        Последний: {person.last_act.number} · {dateText(person.last_act.period_from)} – {dateText(person.last_act.period_to)}
-                    </div>
-                )}
+        <div className={`flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:gap-3 ${checked ? '' : 'opacity-70'}`}>
+            <label className={`flex cursor-pointer items-center gap-3 ${COL_PERSON}`}>
+                <input type="checkbox" checked={checked} onChange={() => onToggle(person.user_id)}
+                       className={CHECKBOX} aria-label={person.name} />
+                <span className="min-w-0 grow basis-0">
+                    <span className="block truncate text-[14px] font-medium text-slate-900">{person.name}</span>
+                    <span className="block truncate text-[12px] text-slate-500">
+                        {[person.company, person.contract_number && `№ ${person.contract_number}`].filter(Boolean).join(' · ') || person.department}
+                    </span>
+                    {warn.length > 0 && (
+                        <span className={`block truncate text-[12px] ${checked ? 'text-amber-700' : 'text-slate-400'}`}>{warn.join(', ')}</span>
+                    )}
+                    {person.last_act && (
+                        <span className="block truncate text-[11.5px] text-slate-400">
+                            Последний: {person.last_act.number} · {dateText(person.last_act.period_from)} – {dateText(person.last_act.period_to)}
+                        </span>
+                    )}
+                </span>
+            </label>
+            <div className="flex items-center gap-2 pl-8 sm:contents">
+                <input value={override.work_name ?? person.work_name} disabled={!checked}
+                       onChange={(event) => onOverride(person.user_id, 'work_name', event.target.value)}
+                       className={`min-w-0 grow basis-0 ${COL_WORK} ${ROW_INPUT}`}
+                       aria-label="Наименование работ" placeholder={person.work_name || 'Услуги …'} />
+                <input value={override.amount ?? (person.amount === null ? '' : String(person.amount))} disabled={!checked}
+                       onChange={(event) => onOverride(person.user_id, 'amount', event.target.value)} inputMode="decimal"
+                       className={`${COL_AMOUNT} text-right tabular-nums ${ROW_INPUT}`}
+                       aria-label="Сумма" placeholder={person.amount === null ? 'сумма, ₸' : moneyText(person.amount)} />
             </div>
-            <input value={override.work_name ?? person.work_name} disabled={!checked}
-                   onChange={(event) => onOverride(person.user_id, 'work_name', event.target.value)}
-                   className="w-full rounded-lg border-0 bg-slate-100 px-2.5 py-1.5 text-[13px] text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                   aria-label="Наименование работ" placeholder={person.work_name || 'Услуги …'} />
-            <input value={override.amount ?? (person.amount === null ? '' : String(person.amount))} disabled={!checked}
-                   onChange={(event) => onOverride(person.user_id, 'amount', event.target.value)} inputMode="decimal"
-                   className="w-full rounded-lg border-0 bg-slate-100 px-2.5 py-1.5 text-right text-[13px] tabular-nums text-slate-800 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70"
-                   aria-label="Сумма" placeholder={person.amount === null ? 'сумма, ₸' : moneyText(person.amount)} />
         </div>
     );
 }
@@ -66,8 +79,6 @@ function PersonRow({ person, checked, onToggle, override, onOverride }) {
 export default function HrActsTab({ api, boot, toast }) {
     const [periodKind, setPeriodKind] = useState('current');
     const [custom, setCustom] = useState({ from: boot.act_periods?.current?.from || '', to: boot.act_periods?.current?.to || '' });
-    const [people, setPeople] = useState(null);
-    const [error, setError] = useState('');
     const [query, setQuery] = useState('');
     const [department, setDepartment] = useState('');
     const [project, setProject] = useState('');
@@ -75,13 +86,25 @@ export default function HrActsTab({ api, boot, toast }) {
     const [overrides, setOverrides] = useState({});
     const [busy, setBusy] = useState(false);
     const [journal, keptJournal, openJournal, closeJournal, , journalToken] = useSheetState(false);
+    const narrow = useNarrowScreen();
 
-    const load = useCallback(() => {
-        api.get('/acts/people')
-            .then(({ data }) => { setPeople(data.people || []); setError(''); })
-            .catch((requestError) => setError(errorText(requestError, 'Список не загрузился')));
-    }, [api]);
-    useEffect(() => { load(); }, [load]);
+    /* Страницами с сервера, как «Учет сотрудников». Вместе со страницей сервер отдаёт выборку всех
+       подходящих (id и сумма): «Выбрать всех» и «итого» берут и тех, кто на других страницах. */
+    const list = useServerPage(api, '/acts/people', { q: query, project, department_id: department });
+    const people = list.data?.people || null;
+    const total = list.data?.total || 0;
+    const error = list.data ? '' : list.error;
+    const load = list.reload;
+    const amounts = useRef(new Map());
+    useEffect(() => {
+        (list.data?.selection || []).forEach((item) => amounts.current.set(item.user_id, item.amount));
+    }, [list.data]);
+    const matching = useMemo(() => (list.data?.selection || []).map((item) => item.user_id), [list.data]);
+    /* Отделы охвата — с первого ответа и дальше те же: отбор по отделу список отделов не сужает. */
+    const [departmentList, setDepartmentList] = useState(null);
+    useEffect(() => {
+        if (list.data?.departments && !departmentList) setDepartmentList(list.data.departments);
+    }, [list.data, departmentList]);
 
     const period = periodKind === 'custom' ? custom : (boot.act_periods?.[periodKind] || custom);
     // Сумма в строке — месячная по договору; за неполный месяц её поправляют руками.
@@ -90,24 +113,11 @@ export default function HrActsTab({ api, boot, toast }) {
         const [year, month] = period.from.split('-').map(Number);
         return period.from.endsWith('-01') && Number(period.to.slice(8, 10)) === new Date(year, month, 0).getDate();
     })();
-    const departments = useMemo(() => {
-        const seen = new Map();
-        (people || []).forEach((person) => { if (person.department_id) seen.set(person.department_id, person.department); });
-        return [{ value: '', label: 'Все отделы' }].concat([...seen.entries()]
-            .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'ru')).map(([value, label]) => ({ value, label })));
-    }, [people]);
+    const departments = useMemo(() => [{ value: '', label: 'Все отделы' }]
+        .concat((departmentList || []).map((item) => ({ value: item.value, label: item.label }))), [departmentList]);
     const projectOptions = [{ value: '', label: 'Все проекты' }].concat((boot.projects || []).map((item) => ({ value: item, label: item })));
 
-    const visible = useMemo(() => {
-        const needle = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-        return (people || []).filter((person) => {
-            if (department && person.department_id !== department) return false;
-            if (project && person.project !== project) return false;
-            if (needle.length && !needle.every((part) => person.name.toLowerCase().includes(part))) return false;
-            return true;
-        });
-    }, [people, query, department, project]);
-    const allChecked = visible.length > 0 && visible.every((person) => selected.has(person.user_id));
+    const allChecked = matching.length > 0 && matching.every((id) => selected.has(id));
 
     const toggle = (id) => setSelected((prev) => {
         const next = new Set(prev);
@@ -115,9 +125,10 @@ export default function HrActsTab({ api, boot, toast }) {
         else next.add(id);
         return next;
     });
+    // «Выбрать всех» — всех под отбор, со всех страниц, а не только видимую.
     const toggleAll = () => setSelected((prev) => {
         const next = new Set(prev);
-        visible.forEach((person) => (allChecked ? next.delete(person.user_id) : next.add(person.user_id)));
+        matching.forEach((id) => (allChecked ? next.delete(id) : next.add(id)));
         return next;
     });
     const override = (id, key, value) => setOverrides((prev) => ({ ...prev, [id]: { ...(prev[id] || {}), [key]: value } }));
@@ -129,10 +140,10 @@ export default function HrActsTab({ api, boot, toast }) {
         }
         setBusy(true);
         try {
-            const items = (people || []).filter((person) => selected.has(person.user_id)).map((person) => ({
-                user_id: person.user_id,
-                work_name: overrides[person.user_id]?.work_name,
-                amount: overrides[person.user_id]?.amount,
+            const items = [...selected].map((id) => ({
+                user_id: id,
+                work_name: overrides[id]?.work_name,
+                amount: overrides[id]?.amount,
             }));
             await api.download('post', '/acts/export', {
                 body: { period_from: period.from, period_to: period.to, items }, fallback: 'АВР.xlsx',
@@ -151,14 +162,16 @@ export default function HrActsTab({ api, boot, toast }) {
            margin-top — белую полосу над затемнением. */
         <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2">
-                <IosSegmented slide value={periodKind} onChange={setPeriodKind} options={PERIODS} ariaLabel="Период" />
+                <div className="w-full sm:w-auto">
+                    <IosSegmented slide stretch={narrow} value={periodKind} onChange={setPeriodKind} options={PERIODS} ariaLabel="Период" />
+                </div>
                 {periodKind === 'custom' && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex w-full items-center gap-2 sm:w-auto">
                         <IosDatePicker value={custom.from} onChange={(value) => setCustom((prev) => ({ from: value, to: prev.to < value ? value : prev.to }))}
-                                       ariaLabel="С" className="w-40" />
+                                       ariaLabel="С" className="min-w-0 grow basis-0 sm:w-40 sm:grow-0 sm:basis-auto" />
                         <span className="text-slate-400">—</span>
                         <IosDatePicker value={custom.to} min={custom.from} onChange={(value) => setCustom((prev) => ({ ...prev, to: value }))}
-                                       ariaLabel="По" className="w-40" />
+                                       ariaLabel="По" className="min-w-0 grow basis-0 sm:w-40 sm:grow-0 sm:basis-auto" />
                     </div>
                 )}
                 {periodKind !== 'custom' && (
@@ -169,57 +182,79 @@ export default function HrActsTab({ api, boot, toast }) {
                         не полный месяц <InfoHint text="В строке — месячная сумма по договору. За неполный период поправьте её перед выгрузкой." />
                     </span>
                 )}
-                <div className="ml-auto flex gap-2">
+                <div className="flex w-full gap-2 sm:ml-auto sm:w-auto">
                     <button type="button" className={TOOLBAR_BTN} onClick={() => openJournal(true)}>
                         <History size={15} /> Журнал
                     </button>
-                    <button type="button" className={TOOLBAR_BTN_PRIMARY} onClick={build} disabled={busy || selected.size === 0}>
+                    <button type="button" className={`${TOOLBAR_BTN_PRIMARY} min-w-0 grow sm:grow-0`} onClick={build} disabled={busy || selected.size === 0}>
                         {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
                         {selected.size ? `Скачать АВР · ${selected.size}` : 'Скачать АВР'}
                     </button>
                 </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-                <div className="relative min-w-[220px] flex-1 sm:max-w-sm">
+                <div className="relative w-full sm:w-auto sm:min-w-56 sm:flex-1 sm:max-w-sm">
                     <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по ФИО"
-                           className="h-9 w-full rounded-xl border-0 bg-white pl-9 pr-3 text-[13.5px] text-slate-900 ring-1 ring-slate-200/70 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70" />
+                           className="h-10 w-full rounded-xl border-0 bg-white pl-9 pr-3 text-[14px] text-slate-900 ring-1 ring-slate-200/70 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70 sm:h-9 sm:text-[13.5px]" />
                 </div>
                 {departments.length > 2 && (
-                    <CustomSelect variant="ios" value={department} onChange={setDepartment} options={departments}
-                                  className="w-56" ariaLabel="Отдел" searchable />
+                    <div className="min-w-0 grow basis-0 sm:grow-0 sm:basis-auto">
+                        <CustomSelect variant="ios" value={department} onChange={setDepartment} options={departments}
+                                      className="w-full sm:w-56" ariaLabel="Отдел" searchable />
+                    </div>
                 )}
                 {boot.capabilities?.acts_all && (
-                    <CustomSelect variant="ios" value={project} onChange={setProject} options={projectOptions}
-                                  className="w-44" ariaLabel="Проект" />
+                    <div className="min-w-0 grow basis-0 sm:grow-0 sm:basis-auto">
+                        <CustomSelect variant="ios" value={project} onChange={setProject} options={projectOptions}
+                                      className="w-full sm:w-44" ariaLabel="Проект" />
+                    </div>
                 )}
             </div>
 
             {error && <div className={`${iosCard} p-4 text-[13.5px] text-rose-600`}>{error}</div>}
             {!people && !error && <Loading text="Загружаем сотрудников…" />}
             {people && (
-                <div className={`${iosCard} overflow-hidden`}>
-                    <div className="hidden items-center gap-3 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:grid sm:grid-cols-[auto_minmax(0,1.2fr)_minmax(0,1.4fr)_9rem]">
-                        <input type="checkbox" checked={allChecked} onChange={toggleAll} aria-label="Выбрать всех"
-                               className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
-                        <span>Сотрудник</span>
-                        <span>Наименование работ</span>
-                        <span className="text-right">Сумма, ₸</span>
+                <div className={`${iosCard} overflow-hidden transition-opacity duration-200 ${list.loading || list.searching ? 'opacity-60' : ''}`}>
+                    <div className="hidden items-center gap-3 border-b border-slate-100 px-4 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:flex">
+                        <label className={`flex cursor-pointer items-center gap-3 ${COL_PERSON}`}>
+                            <input type="checkbox" checked={allChecked} onChange={toggleAll} disabled={!matching.length}
+                                   aria-label={`Выбрать всех: ${matching.length}`} title={`Выбрать всех под отбор — ${matching.length}`}
+                                   className={CHECKBOX} />
+                            <span>Сотрудник</span>
+                        </label>
+                        <span className={`min-w-0 ${COL_WORK}`}>Наименование работ</span>
+                        <span className={`${COL_AMOUNT} text-right`}>Сумма, ₸</span>
                     </div>
+                    {/* Телефон: шапки колонок нет — «Выбрать всех» строкой над списком, мишень во всю ширину. */}
+                    {matching.length > 0 && (
+                        <label className="flex cursor-pointer items-center gap-3 border-b border-slate-100 px-4 py-3 sm:hidden">
+                            <input type="checkbox" checked={allChecked} onChange={toggleAll} className={CHECKBOX}
+                                   aria-label={`Выбрать всех: ${matching.length}`} />
+                            <span className="text-[14px] font-medium text-slate-700">Выбрать всех · {matching.length}</span>
+                        </label>
+                    )}
                     <div className="divide-y divide-slate-100">
-                        {visible.length === 0
-                            ? <Empty>{people.length ? 'Под отбор никто не попал' : 'Сотрудников в вашем охвате нет'}</Empty>
-                            : visible.map((person) => (
+                        {people.length === 0
+                            ? <Empty>{departmentList && departmentList.length ? 'Под отбор никто не попал' : 'Сотрудников в вашем охвате нет'}</Empty>
+                            : people.map((person) => (
                                 <PersonRow key={person.user_id} person={person} checked={selected.has(person.user_id)}
                                            onToggle={toggle} override={overrides[person.user_id] || {}} onOverride={override} />
                             ))}
                     </div>
+                    {total > PAGE_SIZE && (
+                        <div className="border-t border-slate-100 px-4 py-2.5">
+                            <IosPager {...pagerProps(list.page, total)} onPage={list.setPage} unit="сотрудники" />
+                        </div>
+                    )}
                 </div>
             )}
-            {people && selected.size > 0 && (
+            {selected.size > 0 && (
                 <div className="px-1 text-[12px] text-slate-500">
-                    Выбрано {selected.size} · итого {moneyText((people || []).filter((person) => selected.has(person.user_id))
-                        .reduce((sum, person) => sum + (Number(String(actAmount(person, overrides[person.user_id]) ?? 0).replace(/\s/g, '').replace(',', '.')) || 0), 0))} ₸
+                    Выбрано {selected.size} · итого {moneyText([...selected].reduce((sum, id) => {
+                        const raw = actAmount({ amount: amounts.current.get(id) ?? null }, overrides[id]);
+                        return sum + (Number(String(raw ?? 0).replace(/\s/g, '').replace(',', '.')) || 0);
+                    }, 0))} ₸
                 </div>
             )}
             {keptJournal && <HrJournalSheet key={journalToken} open={journal} api={api} section="acts" today={boot.today} onClose={closeJournal} />}

@@ -3,7 +3,8 @@ import {
     Building2, CalendarClock, ChevronRight, CircleCheck, FileDown, FileSpreadsheet, FileText, History, Lock, LockOpen,
     MessageSquareText, Receipt, Search, Table2, TriangleAlert, UserPen, UserPlus,
 } from 'lucide-react';
-import { IosModal, IosSegmented, iosCard } from '../ui/ios';
+import { IosModal, IosPager, IosSegmented, iosCard } from '../ui/ios';
+import { PAGE_SIZE, pagerProps } from './hrUi';
 import { dateText, dayTitle, errorText, plural, timeOf } from './hrOffice';
 import { Avatar, ChangeList, SkeletonRows, changesOf } from './HrChanges';
 
@@ -40,6 +41,8 @@ const ACTIONS = {
     close: { icon: Lock, tone: 'bg-emerald-50 text-emerald-600' },
     reopen: { icon: LockOpen, tone: 'bg-amber-50 text-amber-600' },
     act: { icon: Receipt, tone: 'bg-emerald-50 text-emerald-600' },
+    // Выгрузки Excel: «Список по компаниям» в «Приеме», табель месяца.
+    export: { icon: FileSpreadsheet, tone: 'bg-sky-50 text-sky-600' },
 };
 const OTHER = { icon: History, tone: 'bg-slate-100 text-slate-500' };
 
@@ -89,7 +92,7 @@ function Entry({ item, onOpen }) {
             <button type="button" onClick={() => onOpen(item)}
                     className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-50 active:bg-slate-100 focus:outline-none focus-visible:bg-slate-50">
                 <EntryIcon action={item.action} />
-                <span className="min-w-0 flex-1">
+                <span className="min-w-0 grow basis-0">
                     <span className="block text-[13.5px] font-medium leading-snug text-slate-900">
                         Загружена таблица «{item.details.file || 'без имени'}»
                     </span>
@@ -105,7 +108,7 @@ function Entry({ item, onOpen }) {
     return (
         <div className="flex items-start gap-3 px-4 py-3">
             <EntryIcon action={item.action} />
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 grow basis-0">
                 {item.user_name && <div className="text-[13.5px] font-medium leading-snug text-slate-900">{item.user_name}</div>}
                 {item.action === 'intake' && (
                     <div className="mt-0.5 text-[13px] text-slate-600">Учётка создана — внесены данные для документов</div>
@@ -137,7 +140,7 @@ function PersonLine({ name, children, muted = false, trailing = null }) {
     return (
         <div className="flex items-start gap-3 px-4 py-3">
             <Avatar name={name} className={muted ? '!bg-slate-50 !text-slate-400' : ''} />
-            <div className="min-w-0 flex-1 pt-0.5">
+            <div className="min-w-0 grow basis-0 pt-0.5">
                 <div className={`text-[13.5px] font-medium ${muted ? 'text-slate-600' : 'text-slate-900'}`}>{name}</div>
                 {children}
             </div>
@@ -171,7 +174,7 @@ function ImportDetails({ item }) {
                     <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-50 text-emerald-600">
                         <FileSpreadsheet size={20} />
                     </span>
-                    <div className="min-w-0 flex-1">
+                    <div className="min-w-0 grow basis-0">
                         <div className="truncate text-[14px] font-medium text-slate-900">{details.file || 'Таблица без имени'}</div>
                         <div className="text-[12.5px] text-slate-500">
                             {[details.sheet && `лист «${String(details.sheet).trim()}»`,
@@ -205,7 +208,7 @@ function ImportDetails({ item }) {
                     <IosSegmented slide value={current.key} onChange={setTab} ariaLabel="Кого показать"
                                   options={tabs.map((entry) => ({ value: entry.key, label: `${entry.label} · ${entry.people.length}` }))} />
                 )}
-                <div className="relative ml-auto min-w-[200px] flex-1 sm:max-w-[240px]">
+                <div className="relative ml-auto min-w-48 grow basis-0 sm:max-w-60">
                     <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по ФИО"
                            className="h-9 w-full rounded-xl border-0 bg-white pl-9 pr-3 text-[13.5px] text-slate-900 ring-1 ring-slate-200/70 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/70" />
@@ -269,26 +272,31 @@ export default function HrJournalSheet({ open = true, api, section, today, onClo
     const savedScroll = useRef(0);
     const direction = useRef('');
 
-    /* Номер запроса: ответ на прежний поиск, пришедший позже нового, не перетирает его, а «Показать
-       ещё» по прежнему запросу не дописывается к списку нового. */
+    /* Журнал страницами по 50, как списки раздела (владелец 12.11.2026: «нормальная пагинация»), а не
+       «Показать ещё». Номер запроса: ответ на прежний поиск или страницу, пришедший позже нового, его
+       не перетирает. */
     const ticket = useRef(0);
-    const load = useCallback((offset = 0, append = false) => {
-        const mine = append ? ticket.current : ticket.current + 1;
+    const [listPage, setListPage] = useState(1);
+    const load = useCallback((pageNumber = 1) => {
+        const mine = ticket.current + 1;
         ticket.current = mine;
         setBusy(true);
-        return api.get('/journal', { section, q: query.trim() || undefined, offset })
+        return api.get('/journal', { section, q: query.trim() || undefined, offset: (pageNumber - 1) * PAGE_SIZE })
             .then(({ data }) => {
                 if (mine !== ticket.current) return;
-                setItems((prev) => (append ? [...(prev || []), ...(data.items || [])] : (data.items || [])));
+                setItems(data.items || []);
                 setTotal(data.total || 0);
+                setListPage(pageNumber);
                 setError('');
+                const host = scrollHost(listRef.current);
+                if (host) host.scrollTop = 0;
             })
             .catch((requestError) => { if (mine === ticket.current) setError(errorText(requestError, 'Журнал не загрузился')); })
             .finally(() => { if (mine === ticket.current) setBusy(false); });
     }, [api, section, query]);
 
     useEffect(() => {
-        const timer = window.setTimeout(() => load(0, false), items ? 250 : 0);
+        const timer = window.setTimeout(() => load(1), items ? 250 : 0);
         return () => window.clearTimeout(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [load]);
@@ -319,7 +327,6 @@ export default function HrJournalSheet({ open = true, api, section, today, onClo
         if (host) host.scrollTop = savedScroll.current;
     }, [page]);
 
-    const more = items && items.length < total;
     const motion = direction.current === 'push' ? 'motion-safe:animate-push-in'
         : direction.current === 'pop' ? 'motion-safe:animate-pop-in' : '';
 
@@ -363,15 +370,14 @@ export default function HrJournalSheet({ open = true, api, section, today, onClo
                                         </div>
                                     </section>
                                 ))}
-                                {more && (
-                                    <button type="button" onClick={() => load(items.length, true)} disabled={busy}
-                                            className="w-full rounded-2xl py-2.5 text-[13px] font-medium text-blue-600 transition hover:bg-blue-50/70 disabled:text-slate-400">
-                                        Показать ещё {Math.min(50, total - items.length)}
-                                    </button>
-                                )}
                             </div>
                         )}
                     </div>
+                    {total > PAGE_SIZE && (
+                        <div className="shrink-0 border-t border-slate-200/70 pt-2">
+                            <IosPager {...pagerProps(listPage, total)} onPage={(number) => load(number)} unit="записи" />
+                        </div>
+                    )}
                 </div>
             )}
         </IosModal>

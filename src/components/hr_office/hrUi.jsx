@@ -2,6 +2,96 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import InfoHint from '../common/InfoHint';
 import { SCREEN_LEAVE_MS, WINDOW_LEAVE_MS } from '../ui/ios';
+import { errorText } from './hrOffice';
+
+/*
+ * Списки страницами с сервера (владелец 12.11.2026: «сделать нормальную пагинацию») — как в «Учете
+ * сотрудников»: по 50 строк, под списком общий IosPager «1–50 из 265» с номерами страниц. Поиск уходит
+ * после паузы в печати; сменился отбор — снова первая страница; ответ на прежний запрос новый не
+ * перетирает; опустевшая страница (последнего на ней оформили) — шаг на последнюю непустую.
+ */
+export const PAGE_SIZE = 50;
+
+/*
+ * Узкий экран — телефон стоя (уже 640 px, ступень `sm` Tailwind). На нём табель показывается списком
+ * людей с месяцем человека отдельным экраном, а не таблицей на 31 день: таблица в 390 px — это колонка
+ * имён и дни за краем. Телефон боком и планшет (640+) получают таблицу. Признак оболочки телефона
+ * (useIsMobileShell) сюда не годится: он включён и у телефона боком (844 px), где таблица уместна.
+ */
+const NARROW_QUERY = '(max-width: 639px)';
+
+export function useNarrowScreen() {
+    const read = () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia(NARROW_QUERY).matches : false);
+    const [narrow, setNarrow] = useState(read);
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
+        const query = window.matchMedia(NARROW_QUERY);
+        const update = () => setNarrow(query.matches);
+        update();
+        if (query.addEventListener) query.addEventListener('change', update);
+        else query.addListener?.(update);
+        return () => {
+            if (query.removeEventListener) query.removeEventListener('change', update);
+            else query.removeListener?.(update);
+        };
+    }, []);
+    return narrow;
+}
+
+export function pagerProps(page, total, pageSize = PAGE_SIZE) {
+    const count = Number(total) || 0;
+    return {
+        page,
+        pageCount: Math.max(1, Math.ceil(count / pageSize)),
+        total: count,
+        from: count ? (page - 1) * pageSize + 1 : 0,
+        to: Math.min(count, page * pageSize),
+    };
+}
+
+export function useServerPage(api, path, params, {
+    searchField = 'q', itemsField = 'people', delay = 300, fallback = 'Список не загрузился',
+} = {}) {
+    const search = String(params?.[searchField] ?? '').trim();
+    const [settled, setSettled] = useState(search);
+    useEffect(() => {
+        if (search === settled) return undefined;
+        const timer = window.setTimeout(() => setSettled(search), delay);
+        return () => window.clearTimeout(timer);
+    }, [search, settled, delay]);
+    const filters = {};
+    Object.entries(params || {}).forEach(([name, value]) => {
+        if (name !== searchField && value !== undefined && value !== null && value !== '') filters[name] = value;
+    });
+    if (settled) filters[searchField] = settled;
+    const key = JSON.stringify(filters);
+    const [pageState, setPageState] = useState({ key, number: 1 });
+    const page = pageState.key === key ? pageState.number : 1;
+    const setPage = useCallback((number) => setPageState({ key, number }), [key]);
+    const [state, setState] = useState({ data: null, error: '', loading: true });
+    const ticket = useRef(0);
+    const load = useCallback(() => {
+        const mine = ticket.current + 1;
+        ticket.current = mine;
+        setState((prev) => ({ ...prev, loading: true }));
+        return api.get(path, { ...JSON.parse(key), offset: (page - 1) * PAGE_SIZE, limit: PAGE_SIZE })
+            .then(({ data }) => {
+                if (mine !== ticket.current) return;
+                if (!(data?.[itemsField] || []).length && data?.total > 0 && page > 1) {
+                    setPageState({ key, number: Math.max(1, Math.ceil(data.total / PAGE_SIZE)) });
+                    return;
+                }
+                setState({ data, error: '', loading: false });
+            })
+            .catch((requestError) => {
+                if (mine !== ticket.current) return;
+                setState((prev) => ({ ...prev, error: errorText(requestError, fallback), loading: false }));
+            });
+    }, [api, path, key, page, itemsField, fallback]);
+    useEffect(() => { load(); }, [load]);
+    return { ...state, page, setPage, reload: load, query: filters, searching: search !== settled };
+}
 
 /*
  * ОКНО УХОДИТ ПЛАВНО, ТОЛЬКО ЕСЛИ ОСТАЁТСЯ В ДЕРЕВЕ. IosModal гасит себя сам, когда `open`
@@ -62,6 +152,16 @@ export const TOOLBAR_BTN_PRIMARY =
 export const FIELD =
     'w-full rounded-xl border-0 bg-slate-100 px-3.5 py-2.5 text-[14px] text-slate-900 placeholder-slate-400 transition focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/70';
 export const FIELD_INVALID = 'ring-2 ring-rose-400/80 bg-rose-50/60';
+
+/* Вид значения ячейки табеля — один для таблицы на компьютере и списка дней на телефоне. */
+export const CELL_TONE = {
+    work: 'text-[12.5px] font-medium text-slate-700',
+    off: 'text-[11.5px] text-slate-300',
+    leave: 'rounded-md bg-emerald-50 px-1 text-[11px] font-semibold text-emerald-700 ring-1 ring-emerald-100',
+    unpaid: 'rounded-md bg-amber-50 px-1 text-[11px] font-semibold text-amber-700 ring-1 ring-amber-100',
+    sick: 'rounded-md bg-sky-50 px-1 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-100',
+    empty: 'text-[11px] text-slate-200',
+};
 
 export function Loading({ text = 'Загружаем…' }) {
     return (

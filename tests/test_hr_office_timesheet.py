@@ -163,6 +163,8 @@ class RosterTests(unittest.TestCase):
 
 
 class WorkbookTests(unittest.TestCase):
+    """Excel — как лист « 2026» «Приложения 2» HR: шапка в строках 1–2, человек — строки 3–4."""
+
     def test_workbook_has_two_rows_per_person_and_formulas(self):
         from io import BytesIO
         from openpyxl import load_workbook
@@ -174,10 +176,11 @@ class WorkbookTests(unittest.TestCase):
                                                                   job_title='HR менеджер')]}]}
         sheet = load_workbook(BytesIO(timesheet.workbook(model))).active
         self.assertEqual(sheet.cell(row=2, column=4).value, 'Ф.И.О должностного лица')
-        self.assertEqual(sheet.cell(row=4, column=4).value, 'Тестов Тест')
-        self.assertEqual(sheet.cell(row=5, column=13).value, -10)    # минуты — строкой ниже, 5-е число
-        self.assertEqual(sheet.cell(row=4, column=40).value, '=COUNT(I4:AM4)')
-        self.assertEqual(sheet.cell(row=4, column=43).value, '=SUM(I5:AM5)')
+        self.assertEqual(sheet.cell(row=3, column=4).value, 'Тестов Тест')
+        self.assertEqual(sheet.cell(row=3, column=5).value, 'ГПХ ИП Тест')   # компания — без ёлочек, как у HR
+        self.assertEqual(sheet.cell(row=4, column=13).value, -10)    # минуты — строкой ниже, 5-е число
+        self.assertEqual(sheet.cell(row=3, column=40).value, '=COUNT(I3:AM3)')
+        self.assertEqual(sheet.cell(row=3, column=43).value, '=SUM(I4:AM4)')
 
 
 if __name__ == '__main__':

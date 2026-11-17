@@ -155,7 +155,7 @@ export default function HrCompaniesSheet({ open = true, api, toast, onClose, onC
                                 {companies.map((item) => (
                                     <button key={item.id} type="button" onClick={() => setEditing(item)}
                                             className={`flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 ${item.is_active ? '' : 'opacity-60'}`}>
-                                        <span className="min-w-0 flex-1">
+                                        <span className="min-w-0 grow basis-0">
                                             <span className="block truncate text-[14px] font-medium text-slate-900">{item.display_name || item.name}</span>
                                             <span className="block truncate text-[12.5px] text-slate-500">
                                                 {item.bin ? `${item.id_label} ${item.bin}` : ''}{item.signer_name ? ` · ${item.signer_name}` : ''}

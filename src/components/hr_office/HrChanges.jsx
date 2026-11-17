@@ -88,7 +88,7 @@ export function SkeletonRows({ rows = 6, label = 'Загружаем' }) {
             {Array.from({ length: rows }, (_, index) => (
                 <div key={index} className="flex items-start gap-3 px-4 py-3">
                     <span aria-hidden="true" className="h-8 w-8 shrink-0 animate-pulse rounded-[10px] bg-slate-200/70 motion-reduce:animate-none" />
-                    <div className="min-w-0 flex-1 space-y-2 pt-1">
+                    <div className="min-w-0 grow basis-0 space-y-2 pt-1">
                         <Bone className={`h-2.5 ${WIDTHS[index % WIDTHS.length]}`} />
                         <Bone className={`h-2 ${WIDTHS[(index + 3) % WIDTHS.length]}`} />
                     </div>

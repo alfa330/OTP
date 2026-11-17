@@ -5,7 +5,8 @@
     GET    /companies                     справочник компаний (HR)
     POST   /companies                     завести компанию
     PUT    /companies/<id>                изменить
-    GET    /people                        «Прием»: люди и чего не хватает (?q&project&department_id)
+    GET    /people                        «Прием»: страница людей (?q&project&view=all|new|data&offset&limit)
+    GET    /people/export                 «Список по компаниям» (Excel, как «Приложение 4» HR)
     GET    /people/<id>                   карточка оформления
     PUT    /people/<id>                   сохранить личные данные и договор
     GET    /people/<id>/documents         пакет документов (?kinds=contract,nda)
@@ -22,7 +23,7 @@
     GET    /timesheet/export              Excel
     POST   /timesheet/close               закрыть месяц {month, project}
     DELETE /timesheet/close               открыть заново (?month&project)
-    GET    /acts/people                   «АВР»: люди в моём охвате
+    GET    /acts/people                   «АВР»: страница людей охвата, отделы и выборка всех (?q&project&department_id&offset&limit)
     POST   /acts/export                   собрать АВР {period_from, period_to, act_date, items}
     POST   /import/preview                таблица HR → сверка с iCORE: что поменяется (multipart file, project)
     POST   /import/apply                  записать подтверждённое (строки с confirm: {поле: «было»})
@@ -37,7 +38,7 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import documents, journal, queries, rules, schema, service, timesheet
+from . import documents, journal, queries, rules, schema, service, sheets, timesheet
 from .service import HrError
 
 try:
@@ -210,12 +211,28 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     @route('/people')
     def hr_people(*, ctx, today):
-        service.require(ctx, 'hiring')
+        offset, limit = service.page_bounds(request.args.get('offset'), request.args.get('limit'))
         with db._get_cursor() as cursor:
-            people = service.list_people(cursor, ctx, query=request.args.get('q', ''),
-                                         project=request.args.get('project', ''),
-                                         department_id=request.args.get('department_id') or None)
-        return jsonify({'people': people}), 200
+            page = service.hiring_page(cursor, ctx, query=request.args.get('q', ''),
+                                       project=request.args.get('project', ''),
+                                       view=request.args.get('view', 'all'), offset=offset, limit=limit)
+        return jsonify(page), 200
+
+    @route('/people/export')
+    def hr_people_export(*, ctx, today):
+        """«Список по компаниям» — как «Приложение 4» HR, по тому же отбору, что на экране «Приема»."""
+        with db._get_cursor() as cursor:
+            people = service.hiring_people(cursor, ctx, query=request.args.get('q', ''),
+                                           project=request.args.get('project', ''),
+                                           view=request.args.get('view', 'all'))
+            if not people:
+                raise HrError('Под отбор никто не попал', status=404, code='HR_LIST_EMPTY')
+            queries.audit(cursor, section='intake', action='export', actor_id=ctx['user_id'],
+                          summary=f"Выгружен список по компаниям: {len(people)} "
+                                  f"{rules.plural_form(len(people), ('сотрудник', 'сотрудника', 'сотрудников'))}"
+                                  + (f", проект «{request.args.get('project')}»" if request.args.get('project') else ''))
+        payload = sheets.companies_workbook(service.companies_groups(people))
+        return _file(payload, XLSX_MIME, f'Список по компаниям {today.strftime("%d.%m.%Y")}.xlsx')
 
     @route('/people/<int:user_id>', methods=('GET', 'PUT'))
     def hr_person(user_id, *, ctx, today):
@@ -361,9 +378,16 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
         service.require(ctx, 'timesheet')
         month, project, until, user_ids = _timesheet_args()
         model = _model(today=today, month=month, project=project, until=until, user_ids=user_ids)
-        if not any(group['people'] for group in model['groups']):
+        people = sum(len(group['people']) for group in model['groups'])
+        if not people:
             raise HrError('В табель никто не попал', status=404, code='HR_TIMESHEET_EMPTY')
-        return _file(timesheet.workbook(model), XLSX_MIME, timesheet.file_name(model))
+        payload = timesheet.workbook(model)
+        with db._get_cursor() as cursor:
+            queries.audit(cursor, section='timesheet', action='export', actor_id=ctx['user_id'],
+                          summary=f"Выгружен табель «{model.get('project') or 'выбранные'}», "
+                                  f"{str(model.get('title') or '').lower()}: {people} "
+                                  f"{rules.plural_form(people, ('сотрудник', 'сотрудника', 'сотрудников'))}")
+        return _file(payload, XLSX_MIME, timesheet.file_name(model))
 
     def _ensure_open(cursor, user_id, day):
         """Правки закрытого месяца запрещены: табель уже ушёл в бухгалтерию."""
@@ -470,11 +494,12 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     @route('/acts/people')
     def hr_acts_people(*, ctx, today):
+        offset, limit = service.page_bounds(request.args.get('offset'), request.args.get('limit'))
         with db._get_cursor() as cursor:
-            people = service.acts_people(cursor, ctx, project=request.args.get('project', ''),
-                                         department_id=request.args.get('department_id') or None,
-                                         query=request.args.get('q', ''))
-        return jsonify({'people': people}), 200
+            page = service.acts_page(cursor, ctx, project=request.args.get('project', ''),
+                                     department_id=request.args.get('department_id') or None,
+                                     query=request.args.get('q', ''), offset=offset, limit=limit)
+        return jsonify(page), 200
 
     @route('/acts/export', methods=('POST',))
     def hr_acts_export(*, ctx, today):

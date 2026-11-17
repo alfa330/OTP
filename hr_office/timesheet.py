@@ -19,11 +19,7 @@ import json
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta
-from io import BytesIO
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 
 from . import queries, rules
 
@@ -241,6 +237,9 @@ def build_person_row(person, days, *, holidays, until, fact_until, plan, plan_so
     for day in days:
         cell = {'v': '', 'm': None, 'cv': '', 'cm': None, 'edited': False, 'no_marks': False}
         employed = not not_employed(day, hired, dismissals)
+        if not employed:
+            # Выгрузка пишет поверх таких дней «Прием дд/мм/гггг» / «Увольнение …» — как табель HR.
+            cell['out'] = 'hire' if hired and day < hired else 'dismissal'
         if employed and day <= until:
             period = _period_on(periods, day)
             fact = facts.get(day)
@@ -308,6 +307,8 @@ def build_person_row(person, days, *, holidays, until, fact_until, plan, plan_so
             'minutes': sum(cell['m'] for cell in cells if isinstance(cell['m'], int)),
         },
         'overwork': over_total,
+        'hired_on': hired.isoformat() if hired and days[0] <= hired <= days[-1] else None,
+        'dismissed_on': next((start.isoformat() for start, _end in dismissals if days[0] <= start <= days[-1]), None),
         'note': note if note is not None else '',
         'note_auto': '; '.join(auto_parts),
         'active': person.get('status') not in ('fired', 'dismissal'),
@@ -424,146 +425,11 @@ def model_json(model):
 
 
 # ── Excel по образцу HR ─────────────────────────────────────────────────────
-_THIN = Side(style='thin', color='FFBFBFBF')
-_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-_FILLS = {
-    rules.CODE_UNPAID: PatternFill('solid', fgColor='FFFFFF00'),
-    rules.CODE_LEAVE: PatternFill('solid', fgColor='FF92D050'),
-    rules.CODE_SICK: PatternFill('solid', fgColor='FFF4B6B6'),
-}
-_WEEKEND_FILL = PatternFill('solid', fgColor='FFF2F2F2')
-_EDIT_FONT = Font(name='Calibri', size=9, color='FF1F4E9E', bold=True)
-
 
 def workbook(model):
-    """Лист как у HR: на человека две строки (ячейки и минуты под ними), итоги — формулами."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = (model.get('title') or 'Табель')[:31]
-    days = model['days']
-    first_day_col = 9
-    last_day_col = first_day_col + len(days) - 1
-    total_col = last_day_col + 1
-    font = Font(name='Calibri', size=9)
-    bold = Font(name='Calibri', size=9, bold=True)
-    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    title = f"Табель учёта рабочего времени · {model.get('project') or ''} · {model.get('title') or ''}".strip(' ·')
-    ws.cell(row=1, column=1, value=title).font = Font(name='Calibri', size=12, bold=True)
-
-    head_row = 2
-    headers = {1: 'Отдел', 2: '№', 3: 'Должность', 4: 'Ф.И.О должностного лица', 5: 'ТД/ГПХ', 6: 'график',
-               7: 'кол-во рабочих дней план', 8: 'план часов'}
-    for column, text in headers.items():
-        cell = ws.cell(row=head_row + 1, column=column, value=text)
-        cell.font, cell.alignment, cell.border = bold, center, _BORDER
-        ws.merge_cells(start_row=head_row, start_column=column, end_row=head_row + 1, end_column=column)
-        ws.cell(row=head_row, column=column).value = text
-        ws.cell(row=head_row, column=column).font = bold
-        ws.cell(row=head_row, column=column).alignment = center
-    for offset, day in enumerate(days):
-        column = first_day_col + offset
-        top = ws.cell(row=head_row, column=column, value=day['day'])
-        bottom = ws.cell(row=head_row + 1, column=column, value=day['weekday'])
-        for cell in (top, bottom):
-            cell.font, cell.alignment, cell.border = bold, center, _BORDER
-            if day['weekend'] or day['holiday']:
-                cell.fill = _WEEKEND_FILL
-    totals = ['кол-во отработанных смен', 'КОЛИЧЕСТВО ОТРАБОТАННЫХ ЧАСОВ', 'кол-во пропусков/отпуск/бс/б',
-              'итого минут опозданий/переработок', 'Комментарии, переработки']
-    for offset, text in enumerate(totals):
-        column = total_col + offset
-        ws.merge_cells(start_row=head_row, start_column=column, end_row=head_row + 1, end_column=column)
-        cell = ws.cell(row=head_row, column=column, value=text)
-        cell.font, cell.alignment, cell.border = bold, center, _BORDER
-
-    row = head_row + 2
-    number = 0
-    first_letter = get_column_letter(first_day_col)
-    last_letter = get_column_letter(last_day_col)
-    for group in model['groups']:
-        group_start = row
-        for person in group['people']:
-            number += 1
-            values = {2: number, 3: person['job_title'], 4: person['name'], 5: person['contract_label'],
-                      6: person['schedule'], 7: person['plan_days'], 8: person['plan_hours']}
-            for column, value in values.items():
-                ws.merge_cells(start_row=row, start_column=column, end_row=row + 1, end_column=column)
-                cell = ws.cell(row=row, column=column, value=value)
-                cell.font = font
-                cell.alignment = Alignment(horizontal='left' if column in (3, 4, 5) else 'center',
-                                           vertical='center', wrap_text=True)
-            for offset, cell_data in enumerate(person['cells']):
-                column = first_day_col + offset
-                value = cell_data['v']
-                numeric = rules.number_or_none(value)
-                top = ws.cell(row=row, column=column, value=numeric if numeric is not None and value != '' else
-                              (value or None))
-                top.font = _EDIT_FONT if cell_data.get('edited') else font
-                top.alignment = center
-                if value in _FILLS:
-                    top.fill = _FILLS[value]
-                elif days[offset]['weekend'] or days[offset]['holiday']:
-                    top.fill = _WEEKEND_FILL
-                minutes = cell_data.get('m')
-                bottom = ws.cell(row=row + 1, column=column, value=minutes if minutes not in (None, '') else None)
-                bottom.font = Font(name='Calibri', size=8, color='FFC00000' if isinstance(minutes, int)
-                                   and minutes < 0 else 'FF404040')
-                bottom.alignment = center
-            r1, r2 = row, row + 1
-            formulas = [
-                f'=COUNT({first_letter}{r1}:{last_letter}{r1})',
-                f'=SUM({first_letter}{r1}:{last_letter}{r1})',
-                f'=COUNTIF({first_letter}{r1}:{last_letter}{r1},"О")+COUNTIF({first_letter}{r1}:{last_letter}{r1},"А")'
-                f'+COUNTIF({first_letter}{r1}:{last_letter}{r1},"Б")',
-                f'=SUM({first_letter}{r2}:{last_letter}{r2})',
-            ]
-            for offset, formula in enumerate(formulas):
-                column = total_col + offset
-                ws.merge_cells(start_row=r1, start_column=column, end_row=r2, end_column=column)
-                cell = ws.cell(row=r1, column=column, value=formula)
-                cell.font, cell.alignment = font, center
-            note = person.get('note') or person.get('note_auto') or ''
-            column = total_col + len(formulas)
-            ws.merge_cells(start_row=r1, start_column=column, end_row=r2, end_column=column)
-            cell = ws.cell(row=r1, column=column, value=note or None)
-            cell.font = font
-            cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
-            for r in (r1, r2):
-                for column in range(1, total_col + len(totals)):
-                    ws.cell(row=r, column=column).border = _BORDER
-            row += 2
-        if row > group_start:
-            ws.merge_cells(start_row=group_start, start_column=1, end_row=row - 1, end_column=1)
-            cell = ws.cell(row=group_start, column=1, value=group['name'])
-            cell.font = bold
-            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True, text_rotation=90)
-
-    legend_row = row + 1
-    ws.cell(row=legend_row, column=3, value='Обозначения:').font = bold
-    for index, (code, text) in enumerate(rules.LEGEND):
-        ws.cell(row=legend_row + 1 + index, column=3, value=code).font = bold
-        ws.cell(row=legend_row + 1 + index, column=4, value=text).font = font
-    ws.cell(row=legend_row + 1 + len(rules.LEGEND), column=3, value='−мин').font = bold
-    ws.cell(row=legend_row + 1 + len(rules.LEGEND), column=4,
-            value='Под ячейкой — минуты опоздания по «Отметкам»').font = font
-
-    widths = {1: 6, 2: 4, 3: 22, 4: 26, 5: 18, 6: 6, 7: 8, 8: 7}
-    for column, width in widths.items():
-        ws.column_dimensions[get_column_letter(column)].width = width
-    for column in range(first_day_col, last_day_col + 1):
-        ws.column_dimensions[get_column_letter(column)].width = 4.2
-    for offset, width in enumerate((8, 10, 9, 10, 24)):
-        ws.column_dimensions[get_column_letter(total_col + offset)].width = width
-    ws.freeze_panes = ws.cell(row=head_row + 2, column=first_day_col)
-    ws.page_setup.orientation = 'landscape'
-    ws.page_setup.paperSize = ws.PAPERSIZE_A4
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.print_title_rows = f'{head_row}:{head_row + 1}'
-    buffer = BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+    """Табель в Excel один в один с листом « 2026» «Приложения 2 - Табель» HR — см. hr_office/sheets.py."""
+    from . import sheets
+    return sheets.timesheet_workbook(model)
 
 
 def file_name(model):

@@ -376,8 +376,8 @@ def acts_workbook(acts):
         sheet['F13'] = (f'Договор № {number} от {rules.date_long(signed_on)}' if number
                         else 'Договор №___ от ____________ г.')
         sheet['AH15'] = act['number']
+        # Формат даты и суммы — шаблона HR (дата — короткая системная, сумма — финансовый без копеек).
         sheet['AM15'] = act['act_date']
-        sheet['AM15'].number_format = 'DD.MM.YYYY'
         sheet['C20'] = act['work_name']
         sheet['C20'].alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
         sheet['P20'] = rules.act_period_text(act['period_from'], act['period_to'])
@@ -388,17 +388,19 @@ def acts_workbook(acts):
             sheet['AL20'] = float(amount)
             sheet['AR20'] = float(amount)
             sheet['AR21'] = float(amount)
-            sheet['AR20'].number_format = '#,##0.00'
         sheet['F29'] = _text(contract.get('job_title') or person.get('job_title'))
         sheet['R29'] = rules.short_name(person.get('name'))
         sheet['AF29'] = _text(company.get('signer_position')) or 'Директор'
         sheet['AR29'] = _text(company.get('signer_name'))
-        # Печать — как в образце: альбом, по ширине листа.
-        sheet.page_setup.orientation = 'landscape'
+        # Печать и вид — как в форме HR: альбом, по ширине листа (высота — сколько выйдет), строки
+        # 17–19 повторяются, область A1:AW34, масштаб экрана 130 %. Копия листа их не переносит сама.
+        sheet.page_setup.orientation = base.page_setup.orientation or 'landscape'
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
-        sheet.page_setup.fitToWidth = 1
-        sheet.page_setup.fitToHeight = 1
+        sheet.page_setup.fitToWidth = base.page_setup.fitToWidth
+        sheet.page_setup.fitToHeight = 0
         sheet.print_area = 'A1:AW34'
+        sheet.print_title_rows = '17:19'
+        sheet.sheet_view.zoomScale = base.sheet_view.zoomScale
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
