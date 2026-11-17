@@ -76,7 +76,8 @@ class OutboundReturnRuleTests(unittest.TestCase):
         self.assertEqual(_rule()('6', 'binotel')['seconds'], 180)
 
     def test_sales_and_strangers_get_no_rule(self):
-        """У отдела продаж Тез «Исход» — рабочий режим обзвона: возврат им не положен."""
+        """Отделу продаж Тез возврат не положен: у них простой «Исхода» кончается «Офлайном»
+        (_icore_phone_idle_offline, решение владельца 17.11.2026)."""
         self.assertIsNone(_rule()(9, 'binotel'))
         self.assertIsNone(_rule()(77, 'binotel'))
         # Человека без модели расчёта (глава, СВ) в составе нет вовсе.
@@ -167,6 +168,7 @@ class OutboundReturnEndpointTests(unittest.TestCase):
             '_dial_list_phone_settings': lambda user_id: {'enabled': False},
             '_client_cards_phone_settings': lambda user_id: {'enabled': False},
             '_icore_phone_outbound_return': outbound_return,
+            '_icore_phone_idle_offline': lambda user_id, provider: None,
             'SIP_AUTO_ANSWER_DELAY_DEFAULT': 2,
             '_ICORE_PHONE_PROFILE_UNKNOWN': unknown,
             '_icore_phone_status_profile': lambda user_id, provider: None,
