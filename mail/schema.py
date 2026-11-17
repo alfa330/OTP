@@ -203,7 +203,61 @@ STATEMENTS = (
         updated_at  TIMESTAMP NOT NULL DEFAULT %(now)s
     )
     """,
+    # Уведомления в колоколе (ТЗ п. 8): строка — одному человеку об одном событии отправления
+    # (mail/notices.py). Повтор утреннего обхода отсекает dedupe_key.
+    """
+    CREATE TABLE IF NOT EXISTS mail_notifications (
+        id           BIGSERIAL PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        shipment_id  INTEGER NOT NULL REFERENCES mail_shipments(id) ON DELETE CASCADE,
+        kind         VARCHAR(24) NOT NULL,
+        actionable   BOOLEAN NOT NULL DEFAULT FALSE,
+        title        VARCHAR(300) NOT NULL,
+        body         TEXT,
+        tone         VARCHAR(16) NOT NULL DEFAULT 'default',
+        dedupe_key   VARCHAR(120),
+        created_at   TIMESTAMP NOT NULL DEFAULT %(now)s,
+        read_at      TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_mail_notifications_unread "
+    "ON mail_notifications (user_id, id DESC) WHERE read_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_mail_notifications_shipment "
+    "ON mail_notifications (shipment_id, kind) WHERE read_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_mail_notifications_dedupe "
+    "ON mail_notifications (user_id, dedupe_key) WHERE dedupe_key IS NOT NULL",
 )
+
+# Тычок колоколу — общей функцией портала bell_notify_change() (db/schema.py, ветка
+# 'mail_notifications'). Те же триггеры объявлены в _init_bell_notify_schema_tx: там они на каждом
+# старте снимаются и ставятся заново под lock_timeout с повтором, но только если таблица уже есть,
+# а таблицы раздела создаются позже — при подключении Blueprint. Поэтому ensure() ставит лишь
+# НЕДОСТАЮЩИЕ (первый запуск), а обновление определений остаётся общей схеме.
+BELL_TRIGGERS = (
+    ('trg_bell_mail_notifications_insert', 'AFTER INSERT', ''),
+    ('trg_bell_mail_notifications', 'AFTER UPDATE OF read_at', 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)'),
+)
+
+
+def ensure_bell_triggers(cursor):
+    """Ставит недостающие триггеры колокола; возвращает, сколько поставлено.
+
+    Не снимает и не переставляет существующие: DROP TRIGGER берёт эксклюзивную блокировку
+    таблицы, а во время выкладки старый экземпляр ещё читает и пишет mail_notifications."""
+    cursor.execute("SELECT to_regprocedure('bell_notify_change()') IS NOT NULL")
+    if not cursor.fetchone()[0]:
+        return 0
+    cursor.execute("SELECT tgname FROM pg_trigger WHERE tgrelid = to_regclass('mail_notifications') "
+                   "AND NOT tgisinternal")
+    present = {row[0] for row in cursor.fetchall()}
+    created = 0
+    for name, timing, when in BELL_TRIGGERS:
+        if name in present:
+            continue
+        cursor.execute("CREATE TRIGGER %s %s ON mail_notifications FOR EACH ROW %s "
+                       "EXECUTE FUNCTION bell_notify_change()" % (name, timing, when))
+        created += 1
+    return created
 
 # Администратор раздела по решению владельца 13.11.2026 («суперадмины и Дина»):
 # постановщик ТЗ #417. Заводится ОДИН раз — метка в mail_settings, — чтобы удалённая
@@ -271,6 +325,23 @@ def ensure_in_cursor(cursor):
         cursor.execute(statement)
     zones = seed_zones(cursor)
     admins = seed_admins(cursor)
+    # Экран «Справочников» до 17.11.2026 слал пустые границы эконома нулём (Number(null) === 0), и
+    # «0–0» открывал эконом со сроком в день передачи. Верхнюю границу 0 сервер больше не принимает,
+    # значит нуль здесь — только след той ошибки: возвращаем «эконом не задан».
+    cursor.execute("UPDATE mail_zones SET eco_min_days = NULL, eco_max_days = NULL WHERE eco_max_days = 0")
+    if cursor.rowcount:
+        logger.warning('Почта: у %s зон эконом «0–0» сброшен в «не задан»', cursor.rowcount)
+    # Триггеры колокола — под своей точкой отката и с ограничением ожидания блокировки: без них
+    # колокол обновится по фокусу окна, а вот сбой здесь не должен оставить раздел неподключённым.
+    cursor.execute('SAVEPOINT mail_bell_triggers')
+    try:
+        cursor.execute("SELECT set_config('lock_timeout', '5s', true)")
+        ensure_bell_triggers(cursor)
+    except Exception:  # noqa: BLE001
+        cursor.execute('ROLLBACK TO SAVEPOINT mail_bell_triggers')
+        logger.exception('Почта: триггеры колокола не поставлены — колокол обновится по фокусу окна')
+    finally:
+        cursor.execute('RELEASE SAVEPOINT mail_bell_triggers')
     return zones, admins
 
 

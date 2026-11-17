@@ -773,3 +773,308 @@ def test_pilot_opens_the_section_to_super_admins_only(api, db, monkeypatch):
         assert queries.section_open_for(cur, SUPER, 'super_admin')
         assert not queries.section_open_for(cur, CLERK_A, 'operator')
         assert not queries.section_open_for(cur, ADMIN, 'admin')
+
+
+# ─── Уведомления в колоколе (ТЗ п. 8) ────────────────────────────────────────
+
+def unread(db, user=None, kind=None):
+    """{(user_id, kind)} непрочитанных строк колокола «Почты»."""
+    with db._get_cursor() as cur:
+        cur.execute("SELECT user_id, kind, actionable, tone FROM mail_notifications WHERE read_at IS NULL "
+                    "ORDER BY id")
+        rows = cur.fetchall()
+    return {(row[0], row[1]) for row in rows
+            if (user is None or row[0] == user) and (kind is None or row[1] == kind)}
+
+
+def test_recipient_office_hears_about_incoming_and_reconciliation(api, db):
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1').status_code == 200
+    # Новая входящая — сотрудникам офиса получения (и координатору этого офиса), не отправителю.
+    assert unread(db, kind='incoming') == {(CLERK_P, 'incoming'), (CLERK_P2, 'incoming'), (COORD, 'incoming')}
+    # Открыл карточку — «к сведению» прочитано у него одного.
+    api.as_(CLERK_P).get('/shipments/%d' % sid)
+    assert unread(db, kind='incoming') == {(CLERK_P2, 'incoming'), (COORD, 'incoming')}
+    assert api.as_(CLERK_P).post('/shipments/%d/actions/deliver' % sid,
+                                 {'delivered_on': queries.today_almaty().isoformat()}).status_code == 200
+    assert unread(db, kind='reconcile') == {(CLERK_P, 'reconcile'), (CLERK_P2, 'reconcile'), (COORD, 'reconcile')}
+    # «Сверьте …» сменяет «Входящее …» — по одному отправлению одна строка, не две.
+    assert unread(db, kind='incoming') == set()
+    # «Сверьте» — действие: просмотром не гаснет.
+    api.as_(CLERK_P2).get('/shipments/%d' % sid)
+    assert (CLERK_P2, 'reconcile') in unread(db)
+    items = api.as_(CLERK_P).get('/shipments/%d' % sid).get_json()['items']
+    assert api.as_(CLERK_P).post('/shipments/%d/actions/reconcile' % sid, {
+        'lines': [{'id': item['id'], 'line_status': 'ok'} for item in items]}).status_code == 200
+    assert unread(db, kind='reconcile') == set()
+    # Отправителю — итог сверки.
+    assert unread(db, user=CLERK_A) == {(CLERK_A, 'result')}
+
+
+def test_discrepancy_warns_the_initiator_and_the_coordinator(api, db):
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1').status_code == 200
+    items = api.as_(CLERK_P).get('/shipments/%d' % sid).get_json()['items']
+    assert api.as_(CLERK_P).post('/shipments/%d/actions/reconcile' % sid, {
+        'delivered_on': queries.today_almaty().isoformat(), 'note': 'одного АВР нет',
+        'lines': [{'id': items[0]['id'], 'line_status': 'shortage', 'received_qty': 4},
+                  {'id': items[1]['id'], 'line_status': 'ok'}]}).status_code == 200
+    assert unread(db, kind='problem') == {(CLERK_A, 'problem'), (ADMIN, 'problem'), (CENTRAL, 'problem'),
+                                          (COORD, 'problem')}
+    with db._get_cursor() as cur:
+        cur.execute("SELECT DISTINCT tone, body FROM mail_notifications WHERE kind = 'problem'")
+        assert cur.fetchall() == [('warning', 'одного АВР нет')]
+    # Проблему решили — «Расхождение …» гаснет у всех, инициатору — итог.
+    assert api.as_(COORD).post('/shipments/%d/actions/resolve' % sid, {'note': 'досылаем'}).status_code == 200
+    assert unread(db, kind='problem') == set()
+    assert unread(db, user=CLERK_A) == {(CLERK_A, 'result')}
+
+
+def test_morning_round_reminds_warns_and_escalates(api, db):
+    from mail import notices
+
+    wednesday = date(2026, 11, 18)
+    stale = create(api)['shipment']['id']
+    soon, late, very_late = (create(api)['shipment']['id'] for _ in range(3))
+    for sid, track in ((soon, 'MBE-S'), (late, 'MBE-L'), (very_late, 'MBE-V')):
+        assert hand_over(api, sid, zone_code='1', track_number=track).status_code == 200
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET ready_at = '2026-11-16 09:00' WHERE id = %s", (stale,))
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-19' WHERE id = %s", (soon,))
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-17' WHERE id = %s", (late,))
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-13' WHERE id = %s", (very_late,))
+        cur.execute("UPDATE mail_notifications SET read_at = now()")
+        counts = notices.remind(cur, today=wednesday, holidays=rules.kz_holidays())
+        again = notices.remind(cur, today=wednesday, holidays=rules.kz_holidays())
+    office_p = {CLERK_P, CLERK_P2, COORD}
+    overdue_to = {CLERK_A, ADMIN, CENTRAL} | office_p
+    assert counts == {'ready_stale': 1, 'due_soon': 1 + len(office_p), 'overdue': 2 * len(overdue_to),
+                      'escalation': 3}
+    assert again == {'ready_stale': 0, 'due_soon': 0, 'overdue': 0, 'escalation': 0}
+    assert unread(db, kind='ready_stale') == {(CLERK_A, 'ready_stale')}
+    assert {user for user, _ in unread(db, kind='due_soon')} == {CLERK_A} | office_p
+    # Просрочка — отправителю, офису получения и координатору; эскалация — руководителю.
+    assert {user for user, _ in unread(db, kind='overdue')} == overdue_to
+    assert {user for user, _ in unread(db, kind='escalation')} == {ADMIN, CENTRAL, REGIONAL}
+    with db._get_cursor() as cur:
+        cur.execute("SELECT title FROM mail_notifications WHERE kind = 'escalation' LIMIT 1")
+        assert cur.fetchone()[0].endswith('просрочено на 3 рабочих дня')
+        # На следующий день эскалация встаёт заново — одной свежей строкой, вчерашняя гаснет;
+        # второе отправление (срок 17.11) теперь тоже опаздывает на 2 рабочих дня и поднимается к руководителю.
+        assert notices.remind(cur, today=date(2026, 11, 19), holidays=rules.kz_holidays())['escalation'] == 6
+        cur.execute("SELECT shipment_id, COUNT(*), COUNT(*) FILTER (WHERE read_at IS NULL) FROM mail_notifications "
+                    "WHERE kind = 'escalation' GROUP BY shipment_id")
+        assert {row[0]: (row[1], row[2]) for row in cur.fetchall()} == {very_late: (6, 3), late: (3, 3)}
+        # В выходной обход молчит.
+        assert set(notices.remind(cur, today=date(2026, 11, 21), holidays=rules.kz_holidays()).values()) == {0}
+    # Дело сделано — «ждёт действия» гаснет: передали курьеру, вручили.
+    assert hand_over(api, stale, zone_code='1', track_number='MBE-ST').status_code == 200
+    assert unread(db, kind='ready_stale') == set()
+    assert api.as_(CLERK_P).post('/shipments/%d/actions/deliver' % very_late,
+                                 {'delivered_on': queries.today_almaty().isoformat()}).status_code == 200
+    with db._get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM mail_notifications WHERE shipment_id = %s AND read_at IS NULL "
+                    "AND kind IN ('overdue', 'escalation')", (very_late,))
+        assert cur.fetchone()[0] == 0
+
+
+def test_corrected_deadline_drops_stale_notices(api, db):
+    from mail import notices
+
+    wednesday = date(2026, 11, 18)
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1', track_number='MBE-D').status_code == 200
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-13' WHERE id = %s", (sid,))
+        counts = notices.remind(cur, today=wednesday, holidays=rules.kz_holidays())
+    assert counts['overdue'] and counts['escalation']
+    # Срок исправили на 19.11 — просрочка и эскалация о прежнем сроке гаснут сразу,
+    # по новому сроку (следующий рабочий день) — «срок завтра» сторонам.
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-19' WHERE id = %s", (sid,))
+        shipment = queries.read_shipment(cur, sid)
+        assert notices.refresh_deadline(cur, shipment, today=wednesday, holidays=rules.kz_holidays()) == {
+            'due_soon': 4, 'overdue': 0, 'escalation': 0}
+    assert unread(db, kind='overdue') == set() and unread(db, kind='escalation') == set()
+    assert {user for user, _ in unread(db, kind='due_soon')} == {CLERK_A, CLERK_P, CLERK_P2, COORD}
+    # Наступила просрочка — «срок завтра» сменяется «просрочено», двух строк об одном нет.
+    with db._get_cursor() as cur:
+        notices.remind(cur, today=date(2026, 11, 20), holidays=rules.kz_holidays())
+    assert unread(db, kind='due_soon') == set() and unread(db, kind='overdue')
+    # Тот же сброс — и через правку передачи курьеру в карточке: новый срок в будущем,
+    # строк о просрочке не остаётся (в любой день недели: гашение от выходных не зависит).
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-13' WHERE id = %s", (sid,))
+    earlier = (queries.now_almaty() - timedelta(hours=2)).replace(microsecond=0)
+    fixed = api.as_(CLERK_A).patch('/shipments/%d' % sid, dict(shipment_body(), reason='ошиблись временем',
+                                                              handed_at=earlier.isoformat()))
+    assert fixed.status_code == 200, fixed.get_json()
+    assert fixed.get_json()['shipment']['due_on'] > queries.today_almaty().isoformat()
+    assert unread(db, kind='overdue') == set() and unread(db, kind='escalation') == set()
+
+
+def test_bell_triggers_are_set_once_and_never_take_the_section_down(db, monkeypatch):
+    with db._get_cursor() as cur:
+        # В этой базе нет общей функции колокола (её ставит db/schema.py) — триггеров не ставим.
+        assert schema.ensure_bell_triggers(cur) == 0
+        cur.execute("CREATE FUNCTION bell_notify_change() RETURNS trigger LANGUAGE plpgsql "
+                    "AS $$ BEGIN RETURN NULL; END $$")
+        assert schema.ensure_bell_triggers(cur) == 2
+        # Повторный старт ничего не снимает и не ставит: DROP TRIGGER на живой таблице во время
+        # выкладки ждал бы эксклюзивную блокировку.
+        assert schema.ensure_bell_triggers(cur) == 0
+        cur.execute("SELECT tgname FROM pg_trigger WHERE tgrelid = to_regclass('mail_notifications') "
+                    "AND NOT tgisinternal ORDER BY tgname")
+        assert [row[0] for row in cur.fetchall()] == ['trg_bell_mail_notifications',
+                                                      'trg_bell_mail_notifications_insert']
+
+    def broken(cursor):
+        cursor.execute('SELECT 1 / 0')
+
+    # Сбой на триггерах не роняет подключение раздела: транзакция жива, таблицы на месте.
+    monkeypatch.setattr(schema, 'ensure_bell_triggers', broken)
+    with db._get_cursor() as cur:
+        schema.ensure_in_cursor(cur)
+        cur.execute("SELECT COUNT(*) FROM mail_zones")
+        assert cur.fetchone()[0] == 3
+
+
+def test_pilot_super_admins_stand_in_for_coordinator_and_manager(api, db, monkeypatch):
+    from mail import notices
+
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1', track_number='MBE-PILOT').status_code == 200
+    monkeypatch.setattr(access, 'PILOT_SUPER_ADMIN_ONLY', True)
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_notifications SET read_at = now()")
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-13' WHERE id = %s", (sid,))
+        # Суперадмин не в «Участниках» — раздел не пробует: колокол о пилоте ему не шумит.
+        counts = notices.remind(cur, today=date(2026, 11, 18), holidays=rules.kz_holidays())
+    assert counts['overdue'] == 0 and counts['escalation'] == 0
+    # Завёл себя в «Участники» — замещает координатора и руководителя: строк admin и central у
+    # суперадминов нет, а администраторы раздела в пилоте — они (access.is_admin).
+    assert api.as_(SUPER).put('/participants/%d' % SUPER, {'office_ids': [OFFICE_A]}).status_code == 200
+    with db._get_cursor() as cur:
+        counts = notices.remind(cur, today=date(2026, 11, 19), holidays=rules.kz_holidays())
+    assert counts['overdue'] == 1 and counts['escalation'] == 1
+    assert unread(db) == {(SUPER, 'overdue'), (SUPER, 'escalation')}
+
+
+def test_one_day_route_warns_on_the_handover_day(api, db, monkeypatch):
+    # Срок в 1 рабочий день: утренний обход в день передачи видел отправление ещё не переданным,
+    # а назавтра «следующий рабочий день» — уже сегодня. Строка встаёт сразу при передаче.
+    monday = datetime(2026, 11, 16, 15, 0)
+    monkeypatch.setattr(queries, 'now_almaty', lambda: monday)
+    monkeypatch.setattr(queries, 'today_almaty', lambda: monday.date())
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='2', track_number='MBE-CITY',
+                     handed_at='2026-11-16T14:30').status_code == 200
+    card = api.as_(CLERK_A).get('/shipments/%d' % sid).get_json()['shipment']
+    assert card['due_on'] == '2026-11-17'
+    # Офису получения — ждёт в колоколе; отправитель карточку видит сразу после шага, и его
+    # строка «к сведению» тут же прочитана.
+    assert {user for user, _ in unread(db, kind='due_soon')} == {CLERK_P, CLERK_P2, COORD}
+    with db._get_cursor() as cur:
+        cur.execute("SELECT user_id FROM mail_notifications WHERE kind = 'due_soon' AND read_at IS NOT NULL")
+        assert [row[0] for row in cur.fetchall()] == [CLERK_A]
+
+
+def test_not_delivered_keeps_escalating_and_return_clears_it(api, db):
+    from mail import notices
+
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1', track_number='MBE-ND').status_code == 200
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-11-13' WHERE id = %s", (sid,))
+        assert notices.remind(cur, today=date(2026, 11, 18), holidays=rules.kz_holidays())['escalation'] == 3
+    assert api.as_(CLERK_P).post('/shipments/%d/actions/not_delivered' % sid,
+                                 {'note': 'адресата нет на месте'}).status_code == 200
+    # Срок у «Не удалось вручить» идёт (rules.SLA_RUNNING): эскалация назавтра встаёт свежей,
+    # а не висит вчерашней с застывшим числом дней.
+    with db._get_cursor() as cur:
+        assert notices.remind(cur, today=date(2026, 11, 19), holidays=rules.kz_holidays())['escalation'] == 3
+        cur.execute("SELECT title FROM mail_notifications WHERE kind = 'escalation' AND read_at IS NULL LIMIT 1")
+        assert cur.fetchone()[0].endswith('просрочено на 4 рабочих дня')
+    # Возврат — ждать отправление у получателя и торопить по сроку больше незачем.
+    assert api.as_(ADMIN).post('/shipments/%d/actions/start_return' % sid,
+                               {'note': 'возвращаем отправителю'}).status_code == 200
+    assert unread(db, kind='overdue') == set() and unread(db, kind='escalation') == set()
+    assert unread(db, kind='incoming') == set()
+
+
+def test_round_skips_a_weekday_holiday_and_does_not_count_it(api, db):
+    from mail import notices
+
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1', track_number='MBE-HOL').status_code == 200
+    waiting = create(api)['shipment']['id']
+    holidays = rules.kz_holidays()
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_notifications SET read_at = now()")
+        cur.execute("UPDATE mail_shipments SET due_on = '2026-12-15' WHERE id = %s", (sid,))
+        cur.execute("UPDATE mail_shipments SET ready_at = '2026-12-10 09:00' WHERE id = %s", (waiting,))
+        # 16.12 — День Независимости, среда: обход молчит — и о сроках, и о «ждёт передачи».
+        assert set(notices.remind(cur, today=date(2026, 12, 16), holidays=holidays).values()) == {0}
+        # 17.12: просрочка на 1 рабочий день (праздник не в счёт) — без эскалации.
+        counts = notices.remind(cur, today=date(2026, 12, 17), holidays=holidays)
+        assert counts['overdue'] and counts['escalation'] == 0 and counts['ready_stale'] == 1
+        # 18.12: два рабочих дня просрочки — эскалация.
+        assert notices.remind(cur, today=date(2026, 12, 18), holidays=holidays)['escalation'] == 3
+
+
+def test_cancel_clears_the_handover_reminder(api, db):
+    from mail import notices
+
+    sid = create(api)['shipment']['id']
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET ready_at = '2026-11-16 09:00' WHERE id = %s", (sid,))
+        assert notices.remind(cur, today=date(2026, 11, 18), holidays=rules.kz_holidays())['ready_stale'] == 1
+    assert unread(db, kind='ready_stale') == {(CLERK_A, 'ready_stale')}
+    assert api.as_(CLERK_A).post('/shipments/%d/actions/cancel' % sid, {'note': 'не нужно'}).status_code == 200
+    assert unread(db, kind='ready_stale') == set()
+
+
+def test_zero_economy_left_by_the_old_settings_screen_is_reset(db):
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_zones SET eco_min_days = 0, eco_max_days = 0 WHERE code IN ('1', '2')")
+        cur.execute("UPDATE mail_zones SET eco_min_days = 8, eco_max_days = 15 WHERE code = '3'")
+        schema.ensure_in_cursor(cur)
+        cur.execute("SELECT code, eco_min_days, eco_max_days FROM mail_zones ORDER BY position")
+        assert cur.fetchall() == [('2', None, None), ('1', None, None), ('3', 8, 15)]
+
+
+def test_ready_reminder_threshold_is_set_in_settings(api, db):
+    from mail import notices
+
+    settings = api.as_(ADMIN).get('/settings').get_json()
+    assert settings['params']['ready_remind_days'] == 1
+    body = {'zones': settings['zones'], 'routes': [], 'params': {'ready_remind_days': 3}}
+    assert api.as_(ADMIN).put('/settings', body).get_json()['params']['ready_remind_days'] == 3
+    assert api.as_(ADMIN).put('/settings', dict(body, params={'ready_remind_days': 0})).status_code == 400
+    stale = create(api)['shipment']['id']
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE mail_shipments SET ready_at = '2026-11-16 09:00' WHERE id = %s", (stale,))
+        # Ждёт 2 рабочих дня при пороге 3 — ещё рано; 4 дня — пора.
+        assert notices.remind(cur, today=date(2026, 11, 18), holidays=rules.kz_holidays())['ready_stale'] == 0
+        assert notices.remind(cur, today=date(2026, 11, 20), holidays=rules.kz_holidays())['ready_stale'] == 1
+
+
+def test_bell_source_and_pilot(api, db, monkeypatch):
+    from notifications import sources
+
+    sid = create(api)['shipment']['id']
+    assert hand_over(api, sid, zone_code='1').status_code == 200
+    with db._get_cursor() as cur:
+        total, items = sources.mail(cur, {'user_id': CLERK_P}, 5)
+    assert total == 1 and items[0]['view'] == 'mail' and items[0]['target'] == sid
+    assert items[0]['source'] == 'mail' and items[0]['title'].startswith('Входящее MAIL-')
+    # Маршрутом «Город → Город»: «из <города>» без падежа читалось бы «из Павлодар».
+    assert items[0]['title'].count(' → ') == 1 and ' из ' not in items[0]['title']
+    # Пилот: строки пишутся только тем, кому раздел открыт (суперадминам) — участникам ничего.
+    monkeypatch.setattr(access, 'PILOT_SUPER_ADMIN_ONLY', True)
+    with db._get_cursor() as cur:
+        from mail import notices
+        shipment = queries.read_shipment(cur, sid)
+        assert notices.push(cur, user_ids=[CLERK_P, SUPER], shipment=shipment, kind='incoming', title='x') == 1
+        cur.execute("SELECT user_id FROM mail_notifications WHERE title = 'x'")
+        assert [row[0] for row in cur.fetchall()] == [SUPER]

@@ -4,7 +4,7 @@ import { iosBtnGhost, iosBtnPrimary, iosCard, iosGroupLabel, iosInput } from '..
 import CustomSelect from '../ui/CustomSelect';
 import InfoHint from '../common/InfoHint';
 import { Empty, Loading } from '../hr_office/hrUi';
-import { collapseRoutePairs, errorText, serverIssues } from './mailMeta';
+import { collapseRoutePairs, daysOrNull, errorText, serverIssues } from './mailMeta';
 
 /*
  * «Справочники и настройки» (ТЗ п. 2, 7) — только администратору раздела.
@@ -21,12 +21,14 @@ const SMALL_INPUT = `${iosInput} !px-2.5 !py-2 text-center tabular-nums`;
 const collapseRoutes = (routes) => collapseRoutePairs(routes).map((route) => ({ ...route, key: uid() }));
 
 const numberField = (value) => (value === null || value === undefined ? '' : String(value));
-const toNumber = (value) => (String(value).trim() === '' ? null : Number(value));
 
 export default function MailSettings({ api, toast, onSaved }) {
     const [zones, setZones] = useState(null);
     const [routes, setRoutes] = useState([]);
     const [cities, setCities] = useState([]);
+    // ТЗ п. 8: «Готово к отправке» без передачи курьеру дольше N рабочих дней — напоминание инициатору.
+    const [remindDays, setRemindDays] = useState('1');
+    const [remindMax, setRemindMax] = useState(10);
     const [error, setError] = useState('');
     const [problems, setProblems] = useState({});
     const [busy, setBusy] = useState(false);
@@ -36,6 +38,8 @@ export default function MailSettings({ api, toast, onSaved }) {
         setZones((payload.zones || []).map((zone) => ({ ...zone, key: uid() })));
         setRoutes(collapseRoutes(payload.routes || []));
         setCities(payload.cities || []);
+        setRemindDays(String(payload.params?.ready_remind_days ?? 1));
+        setRemindMax(Number(payload.params?.ready_remind_max) || 10);
         setDirty(false);
         setProblems({});
     }, []);
@@ -61,12 +65,13 @@ export default function MailSettings({ api, toast, onSaved }) {
         try {
             const { data } = await api.put('/settings', {
                 zones: zones.map((zone) => ({
-                    code: String(zone.code).trim(), label: zone.label, min_days: toNumber(zone.min_days), max_days: toNumber(zone.max_days),
-                    eco_min_days: toNumber(zone.eco_min_days), eco_max_days: toNumber(zone.eco_max_days),
+                    code: String(zone.code).trim(), label: zone.label, min_days: daysOrNull(zone.min_days), max_days: daysOrNull(zone.max_days),
+                    eco_min_days: daysOrNull(zone.eco_min_days), eco_max_days: daysOrNull(zone.eco_max_days),
                 })),
                 routes: routes.map((route) => ({
                     from_city: route.from_city, to_city: route.to_city, zone_code: route.zone_code, both_ways: route.both_ways,
                 })),
+                params: { ready_remind_days: daysOrNull(remindDays) },
             });
             apply(data);
             toast?.('Справочники сохранены', 'success');
@@ -87,6 +92,24 @@ export default function MailSettings({ api, toast, onSaved }) {
     const bad = (key) => (problems[key] ? ' ring-2 ring-rose-300' : '');
     return (
         <div className="flex flex-col gap-5">
+            <section className="space-y-2">
+                <div className="flex items-center gap-1.5">
+                    <span className={iosGroupLabel}>Напоминания</span>
+                    <InfoHint side="left" text="Остальное приходит в колокол само: новая входящая и «сверьте» — офису получения, итог сверки — отправителю, «срок — следующий рабочий день» и просрочка — обеим сторонам, эскалация после 2 рабочих дней просрочки — администратору раздела." />
+                </div>
+                {/* Одна фраза с полем внутри: у iosInput w-full, поэтому ширина поля — !w-14,
+                    а сама фраза — строчным текстом, чтобы на узком экране переносилась словами. */}
+                <div className={`${iosCard} px-4 py-3 text-[13.5px] leading-9 text-slate-700`}>
+                    Напомнить отправителю, если отправление «Готово к отправке» и не передано курьеру дольше
+                    <input value={remindDays} inputMode="numeric" aria-label="Порог напоминания, рабочих дней"
+                           onChange={(event) => { setRemindDays(event.target.value.replace(/[^\d]/g, '').slice(0, 2)); setDirty(true); }}
+                           className={`${SMALL_INPUT} mx-2 inline-block !w-14 align-middle leading-5${bad('params.ready_remind_days')}`} />
+                    {Number(remindDays) === 1 ? 'рабочего дня' : 'рабочих дней'}
+                    {problems['params.ready_remind_days'] && (
+                        <div className="text-[12.5px] leading-5 text-rose-600">от 1 до {remindMax} рабочих дней</div>
+                    )}
+                </div>
+            </section>
             <section className="space-y-2">
                 <div className="flex items-center gap-1.5">
                     <span className={iosGroupLabel}>Зоны договора</span>

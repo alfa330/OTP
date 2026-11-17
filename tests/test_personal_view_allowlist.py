@@ -278,9 +278,10 @@ class BellTests(unittest.TestCase):
         # «Воронка найма» (#404) — свой круг: рекрутеры по выдаче, HR, тренеры групп, главы отделов найма.
         # «Карточка клиента» (#335) — свой круг: руководитель отдела, которому раздел выдан, и
         # операторы, которым телефон открывает карточку.
+        # «Почта» (#417) — свой круг: «Участники» раздела (пока пилот — суперадмины).
         self.assertEqual(set(sources.OWN_CIRCLE_VIEWS),
                          {'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'hiring',
-                          'client_cards'})
+                          'client_cards', 'mail'})
         # И наоборот: названный в наборе раздел со своим кругом ничего не меняет.
         self.assertEqual(sources.sources_outside_views(('baiga', 'crm_tickets')),
                          sources.sources_outside_views(('baiga',)))
@@ -331,7 +332,8 @@ class BellTests(unittest.TestCase):
                     continue
                 self.assertRegex(app, r"view === ['\"]%s['\"]" % view, (name, view))
 
-    def _viewer(self, requester_id, role, *, can_see_tasks=False, heads=(), allowlist=None, payments_open=True):
+    def _viewer(self, requester_id, role, *, can_see_tasks=False, heads=(), allowlist=None, payments_open=True,
+                mail_open=True):
         """Настоящий _notifications_viewer_context с подставленными соседями.
 
         payments_open — открыт ли человеку раздел «Оплата счетов»: у него свой
@@ -343,6 +345,8 @@ class BellTests(unittest.TestCase):
             '_four_you_access_for_requester': lambda requester_id, requester: (False, None),
             '_can_access_tasks': lambda role, requester_id: can_see_tasks,
             '_payments_section_open_for': lambda user_id: payments_open,
+            # «Почта» (#417) — свой круг, как у «Оплаты счетов»: по умолчанию «открыта».
+            '_mail_section_open_for': lambda user_id, role=None: mail_open,
             '_birthdays_viewer_scope': lambda requester_id, role, **kwargs: (False, 2134),
             '_checkpoint_scope_for_requester': lambda requester_id, requester: {},
             '_can_manage_checkpoints': lambda requester_id, requester: False,
@@ -383,9 +387,9 @@ class BellTests(unittest.TestCase):
         finally:
             sources._HANDLERS = original
         # Источники со своим кругом (crm, complaints, payments, discipline, twofa, hiring,
-        # client_cards) набор не прячет: их гасит собственный периметр раздела — здесь он открыт.
+        # client_cards, mail) набор не прячет: их гасит собственный периметр раздела — здесь он открыт.
         self.assertEqual(set(called), {'birthdays', 'training_plans', 'crm', 'complaints', 'payments', 'discipline',
-                                       'twofa', 'hiring', 'client_cards'})
+                                       'twofa', 'hiring', 'client_cards', 'mail'})
         for name in viewer['hidden_sources']:
             self.assertEqual(counts[name], 0, name)
         self.assertEqual(counts['total'], 3 * len(set(called)))
@@ -414,6 +418,15 @@ class BellTests(unittest.TestCase):
         self.assertIn('        viewer_context=_notifications_viewer_context,\n', block)
         routes = _read(ROOT / 'notifications' / 'routes.py')
         self.assertIn('return viewer_context(requester_id, requester), None', routes)
+
+    def test_bell_is_silent_about_mail_outside_its_circle(self):
+        """«Почта» (#417): кого нет в «Участниках» (и пока идёт пилот — всем, кроме суперадминов),
+        тому колокол о разделе молчит — строка звала бы туда, куда человека не пустят."""
+        self.assertEqual(self._viewer(ANALYST_ID + 1, 'operator', mail_open=False)['hidden_sources'],
+                         ('tasks', 'mail'))
+        self.assertEqual(self._viewer(229, 'admin', can_see_tasks=True, mail_open=False)['hidden_sources'],
+                         ('mail',))
+        self.assertEqual(self._viewer(229, 'admin', can_see_tasks=True)['hidden_sources'], ())
 
     def test_bell_is_silent_about_payments_outside_its_perimeter(self):
         """«Оплата счетов» открыта поимённо: кому раздел не открыт, тому колокол о нём

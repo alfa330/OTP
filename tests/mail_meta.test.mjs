@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     ACTION_LABELS, MENU_ACTIONS, PRIMARY_ORDER, SECONDARY_ACTIONS, actionLayout, almatyNow, blankForm, collapseRoutePairs,
-    deadlineCell, deadlineText, deadlineTone, economyReady, formIssues, formToPayload, officeLabel, primaryAction,
+    daysOrNull, deadlineCell, deadlineText, deadlineTone, economyReady, formIssues, formToPayload, officeLabel, primaryAction,
     reconcileIssues, recipientDefaults, statusTone,
 } from '../src/components/mail/mailMeta.js';
 
@@ -149,4 +149,12 @@ test('главный шаг', () => {
 test('сейчас по Алматы — от UTC+5, а не от пояса браузера', () => {
     const now = almatyNow(new Date('2026-11-13T20:30:00Z'));
     assert.deepEqual(now, { date: '2026-11-14', time: '01:30' });
+});
+
+test('пустая граница справочника остаётся пустой, а не нулём', () => {
+    // Из базы пустая граница приходит null: Number(null) === 0 молча открывал эконом «0–0».
+    for (const empty of [null, undefined, '', '  ']) assert.equal(daysOrNull(empty), null);
+    assert.equal(daysOrNull('3'), 3);
+    assert.equal(daysOrNull(' 12 '), 12);
+    assert.equal(daysOrNull(0), 0);
 });

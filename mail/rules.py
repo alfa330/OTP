@@ -739,6 +739,10 @@ def clean_zones(raw):
                 value = None
             if value is not None and (value < 0 or value > MAX_SLA_DAYS):
                 errors[key + name] = 'От 0 до %d' % MAX_SLA_DAYS
+            elif value == 0 and name in ('max_days', 'eco_max_days'):
+                # «0–0» не срок доставки: так выглядела пустая граница эконома, которую экран
+                # настроек присылал нулём, — и эконом без сроков молча открывался.
+                errors[key + name] = 'Верхняя граница — от 1 рабочего дня'
             values[name] = value
         if values['max_days'] is None:
             errors[key + 'max_days'] = 'Укажите срок'

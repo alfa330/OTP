@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import axios from 'axios';
-import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, Inbox, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, Trophy, UserPlus, X } from 'lucide-react';
+import { Bell, BookLock, Cake, CalendarCheck, CalendarClock, CalendarRange, GraduationCap, Headset, Image, Inbox, ClipboardList, CalendarDays, ChevronRight, KeyRound, ListChecks, Loader2, Mail, MessageCircleQuestion, MessageSquareWarning, Receipt, ShieldAlert, ShieldCheck, Trophy, UserPlus, X } from 'lucide-react';
 import { APPLE_FONT, IosToggle } from '../ui/ios';
 import { createCoalescedReload } from './coalescedReload.js';
 import { bellResumeHeaders, parseBellFrame } from './bellStream.js';
@@ -39,6 +39,8 @@ const SOURCE_META = {
     wiki_ack: { label: 'Ознакомление', icon: BookLock, tint: 'text-amber-600 bg-amber-50' },
     tasks: { label: 'Задачи', icon: ListChecks, tint: 'text-blue-600 bg-blue-50' },
     payments: { label: 'Оплата счетов', icon: Receipt, tint: 'text-emerald-700 bg-emerald-50' },
+    // «Почта» (#417, ТЗ п. 8): новая входящая, «сверьте», итог сверки, «передайте курьеру», сроки, эскалация.
+    mail: { label: 'Почта', icon: Mail, tint: 'text-sky-700 bg-sky-50' },
     // «Воронка найма» (#404): новый и повторный отклик, дата контакта, возврат в пул, выход на линию, мотивация.
     hiring: { label: 'Воронка найма', icon: UserPlus, tint: 'text-blue-700 bg-blue-50' },
     wiki_questions: { label: 'Вопросы операторов', icon: MessageCircleQuestion, tint: 'text-cyan-600 bg-cyan-50' },

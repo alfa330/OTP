@@ -6258,6 +6258,10 @@ class SchemaMixin:
                     -- «Воронка найма» (#404): адресно, как у «Оплаты счетов» —
                     -- появление строки и её гашение (карточку открыли).
                     targets := ARRAY[NEW.user_id];
+                ELSIF TG_TABLE_NAME = 'mail_notifications' THEN
+                    -- «Почта» (#417, ТЗ п. 8): адресно — новая входящая, «сверьте»,
+                    -- сроки и эскалации; появление строки и её гашение.
+                    targets := ARRAY[NEW.user_id];
                 ELSIF TG_TABLE_NAME = 'twofa_requests' THEN
                     -- «Коды 2FA» (#373): запрос ждёт тех, кто включил уведомления о
                     -- запросах (глава маркетинга, супер-админы — по тумблеру в разделе);
@@ -6416,6 +6420,16 @@ class SchemaMixin:
             (
                 'trg_bell_hiring_notifications',
                 'hiring_notifications',
+                'AFTER UPDATE OF read_at',
+                'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
+            ),
+            # «Почта» (#417): появление уведомления и его погашение. Таблицу раздел заводит при
+            # подключении Blueprint (mail/schema.py) — на самом первом запуске её здесь ещё нет,
+            # и тогда эти же триггеры ставит mail.schema.ensure_bell_triggers.
+            ('trg_bell_mail_notifications_insert', 'mail_notifications', 'AFTER INSERT', ''),
+            (
+                'trg_bell_mail_notifications',
+                'mail_notifications',
                 'AFTER UPDATE OF read_at',
                 'WHEN (OLD.read_at IS DISTINCT FROM NEW.read_at)',
             ),

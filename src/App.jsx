@@ -45014,6 +45014,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const [paymentsFocusRequest, setPaymentsFocusRequest] = useState(null);
             // «Воронка найма»: карточка по номеру из колокола (target — id карточки).
             const [hiringFocusRequest, setHiringFocusRequest] = useState(null);
+            // «Почта» (#417): отправление по номеру из колокола (target — id отправления).
+            const [mailFocusRequest, setMailFocusRequest] = useState(null);
             // «Карточка клиента»: запрос по номеру из колокола (target — id запроса).
             const [clientCardsFocusRequest, setClientCardsFocusRequest] = useState(null);
             // «Ивенты»: колокол позвал на доску почёта месяца (target — «honor:ГГГГ-ММ»).
@@ -55343,6 +55345,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (view !== 'tasks') setTaskFocusRequest(null);
                 if (view !== 'payments') setPaymentsFocusRequest(null);
                 if (view !== 'hiring') setHiringFocusRequest(null);
+                if (view !== 'mail') setMailFocusRequest(null);
                 if (view !== 'client_cards') setClientCardsFocusRequest(null);
                 if (view !== 'events') setEventsFocusRequest(null);
                 if (view !== 'production') setProductionFocusRequest(null);
@@ -55623,6 +55626,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (nextView === 'hiring' && Number(target)) {
                     setHiringFocusRequest((prev) => ({
                         cardId: Number(target),
+                        nonce: Number(prev?.nonce || 0) + 1,
+                    }));
+                }
+                // «Почта»: target — номер отправления (notifications/sources.py: mail).
+                if (nextView === 'mail' && Number(target)) {
+                    setMailFocusRequest((prev) => ({
+                        shipmentId: Number(target),
                         nonce: Number(prev?.nonce || 0) + 1,
                     }));
                 }
@@ -60792,6 +60802,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
                                     showToast={showToast}
+                                    focusRequest={mailFocusRequest}
                                 />
                             </Suspense>
                         )}

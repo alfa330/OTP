@@ -15,7 +15,7 @@ from io import BytesIO
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, files, queries, report, rules, schema
+from . import access, files, notices, queries, report, rules, schema
 
 XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 PAGE_LIMIT = 200
@@ -159,9 +159,23 @@ def build_mail_blueprint(*, db, require_api_key, build_cors_preflight_response, 
         window = rules.sla_window(zone, shipment.get('delivery_type'))
         return {'code': code, 'label': zone['label'], 'window': list(window) if window else None}
 
+    def _quietly(cursor, label, work):
+        """Уведомления — под своей точкой отката: их сбой не должен отменить сам шаг или
+        открытие карточки (то же правило, что у тычка колокола)."""
+        cursor.execute('SAVEPOINT mail_notices')
+        try:
+            work()
+        except Exception:  # noqa: BLE001
+            cursor.execute('ROLLBACK TO SAVEPOINT mail_notices')
+            logging.exception('mail: уведомления не записались (%s)', label)
+        finally:
+            cursor.execute('RELEASE SAVEPOINT mail_notices')
+
     def _card(cursor, ctx, shipment_id):
         today = queries.today_almaty()
         shipment = _load_visible(cursor, ctx, shipment_id)
+        # Открыл карточку — его уведомления «к сведению» по ней прочитаны (ТЗ п. 8).
+        _quietly(cursor, 'прочитано', lambda: notices.mark_seen(cursor, ctx['user_id'], shipment_id))
         items = queries.read_items(cursor, shipment_id)
         can_files = access.can_open_files(ctx, shipment)
         edit_allowed, reason_required, items_editable = access.edit_rights(ctx, shipment)
@@ -450,6 +464,11 @@ def build_mail_blueprint(*, db, require_api_key, build_cors_preflight_response, 
                                     extra_payload=extra)
             if fix_values:
                 queries.update_fields(cursor, shipment_id, fix_values)
+            after = queries.read_shipment(cursor, shipment_id)
+            if after.get('due_on') != current.get('due_on'):
+                # Срок пересчитан — «просрочено» и «срок завтра» о прежнем сроке гаснут сразу (ТЗ п. 8).
+                _quietly(cursor, 'срок', lambda: notices.refresh_deadline(
+                    cursor, after, today=queries.today_almaty(), holidays=holidays))
             return jsonify(_card(cursor, ctx, shipment_id))
 
     # ─── Шаги статуса ────────────────────────────────────────────────────────
@@ -559,6 +578,11 @@ def build_mail_blueprint(*, db, require_api_key, build_cors_preflight_response, 
                     queries.insert_file(cursor, shipment_id, kind=file_kind, filename=upload['filename'],
                                         content_type=upload['content_type'], size=len(upload['data']),
                                         bucket=bucket, blob_path=blob_path, actor=actor, event_id=event_id)
+                after = queries.read_shipment(cursor, shipment_id)
+                _quietly(cursor, action, lambda: notices.after_action(
+                    cursor, action=action, shipment=after, actor_id=ctx['user_id'],
+                    outcome=status_to if action == 'reconcile' else None, note=note,
+                    today=queries.today_almaty(), holidays=holidays))
                 return jsonify(_card(cursor, ctx, shipment_id))
         except Exception:
             files.drop(gcs, refs)
@@ -761,6 +785,10 @@ def build_mail_blueprint(*, db, require_api_key, build_cors_preflight_response, 
             'zones': queries.load_zones(cursor),
             'routes': queries.load_routes(cursor),
             'cities': sorted({office['city'] for office in offices if office.get('city')}, key=str.lower),
+            # ТЗ п. 8: «Готово к отправке» без передачи курьеру дольше N рабочих дней — напоминание
+            # инициатору; «порог настраиваемый».
+            'params': {'ready_remind_days': notices.ready_remind_days(cursor),
+                       'ready_remind_max': notices.READY_REMIND_MAX},
         }
 
     @route('/settings')
@@ -775,10 +803,22 @@ def build_mail_blueprint(*, db, require_api_key, build_cors_preflight_response, 
         payload = _payload()
         zones = rules.clean_zones(payload.get('zones'))
         routes = rules.clean_routes(payload.get('routes') or [], {zone['code'] for zone in zones})
+        remind_days = None
+        params = payload.get('params') if isinstance(payload.get('params'), dict) else {}
+        if 'ready_remind_days' in params:
+            try:
+                remind_days = rules.int_or_none(params.get('ready_remind_days'))
+            except (TypeError, ValueError):
+                remind_days = None
+            if remind_days is None or not 1 <= remind_days <= notices.READY_REMIND_MAX:
+                raise rules.MailError('Проверьте порог напоминания', code='MAIL_FIELDS', fields={
+                    'params.ready_remind_days': 'От 1 до %d рабочих дней' % notices.READY_REMIND_MAX})
         with db._get_cursor() as cursor:
             queries.upsert_zones(cursor, zones)
             queries.save_routes(cursor, routes, ctx['user_id'])
             queries.drop_zones_except(cursor, [zone['code'] for zone in zones])
+            if remind_days is not None:
+                notices.save_ready_remind_days(cursor, remind_days, ctx['user_id'])
             return jsonify(_settings_payload(cursor))
 
     return bp

@@ -207,6 +207,12 @@ class TransitionTests(unittest.TestCase):
             rules.clean_zones([{'code': '1', 'min_days': 4, 'max_days': 3}])
         with self.assertRaises(rules.MailError):
             rules.clean_zones([{'code': '1', 'max_days': 3}, {'code': '1', 'max_days': 4}])
+        # «0–0» — не срок: так приходила пустая граница эконома с экрана настроек.
+        with self.assertRaises(rules.MailError) as caught:
+            rules.clean_zones([{'code': '2', 'min_days': 1, 'max_days': 1, 'eco_min_days': 0, 'eco_max_days': 0}])
+        self.assertEqual(set(caught.exception.fields), {'zones.0.eco_max_days'})
+        self.assertIsNone(rules.clean_zones([{'code': '2', 'max_days': 1, 'eco_min_days': None,
+                                              'eco_max_days': None}])[0]['eco_max_days'])
         routes = rules.clean_routes([{'from_city': 'Алматы', 'to_city': 'Павлодар', 'zone_code': '1'}], {'1'})
         self.assertEqual({(r['from_city'], r['to_city']) for r in routes}, {('Алматы', 'Павлодар'), ('Павлодар', 'Алматы')})
         one_way = rules.clean_routes([{'from_city': 'Алматы', 'to_city': 'Шымкент', 'zone_code': '1', 'both_ways': False}],
@@ -425,6 +431,63 @@ class ReportTests(unittest.TestCase):
         self.assertEqual([path for path, _ in patched], ['xl/worksheets/sheet2.xml', 'xl/worksheets/sheet3.xml'])
         self.assertEqual(patched[1][1], 'A2:A2 I2:I2')
 
+
+
+class NoticesWiringTests(unittest.TestCase):
+    """ТЗ п. 8: то, что не видно из тестов на базе, — доступ без пула, переход из колокола
+    в карточку и ежедневное задание. Сломайся проводка — колокол молча перестал бы звать
+    в карточку, а утренние напоминания — приходить, при зелёных остальных тестах."""
+
+    def test_section_answer_by_role_needs_no_database(self):
+        from mail import queries
+
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertIs(queries.section_open_by_role('super_admin'), True)
+            self.assertIs(queries.section_open_by_role('operator'), False)
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', False):
+            self.assertIs(queries.section_open_by_role(' Super_Admin '), True)
+            self.assertIsNone(queries.section_open_by_role('operator'))
+
+    def test_bell_check_does_not_take_a_pool_connection_when_the_role_answers(self):
+        import ast
+        import logging
+
+        from tests import source_cache
+
+        class _NoPool:
+            def _get_cursor(self):
+                raise AssertionError('соединение из пула ради известного ответа')
+
+        node = source_cache.function_copy(source_cache.monolith_flat_path(), '_mail_section_open_for')
+        namespace = {'db': _NoPool(), '_MAIL_SECTION': {'ready': True}, 'logging': logging}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot_schedule2', 'exec'), namespace)
+        check = namespace['_mail_section_open_for']
+        with mock.patch.object(access, 'PILOT_SUPER_ADMIN_ONLY', True):
+            self.assertIs(check(7, 'super_admin'), True)
+            self.assertIs(check(8, 'operator'), False)
+
+    def test_bell_row_opens_the_shipment_card(self):
+        app = (ROOT / 'src/App.jsx').read_text(encoding='utf-8')
+        view = (ROOT / 'src/components/mail/MailView.jsx').read_text(encoding='utf-8')
+        self.assertIn("if (nextView === 'mail' && Number(target)) {\n"
+                      "                    setMailFocusRequest((prev) => ({\n"
+                      "                        shipmentId: Number(target),", app)
+        self.assertIn("if (view !== 'mail') setMailFocusRequest(null);", app)
+        self.assertIn('focusRequest={mailFocusRequest}', app)
+        self.assertIn('if (focusRequest?.shipmentId) openCardSheet(Number(focusRequest.shipmentId));', view)
+        self.assertIn('}, [focusRequest?.nonce]);', view)
+
+    def test_morning_job_is_scheduled_and_its_names_exist(self):
+        from mail import notices, queries
+
+        bot = (ROOT / 'bot_schedule2.py').read_text(encoding='utf-8')
+        self.assertIn("scheduler.add_job(\n        mail_reminders_async,\n"
+                      "        CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty')),\n"
+                      "        id='mail_reminders_daily',", bot)
+        self.assertIn('from mail import notices as mail_notices, queries as mail_queries, rules as mail_rules', bot)
+        self.assertIn('mail_notices.remind(cursor, today=mail_queries.today_almaty(),', bot)
+        self.assertIn('holidays=mail_rules.kz_holidays())', bot)
+        self.assertTrue(callable(notices.remind) and callable(queries.today_almaty) and callable(rules.kz_holidays))
 
 if __name__ == '__main__':
     unittest.main()

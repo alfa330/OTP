@@ -155,6 +155,10 @@ export const STATUS_OPTIONS = [{ value: '', label: 'Все статусы' }]
     .concat(Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label })));
 
 /* Задан ли срок эконом-доставки хоть у одной зоны (сервер: rules.economy_ready). */
+/* Дни в справочнике (границы зон, порог напоминания) → число или null. Пустая граница из базы приходит null, и
+   String(null) — это 'null', а Number(null) — 0: «эконом не задан» молча становился «0–0». */
+export const daysOrNull = (value) => (
+    value === null || value === undefined || String(value).trim() === '' ? null : Number(value));
 export const economyReady = (zones = []) => (zones || []).some((zone) => zone.eco_max_days !== null && zone.eco_max_days !== undefined);
 export const ECONOMY_MISSING = 'Сроки эконома не заданы в «Справочниках»';
 

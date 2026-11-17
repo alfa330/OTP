@@ -40,9 +40,12 @@ from leave_requests import access as leave_access
 # оплатить, приложить чек), только из процесса закупа.
 #
 # «Коды 2FA» — первым: сотрудник ждёт код прямо сейчас, а запрос сгорает через 10 минут.
-SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'hiring', 'wiki_questions', 'checkpoints', 'shift_requests',
-           'leave_requests', 'crm', 'client_cards', 'complaints', 'training_plans', 'discipline', 'lms',
-           'surveys', 'events', 'honor_board', 'four_you', 'birthdays')
+#
+# «Почта» (#417) — сразу за «Оплатой счетов»: тоже «сделайте к сроку» (сверить входящее,
+# передать курьеру, просрочка доставки).
+SOURCES = ('twofa', 'wiki_ack', 'tasks', 'payments', 'mail', 'hiring', 'wiki_questions', 'checkpoints',
+           'shift_requests', 'leave_requests', 'crm', 'client_cards', 'complaints', 'training_plans', 'discipline',
+           'lms', 'surveys', 'events', 'honor_board', 'four_you', 'birthdays')
 
 # В какие разделы ведут строки источника — все значения поля 'view' его
 # элементов. None — строка никуда не ведёт: день рождения и свой назначенный
@@ -56,6 +59,7 @@ SOURCE_VIEWS = {
     'wiki_ack': ('wiki',),
     'tasks': ('tasks',),
     'payments': ('payments',),
+    'mail': ('mail',),
     'hiring': ('hiring',),
     'wiki_questions': ('wiki',),
     'checkpoints': ('evaluation', 'call_evaluation'),
@@ -80,7 +84,7 @@ SOURCE_VIEWS = {
 # колокол о них не молчит. Кому раздел не открыт, тому источник и так отдаёт ноль.
 # «Оплата счетов» открыта поимённо (payments/access.py) — её гасит не личный
 # набор, а _notifications_viewer_context: тому, кто в раздел не входит.
-OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa',
+OWN_CIRCLE_VIEWS = frozenset({'crm_tickets', 'complaints', 'payments', 'discipline', 'twofa', 'mail',
                               'client_cards', 'hiring'})
 
 
@@ -736,6 +740,29 @@ def payments(cursor, viewer, limit):
     } for row in rows]
 
 
+def mail(cursor, viewer, limit):
+    """«Почта» (#417, ТЗ п. 8): новая входящая, «сверьте», итог сверки и расхождение, «передайте
+    курьеру», срок подходит, просрочено, эскалация.
+
+    Строки пишет сам раздел (mail/notices.py) одному человеку — правил здесь нет. «Ждёт действия»
+    гаснет сделанным делом, «к сведению» — когда человек открыл карточку отправления. Тому, кому
+    раздел не открыт, источник скрывает _notifications_viewer_context.
+    """
+    from mail import notices as mail_notices
+
+    total, rows = mail_notices.bell(cursor, viewer['user_id'], limit)
+    return total, [{
+        'source': 'mail',
+        'id': row['id'],
+        'title': row['title'],
+        'body': row['body'] or '',
+        'at': _iso(row['created_at']),
+        'view': 'mail',
+        'target': row['shipment_id'],
+        'tone': 'warning' if row['tone'] == 'warning' else 'default',
+    } for row in rows]
+
+
 def hiring(cursor, viewer, limit):
     """«Воронка найма» (#404): адресные строки процесса (ТЗ 8.3) — новый и повторный
     отклик, наступившая дата контакта, возврат карточки в пул, выход на линию, мотивация.
@@ -1319,6 +1346,7 @@ _HANDLERS = {
     'wiki_ack': wiki_ack,
     'tasks': tasks,
     'payments': payments,
+    'mail': mail,
     'hiring': hiring,
     'wiki_questions': wiki_questions,
     'checkpoints': checkpoints,

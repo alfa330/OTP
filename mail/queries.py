@@ -79,13 +79,23 @@ def load_context(cursor, user_id):
     }
 
 
-def section_open_for(cursor, user_id, portal_role):
-    """Флаг профиля mail_access: суперадмин или участник раздела (пока идёт пилот —
-    только суперадмин, access.PILOT_SUPER_ADMIN_ONLY)."""
+def section_open_by_role(portal_role):
+    """Ответ без базы, когда он известен по роли: суперадмину раздел открыт, остальным в пилоте —
+    нет. None — нужен запрос к «Участникам». Колокол спрашивает это у каждого пользователя на
+    каждом обновлении, и брать ради известного ответа соединение из пула незачем."""
     if str(portal_role or '').strip().lower() == 'super_admin':
         return True
     if access.PILOT_SUPER_ADMIN_ONLY:
         return False
+    return None
+
+
+def section_open_for(cursor, user_id, portal_role):
+    """Флаг профиля mail_access: суперадмин или участник раздела (пока идёт пилот —
+    только суперадмин, access.PILOT_SUPER_ADMIN_ONLY)."""
+    known = section_open_by_role(portal_role)
+    if known is not None:
+        return known
     cursor.execute("SELECT 1 FROM mail_participants WHERE user_id = %s", (int(user_id),))
     return cursor.fetchone() is not None
 

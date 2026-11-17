@@ -43,7 +43,7 @@ function rememberTab(id) {
     }
 }
 
-export default function MailView({ apiBaseUrl, withAccessTokenHeader, showToast }) {
+export default function MailView({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest = null }) {
     const headersRef = useRef(withAccessTokenHeader);
     useEffect(() => { headersRef.current = withAccessTokenHeader; }, [withAccessTokenHeader]);
     const toastRef = useRef(showToast);
@@ -80,6 +80,11 @@ export default function MailView({ apiBaseUrl, withAccessTokenHeader, showToast 
     }, []);
 
     const openCard = useCallback((id) => openCardSheet(id), [openCardSheet]);
+    /* Строка колокола (ТЗ п. 8: «сверьте входящее», «просрочено»…) открывает карточку отправления —
+       каждое нажатие заново (nonce), даже если та же карточка уже открывалась. */
+    useEffect(() => {
+        if (focusRequest?.shipmentId) openCardSheet(Number(focusRequest.shipmentId));
+    }, [focusRequest?.nonce]); // eslint-disable-line react-hooks/exhaustive-deps
     // Форма: null — новое отправление, карточка — правка.
     const openForm = useCallback((card = null) => openFormSheet(card || 'new'), [openFormSheet]);
     const showQuick = useCallback((quick) => {

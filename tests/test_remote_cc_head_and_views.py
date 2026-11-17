@@ -1202,6 +1202,8 @@ class RemoteCcBellTests(unittest.TestCase):
             # «Оплата счетов» гасится своим поимённым периметром, а не набором
             # отдела; здесь раздел «открыт», чтобы проверка говорила только о наборе.
             '_payments_section_open_for': lambda user_id: True,
+            # «Почта» (#417) — так же: её периметр — «Участники» раздела.
+            '_mail_section_open_for': lambda user_id, role=None: True,
             '_birthdays_viewer_scope': lambda requester_id, role, **kwargs: (False, REMOTE),
             '_checkpoint_scope_for_requester': lambda requester_id, requester: {},
             '_can_manage_checkpoints': lambda requester_id, requester: False,

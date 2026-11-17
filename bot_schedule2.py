@@ -54258,6 +54258,11 @@ def _mail_section_open_for(user_id, role):
         return False
     try:
         from mail import queries as mail_queries
+        # Колокол зовёт это у каждого пользователя на каждом обновлении: известный по роли
+        # ответ (суперадмин; пилот) — без соединения из пула.
+        known = mail_queries.section_open_by_role(role)
+        if known is not None:
+            return known
         with db._get_cursor() as cursor:
             return bool(mail_queries.section_open_for(cursor, user_id, role))
     except Exception:
@@ -54280,6 +54285,35 @@ try:
     logging.info("Раздел «Почта»: Blueprint подключён на /api/mail")
 except Exception:
     logging.exception("Раздел «Почта»: Blueprint НЕ подключён")
+
+
+def mail_reminders_job():
+    """«Почта» (#417, ТЗ п. 8): напоминания и эскалации по срокам — в колокол.
+
+    Раз в сутки утром, только в рабочий день: «Готово к отправке» дольше порога, срок —
+    следующий рабочий день, просрочено, ежедневная эскалация после 2 рабочих дней просрочки.
+    Повторный прогон в тот же день ничего не дублирует (mail/notices.py: dedupe_key).
+    """
+    if not _MAIL_SECTION['ready']:
+        return
+    try:
+        from mail import notices as mail_notices, queries as mail_queries, rules as mail_rules
+
+        with db._get_cursor() as cursor:
+            counts = mail_notices.remind(cursor, today=mail_queries.today_almaty(),
+                                         holidays=mail_rules.kz_holidays())
+        if any(counts.values()):
+            logging.info("Почта: утренние напоминания %s", counts)
+    except Exception:
+        logging.exception("Почта: напоминания о сроках не отработали")
+
+
+async def mail_reminders_async():
+    loop = asyncio.get_event_loop()
+    try:
+        return await loop.run_in_executor(executor_pool, mail_reminders_job)
+    except Exception:
+        logging.exception("mail reminders failed")
 
 
 # ── Раздел «Продакшн» (задача #316): материалы задач продакшна (#354) ──
@@ -55838,6 +55872,10 @@ def _notifications_viewer_context(requester_id, requester):
     # нём молчит — уведомление звало бы туда, куда человека не пустят.
     if not _payments_section_open_for(requester_id):
         hidden_sources += ('payments',)
+    # «Почта» (#417): свой круг — «Участники» раздела (пока пилот — одни суперадмины). Кому раздел
+    # не открыт, тому колокол о нём молчит.
+    if not _mail_section_open_for(requester_id, role):
+        hidden_sources += ('mail',)
     # Личный набор разделов: источники, которые зовут только в скрытые разделы,
     # молчат — иначе бейдж висел бы над уведомлением, которое некуда открыть.
     personal_views = _personal_views_for(requester_id, role)
@@ -59334,6 +59372,17 @@ if __name__ == '__main__':
         payments_deadline_reminders_async,
         CronTrigger(hour=9, minute=0, timezone=ZoneInfo('Asia/Almaty')),
         id='payments_deadline_reminders_daily',
+        misfire_grace_time=3600,
+        max_instances=1,
+        coalesce=True
+    )
+
+    # «Почта» (#417, ТЗ п. 8): «готово, но не передано», срок завтра, просрочка, эскалация —
+    # к началу рабочего дня (выходные и праздники РК обход пропускает сам).
+    scheduler.add_job(
+        mail_reminders_async,
+        CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty')),
+        id='mail_reminders_daily',
         misfire_grace_time=3600,
         max_instances=1,
         coalesce=True
