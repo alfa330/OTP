@@ -4378,6 +4378,18 @@ class SchemaMixin:
                 ALTER TABLE sip_department_config
                 ADD COLUMN IF NOT EXISTS ring_timeout_rings SMALLINT;
             """)
+            # «Офлайн» за простой в «Исходе» у отдела продаж Тез (владелец 17.11.2026: «добавь
+            # возможность эту настройку менять» и «выключить сейчас»). NULL — не задавали: правило
+            # ВЫКЛЮЧЕНО, срок 3 минуты (SIP_IDLE_OFFLINE_SEC_DEFAULT). Дефолтов у колонок нет —
+            # NULL и есть умолчание, как у автосброса.
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS idle_offline_enabled BOOLEAN;
+            """)
+            cursor.execute("""
+                ALTER TABLE sip_department_config
+                ADD COLUMN IF NOT EXISTS idle_offline_sec INTEGER;
+            """)
             # Общий адрес кабинета Binotel. У локальной АТС кабинета нет вовсе,
             # поэтому поле живёт в той же строке отдела, но показывается только
             # в разделе «Тез».

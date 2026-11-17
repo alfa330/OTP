@@ -3,8 +3,10 @@
 
 Владелец 17.11.2026: «для обычных телефонов тез такси … если оператор в исходе бездействует в
 течении 3 мин, то его переводило в оффлайн». Техподдержке Тез по его решению в тот же день —
-прежний возврат в «Активный» (outbound_return). Кому положено правило и какой срок, решает сервер
-(/api/operator/sip_settings → settings.idle_offline), телефон 3.22.57+ только читает.
+прежний возврат в «Активный» (outbound_return). Вечером того же дня: «добавь возможность эту
+настройку менять» и «выключить сейчас» — выключатель и срок живут в карточке отдела Тез КЦ
+(«Настройки SIP»), по умолчанию правило выключено. Кому положено правило и какой срок, решает
+сервер (/api/operator/sip_settings → settings.idle_offline), телефон 3.22.57+ только читает.
 
 Импортировать монолит нельзя (пул к боевой базе, tzset на Windows) — функция достаётся
 через ast и исполняется с заглушками.
@@ -24,8 +26,9 @@ BOT_PATH = source_cache.monolith_flat_path()
 BOT_SOURCE = source_cache.read(BOT_PATH)
 ENV_KEYS = ('TEZ_OP_IDLE_OFFLINE_SEC', 'TEZ_OP_IDLE_OFFLINE_WARN_SEC',
             'TEZ_OUTBOUND_RETURN_SEC', 'TEZ_OUTBOUND_RETURN_WARN_SEC', 'TEZ_OUTBOUND_RETURN_PRESENCE_SEC')
-# Состав табло Тез: техподдержка (tez_line) — 5 и 6, отдел продаж (tez_op) — 9 и 10.
-PEOPLE = {'tp': [{'id': 5}, {'id': 6}], 'op': [{'id': 9}, {'id': 10}]}
+# Состав табло Тез: техподдержка (tez_line) — 5 и 6, отдел продаж (tez_op) — 9 и 10; отдел — 560.
+PEOPLE = {'tp': [{'id': 5}, {'id': 6}], 'op': [{'id': 9}, {'id': 10}], 'department_id': 560}
+ON = {'enabled': True, 'seconds': 180}
 
 
 def _load(names, namespace):
@@ -48,8 +51,22 @@ def _load(names, namespace):
     return namespace
 
 
-def _rules(people=None, error=None, seen=None):
-    """(_icore_phone_idle_offline, _icore_phone_outbound_return) с составом табло Тез из заглушки."""
+class _Db:
+    """Настройка отдела из «Настроек SIP»: что вернуть и кто спрашивал."""
+
+    def __init__(self, rule=ON, error=None):
+        self.rule, self.error, self.asked = rule, error, []
+
+    def get_sip_department_idle_offline(self, department_id):
+        self.asked.append(department_id)
+        if self.error:
+            raise self.error
+        return self.rule
+
+
+def _rules(people=None, error=None, seen=None, db=None):
+    """(_icore_phone_idle_offline, _icore_phone_outbound_return) с составом табло и настройкой отдела
+    из заглушек."""
     people = people if people is not None else PEOPLE
 
     def wallboard_people(day=None):
@@ -59,7 +76,8 @@ def _rules(people=None, error=None, seen=None):
             raise error
         return people
 
-    namespace = {'os': os, 'logging': logging, '_tez_wallboard_people': wallboard_people}
+    namespace = {'os': os, 'logging': logging, '_tez_wallboard_people': wallboard_people,
+                 'db': db if db is not None else _Db()}
     _load(('_env_int', 'ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS', 'ICORE_PHONE_OUTBOUND_RETURN_MAX_SECONDS',
            'ICORE_PHONE_OUTBOUND_RETURN_PRESENCE_SECONDS', '_icore_phone_idle_offline',
            '_icore_phone_outbound_return'), namespace)
@@ -77,31 +95,41 @@ class IdleOfflineRuleTests(unittest.TestCase):
         self.addCleanup(env.stop)
         for key in ENV_KEYS:
             os.environ.pop(key, None)
-        # Правило включено — как его включают на сервере (по умолчанию оно выключено, см. ниже).
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '180'
 
-    def test_rule_is_off_unless_switched_on(self):
-        """Владелец 17.11.2026 вечером: «выключить сейчас». Без переменной правила нет ни у кого,
-        и состав табло даже не читается."""
-        os.environ.pop('TEZ_OP_IDLE_OFFLINE_SEC')
-        seen = []
-        self.assertIsNone(_rule(seen=seen)(9, 'binotel'))
-        self.assertIsNone(_rule(seen=seen)('10', 'binotel'))
-        self.assertEqual(seen, [])
-
-    def test_sales_operator_gets_the_term_when_switched_on(self):
-        self.assertEqual(_rule()(9, 'binotel'), {'seconds': 180, 'warn_seconds': 30})
+    def test_sales_operator_gets_the_term_set_for_the_department(self):
+        db = _Db({'enabled': True, 'seconds': 240})
+        self.assertEqual(_rule(db=db)(9, 'binotel'), {'seconds': 240, 'warn_seconds': 30})
         # Идентификатор приходит и строкой (из токена) — правило то же.
-        self.assertEqual(_rule()('10', 'binotel'), {'seconds': 180, 'warn_seconds': 30})
+        self.assertEqual(_rule(db=db)('10', 'binotel'), {'seconds': 240, 'warn_seconds': 30})
+        self.assertEqual(db.asked, [560, 560])          # настройка отдела Тез КЦ, а не чья-то ещё
 
-    def test_support_and_strangers_get_no_rule(self):
+    def test_switched_off_or_never_set_means_no_rule(self):
+        """«Выключить сейчас» (владелец, 17.11.2026 вечером): выключено и не задано — правила нет."""
+        for rule in ({'enabled': False, 'seconds': 180}, {'enabled': None, 'seconds': 180}, {}, None,
+                     {'enabled': True, 'seconds': 0}):
+            self.assertIsNone(_rule(db=_Db(rule))(9, 'binotel'), rule)
+
+    def test_the_old_environment_switch_no_longer_turns_it_on(self):
+        """Срок и выключатель теперь в портале: переменная окружения правило не включает."""
+        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '180'
+        self.assertIsNone(_rule(db=_Db({'enabled': False, 'seconds': 180}))(9, 'binotel'))
+
+    def test_support_and_strangers_get_no_rule_and_never_read_the_setting(self):
         """Техподдержке — «Активный», а не «Офлайн» (решение владельца 17.11.2026: «Оставить
-        «Активный»»); человека без модели расчёта (глава, СВ) в составе нет вовсе."""
-        self.assertIsNone(_rule()(5, 'binotel'))
-        self.assertIsNone(_rule()(6, 'binotel'))
-        self.assertIsNone(_rule()(77, 'binotel'))
-        self.assertIsNone(_rule(people={'tp': [], 'op': []})(9, 'binotel'))
-        self.assertIsNone(_rule(people={'tp': [{'id': 9}]})(9, 'binotel'))
+        «Активный»»); человека без модели расчёта (глава, СВ) в составе нет вовсе. Настройку
+        отдела читаем только для своих продавцов — не на каждый запрос каждого телефона."""
+        db = _Db()
+        for user_id in (5, 6, 77):
+            self.assertIsNone(_rule(db=db)(user_id, 'binotel'), user_id)
+        self.assertIsNone(_rule(people={'tp': [], 'op': [], 'department_id': 560}, db=db)(9, 'binotel'))
+        self.assertIsNone(_rule(people={'tp': [{'id': 9}], 'department_id': 560}, db=db)(9, 'binotel'))
+        self.assertEqual(db.asked, [])
+
+    def test_without_the_tez_department_there_is_no_rule(self):
+        db = _Db()
+        self.assertIsNone(_rule(people={'op': [{'id': 9}], 'department_id': None}, db=db)(9, 'binotel'))
+        self.assertIsNone(_rule(people={'op': [{'id': 9}]}, db=db)(9, 'binotel'))
+        self.assertEqual(db.asked, [])
 
     def test_one_person_never_gets_both_rules(self):
         """«Активный» и «Офлайн» за один и тот же простой взаимоисключают друг друга: каждому
@@ -112,62 +140,42 @@ class IdleOfflineRuleTests(unittest.TestCase):
                    if rule is not None]
             self.assertEqual(len(got), 0 if user_id == 77 else 1, user_id)
 
-    def test_local_pbx_never_reads_the_tez_roster(self):
-        seen = []
-        rule = _rule(seen=seen)
+    def test_local_pbx_reads_neither_the_roster_nor_the_setting(self):
+        seen, db = [], _Db()
+        rule = _rule(seen=seen, db=db)
         self.assertIsNone(rule(9, 'asterisk'))
         self.assertIsNone(rule(9, None))
         self.assertIsNone(rule(9, ''))
         self.assertEqual(seen, [])
+        self.assertEqual(db.asked, [])
 
-    def test_switch_off_and_term_come_from_the_environment(self):
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '0'
-        seen = []
-        self.assertIsNone(_rule(seen=seen)(9, 'binotel'))
-        self.assertEqual(seen, [])                       # выключено — состав не читаем
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '300'
-        self.assertEqual(_rule()(9, 'binotel'), {'seconds': 300, 'warn_seconds': 30})
-        # Рубильник техподдержки правило отдела продаж не трогает — и наоборот.
-        os.environ['TEZ_OUTBOUND_RETURN_SEC'] = '0'
-        self.assertEqual(_rule()(9, 'binotel')['seconds'], 300)
-
-    def test_warning_is_always_shorter_than_the_term(self):
+    def test_term_is_clamped_and_warning_is_always_shorter(self):
         """Предупреждение «за N секунд» не может начаться раньше самого простоя: как у обзвона
-        удалённого КЦ, оно всегда меньше срока."""
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '20'
-        self.assertEqual(_rule()(9, 'binotel')['warn_seconds'], 19)
+        удалённого КЦ, оно всегда меньше срока; срок из базы держим в пределах телефона."""
+        self.assertEqual(_rule(db=_Db({'enabled': True, 'seconds': 99999}))(9, 'binotel')['seconds'], 3600)
+        self.assertEqual(_rule(db=_Db({'enabled': True, 'seconds': 20}))(9, 'binotel')['warn_seconds'], 19)
+        self.assertEqual(_rule(db=_Db({'enabled': True, 'seconds': 1}))(9, 'binotel'),
+                         {'seconds': 1, 'warn_seconds': 0})
         os.environ['TEZ_OP_IDLE_OFFLINE_WARN_SEC'] = '0'
         self.assertEqual(_rule()(9, 'binotel')['warn_seconds'], 0)
         os.environ['TEZ_OP_IDLE_OFFLINE_WARN_SEC'] = '45'
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '180'
         self.assertEqual(_rule()(9, 'binotel')['warn_seconds'], 45)
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '1'
-        self.assertEqual(_rule()(9, 'binotel'), {'seconds': 1, 'warn_seconds': 0})
-
-    def test_garbage_in_the_environment_falls_back_and_is_clamped(self):
-        # Непонятное значение — как не заданное: правило выключено, а не «какой-то срок».
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = 'три минуты'
-        self.assertIsNone(_rule()(9, 'binotel'))
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = ''
-        self.assertIsNone(_rule()(9, 'binotel'))
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '999999'
-        self.assertEqual(_rule()(9, 'binotel')['seconds'], 3600)
         os.environ['TEZ_OP_IDLE_OFFLINE_WARN_SEC'] = 'полминуты'
         self.assertEqual(_rule()(9, 'binotel')['warn_seconds'], 30)
         os.environ['TEZ_OP_IDLE_OFFLINE_WARN_SEC'] = '-5'
         self.assertEqual(_rule()(9, 'binotel')['warn_seconds'], 0)
-        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '-5'
-        self.assertIsNone(_rule()(9, 'binotel'))
 
     def test_any_failure_means_no_rule_and_is_logged(self):
-        """Сбой состава не должен стоить оператору регистрации: правила просто нет."""
+        """Сбой состава или чтения настройки не должен стоить оператору регистрации: правила нет."""
         with self.assertLogs(level='ERROR') as logs:
             self.assertIsNone(_rule(error=RuntimeError('boom'))(9, 'binotel'))
         self.assertIn('«Офлайн» за простой «Исхода»', logs.output[0])
         with self.assertLogs(level='ERROR'):
+            self.assertIsNone(_rule(db=_Db(error=RuntimeError('db down')))(9, 'binotel'))
+        with self.assertLogs(level='ERROR'):
             self.assertIsNone(_rule()('abc', 'binotel'))
         with self.assertLogs(level='ERROR'):
-            self.assertIsNone(_rule(people={'op': [{'id': 'x'}]})(9, 'binotel'))
+            self.assertIsNone(_rule(people={'op': [{'id': 'x'}], 'department_id': 560})(9, 'binotel'))
 
 
 class IdleOfflineEndpointTests(unittest.TestCase):
@@ -246,6 +254,13 @@ class IdleOfflineEndpointTests(unittest.TestCase):
         body = ast.get_source_segment(
             BOT_SOURCE, source_cache.function_node(BOT_PATH, 'operator_sip_settings_endpoint'))
         self.assertIn('"idle_offline": _icore_phone_idle_offline(requester_id, provider)', body)
+        # Настройку отдела правило читает методом базы — он обязан существовать под этим именем.
+        rule_body = ast.get_source_segment(
+            BOT_SOURCE, source_cache.function_node(BOT_PATH, '_icore_phone_idle_offline'))
+        self.assertIn('db.get_sip_department_idle_offline(department_id)', rule_body)
+        self.assertIn('def get_sip_department_idle_offline(self, department_id)',
+                      source_cache.read(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                                     'db', 'sip.py')))
 
 
 if __name__ == '__main__':

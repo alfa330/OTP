@@ -14,8 +14,11 @@ from db.core import (  # noqa: F401
     parse_sip_flag,
     parse_sip_flag_tri,
     parse_sip_ring_timeout_rings,
+    parse_sip_idle_offline_enabled,
+    parse_sip_idle_offline_sec,
     resolve_sip_auto_answer,
     resolve_sip_auto_answer_delay,
+    resolve_sip_idle_offline,
     resolve_sip_ring_timeout_rings,
     SIP_PROVIDER_DEFAULT,
     sip_ring_timeout_seconds,
@@ -170,7 +173,10 @@ class SipMixin:
                        -- Автосброс исходящего — тоже сырым: NULL = «не задано»
                        -- (действуют 5 гудков, сброс включён), 0 = не сбрасывать.
                        -- COALESCE схлопнул бы противоположности.
-                       c.ring_timeout_rings
+                       c.ring_timeout_rings,
+                       -- «Офлайн» за простой «Исхода» (отдел продаж Тез, 17.11.2026) — сырыми:
+                       -- NULL = не задано (выключено; срок 3 минуты).
+                       c.idle_offline_enabled, c.idle_offline_sec
                 FROM departments d
                 LEFT JOIN sip_department_config c ON c.department_id = d.id
                 LEFT JOIN users u ON u.id = c.updated_by
@@ -219,6 +225,9 @@ class SipMixin:
             "own_auto_answer_count": int(r[16] or 0),
             # None — отдел не задавал (действует умолчание), 0 — сброс выключен.
             "ring_timeout_rings": None if r[17] is None else int(r[17]),
+            # «Офлайн» за простой «Исхода»: None — не задавали (выключено), срок None — 3 минуты.
+            "idle_offline_enabled": None if r[18] is None else bool(r[18]),
+            "idle_offline_sec": None if r[19] is None else int(r[19]),
         } for r in rows]
 
     def update_sip_department_config(self, department_id: int, payload: dict, user_id=None) -> dict:
@@ -262,11 +271,24 @@ class SipMixin:
                 payload['ring_timeout_rings'], current.get('ring_timeout_rings'))
         else:
             ring_timeout_rings = current.get('ring_timeout_rings')
+        # «Офлайн» за простой «Исхода» (отдел продаж Тез): тоже по наличию КЛЮЧА — форма отдела шлёт
+        # эти поля только Тез КЦ, а старая вкладка сайта их не знает. Непригодное — ValueError (400).
+        if 'idle_offline_enabled' in payload:
+            idle_offline_enabled = parse_sip_idle_offline_enabled(
+                payload['idle_offline_enabled'], current.get('idle_offline_enabled'))
+        else:
+            idle_offline_enabled = current.get('idle_offline_enabled')
+        if 'idle_offline_sec' in payload:
+            idle_offline_sec = parse_sip_idle_offline_sec(
+                payload['idle_offline_sec'], current.get('idle_offline_sec'))
+        else:
+            idle_offline_sec = current.get('idle_offline_sec')
         # Ноль у автосброса — настройка («не сбрасывать»), а не пустое поле:
         # отдел на локальной АТС, у которого задан только он, строку не теряет.
         filled = (sip_server, base_password, autodial_code, autodial_server, autodial_base,
                   cabinet_url, auto_answer is not None, auto_answer_delay is not None,
-                  ring_timeout_rings is not None)
+                  ring_timeout_rings is not None, idle_offline_enabled is not None,
+                  idle_offline_sec is not None)
         # Binotel описывается одним признаком провайдера, поэтому его строка
         # «непустая» даже без единого заполненного поля.
         keep_row = any(filled) or provider != SIP_PROVIDER_DEFAULT
@@ -281,6 +303,8 @@ class SipMixin:
             and auto_answer == current['auto_answer']
             and auto_answer_delay == current['auto_answer_delay']
             and ring_timeout_rings == current.get('ring_timeout_rings')
+            and idle_offline_enabled == current.get('idle_offline_enabled')
+            and idle_offline_sec == current.get('idle_offline_sec')
         )
         if unchanged and current['configured'] == keep_row:
             return current
@@ -291,9 +315,10 @@ class SipMixin:
                     INSERT INTO sip_department_config (
                         department_id, sip_server, base_password, autodial_code, autodial_server,
                         autodial_base_password, provider, binotel_cabinet_url,
-                        auto_answer, auto_answer_delay, ring_timeout_rings, updated_by, updated_at)
+                        auto_answer, auto_answer_delay, ring_timeout_rings, updated_by, updated_at,
+                        idle_offline_enabled, idle_offline_sec)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                            (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'), %s, %s)
                     ON CONFLICT (department_id) DO UPDATE SET
                         sip_server = EXCLUDED.sip_server,
                         base_password = EXCLUDED.base_password,
@@ -306,10 +331,12 @@ class SipMixin:
                         auto_answer_delay = EXCLUDED.auto_answer_delay,
                         ring_timeout_rings = EXCLUDED.ring_timeout_rings,
                         updated_by = EXCLUDED.updated_by,
-                        updated_at = EXCLUDED.updated_at
+                        updated_at = EXCLUDED.updated_at,
+                        idle_offline_enabled = EXCLUDED.idle_offline_enabled,
+                        idle_offline_sec = EXCLUDED.idle_offline_sec
                 """, (department_id, sip_server, base_password, autodial_code, autodial_server,
                       autodial_base, provider, cabinet_url, auto_answer, auto_answer_delay,
-                      ring_timeout_rings, user_id))
+                      ring_timeout_rings, user_id, idle_offline_enabled, idle_offline_sec))
             else:
                 cur.execute("DELETE FROM sip_department_config WHERE department_id = %s", (department_id,))
             cur.execute("""
@@ -328,6 +355,10 @@ class SipMixin:
                 # Выключенный автосброс меняет звонки всему отделу — в истории
                 # его видно так же, как общий автоприём.
                 "ring_timeout_rings": ring_timeout_rings,
+                # «Офлайн» за простой решает, кто уйдёт в неоплачиваемое время: кто и когда его
+                # включил или сменил срок, должно быть видно.
+                "idle_offline_enabled": idle_offline_enabled,
+                "idle_offline_sec": idle_offline_sec,
             })))
         return next(
             row for row in self.get_sip_department_configs([department_id])
@@ -1019,6 +1050,23 @@ class SipMixin:
                 """, history, template="(%s, %s, %s::jsonb)")
 
         return self.get_sip_operators_by_ids(ids)
+
+    def get_sip_department_idle_offline(self, department_id) -> dict:
+        """«Офлайн» за простой «Исхода» у отдела: {'enabled': bool, 'seconds': int}.
+
+        Читает ручка настроек телефона (_icore_phone_idle_offline) — только для отдела продаж Тез,
+        поэтому запрос лёгкий и точечный. Строки или значения нет — правило выключено, срок 3 минуты.
+        Ошибку базы не глотаем: вызывающий отвечает телефону «правила нет»."""
+        if department_id is None:
+            return resolve_sip_idle_offline(None, None)
+        with self._get_cursor() as cur:
+            cur.execute(
+                "SELECT idle_offline_enabled, idle_offline_sec FROM sip_department_config WHERE department_id = %s",
+                (int(department_id),))
+            row = cur.fetchone()
+        if not row:
+            return resolve_sip_idle_offline(None, None)
+        return resolve_sip_idle_offline(row[0], row[1])
 
     def _sip_department_ring_timeout_rings(self, department_id):
         """Ярус автосброса исходящего у отдела: число гудков или None («не задано»).

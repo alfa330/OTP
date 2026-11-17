@@ -55327,11 +55327,11 @@ def _icore_phone_outbound_return(user_id, provider):
 # у неё «Исход» закрывает оператора от очереди, и «Офлайн» оставил бы клиентов ждать.
 # За 10–16.11.2026 у отдела продаж Тез 8,1 ч «Исхода» в 136 отрезках, а звонков из него — 2 (звонят
 # они из «Активного»); 35 отрезков дольше трёх минут у 9 человек из 11 — 5,5 ч сверх трёх минут.
-# Срок и состав — на сервере (читает телефон 3.22.57+, прежние ключ не знают и правила не применяют):
-#   TEZ_OP_IDLE_OFFLINE_SEC       срок, секунд (не задан или 0 — правило выключено)
+# Владелец 17.11.2026 вечером: правило у отдела продаж «выключить сейчас» и дать менять настройку.
+# Выключатель и срок — в «Настройках SIP», карточка отдела Тез КЦ (sip_department_config:
+# idle_offline_enabled / idle_offline_sec; не задано — выключено, 3 минуты). Читает телефон 3.22.57+,
+# прежние ключ не знают и правила не применяют. Без выпуска телефона меняется ещё:
 #   TEZ_OP_IDLE_OFFLINE_WARN_SEC  за сколько секунд до «Офлайн» телефон предупреждает (30; меньше срока)
-# Владелец 17.11.2026 вечером: правило у отдела продаж «выключить сейчас» и дать менять настройку в
-# портале. До настройки правило выключено по умолчанию: включить — TEZ_OP_IDLE_OFFLINE_SEC=180.
 ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS = 3600
 
 
@@ -55339,21 +55339,30 @@ def _icore_phone_idle_offline(user_id, provider):
     """Блок idle_offline для /api/operator/sip_settings: dict — правило, None — правила нет.
 
     Правило получает только отдел продаж Тез КЦ — состав тот же, что у табло Тез (модель
-    расчёта tez_op). Ключ свой, а не outbound_return с другим действием: телефон 3.22.54–3.22.56
-    знает outbound_return и по нему поставил бы отделу продаж «Активный». Телефон правило сам не
+    расчёта tez_op), — и только когда оно включено в карточке отдела Тез КЦ («Настройки SIP»).
+    Ключ свой, а не outbound_return с другим действием: телефон 3.22.54–3.22.56 знает
+    outbound_return и по нему поставил бы отделу продаж «Активный». Телефон правило сам не
     применяет в группе статусов и в режиме обзвона (там свои правила) и уступает возврату в
     «Активный», если сервер когда-нибудь пришлёт оба.
     Любой сбой — None: телефон без правила работает как раньше, а без регистрации — нет."""
     try:
         if (provider or 'asterisk') != 'binotel':
             return None
-        seconds = _env_int('TEZ_OP_IDLE_OFFLINE_SEC', 0, minimum=0,
-                           maximum=ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS)
-        if seconds <= 0:
-            return None
         user_id = int(user_id)
-        sales = _tez_wallboard_people().get('op') or []
+        # Состав — из кэша табло Тез; настройку отдела читаем только для своих продавцов, а не на
+        # каждый запрос настроек каждого телефона.
+        people = _tez_wallboard_people()
+        sales = people.get('op') or []
         if not any(int(row.get('id') or 0) == user_id for row in sales):
+            return None
+        department_id = people.get('department_id')
+        if department_id is None:
+            return None
+        rule = db.get_sip_department_idle_offline(department_id) or {}
+        if not rule.get('enabled'):
+            return None
+        seconds = min(int(rule.get('seconds') or 0), ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS)
+        if seconds <= 0:
             return None
         return {
             "seconds": seconds,

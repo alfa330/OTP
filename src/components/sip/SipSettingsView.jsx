@@ -9,6 +9,10 @@ import {
 import { departmentCodeUsesOktellCabinet } from '../../utils/departmentViews';
 import { startFileDownload } from '../../utils/fileDownload';
 import { dialListManagedDepartmentIds } from './dialListDepartments';
+import {
+    IDLE_OFFLINE_MIN_DEFAULT, IDLE_OFFLINE_MIN_MAX, IDLE_OFFLINE_MIN_MIN, IDLE_OFFLINE_RESET,
+    hasIdleOfflineSetting, idleOfflineFormFrom, idleOfflineHint, idleOfflineLabel, idleOfflinePayload,
+} from './idleOfflineSetting';
 
 /*
  * Раздел «Настройки SIP» (iCORE Phone).
@@ -440,6 +444,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
         auto_answer: INHERIT, auto_answer_delay: '',
         // Гудки до автосброса строкой, как и секунды: пусто — умолчание.
         ring_timeout_rings: '',
+        // «Офлайн» за простой «Исхода» (только Тез КЦ): выключатель и минуты строкой.
+        idle_offline_enabled: false, idle_offline_min: '',
     });
     const [deptSaving, setDeptSaving] = useState(false);
 
@@ -1136,6 +1142,7 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
             ring_timeout_rings: typeof dept.ring_timeout_rings === 'number'
                 ? String(dept.ring_timeout_rings)
                 : '',
+            ...idleOfflineFormFrom(dept),
         });
     };
 
@@ -1152,6 +1159,8 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     // старых значений.
                     auto_answer: INHERIT, auto_answer_delay: INHERIT,
                     ring_timeout_rings: INHERIT,
+                    // И «Офлайн» за простой «Исхода»: не задано — выключено.
+                    ...IDLE_OFFLINE_RESET,
                 }
                 : {
                     sip_server: deptForm.sip_server.trim(),
@@ -1166,6 +1175,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                     auto_answer: modeToPayload(deptForm.auto_answer),
                     auto_answer_delay: delayToPayload(deptForm.auto_answer, deptForm.auto_answer_delay),
                     ring_timeout_rings: ringTimeoutToPayload(deptForm.ring_timeout_rings),
+                    // Только Тез КЦ: другим отделам поля не шлём, иначе «выключено» записалось бы
+                    // им строкой. Непригодный срок бросает ошибку — тост ниже, запись не уходит.
+                    ...(hasIdleOfflineSetting(deptEditing) ? idleOfflinePayload(deptForm) : {}),
                 };
             const resp = await fetch(`${apiBaseUrl}/api/sip_config/departments/${deptEditing.department_id}`, {
                 method: 'PUT',
@@ -1716,6 +1728,9 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                             <div className="truncate text-[11.5px] text-slate-400">
                                                 {dept.configured
                                                     ? (isBinotel ? [
+                                                        // Включённое правило простоя — первым: строка обрезается
+                                                        // справа, а сервер и кабинет важны меньше.
+                                                        idleOfflineLabel(dept),
                                                         dept.sip_server ? `сервер ${dept.sip_server}` : 'сервер не задан',
                                                         dept.binotel_cabinet_url
                                                             ? `кабинет ${dept.binotel_cabinet_url.replace(/^https?:\/\//, '')}`
@@ -2084,16 +2099,20 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             {deptForm.auto_answer === 'on' && (
                                 <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
                                     <span className="text-[13px] text-slate-700">Показывать окно звонка, сек</span>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max={AUTO_ANSWER_DELAY_MAX}
-                                        value={deptForm.auto_answer_delay}
-                                        onChange={(e) => setDeptForm((f) => ({ ...f, auto_answer_delay: e.target.value }))}
-                                        placeholder={String(AUTO_ANSWER_DELAY_DEFAULT)}
-                                        disabled={!canEdit}
-                                        className={`${iosInput} w-20 text-center font-mono`}
-                                    />
+                                    {/* Ширину задаёт обёртка: у iosInput свой w-full, и в собранном CSS он
+                                        стоит после w-20 — поле растягивалось и сжимало подпись в столбик. */}
+                                    <div className="w-20 shrink-0">
+                                        <input
+                                            type="number"
+                                            min="0"
+                                            max={AUTO_ANSWER_DELAY_MAX}
+                                            value={deptForm.auto_answer_delay}
+                                            onChange={(e) => setDeptForm((f) => ({ ...f, auto_answer_delay: e.target.value }))}
+                                            placeholder={String(AUTO_ANSWER_DELAY_DEFAULT)}
+                                            disabled={!canEdit}
+                                            className={`${iosInput} text-center font-mono`}
+                                        />
+                                    </div>
                                 </div>
                             )}
                             <p className="text-[11.5px] leading-relaxed text-slate-500">
@@ -2131,16 +2150,18 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                                     <span className="block text-[13px] text-slate-700">Сброс исходящего без ответа, гудков</span>
                                     <span className="block text-[11.5px] text-slate-400">{ringTimeoutHint(deptForm.ring_timeout_rings)}</span>
                                 </span>
-                                <input
-                                    type="number"
-                                    min="0"
-                                    max={RING_TIMEOUT_RINGS_MAX}
-                                    value={deptForm.ring_timeout_rings}
-                                    onChange={(e) => setDeptForm((f) => ({ ...f, ring_timeout_rings: e.target.value }))}
-                                    placeholder={String(RING_TIMEOUT_RINGS_DEFAULT)}
-                                    disabled={!canEdit}
-                                    className={`${iosInput} w-20 shrink-0 text-center font-mono`}
-                                />
+                                <div className="w-20 shrink-0">
+                                    <input
+                                        type="number"
+                                        min="0"
+                                        max={RING_TIMEOUT_RINGS_MAX}
+                                        value={deptForm.ring_timeout_rings}
+                                        onChange={(e) => setDeptForm((f) => ({ ...f, ring_timeout_rings: e.target.value }))}
+                                        placeholder={String(RING_TIMEOUT_RINGS_DEFAULT)}
+                                        disabled={!canEdit}
+                                        className={`${iosInput} text-center font-mono`}
+                                    />
+                                </div>
                             </div>
                             <p className="text-[11.5px] leading-relaxed text-slate-500">
                                 ≈5 секунд на гудок. 0 — не сбрасывать. Пусто — {RING_TIMEOUT_RINGS_DEFAULT} (по умолчанию).
@@ -2151,6 +2172,52 @@ const SipSettingsView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, c
                             </p>
                         </div>
                     </section>
+
+                    {/* «Офлайн» за простой в «Исходе» (владелец 17.11.2026: «добавь возможность эту
+                        настройку менять»). Только у Тез КЦ: правило получает его отдел продаж, у
+                        техподдержки свой возврат в «Активный». По умолчанию выключено. */}
+                    {hasIdleOfflineSetting(deptEditing) && (
+                        <section className="space-y-1.5">
+                            <div className={iosGroupLabel}>Простой в «Исходе» · отдел продаж</div>
+                            <div className={`${iosCard} space-y-2 p-4`}>
+                                <div className="flex items-center justify-between gap-3">
+                                    <span className="min-w-0">
+                                        <span className="block text-[13px] text-slate-700">Ставить «Офлайн» за простой</span>
+                                        <span className="block text-[11.5px] text-slate-400">{idleOfflineHint(deptForm)}</span>
+                                    </span>
+                                    <IosToggle
+                                        checked={deptForm.idle_offline_enabled}
+                                        onChange={(v) => setDeptForm((f) => ({ ...f, idle_offline_enabled: v }))}
+                                        disabled={!canEdit}
+                                    />
+                                </div>
+                                {deptForm.idle_offline_enabled && (
+                                    <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3.5 py-2.5">
+                                        <span className="text-[13px] text-slate-700">Минут в «Исходе» без звонка</span>
+                                        <div className="w-20 shrink-0">
+                                            <input
+                                                type="number"
+                                                min={IDLE_OFFLINE_MIN_MIN}
+                                                max={IDLE_OFFLINE_MIN_MAX}
+                                                value={deptForm.idle_offline_min}
+                                                onChange={(e) => setDeptForm((f) => ({ ...f, idle_offline_min: e.target.value }))}
+                                                placeholder={String(IDLE_OFFLINE_MIN_DEFAULT)}
+                                                disabled={!canEdit}
+                                                className={`${iosInput} text-center font-mono`}
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                                <p className="text-[11.5px] leading-relaxed text-slate-500">
+                                    Продавец стоит в «Исходе» столько минут без звонка — телефон сам ставит
+                                    «Офлайн»: это не рабочее время. За 30 секунд он предупреждает. Звонок или
+                                    «Активный» начинают отсчёт заново, перерыв его не сбрасывает. Техподдержки
+                                    не касается — у неё свой возврат в «Активный». Доезжает до телефонов
+                                    (iCORE Phone 3.22.57 и новее) в течение 10 минут.
+                                </p>
+                            </div>
+                        </section>
+                    )}
                     <p className="px-1 text-[11.5px] text-slate-500">
                         {deptForm.provider === 'binotel' ? (
                             <>

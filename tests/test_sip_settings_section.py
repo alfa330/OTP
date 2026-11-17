@@ -143,6 +143,8 @@ def _database_namespace(method_names):
             # Автосброс исходящего без ответа: ярус только отдела.
             "parse_sip_ring_timeout_rings", "resolve_sip_ring_timeout_rings",
             "sip_ring_timeout_seconds",
+            # «Офлайн» за простой «Исхода» у отдела продаж Тез: тоже ярус только отдела.
+            "parse_sip_idle_offline_enabled", "parse_sip_idle_offline_sec", "resolve_sip_idle_offline",
         ):
             exec(_source_of(node, DATABASE_SOURCE), ns)
     for node in DATABASE_CLASS.body:
@@ -1603,14 +1605,17 @@ class DepartmentSipConfigTests(unittest.TestCase):
         # все флаги за ним сдвинулись; ярусы автоприёма и автосброса дописаны в хвост.
         db = _StubDb(self.ns, _FakeCursor([
             (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7,
-             None, None, '', 0, None),
+             None, None, '', 0, None, None, None),
             (367, 'Отдел продаж', 'op', 'pbx.sales', 'sales', '*77', 'dialer.sales',
-             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3, None, None, '', 0, None),
+             'Secret{номер}!', 'asterisk', True, None, 'Админ', 3, None, None, '', 0, None, None, None),
             (900, 'Тез КЦ', 'tez', '', '', '', '', '', 'binotel', True, None, 'Админ', 5,
-             True, 3, 'https://my.binotel.kz', 2, 0),
+             True, 3, 'https://my.binotel.kz', 2, 0, True, 240),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual([False, True, True], [r["configured"] for r in rows])
+        # «Офлайн» за простой «Исхода» (17.11.2026) — сырыми: None у не задававших (выключено).
+        self.assertEqual([None, None, True], [r["idle_offline_enabled"] for r in rows])
+        self.assertEqual([None, None, 240], [r["idle_offline_sec"] for r in rows])
         self.assertEqual([7, 3, 5], [r["operators_count"] for r in rows])
         # Ярус автопринятия доезжает трёхпозиционным: None у тех, кто его не
         # задавал, — схлопывать его с «выключено» нельзя.
@@ -1642,8 +1647,10 @@ class DepartmentSipConfigTests(unittest.TestCase):
         # Столько колонок, сколько индексов читает маппер: лишняя (или забытая)
         # колонка — это и есть сдвиг.
         self.assertEqual(_max_row_index("get_sip_department_configs", "r") + 1, len(columns))
-        # Гудки автосброса (11.10.2026) дописаны в хвост, а не в середину.
-        self.assertEqual("c.ring_timeout_rings", columns[-1])
+        # Гудки автосброса (11.10.2026) и «Офлайн» за простой «Исхода» (17.11.2026) дописаны в
+        # хвост, а не в середину.
+        self.assertEqual(["c.ring_timeout_rings", "c.idle_offline_enabled", "c.idle_offline_sec"],
+                         columns[-3:])
 
     def test_saving_upserts_and_validates_the_autodial_code(self):
         self.ns["update_sip_department_config"](self.db, 12, {"sip_server": "pbx.sales", "autodial_code": "*7 7"}, user_id=5)
@@ -2934,7 +2941,7 @@ class DepartmentAutoAnswerStorageTests(unittest.TestCase):
         """
         db = _StubDb(self.ns, _FakeCursor([
             (560, 'Тез КЦ', 'tez', 'sip52.binotel.com', '', '', '', '', 'binotel',
-             True, None, 'Админ', 19, True, 3, 'https://my.binotel.kz', 19, None),
+             True, None, 'Админ', 19, True, 3, 'https://my.binotel.kz', 19, None, None, None),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual(19, rows[0]["own_auto_answer_count"])
@@ -3622,11 +3629,11 @@ class DepartmentRingTimeoutStorageTests(unittest.TestCase):
         """
         db = _StubDb(self.ns, _FakeCursor([
             (12, 'СЗоВ', 'szov', '', '', '', '', '', 'asterisk', False, None, None, 7,
-             None, None, '', 0, None),
+             None, None, '', 0, None, None, None),
             (367, 'Отдел продаж', 'op', 'pbx.sales', '', '', '', '', 'asterisk', True, None,
-             'Админ', 40, None, None, '', 0, 0),
+             'Админ', 40, None, None, '', 0, 0, None, None),
             (560, 'Тез КЦ', 'tez', 'sip52.binotel.com', '', '', '', '', 'binotel', True, None,
-             'Админ', 19, True, 3, '', 0, 7),
+             'Админ', 19, True, 3, '', 0, 7, False, None),
         ]))
         rows = self.ns["get_sip_department_configs"](db)
         self.assertEqual([None, 0, 7], [r["ring_timeout_rings"] for r in rows])
@@ -3894,3 +3901,230 @@ class RingTimeoutFrontendTests(unittest.TestCase):
         # И в «Данных для телефона» карточки сотрудника — в обоих разделах.
         self.assertEqual(2, self.view.count(
             "value={ringTimeoutEffective(editing?.department_ring_timeout_rings)}"))
+
+
+class IdleOfflineParseTests(unittest.TestCase):
+    """«Офлайн» за простой «Исхода» у отдела продаж Тез (владелец 17.11.2026: «добавь возможность эту
+    настройку менять», «выключить сейчас»): разбор полей карточки отдела."""
+
+    def setUp(self):
+        self.ns = _database_namespace(set())
+
+    def test_the_switch_takes_bools_words_and_inherit_and_refuses_garbage(self):
+        parse = self.ns["parse_sip_idle_offline_enabled"]
+        self.assertIs(True, parse(True))
+        self.assertIs(False, parse(False))
+        self.assertIs(True, parse("on"))
+        self.assertIs(False, parse("0"))
+        self.assertIsNone(parse("inherit"))
+        # Поле не прислали — прежнее значение.
+        self.assertIs(True, parse(None, default=True))
+        # Мусор не превращается ни во «включено», ни в «выключено»: это оплата людей.
+        for bad in ("может быть", "2", "", [], {}):
+            with self.assertRaises(ValueError):
+                parse(bad)
+
+    def test_the_term_is_whole_seconds_between_a_minute_and_an_hour(self):
+        parse = self.ns["parse_sip_idle_offline_sec"]
+        self.assertEqual(180, parse(180))
+        self.assertEqual(240, parse("240"))
+        self.assertEqual(60, parse(60))
+        self.assertEqual(3600, parse(3600))
+        self.assertEqual(300, parse(300.0))
+        # Пустое и «не задано» — срок по умолчанию; не прислали — прежний.
+        self.assertIsNone(parse(""))
+        self.assertIsNone(parse("inherit"))
+        self.assertEqual(300, parse(None, default=300))
+        # Вне границ, дробь, слова, bool, бесконечность — отказ, а не молча подрезанный срок.
+        for bad in (59, 3601, 0, -60, 90.5, "3 мин", True, float("inf"), float("nan"), "Infinity"):
+            with self.assertRaises(ValueError):
+                parse(bad)
+
+    def test_the_effective_rule_is_off_and_three_minutes_unless_set(self):
+        resolve = self.ns["resolve_sip_idle_offline"]
+        self.assertEqual({"enabled": False, "seconds": 180}, resolve(None, None))
+        self.assertEqual({"enabled": False, "seconds": 240}, resolve(False, 240))
+        self.assertEqual({"enabled": True, "seconds": 180}, resolve(True, None))
+        # Вписанное в базу руками держим в пределах формы.
+        self.assertEqual({"enabled": True, "seconds": 3600}, resolve(True, 99999))
+        self.assertEqual({"enabled": True, "seconds": 60}, resolve(True, 5))
+        # Включает только настоящий TRUE из колонки.
+        self.assertFalse(resolve(1, 240)["enabled"])
+        self.assertFalse(resolve("t", 240)["enabled"])
+
+
+class IdleOfflineMigrationTests(unittest.TestCase):
+    """Схема: две колонки в строке отдела, без дефолтов и без простановки — NULL и есть «выключено»."""
+
+    def test_the_columns_are_nullable_and_sit_next_to_the_ring_timeout(self):
+        for statement in ("ADD COLUMN IF NOT EXISTS idle_offline_enabled BOOLEAN;",
+                          "ADD COLUMN IF NOT EXISTS idle_offline_sec INTEGER;"):
+            self.assertEqual(1, DATABASE_SOURCE.count(statement), statement)
+            head = DATABASE_SOURCE.split(statement, 1)[0]
+            self.assertTrue(head.rstrip().endswith("ALTER TABLE sip_department_config"),
+                            head.rstrip()[-60:])
+        self.assertNotIn("SET idle_offline_enabled", DATABASE_SOURCE)
+        self.assertNotIn("SET idle_offline_sec", DATABASE_SOURCE)
+        ring = DATABASE_SOURCE.index("ADD COLUMN IF NOT EXISTS ring_timeout_rings SMALLINT;")
+        self.assertLess(ring, DATABASE_SOURCE.index("ADD COLUMN IF NOT EXISTS idle_offline_enabled BOOLEAN;"))
+
+
+class DepartmentIdleOfflineStorageTests(unittest.TestCase):
+    """Хранение правила в строке отдела Тез КЦ: карточка «Настройки SIP», история."""
+
+    def setUp(self):
+        self.ns = _database_namespace({
+            "get_sip_department_configs", "update_sip_department_config", "_mask_sip_secret",
+        })
+        self.db = _StubDb(self.ns, _FakeCursor([]))
+        self.state = {
+            "department_id": 560, "department_name": "Тез КЦ", "department_code": "tez",
+            "sip_server": "sip52.binotel.com", "base_password": "", "autodial_code": "",
+            "autodial_server": "", "autodial_base_password": "", "provider": "binotel",
+            "configured": True, "updated_at": None, "updated_by_name": None,
+            "operators_count": 25, "auto_answer": True, "auto_answer_delay": 3,
+            "binotel_cabinet_url": "https://my.binotel.kz", "own_auto_answer_count": 0,
+            "ring_timeout_rings": None,
+            "idle_offline_enabled": None, "idle_offline_sec": None,
+        }
+        self.db.get_sip_department_configs = lambda ids=None: [dict(self.state)]
+
+    def _save(self, payload):
+        return self.ns["update_sip_department_config"](self.db, 560, payload, user_id=5)
+
+    def _upsert(self):
+        return next((s, p) for s, p in self.db.cursor.calls
+                    if "INSERT INTO sip_department_config" in s)
+
+    def _snapshot(self):
+        _, params = next((s, p) for s, p in self.db.cursor.calls
+                         if "INSERT INTO sip_config_history" in s)
+        return json.loads(params[2])
+
+    def test_switching_on_with_a_term_is_stored_and_logged(self):
+        self._save({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        sql, params = self._upsert()
+        self.assertIn("idle_offline_enabled = EXCLUDED.idle_offline_enabled", sql)
+        self.assertIn("idle_offline_sec = EXCLUDED.idle_offline_sec", sql)
+        self.assertEqual((True, 240), tuple(params[-2:]))
+        # Кто и когда включил правило, уводящее людей в неоплачиваемое время, — видно в истории.
+        snapshot = self._snapshot()
+        self.assertIs(True, snapshot["idle_offline_enabled"])
+        self.assertEqual(240, snapshot["idle_offline_sec"])
+
+    def test_switching_off_keeps_the_term(self):
+        """Выключатель и срок — разные поля: выключили и снова включили — срок тот же."""
+        self.state.update({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        self._save({"idle_offline_enabled": False})
+        _, params = self._upsert()
+        self.assertEqual((False, 240), tuple(params[-2:]))
+
+    def test_changing_only_the_term_is_saved(self):
+        """Сменили одни минуты при включённом правиле — это правка, и она обязана записаться."""
+        self.state.update({"idle_offline_enabled": True, "idle_offline_sec": 180})
+        self._save({"idle_offline_enabled": True, "idle_offline_sec": 300})
+        _, params = self._upsert()
+        self.assertEqual((True, 300), tuple(params[-2:]))
+        self.assertEqual(300, self._snapshot()["idle_offline_sec"])
+
+    def test_fields_not_sent_keep_their_values(self):
+        """Старая вкладка сайта полей не знает — её сохранение правило не трогает."""
+        self.state.update({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        self._save({"sip_server": "sip53.binotel.com"})
+        _, params = self._upsert()
+        self.assertEqual((True, 240), tuple(params[-2:]))
+
+    def test_inherit_clears_the_rule_back_to_unset(self):
+        """«Вернуть общие»: не задано — выключено и 3 минуты."""
+        self.state.update({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        self._save({"idle_offline_enabled": "inherit", "idle_offline_sec": "inherit"})
+        _, params = self._upsert()
+        self.assertEqual((None, None), tuple(params[-2:]))
+
+    def test_garbage_is_refused_before_anything_is_written(self):
+        for payload in ({"idle_offline_sec": 30}, {"idle_offline_sec": "три"},
+                        {"idle_offline_enabled": "может быть"}):
+            with self.assertRaises(ValueError):
+                self._save(payload)
+        self.assertFalse(any("INSERT INTO sip_department_config" in s for s, _ in self.db.cursor.calls))
+
+    def test_saving_the_same_values_writes_nothing(self):
+        self.state.update({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        self._save({"idle_offline_enabled": True, "idle_offline_sec": 240})
+        self.assertEqual([], self.db.cursor.calls)
+
+    def test_a_local_pbx_department_with_only_this_rule_keeps_its_row(self):
+        """«Выключено» — значение, а не пустота: строка с ним не удаляется как пустая."""
+        self.state.update({"department_id": 367, "department_code": "op", "provider": "asterisk",
+                           "sip_server": "", "binotel_cabinet_url": "", "auto_answer": None,
+                           "auto_answer_delay": None, "configured": False})
+        self.ns["update_sip_department_config"](self.db, 367, {"idle_offline_enabled": False}, user_id=5)
+        self.assertFalse(any("DELETE FROM sip_department_config" in s for s, _ in self.db.cursor.calls))
+        _, params = self._upsert()
+        self.assertEqual((False, None), tuple(params[-2:]))
+
+
+class IdleOfflineRuleReadTests(unittest.TestCase):
+    """get_sip_department_idle_offline — точечное чтение правила для ручки настроек телефона."""
+
+    def setUp(self):
+        self.ns = _database_namespace({"get_sip_department_idle_offline"})
+
+    def _read(self, rows, department_id=560):
+        db = _StubDb(self.ns, _FakeCursor(rows))
+        return self.ns["get_sip_department_idle_offline"](db, department_id), db.cursor.calls
+
+    def test_the_rule_comes_from_the_department_row(self):
+        rule, calls = self._read([(True, 240)])
+        self.assertEqual({"enabled": True, "seconds": 240}, rule)
+        self.assertEqual(
+            [("SELECT idle_offline_enabled, idle_offline_sec FROM sip_department_config WHERE department_id = %s",
+              (560,))], calls)
+
+    def test_nothing_set_means_off_and_three_minutes(self):
+        self.assertEqual({"enabled": False, "seconds": 180}, self._read([])[0])
+        self.assertEqual({"enabled": False, "seconds": 180}, self._read([(None, None)])[0])
+        self.assertEqual({"enabled": False, "seconds": 240}, self._read([(False, 240)])[0])
+
+    def test_no_department_reads_nothing(self):
+        rule, calls = self._read([(True, 240)], department_id=None)
+        self.assertEqual({"enabled": False, "seconds": 180}, rule)
+        self.assertEqual([], calls)
+
+
+class IdleOfflineFrontendTests(unittest.TestCase):
+    """Блок «Простой в «Исходе» · отдел продаж» в карточке отдела Тез КЦ."""
+
+    def setUp(self):
+        self.view = _read(VIEW_PATH)
+        self.helper = _read(ROOT / "src" / "components" / "sip" / "idleOfflineSetting.js")
+
+    def test_the_limits_match_the_backend(self):
+        """Минуты на фронте и секунды на сервере — одни границы; разъехаться им нельзя."""
+        ns = _database_namespace(set())
+        for front, back in (("IDLE_OFFLINE_MIN_DEFAULT", "SIP_IDLE_OFFLINE_SEC_DEFAULT"),
+                            ("IDLE_OFFLINE_MIN_MIN", "SIP_IDLE_OFFLINE_SEC_MIN"),
+                            ("IDLE_OFFLINE_MIN_MAX", "SIP_IDLE_OFFLINE_SEC_MAX")):
+            match = re.search(r"export const %s = (\d+);" % front, self.helper)
+            self.assertIsNotNone(match, front)
+            self.assertEqual(ns[back], int(match.group(1)) * 60, front)
+
+    def test_the_block_belongs_to_the_tez_department_only(self):
+        """Правило получает отдел продаж Тез КЦ — и код отдела тот же, что у сервера."""
+        code = re.search(r"export const IDLE_OFFLINE_DEPARTMENT_CODE = '([a-z_]+)';", self.helper)
+        self.assertIsNotNone(code)
+        self.assertIn("TEZ_WALLBOARD_DEPARTMENT_CODE = '%s'" % code.group(1), source_cache.read(BOT_PATH))
+        card = self.view.split("{/* Настройки отдела */}", 1)[1].split("{/* Массовое изменение", 1)[0]
+        self.assertIn("{hasIdleOfflineSetting(deptEditing) && (", card)
+        self.assertLess(card.index("Сброс исходящего без ответа, гудков"),
+                        card.index("Простой в «Исходе» · отдел продаж"))
+        self.assertIn("max={IDLE_OFFLINE_MIN_MAX}", card)
+        self.assertIn("placeholder={String(IDLE_OFFLINE_MIN_DEFAULT)}", card)
+
+    def test_the_rule_is_saved_only_for_tez_and_cleared_by_the_reset(self):
+        """Другим отделам поля не шлём (иначе «выключено» записалось бы им строкой), а «Вернуть
+        общие» снимает правило вместе с остальными ярусами."""
+        self.assertIn("...(hasIdleOfflineSetting(deptEditing) ? idleOfflinePayload(deptForm) : {}),", self.view)
+        self.assertIn("...IDLE_OFFLINE_RESET,", self.view)
+        self.assertIn("...idleOfflineFormFrom(dept),", self.view)
+        self.assertIn("idleOfflineLabel(dept),", self.view)

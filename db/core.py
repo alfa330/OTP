@@ -628,6 +628,74 @@ def sip_ring_timeout_seconds(rings) -> int:
     return rings * SIP_RING_SECONDS_PER_RING - SIP_RING_TIMEOUT_LEAD_SEC
 
 
+# «Офлайн» за простой в «Исходе» у отдела продаж Тез КЦ (владелец 17.11.2026: «добавь возможность эту
+# настройку менять» — и «выключить сейчас»). Ярус один — отдел Тез КЦ, личного значения нет; правило
+# получает только его отдел продаж (bot_schedule2._icore_phone_idle_offline), телефон 3.22.57+.
+# idle_offline_enabled: NULL — не задавали, и правило ВЫКЛЮЧЕНО; TRUE / FALSE — явно.
+# idle_offline_sec: NULL — срок по умолчанию (3 минуты), иначе от минуты до часа.
+SIP_IDLE_OFFLINE_SEC_DEFAULT = 180
+SIP_IDLE_OFFLINE_SEC_MIN = 60
+SIP_IDLE_OFFLINE_SEC_MAX = 3600
+
+
+def parse_sip_idle_offline_enabled(value, default=None):
+    """Выключатель «Офлайн» за простой из payload'а: True / False / None («не задано»).
+
+    None на входе — «поле не прислали», возвращаем прежнее; токен SIP_INHERIT_TOKEN — «не задано»
+    (NULL, то есть выключено). Мусор — ошибка, а не молчаливое значение: выключатель решает, уйдут
+    ли люди в неоплачиваемый «Офлайн», и сорванная форма не должна его переключать.
+    """
+    if value is None:
+        return default
+    if is_sip_inherit(value):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ('1', 'true', 'yes', 'on'):
+        return True
+    if text in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError("«Офлайн» за простой: ожидается «включено» или «выключено»")
+
+
+def parse_sip_idle_offline_sec(value, default=None):
+    """Срок простоя в «Исходе» до «Офлайн» из payload'а, секунд: число / None («по умолчанию»).
+
+    None — «поле не прислали», прежнее значение; пустая строка и токен SIP_INHERIT_TOKEN — «по
+    умолчанию» (NULL). Целое вне SIP_IDLE_OFFLINE_SEC_MIN..MAX, дробь и мусор — ошибка: подрезать
+    молча нельзя, срок решает, кого и когда выбросит из работы.
+    """
+    if value is None:
+        return default
+    if is_sip_inherit(value) or (isinstance(value, str) and value.strip() == ''):
+        return None
+    message = "Срок простоя в «Исходе» — от 1 до 60 минут"
+    # bool — тоже int: idle_offline_sec: true не должно стать «1 секунда».
+    if isinstance(value, bool):
+        raise ValueError(message)
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(message)
+    if number != number or number in (float('inf'), float('-inf')) or number != int(number):
+        raise ValueError(message)
+    seconds = int(number)
+    if seconds < SIP_IDLE_OFFLINE_SEC_MIN or seconds > SIP_IDLE_OFFLINE_SEC_MAX:
+        raise ValueError(message)
+    return seconds
+
+
+def resolve_sip_idle_offline(enabled, seconds) -> dict:
+    """Действующее правило отдела: {'enabled': bool, 'seconds': int}.
+
+    Не задано — выключено и 3 минуты. Срок держим в пределах формы и здесь: значение, вписанное в
+    базу руками, не должно уехать в телефон за её границами."""
+    sec = SIP_IDLE_OFFLINE_SEC_DEFAULT if seconds is None else int(seconds)
+    sec = max(SIP_IDLE_OFFLINE_SEC_MIN, min(SIP_IDLE_OFFLINE_SEC_MAX, sec))
+    return {'enabled': enabled is True, 'seconds': sec}
+
+
 def normalize_sip_identifier(value, field="SIP-номер"):
     """Нормализует SIP-номер/код: '' если пусто, иначе валидирует набор символов."""
     if value is None:
