@@ -214,6 +214,33 @@ class VersionTests(unittest.TestCase):
         self.assertIsNone(rounds[2]['outcome'])
         self.assertEqual(materials.rounds_from_history([]), [])
 
+    def test_rounds_after_super_admin_moves_fired_card(self):
+        # Перенос суперадмином карточки уволенного (17.11.2026) пишет статус колонки:
+        # «в работе» или «выставлена» сразу после сдачи. Раунд закрывается возвратом —
+        # иначе версия навсегда висела бы «на проверке», а следующая приёмка закрыла бы
+        # не тот раунд.
+        t = datetime(2026, 11, 17, 12, 0)
+        note = 'Перенёс суперадмин: исполнитель уволен'
+        rows = [
+            ('assigned', t, 1, 'Глава', None),
+            ('in_progress', t, 2, 'Видеограф', None),
+            ('completed', t, 22, 'Суперадмин', note),
+            ('in_progress', t, 22, 'Суперадмин', note),
+            ('completed', t, 22, 'Суперадмин', note),
+            ('assigned', t, 22, 'Суперадмин', note),
+            ('completed', t, 22, 'Суперадмин', note),
+            ('accepted', t, 22, 'Суперадмин', note),
+            # После закрытого раунда «в работе» ничего не меняет — как и в обычном цикле.
+            ('in_progress', t, 22, 'Суперадмин', note),
+        ]
+        rounds = materials.rounds_from_history(rows)
+        self.assertEqual([(r['version'], r['outcome']) for r in rounds],
+                         [(1, 'returned'), (2, 'returned'), (3, 'accepted')])
+        self.assertEqual((rounds[0]['outcome_by_name'], rounds[0]['outcome_comment']), ('Суперадмин', note))
+        # Обычный цикл не задет: сданная версия без ответа остаётся «на проверке».
+        open_round = materials.rounds_from_history(rows[:3])
+        self.assertEqual([(r['version'], r['outcome']) for r in open_round], [(1, None)])
+
     def test_permissions(self):
         p = materials.permissions(status='assigned', is_assignee=True, can_review=False, is_super_admin=False)
         self.assertTrue(p['can_take'])

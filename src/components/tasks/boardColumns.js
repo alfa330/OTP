@@ -51,6 +51,31 @@ export const visibleBoardColumns = (countOf) => BOARD_COLUMNS
   .filter((column) => !column.transient || Number(countOf(column.id) || 0) > 0);
 
 /**
+ * Строки канбана — объединение загруженных колонок (columnState[id].tasks).
+ *
+ * После действия колонки перечитываются каждая своим запросом, и перенесённая
+ * карточка успевает уйти из ответа старой колонки раньше, чем придёт ответ новой:
+ * на кадр-два её не было бы на доске вовсе. Пока колонки дочитываются, карточку с
+ * оптимистичной правкой (overrides) держит её прежняя строка (keptRows, ключ —
+ * id строкой), а правка поверх ставит её в новую колонку. Дочитались все колонки,
+ * а строки нет — карточка ушла за порцию колонки, и показывать её не нужно.
+ */
+export const mergeBoardRows = (columnState, overrides = {}, keptRows = null) => {
+  const byId = new Map();
+  BOARD_COLUMNS.forEach((column) => {
+    (columnState?.[column.id]?.tasks || []).forEach((task) => byId.set(task.id, task));
+  });
+  const reloading = BOARD_COLUMNS.some((column) => columnState?.[column.id]?.loading);
+  if (reloading && keptRows) {
+    Object.keys(overrides || {}).forEach((key) => {
+      const kept = keptRows.get(String(key));
+      if (kept && !byId.has(kept.id)) byId.set(kept.id, kept);
+    });
+  }
+  return [...byId.values()];
+};
+
+/**
  * Известно ли уже, стоят ли временные колонки на доске. columnState — состояние
  * колонок доски: fetched — ответ по колонке пришёл после сброса, loading — запрос
  * в пути. Пока ответа нет, доску после полной загрузки не рисуем: иначе колонка
@@ -61,15 +86,47 @@ export const transientColumnsKnown = (columnState) => BOARD_COLUMNS
   .filter((column) => column.transient)
   .every((column) => Boolean(columnState?.[column.id]?.fetched) || !columnState?.[column.id]?.loading);
 
+/* Колонка → состояние задачи, в котором карточка в ней стоит. Тот же срез, что
+   BOARD_COLUMN_QUERY, и та же таблица, что _TASK_BOARD_COLUMN_STATES у сервера
+   (db/tasks.py): по ней доска сразу ставит карточку, перенесённую суперадмином. */
+export const BOARD_COLUMN_STATE = {
+  todo:     { status: 'assigned',    is_backlog: false },
+  backlog:  { status: 'assigned',    is_backlog: true },
+  progress: { status: 'in_progress', is_backlog: false },
+  returned: { status: 'returned',    is_backlog: false },
+  review:   { status: 'completed',   is_backlog: false },
+  done:     { status: 'accepted',    is_backlog: false },
+};
+
+/* Среди исполнителей есть уволенный — признак is_fired отдаёт сервер, по тем же
+   статусам, что вкладка «Уволенные». */
+export const hasFiredAssignee = (task) => taskAssignees(task).some((person) => Boolean(person?.is_fired));
+
+/* Перенос карточки уволенного — в форме оптимистичной правки доски: ручке уходит
+   ровно та колонка, куда карточку бросили, а её ответ становится списком
+   записанного по задачам; отказ (false) — правку снять. */
+export const sendBoardMove = async (onMoveTask, task, column) => {
+  const item = await onMoveTask(task, column);
+  return item ? [item] : false;
+};
+
 /**
  * Разрешение drag&drop: какая операция стоит за переносом карточки между колонками.
- * Возвращает {type:'status'|'board'|'blocked'|'noop'}.
+ * Возвращает {type:'status'|'board'|'move'|'blocked'|'noop'}.
  */
 export const resolveBoardDrop = (task, toColumn, ctx) => {
   const from = columnOfTask(task);
   if (from === toColumn) return { type: 'noop' };
   // Задача коллеги-СВ открыта только на просмотр (задача #298).
   if (task?.viewer_is_observer) return { type: 'blocked', reason: 'Это задача коллеги — её можно только посмотреть' };
+
+  /* Карточку уволенного суперадмин переносит в любую колонку одним шагом (владелец,
+     17.11.2026): двигать её по циклу некому — брать в работу и сдавать может только
+     исполнитель. Окна сдачи и возврата здесь не нужны: карточка встаёт ровно туда,
+     куда её бросили. */
+  if (ctx.isSuperAdmin && hasFiredAssignee(task) && BOARD_COLUMN_STATE[toColumn]) {
+    return { type: 'move', column: toColumn };
+  }
 
   const creatorId = Number(task?.creator?.id || 0);
   const requesterId = Number(task?.requested_by?.id || 0);

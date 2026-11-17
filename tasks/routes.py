@@ -32,6 +32,15 @@ TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion', 'production'}
 
 TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
 
+# Перенос карточки уволенного исполнителя суперадмином (владелец, 17.11.2026):
+# коды db.move_fired_assignee_task → текст и код ответа.
+TASK_FIRED_MOVE_ERRORS = {
+    'TASK_NOT_FOUND': ("Task not found", 404),
+    'INVALID_COLUMN': ("Неизвестная колонка доски", 400),
+    'ONLY_SUPER_ADMIN_MOVES': ("Карточки уволенных переносит только суперадмин", 403),
+    'ASSIGNEE_NOT_FIRED': ("Исполнитель не уволен — задачу двигает он сам", 409),
+}
+
 TASK_ALLOWED_PRIORITIES = {'normal', 'urgent', 'critical'}
 
 TASK_ALLOWED_RECURRENCE_TYPES = {'daily', 'weekly', 'monthly'}
@@ -2904,6 +2913,44 @@ def build_tasks_blueprint(
             return jsonify({"photos": task_photos.sign_previews(get_gcs_client, rows)}), 200
         except Exception as e:
             logging.error(f"Error in get_task_photo_previews: {e}", exc_info=True)
+            return jsonify({"error": "Internal server error"}), 500
+
+    @bp.route('/tasks/<int:task_id>/move', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    def move_fired_assignee_task(task_id):
+        """Карточка уволенного исполнителя — в любую колонку доски; только суперадмин.
+
+        Тело: {"column": "todo" | "backlog" | "progress" | "returned" | "review" | "done"}.
+        Шаг пишется в историю задачи, Telegram не уходит — см. db.move_fired_assignee_task.
+        """
+        try:
+            requester_id, requester, guard_response, guard_status = _task_route_guard()
+            if guard_response is not None:
+                return guard_response, guard_status
+
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                data = {}
+            try:
+                result = db.move_fired_assignee_task(
+                    task_id=task_id,
+                    requester_id=requester_id,
+                    requester_role=getattr(g, 'effective_task_role', requester[3]),
+                    column=data.get('column'),
+                )
+            except (ValueError, PermissionError) as move_error:
+                message, code = TASK_FIRED_MOVE_ERRORS.get(
+                    str(move_error), (str(move_error), 403 if isinstance(move_error, PermissionError) else 400)
+                )
+                return jsonify({"error": message}), code
+
+            return jsonify({
+                "status": "success",
+                "message": "Задача перенесена" if result.get('updated') else "Задача уже в этой колонке",
+                "task": result,
+            }), 200
+        except Exception as e:
+            logging.error(f"Error in move_fired_assignee_task: {e}", exc_info=True)
             return jsonify({"error": "Internal server error"}), 500
 
     return bp

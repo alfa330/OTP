@@ -3946,6 +3946,144 @@ class TasksMixin:
                 "history_changed_at": (history_row[1].isoformat() if history_row and hasattr(history_row[1], 'isoformat') else (history_row[1] if history_row else None))
             }
 
+    # Колонка доски → состояние задачи. Тот же срез, что BOARD_COLUMN_QUERY и
+    # BOARD_COLUMN_STATE во фронте (boardQuery.js, boardColumns.js): перенесённая
+    # карточка обязана встать ровно в ту колонку, куда её бросили.
+    _TASK_BOARD_COLUMN_STATES = {
+        'todo': ('assigned', False),
+        'backlog': ('assigned', True),
+        'progress': ('in_progress', False),
+        'returned': ('returned', False),
+        'review': ('completed', False),
+        'done': ('accepted', False),
+    }
+
+    # Подпись шага в истории задачи: кто перенёс, видно по имени, а почему шаг идёт
+    # мимо жизненного цикла — по ней.
+    TASK_FIRED_MOVE_COMMENT = 'Перенёс суперадмин: исполнитель уволен'
+
+    @classmethod
+    def _task_board_column_of(cls, status, is_backlog):
+        """В какой колонке доски стоит задача — как columnOfTask во фронте."""
+        if is_backlog:
+            return 'backlog'
+        for column, (column_status, column_backlog) in cls._TASK_BOARD_COLUMN_STATES.items():
+            if not column_backlog and column_status == status:
+                return column
+        return 'todo'
+
+    def move_fired_assignee_task(self, task_id, requester_id, requester_role, column):
+        """Карточку уволенного исполнителя суперадмин переносит в любую колонку доски.
+
+        Обычный путь карточки — жизненный цикл: взять в работу и сдать может только
+        исполнитель. Уволенный в портал уже не войдёт, и его задачи стояли бы в
+        «Новой» или «В работе» навсегда. Владелец, 17.11.2026: «по уволенным
+        сотрудникам… суперадмины могли переносить их карточки в другие колонки».
+        Отсюда перенос одним шагом в любую колонку — без отчёта о сдаче, окна
+        возврата и обязательного чек-листа: это решение суперадмина, а не работа
+        исполнителя. Telegram не шлём: уволенному писать незачем, а для остальных
+        это уборка доски, а не ход работы по задаче.
+
+        «Уволенный» — как во вкладке «Уволенные» (_TASK_FIRED_STATUSES). Хватает
+        одного уволенного среди исполнителей: карточка стоит и на его доске.
+        """
+        task_id = int(task_id)
+        requester_id = int(requester_id)
+        role = normalize_role_value(requester_role)
+        column_norm = str(column or '').strip().lower()
+        target = self._TASK_BOARD_COLUMN_STATES.get(column_norm)
+        if target is None:
+            raise ValueError("INVALID_COLUMN")
+        if not role_has_min(role, 'super_admin'):
+            raise PermissionError("ONLY_SUPER_ADMIN_MOVES")
+        target_status, target_backlog = target
+
+        with self._get_cursor() as cursor:
+            # Под замком строки, как смена статуса: перенос и сдача в одну и ту же
+            # секунду иначе записали бы оба шага поверх друг друга.
+            cursor.execute("""
+                SELECT t.status, t.is_backlog, t.backlog_rank
+                FROM tasks t
+                WHERE t.id = %s
+                FOR UPDATE
+            """, (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("TASK_NOT_FOUND")
+            current_status = row[0]
+            current_backlog = bool(row[1])
+            current_rank = row[2]
+
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM task_assignees ta
+                    JOIN users u ON u.id = ta.user_id
+                    WHERE ta.task_id = %s
+                      AND LOWER(TRIM(COALESCE(u.status, ''))) = ANY(%s)
+                )
+            """, (task_id, sorted(self._TASK_FIRED_STATUSES)))
+            fired_row = cursor.fetchone()
+            if not (fired_row and fired_row[0]):
+                raise PermissionError("ASSIGNEE_NOT_FIRED")
+
+            if self._task_board_column_of(current_status, current_backlog) == column_norm:
+                return {
+                    "task_id": task_id,
+                    "column": column_norm,
+                    "status": current_status,
+                    "is_backlog": current_backlog,
+                    "backlog_rank": current_rank,
+                    "updated": False,
+                    "history_id": None,
+                }
+
+            backlog_rank_new = current_rank
+            if target_backlog and current_rank is None:
+                # Без места в очереди — в конец бэклога, как перенос в бэклог с доски.
+                cursor.execute("SELECT COALESCE(MAX(backlog_rank), 0) + 1 FROM tasks WHERE is_backlog = TRUE")
+                backlog_rank_new = float((cursor.fetchone() or [1])[0] or 1)
+
+            # «В работе» — как обычное «взять в работу»: фактический старт для
+            # таймлайна ставится один раз и потом не сдвигается.
+            started_sql = (
+                "started_at = COALESCE(started_at, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')),"
+                if target_status == 'in_progress' else ""
+            )
+            cursor.execute(f"""
+                UPDATE tasks
+                SET
+                    status = %s,
+                    is_backlog = %s,
+                    backlog_rank = %s,
+                    {started_sql}
+                    updated_at = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty')
+                WHERE id = %s
+                RETURNING updated_at
+            """, (target_status, target_backlog, backlog_rank_new, task_id))
+            updated_row = cursor.fetchone()
+
+            # Бэклог ↔ «Новая» статус не меняют — как и с доски, в истории их нет.
+            history_id = None
+            if target_status != current_status:
+                cursor.execute("""
+                    INSERT INTO task_status_history (task_id, status_code, changed_by, comment)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                """, (task_id, target_status, requester_id, self.TASK_FIRED_MOVE_COMMENT))
+                history_id = cursor.fetchone()[0]
+
+            return {
+                "task_id": task_id,
+                "column": column_norm,
+                "status": target_status,
+                "is_backlog": target_backlog,
+                "backlog_rank": backlog_rank_new,
+                "updated": True,
+                "updated_at": self._task_dt_to_iso(updated_row[0] if updated_row else None),
+                "history_id": history_id,
+            }
+
     def update_task_checklist_item(self, task_id, checklist_item_id, requester_id, requester_role, is_done,
                                    result_note=None, update_note=False):
         task_id = int(task_id)

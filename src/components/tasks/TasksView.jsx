@@ -10297,6 +10297,32 @@ const TasksView = ({
     }
   }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
 
+  /* Карточку уволенного исполнителя суперадмин переносит в любую колонку доски.
+     Доска ставит её туда сразу и сверяет с тем, что сервер записал (task). */
+  const moveBoardTask = useCallback(async (task, column) => {
+    const taskId = Number(task?.id || 0);
+    if (!taskId) return false;
+    setActionLoadingKey(`${taskId}:move`);
+    try {
+      const res = await axios.post(
+        `${apiBaseUrl}/api/tasks/${taskId}/move`,
+        { column },
+        { headers: buildHeaders() }
+      );
+      await refreshTasksData();
+      return res?.data?.task || false;
+    } catch (e) {
+      notify(e?.response?.data?.error || 'Не удалось перенести задачу', 'error');
+      // Отказ значит, что доска знает о задаче устаревшее: исполнителя вернули на
+      // работу (409), задачу удалили. Перечитываем — иначе каждая следующая попытка
+      // снова уходила бы в отказ. Карточка уже на месте, ждать перечитки незачем.
+      refreshTasksData().catch(() => {});
+      return false;
+    } finally {
+      setActionLoadingKey('');
+    }
+  }, [apiBaseUrl, buildHeaders, notify, refreshTasksData]);
+
   /* ── Отчёты о проделанной работе ── */
   const submitTaskReport = useCallback(async (task, { body, spentMinutes, kind = 'progress' }) => {
     const taskId = Number(task?.id || 0);
@@ -10997,12 +11023,14 @@ const TasksView = ({
             isAdmin={isAdminLikeRole(currentUserRole)}
             isSupervisor={isSupervisorRole(currentUserRole)}
             canScore={normalizeRole(currentUserRole) === 'super_admin'}
+            isSuperAdmin={normalizeRole(currentUserRole) === 'super_admin'}
             focusRequest={boardFocus}
             actionNeedOf={actionNeedOf}
             isTaskOpen={Boolean(drawerTask)}
             onOpenTask={setDrawerTask}
             onStatusAction={handleBoardStatusAction}
             onBoardUpdate={updateBoardItems}
+            onMoveTask={moveBoardTask}
             onCreateBacklogItem={openBacklogCreate}
             onExport={exportBoardTasks}
             notify={notify}

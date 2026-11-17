@@ -8,7 +8,7 @@ import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { ACTION_NEED_META } from './taskActionNeeds';
 import { BOARD_CHUNK_SIZES, DEFAULT_BOARD_CHUNK, normalizeBoardChunk } from './boardQuery';
-import { BOARD_COLUMNS, columnOfTask, overrideFromServer, resolveBoardDrop, transientColumnsKnown, visibleBoardColumns } from './boardColumns';
+import { BOARD_COLUMNS, BOARD_COLUMN_STATE, columnOfTask, mergeBoardRows, overrideFromServer, resolveBoardDrop, sendBoardMove, transientColumnsKnown, visibleBoardColumns } from './boardColumns';
 import {
   PRIORITY_SCORE_HINT,
   awaitsPriorityScore,
@@ -1297,9 +1297,8 @@ const BoardView = ({
     if (!dragged) return null;
     const allowed = new Set();
     columns.forEach((column) => {
-      if (dragged.resolve(column.id).type === 'board' || dragged.resolve(column.id).type === 'status') {
-        allowed.add(column.id);
-      }
+      const { type } = dragged.resolve(column.id);
+      if (type === 'board' || type === 'status' || type === 'move') allowed.add(column.id);
     });
     return allowed;
   }, [dragged, columns]);
@@ -1830,12 +1829,15 @@ const TaskBoardWorkspace = ({
   isSupervisor,
   // Балл приоритета (1–5) ставят только суперадмины; сервер держит то же правило.
   canScore = false,
+  // Суперадмин переносит карточку уволенного исполнителя в любую колонку (onMoveTask).
+  isSuperAdmin = false,
   focusRequest = null,
   actionNeedOf,
   isTaskOpen = false,
   onOpenTask,
   onStatusAction,
   onBoardUpdate,
+  onMoveTask,
   onCreateBacklogItem,
   onExport,
   notify,
@@ -1930,6 +1932,9 @@ const TaskBoardWorkspace = ({
   const resetColumns = useCallback(() => {
     setColumnState(emptyColumnState());
     setColumnsResetToken((prev) => prev + 1);
+    // Другая выборка: прежние правки к ней не относятся, а их строки
+    // (mergeBoardRows) показали бы чужие карточки, пока она грузится.
+    setOverrides({});
   }, []);
 
   /* Бэклог и таймлайн — один список, им хватает обычной страницы. */
@@ -2005,15 +2010,13 @@ const TaskBoardWorkspace = ({
   }, [page, pageTotal, chunkSize]);
 
   /* Строки канбана — объединение загруженных колонок: перетаскивание и
-     оптимистичные правки продолжают работать на общем списке. */
+     оптимистичные правки продолжают работать на общем списке. Карточку с правкой,
+     пока колонки дочитываются, держит её прежняя строка — см. mergeBoardRows. */
+  const keptRowsRef = useRef(new Map());
   const boardRows = useMemo(() => {
     if (!isBoardMode) return pageTasks;
-    const byId = new Map();
-    BOARD_COLUMNS.forEach((column) => {
-      (columnState[column.id]?.tasks || []).forEach((task) => byId.set(task.id, task));
-    });
-    return [...byId.values()];
-  }, [isBoardMode, pageTasks, columnState]);
+    return mergeBoardRows(columnState, overrides, keptRowsRef.current);
+  }, [isBoardMode, pageTasks, columnState, overrides]);
 
   const columnMeta = useMemo(() => Object.fromEntries(BOARD_COLUMNS.map((column) => {
     const state = columnState[column.id] || {};
@@ -2051,6 +2054,13 @@ const TaskBoardWorkspace = ({
     // И после сверки с ответом сервера: колонки могли перечитаться раньше ответа, и
     // тогда правка, уже совпавшая со строкой, висела бы и прятала её следующие перемены.
   }, [boardRows, overrides]);
+
+  // Строки нужны, пока жива правка карточки.
+  useEffect(() => {
+    keptRowsRef.current.forEach((_row, key) => {
+      if (!overrides[key]) keptRowsRef.current.delete(key);
+    });
+  }, [overrides]);
 
   const handleWipLimitChange = useCallback((value) => {
     const normalized = Math.max(0, Math.min(99, Number(value) || 0));
@@ -2125,8 +2135,8 @@ const TaskBoardWorkspace = ({
   }, [focusPerson, boardSummary]);
 
   const dropContext = useMemo(
-    () => ({ currentUserId, isAdmin, isSupervisor }),
-    [currentUserId, isAdmin, isSupervisor]
+    () => ({ currentUserId, isAdmin, isSupervisor, isSuperAdmin: isSuperAdmin && typeof onMoveTask === 'function' }),
+    [currentUserId, isAdmin, isSupervisor, isSuperAdmin, onMoveTask]
   );
 
   const canPlan = useCallback(
@@ -2182,10 +2192,15 @@ const TaskBoardWorkspace = ({
     return () => clearTimeout(timer);
   }, [focusTaskId]);
 
-  const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
-    if (!patch || !Object.keys(patch).length) return false;
-    if (optimistic) setOverrides((prev) => ({ ...prev, [task.id]: { ...(prev[task.id] || {}), ...optimistic } }));
-    const result = await onBoardUpdate([{ task_id: task.id, ...patch }]);
+  /* Оптимистичная правка карточки: видна сразу, держится по ответу сервера и
+     снимается, если он отказал. send() отдаёт список записанного по задачам
+     (элементы с task_id) или false. */
+  const applyOptimistic = useCallback(async (task, optimistic, send) => {
+    if (optimistic) {
+      keptRowsRef.current.set(String(task.id), task);
+      setOverrides((prev) => ({ ...prev, [task.id]: { ...(prev[task.id] || {}), ...optimistic } }));
+    }
+    const result = await send();
     if (!result) {
       if (optimistic) {
         setOverrides((prev) => {
@@ -2202,7 +2217,17 @@ const TaskBoardWorkspace = ({
       setOverrides((prev) => (prev[task.id] ? { ...prev, [task.id]: overrideFromServer(prev[task.id], item) } : prev));
     }
     return true;
-  }, [onBoardUpdate]);
+  }, []);
+
+  const applyBoardPatch = useCallback(async (task, patch, optimistic = null) => {
+    if (!patch || !Object.keys(patch).length) return false;
+    return applyOptimistic(task, optimistic, () => onBoardUpdate([{ task_id: task.id, ...patch }]));
+  }, [applyOptimistic, onBoardUpdate]);
+
+  // Карточка уволенного, перенесённая суперадмином, встаёт в колонку сразу.
+  const applyMove = useCallback((task, column) => applyOptimistic(
+    task, BOARD_COLUMN_STATE[column], () => sendBoardMove(onMoveTask, task, column)
+  ), [applyOptimistic, onMoveTask]);
 
   const handleDrop = useCallback((task, toColumn) => {
     const decision = resolveBoardDrop(task, toColumn, dropContext);
@@ -2215,8 +2240,12 @@ const TaskBoardWorkspace = ({
       onStatusAction(task, decision.action);
       return;
     }
+    if (decision.type === 'move') {
+      applyMove(task, decision.column);
+      return;
+    }
     applyBoardPatch(task, decision.patch, decision.patch);
-  }, [dropContext, notify, onStatusAction, applyBoardPatch]);
+  }, [dropContext, notify, onStatusAction, applyBoardPatch, applyMove]);
 
   const handleReorder = useCallback((task, rank) => {
     applyBoardPatch(task, { backlog_rank: rank }, { backlog_rank: rank });

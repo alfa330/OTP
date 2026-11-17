@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 
 import {
   BOARD_COLUMNS,
+  BOARD_COLUMN_STATE,
   columnOfTask,
+  hasFiredAssignee,
+  mergeBoardRows,
   overrideFromServer,
   resolveBoardDrop,
+  sendBoardMove,
   transientColumnsKnown,
   visibleBoardColumns,
 } from '../src/components/tasks/boardColumns.js';
@@ -180,4 +184,136 @@ test('оптимистичная правка после ответа — зна
   // Нечего сверять — правка как есть.
   assert.deepEqual(overrideFromServer(guess, null), guess);
   assert.equal(overrideFromServer(null, server), null);
+});
+
+/* Карточки уволенных (владелец, 17.11.2026): двигать их по циклу некому — брать в
+   работу и сдавать может только исполнитель, — поэтому суперадмин переносит их в
+   любую колонку одним шагом, и карточка встаёт ровно туда, куда её бросили. */
+const FIRED = 11;
+const ACTIVE = 12;
+const firedTaskIn = (status, extra = {}) => taskIn(status, {
+  assignees: [{ id: FIRED, is_fired: true }],
+  ...extra,
+});
+const superAdmin = (extra = {}) => as(STRANGER, { isAdmin: true, isSuperAdmin: true, ...extra });
+const STARTS = [
+  ['assigned', {}],
+  ['assigned', { is_backlog: true }],
+  ['in_progress', {}],
+  ['returned', {}],
+  ['completed', {}],
+  ['accepted', {}],
+];
+
+test('состояние колонки ставит карточку ровно в неё', () => {
+  assert.deepEqual(Object.keys(BOARD_COLUMN_STATE), ids(BOARD_COLUMNS));
+  BOARD_COLUMNS.forEach((column) => {
+    assert.equal(columnOfTask(BOARD_COLUMN_STATE[column.id]), column.id, column.id);
+    // И это тот же срез, что сервер отдаёт колонке.
+    const query = BOARD_COLUMN_QUERY[column.id];
+    const state = BOARD_COLUMN_STATE[column.id];
+    assert.equal(query.backlog === 'only', state.is_backlog, column.id);
+    if (query.status) assert.equal(query.status, state.status, column.id);
+  });
+});
+
+test('уволенный — хоть один из исполнителей; признак у исполнителя, а не у постановщика', () => {
+  assert.equal(hasFiredAssignee(firedTaskIn('assigned')), true);
+  assert.equal(hasFiredAssignee(taskIn('assigned', {
+    assignees: [{ id: ACTIVE }, { id: FIRED, is_fired: true }],
+  })), true);
+  assert.equal(hasFiredAssignee(taskIn('assigned')), false);
+  assert.equal(hasFiredAssignee(taskIn('assigned', { creator: { id: BOSS, is_fired: true } })), false);
+  // Ответ без состава — по единственному исполнителю.
+  assert.equal(hasFiredAssignee({ status: 'assigned', assignee: { id: FIRED, is_fired: true } }), true);
+  assert.equal(hasFiredAssignee(null), false);
+});
+
+test('суперадмин переносит карточку уволенного из любой колонки в любую другую', () => {
+  STARTS.forEach(([status, extra]) => {
+    const task = firedTaskIn(status, extra);
+    const from = columnOfTask(task);
+    BOARD_COLUMNS.forEach((column) => {
+      const decision = resolveBoardDrop(task, column.id, superAdmin());
+      const label = `${from} → ${column.id}`;
+      if (column.id === from) assert.deepEqual(decision, { type: 'noop' }, label);
+      else assert.deepEqual(decision, { type: 'move', column: column.id }, label);
+    });
+  });
+});
+
+test('суперадмин переносит и свою задачу с уволенным соисполнителем, и любую чужую', () => {
+  const shared = taskIn('in_progress', { assignees: [{ id: STRANGER }, { id: FIRED, is_fired: true }] });
+  assert.deepEqual(resolveBoardDrop(shared, 'done', superAdmin()), { type: 'move', column: 'done' });
+  assert.deepEqual(resolveBoardDrop(firedTaskIn('assigned'), 'review', superAdmin({ currentUserId: BOSS })),
+    { type: 'move', column: 'review' });
+});
+
+test('без суперадмина и без уволенного — прежние правила цикла', () => {
+  // Админ, не суперадмин: карточка уволенного по-прежнему ждёт исполнителя.
+  const admin = as(STRANGER, { isAdmin: true });
+  assert.equal(resolveBoardDrop(firedTaskIn('assigned'), 'progress', admin).type, 'blocked');
+  assert.equal(resolveBoardDrop(firedTaskIn('in_progress'), 'review', admin).type, 'blocked');
+  assert.equal(resolveBoardDrop(firedTaskIn('assigned'), 'done', admin).type, 'blocked');
+  // Приёмка админом — как была: это его право и без увольнения.
+  assert.deepEqual(resolveBoardDrop(firedTaskIn('completed'), 'done', admin), { type: 'status', action: 'accepted' });
+  // Суперадмин и работающий исполнитель: цикл двигает исполнитель.
+  assert.equal(resolveBoardDrop(taskIn('assigned'), 'progress', superAdmin()).type, 'blocked');
+  assert.equal(resolveBoardDrop(taskIn('assigned'), 'done', superAdmin()).type, 'blocked');
+  assert.deepEqual(resolveBoardDrop(taskIn('completed'), 'done', superAdmin()), { type: 'status', action: 'accepted' });
+  // Уволен постановщик, исполнитель работает — тоже цикл.
+  const firedBoss = taskIn('assigned', { creator: { id: BOSS, is_fired: true } });
+  assert.equal(resolveBoardDrop(firedBoss, 'done', superAdmin()).type, 'blocked');
+  // Неизвестная колонка — не перенос.
+  assert.equal(resolveBoardDrop(firedTaskIn('assigned'), 'archive', superAdmin()).type, 'blocked');
+});
+
+test('задача коллеги-СВ остаётся только на просмотр', () => {
+  const observed = firedTaskIn('assigned', { viewer_is_observer: true });
+  assert.equal(resolveBoardDrop(observed, 'done', superAdmin()).type, 'blocked');
+});
+
+/* Колонки после действия перечитываются каждая своим запросом. Замер на стенде
+   (17.11.2026): перенесённая карточка уходила из ответа старой колонки на 10–33 мс
+   раньше, чем приходила в ответе новой, и на кадр-два пропадала с доски. */
+test('карточка с правкой не пропадает с доски, пока колонки дочитываются', () => {
+  const stale = { id: 906, status: 'in_progress', is_backlog: false };
+  const other = { id: 5, status: 'in_progress', is_backlog: false };
+  const kept = new Map([['906', stale]]);
+  const overrides = { 906: { status: 'completed', is_backlog: false } };
+  const state = (progress, review, reviewLoading) => ({
+    todo: { tasks: [], loading: false },
+    progress: { tasks: progress, loading: false },
+    review: { tasks: review, loading: reviewLoading },
+  });
+  const ids906 = (rows) => rows.filter((row) => row.id === 906);
+
+  // «В работе» уже перечитана без неё, «На проверке» ещё в пути — строка держится.
+  assert.deepEqual(ids906(mergeBoardRows(state([other], [], true), overrides, kept)), [stale]);
+  // Пришла и «На проверке» — на доске свежая строка сервера, прежняя не нужна.
+  const fresh = { id: 906, status: 'completed', is_backlog: false };
+  assert.deepEqual(ids906(mergeBoardRows(state([other], [fresh], false), overrides, kept)), [fresh]);
+  // Пока свежая строка есть хоть в одной колонке, прежняя её не заменяет.
+  assert.deepEqual(ids906(mergeBoardRows(state([other], [fresh], true), overrides, kept)), [fresh]);
+  // Все колонки дочитаны, а её нет — ушла за порцию колонки: не показываем.
+  assert.deepEqual(ids906(mergeBoardRows(state([other], [], false), overrides, kept)), []);
+  // Без правки прежняя строка не нужна — даже пока колонки грузятся.
+  assert.deepEqual(ids906(mergeBoardRows(state([other], [], true), {}, kept)), []);
+  // Без запомненных строк — просто объединение колонок.
+  assert.deepEqual(mergeBoardRows(state([other], [], true), overrides, null), [other]);
+});
+
+test('перенос уходит на сервер с той колонкой, куда бросили; отказ снимает правку', async () => {
+  const calls = [];
+  const item = { task_id: 401, status: 'accepted', is_backlog: false };
+  const task = firedTaskIn('assigned');
+  assert.deepEqual(await sendBoardMove(async (...args) => { calls.push(args); return item; }, task, 'done'), [item]);
+  assert.deepEqual(calls, [[task, 'done']]);
+  // Ручка вернула false (сервер отказал) — для доски это отказ, а не «записано».
+  assert.equal(await sendBoardMove(async () => false, task, 'done'), false);
+  assert.equal(await sendBoardMove(async () => null, task, 'done'), false);
+});
+
+test('уволенный поручитель — не карточка уволенного (K1)', () => {
+  assert.equal(hasFiredAssignee(taskIn('assigned', { requested_by: { id: BOSS, is_fired: true } })), false);
 });
