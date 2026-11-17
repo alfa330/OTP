@@ -77,8 +77,19 @@ class IdleOfflineRuleTests(unittest.TestCase):
         self.addCleanup(env.stop)
         for key in ENV_KEYS:
             os.environ.pop(key, None)
+        # Правило включено — как его включают на сервере (по умолчанию оно выключено, см. ниже).
+        os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '180'
 
-    def test_sales_operator_gets_three_minutes_by_default(self):
+    def test_rule_is_off_unless_switched_on(self):
+        """Владелец 17.11.2026 вечером: «выключить сейчас». Без переменной правила нет ни у кого,
+        и состав табло даже не читается."""
+        os.environ.pop('TEZ_OP_IDLE_OFFLINE_SEC')
+        seen = []
+        self.assertIsNone(_rule(seen=seen)(9, 'binotel'))
+        self.assertIsNone(_rule(seen=seen)('10', 'binotel'))
+        self.assertEqual(seen, [])
+
+    def test_sales_operator_gets_the_term_when_switched_on(self):
         self.assertEqual(_rule()(9, 'binotel'), {'seconds': 180, 'warn_seconds': 30})
         # Идентификатор приходит и строкой (из токена) — правило то же.
         self.assertEqual(_rule()('10', 'binotel'), {'seconds': 180, 'warn_seconds': 30})
@@ -134,10 +145,11 @@ class IdleOfflineRuleTests(unittest.TestCase):
         self.assertEqual(_rule()(9, 'binotel'), {'seconds': 1, 'warn_seconds': 0})
 
     def test_garbage_in_the_environment_falls_back_and_is_clamped(self):
+        # Непонятное значение — как не заданное: правило выключено, а не «какой-то срок».
         os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = 'три минуты'
-        self.assertEqual(_rule()(9, 'binotel')['seconds'], 180)
+        self.assertIsNone(_rule()(9, 'binotel'))
         os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = ''
-        self.assertEqual(_rule()(9, 'binotel')['seconds'], 180)
+        self.assertIsNone(_rule()(9, 'binotel'))
         os.environ['TEZ_OP_IDLE_OFFLINE_SEC'] = '999999'
         self.assertEqual(_rule()(9, 'binotel')['seconds'], 3600)
         os.environ['TEZ_OP_IDLE_OFFLINE_WARN_SEC'] = 'полминуты'

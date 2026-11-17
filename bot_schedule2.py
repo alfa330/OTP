@@ -55328,8 +55328,10 @@ def _icore_phone_outbound_return(user_id, provider):
 # За 10–16.11.2026 у отдела продаж Тез 8,1 ч «Исхода» в 136 отрезках, а звонков из него — 2 (звонят
 # они из «Активного»); 35 отрезков дольше трёх минут у 9 человек из 11 — 5,5 ч сверх трёх минут.
 # Срок и состав — на сервере (читает телефон 3.22.57+, прежние ключ не знают и правила не применяют):
-#   TEZ_OP_IDLE_OFFLINE_SEC       срок, секунд (180; 0 — правило выключено)
+#   TEZ_OP_IDLE_OFFLINE_SEC       срок, секунд (не задан или 0 — правило выключено)
 #   TEZ_OP_IDLE_OFFLINE_WARN_SEC  за сколько секунд до «Офлайн» телефон предупреждает (30; меньше срока)
+# Владелец 17.11.2026 вечером: правило у отдела продаж «выключить сейчас» и дать менять настройку в
+# портале. До настройки правило выключено по умолчанию: включить — TEZ_OP_IDLE_OFFLINE_SEC=180.
 ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS = 3600
 
 
@@ -55345,7 +55347,7 @@ def _icore_phone_idle_offline(user_id, provider):
     try:
         if (provider or 'asterisk') != 'binotel':
             return None
-        seconds = _env_int('TEZ_OP_IDLE_OFFLINE_SEC', 180, minimum=0,
+        seconds = _env_int('TEZ_OP_IDLE_OFFLINE_SEC', 0, minimum=0,
                            maximum=ICORE_PHONE_IDLE_OFFLINE_MAX_SECONDS)
         if seconds <= 0:
             return None
