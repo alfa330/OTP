@@ -15,6 +15,7 @@
 битый архив); решения о связях и типах частей проверяются на строках.
 Базы не нужно.
 """
+import gc
 import io
 import time
 import zipfile
@@ -283,9 +284,19 @@ def test_nested_merged_tables_are_walked_once():
     # Ячейка на 20 колонок сетки приходила из row.cells 20 раз: глубина 5 —
     # 3,2 млн проходов и 74 с на сервере (замер 30.10.2026). Теперь — один.
     template = _docx(_nested_table(7, '<w:p><w:r><w:t>{{ФИО}}</w:t></w:r></w:p>') + '<w:p/>')
-    started = time.monotonic()
-    result = act_docx.fill_template(template, {'{{ФИО}}': 'Иванова Анна'})
-    assert time.monotonic() - started < 2
+    # Сборщик мусора на время замера выключен, как в `timeit`: в полном прогоне это
+    # 19 тыс. тестов в одном процессе, и полная сборка накопленной кучи, попав внутрь
+    # замера, сама стоила на CI 2,7–3,4 с при самом обходе в 0,1 с (17.11.2026, тест
+    # падал на коммитах, не трогавших «Дисциплину»). Замеряется обход, а не чужая куча.
+    gc.collect()
+    gc.disable()
+    try:
+        started = time.monotonic()
+        result = act_docx.fill_template(template, {'{{ФИО}}': 'Иванова Анна'})
+        elapsed = time.monotonic() - started
+    finally:
+        gc.enable()
+    assert elapsed < 2
     assert 'Иванова Анна' in _texts(result)
 
 
