@@ -305,13 +305,72 @@ export const cardAccountText = (card, fallback = '') => {
     return card?.no_account ? NO_ACCOUNT_LABEL : fallback;
 };
 
+/** Номер из профиля аккаунта, когда он не тот, с которого звонят: человек звонит с другого
+ *  номера (аккаунт привязан ссылкой) или сменил номер в Тез, а нашёлся по прежнему.
+ *  '' — номер тот же или в профиле его нет. */
+export const accountOtherPhone = (account, cardPhone) => {
+    const phone = String(account?.phone || '');
+    return phone && cardPhone && phone !== String(cardPhone) ? (account.phone_text || `+${phone}`) : '';
+};
+
+/** Статус аккаунта для строки: подпись из Тез («Проверен», «Заблокирован»); у удалённого —
+ *  с датой удаления. */
+export const accountStatusText = (account) => {
+    const text = String(account?.status_text || '').trim();
+    return account?.status === 'deleted' && account.deleted_at
+        ? `${text || 'Удалён'} ${fmtDate(account.deleted_at)}` : text;
+};
+
+/** Цвет статуса: красным — с чем человек в Тез работать не может (удалён, заблокирован,
+ *  отклонён), жёлтым — может не полностью или ждёт проверки. Норма не подсвечивается.
+ *  Тон считает сервер (client_cards/rules.py: account_status_tone). */
+export const ACCOUNT_STATUS_CLASSES = { red: 'font-medium text-rose-600', amber: 'text-amber-700' };
+
+/** Регистрация и последняя поездка — под выбранным аккаунтом. Частями: в узком окне строка
+ *  переносится между ними, а не обрезается посреди даты. Пусто, пока профиль не пришёл из
+ *  Тез (аккаунт известен только по ссылке оператора). */
+export const accountDates = (account) => {
+    if (!account?.known) return [];
+    const parts = [];
+    if (account.registered_at) parts.push(`Регистрация ${fmtDate(account.registered_at)}`);
+    if (account.last_order_at) {
+        parts.push(`${parts.length ? 'последняя' : 'Последняя'} поездка ${fmtDate(account.last_order_at)}`);
+    } else if (account.registered_at) {
+        parts.push('поездок не было');
+    }
+    return parts;
+};
+
+/** Откуда аккаунт у этого номера — текст подсказки «i» в строке аккаунта. */
+export const accountOriginHint = (account, cardPhone) => {
+    const link = account?.link;
+    if (!link) return '';
+    if (link.origin === 'manual') {
+        return `Привязан по ссылке оператора${link.created_by_name ? `: ${link.created_by_name}` : ''}${link.created_at ? `, ${fmtDate(link.created_at)}` : ''}`;
+    }
+    return accountOtherPhone(account, cardPhone)
+        ? 'Найден в Тез по прежнему номеру: раньше этот номер был в профиле, сейчас там другой'
+        : 'Найден в Тез по этому номеру';
+};
+
 /** Какой аккаунт подставить самому: единственный привязанный к номеру. Несколько —
  *  выбирает оператор (задача #335, п. 2), уже выбранный не трогаем. Отметку «Аккаунта нет»
- *  тоже: оператор сказал своё, и запоздавший ответ TEZ APP не должен её перебить. */
+ *  тоже: оператор сказал своё, и запоздавший ответ TEZ APP не должен её перебить.
+ *  Найденный в Тез по прежнему номеру сам не подставляется, пока с этого номера по нему
+ *  не обращались: номер мог перейти другому человеку — кто звонит, решает оператор. */
 export const autoAccountId = (card, accounts) => {
     if (!card || card.account_id || card.no_account || card.status !== 'open') return null;
-    return (accounts || []).length === 1 ? accounts[0].id : null;
+    if ((accounts || []).length !== 1) return null;
+    const only = accounts[0];
+    if (only.link?.origin === 'tez' && !only.last_used_at && accountOtherPhone(only, card.phone)) return null;
+    return only.id;
 };
+
+/** Ждать ли ответа Тез, прежде чем подставлять единственный аккаунт. При включённом поиске
+ *  аккаунтов — да: ответ может поменять список (на номере появился второй аккаунт — выбирать
+ *  оператору; прежний с номера ушёл — подставлять нечего), а подставленный заранее держал бы
+ *  на номере привязку, которую Тез уже не подтверждает. Поиска нет — ждать нечего. */
+export const autoPickWaitsForTez = (boot) => boot?.tez?.source === 'accounts';
 
 // ─── Состояние карточки ──────────────────────────────────────────────────────
 

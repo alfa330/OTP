@@ -21,7 +21,8 @@ import {
 import CardRecord from '../components/client_cards/CardRecord';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
+    ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountDates, accountOriginHint,
+    accountOtherPhone, accountStatusText, accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
     errorText, filterCategories, fmtDate, isTopicPicked, looksLikeAccountLink, pickedInBranch, reasonsOfAudience,
     saveLabel, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
 } from '../components/client_cards/cardRules';
@@ -97,19 +98,17 @@ function ReasonLevel({ nodes, branch = [], openPath, searching, topics, limit, o
     );
 }
 
-const ORIGIN_HINTS = {
-    tez: 'Найден в Тез по этому номеру',
-    manual: 'Привязан по ссылке оператора',
-};
-
-function AccountRow({ account, picked, busy, onPick, onUnlink, onOpen }) {
-    const meta = [account.city, account.status].filter(Boolean).join(' · ');
+/* Строка аккаунта. Под именем — то, по чему оператор отличает один аккаунт номера от другого:
+   город и статус из Тез (удалён, заблокирован, отклонён — красным; ждёт проверки или допущен
+   не полностью — жёлтым), номер из профиля, если звонят не с него. Регистрация и последняя
+   поездка — только у выбранного: остальным строкам они не помогают выбрать. Ничего из этого
+   не обрезается многоточием: длинное имя и строки под ним переносятся. */
+function AccountRow({ account, cardPhone, picked, busy, onPick, onUnlink, onOpen }) {
     const link = account.link;
-    const origin = link
-        ? (link.origin === 'manual'
-            ? `${ORIGIN_HINTS.manual}${link.created_by_name ? `: ${link.created_by_name}` : ''}${link.created_at ? `, ${fmtDate(link.created_at)}` : ''}`
-            : ORIGIN_HINTS.tez)
-        : '';
+    const statusText = accountStatusText(account);
+    const otherPhone = accountOtherPhone(account, cardPhone);
+    const dates = picked ? accountDates(account) : [];
+    const origin = accountOriginHint(account, cardPhone);
     return (
         <div className={`flex items-center gap-2 rounded-xl px-2.5 py-2 transition ${picked ? 'bg-blue-50 ring-1 ring-blue-200/80' : 'hover:bg-slate-50'}`}>
             <button type="button" onClick={onPick} disabled={busy} aria-pressed={picked}
@@ -119,11 +118,30 @@ function AccountRow({ account, picked, busy, onPick, onUnlink, onOpen }) {
                     <Check size={12} strokeWidth={3} />
                 </span>
                 <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5">
-                        <IosBadge className="!px-2 !py-0.5">{account.kind_label}</IosBadge>
-                        <span className="min-w-0 truncate text-[13.5px] font-medium text-slate-900">{accountTitle(account)}</span>
+                    <span className="flex items-baseline gap-1.5">
+                        <IosBadge className="shrink-0 !px-2 !py-0.5">{account.kind_label}</IosBadge>
+                        <span className="min-w-0 break-words text-[13.5px] font-medium leading-snug text-slate-900">{accountTitle(account)}</span>
                     </span>
-                    {meta && <span className="mt-0.5 block truncate text-[12px] text-slate-500">{meta}</span>}
+                    {(account.city || statusText) && (
+                        <span className="mt-0.5 block text-[12px] text-slate-500">
+                            {account.city}{account.city && statusText ? ' · ' : ''}
+                            {statusText && <span className={ACCOUNT_STATUS_CLASSES[account.status_tone] || ''}>{statusText}</span>}
+                        </span>
+                    )}
+                    {otherPhone && (
+                        <span className="block text-[12px] text-slate-500">
+                            В профиле другой номер: <span className="whitespace-nowrap">{otherPhone}</span>
+                        </span>
+                    )}
+                    {dates.length > 0 && (
+                        <span className="block text-[12px] text-slate-500">
+                            {dates.map((part, index) => (
+                                <React.Fragment key={part}>
+                                    {index > 0 && ', '}<span className="whitespace-nowrap">{part}</span>
+                                </React.Fragment>
+                            ))}
+                        </span>
+                    )}
                 </span>
             </button>
             {origin && <IosHint text={origin} label="Откуда привязка" align="right" />}
@@ -167,6 +185,15 @@ function TezNotice({ tez, accounts }) {
     if (!tez) return null;
     if (!tez.ok && tez.error) {
         return <p className="px-1 text-[12px] text-amber-700">{tez.error}. Показаны аккаунты, привязанные к номеру ранее.</p>;
+    }
+    // Поиск аккаунтов отработал и ничего не нашёл: оператору видно, что номер проверен и
+    // пустой список — ответ Тез, а не сбой. К номеру уже что-то привязано — строка не нужна.
+    if (tez.ok && tez.source === 'accounts' && !accounts.length) {
+        return (
+            <p className="px-1 text-[12px] text-slate-500">
+                В Тез на этом номере аккаунтов нет. Человек зарегистрирован на другой номер — вставьте ссылку на его аккаунт.
+            </p>
+        );
     }
     const hint = tez.driver_hint;
     if (hint?.exists && !accounts.some((item) => item.kind === 'driver')) {
@@ -367,14 +394,14 @@ export default function CallCard({
                 </div>
                 <div className={`${iosCard} space-y-1 p-2`}>
                     {accounts.map((item) => (
-                        <AccountRow key={item.id} account={item} picked={item.id === card.account_id} busy={Boolean(busy)}
+                        <AccountRow key={item.id} account={item} cardPhone={card.phone} picked={item.id === card.account_id} busy={Boolean(busy)}
                                     onPick={() => run('account', () => api.chooseAccount(cardId, item.id === card.account_id ? null : item.id))}
                                     onUnlink={() => run('unlink', () => api.unlink(cardId, item.link.id))}
                                     onOpen={() => onOpenExternal(item.url)} />
                     ))}
                     {/* Выбранный аккаунт, который от номера уже отвязали, — всё равно показываем. */}
                     {account && !accounts.some((item) => item.id === account.id) && (
-                        <AccountRow account={account} picked busy={Boolean(busy)}
+                        <AccountRow account={account} cardPhone={card.phone} picked busy={Boolean(busy)}
                                     onPick={() => run('account', () => api.chooseAccount(cardId, null))}
                                     onUnlink={() => {}} onOpen={() => onOpenExternal(account.url)} />
                     )}

@@ -715,8 +715,17 @@ def _config(**extra):
 
 
 ROW = {'type': 'driver', 'id': 12345, 'full_name': ' Иванов Иван ', 'phone': '+7 701 234 56 78', 'city': 'Алматы',
-       'status': 'active', 'registered_at': '2026-11-05T09:03:11+00:00', 'last_order_at': None,
+       'status': 'verified', 'status_text': 'Проверен', 'registered_at': '2026-11-05T09:03:11+00:00',
+       'last_order_at': None, 'deleted_at': None, 'matched_by': 'phone',
        'car': 'Chevrolet Cobalt', 'empty': ''}
+# Удалённый аккаунт и водитель, сменивший номер, — как их описал TEZ APP (TT-2989).
+DELETED_ROW = {'type': 'driver', 'id': 11111, 'full_name': 'Иванов Иван', 'phone': '+77012345678', 'city': None,
+               'status': 'deleted', 'status_text': 'Удалён', 'registered_at': '2025-01-10T10:00:00+05:00',
+               'last_order_at': '2025-06-01T18:41:00.250000+05:00', 'deleted_at': '2026-10-01T12:00:00+05:00',
+               'matched_by': 'phone'}
+MOVED_ROW = {'type': 'driver', 'id': 22222, 'full_name': 'Петров Пётр', 'phone': '+77059998877', 'city': 'Астана',
+             'status': 'blocked', 'status_text': 'Заблокирован', 'registered_at': None, 'last_order_at': None,
+             'deleted_at': None, 'matched_by': 'previous_phone'}
 
 
 def test_account_row_is_parsed_into_our_shape():
@@ -725,11 +734,54 @@ def test_account_row_is_parsed_into_our_shape():
         'driver', 12345, 'Иванов Иван', '77012345678', 'Алматы')
     # Время TEZ APP — в наше наивное время Алматы.
     assert account['registered_at'] == datetime(2026, 11, 5, 14, 3, 11) and account['last_order_at'] is None
+    # Код статуса — для логики, подпись — оператору; оба хранятся своими полями, а не в details.
+    assert (account['status'], account['status_text'], account['deleted_at'], account['matched_by']) == (
+        'verified', 'Проверен', None, tez.MATCHED_PHONE)
     assert account['details'] == {'car': 'Chevrolet Cobalt'}
     assert tez.parse_account({'type': 'clients', 'id': '67890'})['kind'] == 'client'
     for bad in (None, {}, {'type': 'driver'}, {'type': 'park', 'id': 1}, {'type': 'driver', 'id': 'x'},
                 {'type': 'driver', 'id': 0}):
         assert tez.parse_account(bad) is None
+
+
+def test_deleted_and_moved_accounts_keep_what_tez_says():
+    deleted = tez.parse_account(DELETED_ROW)
+    assert (deleted['status'], deleted['deleted_at']) == ('deleted', datetime(2026, 10, 1, 12, 0))
+    assert deleted['last_order_at'] == datetime(2025, 6, 1, 18, 41, 0, 250000) and deleted['details'] == {}
+    # Сменил номер: в phone — нынешний номер из профиля, а не тот, по которому искали.
+    moved = tez.parse_account(MOVED_ROW)
+    assert (moved['phone'], moved['matched_by'], moved['status_text']) == (
+        '77059998877', tez.MATCHED_PREVIOUS_PHONE, 'Заблокирован')
+    # Незнакомое «почему в ответе» не выдумываем; пустая подпись — не строка из пробелов.
+    odd = tez.parse_account(dict(ROW, matched_by='email', status_text='  '))
+    assert odd['matched_by'] is None and odd['status_text'] is None
+
+
+def test_account_status_label_and_tone():
+    # Подпись — от TEZ APP; нет её — наша по коду; незнакомый код — как прислали.
+    assert rules.account_status_label('verified', 'Проверен') == 'Проверен'
+    assert rules.account_status_label('rejected_by_iin', None) == 'Отклонён по ИИН'
+    assert rules.account_status_label('on_hold', '') == 'on_hold'
+    assert rules.account_status_label(None, None) is None
+    # Красным — работать в Тез не может; жёлтым — не полностью или ждёт; норма без тона.
+    for status in ('deleted', 'blocked', 'rejected', 'rejected_by_iin'):
+        assert rules.account_status_tone(status) == rules.TONE_RED
+    for status in ('waiting_verification', 'new', 'incomplete_profile', 'profile_in_edit', 'car_photos_expired',
+                   'active_limited'):
+        assert rules.account_status_tone(status) == rules.TONE_AMBER
+    for status in ('verified', 'active', 'on_hold', None):
+        assert rules.account_status_tone(status) == rules.TONE_PLAIN
+    # Каждый код из ответа TEZ APP назван по-русски.
+    assert set(rules._ACCOUNT_STATUS_TONES) <= set(rules.ACCOUNT_STATUS_LABELS)
+    assert len(rules.ACCOUNT_STATUS_LABELS) == 12
+
+
+@pytest.mark.parametrize('key, mobile', [
+    ('77012345678', True), ('77471234567', True), ('77781234567', True), ('77641234567', True),
+    ('77272501234', False), ('77172123456', False), ('998901234567', False), ('7701234567', False), (None, False),
+])
+def test_kz_mobile_numbers(key, mobile):
+    assert rules.is_kz_mobile(key) is mobile
 
 
 def test_lookup_by_phone_and_by_id():
@@ -749,6 +801,49 @@ def test_lookup_by_phone_and_by_id():
     assert session.requests[1]['data'] == b'{"type": "driver", "id": 12345}'
     missing = client.by_id('client', 5)
     assert missing['ok'] is True and missing['account'] is None
+
+
+def test_accounts_come_in_tez_order_with_previous_number():
+    session = _Session(_Response(200, {'accounts': [ROW, DELETED_ROW, MOVED_ROW]}))
+    found = tez.TezAccounts(_config(), session=session).by_phone('77012345678')
+    assert [(a['tez_id'], a['status'], a['matched_by']) for a in found['accounts']] == [
+        (12345, 'verified', 'phone'), (11111, 'deleted', 'phone'), (22222, 'blocked', 'previous_phone')]
+
+
+def test_number_tez_does_not_search_is_no_accounts_not_a_failure(caplog):
+    """400 на номер — «не казахстанский мобильный»: аккаунтов на нём нет, оператору не о чем сообщать."""
+    refusal = _Response(400, {'error': 'Неправильный формат данных', 'error_code': 30001})
+    client = tez.TezAccounts(_config(), session=_Session(refusal, refusal, refusal))
+    with caplog.at_level('WARNING', logger='client_cards.tez'):
+        landline = client.by_phone('77272501234')
+    assert landline == {'source': tez.SOURCE_ACCOUNTS, 'ok': True, 'error': None, 'accounts': [],
+                        'driver_hint': None}
+    assert caplog.records == []
+    # Ответ запомнен, как любой удачный: второй раз за минуту не спрашиваем.
+    assert client.by_phone('77272501234') is landline and len(client._session.requests) == 1
+    # Отказ по мобильному номеру — расхождение с договором: в журнал, без самого номера.
+    with caplog.at_level('WARNING', logger='client_cards.tez'):
+        assert client.by_phone('77012345678')['ok'] is True
+    assert len(caplog.records) == 1 and '…78' in caplog.text and '77012345678' not in caplog.text
+    # По виду и ID отказ — ошибка: аккаунт закрепится как есть, без профиля; в журнал — как расхождение.
+    caplog.clear()
+    with caplog.at_level('WARNING', logger='client_cards.tez'):
+        rejected = client.by_id('driver', 12345)
+    assert rejected == {'source': tez.SOURCE_ACCOUNTS, 'ok': False, 'error': tez.ERROR_REJECTED, 'account': None}
+    assert len(caplog.records) == 1 and 'driver 12345' in caplog.text
+
+
+def test_lookup_is_on_until_switched_off(monkeypatch):
+    monkeypatch.delenv('TEZ_ACCOUNTS_API_ENABLED', raising=False)
+    monkeypatch.setenv('TEZ_DRIVERS_API_TOKEN', 'test-token')
+    assert tez.get_config()['enabled'] is True
+    assert tez.TezAccounts().source() == tez.SOURCE_ACCOUNTS
+    for value in ('0', 'false', 'off', 'No'):
+        monkeypatch.setenv('TEZ_ACCOUNTS_API_ENABLED', value)
+        assert tez.get_config()['enabled'] is False
+        assert tez.TezAccounts().source() == tez.SOURCE_FIRST_ORDERS
+    monkeypatch.setenv('TEZ_ACCOUNTS_API_ENABLED', '1')
+    assert tez.get_config()['enabled'] is True
 
 
 @pytest.mark.parametrize('reply, error', [
@@ -776,7 +871,7 @@ def test_network_error_never_raises():
     assert client.by_phone('77012345678')['accounts'] == [] and client.by_phone('77012345678')['ok'] is True
 
 
-def test_until_the_method_exists_only_driver_dates_are_asked():
+def test_with_lookup_switched_off_only_driver_dates_are_asked():
     calls = []
 
     def first_orders(phone):

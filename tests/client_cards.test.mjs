@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-  AUDIENCES, NO_ACCOUNT_LABEL, accountTitle, almatyToday, audienceLabel, audienceOfTopics, autoAccountId, branchIds,
+  ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, accountDates, accountOriginHint, accountOtherPhone,
+  accountStatusText, accountTitle, almatyToday, audienceLabel, audienceOfTopics, autoAccountId, autoPickWaitsForTez,
+  branchIds,
   callerOptions, canAddTopic, cardAccountText, cardAudience, countReasons,
   errorText, eventIsForCall, filterCategories, flattenReasons, fmtClock,
   fmtDate, fmtSeconds, fmtShare, fmtSize, fmtTime, fmtWhen, isTopicPicked, looksLikeAccountLink, parseCallMessage,
@@ -295,6 +297,84 @@ test('единственный привязанный аккаунт подст�
   assert.equal(autoAccountId({ status: 'open', account_id: 9 }, [{ id: 7 }]), null);
   assert.equal(autoAccountId({ status: 'done', account_id: null }, [{ id: 7 }]), null);
   assert.equal(autoAccountId(null, [{ id: 7 }]), null);
+});
+
+test('строка аккаунта: статус из Тез, дата удаления, номер из профиля, даты у выбранного', () => {
+  const phone = '77012345678';
+  const verified = { status: 'verified', status_text: 'Проверен', status_tone: 'slate', phone, phone_text: '+7 701 234-56-78' };
+  assert.equal(accountStatusText(verified), 'Проверен');
+  // Удалённый — с датой удаления (по Алматы); без даты — одной подписью.
+  const deleted = { status: 'deleted', status_text: 'Удалён', status_tone: 'red', deleted_at: '2026-10-01T12:00:00+05:00' };
+  assert.equal(accountStatusText(deleted), 'Удалён 01.10.2026');
+  assert.equal(accountStatusText({ status: 'deleted', status_text: 'Удалён' }), 'Удалён');
+  assert.equal(accountStatusText({ status: 'deleted', deleted_at: '2026-10-01T12:00:00+05:00' }), 'Удалён 01.10.2026');
+  assert.equal(accountStatusText({}), '');
+  assert.equal(accountStatusText(null), '');
+  // Красным и жёлтым — только то, что надо заметить; у нормы класса нет.
+  assert.match(ACCOUNT_STATUS_CLASSES.red, /text-rose-600/);
+  assert.match(ACCOUNT_STATUS_CLASSES.amber, /text-amber-700/);
+  assert.equal(ACCOUNT_STATUS_CLASSES.slate, undefined);
+
+  // Номер из профиля показываем, только когда звонят не с него.
+  assert.equal(accountOtherPhone(verified, phone), '');
+  const moved = { phone: '77059998877', phone_text: '+7 705 999-88-77' };
+  assert.equal(accountOtherPhone(moved, phone), '+7 705 999-88-77');
+  assert.equal(accountOtherPhone({ phone: '77059998877' }, phone), '+77059998877');
+  assert.equal(accountOtherPhone({ phone: null }, phone), '');
+  assert.equal(accountOtherPhone(moved, ''), '');
+
+  // Регистрация и последняя поездка — когда профиль пришёл из Тез; частями, чтобы строка
+  // в узком окне переносилась между ними, а не обрезалась.
+  const known = { known: true, registered_at: '2026-11-05T14:03:11+05:00', last_order_at: '2026-11-10T18:41:00+05:00' };
+  assert.deepEqual(accountDates(known), ['Регистрация 05.11.2026', 'последняя поездка 10.11.2026']);
+  assert.deepEqual(accountDates({ ...known, last_order_at: null }), ['Регистрация 05.11.2026', 'поездок не было']);
+  assert.deepEqual(accountDates({ known: true, registered_at: null, last_order_at: '2026-11-10T18:41:00+05:00' }),
+    ['Последняя поездка 10.11.2026']);
+  assert.deepEqual(accountDates({ known: true }), []);
+  assert.deepEqual(accountDates({ ...known, known: false }), []);
+  assert.deepEqual(accountDates(null), []);
+  // Строки под именем аккаунта не обрезаются многоточием — сведения из Тез видны целиком.
+  const row = source('../src/client_card_embed/CallCard.jsx');
+  const rowBody = row.slice(row.indexOf('function AccountRow('), row.indexOf('function NoAccountRow('));
+  assert.ok(rowBody.includes('accountDates(account)') && rowBody.includes('accountStatusText(account)'));
+  assert.equal(rowBody.includes('truncate'), false);
+
+  // Подсказка «откуда аккаунт у этого номера».
+  const tezLink = { origin: 'tez' };
+  assert.equal(accountOriginHint({ ...verified, link: tezLink }, phone), 'Найден в Тез по этому номеру');
+  assert.match(accountOriginHint({ ...moved, link: tezLink }, phone), /^Найден в Тез по прежнему номеру/);
+  assert.equal(accountOriginHint({ ...moved, link: { origin: 'manual', created_by_name: 'Анна Оператор',
+    created_at: '2026-11-12T10:00:00+05:00' } }, phone), 'Привязан по ссылке оператора: Анна Оператор, 12.11.2026');
+  assert.equal(accountOriginHint({ ...moved, link: { origin: 'manual' } }, phone), 'Привязан по ссылке оператора');
+  assert.equal(accountOriginHint(verified, phone), '');
+});
+
+test('найденный в Тез по прежнему номеру сам не подставляется, пока с номера по нему не обращались', () => {
+  const open = { status: 'open', account_id: null, phone: '77012345678' };
+  const moved = { id: 7, phone: '77059998877', link: { origin: 'tez' }, last_used_at: null };
+  assert.equal(autoAccountId(open, [moved]), null);
+  // С этого номера по нему уже обращались — человек известен, подставляем.
+  assert.equal(autoAccountId(open, [{ ...moved, last_used_at: '2026-11-12T10:00:00+05:00' }]), 7);
+  // Привязан ссылкой оператора: «звонит с другого номера» — это и есть привязка (задача #335, п. 2).
+  assert.equal(autoAccountId(open, [{ ...moved, link: { origin: 'manual' } }]), 7);
+  // Номер в профиле тот же (в том числе у удалённого) — подставляем.
+  assert.equal(autoAccountId(open, [{ ...moved, phone: '77012345678' }]), 7);
+  assert.equal(autoAccountId(open, [{ ...moved, phone: '77012345678', status: 'deleted' }]), 7);
+});
+
+test('при включённом поиске аккаунтов единственный аккаунт подставляется после ответа Тез', () => {
+  assert.equal(autoPickWaitsForTez({ tez: { source: 'accounts' } }), true);
+  // Поиска нет (выключен или нет ключа) — ждать нечего, подставляем сразу по привязкам номера.
+  assert.equal(autoPickWaitsForTez({ tez: { source: 'first_orders' } }), false);
+  assert.equal(autoPickWaitsForTez({ tez: { source: 'off' } }), false);
+  assert.equal(autoPickWaitsForTez({}), false);
+  assert.equal(autoPickWaitsForTez(null), false);
+  // Страница спрашивает это правило до первой подстановки и подставляет после ответа Тез.
+  const page = source('../src/client_card_embed/ClientCardEmbed.jsx');
+  const open = page.slice(page.indexOf('const openCall = useCallback('), page.indexOf('const handleCall = useCallback('));
+  assert.ok(open.indexOf('autoPickWaitsForTez(bootRef.current)') > 0);
+  assert.ok(open.indexOf('autoPickWaitsForTez(bootRef.current)') < open.indexOf('await autoPick(data)'));
+  assert.ok(open.indexOf('api.lookup(cardId)') < open.indexOf('autoPick(looked)'));
 });
 
 test('«Аккаунта нет»: отметку оператора не перебивает найденный позже аккаунт, в списках она видна', () => {

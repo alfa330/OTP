@@ -3,23 +3,24 @@
 
 Два источника, и работает тот, что есть:
 
-1. **Поиск аккаунтов** — POST {base}/accounts/lookup (docs/API_REQ_TEZ_ACCOUNTS_2026-11-12.md).
-   По номеру отдаёт все аккаунты, водителей и клиентов; по виду и ID — один аккаунт. Этот
-   метод TEZ APP ещё делает: включается переменной TEZ_ACCOUNTS_API_ENABLED=1, когда он
-   выйдет на прод. До этого сервер его не зовёт вовсе — иначе каждая карточка стоила бы
-   запроса с заведомым 404.
+1. **Поиск аккаунтов** — POST {base}/accounts/lookup (docs/API_REQ_TEZ_ACCOUNTS_2026-11-12.md;
+   у TEZ APP — задача TT-2989, на проде отвечает с 17.11.2026). По номеру отдаёт все
+   аккаунты, водителей и клиентов: с этим номером в профиле, удалённые с ним же и водителей,
+   которые им раньше пользовались (matched_by = previous_phone; историю номеров TEZ APP
+   хранит с 16.11.2026, у клиентов её нет). По виду и ID — один аккаунт. Включён, пока его
+   не выключили: TEZ_ACCOUNTS_API_ENABLED=0.
 
-2. **Даты водителя** — уже работающий POST {base}/drivers/first-orders (tez/first_orders.py).
-   По номеру говорит, есть ли на нём аккаунт ВОДИТЕЛЯ, когда он зарегистрирован и когда был
-   последний заказ. ID, имени и города не отдаёт и про клиентов не знает — поэтому это только
-   подсказка оператору («на этом номере есть водитель — найдите его в админке»), а сам
-   аккаунт он прикладывает ссылкой.
+2. **Даты водителя** — POST {base}/drivers/first-orders (tez/first_orders.py), запасной путь
+   при выключенном поиске. По номеру говорит, есть ли на нём аккаунт ВОДИТЕЛЯ, когда он
+   зарегистрирован и когда был последний заказ. ID, имени и города не отдаёт и про клиентов
+   не знает — поэтому это только подсказка оператору («на этом номере есть водитель —
+   найдите его в админке»), а сам аккаунт он прикладывает ссылкой.
 
 Всё с короткими сроками: запрос идёт, пока оператор держит трубку. TEZ APP молчит —
 карточка работает на том, что уже привязано к номеру у нас; ошибка сюда не роняет ничего.
 
 ENV:
-    TEZ_ACCOUNTS_API_ENABLED=1            включить поиск аккаунтов (метод 1)
+    TEZ_ACCOUNTS_API_ENABLED=0            выключить поиск аккаунтов (метод 1); не задана — включён
     TEZ_ACCOUNTS_API_URL                  по умолчанию адрес TEZ_DRIVERS_API_URL / api.tezapp.org
     TEZ_ACCOUNTS_API_PATH                 по умолчанию /accounts/lookup
     TEZ_ACCOUNTS_API_TOKEN                по умолчанию TEZ_DRIVERS_API_TOKEN (тот же X-Integration-Token)
@@ -55,12 +56,20 @@ SOURCE_OFF = 'off'                  # токена нет — TEZ APP не сп�
 _TYPE_KINDS = {'driver': rules.KIND_DRIVER, 'drivers': rules.KIND_DRIVER,
                'client': rules.KIND_CLIENT, 'clients': rules.KIND_CLIENT,
                'passenger': rules.KIND_CLIENT}
-_KNOWN_FIELDS = ('type', 'kind', 'id', 'full_name', 'name', 'phone', 'city', 'status',
-                 'registered_at', 'last_order_at')
+_KNOWN_FIELDS = ('type', 'kind', 'id', 'full_name', 'name', 'phone', 'city', 'status', 'status_text',
+                 'registered_at', 'last_order_at', 'deleted_at', 'matched_by')
+# Почему аккаунт попал в ответ: номер сейчас в профиле (или был в нём до удаления аккаунта),
+# водитель пользовался номером раньше и сменил его, либо аккаунт спросили по виду и ID.
+MATCHED_PHONE, MATCHED_PREVIOUS_PHONE, MATCHED_ID = 'phone', 'previous_phone', 'id'
+_MATCHED_BY = (MATCHED_PHONE, MATCHED_PREVIOUS_PHONE, MATCHED_ID)
+# 400: TEZ APP не принял сам запрос. По номеру это «не казахстанский мобильный» — аккаунтов
+# на таком номере не бывает (см. by_phone); по виду и ID — ошибка.
+ERROR_REJECTED = 'TEZ APP не принял запрос'
 
 
-def _truthy(value):
-    return str(value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+def _enabled(value):
+    """Поиск аккаунтов включён, пока его не выключили явно: TEZ_ACCOUNTS_API_ENABLED=0."""
+    return str(value if value is not None else '').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
 def get_config():
@@ -69,7 +78,7 @@ def get_config():
 
     base = first_orders.get_config()
     return {
-        'enabled': _truthy(os.getenv('TEZ_ACCOUNTS_API_ENABLED')),
+        'enabled': _enabled(os.getenv('TEZ_ACCOUNTS_API_ENABLED')),
         'base_url': (os.getenv('TEZ_ACCOUNTS_API_URL') or base.get('base_url')
                      or first_orders.DEFAULT_API_URL).rstrip('/'),
         'path': '/' + (os.getenv('TEZ_ACCOUNTS_API_PATH') or DEFAULT_LOOKUP_PATH).strip('/'),
@@ -94,8 +103,10 @@ def _naive_almaty(value):
 def parse_account(row):
     """Строка ответа TEZ APP → аккаунт в нашем виде. None — строка не про аккаунт.
 
-    Незнакомые поля не теряем: кладём в details — их покажет карточка, когда TEZ APP
-    добавит что-то сверх договорённого (тариф, машина, баланс).
+    status — код для логики, status_text — подпись «как в админке» (rules.account_status_label).
+    phone — номер из профиля: у найденного по прежнему номеру он не тот, по которому искали,
+    у удалённого — тот, что был до удаления. Незнакомые поля не теряем: кладём в details —
+    на случай, когда TEZ APP добавит что-то сверх договорённого (тариф, машина, баланс).
     """
     if not isinstance(row, dict):
         return None
@@ -115,8 +126,11 @@ def parse_account(row):
         'phone': rules.phone_key(row.get('phone')),
         'city': rules.clean_text(row.get('city'), 120) or None,
         'status': rules.clean_text(row.get('status'), 64) or None,
+        'status_text': rules.clean_text(row.get('status_text'), 120) or None,
         'registered_at': _naive_almaty(row.get('registered_at')),
         'last_order_at': _naive_almaty(row.get('last_order_at')),
+        'deleted_at': _naive_almaty(row.get('deleted_at')),
+        'matched_by': row.get('matched_by') if row.get('matched_by') in _MATCHED_BY else None,
         'details': details,
     }
 
@@ -195,6 +209,8 @@ class TezAccounts:
                 log.warning('client_cards: поиска аккаунтов на %s%s нет (404)', cfg['base_url'], cfg['path'])
                 return None, 'В TEZ APP нет метода поиска аккаунтов'
             return [], None
+        if response.status_code == 400:
+            return None, ERROR_REJECTED
         if response.status_code in (401, 403):
             blocked = _looks_like_cloudflare_block(response.text)
             log.warning('client_cards: TEZ APP отказал в поиске аккаунтов: HTTP %s%s',
@@ -237,6 +253,8 @@ class TezAccounts:
 
         {'source', 'ok', 'error', 'accounts': [...], 'driver_hint': {...} | None}
         ok=False — TEZ APP не ответил: это «не знаем», а не «аккаунтов нет».
+        Аккаунты — в порядке TEZ APP: сначала те, у кого номер сейчас в профиле, затем
+        удалённые, затем водители, сменившие номер.
         """
         source = self.source()
         if source == SOURCE_OFF or not phone:
@@ -246,6 +264,13 @@ class TezAccounts:
             return cached
         if source == SOURCE_ACCOUNTS:
             accounts, error = self._lookup({'phone': '+' + phone})
+            if error == ERROR_REJECTED:
+                # Не казахстанский мобильный (городской, зарубежный): по таким TEZ APP не
+                # ищет, и аккаунта на таком номере быть не может — это «аккаунтов нет», а не
+                # сбой. Отказ по мобильному номеру — уже расхождение с договором: в журнал.
+                if rules.is_kz_mobile(phone):
+                    log.warning('client_cards: TEZ APP не принял мобильный номер …%s (400)', phone[-2:])
+                accounts, error = [], None
             result = {'source': source, 'ok': accounts is not None, 'error': error,
                       'accounts': accounts or [], 'driver_hint': None}
         else:
@@ -268,6 +293,9 @@ class TezAccounts:
             return {'source': source, 'ok': False, 'error': None, 'account': None}
         accounts, error = self._lookup({'type': kind, 'id': int(tez_id)})
         if accounts is None:
+            if error == ERROR_REJECTED:
+                # Вид и ID разобраны из ссылки админки — отказ на них уже расхождение с договором.
+                log.warning('client_cards: TEZ APP не принял вид и ID аккаунта (400): %s %s', kind, int(tez_id))
             return {'source': source, 'ok': False, 'error': error, 'account': None}
         match = next((item for item in accounts
                       if item['kind'] == kind and item['tez_id'] == int(tez_id)), None)

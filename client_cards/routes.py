@@ -103,8 +103,12 @@ def public_account(account, admin_url, *, ctx=None, department_id=None):
         'tez_id': account['tez_id'], 'full_name': account.get('full_name'),
         'phone': account.get('phone'), 'phone_text': rules.format_phone(account.get('phone')),
         'city': account.get('city'), 'status': account.get('status'),
+        # Подпись статуса — как в админке Тез; тон — что оператору надо заметить сразу.
+        'status_text': rules.account_status_label(account.get('status'), account.get('status_text')),
+        'status_tone': rules.account_status_tone(account.get('status')),
         'registered_at': _iso(account.get('registered_at')),
         'last_order_at': _iso(account.get('last_order_at')),
+        'deleted_at': _iso(account.get('deleted_at')),
         # Профиль пришёл из TEZ APP; иначе известны только вид и ID из ссылки оператора.
         'known': account.get('fetched_at') is not None,
         'url': rules.account_url(account['kind'], account['tez_id'], admin_url),

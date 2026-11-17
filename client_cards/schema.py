@@ -91,8 +91,10 @@ _STATEMENTS = [
         phone          VARCHAR(20),
         city           VARCHAR(120),
         status         VARCHAR(64),
+        status_text    VARCHAR(120),
         registered_at  TIMESTAMP,
         last_order_at  TIMESTAMP,
+        deleted_at     TIMESTAMP,
         details        JSONB NOT NULL DEFAULT '{}'::jsonb,
         fetched_at     TIMESTAMP,
         created_by     INTEGER,
@@ -318,6 +320,9 @@ _ADDED_COLUMNS = [
     ('client_card_categories', 'audience', "VARCHAR(16) NOT NULL DEFAULT 'driver'"),
     ('client_cards', 'operator_sip', 'VARCHAR(32)'),
     ('client_cards', 'record_call_id', 'VARCHAR(64)'),
+    # 17.11.2026, ответ TEZ APP accounts/lookup: подпись статуса «как в админке» и дата удаления.
+    ('client_card_accounts', 'status_text', 'VARCHAR(120)'),
+    ('client_card_accounts', 'deleted_at', 'TIMESTAMP'),
 ]
 
 

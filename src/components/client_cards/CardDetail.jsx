@@ -8,7 +8,10 @@ import { ExternalLink, PhoneIncoming, PhoneOutgoing } from 'lucide-react';
 
 import { IosBadge, IosModal, iosBtnPrimary, iosGroupLabel } from '../ui/ios';
 import CardRecord from './CardRecord';
-import { NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, errorText, fmtSeconds, fmtWhen, topicLabel } from './cardRules';
+import {
+    ACCOUNT_STATUS_CLASSES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountStatusText, accountTitle, errorText, fmtSeconds,
+    fmtWhen, topicLabel,
+} from './cardRules';
 import { Spinner, StateBadge } from './ui';
 
 const Row = ({ label, children }) => (
@@ -69,10 +72,18 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
                     <div className="divide-y divide-slate-100">
                         <Row label="Аккаунт">
                             {account ? (
-                                <a href={account.url} target="_blank" rel="noopener noreferrer"
-                                   className="inline-flex items-center gap-1 text-blue-600 hover:underline">
-                                    {account.kind_label} · {accountTitle(account)} <ExternalLink size={12} aria-hidden="true" />
-                                </a>
+                                <>
+                                    <a href={account.url} target="_blank" rel="noopener noreferrer"
+                                       className="inline-flex items-center gap-1 text-blue-600 hover:underline">
+                                        {account.kind_label} · {accountTitle(account)} <ExternalLink size={12} aria-hidden="true" />
+                                    </a>
+                                    {/* Статус аккаунта в Тез — каким он был, когда профиль спрашивали последний раз. */}
+                                    {accountStatusText(account) && (
+                                        <div className={`mt-0.5 text-[12px] ${ACCOUNT_STATUS_CLASSES[account.status_tone] || 'text-slate-500'}`}>
+                                            {accountStatusText(account)}
+                                        </div>
+                                    )}
+                                </>
                             ) : (card.no_account ? NO_ACCOUNT_LABEL : '—')}
                         </Row>
                         {card.city && <Row label="Город">{card.city}</Row>}

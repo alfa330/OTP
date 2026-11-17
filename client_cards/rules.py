@@ -177,6 +177,49 @@ def account_url(kind, tez_id, base=DEFAULT_ADMIN_URL):
     return '%s/admin/%s/%d' % (str(base or DEFAULT_ADMIN_URL).rstrip('/'), section, int(tez_id))
 
 
+# Статус аккаунта в ответе TEZ APP (accounts/lookup, их задача TT-2989): код — для логики,
+# подпись «как в админке» приходит рядом готовой (status_text). Наш список подписей —
+# запасной, на случай пустой подписи. Тон — что оператору надо заметить сразу: красным
+# то, с чем человек в Тез работать не может, жёлтым — может не полностью или ждёт
+# проверки. «Проверен» и «Активен» — без тона: норма не подсвечивается. Незнакомый код
+# тоже без тона, а подписью — что прислали.
+ACCOUNT_STATUS_DELETED = 'deleted'
+ACCOUNT_STATUS_LABELS = {
+    ACCOUNT_STATUS_DELETED: 'Удалён', 'blocked': 'Заблокирован',
+    'active': 'Активен', 'verified': 'Проверен',
+    'waiting_verification': 'Ожидает проверки', 'new': 'Новый',
+    'incomplete_profile': 'Профиль не заполнен', 'profile_in_edit': 'Профиль на правке',
+    'car_photos_expired': 'Фото авто устарели', 'rejected': 'Отклонён',
+    'rejected_by_iin': 'Отклонён по ИИН', 'active_limited': 'Допущен с ограничениями',
+}
+TONE_RED, TONE_AMBER, TONE_PLAIN = 'red', 'amber', 'slate'
+_ACCOUNT_STATUS_TONES = {
+    ACCOUNT_STATUS_DELETED: TONE_RED, 'blocked': TONE_RED, 'rejected': TONE_RED, 'rejected_by_iin': TONE_RED,
+    'waiting_verification': TONE_AMBER, 'new': TONE_AMBER, 'incomplete_profile': TONE_AMBER,
+    'profile_in_edit': TONE_AMBER, 'car_photos_expired': TONE_AMBER, 'active_limited': TONE_AMBER,
+}
+
+
+def account_status_label(status, text=None):
+    """Подпись статуса для оператора: от TEZ APP, иначе наша по коду, иначе сам код."""
+    return clean_text(text, 120) or ACCOUNT_STATUS_LABELS.get(status) or clean_text(status, 64) or None
+
+
+def account_status_tone(status):
+    return _ACCOUNT_STATUS_TONES.get(status, TONE_PLAIN)
+
+
+# Казахстанский мобильный: 7 + код оператора + семь цифр. TEZ APP ищет аккаунты только по
+# таким номерам, на остальные отвечает 400 (городской, зарубежный). Список кодов — чтобы
+# заметить отказ по номеру, который TEZ APP принять должен был: это уже не «номер не тот»,
+# а разошедшийся договор. Запрос в TEZ APP от этого списка не зависит.
+_KZ_MOBILE = re.compile(r'7(70\d|747|75[01]|76[0-4]|77[1-8])\d{7}')
+
+
+def is_kz_mobile(key):
+    return bool(_KZ_MOBILE.fullmatch(str(key or '')))
+
+
 # ─── Карточка звонка ─────────────────────────────────────────────────────────
 
 DIRECTION_IN = 'in'

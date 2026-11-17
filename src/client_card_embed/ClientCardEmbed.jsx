@@ -37,7 +37,8 @@ import {
 import RequestsPanel from '../components/client_cards/RequestsPanel';
 import { createCardsApi } from '../components/client_cards/cardsApi';
 import {
-    NO_ACCOUNT_LABEL, accountTitle, autoAccountId, errorText, eventIsForCall, fmtClock, fmtWhen, parseCallMessage,
+    NO_ACCOUNT_LABEL, accountTitle, autoAccountId, autoPickWaitsForTez, errorText, eventIsForCall, fmtClock, fmtWhen,
+    parseCallMessage,
     topicLabel, topicsOfAudience, topicsPayload, wrapupLeft,
 } from '../components/client_cards/cardRules';
 import { StateBadge } from '../components/client_cards/ui';
@@ -211,6 +212,8 @@ export default function ClientCardEmbed() {
     refreshRef.current = refresh;
     const currentRef = useRef(current);
     currentRef.current = current;
+    const bootRef = useRef(boot);
+    bootRef.current = boot;
     const phaseRef = useRef(phase);
     phaseRef.current = phase;
     const queueRef = useRef([]);
@@ -384,7 +387,10 @@ export default function ClientCardEmbed() {
             if (replaced && replaced.id !== data.card.id && replaced.status === 'open' && replaced.ended_at) {
                 toast('Прошлая карточка не заполнена — она осталась в черновиках', 'info');
             }
-            let latest = await autoPick(data);
+            // Поиск аккаунтов в Тез включён — единственный аккаунт подставим после его ответа:
+            // он может поменять список. Поиска нет — подставляем сразу по привязкам номера.
+            const waitTez = autoPickWaitsForTez(bootRef.current);
+            let latest = waitTez ? data : await autoPick(data);
             // Руками открытая карточка событий звонка не получит: считаем, что разговор идёт.
             if (manual && latest.card.state === 'ringing') {
                 const { data: answered } = await api.callEvent(latest.card.id, 'answered');
@@ -392,10 +398,15 @@ export default function ClientCardEmbed() {
                 latest = answered;
             }
             // TEZ APP — отдельным заходом: карточка не ждёт чужой сервер.
+            const cardId = latest.card.id;
             setTezPending(true);
-            api.lookup(latest.card.id)
+            api.lookup(cardId)
                 .then(({ data: looked }) => { applyBundle(looked); return autoPick(looked); })
-                .catch(() => {})
+                .catch(() => {
+                    // Запрос до портала не дошёл — подставляем по тому, что на экране сейчас.
+                    const shown = currentRef.current?.bundle;
+                    return waitTez && shown?.card?.id === cardId ? autoPick(shown) : null;
+                })
                 .finally(() => setTezPending(false));
         } catch (error) {
             toast(errorText(error, 'Карточка не открылась'), 'error');

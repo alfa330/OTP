@@ -314,8 +314,8 @@ def reorder_categories(cursor, department_id, parent_id, ordered_ids, *, now):
 
 # ─── Аккаунты Тез и привязки номеров ─────────────────────────────────────────
 
-_ACCOUNT_COLUMNS = ('id', 'kind', 'tez_id', 'full_name', 'phone', 'city', 'status',
-                    'registered_at', 'last_order_at', 'details', 'fetched_at')
+_ACCOUNT_COLUMNS = ('id', 'kind', 'tez_id', 'full_name', 'phone', 'city', 'status', 'status_text',
+                    'registered_at', 'last_order_at', 'deleted_at', 'details', 'fetched_at')
 _ACCOUNT_SELECT = ', '.join('a.' + column for column in _ACCOUNT_COLUMNS)
 
 
@@ -347,23 +347,27 @@ def upsert_account(cursor, account, *, by, now, fetched):
     params = {
         'kind': account['kind'], 'tez_id': int(account['tez_id']),
         'full_name': account.get('full_name'), 'phone': account.get('phone'),
-        'city': account.get('city'), 'status': account.get('status'),
+        'city': account.get('city'), 'status': account.get('status'), 'status_text': account.get('status_text'),
         'registered_at': account.get('registered_at'), 'last_order_at': account.get('last_order_at'),
+        'deleted_at': account.get('deleted_at'),
         'details': json.dumps(account.get('details') or {}, ensure_ascii=False, default=str),
         'fetched_at': now if fetched else None, 'by': by, 'now': now,
     }
     if fetched:
         cursor.execute("""
-            INSERT INTO client_card_accounts (kind, tez_id, full_name, phone, city, status, registered_at,
-                                              last_order_at, details, fetched_at, created_by, created_at)
-            VALUES (%(kind)s, %(tez_id)s, %(full_name)s, %(phone)s, %(city)s, %(status)s, %(registered_at)s,
-                    %(last_order_at)s, %(details)s, %(fetched_at)s, %(by)s, %(now)s)
+            INSERT INTO client_card_accounts (kind, tez_id, full_name, phone, city, status, status_text,
+                                              registered_at, last_order_at, deleted_at, details, fetched_at,
+                                              created_by, created_at)
+            VALUES (%(kind)s, %(tez_id)s, %(full_name)s, %(phone)s, %(city)s, %(status)s, %(status_text)s,
+                    %(registered_at)s, %(last_order_at)s, %(deleted_at)s, %(details)s, %(fetched_at)s,
+                    %(by)s, %(now)s)
             ON CONFLICT (kind, tez_id) DO UPDATE
                SET full_name = COALESCE(EXCLUDED.full_name, client_card_accounts.full_name),
                    phone = COALESCE(EXCLUDED.phone, client_card_accounts.phone),
                    city = COALESCE(EXCLUDED.city, client_card_accounts.city),
                    registered_at = COALESCE(EXCLUDED.registered_at, client_card_accounts.registered_at),
-                   status = EXCLUDED.status, last_order_at = EXCLUDED.last_order_at,
+                   status = EXCLUDED.status, status_text = EXCLUDED.status_text,
+                   last_order_at = EXCLUDED.last_order_at, deleted_at = EXCLUDED.deleted_at,
                    details = EXCLUDED.details, fetched_at = EXCLUDED.fetched_at
             RETURNING id
         """, params)
@@ -397,7 +401,12 @@ def phone_accounts(cursor, phone):
     обращались последним: его оператор выберет скорее всего.
 
     «Обращались» — по заполненным карточкам: выбор аккаунта в идущем звонке порядок
-    не меняет, иначе строки прыгали бы под рукой оператора."""
+    не меняет, иначе строки прыгали бы под рукой оператора. Дальше — как отдаёт TEZ APP:
+    действующие аккаунты, за ними удалённые, последними — найденные Тез по прежнему номеру
+    (в профиле уже другой). Привязку оператора ссылкой «другой номер в профиле» вниз не
+    опускает: звонить не с того номера, на который зарегистрирован, — ровно тот случай, ради
+    которого её ставят. Среди равных — свежая привязка выше; найденные одним запросом в
+    TEZ APP остаются в его порядке."""
     cursor.execute("""
         SELECT """ + _ACCOUNT_SELECT + """,
                l.id, l.origin, l.created_by, l.created_by_name, l.created_at,
@@ -406,7 +415,10 @@ def phone_accounts(cursor, phone):
           FROM client_card_phone_links l
           JOIN client_card_accounts a ON a.id = l.account_id
          WHERE l.phone = %s
-         ORDER BY last_used DESC NULLS LAST, l.created_at DESC, l.id DESC
+         ORDER BY last_used DESC NULLS LAST,
+                  CASE WHEN l.origin = 'tez' AND a.phone IS NOT NULL AND a.phone <> l.phone THEN 2
+                       WHEN a.status = 'deleted' THEN 1 ELSE 0 END,
+                  l.created_at DESC, l.id
     """, (phone,))
     result = []
     width = len(_ACCOUNT_COLUMNS)
@@ -431,6 +443,24 @@ def get_link(cursor, link_id):
 
 def unlink_phone(cursor, link_id):
     cursor.execute("DELETE FROM client_card_phone_links WHERE id = %s", (int(link_id),))
+
+
+def unlink_unconfirmed(cursor, link_ids):
+    """Снять привязки, которые поставил поиск TEZ APP и которые он больше не подтверждает.
+
+    Только найденные самим Тез и только те, по которым с номера нет ни одной живой
+    карточки: аккаунт, выбранный в заполненной или ещё открытой карточке этого номера (у
+    любого оператора), остаётся — иначе к следующему звонку он бы не подтянулся.
+    """
+    ids = [int(x) for x in link_ids or ()]
+    if not ids:
+        return
+    cursor.execute("""
+        DELETE FROM client_card_phone_links l
+         WHERE l.id = ANY(%s) AND l.origin = 'tez'
+           AND NOT EXISTS (SELECT 1 FROM client_cards c
+                            WHERE c.phone = l.phone AND c.account_id = l.account_id AND c.status <> 'void')
+    """, (ids,))
 
 
 def account_phones(cursor, account_id):

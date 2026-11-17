@@ -469,8 +469,8 @@ def test_tez_lookup_links_found_accounts_and_fills_city(world):
                                  'registered_at': None, 'last_order_at': None, 'details': {}}]}
     bundle = w.svc.lookup(ctx, card_id)
     assert bundle['tez'] == {'source': SOURCE_ACCOUNTS, 'ok': True, 'error': None, 'driver_hint': None}
-    assert sorted((a['kind'], a['tez_id'], a['link']['origin']) for a in bundle['accounts']) == [
-        (rules.KIND_CLIENT, 67890, 'tez'), (rules.KIND_DRIVER, 12345, 'tez')]
+    assert [(a['kind'], a['tez_id'], a['link']['origin']) for a in bundle['accounts']] == [
+        (rules.KIND_DRIVER, 12345, 'tez'), (rules.KIND_CLIENT, 67890, 'tez')]
     driver = next(a for a in bundle['accounts'] if a['kind'] == rules.KIND_DRIVER)
     assert driver['full_name'] == 'Иванов Иван' and driver['fetched_at'] == w.clock()
     chosen = w.svc.choose_account(ctx, card_id, driver['id'])
@@ -488,6 +488,83 @@ def test_tez_lookup_links_found_accounts_and_fills_city(world):
                                                              phone=OTHER_PHONE)
     linked = w.svc.attach_link(ctx, card_id, 'admin.tezapp.org/admin/drivers/80000')
     assert linked['account']['full_name'] == 'Петров Пётр' and linked['card']['city'] == 'Астана'
+
+
+def _found(*accounts):
+    return {'source': SOURCE_ACCOUNTS, 'ok': True, 'error': None, 'driver_hint': None, 'accounts': list(accounts)}
+
+
+def test_accounts_of_a_number_follow_tez(world):
+    """Статус, дата удаления и порядок — как отдаёт TEZ APP: действующие, удалённые, сменившие номер.
+    Что TEZ APP перестал находить по номеру, с номера уходит — если по нему не обращались."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    driver = _driver(status='verified', status_text='Проверен')
+    client = {'kind': rules.KIND_CLIENT, 'tez_id': 67890, 'full_name': 'Иван', 'phone': PHONE, 'city': 'Алматы',
+              'status': 'active', 'status_text': 'Активен', 'registered_at': None, 'last_order_at': None,
+              'details': {}}
+    deleted = _driver(11111, status='deleted', status_text='Удалён', deleted_at=datetime(2026, 10, 1, 12, 0))
+    moved = _driver(22222, full_name='Петров Пётр', phone=OTHER_PHONE, status='blocked',
+                    status_text='Заблокирован')
+    second_driver = _driver(33333, full_name='Сидоров Сидор', status='new', status_text='Новый')
+    # Порядок держит и наш запрос, а не только очерёдность ответа: подаём вперемешку.
+    w.tez.by_phone_reply[PHONE] = _found(moved, deleted, driver, client, second_driver)
+    first = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='f1')['card']['id']
+    bundle = w.svc.lookup(ctx, first)
+    assert [(a['tez_id'], a['status'], a['status_text']) for a in bundle['accounts']] == [
+        (12345, 'verified', 'Проверен'), (67890, 'active', 'Активен'), (33333, 'new', 'Новый'),
+        (11111, 'deleted', 'Удалён'), (22222, 'blocked', 'Заблокирован')]
+    ids = {a['tez_id']: a for a in bundle['accounts']}
+    assert ids[11111]['deleted_at'] == datetime(2026, 10, 1, 12, 0) and ids[12345]['deleted_at'] is None
+    # У сменившего номер в профиле — нынешний номер, а привязан он к тому, с которого звонят.
+    assert ids[22222]['phone'] == OTHER_PHONE and ids[22222]['link']['origin'] == 'tez'
+
+    # По второму водителю с этого номера обратились — карточка заполнена.
+    w.svc.choose_account(ctx, first, ids[33333]['id'])
+    w.svc.save_card(ctx, first, {'topics': [{'category_id': w.money}]})
+    w.svc.call_event(ctx, first, 'answered')
+    w.svc.call_event(ctx, first, 'ended')
+    assert w.svc.complete_card(ctx, first)['card']['status'] == rules.STATUS_DONE
+
+    # TEZ APP молчит — привязки не трогаем: «не знаем» не значит «аккаунтов нет».
+    w.clock.tick(minutes=5)
+    second = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='f2')['card']['id']
+    w.tez.by_phone_reply[PHONE] = {'source': SOURCE_ACCOUNTS, 'ok': False, 'error': 'TEZ APP не отвечает',
+                                   'accounts': [], 'driver_hint': None}
+    assert len(w.svc.lookup(ctx, second)['accounts']) == 5
+
+    # Оператор выбрал в идущей карточке сменившего номер, а другой оператор в своей — удалённого.
+    # TEZ APP перестал находить по номеру их обоих, второго водителя и клиента. Второй водитель
+    # остаётся — по нему отсюда обращались (и он первый); выбранные в идущих карточках остаются;
+    # клиент, которого держало только слово TEZ APP, уходит.
+    w.svc.choose_account(ctx, second, ids[22222]['id'])
+    boris = w.ctx(BORIS)
+    other = w.svc.open_call(boris, phone=PHONE, direction='in', call_key='f2-boris')['card']['id']
+    w.svc.choose_account(boris, other, ids[11111]['id'])
+    w.tez.by_phone_reply[PHONE] = _found(driver)
+    bundle = w.svc.lookup(ctx, second)
+    assert [a['tez_id'] for a in bundle['accounts']] == [33333, 12345, 11111, 22222]
+    assert bundle['account']['tez_id'] == 22222
+    # Следующий звонок: оператор выбрал другой аккаунт, чужая карточка не состоялась —
+    # держать сменившего номер и удалённого больше нечем, уходят и они.
+    w.svc.choose_account(ctx, second, ids[12345]['id'])
+    assert w.svc.call_event(boris, other, 'ended')['card']['status'] == rules.STATUS_VOID
+    third = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='f3')['card']['id']
+    assert [a['tez_id'] for a in w.svc.lookup(ctx, third)['accounts']] == [33333, 12345]
+    # Привязку ссылкой поиск не трогает, что бы он ни отвечал.
+    w.tez.by_id_reply[(rules.KIND_DRIVER, 999)] = _driver(999, phone=OTHER_PHONE)
+    linked = w.svc.attach_link(ctx, third, 'admin.tezapp.org/admin/drivers/999')
+    assert linked['account']['link']['origin'] == 'manual'
+    # У привязанного ссылкой в профиле другой номер — вниз его это не опускает: свежая привязка
+    # выше давней найденной (выше всех — тот, по которому отсюда обращались).
+    assert [a['tez_id'] for a in w.svc.lookup(ctx, third)['accounts']] == [33333, 999, 12345]
+
+    # Аккаунт восстановили: статус и дата удаления — по свежему ответу, а не по первому.
+    w.tez.by_phone_reply[PHONE] = _found(driver, dict(deleted, status='verified', status_text='Проверен',
+                                                      deleted_at=None))
+    restored = next(a for a in w.svc.lookup(ctx, third)['accounts'] if a['tez_id'] == 11111)
+    assert (restored['status'], restored['status_text'], restored['deleted_at']) == ('verified', 'Проверен', None)
 
 
 def test_tez_silence_keeps_card_working(world):
@@ -1289,8 +1366,15 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
                                       now=datetime(2026, 11, 12, 10, 0))
         cursor.execute('ALTER TABLE client_card_categories DROP COLUMN audience')
         cursor.execute('ALTER TABLE client_cards DROP COLUMN operator_sip, DROP COLUMN record_call_id')
+        cursor.execute('ALTER TABLE client_card_accounts DROP COLUMN status_text, DROP COLUMN deleted_at')
         schema.init_client_cards_schema(cursor)
         schema.init_client_cards_schema(cursor)
+        # Подпись статуса и дата удаления из ответа TEZ APP — аккаунт пишется и читается.
+        account_id = queries.upsert_account(
+            cursor, _driver(status='deleted', status_text='Удалён', deleted_at=datetime(2026, 10, 1, 12, 0)),
+            by=ANNA, now=datetime(2026, 11, 12, 10, 0), fetched=True)
+        saved = queries.get_account(cursor, account_id)
+        assert (saved['status_text'], saved['deleted_at']) == ('Удалён', datetime(2026, 10, 1, 12, 0))
         assert queries.category_index(cursor, TEZ)[old]['audience'] == rules.KIND_DRIVER
         # Столбцы записи разговора тоже на месте — карточка заводится и читается.
         card_id, created = queries.open_card(cursor, department_id=TEZ, operator_id=ANNA, operator_name='Анна',
@@ -1567,6 +1651,8 @@ def test_api_phone_card_flow(api):
     account = linked['account']
     assert status == 200 and account['kind_label'] == 'Водитель' and account['known'] is False
     assert account['url'] == 'https://admin.tezapp.org/admin/drivers/12345'
+    # Профиль из Тез ещё не приходил: ни статуса, ни дат.
+    assert (account['status_text'], account['status_tone'], account['deleted_at']) == (None, 'slate', None)
     assert account['link']['origin'] == 'manual' and account['link']['can_unlink'] is True
     assert linked['completion_error'] == 'Выберите причину обращения'
 
@@ -1601,6 +1687,32 @@ def test_api_phone_card_flow(api):
     link_id = again['accounts'][0]['link']['id']
     assert api.delete('/cards/%d/links/%d' % (second, link_id), user=BORIS)[0] == 403
     assert api.delete('/cards/%d/links/%d' % (second, link_id))[1]['accounts'] == []
+
+
+def test_api_account_shows_what_tez_says(api):
+    """Строка аккаунта на экране: подпись статуса от TEZ APP, тон, дата удаления, номер из профиля."""
+    w = api.w
+    w.tez._source = SOURCE_ACCOUNTS
+    w.tez.by_phone_reply[PHONE] = _found(
+        _driver(status='car_photos_expired', status_text='Фото авто устарели'),
+        _driver(11111, status='deleted', status_text='Удалён', deleted_at=datetime(2026, 10, 1, 12, 0)),
+        _driver(22222, phone=OTHER_PHONE, status='blocked', status_text=None))
+    card_id = api.post('/phone/calls', json={'phone': PHONE, 'direction': 'in', 'call_key': 'tz-1'})[1]['card']['id']
+    status, looked = api.post('/cards/%d/lookup' % card_id)
+    assert status == 200 and looked['tez'] == {'source': 'accounts', 'ok': True, 'error': None, 'driver_hint': None}
+    rows = [(a['tez_id'], a['status'], a['status_text'], a['status_tone'], a['deleted_at'], a['phone'],
+             a['known'], a['link']['can_unlink']) for a in looked['accounts']]
+    assert rows == [
+        (12345, 'car_photos_expired', 'Фото авто устарели', 'amber', None, PHONE, True, False),
+        (11111, 'deleted', 'Удалён', 'red', '2026-10-01T12:00:00+05:00', PHONE, True, False),
+        # Подпись не пришла — наша по коду статуса.
+        (22222, 'blocked', 'Заблокирован', 'red', None, OTHER_PHONE, True, False)]
+    assert looked['accounts'][0]['registered_at'] == '2026-11-05T14:03:00+05:00'
+    assert looked['accounts'][0]['last_order_at'] == '2026-11-10T18:41:00+05:00'
+    # Руководителю в обращении — тот же статус аккаунта.
+    api.post('/cards/%d/account' % card_id, json={'account_id': looked['accounts'][1]['id']})
+    detail = api.get('/cards/%d' % card_id, user=HEAD)[1]
+    assert (detail['account']['status_text'], detail['account']['status_tone']) == ('Удалён', 'red')
 
 
 def test_api_requests_flow(api):

@@ -175,7 +175,8 @@ class ClientCardsService:
             card = self._card_for(cursor, ctx, card_id, edit=False)
             linked = queries.phone_accounts(cursor, card['phone'])
         found = self._tez.by_phone(card['phone'])
-        refreshed = self._refresh_stale(linked, found)
+        gone = self._gone_links(linked, found)
+        refreshed = self._refresh_stale([item for item in linked if item['link']['id'] not in gone], found)
         now = self._now()
         with self._cursor() as cursor:
             # Найденное по номеру — закрепляем за номером; обновлённые профили — только обновляем.
@@ -185,6 +186,7 @@ class ClientCardsService:
                                    by=ctx['user_id'], by_name=ctx['name'], now=now)
             for account in refreshed:
                 queries.upsert_account(cursor, account, by=ctx['user_id'], now=now, fetched=True)
+            queries.unlink_unconfirmed(cursor, gone)
             bundle = self._bundle(cursor, card_id)
             # Город в карточке — снимок: профиль выбранного аккаунта только что обновился.
             account = bundle['account']
@@ -195,6 +197,25 @@ class ClientCardsService:
         bundle['tez'] = {'source': found['source'], 'ok': found['ok'], 'error': found['error'],
                          'driver_hint': found['driver_hint']}
         return bundle
+
+    @staticmethod
+    def _gone_links(linked, found):
+        """Привязки, которые поставил поиск TEZ APP и которые он больше не подтверждает.
+
+        Аккаунт перестал находиться по номеру: клиент сменил номер (историю номеров
+        клиентов TEZ APP не хранит) или номер из профиля убрали. Привязка, по которой с
+        этого номера не обращались, держалась только на слове TEZ APP — снимаем её, иначе
+        чужой аккаунт остался бы на номере навсегда: руками такую привязку не снять.
+        Обращались по аккаунту с этого номера или он выбран в идущей карточке — остаётся
+        (это уже знание оператора, как привязка ссылкой): за этим следит сам запрос
+        снятия, queries.unlink_unconfirmed.
+        """
+        if found['source'] != SOURCE_ACCOUNTS or not found['ok']:
+            return set()
+        seen = {(item['kind'], item['tez_id']) for item in found['accounts']}
+        return {item['link']['id'] for item in linked
+                if item['link']['origin'] == 'tez' and (item['kind'], item['tez_id']) not in seen
+                and item['last_used_at'] is None}
 
     def _refresh_stale(self, linked, found):
         """Профили привязанных аккаунтов, которые TEZ APP давно (или никогда) не отдавал.
