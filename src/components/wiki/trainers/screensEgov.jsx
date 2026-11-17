@@ -89,11 +89,6 @@ export const EgCode = ({ tap, target, purpose }) => {
 
 /* ── Лист подписания ──────────────────────────────────────────────────────── */
 
-/** Период в сценарии хранится с предлогом («за Июль 2026») — реплики барса
- *  читаются «акты ЗА июль». В подписях экрана предлог свой, поэтому лишний
- *  срезаем: иначе на экране стоит «Документы за за Июль 2026». */
-const bare = (label) => String(label || '').replace(/^за\s+/i, '');
-
 /** Строка «поле — значение» листа eGov: подпись сверху серым, значение снизу
  *  чёрным. Это НЕ та же строка, что в кабинете (там значение справа), и
  *  различие видно с первого взгляда — по нему и отличают приложение от сайта. */
@@ -104,7 +99,7 @@ const EgField = ({ label, children }) => (
     </div>
 );
 
-export const EgSign = ({ world, tap, toggle, target, purpose, period }) => {
+export const EgSign = ({ world, tap, toggle, target, purpose }) => {
     const open = !!world.egovExpanded;
     return (
         <div className="wt-screen wt-eg wt-eg--sign">
@@ -125,9 +120,11 @@ export const EgSign = ({ world, tap, toggle, target, purpose, period }) => {
                     {world.qrValid || 'сегодня, 15:25'}
                 </EgField>
                 <EgField label="От кого">
+                    {/* Дословно как на кадрах eGov 10–11.2026: «Вход в систему
+                        Sapar» при входе и «Документ на подписании» при подписи. */}
                     {TRAINEE.requester}: {purpose === 'auth'
                         ? 'Вход в систему Sapar'
-                        : 'Подписание документов'}
+                        : 'Документ на подписании'}
                 </EgField>
                 {purpose === 'docs' && (
                     <p className="wt-eg__warn">
@@ -145,23 +142,19 @@ export const EgSign = ({ world, tap, toggle, target, purpose, period }) => {
                     onClick={() => toggle('egovExpanded')}
                     aria-expanded={open}
                 >
-                    {purpose === 'auth' ? 'Авторизация' : `Документы за ${bare(period)}`}
+                    {purpose === 'auth' ? 'Авторизация' : 'Документ'}
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
                         stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
                         strokeLinejoin="round" aria-hidden="true">
                         <path d="m6 9 6 6 6-6" />
                     </svg>
                 </button>
+                {/* Раскрытый пункт на кадрах — одна строка с тем же словом, что в
+                    заголовке пункта: «Документ» или «Авторизация». Списка актов
+                    eGov здесь не показывает. */}
                 {open && (
                     <div className="wt-eg__docbody">
-                        {purpose === 'auth' ? (
-                            <div>Вход в личный кабинет водителя Sapar</div>
-                        ) : (
-                            <>
-                                <div>АВР №66909180/26: {bare(period)}</div>
-                                <div>АВР №1: {bare(period)}</div>
-                            </>
-                        )}
+                        <div>{purpose === 'auth' ? 'Авторизация' : 'Документ'}</div>
                     </div>
                 )}
             </div>
@@ -182,16 +175,13 @@ export const EgSign = ({ world, tap, toggle, target, purpose, period }) => {
 
 /* ── Подписано ───────────────────────────────────────────────────────────── */
 
-export const EgSuccess = ({ tap, target, purpose }) => (
+/* Под заголовком на настоящем экране ничего нет — сразу «Продолжить» (59 кадров
+   за 10–11.2026). Куда возвращаться, объясняет барс: путь у тренажёров разный. */
+export const EgSuccess = ({ tap, target }) => (
     <div className="wt-screen wt-eg wt-eg--done">
         <div className="wt-eg__done-body">
             <SignedBadge />
             <b>Подписание выполнено успешно!</b>
-            <p>
-                {purpose === 'auth'
-                    ? 'Вход подтверждён. Портал ждёт возврата.'
-                    : 'Подпись создана. Осталось вернуться на портал.'}
-            </p>
         </div>
         <Tap id="continue" target={target} tap={tap} className="wt-eg-primary">Продолжить</Tap>
         {/* Ловушка — не кнопка, а полоска «домой» внизу экрана: свернуть

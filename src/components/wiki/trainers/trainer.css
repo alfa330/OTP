@@ -57,13 +57,16 @@
     --sp-partners: linear-gradient(95deg, #169ee8, #5a6df0);
 
     /* Такси.Про — жёлтых ДВА: яркий у кнопок, приглушённый у значков. */
-    --tp-canvas: #f3f4f6;
+    --tp-canvas: #f2f1f6;
     --tp-ink: #18181a;
-    --tp-yellow: #fce000;
-    --tp-gold: #c8a417;
-    --tp-underline: #f1dd24;
-    --tp-green: #6ea166;
+    --tp-mute: #8a8a8e;
+    --tp-yellow: #fbdf00;
+    --tp-seg: #f5d500;       /* активная вкладка «Через ЭЦП / Через eGov / Договоры» */
+    --tp-seg-track: #e3e2e7;
+    --tp-gold: #c3a526;
+    --tp-green: #34c759;
     --tp-red: #e5342b;
+    --sx-canvas: #f3f4f6;    /* кабинет Сапар внутри окна Такси.Про */
 
     /* Яндекс Про — жёлтый один: он же у кнопки, он же у галочки активного
        провайдера. Карточки двух уровней: #f4f4f0 на iOS, #ececec на Android. */
@@ -599,92 +602,109 @@
 }
 
 /* ── Такси.Про ────────────────────────────────────────────────────────────
-   Палитра снята пипеткой с настоящих скриншотов приложения: фон #f3f4f6,
-   белые карточки, ЯРКО-жёлтая кнопка #fce000 с чёрной надписью и приглушённое
-   золото #c8a417 у значков, ссылок и активной вкладки. Два жёлтых, а не один:
-   кнопкой цвета значков приложение перестаёт быть похожим на себя. */
+   По кадрам водителей за 17.10–17.11.2026 (iOS, светлая тема). Палитра снята
+   пипеткой: фон #f2f1f6, белые карточки, ЯРКО-жёлтая кнопка #fbdf00 с чёрной
+   надписью, жёлтая «таблетка» активной вкладки #f5d500 и приглушённое золото
+   #c3a526 у ссылок и значков. Два жёлтых, а не один: кнопкой цвета значков
+   приложение перестаёт быть похожим на себя. */
+
+/* Строка состояния над приложением — того же серого, что и экран: белая
+   полоса над серым фоном выдаёт макет с первого взгляда. Над окном подписания
+   фон чёрный, а цифры белые — так iOS показывает окно-«шторку». */
+.wt-phone[data-screen^="tp_"] .wt-phone__screen { background: var(--tp-canvas); }
+.wt-phone[data-screen^="tp_sheet"] .wt-phone__screen { background: #000; }
+.wt-phone[data-screen^="tp_sheet"] .wt-phone__status { --wt-batt-ink: #000; color: #fff; }
+
+/* Каркас: список прокручивается, панель и кнопка чата плавают поверх. */
+.wt-tp-app {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--tp-canvas);
+}
 
 .wt-tp {
     gap: 12px;
-    padding: 14px 12px 0;
+    padding: 22px 12px 150px;
     color: var(--tp-ink);
     background: var(--tp-canvas);
 }
 
-.wt-tp__head {
+.wt-tp__hello {
     display: flex;
+    flex: 0 0 auto;
     align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
 }
 
-.wt-tp__head b { font-size: 21px; font-weight: 700; line-height: 1.15; }
+.wt-tp__hello b { font-size: 22px; font-weight: 700; line-height: 1.15; letter-spacing: -0.01em; }
 
 .wt-tp__avatar {
     flex: 0 0 auto;
-    width: 42px;
-    height: 42px;
+    width: 44px;
+    height: 44px;
     overflow: hidden;
     border-radius: 999px;
 }
 
 .wt-tp__avatar svg { display: block; width: 100%; height: 100%; }
 
-/* Лента баннеров с выглядывающими соседями. Она первая на главной и первая, во
-   что попадают мимо кнопок, — поэтому соседи именно выглядывают, а не срезаны. */
-.wt-tp__promos {
+/* Лента баннеров: центральный во всю ширину, у краёв видны соседи. Она первая
+   на главной и первая, во что попадают мимо кнопок. */
+.wt-tp__banners {
     display: flex;
     flex: 0 0 auto;
-    gap: 8px;
+    gap: 6px;
     margin: 0 -12px;
-    padding: 0 12px;
-    overflow: hidden;
 }
 
-.wt-tp__promo {
+.wt-tp__banner {
     display: flex;
-    flex: 0 0 76%;
+    flex: 1 1 auto;
     flex-direction: column;
-    gap: 6px;
+    gap: 7px;
     align-items: flex-start;
+    min-height: 118px;
     padding: 14px;
     color: var(--tp-ink);
     background: var(--tp-yellow);
-    border-radius: 16px;
+    border-radius: 14px;
     text-align: left;
 }
 
-.wt-tp__promo em {
+.wt-tp__banner em {
     font-size: 9px;
     font-style: normal;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    opacity: 0.5;
-}
-
-.wt-tp__promo b { font-size: 13.5px; font-weight: 800; line-height: 1.2; text-transform: uppercase; }
-
-.wt-tp__promo span {
-    padding: 4px 10px;
-    font-size: 10px;
-    font-weight: 700;
+    font-weight: 800;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--tp-yellow);
+    opacity: 0.6;
+}
+
+.wt-tp__banner b {
+    max-width: 82%;
+    font-size: 14px;
+    font-weight: 900;
+    line-height: 1.12;
+    text-transform: uppercase;
+}
+
+.wt-tp__banner span {
+    padding: 3px 9px;
+    font-size: 9.5px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #fff;
     background: var(--tp-ink);
-    border-radius: 999px;
+    border-radius: 6px;
 }
 
-.wt-tp__promo.is-peek {
-    flex: 0 0 26px;
-    align-items: center;
-    justify-content: center;
-    padding: 14px 4px;
-    overflow: hidden;
-}
-
-.wt-tp__promo.is-peek b { font-size: 11px; opacity: 0.75; }
+.wt-tp__banner.is-peek { flex: 0 0 8px; min-height: 0; padding: 0; background: #2b2b2e; border-radius: 0 6px 6px 0; }
+.wt-tp__banner.is-peek:last-child { border-radius: 6px 0 0 6px; }
 
 .wt-tp__card {
     display: flex;
@@ -693,7 +713,7 @@
     gap: 11px;
     padding: 14px;
     background: var(--wt-surface);
-    border-radius: 18px;
+    border-radius: 16px;
 }
 
 .wt-tp__card-head {
@@ -703,15 +723,15 @@
     gap: 8px;
 }
 
-.wt-tp__card-head b { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; }
-.wt-tp__card-head b svg { width: 18px; height: 18px; color: var(--tp-gold); }
+.wt-tp__card-head > span { display: flex; align-items: center; gap: 9px; font-size: 14.5px; font-weight: 500; }
+.wt-tp__card-head > span svg { width: 19px; height: 19px; color: var(--tp-gold); }
 
 .wt-tp__link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
     color: var(--tp-gold);
 }
 
@@ -721,123 +741,184 @@
 .wt-tp__lines li { display: flex; align-items: center; gap: 11px; }
 .wt-tp__lines svg { flex: 0 0 auto; width: 19px; height: 19px; color: var(--tp-gold); }
 
-.wt-tp__balance { display: flex; align-items: center; gap: 10px; font-size: 22px; font-weight: 700; }
-.wt-tp__balance svg { width: 26px; height: 26px; color: var(--tp-gold); }
+.wt-tp__balance { display: flex; align-items: center; gap: 10px; font-size: 22px; font-weight: 800; color: var(--tp-green); }
+.wt-tp__balance svg { width: 27px; height: 27px; color: var(--tp-gold); }
 
-/* Кнопка вывода — пилюля во всю ширину, чёрным по яркому жёлтому. По ней
-   приложение и опознаётся с одного взгляда. */
-.wt-tp__withdraw {
-    width: 100%;
-    padding: 13px;
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--tp-ink);
-    background: var(--tp-yellow);
-    border-radius: 999px;
-}
-
-.wt-tp__quick { display: grid; flex: 0 0 auto; grid-template-columns: 1fr 1fr; gap: 9px; }
-
-.wt-tp__quick button {
-    padding: 15px 13px;
-    font-size: 13.5px;
-    font-weight: 600;
-    line-height: 1.25;
-    color: #fff;
-    border-radius: 14px;
-    text-align: left;
-}
-
-.wt-tp__quick .is-green { background: #6ba209; }
-.wt-tp__quick .is-violet { background: #af6ced; }
-
-/* ── Раздел «Документы» ──────────────────────────────────────────────────
-   Шапка раздела лежит на белом и уходит под края экрана, а вкладки — не
-   пилюли в серой подложке, а две надписи с жёлтой чертой под активной. Это
-   тот случай, когда форма важнее содержания: по черте раздел и опознаётся. */
-
-.wt-tp__docs-head {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    margin: -14px -12px 0;
-    padding: 16px 16px 0;
-    background: var(--wt-surface);
-}
-
-.wt-tp__docs-head h3 { font-size: 20px; font-weight: 700; }
-
-.wt-tp__tabs { display: grid; grid-template-columns: 1fr 1fr; margin-top: 12px; }
-
-.wt-tp__tabs button {
-    padding: 11px 0 9px;
-    font-size: 14px;
-    font-weight: 500;
-    color: #8a8f98;
-    border-bottom: 2.5px solid transparent;
-    text-align: center;
-}
-
-.wt-tp__tabs button.is-active {
-    font-weight: 600;
-    color: var(--tp-gold);
-    border-bottom-color: var(--tp-underline);
-}
-
-.wt-tp__act {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    gap: 5px;
-    padding: 14px;
-    background: var(--wt-surface);
-    border-radius: 16px;
-}
-
-.wt-tp__act-head { display: flex; align-items: flex-start; gap: 9px; }
-.wt-tp__act-ico { flex: 0 0 auto; width: 20px; height: 20px; margin-top: 2px; color: #9aa1ad; }
-.wt-tp__act-head b { flex: 1 1 auto; font-size: 15px; font-weight: 700; line-height: 1.25; }
-.wt-tp__act-head b span { white-space: nowrap; }
-.wt-tp__act-tools { display: inline-flex; flex: 0 0 auto; gap: 11px; color: var(--tp-gold); }
-.wt-tp__act-tools svg { width: 17px; height: 17px; }
-
-.wt-tp__act small { font-size: 12.5px; color: #3f434b; }
-.wt-tp__act small b { font-weight: 700; color: var(--tp-ink); }
-
-/* «Подписать» в приложении — светлая пилюля с росчерком, а не жёлтая кнопка.
-   Жёлтая здесь только одна, «Вывод с баланса», и путать их нельзя. */
-.wt-tp__act-sign {
+/* Жёлтая кнопка — «Вывод с баланса», «Подписать», «Завершить урок»: чёрным
+   по яркому жёлтому, скругление как у карточки, а не пилюля. */
+.wt-tp__yellow {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 9px;
     width: 100%;
-    margin-top: 7px;
-    padding: 11px;
+    padding: 12px;
     font-size: 14.5px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--tp-ink);
-    background: #f3f4f6;
-    border: 1px solid #e5e7eb;
+    background: var(--tp-yellow);
+    border-radius: 12px;
+}
+
+.wt-tp__yellow svg { width: 18px; height: 18px; }
+
+/* Плитки под карточками: значок в жёлтом кружке, подпись снизу слева. */
+.wt-tp__tiles { display: grid; flex: 0 0 auto; grid-template-columns: 1fr 1fr; gap: 9px; }
+
+.wt-tp__tiles button {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: flex-start;
+    min-height: 98px;
+    padding: 12px;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.25;
+    color: var(--tp-ink);
+    background: var(--wt-surface);
+    border-radius: 16px;
+    text-align: left;
+}
+
+.wt-tp__tiles i {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    color: var(--tp-ink);
+    background: var(--tp-yellow);
     border-radius: 999px;
 }
 
-.wt-tp__act-sign svg { width: 18px; height: 18px; }
+.wt-tp__tiles svg { width: 18px; height: 18px; }
+
+/* ── Раздел «Документы» ──────────────────────────────────────────────────
+   Крупный заголовок iOS и переключатель в серой дорожке: активная вкладка —
+   жёлтая «таблетка» с полужирной подписью. Галочки у неё нет: галочка — это
+   Android-вариант того же переключателя, а телефон в тренажёре — iPhone. */
+
+.wt-tp__docs-head { display: flex; flex: 0 0 auto; flex-direction: column; gap: 12px; padding-top: 10px; }
+.wt-tp__docs-head h3 { font-size: 30px; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; }
+
+.wt-tp__seg {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+    padding: 3px;
+    background: var(--tp-seg-track);
+    border-radius: 11px;
+}
+
+.wt-tp__seg button {
+    padding: 7px 4px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--tp-ink);
+    border-radius: 9px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.wt-tp__seg button.is-active { font-weight: 700; background: var(--tp-seg); }
+
+/* Вкладка «Через ЭЦП»: заголовок пакета, карточка, две справки и кнопка. */
+.wt-tp__pack-title { display: flex; flex: 0 0 auto; flex-direction: column; gap: 2px; }
+.wt-tp__pack-title small { font-size: 12px; color: var(--tp-mute); }
+.wt-tp__pack-title b { font-size: 21px; font-weight: 800; letter-spacing: -0.01em; }
+.wt-tp__pack-title span { font-size: 12.5px; color: var(--tp-mute); }
+
+.wt-tp__pack { gap: 0; padding: 0; }
+
+.wt-tp__pack-head {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 13px 14px;
+}
+
+.wt-tp__pack-head > span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wt-tp__pack-head b { font-size: 15px; font-weight: 600; }
+.wt-tp__pack-head small { font-size: 12px; color: var(--tp-mute); }
+.wt-tp__pack-head .wt-tp__sum { align-items: flex-end; margin-left: auto; text-align: right; }
+
+.wt-tp__pack-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 0 14px;
+    padding: 12px 0 13px;
+    font-size: 13px;
+    color: var(--tp-mute);
+    border-top: 1px solid #ececf1;
+}
+
+.wt-tp__pack-row > span:last-child { display: flex; flex-direction: column; align-items: flex-end; text-align: right; }
+.wt-tp__pack-row b { font-weight: 500; color: var(--tp-ink); }
+.wt-tp__pack-row small { font-size: 11.5px; color: var(--tp-mute); }
+
+.wt-tp .wt-tp__note {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 13px;
+    font-size: 13px;
+    line-height: 1.35;
+    color: var(--tp-mute);
+    background: var(--wt-surface);
+    border-radius: 14px;
+}
+
+.wt-tp .wt-tp__note svg { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 1px; color: #636366; }
+
+.wt-tp__history {
+    align-self: center;
+    padding: 6px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--tp-gold);
+}
+
+/* Значок документа в бледно-жёлтой плитке — в карточке акта и пакета. */
+.wt-tp__doc-tile {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    color: var(--tp-gold);
+    background: #fbf6cc;
+    border-radius: 11px;
+}
+
+.wt-tp__doc-tile svg { width: 21px; height: 21px; }
+
+.wt-tp__act { gap: 12px; }
+.wt-tp__act-head { display: flex; align-items: center; gap: 12px; }
+.wt-tp__act-head > span { display: flex; flex: 1 1 0; flex-direction: column; gap: 1px; width: 0; min-width: 0; }
+.wt-tp__act-head b { font-size: 15px; font-weight: 700; line-height: 1.25; }
+.wt-tp__act-head span span { font-size: 13px; color: #3a3a3c; }
+
+.wt-tp__act-head small {
+    overflow: hidden;
+    font-size: 12px;
+    color: var(--tp-mute);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 .wt-tp__act-status {
     display: flex;
     align-items: center;
-    gap: 20px;
-    margin-top: 8px;
+    justify-content: space-between;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
 }
 
-.wt-tp__act-status button { display: inline-flex; align-items: center; gap: 8px; color: var(--tp-gold); }
-.wt-tp__act-status span { display: inline-flex; align-items: center; gap: 8px; }
-.wt-tp__act-status .is-done { color: var(--tp-green); }
-.wt-tp__act-status .is-wait { color: #9aa1ad; }
+.wt-tp__act-status span { display: inline-flex; align-items: center; gap: 7px; color: var(--tp-green); }
 .wt-tp__act-status svg { width: 17px; height: 17px; }
+.wt-tp__act-status button { font-weight: 600; color: var(--tp-gold); }
 
 .wt-tp__refresh {
     display: flex;
@@ -848,58 +929,54 @@
     padding: 10px;
     font-size: 12.5px;
     font-weight: 500;
-    color: var(--tp-gold);
+    color: var(--tp-mute);
     background: var(--wt-surface);
     border-radius: 999px;
 }
 
 .wt-tp__refresh svg { width: 15px; height: 15px; }
 
-.wt-tp__done {
-    display: flex;
-    flex: 0 0 auto;
-    flex-direction: column;
-    gap: 10px;
-    padding: 14px;
-    background: var(--wt-surface);
-    border-radius: 16px;
-    text-align: center;
-}
-
+.wt-tp__done { align-items: center; text-align: center; }
 .wt-tp__done b { font-size: 14px; color: var(--tp-green); }
 
-/* Нижняя панель приложения: пять значков, активный — золотом, на «Документах»
-   красный счётчик неподписанных актов. Он и есть причина зайти в раздел. */
+/* Нижняя панель: плавающая белая карточка с подписями под значками. Активный
+   пункт — серая подложка, значок и подпись золотом; на «Документах» красная
+   цифра неподписанного. */
 .wt-tp__nav {
-    position: sticky;
-    bottom: 0;
-    z-index: 2;
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    bottom: 12px;
+    z-index: 4;
     display: grid;
-    flex: 0 0 auto;
     grid-template-columns: repeat(5, 1fr);
-    margin: auto -12px 0;
-    padding: 9px 4px 11px;
-    background: var(--wt-surface);
-    border-top: 1px solid #e9e9ec;
+    gap: 2px;
+    padding: 5px;
+    background: rgba(255, 255, 255, 0.96);
+    border-radius: 26px;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.10);
 }
 
 .wt-tp__nav button {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
-    font-size: 10.5px;
-    color: #8a8f98;
+    gap: 2px;
+    padding: 6px 0 5px;
+    font-size: 9.5px;
+    font-weight: 500;
+    color: var(--tp-ink);
+    border-radius: 20px;
 }
 
-.wt-tp__nav i { position: relative; display: block; width: 23px; height: 23px; }
+.wt-tp__nav i { position: relative; display: block; width: 22px; height: 22px; }
 .wt-tp__nav svg { width: 100%; height: 100%; }
-.wt-tp__nav button.is-active { color: var(--tp-gold); }
+.wt-tp__nav button.is-active { color: var(--tp-gold); background: #e9e8ee; }
 
 .wt-tp__badge {
     position: absolute;
-    top: -7px;
-    right: -10px;
+    top: -6px;
+    right: -9px;
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
@@ -912,6 +989,24 @@
     border-radius: 999px;
     text-align: center;
 }
+
+/* Зелёная кнопка чата поддержки — над панелью справа, как в приложении. */
+.wt-tp__fab {
+    position: absolute;
+    right: 14px;
+    bottom: 86px;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    width: 48px;
+    height: 48px;
+    color: #fff;
+    background: #35c75a;
+    border-radius: 999px;
+    box-shadow: 0 6px 16px rgba(53, 199, 90, 0.35);
+}
+
+.wt-tp__fab svg { width: 23px; height: 23px; }
 
 /* ── Кабинет Сапар ────────────────────────────────────────────────────────
    Кабинет — это не «страница с кнопками», а узнаваемый набор: белые карточки
@@ -1029,7 +1124,6 @@
 .wt-sp__state.is-wait { color: var(--sp-wait-ink); background: var(--sp-wait-bg); border-color: #cfe3fb; }
 .wt-sp__state.is-done { color: var(--sp-ok-ink); background: var(--sp-ok-bg); border-color: #b6ecd6; }
 
-.wt-sp__doc-name { font-size: 14px; font-weight: 700; }
 .wt-sp__section > small { font-size: 12.5px; color: var(--sp-mute); }
 .wt-sp__section > .wt-blue { margin-top: 3px; }
 
@@ -1269,54 +1363,379 @@
 .wt-sp__nav button.is-active { font-weight: 600; color: var(--sp-nav); }
 .wt-sp__nav button.is-active i { background: var(--sp-nav-chip); }
 
-/* ── Кабинет, открытый браузером изнутри приложения ──────────────────────
-   Такси.Про уводит на тот же сайт, но не своим окном: это Chrome Custom Tab —
-   тёмная полоса, слева крестик и шеврон, по центру заголовок страницы с
-   доменом мелким под ним, справа «поделиться», закладка и «⋮». Полоса и есть
-   единственное отличие от тренажёра браузера: способа два, и человек обязан
-   их различать. */
-.wt-sp__tab {
+/* ── Окно «Подписание документов» в Такси.Про ────────────────────────────
+   С осени 2026 приложение открывает кабинет Сапар не браузером, а своим окном-
+   «шторкой» iOS: на чёрном фоне сверху виден край приложения, ниже — окно со
+   скруглёнными углами, заголовком по центру и серым кружком с крестиком
+   справа. Крестик и есть единственный выход обратно в приложение. */
+.wt-tps {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    background: #000;
+}
+
+.wt-tps__top { position: relative; flex: 0 0 auto; height: 22px; }
+
+.wt-tps__top .wt-mark { top: 1px; right: auto; left: 50%; transform: translateX(-50%); }
+
+.wt-tps__behind {
+    position: absolute;
+    left: 18px;
+    right: 18px;
+    bottom: 0;
+    height: 6px;
+    background: #8e8e93;
+    border-radius: 12px 12px 0 0;
+    opacity: 0.55;
+}
+
+.wt-tps__sheet {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--sx-canvas);
+    border-radius: 13px 13px 0 0;
+}
+
+.wt-tps__head {
+    position: relative;
     display: flex;
     flex: 0 0 auto;
     align-items: center;
-    gap: 2px;
-    padding: 8px 6px;
-    color: #e8eaee;
-    background: #202124;
+    justify-content: center;
+    height: 48px;
+    padding: 0 48px;
+    background: var(--sx-canvas);
 }
 
-.wt-sp__tab-btn { display: grid; place-items: center; flex: 0 0 auto; width: 30px; height: 30px; color: #e8eaee; }
-.wt-sp__tab-btn svg { width: 17px; height: 17px; }
+.wt-tps__head b { font-size: 15px; font-weight: 700; color: #000; }
 
-.wt-sp__tab-title {
+.wt-tps__x {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    color: #3c3c43;
+    background: #e3e3e8;
+    border-radius: 999px;
+    transform: translateY(-50%);
+}
+
+.wt-tps__x svg { width: 15px; height: 15px; }
+
+.wt-tps__body {
+    position: relative;
+    display: flex;
     flex: 1 1 auto;
-    min-width: 0;
-    padding: 0 4px;
-    text-align: center;
+    flex-direction: column;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
 }
 
-.wt-sp__tab-title b,
-.wt-sp__tab-title small {
-    display: block;
+/* ── Кабинет Сапар внутри окна (ноябрь 2026) ─────────────────────────────
+   Не тот кабинет, что в тренажёре браузера: вместо тёмной плашки «Добро
+   пожаловать» — белая карточка с фамилией и инициалами, разделы «Документы от
+   Яндекса / от таксопарка» строками, синяя «Подписать все документы»
+   прилеплена к низу над плавающей панелью «Документы · Сервисы · Помощь ·
+   Профиль». */
+.wt-sx {
+    position: relative;
+    display: flex;
+    flex: 1 0 auto;
+    flex-direction: column;
+    gap: 10px;
+    padding: 6px 10px 132px;
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--sp-ink);
+}
+
+.wt-sx__card {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    background: var(--sp-card);
+    border: 1px solid #e8ebf0;
+    border-radius: 18px;
+}
+
+.wt-sx__head { gap: 12px; box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05); }
+.wt-sx__head-top { display: flex; align-items: flex-start; justify-content: space-between; }
+.wt-sx__head h2 { font-size: 17px; font-weight: 700; color: var(--sp-ink); }
+
+.wt-sx__lang {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 11px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--sp-ink);
+    background: #fff;
+    border: 1px solid #e3e8ee;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.wt-sx__lang svg { color: var(--sp-mute); }
+
+.wt-sx__who { display: flex; align-items: center; gap: 6px; }
+.wt-sx__who > span { display: flex; flex: 1 1 0; flex-direction: column; width: 0; min-width: 0; }
+.wt-sx__who b {
     overflow: hidden;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.wt-sx__who small { font-size: 11.5px; color: var(--sp-mute); }
 
-.wt-sp__tab-title b { font-size: 13px; font-weight: 500; }
-.wt-sp__tab-title small { font-size: 10.5px; color: #a3a7ad; }
+.wt-sx__q {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    font-size: 13px;
+    font-weight: 800;
+    color: #3b30c4;
+    background: #e8e6ff;
+    border-radius: 999px;
+}
+
+.wt-sx__who em {
+    flex: 0 0 auto;
+    padding: 5px 9px;
+    font-size: 11.5px;
+    font-style: normal;
+    color: #333a44;
+    background: #eef0f4;
+    border-radius: 10px;
+}
+
+.wt-sx__section { gap: 0; }
+
+.wt-sx__section h3 {
+    margin-bottom: 4px;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #333a44;
+}
+
+.wt-sx__doc { display: flex; flex-direction: column; gap: 1px; padding: 10px 0; }
+.wt-sx__doc + .wt-sx__doc { border-top: 1px solid #edf0f4; }
+.wt-sx__doc b { font-size: 13.5px; font-weight: 500; line-height: 1.3; }
+.wt-sx__doc small { font-size: 11.5px; color: var(--sp-mute); }
+
+.wt-sx__notice {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 4px 4px 6px;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--sp-mute);
+}
+
+.wt-sx__notice > button:first-child { flex: 1 1 auto; text-align: left; }
+.wt-sx__notice u { color: #3762e4; }
+.wt-sx__notice-x { display: grid; flex: 0 0 auto; place-items: center; width: 22px; height: 22px; color: #6b7280; }
+.wt-sx__notice-x svg { width: 16px; height: 16px; }
+
+/* Зелёные плашки после подписи: «Вы успешно подписали АВР и закрыли ЭДО» и «Нет
+   документов на подписание». Цвета — пипеткой с кадра окна 10.11.2026. */
+.wt-sx .wt-sx__ok {
+    margin-top: 8px;
+    padding: 12px 14px;
+    font-size: 13px;
+    line-height: 1.35;
+    color: #2d6854;
+    background: #ecfdf5;
+    border: 1px solid #bce7d6;
+    border-radius: 12px;
+}
+
+/* Раздел «Документы» внизу кабинета: строка и цветной ярлык статуса. */
+.wt-sx__hist {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    line-height: 1.3;
+    background: #f8f9fb;
+    border: 1px solid #edf0f4;
+    border-radius: 12px;
+}
+
+.wt-sx__hist > span:first-child { min-width: 0; }
+.wt-sx__hist-status { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 6px; color: var(--sp-mute); }
+
+.wt-sx__hist-status em {
+    max-width: 132px;
+    padding: 3px 7px;
+    font-size: 10.5px;
+    font-style: normal;
+    font-weight: 600;
+    line-height: 1.25;
+    text-align: center;
+    border-radius: 5px;
+}
+.wt-sx__hist-status em.is-wait { color: #5c4600; background: #fbe38e; }
+.wt-sx__hist-status em.is-done { color: #39735b; background: #e3fff5; }
+
+.wt-sx .wt-sx__driver { padding: 0 4px; font-size: 13px; color: var(--sp-head); }
+
+.wt-sx .wt-sx__lav {
+    padding: 13px 14px;
+    font-size: 13px;
+    color: #443d66;
+    background: var(--sp-lav);
+    border-radius: 8px;
+}
+
+/* Свернуть-развернуть «Документы на подписание»: состав пакета по запросу. */
+.wt-sx__fold { padding: 0; }
+
+.wt-sx__fold-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 14px 16px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-align: left;
+    text-transform: uppercase;
+    color: #333a44;
+}
+
+.wt-sx__fold-btn span { font-size: 17px; font-weight: 500; line-height: 1; transition: transform 0.18s ease; }
+.wt-sx__fold-btn.is-open span { transform: rotate(90deg); }
+
+.wt-sx__group { display: flex; flex-direction: column; gap: 6px; padding: 0 16px 14px; }
+.wt-sx__group-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.wt-sx .wt-sx__group p { margin-left: 30px; font-size: 12.5px; color: var(--sp-ink); }
+
+.wt-sx__well {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+    background: var(--sp-canvas);
+    border-radius: 14px;
+}
+
+.wt-sx .wt-sx__well p { font-size: 13.5px; color: var(--sp-ink); }
+.wt-sx__well em { font-style: normal; color: var(--sp-violet); }
+.wt-sx__well small { font-size: 12.5px; color: var(--sp-mute); }
+
+.wt-sx__blue,
+.wt-sx__violet,
+.wt-sx__indigo {
+    width: 100%;
+    padding: 12px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #fff;
+    border-radius: 12px;
+}
+
+.wt-sx__blue { background: var(--sp-blue); }
+.wt-sx__violet { background: var(--sp-violet); border-radius: 6px; }
+.wt-sx__indigo { flex: 0 0 auto; background: var(--sp-indigo); border-radius: 6px; }
+.wt-sx__blue.is-behind { background: #a9c1f5; }
+
+/* Низ окна: синяя кнопка и плавающая панель кабинета. */
+.wt-sx__dock {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 10px 12px;
+    pointer-events: none;
+}
+
+.wt-sx__dock > * { pointer-events: auto; }
+
+.wt-sx__nav {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    padding: 8px 6px;
+    background: #fff;
+    border-radius: 18px;
+    box-shadow: 0 2px 16px rgba(15, 23, 42, 0.10);
+}
+
+.wt-sx__nav button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    font-size: 10.5px;
+    color: #6b7280;
+}
+
+.wt-sx__nav i {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 28px;
+    border-radius: 999px;
+}
+
+.wt-sx__nav svg { width: 19px; height: 19px; }
+.wt-sx__nav button.is-active { font-weight: 600; color: var(--sp-nav); }
+.wt-sx__nav button.is-active i { background: var(--sp-nav-chip); }
+
+.wt-sx__dot {
+    position: absolute;
+    top: 3px;
+    right: 8px;
+    width: 6px;
+    height: 6px;
+    background: #ef4444;
+    border-radius: 999px;
+}
 
 /* ── Рекламное окно поверх кабинета ──────────────────────────────────────
    Оно перекрывает страницу целиком, и нажатие «Подписать все документы»
    уходит в баннер. Кнопка под ним нарочно видна и нарочно приглушена: человек
-   должен увидеть, что цель на месте, а мешает именно реклама. */
-.wt-sp__blurred { display: flex; flex-direction: column; gap: 10px; filter: blur(2px); opacity: 0.55; pointer-events: none; }
+   должен увидеть, что цель на месте, а мешает именно реклама. В настоящем
+   кабинете такого окна нет — это учебная ловушка из инструкции (решение
+   владельца, 24.08.2026). */
+.wt-sx__blurred { display: flex; flex-direction: column; gap: 10px; filter: blur(2px); opacity: 0.55; pointer-events: none; }
 
-.wt-sp__ad {
+.wt-sx__ad {
     position: absolute;
-    top: 16%;
-    left: 12px;
-    right: 12px;
+    top: 13%;
+    left: 14px;
+    right: 14px;
     z-index: 5;
     overflow: hidden;
     background: var(--wt-surface);
@@ -1324,38 +1743,38 @@
     box-shadow: 0 18px 44px rgba(15, 23, 42, 0.32);
 }
 
-.wt-sp__ad-cover {
+.wt-sx__ad-cover {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
-    height: 84px;
+    height: 88px;
     padding: 10px 11px;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    color: rgba(255, 255, 255, 0.85);
+    color: rgba(255, 255, 255, 0.88);
     background: linear-gradient(120deg, #1d4ed8, #7c3aed);
 }
 
-.wt-sp__ad-x {
+.wt-sx__ad-x {
     display: grid;
     place-items: center;
-    width: 24px;
-    height: 24px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
     color: #fff;
     background: rgba(15, 23, 42, 0.45);
     border-radius: 999px;
 }
 
-.wt-sp__ad-x svg { width: 13px; height: 13px; }
+.wt-sx__ad-x svg { width: 13px; height: 13px; }
 
-.wt-sp__ad-body { display: flex; flex-direction: column; gap: 6px; padding: 12px; }
-.wt-sp__ad-body > span { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--wt-mute); }
-.wt-sp__ad-body b { font-size: 14px; }
-.wt-sp__ad-body p { font-size: 12px; line-height: 1.4; }
-
-.wt-sp__behind { opacity: 0.45; }
+.wt-sx__ad-body { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px 14px; }
+.wt-sx__ad-body > span { font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--wt-mute); }
+.wt-sx__ad-body b { font-size: 15px; }
+.wt-sx .wt-sx__ad-body p { font-size: 12.5px; line-height: 1.4; color: var(--sp-mute); }
+.wt-sx__ad-more { align-self: flex-start; padding: 0; font-size: 13px; font-weight: 600; color: var(--sp-nav); }
 
 /* ── eGov Mobile ──────────────────────────────────────────────────────────
    Три экрана приложения подписи: код быстрого доступа, лист «Подписать
@@ -2750,7 +3169,12 @@
         min-height: 380px;
     }
 
-    .wt-phone-wrap { height: auto; }
+    /* Колонка телефона — во всю ширину, иначе в колонке с align-items: center
+       она сжималась по содержимому, и «100%» у корпуса считались от экрана
+       приложения: на одном шаге телефон был 360, на соседнем — 304. */
+    .wt-stage:not(.wt-stage--world):not(.wt-stage--desk) { align-self: stretch; }
+
+    .wt-phone-wrap { width: 100%; height: auto; }
 
     /* На узком экране барс выглядывает меньше — иначе он вылезает за край. */
     .wt-peek { left: -44px; width: 104px; bottom: 4%; }

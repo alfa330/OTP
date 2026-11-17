@@ -11,12 +11,15 @@ import React from 'react';
  * каждом шаге. Класс is-target добавляется автоматически по совпадению id.
  */
 
-/** Кнопка учебного телефона: сама решает, подсвечена ли она. */
+/** Кнопка учебного телефона: сама решает, подсвечена ли она.
+ *  data-tap — её код нажатия в разметке: по нему тест экранов находит кнопку
+ *  шага и ловушки, а прогон урока в браузере — куда жать. */
 export const Tap = ({
     id, target, tap, className = '', children, payload, ...rest
 }) => (
     <button
         type="button"
+        data-tap={id}
         onClick={() => tap(id, payload)}
         className={`${className}${id === target ? ' is-target' : ''}`}
         {...rest}

@@ -12,22 +12,10 @@ import {
     browse, currentStep, expectedTap, isFinished, progressPercent, restart, speech,
     stageCount, startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
-import { IntroScreen, ResultScreen } from './screenKit';
-import { DeskScreen } from './screensCrm';
 import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
 import { EVENT_TITLES, createEventLog } from './trainerEvents';
 import { applyEdit } from './caseData';
-import { EgCode, EgSign, EgSuccess } from './screensEgov';
-import {
-    SpAd, SpProfile, SpSignAll, TpCheck, TpDocuments, TpHome,
-} from './screensTaxiPro';
-import {
-    ChromeAddress, ChromeBlank, PhoneHome, SaparDocuments, SaparGuest, SaparProfile,
-    SaparSave, SaparSignSheet, SaparStatus,
-} from './screensSapar';
-import {
-    YpConsent, YpEdo, YpLegal, YpNews, YpProfile, YpProviders, YpSheet,
-} from './screensYandexPro';
+import { SCREENS } from './screenMap';
 import './trainer.css';
 
 /* Сцена с машиной приезжает отдельным чанком вместе с three.js.
@@ -48,73 +36,6 @@ const CarStage = lazyWithRetry(() => import('./CarStage'));
  * (screen-ключ шага), карта ниже — ЧЕМ показать. Разводить их нужно потому, что
  * сценарии чистые (их гоняют тесты без React), а экраны — JSX.
  */
-
-/* Экраны по сценарию. Ключи совпадают со step.screen — расхождение здесь
-   означало бы пустой телефон посреди урока, поэтому карта одна и рядом. */
-const SCREENS = {
-    /* Единственный тренажёр не на телефоне, а за компьютером: оператор заводит
-       обращение в браузере. Экран формы один на все шаги — меняется не он, а
-       состав полей, и приходят они из мира (см. scenarioCrmTicket). */
-    'crm-ticket-create': {
-        intro: IntroScreen,
-        desk: DeskScreen,
-        result: ResultScreen,
-    },
-    /* Та же среда, но со звонком: экраны общие, разный только режим. */
-    'operator-call': {
-        intro: IntroScreen,
-        desk: DeskScreen,
-        result: ResultScreen,
-    },
-    'yandex-pro-edo-provider': {
-        intro: IntroScreen,
-        yp_news: YpNews,
-        yp_profile: YpProfile,
-        yp_legal: YpLegal,
-        // Экран ЭДО один и тот же до смены и после: разница — строка активного
-        // провайдера, по ней и проверяют результат.
-        yp_edo: YpEdo,
-        yp_providers: YpProviders,
-        yp_sheet: YpSheet,
-        yp_consent: YpConsent,
-        result: ResultScreen,
-    },
-    'taxi-pro-avr': {
-        intro: IntroScreen,
-        tp_home: TpHome,
-        tp_documents: TpDocuments,
-        sp_ad: SpAd,
-        sp_profile: SpProfile,
-        sp_sign_all: SpSignAll,
-        eg_sign: EgSign,
-        eg_success: EgSuccess,
-        tp_check: TpCheck,
-        result: ResultScreen,
-    },
-    'photo-control-car': {
-        intro: IntroScreen,
-        result: ResultScreen,
-        // Экраны pc_list и pc_camera — не экраны телефона, а телефон В РУКАХ
-        // человека, стоящего у трёхмерной машины, поэтому они живут не здесь,
-        // а в ветке world ниже.
-    },
-    'sapar-site-avr': {
-        intro: IntroScreen,
-        phone_home: PhoneHome,
-        chrome_blank: ChromeBlank,
-        chrome_address: ChromeAddress,
-        sapar_guest: SaparGuest,
-        eg_code: EgCode,
-        eg_sign: EgSign,
-        eg_success: EgSuccess,
-        sapar_profile: SaparProfile,
-        sapar_documents: SaparDocuments,
-        sapar_sign_sheet: SaparSignSheet,
-        sapar_save: SaparSave,
-        sapar_status: SaparStatus,
-        result: ResultScreen,
-    },
-};
 
 /* Выражение барса. Реплика-ошибка и реплика-подсказка выглядят по-разному —
    иначе неверное нажатие проходит незамеченным: текст сменился, а картинка нет. */

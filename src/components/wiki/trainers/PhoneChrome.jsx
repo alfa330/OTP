@@ -55,8 +55,10 @@ const Battery = ({ level = 90 }) => {
                 stroke="currentColor" strokeWidth="1.2" opacity=".38" />
             <rect x="2" y="2" width={22.2 * (safe / 100)} height="10" rx="2.6" fill="currentColor" />
             <path d="M27.4 5.2v3.6a2.3 2.3 0 0 0 0-3.6Z" fill="currentColor" opacity=".38" />
+            {/* Цвет цифры — из --wt-batt-ink: на светлой строке капсула тёмная и цифра
+                белая, над окном-шторкой Такси.Про наоборот. */}
             <text x="13.1" y="10.4" textAnchor="middle" fontSize="8.4" fontWeight="700"
-                fill="#fff" style={{ letterSpacing: '-0.02em' }}>{safe}</text>
+                style={{ fill: 'var(--wt-batt-ink, #fff)', letterSpacing: '-0.02em' }}>{safe}</text>
         </svg>
     );
 };
