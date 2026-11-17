@@ -144,11 +144,13 @@ class TemplateTests(unittest.TestCase):
         titles = [title for _key, title, _norm, _width, _fmt in R.COLUMNS]
         self.assertEqual(titles, [
             'Дата', 'Номера', 'Очередь', 'Парк', 'План звонки', 'Факт звонки', '% совпадения',
-            'Принято', 'AR%', 'Сбросы на ожидании до 5 сек', 'Сбросы на ожидании от 5 сек',
-            'ОСС', 'План часов', 'Факт часов', '% выработки часов', '% невыходов', 'AHT',
-            'SL/20сек', 'CR%'])
-        # Образец кончается на «AR%» и продолжается с «ОСС»: два столбца сбросов — между ними.
+            'Принято', 'Потеряно', 'AR%', 'Сбросы на ожидании до 5 сек',
+            'Сбросы на ожидании от 5 сек', 'ОСС', 'План часов', 'Факт часов', '% выработки часов',
+            '% невыходов', 'AHT', 'SL/20сек', 'CR%'])
         keys = [key for key, _title, _norm, _width, _fmt in R.COLUMNS]
+        # «Потеряно» — сразу после «Принято» (владелец, 17.11.2026).
+        self.assertEqual(keys[keys.index('answered') + 1], 'lost')
+        # Образец кончается на «AR%» и продолжается с «ОСС»: два столбца сбросов — между ними.
         self.assertEqual(keys[keys.index('ar') + 1:keys.index('occupancy')],
                          ['drops_short', 'drops_long'])
         norms = {title: norm for _key, title, norm, _width, _fmt in R.COLUMNS if norm}
@@ -167,8 +169,10 @@ class DayTablesTests(unittest.TestCase):
 
     def test_queue_numbers_are_counted_like_the_wallboard(self):
         jana = row_of(self.monday, '3034')
-        self.assertEqual((jana['fact'], jana['answered']), (3, 2))
+        self.assertEqual((jana['fact'], jana['answered'], jana['lost']), (3, 2, 1))
         self.assertAlmostEqual(jana['ar'], 1 / 3)
+        # «AR%» — это «Потеряно» долей: одно число на двоих, а не два расчёта.
+        self.assertAlmostEqual(jana['ar'], jana['lost'] / jana['fact'])
         # В срок (≤ 20 с) принят один из трёх ДОШЕДШИХ до очереди, а не из двух принятых.
         self.assertAlmostEqual(jana['sl'], 1 / 3)
         # Разговор усекается до секунды, как на стене: (100 + 51) / 2 = 75,5 → 75.
@@ -192,16 +196,16 @@ class DayTablesTests(unittest.TestCase):
         self.assertEqual(R.drops(touches), (2, 2))
         table = R.day_tables(touches, date(2026, 11, 2), date(2026, 11, 2))[0]
         jana = row_of(table, '3034')
-        self.assertEqual((jana['fact'], jana['answered']), (6, 1))
+        self.assertEqual((jana['fact'], jana['answered'], jana['lost']), (6, 1, 5))
         self.assertEqual((jana['drops_short'], jana['drops_long']), (2, 2))
         self.assertEqual((table['total']['drops_short'], table['total']['drops_long']), (2, 2))
 
     def test_no_drops_is_zero_not_blank(self):
         itaxi = row_of(self.monday, '3001')
-        self.assertEqual((itaxi['drops_short'], itaxi['drops_long']), (0, 0))
+        self.assertEqual((itaxi['lost'], itaxi['drops_short'], itaxi['drops_long']), (0, 0, 0))
         jana = row_of(self.monday, '3034')
         self.assertEqual((jana['drops_short'], jana['drops_long']), (0, 1))
-        self.assertEqual(jana['fact'] - jana['answered'], jana['drops_short'] + jana['drops_long'])
+        self.assertEqual(jana['lost'], jana['drops_short'] + jana['drops_long'])
 
     def test_plan_is_the_same_weekday_a_week_before(self):
         jana = row_of(self.monday, '3034')
@@ -226,10 +230,15 @@ class DayTablesTests(unittest.TestCase):
         self.assertEqual(table['rows'], [])
         self.assertIsNone(table['total']['fact'])
         self.assertIsNone(table['total']['plan'])
+        # Звонков не было — «Потеряно» пустое, а не ноль: ноль читался бы как «ни одного не
+        # потеряли» у дня, в который нечего было терять.
+        self.assertIsNone(table['total']['lost'])
 
     def test_total_is_the_whole_day_not_an_average_of_rows(self):
         total = self.monday['total']
-        self.assertEqual((total['fact'], total['answered'], total['plan']), (4, 3, 4))
+        self.assertEqual((total['fact'], total['answered'], total['lost'], total['plan']),
+                         (4, 3, 1, 4))
+        self.assertEqual(sum(row['lost'] for row in self.monday['rows']), total['lost'])
         self.assertAlmostEqual(total['ar'], 1 / 4)
         self.assertAlmostEqual(total['sl'], 2 / 4)
         # (100 + 51 + 60) / 3 = 70,3 → 70; среднее строк дало бы (75 + 60) / 2 = 67.
@@ -296,13 +305,17 @@ class WorkbookTests(unittest.TestCase):
     def test_header_rows(self):
         self.assertEqual(self.sheet['A1'].value, 'Дата')
         self.assertEqual(self.sheet['F1'].value, 'Факт звонки')
-        self.assertEqual(self.sheet['I2'].value, 'норма >5%')
+        # «Потеряно» — сразу за «Принято» (H): колонка I.
+        self.assertEqual(self.sheet['H1'].value, 'Принято')
+        self.assertEqual(self.sheet['I1'].value, 'Потеряно')
+        self.assertEqual(cell_of(self.sheet, 'ar', 2).value, 'норма >5%')
         self.assertEqual(cell_of(self.sheet, 'sl', 2).value, 'норма 80%')
         self.assertEqual(cell_of(self.sheet, 'drops_short', 1).value, 'Сбросы на ожидании до 5 сек')
         merged = {str(area) for area in self.sheet.merged_cells.ranges}
         # Колонка без нормы — одна клетка на обе строки шапки; с нормой — две.
         self.assertIn('F1:F2', merged)
-        self.assertNotIn('I1:I2', merged)
+        self.assertIn('I1:I2', merged)
+        self.assertNotIn('%s:%s' % (ref('ar', 1), ref('ar', 2)), merged)
 
     def test_queue_block_spans_its_numbers(self):
         merged = {str(area) for area in self.sheet.merged_cells.ranges}
@@ -318,8 +331,8 @@ class WorkbookTests(unittest.TestCase):
         self.assertEqual(tuesday['A4'].value, 'Итого')
         self.assertEqual(self.sheet['C3'].value, 3001)
         self.assertEqual(self.sheet['D3'].value, 'iTaxi вход')
-        for key in ('queue', 'park', 'plan', 'fact', 'match', 'answered', 'ar', 'drops_short',
-                    'drops_long', 'aht', 'sl'):
+        for key in ('queue', 'park', 'plan', 'fact', 'match', 'answered', 'lost', 'ar',
+                    'drops_short', 'drops_long', 'aht', 'sl'):
             self.assertIn('%s:%s' % (ref(key, 3), ref(key, 5)), merged)
         # Дата и дневные колонки (часы, ОСС, CR%) — одной клеткой на все очереди.
         for key in ('date', 'occupancy', 'hours_plan', 'hours_fact', 'hours_done', 'hours_missed',
@@ -332,12 +345,13 @@ class WorkbookTests(unittest.TestCase):
             return cell_of(self.sheet, key, self.jana)
 
         self.assertEqual((cell('plan').value, cell('fact').value, cell('answered').value,
-                          cell('aht').value), (4, 3, 2, 75))
+                          cell('lost').value, cell('aht').value), (4, 3, 2, 1, 75))
         self.assertAlmostEqual(cell('match').value, 0.75)
         self.assertAlmostEqual(cell('ar').value, 1 / 3)
         self.assertAlmostEqual(cell('sl').value, 1 / 3)
         self.assertEqual(cell('ar').number_format, '0.0%')
         self.assertEqual(cell('match').number_format, '0%')
+        self.assertEqual(cell('lost').number_format, '0')
         # Один потерянный, ждал 30 секунд: «от 5 сек».
         self.assertEqual((cell('drops_short').value, cell('drops_long').value), (0, 1))
 
@@ -430,15 +444,17 @@ class WorkbookTests(unittest.TestCase):
         self.assertIn('A%d:D%d' % (self.total, self.total),
                       {str(area) for area in self.sheet.merged_cells.ranges})
         self.assertEqual((cell('plan').value, cell('fact').value, cell('answered').value,
-                          cell('aht').value), (4, 4, 3, 70))
+                          cell('lost').value, cell('aht').value), (4, 4, 3, 1, 70))
         self.assertAlmostEqual(cell('ar').value, 0.25)
         self.assertAlmostEqual(cell('sl').value, 0.5)
         self.assertEqual((cell('drops_short').value, cell('drops_long').value), (0, 1))
         self.assertTrue(cell('date').font.bold)
 
     def test_ar_data_bar_covers_queue_rows(self):
+        # Полоска — на «AR%», а не на соседнем «Потеряно»: сдвиг колонки её не уводит.
         ranges = [str(rule.sqref) for rule in self.sheet.conditional_formatting]
-        self.assertEqual(ranges, ['I3:I%d' % self.last])
+        self.assertEqual(ranges, ['%s:%s' % (ref('ar', 3), ref('ar', self.last))])
+        self.assertEqual(R._LETTER['ar'], 'J')
 
     def test_day_without_any_call_keeps_the_date_and_manual_cells(self):
         stream, _days = R.build_workbook(sample_touches(), day_from=date(2026, 11, 9),
@@ -468,7 +484,9 @@ class WorkbookTests(unittest.TestCase):
         # Показателей смен в этой книге нет — нет и листа со сменами.
         self.assertNotIn(R.SHIFTS_SHEET, self.book.sheetnames)
         self.assertIn('÷ всё их время на линии за день', text)
-        self.assertIn('Сбросы на ожидании|Непринятые звонки (Факт звонки − Принято)', text)
+        self.assertIn('Потеряно|Факт звонки − Принято', text)
+        self.assertIn('AR%|Потеряно ÷ Факт звонки.', text)
+        self.assertIn('Сбросы на ожидании|Звонки из «Потеряно»', text)
         self.assertIn('меньше 5 секунд и 5 секунд и больше', text)
         self.assertIn('Вписать вручную|«План часов» — портал его не заполняет', text)
         self.assertIn('Факт часов ÷ План часов', text)
