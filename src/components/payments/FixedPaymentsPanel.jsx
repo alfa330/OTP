@@ -4,13 +4,14 @@ import { CalendarClock, Download, Loader2, Pencil, Play, Plus, Trash2, Upload } 
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosMenu, IosModal } from '../ui/ios';
 import IosDatePicker from '../ui/DatePicker';
 import {
-    ACCOUNTING_CATEGORY_OPTIONS, AUTO_CREATE_OPTIONS, HINTS, NO_CONTRACT, NO_CONTRACT_LABEL, OBJECT_TYPE_OPTIONS, PERIOD_META,
-    PERIOD_OPTIONS, fmtDate, fmtMoney,
+    ACCOUNTING_CATEGORY_OPTIONS, AUTO_CREATE_OPTIONS, HINTS, INVOICE_REQUIRED_OPTIONS, NO_CONTRACT, NO_CONTRACT_LABEL,
+    OBJECT_TYPE_OPTIONS, PERIOD_META, PERIOD_OPTIONS, arrivalISO, fmtDate, fmtMoney, repeatText,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, Choice, DATE_TRIGGER, ErrorBox, Field, FormSelect, NoticeBox, UserSelect, cardCell,
     errorText, useFits,
 } from './paymentsUi';
+import { RecordHistory } from './PaymentsJournal';
 
 // Наименьшая ширина, в которую таблица платежей встаёт целиком; уже — платежи идут карточками.
 const TABLE_MIN = 896;
@@ -40,6 +41,8 @@ const emptyDraft = (me) => ({
     counterparty_id: null, legal_entity_id: null, contract_id: null, no_contract: false, counterparty_account_id: null,
     payment_purpose: '', amount_limit: '', approver_user_id: null, object_type: 'service', accounting_category: null,
     auto_create: true, note: '', is_active: true,
+    // Правки владельца 17.11.2026: «со счётом / без счёта» (п. 1) и проверяющий бухгалтерии (п. 7).
+    invoice_required: true, checker_user_id: null,
 });
 
 // Договор платежа в строке списка: номер либо «без договора» — выбор администратора (10.11.2026).
@@ -49,6 +52,8 @@ const FixedPaymentsPanel = ({
     apiBaseUrl, headers, users, dictionaries, me, showToast, canEdit, onChanged, onRequestsChanged, onOpenRequest,
 }) => {
     const [rows, setRows] = useState([]);
+    // Кого можно назначить проверяющим — участники бухгалтерии (сервер присылает их администратору).
+    const [checkers, setCheckers] = useState([]);
     const [loading, setLoading] = useState(false);
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(() => emptyDraft(me));
@@ -73,6 +78,7 @@ const FixedPaymentsPanel = ({
         try {
             const response = await axios.get(`${apiBaseUrl}/api/payments/templates`, { headers: headers() });
             setRows(response.data?.items || []);
+            setCheckers(response.data?.checkers || []);
         } catch (err) {
             toastRef.current?.(errorText(err, 'Не удалось загрузить регулярные платежи'), 'error');
         } finally {
@@ -113,6 +119,7 @@ const FixedPaymentsPanel = ({
             amount_limit: row.amount_limit ?? '', approver_user_id: row.approver_user_id ?? null,
             object_type: row.object_type || 'service', accounting_category: row.accounting_category ?? null,
             auto_create: row.auto_create !== false, note: row.note || '', is_active: row.is_active ?? true,
+            invoice_required: row.invoice_required !== false, checker_user_id: row.checker_user_id ?? null,
         } : emptyDraft(me));
         setEditing(true);
     };
@@ -245,9 +252,12 @@ const FixedPaymentsPanel = ({
     const importReady = (importRows || []).filter((row) => !row.errors?.length && !row.exists).length;
     const dueLine = (row) => (
         <>
-            срок {fmtDate(row.next_due_on)}{row.is_due ? <span className="ml-1 text-amber-700">· пора создать</span> : (row.auto_create !== false && row.generate_on ? ` · заявка ${fmtDate(row.generate_on)}` : '')}
+            оплатить к {fmtDate(row.next_due_on)}{row.is_due ? <span className="ml-1 text-rose-600">· пора создать</span> : (row.auto_create !== false && row.generate_on ? ` · заявка ${fmtDate(row.generate_on)}` : '')}
         </>
     );
+    // Повтор словами — как у напоминаний Google (17.11.2026, пп. 1, 6), и что важно о платеже.
+    const repeatLine = (row) => [repeatText(row), row.invoice_required === false && 'без счёта',
+        row.is_active ? null : 'приостановлен', row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ');
 
     return (
         <div ref={paneRef} className="space-y-3">
@@ -307,10 +317,7 @@ const FixedPaymentsPanel = ({
                                     <tr key={row.id} data-template={row.id} onClick={canEdit ? () => openEditor(row) : undefined} className={`h-[56px] ${canEdit ? CARD_ROW : ''}`}>
                                         <td className={`${cell} !pl-4`}>
                                             <div className={`truncate font-medium ${main}`}>{row.name}</div>
-                                            <div className="truncate text-[12px] text-slate-500">
-                                                {[`${PERIOD_META[row.periodicity]?.label || row.periodicity}${row.periodicity === 'custom' && row.interval_days ? ` (${row.interval_days} дн.)` : ''}`,
-                                                    row.is_active ? null : 'приостановлен', row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ')}
-                                            </div>
+                                            <div className="truncate text-[12px] text-slate-500">{repeatLine(row)}</div>
                                         </td>
                                         <td className={cell}>
                                             <div className={`truncate ${row.counterparty_name ? main : 'text-slate-400'}`}>{row.counterparty_name || '—'}</div>
@@ -318,7 +325,11 @@ const FixedPaymentsPanel = ({
                                         </td>
                                         <td className={cell}>
                                             <div className={`truncate ${row.responsible_name ? main : 'text-slate-400'}`}>{row.responsible_name || '—'}</div>
-                                            {row.approver_name && <div className="truncate text-[12px] text-slate-500">согласует {row.approver_name}</div>}
+                                            {(row.checker_name || row.approver_name) && (
+                                                <div className="truncate text-[12px] text-slate-500">
+                                                    {[row.checker_name && `проверяет ${row.checker_name}`, row.approver_name && `согласует ${row.approver_name}`].filter(Boolean).join(' · ')}
+                                                </div>
+                                            )}
                                         </td>
                                         <td className={`${cell} text-right`}>
                                             <div className={`font-semibold tabular-nums ${main}`}>{fmtMoney(row.amount)}</div>
@@ -358,15 +369,12 @@ const FixedPaymentsPanel = ({
                         <div className="min-w-0 grow basis-0">
                             <div className="flex flex-wrap items-baseline gap-x-2">
                                 <span className={`truncate text-[13.5px] font-medium ${row.is_active ? 'text-slate-900' : 'text-slate-500'}`}>{row.name}</span>
-                                <span className="text-[12.5px] text-slate-500">
-                                    {PERIOD_META[row.periodicity]?.label || row.periodicity}{row.periodicity === 'custom' && row.interval_days ? ` (${row.interval_days} дн.)` : ''}
-                                    {row.is_active ? '' : ' · приостановлен'}
-                                </span>
+                                <span className="text-[12.5px] text-slate-500">{repeatLine(row)}</span>
                             </div>
                             <div className="truncate text-[12px] text-slate-500">
                                 {[row.counterparty_name, contractShort(row), row.legal_entity_name && `от ${row.legal_entity_name}`,
-                                    row.responsible_name && `отв. ${row.responsible_name}`, row.approver_name && `согласует ${row.approver_name}`,
-                                    row.auto_create === false && 'заявка — вручную'].filter(Boolean).join(' · ') || '—'}
+                                    row.responsible_name && `отв. ${row.responsible_name}`, row.checker_name && `проверяет ${row.checker_name}`,
+                                    row.approver_name && `согласует ${row.approver_name}`].filter(Boolean).join(' · ') || '—'}
                             </div>
                             <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[12px] tabular-nums text-slate-500">
                                 <span className="text-[13px] text-slate-900">{fmtMoney(row.amount)}</span>
@@ -423,11 +431,31 @@ const FixedPaymentsPanel = ({
                         </Field>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2">
-                        <Field label="Ближайшая дата оплаты" required optionalMark={false} hint="Срок ближайшего платежа. После создания заявки срок сам сдвигается на период вперёд.">
-                            <IosDatePicker value={draft.next_due_on} onChange={(v) => set('next_due_on', v || '')} allowEmpty placeholder="Дата" triggerClassName={DATE_TRIGGER} ariaLabel="Ближайшая дата оплаты" />
+                        <Field label="День оплаты" required optionalMark={false} hint={HINTS.paymentDay}>
+                            <IosDatePicker value={draft.next_due_on} onChange={(v) => set('next_due_on', v || '')} allowEmpty placeholder="Ближайшая дата оплаты" triggerClassName={DATE_TRIGGER} ariaLabel="День оплаты" />
+                            {/* Повтор словами — как у напоминаний Google (17.11.2026, пп. 1, 6, 7). */}
+                            {draft.next_due_on && (
+                                <span className="block px-1 pt-1 text-[12.5px] text-slate-500" data-repeat-summary>
+                                    {repeatText(draft)} · заявка придёт {fmtDate(arrivalISO(draft))}
+                                </span>
+                            )}
                         </Field>
                         <Field label="Ответственный" required optionalMark={false} hint="От его имени раздел заводит заявку; он же прикладывает счёт.">
                             <UserSelect users={users} value={draft.responsible_user_id} onChange={(v) => set('responsible_user_id', v)} />
+                        </Field>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                        <Field as="div" label="Счёт" optionalMark={false} hint={HINTS.invoiceRequired}>
+                            <Choice value={draft.invoice_required} options={INVOICE_REQUIRED_OPTIONS} onChange={(v) => set('invoice_required', v)} ariaLabel="Нужен ли счёт" />
+                        </Field>
+                        <Field label="Проверяющий" hint={HINTS.checker}>
+                            <FormSelect
+                                value={draft.checker_user_id}
+                                onChange={(v) => set('checker_user_id', v || null)}
+                                options={[{ value: '', label: 'Любой из бухгалтерии' }, ...checkers.map((person) => ({ value: person.id, label: person.name }))]}
+                                placeholder="Любой из бухгалтерии"
+                                ariaLabel="Проверяющий"
+                            />
                         </Field>
                     </div>
                     {draft.periodicity === 'custom' && (
@@ -504,6 +532,8 @@ const FixedPaymentsPanel = ({
                             <Choice value={Boolean(draft.is_active)} options={TEMPLATE_ACTIVE_OPTIONS} onChange={(v) => set('is_active', v)} ariaLabel="Действует ли платёж" />
                         </Field>
                     )}
+                    {/* «История» платежа (владелец 17.11.2026, п. 10): кто, когда и что было → стало. */}
+                    {draft.id && <RecordHistory apiBaseUrl={apiBaseUrl} headers={headers} entity="template" entityId={draft.id} />}
                 </div>
             </IosModal>
 

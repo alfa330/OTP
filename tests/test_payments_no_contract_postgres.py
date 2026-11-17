@@ -317,6 +317,8 @@ def test_regular_reply_takes_the_choice_from_the_directory(db):
                                file_size=1, bucket='b', blob_path='p/rent.pdf', actor=person(cur, INITIATOR),
                                subtask_kind=workflow.KIND_INITIATION)
         submit(cur, rid)
+        # С 17.11.2026 (владелец, п. 7) регулярный платёж сначала проверяет бухгалтерия.
+        act(cur, rid, workflow.KIND_REGULAR_CHECK, 'approve', ACCOUNTANT)
         act(cur, rid, workflow.KIND_APPROVAL, 'approve', APPROVER)
         initiation = queries.read_subtask(cur, rid, workflow.KIND_INITIATION)
         assert initiation['clarify_reason'] == 'contract_required'

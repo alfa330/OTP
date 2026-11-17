@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { ArrowRight, FileText, Loader2, Paperclip, Plus, RefreshCcw, ShoppingCart, X } from 'lucide-react';
+import { ArrowRight, Check, FileText, Loader2, Paperclip, Plus, RefreshCcw, ShoppingCart, Sparkles, X } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosInput, IosModal, IosSection } from '../ui/ios';
 import PaymentItemsEditor, { newItem } from './PaymentItemsEditor';
 import PaymentOffersEditor, { newOffer, offerFromRow, offerPayload } from './PaymentOffersEditor';
@@ -198,6 +198,33 @@ const InvoiceFile = ({ file, saved, onPick, onClear }) => {
     );
 };
 
+/* Строка под файлом счёта (владелец 17.11.2026, п. 5): раздел читает счёт и заполняет пустые поля —
+   что заполнено, видно здесь; не совпал поставщик — розовым «обратите внимание». */
+const AutofillNote = ({ state }) => {
+    if (!state) return null;
+    if (state.status === 'reading') {
+        return (
+            <span className="flex items-center gap-1.5 px-1 pt-1 text-[12.5px] text-slate-500" data-autofill="reading">
+                <Loader2 size={13} className="animate-spin" /> Читаем счёт — заполним пустые поля…
+            </span>
+        );
+    }
+    if (state.status === 'error') {
+        return <span className="block px-1 pt-1 text-[12.5px] text-slate-500" data-autofill="error">{state.text}</span>;
+    }
+    return (
+        <span className="block space-y-0.5 px-1 pt-1 text-[12.5px]" data-autofill="done">
+            {(state.filled.length > 0 || !state.warning) && (
+                <span className="flex items-start gap-1.5 text-slate-600">
+                    {state.filled.length ? <Sparkles size={13} className="mt-[2px] shrink-0 text-blue-500" /> : <Check size={13} className="mt-[2px] shrink-0 text-slate-400" />}
+                    {state.filled.length ? `Из счёта заполнено: ${state.filled.join(', ')} — проверьте.` : 'Пустых полей, которые есть в счёте, не нашлось.'}
+                </span>
+            )}
+            {state.warning && <span className="block rounded-md bg-rose-50 px-1.5 py-0.5 text-rose-700" data-autofill-warning>{state.warning}</span>}
+        </span>
+    );
+};
+
 const KIND_CARDS = [
     { value: 'purchase', icon: ShoppingCart, title: 'Новый закуп',
         text: 'Покупаем впервые или у нового поставщика. Понадобятся варианты поставщиков и обоснование.' },
@@ -227,6 +254,10 @@ const PaymentRequestForm = ({
     const [files, setFiles] = useState([]);
     const [invoiceFile, setInvoiceFile] = useState(null);
     const [invoiceOpen, setInvoiceOpen] = useState(false);
+    // Автоподстановка из счёта (17.11.2026, п. 5): что прочитали и заполнили — строкой под файлом.
+    const [autofill, setAutofill] = useState(null);
+    const autofillSeq = useRef(0);
+    const draftRef = useRef(null);
     const [saving, setSaving] = useState('');       // '' | 'save' | 'submit'
     const [error, setError] = useState('');
     const [history, setHistory] = useState([]);
@@ -272,6 +303,9 @@ const PaymentRequestForm = ({
             setError('');
             setFiles([]);
             setInvoiceFile(null);
+            // Чтение счёта из прошлого окна, если оно ещё идёт, новую форму не заполнит.
+            autofillSeq.current += 1;
+            setAutofill(null);
             setPreview(null);
             setCardEditing(false);
             setConfirmClose(false);
@@ -543,6 +577,77 @@ const PaymentRequestForm = ({
     }, [users, draft.observer_ids]);
     // Наблюдатели уходят разницей с тем, что было при открытии формы (paymentsMeta.observersPatch).
     const observersPayload = () => observersPatch(draft.observer_ids, observersAtOpen.current);
+
+    draftRef.current = draft;
+    /* Приложили счёт — раздел читает его и заполняет ПУСТЫЕ поля: номер и дату счёта, у регулярного
+       платежа — сумму (пока она та, что подставил справочник), у закупа без позиций — позиции. Введённое
+       человеком не трогается. Счёт выставил не тот поставщик — розовым «обратите внимание». */
+    const pickInvoice = async (file) => {
+        setInvoiceFile(file);
+        const seq = autofillSeq.current + 1;
+        autofillSeq.current = seq;
+        if (!file) { setAutofill(null); return; }
+        setAutofill({ status: 'reading' });
+        try {
+            const form = new FormData();
+            form.append('kind', 'invoice');
+            form.append('file', file, file.name);
+            const response = await axios.post(`${apiBaseUrl}/api/payments/extract`, form, { headers: headers() });
+            if (autofillSeq.current !== seq) return;
+            const fields = response.data?.fields || {};
+            const matches = response.data?.matches || {};
+            const now = draftRef.current || {};
+            const patch = {};
+            const filled = [];
+            if (!String(now.invoice_number || '').trim() && fields.invoice_number) { patch.invoice_number = fields.invoice_number; filled.push('номер счёта'); }
+            if (!now.invoice_date && fields.invoice_date) { patch.invoice_date = fields.invoice_date; filled.push('дата счёта'); }
+            const current = templates.find((item) => item.id === now.fixed_template_id) || null;
+            if (now.request_kind === 'regular' && parseAmount(fields.total_amount) > 0
+                && (!parseAmount(now.amount) || parseAmount(now.amount) === parseAmount(current?.amount))
+                && parseAmount(fields.total_amount) !== parseAmount(now.amount)) {
+                patch.amount = parseAmount(fields.total_amount);
+                filled.push('сумма');
+            }
+            if (now.request_kind === 'purchase' && (fields.items || []).length && (now.items || []).every(isBlankItem)) {
+                patch.items = fields.items.map((item) => ({
+                    ...newItem(), name: item.name, quantity: String(item.quantity || '1').replace('.', ','), unit: item.unit || newItem().unit,
+                    unit_price: parseAmount(item.unit_price),
+                }));
+                filled.push(fields.items.length > 1 ? `позиции (${fields.items.length})` : 'позиция');
+            }
+            if (Object.keys(patch).length) {
+                // Поле, которое человек успел заполнить, пока шло чтение, не перетирается.
+                setDraft((prev) => {
+                    const next = { ...prev };
+                    if (patch.invoice_number && !String(prev.invoice_number || '').trim()) next.invoice_number = patch.invoice_number;
+                    if (patch.invoice_date && !prev.invoice_date) next.invoice_date = patch.invoice_date;
+                    if (patch.amount !== undefined && parseAmount(prev.amount) === parseAmount(now.amount)) next.amount = patch.amount;
+                    if (patch.items && (prev.items || []).every(isBlankItem)) next.items = patch.items;
+                    return next;
+                });
+            }
+            // Поставщик по счёту — тот ли, что в заявке (по БИН из справочника либо по найденной записи).
+            const supplierNow = now.request_kind === 'regular' ? current?.counterparty_id
+                : (now.no_alternatives ? now.offers?.[0] : (now.offers || []).find((offer) => offer.is_recommended))?.counterparty_id;
+            const supplier = (dictionaries?.counterparties || []).find((item) => item.id === supplierNow) || null;
+            let warning = '';
+            if (supplier && ((matches.counterparty_id && matches.counterparty_id !== supplier.id)
+                || (fields.supplier_bin && supplier.bin && fields.supplier_bin !== supplier.bin))) {
+                warning = `Счёт выставил ${fields.supplier_name || 'другой поставщик'}${fields.supplier_bin ? ` (БИН ${fields.supplier_bin})` : ''}, а в заявке — ${supplier.name}. Проверьте.`;
+            }
+            // На какую нашу компанию выставлен счёт — та ли, что в заявке (у регулярного — из справочника).
+            const entityNow = now.request_kind === 'regular' ? current?.legal_entity_id : now.legal_entity_id;
+            if (!warning && matches.legal_entity_id && entityNow && matches.legal_entity_id !== entityNow) {
+                const entityName = (dictionaries?.legal_entities || []).find((item) => item.id === entityNow)?.name || 'другая';
+                warning = `Счёт выставлен на ${matches.legal_entity_name || fields.buyer_name}, а в заявке компания — ${entityName}. Проверьте.`;
+            }
+            if (response.data?.other_document) warning = warning || 'Похоже, это не счёт на оплату — проверьте файл.';
+            setAutofill({ status: 'done', filled, warning });
+        } catch (err) {
+            if (autofillSeq.current !== seq) return;
+            setAutofill({ status: 'error', text: errorText(err, 'Счёт прочитать не вышло — заполните поля вручную') });
+        }
+    };
 
     const pickTemplate = (id) => {
         const next = templates.find((item) => item.id === id) || null;
@@ -934,6 +1039,8 @@ const PaymentRequestForm = ({
                                     <Row label="Назначение платежа">{template.payment_purpose}</Row>
                                     <Row label="Лимит">{template.amount_limit ? fmtMoney(template.amount_limit) : null}</Row>
                                     <Row label="Периодичность">{PERIOD_META[template.periodicity]?.label}</Row>
+                                    {/* «Без счёта» (17.11.2026, п. 1): платят по договору — полей счёта ниже нет. */}
+                                    <Row label="Счёт">{template.invoice_required === false ? 'не нужен — оплата по договору' : null}</Row>
                                     <Row label="Согласующий">{template.approver_name}</Row>
                                 </div>
                             )}
@@ -953,17 +1060,22 @@ const PaymentRequestForm = ({
                                     Сумма выше лимита платежа ({fmtMoney(template.amount_limit)}) — согласующего выберут общие лимиты и маршруты.
                                 </div>
                             )}
-                            <div className="grid gap-3 sm:grid-cols-2">
-                                <Field label="Номер счёта" required hint={HINTS.invoice} anchor="invoice_number" issue={issueOf('invoice_number')}>
-                                    <FormInput value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
-                                </Field>
-                                <Field label="Дата счёта" required anchor="invoice_date" issue={issueOf('invoice_date')}>
-                                    <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
-                                </Field>
-                            </div>
-                            <Field as="div" label="Счёт" required optionalMark={false} anchor="invoice_file" issue={issueOf('invoice_file')}>
-                                <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
-                            </Field>
+                            {template?.invoice_required !== false && (
+                                <>
+                                    <div className="grid gap-3 sm:grid-cols-2">
+                                        <Field label="Номер счёта" required hint={HINTS.invoice} anchor="invoice_number" issue={issueOf('invoice_number')}>
+                                            <FormInput value={draft.invoice_number} onChange={(event) => set('invoice_number', event.target.value)} maxLength={100} placeholder="Как в счёте" />
+                                        </Field>
+                                        <Field label="Дата счёта" required anchor="invoice_date" issue={issueOf('invoice_date')}>
+                                            <FormDate value={draft.invoice_date} onChange={(value) => set('invoice_date', value || '')} ariaLabel="Дата счёта" />
+                                        </Field>
+                                    </div>
+                                    <Field as="div" label="Счёт" required optionalMark={false} hint={HINTS.autofill} anchor="invoice_file" issue={issueOf('invoice_file')}>
+                                        <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={pickInvoice} onClear={() => pickInvoice(null)} />
+                                        <AutofillNote state={autofill} />
+                                    </Field>
+                                </>
+                            )}
                             {invoiceProofFields}
                             <div className="grid gap-3 sm:grid-cols-2">
                                 <Field label="Подразделение" required hint={HINTS.department} anchor="department_id" issue={issueOf('department_id')}>
@@ -1210,7 +1322,8 @@ const PaymentRequestForm = ({
                                             </div>
                                             {/* Без подписи, как и было: файл счёта стоит сразу под полями счёта. */}
                                             <Field as="div" anchor="invoice_file" issue={issueOf('invoice_file')}>
-                                                <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={setInvoiceFile} onClear={() => setInvoiceFile(null)} />
+                                                <InvoiceFile file={invoiceFile} saved={savedInvoices} onPick={pickInvoice} onClear={() => pickInvoice(null)} />
+                                                <AutofillNote state={autofill} />
                                             </Field>
                                         </>
                                     ) : (

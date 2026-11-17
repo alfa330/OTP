@@ -69,6 +69,8 @@ BOARD_HELPDESK = 'helpdesk'
 APPROVAL_KINDS = ('manager_approval', 'approval')
 # Уточнение компании бухгалтерией (workflow.KIND_ENTITY): заявка у бухгалтерии, но не в оплате.
 ENTITY_KIND = 'entity_clarify'
+# Проверка регулярного платежа бухгалтерией (workflow.KIND_REGULAR_CHECK, 17.11.2026): тоже до оплаты.
+REGULAR_CHECK_KIND = 'regular_check'
 
 
 def user_id(ctx):
@@ -300,7 +302,7 @@ def can_cancel_request(ctx, request):
     me = user_id(ctx)
     if me is None or _int(request.get('initiator_id')) != me:
         return False
-    if request.get('current_kind') == ENTITY_KIND:
+    if request.get('current_kind') in (ENTITY_KIND, REGULAR_CHECK_KIND):
         return True
     return request.get('current_role_code') not in (ROLE_ACCOUNTING, ROLE_FINANCE)
 

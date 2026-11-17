@@ -12,7 +12,7 @@ from io import BytesIO
 
 from flask import request, send_file
 
-from . import access, cards, directory, files, fixed, mail, queries, requisites_mail, schema, workflow
+from . import access, audit, cards, directory, files, fixed, mail, queries, requisites_mail, schema, workflow
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   digits, jsonify, party_kind, payload as _payload)
 
@@ -297,7 +297,26 @@ def register(api):
         starts_on, ends_on = as_date(data.get('starts_on'), 'starts_on'), as_date(data.get('ends_on'), 'ends_on')
         if starts_on and ends_on and ends_on < starts_on:
             raise ApiError('Дата окончания договора раньше даты начала')
-        return directory.upsert_contract(cursor, contract_id=row_id, fields={
+        # Проверка поставщика по БИН (владелец 17.11.2026, п. 8: «при поступлении договора по БИН
+        # проверить все нужные данные — с НДС / без НДС, СНР, ОУР»). У нового договора НДС и режим
+        # обязательны; у заведённого раньше — правятся, когда их прислали.
+        current = directory.read_contract(cursor, row_id) if row_id else None
+        if row_id and not current:
+            raise ApiError('Договор не найден', status=404)
+        tax_sent = 'tax_vat' in data or 'tax_regime' in data
+        tax_vat = None if data.get('tax_vat') in (None, '') else as_bool(data.get('tax_vat'))
+        tax_regime = as_choice(data.get('tax_regime') or None, tuple(workflow.TAX_REGIME_LABELS),
+                               'Режим налогообложения: ОУР или СНР')
+        missing = []
+        if not row_id or tax_sent:
+            if tax_vat is None:
+                missing.append(('tax_vat', 'Проверьте поставщика по БИН: с НДС или без НДС'))
+            if not tax_regime:
+                missing.append(('tax_regime', 'Проверьте поставщика по БИН: ОУР или СНР'))
+        if missing:
+            raise ApiError('; '.join(text for _field, text in missing), code='PAYMENTS_TAX_CHECK_MISSING',
+                           extra={'field': missing[0][0], 'fields': [field for field, _text in missing]})
+        saved = directory.upsert_contract(cursor, contract_id=row_id, fields={
             'counterparty_id': counterparty_id,
             'legal_entity_id': as_int(data.get('legal_entity_id'), 'legal_entity_id'),
             'number': as_text(data.get('number'), 'Номер договора', required=True, limit=100),
@@ -310,6 +329,18 @@ def register(api):
             'responsible_user_id': _user(cursor, data.get('responsible_user_id'), 'Ответственный'),
             'note': as_text(data.get('note'), 'Примечание', limit=2000),
         }, actor_id=ctx['user_id'])
+        if saved and (not row_id or tax_sent):
+            note = as_text(data.get('tax_regime_note'), 'Вид СНР', limit=200) if tax_regime == 'snr' else None
+            source = 'kgd' if str(data.get('tax_source') or '') == 'kgd' else 'manual'
+            changed = (not current or current.get('tax_vat') != tax_vat or current.get('tax_regime') != tax_regime
+                       or (current.get('tax_regime_note') or None) != note or current.get('tax_source') != source
+                       or not current.get('tax_checked_at'))
+            if changed:
+                # Кто и когда проверил — только при новой проверке: пересохранение договора с теми же
+                # данными её дату не сдвигает.
+                directory.set_contract_tax(cursor, saved, vat=tax_vat, regime=tax_regime, note=note,
+                                           source=source, actor=_actor(ctx))
+        return saved
 
     def _save_card(cursor, data, row_id, ctx):
         owner_kind = as_choice(data.get('owner_kind'), schema.CARD_OWNER_KINDS,
@@ -468,6 +499,9 @@ def register(api):
             # строки: изменились — поставщикам уйдёт письмо (requisites_mail).
             before = directory.read_legal_entity(cursor, row_id, lock=True) \
                 if name == 'legal_entities' and row_id else None
+            # Журнал раздела (17.11.2026, п. 10): строка справочника целиком до и после записи.
+            entity = audit.DICTIONARY_ENTITY.get(name)
+            was = audit.snapshot(cursor, entity, row_id) if row_id else None
             if name == 'legal_entities':
                 saved = _save_legal_entity(cursor, data, row_id, ctx, letters=letters, current=before)
             elif name in _SAVERS:
@@ -477,6 +511,8 @@ def register(api):
             mailing = requisites_mail.after_entity_saved(
                 cursor, saved, before, directory.read_legal_entity(cursor, saved), _actor(ctx)) \
                 if before and saved else None
+            if saved and entity:
+                audit.record_change(cursor, _actor(ctx), entity, saved, was, audit.snapshot(cursor, entity, saved))
         if not saved:
             raise ApiError('Запись не найдена', status=404)
         body = {'status': 'success', 'id': saved}
@@ -500,7 +536,11 @@ def register(api):
                                code='PAYMENTS_IN_USE', status=409, extra={'usage': dict(used)})
             if name == 'contracts':
                 stale_file = directory.contract_file(cursor, row_id)
+            entity = audit.DICTIONARY_ENTITY.get(name)
+            was = audit.snapshot(cursor, entity, row_id)
             deleted = directory.delete_row(cursor, name, row_id)
+            if deleted and entity:
+                audit.record_change(cursor, _actor(ctx), entity, row_id, was, None)
         if not deleted:
             raise ApiError('Запись не найдена', status=404)
         if stale_file and gcs.get('client'):
@@ -527,6 +567,8 @@ def register(api):
                 cursor, contract_id, file_name=files.safe_name(storage.filename),
                 file_type=storage.mimetype or 'application/octet-stream', file_size=len(data),
                 bucket=bucket, blob_path=blob_path)
+            audit.record(cursor, _actor(ctx), 'update', 'contract', contract_id, title='Файл договора',
+                         changes={'file_name': [(previous or {}).get('file_name'), files.safe_name(storage.filename)]})
             contract = directory.read_contract(cursor, contract_id)
         if previous and gcs.get('client'):
             files.drop(gcs, [(previous['bucket'], previous['blob_path'])])
@@ -538,6 +580,9 @@ def register(api):
             raise ApiError('Это действие доступно администратору раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
         with db._get_cursor() as cursor:
             previous = directory.set_contract_file(cursor, contract_id)
+            if previous:
+                audit.record(cursor, _actor(ctx), 'update', 'contract', contract_id, title='Файл договора снят',
+                             changes={'file_name': [previous.get('file_name'), None]})
         if previous and gcs.get('client'):
             files.drop(gcs, [(previous['bucket'], previous['blob_path'])])
         return jsonify({'status': 'success'})
@@ -546,8 +591,57 @@ def register(api):
     def contract_file_download(ctx, contract_id):
         with db._get_cursor() as cursor:
             item = directory.contract_file(cursor, contract_id)
+            if item:
+                audit.record(cursor, _actor(ctx), 'download', 'contract', contract_id,
+                             title='Файл договора «%s»' % item['file_name'])
         if not item:
             raise ApiError('К договору файл не приложен', status=404)
+        if not gcs.get('client'):
+            raise ApiError('Хранилище файлов не настроено', code='PAYMENT_STORAGE_OFF', status=503)
+        data = files.download(gcs, item['bucket'], item['blob_path'])
+        if data is None:
+            raise ApiError('Файла нет в хранилище', status=404)
+        return send_file(BytesIO(data), as_attachment=not as_bool(request.args.get('inline')),
+                         download_name=item['file_name'],
+                         mimetype=item.get('file_type') or 'application/octet-stream')
+
+    # ── Выписка КГД к проверке договора по БИН (17.11.2026, п. 8) ───────────
+
+    @route('/dictionaries/contracts/<int:contract_id>/tax-file', methods=('POST',))
+    def contract_tax_file_upload(ctx, contract_id):
+        if not access.can_save_dictionary(ctx, 'contracts', contract_id, ctx['roles']):
+            raise ApiError('Это действие доступно администратору раздела', code='PAYMENTS_ADMIN_ONLY', status=403)
+        storage = request.files.get('file')
+        if not storage or not storage.filename:
+            raise ApiError('Приложите выписку КГД', code='PAYMENT_FILES_MISSING')
+        data = storage.read() or b''
+        files.check_file(filename=storage.filename, content_type=storage.mimetype, size=len(data))
+        with db._get_cursor() as cursor:
+            if not directory.read_contract(cursor, contract_id):
+                raise ApiError('Договор не найден', status=404)
+            bucket, blob_path = files.upload(gcs, data=data, filename=storage.filename,
+                                             content_type=storage.mimetype)
+            previous = directory.set_contract_tax_file(
+                cursor, contract_id, file_name=files.safe_name(storage.filename),
+                file_type=storage.mimetype or 'application/octet-stream', file_size=len(data),
+                bucket=bucket, blob_path=blob_path)
+            audit.record(cursor, _actor(ctx), 'update', 'contract', contract_id,
+                         title='Выписка КГД приложена к проверке по БИН',
+                         changes={'tax_file_name': [(previous or {}).get('file_name'), files.safe_name(storage.filename)]})
+            contract = directory.read_contract(cursor, contract_id)
+        if previous and gcs.get('client'):
+            files.drop(gcs, [(previous['bucket'], previous['blob_path'])])
+        return jsonify({'status': 'success', 'item': contract})
+
+    @route('/dictionaries/contracts/<int:contract_id>/tax-file')
+    def contract_tax_file_download(ctx, contract_id):
+        with db._get_cursor() as cursor:
+            item = directory.contract_tax_file(cursor, contract_id)
+            if item:
+                audit.record(cursor, _actor(ctx), 'download', 'contract', contract_id,
+                             title='Выписка КГД «%s»' % item['file_name'])
+        if not item:
+            raise ApiError('Выписка КГД к договору не приложена', status=404)
         if not gcs.get('client'):
             raise ApiError('Хранилище файлов не настроено', code='PAYMENT_STORAGE_OFF', status=503)
         data = files.download(gcs, item['bucket'], item['blob_path'])
@@ -580,13 +674,15 @@ def register(api):
                 raise ApiError('Компания не найдена', status=404)
             return jsonify(_mailing_reply(cursor, entity_id))
 
-    def _mailing_action(ctx, entity_id, mailing_id, action):
+    def _mailing_action(ctx, entity_id, mailing_id, action, title):
         _mailing_guard(ctx)
         with db._get_cursor() as cursor:
             try:
                 done = action(cursor, entity_id, mailing_id, _actor(ctx))
             except requisites_mail.MailingError as exc:
                 raise ApiError(str(exc), code=exc.code, status=exc.status)
+            audit.record(cursor, _actor(ctx), 'update', 'mailing', mailing_id, title=title,
+                         meta={'legal_entity_id': entity_id, 'payload': _payload()})
             body = _mailing_reply(cursor, entity_id)
         if isinstance(done, dict):
             body.update(done)
@@ -594,7 +690,7 @@ def register(api):
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/cancel', methods=('POST',))
     def entity_mailing_cancel(ctx, entity_id, mailing_id):
-        return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.cancel)
+        return _mailing_action(ctx, entity_id, mailing_id, requisites_mail.cancel, 'Письмо поставщикам отменено')
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/open', methods=('POST',))
     def entity_mailing_open(ctx, entity_id, mailing_id):
@@ -604,7 +700,7 @@ def register(api):
         if addresses is not None and not isinstance(addresses, list):
             raise ApiError('Адреса письма — списком')
         return _mailing_action(ctx, entity_id, mailing_id, lambda cursor, entity, mailing, actor: (
-            requisites_mail.open_in_mail(cursor, entity, mailing, actor, addresses)))
+            requisites_mail.open_in_mail(cursor, entity, mailing, actor, addresses)), 'Письмо поставщикам открыто в почте')
 
     @route('/dictionaries/legal_entities/<int:entity_id>/mailings/<int:mailing_id>/recipients', methods=('POST',))
     def entity_mailing_recipients(ctx, entity_id, mailing_id):
@@ -616,7 +712,8 @@ def register(api):
             raise ApiError('Кому не отправлять — списком поставщиков')
         ids = [as_int(item, 'Поставщик') for item in excluded]
         return _mailing_action(ctx, entity_id, mailing_id, lambda cursor, entity, mailing, actor: (
-            requisites_mail.set_recipients(cursor, entity, mailing, actor, [item for item in ids if item])))
+            requisites_mail.set_recipients(cursor, entity, mailing, actor, [item for item in ids if item])),
+            'Получатели письма поставщикам')
 
     # ── «Письма поставщикам»: все письма раздела и одно письмо целиком ──────
 
@@ -647,6 +744,10 @@ def register(api):
             raise ApiError('Полный номер карты доступен финансовому отделу', code='PAYMENTS_FORBIDDEN', status=403)
         with db._get_cursor() as cursor:
             item = directory.read_card(cursor, card_id)
+            if item:
+                # Кто открывал полный номер карты справочника (п. 10) — сам номер в журнал не идёт.
+                audit.record(cursor, _actor(ctx), 'view', 'card', card_id,
+                             title='Полный номер карты •••• %s' % (item.get('card_last4') or ''))
         number = cards.decrypt((item or {}).get('card_number_enc'))
         if not number:
             raise ApiError('Номер карты не сохранён или не читается', code='PAYMENT_CARD_MISSING', status=404)
@@ -666,6 +767,7 @@ def register(api):
     def settings_save(ctx):
         data = _payload()
         with db._get_cursor() as cursor:
+            was = directory.get_settings(cursor)
             for key, (low, high) in workflow.SETTINGS_LIMITS.items():
                 if key not in data:
                     continue
@@ -674,6 +776,7 @@ def register(api):
                     raise ApiError('Значение от %s до %s' % (low, high), code='PAYMENT_SETTING_INVALID')
                 directory.save_setting(cursor, key, value, ctx['user_id'])
             values = directory.get_settings(cursor)
+            audit.record(cursor, _actor(ctx), 'update', 'settings', changes=audit.diff(was, values))
         return jsonify({'status': 'success', 'settings': values})
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -700,6 +803,9 @@ def register(api):
             if not person or person['fired']:
                 raise ApiError('Сотрудник не найден или уволен', status=404)
             queries.add_role_member(cursor, role_code, user_id, ctx['user_id'])
+            audit.record(cursor, _actor(ctx), 'add', 'role', user_id,
+                         title='%s → «%s»' % (person['name'], workflow.ROLE_LABELS[role_code]),
+                         meta={'role_code': role_code, 'user_id': user_id})
             members = access.mark_section_access(queries.role_members(cursor))
         return jsonify({'status': 'success', 'roles': members})
 
@@ -718,6 +824,10 @@ def register(api):
                                                       workflow._plural(waiting, ('заявка', 'заявки', 'заявок'))),
                                code='PAYMENTS_ROLE_IN_USE', status=409)
             queries.remove_role_member(cursor, role_code, user_id)
+            person = queries.user_brief(cursor, user_id) or {}
+            audit.record(cursor, _actor(ctx), 'remove', 'role', user_id,
+                         title='%s ← «%s»' % (person.get('name') or '№%s' % user_id, workflow.ROLE_LABELS[role_code]),
+                         meta={'role_code': role_code, 'user_id': user_id})
             members = access.mark_section_access(queries.role_members(cursor))
         return jsonify({'status': 'success', 'roles': members})
 
@@ -727,15 +837,23 @@ def register(api):
 
     @route('/templates')
     def templates_list(ctx):
+        admin = access.is_section_admin(ctx)
         with db._get_cursor() as cursor:
             rows = directory.list_templates(cursor)
+            # Кого можно назначить проверяющим (17.11.2026, п. 7) — участники бухгалтерии. Поимённый
+            # состав роли видит только администратор раздела (п. 9 ТЗ), он же правит платежи.
+            checkers = [{'id': person['user_id'], 'name': person['name']}
+                        for person in queries.role_members(cursor).get(workflow.ROLE_ACCOUNTING) or []
+                        if not person.get('fired')] if admin else []
         today = queries.today_almaty()
         for row in rows:
             due = workflow._as_date(row.get('next_due_on'))
             row['generate_on'] = fixed.generate_on(due, row['periodicity'], row.get('lead_days')) if due else None
             row['is_due'] = fixed.is_due(row, today)
             row['periodicity_label'] = fixed.PERIOD_LABELS.get(row['periodicity'], row['periodicity'])
-        return jsonify({'items': rows})
+            if not admin:
+                row.pop('checker_name', None)
+        return jsonify({'items': rows, 'checkers': checkers})
 
     def _validate_template(cursor, data):
         periodicity = as_choice(data.get('periodicity') or 'monthly', schema.PERIODICITIES,
@@ -772,14 +890,26 @@ def register(api):
             account = directory.read_account(cursor, account_id)
             if not account or (counterparty_id and account['counterparty_id'] != counterparty_id):
                 raise ApiError('Банковские реквизиты принадлежат другому поставщику')
+        template_id = as_int(data.get('id'), 'id')
+        current = directory.read_template(cursor, template_id) if template_id else None
         if 'no_contract' in data:
             no_contract = as_bool(data.get('no_contract'))
         else:
             # Окно справочника из прежней сборки отметки «Без договора» не знает и не шлёт:
             # его сохранение не должно её стирать (как НДС «не указан» — `vat_tristate`).
-            template_id = as_int(data.get('id'), 'id')
-            current = directory.read_template(cursor, template_id) if template_id else None
             no_contract = bool((current or {}).get('no_contract'))
+        # «Со счётом / без счёта» и проверяющий (владелец 17.11.2026, пп. 1, 7): окно прежней сборки
+        # их не шлёт — тогда остаётся, что было (у нового платежа — «счёт нужен», без проверяющего).
+        invoice_required = (as_bool(data.get('invoice_required')) if 'invoice_required' in data
+                            else (current or {}).get('invoice_required') is not False)
+        if 'checker_user_id' in data:
+            checker_id = _user(cursor, data.get('checker_user_id'), 'Проверяющий')
+            if checker_id and checker_id not in {int(x) for x in queries.role_member_ids(cursor).get(
+                    workflow.ROLE_ACCOUNTING) or ()}:
+                raise ApiError('Проверяющий — сотрудник бухгалтерии: выберите из участников роли «Бухгалтерия»',
+                               code='PAYMENTS_CHECKER_NOT_ACCOUNTING', extra={'field': 'checker_user_id'})
+        else:
+            checker_id = (current or {}).get('checker_user_id')
         return {
             'name': as_text(data.get('name'), 'Наименование', required=True, limit=300),
             'amount': amount, 'periodicity': periodicity,
@@ -804,6 +934,8 @@ def register(api):
             'accounting_category': accounting_category if object_type == workflow.OBJECT_GOODS else None,
             'due_day': fixed.due_day_of(next_due_on, periodicity),
             'auto_create': as_bool(data.get('auto_create', True)),
+            'invoice_required': invoice_required,
+            'checker_user_id': checker_id,
             'note': as_text(data.get('note'), 'notes'),
             'is_active': as_bool(data.get('is_active', True)),
         }
@@ -813,8 +945,12 @@ def register(api):
         data = _payload()
         with db._get_cursor() as cursor:
             fields = _validate_template(cursor, data)
-            template_id = directory.upsert_template(cursor, template_id=as_int(data.get('id'), 'id'),
+            row_id = as_int(data.get('id'), 'id')
+            was = audit.snapshot(cursor, 'template', row_id) if row_id else None
+            template_id = directory.upsert_template(cursor, template_id=row_id,
                                                     fields=fields, actor_id=ctx['user_id'])
+            audit.record_change(cursor, _actor(ctx), 'template', template_id, was,
+                                audit.snapshot(cursor, 'template', template_id))
             row = directory.read_template(cursor, template_id)
         return jsonify({'status': 'success', 'item': row})
 
@@ -828,7 +964,10 @@ def register(api):
                 raise ApiError('По платежу есть %s — приостановите его вместо удаления'
                                % workflow._plural(used, ('заявка', 'заявки', 'заявок')),
                                code='PAYMENTS_IN_USE', status=409)
+            was = audit.snapshot(cursor, 'template', template_id)
             deleted = directory.delete_template(cursor, template_id)
+            if deleted:
+                audit.record_change(cursor, _actor(ctx), 'template', template_id, was, None)
         if not deleted:
             raise ApiError('Платёж не найден', status=404)
         return jsonify({'status': 'success'})
@@ -838,6 +977,8 @@ def register(api):
         """Ручной запуск того же, что делает ночной планировщик."""
         with db._get_cursor() as cursor:
             created, outbox = fixed.generate(cursor, actor=_actor(ctx), base_url=api.base_url)
+            audit.record(cursor, _actor(ctx), 'run', 'template', title='Календарь регулярных платежей запущен вручную',
+                         meta={'created': created})
         return jsonify({'status': 'success', 'created': created, 'warnings': api.flush(outbox)})
 
     @route('/templates/<int:template_id>/generate', methods=('POST',), admin=True)
@@ -902,6 +1043,9 @@ def register(api):
                 row['errors'].append('не определён ответственный')
         with db._get_cursor() as cursor:
             created = fixed.commit_import(cursor, rows, ctx['user_id'])
+            audit.record(cursor, _actor(ctx), 'import', 'template',
+                         title='Регулярные платежи из Excel: заведено %s' % len(created),
+                         meta={'created': created, 'rows': len(rows)})
         return jsonify({'status': 'success', 'created': len(created),
                         'existing': sum(1 for r in rows if r.get('exists') and not r.get('errors')),
                         'skipped': sum(1 for r in rows if r.get('errors'))})

@@ -31,8 +31,8 @@ from io import BytesIO
 
 from flask import Blueprint, g, request, send_file
 
-from . import (access, assets as assets_sql, cards, directory, files, fixed, flow, legacy, notices, notify,
-               people, privacy, queries, report, routes_assets, routes_directory, schema, workflow)
+from . import (access, assets as assets_sql, audit, cards, directory, extract, files, fixed, flow, legacy, notices,
+               notify, people, privacy, queries, report, routes_assets, routes_directory, schema, workflow)
 from .web import (ApiError, XLSX_MIME, actor as _actor, as_bool, as_choice, as_date, as_int, as_money, as_text,
                   jsonify, payload as _payload, uploaded_files)
 
@@ -338,11 +338,27 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             person['section_open'] = access.can_open_section({'user_id': person['user_id']})
         # Свой срок у открытого этапа «чек» или «закрывающие документы» (п. 17, 09.11.2026); срок
         # документов, который поставил бухгалтер (16.11.2026), важнее настройки.
-        deadline = (workflow.stage_deadline(subtasks, directory.get_settings(cursor), queries.today_almaty(),
-                                            request=request_row)
+        settings = directory.get_settings(cursor)
+        today = queries.today_almaty()
+        deadline = (workflow.stage_deadline(subtasks, settings, today, request=request_row)
                     if any(item['kind'] in workflow.STAGE_DEADLINE_SETTINGS and item['state'] == 'open'
                            for item in subtasks) else None)
         items = queries.list_items(cursor, request_id)
+        # Прошлые закупы того же товара или услуги (владелец 16.11.2026, п. 1) — подбирает раздел
+        # сам, по названию и подкатегории; видно то, что видно и в реестре.
+        similar = queries.similar_purchases(cursor, request_row, items, limit=SIMILAR_LIMIT, **_history_scope(ctx))
+        # Возможный дубль счёта (п. 8): бухгалтерии — по всем заявкам, остальным —
+        # только среди тех, что они видят и в реестре.
+        duplicates = queries.find_duplicates(cursor, request_row, **_history_scope(ctx))
+        # Договор у всех участников заявки (владелец 17.11.2026, пп. 2–4): срок и что останется от
+        # лимита после этой оплаты — с розовым «обратите внимание» и красной тревогой.
+        paid_already = bool(request_row.get('paid_on'))
+        contract_info = workflow.contract_view(
+            contract, queries.contract_usage(cursor, [contract['id']], exclude_request_id=request_id).get(contract['id'])
+            if contract else None,
+            amount=(request_row.get('paid_amount') if paid_already and request_row.get('paid_amount') is not None
+                    else request_row.get('amount')),
+            this_paid=paid_already, today=today, settings=settings) if contract else None
         full = {
             'request': request_row,
             'stage_deadline': deadline,
@@ -363,14 +379,16 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             'supplier_history': queries.payment_history(
                 cursor, counterparty_id=request_row.get('counterparty_id'), exclude_request_id=request_id,
                 limit=SUPPLIER_HISTORY_LIMIT, **_history_scope(ctx)) if request_row.get('counterparty_id') else [],
-            # Прошлые закупы того же товара или услуги (владелец 16.11.2026, п. 1) — подбирает раздел
-            # сам, по названию и подкатегории; видно то, что видно и в реестре.
-            'similar': queries.similar_purchases(cursor, request_row, items, limit=SIMILAR_LIMIT,
-                                                 **_history_scope(ctx)),
-            # Возможный дубль счёта (п. 8): бухгалтерии — по всем заявкам, остальным —
-            # только среди тех, что они видят и в реестре.
-            'duplicates': queries.find_duplicates(cursor, request_row, **_history_scope(ctx)),
+            'similar': similar,
+            'duplicates': duplicates,
             'contract': contract,
+            'contract_view': contract_info,
+            # Готовые проверки для руководителя (владелец 17.11.2026, п. 9): договор, лимит, поставщик
+            # по БИН, возможный дубль, прошлые цены — система проверила сама, человеку остаётся решить.
+            'checks': workflow.auto_checks(
+                request_row, contract_info=contract_info,
+                counterparty=directory.read_counterparty(cursor, request_row.get('counterparty_id')),
+                duplicates=duplicates, similar=similar, items=items),
             'contract_check': {
                 'applies': request_row.get('payment_method') == workflow.METHOD_INVOICE,
                 'ok': gate_ok, 'reason': gate_reason, 'threshold': float(workflow.CONTRACT_REQUIRED_OVER)},
@@ -969,6 +987,8 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             request_row = _load_visible(cursor, ctx, request_id)
             # Открыл заявку — уведомления «к сведению» по ней прочитаны.
             notices.mark_seen(cursor, ctx['user_id'], request_id)
+            # Кто открывал заявку (владелец 17.11.2026, п. 10) — повтор за 10 минут не пишется.
+            audit.record_view(cursor, _actor(ctx), request_id)
             full = _full(cursor, request_id, ctx, request_row)
         return _reply_card(full)
 
@@ -977,6 +997,18 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                  workflow.to_decimal(offer.get('amount'), None), offer.get('terms') or '',
                  offer.get('link') or '', offer.get('comment') or '', bool(offer.get('is_recommended')))
                 for offer in offers or []]
+
+    def _item_text(key):
+        """Позиция строкой журнала: «Картридж HP 85A — 2 шт × 12 000 ₸»."""
+        name, quantity, unit, price = key
+        quantity_text = format(quantity.normalize(), 'f') if isinstance(quantity, Decimal) else str(quantity)
+        return '%s — %s%s × %s' % (name, quantity_text, (' ' + unit) if unit else '', workflow.fmt_money(price))
+
+    def _offer_text(key):
+        """Вариант поставщика строкой журнала: «ТОО Альфа — 120 000 ₸, рекомендуемый»."""
+        name = key[1] or ('поставщик №%s' % key[0] if key[0] else '—')
+        amount = workflow.fmt_money(key[2]) if key[2] is not None else 'без суммы'
+        return '%s — %s%s' % (name, amount, ', рекомендуемый' if key[6] else '')
 
     def _save_edit(cursor, ctx, request_id, data, uploads, actor):
         """Правка заявки инициатором: поля, позиции, поставщики, карта, файлы."""
@@ -988,6 +1020,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
                            code='PAYMENTS_FORBIDDEN', status=403)
         fields, items, offers, card = _request_fields(cursor, data, ctx, creating=False, current=current)
         changes = queries.update_request_fields(cursor, request_id, fields)
+        # «Было → стало» строк и поставщиков целиком — для журнала раздела (17.11.2026, п. 10): лента
+        # карточки по-прежнему говорит «позиций: 2 → 3», журнал показывает, какие именно.
+        details = {}
         if items is not None:
             # Сравниваем значения, а не их запись: «5.000» из базы и «5» из формы —
             # одно и то же количество.
@@ -1000,6 +1035,7 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             if before != after:
                 total = queries.replace_items(cursor, request_id, items)
                 changes['items'] = (len(before), len(after))
+                details['items'] = [[_item_text(row) for row in before], [_item_text(row) for row in after]]
                 if workflow.to_decimal(current.get('amount')) != total:
                     changes['amount'] = (queries.plain(current.get('amount')), float(total))
         offer_ids = None
@@ -1008,10 +1044,15 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             offer_ids = queries.save_offers(cursor, request_id, offers)
             if before != _offers_key(offers):
                 changes['offers'] = (len(before), len(offers))
+                details['offers'] = [[_offer_text(row) for row in before],
+                                     [_offer_text(row) for row in _offers_key(offers)]]
         if _apply_card(cursor, request_id, card, was_submitted=bool(current.get('submitted_at'))):
             changes['card_number'] = ('•', '•')
         if changes:
-            queries.log_event(cursor, request_id, 'edited', actor, payload={'changes': changes})
+            payload = {'changes': changes}
+            if details:
+                payload['details'] = details
+            queries.log_event(cursor, request_id, 'edited', actor, payload=payload)
         if 'observers_add' in data or 'observers_remove' in data:
             # Форма присылает разницу с тем, что было при её открытии, а не список целиком:
             # наблюдателей меняют и в окне заявки, и сохранение формы не должно молча снять
@@ -1476,6 +1517,10 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             if not (access.can_view_assets(ctx, ctx['roles'])
                     and assets_sql.attachment_in_history(cursor, attachment_id)):
                 _load_visible(cursor, ctx, item['request_id'])
+            # Кто скачивал или открывал файл заявки (п. 10).
+            audit.record(cursor, _actor(ctx), 'download', 'attachment', attachment_id,
+                         request_id=item['request_id'], title=item.get('file_name'),
+                         meta={'kind': item.get('kind'), 'inline': as_bool(request.args.get('inline'))})
         if not gcs.get('client'):
             raise ApiError('Хранилище файлов не настроено', code='PAYMENT_STORAGE_OFF', status=503)
         data = files.download(gcs, item['bucket'], item['blob_path'])
@@ -1883,6 +1928,9 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             ids = [row['id'] for row in rows]
             items_by_request = queries.items_for_requests(cursor, ids)
             offers_by_request = queries.offers_for_requests(cursor, ids)
+            # Кто и что выгружал из реестра (п. 10): фильтры выгрузки и сколько строк ушло.
+            audit.record(cursor, _actor(ctx), 'export', 'registry', title='Реестр в Excel: %s' % len(rows),
+                         meta={'filters': {key: value for key, value in request.args.items()}, 'total': total})
         if not access.sees_department_people(ctx, ctx['roles']):
             # Выгрузка — тот же реестр: «Текущий исполнитель» не называет сотрудника подразделения.
             for row in rows:
@@ -1894,6 +1942,76 @@ def build_payments_blueprint(*, db, require_api_key, build_cors_preflight_respon
             filters_text=', '.join(sorted(shown)) if shown else '',
             total=total, truncated=total > len(rows), text_warning_patch=excel_text_warning)
         return send_file(stream, as_attachment=True, download_name=report.file_name(), mimetype=XLSX_MIME)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Автозаполнение из документа (владелец 17.11.2026, пп. 5, 8)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @payments_route('/extract', methods=('POST',))
+    def extract_document(ctx):
+        """Счёт, договор или выписка КГД → поля формы. В базу пишет только строку журнала: поля
+        человек проверяет в форме и сохраняет сам. Модель читает документ вне соединения с базой
+        (до 60 с) — соединение не держится, пока она думает."""
+        storage = request.files.get('file')
+        kind = str(request.form.get('kind') or request.args.get('kind') or '').strip()
+        if not storage or not storage.filename:
+            raise ApiError('Приложите документ', code='PAYMENT_FILES_MISSING')
+        data = storage.read() or b''
+        started = time.monotonic()
+        try:
+            raw, model = extract.read_document(kind, data, filename=storage.filename, content_type=storage.mimetype)
+        except extract.ExtractError as exc:
+            raise ApiError(str(exc), code=exc.code, status=exc.status)
+        fields = extract.normalize(kind, raw)
+        other = fields.pop('_other_document', False)
+        with db._get_cursor() as cursor:
+            matches = extract.match(cursor, kind, fields)
+            audit.record(cursor, _actor(ctx), 'extract', 'document', title=storage.filename,
+                         meta={'kind': kind, 'model': model, 'fields': sorted(fields), 'matches': matches,
+                               'ms': int((time.monotonic() - started) * 1000), 'other_document': other})
+        return jsonify({'kind': kind, 'fields': fields, 'matches': matches, 'model': model,
+                        'other_document': other})
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Журнал раздела (владелец 17.11.2026, п. 10)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @payments_route('/journal', admin=True)
+    def journal(ctx):
+        args = request.args
+        date_from = as_date(args.get('from'), 'from')
+        date_to = as_date(args.get('to'), 'to')
+        entity = args.get('entity') or None
+        if entity and entity not in audit.ENTITY_LABELS:
+            raise ApiError('Нет такого вида записей', code='PAYMENT_REQUEST_INVALID')
+        action = args.get('action') or None
+        if action and action not in audit.ACTION_LABELS:
+            raise ApiError('Нет такого действия', code='PAYMENT_REQUEST_INVALID')
+        with db._get_cursor() as cursor:
+            rows, total = audit.journal(
+                cursor, date_from=date_from, date_to=date_to, actor_id=as_int(args.get('actor_id'), 'actor_id'),
+                entity=entity, action=action, request_id=as_int(args.get('request_id'), 'request_id'),
+                page=as_int(args.get('page'), 'page') or 1,
+                page_size=as_int(args.get('page_size'), 'page_size') or audit.PAGE_SIZE)
+        return jsonify({'items': rows, 'total': total, 'entities': audit.ENTITY_LABELS,
+                        'actions': audit.ACTION_LABELS})
+
+    # Чью «Историю» кто открывает: запись справочника — тот, кто вправе её править; регулярный
+    # платёж и настройки — администратор раздела (он их и правит).
+    _HISTORY_DICTIONARY = {entity: name for name, entity in audit.DICTIONARY_ENTITY.items()}
+
+    @payments_route('/journal/<entity>/<int:entity_id>')
+    def journal_history(ctx, entity, entity_id):
+        if entity not in audit.ENTITY_TABLES:
+            raise ApiError('Нет такого вида записей', status=404)
+        dictionary = _HISTORY_DICTIONARY.get(entity)
+        allowed = access.is_section_admin(ctx) or (
+            dictionary and access.can_save_dictionary(ctx, dictionary, entity_id, ctx['roles']))
+        if not allowed:
+            raise ApiError('Историю записи видит тот, кто её ведёт', code='PAYMENTS_FORBIDDEN', status=403)
+        with db._get_cursor() as cursor:
+            rows = audit.history(cursor, entity, entity_id)
+        return jsonify({'items': rows})
 
     # bp — для ручек без входа в портал (ответ Google на «Войти через Google»).
     api = Api(route=payments_route, db=db, gcs=gcs, flush=_flush, base_url=web_app_base_url,

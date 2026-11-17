@@ -27,6 +27,12 @@
 * **Двойное создание исключено** сдвигом `next_due_on` вперёд сразу после
   создания и пометкой `last_generated_on`.
 
+Правки владельца 17.11.2026 (пп. 1, 6, 7): у платежа выбирается день оплаты — как повтор
+напоминания в Google: каждый месяц такого-то числа, раз в квартал, раз в год; заявка месяца
+по-прежнему приходит 1-го числа и сначала идёт на проверку бухгалтерией — проверяющему из
+справочника (`checker_user_id`, этап workflow.KIND_REGULAR_CHECK), оплатить — к выбранному
+дню. Платёж бывает «со счётом» и «без счёта» (`invoice_required`): без счёта платят по договору.
+
 Чистые функции (даты, разбор файла) отделены от тех, что ходят в базу
 (`generate`, `resolve_import`, `commit_import`) — первые проверяются тестами
 без Postgres.
@@ -110,6 +116,9 @@ def request_fields(template):
         'project_id': template.get('project_id'),
         'branch': template.get('branch'),
         'payment_method': workflow.METHOD_INVOICE,
+        # «Со счётом / без счёта» (владелец 17.11.2026, п. 1): без счёта платят по договору — заявка
+        # не просит счёт ни при отправке, ни перед оплатой. Копия выбора на момент создания заявки.
+        'invoice_required': template.get('invoice_required') is not False,
         'object_type': object_type,
         # П. 10: у товара категория учёта обязательна — её тоже даёт справочник.
         'accounting_category': template.get('accounting_category') if object_type == workflow.OBJECT_GOODS else None,

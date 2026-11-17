@@ -190,6 +190,7 @@ _ROLE_WITHOUT_PEOPLE = {
 # Этапы, которые роль выполняет помимо главного дела: уточнить компанию — тоже бухгалтерии,
 # но «оплатить счёт некому» сказало бы о другом.
 _KIND_WITHOUT_PEOPLE = {
+    workflow.KIND_REGULAR_CHECK: 'Проверить регулярный платёж некому: в роли «Бухгалтерия» нет участников',
     workflow.KIND_ENTITY: 'Выбрать юр. лицо некому: в роли «Бухгалтерия» нет участников',
     workflow.KIND_IT: 'Проверить IT-закуп некому: в роли «Helpdesk IT и учёт имущества» нет участников',
 }
@@ -231,7 +232,8 @@ def plan_route(cursor, request, initiator, manager, settled=()):
     basis = approval_basis(cursor, request)
     approver = _approver_of(cursor, basis, initiator)
     route = workflow.build_route(request, initiator=initiator, manager=manager,
-                                 manager_step=basis['manager_step'], approver=approver)
+                                 manager_step=basis['manager_step'], approver=approver,
+                                 checker=_checker_of(cursor, request))
     gaps = route_gaps(route, queries.role_member_ids(cursor), initiator['id'], settled=settled)
     if workflow.needs_entity_step(request) and not directory.list_legal_entities(cursor):
         # Без компании заявка ушла бы бухгалтерии, а той не из чего выбрать — застряла бы у неё.
@@ -240,6 +242,25 @@ def plan_route(cursor, request, initiator, manager, settled=()):
         raise FlowError('%s. Обратитесь к администратору раздела' % '; '.join(gaps),
                         code='PAYMENTS_ROLES_NOT_CONFIGURED', status=409, missing=gaps)
     return basis, route
+
+
+def _checker_of(cursor, request):
+    """Проверяющий регулярного платежа из справочника (владелец 17.11.2026, п. 7) — если он
+    всё ещё работает и состоит в бухгалтерии. Иначе (не указан, уволен, ушёл из роли) этап
+    уходит роли целиком — проверит любой из бухгалтерии, заявка не зависнет."""
+    if not workflow.needs_regular_check(request) or not request.get('fixed_template_id'):
+        return None
+    template = directory.read_template(cursor, request['fixed_template_id'])
+    user_id = (template or {}).get('checker_user_id')
+    if not user_id:
+        return None
+    person = queries.user_brief(cursor, user_id)
+    if not person or person.get('fired'):
+        return None
+    accounting = {int(x) for x in queries.role_member_ids(cursor).get(workflow.ROLE_ACCOUNTING) or ()}
+    if int(user_id) not in accounting:
+        return None
+    return {'id': person['id'], 'name': person['name']}
 
 
 def _invoice_gate(cursor, request):
@@ -529,6 +550,13 @@ def act(cursor, request_id, kind, action, actor, *, fields=None, new_file_kinds=
         return _it_offers(cursor, request, subtask, actor, fields, comment, **done)
     if action == 'it_stock':
         return _it_stock(cursor, request, subtask, actor, fields.get('stock_assets') or [], comment, **done)
+
+    # ── Проверка регулярного платежа бухгалтерией (17.11.2026, п. 7) ──
+    if action == 'approve' and kind == workflow.KIND_REGULAR_CHECK:
+        notices.clear_subtask(cursor, subtask['id'])
+        queries.complete_subtask(cursor, subtask['id'], actor, outcome='checked', comment=comment)
+        queries.log_event(cursor, request_id, 'checked', actor, comment=comment, payload={'kind': kind})
+        return {'next': advance(cursor, request_id, actor, **done)}
 
     # ── Согласование ──
     if action == 'approve':
@@ -865,7 +893,8 @@ def _replan(cursor, request_id, current):
     manager_passed = manager_step.get('state') in ('done', 'skipped')
     manager = ({'id': manager_step.get('assignee_id'), 'name': manager_step.get('assignee_name')} if manager_passed
                else _current_manager(cursor, request, steps.get(workflow.KIND_MANAGER)))
-    passed = tuple(kind for kind in (workflow.KIND_MANAGER, workflow.KIND_IT, workflow.KIND_ENTITY)
+    passed = tuple(kind for kind in (workflow.KIND_REGULAR_CHECK, workflow.KIND_MANAGER, workflow.KIND_IT,
+                                     workflow.KIND_ENTITY)
                    if (steps.get(kind) or {}).get('state') in ('done', 'skipped'))
     basis, route = plan_route(cursor, request, initiator, manager, settled=passed + (current,))
     approval = steps.get(workflow.KIND_APPROVAL) or {}

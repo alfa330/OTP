@@ -585,7 +585,8 @@ class AccountingBoardTests(unittest.TestCase):
     def test_empty_column_says_what_lands_in_it(self):
         body = self.board([])
         self.assertEqual(body['columns'][0]['key'], 'entity')
-        self.assertEqual(body['columns'][0]['caption'], 'Выбор юр. лица после руководителя')
+        # С 17.11.2026 в той же колонке и проверка регулярных платежей бухгалтерией (п. 7).
+        self.assertEqual(body['columns'][0]['caption'], 'Проверка регулярных платежей и выбор юр. лица')
         self.assertEqual(body['columns'][0]['cards'], [])
 
     def test_column_window_lists_the_column(self):

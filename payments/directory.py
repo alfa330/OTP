@@ -251,7 +251,7 @@ def upsert_legal_entity(cursor, *, entity_id=None, fields, actor_id=None):
 # sync_counterparty_emails — сама карточка поле не трогает.
 _COUNTERPARTY_FIELDS = ('id', 'name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
                         'emails', 'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
-                        'note', 'is_active')
+                        'note', 'is_active', 'tax_regime', 'tax_regime_note', 'tax_checked_at')
 _COUNTERPARTY_WRITE = ('name', 'legal_name', 'bin', 'kind', 'vat_payer', 'requisites', 'contact',
                        'category_id', 'responsible_user_id', 'approver_user_id', 'approval_limit',
                        'note', 'is_active')
@@ -559,7 +559,10 @@ def upsert_account(cursor, *, account_id=None, fields, actor_id=None):
 _CONTRACT_FIELDS = ('id', 'counterparty_id', 'legal_entity_id', 'number', 'signed_on', 'starts_on',
                     'ends_on', 'status', 'subject', 'amount', 'amount_limit', 'periodicity',
                     'responsible_user_id', 'file_name', 'file_type', 'file_size', 'note',
-                    'created_at', 'updated_at')
+                    'created_at', 'updated_at',
+                    # Проверка поставщика по БИН при заведении договора (17.11.2026, п. 8).
+                    'tax_vat', 'tax_regime', 'tax_regime_note', 'tax_source', 'tax_checked_at',
+                    'tax_checked_by', 'tax_checked_by_name', 'tax_file_name', 'tax_file_type', 'tax_file_size')
 _CONTRACT_WRITE = ('counterparty_id', 'legal_entity_id', 'number', 'signed_on', 'starts_on', 'ends_on',
                    'status', 'subject', 'amount', 'amount_limit', 'periodicity', 'responsible_user_id',
                    'note')
@@ -577,6 +580,7 @@ def _contract_row(row):
     extra = row[len(_CONTRACT_FIELDS):]
     item['counterparty_name'], item['legal_entity_name'], item['responsible_name'] = extra[0], extra[1], extra[2]
     item['has_file'] = bool(item.get('file_name'))
+    item['has_tax_file'] = bool(item.get('tax_file_name'))
     return item
 
 
@@ -623,6 +627,53 @@ def contract_file(cursor, contract_id):
     if not row or not row[3]:
         return None
     return {'file_name': row[0], 'file_type': row[1], 'bucket': row[2], 'blob_path': row[3]}
+
+
+def set_contract_tax(cursor, contract_id, *, vat, regime, note=None, source=None, actor=None):
+    """Проверка поставщика по БИН при заведении договора (владелец 17.11.2026, п. 8): НДС и режим
+    (ОУР/СНР) — снимком на договоре, кто и когда проверил. Последнее известное о поставщике ложится и
+    в его карточку (set_counterparty_tax) — по нему окна заявок показывают «Поставщик по БИН»."""
+    cursor.execute(
+        "UPDATE payment_contracts SET tax_vat = %%s, tax_regime = %%s, tax_regime_note = %%s, tax_source = %%s, "
+        "tax_checked_at = %s, tax_checked_by = %%s, tax_checked_by_name = %%s WHERE id = %%s "
+        "RETURNING counterparty_id, tax_checked_at" % NOW_SQL,
+        (vat, regime, (str(note or '').strip() or None) if regime else None, source,
+         (actor or {}).get('id'), (actor or {}).get('name'), int(contract_id)))
+    row = cursor.fetchone()
+    if row and row[0]:
+        set_counterparty_tax(cursor, row[0], vat=vat, regime=regime, note=note, checked_at=row[1])
+    return row[1] if row else None
+
+
+def set_counterparty_tax(cursor, counterparty_id, *, vat, regime, note=None, checked_at=None):
+    """Что известно о поставщике по последней выписке КГД: НДС, режим и дата проверки."""
+    cursor.execute(
+        "UPDATE payment_counterparties SET vat_payer = COALESCE(%s, vat_payer), "
+        "tax_regime = COALESCE(%s, tax_regime), tax_regime_note = %s, tax_checked_at = %s WHERE id = %s",
+        (vat, regime, (str(note or '').strip() or None) if regime == 'snr' else None, checked_at,
+         int(counterparty_id)))
+
+
+def contract_tax_file(cursor, contract_id):
+    """Выписка КГД, приложенная к проверке договора: {'file_name', 'file_type', 'bucket', 'blob_path'}."""
+    cursor.execute(
+        "SELECT tax_file_name, tax_file_type, tax_file_bucket, tax_file_blob FROM payment_contracts WHERE id = %s",
+        (int(contract_id),))
+    row = cursor.fetchone()
+    if not row or not row[3]:
+        return None
+    return {'file_name': row[0], 'file_type': row[1], 'bucket': row[2], 'blob_path': row[3]}
+
+
+def set_contract_tax_file(cursor, contract_id, *, file_name=None, file_type=None, file_size=None, bucket=None,
+                          blob_path=None):
+    """Привязывает выписку КГД к договору (или снимает). Возвращает прежнюю."""
+    previous = contract_tax_file(cursor, contract_id)
+    cursor.execute(
+        "UPDATE payment_contracts SET tax_file_name = %s, tax_file_type = %s, tax_file_size = %s, "
+        "tax_file_bucket = %s, tax_file_blob = %s WHERE id = %s",
+        (file_name, file_type, file_size, bucket, blob_path, int(contract_id)))
+    return previous
 
 
 def set_contract_file(cursor, contract_id, *, file_name=None, file_type=None, file_size=None, bucket=None,
@@ -844,23 +895,24 @@ _TEMPLATE_FIELDS = ('id', 'name', 'amount', 'periodicity', 'interval_days', 'nex
                     'project_id', 'branch', 'responsible_user_id', 'category_id', 'subcategory_id',
                     'counterparty_id', 'legal_entity_id', 'contract_id', 'no_contract', 'counterparty_account_id',
                     'payment_purpose', 'amount_limit', 'approver_user_id', 'object_type',
-                    'accounting_category', 'due_day', 'auto_create',
+                    'accounting_category', 'due_day', 'auto_create', 'invoice_required', 'checker_user_id',
                     'note', 'is_active', 'last_generated_on', 'created_at', 'updated_at')
 _TEMPLATE_WRITE = ('name', 'amount', 'periodicity', 'interval_days', 'next_due_on', 'lead_days', 'project_id',
                    'branch', 'responsible_user_id', 'category_id', 'subcategory_id', 'counterparty_id',
                    'legal_entity_id', 'contract_id', 'no_contract', 'counterparty_account_id', 'payment_purpose',
                    'amount_limit', 'approver_user_id', 'object_type', 'accounting_category', 'due_day',
-                   'auto_create', 'note', 'is_active')
+                   'auto_create', 'invoice_required', 'checker_user_id', 'note', 'is_active')
 _TEMPLATE_EXTRA = ('responsible_name', 'project_name', 'category_name', 'subcategory_name',
                    'counterparty_name', 'legal_entity_name', 'contract_number', 'approver_name',
                    'account_iik', 'account_bank', 'account_bik', 'account_kbe',
-                   'requests_count', 'open_request_id')
+                   'requests_count', 'open_request_id', 'checker_name')
 _TEMPLATE_SQL = """
     SELECT %s, u.name, p.name, c1.name, c2.name, cp.name, le.name, ct.number, appr.name,
            acc.iik, acc.bank_name, acc.bik, acc.kbe,
            (SELECT COUNT(*) FROM payment_requests r WHERE r.fixed_template_id = t.id),
            (SELECT r.id FROM payment_requests r WHERE r.fixed_template_id = t.id AND r.status = 'active'
-               AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1)
+               AND r.deleted_at IS NULL ORDER BY r.id DESC LIMIT 1),
+           chk.name
       FROM payment_fixed_templates t
       LEFT JOIN users u ON u.id = t.responsible_user_id
       LEFT JOIN payment_projects p ON p.id = t.project_id
@@ -871,6 +923,7 @@ _TEMPLATE_SQL = """
       LEFT JOIN payment_contracts ct ON ct.id = t.contract_id
       LEFT JOIN users appr ON appr.id = t.approver_user_id
       LEFT JOIN payment_counterparty_accounts acc ON acc.id = t.counterparty_account_id
+      LEFT JOIN users chk ON chk.id = t.checker_user_id
 """ % columns('t', _TEMPLATE_FIELDS)
 
 
@@ -900,7 +953,9 @@ def read_template(cursor, template_id, *, lock=False):
 
 def upsert_template(cursor, *, template_id=None, fields, actor_id=None):
     # «Без договора» — только когда договор не выбран; пусто — «не выбрано» (NOT NULL).
-    fields = dict(fields, no_contract=bool(fields.get('no_contract')) and not fields.get('contract_id'))
+    # «Счёт нужен» по умолчанию (17.11.2026, п. 1): импорт из Excel и старые формы его не присылают.
+    fields = dict(fields, no_contract=bool(fields.get('no_contract')) and not fields.get('contract_id'),
+                  invoice_required=fields.get('invoice_required') is not False)
     values = [fields.get(col) for col in _TEMPLATE_WRITE]
     if template_id:
         cursor.execute(

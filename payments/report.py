@@ -167,6 +167,9 @@ def enrich(request, items, offers=()):
     # Этап — у живой заявки; у закрытой и удалённой он уже сказан состоянием.
     row['stage_text'] = (workflow.STAGE_LABELS.get(request.get('stage'), '')
                          if request.get('status') == 'active' and not request.get('deleted_at') else '')
+    if row['stage_text'] and request.get('current_kind') == workflow.KIND_REGULAR_CHECK:
+        # Регулярный платёж 1-го числа проверяет бухгалтерия (17.11.2026, п. 7).
+        row['stage_text'] += ' — бухгалтерия, проверка регулярного платежа'
     if row['stage_text'] and request.get('current_kind') == workflow.KIND_ENTITY:
         # Бухгалтерия на «Согласовании» выбирает юр. лицо (согласование с бухгалтерией, 16.11.2026).
         row['stage_text'] += ' — бухгалтерия, выбор юр. лица'

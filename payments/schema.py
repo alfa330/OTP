@@ -118,7 +118,9 @@ EVENT_KINDS = ('created', 'step_done', 'step_skipped', 'returned', 'rejected',
                'deleted', 'supplier_vat',
                # 16.11.2026: бухгалтер поставил срок закрывающих документов (п. 5) и закрыл
                # заявку раньше них — документы ждут до срока (п. 6)
-               'docs_due', 'docs_deferred')
+               'docs_due', 'docs_deferred',
+               # 17.11.2026: бухгалтерия проверила регулярный платёж (п. 7)
+               'checked')
 
 _STATEMENTS = [
 
@@ -1170,6 +1172,115 @@ _STATEMENTS = [
     END $$
     """,
 
+    # ── Правки владельца 17.11.2026 ────────────────────────────────────────
+    #
+    # * Регулярный платёж «со счётом / без счёта» (п. 1): без счёта платят по договору, и
+    #   заявка счёта не требует ни при отправке, ни перед оплатой. Выбор лежит в справочнике
+    #   и копируется в заявку при её создании — смена в справочнике не меняет уже идущие.
+    # * Проверяющий регулярного платежа (п. 7): заявка месяца приходит 1-го числа и сначала
+    #   идёт ему — сотрудник бухгалтерии проверяет все данные. Пусто — любой из бухгалтерии.
+    # * Проверка поставщика по БИН при заведении договора (п. 8): НДС и режим (ОУР/СНР) по
+    #   выписке КГД — на договоре снимок проверки (кто, когда, по какой выписке), у поставщика —
+    #   последний известный режим.
+    # Без внешних ключей на users — как у отделов проекта: ссылка на users в первом старте
+    # брала бы блокировку таблицы пользователей. Колонки — под проверкой наличия: ALTER берёт
+    # блокировку таблицы даже с IF NOT EXISTS, а на старте рядом работает прежний экземпляр.
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_fixed_templates'
+                          AND column_name = 'checker_user_id') THEN
+            ALTER TABLE payment_fixed_templates
+                ADD COLUMN IF NOT EXISTS invoice_required BOOLEAN NOT NULL DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS checker_user_id INTEGER;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_requests'
+                          AND column_name = 'invoice_required') THEN
+            ALTER TABLE payment_requests ADD COLUMN IF NOT EXISTS invoice_required BOOLEAN NOT NULL DEFAULT TRUE;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_contracts'
+                          AND column_name = 'tax_checked_at') THEN
+            ALTER TABLE payment_contracts
+                ADD COLUMN IF NOT EXISTS tax_vat BOOLEAN,
+                ADD COLUMN IF NOT EXISTS tax_regime VARCHAR(8),
+                ADD COLUMN IF NOT EXISTS tax_regime_note VARCHAR(200),
+                ADD COLUMN IF NOT EXISTS tax_source VARCHAR(16),
+                ADD COLUMN IF NOT EXISTS tax_checked_at TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS tax_checked_by INTEGER,
+                ADD COLUMN IF NOT EXISTS tax_checked_by_name VARCHAR(200),
+                ADD COLUMN IF NOT EXISTS tax_file_name VARCHAR(255),
+                ADD COLUMN IF NOT EXISTS tax_file_type VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS tax_file_size INTEGER,
+                ADD COLUMN IF NOT EXISTS tax_file_bucket VARCHAR(255),
+                ADD COLUMN IF NOT EXISTS tax_file_blob TEXT;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = current_schema() AND table_name = 'payment_counterparties'
+                          AND column_name = 'tax_regime') THEN
+            ALTER TABLE payment_counterparties
+                ADD COLUMN IF NOT EXISTS tax_regime VARCHAR(8),
+                ADD COLUMN IF NOT EXISTS tax_regime_note VARCHAR(200),
+                ADD COLUMN IF NOT EXISTS tax_checked_at TIMESTAMP;
+        END IF;
+        -- Сколько выбрано по договору (пп. 2–4) считается по заявкам договора в каждом окне оплаты.
+        IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'idx_payment_requests_contract') THEN
+            CREATE INDEX idx_payment_requests_contract ON payment_requests (contract_id)
+                WHERE contract_id IS NOT NULL;
+        END IF;
+    END $$
+    """,
+
+    # ── Журнал раздела (п. 10, «логирование всех данных, прям всех») ─────
+    #
+    # Всё, что меняется вне заявки (справочники, договоры, регулярные платежи, роли,
+    # настройки, письма, имущество), — с «было → стало»; плюс кто открывал заявки и
+    # скачивал файлы. Ход самой заявки по-прежнему пишет payment_events: экран «Журнал»
+    # показывает обе ленты одной. Строку журнала нельзя ни поправить, ни стереть — как и
+    # историю заявки. Без внешних ключей: запись журнала переживает удаление того, о чём она.
+    """
+    CREATE TABLE IF NOT EXISTS payment_audit_log (
+        id          BIGSERIAL PRIMARY KEY,
+        created_at  TIMESTAMP NOT NULL DEFAULT %(now)s,
+        actor_id    INTEGER,
+        actor_name  VARCHAR(200),
+        action      VARCHAR(16) NOT NULL,
+        entity      VARCHAR(32) NOT NULL,
+        entity_id   INTEGER,
+        request_id  INTEGER,
+        title       TEXT,
+        changes     JSONB,
+        meta        JSONB
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payment_audit_created ON payment_audit_log (created_at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_payment_audit_entity ON payment_audit_log (entity, entity_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_payment_audit_actor ON payment_audit_log (actor_id, id)",
+    "CREATE INDEX IF NOT EXISTS idx_payment_audit_request ON payment_audit_log (request_id, id) "
+    "WHERE request_id IS NOT NULL",
+    """
+    CREATE OR REPLACE FUNCTION payment_audit_immutable()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $$
+    BEGIN
+        RAISE EXCEPTION 'payment_audit_log: журнал раздела неизменяем';
+    END;
+    $$
+    """,
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_payment_audit_immutable') THEN
+            CREATE TRIGGER trg_payment_audit_immutable
+            BEFORE UPDATE OR DELETE ON payment_audit_log
+            FOR EACH ROW EXECUTE FUNCTION payment_audit_immutable();
+        END IF;
+    END $$
+    """,
+
     # ── Неизменяемая история (п. 18) ───────────────────────────────────────
     #
     # Запись истории нельзя ни поправить, ни стереть — даже запросом в обход
@@ -1234,6 +1345,8 @@ TABLES = (
     'payment_counterparty_emails', 'payment_entity_mailboxes',
     # Отделы внутри проекта (16.11.2026)
     'payment_project_departments',
+    # Журнал раздела (17.11.2026, п. 10)
+    'payment_audit_log',
 )
 
 

@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    AtSign, Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, FileSignature, FileText, FolderKanban, Gauge,
-    Landmark, Loader2, Mail, Paperclip, Plus, Route, Search, SlidersHorizontal, Tags, Trash2, WalletCards,
+    AtSign, Boxes, Building2, CalendarClock, ChevronRight, CreditCard, Download, ExternalLink, FileSignature, FileText, FolderKanban,
+    Gauge, Landmark, Loader2, Mail, Paperclip, Plus, Route, Search, SlidersHorizontal, Sparkles, Tags, Trash2, WalletCards,
 } from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosInput, IosModal } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
@@ -10,15 +10,17 @@ import IosDatePicker from '../ui/DatePicker';
 import FixedPaymentsPanel from './FixedPaymentsPanel';
 import RequisitesMailings from './RequisitesMailings';
 import SupplierLetters, { LetterWindow } from './SupplierLetters';
+import { RecordHistory } from './PaymentsJournal';
 import {
     CONTRACT_STATUS_META, CONTRACT_STATUS_OPTIONS, HELPDESK_OPTIONS, HINTS, KIND_SHORT_OPTIONS, LIMIT_STATUS_META, MANAGER_STEP_OPTIONS,
     METHOD_SHORT_OPTIONS, PARTY_KIND_OPTIONS, PAYMENT_METHOD_OPTIONS, PERIOD_META, PERIOD_OPTIONS, REQUEST_KIND_OPTIONS,
     DICTIONARY_PAGE_SIZE, RECORD_FORMS, VAT_OPTIONS, addressLetterState, cardNumberLabel, emailsIssue, emailsShort, fileSizeLabel,
     fmtDate, fmtMoney, lettersEmailIssue, mailingPill, pageRange, parseAmount, parseEmails, plural, vatLabel,
+    KGD_SERVICE_URL, TAX_REGIME_OPTIONS, TAX_VAT_OPTIONS, contractTermView, taxText,
 } from './paymentsMeta';
 import {
     AmountInput, CARD_ROW, CARD_TABLE, CARD_TH, CardNumber, Choice, CopyButton, DATE_TRIGGER, ErrorBox, Field, FormInput, FormSelect,
-    Pager, TonePill, UserSelect, cardCell, errorText, fromKeyboard, revealAnchor, useFits,
+    LevelText, Pager, TonePill, UserSelect, cardCell, errorText, fromKeyboard, revealAnchor, useFits,
 } from './paymentsUi';
 
 /*
@@ -137,6 +139,10 @@ const toDraft = (name, row = {}) => {
                 status: row.status || 'active', subject: row.subject || '', amount: orBlank(row.amount),
                 amount_limit: orBlank(row.amount_limit), periodicity: row.periodicity || '',
                 responsible_user_id: row.responsible_user_id ?? null, note: row.note || '',
+                // Проверка поставщика по БИН (17.11.2026, п. 8). `tax_touched` — проверку делали в этом окне:
+                // у заведённого раньше договора без неё прочие правки сохраняются, не требуя проверки.
+                tax_vat: row.tax_vat ?? null, tax_regime: row.tax_regime ?? null, tax_regime_note: row.tax_regime_note || '',
+                tax_source: row.tax_source || '', tax_touched: false,
             };
         case 'cards':
             return {
@@ -178,6 +184,10 @@ const toPayload = (name, draft) => {
         if (key in payload && !payload[key]) payload[key] = null;
     });
     if (name === 'cards' && !payload.card_number) delete payload.card_number;
+    if (name === 'contracts') {
+        if (payload.id && !payload.tax_touched) ['tax_vat', 'tax_regime', 'tax_regime_note', 'tax_source'].forEach((key) => { delete payload[key]; });
+        delete payload.tax_touched;
+    }
     // НДС поставщика в трёх состояниях (п. 8): по метке сервер знает, что «не указан» здесь —
     // это выбор окна, а не прежнее окно, где ничего не выбрано значило «без НДС».
     if (name === 'counterparties') payload.vat_tristate = true;
@@ -185,6 +195,46 @@ const toPayload = (name, draft) => {
 };
 
 /* Строка «Почты поставщиков»: поставщик и ровно один адрес. */
+/* Справочник → запись журнала раздела: у них есть «История» (17.11.2026, п. 10). */
+const HISTORY_ENTITY = {
+    projects: 'project', project_departments: 'project_department', categories: 'category', asset_categories: 'asset_category',
+    legal_entities: 'legal_entity', counterparties: 'counterparty', counterparty_accounts: 'counterparty_account',
+    counterparty_emails: 'counterparty_email', contracts: 'contract', cards: 'card', limits: 'limit', routes: 'route',
+};
+
+/* Что раздел прочитал из документа (17.11.2026, пп. 5, 8) — строкой под файлом. */
+const ReadNote = ({ state, what }) => {
+    if (!state) return null;
+    if (state.status === 'reading') {
+        return <span className="flex items-center gap-1.5 pt-1 text-[12.5px] text-slate-500" data-read="reading"><Loader2 size={13} className="animate-spin" /> Читаем {what}…</span>;
+    }
+    if (state.status === 'error' || state.status === 'mismatch') {
+        return <span className="block pt-1 text-[12.5px] text-slate-500" data-read={state.status}>{state.status === 'error' ? state.text : ''}</span>;
+    }
+    return (
+        <span className="block space-y-0.5 pt-1 text-[12.5px]" data-read="done">
+            {(state.filled?.length > 0 || !state.warning) && (
+                <span className="flex items-start gap-1.5 text-slate-600">
+                    <Sparkles size={13} className="mt-[2px] shrink-0 text-blue-500" />
+                    {state.filled?.length ? `Заполнено: ${state.filled.join(', ')} — проверьте.` : 'Пустых полей, которые есть в документе, не нашлось.'}
+                </span>
+            )}
+            {state.warning && <span className="block rounded-md bg-rose-50 px-1.5 py-0.5 text-rose-700">{state.warning}</span>}
+        </span>
+    );
+};
+
+/* Проверка поставщика по БИН у договора (владелец 17.11.2026, п. 8): у нового договора НДС и режим
+   обязательны; выписка КГД о другом БИН — красным у поля, НДС и режим из неё не берутся. */
+export const contractTaxIssues = (draft, taxRead = null) => {
+    const issues = {};
+    const required = !draft.id || draft.tax_touched;
+    if (required && draft.tax_vat !== true && draft.tax_vat !== false) issues.tax_vat = 'с НДС или без НДС — по выписке КГД';
+    if (required && !draft.tax_regime) issues.tax_regime = 'ОУР или СНР — по выписке КГД';
+    if (taxRead?.status === 'mismatch') issues.tax_file = taxRead.text;
+    return issues;
+};
+
 export const emailRowIssues = (draft) => {
     const issues = {};
     if (!draft?.counterparty_id) issues.counterparty_id = 'Выберите поставщика, чей это адрес';
@@ -230,7 +280,7 @@ const Hidden = ({ active, label = 'скрыта' }) => (active ? null : (
    названия (категории, проекты) колонок не имеют — у них null, они стоят списком.
    `tools` — то, что нужно ячейкам с действиями: чтение номера карты и тост. */
 const partyLine = (row) => [nameOf(PARTY_KIND_OPTIONS, row.kind), row.bin && `БИН ${row.bin}`, vatLabel(row.vat_payer)].filter(Boolean).join(' · ');
-export const dictionaryColumns = (name, { loadCardNumber, showToast, mailWide = false } = {}) => {
+export const dictionaryColumns = (name, { loadCardNumber, showToast, mailWide = false, warnDays = 30 } = {}) => {
     switch (name) {
         case 'counterparties':
             return [
@@ -249,14 +299,38 @@ export const dictionaryColumns = (name, { loadCardNumber, showToast, mailWide = 
             return [
                 { key: 'number', label: 'Договор', cell: (row) => ({ main: `№${row.number}`, strong: true, sub: [row.signed_on && `от ${fmtDate(row.signed_on)}`, row.has_file ? 'файл приложен' : 'без файла'].filter(Boolean).join(' · ') }) },
                 { key: 'party', label: 'Поставщик', width: 180, cell: (row) => ({ main: row.counterparty_name, sub: row.legal_entity_name }) },
-                { key: 'term', label: 'Срок действия', width: 144, cell: (row) => ({ main: row.ends_on ? `до ${fmtDate(row.ends_on)}` : 'бессрочный', sub: row.starts_on ? `с ${fmtDate(row.starts_on)}` : '' }) },
+                {
+                    // Розовым — подходит к концу, красным — истёк (17.11.2026, п. 4). Спокойный срок — без цвета.
+                    key: 'term', label: 'Срок действия', width: 144,
+                    cell: (row) => {
+                        const term = contractTermView(row, { warnDays });
+                        return {
+                            main: term.level === 'ok' ? term.text : <LevelText level={term.level}>{term.text}</LevelText>,
+                            sub: term.note || (row.starts_on ? `с ${fmtDate(row.starts_on)}` : ''),
+                        };
+                    },
+                },
                 {
                     key: 'amount', label: 'Сумма', width: 128, align: 'right',
                     cell: (row) => (row.amount
                         ? { main: fmtMoney(row.amount), sub: row.periodicity ? (PERIOD_META[row.periodicity]?.label || '').toLowerCase() : '' }
                         : { main: 'не указана', muted: true }),
                 },
-                { key: 'status', label: 'Статус', width: 136, cell: (row) => CONTRACT_STATUS_META[row.status] && <TonePill tone={CONTRACT_STATUS_META[row.status].tone}>{CONTRACT_STATUS_META[row.status].label}</TonePill> },
+                {
+                    // Под статусом — проверка поставщика по БИН (17.11.2026, п. 8): не проверен — мягким розовым.
+                    key: 'status', label: 'Статус', width: 136,
+                    cell: (row) => CONTRACT_STATUS_META[row.status] && (
+                        <div className="min-w-0">
+                            <TonePill tone={CONTRACT_STATUS_META[row.status].tone}>{CONTRACT_STATUS_META[row.status].label}</TonePill>
+                            {/* У недействующего договора проверка уже ни к чему — строки нет. */}
+                            {row.status === 'active' && (
+                                <div className={`mt-0.5 truncate text-[11.5px] ${row.tax_checked_at ? 'text-slate-500' : 'text-rose-600'}`} data-contract-tax-state>
+                                    {row.tax_checked_at ? (taxText(row.tax_vat, row.tax_regime) || 'БИН проверен') : 'БИН не проверен'}
+                                </div>
+                            )}
+                        </div>
+                    ),
+                },
             ];
         case 'legal_entities':
             return [
@@ -380,7 +454,7 @@ const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
                         inputMode="numeric"
                         aria-label={label}
                         value={values[key] ?? ''}
-                        onChange={(event) => setValues((prev) => ({ ...prev, [key]: event.target.value.replace(/\D/g, '').slice(0, 2) }))}
+                        onChange={(event) => setValues((prev) => ({ ...prev, [key]: event.target.value.replace(/\D/g, '').slice(0, String(high).length) }))}
                     />
                     <span className="text-[12.5px] text-slate-500">{unit} · от {low} до {high}</span>
                 </div>
@@ -395,6 +469,9 @@ const Settings = ({ apiBaseUrl, headers, showToast, onSaved }) => {
             {/* П. 17 (решение владельца 09.11.2026): свои сроки у этапов после оплаты. */}
             {numberField('receipt_days', 'Срок чека после пополнения карты', HINTS.receiptDays.intro, 'дней')}
             {numberField('closing_docs_days', 'Срок закрывающих документов после получения', HINTS.closingDocsDays.intro, 'дней')}
+            {/* Когда договор «обратите внимание» — розовым (владелец 17.11.2026, пп. 2–4). */}
+            {numberField('contract_warn_days', 'Договор подходит к концу — за', HINTS.contractWarnDays.intro, 'дней')}
+            {numberField('limit_warn_percent', 'Лимит договора почти выбран — с', HINTS.limitWarnPercent.intro, '%')}
             <div>
                 <button type="button" className={iosBtnPrimary} onClick={save} disabled={saving}>
                     {saving && <Loader2 size={14} className="animate-spin" />} Сохранить
@@ -451,6 +528,12 @@ const PaymentsDictionaries = ({
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [contractFile, setContractFile] = useState(null);
     const fileRef = useRef(null);
+    /* Договор (владелец 17.11.2026): файл договора заполняет пустые поля (п. 5), выписка КГД — НДС и
+       режим поставщика (п. 8). `reading` — что сейчас читается и что из этого вышло. */
+    const [taxFile, setTaxFile] = useState(null);
+    const taxRef = useRef(null);
+    const [reading, setReading] = useState({ contract: null, tax: null });
+    const readSeq = useRef({ contract: 0, tax: 0 });
 
     const toastRef = useRef(showToast);
     useEffect(() => { toastRef.current = showToast; }, [showToast]);
@@ -494,6 +577,9 @@ const PaymentsDictionaries = ({
         setError('');
         setConfirmDelete(false);
         setContractFile(null);
+        setTaxFile(null);
+        readSeq.current = { contract: readSeq.current.contract + 1, tax: readSeq.current.tax + 1 };
+        setReading({ contract: null, tax: null });
         setEmailsTried(false);
         setEmailsRefused('');
         setFieldTried(false);
@@ -506,6 +592,89 @@ const PaymentsDictionaries = ({
     /* Новый отдел — в проекте, у которого нажали «Добавить отдел» (или в выбранном фильтром). */
     const openDepartment = (projectId) => openEditor({ _department: true, project_id: projectId || null, is_active: true });
     const set = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
+    const draftRef = useRef(draft);
+    draftRef.current = draft;
+    /* Прочитать документ разделом (17.11.2026, пп. 5, 8): договор или выписку КГД. Поздний ответ
+       по уже закрытому окну или по заменённому файлу не ложится в черновик. */
+    const readDocument = async (kind, file) => {
+        const slot = kind === 'kgd' ? 'tax' : 'contract';
+        const seq = readSeq.current[slot] + 1;
+        readSeq.current = { ...readSeq.current, [slot]: seq };
+        setReading((prev) => ({ ...prev, [slot]: { status: 'reading' } }));
+        try {
+            const form = new FormData();
+            form.append('kind', kind);
+            form.append('file', file, file.name);
+            const response = await axios.post(`${apiBaseUrl}/api/payments/extract`, form, { headers: headers() });
+            if (readSeq.current[slot] !== seq) return null;
+            return response.data || {};
+        } catch (err) {
+            if (readSeq.current[slot] === seq) {
+                setReading((prev) => ({ ...prev, [slot]: { status: 'error', text: errorText(err, 'Прочитать не вышло — заполните поля вручную') } }));
+            }
+            return null;
+        }
+    };
+    // Файл договора — пустые поля из него: номер, даты, суммы, периодичность, предмет, стороны по БИН.
+    const pickContractFile = async (file) => {
+        setContractFile(file);
+        if (!file) { setReading((prev) => ({ ...prev, contract: null })); return; }
+        const result = await readDocument('contract', file);
+        if (!result) return;
+        const fields = result.fields || {};
+        const matches = result.matches || {};
+        const now = draftRef.current || {};
+        const empty = (source, key) => source[key] === null || source[key] === undefined || source[key] === '';
+        const offered = [
+            ['number', fields.number, 'номер'], ['signed_on', fields.signed_on, 'дата договора'],
+            ['starts_on', fields.starts_on, 'начало'], ['ends_on', fields.ends_on, 'окончание'],
+            ['amount', fields.amount && parseAmount(fields.amount), 'сумма'],
+            ['amount_limit', fields.amount_limit && parseAmount(fields.amount_limit), 'лимит'],
+            ['periodicity', fields.periodicity, 'периодичность'], ['subject', fields.subject, 'предмет'],
+            ['counterparty_id', matches.counterparty_id, 'поставщик'], ['legal_entity_id', matches.legal_entity_id, 'компания'],
+        ].filter(([key, value]) => value && empty(now, key));
+        if (offered.length) {
+            // Поле, которое успели заполнить, пока шло чтение, не перетирается.
+            setDraft((prev) => offered.reduce((next, [key, value]) => (empty(prev, key) ? { ...next, [key]: value } : next), prev));
+        }
+        const filled = offered.map(([, , label]) => label);
+        const unknown = !matches.counterparty_id && (fields.supplier_name || fields.supplier_bin)
+            ? `Поставщика «${fields.supplier_name || ''}»${fields.supplier_bin ? ` (БИН ${fields.supplier_bin})` : ''} нет в справочнике — заведите его в «Поставщиках».` : '';
+        setReading((prev) => ({ ...prev, contract: { status: 'done', filled: [...new Set(filled)], warning: result.other_document ? 'Похоже, это не договор — проверьте файл.' : unknown } }));
+    };
+    // Выписка КГД (п. 8): НДС и режим поставщика — из неё; выписка о другом БИН — ошибка у поля.
+    const pickTaxFile = async (file) => {
+        setTaxFile(file);
+        if (!file) { setReading((prev) => ({ ...prev, tax: null })); return; }
+        const result = await readDocument('kgd', file);
+        if (!result) return;
+        const fields = result.fields || {};
+        const supplier = (dictionaries?.counterparties || []).find((item) => item.id === draft.counterparty_id) || null;
+        if (fields.bin && supplier?.bin && fields.bin !== supplier.bin) {
+            setReading((prev) => ({ ...prev, tax: { status: 'mismatch', text: `выписка — о БИН ${fields.bin}, а у поставщика БИН ${supplier.bin}` } }));
+            return;
+        }
+        const patch = { tax_touched: true, tax_source: 'kgd' };
+        const filled = [];
+        if (fields.vat_payer === true || fields.vat_payer === false) {
+            patch.tax_vat = fields.vat_payer;
+            filled.push(fields.vat_payer ? 'с НДС' : 'без НДС');
+        }
+        if (fields.tax_regime) {
+            patch.tax_regime = fields.tax_regime;
+            patch.tax_regime_note = fields.tax_regime === 'snr' ? (fields.tax_regime_note || '') : '';
+            filled.push(fields.tax_regime === 'our' ? 'ОУР' : `СНР${fields.tax_regime_note ? ` (${fields.tax_regime_note})` : ''}`);
+        }
+        setDraft((prev) => ({ ...prev, ...patch }));
+        setReading((prev) => ({
+            ...prev,
+            tax: {
+                status: 'done', filled: [...new Set(filled)],
+                warning: result.other_document ? 'Похоже, это не выписка КГД — проверьте файл.'
+                    : (!fields.tax_regime && fields.tax_regime_text ? `Режим в выписке: «${fields.tax_regime_text}» — выберите ОУР или СНР сами.` : ''),
+            },
+        }));
+    };
     const changed = async () => { await load(); onDictionariesChanged?.(); };
 
     /* Тост после сохранения компании: изменились реквизиты — готово ли письмо поставщикам. */
@@ -522,7 +691,8 @@ const PaymentsDictionaries = ({
     const revealField = (anchor, event) => requestAnimationFrame(() => revealAnchor(
         document.querySelector(`[data-issue-anchor="${anchor}"]`), { focus: fromKeyboard(event) }));
     // «Почта поставщиков»: что не так в строке — своё и то, что ответил сервер.
-    const fieldIssues = name === 'counterparty_emails' ? { ...emailRowIssues(draft), ...fieldRefused } : {};
+    const fieldIssues = name === 'counterparty_emails' ? { ...emailRowIssues(draft), ...fieldRefused }
+        : (name === 'contracts' ? contractTaxIssues(draft, reading.tax) : {});
 
     const save = async (event) => {
         if (name === 'counterparties' && emailsIssue(draft.emails)) {
@@ -543,6 +713,12 @@ const PaymentsDictionaries = ({
             revealField('letters-email', event);
             return;
         }
+        if (name === 'contracts' && Object.keys(contractTaxIssues(draft, reading.tax)).length) {
+            // Новый договор — без проверки поставщика по БИН не заводится (17.11.2026, п. 8).
+            setFieldTried(true);
+            revealField('contract-tax', event);
+            return;
+        }
         setSaving(true);
         setError('');
         try {
@@ -557,6 +733,12 @@ const PaymentsDictionaries = ({
                 const form = new FormData();
                 form.append('file', contractFile, contractFile.name);
                 await axios.post(`${apiBaseUrl}/api/payments/dictionaries/contracts/${response.data.id}/file`, form, { headers: headers() });
+            }
+            if (name === 'contracts' && taxFile && response.data?.id) {
+                // Выписка КГД ложится к проверке договора — по ней видно, на чём основано «С НДС · ОУР».
+                const form = new FormData();
+                form.append('file', taxFile, taxFile.name);
+                await axios.post(`${apiBaseUrl}/api/payments/dictionaries/contracts/${response.data.id}/tax-file`, form, { headers: headers() });
             }
             const mailing = response.data?.mailing;
             toastRef.current?.(savedText(mailing), 'success');
@@ -574,6 +756,9 @@ const PaymentsDictionaries = ({
                 setEmailsRefused(String(err.response.data.error || '').replace(/^Почта: /, ''));
                 setEmailsTried(true);
                 revealEmails(event);
+            } else if (name === 'contracts' && err?.response?.data?.code === 'PAYMENTS_TAX_CHECK_MISSING') {
+                setFieldTried(true);
+                revealField('contract-tax', event);
             } else if (name === 'counterparty_emails' && ['email', 'counterparty_id'].includes(err?.response?.data?.field)) {
                 const field = err.response.data.field;
                 setFieldRefused({ [field]: String(err.response.data.error || '').replace(/^Адрес: /, '') });
@@ -830,6 +1015,25 @@ const PaymentsDictionaries = ({
         </>
     );
 
+    // БИН поставщика договора — его вводят в сервисе КГД (п. 8).
+    const supplierBin = name === 'contracts'
+        ? ((dictionaries?.counterparties || []).find((item) => item.id === draft.counterparty_id)?.bin || '') : '';
+    const downloadTaxFile = async (row) => {
+        try {
+            const response = await axios.get(`${apiBaseUrl}/api/payments/dictionaries/contracts/${row.id}/tax-file`, { headers: headers(), responseType: 'blob' });
+            const url = URL.createObjectURL(response.data);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = row.tax_file_name || 'Выписка КГД';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) {
+            toastRef.current?.(errorText(err, 'Не удалось скачать выписку'), 'error');
+        }
+    };
+
     const renderForm = () => {
         switch (name) {
             case 'categories':
@@ -981,7 +1185,49 @@ const PaymentsDictionaries = ({
                                 <FormSelect value={draft.status} onChange={(v) => set('status', v)} options={CONTRACT_STATUS_OPTIONS} ariaLabel="Статус договора" />
                             </Field>
                         </div>
-                        <Field as="div" label="Файл договора" hint="Скан подписанного договора: PDF, изображение или Word.">
+                        {/* Проверка поставщика по БИН (владелец 17.11.2026, п. 8): сервис КГД закрыт капчей —
+                            выписку скачивает бухгалтер, раздел читает её и ставит НДС и режим. */}
+                        <Field as="div" label="Проверка по БИН" required={!draft.id} optionalMark={false} hint={HINTS.taxCheck}
+                            anchor="contract-tax" issue={fieldTried ? (fieldIssues.tax_file || '') : ''}>
+                            <div className="space-y-2.5 rounded-xl bg-slate-50 px-3 py-2.5" data-contract-tax>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <a href={KGD_SERVICE_URL} target="_blank" rel="noopener noreferrer" className={iosBtnSecondary}>
+                                        Открыть сервис КГД <ExternalLink size={13} />
+                                    </a>
+                                    {supplierBin && <CopyButton text={supplierBin} label={`БИН ${supplierBin}`} />}
+                                    <input ref={taxRef} type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic" className="hidden"
+                                        onChange={(event) => { const file = event.target.files?.[0] || null; event.target.value = ''; if (file) pickTaxFile(file); }} />
+                                    <button type="button" className={`${iosBtnGhost} -ml-1`} onClick={() => taxRef.current?.click()}>
+                                        <Paperclip size={14} /> {taxFile || editing?.has_tax_file ? 'Заменить выписку КГД' : 'Приложить выписку КГД'}
+                                    </button>
+                                </div>
+                                {taxFile && <div className="truncate text-[12.5px] text-slate-600">{taxFile.name} <span className="text-slate-500">· {fileSizeLabel(taxFile.size)} · загрузится при сохранении</span></div>}
+                                <ReadNote state={reading.tax} what="выписку КГД" />
+                                <div className="grid gap-3 sm:grid-cols-2">
+                                    <Field as="div" label="НДС" required={!draft.id || draft.tax_touched} optionalMark={false} anchor="contract-tax-vat" issue={fieldTried ? (fieldIssues.tax_vat || '') : ''}>
+                                        <Choice value={draft.tax_vat} options={TAX_VAT_OPTIONS} onChange={(v) => setDraft((prev) => ({ ...prev, tax_vat: v, tax_touched: true, tax_source: prev.tax_source || 'manual' }))} ariaLabel="НДС поставщика" invalid={fieldTried && Boolean(fieldIssues.tax_vat)} />
+                                    </Field>
+                                    <Field as="div" label="Режим" required={!draft.id || draft.tax_touched} optionalMark={false} anchor="contract-tax-regime" issue={fieldTried ? (fieldIssues.tax_regime || '') : ''}>
+                                        <Choice value={draft.tax_regime} options={TAX_REGIME_OPTIONS} onChange={(v) => setDraft((prev) => ({ ...prev, tax_regime: v, tax_regime_note: v === 'snr' ? prev.tax_regime_note : '', tax_touched: true, tax_source: prev.tax_source || 'manual' }))} ariaLabel="Режим налогообложения" invalid={fieldTried && Boolean(fieldIssues.tax_regime)} />
+                                    </Field>
+                                </div>
+                                {draft.tax_regime === 'snr' && (
+                                    <Field label="Вид СНР" hint="Как в выписке: на основе упрощённой декларации, для самозанятых, для КФХ.">
+                                        <FormInput value={draft.tax_regime_note || ''} onChange={(event) => setDraft((prev) => ({ ...prev, tax_regime_note: event.target.value, tax_touched: true }))} maxLength={200} placeholder="упрощённая декларация" />
+                                    </Field>
+                                )}
+                                {editing?.tax_checked_at && (
+                                    <div className="flex flex-wrap items-center gap-x-1.5 text-[12.5px] text-slate-500" data-tax-checked>
+                                        Проверено {fmtDate(editing.tax_checked_at)}{editing.tax_checked_by_name ? ` — ${editing.tax_checked_by_name}` : ''}
+                                        {editing.tax_source === 'kgd' ? ', по выписке КГД' : ', отметкой вручную'}
+                                        {editing.has_tax_file && (
+                                            <button type="button" className="font-medium text-blue-600 hover:underline" onClick={() => downloadTaxFile(editing)}>выписка</button>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </Field>
+                        <Field as="div" label="Файл договора" hint={HINTS.autofill}>
                             {editing?.has_file && !contractFile && (
                                 <div className="mb-2 flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
                                     <FileText size={15} className="shrink-0 text-slate-400" />
@@ -997,13 +1243,14 @@ const PaymentsDictionaries = ({
                                 <div className="mb-2 flex items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
                                     <FileText size={15} className="shrink-0 text-slate-400" />
                                     <div className="min-w-0 flex-1 truncate text-[13px] text-slate-800">{contractFile.name} <span className="text-slate-500">· {fileSizeLabel(contractFile.size)} · загрузится при сохранении</span></div>
-                                    <button type="button" aria-label="Убрать файл" className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-700" onClick={() => setContractFile(null)}><Trash2 size={14} /></button>
+                                    <button type="button" aria-label="Убрать файл" className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-slate-400 transition hover:bg-slate-200 hover:text-slate-700" onClick={() => pickContractFile(null)}><Trash2 size={14} /></button>
                                 </div>
                             )}
-                            <input ref={fileRef} type="file" accept={FILE_ACCEPT} className="hidden" onChange={(event) => { setContractFile(event.target.files?.[0] || null); event.target.value = ''; }} />
+                            <input ref={fileRef} type="file" accept={FILE_ACCEPT} className="hidden" onChange={(event) => { const file = event.target.files?.[0] || null; event.target.value = ''; pickContractFile(file); }} />
                             <button type="button" className={`${iosBtnGhost} -ml-2`} onClick={() => fileRef.current?.click()}>
                                 <Paperclip size={14} /> {editing?.has_file || contractFile ? 'Заменить файл' : 'Приложить файл'}
                             </button>
+                            <ReadNote state={reading.contract} what="договор" />
                         </Field>
                         <Field label="Примечание">{text('note', { maxLength: 2000 })}</Field>
                     </>
@@ -1130,7 +1377,8 @@ const PaymentsDictionaries = ({
     /* Таблица встаёт, только когда помещается в поле целиком (useFits): его ширину решают меню
        портала и левый список, а не одно окно. Не помещается — записи идут карточками. */
     const mailWide = name === 'legal_entities' && rows.some((row) => mailingPill(row.mailing));
-    const columns = dictionaryColumns(name, { loadCardNumber, showToast, mailWide });
+    const columns = dictionaryColumns(name, { loadCardNumber, showToast, mailWide,
+        warnDays: Number(dictionaries?.settings?.contract_warn_days) || 30 });
     const [paneRef, fits] = useFits(dictionaryTableMin(columns));
     const asTable = Boolean(columns && fits);
 
@@ -1391,6 +1639,10 @@ const PaymentsDictionaries = ({
                 {/* Письма поставщикам о смене реквизитов — тому, кто реквизиты правит. */}
                 {editing && !isNew && canEdit && name === 'legal_entities' && (
                     <RequisitesMailings apiBaseUrl={apiBaseUrl} headers={headers} entity={editing} draft={draft} showToast={showToast} onChanged={load} />
+                )}
+                {/* «История» записи (владелец 17.11.2026, п. 10): кто, когда и что было → стало. */}
+                {editing && !isNew && HISTORY_ENTITY[target] && (
+                    <RecordHistory apiBaseUrl={apiBaseUrl} headers={headers} entity={HISTORY_ENTITY[target]} entityId={draft.id || editing.id} />
                 )}
                 </div>
             </IosModal>

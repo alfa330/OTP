@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    Check, ChevronDown, ChevronUp, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText, Loader2, Paperclip, RefreshCcw,
-    ShoppingCart, Trash2, UsersRound, X,
+    AlertCircle, AlertTriangle, Check, ChevronDown, ChevronUp, Columns3, Copy, CreditCard, Download, Eye, EyeOff, FileText,
+    Loader2, Minus, Paperclip, RefreshCcw, ShoppingCart, Trash2, UsersRound, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
@@ -12,7 +12,8 @@ import { windowResizeMotion } from '../../utils/windowResize';
 import InfoHint from '../common/InfoHint';
 import useIsMobileShell from '../common/useIsMobileShell';
 import {
-    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, REQUEST_FORMS, approvalSummary, cardNumberLabel, contractSummary, docsDueChip, dueChip, edgeFade,
+    ATTACHMENT_LABELS, CONTRACT_THRESHOLD, HINTS, PERIOD_META, REQUEST_FORMS, approvalSummary, cardNumberLabel, contractSummary,
+    docsDueChip, dueChip, edgeFade,
     fileSizeLabel, fmtMoney, initialsOf,
     issueKeys, issueStep, pageRange, parseAmount, peopleParts, plural, requestState, requestType, requisitesText,
     shortPersonName, stateMeta, toneEdge, tonePill, toneRow,
@@ -264,9 +265,11 @@ export const Choice = ({ value, onChange, options, ariaLabel, stretch = false, d
    метка-чип с тонким кольцом, флажок срока, кружки с инициалами. Цвет у чипа —
    только когда он что-то сообщает (срок подходит, прошёл). */
 
+/* Срок (владелец 17.11.2026, п. 4): «розовые напоминания — обрати внимание, но не слишком нервный;
+   когда истекает срок — уже кричащий красный». Подходит — мягкий розовый, прошёл — сплошной красный. */
 const CHIP_TONE = {
-    overdue: 'bg-rose-50 text-rose-600 ring-rose-100',
-    soon: 'bg-amber-50 text-amber-700 ring-amber-100',
+    overdue: 'bg-red-600 text-white ring-red-600',
+    soon: 'bg-rose-50 text-rose-600 ring-rose-100',
     normal: 'bg-slate-100 text-slate-500 ring-transparent',
     done: 'bg-slate-100 text-slate-400 ring-transparent',
 };
@@ -453,6 +456,102 @@ export const contractValue = (request, threshold, empty = null) => {
     );
 };
 
+/* ── «Обратите внимание» и тревога (владелец 17.11.2026, пп. 2–4) ──
+   Розовый — мягко, чтобы заметили; красный — сплошной, чтобы не пропустили. Спокойное — без
+   цвета: двадцать подсвеченных строк читались бы как тревога, а не как состояние. */
+const LEVEL_BADGE = {
+    attention: 'bg-rose-50 text-rose-700 ring-1 ring-rose-100',
+    alarm: 'bg-red-600 font-semibold text-white ring-1 ring-red-600',
+};
+
+export const LevelText = ({ level, children }) => {
+    const badge = LEVEL_BADGE[level];
+    if (!badge) return <span>{children}</span>;
+    return <span data-level={level} className={`rounded-md px-1.5 py-[1px] [box-decoration-break:clone] ${badge}`}>{children}</span>;
+};
+
+const LEVEL_FRAME = {
+    alarm: 'bg-red-50 ring-2 ring-red-500',
+    attention: 'bg-rose-50/70 ring-1 ring-rose-200',
+};
+
+/* Договор заявки (пп. 2–3): номер, до какого числа действует и что останется от лимита после
+   этой оплаты. Его видят все участники заявки; `strong` — «в моменте оплаты»: весь блок в тоне
+   самого тревожного из сроков и лимита. */
+export const ContractTerms = ({ view, strong = false }) => {
+    if (!view) return null;
+    const { term, limit } = view;
+    const period = view.periodicity ? PERIOD_META[view.periodicity]?.label?.toLowerCase() : '';
+    const body = (
+        <>
+            <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+                <span className="font-medium">№{view.number || '—'}</span>
+                {term?.text && <LevelText level={term.level}>{term.text}</LevelText>}
+            </div>
+            {limit && (
+                <div className="mt-1" data-contract-limit={limit.level}>
+                    <LevelText level={limit.level}>{limit.text}</LevelText>
+                    <span className="mt-0.5 block text-[12px] text-slate-500">
+                        Лимит {fmtMoney(limit.limit)} · оплачено {fmtMoney(limit.this_paid ? parseAmount(limit.paid) + parseAmount(limit.amount) : limit.paid)}
+                        {parseAmount(limit.in_work) > 0 ? ` · в работе ${fmtMoney(limit.in_work)}` : ''}
+                    </span>
+                </div>
+            )}
+            {parseAmount(view.amount) > 0 && (
+                <span className="mt-0.5 block text-[12px] text-slate-500">По договору {fmtMoney(view.amount)}{period ? `, ${period}` : ''}</span>
+            )}
+        </>
+    );
+    if (!strong) return <div data-contract-terms={view.level}>{body}</div>;
+    return (
+        <div data-contract-terms={view.level} className={`rounded-xl px-3 py-2 ${LEVEL_FRAME[view.level] || 'bg-white ring-1 ring-slate-200'}`}>
+            {body}
+        </div>
+    );
+};
+
+const CHECK_ICON = {
+    ok: { icon: Check, cls: 'text-emerald-600' },
+    attention: { icon: AlertCircle, cls: 'text-rose-500' },
+    alarm: { icon: AlertTriangle, cls: 'text-red-600' },
+    none: { icon: Minus, cls: 'text-slate-300' },
+};
+
+/* Готовые проверки (владелец 17.11.2026, п. 9): что раздел проверил сам — руководителю остаётся
+   решить. Заявка, на которую ссылается проверка (дубль, прошлая цена), открывается поверх. */
+export const ChecksPanel = ({ checks = [], onOpenRequest = null }) => {
+    if (!checks.length) return null;
+    return (
+        <div data-auto-checks className="rounded-xl bg-slate-50 px-3 py-1.5">
+            <div className="flex items-center gap-1 pb-0.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                Проверки <FieldHint hint={HINTS.checks} />
+            </div>
+            {checks.map((check) => {
+                const mark = CHECK_ICON[check.level] || CHECK_ICON.none;
+                const Icon = mark.icon;
+                return (
+                    <div key={check.code} data-check={check.code} data-level={check.level} className="flex gap-2.5 py-1.5">
+                        <Icon size={15} strokeWidth={2.25} className={`mt-[2px] shrink-0 ${mark.cls}`} aria-hidden="true" />
+                        {/* На телефоне подпись — над текстом: в колонку рядом метка тревоги рвалась на куски. */}
+                        <div className="min-w-0 flex-1 sm:flex sm:gap-2.5">
+                        <div className="text-[12.5px] text-slate-500 sm:w-[124px] sm:shrink-0">{check.title}</div>
+                        <div className="min-w-0 flex-1 break-words text-[13.5px] text-slate-900">
+                            <LevelText level={check.level}>{check.text}</LevelText>
+                            {check.request_id && onOpenRequest && (
+                                <button type="button" data-open-request={check.request_id} onClick={() => onOpenRequest(check.request_id)}
+                                    className="ml-1.5 font-medium text-blue-600 underline-offset-2 hover:underline">
+                                    открыть №{check.request_id}
+                                </button>
+                            )}
+                        </div>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
+
 export const StatePill = ({ request, className = '' }) => {
     const state = requestState(request);
     const meta = stateMeta(state);
@@ -460,7 +559,7 @@ export const StatePill = ({ request, className = '' }) => {
     const pill = tonePill(meta.tone);
     return (
         <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${pill.fill} ${className}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${pill.dot}`} />
+            <span className={`h-1.5 w-1.5 rounded-full ${pill.inner || pill.dot}`} />
             {/* Закрыта выдачей из наличия (Helpdesk IT, 04.11.2026) — так и сказано, это не закуп. */}
             {state === 'done' && request?.issued_from_stock ? 'Выдано из наличия' : meta.label}
         </span>
@@ -472,7 +571,7 @@ export const TonePill = ({ tone = 'neutral', children, className = '' }) => {
     const pill = tonePill(tone);
     return (
         <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11.5px] font-medium ${pill.fill} ${className}`}>
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${pill.dot}`} />
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${pill.inner || pill.dot}`} />
             {children}
         </span>
     );

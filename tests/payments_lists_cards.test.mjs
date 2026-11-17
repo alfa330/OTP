@@ -114,7 +114,8 @@ test('цвет у числа — только у состояний со смы�
     assert.match(tile(html, 'mine'), /text-slate-900">0<\/span>/);
     // Точка — легенда цвета строк: есть у состояний с цветом, нет у срезов «Все» и «Ждут меня».
     assert.match(tile(html, 'clarification'), /rounded-full align-middle bg-amber-500/);
-    assert.match(tile(html, 'overdue'), /bg-rose-500/);
+    // Просрочка — «кричащий красный» (владелец 17.11.2026, п. 4).
+    assert.match(tile(html, 'overdue'), /bg-red-600/);
     assert.doesNotMatch(tile(html, 'all'), /rounded-full align-middle/);
     assert.doesNotMatch(tile(html, 'mine'), /rounded-full align-middle/);
     // Счётчик ещё не пришёл — прочерк, а не «undefined» и не ноль.
@@ -202,7 +203,8 @@ test('строка-карточка: рамка и фон — на самих я
     const base = 'border-y px-3.5 py-2.5 first:rounded-l-xl first:border-l last:rounded-r-xl last:border-r';
     assert.equal(cardCell(), `${base} border-slate-200 bg-white`);
     assert.equal(cardCell(null), `${base} border-slate-200 bg-white`);
-    assert.equal(cardCell('overdue'), `${base} border-rose-200 bg-rose-50/80`);
+    // Просрочка — «кричащий красный» (владелец 17.11.2026, п. 4).
+    assert.equal(cardCell('overdue'), `${base} border-red-400 bg-red-50`);
     assert.equal(cardCell('blocked'), `${base} border-amber-200 bg-amber-50/80`);
     assert.equal(cardCell('done'), `${base} border-emerald-100 bg-emerald-50/60`);
     assert.equal(cardCell('rejected'), `${base} border-slate-200 bg-slate-50`);

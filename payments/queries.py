@@ -252,6 +252,8 @@ _REQUEST_FIELDS = (
     # документов и заявка, закрытая раньше них.
     'project_department_id', 'needs_payment_order', 'needs_power_of_attorney', 'needs_transfer_proof',
     'docs_due_on', 'docs_deferred_at', 'docs_deferred_by', 'docs_deferred_by_name',
+    # 17.11.2026: регулярный платёж «без счёта» (п. 1) — копия выбора справочника.
+    'invoice_required',
 )
 _REQUEST_EXTRA = ('project_name', 'category_name', 'subcategory_name', 'counterparty_name',
                   'counterparty_bin', 'counterparty_vat', 'legal_entity_name', 'contract_number',
@@ -301,6 +303,8 @@ PROCESS_FIELDS = (
     'supplier_kind', 'supplier_vat', 'it_purchase',
     # Срок закрывающих документов — его ставит бухгалтер (16.11.2026, п. 5).
     'docs_due_on',
+    # Нужен ли счёт регулярному платежу — из справочника (17.11.2026, п. 1), не из формы.
+    'invoice_required',
 )
 
 
@@ -1000,7 +1004,7 @@ def create_request(cursor, *, fields, items, actor, initiator, system_comment=No
     values['no_contract'] = bool(values.get('no_contract')) and not values.get('contract_id')
     for flag in workflow.PROOF_FLAGS:
         values[flag] = bool(values.get(flag))
-    for extra in ('department_name', 'supplier_kind', 'supplier_vat'):
+    for extra in ('department_name', 'supplier_kind', 'supplier_vat', 'invoice_required'):
         if fields.get(extra) is not None:
             cols.append(extra)
             values[extra] = fields[extra]
@@ -1185,6 +1189,36 @@ def remove_attachment(cursor, attachment_id, actor):
 # ─────────────────────────────────────────────────────────────────────────────
 # Дубль счёта (п. 8)
 # ─────────────────────────────────────────────────────────────────────────────
+
+def contract_usage(cursor, contract_ids, *, exclude_request_id=None):
+    """Сколько выбрано по договорам (владелец 17.11.2026, пп. 2–4): {id договора: {'paid', 'paid_count',
+    'in_work', 'in_work_count'}}.
+
+    Оплачено — заявки с датой оплаты (фактическая сумма, нет её — сумма заявки); в работе — живые
+    заявки, ушедшие от инициатора и ещё не оплаченные. Отменённые, отклонённые и удалённые лимит не
+    выбирают. `exclude_request_id` — заявка, глазами которой смотрим: её сумма считается отдельно
+    (workflow.contract_limit), иначе она вошла бы в «в работе» дважды. Считается по ВСЕМ заявкам
+    договора, а не по видимым человеку: остаток лимита — свойство договора, а не реестра."""
+    ids = sorted({int(x) for x in contract_ids or () if x})
+    if not ids:
+        return {}
+    cursor.execute(
+        """
+        SELECT contract_id,
+               COALESCE(SUM(COALESCE(paid_amount, amount)) FILTER (WHERE paid_on IS NOT NULL), 0),
+               COUNT(*) FILTER (WHERE paid_on IS NOT NULL),
+               COALESCE(SUM(amount) FILTER (WHERE paid_on IS NULL AND status = 'active'
+                                              AND submitted_at IS NOT NULL), 0),
+               COUNT(*) FILTER (WHERE paid_on IS NULL AND status = 'active' AND submitted_at IS NOT NULL)
+          FROM payment_requests
+         WHERE contract_id = ANY(%s) AND id <> %s AND deleted_at IS NULL
+           AND status IN ('active', 'done')
+         GROUP BY contract_id
+        """,
+        (ids, int(exclude_request_id or 0)))
+    return {row[0]: {'paid': row[1], 'paid_count': int(row[2] or 0), 'in_work': row[3],
+                     'in_work_count': int(row[4] or 0)} for row in cursor.fetchall()}
+
 
 def find_duplicates(cursor, request, *, visible_to=None, visible_roles=()):
     """Другие заявки с тем же поставщиком, номером счёта, суммой и датой счёта.

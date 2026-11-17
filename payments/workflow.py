@@ -156,10 +156,17 @@ SETTING_DUE_SOON_DAYS = 'due_soon_days'
 # получения. Числа меняет администратор в «Настройках».
 SETTING_RECEIPT_DAYS = 'receipt_days'
 SETTING_CLOSING_DOCS_DAYS = 'closing_docs_days'
+# Когда договор «обратите внимание» (владелец 17.11.2026, пп. 2–4): за сколько дней до конца
+# срока и с какой доли выбранного лимита он подсвечивается розовым. Истёкший срок и оплата
+# сверх лимита — красным всегда.
+SETTING_CONTRACT_WARN_DAYS = 'contract_warn_days'
+SETTING_LIMIT_WARN_PERCENT = 'limit_warn_percent'
 SETTINGS_DEFAULTS = {SETTING_MIN_SUPPLIERS: 3, SETTING_DUE_SOON_DAYS: 2,
-                     SETTING_RECEIPT_DAYS: 3, SETTING_CLOSING_DOCS_DAYS: 10}
+                     SETTING_RECEIPT_DAYS: 3, SETTING_CLOSING_DOCS_DAYS: 10,
+                     SETTING_CONTRACT_WARN_DAYS: 30, SETTING_LIMIT_WARN_PERCENT: 80}
 SETTINGS_LIMITS = {SETTING_MIN_SUPPLIERS: (1, 10), SETTING_DUE_SOON_DAYS: (0, 30),
-                   SETTING_RECEIPT_DAYS: (1, 30), SETTING_CLOSING_DOCS_DAYS: (1, 90)}
+                   SETTING_RECEIPT_DAYS: (1, 30), SETTING_CLOSING_DOCS_DAYS: (1, 90),
+                   SETTING_CONTRACT_WARN_DAYS: (1, 365), SETTING_LIMIT_WARN_PERCENT: (50, 99)}
 
 # Порог, с которого счёт требует действующего договора: «для счетов на сумму
 # более 300 000 тг» — строго больше (дополнение Колкомбаевой к задаче #179).
@@ -178,6 +185,7 @@ KIND_ASSETS = 'asset_registration'
 KIND_CLOSING = 'closing_docs'
 KIND_ENTITY = 'entity_clarify'
 KIND_IT = 'it_review'
+KIND_REGULAR_CHECK = 'regular_check'
 
 BOARD_APPROVAL = 'approval'
 BOARD_ACCOUNTING = 'accounting'
@@ -196,6 +204,19 @@ SUBTASKS = (
         'kind': KIND_INITIATION, 'position': 0, 'stage': STAGE_INITIATION, 'role': ROLE_INITIATOR,
         'title': 'Заявка у инициатора', 'board': None, 'statuses': ('draft', 'rework', 'clarification'),
         'brief': 'Дополните заявку и отправьте её дальше.',
+    },
+    # Проверка регулярного платежа бухгалтерией (владелец 17.11.2026, п. 7: «проверка со стороны
+    # бухгалтерии по всем данным, и поэтому нужно, чтобы такая заявка приходила 1 числа, и добавить
+    # ответственного, который займётся проверкой»). Заявка месяца приходит 1-го и первым делом идёт
+    # проверяющему из справочника «Регулярные платежи» (не указан — любому из бухгалтерии): сумма,
+    # период, поставщик, договор, реквизиты. Всё верно — «Проверено», и заявка идёт по маршруту;
+    # нет — «Вернуть на доработку». Ступень «Согласование»; на доске бухгалтерии — в первой колонке
+    # «Согласование с бухгалтерией», вместе с выбором юр. лица.
+    {
+        'kind': KIND_REGULAR_CHECK, 'position': 5, 'stage': STAGE_APPROVAL, 'role': ROLE_ACCOUNTING,
+        'title': 'Проверка бухгалтерией', 'board': BOARD_ACCOUNTING, 'statuses': ('new',),
+        'brief': 'Проверьте все данные регулярного платежа: сумму, период, поставщика, договор и реквизиты. '
+                 'Всё верно — «Проверено», и заявка пойдёт дальше.',
     },
     {
         'kind': KIND_MANAGER, 'position': 10, 'stage': STAGE_APPROVAL, 'role': ROLE_MANAGER,
@@ -335,7 +356,7 @@ BOARDS = (
     },
     {
         'code': BOARD_ACCOUNTING, 'title': 'Бухгалтерия / Оплата счетов', 'short': 'Бухгалтерия',
-        'kinds': (KIND_ENTITY, KIND_INVOICE, KIND_CLOSING), 'roles': (ROLE_ACCOUNTING,),
+        'kinds': (KIND_REGULAR_CHECK, KIND_ENTITY, KIND_INVOICE, KIND_CLOSING), 'roles': (ROLE_ACCOUNTING,),
         'columns': (
             ('entity', 'Согласование с бухгалтерией'),
             ('new', 'Новые счета'),
@@ -391,7 +412,7 @@ COLUMN_CAPTIONS = {
         'rejected': 'За последние 30 дней',
     },
     BOARD_ACCOUNTING: {
-        'entity': 'Выбор юр. лица после руководителя',
+        'entity': 'Проверка регулярных платежей и выбор юр. лица',
         'new': 'Согласованные счета',
         'checking': 'Бухгалтерия сверяет счёт',
         'clarification': 'Ждут ответа инициатора',
@@ -478,6 +499,13 @@ def board_column(board_code, request, subtasks, focus_kind=None):
         # После выбора этап закрыт, и до согласованного счёта заявки на этой доске снова нет.
         if (by_kind.get(KIND_ENTITY) or {}).get('state') == 'open':
             return 'entity'
+        # Регулярный платёж 1-го числа ждёт проверки бухгалтерией (17.11.2026, п. 7) — та же первая
+        # колонка; вернули на доработку — ждёт ответа инициатора.
+        check = by_kind.get(KIND_REGULAR_CHECK) or {}
+        if check.get('state') == 'open':
+            return 'entity'
+        if check.get('state') == 'waiting':
+            return 'clarification'
         closing = by_kind.get(KIND_CLOSING) or {}
         if closing.get('state') == 'done':
             return 'closed'
@@ -788,6 +816,236 @@ CONTRACT_STATUS_LABELS = {
     'archived': 'Архивный',
     'inactive': 'Недействующий',
 }
+
+
+# ─── Договор у всех участников заявки (владелец 17.11.2026, пп. 2–4) ─────────
+#
+# «Подсвечивать в моменте оплаты сумму и дедлайн, чтобы было понятие, какие лимиты по сумме и
+# срок истечения договора. Это должно отображаться у всех причастных к этому договору. Розовые
+# напоминания / обрати внимание, но не слишком нервный. Когда истекает срок и т. д. — уже
+# кричащий красный.» Три тона: спокойно (без цвета), «обратите внимание» (розовый: срок
+# подходит, лимит почти выбран), тревога (красный: срок истёк или истекает сегодня, договор
+# недействующий, эта оплата выходит за лимит).
+
+LEVEL_OK = 'ok'
+LEVEL_ATTENTION = 'attention'
+LEVEL_ALARM = 'alarm'
+LEVEL_NONE = 'none'          # проверять не по чему: договора нет, поставщик не из справочника
+_LEVEL_RANK = {LEVEL_NONE: 0, LEVEL_OK: 1, LEVEL_ATTENTION: 2, LEVEL_ALARM: 3}
+
+
+def worst_level(*levels):
+    """Самый тревожный тон из перечисленных (None не считается)."""
+    present = [level for level in levels if level in _LEVEL_RANK]
+    return max(present, key=_LEVEL_RANK.get) if present else LEVEL_NONE
+
+
+def contract_term(contract, *, today=None, settings=None):
+    """Срок договора: {'ends_on', 'days_left', 'level', 'text'}."""
+    today = today or date.today()
+    status = str(contract.get('status') or 'active').strip().lower()
+    ends_on = _as_date(contract.get('ends_on'))
+    starts_on = _as_date(contract.get('starts_on'))
+    term = {'ends_on': ends_on, 'days_left': None, 'level': LEVEL_OK, 'text': 'Бессрочный'}
+    if status != 'active':
+        term.update(level=LEVEL_ALARM, text='Договор %s' % CONTRACT_STATUS_LABELS.get(status, status).lower())
+        return term
+    if starts_on and starts_on > today:
+        term.update(level=LEVEL_ATTENTION, text='Вступает в силу %s' % fmt_date(starts_on))
+        return term
+    if not ends_on:
+        return term
+    days = (ends_on - today).days
+    term['days_left'] = days
+    if days < 0:
+        term.update(level=LEVEL_ALARM, text='Срок истёк %s' % fmt_date(ends_on))
+    elif days == 0:
+        term.update(level=LEVEL_ALARM, text='Истекает сегодня, %s' % fmt_date(ends_on))
+    elif days <= setting(settings, SETTING_CONTRACT_WARN_DAYS):
+        term.update(level=LEVEL_ATTENTION, text='Действует до %s — осталось %s'
+                    % (fmt_date(ends_on), _plural(days, ('день', 'дня', 'дней'))))
+    else:
+        term['text'] = 'Действует до %s' % fmt_date(ends_on)
+    return term
+
+
+def contract_limit(contract, usage=None, *, amount=None, this_paid=False, settings=None):
+    """Лимит договора: сколько оплачено, сколько в работе и что останется после ЭТОЙ оплаты.
+
+    `usage` — {'paid', 'in_work'} по ДРУГИМ заявкам с этим договором (queries.contract_usage);
+    `amount` — сумма этой заявки; `this_paid` — эта заявка уже оплачена (её сумма тогда уже
+    выбрала лимит). Лимита нет — None. Тон: красный — эта оплата выходит за лимит (или лимит уже
+    превышен), розовый — после неё выбрано не меньше настройки «лимит почти выбран, %»."""
+    raw = contract.get('amount_limit')
+    if raw in (None, ''):
+        return None
+    cap = to_decimal(raw)
+    if cap <= 0:
+        return None
+    usage = usage or {}
+    paid = to_decimal(usage.get('paid'))
+    in_work = to_decimal(usage.get('in_work'))
+    this = to_decimal(amount)
+    before = paid + in_work
+    after = before + this
+    remaining = cap - before
+    info = {'limit': cap, 'paid': paid, 'in_work': in_work, 'amount': this, 'this_paid': bool(this_paid),
+            'remaining': remaining, 'after': cap - after,
+            'percent': int((after * 100 / cap).quantize(Decimal('1'), rounding=ROUND_HALF_UP)),
+            'level': LEVEL_OK}
+    over = after - cap
+    left = fmt_money(cap - after)
+    if over > 0:
+        info['level'] = LEVEL_ALARM
+        info['text'] = ('Лимит %s превышен на %s' if this_paid
+                        else 'Эта оплата выходит за лимит %s на %s') % (fmt_money(cap), fmt_money(over))
+    elif info['percent'] >= setting(settings, SETTING_LIMIT_WARN_PERCENT):
+        info['level'] = LEVEL_ATTENTION
+        info['text'] = ('Осталось %s — выбрано %s%% лимита' if this_paid
+                        else 'После этой оплаты останется %s — выбрано %s%% лимита') % (left, info['percent'])
+    else:
+        info['text'] = ('Осталось %s из %s' if this_paid
+                        else 'После этой оплаты останется %s из %s') % (left, fmt_money(cap))
+    return info
+
+
+def contract_view(contract, usage=None, *, amount=None, this_paid=False, today=None, settings=None):
+    """Договор заявки для окна оплаты и карточки (пп. 2–4): номер, сумма по договору, срок и лимит
+    с тонами и общий тон (самый тревожный). Нет договора — None."""
+    if not contract:
+        return None
+    term = contract_term(contract, today=today, settings=settings)
+    limit = contract_limit(contract, usage, amount=amount, this_paid=this_paid, settings=settings)
+    return {
+        'id': contract.get('id'), 'number': contract.get('number'), 'status': contract.get('status'),
+        'amount': contract.get('amount'), 'periodicity': contract.get('periodicity'),
+        'term': term, 'limit': limit,
+        'level': worst_level(term['level'], (limit or {}).get('level')),
+    }
+
+
+# ─── Готовые проверки для руководителя (владелец 17.11.2026, п. 9) ───────────
+#
+# «Добавить возможность автоматической подставки проверок руководителю» — на вопрос с
+# вариантами владелец выбрал: руководитель в окне согласования сразу видит, что система
+# проверила сама — договор действует и до какого числа, остаток лимита, НДС и режим
+# поставщика по БИН, возможный дубль, прошлые цены. Ему остаётся решить. Тоны — те же, что у
+# договора: розовый — обратите внимание, красный — тревога.
+
+PRICE_WARN_PERCENT = 10      # цена выше прошлой на столько процентов — «обратите внимание»
+
+
+def _norm_name(text):
+    return ' '.join(str(text or '').split()).lower()
+
+
+def price_check(items, similar):
+    """Цена против прошлого закупа того же товара или услуги (queries.similar_purchases)."""
+    past = next((row for row in similar or () if row.get('match') in ('item', 'name')
+                 and to_decimal(row.get('unit_price')) > 0), None)
+    if not past:
+        return {'code': 'price', 'title': 'Прошлые цены', 'level': LEVEL_NONE,
+                'text': 'Прошлых закупов того же не нашлось', 'request_id': None}
+    past_name = _norm_name(past.get('item_name'))
+    current = next((item for item in items or () if _norm_name(item.get('name'))
+                    and (_norm_name(item.get('name')) in past_name or past_name in _norm_name(item.get('name')))),
+                   None) or next(iter(items or ()), None)
+    price_now = item_price(current) if current else Decimal('0')
+    price_then = to_decimal(past.get('unit_price'))
+    paid_on = fmt_date(past.get('paid_on'))
+    if price_now <= 0:
+        return {'code': 'price', 'title': 'Прошлые цены', 'level': LEVEL_NONE, 'request_id': past.get('request_id'),
+                'text': '№%s от %s — %s за единицу' % (past.get('request_id'), paid_on, fmt_money(price_then))}
+    delta = ((price_now - price_then) * 100 / price_then).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)
+    level = LEVEL_ATTENTION if delta >= PRICE_WARN_PERCENT else LEVEL_OK
+    shown = ('%.1f' % delta).replace('.', ',')
+    shown = shown[:-2] if shown.endswith(',0') else shown
+    text = '№%s от %s: %s за единицу, сейчас %s (%s%s%%)' % (
+        past.get('request_id'), paid_on, fmt_money(price_then), fmt_money(price_now),
+        '+' if delta > 0 else '', shown)
+    return {'code': 'price', 'title': 'Прошлые цены', 'level': level, 'text': text, 'request_id': past.get('request_id')}
+
+
+TAX_REGIME_OUR = 'our'
+TAX_REGIME_SNR = 'snr'
+TAX_REGIME_LABELS = {TAX_REGIME_OUR: 'ОУР', TAX_REGIME_SNR: 'СНР'}
+TAX_REGIME_TITLES = {TAX_REGIME_OUR: 'ОУР — общеустановленный режим',
+                     TAX_REGIME_SNR: 'СНР — специальный налоговый режим'}
+
+
+def tax_text(vat_payer, regime, regime_note=None):
+    """«С НДС · ОУР» / «Без НДС · СНР (упрощённая декларация)» — что известно о поставщике."""
+    parts = []
+    if vat_payer is not None:
+        parts.append('С НДС' if vat_payer else 'Без НДС')
+    if regime in TAX_REGIME_LABELS:
+        label = TAX_REGIME_LABELS[regime]
+        note = str(regime_note or '').strip()
+        parts.append('%s (%s)' % (label, note) if note and regime == TAX_REGIME_SNR else label)
+    return ' · '.join(parts)
+
+
+def supplier_tax_check(request, counterparty):
+    """НДС и режим поставщика по БИН (п. 8 — выписка КГД при заведении договора)."""
+    base = {'code': 'tax', 'title': 'Поставщик по БИН'}
+    if not counterparty:
+        return dict(base, level=LEVEL_NONE, text='Поставщик не из справочника — проверять не по чему')
+    vat = counterparty.get('vat_payer')
+    regime = counterparty.get('tax_regime')
+    known = tax_text(vat, regime, counterparty.get('tax_regime_note'))
+    checked = counterparty.get('tax_checked_at')
+    if not checked:
+        return dict(base, level=LEVEL_ATTENTION,
+                    text=('%s — не проверен по БИН' % known) if known else 'Не проверен по БИН')
+    text = '%s — проверен по БИН %s' % (known or 'данных нет', fmt_date(checked))
+    claimed = (request or {}).get('supplier_vat')
+    if claimed is True and vat is False:
+        return dict(base, level=LEVEL_ALARM, text='В заявке НДС, а поставщик не плательщик НДС (%s)' % text)
+    if claimed is False and vat is True:
+        return dict(base, level=LEVEL_ATTENTION, text='Поставщик — плательщик НДС, а в заявке «без НДС» (%s)' % text)
+    return dict(base, level=LEVEL_OK, text=text)
+
+
+def auto_checks(request, *, contract_info=None, counterparty=None, duplicates=(), similar=(), items=()):
+    """Что система проверила сама — по порядку из выбора владельца: договор, лимит, поставщик по
+    БИН, возможный дубль, прошлые цены. Каждая — {'code', 'title', 'level', 'text'}."""
+    request = request or {}
+    checks = []
+    amount = to_decimal(request.get('amount'))
+    if contract_info:
+        checks.append({'code': 'contract', 'title': 'Договор', 'level': contract_info['term']['level'],
+                       'text': '№%s · %s' % (contract_info.get('number') or '—', contract_info['term']['text'])})
+        limit = contract_info.get('limit')
+        if limit:
+            # Откуда перерасход: оплачено и в работе по другим заявкам договора — иначе «выходит за лимит
+            # на 62 000» у заявки на 6 000 читается как ошибка раздела.
+            spent = [part for part in (
+                'оплачено %s' % fmt_money(limit['paid']) if to_decimal(limit['paid']) > 0 else '',
+                'в работе %s' % fmt_money(limit['in_work']) if to_decimal(limit['in_work']) > 0 else '') if part]
+            text = limit['text'] + (' (%s)' % ', '.join(spent) if spent and limit['level'] != LEVEL_OK else '')
+            checks.append({'code': 'limit', 'title': 'Лимит договора', 'level': limit['level'], 'text': text})
+    elif request.get('no_contract'):
+        checks.append({'code': 'contract', 'title': 'Договор',
+                       'level': LEVEL_ATTENTION if amount > CONTRACT_REQUIRED_OVER else LEVEL_OK,
+                       'text': 'Без договора — отметка инициатора' + (
+                           '; сумма выше %s' % fmt_money(CONTRACT_REQUIRED_OVER) if amount > CONTRACT_REQUIRED_OVER else '')})
+    elif request.get('payment_method') == METHOD_INVOICE and amount > CONTRACT_REQUIRED_OVER:
+        checks.append({'code': 'contract', 'title': 'Договор', 'level': LEVEL_ALARM,
+                       'text': 'Не указан — свыше %s счёт без договора в оплату не уйдёт'
+                               % fmt_money(CONTRACT_REQUIRED_OVER)})
+    else:
+        checks.append({'code': 'contract', 'title': 'Договор', 'level': LEVEL_NONE, 'text': 'Не указан'})
+    checks.append(supplier_tax_check(request, counterparty))
+    if duplicates:
+        first = duplicates[0]
+        checks.append({'code': 'duplicate', 'title': 'Возможный дубль', 'level': LEVEL_ALARM,
+                       'request_id': first.get('id'),
+                       'text': 'Тот же поставщик, номер счёта, сумма и дата: заявка №%s' % first.get('id')
+                               + (' и ещё %s' % (len(duplicates) - 1) if len(duplicates) > 1 else '')})
+    else:
+        checks.append({'code': 'duplicate', 'title': 'Возможный дубль', 'level': LEVEL_OK, 'text': 'Не найден'})
+    checks.append(price_check(items, similar))
+    return checks
 
 
 # ─── Матрица согласования (п. 6) ─────────────────────────────────────────────
@@ -1197,16 +1455,33 @@ def suppliers_by_helpdesk(request):
     return needs_it_step(request)
 
 
+def needs_regular_check(request):
+    """Заявка по регулярному платежу сначала идёт на проверку бухгалтерией (владелец 17.11.2026,
+    п. 7) — и та, что календарь завёл 1-го числа, и та, что завёл человек. Заявке первой версии
+    этапа нет: её приняли по прежним правилам."""
+    return request.get('request_kind') == KIND_REGULAR and not accepted_before(request)
+
+
+def invoice_not_needed(request):
+    """Регулярный платёж «без счёта» (владелец 17.11.2026, п. 1): платят по договору, счёт не нужен
+    ни при отправке, ни перед оплатой. Выбор копируется в заявку из справочника при её создании.
+    Пустое значение — счёт нужен, как у всех заявок до этой правки."""
+    return request.get('request_kind') == KIND_REGULAR and request.get('invoice_required') is False
+
+
 def issued_from_stock(subtasks):
     """Helpdesk IT выдал нужное из наличия — заявка закрыта без закупа и оплаты."""
     check = next((item for item in subtasks or [] if item.get('kind') == KIND_IT), None)
     return bool(check and check.get('state') == 'done' and check.get('outcome') == IT_OUTCOME_STOCK)
 
 
-def build_route(request, *, initiator, manager=None, manager_step=True, approver=None):
+def build_route(request, *, initiator, manager=None, manager_step=True, approver=None, checker=None):
     """Подзадачи заявки по порядку — этапы п. 2 для ЭТОЙ заявки.
 
-    initiator / manager / approver — {'id', 'name'} либо None. Что влияет:
+    initiator / manager / approver / checker — {'id', 'name'} либо None. Что влияет:
+      * проверка бухгалтерией — первой, у регулярного платежа (владелец 17.11.2026,
+        п. 7, needs_regular_check): проверяющему из справочника, не указан — любому
+        из бухгалтерии;
       * этап руководителя — если предусмотрен (`manager_step`); предусмотрен,
         но руководитель у инициатора не определён (владелец, глава без
         начальника) — подзадача ПРОПУСКАЕТСЯ с пометкой, иначе заявка зависла
@@ -1234,6 +1509,8 @@ def build_route(request, *, initiator, manager=None, manager_step=True, approver
         })
 
     add(KIND_INITIATION, assignee=initiator)
+    if needs_regular_check(request):
+        add(KIND_REGULAR_CHECK, assignee=checker if checker and checker.get('id') else None)
     if manager_step:
         if manager and manager.get('id'):
             add(KIND_MANAGER, assignee=manager)
@@ -1465,7 +1742,8 @@ def missing_for_submit(request, *, items=(), offers=(), attachments=(), settings
                 and request.get('accounting_category') not in ACCOUNTING_CATEGORY_LABELS):
             # П. 10 действует и здесь: категорию учёта товара задаёт справочник.
             missing.append('У регулярного платежа не указана категория учёта товара — дополните справочник')
-        if invoice_required:
+        # «Без счёта» (17.11.2026, п. 1): платят по договору — счёта не просим вовсе.
+        if invoice_required and not invoice_not_needed(request):
             missing += _invoice_missing(request, kinds)
         return missing
 
@@ -1579,7 +1857,10 @@ def offers_missing(data, offers, settings=None):
 
 
 def invoice_ready(request, attachments):
-    """Есть ли у заявки счёт целиком: файл, номер и дата. Без него оплату не начать."""
+    """Есть ли у заявки счёт целиком: файл, номер и дата. Без него оплату не начать. Регулярному
+    платежу «без счёта» (17.11.2026, п. 1) он не нужен — платят по договору."""
+    if invoice_not_needed(request):
+        return True
     kinds = {str(att.get('kind') or 'other') for att in (attachments or [])}
     return not _invoice_missing(request, kinds)
 
@@ -1610,6 +1891,9 @@ def _plural(count, forms):
 
 ACTIONS = {
     KIND_INITIATION: ('submit',),
+    # Проверка регулярного платежа (17.11.2026, п. 7): «Проверено» — тем же согласованием,
+    # с подписью этапа; не так — вернуть инициатору на доработку.
+    KIND_REGULAR_CHECK: ('approve', 'return'),
     KIND_ENTITY: ('set_entity',),
     KIND_IT: ('it_offers', 'it_stock', 'return'),
     KIND_MANAGER: ('approve', 'return', 'reject'),

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import axios from 'axios';
 import {
-    BadgeCheck, Banknote, Boxes, ChevronRight, CreditCard, FileCheck2, Inbox, Landmark, MessageCircleQuestion,
+    BadgeCheck, Banknote, Boxes, ChevronRight, ClipboardCheck, CreditCard, FileCheck2, Inbox, Landmark, MessageCircleQuestion,
     MonitorCheck, PackageCheck, Paperclip, PencilLine, ReceiptText, Send,
 } from 'lucide-react';
 import { iosCard } from '../ui/ios';
@@ -49,6 +49,8 @@ import { recall, remember } from './paymentsEntry';
    только заявка, которую человеку вернули, — там ждут его ответа. У своей заявки
    значок — того, что с ней происходит сейчас: согласуют, оплачивают, ставят на учёт. */
 const TASK_ICONS = {
+    // Проверка регулярного платежа бухгалтерией 1-го числа (17.11.2026, п. 7).
+    regular_check: ClipboardCheck,
     entity_clarify: Landmark,
     it_review: MonitorCheck,
     manager_approval: BadgeCheck,

@@ -10,6 +10,7 @@ import PaymentsFilters from './PaymentsFilters';
 import PaymentsAssets from './PaymentsAssets';
 import PaymentsDictionaries, { dictionarySections } from './PaymentsDictionaries';
 import PaymentsRoles from './PaymentsRoles';
+import PaymentsJournal from './PaymentsJournal';
 import {
     DOCS_STATUS_META, EMPTY_FILTERS, PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_SHORT, REGISTRY_COLUMNS, REGISTRY_COLUMNS_STORAGE_KEY,
     REQUEST_KIND_OPTIONS, STATE_FILTERS, activeFilterCount, closedGroupStart, defaultRegistryColumns, deletedLine, dueLabel, expenseSubline,
@@ -205,6 +206,8 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
             list.push({ value: 'dictionaries', label: 'Справочники' });
         }
         if (isAdmin) list.push({ value: 'roles', label: 'Участники' });
+        // Журнал раздела (владелец 17.11.2026, п. 10): всё, что менялось, и кто что открывал.
+        if (isAdmin) list.push({ value: 'journal', label: 'Журнал' });
         return list;
     }, [capabilities.boards, capabilities.can_view_assets, capabilities.sees_all_requests, capabilities.can_manage_cards,
         capabilities.can_manage_assets, isAdmin, meta, deskCount]);
@@ -882,6 +885,12 @@ const PaymentsView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReque
                         onSectionChange={changeDictionary}
                     />
                     )}
+                </div>
+            )}
+
+            {activeTab === 'journal' && (
+                <div className="mt-4 motion-safe:animate-fade-in-soft">
+                    <PaymentsJournal apiBaseUrl={apiBaseUrl} headers={headers} users={users} meta={meta} onOpenRequest={setOpenedId} showToast={showToast} />
                 </div>
             )}
 

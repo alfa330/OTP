@@ -45,7 +45,9 @@ export const PAYMENTS_QUERY_PARAMS = [
    вкладками PaymentsView.jsx и досками сервера, сторожит tests/payments_link.test.mjs. */
 export const PAYMENTS_DEFAULT_TAB = 'desk';
 export const PAYMENTS_BOARD_CODES = ['approval', 'accounting', 'finance', 'helpdesk'];
-export const PAYMENTS_SECTION_KEYS = [PAYMENTS_DEFAULT_TAB, ...PAYMENTS_BOARD_CODES, 'requests', 'assets', 'dictionaries', 'roles'];
+// «Журнал» — администратору раздела (владелец 17.11.2026, п. 10).
+export const PAYMENTS_SECTION_KEYS = [PAYMENTS_DEFAULT_TAB, ...PAYMENTS_BOARD_CODES, 'requests', 'assets', 'dictionaries', 'roles',
+    'journal'];
 const BOARD_TAB_PREFIX = 'board:';
 
 /* Справочники — значения SECTIONS в PaymentsDictionaries.jsx (сверяет тот же тест).

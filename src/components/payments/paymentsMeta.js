@@ -154,6 +154,41 @@ export const AUTO_CREATE_OPTIONS = [
     { value: false, label: 'Только вручную' },
 ];
 
+/* Регулярный платёж «со счётом / без счёта» (владелец 17.11.2026, п. 1): без счёта платят по договору. */
+export const INVOICE_REQUIRED_OPTIONS = [
+    { value: true, label: 'Нужен' },
+    { value: false, label: 'Не нужен' },
+];
+
+/* Проверка поставщика по БИН при заведении договора (владелец 17.11.2026, п. 8): НДС и режим. */
+export const TAX_VAT_OPTIONS = [{ value: true, label: 'С НДС' }, { value: false, label: 'Без НДС' }];
+export const TAX_REGIME_OPTIONS = [{ value: 'our', label: 'ОУР' }, { value: 'snr', label: 'СНР' }];
+export const TAX_REGIME_LABELS = { our: 'ОУР', snr: 'СНР' };
+// Официальный сервис КГД «Сведения по контрагентам»: БИН и капча — там, выписку (PDF) прикладывают сюда.
+export const KGD_SERVICE_URL = 'https://portal.kgd.gov.kz/pages/info-services/find-information-for-ip-ul';
+
+/* Срок договора в списке «Договоры» (владелец 17.11.2026, п. 4): розовым — подходит к концу (за
+   настройку «договор: обратите внимание, дней»), красным — истёк. Недействующий договор говорит о
+   себе статусом — срок у него без цвета. */
+export const contractTermView = (contract, { warnDays = 30, today = todayISO() } = {}) => {
+    if (!contract?.ends_on) return { level: 'ok', text: 'бессрочный', note: '' };
+    const text = `до ${fmtDate(contract.ends_on)}`;
+    if ((contract.status || 'active') !== 'active') return { level: 'ok', text, note: '' };
+    const days = daysUntil(contract.ends_on, today);
+    if (days === null) return { level: 'ok', text, note: '' };
+    // Дата — в метке, что с ней — строкой ниже: в узкой колонке метка не обрезается.
+    if (days < 0) return { level: 'alarm', text, note: 'срок истёк' };
+    if (days === 0) return { level: 'alarm', text, note: 'истекает сегодня' };
+    if (days <= warnDays) return { level: 'attention', text, note: `осталось ${pluralDays(days)}` };
+    return { level: 'ok', text, note: '' };
+};
+
+/* «С НДС · ОУР» / «Без НДС · СНР (упрощённая декларация)» — что известно о поставщике. */
+export const taxText = (vat, regime, note) => [
+    vat === true ? 'С НДС' : vat === false ? 'Без НДС' : '',
+    regime ? `${TAX_REGIME_LABELS[regime] || regime}${regime === 'snr' && note ? ` (${note})` : ''}` : '',
+].filter(Boolean).join(' · ');
+
 export const ROLE_LABELS = {
     initiator: 'Инициатор',
     manager: 'Непосредственный руководитель',
@@ -238,6 +273,32 @@ export const PERIOD_META = {
     custom: { label: 'Свой интервал' },
 };
 export const PERIOD_OPTIONS = Object.entries(PERIOD_META).map(([value, meta]) => ({ value, label: meta.label }));
+
+/* Повтор регулярного платежа словами — как у напоминаний Google (владелец 17.11.2026, пп. 1, 6):
+   «Каждый месяц 10-го», «Раз в квартал, 5-го», «Каждый год 15 марта», «Каждые 14 дней». День
+   берётся из даты ближайшей оплаты. */
+export const repeatText = (payment) => {
+    const { periodicity, next_due_on: due, interval_days: interval } = payment || {};
+    if (periodicity === 'custom') return Number(interval) > 0 ? `Каждые ${pluralDays(Number(interval))}` : 'Свой интервал';
+    const [, month, day] = String(due || '').slice(0, 10).split('-').map(Number);
+    if (!day) return PERIOD_META[periodicity]?.label || '';
+    if (periodicity === 'monthly') return `Каждый месяц ${day}-го`;
+    if (periodicity === 'quarterly') return `Раз в квартал, ${day}-го`;
+    if (periodicity === 'yearly') return `Каждый год ${day} ${MONTHS_GENITIVE[month - 1]}`;
+    return '';
+};
+
+/* Когда придёт заявка под ближайшую оплату: 1-го числа месяца оплаты (п. 7), у своего интервала —
+   за «создавать за» дней до срока. ISO-дата либо ''. */
+export const arrivalISO = (payment) => {
+    const { periodicity, next_due_on: due, lead_days: lead } = payment || {};
+    const iso = String(due || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return '';
+    if (periodicity !== 'custom') return `${iso.slice(0, 8)}01`;
+    const [y, m, d] = iso.split('-').map(Number);
+    const at = new Date(Date.UTC(y, m - 1, d) - Math.max(0, Number(lead) || 0) * 86400000);
+    return at.toISOString().slice(0, 10);
+};
 
 export const PARTY_KIND_OPTIONS = [
     { value: 'too', label: 'ТОО' },
@@ -593,6 +654,33 @@ export const HINTS = {
         ],
     },
     templateLimit: { intro: 'До какой суммы заявка по этому платежу уходит его согласующему. Больше — идёт по общим лимитам и маршрутам.' },
+    // Правки владельца 17.11.2026 (пп. 1, 6, 7).
+    paymentDay: {
+        intro: 'День, к которому платёж нужно оплатить, — как повтор напоминания: каждый месяц такого-то числа, раз в квартал или раз в год.',
+        outro: 'Заявка на этот платёж приходит 1-го числа месяца оплаты: сначала её проверяет бухгалтерия, потом согласование и оплата — к выбранному дню.',
+    },
+    invoiceRequired: {
+        intro: 'Нужен ли к заявке счёт поставщика.',
+        options: [
+            ['Нужен', 'ответственный прикладывает счёт; без него заявку не оплатят'],
+            ['Не нужен', 'платёж идёт по договору, счёт не запрашивается'],
+        ],
+    },
+    checker: {
+        intro: 'Сотрудник бухгалтерии, который 1-го числа проверяет все данные заявки по этому платежу: сумму, период, поставщика, договор, реквизиты.',
+        outro: 'Пусто — проверит любой из бухгалтерии.',
+    },
+    checks: {
+        intro: 'Что раздел проверил сам: договор и до какого числа он действует, остаток лимита, НДС и режим поставщика по БИН, возможный дубль, прошлые цены.',
+        outro: 'Розовым — обратите внимание, красным — тревога.',
+    },
+    taxCheck: {
+        intro: 'При заведении договора поставщика проверяют по БИН: с НДС или без НДС, ОУР или СНР.',
+        outro: 'Откройте сервис КГД «Сведения по контрагентам», введите БИН, скачайте выписку и приложите её сюда — НДС и режим заполнятся сами.',
+    },
+    contractWarnDays: { intro: 'За сколько дней до конца срока договор подсвечивается розовым — «обратите внимание». Истёкший договор — красным всегда.' },
+    limitWarnPercent: { intro: 'С какой доли выбранного лимита договор подсвечивается розовым. Оплата сверх лимита — красным всегда.' },
+    autofill: { intro: 'Приложите документ — раздел прочитает его и заполнит пустые поля. Проверьте их перед сохранением.' },
     minSuppliers: { intro: 'Сколько вариантов поставщиков нужно в новом закупе, чтобы заявка ушла на согласование. Не действует, когда альтернативные предложения отсутствуют.' },
     dueSoonDays: { intro: 'За сколько дней до срока оплаты исполнителю и инициатору приходит напоминание.' },
     receiptDays: { intro: 'Сколько дней у инициатора на чек после пополнения карты. За день до срока и когда он прошёл, инициатору и наблюдателям приходит напоминание.' },
@@ -686,8 +774,10 @@ export const contractPick = (value, supplierKey = '') => (value === NO_CONTRACT
 /* ── Оттенок строки ────────────────────────────────────────────────────────── */
 
 
+/* Просрочка — «кричащий красный» (владелец 17.11.2026, п. 4): строка в красном, метка сплошная.
+   Мягкий розовый остался за «обратите внимание» — подходящим сроком. */
 export const TONE_ROW = {
-    overdue: 'bg-rose-50/80',
+    overdue: 'bg-red-50',
     blocked: 'bg-amber-50/80',
     done: 'bg-emerald-50/60',
     rejected: 'bg-slate-50',
@@ -695,13 +785,14 @@ export const TONE_ROW = {
 /* Рамка строки-карточки того же состояния (фон — TONE_ROW). Закрытая заявка — самой тихой
    зелёной рамкой: таких строк в реестре десятки подряд. */
 export const TONE_EDGE = {
-    overdue: 'border-rose-200',
+    overdue: 'border-red-400',
     blocked: 'border-amber-200',
     done: 'border-emerald-100',
     rejected: 'border-slate-200',
 };
 export const TONE_PILL = {
-    overdue: { fill: 'bg-rose-100 text-rose-800', dot: 'bg-rose-500' },
+    // Сплошная красная метка (17.11.2026, п. 4): точка внутри неё — белая, а легенда плиток — красная.
+    overdue: { fill: 'bg-red-600 text-white', dot: 'bg-red-600', inner: 'bg-white' },
     blocked: { fill: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' },
     done: { fill: 'bg-emerald-100 text-emerald-800', dot: 'bg-emerald-500' },
     rejected: { fill: 'bg-slate-200 text-slate-600', dot: 'bg-slate-400' },
@@ -709,7 +800,7 @@ export const TONE_PILL = {
     current: { fill: 'bg-blue-50 text-blue-700 ring-1 ring-blue-100', dot: 'bg-blue-500' },
 };
 export const TONE_TEXT = {
-    overdue: { main: 'text-rose-950', body: 'text-rose-900/80', meta: 'text-rose-700/70' },
+    overdue: { main: 'text-red-950', body: 'text-red-900/80', meta: 'text-red-700/80' },
     blocked: { main: 'text-amber-950', body: 'text-amber-900/80', meta: 'text-amber-700/70' },
     done: { main: 'text-emerald-950', body: 'text-emerald-900/75', meta: 'text-emerald-700/70' },
     rejected: { main: 'text-slate-500', body: 'text-slate-400', meta: 'text-slate-400' },
@@ -979,8 +1070,8 @@ export const isOverdue = (request, today = todayISO()) => {
 };
 
 /* Метка срока — как у карточек «Задач»: флажок и дата, смысл несёт тон. Красный —
-   срок прошёл, жёлтый — подходит (`soonDays` — та же настройка, по которой раздел
-   шлёт напоминание о сроке), серый — всё спокойно. Подробности — в подсказке.
+   срок прошёл, розовый — подходит (`soonDays` — та же настройка, по которой раздел
+   шлёт напоминание о сроке; розовым с 17.11.2026, п. 4), серый — всё спокойно. Подробности — в подсказке.
    У оплаченной вместо срока — галочка и день оплаты. null — показывать нечего:
    срока нет либо заявка закрыта без оплаты. */
 export const dueChip = (request, { soonDays = 3, today = todayISO(), withWord = false } = {}) => {
@@ -1985,7 +2076,8 @@ export const regularIssues = (draft, { fileKinds = [], template = null, staffed 
     if (!draft.department_id) issues.push(issueOf('department_id', 'укажите подразделение'));
     if (!String(draft.payment_period || '').trim()) issues.push(issueOf('payment_period', 'укажите период оплаты'));
     if (!(parseAmount(draft.amount) > 0)) issues.push(issueOf('amount', 'укажите сумму'));
-    issues.push(...invoiceIssues(draft, fileKinds));
+    // «Без счёта» (владелец 17.11.2026, п. 1): платят по договору — счёта не просим.
+    if (template?.invoice_required !== false) issues.push(...invoiceIssues(draft, fileKinds));
     return issues;
 };
 
@@ -2067,8 +2159,9 @@ export const isBlankOffer = (offer) => !offer?.counterparty_id && !String(offer?
 
 /* ── История ───────────────────────────────────────────────────────────────── */
 
-const FIELD_LABELS = {
+export const FIELD_LABELS = {
     expense_name: 'Наименование закупа',
+    invoice_required: 'Счёт',
     justification: 'Описание и обоснование',
     project_id: 'Проект',
     project_department_id: 'Отдел проекта',
@@ -2152,6 +2245,8 @@ export const describeEvent = (event, titleOf = () => '') => {
             return names ? `Выдано из наличия: ${names}` : 'Выдано из наличия';
         }
         case 'approved': return payload.kind === 'manager_approval' ? 'Согласовано руководителем' : 'Утверждено';
+        // Регулярный платёж 1-го числа проверила бухгалтерия (владелец 17.11.2026, п. 7).
+        case 'checked': return 'Проверено бухгалтерией';
         case 'returned': return `Возвращена на доработку${of}`;
         case 'clarification': return payload.system
             ? `Требуется уточнение${of}`

@@ -16,7 +16,7 @@ import {
 import {
     AmountInput, ApprovalHint, AttachmentList, Bone, CardNumber, DATE_TRIGGER, ErrorBox, Face, Field, FieldHint, FilePicker, Fold,
     FoldGroup, Lifecycle, NoticeBox, PeopleValue, RequisitesBox, ReturnNotice, Row, SectionTitle, StatePill, TonePill,
-    UserSelect, WindowSkeleton, contractValue, errorText, multipart, useIsoLayoutEffect,
+    UserSelect, WindowSkeleton, ContractTerms, contractValue, errorText, multipart, useIsoLayoutEffect,
 } from './paymentsUi';
 
 /*
@@ -917,9 +917,11 @@ const PaymentRequestCard = ({
                                             </>
                                         ) : (
                                             <>
-                                                <Row label="Счёт" wide>{request.invoice_number || request.invoice_date ? `${request.invoice_number ? `№${request.invoice_number}` : ''}${request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}`.trim() : null}</Row>
-                                                {/* Не выбран, а счёт больше порога — коротко, что значит — под «i» (разбор 10.11.2026). */}
-                                                <Row label="Договор" wide>{contractValue(request, contractThreshold, contractPending ? (
+                                                <Row label="Счёт" wide>{request.invoice_number || request.invoice_date ? `${request.invoice_number ? `№${request.invoice_number}` : ''}${request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}`.trim()
+                                                    : (request.invoice_required === false ? 'не нужен — оплата по договору' : null)}</Row>
+                                                {/* Не выбран, а счёт больше порога — коротко, что значит — под «i» (разбор 10.11.2026).
+                                                    Договор с лимитом и сроком — у всех участников заявки (владелец 17.11.2026, пп. 2–4). */}
+                                                <Row label="Договор" wide>{data.contract_view ? <ContractTerms view={data.contract_view} /> : contractValue(request, contractThreshold, contractPending ? (
                                                     <span className="inline-flex items-center gap-1">
                                                         <span className="text-amber-700">не выбран</span>
                                                         <FieldHint hint={HINTS.contractPending} />

@@ -125,7 +125,8 @@ test('строка красится только у состояний со см
   assert.equal(rowTone({ status: 'rejected', state: 'rejected' }), 'rejected');
   assert.equal(rowTone({ status: 'cancelled', state: 'cancelled' }), 'rejected');
   assert.equal(toneRow(null), '');
-  assert.ok(toneRow('overdue').includes('rose'));
+  // Просрочка — «кричащий красный» (владелец 17.11.2026, п. 4).
+  assert.ok(toneRow('overdue').includes('red'));
 });
 
 test('состояние берётся с сервера, а без него — из статуса', () => {

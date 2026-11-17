@@ -21,6 +21,7 @@ MAX_TITLE = 160
 
 # Что сделать исполнителю — заголовок уведомления о новой задаче.
 TASK_TITLES = {
+    workflow.KIND_REGULAR_CHECK: 'Проверьте регулярный платёж',
     workflow.KIND_ENTITY: 'Выберите юр. лицо',
     workflow.KIND_IT: 'Проверьте IT-закуп',
     workflow.KIND_MANAGER: 'Согласуйте закуп',

@@ -13,11 +13,12 @@ import {
     PAYMENT_ORDER_OPTIONS, POWER_OF_ATTORNEY_OPTIONS, TRANSFER_PROOF_OPTIONS, proofsAsked, stageDeadlineLabel,
     helpdeskIssues, isBlankItem, isBlankOffer, issueKeys, issueSentence, issuesByKey, itemQuantity, itemsTotal, parseAmount,
     pricedByOffer, quantityText, recommendedOffer, stageAtFinal, stageTaken, todayISO, vatLabel,
-    contractChoice, contractPick, supplierKeyOf,
+    contractChoice, contractPick, supplierKeyOf, taxText,
 } from './paymentsMeta';
 import {
-    AmountInput, CardNumber, Choice, Field, FieldHint, FileChips, FilePicker, FormDate, FormInput, FormSelect, FormText,
-    INVALID_RING, IssueNav, NoticeBox, ReturnNotice, Row, TonePill, contractValue, errorText, fromKeyboard, useIssueNav,
+    AmountInput, CardNumber, ChecksPanel, Choice, ContractTerms, Field, FieldHint, FileChips, FilePicker, FormDate, FormInput,
+    FormSelect, FormText, INVALID_RING, IssueNav, NoticeBox, ReturnNotice, Row, TonePill, contractValue, errorText, fromKeyboard,
+    useIssueNav,
 } from './paymentsUi';
 
 /*
@@ -848,6 +849,40 @@ const PaymentStageForm = ({
         );
     }
 
+    // ── Бухгалтерия: проверка регулярного платежа 1-го числа (владелец 17.11.2026, п. 7) ──
+    // «Проверка со стороны бухгалтерии по всем данным»: всё, по чему пройдёт оплата, — одним
+    // блоком, рядом — что раздел проверил сам. Всё верно — «Проверено»; нет — вернуть с комментарием.
+    if (kind === 'regular_check') {
+        const view = data.contract_view;
+        return wrap(
+            <>
+                <div className="rounded-xl bg-slate-50 px-3 py-1.5" data-regular-check>
+                    <Row label="Платёж">{[request.template_name || request.expense_name, request.payment_period].filter(Boolean).join(' · ')}</Row>
+                    <Row label="Сумма">{fmtMoney(request.amount)}</Row>
+                    <Row label="Оплатить к">{request.due_on ? fmtDate(request.due_on) : null}</Row>
+                    <Row label="Поставщик">{[request.counterparty_name, request.counterparty_bin && `БИН ${request.counterparty_bin}`].filter(Boolean).join(' · ') || '—'}</Row>
+                    <Row label="Договор">{view ? <ContractTerms view={view} /> : contractValue(request, data.contract_check?.threshold, <span className="text-slate-500">не указан</span>)}</Row>
+                    <Row label="Реквизиты поставщика">{data.counterparty_account?.text || <span className="text-slate-500">не указаны</span>}</Row>
+                    <Row label="Компания-плательщик">{[request.legal_entity_name, data.legal_entity?.bin && `БИН ${data.legal_entity.bin}`].filter(Boolean).join(' · ') || '—'}</Row>
+                    <Row label="Назначение платежа">{request.payment_purpose}</Row>
+                    <Row label="Счёт">{request.invoice_required === false ? 'не нужен — оплата по договору'
+                        : (request.invoice_number ? `№${request.invoice_number}${request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}` : 'ответственный приложит перед оплатой')}</Row>
+                </div>
+                <ChecksPanel checks={(data.checks || []).filter((item) => item.code !== 'contract' && item.code !== 'limit')} onOpenRequest={onOpenRequest} />
+                {mode !== 'return' && <Comment value={comment} onChange={setComment} placeholder="Комментарий (необязательно)" />}
+                <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className={iosBtnPrimary} disabled={busy} onClick={() => act('approve', {}, false)}>
+                        {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Проверено
+                    </button>
+                    <button type="button" className={iosBtnSecondary} disabled={busy} onClick={() => toggleMode('return')}>
+                        Вернуть на доработку
+                    </button>
+                </div>
+                {reasonPanel}
+            </>,
+        );
+    }
+
     // ── Бухгалтерия: согласование — выбор юр. лица (15.10.2026; с 16.11.2026 — у каждого нового закупа) ──
     // Под рукой — то, по чему решают, чья это покупка: подразделение, инициатор, проект и
     // филиал. Что закупают и у кого — в сводке над страницами.
@@ -890,6 +925,8 @@ const PaymentStageForm = ({
         const offerFiles = all.filter((item) => item.kind === 'offer' || item.kind === 'supplier_registry');
         return wrap(
             <>
+                {/* Готовые проверки (владелец 17.11.2026, п. 9): что раздел проверил сам — решить остаётся человеку. */}
+                <ChecksPanel checks={data.checks || []} onOpenRequest={onOpenRequest} />
                 {chips('Коммерческие предложения:', offerFiles)}
                 {/* Решение — когда заявку взяли на рассмотрение (кнопка внизу окна). */}
                 {final && (
@@ -963,16 +1000,24 @@ const PaymentStageForm = ({
                             {!request.counterparty_id ? '—' : (request.counterparty_vat == null
                                 ? <span className="text-amber-700">не указан в справочнике</span>
                                 : `поставщик ${vatLabel(request.counterparty_vat)}`)}
+                            {/* Режим по выписке КГД (17.11.2026, п. 8) — когда поставщика проверили по БИН. */}
+                            {counterparty?.tax_regime && (
+                                <span className="text-slate-500"> · {taxText(null, counterparty.tax_regime, counterparty.tax_regime_note)}</span>
+                            )}
                         </Row>
                     )}
                     <Row label="Счёт">
-                        {request.invoice_number ? `№${request.invoice_number}` : '—'}{request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}
+                        {/* Регулярный платёж «без счёта» (17.11.2026, п. 1) — платят по договору. */}
+                        {request.invoice_required === false && !request.invoice_number ? 'не нужен — оплата по договору' : (
+                            <>{request.invoice_number ? `№${request.invoice_number}` : '—'}{request.invoice_date ? ` от ${fmtDate(request.invoice_date)}` : ''}</>
+                        )}
                     </Row>
                     {/* П. 8: договор. «Без договора» — выбор инициатора (10.11.2026): счёт с ним приходит
                         сюда любой суммы, а свыше порога — с пометкой. Нужен договор — «Запросить
-                        информацию → Нужен действующий договор». */}
+                        информацию → Нужен действующий договор». С 17.11.2026 (владелец, пп. 2–4) срок и
+                        лимит договора здесь подсвечены: розовым — обратите внимание, красным — тревога. */}
                     <Row label="Договор">
-                        {contractValue(request, check.threshold, 'не указан')}
+                        {data.contract_view ? <ContractTerms view={data.contract_view} strong /> : contractValue(request, check.threshold, 'не указан')}
                         {check.applies && !check.ok && <div className="text-amber-700">{check.reason}</div>}
                     </Row>
                     {/* Прошлые оплаты — номером-ссылкой: заявка открывается здесь же (владелец 16.11.2026, п. 2). */}
