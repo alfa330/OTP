@@ -5,25 +5,35 @@ import axios from 'axios';
 import {
   Bell,
   CalendarClock,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft as LucideChevronLeft,
-  GripHorizontal,
+  ChevronRight as LucideChevronRight,
+  Download,
+  GripVertical,
   Inbox,
+  Layers,
   Link2,
+  ListTodo,
   LoaderCircle,
   Maximize2,
   Minimize2,
   MoreHorizontal,
   Palette,
   PanelRightOpen,
+  Pencil,
   PictureInPicture2,
   Pin,
   PinOff,
+  Plus,
   RefreshCw,
   Settings,
   SlidersHorizontal,
   StickyNote,
+  Timer,
+  Trash2,
+  Undo2,
 } from 'lucide-react';
 import { normalizeRole, isAdminLikeRole, isSupervisorRole } from '../../utils/roles';
 import { rankAndFileTasksAllowed } from '../../utils/departmentViews';
@@ -95,10 +105,11 @@ import {
   isActionNeedSeen,
   taskActionNeed,
 } from './taskActionNeeds';
-import { IosLightbox } from '../ui/ios';
+import { IosLightbox, IosMenu, IosToggle } from '../ui/ios';
 import { isPreviewablePhoto, splitTaskFiles } from './taskPhotos';
 import useTaskPhotoPreviews from './useTaskPhotoPreviews';
-import FilePreviewSheet, { saveBlobAs } from '../file_preview/FilePreviewSheet';
+import FilePreviewSheet, { TypeBadge, saveBlobAs } from '../file_preview/FilePreviewSheet';
+import { previewKind } from '../file_preview/fileKinds.js';
 import { previewCache } from '../file_preview/previewCache.js';
 
 /* Шрифты Google разделу больше не нужны: он набран системным шрифтом Apple, как
@@ -145,6 +156,21 @@ styleTag.textContent = `
     --radius: 16px;
     --radius-sm: 12px;
     --radius-xs: 6px;
+    /* Системные заливки и линии iOS (новый вид 16.11): полупрозрачные, поэтому
+       ложатся и на белое, и на серое; тёмные значения — в dark_theme_chrome.css. */
+    --ios-fill: rgba(118, 118, 128, .12);
+    --ios-fill-strong: rgba(118, 118, 128, .2);
+    --ios-sep: rgba(60, 60, 67, .18);
+    --check-indigo: #a5b4fc;
+    --check-amber: #f59e0b;
+    --check-rose: #fb7185;
+    --check-violet: #8b5cf6;
+    --check-emerald: #10b981;
+    --state-indigo: #4f46e5;
+    --state-amber: #b45309;
+    --state-violet: #6d28d9;
+    --state-emerald: #047857;
+    --state-rose: #be123c;
     background: var(--bg);
     min-height: 100vh;
     padding: 28px 24px;
@@ -793,23 +819,8 @@ styleTag.textContent = `
     box-shadow: var(--shadow-sm);
     transform: translateY(-1px);
   }
-  .tv-task-row.is-urgent {
-    border-color: #fcd34d;
-    background: #fffdf6;
-  }
-  .tv-task-row.is-urgent:hover { border-color: #f59e0b; }
-  .tv-task-row.is-critical {
-    border-color: #fecdd3;
-    background: #fff6f7;
-  }
-  .tv-task-row.is-critical:hover { border-color: #fb7185; }
-  .tv-task-row-indicator {
-    width: 3px; height: 28px; border-radius: 99px; flex-shrink: 0;
-  }
-  .tv-task-row.is-urgent .tv-task-row-indicator,
-  .tv-task-row.is-critical .tv-task-row-indicator {
-    width: 4px; height: 32px;
-  }
+  /* Срочность строку целиком больше не красит (16.11): в сгруппированном списке
+     жёлтые и розовые полосы читались бы отдельными карточками — она капсулой справа. */
   .tv-task-row-main {
     flex: 1;
     min-width: 0;
@@ -1496,6 +1507,13 @@ styleTag.textContent = `
     font-size: 11px;
     font-weight: 800;
   }
+  /* Подпись пустой колонки заметок. Жила под классом старой закреплённой задачи
+     (.tv-pin-empty-actions) и пропала вместе с ним — теперь своя, у колонок. */
+  .tv-note-column-empty {
+    color: var(--ink-3);
+    font-size: 12px;
+    line-height: 1.45;
+  }
   .tv-note-column-list {
     min-width: 0;
     display: flex;
@@ -1978,7 +1996,18 @@ styleTag.textContent = `
     line-height: 1.5;
   }
 
-  /* ── Pinned task widget ── */
+  /* ── Закреплённая задача ──
+     Плавающая панель в духе macOS: матовое стекло с тонкой каймой, шапка-тулбар
+     с кнопками-значками без рамок (как у панели помощника), внутри — списки iOS
+     группами на сером полотне, действия — внизу. «Мои задачи», «Заметки»,
+     «Оформление» и форма открываются внутри панели экранами со стрелкой «назад».
+     В Chrome панель живёт в окне «поверх окон» (Document PiP) и занимает его целиком.
+
+     Цвета в правилах — только переменные. Палитра (PIN_PALETTES) ставит их на
+     корень панели, а генератор тёмного слоя сайта переписывает лишь правила с
+     литералами: будь здесь хексы, светлая палитра на тёмном сайте получала бы
+     тёмные кнопки поверх белой панели. Значения ниже — светлая палитра, на
+     случай если своя не пришла. */
   .tv-pin-widget {
     --bg: #f5f5f7;
     --surface: #ffffff;
@@ -1987,300 +2016,993 @@ styleTag.textContent = `
     --border-strong: #cbd5e1;
     --ink: #0f172a;
     --ink-2: #475569;
-    --ink-3: #94a3b8;
+    --ink-3: #7b8597;
     --accent: #2563eb;
     --accent-fg: #ffffff;
-    /* Выбор — мягкий голубой, как везде на сайте; серая заливка — вторичные кнопки и капсулы. */
     --select-bg: #eef4ff;
     --select-border: #bfd4fb;
     --select-ink: #1d4ed8;
-    --fill: #f1f5f9;
+    --fill: #eef1f5;
     --fill-strong: #e2e8f0;
     --amber: #d97706;
     --indigo: #4338ca;
     --emerald: #059669;
     --rose: #e11d48;
     --blue: #2563eb;
-    --shadow-lg: 0 20px 60px rgba(0,0,0,.16), 0 8px 24px rgba(0,0,0,.1);
+    --pin-panel: rgba(255, 255, 255, .94);
+    --pin-bar: rgba(255, 255, 255, .8);
+    --pin-line: rgba(15, 23, 42, .08);
+    --pin-shadow: 0 18px 48px rgba(15, 23, 42, .16), 0 2px 8px rgba(15, 23, 42, .06);
+    --pin-menu-shadow: 0 12px 32px rgba(15, 23, 42, .16), 0 2px 6px rgba(15, 23, 42, .08);
+    --pin-danger: #e11d48;
+    /* Текст-ссылки шапки («‹ Задача», «+ Новая») — темнее заливки главной кнопки:
+       у «Мяты» и «Контраста» акцент на белом давал 3.4:1 для мелкого текста. */
+    --pin-link: #2563eb;
+    /* Бегунок сегментов: в «Тёмной» белый --surface сливался с дорожкой. */
+    --pin-seg-thumb: #ffffff;
+    /* Тона статусов, типов и срочности — те же, что у меток и кнопок раздела. */
+    --tone-gray-bg: #eef1f5;    --tone-gray-ink: #475569;
+    --tone-blue-bg: #dbeafe;    --tone-blue-ink: #1e40af;
+    --tone-indigo-bg: #e0e7ff;  --tone-indigo-ink: #3730a3;
+    --tone-violet-bg: #ede9fe;  --tone-violet-ink: #5b21b6;
+    --tone-amber-bg: #fef3c7;   --tone-amber-ink: #92400e;
+    --tone-emerald-bg: #d1fae5; --tone-emerald-ink: #065f46;
+    --tone-rose-bg: #ffe4e6;    --tone-rose-ink: #9f1239;
+    --tone-teal-bg: #ccfbf1;    --tone-teal-ink: #0f766e;
+    --tone-fuchsia-bg: #fae8ff; --tone-fuchsia-ink: #86198f;
+    --check-done: #10b981;
+    /* Общие правила раздела (.tv-btn, .tv-input, заметки) берут скругления и
+       тени отсюда: у панели нет предка .tv-root, и без этих переменных углы
+       кнопок выходили прямыми. */
+    --radius: 16px;
+    --radius-sm: 12px;
+    --radius-xs: 8px;
+    --shadow-sm: 0 1px 2px rgba(15, 23, 42, .06), 0 1px 1px rgba(15, 23, 42, .04);
+    --shadow-md: 0 4px 16px rgba(15, 23, 42, .08), 0 2px 6px rgba(15, 23, 42, .05);
+    --shadow-lg: 0 20px 60px rgba(15, 23, 42, .14), 0 8px 24px rgba(15, 23, 42, .08);
     position: fixed;
     z-index: 130;
-    width: min(360px, calc(100vw - 24px));
-    background: var(--surface);
-    border: 1px solid var(--border-strong);
-    border-radius: 12px;
-    box-shadow: var(--shadow-lg);
-    overflow: hidden;
+    width: min(380px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    display: flex;
+    flex-direction: column;
+    background: var(--pin-panel);
+    border: 1px solid var(--pin-line);
+    border-radius: 18px;
+    box-shadow: var(--pin-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(24px);
+    backdrop-filter: saturate(180%) blur(24px);
     color: var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.4;
     user-select: none;
+    -webkit-font-smoothing: antialiased;
   }
+  .tv-pin-widget *, .tv-pin-widget *::before, .tv-pin-widget *::after { box-sizing: border-box; }
+  /* Окно «поверх окон»: рамку, тень и скругление даёт само окно. */
   .tv-pin-widget.is-detached {
     position: relative;
     inset: auto;
     width: 100%;
     height: 100vh;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    border-radius: 0;
+    max-height: none;
     border: 0;
+    border-radius: 0;
     box-shadow: none;
+    background: var(--bg);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
   .tv-pin-widget.is-dragging {
-    box-shadow: 0 24px 72px rgba(0,0,0,.2), 0 10px 28px rgba(0,0,0,.14);
+    box-shadow: var(--pin-shadow), 0 28px 72px rgba(15, 23, 42, .12);
   }
-  .tv-pin-header {
+  /* Скругление держит внутренняя рамка: меню «Ещё» живёт рядом с ней и может
+     выйти за край панели, а не обрезаться. */
+  .tv-pin-frame {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
+    flex-direction: column;
+    border-radius: 17px;
+    overflow: hidden;
   }
-  .tv-pin-drag-handle {
-    width: 24px;
-    min-height: 32px;
-    border: 0;
-    background: transparent;
-    color: var(--ink-3);
-    cursor: grab;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    touch-action: none;
+  .tv-pin-widget.is-detached .tv-pin-frame { border-radius: 0; }
+
+  /* Шапка-тулбар. Тянется за всю шапку, как окно macOS, кроме кнопок. */
+  .tv-pin-header {
+    position: relative;
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 44px;
+    padding: 6px 8px 6px 10px;
+    background: var(--pin-bar);
+    border-bottom: 1px solid var(--pin-line);
+    cursor: grab;
+    touch-action: none;
   }
-  .tv-pin-drag-handle:active {
-    cursor: grabbing;
+  .tv-pin-widget.is-dragging .tv-pin-header { cursor: grabbing; }
+  .tv-pin-widget.is-detached .tv-pin-header { cursor: default; touch-action: auto; }
+  .tv-pin-header.is-nav {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    padding-left: 6px;
+  }
+  .tv-pin-grip {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--ink-3);
+    opacity: .75;
   }
   .tv-pin-heading {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
   }
-  .tv-pin-kicker {
-    display: block;
-    margin-bottom: 2px;
-    color: var(--ink-3);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-  }
-  .tv-pin-title {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
-    font-size: 14px;
-    line-height: 1.35;
-    font-weight: 700;
+  .tv-pin-heading-title,
+  .tv-pin-nav-title {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    line-height: 1.25;
     color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tv-pin-nav-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 0;
+    max-width: 210px;
+  }
+  .tv-pin-nav-title { display: block; max-width: 100%; text-align: center; }
+  .tv-pin-nav-sub {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--ink-3);
+    text-align: center;
+  }
+  .tv-pin-nav-side { display: flex; align-items: center; min-width: 0; }
+  .tv-pin-nav-side.is-end { justify-content: flex-end; }
+  .tv-pin-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .tv-pin-tool {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-3);
+    display: inline-grid;
+    place-items: center;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease;
+  }
+  .tv-pin-tool:hover:not(:disabled),
+  .tv-pin-tool.is-active {
+    background: var(--fill);
+    color: var(--ink-2);
+  }
+  .tv-pin-tool:disabled { opacity: .45; cursor: default; }
+  /* «‹ Задача» и текстовые кнопки шапки — как в навигации iOS: акцентным цветом. */
+  .tv-pin-back,
+  .tv-pin-text-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--pin-link);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .15s ease;
+  }
+  .tv-pin-back { padding-left: 2px; }
+  .tv-pin-text-btn { gap: 4px; }
+  .tv-pin-back:hover:not(:disabled),
+  .tv-pin-text-btn:hover:not(:disabled) { background: var(--fill); }
+  .tv-pin-text-btn:disabled { opacity: .45; cursor: default; }
+  .tv-pin-tool:focus-visible,
+  .tv-pin-back:focus-visible,
+  .tv-pin-text-btn:focus-visible,
+  .tv-pin-title-btn:focus-visible,
+  .tv-pin-btn:focus-visible,
+  .tv-pin-file:focus-visible,
+  .tv-pin-list-row:focus-visible,
+  .tv-pin-person:focus-visible,
+  .tv-pin-segmented button:focus-visible,
+  .tv-pin-look:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* Меню «Ещё» — как меню macOS: стекло, выбор строки акцентной заливкой. */
+  .tv-pin-menu {
+    position: absolute;
+    top: 44px;
+    right: 8px;
+    z-index: 5;
+    min-width: 224px;
+    padding: 5px;
+    background: var(--pin-panel);
+    border: 1px solid var(--pin-line);
+    border-radius: 12px;
+    box-shadow: var(--pin-menu-shadow);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    transform-origin: top right;
+    animation: tvPinMenuIn .14s cubic-bezier(.22, .9, .3, 1);
+  }
+  /* Если окно «поверх окон» не дало себя увеличить — меню прокручивается, а не
+     уходит за край окна. */
+  .tv-pin-widget.is-detached .tv-pin-menu {
+    max-height: calc(100vh - 52px);
+    overflow-y: auto;
+  }
+  .tv-pin-menu.is-up {
+    top: auto;
+    bottom: calc(100% + 6px);
+    transform-origin: bottom right;
+  }
+  @keyframes tvPinMenuIn {
+    from { opacity: 0; transform: scale(.96); }
+    to   { opacity: 1; transform: none; }
+  }
+  .tv-pin-menu-item {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .tv-pin-menu-item svg { flex: none; color: var(--ink-3); }
+  .tv-pin-menu-item:hover:not(:disabled),
+  .tv-pin-menu-item:focus-visible {
+    outline: none;
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  .tv-pin-menu-item:hover:not(:disabled) svg,
+  .tv-pin-menu-item:focus-visible svg { color: inherit; }
+  .tv-pin-menu-item.is-danger,
+  .tv-pin-menu-item.is-danger svg { color: var(--pin-danger); }
+  .tv-pin-menu-item.is-danger:hover:not(:disabled),
+  .tv-pin-menu-item.is-danger:focus-visible { background: var(--pin-danger); color: var(--accent-fg); }
+  .tv-pin-menu-item.is-danger:hover:not(:disabled) svg,
+  .tv-pin-menu-item.is-danger:focus-visible svg { color: inherit; }
+  .tv-pin-menu-item:disabled { opacity: .45; cursor: default; }
+  .tv-pin-menu-sep {
+    height: 1px;
+    margin: 4px 8px;
+    background: var(--pin-line);
+  }
+
+  /* Содержимое — серое полотно, сведения — белыми группами, как в настройках iOS. */
+  .tv-pin-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px 12px 16px;
+    background: var(--bg);
+    scrollbar-width: thin;
+  }
+  /* У flex-потомка с overflow: hidden минимальная высота нулевая: при длинном
+     содержимом группы «Описание» и «Исполнитель…» сжимались до полоски вместо
+     прокрутки (замер на задаче с чек-листом и восемью файлами). */
+  .tv-pin-scroll > * { flex-shrink: 0; }
+  .tv-pin-scroll.is-compact { padding-bottom: 12px; }
+  /* Заметки в окне «поверх окон» сами делят высоту окна: список сверху,
+     редактор до низа. На странице — обычная прокрутка панели. */
+  .tv-pin-widget.is-detached .tv-pin-scroll.is-notes { overflow: hidden; }
+  .tv-pin-hero {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 0 4px;
+  }
+  .tv-pin-key {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .01em;
+  }
+  .tv-pin-title-btn {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    transition: color .15s ease;
+  }
+  .tv-pin-title-btn:hover { color: var(--accent); }
+  .tv-pin-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -.012em;
     word-break: break-word;
   }
-  .tv-pin-header-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .tv-pin-header-btn {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--ink-2);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all .15s ease;
-  }
-  .tv-pin-header-btn:hover:not(:disabled) {
-    background: var(--border-strong);
-    color: var(--ink);
-    border-color: var(--border-strong);
-  }
-  .tv-pin-header-btn.is-active {
-    background: var(--select-bg);
-    color: var(--select-ink);
-    border-color: var(--select-border);
-  }
-  .tv-pin-header-btn-danger {
-    color: #e11d48;
-  }
-  .tv-pin-header-btn-danger:hover:not(:disabled) {
-    background: #fff1f2;
-    border-color: var(--border);
-    color: #be123c;
-  }
-  .tv-pin-header-btn:disabled {
-    opacity: .55;
-    cursor: not-allowed;
-  }
-  .tv-pin-body {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 12px;
-  }
-  .tv-pin-widget.is-detached .tv-pin-header {
-    flex-shrink: 0;
-  }
-  .tv-pin-widget.is-detached .tv-pin-body {
-    flex: 1;
-    min-height: 0;
-    overflow: hidden;
-  }
-  .tv-pin-widget.is-detached .tv-pin-body:not(.is-menu-open) {
-    overflow-y: auto;
-  }
-  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open,
-  .tv-pin-widget.is-detached .tv-pin-body.is-task-form-open {
-    overflow: hidden;
-  }
-  .tv-pin-body.is-notes-open {
-    max-height: min(660px, calc(100vh - 88px));
-    min-height: 0;
-    overflow-y: auto;
-  }
-  .tv-pin-widget.is-detached .tv-pin-body.is-notes-open {
-    max-height: none;
-    overflow: hidden;
-  }
-  .tv-pin-badges {
+  .tv-pin-widget:not(.is-expanded) .tv-pin-title { -webkit-line-clamp: 2; }
+  .tv-pin-tags {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 5px;
   }
-  .tv-pin-summary {
+  .tv-pin-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.3;
+    white-space: nowrap;
+    background: var(--tone-gray-bg);
+    color: var(--tone-gray-ink);
+  }
+  .tv-pin-tag.is-blue    { background: var(--tone-blue-bg);    color: var(--tone-blue-ink); }
+  .tv-pin-tag.is-indigo  { background: var(--tone-indigo-bg);  color: var(--tone-indigo-ink); }
+  .tv-pin-tag.is-violet  { background: var(--tone-violet-bg);  color: var(--tone-violet-ink); }
+  .tv-pin-tag.is-amber   { background: var(--tone-amber-bg);   color: var(--tone-amber-ink); }
+  .tv-pin-tag.is-emerald { background: var(--tone-emerald-bg); color: var(--tone-emerald-ink); }
+  .tv-pin-tag.is-rose    { background: var(--tone-rose-bg);    color: var(--tone-rose-ink); }
+  .tv-pin-tag.is-teal    { background: var(--tone-teal-bg);    color: var(--tone-teal-ink); }
+  .tv-pin-tag.is-fuchsia { background: var(--tone-fuchsia-bg); color: var(--tone-fuchsia-ink); }
+  /* «Ждёт ответа» — та же метка, что в списке и на доске (точка и подпись, не
+     капсула), только в тоне палитры: литералы раздела на «Тёмной» не читались бы. */
+  .tv-pin-widget .tv-clar-waiting { color: var(--tone-violet-ink); }
+  .tv-pin-widget .tv-clar-waiting::before { background: currentColor; }
+
+  .tv-pin-section {
     display: flex;
     flex-direction: column;
+    gap: 6px;
+  }
+  .tv-pin-section-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
     gap: 8px;
+    padding: 0 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--ink-3);
   }
-  .tv-pin-files {
+  .tv-pin-section-head small {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-2);
+    letter-spacing: 0;
+    text-transform: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-pin-group {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-  }
-  .tv-pin-note-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-    padding: 10px;
-    border-radius: 10px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-  }
-  .tv-pin-note-panel textarea {
-    width: 100%;
-    min-height: 104px;
-    resize: vertical;
-    border: 1px solid var(--border);
-    border-radius: 8px;
     background: var(--surface);
-    color: var(--ink);
-    font-size: 12px;
-    line-height: 1.45;
-    padding: 8px;
-    outline: none;
+    border-radius: 12px;
+    box-shadow: 0 0 0 1px var(--pin-line);
+    overflow: hidden;
+  }
+  .tv-pin-description {
+    margin: 0;
+    padding: 10px 12px;
+    max-height: 40vh;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    word-break: break-word;
     user-select: text;
   }
-  .tv-pin-palette-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
+  /* Строки списка: подпись слева, значение справа, разделитель — от текста. */
+  .tv-pin-row,
+  .tv-pin-check,
+  .tv-pin-file,
+  .tv-pin-list-row {
+    position: relative;
   }
-  .tv-pin-palette-btn {
-    width: 30px;
-    height: 24px;
-    border-radius: 8px;
-    border: 2px solid var(--border);
-    cursor: pointer;
-    display: inline-flex;
-    overflow: hidden;
-    padding: 0;
-    background: var(--surface);
+  .tv-pin-row + .tv-pin-row::before,
+  .tv-pin-check + .tv-pin-check::before,
+  .tv-pin-file + .tv-pin-file::before,
+  .tv-pin-list-row + .tv-pin-list-row::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    left: 12px;
+    height: 1px;
+    background: var(--pin-line);
   }
-  .tv-pin-palette-btn.is-active { border-color: var(--accent); }
-  .tv-pin-palette-swatch { flex: 1; }
-  .tv-pin-mini-checklist {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .tv-pin-mini-checklist .tv-checklist-row {
-    padding: 7px 8px;
-  }
-  .tv-pin-note-footer,
-  .tv-pin-task-form-actions {
+  .tv-pin-check + .tv-pin-check::before { left: 42px; }
+  .tv-pin-file + .tv-pin-file::before { left: 48px; }
+  .tv-pin-list-row + .tv-pin-list-row::before { left: 30px; }
+  .tv-pin-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 12px;
+    min-height: 40px;
+    padding: 9px 12px;
   }
-  .tv-pin-task-form {
+  .tv-pin-row-label { flex-shrink: 0; color: var(--ink-2); }
+  .tv-pin-row-value {
+    min-width: 0;
+    color: var(--ink);
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tv-pin-row-value.is-overdue { color: var(--pin-danger); font-weight: 600; }
+  .tv-pin-row.is-note { color: var(--ink-3); font-size: 12px; justify-content: flex-start; }
+
+  /* Чек-лист — круглые отметки, как в «Напоминаниях». */
+  .tv-pin-check {
     display: flex;
-    flex-direction: column;
-    gap: 9px;
-    padding: 10px;
-    border-radius: 10px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    color: var(--ink);
+    line-height: 1.35;
+    cursor: pointer;
   }
-  .tv-pin-task-form.is-fullscreen {
-    flex: 1;
-    min-height: 0;
-    height: 100%;
-    overflow-y: auto;
-    padding: 12px;
-    border-radius: 0;
-    border: 0;
-    background: var(--surface);
-  }
-  .tv-pin-task-form.is-fullscreen .tv-pin-task-form-title {
-    padding: 2px 0 4px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tv-pin-task-form.is-fullscreen .tv-form-field,
-  .tv-pin-task-form.is-fullscreen .tv-soft-block {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 9px;
-  }
-  .tv-pin-task-form.is-fullscreen .tv-soft-block .tv-form-field {
-    background: transparent;
-    border: 0;
-    padding: 0;
-  }
-  .tv-pin-task-form.is-fullscreen .tv-pin-task-form-actions {
-    position: sticky;
-    bottom: 0;
-    margin-top: auto;
-    padding-top: 8px;
-    background: var(--surface);
-    border-top: 1px solid var(--border);
-  }
-  .tv-pin-task-form-title {
+  .tv-pin-check:hover { background: var(--surface-2); }
+  .tv-pin-check.is-disabled { cursor: default; }
+  .tv-pin-check.is-disabled:hover { background: transparent; }
+  .tv-pin-check-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
     margin: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .tv-pin-check-mark {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    margin-top: -1px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-strong);
+    display: grid;
+    place-items: center;
+    color: transparent;
+    transition: background .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .tv-pin-check.is-done .tv-pin-check-mark {
+    background: var(--check-done);
+    border-color: var(--check-done);
+    color: var(--accent-fg);
+  }
+  .tv-pin-check.is-disabled .tv-pin-check-mark { opacity: .55; }
+  .tv-pin-check-input:focus-visible + .tv-pin-check-mark {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--select-bg);
+  }
+  .tv-pin-check-title { flex: 1; min-width: 0; word-break: break-word; }
+  .tv-pin-check.is-done .tv-pin-check-title { color: var(--ink-3); text-decoration: line-through; }
+
+  /* Файлы — строками с цветной меткой типа, как список в окне просмотра. */
+  .tv-pin-file {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 8px 12px;
+    border: 0;
+    background: transparent;
     color: var(--ink);
     font-size: 13px;
-    font-weight: 800;
+    text-align: left;
+    cursor: pointer;
   }
-  .tv-pin-task-form-grid {
+  .tv-pin-file:hover { background: var(--surface-2); }
+  .tv-pin-file .tfv-badge {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    font-size: 8px;
+  }
+  .tv-pin-file-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-pin-chevron { flex: none; color: var(--ink-3); opacity: .8; }
+
+  /* Нижняя панель действий. */
+  .tv-pin-footer {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 12px;
+    background: var(--pin-bar);
+    border-top: 1px solid var(--pin-line);
+  }
+  .tv-pin-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 8px;
+  }
+  .tv-pin-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 36px;
+    padding: 8px 12px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--fill);
+    color: var(--ink-2);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    cursor: pointer;
+    transition: box-shadow .15s ease, transform .1s ease, opacity .15s ease;
+  }
+  /* Наведение — лёгкое затемнение поверх своего тона (в тёмной палитре — высветление). */
+  .tv-pin-btn:hover:not(:disabled) { box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--ink) 6%, transparent); }
+  .tv-pin-btn:active:not(:disabled) { transform: scale(.98); }
+  .tv-pin-btn:disabled { opacity: .5; cursor: default; }
+  .tv-pin-btn.is-primary { background: var(--accent); color: var(--accent-fg); }
+  .tv-pin-btn.is-primary:hover:not(:disabled) { box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--ink) 12%, transparent); }
+  .tv-pin-btn.is-amber   { background: var(--tone-amber-bg);   color: var(--tone-amber-ink); }
+  .tv-pin-btn.is-indigo  { background: var(--tone-indigo-bg);  color: var(--tone-indigo-ink); }
+  .tv-pin-btn.is-emerald { background: var(--tone-emerald-bg); color: var(--tone-emerald-ink); }
+  .tv-pin-btn.is-rose    { background: var(--tone-rose-bg);    color: var(--tone-rose-ink); }
+  .tv-pin-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink-3);
+    text-align: center;
+  }
+  .tv-pin-error {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--pin-danger);
+  }
+
+  /* Отчёт при сдаче — внизу, на месте кнопок, как поле ответа в «Сообщениях». */
+  .tv-pin-report { display: flex; flex-direction: column; gap: 8px; }
+  .tv-pin-report-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tv-pin-widget .tv-input,
+  .tv-pin-widget .tv-textarea {
+    background: var(--surface);
+    border-color: var(--pin-line);
+    border-radius: 10px;
+    color: var(--ink);
+    user-select: text;
+  }
+  .tv-pin-widget .tv-input:focus,
+  .tv-pin-widget .tv-textarea:focus {
+    background: var(--surface);
+    border-color: var(--select-border);
+    box-shadow: 0 0 0 3px var(--select-bg);
+  }
+  .tv-pin-widget .tv-input::placeholder,
+  .tv-pin-widget .tv-textarea::placeholder { color: var(--ink-3); }
+  .tv-pin-report .tv-textarea { min-height: 76px; }
+
+  /* «Мои задачи»: сегменты, люди капсулами, задачи строками. */
+  .tv-pin-segmented {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 9px;
+    background: var(--fill);
+  }
+  .tv-pin-segmented button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .tv-pin-segmented button:hover { color: var(--ink); }
+  .tv-pin-segmented button.is-active {
+    background: var(--pin-seg-thumb);
+    color: var(--ink);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12), 0 0 0 .5px rgba(15, 23, 42, .04);
+  }
+  .tv-pin-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-pin-people {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin: 0 -12px;
+    padding: 1px 12px 3px;
+    scrollbar-width: none;
+  }
+  .tv-pin-people::-webkit-scrollbar { display: none; }
+  .tv-pin-person {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 180px;
+    padding: 3px 9px 3px 3px;
+    border: 1px solid var(--pin-line);
+    border-radius: 99px;
+    background: var(--surface);
+    color: var(--ink-2);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .tv-pin-person:hover { color: var(--ink); background: var(--surface-2); }
+  .tv-pin-person.is-active {
+    background: var(--select-bg);
+    border-color: var(--select-border);
+    color: var(--select-ink);
+  }
+  .tv-pin-person-avatar {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    overflow: hidden;
+    display: inline-grid;
+    place-items: center;
+    background: var(--fill-strong);
+    color: var(--ink-2);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .tv-pin-person-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tv-pin-person-badge {
+    flex: none;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 99px;
+    display: inline-grid;
+    place-items: center;
+    background: var(--fill-strong);
+    color: var(--ink-2);
+    font-size: 10.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .tv-pin-person-badge.is-alert { background: var(--tone-amber-bg); color: var(--tone-amber-ink); }
+  .tv-pin-list-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+  }
+  .tv-pin-list-row:hover { background: var(--surface-2); }
+  .tv-pin-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ink-3);
+  }
+  .tv-pin-list-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tv-pin-list-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  .tv-pin-list-row.is-current .tv-pin-list-title { font-weight: 600; }
+  .tv-pin-list-meta {
+    font-size: 11.5px;
+    color: var(--ink-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tv-pin-list-check { flex: none; color: var(--accent); }
+  .tv-pin-empty {
+    padding: 28px 16px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--ink-3);
+    text-align: center;
+  }
+
+  /* «Оформление» — плитки-образцы палитр с отметкой под ними, как выбор темы в iOS. */
+  .tv-pin-appearance {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 12px;
+    padding: 2px 4px 0;
+  }
+  .tv-pin-look {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .tv-pin-look-frame {
+    display: block;
+    width: 100%;
+    padding: 3px;
+    border-radius: 14px;
+    box-shadow: 0 0 0 1px transparent;
+    transition: box-shadow .15s ease;
+  }
+  .tv-pin-look.is-active .tv-pin-look-frame { box-shadow: 0 0 0 2px var(--accent); }
+  .tv-pin-look-preview {
+    display: flex;
+    flex-direction: column;
+    aspect-ratio: 16 / 11;
+    border-radius: 11px;
+    overflow: hidden;
+    background: var(--bg);
+    box-shadow: 0 0 0 1px var(--pin-line), 0 1px 3px rgba(15, 23, 42, .08);
+  }
+  .tv-pin-look-bar {
+    flex: 0 0 20%;
+    background: var(--pin-bar);
+    border-bottom: 1px solid var(--pin-line);
+  }
+  .tv-pin-look-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6%;
+    padding: 8% 9%;
+  }
+  .tv-pin-look-line {
+    flex: 0 0 auto;
+    height: 6px;
+    width: 72%;
+    border-radius: 3px;
+    background: var(--ink);
+    opacity: .82;
+  }
+  .tv-pin-look-line.is-short { width: 46%; background: var(--ink-3); opacity: .7; }
+  .tv-pin-look-card {
+    flex: 1;
+    border-radius: 6px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px var(--pin-line);
+  }
+  .tv-pin-look-btn {
+    flex: 0 0 auto;
+    height: 9px;
+    border-radius: 4px;
+    background: var(--accent);
+  }
+  .tv-pin-look-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .tv-pin-look.is-active .tv-pin-look-name { color: var(--ink); font-weight: 600; }
+  .tv-pin-look-radio {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-strong);
+    display: inline-grid;
+    place-items: center;
+    color: transparent;
+  }
+  .tv-pin-look.is-active .tv-pin-look-radio {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+  }
+
+  /* Заметки внутри панели: рамку и подложку даёт панель, свои — не нужны. */
+  /* Окно «поверх окон» уже 680px, и под него подходят телефонные правила раздела
+     (отступ и предел высоты заметок) — здесь они перебиты: класс .is-compact
+     в селекторе даёт правилам панели вес больше, чем у телефонных. */
+  .tv-pin-widget .tv-notes-panel,
+  .tv-pin-widget .tv-notes-panel.is-compact {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    padding: 0;
+  }
+  .tv-pin-widget .tv-notes-panel.is-compact:not(.is-fullscreen) {
+    max-height: none;
+    overflow: visible;
+  }
+  .tv-pin-widget .tv-notes-panel.is-fullscreen { max-height: none; }
+  /* Редактор — в свой рост, прокручивается весь столбец: сжатый до остатка окна
+     редактор обрезал собственные поля и кнопку «Сохранить». */
+  .tv-pin-widget .tv-notes-panel.is-fullscreen .tv-notes-editor {
+    flex: none;
+    min-height: auto;
+  }
+  .tv-pin-widget .tv-notes-editor-footer {
+    flex-direction: row;
+    align-items: center;
+  }
+  .tv-pin-widget .tv-notes-editor-actions { width: auto; }
+  .tv-pin-widget .tv-notes-editor-actions .tv-btn { flex: none; }
+  /* Общие кнопки и отметки раздела внутри панели (заметки, форма) — в тонах
+     палитры: их светлые литералы на «Тёмной» горели бы пятнами, а синее
+     наведение главной кнопки перекрашивало бы «Мяту» и «Контраст». */
+  .tv-pin-widget .tv-btn-amber,
+  .tv-pin-widget .tv-btn-amber:hover:not(:disabled)   { background: var(--tone-amber-bg);   color: var(--tone-amber-ink); }
+  .tv-pin-widget .tv-btn-indigo,
+  .tv-pin-widget .tv-btn-indigo:hover:not(:disabled)  { background: var(--tone-indigo-bg);  color: var(--tone-indigo-ink); }
+  .tv-pin-widget .tv-btn-emerald,
+  .tv-pin-widget .tv-btn-emerald:hover:not(:disabled) { background: var(--tone-emerald-bg); color: var(--tone-emerald-ink); }
+  .tv-pin-widget .tv-btn-rose,
+  .tv-pin-widget .tv-btn-rose:hover:not(:disabled)    { background: var(--tone-rose-bg);    color: var(--tone-rose-ink); }
+  .tv-pin-widget .tv-btn-primary,
+  .tv-pin-widget .tv-btn-primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .tv-pin-widget .tv-btn:hover:not(:disabled) { box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--ink) 6%, transparent); }
+  .tv-pin-widget .tv-note-due-pill { background: var(--tone-amber-bg); border-color: transparent; color: var(--tone-amber-ink); }
+  .tv-pin-widget .tv-note-done-toggle { background: var(--tone-emerald-bg); border-color: transparent; color: var(--tone-emerald-ink); }
+  .tv-pin-widget .tv-note-topic-btn.is-done { background: var(--tone-emerald-bg); border-color: transparent; }
+  .tv-pin-widget .tv-note-topic-btn.is-done .tv-note-topic-title,
+  .tv-pin-widget .tv-note-topic-btn.is-done .tv-note-topic-date { color: var(--tone-emerald-ink); }
+  .tv-pin-widget .tv-notes-editor.is-done { background: var(--surface); }
+  .tv-pin-widget .tv-notes-panel.is-compact:not(.is-fullscreen) .tv-notes-content {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+  /* В окне «поверх окон» список и редактор делят всю высоту окна: общий
+     предел .is-compact (до 100vh − 200px) оставлял под ними пустую полосу. */
+  .tv-pin-widget .tv-notes-panel.is-fullscreen .tv-notes-content { max-height: none; }
+  /* Узкое окно PiP попадает под телефонные правила раздела (≤680px) — там
+     кнопки заметок растягивались на всю ширину. В панели — как на странице. */
+  .tv-pin-widget .tv-notes-toolbar {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .tv-pin-widget .tv-notes-toolbar-actions { width: auto; }
+  .tv-pin-widget .tv-notes-toolbar-actions .tv-btn { flex: none; }
+  .tv-pin-widget .tv-note-column,
+  .tv-pin-widget .tv-notes-editor {
+    background: var(--surface);
+    border-color: transparent;
+    box-shadow: 0 0 0 1px var(--pin-line);
+  }
+  .tv-pin-widget .tv-note-topic-btn { border-color: var(--pin-line); }
+
+  /* Быстрая форма: поля — белыми карточками на сером полотне. */
+  .tv-pin-form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .tv-pin-form .tv-form-field { margin: 0; }
+  .tv-pin-form .tv-form-field > label {
+    display: block;
+    margin: 0 0 6px;
+    padding: 0 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .tv-pin-form .tv-textarea { min-height: 72px; }
+  .tv-pin-form .tv-soft-block {
+    background: var(--surface);
+    border-color: transparent;
+    border-radius: 12px;
+    box-shadow: 0 0 0 1px var(--pin-line);
+  }
+  .tv-pin-switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .tv-pin-form .tv-composer-segmented { background: var(--fill); }
+  .tv-pin-form .tv-composer-segmented button.is-active {
+    background: var(--pin-seg-thumb);
+    color: var(--ink);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .12), 0 0 0 .5px rgba(15, 23, 42, .04);
+  }
+  .tv-pin-form .tv-person-select > button { background: var(--surface); border-color: var(--pin-line); border-radius: 10px; }
+  .tv-pin-form .tv-file-dropzone { min-height: 72px; }
+  .tv-pin-form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
-  }
-  .tv-pin-task-form .tv-textarea {
-    min-height: 64px;
-  }
-  .tv-pin-task-form .tv-form-field {
-    margin: 0;
-  }
-  .tv-pin-task-form .tv-form-field label {
-    font-size: 10.5px;
   }
   .tv-checklist-editor.is-compact {
     gap: 6px;
@@ -2326,18 +3048,6 @@ styleTag.textContent = `
     justify-content: center;
     border-style: dashed;
     background: transparent;
-  }
-  .tv-pin-form-error {
-    color: var(--rose);
-    font-size: 12px;
-  }
-  .tv-pin-file-section .tv-block-label {
-    margin: 0 0 6px;
-  }
-  .tv-pin-file-section-result .tv-file-btn {
-    background: #e0e7ff;
-    border-color: #c7d2fe;
-    color: #3730a3;
   }
   .tv-file-dropzone-wrap {
     display: flex;
@@ -2471,323 +3181,687 @@ styleTag.textContent = `
     background: #fff1f2;
     border-color: #fecdd3;
   }
-  .tv-pin-task-form.is-fullscreen .tv-file-dropzone {
-    min-height: 76px;
-    padding: 12px;
+
+  /* ═══ Новый вид раздела (16.11.2026): как приложения iOS — крупный заголовок,
+     сегменты вместо вкладок, цифры виджетами, задачи сгруппированными списками,
+     карточка задачи экраном из белых групп на сером полотне. Владелец выбрал
+     этот вариант из двух («как iOS: заголовок и виджеты»).
+     Только компьютер: у телефона свой слой (tasks-mobile.css) уже в этом стиле,
+     и он опирается на разметку — поэтому разметка списков прежняя, а группы
+     собираются соседством строк, как на телефоне. ═══ */
+
+  /* ── Шапка: крупный заголовок, справа — круглые кнопки и «Новая задача» ── */
+  body:not(.mobile-shell) .tv-root .tv-topbar {
+    align-items: center;
+    margin-bottom: 20px;
   }
-  .tv-pin-menu-trigger {
-    width: 30px;
-    height: 32px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--bg);
+  body:not(.mobile-shell) .tv-root .tv-topbar-title {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: -0.026em;
+    line-height: 1.05;
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-lead { gap: 16px; }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions { gap: 10px; }
+  /* Проект и раздел доски — кнопки-меню iOS: серая заливка, без рамки. */
+  body:not(.mobile-shell) .tv-root .tv-project-select > button,
+  body:not(.mobile-shell) .tv-root .tv-section-select > button {
+    border: 0;
+    border-radius: 12px;
+    background: var(--ios-fill);
+    box-shadow: none;
+    font-weight: 600;
+    min-height: 38px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-project-select > button:hover,
+  body:not(.mobile-shell) .tv-root .tv-section-select > button:hover {
+    background: var(--ios-fill-strong);
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-lead > .tv-icon-btn {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: 0; background: var(--ios-fill);
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-lead > .tv-icon-btn:hover:not(:disabled) {
+    background: var(--ios-fill-strong);
+  }
+  /* Круглые кнопки-значки шапки («Заметки», «Обновить») — как кнопки панели iOS. */
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--surface);
     color: var(--ink-2);
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, .06), 0 1px 2px rgba(15, 23, 42, .06);
+    cursor: pointer;
+    transition: background .15s ease, color .15s ease, transform .1s ease;
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--surface-2);
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn:active:not(:disabled) { transform: scale(.95); }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn:disabled { opacity: .55; cursor: default; }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn.is-active { color: #b45309; background: #fef3c7; }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn.is-spinning svg { animation: tvSpin .8s linear infinite; }
+  @keyframes tvSpin { to { transform: rotate(360deg); } }
+  /* «Ждут вас» и «Новая задача» — капсулы. */
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-btn {
+    min-height: 40px;
+    border-radius: 999px;
+    padding: 0 18px;
+    font-size: 14px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-btn-primary {
+    box-shadow: 0 1px 2px rgba(37, 99, 235, .25), 0 4px 12px rgba(37, 99, 235, .18);
+  }
+
+  /* ── Сегменты «Обзор · Бэклог · Доска · Таймлайн» ── */
+  body:not(.mobile-shell) .tv-root .tv-workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    width: min(100%, 680px);
+    gap: 0;
+    padding: 2px;
+    margin-bottom: 26px;
+    border-radius: 11px;
+    background: var(--ios-fill);
+  }
+  body:not(.mobile-shell) .tv-root .tv-workspace-tab {
+    justify-content: center;
+    min-height: 34px;
+    padding: 0 10px;
+    border-radius: 9px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  body:not(.mobile-shell) .tv-root .tv-workspace-tab { position: relative; }
+  body:not(.mobile-shell) .tv-root .tv-workspace-tab:not(.is-active) { color: var(--ink-2); }
+  /* Короткая черта между невыбранными сегментами, как в iOS. */
+  body:not(.mobile-shell) .tv-root .tv-workspace-tab:not(.is-active) + .tv-workspace-tab:not(.is-active)::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 10px; bottom: 10px;
+    width: 1px;
+    background: var(--ios-sep);
+  }
+  body:not(.mobile-shell) .tv-root .tv-workspace-tab.is-active {
+    background: var(--surface);
+    box-shadow: 0 3px 8px rgba(0, 0, 0, .12), 0 3px 1px rgba(0, 0, 0, .04);
+  }
+
+  /* ── Цифры «Обзора» — одним рядом низких плиток (16.11 — «ниже ростом»):
+     значок, подпись и число справа. Плитки белые, цвет — только у кружка со
+     значком, как у смарт-списков «Напоминаний»: пять цветных градиентов подряд
+     владелец назвал «слишком пёстро» (17.11). Тон кружка — переменной: литерал
+     генератор тёмного слоя перекрасил бы с !important. ── */
+  body:not(.mobile-shell) .tv-root .tv-stats-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 34px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-stat-card {
+    --tile-tone: #64748b;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 68px;
+    padding: 12px 18px 12px 14px;
+    border: 0;
+    border-radius: 18px;
+    color: var(--ink);
+    background: var(--surface);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04);
+  }
+  /* Плитки не нажимаются — и не приподнимаются под мышью. */
+  body:not(.mobile-shell) .tv-root .tv-stat-card:hover {
+    transform: none;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04);
+  }
+  body:not(.mobile-shell) .tv-root .tv-stat-card.is-total { --tile-tone: #2563eb; }
+  body:not(.mobile-shell) .tv-root .tv-stat-card.is-amber { --tile-tone: #f59e0b; }
+  body:not(.mobile-shell) .tv-root .tv-stat-card.is-emerald { --tile-tone: #10b981; }
+  body:not(.mobile-shell) .tv-root .tv-stat-card.is-returned { --tile-tone: #f43f5e; }
+  body:not(.mobile-shell) .tv-root .tv-stat-card.is-backlog { --tile-tone: #8e8e93; }
+  body:not(.mobile-shell) .tv-root .tv-stat-icon {
+    grid-column: 1; grid-row: 1;
+    display: inline-grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    color: var(--accent-fg);
+    background: var(--tile-tone);
+  }
+  body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-label {
+    grid-column: 2; grid-row: 1;
+    font-size: 14.5px;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--ink-2);
+  }
+  body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-value {
+    grid-column: 3; grid-row: 1;
+    justify-self: end;
+    font-size: 28px;
+    line-height: 1;
+    color: var(--ink);
+  }
+  /* Окно уже 1200 px: пять плиток в ряд не вмещают значок, подпись и число в
+     строку — «Выполнено» наезжало на цифру. Тогда значок и число сверху,
+     подпись под ними; ряд остаётся одним и симметричным. */
+  @media (max-width: 1199px) {
+    body:not(.mobile-shell) .tv-root .tv-stat-card {
+      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      gap: 8px 10px;
+      padding: 12px 14px;
+    }
+    body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-icon { width: 28px; height: 28px; }
+    body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-value {
+      grid-column: 2; grid-row: 1;
+      font-size: 24px;
+    }
+    body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-label {
+      grid-column: 1 / -1; grid-row: 2;
+      font-size: 13.5px;
+    }
+  }
+
+  /* ── Заголовки «Мои задачи», «Все задачи» — крупные, как в списках iOS ── */
+  body:not(.mobile-shell) .tv-root .tv-section { margin-bottom: 38px; }
+  body:not(.mobile-shell) .tv-root .tv-section-header { margin-bottom: 12px; }
+  body:not(.mobile-shell) .tv-root .tv-section-title {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    text-transform: none;
+    color: var(--ink);
+  }
+
+  /* «Принятые / Исходящие» — малые сегменты. */
+  body:not(.mobile-shell) .tv-root .tv-my-tabs {
+    display: inline-grid;
+    grid-template-columns: 1fr 1fr;
+    min-width: 340px;
+    padding: 2px;
+    margin-bottom: 14px;
+    border: 0;
+    border-radius: 9px;
+    background: var(--ios-fill);
+    transform: none;
+  }
+  body:not(.mobile-shell) .tv-root .tv-tab-btn {
+    justify-content: center;
+    min-height: 30px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  body:not(.mobile-shell) .tv-root .tv-tab-btn.is-active {
+    background: var(--surface);
+    box-shadow: 0 3px 8px rgba(0, 0, 0, .12), 0 3px 1px rgba(0, 0, 0, .04);
+  }
+
+  /* ── Люди «Моих задач» — лентой аватаров, как закреплённые чаты в «Сообщениях»
+     (16.11, выбор владельца). Лента переносится на следующую строку, а не
+     прокручивается вбок: у руководителя людей много, и искать человека
+     прокруткой хуже, чем глазами. ── */
+  body:not(.mobile-shell) .tv-root .tv-people {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 2px;
+    margin: 0 -10px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-item {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 100px;
+    padding: 10px 6px;
+    border: 0;
+    border-radius: 16px;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    transition: background .15s ease;
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-item:hover { background: var(--ios-fill); }
+  body:not(.mobile-shell) .tv-root .tv-people-item:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .35);
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-avatar { position: relative; display: block; }
+  body:not(.mobile-shell) .tv-root .tv-people-avatar .tv-avatar-md {
+    width: 60px;
+    height: 60px;
+    font-size: 18px;
+    color: var(--ink-2);
+    background: var(--surface);
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, .06), 0 1px 3px rgba(15, 23, 42, .08);
+  }
+  /* Число на аватаре — как значок непрочитанного в iOS, с кольцом цвета фона. */
+  body:not(.mobile-shell) .tv-root .tv-people-badge {
+    --people-badge: #64748b;
+    position: absolute;
+    top: -3px;
+    right: -6px;
+    display: inline-grid;
+    place-items: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 11px;
+    background: var(--people-badge);
+    color: var(--accent-fg);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 0 0 2px var(--bg);
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-badge.is-alert { --people-badge: #e11d48; }
+  body:not(.mobile-shell) .tv-root .tv-people-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    max-width: 100%;
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.25;
+    text-align: center;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+  }
+  /* Подсказка: кто это и сколько задач в каком состоянии. Появляется с задержкой,
+     чтобы не мелькать, пока мышь идёт через ленту. */
+  body:not(.mobile-shell) .tv-root .tv-people-tip {
+    --tip-x: -50%;
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 50%;
+    z-index: 30;
+    display: grid;
+    gap: 4px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: 0 10px 28px rgba(15, 23, 42, .16), 0 0 0 1px rgba(15, 23, 42, .06);
+    text-align: left;
+    white-space: nowrap;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translate(var(--tip-x), -4px);
+    transition: opacity .15s ease, transform .15s ease, visibility 0s linear .15s;
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-item[data-tip="start"] .tv-people-tip { --tip-x: 0%; left: 0; }
+  body:not(.mobile-shell) .tv-root .tv-people-item[data-tip="end"] .tv-people-tip { --tip-x: 0%; left: auto; right: 0; }
+  body:not(.mobile-shell) .tv-root .tv-people-item:hover .tv-people-tip,
+  body:not(.mobile-shell) .tv-root .tv-people-item:focus-visible .tv-people-tip {
+    opacity: 1;
+    visibility: visible;
+    transform: translate(var(--tip-x), 0);
+    transition: opacity .15s ease .3s, transform .15s ease .3s, visibility 0s linear .3s;
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-tip-name {
+    margin-bottom: 2px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-tip-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  body:not(.mobile-shell) .tv-root .tv-people-tip-row b {
+    font-weight: 700;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Поиск и фильтры ── */
+  body:not(.mobile-shell) .tv-root .tv-search-input {
+    min-height: 40px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--ios-fill);
+    font-size: 14px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-search-input:focus {
+    background: var(--surface);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .18), 0 0 0 1px #93c5fd;
+  }
+
+  /* ── Фильтры «Все задачи» — три кнопки-меню вместо 11 капсул (16.11) ── */
+  body:not(.mobile-shell) .tv-root .tv-filter-menus {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-filter-menu {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all .15s ease;
-  }
-  .tv-pin-menu-trigger:hover:not(:disabled) {
-    background: var(--border-strong);
+    gap: 6px;
+    min-height: 40px;
+    padding: 0 12px 0 16px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--ios-fill);
     color: var(--ink);
-    border-color: var(--border-strong);
+    font-size: 14px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background .15s ease, box-shadow .15s ease;
   }
-  .tv-pin-menu-head {
+  body:not(.mobile-shell) .tv-root .tv-filter-menu svg { color: var(--ink-3); }
+  body:not(.mobile-shell) .tv-root .tv-filter-menu:hover,
+  body:not(.mobile-shell) .tv-root .tv-filter-menu[aria-expanded="true"] { background: var(--ios-fill-strong); }
+  /* Выбранный фильтр — мягким голубым, как выбор везде на сайте. */
+  body:not(.mobile-shell) .tv-root .tv-filter-menu.is-set,
+  body:not(.mobile-shell) .tv-root .tv-filter-menu.is-set:hover,
+  body:not(.mobile-shell) .tv-root .tv-filter-menu.is-set[aria-expanded="true"] {
+    background: var(--select-bg);
+    color: var(--select-ink);
+    box-shadow: inset 0 0 0 1px var(--select-border);
+  }
+  body:not(.mobile-shell) .tv-root .tv-filter-menu.is-set svg { color: var(--select-ink); }
+  body:not(.mobile-shell) .tv-root .tv-filter-menu:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, .35);
+  }
+  body:not(.mobile-shell) .tv-root .tv-filter-reset {
+    min-height: 40px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 10px;
+    background: none;
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  body:not(.mobile-shell) .tv-root .tv-filter-reset:hover { background: var(--ios-fill); }
+
+  /* ── Задачи — карточками в сетке, как «Заметки» в режиме галереи (вид
+     «Галерея», 16.11); дата — заголовком над своей сеткой. Разметка прежняя и
+     плоская — разделители дат и строки вперемешку: на неё опирается телефон. ── */
+  body:not(.mobile-shell) .tv-root .tv-task-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+  body:not(.mobile-shell) .tv-root .tv-task-date-separator {
+    grid-column: 1 / -1;
+    margin: 22px 0 0 16px;
+    font-size: 12.5px;
+    letter-spacing: .03em;
+  }
+  body:not(.mobile-shell) .tv-root .tv-task-list > .tv-task-date-separator:first-child { margin-top: 2px; }
+  body:not(.mobile-shell) .tv-root .tv-task-date-separator::after { content: none; }
+  /* Карточка: сверху кружок и статус словом (булавка справа), посередине тема и
+     люди, внизу дата и метки «Проблема»/«Критичная». Всё сверху одной строкой
+     переносилось у карточек с метками, и ряд карточек съезжал. */
+  body:not(.mobile-shell) .tv-root .tv-task-row:not(.is-compact) {
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr) auto auto;
+    grid-template-rows: auto 1fr auto;
+    grid-template-areas:
+      "check state state pin"
+      "main main main main"
+      "date date tag prio";
+    align-items: center;
+    gap: 12px 10px;
+    min-height: 168px;
+    padding: 14px 16px;
+    border: 0;
+    border-radius: 16px;
+    background: var(--surface);
+    transform: none;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04);
+  }
+  body:not(.mobile-shell) .tv-root .tv-task-row:not(.is-compact):hover {
+    background: #fafafc;
+    transform: none;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, .09), 0 0 0 1px rgba(15, 23, 42, .05);
+  }
+  /* Значки и дата лежат в одной обёртке с булавкой — она раскрыта, и каждый
+     встаёт в свою область карточки. */
+  body:not(.mobile-shell) .tv-root .tv-task-row-meta { display: contents; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-check { grid-area: check; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-state { grid-area: state; justify-self: start; }
+  body:not(.mobile-shell) .tv-root .tv-row-pin-btn { grid-area: pin; justify-self: end; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-meta > .tv-badge { grid-area: prio; justify-self: end; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-meta > .tv-badge:has(+ .tv-badge) { grid-area: tag; }
+  /* Шеврон «перейти» карточке не нужен: она нажимается целиком. */
+  body:not(.mobile-shell) .tv-root .tv-task-row-meta > svg:last-child { display: none; }
+  /* Дата переносится, а не наезжает на метки: «Предложение» и «Критичная» вместе
+     в самой узкой карточке оставляют ей меньше её ширины. */
+  body:not(.mobile-shell) .tv-root .tv-task-row-date {
+    grid-area: date;
+    justify-self: start;
+    min-width: 0;
+    font-size: 12.5px;
+    white-space: normal;
+    text-align: left;
+    color: var(--ink-3);
+  }
+  body:not(.mobile-shell) .tv-root .tv-task-row-main { grid-area: main; align-self: start; gap: 8px; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-subject {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    white-space: normal;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.005em;
+  }
+  /* Подзаголовок переносится второй строкой, а не режет людей и сроки: на окне
+     ~900 px имена сжимались в ноль, а «Ждёт ответа» уходил за край. */
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow {
+    font-size: 12.5px;
+    gap: 2px 6px;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-deadline-chip,
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-clar-waiting { flex-shrink: 0; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-task-row-assignee-chip { min-width: 48px; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-task-row-assignee-chip { font-size: 12.5px; color: var(--ink-3); max-width: 220px; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-deadline-chip,
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-clar-waiting { font-size: 12px; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-deadline-chip::before { content: '·'; margin-right: 6px; color: var(--ink-3); font-weight: 400; }
+  body:not(.mobile-shell) .tv-root .tv-task-row-flow .tv-task-row-flow-name { max-width: 220px; min-width: 48px; }
+
+  /* Кружок статуса слева — как отметка в «Напоминаниях»: контур в цвет статуса,
+     у выполненных и принятых — заливка с галочкой. */
+  .tv-task-row-check {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 2px solid var(--check-indigo);
+    color: var(--accent-fg);
+  }
+  /* Цвета колец — переменными: это акценты статусов, в тёмной теме они те же. */
+  .tv-task-row-check.is-amber { border-color: var(--check-amber); }
+  .tv-task-row-check.is-amber::after {
+    content: '';
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--check-amber);
+  }
+  .tv-task-row-check.is-rose { border-color: var(--check-rose); }
+  .tv-task-row-check.is-violet { border-color: var(--check-violet); background: var(--check-violet); }
+  .tv-task-row-check.is-emerald { border-color: var(--check-emerald); background: var(--check-emerald); }
+  /* Статус справа — словом в его цвете, без капсулы: кружок слева уже цветной. */
+  .tv-task-row-state {
+    display: inline-flex;
+    align-items: center;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--ink-2);
+  }
+  /* Цвета статуса словом — переменными: светлый индиго генератор тёмной темы не
+     перекрашивал, и «Выставлен» (самый частый статус) на графите давал 2,5:1. */
+  .tv-task-row-state.is-indigo { color: var(--state-indigo); }
+  .tv-task-row-state.is-amber { color: var(--state-amber); }
+  .tv-task-row-state.is-violet { color: var(--state-violet); }
+  .tv-task-row-state.is-emerald { color: var(--state-emerald); }
+  .tv-task-row-state.is-rose { color: var(--state-rose); }
+  body:not(.mobile-shell) .tv-root .tv-row-pin-btn { opacity: 0; transition: opacity .15s ease; }
+  body:not(.mobile-shell) .tv-root .tv-task-row:hover .tv-row-pin-btn,
+  body:not(.mobile-shell) .tv-root .tv-row-pin-btn.is-pinned,
+  body:not(.mobile-shell) .tv-root .tv-row-pin-btn:focus-visible { opacity: 1; }
+
+  /* Пустой список и постраничка. */
+  body:not(.mobile-shell) .tv-root .tv-empty {
+    border: 0;
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, .04);
+  }
+  body:not(.mobile-shell) .tv-root .tv-pagination .tv-btn { border-radius: 999px; }
+  body:not(.mobile-shell) .tv-root .tv-results-info { margin: 0 0 6px 16px; }
+
+  /* ── Доска, бэклог, таймлайн: списки панели — кнопки-меню iOS, как проект в шапке ── */
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-scope-select:not(.inline-flex) > button,
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-sort-select > button,
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-chunk-select > button {
+    border: 0;
+    border-radius: 12px;
+    background: var(--ios-fill);
+    box-shadow: none;
+    font-weight: 600;
+    min-height: 38px;
+  }
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-scope-select:not(.inline-flex) > button:hover,
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-sort-select > button:hover,
+  body:not(.mobile-shell) .tv-root .tb-toolbar .tb-chunk-select > button:hover {
+    background: var(--ios-fill-strong);
+  }
+  body:not(.mobile-shell) .tv-root .tb-toolbar { margin-bottom: 6px; }
+
+  /* ── Карточка задачи — экран iOS: серое полотно, сведения и блоки белыми группами ── */
+  body:not(.mobile-shell) .tv-drawer { width: min(600px, 100vw); background: var(--bg); }
+  body:not(.mobile-shell) .tv-drawer-header {
+    padding: 22px 22px 18px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  body:not(.mobile-shell) .tv-drawer-title { font-size: 22px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.25; margin-bottom: 10px; }
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn,
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-close-btn {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 0; background: var(--ios-fill);
+  }
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn:hover:not(:disabled),
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-close-btn:hover { background: var(--ios-fill-strong); }
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn-danger { background: #fff1f2; }
+  body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn.is-pinned { background: #eef2ff; }
+  body:not(.mobile-shell) .tv-drawer-body {
+    gap: 14px;
+    padding: 18px 18px 22px;
+    background: var(--bg);
+  }
+  body:not(.mobile-shell) .tv-drawer-body > hr.tv-divider { display: none; }
+  /* Каждый блок карточки — белая группа со скруглением. */
+  body:not(.mobile-shell) .tv-drawer-body > div,
+  body:not(.mobile-shell) .tv-drawer-body > section {
+    flex-shrink: 0;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: var(--surface);
+    box-shadow: 0 0 0 1px rgba(15, 23, 42, .04);
+  }
+  body:not(.mobile-shell) .tv-drawer-body > .tv-soft-block { border: 0; }
+  /* Участники — строками с лицами. */
+  /* Участники — в две колонки: столбиком они вместе со строками сведений
+     уводили «Историю» под нижнюю панель кнопок. */
+  body:not(.mobile-shell) .tv-drawer-body > .tv-participants {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0;
+    padding: 4px 0;
+  }
+  body:not(.mobile-shell) .tv-drawer-body > .tv-participants .tv-participant {
+    position: relative;
+    flex: none;
+    gap: 12px;
+    min-width: 0;
+    padding: 8px 16px;
+  }
+  body:not(.mobile-shell) .tv-drawer-body .tv-participant-avatar { width: 36px; height: 36px; font-size: 12.5px; }
+  body:not(.mobile-shell) .tv-drawer-body .tv-participant-info { flex-direction: column-reverse; }
+  body:not(.mobile-shell) .tv-drawer-body .tv-participant-role {
+    font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink-3);
+  }
+  body:not(.mobile-shell) .tv-drawer-body .tv-participant-name { font-size: 15px; font-weight: 500; }
+  /* Сведения — строки «подпись — значение», как в «Настройках». */
+  body:not(.mobile-shell) .tv-drawer-body > .tv-info-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 2px 0;
+  }
+  body:not(.mobile-shell) .tv-drawer-body > .tv-info-grid .tv-info-item {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: 16px;
+    min-height: 40px;
+    padding: 6px 16px;
   }
-  .tv-pin-menu-title {
-    margin: 0;
-    color: var(--ink-2);
-    font-size: 12px;
-    font-weight: 700;
-    flex: 1;
-    min-width: 0;
-  }
-  .tv-pin-menu-head-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-  .tv-pin-menu-create-btn {
-    padding: 7px 10px;
-    font-size: 12px;
-  }
-  .tv-pin-task-menu-shell {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    min-height: 0;
-  }
-  .tv-pin-widget.is-detached .tv-pin-task-menu-shell {
-    flex: 1;
-    min-height: 0;
-  }
-  .tv-pin-menu-tabs {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
-    padding: 3px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .tv-pin-menu-tab {
-    border: 0;
-    border-radius: 8px;
-    padding: 6px 8px;
-    background: transparent;
-    color: var(--ink-2);
-    font-size: 11.5px;
-    font-weight: 800;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    cursor: pointer;
-    transition: all .15s ease;
-  }
-  .tv-pin-menu-tab:hover:not(:disabled) {
-    color: var(--ink);
-  }
-  .tv-pin-menu-tab.is-active {
-    background: var(--surface);
-    color: var(--ink);
-    box-shadow: var(--shadow-sm);
-  }
-  .tv-pin-menu-tab-count {
-    min-width: 18px;
-    height: 17px;
-    padding: 0 5px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    color: var(--ink-2);
-    font-size: 10px;
-    line-height: 1;
-  }
-  .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count {
-    background: #eef2ff;
-    border-color: #c7d2fe;
-    color: #3730a3;
-  }
-  .tv-pin-task-menu {
-    display: grid;
-    grid-template-columns: 48px minmax(0, 1fr);
-    gap: 10px;
-    min-height: 176px;
-  }
-  .tv-pin-widget.is-detached .tv-pin-task-menu {
-    flex: 1;
-    min-height: 0;
-  }
-  .tv-pin-people-rail {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    align-items: center;
-  }
-  .tv-pin-widget.is-detached .tv-pin-people-rail {
-    min-height: 0;
-    overflow-y: auto;
-    gap: 10px;
-    padding-bottom: 4px;
-  }
-  .tv-pin-person-btn {
-    width: 42px;
-    height: 42px;
-    position: relative;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--surface);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: all .15s ease;
-  }
-  .tv-pin-person-btn:hover,
-  .tv-pin-person-btn.is-active {
-    border-color: var(--accent);
-    background: var(--surface-2);
-    color: var(--ink);
-  }
-  .tv-pin-person-btn .tv-avatar-md {
-    width: 30px;
-    height: 30px;
-    font-size: 11px;
-  }
-  .tv-pin-person-count {
-    display: none;
+  body:not(.mobile-shell) .tv-drawer-body > .tv-info-grid .tv-info-item + .tv-info-item::before {
+    content: '';
     position: absolute;
-    right: -4px;
-    bottom: -5px;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: 999px;
-    border: 2px solid var(--surface);
-    font-size: 10px;
-    line-height: 14px;
-    font-weight: 700;
-    text-align: center;
-    color: #ffffff;
+    top: 0; right: 0; left: 16px;
+    height: 1px;
+    background: var(--border);
   }
-  .tv-pin-widget.is-detached .tv-pin-person-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .tv-pin-person-count.is-alert {
-    background: #f59e0b;
-  }
-  .tv-pin-person-count.is-active {
-    background: #2563eb;
-  }
-  .tv-pin-menu-panel {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .tv-pin-widget.is-detached .tv-pin-menu-panel {
-    min-height: 0;
-  }
-  .tv-pin-person-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-  }
-  .tv-pin-person-summary-name {
-    color: var(--ink);
-    font-size: 13px;
-    font-weight: 700;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tv-pin-person-summary-stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    color: var(--ink-2);
-    font-size: 11px;
-  }
-  .tv-pin-person-summary-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .tv-pin-person-task-list {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    max-height: 180px;
-    overflow: auto;
-  }
-  .tv-pin-widget.is-detached .tv-pin-person-task-list {
-    flex: 1;
-    min-height: 0;
-    max-height: none;
-    overflow-y: auto;
-  }
-  .tv-pin-person-task {
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    background: var(--surface);
-    color: var(--ink);
-    padding: 8px 9px;
-    text-align: left;
-    cursor: pointer;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .tv-pin-person-task:hover,
-  .tv-pin-person-task.is-active {
-    border-color: var(--accent);
-    background: var(--surface-2);
-    color: var(--ink);
-  }
-  .tv-pin-person-task-title {
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .tv-pin-person-task-meta {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex-wrap: wrap;
-  }
-  .tv-pin-description {
+  body:not(.mobile-shell) .tv-drawer-body > .tv-info-grid .tv-info-item > label {
     margin: 0;
+    font-size: 14px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
     color: var(--ink-2);
-    font-size: 12.5px;
-    line-height: 1.55;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 150px;
-    overflow: auto;
-    user-select: text;
   }
-  .tv-pin-meta {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
+  body:not(.mobile-shell) .tv-drawer-body > .tv-info-grid .tv-info-item > span {
+    font-size: 14px;
+    text-align: right;
   }
-  .tv-pin-meta-item {
-    min-width: 0;
-    padding: 8px 9px;
-    border-radius: 8px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-  }
-  .tv-pin-meta-label {
-    display: block;
-    margin-bottom: 2px;
-    color: var(--ink-3);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: .05em;
-    text-transform: uppercase;
-  }
-  .tv-pin-meta-value {
-    display: block;
-    color: var(--ink);
+  body:not(.mobile-shell) .tv-drawer-body .tv-block-label {
     font-size: 12px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    letter-spacing: .04em;
+    margin-bottom: 10px;
   }
-  .tv-pin-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 7px;
+  body:not(.mobile-shell) .tv-drawer-body .tv-description { font-size: 14.5px; line-height: 1.6; color: var(--ink); }
+  body:not(.mobile-shell) .tv-drawer-footer {
+    padding: 14px 18px;
+    background: var(--surface);
   }
-  .tv-pin-actions .tv-btn {
-    justify-content: center;
-    flex: 1 1 140px;
-    min-height: 34px;
-    white-space: normal;
-    line-height: 1.25;
-  }
-  .tv-pin-empty-actions {
-    color: var(--ink-3);
-    font-size: 12px;
-  }
+  body:not(.mobile-shell) .tv-drawer-footer .tv-btn { min-height: 40px; border-radius: 12px; padding: 0 18px; font-size: 14px; }
 
   @media (max-width: 680px) {
     .tv-root { padding: 16px 12px; }
@@ -2805,10 +3879,10 @@ styleTag.textContent = `
        исполнителем и постановщиком зияло по 180 px пустоты. */
     .tv-participant { flex: none; }
     .tv-pin-widget {
-      width: min(360px, calc(100vw - 16px));
+      width: min(380px, calc(100vw - 16px));
     }
     .tv-checklist-editor:not(.is-compact) .tv-checklist-editor-row,
-    .tv-pin-task-form-grid {
+    .tv-pin-form-grid {
       grid-template-columns: minmax(0, 1fr);
     }
     .tv-checklist-editor:not(.is-compact) .tv-checklist-editor-row {
@@ -2839,9 +3913,6 @@ styleTag.textContent = `
     .tv-notes-editor-actions .tv-btn {
       justify-content: center;
       flex: 1;
-    }
-    .tv-pin-meta {
-      grid-template-columns: 1fr;
     }
   }
   @media (max-width: 400px) {
@@ -2945,6 +4016,11 @@ const RECURRENCE_OPTIONS = [
   { value: 'monthly', label: 'Ежемесячно' },
 ];
 
+/* Палитры закреплённой задачи («Оформление» в её меню). Каждая задаёт ВСЕ цвета
+   панели: в окне «поверх окон» тёмного слоя сайта нет, и недостающая переменная
+   осталась бы светлой — у прежней «Тёмной» так светлыми были кнопки и метки, а
+   у «Светлой» главная кнопка была чёрной. Тона меток светлые палитры берут из
+   CSS панели (как у меток раздела), тёмная — свои, системные цвета iOS. */
 const PIN_PALETTES = [
   {
     id: 'paper',
@@ -2957,62 +4033,171 @@ const PIN_PALETTES = [
       '--border-strong': '#cbd5e1',
       '--ink': '#0f172a',
       '--ink-2': '#475569',
-      '--ink-3': '#94a3b8',
-      '--accent': '#0f172a',
+      '--ink-3': '#7b8597',
+      '--accent': '#2563eb',
       '--accent-fg': '#ffffff',
+      '--select-bg': '#eef4ff',
+      '--select-border': '#bfd4fb',
+      '--select-ink': '#1d4ed8',
+      '--fill': '#eef1f5',
+      '--fill-strong': '#e2e8f0',
+      '--pin-panel': 'rgba(255, 255, 255, 0.94)',
+      '--pin-bar': 'rgba(255, 255, 255, 0.8)',
+      '--pin-line': 'rgba(15, 23, 42, 0.08)',
+      '--pin-link': '#2563eb',
+      '--pin-seg-thumb': '#ffffff',
     }
   },
   {
     id: 'midnight',
     label: 'Тёмная',
     vars: {
-      '--bg': '#101318',
-      '--surface': '#171b22',
-      '--surface-2': '#1f2530',
-      '--border': '#303846',
-      '--border-strong': '#485365',
-      '--ink': '#f8fafc',
-      '--ink-2': '#cbd5e1',
-      '--ink-3': '#94a3b8',
-      '--accent': '#93c5fd',
-      '--accent-fg': '#0f172a',
+      '--bg': '#1c1c1e',
+      '--surface': '#2c2c2e',
+      '--surface-2': '#333336',
+      '--border': '#3a3a3c',
+      '--border-strong': '#545458',
+      '--ink': '#f5f5f7',
+      '--ink-2': '#c7c7cc',
+      '--ink-3': '#98989f',
+      '--accent': '#0a84ff',
+      '--accent-fg': '#ffffff',
+      '--select-bg': 'rgba(10, 132, 255, 0.2)',
+      '--select-border': 'rgba(10, 132, 255, 0.5)',
+      '--select-ink': '#64b5ff',
+      '--fill': 'rgba(118, 118, 128, 0.24)',
+      '--fill-strong': 'rgba(118, 118, 128, 0.36)',
+      '--amber': '#ffb340',
+      '--indigo': '#a5b4fc',
+      '--emerald': '#30d158',
+      '--rose': '#ff6482',
+      '--blue': '#64d2ff',
+      '--pin-panel': 'rgba(30, 30, 32, 0.94)',
+      '--pin-bar': 'rgba(44, 44, 46, 0.82)',
+      '--pin-line': 'rgba(255, 255, 255, 0.1)',
+      '--pin-link': '#409cff',
+      '--pin-seg-thumb': '#636366',
+      '--pin-shadow': '0 18px 48px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3)',
+      '--pin-menu-shadow': '0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3)',
+      '--pin-danger': '#ff453a',
+      '--check-done': '#30d158',
+      '--tone-gray-bg': 'rgba(118, 118, 128, 0.24)',
+      '--tone-gray-ink': '#c7c7cc',
+      '--tone-blue-bg': 'rgba(10, 132, 255, 0.22)',
+      '--tone-blue-ink': '#8ec5ff',
+      '--tone-indigo-bg': 'rgba(94, 92, 230, 0.3)',
+      '--tone-indigo-ink': '#c0bdff',
+      '--tone-violet-bg': 'rgba(191, 90, 242, 0.24)',
+      '--tone-violet-ink': '#dcb4fb',
+      '--tone-amber-bg': 'rgba(255, 159, 10, 0.2)',
+      '--tone-amber-ink': '#ffcc70',
+      '--tone-emerald-bg': 'rgba(48, 209, 88, 0.18)',
+      '--tone-emerald-ink': '#86e3a0',
+      '--tone-rose-bg': 'rgba(255, 55, 95, 0.2)',
+      '--tone-rose-ink': '#ff9fb2',
+      '--tone-teal-bg': 'rgba(64, 200, 224, 0.18)',
+      '--tone-teal-ink': '#8ee3f0',
+      '--tone-fuchsia-bg': 'rgba(218, 143, 255, 0.2)',
+      '--tone-fuchsia-ink': '#efb8ff',
+      '--shadow-sm': '0 1px 2px rgba(0, 0, 0, 0.4)',
+      '--shadow-md': '0 4px 16px rgba(0, 0, 0, 0.45)',
+      '--shadow-lg': '0 20px 60px rgba(0, 0, 0, 0.6)',
     }
   },
   {
     id: 'mint',
     label: 'Мята',
     vars: {
-      '--bg': '#ecfdf5',
+      '--bg': '#eef8f3',
       '--surface': '#ffffff',
-      '--surface-2': '#d1fae5',
-      '--border': '#a7f3d0',
-      '--border-strong': '#34d399',
-      '--ink': '#064e3b',
-      '--ink-2': '#047857',
-      '--ink-3': '#10b981',
-      '--accent': '#047857',
+      '--surface-2': '#f4fbf7',
+      '--border': '#cdeadb',
+      '--border-strong': '#9fd6bb',
+      '--ink': '#0b3b2a',
+      '--ink-2': '#2f6651',
+      '--ink-3': '#5d8a78',
+      '--accent': '#0f9d6c',
       '--accent-fg': '#ffffff',
+      '--select-bg': '#e2f6ec',
+      '--select-border': '#a5e0c4',
+      '--select-ink': '#0b7a53',
+      '--fill': '#e3f2ea',
+      '--fill-strong': '#d1e9dd',
+      '--pin-panel': 'rgba(255, 255, 255, 0.94)',
+      '--pin-bar': 'rgba(250, 255, 252, 0.82)',
+      '--pin-line': 'rgba(11, 59, 42, 0.1)',
+      '--pin-link': '#0b7a53',
+      '--pin-seg-thumb': '#ffffff',
     }
   },
   {
     id: 'focus',
     label: 'Контраст',
     vars: {
-      '--bg': '#fff7ed',
-      '--surface': '#fffbeb',
-      '--surface-2': '#fed7aa',
-      '--border': '#fdba74',
-      '--border-strong': '#fb923c',
-      '--ink': '#431407',
-      '--ink-2': '#9a3412',
-      '--ink-3': '#c2410c',
+      '--bg': '#fff6ec',
+      '--surface': '#fffdf9',
+      '--surface-2': '#fff3e6',
+      '--border': '#f8dcc0',
+      '--border-strong': '#f2b98a',
+      '--ink': '#3b1405',
+      '--ink-2': '#8a3412',
+      '--ink-3': '#a86a45',
       '--accent': '#ea580c',
       '--accent-fg': '#ffffff',
+      '--select-bg': '#ffedd5',
+      '--select-border': '#fdba74',
+      '--select-ink': '#c2410c',
+      '--fill': '#fdecd9',
+      '--fill-strong': '#fbdcbc',
+      '--pin-panel': 'rgba(255, 253, 249, 0.94)',
+      '--pin-bar': 'rgba(255, 250, 244, 0.84)',
+      '--pin-line': 'rgba(67, 20, 7, 0.1)',
+      '--pin-link': '#c2410c',
+      '--pin-seg-thumb': '#fffdf9',
     }
   },
 ];
 
-const PIN_PALETTE_STORAGE_KEY = 'otp:pinned-task-palette';
+/* Явный выбор оформления. Ключ новый: прежняя панель писала в
+   'otp:pinned-task-palette' активную палитру при каждом показе — то есть
+   «Светлую» всем подряд, и такой записи нельзя верить как выбору человека.
+   Из старого ключа переносим только не-«Светлую»: её выбирали сами. */
+const PIN_PALETTE_STORAGE_KEY = 'otp:pinned-task-palette:v2';
+const PIN_PALETTE_LEGACY_KEY = 'otp:pinned-task-palette';
+
+const readPinPaletteChoice = () => {
+  try {
+    const storage = window.localStorage;
+    const saved = storage.getItem(PIN_PALETTE_STORAGE_KEY);
+    if (PIN_PALETTES.some((palette) => palette.id === saved)) return saved;
+    const legacy = storage.getItem(PIN_PALETTE_LEGACY_KEY);
+    if (legacy === null) return '';
+    storage.removeItem(PIN_PALETTE_LEGACY_KEY);
+    if (legacy !== 'paper' && PIN_PALETTES.some((palette) => palette.id === legacy)) {
+      storage.setItem(PIN_PALETTE_STORAGE_KEY, legacy);
+      return legacy;
+    }
+  } catch (error) {
+    // Хранилище недоступно — оформление как у сайта.
+  }
+  return '';
+};
+
+/* Тон капсулы и кнопки панели — из той же метки раздела: tv-badge-indigo →
+   is-indigo, tv-btn-amber → is-amber. Отдельная таблица разошлась бы с метками. */
+const PIN_TONES = new Set(['gray', 'blue', 'indigo', 'violet', 'amber', 'emerald', 'rose', 'teal', 'fuchsia', 'primary']);
+const pinToneOf = (cls) => {
+  const tone = String(cls || '').replace(/^tv-(badge|btn)-/, '');
+  return PIN_TONES.has(tone) ? tone : '';
+};
+
+/* Капсула человека в «Моих задачах»: «Фамилия И.» — одной фамилии мало для
+   однофамильцев, полное ФИО не влезает. Полное — в подсказке и заголовке группы. */
+const pinPersonShortName = (name) => {
+  const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '—';
+  return words.length > 1 ? `${words[0]} ${words[1].charAt(0)}.` : words[0];
+};
 
 const STATUS_META = {
   assigned:    { label: 'Выставлен',  badge: 'tv-badge-indigo',  dot: '#a5b4fc', chipCls: 'is-active-indigo' },
@@ -3115,6 +4300,7 @@ const writeStoredValue = (key, value) => {
 };
 
 const WORKSPACE_TAB_STORAGE_KEY = 'otp.tasks.workspaceTab';
+
 const WORKSPACE_TABS = [
   { id: 'overview', label: 'Обзор' },
   { id: 'backlog',  label: 'Бэклог' },
@@ -3891,6 +5077,48 @@ const AvatarCircle = ({ className, name, avatarUrl }) => (
   </span>
 );
 
+/* Фильтр «Все задачи» на компьютере — кнопка-меню, как в «Почте» и «Напоминаниях»:
+   одна кнопка на признак вместо 11 капсул в ряд (владелец выбрал 16.11). Выбранное
+   видно в подписи кнопки и мягким голубым; «Все …» снимает фильтр. */
+const TaskFilterMenu = ({ title, allLabel, value, options, onChange }) => {
+  const current = options.find((option) => option.value === value) || null;
+  const caption = current ? `${title}: ${current.label}` : title;
+  return (
+    <IosMenu
+      label={current ? caption : `${title}: все`}
+      align="left"
+      trigger={{
+        className: `tv-filter-menu ${current ? 'is-set' : ''}`,
+        text: (
+          <>
+            <span>{caption}</span>
+            <ChevronDown size={15} strokeWidth={2.2} aria-hidden="true" />
+          </>
+        ),
+      }}
+      items={[
+        { key: '__all', label: allLabel, checked: !current, onSelect: () => onChange('') },
+        ...options.map((option, index) => ({
+          key: option.value,
+          label: option.label,
+          checked: option.value === value,
+          separatorBefore: index === 0,
+          onSelect: () => onChange(option.value),
+        })),
+      ]}
+    />
+  );
+};
+
+/* Подсказка у аватара в «Моих задачах» — по центру, а у краёв окна — к краю:
+   у левого она уходила бы под меню портала, у правого — за окно. */
+const alignPeopleTip = (event) => {
+  const node = event.currentTarget;
+  const rect = node.getBoundingClientRect();
+  const width = (node.ownerDocument?.defaultView || window).innerWidth;
+  node.dataset.tip = rect.left < 240 ? 'start' : (width - rect.right < 140 ? 'end' : 'center');
+};
+
 /* Исполнители на карточке. Один — как было: аватар и имя. Несколько — стопка
    лиц без имён: три имени в строку не влезают, а обрезанные «Айгуль…, Серг…»
    читаются хуже, чем аватары. Полный список — в подсказке и для скринридера. */
@@ -4379,13 +5607,13 @@ const TaskNoteColumn = React.memo(({ title, subtitle, notes, activeNoteId, empty
           onToggleDone={onToggleDone}
         />
       )) : (
-        <span className="tv-pin-empty-actions">{emptyText}</span>
+        <span className="tv-note-column-empty">{emptyText}</span>
       )}
     </div>
   </section>
 ));
 
-const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false, wide = false }) => {
+const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = false, wide = false, hideHeading = false }) => {
   const {
     notes,
     activeNoteId,
@@ -4446,8 +5674,9 @@ const TaskNotesPanel = React.memo(({ notesState, compact = false, fullScreen = f
   return (
     <div className={`tv-notes-panel ${compact ? 'is-compact' : ''} ${fullScreen ? 'is-fullscreen' : ''} ${wide ? 'is-wide' : ''}`}>
       <div className="tv-notes-toolbar">
-        {/* В широком окне заголовок и статус уже в шапке окна — второй раз не повторяем. */}
-        {!wide && (
+        {/* В широком окне и в закреплённой задаче заголовок и статус уже в шапке
+            окна — второй раз не повторяем. */}
+        {!wide && !hideHeading && (
           <div>
             <span className="tv-block-label" style={{ margin: 0 }}>Заметки</span>
             <p>{backendReady ? 'Сохраняются в базе данных' : 'Сервер недоступен, включён локальный режим'}</p>
@@ -5356,11 +6585,10 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
   const deadlineLabel = taskDeadlineLabel(task);
   const creatorName = task?.creator?.name || '—';
   const assigneePeople = taskAssignees(task);
-  const assigneeName = assigneePeople.length > 1
-    ? `${assigneePeople[0]?.name || '—'} и ещё ${assigneePeople.length - 1}`
-    : (assigneePeople[0]?.name || '—');
   const priorityCls = task.priority === 'critical' ? 'is-critical' : task.priority === 'urgent' ? 'is-urgent' : '';
-  const indicatorColor = task.priority === 'critical' ? 'var(--rose)' : task.priority === 'urgent' ? 'var(--amber)' : sm.dot;
+  // Тон статуса — из той же метки, что и везде: tv-badge-amber → is-amber.
+  const statusTone = String(sm.badge || '').replace(/^tv-badge-/, '') || 'gray';
+  const isDone = DONE_STATUSES.has(task.status);
 
   /* Телефон: тема в две строки и одна строка сути под ней. Бейджи в ряд
      съедали ширину, и от темы оставалось «Обновить и…». Цвет — только там, где
@@ -5404,27 +6632,31 @@ const TaskRow = React.memo(({ task, onClick, onPin, isPinned, compact = false })
       </div>
     );
   }
+  /* Строка списка iOS: кружок статуса слева, тема, под ней — кто кому и сроки;
+     справа — срочность и тип (только не по умолчанию), статус словом, дата.
+     «Задача» — тип по умолчанию и не пишется, как в строке телефона. */
   return (
     <div className={`tv-task-row ${priorityCls}`} onClick={() => onClick(task)}>
-      <span className="tv-task-row-indicator" style={{ background: indicatorColor }} />
+      <span className={`tv-task-row-check is-${statusTone}`} aria-hidden="true">
+        {isDone && <Check size={12} strokeWidth={3.2} />}
+      </span>
       <span className="tv-task-row-main">
         <span className="tv-task-row-subject">{task.subject || 'Без темы'}</span>
         <span className="tv-task-row-flow">
           {taskKey && <span className="tv-task-key">{taskKey}</span>}
-          <span className="tv-task-row-flow-name">{creatorName}</span>
+          <span className="tv-task-row-flow-name" title={creatorName}>{creatorName}</span>
           <span className="tv-task-row-flow-arrow">→</span>
-          <span className="tv-task-row-flow-name">{assigneeName}</span>
+          <AssigneeStack people={assigneePeople} />
+          {deadlineLabel && <span className={`tv-deadline-chip ${isTaskOverdue(task) ? 'is-overdue' : ''}`}>{deadlineLabel}</span>}
+          {/* Единственное «лишнее» состояние, которое стоит показать всем: по задаче
+              задали вопрос, и до ответа она не двигается. */}
+          {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
         </span>
       </span>
       <span className="tv-task-row-meta">
-        <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
+        {task.tag && task.tag !== 'task' && <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>}
         {task?.priority && task.priority !== 'normal' && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
-        <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-        {deadlineLabel && <span className={`tv-deadline-chip ${isTaskOverdue(task) ? 'is-overdue' : ''}`}>{deadlineLabel}</span>}
-        {/* Единственное «лишнее» состояние, которое стоит показать всем: по задаче
-            задали вопрос, и до ответа она не двигается. */}
-        {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
-        <AssigneeStack people={assigneePeople} />
+        <span className={`tv-task-row-state is-${statusTone}`}>{sm.label}</span>
         <span className="tv-task-row-date">{fmt(task.created_at)}</span>
         {typeof onPin === 'function' && (
           <button
@@ -5947,8 +7179,9 @@ const TaskDrawer = React.memo(({
       <div className="tv-drawer-badges">
         <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
         <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
-        {/* «Обычная» — срочность по умолчанию: на телефоне её не пишем, как и в строке списка. */}
-        {task?.priority && (!isMobileShell || task.priority !== 'normal') && (
+        {/* «Обычная» — срочность по умолчанию, а не признак: не пишем её нигде —
+            ни в строке списка, ни в карточке, ни в закреплённой задаче. */}
+        {task?.priority && task.priority !== 'normal' && (
           <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>
         )}
         {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
@@ -6490,11 +7723,10 @@ export const PinnedTaskWidget = React.memo(({
   }, [apiBaseUrl, buildNoteHeaders]);
   const [paletteId, setPaletteId] = useState(() => {
     if (typeof window === 'undefined') return PIN_PALETTES[0].id;
-    try {
-      return window.localStorage.getItem(PIN_PALETTE_STORAGE_KEY) || PIN_PALETTES[0].id;
-    } catch (error) {
-      return PIN_PALETTES[0].id;
-    }
+    // Пока человек сам не выбирал оформление — как у сайта: при тёмной теме
+    // портала светлая панель была бы единственным светлым пятном на экране.
+    const siteIsDark = document.documentElement?.getAttribute?.('data-otp-theme') === 'dark';
+    return readPinPaletteChoice() || (siteIsDark ? 'midnight' : PIN_PALETTES[0].id);
   });
   const [selectedMenuPersonKey, setSelectedMenuPersonKey] = useState(null);
   const [pipContainer, setPipContainer] = useState(null);
@@ -6645,19 +7877,29 @@ export const PinnedTaskWidget = React.memo(({
 
   const handlePointerDown = useCallback((event) => {
     if (event.button !== 0 || !widgetRef.current) return;
+    // Панель тянется за всю шапку, как окно macOS, — кроме кнопок в ней.
+    if (event.target?.closest?.('button, a, input, textarea, select, [role="menu"]')) return;
     const rect = widgetRef.current.getBoundingClientRect();
     dragStateRef.current = {
       pointerId: event.pointerId,
       offsetX: event.clientX - rect.left,
       offsetY: event.clientY - rect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    setIsDragging(true);
   }, []);
 
   const handlePointerMove = useCallback((event) => {
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    // Щелчок по шапке — ещё не перенос: без порога панель вздрагивала тенью.
+    if (!drag.moved) {
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 3) return;
+      drag.moved = true;
+      setIsDragging(true);
+    }
     const next = clampPosition(
       event.clientX - drag.offsetX,
       event.clientY - drag.offsetY
@@ -6671,6 +7913,7 @@ export const PinnedTaskWidget = React.memo(({
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragStateRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (!drag.moved) return;
     setIsDragging(false);
     onStateChange?.({
       expanded,
@@ -6678,33 +7921,80 @@ export const PinnedTaskWidget = React.memo(({
     });
   }, [expanded, onStateChange]);
 
-  const toggleExpanded = useCallback(() => {
-    setExpanded((prev) => {
-      const next = !prev;
-      onStateChange?.({
-        expanded: next,
-        position: latestPositionRef.current,
+  /* В окне «поверх окон» «Свернуть» уменьшает само окно до шапки, заголовка и
+     кнопок: содержимое сворачивалось, а окно оставалось прежним — под кнопками
+     зияла пустая серая половина. «Развернуть» возвращает прежнюю высоту.
+     Менять размер окно PiP даёт только сразу после щелчка — отсюда и зовём. */
+  const pipExpandedHeightRef = useRef(0);
+  // Окно сейчас ужато нами. Пока так, «развернуть» извне (закрепили другую
+  // задачу на странице) не принимаем: без щелчка в самом окне его не увеличить,
+  // а развёрнутое содержимое в окне-полоске видно было бы одну шапку.
+  const pipCollapsedRef = useRef(false);
+  const fitPipWindow = useCallback((nextExpanded) => {
+    const win = pipWindow;
+    if (!win || win.closed) return;
+    try {
+      if (nextExpanded) {
+        if (!pipCollapsedRef.current) return;
+        pipCollapsedRef.current = false;
+        if (pipExpandedHeightRef.current > win.outerHeight) {
+          win.resizeTo(win.outerWidth, pipExpandedHeightRef.current);
+        }
+        return;
+      }
+      // Высоту развёрнутого окна помним одну: второе «Свернуть» подряд не
+      // должно записать вместо неё высоту полоски.
+      if (!pipCollapsedRef.current) pipExpandedHeightRef.current = win.outerHeight;
+      pipCollapsedRef.current = true;
+      win.requestAnimationFrame(() => {
+        const node = widgetRef.current;
+        const scroll = node?.querySelector('.tv-pin-scroll');
+        if (!node || !scroll || win.closed) return;
+        const style = win.getComputedStyle(scroll);
+        const hero = scroll.firstElementChild;
+        const header = node.querySelector('.tv-pin-header');
+        const footer = node.querySelector('.tv-pin-footer');
+        const content = (header?.offsetHeight || 0)
+          + (hero?.offsetHeight || 0)
+          + (parseFloat(style.paddingTop) || 0)
+          + (parseFloat(style.paddingBottom) || 0)
+          + (footer?.offsetHeight || 0);
+        const frame = Math.max(0, win.outerHeight - win.innerHeight);
+        if (content > 0) win.resizeTo(win.outerWidth, Math.ceil(content + frame));
       });
-      return next;
+    } catch (error) {
+      // Окно не дало сменить размер — содержимое всё равно свёрнуто.
+    }
+  }, [pipWindow]);
+
+  const toggleExpanded = useCallback(() => {
+    const next = !expanded;
+    setExpanded(next);
+    onStateChange?.({
+      expanded: next,
+      position: latestPositionRef.current,
     });
-  }, [onStateChange]);
+    fitPipWindow(next);
+  }, [expanded, fitPipWindow, onStateChange]);
 
   useEffect(() => {
     latestPositionRef.current = position;
   }, [position]);
 
   useEffect(() => {
-    setExpanded(Boolean(initialExpanded));
+    setExpanded(pipCollapsedRef.current ? false : Boolean(initialExpanded));
   }, [initialExpanded, task?.id]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
+  // Выбор запоминаем только когда его сделал человек: оформление «как у сайта»
+  // не записывается, иначе после смены темы сайта панель осталась бы в прежней.
+  const choosePalette = useCallback((id) => {
+    setPaletteId(id);
     try {
-      window.localStorage.setItem(PIN_PALETTE_STORAGE_KEY, activePalette.id);
+      window.localStorage.setItem(PIN_PALETTE_STORAGE_KEY, id);
     } catch (error) {
       // Palette preference is best-effort browser state.
     }
-  }, [activePalette.id]);
+  }, []);
 
   useEffect(() => {
     if (!pipWindow) return;
@@ -6724,10 +8014,11 @@ export const PinnedTaskWidget = React.memo(({
     setQuickFormMode('create');
     setExpanded(true);
     onStateChange?.({ expanded: true, position: latestPositionRef.current });
+    if (!expanded) fitPipWindow(true);
     setNoteOpen(false);
     setPaletteOpen(false);
     setTaskMenuOpen(false);
-  }, [currentUserId, onStateChange, task, task?.priority]);
+  }, [currentUserId, expanded, fitPipWindow, onStateChange, task, task?.priority]);
 
   const openQuickEdit = useCallback(() => {
     if (!task?.id) return;
@@ -6737,10 +8028,11 @@ export const PinnedTaskWidget = React.memo(({
     setQuickFormMode('edit');
     setExpanded(true);
     onStateChange?.({ expanded: true, position: latestPositionRef.current });
+    if (!expanded) fitPipWindow(true);
     setNoteOpen(false);
     setPaletteOpen(false);
     setTaskMenuOpen(false);
-  }, [currentUserId, onStateChange, task]);
+  }, [currentUserId, expanded, fitPipWindow, onStateChange, task]);
 
   const closeQuickForm = useCallback(() => {
     setQuickFormMode('');
@@ -6826,6 +8118,8 @@ export const PinnedTaskWidget = React.memo(({
   useEffect(() => {
     if (!pipWindow) return undefined;
     const handlePageHide = () => {
+      pipCollapsedRef.current = false;
+      pipExpandedHeightRef.current = 0;
       setPipWindow(null);
       setPipContainer(null);
     };
@@ -6842,11 +8136,15 @@ export const PinnedTaskWidget = React.memo(({
   }, [pipWindow]);
 
   const openDocumentPictureInPicture = useCallback(async () => {
-    setExpanded(true);
-    onStateChange?.({
-      expanded: true,
-      position: latestPositionRef.current,
-    });
+    // Окно уже открыто и ужато — оставляем свёрнутым: увеличит его щелчок
+    // «Развернуть» в самом окне (см. fitPipWindow).
+    if (!(pipWindow && pipCollapsedRef.current)) {
+      setExpanded(true);
+      onStateChange?.({
+        expanded: true,
+        position: latestPositionRef.current,
+      });
+    }
     if (pipWindow) {
       pipWindow.focus?.();
       return;
@@ -6876,28 +8174,239 @@ export const PinnedTaskWidget = React.memo(({
     openDocumentPictureInPicture();
   }, [autoOpenPipRequestId, openDocumentPictureInPicture]);
 
+  // Меню «Ещё» в шапке. Своё, а не IosMenu: общее меню рисуется порталом в
+  // документ портала, и в окне «поверх окон» его не было бы видно.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [moreUp, setMoreUp] = useState(false);
+  const moreButtonRef = useRef(null);
+  const moreMenuRef = useRef(null);
+  const peopleStripRef = useRef(null);
+  const quickFormId = useId();
+  // Клавиатура: меню, открытое с клавиатуры, сразу ставит фокус на первый пункт,
+  // а после «‹ Задача» фокус возвращается на кнопку, которая открыла экран.
+  const moreFocusFirstRef = useRef(false);
+  const returnFocusRef = useRef('');
+  const lastHeightRef = useRef(0);
+  const pinView = noteOpen
+    ? 'notes'
+    : quickFormMode
+      ? 'form'
+      : paletteOpen
+        ? 'palette'
+        : taskMenuOpen
+          ? 'list'
+          : 'task';
+
+  useEffect(() => {
+    const node = widgetRef.current;
+    if (!node) return;
+    if (pinView !== 'task') {
+      // Кнопка, открывшая экран, ушла вместе со старой шапкой — фокус упал на
+      // body. Ставим его на «‹ Задача» («Отмена» у формы); после щелчка мышью
+      // программный фокус кольца не рисует, с клавиатуры — продолжаем отсюда.
+      const doc = node.ownerDocument;
+      if (!doc.activeElement || doc.activeElement === doc.body) {
+        node.querySelector('.tv-pin-header .tv-pin-back, .tv-pin-header .tv-pin-text-btn')?.focus?.({ preventScroll: true });
+      }
+      return;
+    }
+    if (!returnFocusRef.current) return;
+    const key = returnFocusRef.current;
+    returnFocusRef.current = '';
+    node.querySelector(`[data-pin-tool="${key}"]`)?.focus?.({ preventScroll: true });
+  }, [pinView]);
+
+  /* В «Моих задачах» выбранный человек мог остаться за краем ленты (после
+     переключения «Входящие / Исходящие» лента стоит в начале) — подводим к нему. */
+  const activeMenuGroupKey = activeTaskMenuGroup?.key || '';
+  useEffect(() => {
+    if (!taskMenuOpen || !activeMenuGroupKey) return;
+    const strip = peopleStripRef.current;
+    const chip = strip?.querySelector('.tv-pin-person.is-active');
+    if (!strip || !chip) return;
+    const stripRect = strip.getBoundingClientRect();
+    const chipRect = chip.getBoundingClientRect();
+    if (chipRect.left < stripRect.left + 12) {
+      strip.scrollLeft -= stripRect.left + 12 - chipRect.left;
+    } else if (chipRect.right > stripRect.right - 12) {
+      strip.scrollLeft += chipRect.right - (stripRect.right - 12);
+    }
+  }, [taskMenuOpen, taskMenuScope, activeMenuGroupKey]);
+
+  useEffect(() => { setMoreOpen(false); }, [task?.id, pipWindow]);
+
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    const doc = widgetRef.current?.ownerDocument || document;
+    if (moreFocusFirstRef.current) {
+      moreFocusFirstRef.current = false;
+      moreMenuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus?.();
+    }
+    const handlePointer = (event) => {
+      if (moreMenuRef.current?.contains(event.target) || moreButtonRef.current?.contains(event.target)) return;
+      setMoreOpen(false);
+    };
+    const handleKey = (event) => {
+      // Esc и Tab закрывают меню и возвращают фокус на «⋯», как у меню macOS:
+      // иначе Tab из последнего пункта уводил фокус за пределы панели.
+      if (event.key === 'Escape' || (event.key === 'Tab' && moreMenuRef.current?.contains(doc.activeElement))) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMoreOpen(false);
+        moreButtonRef.current?.focus?.();
+        return;
+      }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const items = Array.from(moreMenuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || []);
+      if (!items.length) return;
+      event.preventDefault();
+      const current = items.indexOf(doc.activeElement);
+      const step = event.key === 'ArrowDown' ? 1 : -1;
+      const next = current < 0 ? (step > 0 ? 0 : items.length - 1) : (current + step + items.length) % items.length;
+      items[next].focus();
+    };
+    doc.addEventListener('pointerdown', handlePointer, true);
+    doc.addEventListener('keydown', handleKey, true);
+    return () => {
+      doc.removeEventListener('pointerdown', handlePointer, true);
+      doc.removeEventListener('keydown', handleKey, true);
+    };
+  }, [moreOpen]);
+
+  /* Панель на странице меняет высоту (свернули, открыли «Мои задачи»). Стоит она
+     по левому верхнему углу, поэтому выросшая у нижнего края уходила бы за экран —
+     подтягиваем её обратно, как при смене размера окна. */
+  useEffect(() => {
+    if (pipWindow || typeof ResizeObserver === 'undefined') return undefined;
+    const node = widgetRef.current;
+    if (!node) return undefined;
+    lastHeightRef.current = node.getBoundingClientRect().height;
+    const observer = new ResizeObserver(() => {
+      const height = node.getBoundingClientRect().height;
+      const before = lastHeightRef.current;
+      lastHeightRef.current = height;
+      if (dragStateRef.current) return;
+      setPosition((prev) => {
+        if (!prev) return prev;
+        // Панель, прижатая к низу окна, при смене высоты остаётся прижатой (как
+        // свёрнутая панель macOS), а не повисает над краем на высоту разницы.
+        const gap = window.innerHeight - (prev.y + before);
+        const y = before > 0 && gap >= 0 && gap <= 32 ? window.innerHeight - gap - height : prev.y;
+        const next = clampPosition(prev.x, y);
+        if (next.x === prev.x && next.y === prev.y) return prev;
+        latestPositionRef.current = next;
+        return next;
+      });
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [pipWindow, clampPosition, task?.id]);
+
   if (!task?.id) return null;
 
-  const pinHeaderKicker = noteOpen
-    ? 'Локальные заметки'
-    : quickFormMode === 'create'
-      ? 'Создание задачи'
-      : quickFormMode === 'edit'
-        ? 'Редактирование задачи'
-        : 'Закрепленная задача';
-  const pinHeaderTitle = noteOpen
-    ? 'Темы и заметки'
-    : quickFormMode === 'create'
-      ? 'Новая задача'
-      : quickFormMode === 'edit'
-        ? (task.subject || 'Редактирование')
-        : (task.subject || 'Без темы');
+  const view = pinView;
+  const showView = (name, returnTo = '') => {
+    setMoreOpen(false);
+    if (name !== 'task') returnFocusRef.current = returnTo || name;
+    setNoteOpen(name === 'notes');
+    setPaletteOpen(name === 'palette');
+    setTaskMenuOpen(name === 'list');
+    // Свёрнутое окно «поверх окон» мало для списка и заметок — возвращаем ему высоту.
+    if (name !== 'task' && pipWindow && !expanded) {
+      setExpanded(true);
+      onStateChange?.({ expanded: true, position: latestPositionRef.current });
+      fitPipWindow(true);
+    }
+  };
+  const moreItemsCount = 3
+    + (canEditTask && onEditTask ? 1 : 0)
+    + (!pipWindow && canUseDocumentPictureInPicture ? 1 : 0)
+    + (canDeleteTask && onDeleteTask ? 1 : 0);
+  const toggleMore = (event) => {
+    if (moreOpen) {
+      setMoreOpen(false);
+      return;
+    }
+    // В ужатом окне «поверх окон» меню некуда раскрыться (вверху край окна) —
+    // сначала возвращаем окну высоту, щелчок даёт на это право.
+    if (pipWindow && !expanded) {
+      setExpanded(true);
+      onStateChange?.({ expanded: true, position: latestPositionRef.current });
+      fitPipWindow(true);
+    }
+    // Меню раскрывается вниз, а у нижнего края экрана — вверх, как меню macOS.
+    const button = moreButtonRef.current;
+    const host = button?.ownerDocument?.defaultView || window;
+    const rect = button?.getBoundingClientRect?.();
+    const needed = moreItemsCount * 34 + 9 + 14;
+    if (rect && !pipWindow) {
+      const below = host.innerHeight - rect.bottom;
+      setMoreUp(below < needed && rect.top > below);
+    } else {
+      setMoreUp(false);
+    }
+    moreFocusFirstRef.current = event?.detail === 0;
+    setMoreOpen(true);
+  };
+  const runMenuAction = (action) => {
+    setMoreOpen(false);
+    action();
+  };
+
+  const taskKey = taskKeyOf(task);
+  const assignees = taskAssignees(task);
+  const statusTone = pinToneOf(sm.badge) || 'gray';
+  const tagTone = pinToneOf(tm.badge) || 'gray';
+  const priorityTone = task?.priority && task.priority !== 'normal' ? (pinToneOf(pm.badge) || 'gray') : '';
+  const overdue = isTaskOverdue(task);
+  const dragProps = pipWindow ? {} : {
+    onPointerDown: handlePointerDown,
+    onPointerMove: handlePointerMove,
+    onPointerUp: handlePointerEnd,
+    onPointerCancel: handlePointerEnd,
+  };
+  const backButton = (
+    <button type="button" className="tv-pin-back" onClick={() => showView('task')}>
+      <LucideChevronLeft size={17} strokeWidth={2.2} />
+      Задача
+    </button>
+  );
+  /* У каждого экрана своя шапка и своё содержимое (key): иначе React переиспользовал
+     бы узлы — фокус с «Мои задачи» оставался на появившейся «+ Новая» (второе
+     нажатие Enter создавало задачу), а прокрутка одного экрана переезжала в другой. */
+  const navHeader = ({ left = backButton, title, sub = '', right = null }) => (
+    <header key={`head-${view}`} className="tv-pin-header is-nav" {...dragProps}>
+      <div className="tv-pin-nav-side">{left}</div>
+      <div className="tv-pin-nav-center">
+        <span className="tv-pin-nav-title">{title}</span>
+        {sub && <span className="tv-pin-nav-sub">{sub}</span>}
+      </div>
+      <div className="tv-pin-nav-side is-end">{right}</div>
+    </header>
+  );
+  const fileRows = (items) => items.map((att) => {
+    const { kind, ext } = previewKind(att);
+    return (
+      <button
+        key={att.id}
+        type="button"
+        className="tv-pin-file"
+        // В окне «поверх окон» просмотр не помещается — файл скачивается, и
+        // значок честно говорит об этом вместо шеврона «перейти».
+        title={pipWindow ? `Скачать: ${att.file_name}` : att.file_name}
+        onClick={() => openPinnedFile(items, att)}
+      >
+        <TypeBadge ext={ext} kind={kind} />
+        <span className="tv-pin-file-name">{att.file_name}</span>
+        {pipWindow
+          ? <Download className="tv-pin-chevron" size={15} strokeWidth={2} aria-hidden="true" />
+          : <LucideChevronRight className="tv-pin-chevron" size={15} strokeWidth={2} aria-hidden="true" />}
+      </button>
+    );
+  });
 
   const quickTaskForm = quickFormMode ? (
-    <form className={`tv-pin-task-form ${pipWindow ? 'is-fullscreen' : ''}`} onSubmit={submitQuickForm}>
-      <p className="tv-pin-task-form-title">
-        {quickFormMode === 'edit' ? 'Редактирование задачи' : 'Новая задача'}
-      </p>
+    <form id={quickFormId} className="tv-pin-form" onSubmit={submitQuickForm}>
       <div className="tv-form-field">
         <label>Тема *</label>
         <input
@@ -6982,21 +8491,21 @@ export const PinnedTaskWidget = React.memo(({
         </div>
       </div>
       <div className="tv-soft-block">
-        <label className="tv-form-switch">
-          <input
-            type="checkbox"
+        {/* Да/нет — переключателем iOS, как в настройках, а не системной галочкой. */}
+        <label className="tv-pin-switch-row">
+          <span>Регламентная задача</span>
+          <IosToggle
             checked={!!quickForm.isRegulation}
             disabled={quickFormLoading}
-            onChange={(event) => setQuickForm((prev) => ({
+            onChange={(checked) => setQuickForm((prev) => ({
               ...prev,
-              isRegulation: event.target.checked,
-              recurrenceType: event.target.checked ? (prev.recurrenceType || 'daily') : ''
+              isRegulation: checked,
+              recurrenceType: checked ? (prev.recurrenceType || 'daily') : ''
             }))}
           />
-          Регламентная задача
         </label>
         {quickForm.isRegulation && (
-          <div className="tv-pin-task-form-grid" style={{ marginTop: 8 }}>
+          <div className="tv-pin-form-grid" style={{ marginTop: 12 }}>
             <div className="tv-form-field" style={{ gridColumn: '1 / -1' }}>
               <label>Период</label>
               <div className="tv-composer-segmented is-stretch" role="group" aria-label="Период повтора">
@@ -7048,482 +8557,541 @@ export const PinnedTaskWidget = React.memo(({
           />
         </div>
       ) : attachments.length > 0 ? (
-        <div className="tv-soft-block tv-pin-file-section">
-          <p className="tv-block-label">Прикрепленные файлы</p>
-          <div className="tv-file-list">
-            {attachments.map((att) => (
-              <button
-                key={att.id}
-                type="button"
-                className="tv-file-btn"
-                title={att.file_name}
-                onClick={() => openPinnedFile(attachments, att)}
-              >
-                <FileIcon />
-                <span className="tv-file-name">{att.file_name}</span>
-              </button>
-            ))}
-          </div>
+        <div className="tv-pin-section">
+          <div className="tv-pin-section-head"><span>Прикрепленные файлы</span></div>
+          <div className="tv-pin-group">{fileRows(attachments)}</div>
         </div>
       ) : null}
-      {quickFormError && <span className="tv-pin-form-error">{quickFormError}</span>}
-      <div className="tv-pin-task-form-actions">
-        <button type="button" className="tv-btn tv-btn-ghost" disabled={quickFormLoading} onClick={closeQuickForm}>
-          Отмена
-        </button>
-        <button type="submit" className="tv-btn tv-btn-primary" disabled={quickFormLoading || isTaskRecipientsLoading}>
-          {quickFormLoading ? 'Сохраняю...' : 'Сохранить'}
-        </button>
-      </div>
     </form>
   ) : null;
+
+  let header;
+  let body;
+  let footer = null;
+
+  if (view === 'notes') {
+    header = navHeader({
+      title: 'Заметки',
+      // Подпись — только когда есть о чём предупредить: обычное «сохраняется» — шум.
+      sub: notesState?.backendReady ? '' : 'Сервер недоступен — локальный режим',
+    });
+    body = (
+      <div key="body-notes" className="tv-pin-scroll is-notes">
+        <TaskNotesPanel notesState={notesState} compact fullScreen={!!pipWindow} hideHeading />
+      </div>
+    );
+  } else if (view === 'form') {
+    header = navHeader({
+      left: (
+        <button type="button" className="tv-pin-text-btn" disabled={quickFormLoading} onClick={closeQuickForm}>
+          Отмена
+        </button>
+      ),
+      title: quickFormMode === 'edit' ? 'Изменение задачи' : 'Новая задача',
+    });
+    body = <div key="body-form" className="tv-pin-scroll">{quickTaskForm}</div>;
+    footer = (
+      <footer key="foot-form" className="tv-pin-footer">
+        {quickFormError && <p className="tv-pin-error" role="alert">{quickFormError}</p>}
+        <button
+          type="submit"
+          form={quickFormId}
+          className="tv-pin-btn is-primary"
+          disabled={quickFormLoading || isTaskRecipientsLoading}
+        >
+          {quickFormLoading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
+          {quickFormLoading ? 'Сохраняю…' : (quickFormMode === 'edit' ? 'Сохранить' : 'Создать задачу')}
+        </button>
+      </footer>
+    );
+  } else if (view === 'palette') {
+    header = navHeader({ title: 'Оформление' });
+    body = (
+      <div key="body-palette" className="tv-pin-scroll">
+        <div className="tv-pin-appearance" role="radiogroup" aria-label="Оформление закрепленной задачи">
+          {PIN_PALETTES.map((palette) => {
+            const active = palette.id === activePalette.id;
+            return (
+              <button
+                key={palette.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                className={`tv-pin-look ${active ? 'is-active' : ''}`}
+                onClick={() => choosePalette(palette.id)}
+              >
+                <span className="tv-pin-look-frame">
+                  <span className="tv-pin-look-preview" style={palette.vars} aria-hidden="true">
+                    <span className="tv-pin-look-bar" />
+                    <span className="tv-pin-look-body">
+                      <span className="tv-pin-look-line" />
+                      <span className="tv-pin-look-line is-short" />
+                      <span className="tv-pin-look-card" />
+                      <span className="tv-pin-look-btn" />
+                    </span>
+                  </span>
+                </span>
+                <span className="tv-pin-look-name">
+                  <span className="tv-pin-look-radio" aria-hidden="true">
+                    <Check size={12} strokeWidth={3} />
+                  </span>
+                  {palette.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  } else if (view === 'list') {
+    header = navHeader({
+      title: 'Мои задачи',
+      right: onCreateTask ? (
+        <button
+          type="button"
+          className="tv-pin-text-btn"
+          disabled={!!actionLoadingKey || quickFormLoading}
+          onClick={() => {
+            returnFocusRef.current = 'list';
+            openQuickCreate();
+          }}
+        >
+          <Plus size={15} strokeWidth={2.2} />
+          Новая
+        </button>
+      ) : null,
+    });
+    body = (
+      <div key="body-list" className="tv-pin-scroll">
+        <div className="tv-pin-segmented" role="tablist" aria-label="Мои задачи">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={taskMenuScope === 'incoming'}
+            className={taskMenuScope === 'incoming' ? 'is-active' : ''}
+            onClick={() => setTaskMenuScope('incoming')}
+          >
+            Входящие
+            <span className="tv-pin-count">{incomingTaskOptions.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={taskMenuScope === 'outgoing'}
+            className={taskMenuScope === 'outgoing' ? 'is-active' : ''}
+            onClick={() => setTaskMenuScope('outgoing')}
+          >
+            Исходящие
+            <span className="tv-pin-count">{outgoingTaskOptions.length}</span>
+          </button>
+        </div>
+        {taskMenuGroups.length > 0 ? (
+          <>
+            {/* Люди — капсулами в одну прокручиваемую строку: список задач под ними
+                получает всю ширину панели. Полное имя — в подсказке и в заголовке группы. */}
+            <div className="tv-pin-people" ref={peopleStripRef}>
+              {taskMenuGroups.map((group) => {
+                const open = group.active + group.notAccepted;
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    className={`tv-pin-person ${activeTaskMenuGroup?.key === group.key ? 'is-active' : ''}`}
+                    title={group.name}
+                    aria-pressed={activeTaskMenuGroup?.key === group.key}
+                    onClick={() => setSelectedMenuPersonKey(group.key)}
+                  >
+                    <AvatarCircle className="tv-pin-person-avatar" name={group.name} avatarUrl={group.avatarUrl} />
+                    <span className="tv-pin-person-name">{pinPersonShortName(group.name)}</span>
+                    {open > 0 && (
+                      <span className={`tv-pin-person-badge ${group.notAccepted > 0 ? 'is-alert' : ''}`}>
+                        {open > 99 ? '99+' : open}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {activeTaskMenuGroup && (
+              <section className="tv-pin-section">
+                <div className="tv-pin-section-head">
+                  <span>{activeTaskMenuGroup.name}</span>
+                  <small>
+                    {[
+                      activeTaskMenuGroup.notAccepted > 0 ? `ждут принятия: ${activeTaskMenuGroup.notAccepted}` : '',
+                      activeTaskMenuGroup.active > 0 ? `в работе: ${activeTaskMenuGroup.active}` : '',
+                      activeTaskMenuGroup.done > 0 ? `выполнено: ${activeTaskMenuGroup.done}` : '',
+                    ].filter(Boolean).join(' · ')}
+                  </small>
+                </div>
+                <div className="tv-pin-group">
+                  {activeTaskMenuGroup.tasks.map((item) => {
+                    const itemStatus = STATUS_META[item.status] || { label: item.status || '—', dot: '' };
+                    const current = Number(item?.id || 0) === Number(task.id);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={`tv-pin-list-row ${current ? 'is-current' : ''}`}
+                        aria-current={current ? 'true' : undefined}
+                        onClick={() => {
+                          onSelectTask?.(item);
+                          setTaskMenuOpen(false);
+                        }}
+                      >
+                        <span className="tv-pin-dot" style={itemStatus.dot ? { background: itemStatus.dot } : undefined} aria-hidden="true" />
+                        <span className="tv-pin-list-main">
+                          <span className="tv-pin-list-title">{item.subject || `Задача #${item.id}`}</span>
+                          <span className="tv-pin-list-meta">{itemStatus.label} · {fmt(item.created_at)}</span>
+                        </span>
+                        {current && <Check className="tv-pin-list-check" size={16} strokeWidth={2.4} aria-hidden="true" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+          </>
+        ) : (
+          <p className="tv-pin-empty">
+            {isTasksLoading
+              ? 'Загружаю задачи…'
+              : (taskMenuScope === 'outgoing' ? 'Исходящих задач пока нет.' : 'Входящих задач пока нет.')}
+          </p>
+        )}
+      </div>
+    );
+  } else {
+    header = (
+      <header key="head-task" className="tv-pin-header" {...dragProps}>
+        {!pipWindow && (
+          <span className="tv-pin-grip" aria-hidden="true">
+            <GripVertical size={14} strokeWidth={2} />
+          </span>
+        )}
+        <div className="tv-pin-heading">
+          <span className="tv-pin-heading-title">Закрепленная задача</span>
+        </div>
+        <div className="tv-pin-tools">
+          <button
+            type="button"
+            className="tv-pin-tool"
+            title="Мои задачи"
+            aria-label="Мои задачи"
+            data-pin-tool="list"
+            onClick={() => showView('list')}
+          >
+            <ListTodo size={16} strokeWidth={1.9} />
+          </button>
+          <button
+            type="button"
+            className="tv-pin-tool"
+            title="Заметки"
+            aria-label="Заметки"
+            data-pin-tool="notes"
+            onClick={() => showView('notes')}
+          >
+            <StickyNote size={16} strokeWidth={1.9} />
+          </button>
+          <button
+            type="button"
+            className="tv-pin-tool"
+            title={expanded ? 'Свернуть' : 'Развернуть'}
+            aria-label={expanded ? 'Свернуть' : 'Развернуть'}
+            aria-expanded={expanded}
+            onClick={toggleExpanded}
+          >
+            {expanded ? <Minimize2 size={15} strokeWidth={2} /> : <Maximize2 size={15} strokeWidth={2} />}
+          </button>
+          <button
+            ref={moreButtonRef}
+            type="button"
+            className={`tv-pin-tool ${moreOpen ? 'is-active' : ''}`}
+            title="Ещё"
+            aria-label="Ещё"
+            aria-haspopup="menu"
+            aria-expanded={moreOpen}
+            data-pin-tool="more"
+            onClick={toggleMore}
+          >
+            <MoreHorizontal size={17} strokeWidth={2} />
+          </button>
+        </div>
+      </header>
+    );
+    body = (
+      <div key="body-task" className={`tv-pin-scroll ${expanded ? '' : 'is-compact'}`}>
+        <div className="tv-pin-hero">
+          {taskKey && <span className="tv-pin-key">{taskKey}</span>}
+          <button
+            type="button"
+            className="tv-pin-title-btn"
+            title="Открыть карточку задачи"
+            onClick={() => onOpenDetails?.(task)}
+          >
+            <span className="tv-pin-title">{task.subject || 'Без темы'}</span>
+          </button>
+          <div className="tv-pin-tags">
+            <span className={`tv-pin-tag is-${statusTone}`}>{sm.label}</span>
+            {task?.tag && <span className={`tv-pin-tag is-${tagTone}`}>{tm.label}</span>}
+            {/* «Обычная» срочность — не признак, а её отсутствие: как и в списке
+                задач, капсулу ставим только срочной и критичной. */}
+            {priorityTone && <span className={`tv-pin-tag is-${priorityTone}`}>{pm.label}</span>}
+            {task?.is_regulation && <span className="tv-pin-tag is-teal">Регламент</span>}
+            {/* Закреплённая задача — та, над которой работают: если работа
+                стоит из-за незакрытого вопроса, это надо видеть сразу. */}
+            {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
+          </div>
+        </div>
+
+        {expanded && (
+          <>
+            {String(task.description || '').trim() && (
+              <div className="tv-pin-group">
+                <p className="tv-pin-description">{task.description}</p>
+              </div>
+            )}
+            <div className="tv-pin-group">
+              <div className="tv-pin-row">
+                <span className="tv-pin-row-label">{assignees.length > 1 ? 'Исполнители' : 'Исполнитель'}</span>
+                <span className="tv-pin-row-value" title={assignees.map((person) => person.name).join(', ')}>
+                  {taskAssigneesLabel(task)}
+                </span>
+              </div>
+              <div className="tv-pin-row">
+                <span className="tv-pin-row-label">Постановщик</span>
+                <span className="tv-pin-row-value">{task?.creator?.name || '—'}</span>
+              </div>
+              {task?.due_at && (
+                <div className="tv-pin-row">
+                  <span className="tv-pin-row-label">{overdue ? 'Просрочено' : 'Дедлайн'}</span>
+                  <span className={`tv-pin-row-value ${overdue ? 'is-overdue' : ''}`}>{fmtShortDateTime(task.due_at)}</span>
+                </div>
+              )}
+            </div>
+            {checklist.length > 0 && (
+              <section className="tv-pin-section">
+                <div className="tv-pin-section-head">
+                  <span>Чек-лист</span>
+                  <small>{progress.done} из {progress.total}</small>
+                </div>
+                <div className="tv-pin-group">
+                  {checklist.slice(0, 5).map((item) => {
+                    const locked = actionLoadingKey === `${task.id}:checklist:${item.id}` || !!task?.viewer_is_observer;
+                    return (
+                      <label
+                        key={item.id}
+                        className={`tv-pin-check ${item.is_done ? 'is-done' : ''} ${locked ? 'is-disabled' : ''}`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="tv-pin-check-input"
+                          checked={!!item.is_done}
+                          disabled={actionLoadingKey === `${task.id}:checklist:${item.id}` || !!task?.viewer_is_observer}
+                          onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
+                        />
+                        <span className="tv-pin-check-mark" aria-hidden="true">
+                          <Check size={12} strokeWidth={3} />
+                        </span>
+                        <span className="tv-pin-check-title">{item.title}</span>
+                      </label>
+                    );
+                  })}
+                  {checklist.length > 5 && (
+                    <div className="tv-pin-row is-note">Ещё пунктов: {checklist.length - 5} — в карточке задачи</div>
+                  )}
+                </div>
+              </section>
+            )}
+            {attachments.length > 0 && (
+              <section className="tv-pin-section">
+                <div className="tv-pin-section-head"><span>Файлы задачи</span></div>
+                <div className="tv-pin-group">{fileRows(attachments)}</div>
+              </section>
+            )}
+            {compAttachments.length > 0 && (
+              <section className="tv-pin-section">
+                <div className="tv-pin-section-head"><span>Файлы выполнения</span></div>
+                <div className="tv-pin-group">{fileRows(compAttachments)}</div>
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    );
+    footer = (
+      <footer key="foot-task" className="tv-pin-footer">
+        {completeDraft ? (
+          <div className="tv-pin-report">
+            <textarea
+              className="tv-textarea"
+              placeholder="Отчёт о проделанной работе"
+              autoFocus
+              value={completeDraft.body}
+              disabled={!!actionLoadingKey}
+              onChange={(event) => setCompleteDraft((prev) => ({ ...prev, body: event.target.value }))}
+            />
+            <input
+              className="tv-input"
+              placeholder="Затрачено: 3ч, 90"
+              value={completeDraft.spent}
+              disabled={!!actionLoadingKey}
+              onChange={(event) => setCompleteDraft((prev) => ({ ...prev, spent: event.target.value }))}
+            />
+            <div className="tv-pin-report-actions">
+              <button
+                type="button"
+                className="tv-pin-btn"
+                disabled={!!actionLoadingKey}
+                onClick={() => setCompleteDraft(null)}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="tv-pin-btn is-indigo"
+                disabled={!!actionLoadingKey || !completeDraft.body.trim()}
+                onClick={async () => {
+                  const ok = await onRunAction?.(task, 'completed', {
+                    report: completeDraft.body.trim(),
+                    spentMinutes: parseSpentInput(completeDraft.spent),
+                  });
+                  if (ok !== false) setCompleteDraft(null);
+                }}
+              >
+                {actionLoadingKey === `${task.id}:completed` && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
+                Сдать работу
+              </button>
+            </div>
+          </div>
+        ) : actionButtons.length > 0 ? (
+          <div className="tv-pin-actions">
+            {actionButtons.map((btn) => {
+              const loading = actionLoadingKey === `${task.id}:${btn.action}`;
+              const tone = pinToneOf(btn.cls);
+              return (
+                <button
+                  key={btn.action}
+                  type="button"
+                  className={`tv-pin-btn ${tone ? `is-${tone}` : ''}`}
+                  disabled={!!actionLoadingKey}
+                  onClick={() => {
+                    if (btn.action === 'completed') {
+                      setCompleteDraft({ body: '', spent: '' });
+                      return;
+                    }
+                    onRunAction?.(task, btn.action);
+                  }}
+                >
+                  {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
+                  {loading ? 'Сохраняю…' : btn.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : canEditTask && onEditTask ? (
+          /* Своя задача, а шагов по статусу нет (ждёт исполнителя): вместо фразы
+             «быстрых действий нет» над пустым местом — «Изменить», как была
+             видимая кнопка у прежней панели. Удаление — в «⋯». */
+          <div className="tv-pin-actions">
+            <button
+              type="button"
+              className="tv-pin-btn"
+              disabled={!!actionLoadingKey || quickFormLoading}
+              onClick={() => {
+                returnFocusRef.current = 'more';
+                openQuickEdit();
+              }}
+            >
+              <Pencil size={14} strokeWidth={2} />
+              Изменить
+            </button>
+          </div>
+        ) : (
+          /* Наблюдателю — почему кнопок нет; в остальных случаях подвал пуст
+             и не выводится вовсе (см. ниже): фраза без действия — шум. */
+          <p className="tv-pin-hint">
+            {task?.viewer_is_observer ? 'Задача открыта вам только на просмотр.' : ''}
+          </p>
+        )}
+      </footer>
+    );
+    // Ни действий, ни отчёта, ни пояснения наблюдателю — подвал не нужен.
+    if (!completeDraft && !actionButtons.length && !(canEditTask && onEditTask) && !task?.viewer_is_observer) {
+      footer = null;
+    }
+  }
 
   const widgetMarkup = (
     <section
       ref={widgetRef}
-      className={`tv-pin-widget ${isDragging ? 'is-dragging' : ''} ${pipWindow ? 'is-detached' : ''}`}
+      className={`tv-pin-widget ${expanded ? 'is-expanded' : ''} ${isDragging ? 'is-dragging' : ''} ${pipWindow ? 'is-detached' : ''}`}
       style={{
         ...activePalette.vars,
         ...(pipWindow ? {} : (position ? { left: position.x, top: position.y } : { right: 18, bottom: 18 }))
       }}
       aria-label="Закрепленная задача"
     >
-      <header className="tv-pin-header">
-        {!pipWindow && (
-          <button
-            type="button"
-            className="tv-pin-drag-handle"
-            aria-label="Перетащить закрепленную задачу"
-            title="Перетащить"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerEnd}
-          >
-            <GripHorizontal size={16} strokeWidth={2} />
+      <div className="tv-pin-frame">
+        {header}
+        {body}
+        {footer}
+      </div>
+      {moreOpen && view === 'task' && (
+        <div
+          ref={moreMenuRef}
+          className={`tv-pin-menu ${moreUp ? 'is-up' : ''}`}
+          role="menu"
+          aria-label="Действия с закрепленной задачей"
+        >
+          <button type="button" role="menuitem" className="tv-pin-menu-item" onClick={() => runMenuAction(() => onOpenDetails?.(task))}>
+            <PanelRightOpen size={15} strokeWidth={2} />
+            Открыть карточку
           </button>
-        )}
-        <div className="tv-pin-heading">
-          <span className="tv-pin-kicker">{pinHeaderKicker}</span>
-          <h2 className="tv-pin-title">{pinHeaderTitle}</h2>
-        </div>
-        <div className="tv-pin-header-actions">
-          <button
-            type="button"
-            className={`tv-pin-header-btn ${noteOpen ? 'is-active' : ''}`}
-            title={noteOpen ? 'Скрыть заметки' : 'Открыть заметки'}
-            aria-label={noteOpen ? 'Скрыть заметки' : 'Открыть заметки'}
-            onClick={() => {
-              setNoteOpen((prev) => !prev);
-              setPaletteOpen(false);
-              setTaskMenuOpen(false);
-            }}
-          >
-            <StickyNote size={15} strokeWidth={2} />
-          </button>
-          <button
-            type="button"
-            className={`tv-pin-header-btn ${paletteOpen ? 'is-active' : ''}`}
-            title="Палитра закрепленной задачи"
-            aria-label="Палитра закрепленной задачи"
-            onClick={() => {
-              setPaletteOpen((prev) => !prev);
-              setNoteOpen(false);
-              setTaskMenuOpen(false);
-            }}
-          >
-            <Palette size={15} strokeWidth={2} />
-          </button>
-          {!pipWindow && canUseDocumentPictureInPicture && (
+          {canEditTask && onEditTask && (
             <button
               type="button"
-              className="tv-pin-header-btn"
-              title="Открыть поверх окон"
-              aria-label="Открыть поверх окон"
-              onClick={openDocumentPictureInPicture}
+              role="menuitem"
+              className="tv-pin-menu-item"
+              disabled={!!actionLoadingKey || quickFormLoading}
+              onClick={() => runMenuAction(() => {
+                returnFocusRef.current = 'more';
+                openQuickEdit();
+              })}
             >
-              <PictureInPicture2 size={15} strokeWidth={2} />
+              <Pencil size={15} strokeWidth={2} />
+              Изменить
             </button>
           )}
-          <button
-            type="button"
-            className="tv-pin-header-btn"
-            title={expanded ? 'Свернуть' : 'Развернуть'}
-            aria-label={expanded ? 'Свернуть' : 'Развернуть'}
-            onClick={toggleExpanded}
-          >
-            {expanded ? <Minimize2 size={15} strokeWidth={2} /> : <Maximize2 size={15} strokeWidth={2} />}
+          <button type="button" role="menuitem" className="tv-pin-menu-item" onClick={() => runMenuAction(() => showView('palette', 'more'))}>
+            <Palette size={15} strokeWidth={2} />
+            Оформление
           </button>
-          <button
-            type="button"
-            className="tv-pin-header-btn"
-            title="Открыть карточку задачи"
-            aria-label="Открыть карточку задачи"
-            onClick={() => onOpenDetails?.(task)}
-          >
-            <PanelRightOpen size={15} strokeWidth={2} />
-          </button>
-          <button
-            type="button"
-            className="tv-pin-header-btn tv-pin-header-btn-danger"
-            title="Открепить задачу"
-            aria-label="Открепить задачу"
-            onClick={() => onUnpin?.()}
-          >
+          {!pipWindow && canUseDocumentPictureInPicture && (
+            <button type="button" role="menuitem" className="tv-pin-menu-item" onClick={() => runMenuAction(openDocumentPictureInPicture)}>
+              <PictureInPicture2 size={15} strokeWidth={2} />
+              Открыть поверх окон
+            </button>
+          )}
+          <div className="tv-pin-menu-sep" role="separator" />
+          <button type="button" role="menuitem" className="tv-pin-menu-item" onClick={() => runMenuAction(() => onUnpin?.())}>
             <PinOff size={15} strokeWidth={2} />
+            Открепить
           </button>
-        </div>
-      </header>
-
-      <div className={`tv-pin-body ${taskMenuOpen ? 'is-menu-open' : ''} ${noteOpen ? 'is-notes-open' : ''} ${quickFormMode ? 'is-task-form-open' : ''}`}>
-        {!noteOpen && !quickFormMode && (
-        <div className="tv-pin-menu-head">
-          <button
-            type="button"
-            className="tv-pin-menu-trigger"
-            title={taskMenuOpen ? 'Вернуться к задаче' : 'Открыть меню задач'}
-            aria-label={taskMenuOpen ? 'Вернуться к задаче' : 'Открыть меню задач'}
-            onClick={() => setTaskMenuOpen((prev) => !prev)}
-          >
-            <LucideChevronLeft size={15} strokeWidth={2} />
-          </button>
-          <p className="tv-pin-menu-title">{taskMenuOpen ? 'Меню задач' : 'Текущая задача'}</p>
-          {taskMenuOpen ? (
-            <div className="tv-pin-menu-head-actions">
-              {onCreateTask && (
-                <button
-                  type="button"
-                  className="tv-btn tv-btn-primary tv-pin-menu-create-btn"
-                  disabled={!!actionLoadingKey || quickFormLoading}
-                  onClick={openQuickCreate}
-                >
-                  <PlusIcon /> Новая
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="tv-pin-badges">
-              <span className={`tv-badge ${sm.badge}`}>{sm.label}</span>
-              <span className={`tv-badge ${tm.badge}`}>{tm.label}</span>
-              {task?.priority && <span className={`tv-badge ${pm.badge}`}>{pm.label}</span>}
-              {task?.is_regulation && <span className="tv-badge tv-badge-teal">Регламент</span>}
-              {/* Закреплённая задача — та, над которой работают: если работа
-                  стоит из-за незакрытого вопроса, это надо видеть сразу. */}
-              {task?.info_request && <span className="tv-clar-waiting">Ждёт ответа</span>}
-            </div>
+          {canDeleteTask && onDeleteTask && (
+            <button
+              type="button"
+              role="menuitem"
+              className="tv-pin-menu-item is-danger"
+              disabled={!!actionLoadingKey || quickFormLoading}
+              onClick={() => runMenuAction(handleQuickDelete)}
+            >
+              <Trash2 size={15} strokeWidth={2} />
+              Удалить задачу
+            </button>
           )}
         </div>
-        )}
-
-        {noteOpen ? (
-          <TaskNotesPanel notesState={notesState} compact fullScreen={!!pipWindow} />
-        ) : quickFormMode ? (
-          quickTaskForm
-        ) : paletteOpen ? (
-          <div className="tv-pin-note-panel">
-            <p className="tv-block-label" style={{ margin: 0 }}>Палитра PiP</p>
-            <div className="tv-pin-palette-row">
-              {PIN_PALETTES.map((palette) => (
-                <button
-                  key={palette.id}
-                  type="button"
-                  className={`tv-pin-palette-btn ${palette.id === activePalette.id ? 'is-active' : ''}`}
-                  title={palette.label}
-                  aria-label={palette.label}
-                  onClick={() => setPaletteId(palette.id)}
-                >
-                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--surface-2'] }} />
-                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--surface'] }} />
-                  <span className="tv-pin-palette-swatch" style={{ background: palette.vars['--accent'] }} />
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : taskMenuOpen ? (
-          <div className="tv-pin-task-menu-shell">
-            <div className="tv-pin-menu-tabs" role="tablist" aria-label="Фильтр задач">
-              <button
-                type="button"
-                className={`tv-pin-menu-tab ${taskMenuScope === 'incoming' ? 'is-active' : ''}`}
-                onClick={() => setTaskMenuScope('incoming')}
-              >
-                Входящие
-                <span className="tv-pin-menu-tab-count">{incomingTaskOptions.length}</span>
-              </button>
-              <button
-                type="button"
-                className={`tv-pin-menu-tab ${taskMenuScope === 'outgoing' ? 'is-active' : ''}`}
-                onClick={() => setTaskMenuScope('outgoing')}
-              >
-                Исходящие
-                <span className="tv-pin-menu-tab-count">{outgoingTaskOptions.length}</span>
-              </button>
-            </div>
-            <div className="tv-pin-task-menu">
-            <div className="tv-pin-people-rail">
-              {taskMenuGroups.map((group) => (
-                <button
-                  key={group.key}
-                  type="button"
-                  className={`tv-pin-person-btn ${activeTaskMenuGroup?.key === group.key ? 'is-active' : ''}`}
-                  title={group.name}
-                  aria-label={group.name}
-                  onClick={() => setSelectedMenuPersonKey(group.key)}
-                >
-                  <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
-                  {(group.active + group.notAccepted) > 0 && (
-                    <span
-                      className={`tv-pin-person-count ${group.notAccepted > 0 ? 'is-alert' : 'is-active'}`}
-                      aria-hidden="true"
-                    >
-                      {(group.active + group.notAccepted) > 9 ? '9+' : (group.active + group.notAccepted)}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-            <div className="tv-pin-menu-panel">
-              {activeTaskMenuGroup ? (
-                <>
-                  <div className="tv-pin-person-summary">
-                    <span className="tv-pin-person-summary-name">{activeTaskMenuGroup.name}</span>
-                    <span className="tv-pin-person-summary-stats">
-                      <span className="tv-pin-person-summary-chip">
-                        <span className="tv-task-count">{activeTaskMenuGroup.done}</span> выполнено
-                      </span>
-                      <span className="tv-pin-person-summary-chip">
-                        <span className="tv-task-count">{activeTaskMenuGroup.active}</span> в работе
-                      </span>
-                      <span className="tv-pin-person-summary-chip">
-                        <span className={`tv-task-count ${activeTaskMenuGroup.notAccepted > 0 ? 'is-alert' : ''}`}>
-                          {activeTaskMenuGroup.notAccepted}
-                        </span> ждут принятия
-                      </span>
-                    </span>
-                  </div>
-                  <div className="tv-pin-person-task-list">
-                    {activeTaskMenuGroup.tasks.map((item) => {
-                      const itemStatus = STATUS_META[item.status] || { label: item.status || '—', badge: 'tv-badge-gray' };
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          className={`tv-pin-person-task ${Number(item?.id || 0) === Number(task.id) ? 'is-active' : ''}`}
-                          onClick={() => {
-                            onSelectTask?.(item);
-                            setTaskMenuOpen(false);
-                          }}
-                        >
-                          <span className="tv-pin-person-task-title">{item.subject || `Задача #${item.id}`}</span>
-                          <span className="tv-pin-person-task-meta">
-                            <span className={`tv-badge ${itemStatus.badge}`}>{itemStatus.label}</span>
-                            <span className="tv-task-row-date">{fmt(item.created_at)}</span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <span className="tv-pin-empty-actions">
-                  {isTasksLoading
-                    ? 'Загружаю задачи...'
-                    : (taskMenuScope === 'outgoing' ? 'Исходящих задач пока нет.' : 'Входящих задач пока нет.')}
-                </span>
-              )}
-            </div>
-            </div>
-          </div>
-        ) : (
-          <>
-            {expanded && (
-              <div className="tv-pin-summary">
-                <p className="tv-pin-description">
-                  {task.description || 'Описание не добавлено.'}
-                </p>
-                <div className="tv-pin-meta">
-                  <div className="tv-pin-meta-item">
-                    <span className="tv-pin-meta-label">
-                      {taskAssignees(task).length > 1 ? 'Исполнители' : 'Исполнитель'}
-                    </span>
-                    <span className="tv-pin-meta-value" title={taskAssignees(task).map((person) => person.name).join(', ')}>
-                      {taskAssigneesLabel(task)}
-                    </span>
-                  </div>
-                  <div className="tv-pin-meta-item">
-                    <span className="tv-pin-meta-label">Постановщик</span>
-                    <span className="tv-pin-meta-value">{task?.creator?.name || '—'}</span>
-                  </div>
-                  {task?.due_at && (
-                    <div className="tv-pin-meta-item">
-                      <span className="tv-pin-meta-label">Дедлайн</span>
-                      <span className="tv-pin-meta-value">{taskDeadlineLabel(task)}</span>
-                    </div>
-                  )}
-                  {progress.total > 0 && (
-                    <div className="tv-pin-meta-item">
-                      <span className="tv-pin-meta-label">Чек-лист</span>
-                      <span className="tv-pin-meta-value">{`${progress.done}/${progress.total}`}</span>
-                    </div>
-                  )}
-                </div>
-                {checklist.length > 0 && (
-                  <div className="tv-pin-mini-checklist">
-                    {checklist.slice(0, 5).map((item) => (
-                      <label key={item.id} className={`tv-checklist-row ${item.is_done ? 'is-done' : ''}`}>
-                        <input
-                          type="checkbox"
-                          className="tv-checklist-checkbox"
-                          checked={!!item.is_done}
-                          disabled={actionLoadingKey === `${task.id}:checklist:${item.id}` || !!task?.viewer_is_observer}
-                          onChange={() => onToggleChecklistItem?.(task, item, !item.is_done)}
-                        />
-                        <span className="tv-checklist-title">{item.title}</span>
-                      </label>
-                    ))}
-                    {checklist.length > 5 && (
-                      <span className="tv-pin-empty-actions">Ещё пунктов: {checklist.length - 5}</span>
-                    )}
-                  </div>
-                )}
-                {(attachments.length > 0 || compAttachments.length > 0) && (
-                  <div className="tv-pin-files">
-                    {attachments.length > 0 && (
-                      <div className="tv-pin-file-section">
-                        <p className="tv-block-label">Файлы задачи</p>
-                        <div className="tv-file-list">
-                          {attachments.map((att) => (
-                            <button
-                              key={att.id}
-                              type="button"
-                              className="tv-file-btn"
-                              title={att.file_name}
-                              onClick={() => openPinnedFile(attachments, att)}
-                            >
-                              <FileIcon />
-                              <span className="tv-file-name">{att.file_name}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {compAttachments.length > 0 && (
-                      <div className="tv-pin-file-section tv-pin-file-section-result">
-                        <p className="tv-block-label">Файлы выполнения</p>
-                        <div className="tv-file-list">
-                          {compAttachments.map((att) => (
-                            <button
-                              key={att.id}
-                              type="button"
-                              className="tv-file-btn"
-                              title={att.file_name}
-                              onClick={() => openPinnedFile(compAttachments, att)}
-                            >
-                              <FileIcon />
-                              <span className="tv-file-name">{att.file_name}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="tv-pin-actions">
-              {canEditTask && onEditTask && (
-                <button
-                  type="button"
-                  className="tv-btn tv-btn-ghost"
-                  disabled={!!actionLoadingKey || quickFormLoading}
-                  onClick={openQuickEdit}
-                >
-                  Редактировать
-                </button>
-              )}
-              {canDeleteTask && onDeleteTask && (
-                <button
-                  type="button"
-                  className="tv-btn tv-btn-rose"
-                  disabled={!!actionLoadingKey || quickFormLoading}
-                  onClick={handleQuickDelete}
-                >
-                  Удалить
-                </button>
-              )}
-              {actionButtons.map((btn) => {
-                const loading = actionLoadingKey === `${task.id}:${btn.action}`;
-                return (
-                  <button
-                    key={btn.action}
-                    type="button"
-                    className={`tv-btn ${btn.cls}`}
-                    disabled={!!actionLoadingKey}
-                    onClick={() => {
-                      if (btn.action === 'completed') {
-                        setCompleteDraft({ body: '', spent: '' });
-                        return;
-                      }
-                      onRunAction?.(task, btn.action);
-                    }}
-                  >
-                    {loading && <LoaderCircle size={14} strokeWidth={2} className="animate-spin" />}
-                    {loading ? 'Сохраняю...' : btn.label}
-                  </button>
-                );
-              })}
-              {!(canEditTask && onEditTask) && !(canDeleteTask && onDeleteTask) && actionButtons.length === 0 && (
-                <span className="tv-pin-empty-actions">{task?.viewer_is_observer ? 'Задача открыта вам только на просмотр.' : 'Для текущего статуса быстрых действий нет.'}</span>
-              )}
-            </div>
-
-            {completeDraft && (
-              <div className="tv-report-form tv-report-composer">
-                <textarea
-                  className="tv-textarea"
-                  placeholder="Отчёт о проделанной работе"
-                  autoFocus
-                  value={completeDraft.body}
-                  disabled={!!actionLoadingKey}
-                  onChange={(event) => setCompleteDraft((prev) => ({ ...prev, body: event.target.value }))}
-                />
-                <div className="tv-report-form-row">
-                  <input
-                    className="tv-input"
-                    placeholder="Затрачено: 3ч, 90"
-                    value={completeDraft.spent}
-                    disabled={!!actionLoadingKey}
-                    onChange={(event) => setCompleteDraft((prev) => ({ ...prev, spent: event.target.value }))}
-                  />
-                  <button
-                    type="button"
-                    className="tv-btn tv-btn-ghost"
-                    disabled={!!actionLoadingKey}
-                    onClick={() => setCompleteDraft(null)}
-                  >
-                    Отмена
-                  </button>
-                  <button
-                    type="button"
-                    className="tv-btn tv-btn-indigo"
-                    disabled={!!actionLoadingKey || !completeDraft.body.trim()}
-                    onClick={async () => {
-                      const ok = await onRunAction?.(task, 'completed', {
-                        report: completeDraft.body.trim(),
-                        spentMinutes: parseSpentInput(completeDraft.spent),
-                      });
-                      if (ok !== false) setCompleteDraft(null);
-                    }}
-                  >
-                    Сдать работу
-                  </button>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+      )}
     </section>
   );
 
@@ -9121,7 +10689,7 @@ const TasksView = ({
       return (
         <>
           <div className="tv-person-tasks-header">
-            <span className="tv-person-tasks-label">{selected.name} · {selectedTotal} задач</span>
+            <span className="tv-person-tasks-label">{selected.name} · {selectedTotal} {pluralRu(selectedTotal, 'задача', 'задачи', 'задач')}</span>
             <button className="tv-person-tasks-back" type="button" onClick={() => onSelect(null)}>
               <BackIcon /> Назад к списку
             </button>
@@ -9149,6 +10717,49 @@ const TasksView = ({
             </div>
           )}
         </>
+      );
+    }
+
+    /* Компьютер: люди — лентой аватаров, как закреплённые чаты в «Сообщениях»
+       (владелец выбрал 16.11). Число на аватаре — задачи, которые ждут принятия:
+       во «Входящих» — вашего, красным, как «Ждут вас»; в «Исходящих» — их, серым.
+       Остальные счётчики — в подсказке при наведении и в подписи для скринридера.
+       На телефоне — прежние строки: там свой слой (tasks-mobile.css). */
+    if (!isMobileShell) {
+      return (
+        <div className="tv-people" role="group" aria-label={showNotAccepted ? 'Кто поставил вам задачи' : 'Кому вы поставили задачи'}>
+          {groups.map((group) => {
+            const waiting = Number(group.notAccepted || 0);
+            const waitingLabel = showNotAccepted ? 'Ожидают принятия' : 'Ещё не приняты';
+            return (
+              <button
+                key={group.key}
+                type="button"
+                className="tv-people-item"
+                onClick={() => onSelect(group.key)}
+                onMouseEnter={alignPeopleTip}
+                onFocus={alignPeopleTip}
+                aria-label={`${group.name}: ${waitingLabel.toLowerCase()} ${waiting}, в работе ${group.active}, выполнено ${group.done}`}
+              >
+                <span className="tv-people-avatar" aria-hidden="true">
+                  <AvatarCircle className="tv-avatar-md" name={group.name} avatarUrl={group.avatarUrl} />
+                  {waiting > 0 && (
+                    <span className={`tv-people-badge ${showNotAccepted ? 'is-alert' : ''}`}>
+                      {waiting > 99 ? '99+' : waiting}
+                    </span>
+                  )}
+                </span>
+                <span className="tv-people-name" aria-hidden="true">{group.name}</span>
+                <span className="tv-people-tip" aria-hidden="true">
+                  <span className="tv-people-tip-name">{group.name}</span>
+                  <span className="tv-people-tip-row"><span>{waitingLabel}</span><b>{waiting}</b></span>
+                  <span className="tv-people-tip-row"><span>В работе</span><b>{group.active}</b></span>
+                  <span className="tv-people-tip-row"><span>Выполнено</span><b>{group.done}</b></span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
       );
     }
 
@@ -9191,6 +10802,7 @@ const TasksView = ({
 
   const hasActiveFilters = Boolean(searchQuery.trim() || filterStatus || filterTag || filterPriority);
   const isAnyTasksLoading = isTasksLoading || isPagedTasksLoading || isPersonTasksLoading;
+
 
   return (
     <div className={`tv-root ${workspaceTab === 'overview' ? '' : 'is-board-mode'}`}>
@@ -9273,17 +10885,26 @@ const TasksView = ({
             </>
           ) : (
             <>
+              {/* Компьютер: «Заметки» и «Обновить» — круглые кнопки-значки, как на
+                  панели iOS; подписи — в подсказке и для скринридера. */}
               <button
-                className={`tv-btn ${notesOpen ? 'tv-btn-amber' : 'tv-btn-ghost'}`}
+                className={`tv-round-btn ${notesOpen ? 'is-active' : ''}`}
                 type="button"
+                title="Заметки"
+                aria-label="Заметки"
                 onClick={() => setNotesOpen((prev) => !prev)}
               >
-                <StickyNote size={13} strokeWidth={2} />
-                Заметки
+                <StickyNote size={18} strokeWidth={1.9} />
               </button>
-              <button className="tv-btn tv-btn-ghost" onClick={refreshTasksData} disabled={isAnyTasksLoading}>
-                <RefreshCw size={13} strokeWidth={2} style={{ transition: 'transform .4s', transform: isAnyTasksLoading ? 'rotate(360deg)' : 'none' }} />
-                {isAnyTasksLoading ? 'Обновляю...' : 'Обновить'}
+              <button
+                className={`tv-round-btn ${isAnyTasksLoading ? 'is-spinning' : ''}`}
+                type="button"
+                title={isAnyTasksLoading ? 'Обновляю…' : 'Обновить'}
+                aria-label={isAnyTasksLoading ? 'Обновляю…' : 'Обновить'}
+                onClick={refreshTasksData}
+                disabled={isAnyTasksLoading}
+              >
+                <RefreshCw size={17} strokeWidth={1.9} />
               </button>
               <button className="tv-btn tv-btn-primary" onClick={() => setCreateOpen(true)}>
                 <PlusIcon /> Новая задача
@@ -9385,24 +11006,31 @@ const TasksView = ({
       {workspaceTab === 'overview' && (
       <>
       {/* Stats strip */}
+      {/* Виджеты, как смарт-списки «Напоминаний»: цветной кружок со значком,
+          число справа, подпись снизу. Цвет — у значка, число нейтральное. */}
       <div className="tv-stats-strip">
-        <div className="tv-stat-card">
+        <div className="tv-stat-card is-total">
+          <span className="tv-stat-icon" aria-hidden="true"><Layers size={17} strokeWidth={2.2} /></span>
           <span className="tv-stat-label">Всего задач</span>
           <span className="tv-stat-value">{stats.total}</span>
         </div>
         <div className="tv-stat-card is-amber">
+          <span className="tv-stat-icon" aria-hidden="true"><Timer size={17} strokeWidth={2.2} /></span>
           <span className="tv-stat-label">В работе</span>
           <span className="tv-stat-value">{stats.inProgress}</span>
         </div>
         <div className="tv-stat-card is-emerald">
+          <span className="tv-stat-icon" aria-hidden="true"><CheckCircle2 size={17} strokeWidth={2.2} /></span>
           <span className="tv-stat-label">Выполнено</span>
           <span className="tv-stat-value">{stats.completed}</span>
         </div>
-        <div className="tv-stat-card is-indigo">
+        <div className="tv-stat-card is-indigo is-returned">
+          <span className="tv-stat-icon" aria-hidden="true"><Undo2 size={17} strokeWidth={2.2} /></span>
           <span className="tv-stat-label">Возвращено</span>
           <span className="tv-stat-value">{stats.overdue}</span>
         </div>
-        <div className="tv-stat-card">
+        <div className="tv-stat-card is-backlog">
+          <span className="tv-stat-icon" aria-hidden="true"><ListTodo size={17} strokeWidth={2.2} /></span>
           <span className="tv-stat-label">В бэклоге</span>
           <span className="tv-stat-value">{stats.backlog}</span>
         </div>
@@ -9471,6 +11099,48 @@ const TasksView = ({
                 }}
               />
             </div>
+            {!isMobileShell ? (
+              <div className="tv-filter-menus">
+                <TaskFilterMenu
+                  title="Статус"
+                  allLabel="Все статусы"
+                  value={filterStatus}
+                  options={Object.entries(STATUS_META).map(([key, meta]) => ({ value: key, label: meta.label }))}
+                  onChange={(next) => { setFilterStatus(next); setAllTasksPage(1); }}
+                />
+                <TaskFilterMenu
+                  title="Тип"
+                  allLabel="Все типы"
+                  value={filterTag}
+                  options={Object.entries(TAG_META).map(([key, meta]) => ({ value: key, label: meta.label }))}
+                  onChange={(next) => { setFilterTag(next); setAllTasksPage(1); }}
+                />
+                <TaskFilterMenu
+                  title="Срочность"
+                  allLabel="Любая срочность"
+                  value={filterPriority}
+                  options={Object.entries(PRIORITY_META)
+                    .filter(([key]) => key !== 'normal')
+                    .map(([key, meta]) => ({ value: key, label: meta.label }))}
+                  onChange={(next) => { setFilterPriority(next); setAllTasksPage(1); }}
+                />
+                {hasActiveFilters && (
+                  <button
+                    type="button"
+                    className="tv-filter-reset"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setFilterStatus('');
+                      setFilterTag('');
+                      setFilterPriority('');
+                      setAllTasksPage(1);
+                    }}
+                  >
+                    Сбросить
+                  </button>
+                )}
+              </div>
+            ) : (
             <div className="tv-filter-chips">
               {Object.entries(STATUS_META).map(([key, meta]) => (
                 <button
@@ -9528,6 +11198,7 @@ const TasksView = ({
                 </button>
               )}
             </div>
+            )}
           </div>
 
           {!isPagedTasksLoading && allTasksTotal > 0 && (

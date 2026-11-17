@@ -784,7 +784,9 @@ class FrontendTest(unittest.TestCase):
         self.assertIn('fileBtnStyle={RESULT_FILE_BTN_STYLE}', VIEW)
 
     def test_shared_lightbox_not_a_private_copy(self):
-        self.assertIn("import { IosLightbox } from '../ui/ios';", VIEW)
+        # Из общего ios.jsx раздел берёт и другие примитивы (переключатель
+        # закреплённой задачи) — важен сам источник просмотрщика, не состав строки.
+        self.assertRegex(VIEW, r"import \{[^}]*\bIosLightbox\b[^}]*\} from '\.\./ui/ios';")
         self.assertNotIn('function ImageLightbox', VIEW)
 
     def test_one_request_per_card_and_no_proxy(self):

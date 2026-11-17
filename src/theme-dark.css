@@ -351,6 +351,23 @@ html[data-otp-theme="dark"] .tv-root {
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
     --shadow-md: 0 4px 16px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
     --shadow-lg: 0 20px 60px rgba(0, 0, 0, .7), 0 8px 24px rgba(0, 0, 0, .5);
+    /* Системные заливки iOS в тёмном режиме светлее, а не темнее фона. */
+    --ios-fill: rgba(118, 118, 128, .24);
+    --ios-fill-strong: rgba(118, 118, 128, .34);
+    --ios-sep: rgba(255, 255, 255, .12);
+    /* Статус словом в строке — светлые тона, как у меток раздела в темноте. */
+    --state-indigo: #a5b4fc;
+    --state-amber: #fcd34d;
+    --state-violet: #c4b5fd;
+    --state-emerald: #6ee7b7;
+    --state-rose: #fda4af;
+}
+
+/* «Задачи», плитки «Обзора»: цифры нейтральные и в темноте. Старое правило
+   красит цифру «В работе» литералом, и его тёмная пара с !important выделяла бы
+   одну плитку из пяти оранжевым. */
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-root .tv-stat-card .tv-stat-value {
+    color: var(--ink) !important;
 }
 
 /* Кольцо между аватарами в стопке на карточке доски — цвета самой карточки.
@@ -748,6 +765,7 @@ html[data-otp-theme="dark"] .active\:bg-slate-100:active { background-color: #22
 html[data-otp-theme="dark"] .after\:bg-white::after { background-color: #1e2127 !important; }
 html[data-otp-theme="dark"] .after\:border-gray-300::after { border-color: #3a414b !important; }
 html[data-otp-theme="dark"] .before\:bg-slate-200::before { background-color: #2a2f37 !important; }
+html[data-otp-theme="dark"] .before\:bg-slate-200\/70::before { background-color: rgba(42, 47, 55, 0.7) !important; }
 html[data-otp-theme="dark"] .before\:bg-slate-400::before { background-color: #3d434d !important; }
 html[data-otp-theme="dark"] .bg-amber-100\/70 { background-color: rgba(64, 53, 35, 0.7) !important; }
 html[data-otp-theme="dark"] .bg-amber-100\/90 { background-color: rgba(64, 53, 35, 0.9) !important; }
@@ -1185,11 +1203,6 @@ html[data-otp-theme="dark"] .tv-btn-emerald { color: #8beed2 !important; }
 html[data-otp-theme="dark"] .tv-btn-emerald:hover:not(:disabled) { background: #245343 !important; }
 html[data-otp-theme="dark"] .tv-btn-rose { background: #3d242b !important; }
 html[data-otp-theme="dark"] .tv-btn-rose:hover:not(:disabled) { background: #3d242d !important; }
-html[data-otp-theme="dark"] .tv-task-row.is-urgent { border-color: #7a6c39 !important; }
-html[data-otp-theme="dark"] .tv-task-row.is-urgent { background: #3d3a29 !important; }
-html[data-otp-theme="dark"] .tv-task-row.is-critical { border-color: #7a3442 !important; }
-html[data-otp-theme="dark"] .tv-task-row.is-critical { background: #3d242c !important; }
-html[data-otp-theme="dark"] .tv-task-row.is-critical:hover { border-color: #7a3444 !important; }
 html[data-otp-theme="dark"] .tv-avatar-xs { background: #2a2f37 !important; }
 html[data-otp-theme="dark"] .tv-avatar-rest { background: #2a2f37 !important; }
 html[data-otp-theme="dark"] .tv-row-pin-btn:hover { background: #222b45 !important; }
@@ -1270,20 +1283,16 @@ html[data-otp-theme="dark"] .tv-person-select > button[aria-expanded="true"] { b
 html[data-otp-theme="dark"] .tv-person-select > button:focus { border-color: #315682 !important; }
 html[data-otp-theme="dark"] .tv-person-select > button:focus-visible { border-color: #315682 !important; }
 html[data-otp-theme="dark"] .tv-kbd { background: #242830 !important; }
-html[data-otp-theme="dark"] .tv-pin-header-btn-danger { color: #ee8ba1 !important; }
-html[data-otp-theme="dark"] .tv-pin-header-btn-danger:hover:not(:disabled) { background: #3d242b !important; }
-html[data-otp-theme="dark"] .tv-pin-header-btn-danger:hover:not(:disabled) { color: #ee8ba3 !important; }
-html[data-otp-theme="dark"] .tv-pin-file-section-result .tv-file-btn { background: #222b45 !important; }
-html[data-otp-theme="dark"] .tv-pin-file-section-result .tv-file-btn { border-color: #314382 !important; }
-html[data-otp-theme="dark"] .tv-pin-file-section-result .tv-file-btn { color: #9d99e1 !important; }
 html[data-otp-theme="dark"] .tv-file-dropzone-count { background: #222b45 !important; }
 html[data-otp-theme="dark"] .tv-file-dropzone-count { color: #9d99e1 !important; }
 html[data-otp-theme="dark"] .tv-file-dropzone-count { border: 1px solid #314382 !important; }
 html[data-otp-theme="dark"] .tv-file-remove-btn:hover:not(:disabled) { background: #3d242b !important; }
 html[data-otp-theme="dark"] .tv-file-remove-btn:hover:not(:disabled) { border-color: #7a3442 !important; }
-html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { background: #222b45 !important; }
-html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { border-color: #314382 !important; }
-html[data-otp-theme="dark"] .tv-pin-menu-tab.is-active .tv-pin-menu-tab-count { color: #9d99e1 !important; }
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn.is-active { color: #eeb68b !important; }
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-root .tv-topbar-actions .tv-round-btn.is-active { background: #3d3a29 !important; }
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-root .tv-task-row:not(.is-compact):hover { background: #242830 !important; }
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn-danger { background: #3d242b !important; }
+html[data-otp-theme="dark"] body:not(.mobile-shell) .tv-drawer-header-actions .tv-icon-btn.is-pinned { background: #222b45 !important; }
 html[data-otp-theme="dark"] .tv-root .tv-brief-issue { color: #ee8ba1 !important; }
 html[data-otp-theme="dark"] .tv-root .tv-brief-field.is-invalid .tv-input { border-color: #7a3442 !important; }
 html[data-otp-theme="dark"] .tv-root .tv-brief-field.is-invalid .tv-textarea { border-color: #7a3442 !important; }

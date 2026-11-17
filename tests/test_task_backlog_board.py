@@ -530,10 +530,18 @@ class TaskReportFrontendTests(unittest.TestCase):
         self.assertIn('<p className="tv-block-label">Файлы результата</p>', self.src)
 
     def test_pinned_widget_also_asks_for_report(self):
-        # Иначе сдача из виджета молча обходила бы журнал отчётов.
-        start = self.src.index("if (btn.action === 'completed') {\n                        setCompleteDraft")
-        block = self.src[start:start + 3200]
-        self.assertIn("setCompleteDraft({ body: '', spent: '' })", block)
+        # Иначе сдача из виджета молча обходила бы журнал отчётов. Ищем внутри
+        # самой закреплённой задачи: форма отчёта стоит в её нижней панели на
+        # месте кнопок, то есть в разметке — выше кнопки «Отметить выполненной».
+        start = self.src.index("export const PinnedTaskWidget")
+        block = self.src[start:self.src.index("/* ─── Уведомления: задачи, которые ждут действия", start)]
+        # Нажатие «Отметить выполненной» только открывает форму и дальше не идёт:
+        # без return сдача ушла бы на сервер сразу, а он отчёт не требует.
+        self.assertRegex(
+            block,
+            r"if \(btn\.action === 'completed'\) \{\s*setCompleteDraft\(\{ body: '', spent: '' \}\);\s*return;",
+        )
+        self.assertIn("disabled={!!actionLoadingKey || !completeDraft.body.trim()}", block)
         self.assertIn("Отчёт о проделанной работе", block)
         self.assertIn("report: completeDraft.body.trim()", block)
         self.assertIn("spentMinutes: parseSpentInput(completeDraft.spent)", block)

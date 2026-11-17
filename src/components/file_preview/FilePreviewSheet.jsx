@@ -216,8 +216,9 @@ function FileGlyph({ ext, kind }) {
     );
 }
 
-/** Цветная метка типа — как значки файлов в Finder и на Диске: PDF красный, Word синий. */
-function TypeBadge({ ext, kind }) {
+/** Цветная метка типа — как значки файлов в Finder и на Диске: PDF красный, Word синий.
+ *  Та же метка — у строк файлов в закреплённой задаче («Задачи»). */
+export function TypeBadge({ ext, kind }) {
     const tone = FILE_GLYPH_TONES[kind] || FILE_GLYPH_TONES[LEGACY_TONE_KIND[ext]] || '#64748b';
     return (
         <span className="tfv-badge" style={{ background: tone }} aria-hidden="true">

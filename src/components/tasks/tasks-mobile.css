@@ -237,6 +237,12 @@ body.mobile-shell .tv-root .tv-stat-label {
     text-transform: none;
 }
 
+/* Значки виджетов (компьютер, 16.11.2026) в полосе телефона лишние: в ней число
+   и подпись, на значок места нет. */
+body.mobile-shell .tv-root .tv-stat-icon {
+    display: none;
+}
+
 /* ── Заголовки групп ── */
 
 body.mobile-shell .tv-root .tv-section-header {

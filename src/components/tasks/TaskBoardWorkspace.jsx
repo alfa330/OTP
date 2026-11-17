@@ -232,7 +232,7 @@ const actualEndOf = (task) => {
 /* ─────────────── Атомы ─────────────── */
 
 const SegmentedControl = ({ value, options, onChange, className = '' }) => (
-  <div className={`inline-flex rounded-[10px] bg-slate-100 p-[3px] ${className}`}>
+  <div className={`inline-flex rounded-[9px] bg-slate-200/60 p-[2px] ${className}`}>
     {options.map((option) => {
       const active = option.value === value;
       return (
@@ -240,9 +240,9 @@ const SegmentedControl = ({ value, options, onChange, className = '' }) => (
           key={option.value}
           type="button"
           onClick={() => onChange(option.value)}
-          className={`relative rounded-[8px] px-3 py-[5px] text-[12.5px] font-medium transition-all ${
+          className={`relative rounded-[7px] px-3.5 py-[6px] text-[13px] font-semibold transition-all ${
             active
-              ? 'bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+              ? 'bg-white text-slate-900 shadow-[0_3px_8px_rgba(0,0,0,0.12),0_3px_1px_rgba(0,0,0,0.04)]'
               : 'text-slate-500 hover:text-slate-700'
           }`}
         >
@@ -679,7 +679,7 @@ const BacklogRow = ({
       onDrop={(event) => { event.stopPropagation(); onDrop(event, index); }}
       onDragEnd={onDragEnd}
       onClick={() => onOpen(task)}
-      className={`group relative flex cursor-pointer items-center gap-3 border-t border-slate-100 px-3 py-2.5 transition first:border-t-0 hover:bg-slate-50/80 ${
+      className={`group relative flex min-h-[60px] cursor-pointer items-center gap-3 px-4 py-2.5 transition before:pointer-events-none before:absolute before:left-[56px] before:right-0 before:top-0 before:h-px before:bg-slate-200/70 before:content-[''] first:before:hidden hover:bg-slate-50/80 ${
         isDragging ? 'opacity-40' : ''
       }`}
     >
@@ -692,8 +692,8 @@ const BacklogRow = ({
       <PriorityDot priority={task?.priority} />
 
       <span className="min-w-0 flex-1">
-        <span className="tb-backlog-subject block truncate text-[13.5px] font-medium text-slate-800">{task?.subject}</span>
-        <span className="mt-0.5 flex items-center gap-1.5 text-[11.5px] text-slate-400">
+        <span className="tb-backlog-subject block truncate text-[14.5px] font-medium text-slate-900">{task?.subject}</span>
+        <span className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-slate-500">
           <TaskKeyLabel task={task} className="shrink-0 font-medium tabular-nums after:content-['_·']" />
           <span className="truncate">{TAG_LABEL[task?.tag] || 'Задача'}</span>
           {taskAssignees(task).length > 0 && <span className="truncate">· {taskAssigneesLabel(task)}</span>}
@@ -734,7 +734,7 @@ const BacklogRow = ({
           <button
             type="button"
             onClick={(event) => { event.stopPropagation(); onPromote(task); }}
-            className="tb-promote-btn rounded-lg bg-slate-100 px-2.5 py-1 text-[12px] font-medium text-slate-600 transition hover:bg-slate-900 hover:text-white active:scale-[0.98]"
+            className="tb-promote-btn rounded-full bg-blue-50 px-3 py-1.5 text-[12.5px] font-semibold text-blue-600 transition hover:bg-blue-100 active:scale-[0.98]"
           >
             В работу
           </button>
@@ -860,7 +860,7 @@ const BacklogView = ({
         <button
           type="button"
           onClick={onCreate}
-          className="tb-backlog-add rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98]"
+          className="tb-backlog-add rounded-full bg-blue-50 px-4 py-2 text-[13px] font-semibold text-blue-600 transition hover:bg-blue-100 active:scale-[0.98]"
         >
           + В бэклог
         </button>
@@ -877,7 +877,7 @@ const BacklogView = ({
           {groups.map((group) => (
             <section key={group.score ?? 'none'}>
               {group.title && (
-                <h3 className="flex items-center justify-between px-3 pb-1.5 text-[12px] font-semibold text-slate-500">
+                <h3 className="flex items-center justify-between px-4 pb-2 text-[12.5px] font-semibold uppercase tracking-[0.03em] text-slate-500">
                   <span className="inline-flex items-center gap-2">
                     <PriorityScoreDot score={group.score} />
                     {group.title}
@@ -886,7 +886,7 @@ const BacklogView = ({
                 </h3>
               )}
               <div
-                className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70"
+                className="overflow-hidden rounded-[14px] bg-white shadow-[0_0_0_1px_rgba(15,23,42,0.04)]"
                 onDragOver={(event) => { if (draggedId !== null) event.preventDefault(); }}
                 onDrop={handleDrop}
               >
@@ -1172,7 +1172,7 @@ const BoardCard = ({
       onDragStart={isDraggable ? (event) => onDragStart(event, task) : undefined}
       onDragEnd={onDragEnd}
       onClick={() => onOpen(task)}
-      className={`group relative cursor-pointer rounded-xl bg-white p-2.5 ring-1 ring-slate-200/70 transition hover:ring-slate-300 hover:shadow-[0_2px_10px_rgba(15,23,42,0.06)] ${
+      className={`group relative cursor-pointer rounded-[14px] bg-white p-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.06),0_0_0_1px_rgba(15,23,42,0.04)] transition hover:shadow-[0_6px_16px_rgba(15,23,42,0.1),0_0_0_1px_rgba(15,23,42,0.06)] ${
         isDragging ? 'opacity-40' : ''
       } ${isFocused ? 'tb-card-focus' : ''}`}
     >
@@ -1180,7 +1180,7 @@ const BoardCard = ({
         {/* flex: без строки текста вокруг точки — иначе она садится на базовую линию
             строки в 24 px и съезжает на полстроки ниже первой строки темы. */}
         <span className="mt-[6px] flex shrink-0"><PriorityDot priority={task?.priority} /></span>
-        <p className="min-w-0 flex-1 text-[13px] font-medium leading-snug text-slate-800 line-clamp-2">
+        <p className="min-w-0 flex-1 text-[14px] font-medium leading-snug text-slate-900 line-clamp-3">
           {task?.subject}
         </p>
         <button
@@ -1373,19 +1373,19 @@ const BoardView = ({
            колонки во всю ширину экрана ничего не отделяет. */
         className={single
           ? 'flex w-full flex-col'
-          : `flex w-[268px] shrink-0 flex-col rounded-2xl p-2 transition-colors ${
-            isHover ? 'bg-blue-50/70 ring-1 ring-blue-200' : 'bg-slate-100/70'
+          : `flex w-[268px] shrink-0 flex-col rounded-[18px] p-2 transition-colors ${
+            isHover ? 'bg-blue-50/80 ring-1 ring-blue-200' : 'bg-slate-200/50'
           } ${dragged && !isAllowed ? 'opacity-50' : ''}`}
       >
         {/* Имя и счёт колонки на телефоне уже стоят в переключателе над ней,
             а лимит WIP кнопками в 20 px пальцем не настроить. */}
         {!single && (
-          <header className="flex items-center justify-between gap-2 px-1.5 pb-2 pt-1">
-            <span className="flex items-center gap-1.5">
-              <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${COLUMN_DOT[column.id] || 'bg-slate-300'}`} />
-              <span className="text-[12.5px] font-semibold text-slate-700">{column.title}</span>
+          <header className="flex items-center justify-between gap-2 px-1.5 pb-2.5 pt-1">
+            <span className="flex items-center gap-2">
+              <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${COLUMN_DOT[column.id] || 'bg-slate-300'}`} />
+              <span className="text-[14px] font-semibold tracking-[-0.01em] text-slate-900">{column.title}</span>
               <span
-                className={`text-[11.5px] tabular-nums ${wipExceeded && isProgress ? 'font-semibold text-amber-600' : 'text-slate-400'}`}
+                className={`rounded-full bg-white px-1.5 py-[1px] text-[11.5px] font-semibold tabular-nums shadow-[0_0_0_1px_rgba(15,23,42,0.06)] ${wipExceeded && isProgress ? 'text-amber-600' : 'text-slate-500'}`}
                 title={meta.hidden > 0 ? `Показано ${items.length} из ${meta.total}` : undefined}
               >
                 {meta.total || items.length}
@@ -1421,7 +1421,7 @@ const BoardView = ({
           </p>
         )}
 
-        <div className="flex min-h-[72px] flex-col gap-1.5">
+        <div className="flex min-h-[72px] flex-col gap-2">
           {items.length === 0 ? (
             <p className="px-1.5 py-3 text-[11.5px] text-slate-400">{column.caption}</p>
           ) : (
@@ -1448,7 +1448,7 @@ const BoardView = ({
             <button
               type="button"
               onClick={() => onBrowseColumn?.(column)}
-              className="mt-0.5 rounded-lg border border-dashed border-slate-300 px-2 py-2 text-[11.5px] font-medium text-slate-500 transition hover:border-slate-400 hover:bg-white hover:text-slate-700"
+              className="mt-0.5 rounded-xl px-2 py-2 text-[12.5px] font-semibold text-blue-600 transition hover:bg-white/80"
             >
               Посмотреть ещё · не показано {meta.hidden}
             </button>
@@ -1490,9 +1490,12 @@ const BoardView = ({
     );
   }
 
+  /* Серая подложка колонки — в длину её задач (16.11, просьба владельца): пустая
+     «На проверке» не тянется во всю высоту доски. Пока карточку несут, колонки
+     вытягиваются в полный рост — бросить можно и ниже последней карточки. */
   return (
     <div className="-mx-1 overflow-x-auto px-1 pb-1">
-      <div className="flex min-w-max gap-2.5">
+      <div className={`flex min-w-max gap-3 ${dragged ? 'items-stretch' : 'items-start'}`}>
         {columns.map((column) => renderColumn(column))}
       </div>
     </div>
@@ -1662,7 +1665,7 @@ const TimelineView = ({ tasks, onOpen }) => {
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
             title={expanded ? 'Свернуть' : 'Развернуть на весь экран'}
-            className="tb-timeline-expand grid h-[32px] w-[32px] place-items-center rounded-[10px] bg-slate-100 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
+            className="tb-timeline-expand grid h-[34px] w-[34px] place-items-center rounded-full bg-slate-200/60 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 active:scale-95"
           >
             {expanded
               ? <Minimize2 size={14} strokeWidth={2} />
@@ -1677,11 +1680,11 @@ const TimelineView = ({ tasks, onOpen }) => {
           hint="Таймлайн показывает задачи, у которых есть плановый срок или зафиксировано начало работ."
         />
       ) : (
-        <div className="tb-timeline-card overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
+        <div className="tb-timeline-card overflow-hidden rounded-[18px] bg-white shadow-[0_1px_2px_rgba(15,23,42,0.05),0_0_0_1px_rgba(15,23,42,0.04)]">
           {/* Обёртка нужна телефону: шкала там шире экрана и едет вбок вместе с
               шапкой, а колонка задач остаётся на месте. На компьютере — просто блок. */}
           <div className="tb-timeline-inner">
-          <div className="flex border-b border-slate-100 bg-slate-50/60">
+          <div className="flex border-b border-slate-200/70 bg-white">
             <div className="tb-timeline-name w-[190px] shrink-0 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400 sm:w-[240px]">
               Задача
             </div>
@@ -1716,8 +1719,8 @@ const TimelineView = ({ tasks, onOpen }) => {
                   <div className="tb-timeline-name flex w-[190px] shrink-0 items-center gap-2 px-3 py-2 sm:w-[240px]">
                     <PriorityDot priority={task?.priority} />
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12.5px] font-medium text-slate-800">{task.subject}</span>
-                      <span className="block truncate text-[11px] text-slate-400">{taskAssigneesLabel(task)}</span>
+                      <span className="block truncate text-[13.5px] font-medium text-slate-900">{task.subject}</span>
+                      <span className="block truncate text-[12px] text-slate-500">{taskAssigneesLabel(task)}</span>
                     </span>
                   </div>
 
@@ -2329,7 +2332,7 @@ const TaskBoardWorkspace = ({
               disabled={isExporting}
               title="Excel: лист на каждую колонку доски"
               aria-label="Выгрузка в Excel"
-              className="tb-export-btn flex shrink-0 items-center gap-1.5 rounded-xl bg-slate-100 px-3 py-1.5 text-[12.5px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.98] disabled:opacity-50"
+              className="tb-export-btn flex shrink-0 items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-[13px] font-semibold text-slate-700 shadow-[0_0_0_1px_rgba(15,23,42,0.08)] transition hover:bg-slate-50 active:scale-[0.98] disabled:opacity-50"
             >
               <Download size={13} strokeWidth={2} />
               <span className="tb-export-label">{isExporting ? 'Готовлю…' : 'Выгрузка'}</span>
