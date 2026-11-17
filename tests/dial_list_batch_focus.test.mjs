@@ -9,8 +9,9 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
-    PARKED_STAGE, batchProgress, focusHint, focusStateText, focusWaitingText, focusedIds, goalLabel, plural,
-    toggledFocus, uploadFocusNote, withFocusDraft,
+    PARKED_STAGE, batchProgress, batchRowState, focusErrorText, focusHint, focusStateText, focusSubtitleNote,
+    focusWaitingText, focusedIds, goalLabel, plural, summaryMatchesScope, toggledFocus, uploadFocusNote,
+    withFocusDraft,
 } from '../src/components/dial_list/batchFocus.js';
 import { TEZ_STAGES, TEZ_STAGE_ROW_LABEL } from '../src/components/dial_list/tezAutodial.js';
 
@@ -23,11 +24,60 @@ test('прогресс файла: обработано = всего − в об
     // Сломанные данные не дают полосе вылезти за край: «в обзвоне» не больше всего, цель не больше обработанных.
     const bad = batchProgress({ progress: { total: 5, open: 9, goal: 3 } });
     assert.deepEqual([bad.total, bad.open, bad.done, bad.goal, bad.pct], [5, 5, 0, 0, 0]);
-    for (const empty of [undefined, null, {}, { progress: null }, { progress: { total: 'x', open: -2 } }]) {
+    for (const empty of [undefined, null, {}, { progress: null }]) {
         assert.deepEqual(batchProgress(empty), {
-            total: 0, open: 0, done: 0, goal: 0, ready: 0, pct: 0, goalShare: 0, restShare: 0,
+            known: false, total: 0, open: 0, done: 0, goal: 0, ready: 0, pct: 0, goalShare: 0, restShare: 0,
         });
     }
+    // Прогресс пришёл, но пустой или битый — известен: «водителей нет» правда.
+    assert.deepEqual(batchProgress({ progress: { total: 'x', open: -2 } }), {
+        known: true, total: 0, open: 0, done: 0, goal: 0, ready: 0, pct: 0, goalShare: 0, restShare: 0,
+    });
+});
+
+test('строка файла: кружок только у обзваниваемого месяца, приглушён неотмеченный, нажать — с правом правки', () => {
+    const on = { focused: true };
+    const off = { focused: false };
+    assert.deepEqual(batchRowState(on, { focusShown: true, focusOn: true, canEdit: true }),
+        { mark: true, paused: false, toggle: true });
+    assert.deepEqual(batchRowState(off, { focusShown: true, focusOn: true, canEdit: true }),
+        { mark: false, paused: true, toggle: true });
+    // Ничего не отмечено — никто не приглушён; без права правки — состояние видно, нажать нельзя.
+    assert.deepEqual(batchRowState(off, { focusShown: true, focusOn: false, canEdit: false }),
+        { mark: false, paused: false, toggle: false });
+    // Месяц не обзванивается (или сервер отметок не знает) — ни кружка, ни нажатия.
+    assert.deepEqual(batchRowState(on, { focusShown: false, focusOn: false, canEdit: true }),
+        { mark: null, paused: false, toggle: false });
+    assert.deepEqual(batchRowState(off), { mark: null, paused: false, toggle: false });
+});
+
+test('ответ на отметку применяется только к своему отделу и месяцу', () => {
+    const data = { department_id: 560, period: '2026-11-01' };
+    assert.equal(summaryMatchesScope(data, { departmentId: 560, period: '' }), true);
+    assert.equal(summaryMatchesScope(data, { departmentId: '560', period: '2026-11' }), true);
+    assert.equal(summaryMatchesScope(data, { departmentId: 560, period: '2026-10-01' }), false);   // сменили месяц
+    assert.equal(summaryMatchesScope(data, { departmentId: 1954, period: '' }), false);           // сменили отдел
+    assert.equal(summaryMatchesScope(null, { departmentId: 560 }), false);
+    assert.equal(summaryMatchesScope(data, null), false);
+});
+
+test('ошибка отметки словами: текст сервера как есть, сеть и пустой ответ — по-русски', () => {
+    assert.equal(focusErrorText(new Error('Этого файла нет в базе месяца — обновите страницу')),
+        'Этого файла нет в базе месяца — обновите страницу');
+    const fallback = 'Не удалось отметить файлы — проверьте связь и повторите';
+    assert.equal(focusErrorText(new TypeError('Failed to fetch')), fallback);
+    assert.equal(focusErrorText(new Error('HTTP 502')), fallback);
+    assert.equal(focusErrorText(new Error('')), fallback);
+    assert.equal(focusErrorText(null), fallback);
+});
+
+test('метка в шапке отдела — только пока отбор включён и месяц обзванивается', () => {
+    const batches = [{ id: 'a', focused: true }, { id: 'b' }, { id: 'c', focused: true }];
+    assert.equal(focusSubtitleNote({ batches }), 'в работе 2 из 3 файлов');
+    assert.equal(focusSubtitleNote({ batches: [{ id: 'a', focused: true }] }), 'в работе 1 из 1 файла');
+    assert.equal(focusSubtitleNote({ batches: [{ id: 'a' }] }), '');
+    assert.equal(focusSubtitleNote({ batches, is_active_period: false }), '');
+    assert.equal(focusSubtitleNote(null), '');
 });
 
 test('процент не врёт по краям: 100 — только все, 0 — только никто', () => {
@@ -71,6 +121,7 @@ test('операторы ждут: в отмеченных звонить нек
         + 'В остальных можно выдать 31 водителя: отметьте их или снимите отметки.');
     assert.match(focusWaitingText(summary({ focus: { active: true, paused_ready: 5 } })), /выдать 5 водителей/);
     assert.equal(focusWaitingText(summary({ pool_available: 3 })), '');               // звонить есть кому
+    assert.equal(focusWaitingText(summary({ pool_available: 1 })), '');               // и один — уже есть кому
     assert.equal(focusWaitingText(summary({ focus: { active: true, paused_ready: 0 } })), '');   // база пуста вообще
     assert.equal(focusWaitingText(summary({ focus: { active: false, paused_ready: 9 } })), '');
     assert.equal(focusWaitingText(summary({ is_active_period: false })), '');        // месяц не обзванивается
@@ -81,6 +132,9 @@ test('новый файл при отмеченных других — сказ�
     assert.match(uploadFocusNote({ focus: { active: true } }), /отметьте новый, чтобы операторы его получили/);
     assert.equal(uploadFocusNote({ focus: { active: false } }), '');
     assert.equal(uploadFocusNote(null), '');
+    // Загрузка в другой месяц и файл, где не загрузилось ни строки, — без приписки.
+    assert.equal(uploadFocusNote({ focus: { active: true } }, { isActive: false }), '');
+    assert.equal(uploadFocusNote({ focus: { active: true } }, { failed: true }), '');
 });
 
 test('этап «База на паузе» — в обоих журналах, точка полая, чип только с водителями', () => {
@@ -104,9 +158,22 @@ test('проводка: отметки — PUT ручки раздела, отв
     const panel = read('src/components/sip/DialListSettings.jsx');
     assert.match(panel, /\/batches\/focus`, \{\s*method: 'PUT',/);
     assert.match(panel, /body: JSON\.stringify\(\{ batch_ids: ids,/);
-    assert.match(panel, /if \(typeof onSummary === 'function'\) onSummary\(data\);/);
-    // Опрос сводки, начатый до отметки, не возвращает прежние отметки: устаревший ответ не применяется.
-    assert.match(panel, /const applySummary = useCallback\(\(data\) => \{\s*loadSeq\.current \+= 1;/);
+    assert.match(panel, /if \(typeof onSummary !== 'function'\) onChanged\?\.\(\);\s*else onSummary\(data\);/);
+    assert.match(panel, /toast\(focusErrorText\(e\), 'error'\);/);
+    // Опрос сводки, начатый до отметки, не возвращает прежние отметки: устаревший ответ не применяется; ответ
+    // отметки — только к своему отделу и месяцу.
+    assert.match(panel, /const applySummary = useCallback\(\(data\) => \{\s*if \(!summaryMatchesScope\(data, scopeRef\.current\)\) return false;\s*loadSeq\.current \+= 1;/);
+    assert.match(panel, /scopeRef\.current = \{ departmentId, period \};/);
+    // Смена отдела и месяца сбрасывают несохранённые отметки; строки — по общей функции состояния.
+    assert.match(panel, /useEffect\(\(\) => \{ setFocusDraft\(null\); \}, \[period\]\);/);
+    assert.match(panel, /const row = batchRowState\(b, \{ focusShown, focusOn, canEdit \}\);/);
+    assert.match(panel, /onToggle=\{row\.toggle \? \(id\) => saveFocus\(toggledFocus\(batches, id\)\) : null\}/);
+    assert.match(panel, /uploadFocusNote\(summary, \{ isActive, failed: Boolean\(failedAll\) \}\)/);
+    // Строки «звонить некому» в файле нет: о ней говорит плашка над списком.
+    assert.doesNotMatch(panel, /остальные ждут повтора/);
+    const view = read('src/components/dial_list/DialListView.jsx');
+    assert.match(view, /\? \(focusWaitingText\(dept\.summary\)/);
+    assert.match(view, /\$\{focusNote \? `, \$\{focusNote\}` : ''\}/);
     assert.match(panel, /if \(my !== loadSeq\.current\) return;\s*setSettings/);
     // Отметки — только у обзваниваемого месяца и только у сервера, который их знает.
     assert.match(panel, /const focusShown = isActive && Boolean\(summary\?\.focus\);/);

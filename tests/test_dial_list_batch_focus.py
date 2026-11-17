@@ -6,6 +6,7 @@
 стоит там, где обещанный звонок идёт мимо пула; журнал не называет «В очереди» тех, кого пул не выдаст; ручка
 проверяет тело запроса; схема без блокировки users на старте.
 """
+import inspect
 import os
 import sys
 import unittest
@@ -25,11 +26,14 @@ IN_WORK = batch_focus.in_work_sql("l")
 class BatchFocusSqlTests(unittest.TestCase):
     def test_condition_is_safe_to_paste_anywhere(self):
         # Вставляется в тексты с %s (psycopg2) и в тексты, которые идут через str.format.
-        for text in (IN_WORK, batch_focus.member_batches_sql("l")):
-            self.assertNotIn('%', text)
-            self.assertNotIn('{', text)
-            self.assertNotIn('}', text)
+        self.assertNotIn('%', IN_WORK)
+        self.assertNotIn('{', IN_WORK)
+        self.assertNotIn('}', IN_WORK)
         self.assertEqual(batch_focus.in_work_sql("x").count("x.department_id"), 1)
+        # Пары (файл, водитель) — только именованные параметры отдела и месяца, без фигурных скобок.
+        members = batch_focus.file_members_sql()
+        self.assertNotIn('{', members)
+        self.assertEqual(members.count('%('), members.count('%(department_id)s') + members.count('%(period)s'))
 
     def test_condition_is_never_null_and_uses_hashed_subqueries(self):
         # Водитель без файла при отметках — FALSE, а не NULL: журнал берёт NOT от условия.
@@ -50,19 +54,53 @@ class BatchFocusSqlTests(unittest.TestCase):
         self.assertIn(S._POOL_READY_SQL, S._POOL_SQL)
 
     def test_progress_ignores_marks_but_uses_pool_rules_and_month_base(self):
-        # «Можно выдать сейчас» у файла — «если отметить этот файл»: без отметок, по правилам пула.
-        self.assertNotIn(IN_WORK, S._BATCH_PROGRESS_SQL)
-        self.assertIn(S._POOL_READY_SQL, S._BATCH_PROGRESS_SQL)
-        self.assertIn(dial_service.month_base.in_month_base_sql("l"), S._BATCH_PROGRESS_SQL)
-        self.assertIn(batch_focus.member_batches_sql("l"), S._BATCH_PROGRESS_SQL)
-        # Порядок параметров: часы повтора и попытки (в FILTER) — раньше отдела и месяца (в WHERE).
-        self.assertLess(S._BATCH_PROGRESS_SQL.index('FILTER (WHERE' + S._POOL_READY_SQL),
-                        S._BATCH_PROGRESS_SQL.index('WHERE l.department_id = %s'))
-        self.assertEqual(S._BATCH_PROGRESS_SQL.count('%s'), 4)
+        # «Можно выдать сейчас» у файла — «если отметить этот файл»: без отметок, по правилам пула (тот же текст,
+        # только с именами параметров вместо позиций — без единой позиционной метки).
+        sql = S._BATCH_PROGRESS_SQL
+        self.assertNotIn(IN_WORK, sql)
+        named = S._POOL_READY_NAMED_SQL
+        self.assertEqual(named.count('%s'), 0)
+        self.assertEqual(named, S._POOL_READY_SQL.replace('make_interval(hours => %s)',
+                                                          'make_interval(hours => %(retry_hours)s)')
+                         .replace('l.attempts_total < %s', 'l.attempts_total < %(max_attempts)s'))
+        self.assertIn('FILTER (WHERE' + named + ')', sql)
+        self.assertIn(dial_service.month_base.in_month_base_sql("l"), sql)
+        self.assertIn('WITH members AS (' + batch_focus.file_members_sql() + ')', sql)
+        # «В обзвоне» — как журнал: попытки кончились — уже не в обзвоне.
+        self.assertIn("AND l.sign_status <> 'processing' AND l.attempts_total < %(max_attempts)s)", sql)
+        self.assertEqual(sql.count('%s'), 0)
+        self.assertIn('"retry_hours": settings["retry_after_hours"], "max_attempts": settings["max_attempts"]}',
+                      inspect.getsource(S.leads_summary))
 
     def test_own_callbacks_and_recall_go_past_the_marks(self):
-        # Обещанный водителю звонок (перезвон, «дожать» у Тез) не пропадает из-за снятого файла.
+        # Обещанный водителю звонок (перезвон, «дожать» у Тез) не пропадает из-за снятого файла: ни у своего
+        # оператора, ни общим пулом после его окна (ревью 17.11.2026).
         self.assertNotIn('dial_list_lead_batches', S._AUTO_OWN_DUE_SQL)
+        self.assertIn("OR (l.due_kind IN ('callback', 'online') AND l.owner_call_at IS NOT NULL))", IN_WORK)
+
+    def test_file_membership_is_every_file_the_driver_was_in(self):
+        # Третья загрузка не уводит водителя из отмеченного «среднего» файла: принадлежность — first ∪ last ∪
+        # записи загрузок, одинаково для пула, прогресса и фильтра «Файл» журнала.
+        self.assertIn('l.id IN (SELECT bf_m.lead_id FROM dial_list_batch_leads bf_m', IN_WORK)
+        members = batch_focus.file_members_sql()
+        for part in ('SELECT ml.first_batch_id AS batch_id, ml.id AS lead_id', 'UNION SELECT ml.last_batch_id, ml.id',
+                     'UNION SELECT bl.batch_id, bl.lead_id FROM dial_list_batch_leads bl'):
+            self.assertIn(part, members)
+        self.assertIn('batch_focus.in_batch_sql("l2", "%(batch_id)s::uuid")', inspect.getsource(S.leads_journal))
+        self.assertIn('OR EXISTS (SELECT 1 FROM dial_list_batch_leads bl_in WHERE bl_in.batch_id = %(b)s',
+                      batch_focus.in_batch_sql('l2', '%(b)s'))
+        importer = inspect.getsource(S.import_leads)
+        self.assertIn('INSERT INTO dial_list_batch_leads (batch_id, lead_id) VALUES %s ON CONFLICT DO NOTHING',
+                      importer)
+        self.assertIn('in_file += [r[0] for r in attached]', importer)
+        self.assertIn('RETURNING (xmax = 0) AS inserted, id', S._IMPORT_SQL)
+
+    def test_marks_lock_does_not_wait_for_key_checks_and_old_months_are_cleared(self):
+        src = inspect.getsource(S.set_batch_focus)
+        self.assertIn('FOR NO KEY UPDATE', src)
+        self.assertIn('cur.execute(self._CLEAR_FOCUS_SQL + " AND period <> %s", (department_id, period))', src)
+        settings = inspect.getsource(S.save_department_settings)
+        self.assertIn('cur.execute(self._CLEAR_FOCUS_SQL, (int(department_id),))', settings)
 
     def test_journal_parks_only_those_the_pool_would_have_given(self):
         sql = S._JOURNAL_BASE_SQL
@@ -123,6 +161,9 @@ class SetBatchFocusValidationTests(unittest.TestCase):
     def test_too_many_files(self):
         many = ['00000000-0000-4000-8000-%012d' % i for i in range(dial_service.BATCH_FOCUS_MAX + 1)]
         self.assertEqual(self._refused(1954, many, requester_id=1)[1], 400)
+        # Ровно предел — не отказ по числу: запрос доходит до базы (здесь — до заглушки без базы).
+        with self.assertRaises(AssertionError):
+            self._svc().set_batch_focus(1954, many[:-1], requester_id=1)
 
 
 class BatchFocusRouteTests(unittest.TestCase):
@@ -161,6 +202,22 @@ class BatchFocusRouteTests(unittest.TestCase):
         self.assertEqual(seen[-1], (1954, [], 5, None))
         # Только PUT: GET с тем же адресом не меняет отметки.
         self.assertEqual(client.get(url).status_code, 405)
+
+    def test_route_refuses_someone_elses_department(self):
+        # Глава отдела 560 не переключает обзвон отдела 1954: 403 до сервиса.
+        seen = []
+
+        class Svc:
+            def manager_scope(self, is_admin, heads, login=None, supervisor_department_code=None, **extra):
+                return [560]
+
+            def set_batch_focus(self, *args, **kwargs):
+                seen.append(args)
+                return {}
+
+        resp = self._client(Svc()).put('/api/dial_list/departments/1954/batches/focus', json={"batch_ids": []})
+        self.assertEqual((resp.status_code, resp.get_json()), (403, {"error": "Это не ваш отдел"}))
+        self.assertEqual(seen, [])
 
 
 if __name__ == '__main__':

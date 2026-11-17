@@ -29,7 +29,7 @@ PORT = os.environ.get('DIAL_LIST_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (DIAL_LIST_TEST_PORT)')
 
 TEZ, RCC = 560, 1954
-RCC_OP, TEZ_OP = 520, 530
+RCC_OP, TEZ_OP, TEZ_OTHER = 520, 530, 531
 GUARDED = '3.22.46'
 
 BASE_DDL = '''
@@ -47,7 +47,8 @@ BASE_DDL = '''
     INSERT INTO users (id, name, login, role, status, department_id, sip_number) VALUES
         (1, 'Руководитель', 'boss', 'admin', 'working', NULL, NULL),
         (520, 'Своев Сава', 'sava', 'operator', 'working', 1954, '902'),
-        (530, 'Ашимова Айгерим', 'aigerim', 'operator', 'working', 560, '601');
+        (530, 'Ашимова Айгерим', 'aigerim', 'operator', 'working', 560, '601'),
+        (531, 'Серикова Сауле', 'saule', 'operator', 'working', 560, '602');
 '''
 
 
@@ -172,7 +173,7 @@ def env():
                                        trips_configured=lambda: True)
     svc.operator_context = lambda uid: {
         "user_id": int(uid), "name": "Оператор", "department_id": RCC if int(uid) == RCC_OP else TEZ,
-        "internal_number": '902' if int(uid) == RCC_OP else '601',
+        "internal_number": {RCC_OP: '902', TEZ_OP: '601', TEZ_OTHER: '602'}[int(uid)],
         "settings": svc.department_settings(RCC if int(uid) == RCC_OP else TEZ)}
     try:
         yield _Env(db, svc, binotel)
@@ -265,12 +266,101 @@ def test_driver_of_two_files_belongs_to_both(env):
                    (A_PHONES[0],)) == (a, b)
     summary = env.svc.leads_summary(RCC)
     assert (env.file(summary, a)["progress"]["total"], env.file(summary, b)["progress"]["total"]) == (3, 2)
+    # Отмечен А — водитель 0001 в работе по первой загрузке, на паузе только новый водитель Б.
+    summary = env.svc.set_batch_focus(RCC, [a], requester_id=1)
+    assert (summary["pool_available"], summary["focus"]["paused_ready"]) == (3, 1)
+    assert [i["id"] for i in env.svc.leads_journal(RCC, stage='parked')["items"]] == [env.lead('77030000001')]
     summary = env.svc.set_batch_focus(RCC, [b], requester_id=1)
     assert summary["pool_available"] == 2
     portion = env.svc.issue_next_portion(RCC_OP, phone_version=GUARDED)["portion"]
     assert env.phones_of(portion["items"]) == [A_PHONES[0], '77030000001']
     summary = env.svc.set_batch_focus(RCC, [a], requester_id=1)
     assert summary["pool_available"] == 2          # третий водитель А у оператора (он и в Б)
+
+
+def test_third_upload_keeps_the_driver_in_the_marked_middle_file(env):
+    # Ревью 17.11.2026: first/last помнят две загрузки — третья уводила водителя из отмеченного «среднего»
+    # файла (из пула и из прогресса). Теперь каждая загрузка записывает, кто был в файле.
+    a = env.upload(RCC, 'А.xlsx', ['77010000001', '77010000002'])
+    b = env.upload(RCC, 'Б.xlsx', ['77010000001', '77020000002'])
+    assert env.svc.set_batch_focus(RCC, [b], requester_id=1)["pool_available"] == 2
+    c = env.upload(RCC, 'В.xlsx', ['77010000001', '77030000003'])
+    assert env.one("SELECT first_batch_id::text, last_batch_id::text FROM dial_list_leads "
+                   "WHERE phone_norm = '77010000001'") == (a, c)
+    summary = env.svc.leads_summary(RCC)
+    assert [env.file(summary, x)["progress"]["total"] for x in (a, b, c)] == [2, 2, 2]
+    assert summary["pool_available"] == 2                          # 0001 по-прежнему в работе с Б
+    tails = sorted(''.join(ch for ch in i["phone_masked"] if ch.isdigit())[-4:]
+                   for i in env.svc.leads_journal(RCC, batch_id=b)["items"])
+    assert tails == ['0001', '0002']                               # фильтр «Файл» — по тем же правилам
+    portion = env.svc.issue_next_portion(RCC_OP, phone_version=GUARDED)["portion"]
+    assert env.phones_of(portion["items"]) == ['77010000001', '77020000002']
+
+
+def test_overdue_tez_callback_goes_to_anyone_despite_marks(env):
+    # Ревью 17.11.2026: перезвон оператора, чьё окно прошло, общий пул отдаёт любому — отметки файлов этому не
+    # мешают (обещанный звонок не ждёт, пока файл отметят).
+    env.svc.enroll_department(TEZ, changed_by=1, profile='tez')
+    env.upload(TEZ, 'КЗО база.xlsx', ['77060000001'])
+    trk = env.upload(TEZ, 'Туркестан база.xlsx', ['77070000001'])
+    promised = env.lead('77060000001')
+    env.q("UPDATE dial_list_leads SET status = 'in_progress', owner_operator_id = %s, due_kind = 'callback', "
+          "owner_call_at = CURRENT_TIMESTAMP - INTERVAL '3 hours', next_call_at = CURRENT_TIMESTAMP - INTERVAL '1 hour'"
+          " WHERE id = %s", (TEZ_OP, promised))
+    summary = env.svc.set_batch_focus(TEZ, [trk], requester_id=1)
+    assert (summary["pool_available"], summary["focus"]["paused_ready"]) == (2, 0)
+    assert env.svc.leads_journal(TEZ)["by_stage"]["parked"] == 0
+    portion = env.svc.issue_next_portion(TEZ_OTHER, phone_version=GUARDED)["portion"]
+    assert env.phones_of(portion["items"]) == ['77060000001', '77070000001']
+
+
+def test_changing_the_dialed_month_clears_marks(env):
+    # Ревью 17.11.2026: отметки прежнего месяца не оживают при возврате к нему — смена месяца их снимает; отметка
+    # в обзваниваемом месяце снимает и оставшиеся от смены месяца по календарю.
+    a = env.upload(RCC, 'А.xlsx', A_PHONES)
+    later = env.upload(RCC, 'Декабрь.xlsx', ['77040000001'], period=env.next_month)
+    env.svc.set_batch_focus(RCC, [a], requester_id=1)
+    env.svc.save_department_settings(RCC, {"max_attempts": 4}, changed_by=1)        # месяц тот же — отметки целы
+    assert env.one("SELECT COUNT(*) FROM dial_list_lead_batches WHERE focused") == (1,)
+    env.svc.save_department_settings(RCC, {"active_period": env.next_month.strftime('%Y-%m')}, changed_by=1)
+    assert env.one("SELECT COUNT(*) FROM dial_list_lead_batches WHERE focused") == (0,)
+    env.svc.save_department_settings(RCC, {"active_period": ""}, changed_by=1)
+    assert env.svc.leads_summary(RCC)["focus"]["active"] is False
+    env.q("UPDATE dial_list_lead_batches SET focused = TRUE WHERE id = %s", (later,))   # след смены по календарю
+    env.svc.set_batch_focus(RCC, [a], requester_id=1)
+    assert env.q("SELECT id::text FROM dial_list_lead_batches WHERE focused") == [(a,)]
+
+
+def test_remaining_and_ready_follow_the_department_rules(env):
+    # Ревью 17.11.2026: «можно выдать» и «операторы ждут» — по часам повтора и числу попыток отдела (порядок
+    # параметров), «в обзвоне» — как в журнале: попытки кончились — уже не в обзвоне.
+    env.q("UPDATE dial_list_department_settings SET max_attempts = 5, retry_after_hours = 2 WHERE department_id = %s",
+          (RCC,))
+    f1 = env.upload(RCC, 'Ф1.xlsx', ['77080000001', '77080000002', '77080000003'])
+    f2 = env.upload(RCC, 'Ф2.xlsx', ['77080000004'])
+    for phone, attempts, hours in (('77080000001', 4, 3), ('77080000002', 5, 3), ('77080000003', 1, 1)):
+        env.q("UPDATE dial_list_leads SET status = 'in_progress', attempts_total = %s, "
+              "last_attempt_at = CURRENT_TIMESTAMP - make_interval(hours => %s) WHERE phone_norm = %s",
+              (attempts, hours, phone))
+    summary = env.svc.leads_summary(RCC)
+    # 0001 — 4 попытки из 5, повтор прошёл: в обзвоне и можно выдать; 0002 — попытки кончились; 0003 — ждёт повтора.
+    assert env.file(summary, f1)["progress"] == {"total": 3, "goal": 0, "open": 2, "ready": 1}
+    summary = env.svc.set_batch_focus(RCC, [f2], requester_id=1)
+    assert (summary["pool_available"], summary["focus"]["paused_ready"]) == (1, 1)
+
+
+def test_driver_without_a_file_waits_while_files_are_marked(env):
+    # Строка без файла (first/last NULL): без отметок она в обзвоне, как вся база; при отметках её нет ни в
+    # одном отмеченном файле — пул её не выдаёт, журнал пишет «База на паузе», а не «В очереди».
+    a = env.upload(RCC, 'Город А.xlsx', A_PHONES)
+    lone = str(env.one("INSERT INTO dial_list_leads (department_id, phone_norm, full_name, period) "
+                       "VALUES (%s, '77090000001', 'Без Файла', %s) RETURNING id", (RCC, env.month))[0])
+    assert env.svc.leads_summary(RCC)["pool_available"] == 4
+    summary = env.svc.set_batch_focus(RCC, [a], requester_id=1)
+    assert (summary["pool_available"], summary["focus"]["paused_ready"]) == (3, 1)
+    assert [i["id"] for i in env.svc.leads_journal(RCC, stage='parked')["items"]] == [lone]
+    portion = env.svc.issue_next_portion(RCC_OP, phone_version=GUARDED)["portion"]
+    assert env.phones_of(portion["items"]) == A_PHONES
 
 
 def test_progress_counts_goal_open_ready_and_only_the_month_base(env):

@@ -7,8 +7,8 @@ import useStableCallback from '../wiki/useStableCallback';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 import { citiesSummary } from '../dial_list/signReport';
 import {
-    batchProgress, focusHint, focusStateText, focusWaitingText, goalLabel, toggledFocus, uploadFocusNote,
-    withFocusDraft,
+    batchProgress, batchRowState, focusErrorText, focusHint, focusStateText, focusWaitingText, goalLabel,
+    summaryMatchesScope, toggledFocus, uploadFocusNote, withFocusDraft,
 } from '../dial_list/batchFocus';
 import {
     LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
@@ -153,10 +153,16 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, p
         }
     }, [apiBaseUrl, authHeaders, departmentId, period]);
 
+    // Отдел и месяц, которые сейчас на экране: ответ на отметку, пришедший после их смены, не применяется
+    // (summaryMatchesScope) — иначе он лёг бы поверх загрузки нового отдела или месяца (ревью 17.11.2026).
+    const scopeRef = useRef({ departmentId, period });
+    scopeRef.current = { departmentId, period };
     const applySummary = useCallback((data) => {
+        if (!summaryMatchesScope(data, scopeRef.current)) return false;
         loadSeq.current += 1;
         setSummary(data);
         setLoading(false);
+        return true;
     }, []);
 
     useEffect(() => { load(); }, [load]);
@@ -538,7 +544,7 @@ const TripCheckCard = ({ check }) => {
    обработано. Под названием — что дала загрузка; справа — сколько осталось и цель отдела. Полоса: зелёное — цель,
    синее — остальные обработанные. Пока отмечены другие файлы, неотмеченный приглушён: его водителей операторы не
    получают. Нажатие по всей строке — отметить или снять (только обзваниваемый месяц и с правом правки). */
-const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle, showWaiting }) => {
+const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle }) => {
     const pr = batchProgress(batch);
     const upload = [fmtDate(batch.created_at), `строк ${batch.rows_total ?? 0}`];
     if (batch.rows_new) upload.push(`новых ${batch.rows_new}`);
@@ -558,7 +564,7 @@ const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle, showWaiting }) =
                 : <span className="mt-0.5 h-[22px] w-[22px] shrink-0 rounded-full ring-[1.5px] ring-inset ring-slate-300" aria-hidden="true" />)}
             <div className={`min-w-0 flex-1 transition-opacity ${paused ? 'opacity-60' : ''}`}>
                 <div className="flex items-baseline justify-between gap-3">
-                    <div className="truncate text-[13.5px] font-medium text-slate-800">{batch.file_name || 'файл'}</div>
+                    <div className="truncate text-[13.5px] font-medium text-slate-800" title={batch.file_name || ''}>{batch.file_name || 'файл'}</div>
                     {pr.total > 0 && <div className="shrink-0 text-[13px] font-semibold tabular-nums text-slate-700">{pr.pct}&nbsp;%</div>}
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-[11.5px] text-slate-500">
@@ -566,7 +572,7 @@ const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle, showWaiting }) =
                         {upload.join(' · ')}
                         {problems.length > 0 && <span className="text-rose-600">{` · ${problems.join(' · ')}`}</span>}
                     </span>
-                    {pr.total > 0 ? (
+                    {!pr.known ? null : pr.total > 0 ? (
                         <span className="tabular-nums">
                             {`осталось ${pr.open}`}
                             {pr.goal > 0 && <span className="text-emerald-600">{` · ${goalLabel(isTez)} ${pr.goal}`}</span>}
@@ -579,7 +585,6 @@ const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle, showWaiting }) =
                         <div className="h-full bg-blue-500" style={{ width: `${pr.restShare * 100}%` }} />
                     </div>
                 )}
-                {showWaiting && <div className="mt-1.5 text-[11.5px] text-amber-700">Сейчас звонить некому: остальные ждут повтора</div>}
             </div>
         </>
     );
@@ -626,6 +631,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
     const reloadSummary = useStableCallback(() => onChanged?.());
 
     useEffect(() => { setLastUpload(null); setPollUntil(0); setFocusDraft(null); }, [departmentId]);
+    useEffect(() => { setFocusDraft(null); }, [period]);
 
     const tripRunning = !!summary?.trip_check?.running;
     useEffect(() => {
@@ -656,7 +662,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             // Не загрузилось ничего из-за ИИН — это ошибка файла, а не успех.
             const failedAll = !data.rows_new && !data.rows_duplicate && (data.rows_bad_iin || data.rows_invalid);
             // Отмечены другие файлы обзваниваемого месяца — новый сам в работу не встаёт: сказать сразу.
-            const focusNote = isActive && !failedAll ? uploadFocusNote(summary) : '';
+            const focusNote = uploadFocusNote(summary, { isActive, failed: Boolean(failedAll) });
             const withFocusNote = (text) => (focusNote ? `${text}. ${focusNote}` : text);
             if (isTez) {
                 toast(withFocusNote(tezUploadSummary(data, monthLabel(data.period || shownPeriod))), failedAll ? 'error' : 'success');
@@ -694,10 +700,12 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             });
             const data = await resp.json().catch(() => ({}));
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
-            if (typeof onSummary === 'function') onSummary(data);
-            else onChanged?.();
+            // Ответ про другой отдел или месяц (их сменили, пока шло сохранение) экран не трогает: там уже
+            // грузятся свои данные.
+            if (typeof onSummary !== 'function') onChanged?.();
+            else onSummary(data);
         } catch (e) {
-            toast(e.message || 'Не удалось отметить файлы', 'error');
+            toast(focusErrorText(e), 'error');
             onChanged?.();
         } finally {
             setFocusDraft(null);
@@ -914,17 +922,16 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                     {!batches.length ? (
                         <div className="px-4 py-5 text-center text-[13px] text-slate-500">В этот месяц файлов ещё не загружали</div>
                     ) : batches.map((b) => {
-                        const pr = batchProgress(b);
+                        const row = batchRowState(b, { focusShown, focusOn, canEdit });
                         return (
                             <BatchRow
                                 key={b.id}
                                 batch={b}
                                 isTez={isTez}
-                                mark={focusShown ? Boolean(b.focused) : null}
-                                paused={focusOn && !b.focused}
+                                mark={row.mark}
+                                paused={row.paused}
                                 busy={focusBusy}
-                                onToggle={focusShown && canEdit ? (id) => saveFocus(toggledFocus(batches, id)) : null}
-                                showWaiting={focusOn && Boolean(b.focused) && !focusDraft && pr.open > 0 && pr.ready === 0}
+                                onToggle={row.toggle ? (id) => saveFocus(toggledFocus(batches, id)) : null}
                             />
                         );
                     })}

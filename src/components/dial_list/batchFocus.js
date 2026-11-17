@@ -50,10 +50,51 @@ export const batchProgress = (batch) => {
     if (total && done === total) pct = 100;
     else if (total && done) pct = Math.min(99, Math.max(1, Math.round((done * 100) / total)));
     return {
+        // known — сервер прогресс прислал (старый сервер, пока выкладка не догнала сайт, — нет): без него строка
+        // не пишет «водителей нет», а просто молчит.
+        known: Boolean(batch?.progress),
         total, open, done, goal, ready: count(p.ready), pct,
         goalShare: total ? goal / total : 0,
         restShare: total ? (done - goal) / total : 0,
     };
+};
+
+/**
+ * Строка файла: mark — кружок отметки (null — кружков нет: месяц не обзванивается или сервер отметок не знает),
+ * paused — приглушить (отмечены другие файлы, этот операторы не получают), toggle — нажатие меняет отметку.
+ */
+export const batchRowState = (batch, { focusShown = false, focusOn = false, canEdit = false } = {}) => ({
+    mark: focusShown ? Boolean(batch?.focused) : null,
+    paused: Boolean(focusOn && !batch?.focused),
+    toggle: Boolean(focusShown && canEdit),
+});
+
+/**
+ * Сводка из ответа на отметку — того ли отдела и месяца, что сейчас на экране (scope.period '' — обзваниваемый
+ * месяц: ответ отметки всегда про него). Ответ, пришедший после смены отдела или месяца, не применяется — иначе
+ * на экране остались бы файлы и плитки чужого отдела или месяца (ревью 17.11.2026).
+ */
+export const summaryMatchesScope = (data, scope) => {
+    if (!data || !scope || String(data.department_id) !== String(scope.departmentId)) return false;
+    const want = String(scope.period || '').slice(0, 7);
+    return !want || String(data.period || '').slice(0, 7) === want;
+};
+
+/** Ошибка сохранения отметок словами: сервер объяснил — его текст; сети нет или ответ без текста — по-русски. */
+export const focusErrorText = (error) => {
+    const message = String(error?.message || '').trim();
+    if (!message || error?.name === 'TypeError' || /^HTTP \d+$/.test(message)) {
+        return 'Не удалось отметить файлы — проверьте связь и повторите';
+    }
+    return message;
+};
+
+/** Метка в шапке отдела, пока отбор включён: «в работе 2 из 16 файлов» (только обзваниваемый месяц). */
+export const focusSubtitleNote = (summary) => {
+    const files = Array.isArray(summary?.batches) ? summary.batches : [];
+    const on = focusedIds(files).length;
+    if (!on || summary?.is_active_period === false) return '';
+    return `в работе ${on} из ${files.length} ${plural(files.length, 'файла', 'файлов', 'файлов')}`;
 };
 
 /** Отмеченные файлы списка (id строкой). */
@@ -98,10 +139,14 @@ export const focusWaitingText = (summary) => {
         + `${plural(paused, 'водителя', 'водителей', 'водителей')}: отметьте их или снимите отметки.`;
 };
 
-/** Что дописать к итогу загрузки, когда отмечены другие файлы: новый файл сам в работу не встаёт. */
-export const uploadFocusNote = (summary) => (summary?.focus?.active
-    ? 'Сейчас обзваниваются только отмеченные файлы — отметьте новый, чтобы операторы его получили'
-    : '');
+/**
+ * Что дописать к итогу загрузки, когда отмечены другие файлы: новый файл сам в работу не встаёт. Только у
+ * загрузки в обзваниваемый месяц (isActive) и только когда файл загрузился (failed — ни одной строки).
+ */
+export const uploadFocusNote = (summary, { isActive = true, failed = false } = {}) => (
+    isActive && !failed && summary?.focus?.active
+        ? 'Сейчас обзваниваются только отмеченные файлы — отметьте новый, чтобы операторы его получили'
+        : '');
 
 /** Цель файла словами отдела: у Тез — выход на линию, у удалённого КЦ — подписание. */
 export const goalLabel = (isTez) => (isTez ? 'вышли на линию' : 'подписали');

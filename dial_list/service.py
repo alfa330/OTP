@@ -2636,6 +2636,11 @@ class DialListService:
                   caller_id, company, active_period, changed_by,
                   profile, auto_dial, call_interval_sec, wrapup_sec, json.dumps(retry_schedule),
                   callback_own_minutes, followup_after_min, wa_license_id))
+            # Точечная обработка (ревью 17.11.2026): сменился обзваниваемый месяц — отметки файлов отдела снимаются
+            # все. Иначе отметки прежнего месяца при возврате к нему ожили бы сами, а снять их, пока месяц не
+            # обзванивается, нельзя. Новый месяц начинается со всей базы.
+            if (active_period or current_period()) != (parse_period(current["active_period"]) or current_period()):
+                cur.execute(self._CLEAR_FOCUS_SQL, (int(department_id),))
             if switched_to_tez:
                 # Итоги — стартовый набор Тез (с датами). Заведённые раньше, но ни разу не выбранные
                 # (так у Тез КЦ: подключён к удалённому КЦ 01.10.2026 со стандартным набором и не
@@ -2937,7 +2942,7 @@ class DialListService:
                                    THEN NULL ELSE dial_list_leads.sign_checked_at END,
             yandex_driver_ids = CASE WHEN dial_list_leads.signed_at IS NULL AND dial_list_leads.iin <> EXCLUDED.iin
                                      THEN NULL ELSE dial_list_leads.yandex_driver_ids END
-        RETURNING (xmax = 0) AS inserted
+        RETURNING (xmax = 0) AS inserted, id
     """
 
     # Строка «без номера» (REPORT_ONLY_*) получает номер из загрузки базы: обычный водитель обзвона.
@@ -3031,12 +3036,22 @@ class DialListService:
                 new = sum(1 for r in inserted if r[0])
                 counts["rows_new"] += new
                 counts["rows_duplicate"] += len(inserted) - new
+                in_file = [r[1] for r in inserted]
+            else:
+                in_file = []
             if attach:
                 attached = execute_values(cur, self._ATTACH_PHONE_SQL, attach,
                                           template="(%s, %s, %s, %s, %s::uuid, %s::integer, %s::date, %s)",
                                           page_size=1000, fetch=True)
                 counts["rows_new"] += len(attached)
                 counts["rows_duplicate"] += len(attach) - len(attached)
+                in_file += [r[0] for r in attached]
+            # Кто был в этом файле — все его строки, новые и повторные (точечная обработка, ревью 17.11.2026):
+            # first/last_batch_id третья загрузка водителя перезапишет, а файл он не покидал.
+            if in_file:
+                execute_values(cur, """
+                    INSERT INTO dial_list_batch_leads (batch_id, lead_id) VALUES %s ON CONFLICT DO NOTHING
+                """, [(batch_id, lead_id) for lead_id in in_file], template="(%s::uuid, %s::uuid)", page_size=1000)
             cur.execute("""
                 UPDATE dial_list_lead_batches
                 SET rows_new = %s, rows_duplicate = %s, rows_invalid = %s, rows_bad_iin = %s WHERE id = %s
@@ -3173,8 +3188,9 @@ class DialListService:
             # Прогресс каждого файла и «можно выдать сейчас» — теми же правилами, что у выдачи.
             progress = {}
             if batch_rows:
-                cur.execute(self._BATCH_PROGRESS_SQL, (settings["retry_after_hours"], settings["max_attempts"],
-                                                       department_id, period))
+                cur.execute(self._BATCH_PROGRESS_SQL, {
+                    "department_id": department_id, "period": period,
+                    "retry_hours": settings["retry_after_hours"], "max_attempts": settings["max_attempts"]})
                 for batch_id, total, goal, still_open, ready in cur.fetchall():
                     progress[_sid(batch_id)] = {"total": int(total), "goal": int(goal), "open": int(still_open),
                                                 "ready": int(ready)}
@@ -3235,13 +3251,21 @@ class DialListService:
             summary.update(self._tez_summary(department_id, period))
         return summary
 
+    # Снять отметки файлов отдела (точечная обработка): при смене обзваниваемого месяца — все, при отметке — других
+    # месяцев. Параметр — department_id; дописывается условием.
+    _CLEAR_FOCUS_SQL = """
+        UPDATE dial_list_lead_batches SET focused = FALSE, focused_at = NULL, focused_by = NULL
+        WHERE department_id = %s AND focused"""
+
     def set_batch_focus(self, department_id, batch_ids, requester_id=None, period=None):
         """Точечная обработка (владелец, 17.11.2026; правило — batch_focus.py): отметить «в работу» ровно эти
         файлы базы месяца (полная замена; пустой список — снять все отметки: обзванивается вся база месяца).
         Только обзваниваемый месяц: из других пул не выдаёт никого, отметка там ничего бы не значила. Уже
         выданные операторам списки не трогаются — меняется только то, что выдаст пул. Возвращает сводку базы.
-        Файлы отдела и месяца читаются под FOR UPDATE: два руководителя, отмечающие одновременно, не
-        перемешают выборы — второй ляжет поверх первого целиком."""
+        Файлы отдела и месяца читаются под FOR NO KEY UPDATE: два руководителя, отмечающие одновременно, не
+        перемешают выборы — второй ляжет поверх первого целиком (ключи файлов не меняются, поэтому проверки
+        внешних ключей водителей замок не задерживает). Отметки других месяцев отдела снимаются: остались они
+        только от смены месяца по календарю и при возврате к тому месяцу ожили бы сами (ревью 17.11.2026)."""
         department_id = int(department_id)
         settings = self.department_settings(department_id)
         active = settings["_period"]
@@ -3262,7 +3286,7 @@ class DialListService:
             cur.execute("""
                 SELECT id, focused FROM dial_list_lead_batches
                 WHERE department_id = %s AND period = %s
-                FOR UPDATE
+                FOR NO KEY UPDATE
             """, (department_id, period))
             current = {_sid(r[0]): bool(r[1]) for r in cur.fetchall()}
             if any(b not in current for b in wanted):
@@ -3281,6 +3305,7 @@ class DialListService:
                     SET focused = FALSE, focused_at = NULL, focused_by = NULL
                     WHERE id = ANY(%s::uuid[])
                 """, (turn_off,))
+            cur.execute(self._CLEAR_FOCUS_SQL + " AND period <> %s", (department_id, period))
         if turn_on or turn_off:
             log.info("dial_list: точечная обработка, отдел %s, база %s: в работе %d из %d файлов "
                      "(отмечено %d, снято %d), руководитель %s", department_id, period.isoformat(), len(wanted),
@@ -4136,9 +4161,10 @@ class DialListService:
                                       WHERE a.lead_id = base.id AND a.operator_id = %(operator_id)s)""")
         if batch_id:
             params["batch_id"] = str(batch_id)
+            # Все файлы водителя (batch_focus): первая и последняя загрузки и записи загрузок — как у прогресса.
             filters.append("""EXISTS (SELECT 1 FROM dial_list_leads l2
                                       WHERE l2.id = base.id
-                                        AND (l2.first_batch_id = %(batch_id)s::uuid OR l2.last_batch_id = %(batch_id)s::uuid))""")
+                                        AND """ + batch_focus.in_batch_sql("l2", "%(batch_id)s::uuid") + ")")
         # «Дата звонка»: водителю звонили в эти дни (хотя бы одна попытка, дни по
         # Алматы). Обе границы — на ОДНОЙ попытке: звонок до периода и звонок после
         # него вместе не делают водителя «звонили в эти дни».
@@ -4795,21 +4821,28 @@ class DialListService:
         ORDER BY l.attempts_total ASC, l.last_attempt_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %s {lock}
     """
-    # Прогресс каждого файла базы месяца (точечная обработка, 17.11.2026): водители файла (batch_focus —
-    # пришёл с ним впервые или файл — его последняя загрузка), вышли на линию / подписали, ещё в обзвоне,
-    # можно выдать прямо сейчас (без учёта отметок — «если отметить этот файл»). База месяца — та же, что у
-    # плиток сводки (month_base). Параметры: retry_after_hours, max_attempts, department_id, period.
+    # Прогресс каждого файла базы месяца (точечная обработка, 17.11.2026): водители файла (batch_focus — все
+    # его файлы: первая и последняя загрузки и записи загрузок), вышли на линию / подписали, ещё в обзвоне,
+    # можно выдать прямо сейчас (без учёта отметок — «если отметить этот файл»). «В обзвоне» — как в журнале:
+    # попытки кончились (attempts_total ≥ max_attempts) — уже «Не дозвонились», даже если статус остался
+    # in_progress (руководитель уменьшил число попыток). База месяца — та же, что у плиток сводки (month_base).
+    # Параметры по именам: department_id, period, retry_hours, max_attempts. «Можно выдать» — тот же
+    # _POOL_READY_SQL, что у выдачи, с именами вместо позиций (_POOL_READY_NAMED_SQL).
+    _POOL_READY_NAMED_SQL = _POOL_READY_SQL.replace(
+        "make_interval(hours => %s)", "make_interval(hours => %(retry_hours)s)").replace(
+        "l.attempts_total < %s", "l.attempts_total < %(max_attempts)s")
     _BATCH_PROGRESS_SQL = """
-        SELECT mb.batch_id,
+        WITH members AS (""" + batch_focus.file_members_sql() + """)
+        SELECT m.batch_id,
                COUNT(*),
                COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL),
                COUNT(*) FILTER (WHERE l.status IN ('new', 'in_progress') AND l.signed_at IS NULL
-                                  AND l.sign_status <> 'processing'),
-               COUNT(*) FILTER (WHERE""" + _POOL_READY_SQL + """)
-        FROM dial_list_leads l
-        CROSS JOIN """ + batch_focus.member_batches_sql("l") + """
-        WHERE l.department_id = %s AND l.period = %s AND """ + month_base.in_month_base_sql("l") + """
-        GROUP BY mb.batch_id
+                                  AND l.sign_status <> 'processing' AND l.attempts_total < %(max_attempts)s),
+               COUNT(*) FILTER (WHERE""" + _POOL_READY_NAMED_SQL + """)
+        FROM members m
+        JOIN dial_list_leads l ON l.id = m.lead_id
+        WHERE """ + month_base.in_month_base_sql("l") + """
+        GROUP BY m.batch_id
     """
     # Кандидаты проверки подписания перед выдачей (_precheck_signatures): тот же пул —
     # те же условия и порядок, — только с тем, что нужно проверке, и без блокировки.

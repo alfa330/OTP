@@ -11,6 +11,7 @@ import DialListOutcomesPanel from './DialListOutcomesPanel';
 import DialListScriptPanel from './DialListScriptPanel';
 import DialListCallsExport from './DialListCallsExport';
 import DialListInformerPanel from './DialListInformerPanel';
+import { focusSubtitleNote, focusWaitingText } from './batchFocus';
 import { monthLabel } from './dialListPeriods';
 import { sameSectionTitle } from './linePicker';
 import TezAutodialAnalytics from './TezAutodialAnalytics';
@@ -323,8 +324,9 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
     const autoDial = !!dept.settings?.auto_dial;
     const isToday = date === todayIso();
 
+    const focusNote = focusSubtitleNote(dept.summary);
     const counts = selected
-        ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}`
+        ? `Порции по ${dept.settings?.portion_size ?? selected.portion_size}, в базе ${selected.leads_total}${dept.summary ? `, доступно ${dept.summary.pool_available}` : ''}${focusNote ? `, ${focusNote}` : ''}`
         : '';
     let subtitle = !selected
         ? (candidates.length ? 'Подключите отдел, чтобы начать' : 'Отделов для обзвона пока нет')
@@ -507,7 +509,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         </div>
                                         <div className="mt-1 text-[12.5px] text-slate-500">
                                             {(tez || enabled) && (dept.summary?.pool_available ?? 0) === 0
-                                                ? (dept.summary?.focus?.active
+                                                ? (focusWaitingText(dept.summary)
                                                     // Точечная обработка (17.11.2026): база не пуста — пусты отмеченные файлы.
                                                     ? 'В отмеченных файлах звонить некому — отметьте другие во вкладке «База водителей» или снимите отметки.'
                                                     : 'База пуста — загрузите список водителей во вкладке «База водителей».')

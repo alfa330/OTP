@@ -218,8 +218,13 @@ class ImportTests(unittest.TestCase):
         captured = {}
 
         def fake_values(cur, sql, values, page_size=100, fetch=False, template=None):
+            # Вставка строк базы отвечает (вставлено ли, id); запись «кто был в файле» (dial_list_batch_leads,
+            # 17.11.2026) ответа не ждёт и строки базы не подменяет.
+            if 'INSERT INTO dial_list_batch_leads' in sql:
+                captured['members'] = values
+                return None
             captured['values'] = values
-            return [(True,) for _ in values]
+            return [(True, 'lead-%d' % i) for i, _ in enumerate(values)]
 
         original = dial_service.execute_values
         dial_service.execute_values = fake_values

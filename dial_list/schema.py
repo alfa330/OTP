@@ -19,6 +19,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
     dial_list_lead_batches         загрузки списков водителей (файл ФИО+телефон)
                                    отделом-обзвонщиком; focused — файл отмечен на
                                    точечную обработку (batch_focus.py).
+    dial_list_batch_leads          какие водители были в каком файле (каждая загрузка;
+                                   вместе с first/last_batch_id лида — все его файлы).
     dial_list_leads                база водителей ОТДЕЛА: ФИО, номер, сколько раз
                                    звонили, дозвонились ли. Номер уникален в
                                    пределах отдела: у каждого отдела-обзвонщика
@@ -552,6 +554,18 @@ DDL = [
     "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused BOOLEAN NOT NULL DEFAULT FALSE",
     "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused_at TIMESTAMP WITH TIME ZONE",
     "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused_by INTEGER",
+    # Какие водители были в каком файле (точечная обработка, ревью 17.11.2026). first/last_batch_id помнят
+    # только первую и последнюю загрузку водителя: третья загрузка увела бы его из отмеченного «среднего»
+    # файла — из пула и из прогресса этого файла. Пишется при каждой загрузке (import_leads) для всех строк
+    # файла — новых, повторных и привязанных; принадлежность к файлу = first ∪ last ∪ эта таблица, поэтому
+    # прежние загрузки (до 17.11.2026 ни один водитель не загружался трижды) переносить не нужно.
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_batch_leads (
+        batch_id UUID NOT NULL REFERENCES dial_list_lead_batches(id) ON DELETE CASCADE,
+        lead_id UUID NOT NULL REFERENCES dial_list_leads(id) ON DELETE CASCADE,
+        PRIMARY KEY (batch_id, lead_id)
+    )
+    """,
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
@@ -654,6 +668,8 @@ DDL = [
     # месяце отдела хоть один файл.
     "CREATE INDEX IF NOT EXISTS idx_dial_list_lead_batches_focused ON dial_list_lead_batches(department_id, period)"
     " WHERE focused",
+    # Файлы водителя — прогресс файлов сводки ищет их по водителю.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_batch_leads_lead ON dial_list_batch_leads(lead_id)",
 ]
 
 
