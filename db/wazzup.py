@@ -291,6 +291,21 @@ class WazzupMixin:
         """)
         return cursor.rowcount
 
+    def cleanup_wazzup_reply_dismissals(self, retention_days=45):
+        """Журнал «Ответ не нужен» (wazzup/unread.py) живёт столько же, сколько переписка, к которой
+        относится: отчёту по сменам чата (SALES-1) он нужен только рядом с сообщениями. Отдельно от
+        cleanup_wazzup_messages — таблица заводится схемой счётчика «Чатов ОП» и может ещё не
+        существовать там, где раздел не разворачивали."""
+        with self._get_cursor() as cursor:
+            cursor.execute("SELECT to_regclass('wazzup_reply_dismissals') IS NOT NULL")
+            exists = cursor.fetchone()
+            if not (exists and exists[0]):
+                return 0
+            cursor.execute(
+                "DELETE FROM wazzup_reply_dismissals WHERE dismissed_at < now() - make_interval(days => %s)",
+                (int(retention_days),))
+            return cursor.rowcount
+
     def cleanup_wazzup_messages(self, retention_days=45):
         """Ретеншн Wazzup: удаляет сырые данные старше retention_days.
 
@@ -315,6 +330,8 @@ class WazzupMixin:
                 "DELETE FROM wazzup_messages WHERE dt < now() - make_interval(days => %s)",
                 (days,))
             deleted_messages = cursor.rowcount
+            # Журнал «Ответ не нужен» (wazzup/unread.py) нужен отчёту по сменам чата ровно столько,
+            # сколько живёт переписка, к которой он относится.
             cursor.execute(
                 "DELETE FROM wazzup_chats WHERE last_message_at < now() - make_interval(days => %s)",
                 (days,))

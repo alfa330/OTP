@@ -195,6 +195,23 @@ def test_snapshot_and_seen_ack_leave_newer_unread_messages_intact(pg):
     assert client.get('/api/wazzup/pilot/unread').get_json()['items'] == []
 
 
+
+@postgres
+def test_effective_no_reply_needed_is_journalled_with_who_and_when(pg):
+    """«Ответ не нужен» пишется в журнал, только когда сняло ожидание (SALES-1: отчёт по сменам чата
+    засчитывает разговор тому, кто его закончил)."""
+    _, cursor, database, _ = pg
+    db = database()
+    db.store_wazzup_messages([inbound(), inbound('inbound-2')])
+    client = client_for(db)
+    client.post('/api/wazzup/pilot/read', json=body())              # устаревшее: не сработало
+    client.post('/api/wazzup/pilot/read', json=body('inbound-2'))   # сработало
+    client.post('/api/wazzup/pilot/read', json=body('inbound-2'))   # ждать уже нечего
+    cursor.execute("""SELECT account, channel_id, chat_id, message_id, user_id,
+                             dismissed_at > now() - interval '1 minute'
+                        FROM wazzup_reply_dismissals""")
+    assert cursor.fetchall() == [('op', 'channel', '70000000000', 'inbound-2', 42, True)]
+
 @postgres
 def test_read_ack_racing_with_inbound_does_not_clear_unseen_message(pg):
     connection, cursor, database, connect = pg

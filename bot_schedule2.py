@@ -55721,6 +55721,28 @@ try:
 except Exception:
     logging.exception("Активность операторов: Blueprint НЕ подключён")
 
+# --- «Отчёт по сменам» · «Чат» (SALES-1, #424): смены верификаторов в том же окне табло ОП -------
+# Смены — кнопка смены «Чатов ОП» (wazzup/shift.py), чаты — переписка Wazzup по правилам «Табло ОП ·
+# Чат». Права — те же, что у отчёта линии: guard табло плюс поимённый список.
+try:
+    from op_wallboard import activity_routes as op_activity_routes  # noqa: E402
+    from op_wallboard import chat_shifts as op_chat_shifts  # noqa: E402
+    from op_wallboard import chat_shifts_routes as op_chat_shifts_routes  # noqa: E402
+    from database import STATUS_EVENTS_RETENTION_DAYS as _OP_CHAT_SHIFTS_STATUS_DAYS  # noqa: E402
+
+    app.register_blueprint(op_chat_shifts_routes.build_chat_shifts_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        guard=op_activity_routes.make_activity_guard(_op_wallboard_guard),
+        # Дни, за которые нет переписки или уже нет статусов, дали бы смены с нулями: граница —
+        # меньший из двух сроков хранения.
+        retention_days=min(op_chat_shifts.RETENTION_DAYS, _OP_CHAT_SHIFTS_STATUS_DAYS),
+    ))
+    logging.info("Отчёт по сменам · чат: Blueprint подключён на /api/op_wallboard/chat_shifts")
+except Exception:
+    logging.exception("Отчёт по сменам · чат: Blueprint НЕ подключён")
+
 
 # ── Раздел «Воронка ОП»: ежедневная воронка обзвона по направлениям продаж ────
 # Задачи #301, #302, #303, #305 — четыре супервайзера вели одну и ту же
@@ -57970,6 +57992,11 @@ async def run_wazzup_retention_async():
     # Ежедневный ретеншн переписки Wazzup (см. db.cleanup_wazzup_messages).
     loop = asyncio.get_event_loop()
     try:
+        # Журнал «Ответ не нужен» — вслед за перепиской, тем же сроком; его сбой переписку не держит.
+        try:
+            await loop.run_in_executor(executor_pool, db.cleanup_wazzup_reply_dismissals)
+        except Exception:
+            logging.exception("wazzup reply dismissals retention failed")
         return await loop.run_in_executor(executor_pool, db.cleanup_wazzup_messages)
     except Exception:
         logging.exception("wazzup retention failed")

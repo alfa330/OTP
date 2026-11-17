@@ -29,8 +29,8 @@ import {
     useOpWallboardSnapshot,
 } from './opWallboardShared';
 
-// «Отчёт по сменам» (ТЗ #392) — завершённые смены операторов ОП за месяц, полноэкранным окном
-// из шапки табло, рядом с «Отбивкой» и «Виджетом». Код отчёта грузится при первом открытии и
+// «Отчёт по сменам» (ТЗ #392 — линия, SALES-1 — чат) — завершённые смены за месяц, полноэкранным
+// окном из шапки табло, рядом с «Отбивкой» и «Виджетом». Код отчёта грузится при первом открытии и
 // заранее — при наведении на кнопку, а на телефоне — в момент касания: стене в зале он не нужен.
 const loadActivityReport = () => import('./OpActivityReport');
 const OpActivityReportSheet = lazy(loadActivityReport);
@@ -684,18 +684,21 @@ export default function OpWallboardView(props) {
     // «Отчёт по сменам» — один на табло: кнопка стоит в шапке любого направления рядом с
     // «Отбивкой», окно живёт здесь и переживает переключение «Линия / Чат». Раз открытое, оно
     // остаётся смонтированным: закрывается плавно и при повторном открытии стоит на тех же
-    // фильтрах и той же странице.
+    // фильтрах и той же странице. Отчётов в окне два (SALES-1): линии и чата — окно открывается на
+    // направлении табло, а переключатель в его шапке меняет отчёт, не трогая само табло.
     const [reportOpen, setReportOpen] = useState(false);
     const [reportMounted, setReportMounted] = useState(false);
+    const [reportDirection, setReportDirection] = useState(direction);
     const openReport = useCallback(() => {
+        setReportDirection(direction);
         setReportMounted(true);
         setReportOpen(true);
-    }, []);
+    }, [direction]);
     const closeReport = useCallback(() => setReportOpen(false), []);
     const reportButton = (
         <button type="button" className={iosBtnGhost} onClick={openReport}
                 onMouseEnter={loadActivityReport} onFocus={loadActivityReport} onPointerDown={loadActivityReport}
-                title="Завершённые смены операторов за месяц: статусы, звонки, журнал смены, Excel">
+                title="Завершённые смены за месяц: линия и чат, журнал смены, Excel">
             <FaIcon className="fas fa-clock-rotate-left"></FaIcon>
             Отчёт по сменам
         </button>
@@ -705,6 +708,8 @@ export default function OpWallboardView(props) {
             <OpActivityReportSheet
                 open={reportOpen}
                 onClose={closeReport}
+                direction={reportDirection}
+                onDirectionChange={setReportDirection}
                 user={props.user}
                 apiBaseUrl={props.apiBaseUrl}
                 withAccessTokenHeader={props.withAccessTokenHeader}

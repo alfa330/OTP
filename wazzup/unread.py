@@ -179,6 +179,37 @@ def init_unread_schema(cursor):
                     WHERE account='op' AND channel_id=cid AND chat_id=chat;
             END IF;
         END $$;
+        -- The same dismissal that says whether it happened: only an effective
+        -- «Ответ не нужен» is journalled (SALES-1, the chat shift report credits
+        -- whoever closed the conversation). The VOID variant above stays for a
+        -- process still running the previous release during a deploy.
+        CREATE OR REPLACE FUNCTION wazzup_dismiss_unanswered_by(cid TEXT, chat TEXT, seen TEXT)
+        RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+        DECLARE current_id TEXT; current_count INTEGER;
+        BEGIN
+            SELECT last_inbound_id,unread_count INTO current_id,current_count FROM wazzup_chat_read_state
+                WHERE account='op' AND channel_id=cid AND chat_id=chat FOR UPDATE;
+            IF current_id=seen AND current_count>0 THEN
+                DELETE FROM wazzup_unanswered_messages WHERE account='op' AND channel_id=cid AND chat_id=chat;
+                UPDATE wazzup_chat_read_state SET unread_count=0,revision=revision+1,updated_at=now()
+                    WHERE account='op' AND channel_id=cid AND chat_id=chat;
+                RETURN TRUE;
+            END IF;
+            RETURN FALSE;
+        END $$;
+        -- Who pressed «Ответ не нужен» and when. Retention follows the messages
+        -- (db.cleanup_wazzup_messages); no FK to users: the journal outlives a
+        -- deleted account the same way the messages do.
+        CREATE TABLE IF NOT EXISTS wazzup_reply_dismissals (
+            id BIGSERIAL PRIMARY KEY,
+            account TEXT NOT NULL, channel_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+            message_id TEXT NOT NULL, user_id INTEGER,
+            dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_wazzup_reply_dismissals_time
+            ON wazzup_reply_dismissals(account, dismissed_at);
+        CREATE INDEX IF NOT EXISTS idx_wazzup_reply_dismissals_user
+            ON wazzup_reply_dismissals(user_id, dismissed_at);
         CREATE OR REPLACE FUNCTION wazzup_notify_unread() RETURNS TRIGGER LANGUAGE plpgsql AS $$
         BEGIN
             IF TG_OP='INSERT' AND NEW.unread_count=0 THEN RETURN NEW; END IF;
@@ -283,7 +314,7 @@ def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_c
     def acknowledge_read():
         if request.method == 'OPTIONS':
             return preflight()
-        _, error = actor()
+        user, error = actor()
         if error:
             return error
         body = request.get_json(silent=True)
@@ -298,7 +329,13 @@ def register_unread_routes(bp, actor, require_api_key, preflight, db, excluded_c
             # This is an explicit "Ответ не нужен" action. Opening a chat does
             # not call it. The row lock protects the pending IDs and the count
             # together; a newer unseen inbound makes this dismissal a no-op.
-            cur.execute('SELECT wazzup_dismiss_unanswered(%s,%s,%s)', (cid,chat,seen))
+            cur.execute('SELECT wazzup_dismiss_unanswered_by(%s,%s,%s)', (cid,chat,seen))
+            dismissed = cur.fetchone()
+            if dismissed and dismissed[0]:
+                # Who closed the waiting and when — in the same transaction, so
+                # the journal never names a dismissal the counter did not make.
+                cur.execute("""INSERT INTO wazzup_reply_dismissals(account,channel_id,chat_id,message_id,user_id)
+                    VALUES ('op',%s,%s,%s,%s)""", (cid, chat, seen, user[0] if user else None))
             cur.execute("""SELECT channel_id,chat_id,unread_count,last_inbound_id,revision
                 FROM wazzup_chat_read_state WHERE account='op' AND channel_id=%s AND chat_id=%s""", (cid,chat))
             row = cur.fetchone()
