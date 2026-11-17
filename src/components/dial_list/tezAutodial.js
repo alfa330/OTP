@@ -22,6 +22,7 @@
  * сроки, метка поездок, проверки офферов и WhatsApp-шаблонов.
  */
 
+import { PARKED_STAGE } from './batchFocus.js';
 import { isNewId } from './outcomeFormat.js';
 
 export const PROFILE_REMOTE_CC = 'remote_cc';
@@ -230,6 +231,8 @@ export const validateTezSettings = (payload) => {
 export const TEZ_STAGES = [
     { value: 'queue', label: 'В очереди', dot: 'bg-slate-400' },
     { value: 'waiting', label: 'Ждут повтора', dot: 'bg-amber-400' },
+    // Точечная обработка (17.11.2026): файл водителя не отмечен, а другие отмечены. Чип — только когда такие есть.
+    PARKED_STAGE,
     { value: 'callback', label: 'Перезвон назначен', dot: 'bg-orange-400' },
     { value: 'issued', label: 'У операторов', dot: 'bg-blue-500' },
     { value: 'answered', label: 'Дозвонились', dot: 'bg-emerald-500' },
@@ -244,6 +247,7 @@ export const TEZ_STAGES = [
 export const TEZ_STAGE_ROW_LABEL = {
     queue: 'В очереди',
     waiting: 'Ждёт повтора',
+    parked: 'База на паузе',
     callback: 'Перезвон назначен',
     issued: 'У оператора',
     answered: 'Дозвонились',

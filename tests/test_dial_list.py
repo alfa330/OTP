@@ -587,7 +587,15 @@ class LeadsJournalTests(unittest.TestCase):
                          "l.attempts_total >= %(max_attempts)s", "l.status = 'excluded'"):
             self.assertIn(fragment, sql)
         self.assertEqual(set(dial_service.LEAD_STAGES),
-                         {'queue', 'waiting', 'issued', 'answered', 'exhausted', 'excluded', 'signed', 'sign_wait'})
+                         {'queue', 'waiting', 'parked', 'issued', 'answered', 'exhausted', 'excluded', 'signed',
+                          'sign_wait'})
+        # «База на паузе» (точечная обработка, 17.11.2026): тот же признак отметок файлов, что у пула, и раньше
+        # «Ждёт повтора» и «В очереди» — водителя неотмеченного файла пул не выдаст.
+        from dial_list import batch_focus
+        in_work = batch_focus.in_work_sql("l")
+        self.assertIn(in_work, dial_service.DialListService._POOL_SQL)
+        self.assertIn("WHEN NOT " + in_work + " THEN 'parked'", sql)
+        self.assertLess(sql.index("THEN 'parked'"), sql.index("THEN 'waiting'"))
         # Подписавший — первым: из пула он ушёл (signed_at в _POOL_SQL), и «В очереди»
         # у него было бы неправдой (владелец, 29.09.2026). Сразу за ним — «на проверке у
         # Яндекса» (11.10.2026): водитель уже подписал и из пула ушёл так же.

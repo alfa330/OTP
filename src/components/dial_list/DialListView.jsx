@@ -507,7 +507,10 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         </div>
                                         <div className="mt-1 text-[12.5px] text-slate-500">
                                             {(tez || enabled) && (dept.summary?.pool_available ?? 0) === 0
-                                                ? 'База пуста — загрузите список водителей во вкладке «База водителей».'
+                                                ? (dept.summary?.focus?.active
+                                                    // Точечная обработка (17.11.2026): база не пуста — пусты отмеченные файлы.
+                                                    ? 'В отмеченных файлах звонить некому — отметьте другие во вкладке «База водителей» или снимите отметки.'
+                                                    : 'База пуста — загрузите список водителей во вкладке «База водителей».')
                                                 : tez
                                                     ? 'Включите операторов во вкладке «Настройки» — в статусе «Активный» их телефоны звонят сами.'
                                                     : !enabled
@@ -587,6 +590,7 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                             period={period === 'all' ? '' : period}
                             onPeriodChange={setPeriod}
                             onChanged={dept.reload}
+                            onSummary={dept.applySummary}
                             canEdit={canEdit}
                             showToast={showToast}
                             profile={sectionProfile}

@@ -1,10 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Check } from 'lucide-react';
 import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosToggle, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import useStableCallback from '../wiki/useStableCallback';
 import { buildPeriodOptions, monthLabel } from '../dial_list/dialListPeriods';
 import { citiesSummary } from '../dial_list/signReport';
+import {
+    batchProgress, focusHint, focusStateText, focusWaitingText, goalLabel, toggledFocus, uploadFocusNote,
+    withFocusDraft,
+} from '../dial_list/batchFocus';
 import {
     LIMITS, PROFILE_REMOTE_CC, PROFILE_TEZ, RETRY_MINUTES_MAX, RETRY_SCHEDULE_MAX, formatMinutes, formatSchedule,
     formatSeconds, mirrorSummary, normalizeProfile, rateLabel, retryPlanText, scheduleFromInputs, tezSettingsForm,
@@ -116,9 +121,14 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, p
     // 403 — раздел не для этого человека (пилот или чужой отдел): встроенные
     // карточки в таком случае не показываются вовсе, а не пишут ошибку.
     const [forbidden, setForbidden] = useState(false);
+    // Номер загрузки: ответ, который обогнали более новая загрузка или сводка, уже возвращённая сервером на
+    // действие (applySummary — отметки файлов, 17.11.2026), не применяется. Иначе опрос сводки у Тез (раз в 5 с,
+    // пока идёт проверка поездок), начатый до отметки, возвращал бы на экран прежние отметки.
+    const loadSeq = useRef(0);
 
     const load = useCallback(async () => {
         if (!departmentId) return;
+        const my = ++loadSeq.current;
         setLoading(true);
         setError('');
         try {
@@ -127,23 +137,35 @@ export const useDialListDepartment = ({ apiBaseUrl, authHeaders, departmentId, p
                 fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/settings`, { credentials: 'include', headers: authHeaders() }),
                 fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/leads/summary${qs}`, { credentials: 'include', headers: authHeaders() }),
             ]);
+            if (my !== loadSeq.current) return;
             if (sResp.status === 403) { setForbidden(true); return; }
             if (!sResp.ok) throw new Error(await readError(sResp));
             const sData = await sResp.json();
+            const lData = lResp.ok ? await lResp.json() : null;
+            if (my !== loadSeq.current) return;
             setSettings(sData.settings || {});
-            setSummary(lResp.ok ? await lResp.json() : null);
+            setSummary(lData);
         } catch (e) {
+            if (my !== loadSeq.current) return;
             setError(e.message || 'Не удалось загрузить настройки обзвона');
         } finally {
-            setLoading(false);
+            if (my === loadSeq.current) setLoading(false);
         }
     }, [apiBaseUrl, authHeaders, departmentId, period]);
+
+    const applySummary = useCallback((data) => {
+        loadSeq.current += 1;
+        setSummary(data);
+        setLoading(false);
+    }, []);
 
     useEffect(() => { load(); }, [load]);
 
     const departmentProfile = settings ? normalizeProfile(settings.profile) : null;
     return {
-        settings, summary, loading, error, forbidden, reload: load,
+        // applySummary — сводка, которую сервер уже вернул ответом на действие (отметки файлов,
+        // 17.11.2026): экран обновляется сразу, без второго запроса.
+        settings, summary, loading, error, forbidden, reload: load, applySummary,
         profile: departmentProfile,
         mismatch: departmentProfile !== null && departmentProfile !== normalizeProfile(profile),
     };
@@ -511,7 +533,73 @@ const TripCheckCard = ({ check }) => {
     );
 };
 
-export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
+/* Строка файла в «Загрузках за месяц» (точечная обработка, владелец 17.11.2026). Слева — кружок отметки «в работе»
+   (как выбор в списках iOS: пустой — не отмечен, синий с галочкой — отмечен), справа — сколько водителей файла уже
+   обработано. Под названием — что дала загрузка; справа — сколько осталось и цель отдела. Полоса: зелёное — цель,
+   синее — остальные обработанные. Пока отмечены другие файлы, неотмеченный приглушён: его водителей операторы не
+   получают. Нажатие по всей строке — отметить или снять (только обзваниваемый месяц и с правом правки). */
+const BatchRow = ({ batch, isTez, mark, paused, busy, onToggle, showWaiting }) => {
+    const pr = batchProgress(batch);
+    const upload = [fmtDate(batch.created_at), `строк ${batch.rows_total ?? 0}`];
+    if (batch.rows_new) upload.push(`новых ${batch.rows_new}`);
+    if (batch.rows_duplicate) upload.push(`повтор ${batch.rows_duplicate}`);
+    const problems = [
+        batch.rows_bad_iin > 0 ? `без ИИН ${batch.rows_bad_iin}` : '',
+        batch.rows_invalid > 0 ? `без номера ${batch.rows_invalid}` : '',
+    ].filter(Boolean);
+    const body = (
+        <>
+            {mark !== null && (mark
+                ? (
+                    <span className="mt-0.5 grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full bg-blue-600 text-white" aria-hidden="true">
+                        <Check size={13} strokeWidth={3.2} />
+                    </span>
+                )
+                : <span className="mt-0.5 h-[22px] w-[22px] shrink-0 rounded-full ring-[1.5px] ring-inset ring-slate-300" aria-hidden="true" />)}
+            <div className={`min-w-0 flex-1 transition-opacity ${paused ? 'opacity-60' : ''}`}>
+                <div className="flex items-baseline justify-between gap-3">
+                    <div className="truncate text-[13.5px] font-medium text-slate-800">{batch.file_name || 'файл'}</div>
+                    {pr.total > 0 && <div className="shrink-0 text-[13px] font-semibold tabular-nums text-slate-700">{pr.pct}&nbsp;%</div>}
+                </div>
+                <div className="mt-0.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-[11.5px] text-slate-500">
+                    <span className="tabular-nums">
+                        {upload.join(' · ')}
+                        {problems.length > 0 && <span className="text-rose-600">{` · ${problems.join(' · ')}`}</span>}
+                    </span>
+                    {pr.total > 0 ? (
+                        <span className="tabular-nums">
+                            {`осталось ${pr.open}`}
+                            {pr.goal > 0 && <span className="text-emerald-600">{` · ${goalLabel(isTez)} ${pr.goal}`}</span>}
+                        </span>
+                    ) : <span>водителей нет</span>}
+                </div>
+                {pr.total > 0 && (
+                    <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                        <div className="h-full bg-emerald-500" style={{ width: `${pr.goalShare * 100}%` }} />
+                        <div className="h-full bg-blue-500" style={{ width: `${pr.restShare * 100}%` }} />
+                    </div>
+                )}
+                {showWaiting && <div className="mt-1.5 text-[11.5px] text-amber-700">Сейчас звонить некому: остальные ждут повтора</div>}
+            </div>
+        </>
+    );
+    if (!onToggle) return <div className="flex items-start gap-3 px-4 py-3">{body}</div>;
+    return (
+        <button
+            type="button"
+            role="checkbox"
+            aria-checked={!!mark}
+            aria-label={`${batch.file_name || 'файл'}: ${mark ? 'в работе' : 'не в работе'}`}
+            disabled={busy}
+            onClick={() => onToggle(batch.id)}
+            className={`flex w-full items-start gap-3 px-4 py-3 text-left transition active:scale-[0.995] disabled:cursor-wait ${mark ? 'bg-blue-50/50' : 'hover:bg-slate-50'}`}
+        >
+            {body}
+        </button>
+    );
+};
+
+export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summary, period = '', onPeriodChange, onChanged, onSummary, canEdit = true, showToast, profile = PROFILE_REMOTE_CC }) => {
     const isTez = normalizeProfile(profile) === PROFILE_TEZ;
     const [uploading, setUploading] = useState(false);
     const [dragOver, setDragOver] = useState(false);
@@ -525,6 +613,11 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
     // Города по ИИН (19.10.2026): свой файл и своя загрузка, база не трогается.
     const citiesRef = useRef(null);
     const [citiesBusy, setCitiesBusy] = useState(false);
+    // Точечная обработка (17.11.2026): отметки, которые сервер сейчас сохраняет (список id — экран показывает их
+    // сразу), и идёт ли сохранение: на это время строки не нажимаются, и два нажатия подряд не разойдутся
+    // порядком ответов.
+    const [focusDraft, setFocusDraft] = useState(null);
+    const [focusBusy, setFocusBusy] = useState(false);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -532,7 +625,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
     // onChanged — перечитать отдел (настройки + сводку); в зависимости опроса не кладём.
     const reloadSummary = useStableCallback(() => onChanged?.());
 
-    useEffect(() => { setLastUpload(null); setPollUntil(0); }, [departmentId]);
+    useEffect(() => { setLastUpload(null); setPollUntil(0); setFocusDraft(null); }, [departmentId]);
 
     const tripRunning = !!summary?.trip_check?.running;
     useEffect(() => {
@@ -562,8 +655,11 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
             // Не загрузилось ничего из-за ИИН — это ошибка файла, а не успех.
             const failedAll = !data.rows_new && !data.rows_duplicate && (data.rows_bad_iin || data.rows_invalid);
+            // Отмечены другие файлы обзваниваемого месяца — новый сам в работу не встаёт: сказать сразу.
+            const focusNote = isActive && !failedAll ? uploadFocusNote(summary) : '';
+            const withFocusNote = (text) => (focusNote ? `${text}. ${focusNote}` : text);
             if (isTez) {
-                toast(tezUploadSummary(data, monthLabel(data.period || shownPeriod)), failedAll ? 'error' : 'success');
+                toast(withFocusNote(tezUploadSummary(data, monthLabel(data.period || shownPeriod))), failedAll ? 'error' : 'success');
                 // Сбой зеркала загрузку не валит (контракт §5) — но руководитель должен
                 // знать, что во второй базе этого файла нет: отдельным тостом-ошибкой.
                 const mirror = mirrorSummary(data.mirror);
@@ -571,7 +667,7 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
                 setLastUpload({ fileName: file.name, at: new Date().toISOString(), data, mirror });
                 setPollUntil(Date.now() + 90 * 1000);
             } else {
-                toast(uploadSummary(data, shownPeriod), failedAll ? 'error' : 'success');
+                toast(withFocusNote(uploadSummary(data, shownPeriod)), failedAll ? 'error' : 'success');
             }
             onChanged?.();
         } catch (e) {
@@ -579,6 +675,33 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         } finally {
             setUploading(false);
             if (fileRef.current) fileRef.current.value = '';
+        }
+    };
+
+    // Точечная обработка: ровно эти файлы «в работе» (пусто — вся база). Ответ сервера — свежая сводка: её и
+    // показываем (onSummary), без второго запроса. Отказ — сказать почему и перечитать: отметки мог поменять
+    // кто-то другой.
+    const saveFocus = async (ids) => {
+        if (focusBusy || !canEdit) return;
+        setFocusDraft(ids);
+        setFocusBusy(true);
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/batches/focus`, {
+                method: 'PUT',
+                credentials: 'include',
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ batch_ids: ids, ...(shownPeriod ? { period: shownPeriod } : {}) }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`);
+            if (typeof onSummary === 'function') onSummary(data);
+            else onChanged?.();
+        } catch (e) {
+            toast(e.message || 'Не удалось отметить файлы', 'error');
+            onChanged?.();
+        } finally {
+            setFocusDraft(null);
+            setFocusBusy(false);
         }
     };
 
@@ -623,6 +746,13 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
         { label: 'Подписали', value: summary?.signed ?? 0, tone: 'text-emerald-600' },
         { label: 'Доступно сейчас', value: isActive ? (summary?.pool_available ?? 0) : '—', tone: 'text-blue-600' },
     ];
+
+    // Точечная обработка (17.11.2026): отметки — только у обзваниваемого месяца (из других пул никого не выдаёт)
+    // и только у сервера, который о них знает (ключ focus в сводке).
+    const batches = withFocusDraft(summary?.batches || [], focusDraft);
+    const focusShown = isActive && Boolean(summary?.focus);
+    const focusOn = focusShown && batches.some((b) => b.focused);
+    const waitingText = focusShown && !focusDraft ? focusWaitingText(summary) : '';
 
     return (
         <div className="space-y-4">
@@ -752,24 +882,52 @@ export const DialListLeadsPanel = ({ apiBaseUrl, authHeaders, departmentId, summ
             )}
 
             <section className="space-y-1.5">
-                <div className={iosGroupLabel}>Загрузки за {monthLabel(shownPeriod) || 'месяц'}</div>
-                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
-                    {!summary?.batches?.length ? (
-                        <div className="px-4 py-5 text-center text-[13px] text-slate-500">В этот месяц файлов ещё не загружали</div>
-                    ) : summary.batches.slice(0, 8).map((b) => (
-                        <div key={b.id} className="flex items-center justify-between gap-3 px-4 py-3">
-                            <div className="min-w-0">
-                                <div className="truncate text-[13.5px] font-medium text-slate-800">{b.file_name || 'файл'}</div>
-                                <div className="text-[11.5px] text-slate-500">{fmtDate(b.created_at)} · строк {b.rows_total}</div>
-                            </div>
-                            <div className="flex shrink-0 items-center gap-1.5">
-                                <IosBadge tone="green">+{b.rows_new}</IosBadge>
-                                {b.rows_duplicate > 0 && <IosBadge tone="slate">повтор {b.rows_duplicate}</IosBadge>}
-                                {b.rows_bad_iin > 0 && <IosBadge tone="red">без ИИН {b.rows_bad_iin}</IosBadge>}
-                                {b.rows_invalid > 0 && <IosBadge tone="red">без номера {b.rows_invalid}</IosBadge>}
-                            </div>
+                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-1">
+                    <div className="flex items-center gap-1.5">
+                        <span className={iosGroupLabel}>Загрузки за {monthLabel(shownPeriod) || 'месяц'}</span>
+                        {focusShown && batches.length > 0 && (
+                            <IosHint text={focusHint(isTez)} label="Как выбрать файлы для обзвона" />
+                        )}
+                    </div>
+                    {focusShown && batches.length > 0 && (
+                        <div className="flex items-center gap-1 text-[12px]">
+                            <span className={`tabular-nums ${focusOn ? 'font-medium text-blue-600' : 'text-slate-500'}`}>
+                                {focusStateText(batches)}
+                            </span>
+                            {focusOn && canEdit && (
+                                <button
+                                    type="button"
+                                    onClick={() => saveFocus([])}
+                                    disabled={focusBusy}
+                                    className="rounded-lg px-2 py-1 font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 active:scale-[0.98] disabled:opacity-50"
+                                >
+                                    Снять отметки
+                                </button>
+                            )}
                         </div>
-                    ))}
+                    )}
+                </div>
+                {waitingText && (
+                    <div className="rounded-xl bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">{waitingText}</div>
+                )}
+                <div className={`${iosCard} divide-y divide-slate-100 overflow-hidden`}>
+                    {!batches.length ? (
+                        <div className="px-4 py-5 text-center text-[13px] text-slate-500">В этот месяц файлов ещё не загружали</div>
+                    ) : batches.map((b) => {
+                        const pr = batchProgress(b);
+                        return (
+                            <BatchRow
+                                key={b.id}
+                                batch={b}
+                                isTez={isTez}
+                                mark={focusShown ? Boolean(b.focused) : null}
+                                paused={focusOn && !b.focused}
+                                busy={focusBusy}
+                                onToggle={focusShown && canEdit ? (id) => saveFocus(toggledFocus(batches, id)) : null}
+                                showWaiting={focusOn && Boolean(b.focused) && !focusDraft && pr.open > 0 && pr.ready === 0}
+                            />
+                        );
+                    })}
                 </div>
             </section>
         </div>
@@ -823,6 +981,7 @@ export const DialListDepartmentCard = ({ apiBaseUrl, authHeaders, departmentId, 
                     departmentId={departmentId}
                     summary={dept.summary}
                     onChanged={dept.reload}
+                    onSummary={dept.applySummary}
                     canEdit={canEdit}
                     showToast={showToast}
                 />

@@ -167,7 +167,12 @@ phone_event, outcome и mode — без замка: идущий разгово�
                                                              ИИН обязателен, после загрузки — проверка подписания;
                                                              у Тез — ФИО + телефон (+ город), проверка поездок и
                                                              тот же файл в базу успешек (mirror)
-    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=)
+    GET     /api/dial_list/departments/<id>/leads/summary    сколько загружено/в пуле/подписали (?period=);
+                                                             файлы месяца с отметкой «в работе» и прогрессом
+                                                             каждого (batches[].focused, .progress), focus
+    PUT     /api/dial_list/departments/<id>/batches/focus    точечная обработка: {batch_ids, period?} — ровно
+                                                             эти файлы обзваниваемого месяца «в работе»
+                                                             (пусто — вся база); ответ — сводка базы
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
     GET     /api/dial_list/departments/<id>/funnel           «Воронка ОП» Тез: база → уже зарегистрированы →
@@ -923,6 +928,22 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         _manager(department_id)
         period = parse_period(request.args.get('period'))
         return jsonify({"status": "success", **svc.leads_summary(department_id, period=period)}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/batches/focus', methods=['PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def batches_focus(department_id):
+        """Точечная обработка (владелец, 17.11.2026): {batch_ids: [...], period?: 'YYYY-MM'} — ровно эти файлы
+        базы обзваниваемого месяца «в работе» (пустой список — обзванивается вся база). Право — то же, что у
+        загрузки базы. Ответ — сводка базы, как у leads/summary."""
+        requester_id, _scope = _manager(department_id)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise DialListError("Ожидается JSON-объект {batch_ids: [...]}")
+        period = parse_period(data.get('period'))
+        summary = svc.set_batch_focus(department_id, data.get('batch_ids'), requester_id=requester_id,
+                                      period=period)
+        return jsonify({"status": "success", **summary}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/analytics', methods=['GET', 'OPTIONS'])
     @require_api_key

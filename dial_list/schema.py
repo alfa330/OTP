@@ -17,7 +17,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
                                    нужно для пилота на одном-двух операторах,
                                    потому что телефон раскатывается всем сразу.
     dial_list_lead_batches         загрузки списков водителей (файл ФИО+телефон)
-                                   отделом-обзвонщиком.
+                                   отделом-обзвонщиком; focused — файл отмечен на
+                                   точечную обработку (batch_focus.py).
     dial_list_leads                база водителей ОТДЕЛА: ФИО, номер, сколько раз
                                    звонили, дозвонились ли. Номер уникален в
                                    пределах отдела: у каждого отдела-обзвонщика
@@ -543,6 +544,14 @@ DDL = [
     # Yandex Driver Id из Sapar (driver_ids.py): NULL — Sapar ещё не спрашивали, '' — спросили, а он
     # водителя не знает, иначе ID через запятую. Индекса нет: читают выгрузки по уже отобранным строкам.
     "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS yandex_driver_ids TEXT",
+    # Точечная обработка (владелец, 17.11.2026; правило — batch_focus.py): файлы базы месяца, которые
+    # руководитель отметил «в работу». Отмечен хоть один файл месяца — пул выдаёт водителей только
+    # отмеченных файлов; ни одного — всю базу месяца, как раньше. focused_at / focused_by — когда и кто
+    # отметил (разбор «почему этот файл не обзванивали»); FK на users нет намеренно: стартовый DDL не
+    # должен ждать блокировку users.
+    "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused BOOLEAN NOT NULL DEFAULT FALSE",
+    "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_lead_batches ADD COLUMN IF NOT EXISTS focused_by INTEGER",
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
@@ -641,6 +650,10 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_wa_messages_lead ON dial_list_wa_messages(lead_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempt_offers_offer ON dial_list_attempt_offers(offer_id)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_offers_department ON dial_list_offers(department_id, position)",
+    # Отмеченные файлы месяца (batch_focus.in_work_sql): пул на каждой выдаче спрашивает, отмечен ли в
+    # месяце отдела хоть один файл.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_lead_batches_focused ON dial_list_lead_batches(department_id, period)"
+    " WHERE focused",
 ]
 
 

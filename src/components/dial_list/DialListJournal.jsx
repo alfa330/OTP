@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    Ban, CalendarClock, CarFront, Check, ChevronRight, Clock3, FileCheck2, FileClock, Hourglass, Loader2, PhoneCall,
+    Ban, CalendarClock, CarFront, Check, ChevronRight, CirclePause, Clock3, FileCheck2, FileClock, Hourglass, Loader2, PhoneCall,
     PhoneMissed, PhoneOff, PhoneOutgoing, Play, Plus, RefreshCw, Search, SlidersHorizontal, StickyNote, TriangleAlert,
     Undo2, X,
 } from 'lucide-react';
@@ -15,6 +15,7 @@ import { subtypeChips } from './outcomeFormat';
 import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
 import { operatorsForFilter } from './linePicker';
+import { PARKED_STAGE } from './batchFocus';
 import {
     PROFILE_TEZ, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, leadDue, normalizeProfile,
     registrationLabel, tezStageLabel, tezSuccessText, tripLabel,
@@ -81,6 +82,8 @@ const MAX_PAGE = 200; // JOURNAL_MAX_LIMIT на сервере
 const STAGES = [
     { value: 'queue', label: 'В очереди', dot: 'bg-slate-400' },
     { value: 'waiting', label: 'Ждут повтора', dot: 'bg-amber-400' },
+    // Точечная обработка (17.11.2026): файл водителя не отмечен, а другие отмечены. Чип — только когда такие есть.
+    PARKED_STAGE,
     { value: 'issued', label: 'У операторов', dot: 'bg-blue-500' },
     { value: 'answered', label: 'Дозвонились', dot: 'bg-emerald-500' },
     { value: 'exhausted', label: 'Не дозвонились', dot: 'bg-rose-500' },
@@ -255,6 +258,9 @@ const stageDetail = (lead, tez = false) => {
             return last ? [result, attempt].filter(Boolean).join(' · ') : 'ещё не звонили';
         case 'waiting':
             return [result, lead.next_retry_at ? `повтор ${fmtWhen(lead.next_retry_at)}` : attempt].filter(Boolean).join(' · ');
+        case 'parked':
+            // Точечная обработка: операторы получают только отмеченные файлы, этот — нет.
+            return [last ? result : 'ещё не звонили', 'файл не отмечен в работу'].filter(Boolean).join(' · ');
         case 'issued':
             return last ? [result, attempt].filter(Boolean).join(' · ') : 'в списке, ещё не звонили';
         case 'answered':
@@ -415,8 +421,9 @@ const LeadRow = ({ lead, onOpen, showMonth, tez = false }) => {
    знает, на отбор по нему ответил бы 400 «stage: неизвестный этап». Выбранный
    чип не прячем — иначе отбор было бы нечем снять. */
 const StageStrip = ({ value, onChange, counts, stages: list = STAGES }) => {
-    const stages = list.filter((s) => !s.onlyIfReported || value === s.value
-        || Object.prototype.hasOwnProperty.call(counts, s.value));
+    const stages = list.filter((s) => (!s.onlyIfReported || value === s.value
+        || Object.prototype.hasOwnProperty.call(counts, s.value))
+        && (!s.hideIfZero || value === s.value || Number(counts[s.value]) > 0));
     const all = stages.reduce((sum, s) => sum + (Number(counts[s.value]) || 0), 0);
     const items = [{ value: '', label: 'Все', count: all }, ...stages.map((s) => ({ ...s, count: Number(counts[s.value]) || 0 }))];
     return (
@@ -722,6 +729,7 @@ const History = ({ lead, recordings, onRecording, tez = false }) => {
 const STAGE_BADGE = {
     queue: { Icon: Clock3, tone: 'slate' },
     waiting: { Icon: Hourglass, tone: 'amber' },
+    parked: { Icon: CirclePause, tone: 'slate' },
     issued: { Icon: PhoneOutgoing, tone: 'blue' },
     answered: { Icon: PhoneCall, tone: 'green' },
     exhausted: { Icon: PhoneMissed, tone: 'red' },
