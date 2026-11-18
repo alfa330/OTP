@@ -3870,17 +3870,6 @@ class SchemaMixin:
                 CREATE INDEX IF NOT EXISTS idx_chat_resource_hours_date
                 ON chat_resource_hours(report_date);
             """)
-            # Планы графиков теперь общие для линии и чата, поэтому им нужен
-            # дискриминатор направления. DEFAULT 'line' — все существующие планы
-            # (и вся механика аукциона, что на них завязана) остаются линией.
-            cursor.execute("""
-                ALTER TABLE resource_saved_schedule_plans
-                ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(10) NOT NULL DEFAULT 'line';
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_plans_mode_period
-                ON resource_saved_schedule_plans(direction_mode, date_from, date_to, archived_at);
-            """)
             # Настройки распределения звонков на оценку («Деление звонков»): фильтр длительности
             # + флаг автораспределения. Singleton + аудит (кто/когда), история изменений отдельно.
             cursor.execute("""
@@ -4500,6 +4489,19 @@ class SchemaMixin:
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     archived_at TIMESTAMP NULL
                 );
+            """)
+            # Планы графиков теперь общие для линии и чата, поэтому им нужен
+            # дискриминатор направления. DEFAULT 'line' — все существующие планы
+            # (и вся механика аукциона, что на них завязана) остаются линией.
+            # Строго ПОСЛЕ CREATE TABLE выше: на пустой базе таблицы раньше нет, а
+            # _init_db — одна транзакция, и упавший ALTER откатывал всю схему.
+            cursor.execute("""
+                ALTER TABLE resource_saved_schedule_plans
+                ADD COLUMN IF NOT EXISTS direction_mode VARCHAR(10) NOT NULL DEFAULT 'line';
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_saved_schedule_plans_mode_period
+                ON resource_saved_schedule_plans(direction_mode, date_from, date_to, archived_at);
             """)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS resource_saved_schedule_shifts (

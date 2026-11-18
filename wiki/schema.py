@@ -1563,18 +1563,21 @@ def _regenerate_folded_columns(cursor):
     rebuilt = []
     for table, column in (('wiki_articles', 'search_vector'),
                           ('wiki_ai_chunks', 'chunk_tsv')):
+        # to_regclass, а не %s::regclass: на пустой базе wiki_ai_chunks создаётся
+        # НИЖЕ (_AI_STATEMENTS), и приведение к regclass падало UndefinedTable —
+        # откатывалась вся схема вики, а за ней «Посылки», вода и термокороба.
         cursor.execute(
             """
             SELECT pg_get_expr(d.adbin, d.adrelid)
               FROM pg_attrdef d
               JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
-             WHERE d.adrelid = %s::regclass AND a.attname = %s
+             WHERE d.adrelid = to_regclass(%s) AND a.attname = %s
             """,
             (table, column),
         )
         row = cursor.fetchone()
         if not row:
-            continue                      # колонки ещё нет — её создаст ADD COLUMN
+            continue                      # таблицы или колонки ещё нет — их создадут ниже
         if SQL_FOLD_FROM in (row[0] or ''):
             continue                      # правило уже актуальное
         cursor.execute('ALTER TABLE %s DROP COLUMN %s' % (table, column))
