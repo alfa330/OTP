@@ -32,13 +32,13 @@ TASK_ALLOWED_TAGS = {'task', 'problem', 'suggestion', 'production'}
 
 TASK_ALLOWED_ACTIONS = {'in_progress', 'completed', 'accepted', 'returned', 'reopened'}
 
-# Перенос карточки уволенного исполнителя суперадмином (владелец, 17.11.2026):
-# коды db.move_fired_assignee_task → текст и код ответа.
+# Перенос карточки уволенного сотрудника суперадмином (владелец, 17.11.2026):
+# коды db.move_fired_employee_task → текст и код ответа.
 TASK_FIRED_MOVE_ERRORS = {
     'TASK_NOT_FOUND': ("Task not found", 404),
     'INVALID_COLUMN': ("Неизвестная колонка доски", 400),
     'ONLY_SUPER_ADMIN_MOVES': ("Карточки уволенных переносит только суперадмин", 403),
-    'ASSIGNEE_NOT_FIRED': ("Исполнитель не уволен — задачу двигает он сам", 409),
+    'NO_FIRED_EMPLOYEE': ("В задаче нет уволенных — её двигают по обычным правилам", 409),
 }
 
 TASK_ALLOWED_PRIORITIES = {'normal', 'urgent', 'critical'}
@@ -2917,11 +2917,11 @@ def build_tasks_blueprint(
 
     @bp.route('/tasks/<int:task_id>/move', methods=['POST', 'OPTIONS'])
     @require_api_key
-    def move_fired_assignee_task(task_id):
-        """Карточка уволенного исполнителя — в любую колонку доски; только суперадмин.
+    def move_fired_employee_task(task_id):
+        """Карточка уволенного сотрудника — в любую колонку доски; только суперадмин.
 
         Тело: {"column": "todo" | "backlog" | "progress" | "returned" | "review" | "done"}.
-        Шаг пишется в историю задачи, Telegram не уходит — см. db.move_fired_assignee_task.
+        Шаг пишется в историю задачи, Telegram не уходит — см. db.move_fired_employee_task.
         """
         try:
             requester_id, requester, guard_response, guard_status = _task_route_guard()
@@ -2932,7 +2932,7 @@ def build_tasks_blueprint(
             if not isinstance(data, dict):
                 data = {}
             try:
-                result = db.move_fired_assignee_task(
+                result = db.move_fired_employee_task(
                     task_id=task_id,
                     requester_id=requester_id,
                     requester_role=getattr(g, 'effective_task_role', requester[3]),
@@ -2950,7 +2950,7 @@ def build_tasks_blueprint(
                 "task": result,
             }), 200
         except Exception as e:
-            logging.error(f"Error in move_fired_assignee_task: {e}", exc_info=True)
+            logging.error(f"Error in move_fired_employee_task: {e}", exc_info=True)
             return jsonify({"error": "Internal server error"}), 500
 
     return bp

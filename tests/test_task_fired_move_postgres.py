@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Необязательная проверка настоящим SQL: TASK_PROJECTS_TEST_PORT — порт локального Postgres.
 
-Карточки уволенных (владелец, 17.11.2026): суперадмин переносит карточку, у которой
-уволен исполнитель, в любую колонку доски одним шагом. Здесь — что метод на деле
+Карточки уволенных (владелец, 17.11.2026): суперадмин переносит карточку, где уволен
+исполнитель, постановщик или поручитель (задача 332, 18.11), в любую колонку доски одним шагом. Здесь — что метод на деле
 пишет в базу: статус и бэклог ровно той колонки, место в очереди, старт работы,
 строку истории (её CHECK взят из настоящей схемы db/schema.py), и кому перенос
 закрыт. Настоящие методы Database (вытащены AST'ом из склейки database.py и
@@ -48,7 +48,7 @@ TASK_STATUS_CHECK = _schema_check(
 HISTORY_STATUS_CHECK = _schema_check(
     r"CREATE TABLE IF NOT EXISTS task_status_history \(.*?status_code VARCHAR\(32\) NOT NULL CHECK \(status_code IN \(([^)]*)\)\)")
 
-SUPER, ADMIN, FIRED, LEAVING, ACTIVE, BOSS = 1, 2, 3, 4, 5, 6
+SUPER, ADMIN, FIRED, LEAVING, ACTIVE, BOSS, CHIEF = 1, 2, 3, 4, 5, 6, 7
 
 BASE_DDL = f'''
     CREATE TABLE users (id integer PRIMARY KEY, name text NOT NULL, role text NOT NULL, status text);
@@ -56,14 +56,19 @@ BASE_DDL = f'''
         id integer PRIMARY KEY,
         status varchar(32) NOT NULL DEFAULT 'assigned' CHECK (status IN ({TASK_STATUS_CHECK})),
         created_by integer,
+        requested_by_id integer,
         is_backlog boolean NOT NULL DEFAULT FALSE,
         backlog_rank double precision,
         started_at timestamp,
         completed_at timestamp,
         completed_by integer,
         completion_summary text,
+        due_at timestamp,
         updated_at timestamp NOT NULL DEFAULT TIMESTAMP '2026-11-01 09:00:00'
     );
+    CREATE TABLE task_action_reads (user_id integer NOT NULL, task_id integer NOT NULL,
+                                    kind varchar(16) NOT NULL, seen_at timestamp NOT NULL,
+                                    PRIMARY KEY (user_id, task_id));
     CREATE TABLE task_assignees (task_id integer NOT NULL, user_id integer NOT NULL,
                                  position integer NOT NULL DEFAULT 0);
     CREATE TABLE task_status_history (
@@ -81,12 +86,13 @@ BASE_DDL = f'''
         ({FIRED}, 'В Уволенный', 'operator', ' Fired '),
         ({LEAVING}, 'Г Увольняется', 'operator', 'dismissal'),
         ({ACTIVE}, 'Д Работает', 'operator', 'working'),
-        ({BOSS}, 'Е Постановщик', 'sv', 'fired');
+        ({BOSS}, 'Е Уволенная СВ', 'sv', 'fired'),
+        ({CHIEF}, 'Ж Постановщик', 'sv', 'working');
 '''
 
 NAMES = [
-    '_TASK_FIRED_STATUSES', '_TASK_BOARD_COLUMN_STATES', 'TASK_FIRED_MOVE_COMMENT',
-    '_task_board_column_of', '_task_dt_to_iso', 'move_fired_assignee_task',
+    '_TASK_FIRED_STATUSES', '_TASK_BOARD_COLUMN_STATES', 'TASK_FIRED_MOVE_COMMENTS',
+    '_task_board_column_of', '_task_dt_to_iso', '_task_now', '_task_own_move_kind', 'move_fired_employee_task',
 ]
 MODULE_NAMES = {'normalize_role_value', 'role_has_min', 'ROLE_ALIASES', 'ROLE_HIERARCHY'}
 
@@ -103,7 +109,7 @@ COLUMNS = {
 
 def _build_database():
     module = source_cache.parse(DATABASE_SOURCE)
-    namespace = {'contextlib': contextlib, 'Optional': Optional, 'List': List}
+    namespace = {'contextlib': contextlib, 'Optional': Optional, 'List': List, 'datetime': datetime}
     for node in module.body:
         names = ([node.name] if isinstance(node, ast.FunctionDef)
                  else [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)])
@@ -174,11 +180,12 @@ def cur():
             base.execute('DROP SCHEMA %s CASCADE' % name)
 
 
-def _task(cur, task_id, status='assigned', *, assignees=(FIRED,), is_backlog=False, rank=None, started_at=None):
+def _task(cur, task_id, status='assigned', *, assignees=(FIRED,), is_backlog=False, rank=None, started_at=None,
+          creator=CHIEF, requester=None, due_at=None):
     cur.execute(
-        'INSERT INTO tasks (id, status, created_by, is_backlog, backlog_rank, started_at)'
-        ' VALUES (%s, %s, %s, %s, %s, %s)',
-        (task_id, status, BOSS, is_backlog, rank, started_at),
+        'INSERT INTO tasks (id, status, created_by, requested_by_id, is_backlog, backlog_rank, started_at, due_at)'
+        ' VALUES (%s, %s, %s, %s, %s, %s, %s, %s)',
+        (task_id, status, creator, requester, is_backlog, rank, started_at, due_at),
     )
     for position, user_id in enumerate(assignees):
         cur.execute('INSERT INTO task_assignees (task_id, user_id, position) VALUES (%s, %s, %s)',
@@ -214,7 +221,7 @@ def test_every_column_from_every_column(cur):
                 continue
             task_id += 1
             _task(cur, task_id, from_status, is_backlog=from_backlog, rank=5.0 if from_backlog else None)
-            result = DB.move_fired_assignee_task(task_id, SUPER, 'super_admin', to_column)
+            result = DB.move_fired_employee_task(task_id, SUPER, 'super_admin', to_column)
             label = f'{from_column} → {to_column}'
             status, is_backlog, _rank, started, _updated = _state(cur, task_id)
             assert (status, is_backlog) == (to_status, to_backlog), label
@@ -224,7 +231,7 @@ def test_every_column_from_every_column(cur):
             assert result['updated'] is True, label
             assert (result['status'], result['is_backlog'], result['column']) == (to_status, to_backlog, to_column)
             if to_status != from_status:
-                assert _history(cur, task_id) == [(to_status, SUPER, DB.TASK_FIRED_MOVE_COMMENT)], label
+                assert _history(cur, task_id) == [(to_status, SUPER, DB.TASK_FIRED_MOVE_COMMENTS['assignee'])], label
                 assert result['history_id'] is not None, label
             else:
                 # Бэклог ↔ «Новая» статус не меняют — в истории пусто, как и с доски.
@@ -235,7 +242,7 @@ def test_every_column_from_every_column(cur):
 def test_same_column_writes_nothing(cur):
     _task(cur, 1, 'in_progress')
     before = _state(cur, 1)
-    result = DB.move_fired_assignee_task(1, SUPER, 'super_admin', 'progress')
+    result = DB.move_fired_employee_task(1, SUPER, 'super_admin', 'progress')
     assert result['updated'] is False and result['history_id'] is None
     assert _state(cur, 1) == before
     assert _history(cur, 1) == []
@@ -248,13 +255,13 @@ def test_backlog_queue_place(cur):
     _task(cur, 3, 'completed', rank=2.5)
     # Вне бэклога место в очереди хранится от прошлого захода — на конец очереди не влияет.
     _task(cur, 4, 'in_progress', rank=50.0, assignees=(ACTIVE,))
-    result = DB.move_fired_assignee_task(2, SUPER, 'super_admin', 'backlog')
+    result = DB.move_fired_employee_task(2, SUPER, 'super_admin', 'backlog')
     assert _state(cur, 2)[:3] == ('assigned', True, 8.0)
     assert result['backlog_rank'] == 8.0
-    DB.move_fired_assignee_task(3, SUPER, 'super_admin', 'backlog')
+    DB.move_fired_employee_task(3, SUPER, 'super_admin', 'backlog')
     assert _state(cur, 3)[:3] == ('assigned', True, 2.5)
     # Из бэклога в «Новую» — без истории, место в очереди остаётся до следующего захода.
-    DB.move_fired_assignee_task(2, SUPER, 'super_admin', 'todo')
+    DB.move_fired_employee_task(2, SUPER, 'super_admin', 'todo')
     assert _state(cur, 2)[:3] == ('assigned', False, 8.0)
 
 
@@ -263,12 +270,12 @@ def test_work_start_is_stamped_once(cur):
     _task(cur, 1, 'assigned')
     _task(cur, 2, 'accepted', started_at=started)
     _task(cur, 3, 'assigned')
-    DB.move_fired_assignee_task(1, SUPER, 'super_admin', 'progress')
+    DB.move_fired_employee_task(1, SUPER, 'super_admin', 'progress')
     assert _state(cur, 1)[3] is not None
-    DB.move_fired_assignee_task(2, SUPER, 'super_admin', 'progress')
+    DB.move_fired_employee_task(2, SUPER, 'super_admin', 'progress')
     assert _state(cur, 2)[3] == started
     # Сразу в «Готово» — работа не начиналась, старта нет.
-    DB.move_fired_assignee_task(3, SUPER, 'super_admin', 'done')
+    DB.move_fired_employee_task(3, SUPER, 'super_admin', 'done')
     assert _state(cur, 3)[3] is None
     # Отметка «изменена» сдвигается: доска и сортировка «Сначала новые» её видят.
     assert _state(cur, 3)[4] > datetime(2026, 11, 1, 9, 0)
@@ -277,35 +284,35 @@ def test_work_start_is_stamped_once(cur):
 def test_one_fired_assignee_is_enough_and_both_statuses_count(cur):
     _task(cur, 1, 'assigned', assignees=(ACTIVE, FIRED))
     _task(cur, 2, 'in_progress', assignees=(LEAVING,))
-    assert DB.move_fired_assignee_task(1, SUPER, 'super_admin', 'done')['status'] == 'accepted'
-    assert DB.move_fired_assignee_task(2, SUPER, 'super_admin', 'review')['status'] == 'completed'
+    assert DB.move_fired_employee_task(1, SUPER, 'super_admin', 'done')['status'] == 'accepted'
+    assert DB.move_fired_employee_task(2, SUPER, 'super_admin', 'review')['status'] == 'completed'
 
 
 def test_who_cannot_move(cur):
     _task(cur, 1, 'assigned')
     _task(cur, 2, 'assigned', assignees=(ACTIVE,))
-    # Уволен только постановщик — исполнитель работает и двигает задачу сам.
-    _task(cur, 3, 'assigned', assignees=(ACTIVE,))
+    # Все работают, поручитель тоже — переносить по-новому нечего.
+    _task(cur, 3, 'assigned', assignees=(ACTIVE,), requester=SUPER)
     for role in ('admin', 'sv', 'operator', 'superadmin_typo'):
         with pytest.raises(PermissionError, match='ONLY_SUPER_ADMIN_MOVES'):
-            DB.move_fired_assignee_task(1, ADMIN, role, 'done')
+            DB.move_fired_employee_task(1, ADMIN, role, 'done')
     # Псевдоним роли — тот же суперадмин.
-    assert DB.move_fired_assignee_task(1, SUPER, 'superadmin', 'progress')['updated'] is True
+    assert DB.move_fired_employee_task(1, SUPER, 'superadmin', 'progress')['updated'] is True
     for task_id in (2, 3):
-        with pytest.raises(PermissionError, match='ASSIGNEE_NOT_FIRED'):
-            DB.move_fired_assignee_task(task_id, SUPER, 'super_admin', 'done')
+        with pytest.raises(PermissionError, match='NO_FIRED_EMPLOYEE'):
+            DB.move_fired_employee_task(task_id, SUPER, 'super_admin', 'done')
         # И в ту же колонку: ответ «уже там» про чужую задачу — тоже ответ о ней.
-        with pytest.raises(PermissionError, match='ASSIGNEE_NOT_FIRED'):
-            DB.move_fired_assignee_task(task_id, SUPER, 'super_admin', 'todo')
+        with pytest.raises(PermissionError, match='NO_FIRED_EMPLOYEE'):
+            DB.move_fired_employee_task(task_id, SUPER, 'super_admin', 'todo')
     with pytest.raises(ValueError, match='TASK_NOT_FOUND'):
-        DB.move_fired_assignee_task(999, SUPER, 'super_admin', 'done')
+        DB.move_fired_employee_task(999, SUPER, 'super_admin', 'done')
     for column in ('archive', '', None, 'DONE '):
         if column == 'DONE ':
             # Регистр и пробелы колонки не меняют.
-            assert DB.move_fired_assignee_task(1, SUPER, 'super_admin', column)['status'] == 'accepted'
+            assert DB.move_fired_employee_task(1, SUPER, 'super_admin', column)['status'] == 'accepted'
             continue
         with pytest.raises(ValueError, match='INVALID_COLUMN'):
-            DB.move_fired_assignee_task(1, SUPER, 'super_admin', column)
+            DB.move_fired_employee_task(1, SUPER, 'super_admin', column)
     # Отказы ничего не записали.
     assert _state(cur, 2)[:2] == ('assigned', False)
     assert _history(cur, 2) == [] and _history(cur, 3) == []
@@ -317,8 +324,65 @@ def test_move_locks_the_task_row():
     # ждёт открытую транзакцию со строкой задачи и видит уже записанное.
     method = ast.get_source_segment(DATABASE_SOURCE, next(
         node for node in ast.walk(source_cache.parse(DATABASE_SOURCE))
-        if isinstance(node, ast.FunctionDef) and node.name == 'move_fired_assignee_task'))
+        if isinstance(node, ast.FunctionDef) and node.name == 'move_fired_employee_task'))
     select = method[method.index('SELECT t.status'):method.index('row = cursor.fetchone()')]
     assert 'FOR UPDATE' in select
     # Замок берётся раньше любых проверок состояния и записи.
-    assert method.index('FOR UPDATE') < method.index('ASSIGNEE_NOT_FIRED') < method.index('UPDATE tasks')
+    assert method.index('FOR UPDATE') < method.index('NO_FIRED_EMPLOYEE') < method.index('UPDATE tasks')
+
+
+def test_fired_creator_or_requester_is_enough(cur):
+    # Задача 332: поставила уволенная СВ, исполнители — суперадмины, задача сдана.
+    # Принять может только постановщик, свою работу себе не принимают — висела навсегда.
+    _task(cur, 1, 'completed', assignees=(SUPER, ACTIVE), creator=BOSS)
+    result = DB.move_fired_employee_task(1, SUPER, 'super_admin', 'done')
+    assert (result['status'], result['updated']) == ('accepted', True)
+    assert _history(cur, 1) == [('accepted', SUPER, DB.TASK_FIRED_MOVE_COMMENTS['creator'])]
+    # Уволен поручитель (он принимает итог) — то же самое, подпись своя.
+    _task(cur, 2, 'completed', assignees=(ACTIVE,), requester=LEAVING)
+    DB.move_fired_employee_task(2, SUPER, 'super_admin', 'progress')
+    assert _history(cur, 2) == [('in_progress', SUPER, DB.TASK_FIRED_MOVE_COMMENTS['requester'])]
+    # Уволены и исполнитель, и постановщик — подпись про исполнителя: его карточка.
+    _task(cur, 3, 'assigned', assignees=(FIRED,), creator=BOSS)
+    DB.move_fired_employee_task(3, SUPER, 'super_admin', 'done')
+    assert _history(cur, 3) == [('accepted', SUPER, DB.TASK_FIRED_MOVE_COMMENTS['assignee'])]
+    # Постановщика нет вовсе (учётку удалили) — это не «уволен».
+    _task(cur, 4, 'assigned', assignees=(ACTIVE,), creator=None)
+    with pytest.raises(PermissionError, match='NO_FIRED_EMPLOYEE'):
+        DB.move_fired_employee_task(4, SUPER, 'super_admin', 'done')
+
+
+def _reads(cur, task_id):
+    cur.execute('SELECT r.user_id, r.kind, r.seen_at = t.updated_at FROM task_action_reads r'
+                ' JOIN tasks t ON t.id = r.task_id WHERE r.task_id = %s ORDER BY r.user_id', (task_id,))
+    return cur.fetchall()
+
+
+def test_move_author_gets_no_bell_item_about_own_step(cur):
+    # Задача 332: суперадмин-исполнитель закрыл сданную задачу уволенной СВ. Колокол
+    # иначе сказал бы ему же «Работу приняли». Отметка — тем же временем, что правка
+    # задачи: «seen_at < updated_at» колокола ложно. Соисполнителю — сообщить.
+    _task(cur, 1, 'completed', assignees=(SUPER, ACTIVE), creator=BOSS)
+    DB.move_fired_employee_task(1, SUPER, 'super_admin', 'done')
+    assert _reads(cur, 1) == [(SUPER, 'accepted', True)]
+    # Поручитель сам отправил на проверку — «ждёт вашей приёмки» о своём шаге не нужно.
+    _task(cur, 2, 'in_progress', assignees=(FIRED,), requester=SUPER)
+    DB.move_fired_employee_task(2, SUPER, 'super_admin', 'review')
+    assert _reads(cur, 2) == [(SUPER, 'review', True)]
+    # Исполнитель вернул себе в «Новую» и в «Возвращено»; просроченная — «просрочена».
+    _task(cur, 3, 'completed', assignees=(SUPER,), creator=BOSS)
+    DB.move_fired_employee_task(3, SUPER, 'super_admin', 'todo')
+    assert _reads(cur, 3) == [(SUPER, 'fresh', True)]
+    DB.move_fired_employee_task(3, SUPER, 'super_admin', 'returned')
+    assert _reads(cur, 3) == [(SUPER, 'returned', True)]
+    _task(cur, 4, 'completed', assignees=(SUPER,), creator=BOSS, due_at=datetime(2026, 1, 1, 9, 0))
+    DB.move_fired_employee_task(4, SUPER, 'super_admin', 'progress')
+    assert _reads(cur, 4) == [(SUPER, 'overdue', True)]
+    # Не участник и не о себе — ничего не отмечаем: его колокол это не касается.
+    _task(cur, 5, 'completed')
+    DB.move_fired_employee_task(5, SUPER, 'super_admin', 'done')
+    assert _reads(cur, 5) == []
+    # В бэклоге причин нет — отмечать нечего.
+    _task(cur, 6, 'completed', assignees=(SUPER,), creator=BOSS)
+    DB.move_fired_employee_task(6, SUPER, 'super_admin', 'backlog')
+    assert _reads(cur, 6) == []

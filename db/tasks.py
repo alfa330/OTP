@@ -3344,7 +3344,7 @@ class TasksMixin:
                     t.project_id, t.project_number, project.code, project.name,
                     section.id, section.name,
                     t.priority_score,
-                    creator.status, assignee.status
+                    creator.status, assignee.status, origin_user.status
                 FROM tasks t
                 LEFT JOIN users assignee ON assignee.id = t.assigned_to
                 LEFT JOIN users creator ON creator.id = t.created_by
@@ -3606,7 +3606,9 @@ class TasksMixin:
                 "requested_by": ({
                     "id": row[36],
                     "name": row[37],
-                    "source": 'user' if row[36] else 'external'
+                    "source": 'user' if row[36] else 'external',
+                    # Уволенный поручитель — карточка уволенного (перенос суперадмином).
+                    "is_fired": self._task_person_is_fired(row[53]) if row[36] else False
                 } if (row[36] or row[37]) else None),
                 "reminder_minutes_before": row[38],
                 "reminder_sent_at": self._task_dt_to_iso(row[39]),
@@ -3959,8 +3961,12 @@ class TasksMixin:
     }
 
     # Подпись шага в истории задачи: кто перенёс, видно по имени, а почему шаг идёт
-    # мимо жизненного цикла — по ней.
-    TASK_FIRED_MOVE_COMMENT = 'Перенёс суперадмин: исполнитель уволен'
+    # мимо жизненного цикла — по ней. Ключ — чьё увольнение держит задачу.
+    TASK_FIRED_MOVE_COMMENTS = {
+        'assignee': 'Перенёс суперадмин: исполнитель уволен',
+        'creator': 'Перенёс суперадмин: постановщик уволен',
+        'requester': 'Перенёс суперадмин: поручитель уволен',
+    }
 
     @classmethod
     def _task_board_column_of(cls, status, is_backlog):
@@ -3972,20 +3978,47 @@ class TasksMixin:
                 return column
         return 'todo'
 
-    def move_fired_assignee_task(self, task_id, requester_id, requester_role, column):
-        """Карточку уволенного исполнителя суперадмин переносит в любую колонку доски.
+    @staticmethod
+    def _task_own_move_kind(target_status, target_backlog, due_at, now, is_assignee, is_authority):
+        """Причина «Ждут вас», которую перенос создал бы самому его автору.
 
-        Обычный путь карточки — жизненный цикл: взять в работу и сдать может только
-        исполнитель. Уволенный в портал уже не войдёт, и его задачи стояли бы в
-        «Новой» или «В работе» навсегда. Владелец, 17.11.2026: «по уволенным
-        сотрудникам… суперадмины могли переносить их карточки в другие колонки».
-        Отсюда перенос одним шагом в любую колонку — без отчёта о сдаче, окна
-        возврата и обязательного чек-листа: это решение суперадмина, а не работа
-        исполнителя. Telegram не шлём: уволенному писать незачем, а для остальных
-        это уборка доски, а не ход работы по задаче.
+        Те же правила, что в колоколе (notifications/sources.py::tasks) и счётчике
+        (get_task_action_needs_summary), для одной задачи и одного человека: сдана —
+        «ждёт приёмки» у поручителя; принята — «работу приняли» у исполнителя, если
+        принимал не он сам; дальше у исполнителя вне бэклога — просрочка, возврат,
+        «не начата». Вопрос исполнителя (info) не трогаем: он не про перенос.
+        """
+        if target_status == 'completed':
+            return 'review' if is_authority else None
+        if target_status == 'accepted':
+            return 'accepted' if (is_assignee and not is_authority) else None
+        if not is_assignee or target_backlog:
+            return None
+        if due_at is not None and due_at < now:
+            return 'overdue'
+        if target_status == 'returned':
+            return 'returned'
+        if target_status == 'assigned':
+            return 'fresh'
+        return None
 
-        «Уволенный» — как во вкладке «Уволенные» (_TASK_FIRED_STATUSES). Хватает
-        одного уволенного среди исполнителей: карточка стоит и на его доске.
+    def move_fired_employee_task(self, task_id, requester_id, requester_role, column):
+        """Карточку уволенного сотрудника суперадмин переносит в любую колонку доски.
+
+        Обычный путь карточки — жизненный цикл: в работу берёт и сдаёт исполнитель,
+        принимает и возвращает постановщик (или поручитель). Уволенный в портал уже
+        не войдёт, и его задачи застревали: у уволенного исполнителя — в «Новой» и
+        «В работе», у уволенного постановщика — «На проверке» (свою работу себе не
+        принимают, и исполнители-суперадмины закрыть её не могли — задача 332).
+        Владелец, 17.11.2026: «по уволенным сотрудникам… суперадмины могли
+        переносить их карточки в другие колонки». Отсюда перенос одним шагом в любую
+        колонку — без отчёта о сдаче, окна возврата и обязательного чек-листа: это
+        решение суперадмина, а не работа исполнителя. Telegram не шлём: уволенному
+        писать незачем, а для остальных это уборка доски, а не ход работы по задаче.
+
+        Карточка уволенного — уволен хоть кто-то из людей задачи: исполнитель (любой
+        из нескольких), постановщик или поручитель. «Уволенный» — как во вкладке
+        «Уволенные» (_TASK_FIRED_STATUSES).
         """
         task_id = int(task_id)
         requester_id = int(requester_id)
@@ -4002,7 +4035,7 @@ class TasksMixin:
             # Под замком строки, как смена статуса: перенос и сдача в одну и ту же
             # секунду иначе записали бы оба шага поверх друг друга.
             cursor.execute("""
-                SELECT t.status, t.is_backlog, t.backlog_rank
+                SELECT t.status, t.is_backlog, t.backlog_rank, t.created_by, t.requested_by_id, t.due_at
                 FROM tasks t
                 WHERE t.id = %s
                 FOR UPDATE
@@ -4013,19 +4046,37 @@ class TasksMixin:
             current_status = row[0]
             current_backlog = bool(row[1])
             current_rank = row[2]
+            # Кто принимает итог — как _task_review_authority: поручитель, иначе постановщик.
+            authority_id = row[4] if row[4] is not None else row[3]
+            due_at = row[5]
 
+            fired_statuses = sorted(self._TASK_FIRED_STATUSES)
             cursor.execute("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM task_assignees ta
-                    JOIN users u ON u.id = ta.user_id
-                    WHERE ta.task_id = %s
-                      AND LOWER(TRIM(COALESCE(u.status, ''))) = ANY(%s)
-                )
-            """, (task_id, sorted(self._TASK_FIRED_STATUSES)))
-            fired_row = cursor.fetchone()
-            if not (fired_row and fired_row[0]):
-                raise PermissionError("ASSIGNEE_NOT_FIRED")
+                SELECT
+                    EXISTS (
+                        SELECT 1
+                        FROM task_assignees ta
+                        JOIN users u ON u.id = ta.user_id
+                        WHERE ta.task_id = t.id
+                          AND LOWER(TRIM(COALESCE(u.status, ''))) = ANY(%s)
+                    ),
+                    LOWER(TRIM(COALESCE(creator.status, ''))) = ANY(%s),
+                    LOWER(TRIM(COALESCE(origin.status, ''))) = ANY(%s),
+                    EXISTS (
+                        SELECT 1 FROM task_assignees ta_me
+                        WHERE ta_me.task_id = t.id AND ta_me.user_id = %s
+                    )
+                FROM tasks t
+                LEFT JOIN users creator ON creator.id = t.created_by
+                LEFT JOIN users origin ON origin.id = t.requested_by_id
+                WHERE t.id = %s
+            """, (fired_statuses, fired_statuses, fired_statuses, requester_id, task_id))
+            fired_row = cursor.fetchone() or (False, False, False, False)
+            fired_whom = next((whom for whom, fired in zip(('assignee', 'creator', 'requester'), fired_row[:3])
+                               if fired), None)
+            requester_is_assignee = bool(fired_row[3])
+            if fired_whom is None:
+                raise PermissionError("NO_FIRED_EMPLOYEE")
 
             if self._task_board_column_of(current_status, current_backlog) == column_norm:
                 return {
@@ -4070,8 +4121,26 @@ class TasksMixin:
                     INSERT INTO task_status_history (task_id, status_code, changed_by, comment)
                     VALUES (%s, %s, %s, %s)
                     RETURNING id
-                """, (task_id, target_status, requester_id, self.TASK_FIRED_MOVE_COMMENT))
+                """, (task_id, target_status, requester_id, self.TASK_FIRED_MOVE_COMMENTS[fired_whom]))
                 history_id = cursor.fetchone()[0]
+
+            # О своём же шаге автор переноса уведомлений не получает: суперадмин-
+            # исполнитель, закрывший сданную задачу уволенного постановщика (задача
+            # 332), иначе видел бы в колоколе «Работу приняли». Время отметки — то же
+            # CURRENT_TIMESTAMP транзакции, что и updated_at задачи: «seen_at <
+            # updated_at» колокола тогда ложно, и причина остаётся просмотренной.
+            own_kind = self._task_own_move_kind(
+                target_status, target_backlog, due_at, self._task_now(),
+                requester_is_assignee, authority_id is not None and int(authority_id) == requester_id,
+            )
+            if own_kind:
+                cursor.execute("""
+                    INSERT INTO task_action_reads (user_id, task_id, kind, seen_at)
+                    VALUES (%s, %s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty'))
+                    ON CONFLICT (user_id, task_id) DO UPDATE
+                    SET kind = EXCLUDED.kind,
+                        seen_at = EXCLUDED.seen_at
+                """, (requester_id, task_id, own_kind))
 
             return {
                 "task_id": task_id,

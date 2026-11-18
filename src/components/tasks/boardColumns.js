@@ -98,9 +98,13 @@ export const BOARD_COLUMN_STATE = {
   done:     { status: 'accepted',    is_backlog: false },
 };
 
-/* Среди исполнителей есть уволенный — признак is_fired отдаёт сервер, по тем же
-   статусам, что вкладка «Уволенные». */
-export const hasFiredAssignee = (task) => taskAssignees(task).some((person) => Boolean(person?.is_fired));
+/* Карточка уволенного: уволен хоть кто-то из людей задачи — исполнитель (любой из
+   нескольких), постановщик или поручитель. Признак is_fired отдаёт сервер, по тем же
+   статусам, что вкладка «Уволенные». Уволенный постановщик держит задачу «На
+   проверке»: принять её больше некому, а исполнитель свою работу себе не принимает. */
+export const hasFiredParticipant = (task) => Boolean(task?.creator?.is_fired)
+  || Boolean(task?.requested_by?.is_fired)
+  || taskAssignees(task).some((person) => Boolean(person?.is_fired));
 
 /* Перенос карточки уволенного — в форме оптимистичной правки доски: ручке уходит
    ровно та колонка, куда карточку бросили, а её ответ становится списком
@@ -121,10 +125,10 @@ export const resolveBoardDrop = (task, toColumn, ctx) => {
   if (task?.viewer_is_observer) return { type: 'blocked', reason: 'Это задача коллеги — её можно только посмотреть' };
 
   /* Карточку уволенного суперадмин переносит в любую колонку одним шагом (владелец,
-     17.11.2026): двигать её по циклу некому — брать в работу и сдавать может только
-     исполнитель. Окна сдачи и возврата здесь не нужны: карточка встаёт ровно туда,
-     куда её бросили. */
-  if (ctx.isSuperAdmin && hasFiredAssignee(task) && BOARD_COLUMN_STATE[toColumn]) {
+     17.11.2026): двигать её по циклу некому — в работу берёт и сдаёт исполнитель,
+     принимает постановщик. Окна сдачи и возврата здесь не нужны: карточка встаёт
+     ровно туда, куда её бросили. */
+  if (ctx.isSuperAdmin && hasFiredParticipant(task) && BOARD_COLUMN_STATE[toColumn]) {
     return { type: 'move', column: toColumn };
   }
 

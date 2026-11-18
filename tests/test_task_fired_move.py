@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Карточки уволенных: суперадмин переносит их в любую колонку доски (17.11.2026).
+"""Карточки уволенных (исполнитель, постановщик или поручитель): суперадмин переносит их в любую колонку доски.
 
 Здесь — ручка POST /api/tasks/<id>/move и проводка фронта. Ручку гоняем НАСТОЯЩУЮ:
 её тело достаётся из tasks/routes.py AST'ом и выполняется в настоящем запросе
@@ -32,7 +32,7 @@ def _route_namespace():
     builder = next(node for node in module.body
                    if isinstance(node, ast.FunctionDef) and node.name == 'build_tasks_blueprint')
     route = copy.deepcopy(next(node for node in builder.body
-                               if isinstance(node, ast.FunctionDef) and node.name == 'move_fired_assignee_task'))
+                               if isinstance(node, ast.FunctionDef) and node.name == 'move_fired_employee_task'))
     decorators = [ast.unparse(item) for item in route.decorator_list]
     route.decorator_list = []
     exec(compile(ast.Module(body=[route], type_ignores=[]), str(ROUTES_PATH), 'exec'), namespace)
@@ -46,7 +46,7 @@ class FakeDb:
         self.result = {'task_id': 5, 'column': 'done', 'status': 'accepted', 'is_backlog': False,
                        'backlog_rank': None, 'updated': True, 'history_id': 9}
 
-    def move_fired_assignee_task(self, **kwargs):
+    def move_fired_employee_task(self, **kwargs):
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
@@ -77,7 +77,7 @@ class MoveRouteTest(unittest.TestCase):
         elif body is not None:
             kwargs['json'] = body
         with self.app.test_request_context('/api/tasks/5/move', **kwargs):
-            response = self.namespace['move_fired_assignee_task'](5)
+            response = self.namespace['move_fired_employee_task'](5)
             response, status = response if isinstance(response, tuple) else (response, 200)
             return status, response.get_json()
 
@@ -108,7 +108,7 @@ class MoveRouteTest(unittest.TestCase):
     def test_database_refusals_map_to_codes(self):
         cases = [
             (PermissionError('ONLY_SUPER_ADMIN_MOVES'), 403, 'Карточки уволенных переносит только суперадмин'),
-            (PermissionError('ASSIGNEE_NOT_FIRED'), 409, 'Исполнитель не уволен — задачу двигает он сам'),
+            (PermissionError('NO_FIRED_EMPLOYEE'), 409, 'В задаче нет уволенных — её двигают по обычным правилам'),
             (ValueError('INVALID_COLUMN'), 400, 'Неизвестная колонка доски'),
             (ValueError('TASK_NOT_FOUND'), 404, 'Task not found'),
             # Незнакомый отказ не становится 500: код по виду ошибки.

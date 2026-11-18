@@ -197,11 +197,15 @@ class FiredPeopleTests(unittest.TestCase):
         """Статусы постановщика и первого исполнителя — в конце главного запроса
         (номера прежних колонок не сдвигаются), исполнителей — в их пакетном запросе."""
         listing = self.DB_TASKS[self.DB_TASKS.index('    def get_tasks_for_requester('):self.DB_TASKS.index('    def get_tasks_for_export(')]
-        self.assertIn('t.priority_score,\n                    creator.status, assignee.status\n                FROM tasks t', listing)
+        self.assertIn('t.priority_score,\n                    creator.status, assignee.status, origin_user.status\n                FROM tasks t', listing)
         creator = listing[listing.index('"creator": {'):]
         self.assertIn('"is_fired": self._task_person_is_fired(row[51])', creator[:400])
         assignee = listing[listing.index('"assignee": {'):]
         self.assertIn('"is_fired": self._task_person_is_fired(row[52])', assignee[:400])
+        # Поручитель — только у поручителя-сотрудника (у внешнего текста статуса нет):
+        # уволенный поручитель делает карточку переносимой суперадмином.
+        requested = listing[listing.index('"requested_by": ({'):]
+        self.assertIn('"is_fired": self._task_person_is_fired(row[53]) if row[36] else False', requested[:500])
         self.assertIn('u.avatar_bucket, u.avatar_blob_path, u.status\n                    FROM task_assignees ta', listing)
         self.assertIn('"is_fired": self._task_person_is_fired(row[7])', listing)
 

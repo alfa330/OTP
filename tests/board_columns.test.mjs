@@ -5,7 +5,7 @@ import {
   BOARD_COLUMNS,
   BOARD_COLUMN_STATE,
   columnOfTask,
-  hasFiredAssignee,
+  hasFiredParticipant,
   mergeBoardRows,
   overrideFromServer,
   resolveBoardDrop,
@@ -217,16 +217,20 @@ test('состояние колонки ставит карточку ровно
   });
 });
 
-test('уволенный — хоть один из исполнителей; признак у исполнителя, а не у постановщика', () => {
-  assert.equal(hasFiredAssignee(firedTaskIn('assigned')), true);
-  assert.equal(hasFiredAssignee(taskIn('assigned', {
+test('карточка уволенного — уволен исполнитель, постановщик или поручитель', () => {
+  assert.equal(hasFiredParticipant(firedTaskIn('assigned')), true);
+  // Хватает одного из нескольких исполнителей.
+  assert.equal(hasFiredParticipant(taskIn('assigned', {
     assignees: [{ id: ACTIVE }, { id: FIRED, is_fired: true }],
   })), true);
-  assert.equal(hasFiredAssignee(taskIn('assigned')), false);
-  assert.equal(hasFiredAssignee(taskIn('assigned', { creator: { id: BOSS, is_fired: true } })), false);
+  // Уволенный постановщик держит задачу «На проверке» (задача 332).
+  assert.equal(hasFiredParticipant(taskIn('completed', { creator: { id: BOSS, is_fired: true } })), true);
+  assert.equal(hasFiredParticipant(taskIn('completed', { requested_by: { id: BOSS, is_fired: true } })), true);
+  assert.equal(hasFiredParticipant(taskIn('assigned')), false);
+  assert.equal(hasFiredParticipant(taskIn('assigned', { requested_by: { name: 'Клиент', source: 'external' } })), false);
   // Ответ без состава — по единственному исполнителю.
-  assert.equal(hasFiredAssignee({ status: 'assigned', assignee: { id: FIRED, is_fired: true } }), true);
-  assert.equal(hasFiredAssignee(null), false);
+  assert.equal(hasFiredParticipant({ status: 'assigned', assignee: { id: FIRED, is_fired: true } }), true);
+  assert.equal(hasFiredParticipant(null), false);
 });
 
 test('суперадмин переносит карточку уволенного из любой колонки в любую другую', () => {
@@ -261,9 +265,11 @@ test('без суперадмина и без уволенного — преж�
   assert.equal(resolveBoardDrop(taskIn('assigned'), 'progress', superAdmin()).type, 'blocked');
   assert.equal(resolveBoardDrop(taskIn('assigned'), 'done', superAdmin()).type, 'blocked');
   assert.deepEqual(resolveBoardDrop(taskIn('completed'), 'done', superAdmin()), { type: 'status', action: 'accepted' });
-  // Уволен постановщик, исполнитель работает — тоже цикл.
-  const firedBoss = taskIn('assigned', { creator: { id: BOSS, is_fired: true } });
-  assert.equal(resolveBoardDrop(firedBoss, 'done', superAdmin()).type, 'blocked');
+  // Уволен постановщик, но переносит не суперадмин — цикл: админ-исполнитель свою
+  // работу не принимает, админ со стороны принимает как раньше.
+  const firedBoss = taskIn('completed', { creator: { id: BOSS, is_fired: true } });
+  assert.equal(resolveBoardDrop(firedBoss, 'done', as(ASSIGNEE, { isAdmin: true })).type, 'blocked');
+  assert.deepEqual(resolveBoardDrop(firedBoss, 'done', admin), { type: 'status', action: 'accepted' });
   // Неизвестная колонка — не перенос.
   assert.equal(resolveBoardDrop(firedTaskIn('assigned'), 'archive', superAdmin()).type, 'blocked');
 });
@@ -314,6 +320,22 @@ test('перенос уходит на сервер с той колонкой, 
   assert.equal(await sendBoardMove(async () => null, task, 'done'), false);
 });
 
-test('уволенный поручитель — не карточка уволенного (K1)', () => {
-  assert.equal(hasFiredAssignee(taskIn('assigned', { requested_by: { id: BOSS, is_fired: true } })), false);
+/* Задача 332 (18.11.2026): её поставила уволенная СВ, исполнители — два суперадмина,
+   задача сдана. Принять итог может только постановщик, а исполнитель свою работу
+   себе не принимает — карточка стояла «На проверке» навсегда. */
+test('суперадмин-исполнитель закрывает сданную задачу уволенного постановщика', () => {
+  const SECOND_SUPER = 40;
+  const task332 = taskIn('completed', {
+    creator: { id: BOSS, is_fired: true },
+    assignees: [{ id: STRANGER }, { id: SECOND_SUPER }],
+  });
+  // По циклу — отказ: это своя работа.
+  assert.equal(resolveBoardDrop(task332, 'done', as(STRANGER, { isAdmin: true })).type, 'blocked');
+  // Суперадмин переносит в любую колонку.
+  ['done', 'progress', 'todo', 'backlog'].forEach((column) => {
+    assert.deepEqual(resolveBoardDrop(task332, column, superAdmin()), { type: 'move', column }, column);
+  });
+  // Уволенный поручитель — то же самое.
+  const firedRequester = taskIn('completed', { requested_by: { id: BOSS, is_fired: true }, assignees: [{ id: STRANGER }] });
+  assert.deepEqual(resolveBoardDrop(firedRequester, 'done', superAdmin()), { type: 'move', column: 'done' });
 });
