@@ -19,7 +19,7 @@ import { buildSync } from 'esbuild';
 import { TRAINERS } from '../src/components/wiki/trainers/registry.js';
 import taxiPro from '../src/components/wiki/trainers/scenarioTaxiPro.js';
 import {
-    currentStep, expectedTap, startRun, tap, toggle,
+    activeSteps, currentStep, expectedTap, startRun, tap, toggle,
 } from '../src/components/wiki/trainers/runner.js';
 
 async function loadScreens() {
@@ -63,6 +63,16 @@ const renderStep = (run, target) => {
 const highlighted = (html) => [...html.matchAll(/data-tap="([^"]+)" class="[^"]*\bis-target\b/g)]
     .map((m) => m[1]);
 
+/** Правильное нажатие шага; на развилке — кнопка нужного способа. */
+const pickTap = (run, variant) => {
+    const want = expectedTap(run);
+    if (!Array.isArray(want)) return want;
+    const choice = Object.entries(currentStep(run).choices || {}).find(([, v]) => v === variant);
+    return choice ? choice[0] : want[0];
+};
+
+const VARIANTS = Object.keys(taxiPro.variants);
+
 test('карта экранов покрывает каждый шаг каждого тренажёра и не держит лишних экранов', () => {
     for (const scenario of TRAINERS) {
         const map = SCREENS[scenario.key];
@@ -79,37 +89,82 @@ test('карта экранов покрывает каждый шаг кажд�
     }
 });
 
-test('Такси.Про: на экране каждого шага подсвечена ровно кнопка этого шага', () => {
-    let run = startRun(taxiPro, { now: NOW });
-    let checked = 0;
-    for (let guard = 0; guard < 40 && currentStep(run).screen !== 'result'; guard += 1) {
-        const step = currentStep(run);
-        const expected = expectedTap(run);
-        const html = renderStep(run, expected);
-        assert.deepEqual(highlighted(html), [expected],
-            `${step.key}: подсвечено ${JSON.stringify(highlighted(html))}, а шаг ждёт «${expected}»`);
-        run = tap(run, expected).run;
-        checked += 1;
+test('Такси.Про: на экране каждого шага подсвечены ровно кнопки этого шага — в обоих способах', () => {
+    for (const variant of VARIANTS) {
+        let run = startRun(taxiPro, { now: NOW });
+        let checked = 0;
+        for (let guard = 0; guard < 40 && currentStep(run).screen !== 'result'; guard += 1) {
+            const step = currentStep(run);
+            const expected = expectedTap(run);
+            const want = (Array.isArray(expected) ? [...expected] : [expected]).sort();
+            const html = renderStep(run, expected);
+            assert.deepEqual(highlighted(html).sort(), want,
+                `${variant}/${step.key}: подсвечено ${JSON.stringify(highlighted(html))}, а шаг ждёт ${JSON.stringify(want)}`);
+            run = tap(run, pickTap(run, variant)).run;
+            checked += 1;
+        }
+        assert.equal(run.world.variant, variant);
+        assert.equal(checked, activeSteps(taxiPro, { variant }).length - 1, `${variant}: урок обязан дойти до итога`);
     }
-    assert.equal(checked, taxiPro.steps.length - 1, 'урок обязан дойти до итога');
 });
 
-test('Такси.Про: ловушки шага — про кнопки, которые на его экране есть', () => {
-    let run = startRun(taxiPro, { now: NOW });
-    for (let guard = 0; guard < 40 && currentStep(run).screen !== 'result'; guard += 1) {
-        const step = currentStep(run);
-        const html = renderStep(run, expectedTap(run));
-        for (const id of Object.keys(step.traps || {})) {
-            assert.ok(html.includes(`data-tap="${id}"`),
-                `${step.key}: ловушка «${id}» объясняет кнопку, которой на экране нет`);
+test('Такси.Про: ловушки шага — про кнопки, которые на его экране есть, в обоих способах', () => {
+    for (const variant of VARIANTS) {
+        let run = startRun(taxiPro, { now: NOW });
+        for (let guard = 0; guard < 40 && currentStep(run).screen !== 'result'; guard += 1) {
+            const step = currentStep(run);
+            const html = renderStep(run, expectedTap(run));
+            for (const id of Object.keys(step.traps || {})) {
+                assert.ok(html.includes(`data-tap="${id}"`),
+                    `${variant}/${step.key}: ловушка «${id}» объясняет кнопку, которой на экране нет`);
+            }
+            run = tap(run, pickTap(run, variant)).run;
         }
-        run = tap(run, expectedTap(run)).run;
     }
+});
+
+test('Такси.Про: старт предлагает оба способа, «Через ЭЦП» ведёт к экрану «Документы подписаны»', () => {
+    let run = startRun(taxiPro, { now: NOW });
+    const intro = renderStep(run, expectedTap(run));
+    assert.match(intro, /Через ЭЦП/);
+    assert.match(intro, /Через eGov/);
+    assert.doesNotMatch(intro, /data-tap="begin"/, 'вместо «Начать урок» — выбор способа');
+
+    run = tap(run, 'begin_ecp').run;
+    // Окно ключа — текст приложения слово в слово, главная под ним недоступна.
+    const add = renderStep(run, expectedTap(run));
+    assert.match(add, /Добавьте ЭЦП на этот телефон/);
+    assert.match(add, /Выпустите ключ здесь или\s+прикрепите файл — это займёт пару минут\./);
+    assert.match(add, /inert=""[^>]*>[\s\S]*data-tap="nav_docs"/, 'панель главной — под окном, в inert');
+    assert.deepEqual(highlighted(add), ['ecp_key_continue']);
+
+    for (const id of ['ecp_key_continue', 'nav_docs', 'ecp_sign']) run = tap(run, id).run;
+    const signed = renderStep(run, expectedTap(run));
+    assert.match(signed, /Документы подписаны/);
+    assert.match(signed, /Время подписи: 17 ноября 2026, 15:25/);
+    assert.equal((signed.match(/Подтверждено Sapar/g) || []).length, 1, 'у документа пакета');
+    assert.deepEqual(highlighted(signed), ['ecp_ready']);
+
+    // После «Готово» вкладка пустая, без кнопки подписания и без красной цифры.
+    run = tap(run, 'ecp_ready').run;
+    const empty = renderStep(run, expectedTap(run));
+    assert.match(empty, /Сейчас подписывать нечего/);
+    assert.doesNotMatch(empty, /data-tap="ecp_sign"/);
+    assert.doesNotMatch(empty, /wt-tp__badge/);
+    assert.deepEqual(highlighted(empty), ['ecp_history']);
+
+    run = tap(run, 'ecp_history').run;
+    const history = renderStep(run, expectedTap(run));
+    assert.match(history, /История подписаний/);
+    assert.match(history, /Документов: 1 · 17 ноября 2026, 15:25/);
+    // Месяц в карточке приложения — как в приложении, в тексте урока — строчными.
+    assert.match(history, /<b>Октябрь 2026<\/b>/);
+    assert.match(history, /Пакет за октябрь 2026 — в истории подписаний/);
 });
 
 test('Такси.Про: вкладки «Через ЭЦП» и «Через eGov» рисуют своё содержимое', () => {
     let run = startRun(taxiPro, { now: NOW });
-    run = tap(run, 'begin').run;
+    run = tap(run, 'begin_egov').run;
     run = tap(run, 'nav_docs').run;
     const ecp = renderStep(run, expectedTap(run));
     assert.match(ecp, /Документы на подпись/);
@@ -125,7 +180,7 @@ test('Такси.Про: вкладки «Через ЭЦП» и «Через eG
 
 test('Такси.Про: после «Продолжить» в окне — кабинет с «Вы успешно подписали», без кнопки подписания', () => {
     let run = startRun(taxiPro, { now: NOW });
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
         'open_egov', 'approve', 'continue']) {
         run = tap(run, id).run;
     }
@@ -137,7 +192,7 @@ test('Такси.Про: после «Продолжить» в окне — к�
 
 test('Такси.Про: раскрытый список пакета показывает документы месяца, свёрнутый — нет', () => {
     let run = startRun(taxiPro, { now: NOW });
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all']) {
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all']) {
         run = tap(run, id).run;
     }
     assert.doesNotMatch(renderStep(run, expectedTap(run)), /Агентский договор/);

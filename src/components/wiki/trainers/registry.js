@@ -26,7 +26,7 @@ import photoControl from './scenarioPhotoControl.js';
 import saparSite from './scenarioSapar.js';
 import taxiPro from './scenarioTaxiPro.js';
 import yandexPro from './scenarioYandexPro.js';
-import { stageCount } from './runner.js';
+import { activeSteps, stageCount } from './runner.js';
 
 /* Порядок фиксирован и читается по адресату.
    Первыми — рабочее место САМОГО оператора: сначала свободная среда (осмотреться
@@ -52,6 +52,17 @@ export const trainerCard = (scenario) => ({
     description: scenario.description,
     stages: stageCount(scenario),
     checklist: scenario.checklist || [],
+    /* Способы прохождения (подпись «Через ЭЦП» и «Через eGov»): витрина
+       показывает шаги каждого, а не только способа по умолчанию — иначе
+       карточка обещала бы один путь, а тренажёр предлагал два. */
+    variants: scenario.variants
+        ? Object.entries(scenario.variants).map(([key, variant]) => ({
+            key,
+            label: variant.label,
+            checklist: variant.checklist || [],
+            stages: stageCount({ steps: activeSteps(scenario, { variant: key }) }),
+        }))
+        : null,
     /* Среда урока нужна витрине: она рисует рядом с карточкой телефон, а
        тренажёр за компьютером телефоном не показать — это отвечало бы на
        «где я это увижу» неправдой. */

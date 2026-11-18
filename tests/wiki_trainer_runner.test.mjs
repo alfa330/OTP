@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     startRun, tap, toggle, takeHint, currentStep, expectedTap, progressPercent,
     stageCount, previousPeriod, almatyToday, speech, stepGoal, isFinished,
+    activeSteps, checklistFor, restart, stagesOf,
 } from '../src/components/wiki/trainers/runner.js';
 import taxiPro from '../src/components/wiki/trainers/scenarioTaxiPro.js';
 import saparSite from '../src/components/wiki/trainers/scenarioSapar.js';
@@ -24,12 +25,21 @@ const INPUT = {
     }),
 };
 
+/** Правильное нажатие шага. На развилке (несколько верных кнопок) — кнопка
+ *  нужного способа, без способа — первая. */
+const pickTap = (run, variant) => {
+    const want = expectedTap(run);
+    if (!Array.isArray(want)) return want;
+    const choice = Object.entries(currentStep(run).choices || {}).find(([, v]) => v === variant);
+    return choice ? choice[0] : want[0];
+};
+
 /** Прогон сценария правильными нажатиями. Возвращает финальную попытку. */
-const playThrough = (scenario, { random } = {}) => {
+const playThrough = (scenario, { random, variant } = {}) => {
     let run = startRun(scenario, { random });
     let guard = 0;
     while (!isFinished(run) && guard < 60) {
-        const id = expectedTap(run);
+        const id = pickTap(run, variant);
         const payload = INPUT[id] ? INPUT[id](run) : {};
         const result = tap(run, id, payload);
         assert.equal(result.ok, true,
@@ -52,10 +62,16 @@ const TAPPABLE = TRAINERS.filter((scenario) => scenario.stage !== 'world');
 test('тренажёры проходятся правильными нажатиями до конца', () => {
     assert.ok(TAPPABLE.length >= 2, 'проходимых нажатиями сценариев стало меньше двух — проверь фильтр');
     for (const scenario of TAPPABLE) {
-        const run = playThrough(scenario);
-        assert.equal(run.errors, 0, `${scenario.key}: правильный путь не должен давать ошибок`);
-        assert.equal(progressPercent(run), 100);
-        assert.equal(currentStep(run).screen, 'result');
+        // У тренажёра со способами проходим каждый: путь «Через ЭЦП» и путь
+        // «Через eGov» — разные шаги, и сломаться может любой.
+        for (const variant of scenario.variants ? Object.keys(scenario.variants) : [undefined]) {
+            const run = playThrough(scenario, { variant });
+            const label = `${scenario.key}${variant ? `/${variant}` : ''}`;
+            assert.equal(run.errors, 0, `${label}: правильный путь не должен давать ошибок`);
+            assert.equal(progressPercent(run), 100);
+            assert.equal(currentStep(run).screen, 'result');
+            if (variant) assert.equal(run.world.variant, variant, `${label}: способ не выбран`);
+        }
     }
 });
 
@@ -85,25 +101,27 @@ test('у каждого тренажёра в каталоге есть имя, 
     }
 });
 
-test('прогресс растёт монотонно от 0 до 100', () => {
-    let run = startRun(taxiPro);
-    assert.equal(progressPercent(run), 0);
-    let previous = 0;
-    let guard = 0;
-    while (!isFinished(run) && guard < 60) {
-        run = tap(run, expectedTap(run)).run;
-        const now = progressPercent(run);
-        assert.ok(now > previous, 'шаг вперёд обязан двигать полосу прогресса');
-        previous = now;
-        guard += 1;
+test('прогресс растёт монотонно от 0 до 100 — в обоих способах', () => {
+    for (const variant of ['egov', 'ecp']) {
+        let run = startRun(taxiPro);
+        assert.equal(progressPercent(run), 0);
+        let previous = 0;
+        let guard = 0;
+        while (!isFinished(run) && guard < 60) {
+            run = tap(run, pickTap(run, variant)).run;
+            const now = progressPercent(run);
+            assert.ok(now > previous, `${variant}: шаг вперёд обязан двигать полосу прогресса`);
+            previous = now;
+            guard += 1;
+        }
+        assert.equal(previous, 100);
     }
-    assert.equal(previous, 100);
 });
 
 test('неверное нажатие не двигает шаг, а объясняет', () => {
     // Реклама поверх кабинета — тот самый экран, где нажатие «уходит в баннер».
     let run = startRun(taxiPro);
-    run = tap(run, 'begin').run;         // intro → главная
+    run = tap(run, 'begin_egov').run;         // intro → главная
     run = tap(run, 'nav_docs').run;      // главная → документы (вкладка «Через ЭЦП»)
     run = tap(run, 'tab_egov').run;      // → вкладка «Через eGov» с актами
     run = tap(run, 'press_sign').run;    // документы → окно подписания с рекламой
@@ -134,7 +152,7 @@ test('нажатие, которого автор сценария не пред
 test('свернуть eGov вместо «Продолжить» — отдельное объяснение', () => {
     // Самая частая ошибка: подпись создана, но портал о ней не узнал.
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
         'open_egov', 'approve']) {
         run = tap(run, id).run;
     }
@@ -149,7 +167,7 @@ test('Такси.Про: раздел открывается на «Через �
     // пять минут — «Через eGov» с актами. Кнопка «Подписать» есть на обеих, и
     // нажать не ту — главная ошибка нового интерфейса.
     let run = startRun(taxiPro);
-    run = tap(run, 'begin').run;
+    run = tap(run, 'begin_egov').run;
     run = tap(run, 'nav_docs').run;
     assert.equal(currentStep(run).key, 'choose_egov_tab');
     assert.equal(run.world.docsTab, 'ecp', 'раздел обязан открываться на «Через ЭЦП»');
@@ -166,7 +184,7 @@ test('Такси.Про: раздел открывается на «Через �
 
 test('Такси.Про: после eGov окно подписания закрывают сами, повторно не подписывают', () => {
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
         'open_egov', 'approve', 'continue']) {
         run = tap(run, id).run;
     }
@@ -189,7 +207,7 @@ test('Такси.Про: после eGov окно подписания закр�
 
 test('Такси.Про: крестик окна подписания до подписи — ловушка, после — правильный шаг', () => {
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad']) {
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad']) {
         run = tap(run, id).run;
     }
     assert.equal(currentStep(run).key, 'sign_all');
@@ -202,14 +220,19 @@ test('Такси.Про: этапы инструкции — 8 пунктов, �
     // Номер этапа уходит в «Шаг N из 8», в чек-лист и в stages_done учёта
     // прохождений: под-шаг, съехавший на соседний этап, записал бы брошенную
     // попытку как дошедшую дальше.
-    assert.deepEqual(taxiPro.steps.map((s) => s.stage), [0, 1, 2, 2, 3, 4, 5, 6, 7, 7, 8, 8, 8]);
-    assert.equal(taxiPro.checklist.length, 8);
+    const stagesOfVariant = (variant) => activeSteps(taxiPro, { variant }).map((s) => s.stage);
+    assert.deepEqual(stagesOfVariant('egov'), [0, 1, 2, 2, 3, 4, 5, 6, 7, 7, 8, 8, 8]);
+    assert.deepEqual(stagesOfVariant('ecp'), [0, 1, 2, 3, 4, 5, 5, 5]);
+    assert.equal(taxiPro.variants.egov.checklist.length, 8);
+    assert.equal(taxiPro.variants.ecp.checklist.length, 5);
+    // В учёт прохождений и на витрину — постоянное число, по самому длинному способу.
+    assert.equal(stageCount(taxiPro), 8);
 });
 
 test('Такси.Про: месяц актов в репликах и дата пакета «Через ЭЦП» — от даты запуска', () => {
     let run = startRun(taxiPro, { now: new Date(Date.UTC(2026, 10, 17, 6)) });
     assert.equal(run.world.packDate, '6 ноября 2026');
-    for (const id of ['begin', 'nav_docs', 'tab_egov']) run = tap(run, id).run;
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov']) run = tap(run, id).run;
     assert.match(speech(run).text, /акты за октябрь 2026/);
     assert.doesNotMatch(speech(run).text, /за за/);
 
@@ -221,15 +244,87 @@ test('Такси.Про: месяц актов в репликах и дата �
 
 test('Такси.Про: «Документы» в панели, когда раздел уже открыт, — пояснение, а не общий отказ', () => {
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs']) run = tap(run, id).run;
+    for (const id of ['begin_egov', 'nav_docs']) run = tap(run, id).run;
     const again = tap(run, 'nav_docs');
     assert.equal(again.ok, false);
     assert.match(speech(again.run).text, /уже в разделе «Документы»/);
 });
 
+test('Такси.Про: на старте выбор способа — обе кнопки верны, остальное объясняется', () => {
+    const run = startRun(taxiPro);
+    assert.deepEqual([...expectedTap(run)].sort(), ['begin_ecp', 'begin_egov']);
+    assert.equal(run.world.variant, null);
+    const wrong = tap(run, 'nav_docs');
+    assert.equal(wrong.ok, false);
+    assert.equal(currentStep(wrong.run).key, 'intro');
+
+    const ecp = tap(run, 'begin_ecp');
+    assert.equal(ecp.ok, true);
+    assert.equal(ecp.run.world.variant, 'ecp');
+    assert.equal(currentStep(ecp.run).key, 'ecp_add_key', '«Через ЭЦП» начинается с ключа на телефоне');
+    const egov = tap(run, 'begin_egov');
+    assert.equal(egov.run.world.variant, 'egov');
+    assert.equal(currentStep(egov.run).key, 'open_documents');
+});
+
+test('Такси.Про «Через ЭЦП»: ключ, пакет одной подписью, «Документы подписаны», история', () => {
+    let run = startRun(taxiPro, { now: new Date(Date.UTC(2026, 10, 18, 6)) });
+    run = tap(run, 'begin_ecp').run;
+    // Окно «Добавьте ЭЦП на этот телефон» стоит поверх главной: пока не нажато
+    // «Продолжить», раздел «Документы» не открыть.
+    assert.equal(currentStep(run).key, 'ecp_add_key');
+    assert.equal(currentStep(run).screen, 'tp_ecp_add');
+    assert.equal(tap(run, 'nav_docs').ok, false);
+    run = tap(run, 'ecp_key_continue').run;
+    assert.equal(run.world.keyAdded, true);
+    assert.equal(currentStep(run).key, 'ecp_open_docs');
+    // Как добавляют ключ — словами барса: экранов выпуска на кадрах водителей нет.
+    assert.match(speech(run).text, /через eGov или в ЦОН, — один раз/);
+    run = tap(run, 'nav_docs').run;
+    assert.equal(currentStep(run).key, 'ecp_sign');
+    assert.equal(currentStep(run).screen, 'tp_documents');
+    assert.equal(run.world.docsTab, 'ecp', 'вкладка «Через ЭЦП» открыта сразу — переключать не надо');
+    assert.equal(stagesOf(run), 5);
+    assert.deepEqual(checklistFor(taxiPro, run.world), taxiPro.variants.ecp.checklist);
+    assert.match(speech(run).text, /за октябрь 2026/);
+
+    // Вкладка второго способа — ловушка с объяснением, а не переход.
+    const other = tap(run, 'tab_egov');
+    assert.equal(other.ok, false);
+    assert.match(speech(other.run).text, /второй способ/);
+    assert.equal(other.run.world.docsTab, 'ecp');
+
+    run = tap(other.run, 'ecp_sign').run;
+    assert.equal(run.world.ecpSigned, true);
+    assert.equal(currentStep(run).key, 'ecp_ready');
+    assert.equal(currentStep(run).screen, 'tp_ecp_signed');
+    assert.equal(run.world.signedAt, '18 ноября 2026, 15:25');
+    run = tap(run, 'ecp_ready').run;
+    // После подписи вкладка пустая, пакет — в «Истории подписаний».
+    assert.equal(currentStep(run).key, 'ecp_history');
+    const back = tap(run, 'tab_egov');
+    assert.equal(back.ok, false);
+    assert.match(speech(back.run).text, /уже подписан/);
+    run = tap(run, 'ecp_history').run;
+    assert.equal(currentStep(run).screen, 'tp_ecp_history');
+    run = tap(run, 'ecp_finish').run;
+    assert.ok(isFinished(run));
+    assert.equal(currentStep(run).key, 'result_ecp');
+    assert.match(speech(run).text, /одной кнопкой/);
+});
+
+test('Такси.Про: «Заново» снимает выбор способа', () => {
+    let run = startRun(taxiPro);
+    for (const id of ['begin_ecp', 'ecp_key_continue', 'nav_docs']) run = tap(run, id).run;
+    const again = restart(run);
+    assert.equal(again.world.keyAdded, false);
+    assert.equal(again.world.variant, null);
+    assert.equal(currentStep(again).key, 'intro');
+});
+
 test('статусы актов меняются только после обновления списка', () => {
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all',
         'open_egov', 'approve', 'continue', 'close_sheet']) {
         run = tap(run, id).run;
     }
@@ -307,7 +402,7 @@ test('«Сохранить» обязательно: до него докуме�
 
 test('раскрыть список — не шаг и не ошибка', () => {
     let run = startRun(taxiPro);
-    for (const id of ['begin', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all']) {
+    for (const id of ['begin_egov', 'nav_docs', 'tab_egov', 'press_sign', 'close_ad', 'sign_all']) {
         run = tap(run, id).run;
     }
     const before = currentStep(run).key;
@@ -401,7 +496,7 @@ test('у каждого шага есть экран, и все экраны с�
     for (const scenario of TRAINERS) {
         for (const step of scenario.steps) {
             assert.ok(step.screen, `${scenario.key}/${step.key}: не указан экран`);
-            assert.ok(step.action, `${scenario.key}/${step.key}: не указано нажатие`);
+            assert.ok(step.action || step.choices, `${scenario.key}/${step.key}: не указано нажатие`);
         }
     }
 });

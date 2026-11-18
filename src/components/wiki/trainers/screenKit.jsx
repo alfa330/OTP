@@ -1,5 +1,7 @@
 import React from 'react';
 
+import { checklistFor } from './runner';
+
 /* Общие детали учебных экранов.
  *
  * Каждый экран получает одни и те же три вещи: world (что уже сделано), tap
@@ -13,7 +15,10 @@ import React from 'react';
 
 /** Кнопка учебного телефона: сама решает, подсвечена ли она.
  *  data-tap — её код нажатия в разметке: по нему тест экранов находит кнопку
- *  шага и ловушки, а прогон урока в браузере — куда жать. */
+ *  шага и ловушки, а прогон урока в браузере — куда жать. Цель может быть
+ *  списком: на шаге-развилке верна любая из кнопок, и подсвечены все. */
+const isTarget = (id, target) => (Array.isArray(target) ? target.includes(id) : id === target);
+
 export const Tap = ({
     id, target, tap, className = '', children, payload, ...rest
 }) => (
@@ -21,7 +26,7 @@ export const Tap = ({
         type="button"
         data-tap={id}
         onClick={() => tap(id, payload)}
-        className={`${className}${id === target ? ' is-target' : ''}`}
+        className={`${className}${isTarget(id, target) ? ' is-target' : ''}`}
         {...rest}
     >
         {children}
@@ -50,11 +55,16 @@ export const IntroScreen = ({ scenario, tap, target }) => (
         </div>
         <h2>{scenario.title}</h2>
         <p>{scenario.description}</p>
-        <div className="wt-intro__flow">
-            {(scenario.checklist || []).slice(0, 4).map((item, index) => (
-                <span key={`${index}-${item}`}>{index + 1}. {item}</span>
-            ))}
-        </div>
+        {/* У тренажёра со способами вместо начала урока — выбор способа: та же
+            кнопка в статье ведёт к обоим путям, и человек сам решает, какой
+            проходить. Без способов — первые шаги и «Начать урок». */}
+        {!scenario.variants && (
+            <div className="wt-intro__flow">
+                {(scenario.checklist || []).slice(0, 4).map((item, index) => (
+                    <span key={`${index}-${item}`}>{index + 1}. {item}</span>
+                ))}
+            </div>
+        )}
         {/* Оговорка про учебные данные у сценариев разная: в подписании это ФИО,
             ИИН и подпись, в смене провайдера — ни того, ни другого на экранах
             нет, и обещать «подпись не создаётся» там незачем. */}
@@ -63,11 +73,23 @@ export const IntroScreen = ({ scenario, tap, target }) => (
                 || 'Данные учебные: ФИО, ИИН, коды и номера документов вымышлены, '
                 + 'настоящая подпись не создаётся.'}
         </p>
-        <Tap id="begin" target={target} tap={tap} className="wt-primary">Начать урок</Tap>
+        {scenario.variants ? (
+            <div className="wt-intro__choices">
+                {Object.entries(scenario.variants).map(([key, variant]) => (
+                    <Tap key={key} id={variant.begin} target={target} tap={tap}
+                        className="wt-intro__choice">
+                        <b>{variant.label}</b>
+                        <span>{variant.summary}</span>
+                    </Tap>
+                ))}
+            </div>
+        ) : (
+            <Tap id="begin" target={target} tap={tap} className="wt-primary">Начать урок</Tap>
+        )}
     </div>
 );
 
-export const ResultScreen = ({ scenario, onRestart }) => (
+export const ResultScreen = ({ scenario, world, onRestart }) => (
     <div className="wt-screen wt-result">
         <div className="wt-result__check" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor"
@@ -84,7 +106,7 @@ export const ResultScreen = ({ scenario, onRestart }) => (
         <ol className="wt-result__recap">
             {/* Ключ по индексу: в чек-листе есть повторяющиеся пункты —
                 «Нажать „Подписать“» встречается дважды (в приложении и в eGov). */}
-            {(scenario.checklist || []).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
+            {checklistFor(scenario, world).map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
         </ol>
         <button type="button" className="wt-primary" onClick={onRestart}>Пройти ещё раз</button>
     </div>

@@ -7,6 +7,10 @@
  *
  * Модель одна на все сценарии: упорядоченный список шагов, у каждого — ОДНО
  * правильное нажатие и список ловушек с объяснением, почему нажали не туда.
+ * Исключение — шаг-развилка (choices): у него несколько верных кнопок, и каждая
+ * выбирает СПОСОБ (вариант) прохождения. Шаги, помеченные variant, идут только
+ * в своём способе — так один тренажёр учит двум путям к одной цели (подпись в
+ * Такси.Про «Через ЭЦП» или «Через eGov»), а кнопка в статье остаётся одна.
  * Баллов и порога нет намеренно: это учебная прогулка по инструкции, а не
  * экзамен. Неверное нажатие ничего не отнимает — оно объясняет, и это главное,
  * что тренажёр даёт сверх скриншотов в статье.
@@ -76,11 +80,38 @@ export const periodBefore = (period) => previousPeriod({ year: period.year, mont
    перестаёт учить тому, что код всегда приходит заново. */
 export const trainingCode = (random = Math.random) => String(Math.floor(random() * 10000)).padStart(4, '0');
 
-const stepAt = (scenario, index) => scenario.steps[Math.max(0, Math.min(index, scenario.steps.length - 1))];
+/** Шаги, по которым идёт попытка. У сценария со способами (variants) шаг с
+ *  пометкой variant берётся только в своём способе; до выбора — в способе по
+ *  умолчанию, чтобы прогресс и подсказки до развилки были осмысленными. У
+ *  сценариев без способов это просто весь список. */
+export const activeSteps = (scenario, world) => {
+    if (!scenario.variants) return scenario.steps;
+    const variant = (world && world.variant) || scenario.defaultVariant;
+    return scenario.steps.filter((step) => !step.variant || step.variant === variant);
+};
 
-/** Сколько пунктов инструкции в сценарии — знаменатель прогресса. */
-export const stageCount = (scenario) => scenario.steps
-    .reduce((max, step) => Math.max(max, Number(step.stage) || 0), 0);
+const stepsOf = (run) => activeSteps(run.scenario, run.world);
+
+const stepAt = (steps, index) => steps[Math.max(0, Math.min(index, steps.length - 1))];
+
+const maxStage = (steps) => steps.reduce((max, step) => Math.max(max, Number(step.stage) || 0), 0);
+
+/** Сколько пунктов инструкции в сценарии — по ВСЕМ шагам, то есть по самому
+ *  длинному способу. Это число уходит в учёт прохождений (stages_total) и на
+ *  витрину, и оно обязано быть постоянным: поменяйся оно посреди урока, учёт
+ *  завёл бы вторую строку попытки. */
+export const stageCount = (scenario) => maxStage(scenario.steps);
+
+/** Сколько пунктов в способе, которым идёт эта попытка, — для «шаг N из M». */
+export const stagesOf = (run) => maxStage(stepsOf(run));
+
+/** Чек-лист рядом с телефоном: свой у каждого способа, до выбора — способа по
+ *  умолчанию. */
+export const checklistFor = (scenario, world) => {
+    const variant = (world && world.variant) || scenario.defaultVariant;
+    const own = scenario.variants && variant && scenario.variants[variant];
+    return (own && own.checklist) || scenario.checklist || [];
+};
 
 /** Новая попытка.
  *
@@ -90,6 +121,7 @@ export const stageCount = (scenario) => scenario.steps
  */
 export const startRun = (scenario, { now, random, caseData } = {}) => {
     const today = almatyToday(now);
+    const world = scenario.createWorld({ today, code: () => trainingCode(random), caseData });
     return {
         scenario,
         index: 0,
@@ -98,25 +130,27 @@ export const startRun = (scenario, { now, random, caseData } = {}) => {
         // Что барс говорит прямо сейчас. tone нужен интерфейсу: реплика-ошибка
         // и реплика-объяснение выглядят по-разному, иначе неверное нажатие
         // проходит незамеченным.
-        speech: { text: stepAt(scenario, 0).msg, tone: 'idle' },
-        world: scenario.createWorld({ today, code: () => trainingCode(random), caseData }),
+        speech: { text: stepAt(activeSteps(scenario, world), 0).msg, tone: 'idle' },
+        world,
     };
 };
 
-export const currentStep = (run) => stepAt(run.scenario, run.index);
+export const currentStep = (run) => stepAt(stepsOf(run), run.index);
 
-/** Идентификатор кнопки, которую сейчас ждут. Подсветка цели берёт его же. */
+/** Идентификатор кнопки, которую сейчас ждут. Подсветка цели берёт его же.
+ *  У шага-развилки — список: верна любая из кнопок, подсвечены все. */
 export const expectedTap = (run) => {
     const step = currentStep(run);
+    if (step.choices) return Object.keys(step.choices);
     return typeof step.action === 'function' ? step.action(run.world) : step.action;
 };
 
-export const isFinished = (run) => run.index >= run.scenario.steps.length - 1;
+export const isFinished = (run) => run.index >= stepsOf(run).length - 1;
 
 /** Прогресс в процентах — по шагам движка, а не по пунктам инструкции.
  *  По пунктам полоса стояла бы на месте три экрана подряд и выглядела зависшей. */
 export const progressPercent = (run) => Math.round(
-    (run.index / Math.max(1, run.scenario.steps.length - 1)) * 100,
+    (run.index / Math.max(1, stepsOf(run).length - 1)) * 100,
 );
 
 /* Подстановка в реплики: {period}, {code}, {month}. Значения приходят из мира,
@@ -161,8 +195,11 @@ const commonTrap = (scenario, id, world) => {
 export const tap = (run, id, payload = {}) => {
     const step = currentStep(run);
     const expected = expectedTap(run);
+    const accepted = step.choices
+        ? Object.prototype.hasOwnProperty.call(step.choices, id)
+        : id === expected;
 
-    if (id !== expected) {
+    if (!accepted) {
         const message = trapMessage(step, id, run.world)
             || commonTrap(run.scenario, id, run.world)
             // Общий ответ обязателен: без него неверное нажатие по кнопке, о
@@ -195,12 +232,17 @@ export const tap = (run, id, payload = {}) => {
         }
     }
 
-    const world = step.apply ? { ...run.world, ...step.apply(run.world, payload) } : run.world;
-    const nextIndex = Math.min(run.index + 1, run.scenario.steps.length - 1);
+    let world = step.apply ? { ...run.world, ...step.apply(run.world, payload) } : run.world;
+    // Развилка: нажатая кнопка выбирает способ, и дальше список шагов уже его.
+    // Шаги до развилки общие для всех способов, поэтому номер следующего шага
+    // в новом списке — тот же index + 1.
+    if (step.choices) world = { ...world, variant: step.choices[id] };
+    const steps = activeSteps(run.scenario, world);
+    const nextIndex = Math.min(run.index + 1, steps.length - 1);
     const next = { ...run, index: nextIndex, world };
     return {
         ok: true,
-        run: { ...next, speech: { text: stepAt(run.scenario, nextIndex).msg, tone: 'idle' } },
+        run: { ...next, speech: { text: stepAt(steps, nextIndex).msg, tone: 'idle' } },
     };
 };
 

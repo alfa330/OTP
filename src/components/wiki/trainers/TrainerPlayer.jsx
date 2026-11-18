@@ -9,8 +9,8 @@ import SnowLeopard from './SnowLeopard';
 import useTrainerRun from './useTrainerRun';
 import { StatusIcons, StatusTime } from './PhoneChrome';
 import {
-    browse, currentStep, expectedTap, isFinished, progressPercent, restart, speech,
-    stageCount, startRun, stepGoal, takeHint, tap, toggle,
+    browse, checklistFor, currentStep, expectedTap, isFinished, progressPercent, restart, speech,
+    stageCount, stagesOf, startRun, stepGoal, takeHint, tap, toggle,
 } from './runner';
 import { callNext, emptyCall, syncReady, talkMs } from './callMachine';
 import { EVENT_TITLES, createEventLog } from './trainerEvents';
@@ -266,6 +266,15 @@ export function TrainerPlayer({
     const step = currentStep(run);
     const target = expectedTap(run);
     const finished = isFinished(run);
+    /* «Шаг N из M» и чек-лист — по способу, которым идёт попытка: у подписи
+       «Через ЭЦП» пунктов меньше, чем «Через eGov». В учёт прохождений уходит
+       stages — по всему сценарию, оно постоянно (см. runner.stageCount). */
+    const shownStages = stagesOf(run);
+    const checklist = checklistFor(scenario, run.world);
+    /* Способ ещё не выбран: «шаг 1 из 8» и список одного способа здесь врали
+       бы — человек ещё не решил, каким путём идёт. До выбора показываем шаги
+       обоих способов. */
+    const choosing = !!scenario.variants && !run.world.variant;
     const said = speech(run);
     const percent = progressPercent(run);
     const mood = finished ? 'success' : (MOOD[said.tone] || 'speak');
@@ -890,11 +899,32 @@ export function TrainerPlayer({
                                 aria-label={`Прогресс тренажёра: ${percent}%`}>
                                 <i style={{ width: `${percent}%` }} />
                             </div>
-                            <span>{finished ? 'Урок пройден' : `Шаг ${Math.max(1, step.stage)} из ${stages}`}</span>
+                            <span>
+                                {finished ? 'Урок пройден'
+                                    : choosing ? 'Выберите способ'
+                                        : `Шаг ${Math.max(1, step.stage)} из ${shownStages}`}
+                            </span>
                         </div>
 
+                        {choosing ? (
+                            <div className="wt-steps-choice">
+                                {Object.entries(scenario.variants).map(([key, variant]) => (
+                                    <div key={key}>
+                                        <b>{variant.label}</b>
+                                        <ol className="wt-steps">
+                                            {(variant.checklist || []).map((item, index) => (
+                                                <li key={`${index}-${item}`}>
+                                                    <i aria-hidden="true">{index + 1}</i>
+                                                    {item}
+                                                </li>
+                                            ))}
+                                        </ol>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
                         <ol className="wt-steps">
-                            {(scenario.checklist || []).map((item, index) => {
+                            {checklist.map((item, index) => {
                                 const number = index + 1;
                                 const state = finished || step.stage > number ? 'is-done'
                                     : (step.stage === number ? 'is-current' : '');
@@ -906,6 +936,7 @@ export function TrainerPlayer({
                                 );
                             })}
                         </ol>
+                        )}
                     </>
                 )}
 

@@ -11,7 +11,8 @@ import { IntroScreen, ResultScreen } from './screenKit';
 import { DeskScreen } from './screensCrm';
 import { EgCode, EgSign, EgSuccess } from './screensEgov';
 import {
-    TpCheck, TpDocuments, TpHome, TpSheetAd, TpSheetCabinet, TpSheetSignAll, TpSheetSigned,
+    TpCheck, TpDocuments, TpEcpAdd, TpEcpHistory, TpEcpSigned, TpHome, TpSheetAd,
+    TpSheetCabinet, TpSheetSignAll, TpSheetSigned,
 } from './screensTaxiPro';
 import {
     ChromeAddress, ChromeBlank, PhoneHome, SaparDocuments, SaparGuest, SaparProfile,
@@ -66,6 +67,11 @@ export const SCREENS = {
         eg_success: EgSuccess,
         tp_sheet_signed: TpSheetSigned,
         tp_check: TpCheck,
+        // Способ «Через ЭЦП»: окно «Добавьте ЭЦП на этот телефон» над главной,
+        // после «Подписать» — «Документы подписаны», в конце — история подписаний.
+        tp_ecp_add: TpEcpAdd,
+        tp_ecp_signed: TpEcpSigned,
+        tp_ecp_history: TpEcpHistory,
         result: ResultScreen,
     },
     'photo-control-car': {

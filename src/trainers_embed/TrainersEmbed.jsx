@@ -226,6 +226,11 @@ function TrainerCardView({ scenario, onOpen }) {
                 </IosBadge>
                 {sandbox ? (
                     <IosBadge tone="blue"><Layers size={11} /> свободная среда</IosBadge>
+                ) : card.variants ? (
+                    <IosBadge tone="blue">
+                        <Layers size={11} /> {card.variants.length}
+                        {' '}{plural(card.variants.length, 'способ', 'способа', 'способов')}
+                    </IosBadge>
                 ) : card.stages > 0 ? (
                     <IosBadge tone="blue">
                         <Layers size={11} /> {card.stages} {plural(card.stages, 'шаг', 'шага', 'шагов')}
@@ -246,11 +251,24 @@ function TrainerCardView({ scenario, onOpen }) {
                         {showSteps ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                         {showSteps ? 'Скрыть шаги' : `Что внутри · ${steps.length}`}
                     </button>
-                    {showSteps && (
+                    {showSteps && (card.variants ? (
+                        /* Способы — каждый своим списком: шаги «Через ЭЦП» и
+                           «Через eGov» разные, общий список врал бы обоим. */
+                        <div className="mt-2 space-y-2.5">
+                            {card.variants.map((variant) => (
+                                <div key={variant.key}>
+                                    <div className="text-[12.5px] font-semibold text-slate-700">{variant.label}</div>
+                                    <ol className="mt-1 space-y-1 pl-5 text-[12.5px] leading-relaxed text-slate-500 [list-style:decimal]">
+                                        {variant.checklist.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
+                                    </ol>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
                         <ol className="mt-2 space-y-1 pl-5 text-[12.5px] leading-relaxed text-slate-500 [list-style:decimal]">
                             {steps.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}
                         </ol>
-                    )}
+                    ))}
                 </div>
             )}
 

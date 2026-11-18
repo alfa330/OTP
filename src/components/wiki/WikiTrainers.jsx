@@ -181,10 +181,20 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null,
                                             <IosBadge tone="slate">
                                                 <Smartphone size={11} /> {trainer.app}
                                             </IosBadge>
-                                            <IosBadge tone="blue">
-                                                <Layers size={11} /> {card.stages}
-                                                {' '}{plural(card.stages, 'шаг', 'шага', 'шагов')}
-                                            </IosBadge>
+                                            {/* У тренажёра со способами число шагов у
+                                                каждого своё — на значке число способов,
+                                                шаги каждого — в списке ниже. */}
+                                            {card.variants ? (
+                                                <IosBadge tone="blue">
+                                                    <Layers size={11} /> {card.variants.length}
+                                                    {' '}{plural(card.variants.length, 'способ', 'способа', 'способов')}
+                                                </IosBadge>
+                                            ) : (
+                                                <IosBadge tone="blue">
+                                                    <Layers size={11} /> {card.stages}
+                                                    {' '}{plural(card.stages, 'шаг', 'шага', 'шагов')}
+                                                </IosBadge>
+                                            )}
                                         </div>
                                     </div>
                                 </header>
@@ -202,12 +212,34 @@ export default function WikiTrainers({ base, headers, onOpenArticle = null,
                                     а колонка ужимала бы заголовок и описание — текст важнее
                                     картинки. */}
                                 <div className="flex items-center gap-4">
-                                    <ol className="min-w-0 flex-1 space-y-1 pl-5 text-[12.5px]
-                                                   leading-relaxed text-slate-500 [list-style:decimal]">
-                                        {(trainer.checklist || []).map((item, index) => (
-                                            <li key={`${index}-${item}`}>{item}</li>
-                                        ))}
-                                    </ol>
+                                    {card.variants ? (
+                                        <div className="min-w-0 flex-1 space-y-2.5">
+                                            {card.variants.map((variant) => (
+                                                <div key={variant.key}>
+                                                    <div className="text-[12.5px] font-semibold text-slate-700">
+                                                        {variant.label}
+                                                        <span className="font-normal text-slate-400">
+                                                            {' · '}{variant.stages}
+                                                            {' '}{plural(variant.stages, 'шаг', 'шага', 'шагов')}
+                                                        </span>
+                                                    </div>
+                                                    <ol className="mt-1 space-y-1 pl-5 text-[12.5px]
+                                                                   leading-relaxed text-slate-500 [list-style:decimal]">
+                                                        {variant.checklist.map((item, index) => (
+                                                            <li key={`${index}-${item}`}>{item}</li>
+                                                        ))}
+                                                    </ol>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <ol className="min-w-0 flex-1 space-y-1 pl-5 text-[12.5px]
+                                                       leading-relaxed text-slate-500 [list-style:decimal]">
+                                            {(trainer.checklist || []).map((item, index) => (
+                                                <li key={`${index}-${item}`}>{item}</li>
+                                            ))}
+                                        </ol>
+                                    )}
                                     {/* Тренажёр за компьютером телефоном не
                                         показывают: витрина отвечает на «где я это
                                         увижу», и телефон рядом с уроком про CRM

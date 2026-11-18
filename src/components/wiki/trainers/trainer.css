@@ -574,6 +574,26 @@
 
 .wt-result__check, .wt-eg__mark { background: linear-gradient(135deg, #16a34a, #4ade80); border-radius: 999px; }
 
+/* Выбор способа вместо «Начать урок»: две кнопки-карточки, у каждой — название
+   способа и одна строка, чем он отличается. Обе подсвечены как цель. */
+.wt-intro__choices { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+
+.wt-intro__choice {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+    width: 100%;
+    padding: 11px 14px;
+    color: #fff;
+    background: var(--wt-accent);
+    border-radius: 12px;
+    text-align: left;
+}
+
+.wt-intro__choice b { font-size: 14px; font-weight: 650; }
+.wt-intro__choice span { font-size: 12px; line-height: 1.35; opacity: 0.88; }
+
 .wt-intro__flow {
     display: flex;
     flex-direction: column;
@@ -837,10 +857,10 @@
     padding: 13px 14px;
 }
 
-.wt-tp__pack-head > span { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wt-tp__pack-head > span { display: flex; flex: 1 1 auto; flex-direction: column; gap: 1px; min-width: 0; }
 .wt-tp__pack-head b { font-size: 15px; font-weight: 600; }
 .wt-tp__pack-head small { font-size: 12px; color: var(--tp-mute); }
-.wt-tp__pack-head .wt-tp__sum { align-items: flex-end; margin-left: auto; text-align: right; }
+.wt-tp__pack-head .wt-tp__sum { flex: 0 0 auto; align-items: flex-end; margin-left: auto; text-align: right; white-space: nowrap; }
 
 .wt-tp__pack-row {
     display: flex;
@@ -938,6 +958,152 @@
 
 .wt-tp__done { align-items: center; text-align: center; }
 .wt-tp__done b { font-size: 14px; color: var(--tp-green); }
+
+/* «Через ЭЦП»: экран «Подписание документов» после подписи. Панели внизу нет,
+   поэтому и запас под неё не нужен — только под кнопку чата. */
+.wt-tp.wt-tp--plain { padding-bottom: 92px; }
+
+.wt-tp__navbar {
+    position: relative;
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0 44px;
+}
+
+.wt-tp__navbar b { font-size: 15.5px; font-weight: 600; text-align: center; }
+
+.wt-tp__back {
+    position: absolute;
+    left: 0;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    color: var(--tp-ink);
+    background: var(--wt-surface);
+    border-radius: 999px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.wt-tp__back svg { width: 20px; height: 20px; }
+
+.wt-tp__signed { gap: 6px; align-items: center; padding: 16px 14px; text-align: center; }
+.wt-tp__signed small { font-size: 12px; color: var(--tp-mute); }
+.wt-tp__signed b { font-size: 16px; font-weight: 700; }
+.wt-tp__signed span { font-size: 13px; color: var(--tp-mute); }
+
+/* «Через ЭЦП»: пустая вкладка после подписи — значок в бледно-жёлтом круге,
+   «Сейчас подписывать нечего» и ссылка «История подписаний» ниже. */
+.wt-tp__empty {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 44px 8px 0;
+    text-align: center;
+}
+
+.wt-tp__empty > i {
+    display: grid;
+    place-items: center;
+    width: 60px;
+    height: 60px;
+    color: var(--tp-ink);
+    background: #f3e9b8;
+    border-radius: 999px;
+}
+
+.wt-tp__empty > i svg { width: 27px; height: 27px; }
+.wt-tp__empty > b { font-size: 18px; font-weight: 700; line-height: 1.25; }
+.wt-tp__empty .wt-tp__history { margin-top: 30px; }
+
+/* Карточка «Истории подписаний»: месяц, состояние пакета, число документов и
+   время подписи. */
+.wt-tp__hist { gap: 3px; padding: 14px; }
+.wt-tp__hist b { font-size: 16px; font-weight: 700; }
+.wt-tp__hist span { font-size: 13.5px; color: var(--tp-ink); }
+.wt-tp__hist small { font-size: 12px; color: var(--tp-mute); }
+
+/* Окно «Добавьте ЭЦП на этот телефон» поверх размытой главной (кадр
+   09.11.2026): затемнение ≈ #717171 над светлым фоном, белая карточка с
+   крупным скруглением, оранжевый круг #f49e0b с ключом, серый текст #686868 и
+   жёлтая кнопка-«пилюля» #fbd34d — светлее обычной жёлтой кнопки. */
+.wt-phone[data-screen="tp_ecp_add"] .wt-phone__screen { background: #727176; }
+
+.wt-tp-modal {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--tp-canvas);
+}
+
+.wt-tp-modal__behind {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    filter: blur(3px);
+    pointer-events: none;
+}
+
+.wt-tp-modal__veil {
+    position: absolute;
+    inset: 0;
+    z-index: 7;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    background: rgba(0, 0, 0, 0.52);
+}
+
+.wt-tp-modal__card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 24px 18px 20px;
+    color: var(--tp-ink);
+    text-align: center;
+    background: #fff;
+    border-radius: 26px;
+}
+
+.wt-tp-modal__key {
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 64px;
+    margin-bottom: 4px;
+    color: #fff;
+    background: #f49e0b;
+    border-radius: 999px;
+}
+
+.wt-tp-modal__key svg { width: 40px; height: 40px; }
+.wt-tp-modal__card > b { font-size: 17px; font-weight: 700; line-height: 1.25; }
+.wt-tp-modal__card > p { font-size: 13.5px; line-height: 1.4; color: #686868; }
+.wt-tp-modal__card .wt-tp__yellow { margin-top: 8px; background: #fbd34d; border-radius: 999px; }
+
+.wt-tp .wt-tp__confirmed {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0 14px 13px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--tp-green);
+}
+
+.wt-tp__confirmed svg { width: 16px; height: 16px; }
 
 /* Нижняя панель: плавающая белая карточка с подписями под значками. Активный
    пункт — серая подложка, значок и подпись золотом; на «Документах» красная
@@ -2925,6 +3091,12 @@
 .wt-steps li.is-done { color: var(--wt-ink-soft); }
 .wt-steps li.is-done i { color: #fff; background: var(--wt-green); }
 
+/* До выбора способа — шаги обоих, каждый под своим названием. */
+.wt-steps-choice { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
+.wt-steps-choice > div { display: flex; flex-direction: column; gap: 7px; }
+.wt-steps-choice b { font-size: 13px; font-weight: 650; color: var(--wt-ink); }
+.wt-steps-choice .wt-steps { overflow: visible; }
+
 .wt-side__foot {
     display: flex;
     flex-direction: column;
@@ -3129,7 +3301,8 @@
     .wt-side__percent b { font-size: 24px; }
     .wt-side__progress .wt-bar { flex: 1 1 auto; }
     .wt-side__progress > span { flex: 0 0 auto; font-size: 12.5px; }
-    .wt-steps { display: none; }
+    .wt-steps,
+    .wt-steps-choice { display: none; }
     .wt-side__head strong { font-size: 14.5px; }
     .wt-side__foot { flex-direction: row; align-items: center; justify-content: space-between; }
 

@@ -203,53 +203,91 @@ const TpDocsHead = ({ tab, tap, target }) => (
     </div>
 );
 
-/* Вкладка «Через ЭЦП»: пакет документов месяца, который подписывают ключом ЭЦП,
-   загруженным в приложение. В уроке это не путь, а ловушка — но рисуется она
-   полностью: раздел открывается именно на ней, и человек должен узнать экран. */
-const TpEcpPack = ({ world, tap, target }) => (
-    <>
-        <div className="wt-tp__pack-title">
-            <small>Документы на подпись</small>
-            <b>{bare(world.period.label)}</b>
-            <span>Документов: 1 · подписываются одним пакетом</span>
-        </div>
-        <article className="wt-tp__card wt-tp__pack">
-            <div className="wt-tp__pack-head">
-                <i className="wt-tp__doc-tile" aria-hidden="true"><TpIcon name="doc" /></i>
-                <span>
-                    <b>АВР парка</b>
-                    <small>{world.packDate}</small>
-                </span>
+/* Пакет «Через ЭЦП»: документы месяца, которые подписывают одной подписью
+   ключом ЭЦП, загруженным в приложение. Чаще всего на кадрах 11–17.11 в пакете
+   один документ — «АВР парка» («Документов: 1»), и «Подписать» видна сразу,
+   без прокрутки. Сумма и реквизиты учебные (круглые, не с кадров). */
+const PACK = (world) => [
+    {
+        id: 'park', title: 'АВР парка', date: world.packDate,
+        sum: '10 000,00 ₸', vat: 'в т.ч. НДС 1 071,43 ₸',
+        rows: [['Контрагент', TRAINEE.parkCompany, `БИН/ИИН ${TRAINEE.parkBin}`]],
+    },
+];
+
+/** Карточка документа пакета: плитка, название, дата, сумма и реквизиты. */
+const TpPackDoc = ({ doc, footer = null }) => (
+    <article className="wt-tp__card wt-tp__pack">
+        <div className="wt-tp__pack-head">
+            <i className="wt-tp__doc-tile" aria-hidden="true"><TpIcon name="doc" /></i>
+            <span>
+                <b>{doc.title}</b>
+                <small>{doc.date}</small>
+            </span>
+            {doc.sum && (
                 <span className="wt-tp__sum">
-                    <b>10 000,00 ₸</b>
-                    <small>в т.ч. НДС 1 071,43 ₸</small>
+                    <b>{doc.sum}</b>
+                    <small>{doc.vat}</small>
                 </span>
-            </div>
-            <div className="wt-tp__pack-row">
-                <span>Контрагент</span>
+            )}
+        </div>
+        {doc.rows.map(([label, value, sub]) => (
+            <div key={label} className="wt-tp__pack-row">
+                <span>{label}</span>
                 <span>
-                    <b>{TRAINEE.parkCompany}</b>
-                    <small>БИН/ИИН {TRAINEE.parkBin}</small>
+                    <b>{value}</b>
+                    {sub ? <small>{sub}</small> : null}
                 </span>
             </div>
-        </article>
-        <p className="wt-tp__note">
-            <TpIcon name="info" />
-            Подписывается именно этот набор документов, целиком
-        </p>
-        <p className="wt-tp__note">
-            <TpIcon name="info" />
-            Документы подписываются вашим ключом ЭЦП, который вы загрузили в приложение
-        </p>
-        <Tap id="ecp_sign" target={target} tap={tap} className="wt-tp__yellow">
-            <TpIcon name="sign" />
-            Подписать
-        </Tap>
-        <Tap id="ecp_history" target={target} tap={tap} className="wt-tp__history">
-            История подписаний
-        </Tap>
-    </>
+        ))}
+        {footer}
+    </article>
 );
+
+/* Вкладка «Через ЭЦП»: пакет месяца, справки и одна кнопка «Подписать» на весь
+   пакет. Раздел открывается именно на ней, поэтому в способе «Через eGov» это
+   ловушка, а в способе «Через ЭЦП» — шаг. После подписи пакета вкладка пустеет:
+   значок в бледно-жёлтом круге, «Сейчас подписывать нечего» и золотая ссылка
+   «История подписаний» — так на кадрах 09–16.11.2026. */
+const TpEcpPack = ({ world, tap, target }) => {
+    const pack = PACK(world);
+    if (world.ecpSigned) {
+        return (
+            <div className="wt-tp__empty">
+                <i aria-hidden="true"><TpIcon name="copy" /></i>
+                <b>Сейчас подписывать нечего</b>
+                <Tap id="ecp_history" target={target} tap={tap} className="wt-tp__history">
+                    История подписаний
+                </Tap>
+            </div>
+        );
+    }
+    return (
+        <>
+            <div className="wt-tp__pack-title">
+                <small>Документы на подпись</small>
+                <b>{bare(world.period.label)}</b>
+                <span>Документов: {pack.length} · подписываются одним пакетом</span>
+            </div>
+            {pack.map((doc) => <TpPackDoc key={doc.id} doc={doc} />)}
+            <p className="wt-tp__note">
+                <TpIcon name="info" />
+                Подписывается именно этот набор документов, целиком
+            </p>
+            <p className="wt-tp__note">
+                <TpIcon name="info" />
+                Документы подписываются вашим ключом ЭЦП, который вы загрузили в приложение
+            </p>
+            <Tap id="ecp_sign" target={target} tap={tap} className="wt-tp__yellow">
+                <TpIcon name="sign" />
+                Подписать
+            </Tap>
+            <Tap id="ecp_history" target={target} tap={tap} className="wt-tp__history">
+                История подписаний
+            </Tap>
+        </>
+    );
+};
 
 /* ── Карточка акта ────────────────────────────────────────────────────────
    Состояний у акта в приложении два: «Подписать» или «Подписан · Открыть».
@@ -296,7 +334,7 @@ const TpActs = ({ world, signed, tap, target }) => (
 export const TpDocuments = ({ world, tap, target }) => {
     const tab = world.docsTab || 'ecp';
     return (
-        <TpApp active="nav_docs" badge={2} tap={tap} target={target}>
+        <TpApp active="nav_docs" badge={world.ecpSigned ? 0 : 2} tap={tap} target={target}>
             <TpDocsHead tab={tab} tap={tap} target={target} />
             {tab === 'ecp'
                 ? <TpEcpPack world={world} tap={tap} target={target} />
@@ -330,6 +368,103 @@ export const TpCheck = ({ world, tap, target }) => {
         </TpApp>
     );
 };
+
+/* ── «Через ЭЦП»: ключ на телефоне ────────────────────────────────────────
+   Окно поверх главной, кадр водителя 09.11.2026: оранжевый круг с белым ключом,
+   «Добавьте ЭЦП на этот телефон», текст приложения слово в слово и жёлтая
+   «Продолжить». Главная под окном размыта и затемнена — нажать её нельзя
+   (inert: Tab тоже не уводит фокус под окно). Что за «Продолжить» дальше
+   (выпуск ключа или файл), на кадрах водителей нет — поэтому не нарисовано. */
+export const TpEcpAdd = ({ tap, target }) => (
+    <div className="wt-tp-modal">
+        <div className="wt-tp-modal__behind" aria-hidden="true" inert="">
+            <TpHome tap={() => {}} target={null} />
+        </div>
+        <div className="wt-tp-modal__veil">
+            <TrainMark />
+            <section className="wt-tp-modal__card" role="dialog"
+                aria-label="Добавьте ЭЦП на этот телефон">
+                <i className="wt-tp-modal__key" aria-hidden="true"><TpIcon name="key" /></i>
+                <b>Добавьте ЭЦП на этот телефон</b>
+                <p>
+                    Ею подписываются документы в приложении. Выпустите ключ здесь или
+                    прикрепите файл — это займёт пару минут.
+                </p>
+                <Tap id="ecp_key_continue" target={target} tap={tap} className="wt-tp__yellow">
+                    Продолжить
+                </Tap>
+            </section>
+        </div>
+    </div>
+);
+
+/** Шапка экранов приложения без нижней панели: кнопка «назад» в белом кружке
+ *  слева и заголовок по центру. */
+const TpNavbar = ({ title, tap, target }) => (
+    <header className="wt-tp__navbar">
+        <Tap id="ecp_back" target={target} tap={tap} className="wt-tp__back" aria-label="Назад">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"
+                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="m14.5 5.5-6.5 6.5 6.5 6.5" />
+            </svg>
+        </Tap>
+        <b>{title}</b>
+    </header>
+);
+
+/* ── «Через ЭЦП»: документы подписаны ────────────────────────────────────
+   Экран приложения (не кабинет Сапар): назад-стрелка и заголовок «Подписание
+   документов», карточка «Октябрь 2026 · Документы подписаны · Время подписи»,
+   жёлтая «Готово» и подписанные документы с «Подтверждено Sapar» — по кадрам
+   водителей 11.11.2026. */
+export const TpEcpSigned = ({ world, tap, target }) => (
+    <div className="wt-tp-app">
+        <div className="wt-screen wt-tp wt-tp--plain">
+            <TrainMark />
+            <TpNavbar title="Подписание документов" tap={tap} target={target} />
+            <section className="wt-tp__card wt-tp__signed">
+                <small>{bare(world.period.label)}</small>
+                <b>Документы подписаны</b>
+                <span>Время подписи: {world.signedAt}</span>
+            </section>
+            <Tap id="ecp_ready" target={target} tap={tap} className="wt-tp__yellow">Готово</Tap>
+            {PACK(world).map((doc) => (
+                <TpPackDoc key={doc.id} doc={doc} footer={(
+                    <p className="wt-tp__confirmed">
+                        <TpIcon name="checkCircleFill" />
+                        Подтверждено Sapar
+                    </p>
+                )} />
+            ))}
+        </div>
+        <TpFab tap={tap} target={target} />
+    </div>
+);
+
+/* ── «Через ЭЦП»: история подписаний ──────────────────────────────────────
+   Список подписанных пакетов, кадры 09.11.2026: карточка с месяцем, состоянием
+   пакета и строкой «Документов: 1 · 9 ноября 2026, 17:59». Карточка итога урока
+   ниже — тренажёрная, как в способе «Через eGov»: в приложении её нет. */
+export const TpEcpHistory = ({ world, tap, target }) => (
+    <div className="wt-tp-app">
+        <div className="wt-screen wt-tp wt-tp--plain">
+            <TrainMark />
+            <TpNavbar title="История подписаний" tap={tap} target={target} />
+            <section className="wt-tp__card wt-tp__hist">
+                <b>{bare(world.period.label)}</b>
+                <span>Документы подписаны</span>
+                <small>Документов: {PACK(world).length} · {world.signedAt}</small>
+            </section>
+            <div className="wt-tp__card wt-tp__done">
+                <b>Пакет за {world.period.short} — в истории подписаний</b>
+                <Tap id="ecp_finish" target={target} tap={tap} className="wt-tp__yellow">
+                    Завершить урок
+                </Tap>
+            </div>
+        </div>
+        <TpFab tap={tap} target={target} />
+    </div>
+);
 
 /* ── Окно «Подписание документов» ─────────────────────────────────────────
    Приложение открывает кабинет Сапар своим окном-«шторкой» iOS: сверху на
