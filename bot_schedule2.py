@@ -53250,6 +53250,9 @@ try:
             'news_bucket_name': _news_bucket_name,
         },
         session_id_provider=_current_session_id_from_access_token,
+        # Ролики едут из браузера прямо в хранилище; сессию загрузки сервер
+        # открывает с Origin страницы — только для сайтов из списка CORS.
+        allowed_origin=_is_allowed_origin,
     ))
     logging.info("Раздел «Вики»: Blueprint подключён на /api/wiki")
 except Exception:

@@ -22,6 +22,10 @@
     обновление таблицы сводится к замене одного маркера на другой;
   * пропавший маркер не стоит статье таблицы — она уезжает в конец с
     предупреждением (restore_tables);
+  * ролик статьи (wiki/videos.py) тоже уходит маркером — [[РОЛИК-N]] — и
+    возвращается ДОСЛОВНО: модель его не видит и переписать не может, а
+    потерянный маркер ставит ролик в конец статьи с предупреждением. Убрать
+    ролик можно только явно, хвостом «убрать», как картинку;
   * ЧТО ИМЕННО ИЗМЕНИЛОСЬ, модель обязана перечислить. Список изменений — не
     украшение: без него редактор получает 7000 знаков нового текста и не может
     проверить его иначе, чем прочитав целиком;
@@ -126,6 +130,72 @@ FILE_EXTRA = """
 # он утекал наружу как есть, а при сдвиге номеров оставался со старым.
 _MARKER_RE = re.compile(r'\[\[(ТАБЛИЦА|КАРТИНКА)-(\d+)([^\]]*)\]\]', re.I)
 
+# Ролики статьи. Своя нумерация, а не общая с картинками: тег картинки
+# пересобирается с новыми контролами (markup.retag_image), а ролик обязан
+# вернуться байт в байт — с обложкой, размером кадра и длительностью.
+VIDEO_TOKEN = '[[РОЛИК-%d]]'
+_VIDEO_TOKEN_RE = re.compile(r'\[{1,2}\s*РОЛИК[\s-]*(\d+)([^\]]*)\]{1,2}', re.I)
+VIDEO_GUIDE = (
+    'РОЛИКИ: маркер [[РОЛИК-N]] — ролик статьи. Переноси его ДОСЛОВНО, отдельной '
+    'строкой, на том же месте. Убрать ролик можно только по прямому указанию — '
+    'тогда напиши [[РОЛИК-N убрать]].')
+
+
+def protect_videos(html):
+    """Вырезает ролики, ставит маркеры: (html, [теги роликов])."""
+    text = str(html or '')
+    if '<video' not in text.lower():
+        return text, []
+    soup = BeautifulSoup(text, 'html.parser')
+    videos = []
+    for video in soup.find_all('video'):
+        if not str(video.get('src') or '').strip():
+            video.decompose()
+            continue
+        videos.append(str(video))
+        marker = soup.new_tag('p')
+        marker.string = VIDEO_TOKEN % len(videos)
+        video.replace_with(marker)
+    return str(soup), videos
+
+
+def restore_videos(html, videos):
+    """Вернуть ролики на места маркеров: (html, [потерянные], [убранные]).
+
+    Потерянный ролик не пропадает: он встаёт в конец статьи, а автор получает
+    предупреждение. Убранный явно («убрать») — не возвращается.
+    """
+    if not videos:
+        return html, [], []
+    used, removed = set(), []
+
+    def substitute(match):
+        index = int(match.group(1))
+        if not 1 <= index <= len(videos):
+            return ''
+        used.add(index)
+        if markup.parse_image_controls(match.group(2))[2]:
+            removed.append(index)
+            return ''
+        return videos[index - 1]
+
+    soup = BeautifulSoup(_VIDEO_TOKEN_RE.sub(substitute, str(html or '')), 'html.parser')
+    # Маркер стоял абзацем — ролик внутри <p> браузер разобрал бы как ошибку
+    # вложенности. Выносим его из абзаца, пустой абзац убираем.
+    for video in soup.find_all('video'):
+        parent = video.parent
+        if parent is not None and parent.name == 'p':
+            parent.insert_before(video.extract())
+            if not parent.get_text(strip=True) and not parent.find(True):
+                parent.decompose()
+    for para in soup.find_all('p'):
+        if not para.find(True) and not para.get_text(strip=True):
+            para.decompose()
+    lost = [index for index in range(1, len(videos) + 1) if index not in used]
+    for index in lost:
+        soup.append(BeautifulSoup(videos[index - 1], 'html.parser'))
+    return str(soup).strip(), lost, removed
+
 
 def humanize(line):
     """Убрать служебные маркеры из текста, который прочитает человек.
@@ -134,10 +204,11 @@ def humanize(line):
     выглядят как утечка кода наружу: «добавлен вводный текст и [[ТАБЛИЦА-4]]».
     Замер на живом прогоне: маркеры попали и в изменения, и в вопрос редактору.
     """
-    return _MARKER_RE.sub(
+    text = _MARKER_RE.sub(
         lambda m: '%s %s' % ('таблица' if m.group(1).upper() == 'ТАБЛИЦА' else 'картинка',
                              m.group(2)),
         str(line or ''))
+    return _VIDEO_TOKEN_RE.sub(lambda m: 'ролик %s' % m.group(1), text)
 
 
 def dedupe(lines):
@@ -208,6 +279,7 @@ def _prepare(current_html, document_html):
     пространства имён заставляли бы её удерживать ещё и правило, какое из них
     чьё, — лишний повод ошибиться там, где ошибка дорога.
     """
+    current_html, videos = protect_videos(current_html)
     body, tables, images = protect_tables(current_html)
     doc_body, doc_tables, doc_images = ('', [], [])
     if document_html:
@@ -220,11 +292,11 @@ def _prepare(current_html, document_html):
                 # Хвост переносится как есть: номер сдвигается, контролы нет.
                 return '[[%s-%d%s]]' % (kind, number + base, match.group(3))
             doc_body = _MARKER_RE.sub(renumber, doc_body)
-    return body, doc_body, tables + doc_tables, images + doc_images
+    return body, doc_body, tables + doc_tables, images + doc_images, videos
 
 
 def _finish(text, *, current_html, tables, images, sources_text, meta,
-            allow_table_patches=True, links=()):
+            allow_table_patches=True, links=(), videos=()):
     """Собрать результат правки и проверить его.
 
     sources_text обязан включать НАЗВАНИЕ статьи: на живом прогоне правка
@@ -252,6 +324,7 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
     dropped = removed_images(body)
     body = canonicalize(body)
     body, lost = restore_tables(body, tables, images)
+    body, lost_videos, removed_videos = restore_videos(body, list(videos or ()))
     clean = sanitize_html(body)
 
     # Адрес, который модель не поставила, дописывается разделом в конец. Пустая
@@ -289,6 +362,13 @@ def _finish(text, *, current_html, tables, images, sources_text, meta,
         warnings.append('ИИ убрал %s (%s) — так и было задумано?'
                         % ('картинку' if len(dropped) == 1 else 'картинки',
                            ', '.join('№%d' % number for number in dropped)))
+    if lost_videos:
+        warnings.append('ИИ потерял %s — %s в конце статьи, перенесите на место'
+                        % ('ролик' if len(lost_videos) == 1 else 'ролики',
+                           'он поставлен' if len(lost_videos) == 1 else 'они поставлены'))
+    if removed_videos:
+        warnings.append('ИИ убрал %s — так и было задумано?'
+                        % ('ролик' if len(removed_videos) == 1 else 'ролики'))
     if not changes:
         warnings.append('ИИ не перечислил изменения — сверьте текст сами')
 
@@ -300,7 +380,7 @@ def update_from_document(*, current_title, current_html, document_html='',
                          document_text='', filename='', kind='', generate_fn,
                          blob=None, mime=None, generate_file_fn=None, links=()):
     """Обновить статью новым документом. Возвращает content/changes/questions/warnings."""
-    body, doc_body, tables, images = _prepare(
+    body, doc_body, tables, images, videos = _prepare(
         current_html, '' if blob is not None else document_html)
 
     header = 'ТЕКУЩАЯ СТАТЬЯ: «%s»\n%s' % (current_title or 'без названия', body)
@@ -316,6 +396,8 @@ def update_from_document(*, current_title, current_html, document_html='',
     pictures = images_block(images)
     if pictures:
         header += '\n\n' + pictures
+    if videos:
+        header += '\n\n' + VIDEO_GUIDE
 
     # Ссылки нового документа. Для PDF это единственный способ их получить:
     # адрес там в аннотации, а не в тексте (см. importer.pdf_links).
@@ -342,7 +424,7 @@ def update_from_document(*, current_title, current_html, document_html='',
     sources = '\n'.join(filter(None, [current_title, to_plain_text(current_html),
                                       document_text, to_plain_text(document_html)]))
     return _finish(text, current_html=current_html, tables=tables, images=images,
-                   sources_text=sources, meta=meta, links=links)
+                   sources_text=sources, meta=meta, links=links, videos=videos)
 
 
 def edit_by_instruction(*, current_title, current_html, instruction, generate_fn,
@@ -358,7 +440,7 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     if not instruction:
         raise ValueError('нужно указание')
 
-    body, _doc, tables, images = _prepare(current_html, '')
+    body, _doc, tables, images, videos = _prepare(current_html, '')
     prompt = 'ТЕКУЩАЯ СТАТЬЯ: «%s»\n%s' % (current_title or 'без названия', body)
     grid = tablepatch.serialize(tables)
     if grid:
@@ -367,6 +449,8 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     pictures = images_block(images)
     if pictures:
         prompt += '\n\n' + pictures
+    if videos:
+        prompt += '\n\n' + VIDEO_GUIDE
     prompt += '\n\nУКАЗАНИЕ РЕДАКТОРА:\n' + instruction
 
     text, meta = generate_fn(EDIT_PROMPT, prompt, max_tokens=MAX_OUTPUT_TOKENS)
@@ -374,7 +458,7 @@ def edit_by_instruction(*, current_title, current_html, instruction, generate_fn
     if extra_sources:
         sources_text += '\n' + str(extra_sources)
     result = _finish(text, current_html=current_html, tables=tables, images=images,
-                     sources_text=sources_text, meta=meta)
+                     sources_text=sources_text, meta=meta, videos=videos)
     result['instruction'] = instruction
     return result
 

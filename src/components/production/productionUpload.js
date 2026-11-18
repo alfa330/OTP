@@ -21,6 +21,13 @@
  * канал и оба приходят позже. Очередь живёт в модуле, а не в окне задачи:
  * закрыли карточку или ушли в другой раздел — загрузка продолжается, а
  * переход со страницы спросит подтверждение.
+ *
+ * ЕЮ ЖЕ ГРУЗЯТ РОЛИКИ ВИКИ (src/components/wiki/videoUpload.js, 18.11.2026):
+ * путь файла тот же, отличаются только ручки сервера — их вызывающий приносит
+ * в add({ endpoints }). Без endpoints всё идёт по адресам «Продакшна», как и
+ * раньше. Строки вики у разделов «Продакшна» не видны: те показывают строки
+ * своей задачи (taskId) или «Медиатеки» (library), а у вики нет ни того, ни
+ * другого.
  */
 
 import axios from 'axios';
@@ -95,7 +102,8 @@ export const uploadStore = {
     },
     /** Поставить файлы в очередь. Неподходящие сразу отмечаются ошибкой.
         library — файл «Медиатеки» (без задачи) в категорию category: taskId тогда не нужен. */
-    add({ taskId = null, library = false, category = null, files, apiBaseUrl, headers, onDone }) {
+    add({ taskId = null, library = false, category = null, files, apiBaseUrl, headers, onDone, endpoints = null }) {
+        const keys = [];
         Array.from(files || []).forEach((file) => {
             const check = library ? classifyLibraryFile(file, category) : classifyFile(file);
             items.push({
@@ -116,11 +124,15 @@ export const uploadStore = {
                 eta: null,
                 materialId: null,
                 ownerId: currentUserId(),
-                ctx: { apiBaseUrl, headers, onDone },
+                ctx: { apiBaseUrl, headers, onDone, endpoints },
             });
+            keys.push(items[items.length - 1].key);
         });
         emit();
         pump();
+        // Номера строк — чтобы вызывающий мог следить за своей (вики держит по
+        // номеру узел ролика в тексте статьи). «Продакшн» их не читает.
+        return keys;
     },
     cancel(key) {
         const item = items.find((entry) => entry.key === key);
@@ -129,7 +141,7 @@ export const uploadStore = {
         state.canceled = true;
         try { state.xhr?.abort(); } catch { /* уже закрыт */ }
         if (item.materialId) {
-            axios.delete(`${item.ctx.apiBaseUrl}/api/production/materials/${item.materialId}`, { headers: item.ctx.headers() })
+            axios.delete(urlsOf(item).cancel(item.materialId), { headers: item.ctx.headers() })
                 .catch(() => {});
         }
         items = items.filter((entry) => entry.key !== key);
@@ -153,6 +165,20 @@ export const uploadStore = {
 };
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/* Ручки сервера для строки. По умолчанию — «Продакшн»; вики приносит свои
+   (add({ endpoints })), и тогда каждая ручка — её. */
+const urlsOf = (item) => {
+    const own = item.ctx.endpoints || null;
+    const base = `${item.ctx.apiBaseUrl}/api/production`;
+    return {
+        start: own?.start || (item.library ? `${base}/library/uploads` : `${base}/tasks/${item.taskId}/uploads`),
+        state: (id) => (own?.state ? own.state(id) : `${base}/uploads/${id}`),
+        poster: (id) => (own?.poster ? own.poster(id) : `${base}/uploads/${id}/poster`),
+        complete: (id) => (own?.complete ? own.complete(id) : `${base}/uploads/${id}/complete`),
+        cancel: (id) => (own?.cancel ? own.cancel(id) : `${base}/materials/${id}`),
+    };
+};
 
 /* Чья это загрузка. Очередь живёт в модуле, а выход из учётки в портале страницу
    не перезагружает: без этой сверки недогруженный файл продолжил бы ехать уже под
@@ -376,7 +402,8 @@ const putRemainder = (item, sessionUrl, offset) => new Promise((resolve) => {
 });
 
 const uploadOne = async (item) => {
-    const { apiBaseUrl, headers } = item.ctx;
+    const { headers } = item.ctx;
+    const urls = urlsOf(item);
     const isCanceled = () => ownerChanged(item)
         || live(item.key).canceled
         || !items.some((entry) => entry.key === item.key);
@@ -385,9 +412,7 @@ const uploadOne = async (item) => {
     let started;
     try {
         const response = await axios.post(
-            item.library
-                ? `${apiBaseUrl}/api/production/library/uploads`
-                : `${apiBaseUrl}/api/production/tasks/${item.taskId}/uploads`,
+            urls.start,
             // Отпечаток (дата изменения файла): докачка подхватит только тот же файл.
             {
                 name: item.name,
@@ -405,7 +430,7 @@ const uploadOne = async (item) => {
     patch(item.key, { materialId, loaded: Number(started.offset || 0) });
     if (isCanceled()) {
         // Отменили, пока сервер открывал сессию: заготовку на сервере убираем сразу.
-        axios.delete(`${apiBaseUrl}/api/production/materials/${materialId}`, { headers: headers() }).catch(() => {});
+        axios.delete(urls.cancel(materialId), { headers: headers() }).catch(() => {});
         return 'canceled';
     }
 
@@ -414,7 +439,7 @@ const uploadOne = async (item) => {
         if (poster?.blob && !isCanceled()) {
             const form = new FormData();
             form.append('file', poster.blob, 'poster.jpg');
-            await axios.post(`${apiBaseUrl}/api/production/uploads/${materialId}/poster`, form, { headers: headers() })
+            await axios.post(urls.poster(materialId), form, { headers: headers() })
                 .catch(() => {});
         }
         return poster;
@@ -452,7 +477,7 @@ const uploadOne = async (item) => {
         if (isCanceled()) return 'canceled';
         try {
             // eslint-disable-next-line no-await-in-loop
-            const state = await axios.get(`${apiBaseUrl}/api/production/uploads/${materialId}`, { headers: headers() });
+            const state = await axios.get(urls.state(materialId), { headers: headers() });
             offset = Number(state.data?.offset || 0);
             finished = Boolean(state.data?.finished);
             if (offset > progressMark) {
@@ -474,7 +499,7 @@ const uploadOne = async (item) => {
     const [crc, poster] = await Promise.all([crcPromise, posterPromise]);
     if (isCanceled()) return 'canceled';
     try {
-        await axios.post(`${apiBaseUrl}/api/production/uploads/${materialId}/complete`, {
+        await axios.post(urls.complete(materialId), {
             crc32c: crc == null ? null : String(crc),
             duration: poster?.duration ?? null,
             width: poster?.width ?? null,

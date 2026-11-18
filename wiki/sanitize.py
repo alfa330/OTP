@@ -39,6 +39,9 @@ ALLOWED_TAGS = {
     'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'colgroup', 'col', 'caption',
     'a', 'img',
     'details', 'summary',
+    # Ролик статьи (wiki/videos.py). Источник — только файл самой вики, см.
+    # _VIDEO_SRC ниже: чужой адрес в <video> — это трафик и слежка мимо нас.
+    'video',
 }
 
 # Атрибуты, общие для всех тегов.
@@ -77,6 +80,11 @@ ALLOWED_ATTRIBUTES['a'] |= {'href', 'target'}
 # и заданный автором размер сбросится, причём молча.
 ALLOWED_ATTRIBUTES['img'] |= {'src', 'alt', 'width', 'height', 'loading',
                              'data-width', 'data-align'}
+# Ролик: адрес, обложка, размер кадра (по нему витрина держит пропорцию до
+# загрузки, без прыжка страницы) и длительность. autoplay, loop и muted нет
+# намеренно: ролик в статье запускает читатель, а не страница.
+ALLOWED_ATTRIBUTES['video'] |= {'src', 'poster', 'controls', 'preload', 'playsinline',
+                               'width', 'height', 'data-duration'}
 ALLOWED_ATTRIBUTES['td'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['th'] |= {'colspan', 'rowspan', 'colwidth'}
 ALLOWED_ATTRIBUTES['col'] |= {'span', 'width'}
@@ -159,6 +167,9 @@ def _attribute_filter(tag, attribute, value):
         if src.startswith('data:') and not src.startswith('data:image/'):
             return None
 
+    if tag == 'video' and attribute in _VIDEO_OWN_ATTRS:
+        return _video_attribute(attribute, value)
+
     if attribute == 'class':
         # Классы оставляем (в контенте их 328), но не даём вырваться из потока
         # статьи и накрыть собой интерфейс портала.
@@ -167,6 +178,50 @@ def _attribute_filter(tag, attribute, value):
         return ' '.join(classes) or None
 
     return value
+
+
+# Источник ролика и его обложки — только файл вики, постоянным адресом. Так их
+# пишет редактор (WikiVideoNode.jsx), а витрина подставляет подпись хранилища
+# поверх именно этого адреса (file_urls.py). Внешний адрес не нужен никому, а
+# пропусти его — и статья с <video src="https://чужой-сайт/..."> раздавала бы
+# чужой трафик каждому читателю.
+_VIDEO_SRC = re.compile(
+    r'^(?:https?://[^/?#\s]+)?(/api/wiki/file/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$',
+    re.I)
+# Атрибуты, которые решает правило ролика. Остальные (class, style, id, title)
+# идут общими фильтрами ниже — иначе класс «fixed z-50» у ролика прошёл бы мимо
+# запрета, который держат все остальные теги (поймано разбором 18.11.2026).
+_VIDEO_OWN_ATTRS = frozenset({'src', 'poster', 'controls', 'preload', 'playsinline',
+                              'width', 'height', 'data-duration'})
+_NUMBER = re.compile(r'^\d{1,6}(\.\d{1,3})?$')
+_DIGITS = re.compile(r'^\d{1,6}$')
+
+
+def _video_attribute(attribute, value):
+    text = str(value or '').strip()
+    if attribute in ('src', 'poster'):
+        # Полный адрес нашего же файла сводится к постоянному: так тело статьи
+        # отдаёт редактор, когда шлёт его на правку ИИ (там адреса раскрыты до
+        # домена API), и без этого ролик молча выпадал из результата правки.
+        # Хост при этом не сохраняется — запросов на чужой сайт не будет.
+        found = _VIDEO_SRC.match(text)
+        return found.group(1) if found else None
+    if attribute in ('controls', 'playsinline'):
+        return ''
+    if attribute == 'preload':
+        # 'auto' скачивал бы ролик целиком у каждого, кто просто открыл статью.
+        return 'none' if text.lower() == 'none' else 'metadata'
+    if attribute in ('width', 'height'):
+        return text if _DIGITS.match(text) and int(text) > 0 else None
+    if attribute == 'data-duration':
+        return text if _NUMBER.match(text) else None
+    return value
+
+
+# Ролик без источника — пустой чёрный прямоугольник в статье: такой узел
+# выбрасываем целиком. nh3 решает по атрибутам, а не по элементам, поэтому
+# отдельным проходом после него.
+_VIDEO_WITHOUT_SRC = re.compile(r'<video(?![^>]*\ssrc=")[^>]*>.*?</video>', re.I | re.S)
 
 
 def sanitize_html(html):
@@ -182,7 +237,7 @@ def sanitize_html(html):
             'Не установлен nh3 — сохранять HTML без санитизации нельзя. '
             'Добавьте nh3 в requirements.txt.'
         )
-    return nh3.clean(
+    cleaned = nh3.clean(
         str(html),
         tags=ALLOWED_TAGS,
         attributes={tag: set(attrs) for tag, attrs in ALLOWED_ATTRIBUTES.items()},
@@ -191,6 +246,9 @@ def sanitize_html(html):
         link_rel='noopener noreferrer',
         strip_comments=True,
     )
+    if '<video' in cleaned:
+        cleaned = _VIDEO_WITHOUT_SRC.sub('', cleaned)
+    return cleaned
 
 
 _TAG_RE = re.compile(r'<[^>]+>')

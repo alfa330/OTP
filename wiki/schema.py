@@ -105,6 +105,11 @@ ARTICLE_TYPES = (
     # чтобы редактор знал, когда показывать выбор тренажёра, а витрина умела
     # собрать такие статьи в одну подборку.
     'trainer',
+    # 'video' — статья-ролик (владелец 18.11.2026: «загружать ролики как
+    # статью»). Сам ролик — узел <video> в теле статьи (wiki/videos.py), а тип
+    # даёт подпись «Ролик» в списках, подборку «Ролики» в оглавлении и фильтр в
+    # поиске. CHECK в базе пересобирается сам (_article_type_check_statement).
+    'video',
 )
 
 # Статусы статьи, сгруппированные в три корзины витрины: «Статьи», «Черновики»,
@@ -779,6 +784,40 @@ _SEED_ROLES = [
     ('process_owner',  'Владелец процесса',         True,  True,  True,  True,  True,  False, False, False, False),
     ('approver',       'Согласующий',               True,  False, False, False, False, True,  False, False, False),
     ('wiki_admin',     'Администратор вики',        True,  True,  True,  True,  True,  True,  True,  True,  True),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ролики (wiki/videos.py)
+#
+# Ролик едет из браузера прямо в бакет сессией докачки, поэтому строка файла
+# появляется ДО того, как файл доехал: в ней живут адрес сессии (докачка после
+# закрытой вкладки) и отметка «ещё едет» (такой файл не отдаёт ни /file/<id>,
+# ни подпись витрины). Готовый ролик — upload_state IS NULL, как у всех прежних
+# файлов вики, поэтому ни одна старая выборка новой колонки не замечает.
+#
+# CHECK на upload_state не ставим: значение одно и пишет его только
+# wiki/videos.py, а расширять ограничение под каждое новое состояние — та самая
+# миграция, которой лучше не заводить без нужды.
+# ─────────────────────────────────────────────────────────────────────────────
+_VIDEO_STATEMENTS = [
+    "ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS upload_state VARCHAR(16);",
+    "ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS upload_session TEXT;",
+    "ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS upload_origin VARCHAR(255);",
+    "ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS client_fingerprint VARCHAR(64);",
+    "ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS duration_seconds REAL;",
+    # Обложка ролика — обычная картинка вики (WebP, своя строка wiki_files):
+    # её подписывает и привязывает к статье тот же код, что и любую картинку.
+    """
+    ALTER TABLE wiki_files ADD COLUMN IF NOT EXISTS poster_file_id UUID
+        REFERENCES wiki_files(id) ON DELETE SET NULL;
+    """,
+    # Незаконченные загрузки: докачка ищет свою по человеку, уборка — старые.
+    # Частичный индекс: таких строк единицы, а файлов вики — сотни.
+    """
+    CREATE INDEX IF NOT EXISTS idx_wiki_files_uploading
+        ON wiki_files(uploaded_by, created_at) WHERE upload_state IS NOT NULL;
+    """,
 ]
 
 
@@ -2873,6 +2912,11 @@ def init_wiki_schema(cursor):
         # (ValueError: unsupported format character). psycopg2 интерполяцию тоже
         # не делает — второй аргумент execute не передаётся.
         cursor.execute(statement.replace('%(now)s', _NOW))
+
+    # Колонки загрузки роликов — сразу за базовыми таблицами: это ALTER по
+    # wiki_files, которая заводится в _STATEMENTS.
+    for statement in _VIDEO_STATEMENTS:
+        cursor.execute(statement)
 
     # Отдел и уровень должности в дереве — строго после базовых таблиц:
     # это ALTER по wiki_sections и обеим таблицам правил.

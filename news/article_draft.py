@@ -18,6 +18,9 @@ wiki_enabled и QR-подтверждения). Ссылка «читайте в
   * картинки уходят из текста в КАРУСЕЛЬ новости — единственное место, где
     новость показывает картинки (адреса вики у читателя новости не откроются);
   * кнопка тренажёра уходит из текста в ТРЕНАЖЁР новости — у неё есть свой;
+  * ролик (wiki/videos.py) новость не повезёт — он весит сотни мегабайт и
+    живёт за дверями вики; его обложка уходит в карусель, а на месте ролика
+    остаётся строка «▶ Ролик · 1:23 — смотрите в статье вики»;
   * блоки оформления (плашки, шаги, карточки) и раскрывашки теряют рамку, но
     сохраняют текст; заголовок раскрывашки становится жирной строкой;
   * заголовки глубже третьего уровня становятся третьим — у новости их три;
@@ -38,6 +41,11 @@ except ImportError:  # pragma: no cover — окружение без завис
 # порядок: отбирает и считает пропущенные вызывающий.
 _IMG = re.compile(r'<img\b[^>]*>', re.I)
 _SRC = re.compile(r'''\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)')''', re.I)
+# Ролик статьи: картинкой в карусель идёт его обложка (poster).
+_MEDIA = re.compile(r'<(img|video)\b[^>]*>', re.I)
+_POSTER = re.compile(r'''\bposter\s*=\s*(?:"([^"]*)"|'([^']*)')''', re.I)
+_VIDEO = re.compile(r'<video\b([^>]*)>.*?</video\s*>', re.I | re.S)
+_DURATION = re.compile(r'''\bdata-duration\s*=\s*["']([0-9.]+)["']''', re.I)
 
 # Кнопка тренажёра (src/components/wiki/trainers/TrainerNode.jsx): пустой по
 # смыслу div с ключом сценария и подписью внутри. Вложенных div у неё нет.
@@ -92,14 +100,35 @@ def is_wiki_link(href):
 
 def image_sources(html):
     """Адреса картинок статьи в порядке текста. Без повторов: одна и та же
-    картинка дважды в карусели — это не два кадра."""
+    картинка дважды в карусели — это не два кадра. У ролика картинка — его
+    обложка: сам ролик новость не повезёт (см. шапку)."""
     seen, order = set(), []
-    for tag in _IMG.findall(str(html or '')):
-        src = _attr(_SRC, tag).strip()
+    for match in _MEDIA.finditer(str(html or '')):
+        tag = match.group(0)
+        pattern = _POSTER if match.group(1).lower() == 'video' else _SRC
+        src = _attr(pattern, tag).strip()
         if src and src not in seen:
             seen.add(src)
             order.append(src)
     return order
+
+
+def _video_line(match):
+    """Ролик → строка о нём: сам ролик у новости не играет, но и пропасть
+    из текста молча не должен — тот, кто выпускает новость, решит сам."""
+    words = 'Ролик'
+    found = _DURATION.search(match.group(1) or '')
+    if found:
+        try:
+            seconds = int(round(float(found.group(1))))
+        except ValueError:
+            seconds = 0
+        if seconds > 0:
+            hours, rest = divmod(seconds, 3600)
+            minutes, secs = divmod(rest, 60)
+            words += ' · ' + ('%d:%02d:%02d' % (hours, minutes, secs) if hours
+                              else '%d:%02d' % (minutes, secs))
+    return '<p>▶ %s — смотрите в статье вики</p>' % words
 
 
 def trainer_key(html):
@@ -121,6 +150,7 @@ def news_body(html):
         raise RuntimeError('Не установлен nh3 — разметку статьи не очистить')
     text = str(html or '')
     text = _TRAINER_BLOCK.sub('', text)
+    text = _VIDEO.sub(_video_line, text)
     text = _IMG.sub('', text)
     text = _FIGCAPTION.sub('', text)
     text = _SUMMARY.sub(lambda m: '<p><strong>%s</strong></p>' % m.group(1), text)

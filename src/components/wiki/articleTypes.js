@@ -23,6 +23,12 @@ export const ARTICLE_TYPES = [
        в текст кнопку запуска. Поэтому тип нужен и здесь, и на сервере
        (wiki/schema.py: ARTICLE_TYPES) — по нему же собирается подборка. */
     { value: 'trainer', label: 'Тренажёр', plural: 'Тренажёры', tone: 'green' },
+    /* «Ролик» — статья, у которой ролик и есть содержание (владелец 18.11.2026:
+       «загружать ролики как статью»). Как и тренажёр, тип ВКЛЮЧАЕТ: в пустой
+       статье-ролике редактор показывает карточку «Выберите ролик». Сам ролик —
+       узел в тексте (WikiVideoNode.jsx), так что вставить его можно и в любую
+       другую статью. Тон нейтральный: подпись говорит о виде, а не о важности. */
+    { value: 'video', label: 'Ролик', plural: 'Ролики', tone: 'slate' },
 ];
 
 const BY_VALUE = new Map(ARTICLE_TYPES.map((type) => [type.value, type]));
@@ -30,6 +36,9 @@ const BY_VALUE = new Map(ARTICLE_TYPES.map((type) => [type.value, type]));
 /** Тип, при котором в редакторе появляется выбор тренажёра. Одна константа на
  *  редактор и на проверки: строкой 'trainer' в двух местах разойтись легко. */
 export const TRAINER_TYPE = 'trainer';
+
+/** Статья-ролик — та же причина отдельной константы. */
+export const VIDEO_TYPE = 'video';
 
 /** Подпись типа — или null для обычной статьи и незнакомого значения. */
 export const typeBadge = (value) => {
@@ -51,7 +60,8 @@ export const normalizeType = (value) => (BY_VALUE.has(value) ? value : 'general'
    Отдельная константа, а не порядок ARTICLE_TYPES: там порядок задан
    выпадающим списком редактора, где первым стоит значение по умолчанию. */
 export const GROUP_ORDER = [
-    'job_description', 'regulation', 'instruction', 'trainer', 'tool_description', 'general',
+    'job_description', 'regulation', 'instruction', 'trainer', 'video', 'tool_description',
+    'general',
 ];
 
 /* Статьи, разложенные по типу: [{ key, label, items }] — или null, если тип

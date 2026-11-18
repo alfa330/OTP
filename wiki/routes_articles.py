@@ -685,23 +685,24 @@ def register(bp, wiki_route, db, log_ip, gcs):
         return paths
 
     # ── Файлы ────────────────────────────────────────────────────────────
-    @wiki_route('/file/<file_id>')
-    def wiki_file(cursor, ctx, file_id):
-        """Стабильная ссылка на файл статьи.
+    def _file_record_for(cursor, ctx, file_id):
+        """Строка файла, если человеку его можно отдать, иначе None.
 
-        Почему не signed URL прямо в HTML, как это делает LMS: подписанная
-        ссылка живёт 240 минут, а тело статьи хранится годами — все картинки
-        протухли бы. Здесь адрес постоянный, а подпись выдаётся на каждый
-        запрос, и только после проверки доступа к статье-владельцу.
+        Одно правило на обе двери — редирект /file/<id> и свежую подпись
+        /file/<id>/url: вторая копия разошлась бы с первой молча.
         """
         record = wiki_articles.get_file(cursor, file_id)
         if not record:
-            return jsonify({"error": "Файл не найден"}), 404
+            return None
+        # Ролик, который ещё едет в бакет (wiki/videos.py), не отдаём никому —
+        # даже загрузившему: объекта под строкой ещё нет или он неполный.
+        if record.get('upload_state'):
+            return None
 
         if record['article_id']:
             _subjects, _sections, visible = _perimeter(cursor, ctx)
             if record['article_id'] not in visible:
-                return jsonify({"error": "Файл не найден"}), 404
+                return None
         elif record.get('uploaded_by') != ctx['user_id']:
             # Файл ещё не привязан к статье (загружен в редактор или пришёл из
             # импорта). Пока привязки нет, проверять нечего — значит доступ
@@ -719,7 +720,21 @@ def register(bp, wiki_route, db, log_ip, gcs):
             # служит то же пространство и то же правило, что у справочника.
             if not spaces or not (spaces & set(queries.spaces_for_user(
                     cursor, ctx, include_guest=False))):
-                return jsonify({"error": "Файл не найден"}), 404
+                return None
+        return record
+
+    @wiki_route('/file/<file_id>')
+    def wiki_file(cursor, ctx, file_id):
+        """Стабильная ссылка на файл статьи.
+
+        Почему не signed URL прямо в HTML, как это делает LMS: подписанная
+        ссылка живёт 240 минут, а тело статьи хранится годами — все картинки
+        протухли бы. Здесь адрес постоянный, а подпись выдаётся на каждый
+        запрос, и только после проверки доступа к статье-владельцу.
+        """
+        record = _file_record_for(cursor, ctx, file_id)
+        if not record:
+            return jsonify({"error": "Файл не найден"}), 404
 
         url = gcs['signed_url'](
             record['bucket'], record['blob_path'],
@@ -730,3 +745,23 @@ def register(bp, wiki_route, db, log_ip, gcs):
         if not url:
             return jsonify({"error": "Файл временно недоступен"}), 503
         return redirect(url, code=302)
+
+    @wiki_route('/file/<file_id>/url')
+    def wiki_file_url(cursor, ctx, file_id):
+        """Свежая подпись файла — ответом, а не редиректом.
+
+        Нужна ролику на витрине. Подпись в теле статьи (file_urls) живёт три
+        часа, а ролик перематывают и досматривают позже: каждый запрос перемотки
+        идёт по той же ссылке, и истёкшая подпись выглядит как «плеер сломался».
+        Редирект /file/<id> на телефоне не поможет — тег <video> не несёт ни
+        заголовка, ни (с Lax) куки, — поэтому плеер спрашивает подпись сам,
+        запросом с заголовком, и подменяет адрес (WikiArticle.jsx).
+        """
+        record = _file_record_for(cursor, ctx, file_id)
+        if not record:
+            return jsonify({"error": "Файл не найден"}), 404
+        urls = wiki_file_urls.sign_files(gcs, [record])
+        url = urls.get(str(record['id']).lower())
+        if not url:
+            return jsonify({"error": "Файл временно недоступен"}), 503
+        return jsonify({"url": url})

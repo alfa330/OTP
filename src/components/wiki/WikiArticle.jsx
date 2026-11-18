@@ -23,6 +23,7 @@ import { absolutizeFileUrls } from './fileUrls';
 import { buildArticleLink, readArticleSlugFromHref } from './articleLink';
 import { docxFileName, downloadErrorText, portalAddress, saveBlob } from './articleDownload';
 import { mountGalleries } from './gallery';
+import { videoBoxCss } from './videoRules';
 import { distinctiveTokens, foldKazakh, queryVariants } from './searchText';
 import useCopyGuard from './useCopyGuard';
 import useStableCallback from './useStableCallback';
@@ -142,7 +143,7 @@ const fmtDate = (iso) => (iso
    DOMPurify вырезал бы data-* и обесцветил 251 выделение, а 35 раскрывающихся
    блоков превратились бы в простые абзацы. */
 const SANITIZE_OPTIONS = {
-    ADD_TAGS: ['details', 'summary', 'mark', 'colgroup', 'col'],
+    ADD_TAGS: ['details', 'summary', 'mark', 'colgroup', 'col', 'video'],
     ADD_ATTR: [
         'data-color', 'data-title', 'data-default-open', 'data-allow-multiple',
         'data-required-for-ack', 'data-wiki-collapsible', 'data-wiki-collapsible-group',
@@ -171,6 +172,11 @@ const SANITIZE_OPTIONS = {
            ради того же паритета: список, из которого имя можно безнаказанно
            забыть, — это список, из которого его однажды забудут. */
         'data-wiki-block', 'data-tone', 'data-cols', 'data-numbered', 'data-variant',
+        /* Ролик статьи (WikiVideoNode.jsx). Тот же список, что у серверного
+           санитайзера (wiki/sanitize.py: ALLOWED_ATTRIBUTES['video']); src и
+           width/height DOMPurify пропускает и так. Паритет сторожит
+           tests/test_wiki_videos.py. */
+        'poster', 'controls', 'preload', 'playsinline', 'data-duration',
     ],
 };
 
@@ -185,6 +191,44 @@ const SANITIZE_OPTIONS = {
  * Порядок принципиален: обёртка добавляется к уже очищенному HTML, поэтому она
  * не может протащить ничего мимо DOMPurify.
  */
+/* Ролики статьи — ПОСЛЕ санитайзера и ДО подстановки подписей (порядок тот же,
+ * что у таблиц: ничего мимо DOMPurify не проносится).
+ *
+ *  * рамка: пропорция из размера кадра — место под ролик стоит сразу, и
+ *    страница не прыгает, когда догрузится обложка; вертикальный кадр не выше
+ *    трёх четвертей экрана (videoBox в videoUpload.js);
+ *  * пульт, «только сведения» и игра без полноэкранного режима на iPhone — не
+ *    из сохранённого текста, а здесь: ролик без пульта не запустить;
+ *  * data-file-id — номер файла для свежей подписи. После подстановки (file_urls)
+ *    в src стоит подписанный адрес хранилища, и узнать по нему файл нельзя.
+ *  * ролик без адреса выбрасывается: пустой чёрный прямоугольник в статье хуже,
+ *    чем ничего.
+ */
+const VIDEO_FILE_ID = /\/api\/wiki\/file\/([0-9a-f-]{36})(?:$|[?#])/i;
+const prepareVideos = (html) => {
+    if (!html || html.indexOf('<video') === -1) return html;
+    const parsed = new DOMParser().parseFromString(html, 'text/html');
+    parsed.body.querySelectorAll('video').forEach((video) => {
+        const src = video.getAttribute('src') || '';
+        const match = VIDEO_FILE_ID.exec(src);
+        if (!match) {
+            video.remove();
+            return;
+        }
+        video.setAttribute('data-file-id', match[1].toLowerCase());
+        // Номер обложки — на тот же случай, что и номер ролика: скопированный
+        // со страницы ролик редактор узнаёт по номерам, а не по подписи.
+        const poster = VIDEO_FILE_ID.exec(video.getAttribute('poster') || '');
+        if (poster) video.setAttribute('data-poster-id', poster[1].toLowerCase());
+        video.setAttribute('controls', '');
+        video.setAttribute('preload', 'metadata');
+        video.setAttribute('playsinline', '');
+        video.classList.add('wiki-video');
+        video.setAttribute('style', videoBoxCss(video.getAttribute('width'), video.getAttribute('height')));
+    });
+    return parsed.body.innerHTML;
+};
+
 const wrapTables = (html) => {
     if (!html || html.indexOf('<table') === -1) return html;
     const parsed = new DOMParser().parseFromString(html, 'text/html');
@@ -429,7 +473,7 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
     const safeHtml = useMemo(
         () => (article?.content
             ? absolutizeFileUrls(
-                wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS)),
+                prepareVideos(wrapTables(DOMPurify.sanitize(article.content, SANITIZE_OPTIONS))),
                 base, article.file_urls)
             : ''),
         [article?.content, article?.file_urls, base],
@@ -493,6 +537,63 @@ export default function WikiArticle({ base, headers, slug, onBack, showToast,
             if (label) node.setAttribute('aria-label', `${label}. Откроется тренажёр`);
         });
     }, [safeHtml, bodyReady]);
+
+    /* РОЛИКИ после вставки в DOM.
+     *
+     * Подпись адреса живёт три часа (file_urls.py), а ролик перематывают и
+     * досматривают позже: каждый запрос перемотки идёт по той же ссылке, и
+     * истёкшая подпись выглядела бы как «плеер сломался». Поэтому на ошибке
+     * плеер один раз просит свежую подпись (/file/<id>/url — запросом с
+     * заголовком входа, на телефоне по-другому нельзя) и продолжает с того же
+     * места. Вторая ошибка подряд — настоящая, её показывает сам плеер.
+     *
+     * У статьи, защищённой от копирования, у плеера нет «Скачать» и меню по
+     * правой кнопке: то же правило, что у текста (useCopyGuard.js). */
+    useEffect(() => {
+        if (!safeHtml || !bodyRef.current) return undefined;
+        const videos = Array.from(bodyRef.current.querySelectorAll('video[data-file-id]'));
+        if (!videos.length) return undefined;
+        const cleanups = videos.map((video) => {
+            if (copyProtected) {
+                video.setAttribute('controlslist', 'nodownload');
+            } else {
+                video.removeAttribute('controlslist');
+            }
+            const noMenu = (event) => { if (copyProtected) event.preventDefault(); };
+            let resigned = false;
+            const onError = () => {
+                const fileId = video.getAttribute('data-file-id');
+                if (resigned || !fileId) return;
+                resigned = true;
+                const at = video.currentTime || 0;
+                axios.get(`${base}/file/${fileId}/url`, { headers })
+                    .then((r) => {
+                        if (!r.data?.url || !video.isConnected) return;
+                        video.src = r.data.url;
+                        const resume = () => {
+                            video.removeEventListener('loadedmetadata', resume);
+                            if (at > 0) {
+                                try { video.currentTime = at; } catch { /* перемотка не обязательна */ }
+                            }
+                        };
+                        video.addEventListener('loadedmetadata', resume);
+                        video.load();
+                    })
+                    .catch(() => { /* ошибку покажет сам плеер */ });
+            };
+            // Удачная загрузка снова разрешает одну перепроверку подписи.
+            const onLoaded = () => { resigned = false; };
+            video.addEventListener('error', onError);
+            video.addEventListener('loadeddata', onLoaded);
+            video.addEventListener('contextmenu', noMenu);
+            return () => {
+                video.removeEventListener('error', onError);
+                video.removeEventListener('loadeddata', onLoaded);
+                video.removeEventListener('contextmenu', noMenu);
+            };
+        });
+        return () => cleanups.forEach((cleanup) => cleanup());
+    }, [safeHtml, bodyReady, copyProtected, base, headers]);
 
     /* ГАЛЕРЕЯ: стрелки, точки, подпись, перетаскивание и клавиши.
      *

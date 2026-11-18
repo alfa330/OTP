@@ -229,6 +229,7 @@ TYPE_WORDS = {
     'job_description': 'Должностная инструкция',
     'tool_description': 'Описание инструмента',
     'trainer': 'Тренажёр',
+    'video': 'Ролик',
 }
 # Тон бейджа: (фон, рамка, чернила). Серый — у ярлыков и статуса «в архиве».
 BADGE_TONES = {
@@ -355,6 +356,21 @@ def portal_address(value):
     if len(candidate) > 300 or not _PORTAL_RE.match(candidate):
         return ''
     return candidate
+
+
+def duration_words(value):
+    """Длительность ролика для подписи: 83.4 → «1:23», 3725 → «1:02:05»."""
+    try:
+        seconds = int(round(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return ''
+    if seconds <= 0:
+        return ''
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return '%d:%02d:%02d' % (hours, minutes, secs)
+    return '%d:%02d' % (minutes, secs)
 
 
 def date_words(value):
@@ -1513,6 +1529,8 @@ class _Builder:
             self._rule(ctx)
         elif name == 'img':
             self._paragraph([node], ctx, node=node)
+        elif name == 'video':
+            self._video(node, ctx)
         elif name == 'figure':
             self._figure(node, ctx)
         elif name == 'figcaption':
@@ -1916,6 +1934,35 @@ class _Builder:
         run.font.size = Pt(2)
         ctx['empties'][0] = False
 
+    def _video(self, node, ctx):
+        """Ролик (wiki/videos.py) Word не сыграет: вместо него обложка ролика и
+        строка «▶ Ролик · 3:24 · смотреть в вики» со ссылкой на статью.
+
+        Обложка — обычная картинка вики, поэтому идёт тем же путём, что <img>:
+        тот же fetch_image, тот же размер по колонке. Без обложки (браузер не
+        сумел снять кадр) остаётся одна строка — ролик из документа не пропадает
+        молча.
+        """
+        soup = BeautifulSoup('', 'html.parser')
+        poster = str(node.get('poster') or '').strip()
+        if poster:
+            img = soup.new_tag('img', src=poster)
+            img['data-align'] = 'center'
+            self._paragraph([img], ctx, node=img)
+        words = '▶ Ролик'
+        length = duration_words(node.get('data-duration'))
+        if length:
+            words += ' · ' + length
+        caption = soup.new_tag('p')
+        caption.append(soup.new_string(words))
+        link = self._article_url(self.slug)
+        if link:
+            caption.append(soup.new_string(' · '))
+            anchor = soup.new_tag('a', href=link)
+            anchor.string = 'смотреть в вики'
+            caption.append(anchor)
+        self._paragraph(list(caption.children), ctx, node=caption, style='Caption')
+
     def _figure(self, node, ctx):
         """Картинка (или несколько) и подпись к ней стилем «Название объекта»."""
         caption = node.find('figcaption', recursive=False)
@@ -2001,7 +2048,9 @@ class _Builder:
     def _can_keep_whole(self, node):
         """Держать блок на одной странице можно, пока он короткий: строку с
         cantSplit длиннее листа Word обрезает."""
-        return node.find('img') is None and len(node.find_all(['p', 'li', 'h4', 'tr'])) <= 12
+        # Ролик в Word — его обложка, то есть та же картинка ростом до листа.
+        return (node.find(('img', 'video')) is None
+                and len(node.find_all(['p', 'li', 'h4', 'tr'])) <= 12)
 
     def _note(self, node, ctx):
         """Плашка: значок тона слева, заголовок чернилами тона, тело на фоне тона."""

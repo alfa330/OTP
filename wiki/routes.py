@@ -28,7 +28,8 @@ from .schema import CAPABILITY_TITLES
 
 def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                          resolve_requester, sensitive_access_granted,
-                         client_ip=None, gcs=None, session_id_provider=None):
+                         client_ip=None, gcs=None, session_id_provider=None,
+                         allowed_origin=None):
     """Собирает Blueprint раздела.
 
     Все зависимости приходят аргументами — импортировать их из bot_schedule2
@@ -53,7 +54,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
                                    прокси файлов: подпись выдаётся на каждый
                                    запрос, а не вшивается в тело статьи;
     session_id_provider          — _current_session_id_from_access_token, чтобы
-                                   версия статьи знала, из какой сессии её правили.
+                                   версия статьи знала, из какой сессии её правили;
+    allowed_origin               — (origin) -> bool, тот же список сайтов, что у
+                                   CORS портала: с этим Origin открывается сессия
+                                   загрузки ролика (routes_videos). Без него ролик
+                                   можно загрузить только запросом без Origin.
 
     Префикс ОБЯЗАН начинаться с /api: на этом завязаны CORS и оба before_request
     (hydrate_user_context_from_jwt первой строкой отсекает всё, что не /api/,
@@ -348,6 +353,11 @@ def build_wiki_blueprint(*, db, require_api_key, build_cors_preflight_response,
 
     from . import routes_import
     routes_import.register(bp, wiki_route, db, _ip, gcs or {})
+
+    # Ролики: браузер шлёт файл прямо в хранилище сессией докачки, сервер её
+    # открывает и проверяет то, что доехало (wiki/videos.py).
+    from . import routes_videos
+    routes_videos.register(bp, wiki_route, db, _ip, gcs or {}, allowed_origin=allowed_origin)
 
     from . import routes_ack
     routes_ack.register(bp, wiki_route, db, _ip)

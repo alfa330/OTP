@@ -337,6 +337,129 @@
 .wiki-prose img[data-align='center'] { margin-left: auto; margin-right: auto; }
 .wiki-prose img[data-align='right'] { margin-left: auto; margin-right: 0; }
 
+/* ── Ролик статьи (WikiVideoNode.jsx, wiki/videos.py) ─────────────────────
+   Рамка — та же, что у картинки: скругление, тонкая линия, лёгкая тень. Поле
+   под кадр — чёрное: у вертикального ролика в горизонтальной рамке и пока
+   обложка не догрузилась это выглядит плеером, а не дырой в странице.
+   Пропорцию и предел высоты вертикального кадра ставит инлайновый стиль
+   (videoBox в videoUpload.js) — здесь только то, что у всех роликов общее. */
+.wiki-prose video {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    margin: 1.5rem auto;
+    border-radius: 12px;
+    border: 1px solid var(--wiki-line);
+    background: #000;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    object-fit: contain;
+}
+
+/* Ролик в редакторе: обвязка с панелью. Панель — на наведение и у
+   выделенного узла, как у кнопки тренажёра. */
+.wiki-video-node {
+    position: relative;
+    margin: 1.5rem 0;
+}
+.wiki-video-node__frame {
+    position: relative;
+    margin: 0 auto;
+}
+.wiki-video-node__frame video {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+}
+.wiki-video-node.is-selected video,
+.wiki-video-node.is-selected .wiki-video-upload {
+    outline: 2px solid var(--wiki-accent);
+    outline-offset: 2px;
+}
+.wiki-video-node__tools {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    display: none;
+    gap: 2px;
+    padding: 3px;
+    border-radius: 10px;
+    background: var(--wiki-surface);
+    box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+}
+.wiki-video-node:hover .wiki-video-node__tools,
+.wiki-video-node.is-selected .wiki-video-node__tools { display: flex; }
+.wiki-video-node__tools button,
+.wiki-video-node__grip {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    color: var(--wiki-ink-soft);
+}
+.wiki-video-node__tools button:hover { background: var(--wiki-line-soft); color: #e11d48; }
+.wiki-video-node__grip { cursor: grab; }
+
+/* Полоса загрузки — компактной плашкой, а не рамкой будущего ролика: размер
+   кадра до конца загрузки неизвестен, и пустая рамка 16:9 в три четверти
+   экрана (замер стенда 18.11) была бы пустым местом, которое у вертикального
+   ролика всё равно сменилось бы другим. */
+.wiki-video-upload {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 132px;
+    margin: 0 auto;
+    box-sizing: border-box;
+    padding: 24px 16px;
+    border-radius: 12px;
+    border: 1px dashed var(--wiki-line);
+    background: var(--wiki-surface-alt);
+}
+.wiki-video-upload__btn {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    color: var(--wiki-ink-soft);
+}
+.wiki-video-upload__btn:hover { background: var(--wiki-line-soft); color: var(--wiki-ink); }
+
+/* Статья-ролик без ролика: карточка выбора файла над текстом. */
+.wiki-video-drop {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 1rem;
+    padding: 28px 16px;
+    border-radius: 14px;
+    border: 1.5px dashed var(--wiki-line);
+    background: var(--wiki-surface-alt);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+.wiki-video-drop:hover {
+    border-color: var(--wiki-accent-line);
+    background: var(--wiki-accent-soft);
+}
+.wiki-video-drop__icon {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    margin-bottom: 6px;
+    border-radius: 12px;
+    background: var(--wiki-accent-soft);
+    color: var(--wiki-accent);
+}
+
 /* ── Та же картинка в редакторе: обвязка с ручками ─────────────────────────
    Обвязки нет в сохранённом HTML вовсе — она нужна только автору. Расстановку
    поэтому делает она, а не поля картинки: в редакторе картинка всегда занимает

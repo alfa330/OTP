@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 // mergeAttributes берём из @tiptap/react, а не из @tiptap/core: core стоит
 // транзитивно и в package.json не заявлен, а на нетронутый транзитивный пакет
@@ -18,19 +18,25 @@ import Highlight from '@tiptap/extension-highlight';
 import { Color, TextStyle } from '@tiptap/extension-text-style';
 import { Table, TableCell, TableHeader, TableRow } from '@tiptap/extension-table';
 import {
-    AlignCenter, AlignLeft, AlignRight, Blocks, Bold, Code, FileSymlink, Heading1, Heading2,
+    AlignCenter, AlignLeft, AlignRight, Blocks, Bold, Clapperboard, Code, FileSymlink, Heading1, Heading2,
     Heading3, Gamepad2, Highlighter, Italic, Link2, List, ListOrdered, Loader2, Quote, Redo2,
     Image as ImageIcon, Save, Strikethrough, Table as TableIcon,
     Underline as UnderlineIcon, Undo2, Upload,
 } from 'lucide-react';
 import {
     iosCard, iosGroupLabel, iosInput, iosBtnPrimary, iosBtnSecondary, IosBadge, IosHint,
-    IosToggle,
+    IosModal, IosToggle,
 } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import { absoluteFileUrl, absolutizeFileUrls, relativizeFileUrls } from './fileUrls';
-import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE } from './articleTypes';
+import { ARTICLE_TYPES, JOB_DESCRIPTION_TEMPLATE, TRAINER_TYPE, VIDEO_TYPE } from './articleTypes';
 import WikiImage from './WikiImageNode';
+import WikiVideo, { videoNodes } from './WikiVideoNode';
+import { VIDEO_ACCEPT, checkVideoFile, looksLikeVideo, titleFromName } from './videoRules';
+import {
+    fetchVideo, markFinishing, startVideoUpload, uploadRow, uploadStuck,
+} from './videoUpload';
+import { uploadStore } from '../production/productionUpload';
 import WikiTrainerNode from './trainers/TrainerNode';
 import { TRAINER_CARDS, defaultButtonLabel, findTrainer } from './trainers/registry';
 import SectionTreeSelect from './SectionTreeSelect';
@@ -93,6 +99,33 @@ const imageFiles = (event) => {
     if (!transfer) return [];
     if (event.clipboardData && String(transfer.getData('text/plain') || '').trim()) return [];
     return Array.from(transfer.files || []).filter((file) => file.type?.startsWith('image/'));
+};
+
+/* Ролики из того же перетаскивания. Отдельно от картинок: они едут не через
+   /upload, а очередью прямо в хранилище (videoUpload.js). По расширению, а не
+   только по типу: macOS для .mov отдаёт то video/quicktime, то пустую строку. */
+const videoFiles = (event) => {
+    const transfer = event.clipboardData || event.dataTransfer;
+    if (!transfer) return [];
+    if (event.clipboardData && String(transfer.getData('text/plain') || '').trim()) return [];
+    return Array.from(transfer.files || []).filter(looksLikeVideo);
+};
+
+/* Есть ли в документе ролик — с выходом на первом найденном. */
+const hasVideoNode = (doc) => {
+    let found = false;
+    doc?.descendants((node) => {
+        if (found) return false;
+        if (node.type.name === 'wikiVideo') found = true;
+        return !found;
+    });
+    return found;
+};
+
+/* Ещё едет: строка очереди есть и не закончилась. */
+const uploadActive = (key) => {
+    const row = uploadRow(key);
+    return Boolean(row && !['done', 'failed'].includes(row.state));
 };
 
 const ToolButton = ({ active, disabled, title, onClick, children }) => (
@@ -196,6 +229,14 @@ export default function WikiEditor({
     // Выбор блока держим пустым по той же причине, что и выбор тренажёра:
     // селектор здесь — команда «вставить», а не поле со значением.
     const [blockPick, setBlockPick] = useState('');
+    /* Ролики, которые грузит ЭТОТ редактор (номера строк очереди). Очередь живёт
+       в модуле и переживает редактор, а ролик без статьи никому не нужен:
+       закрыли редактор или удалили узел — загрузку отменяем (dropOrphanUploads). */
+    const ownUploads = useRef(new Set());
+    // Заголовок входа на момент запроса: ролик едет минутами.
+    const headersRef = useRef(headers);
+    headersRef.current = headers;
+    const [closeAsk, setCloseAsk] = useState(false);
     // Поддержка ИИ по умолчанию ВКЛЮЧЕНА: в базе рубильник называется ai_opt_out
     // и по умолчанию false, то есть новая статья и так участвует в ответах
     // помощника. Показать её выключенной значило бы соврать про текущее
@@ -289,6 +330,21 @@ export default function WikiEditor({
     const aiClosedBy = useMemo(() => aiClosedSection(sections, sectionIds),
         [sections, sectionIds]);
 
+    /* Узел ролика пропал из текста (удалили, вырезали, отменили вставку), а файл
+       ещё едет — загрузку отменяем: ролик без места в статье никто не увидит,
+       а в бакете он лёг бы мусором. Готовую строку просто убираем из очереди. */
+    const dropOrphanUploads = useStableCallback((ed) => {
+        if (!ownUploads.current.size || !ed) return;
+        const present = new Set(videoNodes(ed.state.doc)
+            .map(({ node }) => node.attrs.uploadKey).filter(Boolean));
+        Array.from(ownUploads.current).forEach((key) => {
+            if (present.has(key)) return;
+            ownUploads.current.delete(key);
+            if (uploadActive(key)) uploadStore.cancel(key);
+            else if (uploadRow(key)) uploadStore.dismiss(key);
+        });
+    });
+
     const editor = useEditor({
         extensions: [
             StarterKit.configure({ heading: { levels: [1, 2, 3, 4] } }),
@@ -304,6 +360,10 @@ export default function WikiEditor({
                так уже не появляются — вставленный скриншот уходит в бакет
                (handlePaste ниже). */
             WikiImage.configure({ inline: false, allowBase64: true }),
+            /* Ролик (WikiVideoNode.jsx). Подключён всегда, как и кнопка
+               тренажёра: тип статьи можно сменить, а без узла в схеме ролик
+               при открытии редактора пропал бы из текста молча. */
+            WikiVideo.configure({ base }),
             TextAlign.configure({ types: ['heading', 'paragraph'] }),
             TextStyle,
             Color,
@@ -337,7 +397,10 @@ export default function WikiEditor({
         // уже загруженной статьи стоят битыми (см. fileUrls.js). Обратно они
         // сворачиваются при сохранении.
         content: absolutizeFileUrls(article?.content || '', base),
-        onUpdate: () => setDirty(true),
+        onUpdate: ({ editor: ed }) => {
+            setDirty(true);
+            dropOrphanUploads(ed);
+        },
         editorProps: {
             attributes: {
                 class: 'wiki-prose min-h-[320px] focus:outline-none',
@@ -354,11 +417,11 @@ export default function WikiEditor({
                пришлось 81 % всего объёма контента. Заодно это единственный
                путь, на котором картинка иначе не превратилась бы в WebP:
                пережимает их сервер, при укладке в бакет (wiki/images.py). */
-            handlePaste: (_view, event) => insertImageFiles(imageFiles(event)),
-            handleDrop: (view, event) => insertImageFiles(
-                imageFiles(event),
+            handlePaste: (_view, event) => insertDroppedFiles(event),
+            handleDrop: (view, event) => insertDroppedFiles(
+                event,
                 // Картинка должна лечь ТУДА, КУДА её бросили, а не туда, где
-                // стоял курсор до перетаскивания.
+                // стоял курсор до перетаскивания. Ролик — тоже.
                 view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos),
         },
     }, [article?.id]);
@@ -390,6 +453,14 @@ export default function WikiEditor({
         } : null),
     });
 
+    /* Есть ли в статье ролик — только у статьи-ролика: по нему прячется
+       карточка «Выберите ролик». У остальных типов документ не обходим вовсе. */
+    const hasVideo = useEditorState({
+        editor,
+        selector: ({ editor: ed }) => Boolean(ed) && articleType === VIDEO_TYPE
+            && hasVideoNode(ed.state.doc),
+    });
+
     /* Смена типа на «Должностная инструкция» раскладывает скелет документа.
      *
      * Только в ПУСТУЮ статью: перебор типов на уже написанном тексте не должен
@@ -412,10 +483,31 @@ export default function WikiEditor({
         return () => window.removeEventListener('beforeunload', handler);
     }, [dirty]);
 
+    /* Ролик без адреса в тексте — ещё едет или застрял. Одно правило на три
+       двери, которые иначе потеряли бы его молча: сохранение (санитайзер
+       выбросил бы узел), правку ИИ и импорт (они заменяют текст целиком).
+       Что делать после загрузки, договаривает вызывающий. */
+    const unfinishedVideo = useStableCallback((whenReady) => {
+        if (!editor) return null;
+        const unfinished = videoNodes(editor.state.doc).filter(({ node }) => !node.attrs.src);
+        if (!unfinished.length) return null;
+        if (unfinished.some(({ node }) => uploadStuck(node.attrs))) {
+            return 'Ролик не загрузился — повторите загрузку или уберите его из статьи';
+        }
+        return `Ролик ещё загружается — ${whenReady}`;
+    });
+
     const save = useCallback((status) => {
         if (!editor) return;
         if (!title.trim()) {
             showToast?.('Укажите название статьи', 'error');
+            return;
+        }
+        /* Ролик без адреса санитайзер выбросил бы, и статья ушла бы без ролика
+           молча. Поэтому не сохраняем, а говорим, чего ждём. */
+        const waiting = unfinishedVideo('сохраните статью, когда он догрузится');
+        if (waiting) {
+            showToast?.(waiting, 'error');
             return;
         }
         const payload = {
@@ -488,6 +580,12 @@ export default function WikiEditor({
 
     const importDocument = (file) => {
         if (!file) return;
+        // Импорт заменяет текст — едущий ролик пропал бы вместе с загрузкой.
+        const waiting = unfinishedVideo('импортируйте, когда он догрузится');
+        if (waiting) {
+            showToast?.(waiting, 'error');
+            return;
+        }
         const form = new FormData();
         form.append('file', file);
         setImporting(true);
@@ -590,6 +688,139 @@ export default function WikiEditor({
         return true;
     });
 
+    /* Ролик догрузился: берём у сервера адрес, обложку, размер кадра и
+       длительность и ставим их в узел. Правка узла — мимо истории отмены:
+       «Отменить» после загрузки иначе вернуло бы узел в полосу загрузки, у
+       которой уже нет строки очереди. */
+    const finishVideo = useStableCallback((key) => {
+        const row = uploadRow(key);
+        // Ошибку узел покажет сам — по строке очереди.
+        if (!row || row.state !== 'done' || !row.materialId) return;
+        markFinishing(key, true);
+        const apply = (attempt) => fetchVideo(base, headersRef.current, row.materialId)
+            .then((info) => {
+                if (!editor || editor.isDestroyed || !info?.url) throw new Error('no-url');
+                markFinishing(key, false);
+                ownUploads.current.delete(key);
+                const found = videoNodes(editor.state.doc)
+                    .find(({ node }) => node.attrs.uploadKey === key);
+                if (!found) return;
+                const { tr } = editor.state;
+                tr.setNodeMarkup(found.pos, undefined, {
+                    ...found.node.attrs,
+                    src: absoluteFileUrl(info.url, base),
+                    poster: info.poster_url ? absoluteFileUrl(info.poster_url, base) : null,
+                    width: info.width || null,
+                    height: info.height || null,
+                    duration: info.duration || null,
+                    uploadKey: null,
+                    uploadName: '',
+                    uploadError: '',
+                });
+                tr.setMeta('addToHistory', false);
+                editor.view.dispatch(tr);
+            })
+            .catch(() => {
+                if (!editor || editor.isDestroyed) {
+                    markFinishing(key, false);
+                    return;
+                }
+                if (attempt < 3) {
+                    window.setTimeout(() => apply(attempt + 1), 1000 * (2 ** attempt));
+                    return;
+                }
+                markFinishing(key, false);
+                const found = videoNodes(editor.state.doc)
+                    .find(({ node }) => node.attrs.uploadKey === key);
+                if (!found) return;
+                const { tr } = editor.state;
+                tr.setNodeMarkup(found.pos, undefined, {
+                    ...found.node.attrs,
+                    uploadError: 'Ролик загрузился, но редактор не получил его адрес — '
+                        + 'уберите его и загрузите ещё раз',
+                });
+                tr.setMeta('addToHistory', false);
+                editor.view.dispatch(tr);
+            });
+        apply(0);
+    });
+
+    /* Ролик в статью: узел с полосой загрузки встаёт сразу, файл едет очередью.
+       В пустую новую статью ролик встаёт ВМЕСТО пустого абзаца и делает её
+       статьёй-роликом: тип «Ролик», название — из имени файла (если его ещё нет).
+       Так «загрузить ролик как статью» — это выбрать файл и опубликовать. */
+    const insertVideoFiles = useStableCallback((files, at) => {
+        if (!editor || !files?.length) return false;
+        let position = at;
+        // Название — из ПЕРВОГО файла: setTitle внутри цикла читал бы одно и
+        // то же «пусто», и статья назвалась бы по последнему ролику.
+        let untitled = !title.trim();
+        files.forEach((file) => {
+            const check = checkVideoFile(file);
+            if (!check.ok) {
+                showToast?.(check.error, 'error');
+                return;
+            }
+            const emptyArticle = editor.isEmpty;
+            const key = startVideoUpload({
+                file,
+                base,
+                headers: () => headersRef.current,
+                onSettled: finishVideo,
+            });
+            if (!key) return;
+            ownUploads.current.add(key);
+            editor.commands.insertWikiVideo(
+                { uploadKey: key, uploadName: file.name },
+                emptyArticle ? { from: 0, to: editor.state.doc.content.size } : position);
+            position = undefined;
+            if (untitled) {
+                setTitle(titleFromName(file.name));
+                untitled = false;
+            }
+            if (isNew && emptyArticle && articleType === 'general') setArticleType(VIDEO_TYPE);
+            setDirty(true);
+        });
+        return true;
+    });
+
+    /* Перетащили или вставили файлы: картинки — в бакет картинкой, ролики —
+       очередью. true — разобрали сами, ProseMirror ничего не вставляет. */
+    const insertDroppedFiles = useStableCallback((event, at) => {
+        const images = imageFiles(event);
+        const videos = videoFiles(event);
+        if (!images.length && !videos.length) return false;
+        /* Ролики встают сразу (узел с полосой загрузки), картинки — когда
+           доедут. Поэтому сначала ролики в точку броска, а картинки следом за
+           ними, у курсора: обратный порядок отдал бы картинкам устаревшую
+           позицию, сдвинутую вставкой роликов. */
+        if (videos.length) insertVideoFiles(videos, at);
+        if (images.length) insertImageFiles(images, videos.length ? undefined : at);
+        return true;
+    });
+
+    /* Редактор закрыли или он размонтировался — его ролики, что ещё едут,
+       отменяем: статьи, в которую они ехали, больше нет на экране. */
+    useEffect(() => () => {
+        Array.from(ownUploads.current).forEach((key) => {
+            if (uploadActive(key)) uploadStore.cancel(key);
+            else if (uploadRow(key)) uploadStore.dismiss(key);
+        });
+        ownUploads.current.clear();
+    }, []);
+
+    const uploadsRunning = () => Array.from(ownUploads.current).some(uploadActive);
+
+    /* «Закрыть», пока ролик едет: спросить. Закрытие отменило бы загрузку, и
+       узнать об этом человек должен до, а не после. */
+    const requestClose = () => {
+        if (uploadsRunning()) {
+            setCloseAsk(true);
+            return;
+        }
+        onClose?.();
+    };
+
     const setLink = () => {
         const previous = editor.getAttributes('link').href || '';
         const url = window.prompt('Адрес ссылки', previous);
@@ -686,7 +917,7 @@ export default function WikiEditor({
         <div className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                    <button type="button" className={iosBtnSecondary} onClick={onClose}>
+                    <button type="button" className={iosBtnSecondary} onClick={requestClose}>
                         Закрыть
                     </button>
                     {dirty && <IosBadge tone="amber">Есть несохранённые правки</IosBadge>}
@@ -885,7 +1116,15 @@ export default function WikiEditor({
                 closedBy={aiClosedBy}
                 onEnabledChange={(value) => { setAiSupport(value); setDirty(true); }}
                 excludeId={article?.id || null}
-                getSnapshot={() => ({ title, content: editor?.getHTML() || '' })}
+                /* Адреса файлов — свёрнутыми, как при сохранении: правка ИИ
+                   возвращает тело через санитайзер, и раскрытый до домена
+                   адрес ролика там бы не прошёл. blocked — пока ролик едет,
+                   замена текста выкинула бы его вместе с загрузкой. */
+                getSnapshot={() => ({
+                    title,
+                    content: relativizeFileUrls(editor?.getHTML() || ''),
+                    blocked: unfinishedVideo('дождитесь, пока он догрузится'),
+                })}
                 pendingUpdateFile={pendingUpdateFile}
                 onPendingUsed={onPendingUsed}
                 onUpdateExisting={onUpdateExisting}
@@ -1031,6 +1270,23 @@ export default function WikiEditor({
                                 }}
                             />
                         </label>
+                        {/* Ролик — рядом с картинкой: то же действие «вставить
+                            сюда», только файл едет прямо в хранилище. */}
+                        <label
+                            title="Ролик — MP4, MOV или WebM до 2 ГБ"
+                            className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100"
+                        >
+                            <Clapperboard size={15} />
+                            <input
+                                type="file"
+                                className="hidden"
+                                accept={VIDEO_ACCEPT}
+                                onChange={(e) => {
+                                    insertVideoFiles(Array.from(e.target.files || []));
+                                    e.target.value = '';
+                                }}
+                            />
+                        </label>
                         <Divider />
 
                         <span className="flex items-center gap-1 px-1">
@@ -1110,6 +1366,39 @@ export default function WikiEditor({
                     </div>
 
                     <div className="px-4 py-4 sm:px-6">
+                        {/* Статья-ролик без ролика: главное действие — выбрать
+                            файл. Карточка уходит, как только ролик встал в текст. */}
+                        {articleType === VIDEO_TYPE && !hasVideo && (
+                            <label
+                                className="wiki-video-drop"
+                                /* Карточка вне текста редактора: без своих
+                                   обработчиков брошенный файл браузер открыл бы
+                                   вместо загрузки. */
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={(e) => {
+                                    e.preventDefault();
+                                    insertVideoFiles(
+                                        Array.from(e.dataTransfer?.files || []).filter(looksLikeVideo), 0);
+                                }}
+                            >
+                                <span className="wiki-video-drop__icon"><Clapperboard size={20} /></span>
+                                <span className="text-[14px] font-medium text-slate-800">
+                                    Выберите ролик или перетащите его сюда
+                                </span>
+                                <span className="text-[12.5px] text-slate-500">
+                                    MP4, MOV или WebM · до 2 ГБ · встанет в начало статьи
+                                </span>
+                                <input
+                                    type="file"
+                                    className="hidden"
+                                    accept={VIDEO_ACCEPT}
+                                    onChange={(e) => {
+                                        insertVideoFiles(Array.from(e.target.files || []), 0);
+                                        e.target.value = '';
+                                    }}
+                                />
+                            </label>
+                        )}
                         <EditorContent editor={editor} />
                         {/* Панель команд таблицы: всплывает у той таблицы, в
                             которой стоит курсор. Живёт рядом с EditorContent,
@@ -1125,6 +1414,28 @@ export default function WikiEditor({
                     </div>
                 </div>
             </section>
+
+            <IosModal
+                open={closeAsk}
+                onClose={() => setCloseAsk(false)}
+                title="Ролик ещё загружается"
+                footer={(
+                    <>
+                        <button type="button" className={iosBtnSecondary}
+                                onClick={() => setCloseAsk(false)}>
+                            Подождать
+                        </button>
+                        <button type="button" className={iosBtnPrimary}
+                                onClick={() => { setCloseAsk(false); onClose?.(); }}>
+                            Закрыть и отменить
+                        </button>
+                    </>
+                )}
+            >
+                <p className="text-[13.5px] leading-relaxed text-slate-600">
+                    Если закрыть редактор сейчас, загрузка остановится и ролик в статью не попадёт.
+                </p>
+            </IosModal>
 
             <ArticlePicker
                 open={pickerOpen}

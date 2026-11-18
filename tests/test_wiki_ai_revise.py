@@ -83,7 +83,9 @@ class ParseReplyTest(unittest.TestCase):
 class PrepareTest(unittest.TestCase):
     def test_numbering_is_continuous_across_sources(self):
         """Сквозная нумерация: замена таблицы — это замена номера, и только."""
-        body, doc, tables, _images = revise._prepare(ARTICLE, DOCUMENT)
+        # Пятое значение — ролики статьи (revise.protect_videos): у этой статьи их нет.
+        body, doc, tables, _images, videos = revise._prepare(ARTICLE, DOCUMENT)
+        self.assertEqual(videos, [])
         self.assertIn('[[ТАБЛИЦА-1]]', body)
         self.assertIn('[[ТАБЛИЦА-2]]', doc)
         self.assertEqual(2, len(tables))

@@ -195,9 +195,19 @@ export default function WikiAiDraft({
     const lastFile = useRef(null);
     const isExisting = !!excludeId;
 
+    /* Правка, обновление и черновик ЗАМЕНЯЮТ текст редактора. Пока в нём едет
+       ролик (WikiVideoNode.jsx), замена выкинула бы его узел и отменила бы
+       загрузку — поэтому редактор говорит, почему сейчас нельзя (blocked). */
+    const blockedBy = (snapshot) => {
+        if (!snapshot?.blocked) return false;
+        showToast?.(snapshot.blocked, 'error');
+        return true;
+    };
+
     const updateFromDocument = (file) => {
         if (!file) return;
         const snapshot = getSnapshot?.() || {};
+        if (blockedBy(snapshot)) return;
         const form = new FormData();
         form.append('file', file);
         form.append('ai_support', '1');
@@ -231,6 +241,7 @@ export default function WikiAiDraft({
 
     const buildFromDocument = (file, task) => {
         if (!file) return;
+        if (blockedBy(getSnapshot?.())) return;
         lastFile.current = file;
         const form = new FormData();
         form.append('file', file);
@@ -262,6 +273,7 @@ export default function WikiAiDraft({
         const snapshot = getSnapshot?.() || {};
         const task = instruction;
         if (task.trim().length < 3) return;
+        if (blockedBy(snapshot)) return;
         setBusy('edit');
         setResult(null);
         axios.post(`${base}/articles/ai/edit`, {

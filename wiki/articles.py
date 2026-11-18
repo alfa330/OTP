@@ -719,10 +719,12 @@ def set_favorite(cursor, user_id, article_id, favorite):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_file(cursor, file_id):
+    # upload_state — ролик, который ещё едет в бакет (wiki/videos.py): ручка
+    # /file/<id> такой файл не отдаёт никому, объекта под ним ещё нет.
     cursor.execute(
         """
         SELECT id, article_id, bucket, blob_path, original_name, content_type,
-               uploaded_by
+               uploaded_by, upload_state
           FROM wiki_files WHERE id = %s
         """,
         (file_id,),
@@ -731,7 +733,7 @@ def get_file(cursor, file_id):
     if not row:
         return None
     return dict(zip(('id', 'article_id', 'bucket', 'blob_path',
-                     'original_name', 'content_type', 'uploaded_by'), row))
+                     'original_name', 'content_type', 'uploaded_by', 'upload_state'), row))
 
 
 def files_for_display(cursor, file_ids):
@@ -749,10 +751,12 @@ def files_for_display(cursor, file_ids):
     ids = [str(value) for value in (file_ids or []) if str(value or '').strip()]
     if not ids:
         return []
+    # Недогруженный ролик (upload_state) не подписываем: объекта ещё нет, и
+    # подпись вела бы на 404 хранилища вместо понятного «ролик загружается».
     cursor.execute(
         """
         SELECT id, article_id, bucket, blob_path, content_type, uploaded_by
-          FROM wiki_files WHERE id = ANY(%s::uuid[])
+          FROM wiki_files WHERE id = ANY(%s::uuid[]) AND upload_state IS NULL
         """,
         (ids,),
     )

@@ -67,8 +67,10 @@ export const absolutizeFileUrls = (html, base, urls = null) => {
     if (!origin && !urls) return html;
     // Только адреса, начинающиеся со слеша: уже абсолютные (`https://…/api/wiki/file/…`)
     // трогать нельзя, иначе получится `https://hosthttps://host`.
+    // poster — обложка ролика (WikiVideoNode.jsx): такая же картинка вики, и
+    // без разворота у ролика на витрине стоял бы чёрный кадр вместо обложки.
     return String(html).replace(
-        new RegExp('(src|href)="' + FILE_PREFIX + '([0-9a-f-]{36})([^"]*)"', 'gi'),
+        new RegExp('(src|href|poster)="' + FILE_PREFIX + '([0-9a-f-]{36})([^"]*)"', 'gi'),
         (whole, attr, id, tail) => {
             // Хвост (query, якорь) у подписи отобрал бы саму подпись — такой
             // адрес отдаём ручке, как и раньше. В теле статьи хвостов нет:
@@ -102,6 +104,6 @@ export const absoluteFileUrl = (url, base) => {
 export const relativizeFileUrls = (html) => {
     if (!html || html.indexOf(FILE_PREFIX) === -1) return html;
     return String(html).replace(
-        new RegExp('(src|href)="https?://[^"]*?' + FILE_PREFIX, 'g'),
+        new RegExp('(src|href|poster)="https?://[^"]*?' + FILE_PREFIX, 'g'),
         '$1="' + FILE_PREFIX);
 };
