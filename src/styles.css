@@ -2002,3 +2002,37 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
         scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
     }
 }
+
+/* Горизонтальная прокрутка канбан-доски («Воронка найма»): тонкая до наведения (владелец 18.11.2026 —
+   «нижний скролл тонким до наводки и кастомным»). Ползунок 3 px, как у .thin-scroll, а под курсором —
+   9 px: за него удобно взяться мышью. Толщину меняет прозрачная рамка ползунка, а не высота полосы:
+   полоса всё время 13 px, и доска не прыгает, когда курсор входит в неё и выходит. Пока курсор над
+   доской, ползунок чуть темнее — видно, что доску можно листать вбок. Дорожка прозрачная и отступает
+   от краёв на поля доски. scrollbar-width рядом не задаётся — см. комментарий у .thin-scroll выше. */
+.board-scroll::-webkit-scrollbar {
+    height: 13px;
+}
+.board-scroll::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 0 12px;
+}
+.board-scroll::-webkit-scrollbar-thumb {
+    background-color: rgba(100, 116, 139, 0.3);
+    background-clip: padding-box;
+    border: 5px solid transparent;
+    border-radius: 9999px;
+}
+.board-scroll:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(100, 116, 139, 0.45);
+}
+.board-scroll::-webkit-scrollbar-thumb:hover,
+.board-scroll::-webkit-scrollbar-thumb:active {
+    border-width: 2px;
+    background-color: rgba(71, 85, 105, 0.62);
+}
+@supports not selector(::-webkit-scrollbar) {
+    .board-scroll {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(100, 116, 139, 0.4) transparent;
+    }
+}

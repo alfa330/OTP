@@ -4,9 +4,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    CHANNEL_COLORS, CHANNEL_COLOR_CODES, ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES, SUBSTAGE_LABELS,
-    TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, joinDateTime, longTime, matchesQuery,
-    monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime,
+    CHANNEL_COLORS, CHANNEL_COLOR_CODES, GROUP_CAPACITY_MAX, ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES,
+    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, groupNameFor, groupSeats,
+    joinDateTime, longTime, matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor,
+    shiftMonth, shortTime, splitDateTime,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -95,6 +96,29 @@ test('channel labels: palette from the owner (blue, red, pink) with whole Tailwi
         assert.ok(CHANNEL_COLORS[code].label && /^bg-\S+ text-\S+ ring-1 ring-\S+$/.test(CHANNEL_COLORS[code].pill), code);
     }
     assert.equal(channelTone('unknown'), CHANNEL_COLORS.gray);       // цвет из будущего — серый, не падение
+});
+
+test('group seats: how many more fit, full group, groups without capacity', () => {
+    // Владелец 18.11.2026: рекрутер при выборе группы сразу видит, сколько ещё кандидатов в неё войдёт.
+    assert.deepEqual(groupSeats({ capacity: 12, seats_taken: 8 }),
+        { capacity: 12, taken: 8, free: 4, full: false, share: 8 / 12, label: 'свободно 4 из 12' });
+    assert.deepEqual(groupSeats({ capacity: 3, seats_taken: 3 }), { capacity: 3, taken: 3, free: 0, full: true, share: 1, label: 'мест нет' });
+    assert.equal(groupSeats({ capacity: 3, seats_taken: 5 }).free, 0);     // вместимость уменьшили раньше — не «-2»
+    assert.equal(groupSeats({ capacity: 3, seats_taken: 5 }).share, 1);
+    assert.equal(groupSeats({ capacity: '10', seats_taken: '4' }).label, 'свободно 6 из 10');
+    // Группа до 18.11.2026: вместимости нет — предела нет, строка выбора не гаснет.
+    assert.deepEqual(groupSeats({ capacity: null, seats_taken: 2 }),
+        { capacity: null, taken: 2, free: null, full: false, share: 0, label: 'вместимость не указана' });
+    assert.equal(groupSeats({}).label, 'вместимость не указана');
+    assert.equal(groupSeats({ capacity: '', seats_taken: 1 }).capacity, null);
+    assert.equal(groupSeats(undefined).full, false);
+    assert.equal(GROUP_CAPACITY_MAX, 500);
+});
+
+test('group name follows the start date until the trainer types own', () => {
+    assert.equal(groupNameFor('2026-11-24'), 'Группа 24.11');
+    assert.equal(groupNameFor(''), '');
+    assert.equal(groupNameFor(null), '');
 });
 
 test('status «Недозвон / не ответил» covers WhatsApp, the call outcome stays «Недозвон»', () => {

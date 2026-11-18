@@ -16,14 +16,19 @@ import { ChannelPill, FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, 
  * подсвечены, остальные приглушены — путь по правилам ТЗ 4.2 виден до броска.
  *
  * Десять колонок шире экрана: любую можно свернуть в узкую полоску со счётчиком (запоминается
- * в браузере), завершающие обычно так и держат. Рекрутер видит пул и свои карточки; у
- * удалённого рекрутера в пуле нет телефонов (сервер их не присылает). «Взять в работу» —
- * прямо с карточки в пуле, по наведению; «Позвонить» — с карточки в работе, в iCore Phone.
+ * в браузере), завершающие обычно так и держат; полоса прокрутки под доской тонкая и толстеет под
+ * курсором. Рекрутер видит пул и свои карточки; у удалённого рекрутера в пуле нет телефонов (сервер
+ * их не присылает). «Взять в работу» — маленькой кнопкой в углу карточки пула, по наведению;
+ * «Позвонить» — с карточки в работе, в iCore Phone.
  */
 
 // Колонка растёт, когда экран широкий (на большом мониторе все десять этапов без прокрутки), но не уже 236 px.
 const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
+// Кнопка пула: высотой 24 px в строке из 16 — отрицательные поля не дают ей раздвинуть карточку.
+const TAKE_BTN = '-my-1 inline-flex h-6 shrink-0 items-center rounded-full bg-blue-50 px-2.5 text-[12px] font-semibold text-blue-700 '
+    + 'ring-1 ring-blue-100 transition hover:bg-blue-600 hover:text-white hover:ring-blue-600 active:scale-[0.97] '
+    + 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70';
 const EMPTY_FILTERS = { vacancy_id: '', city: '', source_id: '', recruiter_id: '' };
 
 const readCollapsed = () => {
@@ -75,26 +80,22 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
                 {overdue && <Pill tone="red">просрочено</Pill>}
             </div>
             <div className="mt-2 flex items-center justify-between gap-2 text-[11.5px] tabular-nums text-slate-400">
-                <span>{card.candidate_no ? `№${card.candidate_no}` : shortTime(card.received_at)}</span>
-                <span className="truncate">
-                    {card.next_contact_at && !card.is_closed ? `контакт ${shortTime(card.next_contact_at)}`
-                        : idleDays !== null && idleDays >= 7 ? `без касаний ${idleDays} дн` : card.candidate_no ? shortTime(card.received_at) : ''}
-                </span>
+                <span className="shrink-0">{card.candidate_no ? `№${card.candidate_no}` : shortTime(card.received_at)}</span>
+                {canTake && inPool ? (
+                    /* «Взять в работу» — маленькой кнопкой в правом углу (владелец 18.11.2026: широкая кнопка во всю
+                       карточку ловила щелчки, которыми открывали карточку). С мышью — по наведению, на сенсорном —
+                       всегда; светлая, синеет только под самим курсором. */
+                    <button type="button" onClick={(event) => { event.stopPropagation(); onTake(card); }}
+                            className={`${TAKE_BTN} ${HOVER_REVEAL}`}>
+                        Взять в работу
+                    </button>
+                ) : (
+                    <span className="truncate">
+                        {card.next_contact_at && !card.is_closed ? `контакт ${shortTime(card.next_contact_at)}`
+                            : idleDays !== null && idleDays >= 7 ? `без касаний ${idleDays} дн` : card.candidate_no ? shortTime(card.received_at) : ''}
+                    </span>
+                )}
             </div>
-            {canTake && inPool && (
-                <>
-                    {/* С мышью кнопка не занимает места: по наведению ложится поверх нижней строки
-                        (там только дата поступления). На сенсорном экране наведения нет — кнопка в строке. */}
-                    <button type="button" onClick={(event) => { event.stopPropagation(); onTake(card); }}
-                            className={`absolute inset-x-3 bottom-3 hidden h-8 items-center justify-center rounded-xl bg-blue-600 text-[12.5px] font-semibold text-white shadow-sm transition hover:bg-blue-700 active:scale-[0.98] [@media(hover:hover)]:inline-flex ${HOVER_REVEAL}`}>
-                        Взять в работу
-                    </button>
-                    <button type="button" onClick={(event) => { event.stopPropagation(); onTake(card); }}
-                            className="mt-2.5 inline-flex h-8 w-full items-center justify-center rounded-xl bg-blue-600 text-[12.5px] font-semibold text-white transition hover:bg-blue-700 active:scale-[0.98] [@media(hover:hover)]:hidden">
-                        Взять в работу
-                    </button>
-                </>
-            )}
             {canCall && (
                 <button type="button" aria-label="Позвонить" title="Позвонить из iCore Phone"
                         onClick={(event) => { event.stopPropagation(); onCall(card); }}
@@ -386,7 +387,8 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
             </FiltersRow>
 
             {!columns ? <Loading text="Загружаем доску…" /> : (
-                <div className="-mx-3 overflow-x-auto px-3 pb-2 sm:-mx-5 sm:px-5">
+                /* Нижняя полоса прокрутки — своя, тонкая до наведения (владелец 18.11.2026): .board-scroll в styles.css. */
+                <div className="board-scroll -mx-3 overflow-x-auto px-3 pb-1 sm:-mx-5 sm:px-5">
                     <div className="flex items-start gap-3">
                         {columns.map((column) => (
                             <Column key={column.stage} column={column} caps={caps} dropState={dropStateOf(column.stage)}

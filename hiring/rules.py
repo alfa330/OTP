@@ -83,6 +83,36 @@ SHIFTS_TO_HIRE = 7
 # 30.10.2026): день, где по статусам отработано не меньше часа, — выход на линию.
 SHIFT_MIN_HOURS = 1.0
 
+# ─── Группы на обучение ───────────────────────────────────────────────────────
+# Вместимость группы задаёт тренер (владелец 18.11.2026): рекрутер, приглашая на обучение, видит, сколько
+# ещё кандидатов войдёт в каждую группу, а в полную пригласить нельзя. Место занимает кандидат, которого
+# пригласили в группу и который не отпал: приглашён, вышел на обучение, на линию, отработал 7 дней.
+# Отказ до обучения и отсев место освобождают.
+SEAT_STAGES = (INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED)
+GROUP_CAPACITY_MAX = 500
+
+
+def parse_capacity(value):
+    """Вместимость из формы: целое от 1 до GROUP_CAPACITY_MAX, иначе None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not value.is_integer():
+            return None
+        value = int(value)
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if 1 <= number <= GROUP_CAPACITY_MAX else None
+
+
+def seats_free(capacity, taken):
+    """Сколько ещё кандидатов войдёт в группу. None — вместимость не задана (группы до 18.11.2026)."""
+    if capacity is None:
+        return None
+    return max(0, int(capacity) - int(taken or 0))
+
 # ─── Касания ──────────────────────────────────────────────────────────────────
 
 TOUCH_CALL, TOUCH_WHATSAPP, TOUCH_COMMENT, TOUCH_REPEAT, TOUCH_SYSTEM = (

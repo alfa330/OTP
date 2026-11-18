@@ -21,6 +21,8 @@
 
 import contextlib
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 
@@ -480,6 +482,162 @@ def test_drop_on_line_cancels_motivation(world):
     assert card['is_closed'] and card['close_stage'] == 'line' and card['close_day'] == 2
     with world['db']._get_cursor() as cur:
         assert queries.get_motivation(cur, card['id'])['status'] == 'cancelled'
+
+
+# ─── Группы на обучение: тренер и вместимость (владелец 18.11.2026) ────────────
+
+NEW_TRAINER = 21
+
+
+def _add_trainer(world, user_id=NEW_TRAINER):
+    with world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id) VALUES (%s, 'Новый Тренер', 'trainer', 'working', 1)",
+                    (user_id,))
+
+
+def _invite(world, user_id, phone, group_id):
+    card = take_and_touch(world, user_id, phone)
+    return world['service'].move(ctx_of(world, user_id), card['id'], 'invited_training', {'group_id': group_id})
+
+
+def _group(world, group_id):
+    with world['db']._get_cursor() as cur:
+        return next(row for row in queries.list_groups(cur) if row['id'] == group_id)
+
+
+def test_trainer_runs_own_groups_with_capacity(world):
+    from hiring import access
+    service = world['service']
+    _add_trainer(world)
+    newbie = ctx_of(world, NEW_TRAINER)
+    # Роль «тренер» открывает раздел и без группы; своих кандидатов пока нет — доска пустая.
+    assert newbie['trainer_group_ids'] == [] and access.can_open_section(newbie)
+    with world['db']._get_cursor() as cur:
+        assert queries.board(cur, access.capabilities(newbie), NEW_TRAINER, {})[1] == {}
+    # Группу тренер заводит на себя: вместимость обязательна, другого тренера и отдел не назначает.
+    payload = {'name': 'Группа 19.10', 'start_date': '2026-10-19', 'capacity': 2, 'vacancy_id': world['vacancy_id']}
+    for bad, code in (({'capacity': None}, 'HIRING_BAD_CAPACITY'), ({'capacity': 0}, 'HIRING_BAD_CAPACITY'),
+                      ({'capacity': 501}, 'HIRING_BAD_CAPACITY'), ({'capacity': '2,5'}, 'HIRING_BAD_CAPACITY'),
+                      ({'name': '  '}, 'HIRING_BAD_GROUP'), ({'start_date': ''}, 'HIRING_BAD_GROUP'),
+                      ({'start_date': 'завтра'}, 'HIRING_BAD_DATE'), ({'trainer_id': TRAINER}, 'HIRING_FORBIDDEN'),
+                      ({'department_id': 367}, 'HIRING_FORBIDDEN'), ({'vacancy_id': 9999}, 'HIRING_NOT_FOUND')):
+        with pytest.raises(HiringError) as caught:
+            service.create_group(newbie, dict(payload, **bad))
+        assert caught.value.code == code, bad
+    with pytest.raises(HiringError) as caught:
+        service.create_group(ctx_of(world, REC1), payload)
+    assert caught.value.code == 'HIRING_FORBIDDEN'
+    mine = service.create_group(newbie, dict(payload, trainer_id=NEW_TRAINER))   # указать себя — можно
+    assert [(g['name'], g['trainer_id'], g['capacity'], g['seats_taken'], g['seats_free'], g['department_id']) for g in mine] \
+        == [('Группа 19.10', NEW_TRAINER, 2, 0, 2, None)]
+    group_id = mine[0]['id']
+    # Тренер видит свои группы, руководитель — все, рекрутер выбирает из действующих: ближний старт сверху.
+    assert [g['id'] for g in service.groups(newbie)] == [group_id]
+    assert {g['id'] for g in service.groups(ctx_of(world, LEAD_GRANT))} == {group_id, world['group_id']}
+    assert [g['id'] for g in service.groups(ctx_of(world, REC1), pick=True)] == [group_id, world['group_id']]
+    # Чужую группу тренер не правит.
+    with pytest.raises(HiringError) as caught:
+        service.edit_group(newbie, world['group_id'], {'capacity': 5})
+    assert caught.value.code == 'HIRING_FORBIDDEN'
+
+    first = _invite(world, REC1, '8 705 600 00 01', group_id)
+    second = _invite(world, REC2, '8 705 600 00 02', group_id)
+    newbie = ctx_of(world, NEW_TRAINER)
+    assert newbie['trainer_group_ids'] == [group_id] and service.visible(newbie, first) and service.visible(newbie, second)
+    assert (_group(world, group_id)['seats_taken'], _group(world, group_id)['seats_free']) == (2, 0)
+    # Полная группа третьего не принимает — ни от рекрутера, ни от руководителя.
+    third = take_and_touch(world, REC1, '8 705 600 00 03')
+    for who in (REC1, LEAD_GRANT):
+        with pytest.raises(HiringError) as caught:
+            service.move(ctx_of(world, who), third['id'], 'invited_training', {'group_id': group_id})
+        assert caught.value.code == 'HIRING_GROUP_FULL' and caught.value.status == 409
+        assert '«Группа 19.10»' in caught.value.message and '2 из 2' in caught.value.message
+    with world['db']._get_cursor() as cur:
+        assert queries.get_card(cur, third['id'])['stage'] == 'in_work'
+    # Вместимость не меньше занятых мест; расширили — третий проходит.
+    with pytest.raises(HiringError) as caught:
+        service.edit_group(newbie, group_id, {'capacity': 1})
+    assert caught.value.code == 'HIRING_CAPACITY_BELOW_TAKEN' and caught.value.status == 409
+    assert _group(world, group_id)['capacity'] == 2
+    service.edit_group(newbie, group_id, {'capacity': 2})                     # ровно по занятым — можно
+    service.edit_group(newbie, group_id, {'capacity': 3, 'name': 'Группа 19.10 · вечер'})
+    assert service.move(ctx_of(world, REC1), third['id'], 'invited_training', {'group_id': group_id})['group_id'] == group_id
+    # Вышедший на обучение место держит, отказ до обучения место освобождает.
+    service.move(newbie, first['id'], 'on_training', {})
+    with world['db']._get_cursor() as cur:
+        no_show = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_SHOW_TRAINING)
+    service.move(ctx_of(world, REC2), second['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_show['id']})
+    row = _group(world, group_id)
+    assert (row['name'], row['capacity'], row['seats_taken'], row['seats_free']) == ('Группа 19.10 · вечер', 3, 2, 1)
+    # Освободившееся место получает следующий кандидат — приглашение считает места так же, без отказавшихся.
+    assert _invite(world, REC2, '8 705 600 00 06', group_id)['group_id'] == group_id
+    with world['db']._get_cursor() as cur:
+        assert queries.group_seats_taken(cur, group_id) == 3
+    # Завершённую группу рекрутер не выбирает, и пригласить в неё нельзя; тот же тренер возвращает её.
+    with pytest.raises(HiringError) as caught:
+        service.edit_group(newbie, group_id, {'status': 'archived'})
+    assert caught.value.code == 'HIRING_BAD_GROUP'
+    service.edit_group(newbie, group_id, {'status': 'done'})
+    assert group_id not in [g['id'] for g in service.groups(ctx_of(world, REC1), pick=True)]
+    fourth = take_and_touch(world, REC2, '8 705 600 00 04')
+    with pytest.raises(HiringError) as caught:
+        service.move(ctx_of(world, REC2), fourth['id'], 'invited_training', {'group_id': group_id})
+    assert caught.value.code == 'HIRING_BAD_GROUP'
+    assert [g['status'] for g in service.edit_group(newbie, group_id, {'status': 'active'})] == ['active']
+    # Руководитель правит любую группу и назначает её другому тренеру; группа без вместимости (до 18.11) — без предела.
+    lead = ctx_of(world, LEAD_GRANT)
+    service.edit_group(lead, group_id, {'trainer_id': TRAINER})
+    assert _group(world, group_id)['trainer_id'] == TRAINER
+    with pytest.raises(HiringError) as caught:
+        service.edit_group(ctx_of(world, NEW_TRAINER), group_id, {'capacity': 9})
+    assert caught.value.code == 'HIRING_FORBIDDEN'
+    with pytest.raises(HiringError) as caught:
+        service.edit_group(lead, group_id, {'trainer_id': 9999})
+    assert caught.value.code == 'HIRING_NOT_FOUND'
+    legacy = _group(world, world['group_id'])
+    assert legacy['capacity'] is None and legacy['seats_free'] is None
+    assert _invite(world, REC2, '8 705 600 00 05', world['group_id'])['group_id'] == world['group_id']
+
+
+def test_last_seat_goes_to_one_of_two_recruiters(world):
+    """Два рекрутера приглашают в группу с последним местом одновременно — проходит один: место считается
+    под блокировкой строки группы. Строку держит третье соединение, пока оба приглашения не встанут за ней."""
+    service = world['service']
+    groups = service.create_group(ctx_of(world, LEAD_GRANT), {'name': 'Одно место', 'start_date': '2026-10-21', 'capacity': 1,
+                                                              'trainer_id': TRAINER})
+    group_id = next(g['id'] for g in groups if g['name'] == 'Одно место')
+    cards = {REC1: take_and_touch(world, REC1, '8 705 700 00 01'), REC2: take_and_touch(world, REC2, '8 705 700 00 02')}
+    results = {}
+
+    def invite(user_id):
+        try:
+            results[user_id] = service.move(ctx_of(world, user_id), cards[user_id]['id'], 'invited_training', {'group_id': group_id})['stage']
+        except HiringError as exc:
+            results[user_id] = exc.code
+
+    holder = world['db'].connect()
+    threads = [threading.Thread(target=invite, args=(user_id,)) for user_id in (REC1, REC2)]
+    try:
+        with holder.cursor() as cur:
+            cur.execute('SELECT id FROM hiring_groups WHERE id = %s FOR UPDATE', (group_id,))
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + 15
+        while True:
+            with world['db']._get_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                            " AND query ILIKE %s", ('%hiring_groups%FOR UPDATE%',))
+                if cur.fetchone()[0] == 2:
+                    break
+            assert time.monotonic() < deadline, 'приглашения не встали в очередь за строкой группы'
+            time.sleep(0.05)
+    finally:
+        holder.rollback()
+        holder.close()
+        for thread in threads:
+            thread.join(20)
+    assert sorted(results.values()) == ['HIRING_GROUP_FULL', 'invited_training']
+    assert _group(world, group_id)['seats_taken'] == 1
 
 
 # ─── Руководитель: переназначение, отключение ──────────────────────────────────

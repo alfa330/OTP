@@ -240,6 +240,28 @@ export const plural = (n, one, few, many) => {
     return many;
 };
 
+/*
+ * Места в группе на обучение (владелец 18.11.2026): вместимость задаёт тренер, рекрутер видит, сколько
+ * ещё кандидатов войдёт. Место занимает приглашённый и не отпавший (hiring/rules.py SEAT_STAGES); сервер
+ * присылает capacity и seats_taken. У групп до 18.11.2026 вместимости нет — предела нет, места не считаются.
+ */
+export const GROUP_CAPACITY_MAX = 500;
+
+export const groupSeats = (group) => {
+    const taken = Math.max(0, Math.trunc(Number(group?.seats_taken) || 0));
+    const raw = group?.capacity;
+    const capacity = raw === null || raw === undefined || raw === '' || !Number.isFinite(Number(raw)) ? null : Number(raw);
+    if (capacity === null) return { capacity: null, taken, free: null, full: false, share: 0, label: 'вместимость не указана' };
+    const free = Math.max(0, capacity - taken);
+    return {
+        capacity, taken, free, full: free === 0, share: capacity > 0 ? Math.min(1, taken / capacity) : 1,
+        label: free === 0 ? 'мест нет' : `свободно ${free} из ${capacity}`,
+    };
+};
+
+/** Название группы по дате старта, пока тренер не написал своё: «Группа 24.11». */
+export const groupNameFor = (startIso) => (shortTime(startIso) ? `Группа ${shortTime(startIso)}` : '');
+
 /** Отбор карточек по строке поиска на клиенте: имя, телефон, город, вакансия, номер. */
 export const matchesQuery = (card, query) => {
     const text = String(query || '').trim().toLowerCase();

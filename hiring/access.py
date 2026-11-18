@@ -8,7 +8,8 @@
     штатный рекрутер               выдача в разделе («Штатный рекрутер»)
     удалённый рекрутер             выдача в разделе («Удалённый рекрутер»): телефоны видит
                                    только в своих карточках
-    тренер                         роль «тренер», ведёт группу на обучение — видит её кандидатов
+    тренер                         роль «тренер» (или тренер действующей группы): заводит свои группы
+                                   на обучение с вместимостью и видит кандидатов своих групп
     руководитель отдела            глава отдела, куда был найм: кандидаты своего отдела,
                                    отметки смен и подтверждение «Отработал 7 дней»
 
@@ -19,6 +20,7 @@
 from . import rules
 
 HR_DEPARTMENT_CODE = 'hr'
+TRAINER_ROLE = 'trainer'
 _INACTIVE_STATUSES = ('fired', 'dismissal')
 
 
@@ -60,8 +62,9 @@ def is_remote(ctx):
 
 
 def is_trainer(ctx):
-    """Тренер с хотя бы одной группой на обучение."""
-    return bool(ctx.get('trainer_group_ids'))
+    """Тренер: роль «тренер» в портале — раздел открыт ему и без группы, группы он заводит сам (владелец
+    18.11.2026); или человек ведёт действующую группу на обучение (тренером группы назначен не тренер)."""
+    return str(ctx.get('role') or '').strip().lower() == TRAINER_ROLE or bool(ctx.get('trainer_group_ids'))
 
 
 def is_dept_head(ctx):
@@ -96,8 +99,22 @@ def can_add_response(ctx):
 
 
 def can_manage(ctx):
-    """Справочники, выдачи, группы, планы, переназначение и возврат в пул."""
+    """Справочники, выдачи, планы, переназначение и возврат в пул; группы — любые (can_edit_group)."""
     return is_lead(ctx)
+
+
+def can_manage_groups(ctx):
+    """Вкладка «Группы»: заводить группы на обучение и задавать их вместимость. Руководитель рекрутинга —
+    любые группы и любому тренеру, тренер — свои (владелец 18.11.2026)."""
+    return is_lead(ctx) or is_trainer(ctx)
+
+
+def can_edit_group(ctx, group):
+    """Править группу: руководитель — любую, тренер — ту, где тренером он сам."""
+    if is_lead(ctx):
+        return True
+    trainer_id = (group or {}).get('trainer_id')
+    return is_trainer(ctx) and bool(trainer_id) and int(trainer_id) == int(ctx['user_id'])
 
 
 def can_see_all_motivation(ctx):
@@ -130,6 +147,7 @@ def capabilities(ctx):
         'upload': can_upload(ctx),
         'add_response': can_add_response(ctx),
         'manage': can_manage(ctx),
+        'groups': can_manage_groups(ctx),
         'reports': can_see_reports(ctx),
         'headed_ids': sorted(_headed_ids(ctx)),
         'trainer_group_ids': sorted({int(x) for x in (ctx.get('trainer_group_ids') or ())}),

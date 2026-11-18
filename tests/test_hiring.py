@@ -96,6 +96,63 @@ class StageTests(unittest.TestCase):
         self.assertEqual(tuple(re.findall(r'^\s+(\w+): \{ label:', block, re.M)), rules.CHANNEL_COLORS)
 
 
+class GroupsAndBoardInterfaceTests(unittest.TestCase):
+    """Владелец 18.11.2026: тренер ведёт группы с вместимостью, рекрутер при приглашении видит свободные места;
+    полоса прокрутки под доской тонкая до наведения, «Взять в работу» — маленькая кнопка в углу карточки."""
+
+    @classmethod
+    def setUpClass(cls):
+        ui = ROOT / 'src' / 'components' / 'hiring'
+        cls.view = (ui / 'HiringView.jsx').read_text(encoding='utf-8')
+        cls.board = (ui / 'BoardTab.jsx').read_text(encoding='utf-8')
+        cls.sheet = (ui / 'CardSheet.jsx').read_text(encoding='utf-8')
+        cls.settings = (ui / 'SettingsTab.jsx').read_text(encoding='utf-8')
+        cls.groups = (ui / 'GroupsTab.jsx').read_text(encoding='utf-8')
+        cls.meta = (ui / 'hiringMeta.js').read_text(encoding='utf-8')
+        cls.styles = (ROOT / 'src' / 'styles.css').read_text(encoding='utf-8')
+
+    def test_capacity_limit_is_one_for_server_and_interface(self):
+        self.assertIn('export const GROUP_CAPACITY_MAX = %d;' % rules.GROUP_CAPACITY_MAX, self.meta)
+
+    def test_groups_tab_for_trainer_and_lead(self):
+        self.assertIn("import GroupsTab from './GroupsTab';", self.view)
+        self.assertIn("{active === 'groups' && <GroupsTab {...shared} />}", self.view)
+        # Тренеру «Группы» — первой вкладкой, отчётов рекрутеров у него нет.
+        self.assertIn('const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);', self.view)
+        self.assertIn("trainerOnly && 'groups',", self.view)
+        self.assertIn("caps.groups && !trainerOnly && 'groups',", self.view)
+        self.assertIn("(caps.recruiter || caps.lead || caps.dept_head) && 'reports',", self.view)
+        # Группы — одним местом: из «Настроек» они ушли во вкладку.
+        self.assertNotIn("value: 'groups'", self.settings)
+        self.assertNotIn('GroupsSection', self.settings)
+        # Тренера и отдел группе назначает руководитель — поля только у него (сервер проверяет то же).
+        self.assertIn('{lead && (', self.groups)
+        self.assertIn("api.get('/people/search')", self.groups)
+        self.assertIn('if (!lead) return undefined;', self.groups)
+
+    def test_recruiter_sees_free_seats_when_inviting(self):
+        self.assertIn("api.get('/groups', { pick: 1 })", self.sheet)
+        self.assertIn("<GroupPicker groups={pickGroups} value={form.group_id} onChange={set('group_id')} />", self.sheet)
+        self.assertIn('disabled={seats.full}', self.sheet)
+        self.assertIn("if (codeOf(error) === 'HIRING_GROUP_FULL') {", self.sheet)
+        self.assertNotIn("boot.dictionaries?.groups || []).filter((g) => g.status === 'active');\n    const kind", self.sheet)
+
+    def test_board_scrollbar_and_take_button(self):
+        self.assertIn('className="board-scroll -mx-3 overflow-x-auto', self.board)
+        block = self.styles[self.styles.index('.board-scroll::-webkit-scrollbar {'):]
+        block = block[:block.index('@supports not selector(::-webkit-scrollbar)')]
+        self.assertNotIn('scrollbar-width', block)      # иначе Chrome рисует штатную полосу ~11 px
+        self.assertIn('height: 13px;', block)
+        self.assertIn('border: 5px solid transparent;', block)   # 13 − 2×5 = 3 px до наведения
+        self.assertIn('.board-scroll::-webkit-scrollbar-thumb:hover', block)
+        self.assertIn('border-width: 2px;', block)               # 13 − 2×2 = 9 px под курсором
+        # Кнопка пула — маленькая, в нижней строке, а не поверх карточки во всю ширину.
+        self.assertIn('className={`${TAKE_BTN} ${HOVER_REVEAL}`}', self.board)
+        self.assertIn("const TAKE_BTN = '-my-1 inline-flex h-6 shrink-0", self.board)
+        self.assertNotIn('absolute inset-x-3 bottom-3', self.board)
+        self.assertNotIn('h-8 w-full items-center justify-center rounded-xl bg-blue-600', self.board)
+
+
 class TransitionTests(unittest.TestCase):
     def check(self, card, target, kinds, has_touch=True, payload=None):
         return rules.check_transition(card, target, set(kinds), has_touch=has_touch, payload=payload or {})
@@ -152,6 +209,21 @@ class TransitionTests(unittest.TestCase):
         self.assertEqual(rules.drop_stage_for('on_line'), 'line')
         self.assertEqual(rules.drop_stage_for('on_training'), 'training')
 
+    def test_group_seats(self):
+        # Место занимает приглашённый и не отпавший: отказ до обучения и отсев место освобождают.
+        self.assertEqual(rules.SEAT_STAGES, ('invited_training', 'on_training', 'on_line', 'hired'))
+        self.assertEqual(rules.seats_free(12, 8), 4)
+        self.assertEqual(rules.seats_free(3, 3), 0)
+        self.assertEqual(rules.seats_free(3, 5), 0)
+        self.assertEqual(rules.seats_free(10, None), 10)
+        self.assertIsNone(rules.seats_free(None, 4))    # группа до 18.11.2026: вместимость не задана
+
+    def test_parse_capacity(self):
+        for raw, expected in ((12, 12), ('12', 12), (' 7 ', 7), (12.0, 12), (1, 1), (500, 500)):
+            self.assertEqual(rules.parse_capacity(raw), expected, raw)
+        for raw in (None, '', 0, -3, 501, '1e3', 'abc', 2.5, True, False, [], {}):
+            self.assertIsNone(rules.parse_capacity(raw), raw)
+
     def test_actor_kinds(self):
         caps = {'lead': False, 'recruiter': True, 'headed_ids': [5], 'super_admin': False}
         card = {'recruiter_id': 7, 'group_id': 3, 'department_id': 5}
@@ -183,11 +255,35 @@ class AccessTests(unittest.TestCase):
         self.assertFalse(access.can_manage(ctx(grant='staff')))
 
     def test_trainer_and_dept_head(self):
-        self.assertFalse(access.can_open_section(ctx(role='trainer')))
+        # Тренеру раздел открыт ролью, и без группы (владелец 18.11.2026): группы он заводит сам.
+        self.assertTrue(access.can_open_section(ctx(role='trainer')))
+        self.assertTrue(access.can_open_section(ctx(role=' Trainer ')))
         self.assertTrue(access.can_open_section(ctx(role='trainer', trainer_group_ids=[4])))
+        self.assertFalse(access.can_open_section(ctx(role='trainer', status='fired')))
+        # Тренер группы без роли «тренер» — тоже тренер, пока группа действует.
+        self.assertTrue(access.is_trainer(ctx(role='operator', trainer_group_ids=[4])))
+        self.assertFalse(access.is_trainer(ctx(role='trainee')))
         self.assertFalse(access.can_open_section(ctx(role='admin', headed_ids=[9], vacancy_department_ids=[3])))
         self.assertTrue(access.can_open_section(ctx(role='admin', headed_ids=[9], vacancy_department_ids=[9, 3])))
         self.assertFalse(access.can_see_pool(ctx(role='trainer', trainer_group_ids=[4])))
+        trainer = access.capabilities(ctx(role='trainer'))
+        self.assertTrue(trainer['trainer'] and trainer['groups'])
+        self.assertFalse(trainer['lead'] or trainer['manage'] or trainer['recruiter'] or trainer['pool'] or trainer['take'])
+        self.assertEqual(trainer['trainer_group_ids'], [])
+        self.assertEqual(access.scope_label(ctx(role='trainer')), 'Тренер')
+
+    def test_who_edits_groups(self):
+        trainer = ctx(role='trainer')
+        self.assertTrue(access.can_edit_group(trainer, {'trainer_id': 7}))
+        self.assertFalse(access.can_edit_group(trainer, {'trainer_id': 8}))
+        self.assertFalse(access.can_edit_group(trainer, {'trainer_id': None}))
+        self.assertTrue(access.can_edit_group(ctx(grant='lead'), {'trainer_id': 8}))
+        self.assertTrue(access.can_edit_group(ctx(role='super_admin'), {'trainer_id': None}))
+        # Рекрутер и руководитель отдела групп не ведут — ни своих, ни чужих.
+        self.assertFalse(access.can_manage_groups(ctx(grant='staff')))
+        self.assertFalse(access.can_edit_group(ctx(grant='staff'), {'trainer_id': 7}))
+        self.assertFalse(access.can_manage_groups(ctx(role='admin', headed_ids=[9], vacancy_department_ids=[9])))
+        self.assertTrue(access.capabilities(ctx(grant='lead'))['groups'])
 
     def test_fired_sees_nothing(self):
         self.assertFalse(access.can_open_section(ctx(role='super_admin', status='fired')))

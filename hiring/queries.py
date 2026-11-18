@@ -294,44 +294,64 @@ def update_channel(cursor, channel_id, now, **fields):
     return _update('hiring_channels', channel_id, fields, allowed=('name', 'color', 'is_active', 'updated_at'), cursor=cursor)
 
 
-def list_groups(cursor, active_only=False, trainer_id=None):
+def list_groups(cursor, active_only=False, trainer_id=None, soonest_first=False):
+    """Группы на обучение с местами: seats_taken — кандидаты, занявшие место (rules.SEAT_STAGES),
+    seats_free — сколько ещё войдёт (None, если вместимость не задана). soonest_first — ближний старт
+    сверху: так их видит рекрутер, выбирая группу; в списке тренера и руководителя — свежие сверху."""
     where = ["TRUE"]
-    params = []
+    params = [list(rules.SEAT_STAGES)]
     if active_only:
         where.append("g.status = 'active'")
     if trainer_id:
         where.append("g.trainer_id = %s")
         params.append(int(trainer_id))
+    order = "g.start_date ASC, g.id ASC" if soonest_first else "g.start_date DESC, g.id DESC"
     cursor.execute("""
         SELECT g.id, g.name, g.start_date, g.trainer_id, t.name AS trainer_name, g.department_id,
-               d.name AS department_name, g.vacancy_id, v.name AS vacancy_name, g.status,
-               (SELECT COUNT(*) FROM hiring_cards c WHERE c.group_id = g.id) AS cards_total
+               d.name AS department_name, g.vacancy_id, v.name AS vacancy_name, g.status, g.capacity,
+               COALESCE(seats.taken, 0) AS seats_taken
           FROM hiring_groups g
           LEFT JOIN users t ON t.id = g.trainer_id
           LEFT JOIN departments d ON d.id = g.department_id
           LEFT JOIN hiring_vacancies v ON v.id = g.vacancy_id
-         WHERE """ + " AND ".join(where) + " ORDER BY g.start_date DESC, g.id DESC", params)
-    return _all(cursor)
+          LEFT JOIN LATERAL (SELECT COUNT(*) AS taken FROM hiring_cards c
+                              WHERE c.group_id = g.id AND c.stage = ANY(%s)) seats ON TRUE
+         WHERE """ + " AND ".join(where) + " ORDER BY " + order, params)
+    rows = _all(cursor)
+    for row in rows:
+        row['seats_taken'] = int(row['seats_taken'] or 0)
+        row['seats_free'] = rules.seats_free(row['capacity'], row['seats_taken'])
+    return rows
 
 
-def get_group(cursor, group_id):
-    cursor.execute("SELECT id, name, start_date, trainer_id, department_id, vacancy_id, status FROM hiring_groups WHERE id = %s",
-                   (int(group_id),))
+def get_group(cursor, group_id, lock=False):
+    """lock — FOR UPDATE: приглашение в группу и смена вместимости идут по одной, последнее место не
+    достаётся двоим."""
+    cursor.execute("SELECT id, name, start_date, trainer_id, department_id, vacancy_id, status, capacity FROM hiring_groups"
+                   " WHERE id = %s" + (" FOR UPDATE" if lock else ""), (int(group_id),))
     return _one(cursor)
 
 
-def create_group(cursor, name, start_date, trainer_id, department_id, vacancy_id, by, now):
+def group_seats_taken(cursor, group_id, exclude_card_id=None):
+    """Сколько мест в группе занято (rules.SEAT_STAGES), не считая карточку exclude_card_id."""
+    cursor.execute("SELECT COUNT(*) FROM hiring_cards WHERE group_id = %s AND stage = ANY(%s) AND id <> %s",
+                   (int(group_id), list(rules.SEAT_STAGES), int(exclude_card_id or 0)))
+    return int(cursor.fetchone()[0])
+
+
+def create_group(cursor, name, start_date, trainer_id, department_id, vacancy_id, by, now, capacity=None):
     cursor.execute("""
-        INSERT INTO hiring_groups (name, start_date, trainer_id, department_id, vacancy_id, created_by, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
-    """, (name, start_date, trainer_id, department_id, vacancy_id, by, now, now))
+        INSERT INTO hiring_groups (name, start_date, trainer_id, department_id, vacancy_id, capacity, created_by, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+    """, (name, start_date, trainer_id, department_id, vacancy_id, capacity, by, now, now))
     return int(cursor.fetchone()[0])
 
 
 def update_group(cursor, group_id, now, **fields):
     fields['updated_at'] = now
     _update('hiring_groups', group_id, fields,
-            allowed=('name', 'start_date', 'trainer_id', 'department_id', 'vacancy_id', 'status', 'updated_at'), cursor=cursor)
+            allowed=('name', 'start_date', 'trainer_id', 'department_id', 'vacancy_id', 'status', 'capacity', 'updated_at'),
+            cursor=cursor)
 
 
 def list_plans(cursor, month_start, recruiter_id=None):

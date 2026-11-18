@@ -5,7 +5,7 @@ import IosDatePicker from '../ui/DatePicker';
 import { IosHint, IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import {
     CHANNEL_COLORS, CHANNEL_COLOR_CODES, GRANT_LABELS, INTEGRATION_LABELS, INTEGRATION_STATE_LABELS, REASON_KIND_LABELS,
-    channelTone, currentMonth, errorOf, fullDate, plural, shortTime,
+    channelTone, currentMonth, errorOf, fullDate, shortTime,
 } from './hiringMeta';
 import {
     ConfirmDialog, DATE_TRIGGER, Empty, FIELD, Group, Label, Loading, MonthSwitch, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY,
@@ -19,8 +19,8 @@ import { WhatsAppIntegration } from './WhatsAppPanel';
  *   каналы      метки откликов с цветом — откуда кандидат узнал о вакансии (владелец 09.11.2026);
  *   вакансии    куда идёт найм, есть ли собеседование в офисе (ТЗ 4.2);
  *   причины     отказа и отсева по инициаторам (ТЗ 6.2, 6.3), не трогают закрытые карточки;
- *   группы      на обучение: дата старта, тренер (ТЗ 1.2);
  *   план        месячные задачи на найм в FTE (ТЗ 1.2, 3);
+ * Группы на обучение — своей вкладкой раздела (GroupsTab.jsx): их ведёт и тренер (владелец 18.11.2026).
  *   интеграции  HeadHunter, OLX, вебхук площадок — состояние и запуск вручную; номер WhatsApp найма —
  *               состояние сервиса на шлюзе, привязка по QR (WhatsAppPanel.jsx).
  *
@@ -34,7 +34,6 @@ const SECTIONS = [
     { value: 'channels', label: 'Каналы' },
     { value: 'vacancies', label: 'Вакансии' },
     { value: 'reasons', label: 'Причины' },
-    { value: 'groups', label: 'Группы' },
     { value: 'plans', label: 'План найма' },
     { value: 'integrations', label: 'Интеграции' },
 ];
@@ -566,86 +565,6 @@ const ReasonsSection = ({ api, toast, boot, reloadBoot }) => {
     );
 };
 
-/* ─── Группы на обучение ────────────────────────────────────────────────── */
-const GroupsSection = ({ api, toast, boot, reloadBoot }) => {
-    const [items, setItems] = useState(null);
-    const [adding, setAdding] = useState(false);
-    const empty = { name: '', start_date: '', trainer_id: '', department_id: '', vacancy_id: '' };
-    const [form, setForm] = useState(empty);
-    const [saving, submit] = useSubmit(toast, 'Не удалось добавить');
-    const trainers = useUsers(api);
-    const departments = boot.dictionaries?.departments || [];
-    const vacancies = boot.dictionaries?.vacancies || [];
-    const load = useCallback(() => api.get('/groups').then(({ data }) => setItems(data.items))
-        .catch((error) => toast(errorOf(error, 'Не удалось загрузить'), 'error')), [api, toast]);
-    useEffect(() => { load(); }, [load]);
-    useEffect(() => { if (adding) setForm(empty); }, [adding]); // eslint-disable-line react-hooks/exhaustive-deps
-    const add = async () => {
-        if (!form.name.trim() || !form.start_date) return toast('Нужны название и дата старта', 'error');
-        const done = await submit(async () => {
-            const { data } = await api.post('/groups', { name: form.name.trim(), start_date: form.start_date,
-                trainer_id: form.trainer_id ? Number(form.trainer_id) : null, department_id: form.department_id ? Number(form.department_id) : null,
-                vacancy_id: form.vacancy_id ? Number(form.vacancy_id) : null });
-            setItems(data.items);
-            reloadBoot();
-        });
-        if (done) setAdding(false);
-        return undefined;
-    };
-    const finish = async (row) => {
-        try {
-            const { data } = await api.patch(`/groups/${row.id}`, { status: row.status === 'active' ? 'done' : 'active' });
-            setItems(data.items);
-            reloadBoot();
-        } catch (error) {
-            toast(errorOf(error, 'Не удалось изменить'), 'error');
-        }
-    };
-    return (
-        <div className="space-y-3">
-            <Toolbar onAdd={() => setAdding(true)} />
-            <div className={`${iosCard} overflow-hidden`}>
-                {!items ? <Loading text="Загружаем…" /> : items.length === 0 ? <Empty>Групп пока нет</Empty> : (
-                    <ul className="divide-y divide-slate-100">
-                        {items.map((row) => (
-                            <Row key={row.id} muted={row.status !== 'active'}>
-                                <div className="min-w-0 grow basis-0">
-                                    <div className="truncate text-[13.5px] text-slate-900">{row.name} <span className="text-slate-400">· с {fullDate(row.start_date)}</span></div>
-                                    <div className="truncate text-[12px] text-slate-500">{[row.trainer_name || 'тренер не указан', row.department_name, row.vacancy_name, `${row.cards_total} ${plural(row.cards_total, 'кандидат', 'кандидата', 'кандидатов')}`].filter(Boolean).join(' · ')}</div>
-                                </div>
-                                <button type="button" className={TOOLBAR_BTN} onClick={() => finish(row)}>{row.status === 'active' ? 'Завершить' : 'Вернуть'}</button>
-                            </Row>
-                        ))}
-                    </ul>
-                )}
-            </div>
-            <FormModal open={adding} onClose={() => setAdding(false)} title="Новая группа" subtitle="Группа задаёт дату старта обучения и тренера" onSubmit={add} saving={saving}>
-                <div className="grid gap-3 sm:grid-cols-[1fr_200px]">
-                    <div><Label required>Название</Label><input className={FIELD} value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Группа 12.11" /></div>
-                    <div><Label required hint="Первый день обучения: по нему отмечается выход на обучение.">Старт</Label><IosDatePicker value={form.start_date} onChange={(v) => setForm((f) => ({ ...f, start_date: v }))} allowEmpty triggerClassName={DATE_TRIGGER} ariaLabel="Старт группы" /></div>
-                </div>
-                <div>
-                    <Label hint="Тренер видит кандидатов группы и отмечает выход на обучение и отсев на обучении.">Тренер</Label>
-                    <CustomSelect variant="ios" value={form.trainer_id} onChange={(v) => setForm((f) => ({ ...f, trainer_id: v }))} placeholder="Не указан" searchable searchPlaceholder="Фамилия"
-                                  options={[{ value: '', label: 'Не указан' }, ...trainers.map((u) => ({ value: String(u.id), label: u.name, meta: u.department_name || '' }))]} />
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                        <Label>Отдел</Label>
-                        <CustomSelect variant="ios" value={form.department_id} onChange={(v) => setForm((f) => ({ ...f, department_id: v }))} placeholder="Не указан" searchable
-                                      options={[{ value: '', label: 'Не указан' }, ...departments.map((d) => ({ value: String(d.id), label: d.name }))]} />
-                    </div>
-                    <div>
-                        <Label>Вакансия</Label>
-                        <CustomSelect variant="ios" value={form.vacancy_id} onChange={(v) => setForm((f) => ({ ...f, vacancy_id: v }))} placeholder="Не указана"
-                                      options={[{ value: '', label: 'Не указана' }, ...vacancies.map((v) => ({ value: String(v.id), label: v.name }))]} />
-                    </div>
-                </div>
-            </FormModal>
-        </div>
-    );
-};
-
 /* ─── План найма ────────────────────────────────────────────────────────── */
 const PlansSection = ({ api, toast, boot }) => {
     const [month, setMonth] = useState(currentMonth);
@@ -838,7 +757,6 @@ const SettingsTab = ({ api, toast, boot, reloadBoot }) => {
             {section === 'channels' && <ChannelsSection {...shared} />}
             {section === 'vacancies' && <VacanciesSection {...shared} />}
             {section === 'reasons' && <ReasonsSection {...shared} />}
-            {section === 'groups' && <GroupsSection {...shared} />}
             {section === 'plans' && <PlansSection {...shared} />}
             {section === 'integrations' && <IntegrationsSection {...shared} />}
         </div>

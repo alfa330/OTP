@@ -159,6 +159,24 @@ html[data-otp-theme="dark"] .hours-scroll::-webkit-scrollbar-thumb:hover {
     }
 }
 
+/* Полоса под канбан-доской «Воронки найма» (.board-scroll в src/styles.css): тонкая до наведения, на
+   тёмном полотне — светлее; толщину по-прежнему задаёт рамка ползунка из styles.css. */
+html[data-otp-theme="dark"] .board-scroll::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.3);
+}
+html[data-otp-theme="dark"] .board-scroll:hover::-webkit-scrollbar-thumb {
+    background-color: rgba(148, 163, 184, 0.45);
+}
+html[data-otp-theme="dark"] .board-scroll::-webkit-scrollbar-thumb:hover,
+html[data-otp-theme="dark"] .board-scroll::-webkit-scrollbar-thumb:active {
+    background-color: rgba(148, 163, 184, 0.65);
+}
+@supports not selector(::-webkit-scrollbar) {
+    html[data-otp-theme="dark"] .board-scroll {
+        scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+    }
+}
+
 /* ── Раздел «Обращения» и док переписки ── */
 html[data-otp-theme="dark"] .chat-dock,
 html[data-otp-theme="dark"] .crm-aside {

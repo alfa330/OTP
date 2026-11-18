@@ -26,7 +26,9 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/dashboard[/export]       итоговый дашборд (ТЗ 8.1), выгрузка
     GET    /reports/cards?key=               список карточек за цифрой дашборда
     GET    /reports/motivation[/export]      начисления месяца
-    …/people, /sources, /vacancies, /reasons, /groups, /plans, /integrations — настройки
+    …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки
+    GET    /groups[?pick=1], POST /groups,   группы на обучение с вместимостью: тренер ведёт свои, руководитель —
+    PATCH  /groups/<id>                      любые; pick — выбор при приглашении (действующие, свободные места)
     POST   /channels, PATCH /channels/<id>   каналы — метки откликов с цветом; ставятся PATCH /cards/<id> {channel_id}
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
     PUT    /whatsapp/settings                кто отвечает с телефона (его первый ответ берёт карточку в работу)
@@ -756,49 +758,21 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_channel_edit(channel_id, ctx):
         return jsonify({'items': _json(service.edit_channel(ctx, channel_id, _body()))})
 
+    # Группы на обучение (владелец 18.11.2026): тренер заводит свои и задаёт вместимость, руководитель
+    # рекрутинга — любые. ?pick=1 — выбор при приглашении на обучение: действующие группы всех тренеров
+    # со свободными местами, ближний старт сверху.
     @hiring_route('/groups')
     def hiring_groups(ctx):
-        caps = access.capabilities(ctx)
-        with db._get_cursor() as cursor:
-            rows = queries.list_groups(cursor, active_only=not caps['manage'])
-        return jsonify({'items': _json(rows)})
+        pick = request.args.get('pick') in ('1', 'true')
+        return jsonify({'items': _json(service.groups(ctx, pick=pick))})
 
     @hiring_route('/groups', methods=('POST',))
     def hiring_group_add(ctx):
-        _manage_only(ctx)
-        body = _body()
-        name = str(body.get('name') or '').strip()[:120]
-        start = _date(body.get('start_date'))
-        if not name or not start:
-            return _bad('Нужны название группы и дата старта', 'HIRING_BAD_GROUP')
-        with db._get_cursor() as cursor:
-            queries.create_group(cursor, name, start, _int(body.get('trainer_id')), _int(body.get('department_id')),
-                                 _int(body.get('vacancy_id')), ctx['user_id'], rules.now_almaty())
-            rows = queries.list_groups(cursor)
-        return jsonify({'items': _json(rows)}), 201
+        return jsonify({'items': _json(service.create_group(ctx, _body()))}), 201
 
     @hiring_route('/groups/<int:group_id>', methods=('PATCH',))
     def hiring_group_edit(group_id, ctx):
-        _manage_only(ctx)
-        body = _body()
-        fields = {}
-        if 'name' in body:
-            fields['name'] = str(body.get('name') or '').strip()[:120]
-            if not fields['name']:
-                return _bad('Название группы пустое', 'HIRING_BAD_GROUP')
-        if 'start_date' in body:
-            fields['start_date'] = _date(body.get('start_date'))
-            if not fields['start_date']:
-                return _bad('Дата старта не разобрана', 'HIRING_BAD_GROUP')
-        for key in ('trainer_id', 'department_id', 'vacancy_id'):
-            if key in body:
-                fields[key] = _int(body.get(key))
-        if 'status' in body and body.get('status') in ('active', 'done'):
-            fields['status'] = body['status']
-        with db._get_cursor() as cursor:
-            queries.update_group(cursor, group_id, rules.now_almaty(), **fields)
-            rows = queries.list_groups(cursor)
-        return jsonify({'items': _json(rows)})
+        return jsonify({'items': _json(service.edit_group(ctx, group_id, _body()))})
 
     @hiring_route('/plans')
     def hiring_plans(ctx):

@@ -435,6 +435,11 @@ _STATEMENTS = [
     # рекламы (владелец 09.11.2026). Имя и цвет руководитель правит, код остаётся; свои каналы — без кода.
     "ALTER TABLE hiring_channels ADD COLUMN IF NOT EXISTS code VARCHAR(24)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_channels_code ON hiring_channels (code) WHERE code IS NOT NULL",
+
+    # Вместимость группы на обучение (владелец 18.11.2026): сколько кандидатов она вмещает. Задаёт тренер
+    # или руководитель; рекрутер видит свободные места при приглашении, в полную группу не пригласить.
+    # NULL — у групп, заведённых до 18.11.2026: ограничения нет, пока вместимость не укажут.
+    "ALTER TABLE hiring_groups ADD COLUMN IF NOT EXISTS capacity INTEGER",
 ]
 
 

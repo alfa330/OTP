@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-    ArrowRight, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
+    ArrowRight, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
     PhoneMissed, PhoneOutgoing, Play, Plus, RefreshCw, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
@@ -10,7 +10,7 @@ import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondar
 import {
     ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, CHANNEL_COLOR_CODES, FINAL_STAGES,
     MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS,
-    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, joinDateTime, longTime,
+    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, groupSeats, joinDateTime, longTime,
     openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
 } from './hiringMeta';
 import { ChannelPill, DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
@@ -87,10 +87,52 @@ const ChannelPicker = ({ card, channels, canEdit, onChange }) => {
     );
 };
 
+/* Выбор группы на обучение (владелец 18.11.2026): рекрутер сразу видит, сколько ещё кандидатов войдёт в каждую
+   группу, — справа у строки; полная группа погашена, в неё не пригласить. Ближний старт — сверху. */
+const GroupPicker = ({ groups, value, onChange }) => (
+    <div role="radiogroup" aria-label="Группа на обучение"
+         className="thin-scroll max-h-[272px] overflow-y-auto rounded-2xl bg-slate-50 ring-1 ring-slate-200/60">
+        <ul className="divide-y divide-slate-200/60">
+            {groups.map((group) => {
+                const seats = groupSeats(group);
+                const selected = String(group.id) === String(value);
+                return (
+                    <li key={group.id}>
+                        <button type="button" role="radio" aria-checked={selected} disabled={seats.full} onClick={() => onChange(String(group.id))}
+                                className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition ${selected ? 'bg-blue-50' : 'hover:bg-white'} disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent`}>
+                            <span className="min-w-0 grow basis-0">
+                                <span className={`block truncate text-[13.5px] font-medium ${selected ? 'text-blue-700' : 'text-slate-900'}`}>{group.name}</span>
+                                <span className="block truncate text-[12px] text-slate-500">
+                                    {[`старт ${longTime(group.start_date)}`, group.trainer_name].filter(Boolean).join(' · ')}
+                                </span>
+                            </span>
+                            <span className={`shrink-0 text-[12.5px] font-medium tabular-nums ${seats.full ? 'text-rose-600' : selected ? 'text-blue-700' : 'text-slate-600'}`}>
+                                {seats.label}
+                            </span>
+                            <Check size={16} strokeWidth={2.5} className={`shrink-0 text-blue-600 ${selected ? '' : 'invisible'}`} />
+                        </button>
+                    </li>
+                );
+            })}
+        </ul>
+    </div>
+);
+
 /* Переход с его обязательными полями (ТЗ 4.1, 4.2). */
 const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone }) => {
     const [form, setForm] = useState({});
     const [saving, setSaving] = useState(false);
+    // Группы с местами — свежие при каждом открытии: места занимают и другие рекрутеры, а справочник из
+    // первого ответа раздела мог устареть. null — ещё грузятся.
+    const [pickGroups, setPickGroups] = useState(null);
+    const loadGroups = useCallback(() => api.get('/groups', { pick: 1 })
+        .then(({ data }) => setPickGroups(data.items || []))
+        .catch(() => setPickGroups((boot.dictionaries?.groups || []).filter((g) => g.status === 'active'))), [api, boot]);
+    useEffect(() => {
+        if (!open || target !== 'invited_training') return;
+        setPickGroups(null);
+        loadGroups();
+    }, [open, target, loadGroups]);
     useEffect(() => {
         if (!open) return;
         const initial = { office_date: '', office_time: '10:00', group_id: '', initiator: '', reason_id: '', comment: '', day: '',
@@ -103,7 +145,6 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
         setForm(initial);
     }, [open, target, card]);
     const reasons = boot.dictionaries?.reasons || [];
-    const groups = (boot.dictionaries?.groups || []).filter((g) => g.status === 'active');
     const kind = reasonKindFor(target, form.initiator);
     const reasonOptions = reasons.filter((r) => r.kind === kind && r.is_active !== false).map((r) => ({ value: String(r.id), label: r.name }));
     useEffect(() => {
@@ -138,6 +179,11 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
             onClose();
         } catch (error) {
             toast(errorOf(error, 'Переход не выполнен'), 'error');
+            // Последнее место заняли, пока окно было открыто, — места перечитываются, выбор снимается.
+            if (codeOf(error) === 'HIRING_GROUP_FULL') {
+                setForm((f) => ({ ...f, group_id: '' }));
+                loadGroups();
+            }
         } finally {
             setSaving(false);
         }
@@ -145,7 +191,7 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
 
     const title = `В «${STAGE_LABELS[target] || target}»`;
     const subtitle = {
-        invited_office: 'Дата и время собеседования в офисе', invited_training: 'Группа на обучение и дата старта',
+        invited_office: 'Дата и время собеседования в офисе', invited_training: 'Группа на обучение: старт и свободные места',
         refused: 'Сначала инициатор, затем причина из его списка', dropped: 'Инициатор, причина и день отсева',
         on_training: 'Дата первого дня обучения', on_line: 'Дата выхода на линию',
         hired: `Семь отработанных смен подтверждает руководитель отдела — отмечено ${card?.shifts_done || 0} из ${boot.meta.shifts_to_hire}`,
@@ -169,10 +215,15 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
                 )}
                 {target === 'invited_training' && (
                     <div>
-                        <Label required hint="Группа задаёт дату старта и тренера, который отметит выход на обучение.">Группа на обучение</Label>
-                        <CustomSelect variant="ios" value={form.group_id} onChange={set('group_id')} placeholder="Выберите группу" invalid={!form.group_id}
-                                      options={groups.map((g) => ({ value: String(g.id), label: `${g.name} · ${fullDate(g.start_date)}`, meta: g.trainer_name || '' }))} />
-                        {groups.length === 0 && <div className="mt-1 text-[12px] text-rose-600">Активных групп нет — их заводит руководитель рекрутинга в «Настройках»</div>}
+                        <Label required hint="Группа задаёт дату старта и тренера, который отметит выход на обучение. Справа — сколько ещё кандидатов в неё войдёт; полную выбрать нельзя.">
+                            Группа на обучение
+                        </Label>
+                        {pickGroups === null ? <Loading text="Смотрим свободные места…" />
+                            : pickGroups.length === 0 ? (
+                                <div className="rounded-2xl bg-slate-50 px-4 py-3 text-[13px] text-slate-600 ring-1 ring-slate-200/60">
+                                    Групп на обучение нет — их заводит тренер во вкладке «Группы»
+                                </div>
+                            ) : <GroupPicker groups={pickGroups} value={form.group_id} onChange={set('group_id')} />}
                     </div>
                 )}
                 {(target === 'on_training' || target === 'on_line') && (

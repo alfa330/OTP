@@ -5,6 +5,7 @@ import { APPLE_FONT, IosHint, IosSegmented, iosCard } from '../ui/ios';
 import BoardTab from './BoardTab';
 import CardSheet from './CardSheet';
 import DeskTab from './DeskTab';
+import GroupsTab from './GroupsTab';
 import ReportsTab from './ReportsTab';
 import SettingsTab from './SettingsTab';
 import UploadTab from './UploadTab';
@@ -19,9 +20,12 @@ import { Loading } from './hiringUi';
  *                  моя воронка, моя мотивация;
  *   Воронка        канбан-доска — всем, кому раздел открыт (тренер и руководитель отдела
  *                  видят только своих кандидатов);
- *   Отчёты         дашборд и отчёты: руководителю целиком, рекрутеру — по себе;
+ *   Группы         группы на обучение с вместимостью — тренер ведёт свои, руководитель рекрутинга —
+ *                  все (владелец 18.11.2026); у тренера это первая вкладка;
+ *   Отчёты         дашборд и отчёты: руководителю целиком, рекрутеру — по себе; тренеру их нет —
+ *                  там цифры рекрутеров;
  *   Загрузки       база контактов файлом и партии — руководитель рекрутинга;
- *   Настройки      рекрутеры, источники, вакансии, причины, группы, план найма, интеграции.
+ *   Настройки      рекрутеры, источники, вакансии, причины, план найма, интеграции.
  *
  * Карточка кандидата — одно окно на весь раздел (CardSheet): открывается с доски, с рабочего
  * стола, из отчёта и по ссылке ?view=hiring&card=<id> (колокол, Telegram).
@@ -39,9 +43,10 @@ const HOW_IT_WORKS =
 const TAB_META = {
     desk: { label: 'Рабочий стол', short: 'Стол', subtitle: 'План найма, задачи на сегодня, моя воронка и мотивация' },
     board: { label: 'Воронка', short: 'Воронка', subtitle: 'Канбан-доска: общий пул и карточки по этапам', hint: HOW_IT_WORKS },
+    groups: { label: 'Группы', short: 'Группы', subtitle: 'Группы на обучение: старт, вместимость и свободные места' },
     reports: { label: 'Отчёты', short: 'Отчёты', subtitle: 'Дашборд воронки, потери, рекрутеры, источники, мотивация' },
     upload: { label: 'Загрузки', short: 'Загрузки', subtitle: 'База контактов файлом и партии загрузок' },
-    settings: { label: 'Настройки', short: 'Настройки', subtitle: 'Рекрутеры, источники, каналы, вакансии, причины, группы, план и интеграции' },
+    settings: { label: 'Настройки', short: 'Настройки', subtitle: 'Рекрутеры, источники, каналы, вакансии, причины, план и интеграции' },
 };
 
 const tabLabel = ({ label, short }) => (short === label ? label : (
@@ -135,13 +140,18 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     useEffect(() => { writeCardParam(openCardId); }, [openCardId]);
 
     const caps = boot?.capabilities || {};
+    // Тренеру (не рекрутеру и не руководителю) «Группы» — первой вкладкой: группы он ведёт сам, а доска —
+    // его кандидаты по этапам. Отчётов у тренера нет: там цифры рекрутеров, по нему они пустые.
+    const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);
     const tabs = useMemo(() => [
+        trainerOnly && 'groups',
         caps.recruiter && 'desk',
         'board',
-        'reports',
+        caps.groups && !trainerOnly && 'groups',
+        (caps.recruiter || caps.lead || caps.dept_head) && 'reports',
         caps.upload && 'upload',
         caps.manage && 'settings',
-    ].filter(Boolean), [caps.recruiter, caps.upload, caps.manage]);
+    ].filter(Boolean), [trainerOnly, caps.recruiter, caps.lead, caps.dept_head, caps.groups, caps.upload, caps.manage]);
     const active = tabs.includes(tab) ? tab : tabs[0];
     const chooseTab = (value) => {
         setTab(value);
@@ -203,6 +213,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
             </header>
             {active === 'desk' && <DeskTab {...shared} />}
             {active === 'board' && <BoardTab {...shared} />}
+            {active === 'groups' && <GroupsTab {...shared} />}
             {active === 'reports' && <ReportsTab {...shared} />}
             {active === 'upload' && <UploadTab {...shared} />}
             {active === 'settings' && <SettingsTab {...shared} />}

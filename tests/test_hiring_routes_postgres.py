@@ -341,8 +341,10 @@ def test_upload_reports_and_settings(client):
     assert client.post('/api/hiring/vacancies', json={'name': 'Курьер', 'department_id': 367, 'office_interview': False}, headers=lead).status_code == 201
     assert client.post('/api/hiring/reasons', json={'kind': 'drop_we', 'name': 'Опоздания'}, headers=lead).status_code == 201
     assert client.post('/api/hiring/reasons', json={'kind': 'nope', 'name': 'x'}, headers=lead).status_code == 400
-    groups = client.post('/api/hiring/groups', json={'name': 'Группа 2', 'start_date': '2026-11-12', 'trainer_id': TRAINER}, headers=lead)
+    groups = client.post('/api/hiring/groups', json={'name': 'Группа 2', 'start_date': '2026-11-12', 'trainer_id': TRAINER, 'capacity': 15},
+                         headers=lead)
     assert groups.status_code == 201 and groups.get_json()['items'][0]['start_date'] == '2026-11-12'
+    assert groups.get_json()['items'][0]['capacity'] == 15 and groups.get_json()['items'][0]['trainer_id'] == TRAINER
     plans = client.post('/api/hiring/plans', json={'month': '2026-11', 'plan_fte': '5', 'planned_date': '2026-11-30', 'department_id': 367}, headers=lead)
     assert plans.status_code == 201 and plans.get_json()['items'][0]['plan_fte'] == 5.0
     plan_id = plans.get_json()['items'][0]['id']
@@ -362,6 +364,59 @@ def test_upload_reports_and_settings(client):
     run = client.post('/api/hiring/integrations/olx/run', headers=lead).get_json()
     assert run['received'] == 0 and next(row for row in run['items'] if row['code'] == 'olx')['state'] == 'not_configured'
     assert client.post('/api/hiring/integrations/nope/run', headers=lead).status_code == 404
+
+
+def test_trainer_groups_through_routes(client):
+    """Тренер (владелец 18.11.2026): раздел открыт ролью и без группы, группы с вместимостью заводит сам,
+    чужие не правит; рекрутер выбирает из действующих групп и видит свободные места."""
+    boot = client.get('/api/hiring', headers=as_user(TRAINER)).get_json()
+    caps = boot['capabilities']
+    assert caps['trainer'] and caps['groups'] and not (caps['manage'] or caps['recruiter'] or caps['pool'])
+    assert boot['me']['scope_label'] == 'Тренер'
+    with client.world['db']._get_cursor() as cur:
+        cur.execute("INSERT INTO users (id, name, role, status, department_id) VALUES (21, 'Новый Тренер', 'trainer', 'working', 1)")
+    newbie = as_user(21)
+    assert client.get('/api/hiring', headers=newbie).get_json()['capabilities']['groups']
+    assert client.get('/api/hiring/groups', headers=newbie).get_json()['items'] == []
+    board = client.get('/api/hiring/board', headers=newbie).get_json()
+    assert sum(column['total'] for column in board['columns']) == 0
+
+    created = client.post('/api/hiring/groups', json={'name': 'Группа 21', 'start_date': '2026-11-20', 'capacity': '12'}, headers=newbie)
+    assert created.status_code == 201
+    items = created.get_json()['items']
+    assert [(g['name'], g['trainer_id'], g['capacity'], g['seats_taken'], g['seats_free'], g['start_date'], g['status'])
+            for g in items] == [('Группа 21', 21, 12, 0, 12, '2026-11-20', 'active')]
+    no_capacity = client.post('/api/hiring/groups', json={'name': 'Без мест', 'start_date': '2026-11-20'}, headers=newbie)
+    assert no_capacity.status_code == 400 and no_capacity.get_json()['code'] == 'HIRING_BAD_CAPACITY'
+    other = client.post('/api/hiring/groups', json={'name': 'Чужая', 'start_date': '2026-11-20', 'capacity': 3, 'trainer_id': TRAINER},
+                        headers=newbie)
+    assert other.status_code == 403
+    assert client.patch('/api/hiring/groups/%s' % client.world['group_id'], json={'capacity': 3}, headers=newbie).status_code == 403
+    assert client.patch('/api/hiring/groups/999999', json={'capacity': 3}, headers=newbie).status_code == 404
+    edited = client.patch('/api/hiring/groups/%s' % items[0]['id'], json={'capacity': 10, 'status': 'done'}, headers=newbie)
+    assert edited.status_code == 200 and (edited.get_json()['items'][0]['capacity'], edited.get_json()['items'][0]['status']) == (10, 'done')
+
+    # Рекрутер групп не заводит, а выбирает из действующих: завершённая группа нового тренера в выбор не попала,
+    # у старой группы вместимость не задана — мест не считаем.
+    recruiter = as_user(REC1)
+    assert client.post('/api/hiring/groups', json={'name': 'x', 'start_date': '2026-11-20', 'capacity': 5}, headers=recruiter).status_code == 403
+    assert client.patch('/api/hiring/groups/%s' % client.world['group_id'], json={'capacity': 5}, headers=recruiter).status_code == 403
+    picked = client.get('/api/hiring/groups', query_string={'pick': '1'}, headers=recruiter).get_json()['items']
+    assert [g['id'] for g in picked] == [client.world['group_id']]
+    assert picked[0]['capacity'] is None and picked[0]['seats_free'] is None and picked[0]['seats_taken'] == 0
+    # Выбор — ближний старт сверху (у списка тренера и руководителя — свежие сверху).
+    early = client.post('/api/hiring/groups', json={'name': 'Ранняя', 'start_date': '2026-11-01', 'capacity': 4}, headers=newbie)
+    early_id = next(g['id'] for g in early.get_json()['items'] if g['name'] == 'Ранняя')
+    picked = client.get('/api/hiring/groups', query_string={'pick': '1'}, headers=recruiter).get_json()['items']
+    assert [g['id'] for g in picked] == [early_id, client.world['group_id']]
+    assert [g['id'] for g in client.get('/api/hiring/groups', headers=recruiter).get_json()['items']] == [client.world['group_id'], early_id]
+    # Руководитель видит все группы и задаёт вместимость любой.
+    lead = as_user(HR_HEAD)
+    assert {g['id'] for g in client.get('/api/hiring/groups', headers=lead).get_json()['items']} == {client.world['group_id'], items[0]['id'], early_id}
+    assert client.patch('/api/hiring/groups/%s' % client.world['group_id'], json={'capacity': 8}, headers=lead).status_code == 200
+    picked = client.get('/api/hiring/groups', query_string={'pick': '1'}, headers=recruiter).get_json()['items']
+    legacy = next(g for g in picked if g['id'] == client.world['group_id'])
+    assert (legacy['capacity'], legacy['seats_free']) == (8, 8)
 
 
 def test_channels_through_routes(client):

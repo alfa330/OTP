@@ -661,6 +661,99 @@ class HiringService:
                 queries.update_channel(cursor, channel_id, now, **fields)
             return queries.list_channels(cursor)
 
+    # ─── Группы на обучение (владелец 18.11.2026) ───────────────────────────
+    # Группу заводит тренер — сам, без руководителя — и задаёт её вместимость; руководитель рекрутинга
+    # ведёт любые группы. Рекрутер, приглашая на обучение, видит свободные места, а в полную группу
+    # пригласить нельзя: место считает move() под блокировкой строки группы.
+
+    @staticmethod
+    def _groups_of(cursor, ctx):
+        """Группы, которые человек ведёт: руководитель — все, тренер — свои, остальным — действующие."""
+        if access.is_lead(ctx):
+            return queries.list_groups(cursor)
+        if access.is_trainer(ctx):
+            return queries.list_groups(cursor, trainer_id=ctx['user_id'])
+        return queries.list_groups(cursor, active_only=True)
+
+    def groups(self, ctx, pick=False):
+        """pick — выбор группы при приглашении на обучение: действующие группы всех тренеров с местами,
+        ближний старт сверху."""
+        with self._cursor() as cursor:
+            if pick:
+                return queries.list_groups(cursor, active_only=True, soonest_first=True)
+            return self._groups_of(cursor, ctx)
+
+    def _group_fields(self, cursor, ctx, payload, *, creating):
+        """Поля группы из формы. Тренера и отдел группы назначает руководитель рекрутинга; тренер заводит
+        группы на себя и правит название, старт, вместимость, вакансию и «завершена»."""
+        lead = access.is_lead(ctx)
+        fields = {}
+        if creating or 'name' in payload:
+            fields['name'] = _text(payload.get('name'), 120)
+            if not fields['name']:
+                raise HiringError('HIRING_BAD_GROUP', 'Название группы пустое')
+        if creating or 'start_date' in payload:
+            fields['start_date'] = _parse_date(payload.get('start_date'), 'дату старта')
+            if not fields['start_date']:
+                raise HiringError('HIRING_BAD_GROUP', 'Укажите дату старта группы')
+        if creating or 'capacity' in payload:
+            fields['capacity'] = rules.parse_capacity(payload.get('capacity'))
+            if fields['capacity'] is None:
+                raise HiringError('HIRING_BAD_CAPACITY', 'Вместимость — целое число от 1 до %d' % rules.GROUP_CAPACITY_MAX)
+        if 'vacancy_id' in payload:
+            fields['vacancy_id'] = _int(payload.get('vacancy_id'))
+            if fields['vacancy_id'] and not queries.get_vacancy(cursor, fields['vacancy_id']):
+                raise HiringError('HIRING_NOT_FOUND', 'Вакансия не найдена', 404)
+        if not creating and 'status' in payload:
+            if payload.get('status') not in ('active', 'done'):
+                raise HiringError('HIRING_BAD_GROUP', 'Группа бывает только «идёт» или «завершена»')
+            fields['status'] = payload['status']
+        for key in ('trainer_id', 'department_id'):
+            if key not in payload:
+                continue
+            value = _int(payload.get(key))
+            if not lead:
+                if key == 'trainer_id' and value == int(ctx['user_id']):
+                    continue
+                raise _forbidden('Тренера и отдел группы назначает руководитель рекрутинга')
+            if key == 'trainer_id' and value and not queries.user_name(cursor, value):
+                raise HiringError('HIRING_NOT_FOUND', 'Тренер не найден', 404)
+            fields[key] = value
+        return fields
+
+    def create_group(self, ctx, payload):
+        """Новая группа: название, старт, вместимость (обязательно), вакансия. Тренер заводит на себя."""
+        if not access.can_manage_groups(ctx):
+            raise _forbidden('Группы заводят тренер и руководитель рекрутинга')
+        now = self._now()
+        with self._cursor() as cursor:
+            fields = self._group_fields(cursor, ctx, payload or {}, creating=True)
+            trainer_id = fields.get('trainer_id') if access.is_lead(ctx) else int(ctx['user_id'])
+            queries.create_group(cursor, fields['name'], fields['start_date'], trainer_id, fields.get('department_id'),
+                                 fields.get('vacancy_id'), ctx['user_id'], now, capacity=fields['capacity'])
+            return self._groups_of(cursor, ctx)
+
+    def edit_group(self, ctx, group_id, payload):
+        """Правка группы. Вместимость не меньше занятых мест: уменьшить можно до числа кандидатов в группе."""
+        if not access.can_manage_groups(ctx):
+            raise _forbidden('Группы ведут тренер и руководитель рекрутинга')
+        now = self._now()
+        with self._cursor() as cursor:
+            group = queries.get_group(cursor, group_id, lock=True)
+            if not group:
+                raise HiringError('HIRING_NOT_FOUND', 'Группа не найдена', 404)
+            if not access.can_edit_group(ctx, group):
+                raise _forbidden('Эту группу ведёт другой тренер')
+            fields = self._group_fields(cursor, ctx, payload or {}, creating=False)
+            if 'capacity' in fields:
+                taken = queries.group_seats_taken(cursor, group['id'])
+                if fields['capacity'] < taken:
+                    raise HiringError('HIRING_CAPACITY_BELOW_TAKEN',
+                                      'В группе уже %d — вместимость не может быть меньше' % taken, 409)
+            if fields:
+                queries.update_group(cursor, group['id'], now, **fields)
+            return self._groups_of(cursor, ctx)
+
     def move(self, ctx, card_id, target, payload):
         """Переход по этапам (ТЗ 4.2) со всеми следствиями."""
         payload = payload or {}
@@ -694,9 +787,16 @@ class HiringService:
                 fields['office_visit_at'] = _parse_moment(payload.get('office_visit_at'), 'дату визита')
                 fields['substage'] = 'expected'
             elif target == rules.INVITED_TRAINING:
-                group = queries.get_group(cursor, _int(payload.get('group_id')) or 0)
+                # Строка группы — под блокировкой: два рекрутера, приглашающих на последнее место, идут по
+                # очереди, и второй видит место уже занятым (владелец 18.11.2026: полная группа не принимает).
+                group = queries.get_group(cursor, _int(payload.get('group_id')) or 0, lock=True)
                 if not group or group['status'] != 'active':
                     raise HiringError('HIRING_BAD_GROUP', 'Такой группы на обучение нет')
+                if group.get('capacity') is not None:
+                    taken = queries.group_seats_taken(cursor, group['id'], exclude_card_id=card_id)
+                    if taken >= int(group['capacity']):
+                        raise HiringError('HIRING_GROUP_FULL', 'В группе «%s» мест нет — занято %d из %d. Выберите другую группу' % (
+                            group['name'], taken, int(group['capacity'])), 409)
                 fields['group_id'] = group['id']
                 if not card.get('vacancy_id') and group.get('vacancy_id'):
                     fields['vacancy_id'] = group['vacancy_id']
