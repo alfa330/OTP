@@ -326,6 +326,15 @@ export const accountStatusText = (account) => {
  *  Тон считает сервер (client_cards/rules.py: account_status_tone). */
 export const ACCOUNT_STATUS_CLASSES = { red: 'font-medium text-rose-600', amber: 'text-amber-700' };
 
+/** Статус аккаунта в Тез, каким он был, когда карточку сохранили (снимок сервера), — для окна
+ *  обращения: { text, tone }. Нынешний статус аккаунта сюда не подходит: он мог смениться. */
+export const cardAccountStatus = (card) => ({
+    text: accountStatusText({
+        status: card?.account_status, status_text: card?.account_status_text, deleted_at: card?.account_deleted_at,
+    }),
+    tone: card?.account_status_tone || 'slate',
+});
+
 /** Регистрация и последняя поездка — под выбранным аккаунтом. Частями: в узком окне строка
  *  переносится между ними, а не обрезается посреди даты. Пусто, пока профиль не пришёл из
  *  Тез (аккаунт известен только по ссылке оператора). */
@@ -341,6 +350,17 @@ export const accountDates = (account) => {
     return parts;
 };
 
+/** Строки под именем аккаунта: город и статус (с тоном), номер из профиля, если звонят не с
+ *  него, регистрация и последняя поездка — только у выбранного: остальным строкам они не
+ *  помогают выбрать. */
+export const accountRowLines = (account, cardPhone, picked = false) => ({
+    city: account?.city || '',
+    status: accountStatusText(account),
+    tone: account?.status_tone || 'slate',
+    otherPhone: accountOtherPhone(account, cardPhone),
+    dates: picked ? accountDates(account) : [],
+});
+
 /** Откуда аккаунт у этого номера — текст подсказки «i» в строке аккаунта. */
 export const accountOriginHint = (account, cardPhone) => {
     const link = account?.link;
@@ -355,15 +375,32 @@ export const accountOriginHint = (account, cardPhone) => {
 
 /** Какой аккаунт подставить самому: единственный привязанный к номеру. Несколько —
  *  выбирает оператор (задача #335, п. 2), уже выбранный не трогаем. Отметку «Аккаунта нет»
- *  тоже: оператор сказал своё, и запоздавший ответ TEZ APP не должен её перебить.
- *  Найденный в Тез по прежнему номеру сам не подставляется, пока с этого номера по нему
- *  не обращались: номер мог перейти другому человеку — кто звонит, решает оператор. */
+ *  тоже: оператор сказал своё, и запоздавший ответ TEZ APP не должен её перебить (сервер к
+ *  тому же подставляет только в пустую карточку — auto). Найденный Тез по прежнему номеру
+ *  (в профиле уже другой) сам не подставляется никогда: номер мог перейти другому человеку,
+ *  и даже прошлые обращения с этого номера могли быть до смены номера. */
 export const autoAccountId = (card, accounts) => {
     if (!card || card.account_id || card.no_account || card.status !== 'open') return null;
     if ((accounts || []).length !== 1) return null;
     const only = accounts[0];
-    if (only.link?.origin === 'tez' && !only.last_used_at && accountOtherPhone(only, card.phone)) return null;
+    if (only.link?.origin === 'tez' && accountOtherPhone(only, card.phone)) return null;
     return only.id;
+};
+
+/** Что сказать под списком аккаунтов про ответ Тез:
+ *  'failed' — Тез не ответил: показаны аккаунты, привязанные к номеру раньше;
+ *  'empty'  — поиск отработал, на номере аккаунтов нет, а оператор ещё не решил: выбранный, но
+ *             от номера отвязанный аккаунт показан отдельной строкой («нет» было бы неправдой),
+ *             а отметка «Аккаунта нет» — уже решение, подсказывать нечего;
+ *  'driver' — поиск выключен, но по датам водителя на номере есть водитель, которого нет среди привязок;
+ *  null — сказать нечего. */
+export const tezNotice = (tez, accounts, account = null, noAccount = false) => {
+    if (!tez) return null;
+    if (!tez.ok && tez.error) return 'failed';
+    const list = accounts || [];
+    if (tez.ok && tez.source === 'accounts' && !list.length) return account || noAccount ? null : 'empty';
+    if (tez.driver_hint?.exists && !list.some((item) => item.kind === 'driver')) return 'driver';
+    return null;
 };
 
 /** Ждать ли ответа Тез, прежде чем подставлять единственный аккаунт. При включённом поиске
@@ -371,6 +408,10 @@ export const autoAccountId = (card, accounts) => {
  *  оператору; прежний с номера ушёл — подставлять нечего), а подставленный заранее держал бы
  *  на номере привязку, которую Тез уже не подтверждает. Поиска нет — ждать нечего. */
 export const autoPickWaitsForTez = (boot) => boot?.tez?.source === 'accounts';
+
+/** Какой аккаунт подставить сразу при открытии карточки, до ответа Тез: при включённом поиске —
+ *  никакой (ждём ответа), иначе — по привязкам номера. */
+export const pickBeforeTez = (boot, card, accounts) => (autoPickWaitsForTez(boot) ? null : autoAccountId(card, accounts));
 
 // ─── Состояние карточки ──────────────────────────────────────────────────────
 

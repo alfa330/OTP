@@ -4,8 +4,8 @@ import test from 'node:test';
 
 import {
   ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, accountDates, accountOriginHint, accountOtherPhone,
-  accountStatusText, accountTitle, almatyToday, audienceLabel, audienceOfTopics, autoAccountId, autoPickWaitsForTez,
-  branchIds,
+  accountRowLines, accountStatusText, accountTitle, almatyToday, audienceLabel, audienceOfTopics, autoAccountId,
+  autoPickWaitsForTez, branchIds, cardAccountStatus, pickBeforeTez, tezNotice,
   callerOptions, canAddTopic, cardAccountText, cardAudience, countReasons,
   errorText, eventIsForCall, filterCategories, flattenReasons, fmtClock,
   fmtDate, fmtSeconds, fmtShare, fmtSize, fmtTime, fmtWhen, isTopicPicked, looksLikeAccountLink, parseCallMessage,
@@ -333,10 +333,20 @@ test('строка аккаунта: статус из Тез, дата удал
   assert.deepEqual(accountDates({ known: true }), []);
   assert.deepEqual(accountDates({ ...known, known: false }), []);
   assert.deepEqual(accountDates(null), []);
-  // Строки под именем аккаунта не обрезаются многоточием — сведения из Тез видны целиком.
+  // Строки под именем: город и статус с тоном, номер профиля, если звонят не с него; даты — только
+  // у выбранного, остальным строкам они выбрать не помогают.
+  const profile = { ...known, city: 'Алматы', status: 'blocked', status_text: 'Заблокирован', status_tone: 'red',
+    phone: '77059998877', phone_text: '+7 705 999-88-77' };
+  assert.deepEqual(accountRowLines(profile, phone, true), {
+    city: 'Алматы', status: 'Заблокирован', tone: 'red', otherPhone: '+7 705 999-88-77',
+    dates: ['Регистрация 05.11.2026', 'последняя поездка 10.11.2026'] });
+  assert.deepEqual(accountRowLines(profile, phone, false).dates, []);
+  assert.deepEqual(accountRowLines({ status: 'verified', status_text: 'Проверен', phone }, phone), {
+    city: '', status: 'Проверен', tone: 'slate', otherPhone: '', dates: [] });
+  // Строка аккаунта рисуется по этому правилу, ничего не обрезая многоточием.
   const row = source('../src/client_card_embed/CallCard.jsx');
   const rowBody = row.slice(row.indexOf('function AccountRow('), row.indexOf('function NoAccountRow('));
-  assert.ok(rowBody.includes('accountDates(account)') && rowBody.includes('accountStatusText(account)'));
+  assert.ok(rowBody.includes('accountRowLines(account, cardPhone, picked)'));
   assert.equal(rowBody.includes('truncate'), false);
 
   // Подсказка «откуда аккаунт у этого номера».
@@ -349,17 +359,44 @@ test('строка аккаунта: статус из Тез, дата удал
   assert.equal(accountOriginHint(verified, phone), '');
 });
 
-test('найденный в Тез по прежнему номеру сам не подставляется, пока с номера по нему не обращались', () => {
+test('найденный в Тез по прежнему номеру сам не подставляется никогда — выбирает оператор', () => {
   const open = { status: 'open', account_id: null, phone: '77012345678' };
   const moved = { id: 7, phone: '77059998877', link: { origin: 'tez' }, last_used_at: null };
   assert.equal(autoAccountId(open, [moved]), null);
-  // С этого номера по нему уже обращались — человек известен, подставляем.
-  assert.equal(autoAccountId(open, [{ ...moved, last_used_at: '2026-11-12T10:00:00+05:00' }]), 7);
+  // И когда по нему с этого номера обращались: обращение могло быть до смены номера, а номер — уже чужой.
+  assert.equal(autoAccountId(open, [{ ...moved, last_used_at: '2026-11-12T10:00:00+05:00' }]), null);
   // Привязан ссылкой оператора: «звонит с другого номера» — это и есть привязка (задача #335, п. 2).
   assert.equal(autoAccountId(open, [{ ...moved, link: { origin: 'manual' } }]), 7);
   // Номер в профиле тот же (в том числе у удалённого) — подставляем.
   assert.equal(autoAccountId(open, [{ ...moved, phone: '77012345678' }]), 7);
   assert.equal(autoAccountId(open, [{ ...moved, phone: '77012345678', status: 'deleted' }]), 7);
+});
+
+test('под списком аккаунтов — что ответил Тез', () => {
+  const found = { source: 'accounts', ok: true, error: null, driver_hint: null };
+  const driver = { id: 7, kind: 'driver' };
+  assert.equal(tezNotice(undefined, []), null);
+  // Тез не ответил — предупреждение, а не «аккаунтов нет».
+  assert.equal(tezNotice({ source: 'accounts', ok: false, error: 'TEZ APP не отвечает' }, []), 'failed');
+  // Проверил номер, пусто — так и сказано; есть привязки — молчим.
+  assert.equal(tezNotice(found, []), 'empty');
+  assert.equal(tezNotice(found, [driver]), null);
+  // Выбранный аккаунт от номера отвязали — он на экране отдельной строкой: «аккаунтов нет» было бы неправдой.
+  assert.equal(tezNotice(found, [], driver), null);
+  // Оператор отметил «Аккаунта нет» — решение принято, подсказывать нечего.
+  assert.equal(tezNotice(found, [], null, true), null);
+  // Сбой остаётся сбоем и при отметке: оператор должен видеть, что список не проверен.
+  assert.equal(tezNotice({ source: 'accounts', ok: false, error: 'TEZ APP не принял запрос' }, [], null, true), 'failed');
+  // Поиск выключен: по датам водителя — подсказка, пока водителя нет среди привязок.
+  const hint = { source: 'first_orders', ok: true, error: null, driver_hint: { exists: true } };
+  assert.equal(tezNotice(hint, []), 'driver');
+  assert.equal(tezNotice(hint, [driver]), null);
+  assert.equal(tezNotice({ ...hint, driver_hint: { exists: false } }, []), null);
+  // Карточка передаёт в подсказку выбранный аккаунт и отметку; при сбое — «Проверить ещё раз».
+  const card = source('../src/client_card_embed/CallCard.jsx');
+  assert.ok(card.includes('<TezNotice tez={bundle.tez} accounts={accounts} account={account} noAccount={noAccount}'));
+  assert.ok(card.includes('onRetry={onRetryTez && !tezPending ? onRetryTez : null}'));
+  assert.ok(card.includes('Проверить ещё раз') && card.includes('не зарегистрирован — отметьте «Аккаунта нет»'));
 });
 
 test('при включённом поиске аккаунтов единственный аккаунт подставляется после ответа Тез', () => {
@@ -369,12 +406,44 @@ test('при включённом поиске аккаунтов единств
   assert.equal(autoPickWaitsForTez({ tez: { source: 'off' } }), false);
   assert.equal(autoPickWaitsForTez({}), false);
   assert.equal(autoPickWaitsForTez(null), false);
-  // Страница спрашивает это правило до первой подстановки и подставляет после ответа Тез.
+  // До ответа Тез — подстановка только при выключенном поиске.
+  const one = { status: 'open', account_id: null, phone: '77012345678' };
+  const linked = [{ id: 7, phone: '77012345678', link: { origin: 'manual' } }];
+  assert.equal(pickBeforeTez({ tez: { source: 'accounts' } }, one, linked), null);
+  assert.equal(pickBeforeTez({ tez: { source: 'first_orders' } }, one, linked), 7);
+  assert.equal(pickBeforeTez(null, one, linked), 7);
+  // Страница: первая подстановка — по этому правилу; Тез спрашивают и при звонке, и при открытии
+  // черновика; подстановка помечена auto — сервер не перебьёт выбор оператора.
   const page = source('../src/client_card_embed/ClientCardEmbed.jsx');
-  const open = page.slice(page.indexOf('const openCall = useCallback('), page.indexOf('const handleCall = useCallback('));
-  assert.ok(open.indexOf('autoPickWaitsForTez(bootRef.current)') > 0);
-  assert.ok(open.indexOf('autoPickWaitsForTez(bootRef.current)') < open.indexOf('await autoPick(data)'));
-  assert.ok(open.indexOf('api.lookup(cardId)') < open.indexOf('autoPick(looked)'));
+  const between = (from, to) => page.slice(page.indexOf(from), page.indexOf(to));
+  const openCall = between('const openCall = useCallback(', 'const handleCall = useCallback(');
+  assert.ok(openCall.includes('pickBeforeTez(bootRef.current, data.card, data.accounts) ? await autoPick(data) : data'));
+  assert.ok(openCall.includes('lookupTez(latest.card.id, deferred)'));
+  const lookup = between('const lookupTez = useCallback(', 'const openCall = useCallback(');
+  assert.ok(lookup.indexOf('api.lookup(cardId)') > 0 && lookup.indexOf('api.lookup(cardId)') < lookup.indexOf('autoPick(looked)'));
+  assert.ok(lookup.includes('deferred && shown?.card?.id === cardId ? autoPick(shown) : null'));
+  const pending = between('const openPending = useCallback(', 'const closeCard = useCallback(');
+  assert.ok(pending.includes("if (data.card.status === 'open') lookupTez(id, autoPickWaitsForTez(bootRef.current))"));
+  const pick = between('const autoPick = useCallback(', 'const lookupTez = useCallback(');
+  assert.ok(pick.includes('api.chooseAccount(data.card.id, accountId, { auto: true })'));
+  assert.ok(source('../src/components/client_cards/cardsApi.js').includes('{ account_id: accountId, ...extra }'));
+});
+
+test('окно обращения — статус аккаунта при обращении; поле «Город» — пока город не отдал Тез', () => {
+  assert.deepEqual(cardAccountStatus({ account_status: 'deleted', account_status_text: 'Удалён',
+    account_status_tone: 'red', account_deleted_at: '2026-10-01T12:00:00+05:00' }), { text: 'Удалён 01.10.2026', tone: 'red' });
+  assert.deepEqual(cardAccountStatus({ account_status: 'blocked', account_status_text: 'Заблокирован',
+    account_status_tone: 'red' }), { text: 'Заблокирован', tone: 'red' });
+  assert.deepEqual(cardAccountStatus({ account_status: null, account_status_text: null, account_status_tone: 'slate' }),
+    { text: '', tone: 'slate' });
+  assert.deepEqual(cardAccountStatus(null), { text: '', tone: 'slate' });
+  // Окно обращения берёт снимок карточки, а не нынешний статус аккаунта.
+  const detail = source('../src/components/client_cards/CardDetail.jsx');
+  assert.ok(detail.includes('cardAccountStatus(card)'));
+  assert.equal(detail.includes('accountStatusText(account)'), false);
+  assert.equal(detail.includes('account.status_tone'), false);
+  // Поле «Город» прячется только перед городом, который отдал сам Тез.
+  assert.ok(source('../src/client_card_embed/CallCard.jsx').includes('Boolean(account?.city_from_tez && account?.city)'));
 });
 
 test('«Аккаунта нет»: отметку оператора не перебивает найденный позже аккаунт, в списках она видна', () => {

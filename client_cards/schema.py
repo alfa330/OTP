@@ -90,6 +90,7 @@ _STATEMENTS = [
         full_name      VARCHAR(255),
         phone          VARCHAR(20),
         city           VARCHAR(120),
+        city_from_tez  BOOLEAN NOT NULL DEFAULT FALSE,
         status         VARCHAR(64),
         status_text    VARCHAR(120),
         registered_at  TIMESTAMP,
@@ -138,6 +139,9 @@ _STATEMENTS = [
         wrapup_sec     INTEGER NOT NULL DEFAULT 0,
         operator_sip   VARCHAR(32),
         record_call_id VARCHAR(64),
+        account_status      VARCHAR(64),
+        account_status_text VARCHAR(120),
+        account_deleted_at  TIMESTAMP,
         created_at     TIMESTAMP NOT NULL,
         answered_at    TIMESTAMP,
         ended_at       TIMESTAMP,
@@ -323,6 +327,12 @@ _ADDED_COLUMNS = [
     # 17.11.2026, ответ TEZ APP accounts/lookup: подпись статуса «как в админке» и дата удаления.
     ('client_card_accounts', 'status_text', 'VARCHAR(120)'),
     ('client_card_accounts', 'deleted_at', 'TIMESTAMP'),
+    # 18.11.2026: город из Тез или от оператора — свой оператор правит, город Тез нет.
+    ('client_card_accounts', 'city_from_tez', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+    # Статус аккаунта на момент сохранения карточки — окно обращения показывает его, а не нынешний.
+    ('client_cards', 'account_status', 'VARCHAR(64)'),
+    ('client_cards', 'account_status_text', 'VARCHAR(120)'),
+    ('client_cards', 'account_deleted_at', 'TIMESTAMP'),
 ]
 
 

@@ -9,7 +9,7 @@ import { ExternalLink, PhoneIncoming, PhoneOutgoing } from 'lucide-react';
 import { IosBadge, IosModal, iosBtnPrimary, iosGroupLabel } from '../ui/ios';
 import CardRecord from './CardRecord';
 import {
-    ACCOUNT_STATUS_CLASSES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountStatusText, accountTitle, errorText, fmtSeconds,
+    ACCOUNT_STATUS_CLASSES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, cardAccountStatus, errorText, fmtSeconds,
     fmtWhen, topicLabel,
 } from './cardRules';
 import { Spinner, StateBadge } from './ui';
@@ -38,6 +38,8 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
 
     const card = detail?.card;
     const account = detail?.account;
+    // Статус аккаунта в Тез на момент сохранения карточки, а не нынешний.
+    const accountStatus = cardAccountStatus(card);
     const Direction = card?.direction === 'out' ? PhoneOutgoing : PhoneIncoming;
     const spent = card?.completed_at && card?.ended_at
         ? Math.max(0, (new Date(card.completed_at) - new Date(card.ended_at)) / 1000) : null;
@@ -77,10 +79,11 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
                                        className="inline-flex items-center gap-1 text-blue-600 hover:underline">
                                         {account.kind_label} · {accountTitle(account)} <ExternalLink size={12} aria-hidden="true" />
                                     </a>
-                                    {/* Статус аккаунта в Тез — каким он был, когда профиль спрашивали последний раз. */}
-                                    {accountStatusText(account) && (
-                                        <div className={`mt-0.5 text-[12px] ${ACCOUNT_STATUS_CLASSES[account.status_tone] || 'text-slate-500'}`}>
-                                            {accountStatusText(account)}
+                                    {/* Статус аккаунта в Тез, каким он был, когда карточку сохранили: водитель мог
+                                        быть заблокирован тогда и разблокирован теперь. */}
+                                    {accountStatus.text && (
+                                        <div className="mt-0.5 text-[12px] text-slate-500">
+                                            При обращении: <span className={ACCOUNT_STATUS_CLASSES[accountStatus.tone] || ''}>{accountStatus.text}</span>
                                         </div>
                                     )}
                                 </>

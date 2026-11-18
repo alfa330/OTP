@@ -103,6 +103,8 @@ def public_account(account, admin_url, *, ctx=None, department_id=None):
         'tez_id': account['tez_id'], 'full_name': account.get('full_name'),
         'phone': account.get('phone'), 'phone_text': rules.format_phone(account.get('phone')),
         'city': account.get('city'), 'status': account.get('status'),
+        # Город отдал сам Тез — поля «Город» у оператора нет; иначе город указывает оператор.
+        'city_from_tez': bool(account.get('city_from_tez')),
         # Подпись статуса — как в админке Тез; тон — что оператору надо заметить сразу.
         'status_text': rules.account_status_label(account.get('status'), account.get('status_text')),
         'status_tone': rules.account_status_tone(account.get('status')),
@@ -148,6 +150,12 @@ def public_card(card, now):
         'wrapup_left_sec': left, 'late': late,
         'created_at': _iso(card.get('created_at')), 'answered_at': _iso(card.get('answered_at')),
         'ended_at': _iso(card.get('ended_at')), 'completed_at': _iso(card.get('completed_at')),
+        # Статус аккаунта в Тез на момент сохранения карточки (снимок): окно обращения
+        # показывает его, а не нынешний.
+        'account_status': card.get('account_status'),
+        'account_status_text': rules.account_status_label(card.get('account_status'), card.get('account_status_text')),
+        'account_status_tone': rules.account_status_tone(card.get('account_status')),
+        'account_deleted_at': _iso(card.get('account_deleted_at')),
     }
 
 
@@ -426,7 +434,9 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
         account_id = _int(data.get('account_id'))
         if account_id is None and data.get('account_id') is not None:
             return _bad('Аккаунт указан неверно', 'CARD_BAD_ACCOUNT')
-        return jsonify(_bundle(ctx, service.choose_account(ctx, card_id, account_id)))
+        # {"auto": true} — единственный аккаунт подставила страница: выбор оператора не перебивает.
+        return jsonify(_bundle(ctx, service.choose_account(ctx, card_id, account_id,
+                                                           auto=data.get('auto') is True)))
 
     @cards_route('/cards/<int:card_id>/links/<int:link_id>', methods=('DELETE',))
     def client_cards_card_unlink(card_id, link_id, ctx):

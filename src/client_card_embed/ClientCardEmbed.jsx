@@ -38,7 +38,7 @@ import RequestsPanel from '../components/client_cards/RequestsPanel';
 import { createCardsApi } from '../components/client_cards/cardsApi';
 import {
     NO_ACCOUNT_LABEL, accountTitle, autoAccountId, autoPickWaitsForTez, errorText, eventIsForCall, fmtClock, fmtWhen,
-    parseCallMessage,
+    parseCallMessage, pickBeforeTez,
     topicLabel, topicsOfAudience, topicsPayload, wrapupLeft,
 } from '../components/client_cards/cardRules';
 import { StateBadge } from '../components/client_cards/ui';
@@ -198,6 +198,7 @@ export default function ClientCardEmbed() {
     const [attempt, setAttempt] = useState(0);
     const [nonce, setNonce] = useState(0);
     const [current, setCurrent] = useState(null);        // { bundle, receivedAt, callKey, talkStartedAt }
+    // Карточка, по номеру которой сейчас ждём ответа Тез (id), или false.
     const [tezPending, setTezPending] = useState(false);
     const [tab, setTab] = useState('card');
     const [busy, setBusy] = useState(false);
@@ -360,18 +361,33 @@ export default function ClientCardEmbed() {
         });
     }, []);
 
-    /* Единственный привязанный аккаунт подставляется сам; несколько — выбирает оператор. */
+    /* Единственный привязанный аккаунт подставляется сам; несколько — выбирает оператор.
+       auto: сервер ставит его только в пустую карточку — если оператор успел выбрать аккаунт
+       или отметить «Аккаунта нет», пока шёл ответ Тез, его выбор остаётся. */
     const autoPick = useCallback(async (data) => {
         const accountId = autoAccountId(data.card, data.accounts);
         if (!accountId) return data;
         try {
-            const { data: picked } = await api.chooseAccount(data.card.id, accountId);
+            const { data: picked } = await api.chooseAccount(data.card.id, accountId, { auto: true });
             applyBundle(picked);
             return picked;
         } catch {
             return data;
         }
     }, [api, applyBundle]);
+
+    /* Спросить Тез о номере карточки и подставить единственный аккаунт по его ответу. Запрос не
+       дошёл до портала — подставляем по тому, что на экране, если подстановку отложили до ответа. */
+    const lookupTez = useCallback((cardId, deferred = false) => {
+        setTezPending(cardId);
+        return api.lookup(cardId)
+            .then(({ data: looked }) => { applyBundle(looked); return autoPick(looked); })
+            .catch(() => {
+                const shown = currentRef.current?.bundle;
+                return deferred && shown?.card?.id === cardId ? autoPick(shown) : null;
+            })
+            .finally(() => setTezPending((prev) => (prev === cardId ? false : prev)));
+    }, [api, applyBundle, autoPick]);
 
     const openCall = useCallback(async ({ phone, direction, callKey, manual = false }) => {
         setBusy(true);
@@ -389,8 +405,8 @@ export default function ClientCardEmbed() {
             }
             // Поиск аккаунтов в Тез включён — единственный аккаунт подставим после его ответа:
             // он может поменять список. Поиска нет — подставляем сразу по привязкам номера.
-            const waitTez = autoPickWaitsForTez(bootRef.current);
-            let latest = waitTez ? data : await autoPick(data);
+            const deferred = autoPickWaitsForTez(bootRef.current);
+            let latest = pickBeforeTez(bootRef.current, data.card, data.accounts) ? await autoPick(data) : data;
             // Руками открытая карточка событий звонка не получит: считаем, что разговор идёт.
             if (manual && latest.card.state === 'ringing') {
                 const { data: answered } = await api.callEvent(latest.card.id, 'answered');
@@ -398,22 +414,13 @@ export default function ClientCardEmbed() {
                 latest = answered;
             }
             // TEZ APP — отдельным заходом: карточка не ждёт чужой сервер.
-            const cardId = latest.card.id;
-            setTezPending(true);
-            api.lookup(cardId)
-                .then(({ data: looked }) => { applyBundle(looked); return autoPick(looked); })
-                .catch(() => {
-                    // Запрос до портала не дошёл — подставляем по тому, что на экране сейчас.
-                    const shown = currentRef.current?.bundle;
-                    return waitTez && shown?.card?.id === cardId ? autoPick(shown) : null;
-                })
-                .finally(() => setTezPending(false));
+            lookupTez(latest.card.id, deferred);
         } catch (error) {
             toast(errorText(error, 'Карточка не открылась'), 'error');
         } finally {
             setBusy(false);
         }
-    }, [api, applyBundle, autoPick, toast]);
+    }, [api, applyBundle, autoPick, lookupTez, toast]);
 
     const handleCall = useCallback(async (event) => {
         if (event.kind === 'start') {
@@ -548,12 +555,15 @@ export default function ClientCardEmbed() {
             setHistoryCount(null);
             setTab('card');
             applyBundle(data, { replace: true, callKey: null, talkStartedAt: null });
+            // Черновик Тез мог не спрашивать вовсе (карточка второго звонка заводится в фоне) или
+            // спрашивал давно, а то и не дождался ответа — спрашиваем при открытии.
+            if (data.card.status === 'open') lookupTez(id, autoPickWaitsForTez(bootRef.current));
         } catch (error) {
             toast(errorText(error, 'Карточка не открылась'), 'error');
         } finally {
             setBusy(false);
         }
-    }, [api, applyBundle, toast]);
+    }, [api, applyBundle, lookupTez, toast]);
 
     const closeCard = useCallback(() => {
         setCurrent(null);
@@ -635,7 +645,8 @@ export default function ClientCardEmbed() {
                         {current ? (
                             <CallCard key={`${card.id}:${current.draftKey || 0}`} api={api} bundle={current.bundle} boot={boot}
                                       toast={toast} onBundle={applyBundle} onCompleted={onCompleted}
-                                      onOpenExternal={openExternal} tezPending={tezPending} />
+                                      onOpenExternal={openExternal} tezPending={tezPending === card.id}
+                                      onRetryTez={() => lookupTez(card.id)} />
                         ) : (
                             <IdleScreen boot={boot} busy={busy} onOpenPending={openPending}
                                         onManual={(phone, direction) => openCall({ phone, direction, manual: true })} />

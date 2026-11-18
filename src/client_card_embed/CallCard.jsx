@@ -21,10 +21,10 @@ import {
 import CardRecord from '../components/client_cards/CardRecord';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountDates, accountOriginHint,
-    accountOtherPhone, accountStatusText, accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
+    ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountOriginHint, accountRowLines,
+    accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
     errorText, filterCategories, fmtDate, isTopicPicked, looksLikeAccountLink, pickedInBranch, reasonsOfAudience,
-    saveLabel, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
+    saveLabel, tezNotice, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
 } from '../components/client_cards/cardRules';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../utils/kazakhstanCities';
 
@@ -105,9 +105,7 @@ function ReasonLevel({ nodes, branch = [], openPath, searching, topics, limit, o
    не обрезается многоточием: длинное имя и строки под ним переносятся. */
 function AccountRow({ account, cardPhone, picked, busy, onPick, onUnlink, onOpen }) {
     const link = account.link;
-    const statusText = accountStatusText(account);
-    const otherPhone = accountOtherPhone(account, cardPhone);
-    const dates = picked ? accountDates(account) : [];
+    const lines = accountRowLines(account, cardPhone, picked);
     const origin = accountOriginHint(account, cardPhone);
     return (
         <div className={`flex items-center gap-2 rounded-xl px-2.5 py-2 transition ${picked ? 'bg-blue-50 ring-1 ring-blue-200/80' : 'hover:bg-slate-50'}`}>
@@ -122,20 +120,20 @@ function AccountRow({ account, cardPhone, picked, busy, onPick, onUnlink, onOpen
                         <IosBadge className="shrink-0 !px-2 !py-0.5">{account.kind_label}</IosBadge>
                         <span className="min-w-0 break-words text-[13.5px] font-medium leading-snug text-slate-900">{accountTitle(account)}</span>
                     </span>
-                    {(account.city || statusText) && (
+                    {(lines.city || lines.status) && (
                         <span className="mt-0.5 block text-[12px] text-slate-500">
-                            {account.city}{account.city && statusText ? ' · ' : ''}
-                            {statusText && <span className={ACCOUNT_STATUS_CLASSES[account.status_tone] || ''}>{statusText}</span>}
+                            {lines.city}{lines.city && lines.status ? ' · ' : ''}
+                            {lines.status && <span className={ACCOUNT_STATUS_CLASSES[lines.tone] || ''}>{lines.status}</span>}
                         </span>
                     )}
-                    {otherPhone && (
+                    {lines.otherPhone && (
                         <span className="block text-[12px] text-slate-500">
-                            В профиле другой номер: <span className="whitespace-nowrap">{otherPhone}</span>
+                            В профиле другой номер: <span className="whitespace-nowrap">{lines.otherPhone}</span>
                         </span>
                     )}
-                    {dates.length > 0 && (
+                    {lines.dates.length > 0 && (
                         <span className="block text-[12px] text-slate-500">
-                            {dates.map((part, index) => (
+                            {lines.dates.map((part, index) => (
                                 <React.Fragment key={part}>
                                     {index > 0 && ', '}<span className="whitespace-nowrap">{part}</span>
                                 </React.Fragment>
@@ -181,22 +179,32 @@ function NoAccountRow({ picked, busy, divided, onPick }) {
     );
 }
 
-function TezNotice({ tez, accounts }) {
-    if (!tez) return null;
-    if (!tez.ok && tez.error) {
-        return <p className="px-1 text-[12px] text-amber-700">{tez.error}. Показаны аккаунты, привязанные к номеру ранее.</p>;
-    }
-    // Поиск аккаунтов отработал и ничего не нашёл: оператору видно, что номер проверен и
-    // пустой список — ответ Тез, а не сбой. К номеру уже что-то привязано — строка не нужна.
-    if (tez.ok && tez.source === 'accounts' && !accounts.length) {
+/* Под списком аккаунтов — что ответил Тез (cardRules.tezNotice): не ответил — с кнопкой спросить
+   ещё раз; проверил номер и аккаунтов нет — пустой список это ответ Тез, а не сбой; поиск выключен,
+   а водитель на номере есть. */
+function TezNotice({ tez, accounts, account, noAccount, onRetry }) {
+    const kind = tezNotice(tez, accounts, account, noAccount);
+    if (kind === 'failed') {
         return (
-            <p className="px-1 text-[12px] text-slate-500">
-                В Тез на этом номере аккаунтов нет. Человек зарегистрирован на другой номер — вставьте ссылку на его аккаунт.
+            <p className="px-1 text-[12px] text-amber-700">
+                {tez.error}. Показаны аккаунты, привязанные к номеру ранее.
+                {onRetry && (
+                    <button type="button" onClick={onRetry} className="ml-1.5 font-medium text-blue-600 hover:underline">
+                        Проверить ещё раз
+                    </button>
+                )}
             </p>
         );
     }
-    const hint = tez.driver_hint;
-    if (hint?.exists && !accounts.some((item) => item.kind === 'driver')) {
+    if (kind === 'empty') {
+        return (
+            <p className="px-1 text-[12px] text-slate-500">
+                В Тез на этом номере аккаунтов нет. Зарегистрирован на другой номер — вставьте ссылку на его аккаунт; не зарегистрирован — отметьте «Аккаунта нет».
+            </p>
+        );
+    }
+    if (kind === 'driver') {
+        const hint = tez.driver_hint;
         return (
             <p className="px-1 text-[12px] text-slate-600">
                 В Тез на этом номере есть аккаунт водителя
@@ -208,7 +216,7 @@ function TezNotice({ tez, accounts }) {
 }
 
 export default function CallCard({
-    api, bundle, boot, toast, onBundle, onCompleted, onOpenExternal, tezPending = false,
+    api, bundle, boot, toast, onBundle, onCompleted, onOpenExternal, tezPending = false, onRetryTez = null,
 }) {
     const { card, accounts, account, requests } = bundle;
     const cardId = card.id;
@@ -365,7 +373,9 @@ export default function CallCard({
     const personKnown = Boolean(account) || noAccount;
     const missing = !personKnown ? 'Выберите аккаунт или отметьте «Аккаунта нет»'
         : !topics.length ? 'Выберите причину обращения' : '';
-    const cityKnownFromTez = Boolean(account?.known && account?.city);
+    // Город отдал сам Тез — поля «Город» нет. Тез ответил без города — город указывает оператор
+    // и может исправить ошибку (сервер отличает одно от другого: city_from_tez).
+    const cityKnownFromTez = Boolean(account?.city_from_tez && account?.city);
     const showLinkField = !accounts.length || linkOpen;
     const done = card.status === 'done';
 
@@ -434,7 +444,8 @@ export default function CallCard({
                     <NoAccountRow picked={noAccount} busy={Boolean(busy)} divided
                                   onPick={() => run('account', () => (noAccount ? api.chooseAccount(cardId, null) : api.noAccount(cardId)))} />
                 </div>
-                <TezNotice tez={bundle.tez} accounts={accounts} />
+                <TezNotice tez={bundle.tez} accounts={accounts} account={account} noAccount={noAccount}
+                           onRetry={onRetryTez && !tezPending ? onRetryTez : null} />
                 {account && !cityKnownFromTez && (
                     <div className="flex items-center gap-2 px-1 pt-1">
                         <span className="shrink-0 text-[12.5px] text-slate-500">Город</span>

@@ -88,15 +88,19 @@ def get_config():
 
 
 def _naive_almaty(value):
-    """ISO-строка TEZ APP → наивное время Алматы (так оно лежит в наших таблицах)."""
+    """ISO-строка TEZ APP → наивное время Алматы (так оно лежит в наших таблицах).
+
+    Неразборчивое — None: дата вне диапазона («0001-01-01T00:00:00+05:00» в Алматы не
+    переводится) не должна ронять весь ответ.
+    """
     if not value:
         return None
     try:
         parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).strip())
-    except ValueError:
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(rules.ALMATY).replace(tzinfo=None)
+    except (ValueError, OverflowError, TypeError):
         return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(rules.ALMATY).replace(tzinfo=None)
     return parsed
 
 
@@ -201,14 +205,16 @@ class TezAccounts:
             log.warning('client_cards: TEZ APP не ответил на поиск аккаунтов: %s', type(error).__name__)
             return None, 'TEZ APP не отвечает'
         if response.status_code == 404:
-            # Нет такого аккаунта — либо метода ещё нет на этом адресе. Различает тело:
-            # наш метод отвечает JSON, а несуществующий путь — нет.
+            # 404 у метода по договору не бывает: «не нашли» — это 200 с пустым списком. Без
+            # JSON — метода нет на этом адресе; с JSON — расхождение с договором. И то и
+            # другое — «не знаем», а не «аккаунтов нет»: привязки номера остаются.
             try:
                 response.json()
             except ValueError:
                 log.warning('client_cards: поиска аккаунтов на %s%s нет (404)', cfg['base_url'], cfg['path'])
                 return None, 'В TEZ APP нет метода поиска аккаунтов'
-            return [], None
+            log.warning('client_cards: TEZ APP ответил 404 с телом — не по договору')
+            return None, 'TEZ APP ответил ошибкой 404'
         if response.status_code == 400:
             return None, ERROR_REJECTED
         if response.status_code in (401, 403):
@@ -226,7 +232,15 @@ class TezAccounts:
         rows = payload.get('accounts') if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             return None, 'TEZ APP ответил не по договору'
-        accounts = [account for account in (parse_account(row) for row in rows) if account]
+        accounts = []
+        for row in rows:
+            try:
+                account = parse_account(row)
+            except Exception:  # noqa: BLE001 — одна кривая строка не роняет весь ответ
+                log.warning('client_cards: строку ответа TEZ APP не разобрать — пропущена')
+                continue
+            if account:
+                accounts.append(account)
         return accounts, None
 
     def _driver_hint(self, phone):
@@ -265,12 +279,15 @@ class TezAccounts:
         if source == SOURCE_ACCOUNTS:
             accounts, error = self._lookup({'phone': '+' + phone})
             if error == ERROR_REJECTED:
-                # Не казахстанский мобильный (городской, зарубежный): по таким TEZ APP не
-                # ищет, и аккаунта на таком номере быть не может — это «аккаунтов нет», а не
-                # сбой. Отказ по мобильному номеру — уже расхождение с договором: в журнал.
                 if rules.is_kz_mobile(phone):
+                    # Мобильный номер TEZ APP принимать обязан: отказ — расхождение с договором,
+                    # то есть «не знаем», а не «аккаунтов нет». Привязки номера не снимаются,
+                    # оператор видит сбой, следующий звонок спрашивает заново.
                     log.warning('client_cards: TEZ APP не принял мобильный номер …%s (400)', phone[-2:])
-                accounts, error = [], None
+                else:
+                    # Городской или зарубежный: по таким TEZ APP не ищет, и аккаунта на таком
+                    # номере быть не может — это «аккаунтов нет», а не сбой.
+                    accounts, error = [], None
             result = {'source': source, 'ok': accounts is not None, 'error': error,
                       'accounts': accounts or [], 'driver_hint': None}
         else:

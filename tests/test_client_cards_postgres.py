@@ -567,6 +567,155 @@ def test_accounts_of_a_number_follow_tez(world):
     assert (restored['status'], restored['status_text'], restored['deleted_at']) == ('verified', 'Проверен', None)
 
 
+def _done(w, ctx, card_id, account_id):
+    """Довести карточку до «заполнена»: аккаунт, причина, разговор, сохранение."""
+    w.svc.choose_account(ctx, card_id, account_id)
+    w.svc.save_card(ctx, card_id, {'topics': [{'category_id': w.orders, 'subcategory_id': w.no_orders}]})
+    w.svc.call_event(ctx, card_id, 'answered')
+    w.svc.call_event(ctx, card_id, 'ended')
+    return w.svc.complete_card(ctx, card_id)
+
+
+def _ids(bundle):
+    return [account['tez_id'] for account in bundle['accounts']]
+
+
+def test_switched_off_lookup_does_not_unlink(world):
+    """Поиск выключили (TEZ_ACCOUNTS_API_ENABLED=0) — пустой ответ запасного пути ничего не
+    значит: найденные раньше привязки остаются."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(67000))
+    first = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='off-1')['card']['id']
+    assert _ids(w.svc.lookup(ctx, first)) == [67000]
+    w.tez._source = SOURCE_FIRST_ORDERS
+    w.tez.by_phone_reply[PHONE] = {'source': SOURCE_FIRST_ORDERS, 'ok': True, 'error': None, 'accounts': [],
+                                   'driver_hint': None}
+    second = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='off-2')['card']['id']
+    assert _ids(w.svc.lookup(ctx, second)) == [67000]
+
+
+def test_held_link_is_refreshed_and_an_old_draft_stops_holding_it(world):
+    """Тез перестал находить аккаунт по номеру, а его держит незаполненная карточка: привязка
+    остаётся, но профиль освежается по ID — видно, что в профиле уже другой номер. Брошенный
+    черновик старше срока черновиков привязку больше не держит."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(55555))
+    draft = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='held-1')['card']['id']
+    account_id = w.svc.lookup(ctx, draft)['accounts'][0]['id']
+    w.svc.choose_account(ctx, draft, account_id)
+    w.svc.call_event(ctx, draft, 'answered')
+    w.svc.call_event(ctx, draft, 'ended')
+
+    w.clock.tick(days=3)
+    w.tez.by_phone_reply[PHONE] = _found()
+    w.tez.by_id_reply[(rules.KIND_DRIVER, 55555)] = _driver(55555, phone=OTHER_PHONE)
+    second = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='held-2')['card']['id']
+    bundle = w.svc.lookup(ctx, second)
+    assert ('id', rules.KIND_DRIVER, 55555) in w.tez.calls
+    assert [(a['tez_id'], a['phone']) for a in bundle['accounts']] == [(55555, OTHER_PHONE)]
+
+    w.clock.tick(days=service_module.PENDING_DAYS + 1)
+    third = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='held-3')['card']['id']
+    assert w.svc.lookup(ctx, third)['accounts'] == []
+
+
+def test_operator_city_stays_editable_until_tez_gives_one(world):
+    """Тез ответил без города — город указывает оператор и может его исправить. Город, который
+    отдал сам Тез, руками не меняется."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(61000, city=None))
+    card_id = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='city-1')['card']['id']
+    account_id = w.svc.lookup(ctx, card_id)['accounts'][0]['id']
+    w.svc.choose_account(ctx, card_id, account_id)
+    w.svc.save_card(ctx, card_id, {'city': 'Алматы'})
+    fixed = w.svc.save_card(ctx, card_id, {'city': 'Астана'})
+    assert fixed['card']['city'] == 'Астана'
+    assert (fixed['account']['city'], fixed['account']['city_from_tez']) == ('Астана', False)
+    # Тез снова без города — город оператора остаётся.
+    again = w.svc.lookup(ctx, card_id)
+    assert (again['account']['city'], again['account']['city_from_tez']) == ('Астана', False)
+    # Тез отдал город — он и верный, правка оператора его не меняет.
+    w.tez.by_phone_reply[PHONE] = _found(_driver(61000, city='Шымкент'))
+    assert w.svc.lookup(ctx, card_id)['account']['city_from_tez'] is True
+    locked = w.svc.save_card(ctx, card_id, {'city': 'Астана'})
+    assert (locked['card']['city'], locked['account']['city']) == ('Шымкент', 'Шымкент')
+
+
+def test_card_keeps_the_account_status_it_was_saved_with(world):
+    """Окно обращения показывает статус аккаунта на момент сохранения карточки, а не нынешний."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(62000, status='blocked', status_text='Заблокирован'))
+    card_id = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='snap-1')['card']['id']
+    account_id = w.svc.lookup(ctx, card_id)['accounts'][0]['id']
+    saved = _done(w, ctx, card_id, account_id)['card']
+    assert (saved['account_status'], saved['account_status_text'], saved['account_deleted_at']) == (
+        'blocked', 'Заблокирован', None)
+    # Водителя разблокировали — следующий звонок освежил профиль; прошлое обращение помнит своё.
+    w.clock.tick(days=2)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(62000, status='verified', status_text='Проверен'))
+    later = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='snap-2')['card']['id']
+    w.svc.lookup(ctx, later)
+    detail = w.svc.card_detail(ctx, card_id)
+    assert (detail['card']['account_status'], detail['account']['status']) == ('blocked', 'verified')
+    # Карточка без аккаунта — без статуса.
+    none = w.svc.open_call(ctx, phone=OTHER_PHONE, direction='in', call_key='snap-3')['card']['id']
+    w.svc.mark_no_account(ctx, none)
+    w.svc.save_card(ctx, none, {'topics': [{'category_id': w.money}]})
+    assert w.svc.complete_card(ctx, none)['card']['account_status'] is None
+
+
+def test_page_pick_does_not_override_the_operator(world):
+    """Единственный аккаунт страница подставляет сама (auto) — только в пустую открытую карточку:
+    оператор мог успеть отметить «Аккаунта нет» или выбрать аккаунт, пока шёл ответ Тез."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(63000))
+    marked = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='auto-1')['card']['id']
+    only = w.svc.lookup(ctx, marked)['accounts'][0]['id']
+    w.svc.mark_no_account(ctx, marked)
+    kept = w.svc.choose_account(ctx, marked, only, auto=True)['card']
+    assert (kept['account_id'], kept['account_kind']) == (None, rules.KIND_NONE)
+    # Оператор успел привязать другой аккаунт ссылкой — подстановка его не перебивает.
+    chosen = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='auto-2')['card']['id']
+    w.svc.lookup(ctx, chosen)
+    w.tez.by_id_reply[(rules.KIND_DRIVER, 64000)] = _driver(64000, phone=OTHER_PHONE)
+    other = w.svc.attach_link(ctx, chosen, 'admin.tezapp.org/admin/drivers/64000')['account']['id']
+    assert w.svc.choose_account(ctx, chosen, only, auto=True)['card']['account_id'] == other
+    # Пустая открытая карточка — подставляется.
+    empty = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='auto-3')['card']['id']
+    assert w.svc.choose_account(ctx, empty, only, auto=True)['card']['account_id'] == only
+    # Снять выбор подстановкой нельзя: auto без аккаунта ничего не делает.
+    assert w.svc.choose_account(ctx, empty, None, auto=True)['card']['account_id'] == only
+
+
+def test_account_of_the_previous_owner_of_the_number_goes_last(world):
+    """Водитель обращался с этого номера, потом сменил номер, а номер достался другому. Тез
+    находит прежнего владельца по прежнему номеру — он в конце списка, хотя по нему отсюда
+    обращались: обращения до смены номера про нового владельца ничего не говорят."""
+    w = world
+    w.tez._source = SOURCE_ACCOUNTS
+    ctx = w.ctx(ANNA)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(65000))
+    first = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='prev-1')['card']['id']
+    _done(w, ctx, first, w.svc.lookup(ctx, first)['accounts'][0]['id'])
+    w.clock.tick(days=30)
+    w.tez.by_phone_reply[PHONE] = _found(_driver(66000, full_name='Новый Владелец'),
+                                         _driver(65000, phone=OTHER_PHONE))
+    second = w.svc.open_call(ctx, phone=PHONE, direction='in', call_key='prev-2')['card']['id']
+    bundle = w.svc.lookup(ctx, second)
+    assert _ids(bundle) == [66000, 65000]
+    assert bundle['accounts'][1]['last_used_at'] is not None
+
+
 def test_tez_silence_keeps_card_working(world):
     w = world
     ctx = w.ctx(ANNA)
@@ -1365,8 +1514,10 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
         old = queries.create_category(cursor, TEZ, title='Старая причина', parent_id=None, by=HEAD,
                                       now=datetime(2026, 11, 12, 10, 0))
         cursor.execute('ALTER TABLE client_card_categories DROP COLUMN audience')
-        cursor.execute('ALTER TABLE client_cards DROP COLUMN operator_sip, DROP COLUMN record_call_id')
-        cursor.execute('ALTER TABLE client_card_accounts DROP COLUMN status_text, DROP COLUMN deleted_at')
+        cursor.execute('ALTER TABLE client_cards DROP COLUMN operator_sip, DROP COLUMN record_call_id, '
+                       'DROP COLUMN account_status, DROP COLUMN account_status_text, DROP COLUMN account_deleted_at')
+        cursor.execute('ALTER TABLE client_card_accounts DROP COLUMN status_text, DROP COLUMN deleted_at, '
+                       'DROP COLUMN city_from_tez')
         schema.init_client_cards_schema(cursor)
         schema.init_client_cards_schema(cursor)
         # Подпись статуса и дата удаления из ответа TEZ APP — аккаунт пишется и читается.
@@ -1375,6 +1526,13 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
             by=ANNA, now=datetime(2026, 11, 12, 10, 0), fetched=True)
         saved = queries.get_account(cursor, account_id)
         assert (saved['status_text'], saved['deleted_at']) == ('Удалён', datetime(2026, 10, 1, 12, 0))
+        # Признак «город из Тез» — не пустой, по умолчанию «нет»: старые аккаунты города не запирают.
+        assert saved['city_from_tez'] is True
+        cursor.execute("""SELECT is_nullable, column_default FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'client_card_accounts'
+                             AND column_name = 'city_from_tez'""")
+        nullable, default = cursor.fetchone()
+        assert nullable == 'NO' and 'false' in default.lower()
         assert queries.category_index(cursor, TEZ)[old]['audience'] == rules.KIND_DRIVER
         # Столбцы записи разговора тоже на месте — карточка заводится и читается.
         card_id, created = queries.open_card(cursor, department_id=TEZ, operator_id=ANNA, operator_name='Анна',
@@ -1382,6 +1540,12 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
                                              now=datetime(2026, 11, 12, 10, 0))
         card = queries.get_card(cursor, card_id)
         assert created and (card['operator_sip'], card['record_call_id']) == ('930', None)
+        # Снимок статуса аккаунта в карточке пишется и читается.
+        cursor.execute('UPDATE client_cards SET account_id = %s WHERE id = %s', (account_id, card_id))
+        queries.snapshot_account_status(cursor, card_id)
+        snap = queries.get_card(cursor, card_id)
+        assert (snap['account_status'], snap['account_status_text'], snap['account_deleted_at']) == (
+            'deleted', 'Удалён', datetime(2026, 10, 1, 12, 0))
         cursor.execute("""SELECT is_nullable, column_default FROM information_schema.columns
                            WHERE table_schema = current_schema() AND table_name = 'client_card_categories'
                              AND column_name = 'audience'""")
@@ -1709,10 +1873,24 @@ def test_api_account_shows_what_tez_says(api):
         (22222, 'blocked', 'Заблокирован', 'red', None, OTHER_PHONE, True, False)]
     assert looked['accounts'][0]['registered_at'] == '2026-11-05T14:03:00+05:00'
     assert looked['accounts'][0]['last_order_at'] == '2026-11-10T18:41:00+05:00'
-    # Руководителю в обращении — тот же статус аккаунта.
-    api.post('/cards/%d/account' % card_id, json={'account_id': looked['accounts'][1]['id']})
+    # Город отдал сам Тез — экрану это видно (поля «Город» у оператора не будет).
+    assert looked['accounts'][0]['city_from_tez'] is True
+    # Оператор выбрал удалённый; подстановка страницы (auto) его выбор не перебивает.
+    deleted_id = looked['accounts'][1]['id']
+    api.post('/cards/%d/account' % card_id, json={'account_id': deleted_id})
+    status, kept = api.post('/cards/%d/account' % card_id, json={'account_id': looked['accounts'][0]['id'],
+                                                                  'auto': True})
+    assert status == 200 and kept['card']['account_id'] == deleted_id
+    # Сохранили — в карточке снимок статуса: руководитель видит, каким аккаунт был при обращении.
+    api.patch('/cards/%d' % card_id, json={'topics': [{'category_id': w.orders, 'subcategory_id': w.no_orders}]})
+    api.post('/cards/%d/event' % card_id, json={'event': 'answered'})
+    api.post('/cards/%d/event' % card_id, json={'event': 'ended'})
+    assert api.post('/cards/%d/complete' % card_id)[0] == 200
     detail = api.get('/cards/%d' % card_id, user=HEAD)[1]
     assert (detail['account']['status_text'], detail['account']['status_tone']) == ('Удалён', 'red')
+    assert (detail['card']['account_status'], detail['card']['account_status_text'],
+            detail['card']['account_status_tone'], detail['card']['account_deleted_at']) == (
+        'deleted', 'Удалён', 'red', '2026-10-01T12:00:00+05:00')
 
 
 def test_api_requests_flow(api):

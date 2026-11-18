@@ -39,7 +39,8 @@ export const createCardsApi = (apiBaseUrl, getHeaders = null) => {
         openCall: (body) => axios.post(url('/phone/calls'), body, config()),
         callEvent: (cardId, event) => axios.post(url(`/cards/${cardId}/event`), { event }, config()),
         lookup: (cardId) => axios.post(url(`/cards/${cardId}/lookup`), {}, config()),
-        chooseAccount: (cardId, accountId) => axios.post(url(`/cards/${cardId}/account`), { account_id: accountId }, config()),
+        // extra.auto — аккаунт подставила страница: сервер ставит его только в пустую карточку.
+        chooseAccount: (cardId, accountId, extra = {}) => axios.post(url(`/cards/${cardId}/account`), { account_id: accountId, ...extra }, config()),
         attachLink: (cardId, link) => axios.post(url(`/cards/${cardId}/account`), { link }, config()),
         // «Аккаунта нет»: звонивший не зарегистрирован в Тез. Снимается выбором аккаунта.
         noAccount: (cardId) => axios.post(url(`/cards/${cardId}/account`), { none: true }, config()),

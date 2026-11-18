@@ -811,9 +811,10 @@ def test_accounts_come_in_tez_order_with_previous_number():
 
 
 def test_number_tez_does_not_search_is_no_accounts_not_a_failure(caplog):
-    """400 на номер — «не казахстанский мобильный»: аккаунтов на нём нет, оператору не о чем сообщать."""
+    """400 на номер. Городской или зарубежный — по таким TEZ APP не ищет: аккаунтов нет, оператору
+    не о чем сообщать. Мобильный TEZ APP принимать обязан: отказ — «не знаем», а не «нет»."""
     refusal = _Response(400, {'error': 'Неправильный формат данных', 'error_code': 30001})
-    client = tez.TezAccounts(_config(), session=_Session(refusal, refusal, refusal))
+    client = tez.TezAccounts(_config(), session=_Session(*([refusal] * 5)))
     with caplog.at_level('WARNING', logger='client_cards.tez'):
         landline = client.by_phone('77272501234')
     assert landline == {'source': tez.SOURCE_ACCOUNTS, 'ok': True, 'error': None, 'accounts': [],
@@ -821,10 +822,14 @@ def test_number_tez_does_not_search_is_no_accounts_not_a_failure(caplog):
     assert caplog.records == []
     # Ответ запомнен, как любой удачный: второй раз за минуту не спрашиваем.
     assert client.by_phone('77272501234') is landline and len(client._session.requests) == 1
-    # Отказ по мобильному номеру — расхождение с договором: в журнал, без самого номера.
+    # Отказ по мобильному — расхождение с договором: сбой, а не «аккаунтов нет» (привязки номера
+    # остаются), в журнал без самого номера, не запоминается — следующий звонок спросит заново.
     with caplog.at_level('WARNING', logger='client_cards.tez'):
-        assert client.by_phone('77012345678')['ok'] is True
+        mobile = client.by_phone('77012345678')
+    assert mobile == {'source': tez.SOURCE_ACCOUNTS, 'ok': False, 'error': tez.ERROR_REJECTED, 'accounts': [],
+                      'driver_hint': None}
     assert len(caplog.records) == 1 and '…78' in caplog.text and '77012345678' not in caplog.text
+    assert client.by_phone('77012345678')['ok'] is False and len(client._session.requests) == 3
     # По виду и ID отказ — ошибка: аккаунт закрепится как есть, без профиля; в журнал — как расхождение.
     caplog.clear()
     with caplog.at_level('WARNING', logger='client_cards.tez'):
@@ -866,9 +871,33 @@ def test_network_error_never_raises():
     client = tez.TezAccounts(_config(), session=_Session(requests.ConnectionError('boom')))
     assert client.by_id('driver', 1) == {'source': tez.SOURCE_ACCOUNTS, 'ok': False,
                                          'error': 'TEZ APP не отвечает', 'account': None}
-    # 404 с JSON — «аккаунтов нет», а не «метода нет».
-    client = tez.TezAccounts(_config(), session=_Session(_Response(404, {'error': 'not found'})))
-    assert client.by_phone('77012345678')['accounts'] == [] and client.by_phone('77012345678')['ok'] is True
+    # 404 у метода по договору не бывает («не нашли» — 200 с пустым списком): с телом JSON — тоже
+    # сбой, а не «аккаунтов нет»; и ссылка по такому ответу не отклоняется как несуществующая.
+    client = tez.TezAccounts(_config(), session=_Session(*([_Response(404, {'error': 'not found'})] * 2)))
+    assert client.by_phone('77012345678') == {'source': tez.SOURCE_ACCOUNTS, 'ok': False,
+                                              'error': 'TEZ APP ответил ошибкой 404', 'accounts': [],
+                                              'driver_hint': None}
+    assert client.by_id('driver', 5) == {'source': tez.SOURCE_ACCOUNTS, 'ok': False,
+                                         'error': 'TEZ APP ответил ошибкой 404', 'account': None}
+
+
+def test_odd_dates_and_rows_do_not_break_the_answer(monkeypatch):
+    # Дата вне диапазона («нулевая» в +05:00 в Алматы не переводится), не дата, не строка — пусто.
+    odd = tez.parse_account(dict(ROW, registered_at='0001-01-01T00:00:00+05:00', last_order_at='не дата',
+                                 deleted_at=12345))
+    assert (odd['registered_at'], odd['last_order_at'], odd['deleted_at']) == (None, None, None)
+    # Строку, которую не разобрать совсем, пропускаем — остальные аккаунты ответа на месте.
+    real = tez.parse_account
+
+    def flaky(row):
+        if row.get('id') == 1:
+            raise RuntimeError('boom')
+        return real(row)
+
+    monkeypatch.setattr(tez, 'parse_account', flaky)
+    session = _Session(_Response(200, {'accounts': [dict(ROW, id=1), ROW]}))
+    found = tez.TezAccounts(_config(), session=session).by_phone('77012345678')
+    assert found['ok'] and [account['tez_id'] for account in found['accounts']] == [12345]
 
 
 def test_with_lookup_switched_off_only_driver_dates_are_asked():

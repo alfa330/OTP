@@ -176,7 +176,9 @@ class ClientCardsService:
             linked = queries.phone_accounts(cursor, card['phone'])
         found = self._tez.by_phone(card['phone'])
         gone = self._gone_links(linked, found)
-        refreshed = self._refresh_stale([item for item in linked if item['link']['id'] not in gone], found)
+        # Освежаем и то, что Тез по номеру больше не нашёл: привязку, которую держит карточка,
+        # снятие не тронет — пусть хотя бы профиль (номер, статус) будет нынешним.
+        refreshed = self._refresh_stale(linked, found)
         now = self._now()
         with self._cursor() as cursor:
             # Найденное по номеру — закрепляем за номером; обновлённые профили — только обновляем.
@@ -186,7 +188,7 @@ class ClientCardsService:
                                    by=ctx['user_id'], by_name=ctx['name'], now=now)
             for account in refreshed:
                 queries.upsert_account(cursor, account, by=ctx['user_id'], now=now, fetched=True)
-            queries.unlink_unconfirmed(cursor, gone)
+            queries.unlink_unconfirmed(cursor, gone, open_after=now - timedelta(days=PENDING_DAYS))
             bundle = self._bundle(cursor, card_id)
             # Город в карточке — снимок: профиль выбранного аккаунта только что обновился.
             account = bundle['account']
@@ -206,9 +208,10 @@ class ClientCardsService:
         клиентов TEZ APP не хранит) или номер из профиля убрали. Привязка, по которой с
         этого номера не обращались, держалась только на слове TEZ APP — снимаем её, иначе
         чужой аккаунт остался бы на номере навсегда: руками такую привязку не снять.
-        Обращались по аккаунту с этого номера или он выбран в идущей карточке — остаётся
-        (это уже знание оператора, как привязка ссылкой): за этим следит сам запрос
-        снятия, queries.unlink_unconfirmed.
+        Обращались по аккаунту с этого номера или он выбран в карточке, которую ещё
+        заполняют, — остаётся (это уже знание оператора, как привязка ссылкой): за этим
+        следит сам запрос снятия, queries.unlink_unconfirmed. Только по ответу поиска
+        аккаунтов: при выключенном поиске пустой список ничего не значит.
         """
         if found['source'] != SOURCE_ACCOUNTS or not found['ok']:
             return set()
@@ -237,11 +240,19 @@ class ClientCardsService:
                 refreshed.append(reply['account'])
         return refreshed
 
-    def choose_account(self, ctx, card_id, account_id):
-        """Оператор выбрал аккаунт из привязанных к номеру (или снял выбор: account_id None)."""
+    def choose_account(self, ctx, card_id, account_id, *, auto=False):
+        """Оператор выбрал аккаунт из привязанных к номеру (или снял выбор: account_id None).
+
+        auto — единственный аккаунт номера подставила сама страница. Тогда только в пустую
+        открытую карточку: оператор мог выбрать аккаунт или отметить «Аккаунта нет», пока
+        страница ждала ответа Тез, и его выбор подстановка не перебивает.
+        """
         now = self._now()
         with self._cursor() as cursor:
             card = self._card_for(cursor, ctx, card_id, edit=True, for_update=True, live=True)
+            if auto and (account_id is None or card['status'] != rules.STATUS_OPEN or card['account_id']
+                         or card['account_kind'] == rules.KIND_NONE):
+                return self._bundle(cursor, card_id)
             if account_id is None:
                 # Заполненная карточка без аккаунта и без отметки «Аккаунта нет» выпала бы из
                 # отчёта: заполненные = водители + клиенты + без аккаунта.
@@ -404,7 +415,9 @@ class ClientCardsService:
         if not card['account_id']:
             raise CardError('Сначала выберите аккаунт', 'CARD_INCOMPLETE')
         account = queries.get_account(cursor, card['account_id'])
-        if account and account['fetched_at'] is not None and account.get('city'):
+        # Город отдал сам Тез — он и верный. Тез ответил без города — город оператора, и
+        # ошибку в нём оператор исправит.
+        if account and account.get('city_from_tez') and account.get('city'):
             return {'city': account['city']}
         queries.set_account_city(cursor, card['account_id'], city)
         return {'city': city}
@@ -420,6 +433,8 @@ class ClientCardsService:
                 raise CardError(problem, 'CARD_INCOMPLETE')
             if card['status'] != rules.STATUS_DONE:
                 queries.update_card(cursor, card_id, {'status': rules.STATUS_DONE, 'completed_at': now}, now=now)
+            # Статус аккаунта в Тез на момент сохранения — для окна обращения.
+            queries.snapshot_account_status(cursor, card_id)
             bundle = self._bundle(cursor, card_id)
         department_id = card['department_id']
         self._spawn(lambda: self.check_alerts(department_id))
