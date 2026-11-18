@@ -658,3 +658,77 @@ def test_existing_table_gets_master_column():
         with admin.cursor() as cur:
             cur.execute('DROP SCHEMA ' + schema + ' CASCADE')
         admin.close()
+
+
+# ── линия робота, на которую посадили человека (владелец, 18.11.2026: «Одну линию авто информатора дай») ──
+
+HUMAN_LINES_DDL = '''
+    ALTER TABLE users ADD COLUMN status text NOT NULL DEFAULT 'working', ADD COLUMN department_id integer,
+                      ADD COLUMN sip_number text;
+    CREATE TABLE dial_list_department_settings (department_id integer PRIMARY KEY, profile text);
+    CREATE TABLE dial_list_line_members (id serial PRIMARY KEY, user_id integer NOT NULL, department_id integer NOT NULL,
+                                         internal_number text NOT NULL, released_at timestamptz);
+    INSERT INTO departments VALUES (909, 'Фронт офисы');
+    INSERT INTO dial_list_department_settings VALUES (1954, 'remote_cc'), (560, 'tez');
+    INSERT INTO users (id, name, department_id) VALUES (501, 'Фронтов Фёдор', 909), (502, 'Своев Сава', 1954),
+                                                      (503, 'Тезова Тамара', 560);
+'''
+ROBOT_LINES = {'902': {'capacity': 2, 'active': 0}, '913': {'capacity': 2, 'active': 0}}
+
+
+def _sql(db, sql, params=None):
+    with db._get_cursor() as cur:
+        cur.execute(sql, params)
+
+
+def test_robot_does_not_get_a_line_a_person_sits_on(env):
+    svc, clock, db = env
+    _sql(db, HUMAN_LINES_DDL)
+    campaign = make_campaign(svc, phones(12))
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    # Менеджера фронт-офиса посадили на линию робота 913 (гостем удалённого КЦ): робот звонит только с 902.
+    _sql(db, "INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (501, 1954, '913')")
+    first = poll(svc, ROBOT_LINES)
+    assert [c['line'] for c in first['calls']] == ['902', '902']
+    assert set(svc.robot_status()['lines']) == {'902'}
+    # 902 занята целиком — на 913 звонков всё равно нет.
+    clock.tick(seconds=61)
+    assert poll(svc, {'902': {'capacity': 2, 'active': 2}, '913': {'capacity': 2, 'active': 0}})['calls'] == []
+    # Сняли с линии — 913 снова робота.
+    _sql(db, "UPDATE dial_list_line_members SET released_at = now()")
+    clock.tick(seconds=61)
+    again = poll(svc, {'902': {'capacity': 2, 'active': 2}, '913': {'capacity': 2, 'active': 0}})
+    assert {c['line'] for c in again['calls']} == {'913'} and again['calls']
+    assert set(svc.robot_status()['lines']) == {'902', '913'}
+
+
+def test_who_holds_a_robot_line(env):
+    svc, _clock, db = env
+    _sql(db, HUMAN_LINES_DDL)
+    poll(svc, ROBOT_LINES)                                   # состояние робота: обе линии его
+    assert set(svc.robot_status()['lines']) == {'902', '913'}
+    # Уволенный линию не держит.
+    _sql(db, "INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (501, 1954, '913')")
+    _sql(db, "UPDATE users SET status = 'fired' WHERE id = 501")
+    assert set(svc.robot_status()['lines']) == {'902', '913'}
+    _sql(db, "UPDATE users SET status = 'working' WHERE id = 501")
+    assert set(svc.robot_status()['lines']) == {'902'}
+    _sql(db, "UPDATE dial_list_line_members SET released_at = now()")
+    # Свой сотрудник удалённого КЦ с этим номером — держит; сотрудник Тез с тем же номером (другой кабинет) — нет.
+    _sql(db, "UPDATE users SET sip_number = '913' WHERE id = 503")
+    assert set(svc.robot_status()['lines']) == {'902', '913'}
+    _sql(db, "UPDATE users SET sip_number = '902' WHERE id = 502")
+    assert set(svc.robot_status()['lines']) == {'913'}
+    # Свой сотрудник, посаженный на линию ДРУГОГО отдела, свою линию не держит.
+    _sql(db, "INSERT INTO dial_list_line_members (user_id, department_id, internal_number) VALUES (502, 560, '931')")
+    assert set(svc.robot_status()['lines']) == {'902', '913'}
+
+
+def test_robot_keeps_all_lines_without_the_section_tables(env):
+    """Стенд автоинформатора без раздела «Удаленный КЦ»: никого на линиях нет, звонки идут как раньше."""
+    svc, _clock, _db = env
+    campaign = make_campaign(svc, phones(4))
+    svc.campaign_action(DEPT, campaign['id'], 'start')
+    calls = poll(svc, ROBOT_LINES)['calls']
+    assert len(calls) == 3                                   # прогрев: 3 в первую минуту
+    assert set(svc.robot_status()['lines']) == {'902', '913'}

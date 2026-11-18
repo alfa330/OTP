@@ -225,6 +225,22 @@ test('линия робота — без «Назначить», остальн�
     assert.equal(canReleaseHolder({ id: 11, guest: false }, false), true);
 });
 
+/*
+ * Суперадмину — можно (владелец, 18.11.2026: «Одну линию авто информатора дай»): сервер присылает
+ * can_seat_robot, робот с линии, на которой сидит человек, звонить перестаёт сам.
+ */
+test('линию робота назначает только суперадмин; признак — только true', () => {
+    const robot = { internal_number: '913', informer: true, icore_user: null };
+    assert.equal(canAssignLine(robot, true), true);
+    assert.equal(canAssignLine(robot, false), false);
+    assert.equal(canAssignLine(robot, 'true'), false);
+    assert.equal(canAssignLine(robot), false);
+    // Занятую линию робота не назначают и суперадмину — сначала «Снять».
+    assert.equal(canAssignLine({ ...robot, icore_user: { id: 11, name: 'Аверин Аким' } }, true), false);
+    // На обычные линии признак не влияет.
+    assert.equal(canAssignLine({ internal_number: '914', informer: false, icore_user: null }, false), true);
+});
+
 test('вкладка «Линии»: линия робота серая, с подписью и без кнопки назначения', () => {
     const panel = read('../src/components/dial_list/DialListLinesPanel.jsx');
     assert.ok(panel.includes('const robot = isRobotLine(line);'));
@@ -232,9 +248,10 @@ test('вкладка «Линии»: линия робота серая, с по
     assert.ok(panel.includes("robot ? 'bg-slate-200/70 text-slate-400'"));
     assert.ok(panel.includes('<IosBadge tone="slate"><FaIcon className="fas fa-robot" />автоинформатор</IosBadge>'));
     assert.ok(panel.includes('{robot && !line.icore_user ? ('));
-    assert.ok(panel.includes('звонит робот — назначить нельзя'));
-    // «Назначить» — только через общее правило, своей проверки рядом нет.
-    assert.ok(panel.includes(') : canAssignLine(line) && ('));
+    assert.ok(panel.includes("{canSeatRobot ? 'звонит робот' : 'звонит робот — назначить нельзя'}"));
+    // «Назначить» — только через общее правило, своей проверки рядом нет; право суперадмина — с сервера.
+    assert.ok(panel.includes('const canSeatRobot = data?.can_seat_robot === true;'));
+    assert.ok(panel.includes(') : canAssignLine(line, canSeatRobot) && ('));
     assert.equal((panel.match(/^\s*Назначить$/gm) || []).length, 2, 'кнопка в строке и кнопка в выборе сотрудника');
     // Иконка робота есть в наборе FaIcon (без неё — пустой кружок).
     const icons = read('../src/components/common/FaIcon.jsx');

@@ -106,6 +106,8 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
     // Сажать на линию сотрудника другого отдела — глава и СВ СЗоВ и суперадмины; признак
     // и список таких сотрудников (candidates) приходят с сервера.
     const canSeatAnyone = data?.can_seat_anyone === true;
+    // Посадить человека на линию робота — только суперадмин (признак с сервера, см. canAssignLine).
+    const canSeatRobot = data?.can_seat_robot === true;
     const pickerOptions = useMemo(() => buildLinePickerOptions({
         users: data?.users, candidates: data?.candidates, canSeatAnyone, departmentName,
     }), [data, canSeatAnyone, departmentName]);
@@ -179,7 +181,7 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                                         </div>
                                         <div className="mt-0.5 text-[13.5px]">
                                             {robot && !line.icore_user ? (
-                                                <span className="text-slate-400">звонит робот — назначить нельзя</span>
+                                                <span className="text-slate-400">{canSeatRobot ? 'звонит робот' : 'звонит робот — назначить нельзя'}</span>
                                             ) : line.icore_user ? (
                                                 <span className="font-medium text-slate-800">
                                                     {line.icore_user.name}
@@ -203,7 +205,7 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                                                     Снять
                                                 </button>
                                             )
-                                        ) : canAssignLine(line) && (
+                                        ) : canAssignLine(line, canSeatRobot) && (
                                             <button
                                                 type="button"
                                                 onClick={() => { setPicking(line.internal_number); setPickedUser(defaultPickedUser(users)); }}
@@ -221,7 +223,7 @@ const DialListLinesPanel = ({ apiBaseUrl, authHeaders, departmentId, departmentN
                                         <span className="flex items-center gap-1 text-[12.5px] text-slate-600">
                                             Кому:
                                             {canSeatAnyone && (
-                                                <IosHint text="Можно выбрать сотрудника любого отдела. Он остаётся в своём отделе: пока сидит на линии, его iCORE Phone работает на ней и показывает вкладку «Обзвон», а после «Снять» возвращается к настройкам своего отдела. Показатели считаются как у сотрудников удалённого КЦ." />
+                                                <IosHint text={`Можно выбрать сотрудника любого отдела. Он остаётся в своём отделе: пока сидит на линии, его iCORE Phone работает на ней и показывает вкладку «Обзвон», а после «Снять» возвращается к настройкам своего отдела. Показатели считаются как у сотрудников удалённого КЦ.${isRobotLine(line) ? ' С этой линии звонит автоинформатор: пока на ней сидит человек, робот с неё не звонит, а после «Снять» линия снова его.' : ''}`} />
                                             )}
                                         </span>
                                         <CustomSelect

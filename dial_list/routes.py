@@ -158,10 +158,12 @@ phone_event, outcome и mode — без замка: идущий разгово�
     GET     /api/dial_list/departments/<id>/lines            линии Binotel, кто на них сидит, кого можно
                                                              посадить (candidates — сотрудники других
                                                              отделов: только главе и СВ СЗоВ и суперадмину);
-                                                             informer: true — с линии звонит автоинформатор
+                                                             informer: true — с линии звонит автоинформатор;
+                                                             can_seat_robot — можно ли посадить на неё (суперадмин)
     POST    /api/dial_list/departments/<id>/lines/assign     {user_id, internal_number}; сотрудника
                                                              другого отдела — только они же, иначе 403;
-                                                             на линию автоинформатора — 409
+                                                             на линию автоинформатора — только суперадмин
+                                                             (робот с неё звонить перестаёт), иначе 409
     POST    /api/dial_list/departments/<id>/lines/release    {user_id}
     POST    /api/dial_list/departments/<id>/leads/upload     файл ФИО + телефон + ИИН (+period=YYYY-MM);
                                                              ИИН обязателен, после загрузки — проверка подписания;
@@ -424,6 +426,13 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         is_super = bool(is_super_admin_role and is_super_admin_role(role))
         return svc.can_seat_anyone(is_super, headed_department_ids(requester_id),
                                    supervisor_department_code=_supervisor_department_code(requester_id, role))
+
+    def _seats_on_robot_lines():
+        """Может ли запросивший посадить человека на линию автоинформатора: только суперадмин (владелец, 18.11.2026:
+        «Одну линию авто информатора дай»). Остальным линии робота по-прежнему серые (10.11.2026: «чтобы другие не
+        могли забрать»). Робот с такой линии звонить перестаёт сам (informer/service.py, _HUMAN_LINES_SQL)."""
+        _requester_id, requester = _operator()
+        return bool(is_super_admin_role and is_super_admin_role(requester[3]))
 
     def _phone_version():
         """Версия телефона из заголовка запроса (X-ICore-Phone-Version) — как пришла; None —
@@ -767,7 +776,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     # другие не могли забрать эти линии»). Какие линии у робота, сообщает сам диспетчер на шлюзе
     # (INFORMER_LINES → informer_agent_state.lines): сменили список на шлюзе — вкладка «Линии» сразу видит
     # новый, второго списка в портале нет. Робот звонит с линий кабинета удалённого КЦ, поэтому только у
-    # отделов этого профиля. Не прочитали — пусто: вкладка из-за соседнего раздела не ломается.
+    # отделов этого профиля. Не прочитали — пусто: вкладка из-за соседнего раздела не ломается. Линию робота, на
+    # которую суперадмин посадил человека (18.11.2026), robot_status уже не отдаёт — она снова обычная.
     def _robot_lines(department_id):
         if informer_service is None:
             return frozenset()
@@ -788,7 +798,8 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         users — сотрудники отдела и те, кто уже сидит на его линиях. candidates —
         сотрудники ДРУГИХ отделов для выбора по ФИО: только главе и СВ СЗоВ и
         суперадмину (can_seat_anyone), остальным список пуст, а сервер чужого не посадит.
-        informer у линии — с неё звонит автоинформатор: назначить на неё нельзя."""
+        informer у линии — с неё звонит автоинформатор: назначить на неё может только суперадмин
+        (can_seat_robot), и тогда робот с неё звонить перестаёт."""
         _manager(department_id)
         anyone = _seats_anyone()
         robot = _robot_lines(department_id)
@@ -801,6 +812,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
             "lines": line_rows,
             "users": svc.department_users(department_id),
             "can_seat_anyone": anyone,
+            "can_seat_robot": _seats_on_robot_lines(),
             "candidates": svc.line_candidates(department_id) if anyone else [],
         }), 200
 
@@ -815,7 +827,7 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         except (TypeError, ValueError):
             raise DialListError("user_id: число")
         number = str(payload.get('internal_number') or '').strip()
-        if number and number in _robot_lines(department_id):
+        if number and number in _robot_lines(department_id) and not _seats_on_robot_lines():
             raise DialListError(f"С линии {number} звонит автоинформатор — назначить на неё нельзя", 409)
         result = svc.assign_line(department_id, user_id, payload.get('internal_number'),
                                  changed_by=requester_id, seat_anyone=_seats_anyone())

@@ -9,7 +9,9 @@
   * какие линии у робота — сообщает сам диспетчер (informer_agent_state.lines через
     InformerService.robot_status); в ответе GET …/lines у такой линии informer: true, у остальных false;
   * «Назначить» на линию робота сервер отклоняет 409 и до сервиса посадки не доходит — даже у тех, кто
-    вправе сажать кого угодно (СВ СЗоВ, суперадмин);
+    вправе сажать кого угодно (СВ СЗоВ, админ); исключение — суперадмин (владелец, 18.11.2026: «Одну линию
+    авто информатора дай»): его посадка проходит, а робот с занятой человеком линии звонить перестаёт сам
+    (informer/service.py, tests/test_informer_postgres.py); can_seat_robot в ответе GET …/lines — для кнопки;
   * робот звонит с линий кабинета удалённого КЦ: у отдела другого профиля (Тез — свой кабинет, номера
     линий те же) ничего не помечается и не запрещается, состояние робота там даже не читается;
   * не прочитали состояние робота (или автоинформатор на сервере не подключён) — вкладка работает как
@@ -163,12 +165,24 @@ class _no_logs:
 class RobotLinesAssignTests(unittest.TestCase):
     def test_robot_line_is_refused_before_the_seating_service(self):
         for number in ("902", " 913 "):
-            client, svc = _client(_Informer())
+            client, svc = _client(_Informer(), role='admin')
             resp = client.post(_lines_url(REMOTE_CC) + '/assign', json={"user_id": 77, "internal_number": number})
             self.assertEqual(resp.status_code, 409, number)
             self.assertEqual(resp.get_json()["error"],
                              f"С линии {number.strip()} звонит автоинформатор — назначить на неё нельзя")
             self.assertEqual(svc.calls, [], 'до посадки дело дойти не должно')
+
+    def test_super_admin_takes_a_robot_line_for_a_person(self):
+        """Владелец, 18.11.2026: «Одну линию авто информатора дай» — суперадмину посадка на линию робота проходит."""
+        client, svc = _client(_Informer(), role='super_admin')
+        resp = client.post(_lines_url(REMOTE_CC) + '/assign', json={"user_id": 77, "internal_number": "913"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(svc.calls, [('assign', REMOTE_CC, 77, "913", True)])
+
+    def test_only_super_admin_sees_the_robot_line_button(self):
+        for role, expected in (('super_admin', True), ('admin', False)):
+            body = _client(_Informer(), role=role)[0].get(_lines_url(REMOTE_CC)).get_json()
+            self.assertIs(body["can_seat_robot"], expected, role)
 
     def test_free_line_is_assigned_as_before(self):
         client, svc = _client(_Informer())

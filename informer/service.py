@@ -30,6 +30,31 @@ POLL_IDLE_SEC = 10
 POLL_QUIET_SEC = 60
 POLL_AMI_DOWN_SEC = 15
 
+# Линия робота, на которую посадили человека, — уже не робота (владелец, 18.11.2026: «Одну линию авто информатора
+# дай» менеджеру фронт-офиса, а VM шлюза со списком линий недоступна; сажает на линию робота только суперадмин —
+# dial_list/routes.py). Портал не раздаёт на неё звонков и не показывает её среди линий робота; список линий у
+# диспетчера на шлюзе прежний — правка VM не нужна, человека сняли — линия снова робота. Иначе робот звонил бы с
+# той же учётки, деля с человеком её два звонка (20.10.2026 у операторов на общих линиях так и шли ошибки).
+# «Сидит» — как на вкладке «Линии»: действующая привязка сотрудника к линии отдела удалённого КЦ или свой
+# сотрудник такого отдела с этим номером (не посаженный на линию другого отдела); уволенные линию не держат.
+# Только отделы профиля remote_cc: у Тез свой кабинет Binotel с теми же номерами линий.
+_HUMAN_LINES_SQL = """
+    SELECT m.internal_number FROM dial_list_line_members m
+    JOIN users u ON u.id = m.user_id
+    JOIN dial_list_department_settings s ON s.department_id = m.department_id
+    WHERE m.released_at IS NULL AND m.internal_number = ANY(%(lines)s)
+      AND LOWER(COALESCE(s.profile, 'remote_cc')) = 'remote_cc'
+      AND LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
+    UNION
+    SELECT u.sip_number FROM users u
+    JOIN dial_list_department_settings s ON s.department_id = u.department_id
+    WHERE u.sip_number = ANY(%(lines)s)
+      AND LOWER(COALESCE(s.profile, 'remote_cc')) = 'remote_cc'
+      AND LOWER(COALESCE(u.status, '')) NOT IN ('fired', 'dismissal')
+      AND NOT EXISTS (SELECT 1 FROM dial_list_line_members o
+                      WHERE o.user_id = u.id AND o.released_at IS NULL AND o.department_id <> u.department_id)
+"""
+
 
 class InformerError(Exception):
     def __init__(self, message, status=400):
@@ -491,8 +516,37 @@ class InformerService:
         if not row or not row[5]:
             return {"online": False, "lines": {}, "last_seen_at": None, "error": ''}
         online = (self.clock() - row[5]).total_seconds() <= ROBOT_ONLINE_SECONDS and bool(row[3])
-        return {"online": online, "lines": row[2] or {}, "last_seen_at": row[5].isoformat(),
+        lines = row[2] or {}
+        if lines:
+            # Линии, на которые посадили людей, — не робота (_HUMAN_LINES_SQL): ни на вкладке «Линии», ни в
+            # ёмкости робота при выборе темпа рассылки.
+            with self.db._get_cursor() as cur:
+                held = self._human_lines(cur, lines)
+            lines = {line: info for line, info in lines.items() if str(line) not in held}
+        return {"online": online, "lines": lines, "last_seen_at": row[5].isoformat(),
                 "error": row[4] or '', "version": row[1] or ''}
+
+    def _human_lines(self, cur, lines):
+        """Какие из линий робота заняты человеком (_HUMAN_LINES_SQL), в транзакции вызывающего. Нет таблиц раздела
+        «Удаленный КЦ» (стенд автоинформатора без раздела) или запрос упал — никакие: под SAVEPOINT, чтобы сбой
+        здесь не остановил раздачу звонков роботу."""
+        numbers = sorted({str(line) for line in (lines or {})})
+        if not numbers:
+            return set()
+        cur.execute("SAVEPOINT informer_human_lines")
+        try:
+            cur.execute("SELECT to_regclass('dial_list_line_members') IS NOT NULL"
+                        " AND to_regclass('dial_list_department_settings') IS NOT NULL")
+            held = set()
+            if cur.fetchone()[0]:
+                cur.execute(_HUMAN_LINES_SQL, {"lines": numbers})
+                held = {str(r[0]) for r in cur.fetchall()}
+        except psycopg2.Error:
+            cur.execute("ROLLBACK TO SAVEPOINT informer_human_lines")
+            log.exception("Автоинформатор: не прочитаны люди на линиях робота — раздаём все линии, как раньше")
+            return set()
+        cur.execute("RELEASE SAVEPOINT informer_human_lines")
+        return held
 
     # ── диспетчер на шлюзе ───────────────────────────────────────────────────
     def agent_poll(self, payload, key_id=''):
@@ -525,6 +579,10 @@ class InformerService:
             if not ami_ok or not lines:
                 return {"calls": [], "next_poll_sec": POLL_AMI_DOWN_SEC}
             free = {line: max(0, info["capacity"] - info["active"]) for line, info in lines.items()}
+            # Линию, на которую посадили человека, робот не получает (_HUMAN_LINES_SQL); звонки, что уже идут на ней,
+            # договорят — в «разом» они считаются, пока не закончатся.
+            for line in self._human_lines(cur, free):
+                free.pop(line, None)
             # Не больше MAX_ACTIVE_CALLS звонков разом (владелец, 16.10.2026: «залпов не надо, по 3 максимум»),
             # даже если диспетчер старый и сообщил все места линий. Минутного потолка нет: темп — поле рассылки.
             room_total = min(sum(free.values()), rules.MAX_ACTIVE_CALLS - sum(info["active"] for info in lines.values()))
