@@ -10,7 +10,8 @@ import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondar
 import {
     ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, CHANNEL_COLOR_CODES, FINAL_STAGES,
     MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS,
-    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, groupSeats, joinDateTime, longTime,
+    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, joinDateTime, longTime,
+    markGroupFull,
     openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
 } from './hiringMeta';
 import { ChannelPill, DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
@@ -88,49 +89,76 @@ const ChannelPicker = ({ card, channels, canEdit, onChange }) => {
 };
 
 /* Выбор группы на обучение (владелец 18.11.2026): рекрутер сразу видит, сколько ещё кандидатов войдёт в каждую
-   группу, — справа у строки; полная группа погашена, в неё не пригласить. Ближний старт — сверху. */
-const GroupPicker = ({ groups, value, onChange }) => (
-    <div role="radiogroup" aria-label="Группа на обучение"
-         className="thin-scroll max-h-[272px] overflow-y-auto rounded-2xl bg-slate-50 ring-1 ring-slate-200/60">
-        <ul className="divide-y divide-slate-200/60">
-            {groups.map((group) => {
-                const seats = groupSeats(group);
-                const selected = String(group.id) === String(value);
-                return (
-                    <li key={group.id}>
-                        <button type="button" role="radio" aria-checked={selected} disabled={seats.full} onClick={() => onChange(String(group.id))}
-                                className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition ${selected ? 'bg-blue-50' : 'hover:bg-white'} disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent`}>
-                            <span className="min-w-0 grow basis-0">
-                                <span className={`block truncate text-[13.5px] font-medium ${selected ? 'text-blue-700' : 'text-slate-900'}`}>{group.name}</span>
-                                <span className="block truncate text-[12px] text-slate-500">
-                                    {[`старт ${longTime(group.start_date)}`, group.trainer_name].filter(Boolean).join(' · ')}
+   группу, — справа у строки; полная группа погашена, в неё не пригласить. Сначала предстоящие (ближний старт сверху),
+   начавшиеся — ниже, с подписью «идёт с …». Радиогруппа как положено: одна остановка Tab, стрелки и Home/End
+   переводят выбор, пропуская полные. На телефоне список целиком — без своей прокрутки внутри экрана. */
+const GroupPicker = ({ groups, value, onChange }) => {
+    const rows = useMemo(() => groups.map((group) => ({ group, seats: groupSeats(group) })), [groups]);
+    const enabled = rows.filter((row) => !row.seats.full).map((row) => String(row.group.id));
+    const current = enabled.includes(String(value)) ? String(value) : enabled[0];
+    const listRef = React.useRef(null);
+    const pick = (id) => {
+        onChange(id);
+        const node = listRef.current?.querySelector(`[data-group-id="${id}"]`);
+        if (node) node.focus();
+    };
+    const onKeyDown = (event) => {
+        if (!enabled.length) return;
+        const at = Math.max(0, enabled.indexOf(current));
+        const next = { ArrowDown: at + 1, ArrowRight: at + 1, ArrowUp: at - 1, ArrowLeft: at - 1, Home: 0, End: enabled.length - 1 }[event.key];
+        if (next === undefined) return;
+        event.preventDefault();
+        pick(enabled[(next + enabled.length) % enabled.length]);
+    };
+    return (
+        <div ref={listRef} role="radiogroup" aria-label="Группа на обучение" onKeyDown={onKeyDown}
+             className="thin-scroll overflow-hidden rounded-2xl bg-slate-50 ring-1 ring-slate-200/60 sm:max-h-[272px] sm:overflow-y-auto">
+            <ul className="divide-y divide-slate-200/60">
+                {rows.map(({ group, seats }) => {
+                    const selected = String(group.id) === String(value);
+                    return (
+                        <li key={group.id}>
+                            <button type="button" role="radio" aria-checked={selected} disabled={seats.full} data-group-id={group.id}
+                                    tabIndex={String(group.id) === current ? 0 : -1} onClick={() => onChange(String(group.id))}
+                                    className={`flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/70 ${selected ? 'bg-blue-50' : 'hover:bg-white'} disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:bg-transparent`}>
+                                <span className="min-w-0 grow basis-0">
+                                    <span className={`block truncate text-[13.5px] font-medium ${selected ? 'text-blue-700' : 'text-slate-900'}`}>{group.name}</span>
+                                    <span className="block truncate text-[12px] text-slate-500">
+                                        {[groupWhen(group), group.trainer_name].filter(Boolean).join(' · ')}
+                                    </span>
                                 </span>
-                            </span>
-                            <span className={`shrink-0 text-[12.5px] font-medium tabular-nums ${seats.full ? 'text-rose-600' : selected ? 'text-blue-700' : 'text-slate-600'}`}>
-                                {seats.label}
-                            </span>
-                            <Check size={16} strokeWidth={2.5} className={`shrink-0 text-blue-600 ${selected ? '' : 'invisible'}`} />
-                        </button>
-                    </li>
-                );
-            })}
-        </ul>
-    </div>
-);
+                                <span className={`shrink-0 text-[12.5px] font-medium tabular-nums ${seats.full ? 'text-amber-700' : selected ? 'text-blue-700' : 'text-slate-600'}`}>
+                                    {seats.label}
+                                </span>
+                                <Check size={16} strokeWidth={2.5} className={`shrink-0 text-blue-600 ${selected ? '' : 'invisible'}`} />
+                            </button>
+                        </li>
+                    );
+                })}
+            </ul>
+        </div>
+    );
+};
 
 /* Переход с его обязательными полями (ТЗ 4.1, 4.2). */
 const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone }) => {
     const [form, setForm] = useState({});
     const [saving, setSaving] = useState(false);
     // Группы с местами — свежие при каждом открытии: места занимают и другие рекрутеры, а справочник из
-    // первого ответа раздела мог устареть. null — ещё грузятся.
+    // первого ответа раздела мог устареть. null — ещё грузятся. Не загрузились — показываем справочник из
+    // первого ответа с честной пометкой и «Повторить», а не молча старые места.
     const [pickGroups, setPickGroups] = useState(null);
+    const [pickStale, setPickStale] = useState(false);
     const loadGroups = useCallback(() => api.get('/groups', { pick: 1 })
-        .then(({ data }) => setPickGroups(data.items || []))
-        .catch(() => setPickGroups((boot.dictionaries?.groups || []).filter((g) => g.status === 'active'))), [api, boot]);
+        .then(({ data }) => { setPickGroups(data.items || []); setPickStale(false); })
+        .catch(() => {
+            setPickStale(true);
+            setPickGroups((prev) => prev || (boot.dictionaries?.groups || []).filter((g) => g.status === 'active'));
+        }), [api, boot]);
     useEffect(() => {
         if (!open || target !== 'invited_training') return;
         setPickGroups(null);
+        setPickStale(false);
         loadGroups();
     }, [open, target, loadGroups]);
     useEffect(() => {
@@ -179,8 +207,10 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
             onClose();
         } catch (error) {
             toast(errorOf(error, 'Переход не выполнен'), 'error');
-            // Последнее место заняли, пока окно было открыто, — места перечитываются, выбор снимается.
+            // Последнее место заняли, пока окно было открыто: группа гаснет сразу (даже если перечитать не выйдет),
+            // выбор снимается, места перечитываются.
             if (codeOf(error) === 'HIRING_GROUP_FULL') {
+                setPickGroups((prev) => markGroupFull(prev, payload.group_id));
                 setForm((f) => ({ ...f, group_id: '' }));
                 loadGroups();
             }
@@ -224,6 +254,12 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
                                     Групп на обучение нет — их заводит тренер во вкладке «Группы»
                                 </div>
                             ) : <GroupPicker groups={pickGroups} value={form.group_id} onChange={set('group_id')} />}
+                        {pickStale && (
+                            <div className="mt-1.5 flex items-center gap-2 text-[12px] text-amber-700">
+                                Места не обновились — показаны на момент открытия раздела
+                                <button type="button" onClick={loadGroups} className="font-medium text-blue-600 hover:underline">Повторить</button>
+                            </div>
+                        )}
                     </div>
                 )}
                 {(target === 'on_training' || target === 'on_line') && (

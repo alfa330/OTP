@@ -90,6 +90,9 @@ SHIFT_MIN_HOURS = 1.0
 # Отказ до обучения и отсев место освобождают.
 SEAT_STAGES = (INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED)
 GROUP_CAPACITY_MAX = 500
+# Этапы, на которых тренер карточку своей группы не видит: до приглашения на обучение она — работа рекрутера.
+# Повторная активация и возврат в пул оставляют у карточки старую группу, а в пуле — телефон (разбор 18.11.2026).
+TRAINER_HIDDEN_STAGES = POOL_STAGES + (IN_WORK, INVITED_OFFICE)
 
 
 def parse_capacity(value):

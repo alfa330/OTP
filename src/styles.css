@@ -2006,9 +2006,11 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
 /* Горизонтальная прокрутка канбан-доски («Воронка найма»): тонкая до наведения (владелец 18.11.2026 —
    «нижний скролл тонким до наводки и кастомным»). Ползунок 3 px, как у .thin-scroll, а под курсором —
    9 px: за него удобно взяться мышью. Толщину меняет прозрачная рамка ползунка, а не высота полосы:
-   полоса всё время 13 px, и доска не прыгает, когда курсор входит в неё и выходит. Пока курсор над
-   доской, ползунок чуть темнее — видно, что доску можно листать вбок. Дорожка прозрачная и отступает
-   от краёв на поля доски. scrollbar-width рядом не задаётся — см. комментарий у .thin-scroll выше. */
+   полоса всё время 13 px, и доска не прыгает, когда курсор входит в неё и выходит. Дорожка прозрачная
+   и отступает от краёв на поля доски. scrollbar-width рядом не задаётся — см. комментарий у .thin-scroll
+   выше. Правила «темнее, пока курсор над доской» (.board-scroll:hover::-webkit-scrollbar-thumb) нет
+   намеренно: Chromium не перерисовывает полосу по :hover самой области — ползунок не темнел, а уйдя
+   с ползунка, залипал тёмным (разбор 18.11.2026). */
 .board-scroll::-webkit-scrollbar {
     height: 13px;
 }
@@ -2022,9 +2024,6 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
     border: 5px solid transparent;
     border-radius: 9999px;
 }
-.board-scroll:hover::-webkit-scrollbar-thumb {
-    background-color: rgba(100, 116, 139, 0.45);
-}
 .board-scroll::-webkit-scrollbar-thumb:hover,
 .board-scroll::-webkit-scrollbar-thumb:active {
     border-width: 2px;
@@ -2034,5 +2033,56 @@ body.chat-dock-open { padding-right: var(--chat-dock-w); }
     .board-scroll {
         scrollbar-width: thin;
         scrollbar-color: rgba(100, 116, 139, 0.4) transparent;
+    }
+}
+
+/* «Взять в работу» у карточки пула «Воронки найма» (BoardTab.jsx) — маленькая светлая кнопка в углу, синеет только
+   под самим курсором (владелец 18.11.2026: широкая кнопка ловила щелчки «открыть карточку»). Где есть мышь, кнопка
+   проявляется по наведению на карточку С ЗАДЕРЖКОЙ и до этого невидима и щелчков не берёт (visibility): быстрый
+   щелчок в угол открывает карточку, а не берёт её — человек кнопку ещё не видел (разбор 18.11.2026). На сенсорном
+   экране наведения нет — кнопка видна всегда. Своим классом, а не утилитами Tailwind: тёмная тема перекрашивает
+   bg-blue-50 / text-blue-700 через !important, и синеть под курсором утилиты бы перестали (цвета тёмной темы —
+   в theme-dark.css). Высота 24 px в строке из 16 — отрицательные поля не раздвигают карточку. */
+.hiring-take-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    height: 24px;
+    margin-block: -4px;
+    padding: 0 10px;
+    border-radius: 9999px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    background-color: #eff6ff;
+    color: #1d4ed8;
+    box-shadow: inset 0 0 0 1px #dbeafe;
+    transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+.hiring-take-btn:hover {
+    background-color: #2563eb;
+    color: #fff;
+    box-shadow: inset 0 0 0 1px #2563eb;
+}
+.hiring-take-btn:active {
+    transform: scale(0.97);
+}
+.hiring-take-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.7);
+}
+@media (hover: hover) {
+    .hiring-take-btn {
+        visibility: hidden;
+        opacity: 0;
+        transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease,
+            opacity 0.15s ease, visibility 0s linear 0.15s;
+    }
+    .group:hover .hiring-take-btn,
+    .group:focus-within .hiring-take-btn {
+        visibility: visible;
+        opacity: 1;
+        transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease,
+            opacity 0.12s ease 0.15s, visibility 0s linear 0.15s;
     }
 }

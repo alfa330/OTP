@@ -262,6 +262,63 @@ export const groupSeats = (group) => {
 /** Название группы по дате старта, пока тренер не написал своё: «Группа 24.11». */
 export const groupNameFor = (startIso) => (shortTime(startIso) ? `Группа ${shortTime(startIso)}` : '');
 
+/** Название при смене даты старта: пока его не трогали руками, оно идёт за датой; своё не затирается. */
+export const groupNameAfterStart = (name, startIso, touched) => (touched ? name : groupNameFor(startIso));
+
+/** Шаг степпера вместимости: из пустого поля «+» ставит число занятых мест (не меньше 1) — меньше всё равно
+ *  нельзя; «−» не опускает ниже занятых и ниже 1; сверху — GROUP_CAPACITY_MAX. */
+export const stepCapacity = (value, delta, taken = 0) => {
+    const floor = Math.min(GROUP_CAPACITY_MAX, Math.max(1, Math.trunc(Number(taken) || 0)));
+    const number = Math.trunc(Number(value) || 0);
+    if (!number) return delta > 0 ? String(floor) : '';
+    return String(Math.min(GROUP_CAPACITY_MAX, Math.max(floor, number + delta)));
+};
+
+/** Тело запроса окна группы. Тренера и отдел группе назначает руководитель: тренер их не шлёт, иначе
+ *  сервер ответит 403 «Тренера и отдел группы назначает руководитель рекрутинга». */
+export const groupRequestBody = (form, { lead = false } = {}) => {
+    const body = {
+        name: String(form?.name || '').trim() || groupNameFor(form?.start_date),
+        start_date: form?.start_date || '',
+        capacity: Number(form?.capacity),
+        vacancy_id: form?.vacancy_id ? Number(form.vacancy_id) : null,
+    };
+    if (lead) {
+        body.trainer_id = form?.trainer_id ? Number(form.trainer_id) : null;
+        body.department_id = form?.department_id ? Number(form.department_id) : null;
+    }
+    return body;
+};
+
+/** Когда группа: «старт 24 ноября», а уже начавшаяся — «идёт с 5 ноября» (рекрутер видит, что обучение идёт). */
+export const groupWhen = (group, today = todayIso()) => {
+    const start = String(group?.start_date || '').slice(0, 10);
+    if (!start) return '';
+    return start < String(today).slice(0, 10) ? `идёт с ${longTime(start)}` : `старт ${longTime(start)}`;
+};
+
+/** Сервер ответил «мест нет»: группа помечается полной у себя, даже если перечитать места не удалось. */
+export const markGroupFull = (groups, groupId) => (groups || []).map((group) => (
+    String(group.id) === String(groupId) && group.capacity !== null && group.capacity !== undefined
+        ? { ...group, seats_taken: Math.max(Number(group.seats_taken) || 0, Number(group.capacity)), seats_free: 0 }
+        : group));
+
+/** Вкладки раздела по правам (hiring/access.py, capabilities). Тренеру — не рекрутеру и не руководителю —
+ *  «Группы» первой: группы он ведёт сам, а доска — его кандидаты по этапам. Отчётов у тренера нет: там цифры
+ *  рекрутеров, по нему пустые. */
+export const hiringTabs = (caps = {}) => {
+    const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);
+    return [
+        trainerOnly && 'groups',
+        caps.recruiter && 'desk',
+        'board',
+        caps.groups && !trainerOnly && 'groups',
+        (caps.recruiter || caps.lead || caps.dept_head) && 'reports',
+        caps.upload && 'upload',
+        caps.manage && 'settings',
+    ].filter(Boolean);
+};
+
 /** Отбор карточек по строке поиска на клиенте: имя, телефон, город, вакансия, номер. */
 export const matchesQuery = (card, query) => {
     const text = String(query || '').trim().toLowerCase();

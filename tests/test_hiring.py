@@ -117,24 +117,35 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
     def test_groups_tab_for_trainer_and_lead(self):
         self.assertIn("import GroupsTab from './GroupsTab';", self.view)
         self.assertIn("{active === 'groups' && <GroupsTab {...shared} />}", self.view)
-        # Тренеру «Группы» — первой вкладкой, отчётов рекрутеров у него нет.
-        self.assertIn('const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);', self.view)
-        self.assertIn("trainerOnly && 'groups',", self.view)
-        self.assertIn("caps.groups && !trainerOnly && 'groups',", self.view)
-        self.assertIn("(caps.recruiter || caps.lead || caps.dept_head) && 'reports',", self.view)
+        # Набор и порядок вкладок — hiringTabs (поведение проверяет tests/hiring_meta.test.mjs).
+        self.assertIn('const tabs = useMemo(() => hiringTabs(caps), [caps]);', self.view)
         # Группы — одним местом: из «Настроек» они ушли во вкладку.
         self.assertNotIn("value: 'groups'", self.settings)
         self.assertNotIn('GroupsSection', self.settings)
-        # Тренера и отдел группе назначает руководитель — поля только у него (сервер проверяет то же).
+        # Тренера и отдел группе назначает руководитель — поля только у него (сервер проверяет то же); тело запроса —
+        # groupRequestBody, шаг степпера — stepCapacity (оба проверены node-тестами).
         self.assertIn('{lead && (', self.groups)
         self.assertIn("api.get('/people/search')", self.groups)
         self.assertIn('if (!lead) return undefined;', self.groups)
+        self.assertIn('const body = groupRequestBody(form, { lead });', self.groups)
+        self.assertEqual(self.groups.count('onChange(stepCapacity(value, '), 2)
+        self.assertIn('onClick={() => onOpen(group)}', self.groups)
+        # «Новая группа» — только тем, кто вправе заводить группы; места перечитываются при изменении карточек.
+        self.assertIn('{caps.create_groups && (', self.groups)
+        self.assertIn('useEffect(() => { load(); }, [load, version]);', self.groups)
+        self.assertIn("if (codeOf(error) === 'HIRING_CAPACITY_BELOW_TAKEN') onStale(group?.id);", self.groups)
 
     def test_recruiter_sees_free_seats_when_inviting(self):
         self.assertIn("api.get('/groups', { pick: 1 })", self.sheet)
+        self.assertIn("if (!open || target !== 'invited_training') return;", self.sheet)
         self.assertIn("<GroupPicker groups={pickGroups} value={form.group_id} onChange={set('group_id')} />", self.sheet)
         self.assertIn('disabled={seats.full}', self.sheet)
         self.assertIn("if (codeOf(error) === 'HIRING_GROUP_FULL') {", self.sheet)
+        self.assertIn('setPickGroups((prev) => markGroupFull(prev, payload.group_id));', self.sheet)
+        self.assertIn("setForm((f) => ({ ...f, group_id: '' }));", self.sheet)
+        # Места не загрузились — честная пометка и «Повторить»; на телефоне список без своей прокрутки.
+        self.assertIn('{pickStale && (', self.sheet)
+        self.assertIn('sm:max-h-[272px] sm:overflow-y-auto', self.sheet)
         self.assertNotIn("boot.dictionaries?.groups || []).filter((g) => g.status === 'active');\n    const kind", self.sheet)
 
     def test_board_scrollbar_and_take_button(self):
@@ -146,11 +157,26 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('border: 5px solid transparent;', block)   # 13 − 2×5 = 3 px до наведения
         self.assertIn('.board-scroll::-webkit-scrollbar-thumb:hover', block)
         self.assertIn('border-width: 2px;', block)               # 13 − 2×2 = 9 px под курсором
-        # Кнопка пула — маленькая, в нижней строке, а не поверх карточки во всю ширину.
-        self.assertIn('className={`${TAKE_BTN} ${HOVER_REVEAL}`}', self.board)
-        self.assertIn("const TAKE_BTN = '-my-1 inline-flex h-6 shrink-0", self.board)
+        # «Темнее над доской» Chromium не перерисовывает и залипает — правила нет ни в одной теме.
+        theme = (ROOT / 'src' / 'theme-dark.css').read_text(encoding='utf-8')
+        self.assertNotIn('.board-scroll:hover::-webkit-scrollbar-thumb {', self.styles + theme)
+        # Кнопка пула — маленькая, в нижней строке, только у карточек пула и только тому, кто берёт в работу; щелчок по
+        # ней карточку не открывает, Enter на ней — тоже.
+        self.assertIn("const TAKE_BTN = 'hiring-take-btn';", self.board)
+        self.assertIn('{canTake && inPool ? (', self.board)
+        self.assertIn('<button type="button" onClick={(event) => { event.stopPropagation(); onTake(card); }}\n'
+                      '                            className={TAKE_BTN}>', self.board)
+        self.assertIn("if (event.key === 'Enter' && event.target === event.currentTarget) onOpen(card.id);", self.board)
         self.assertNotIn('absolute inset-x-3 bottom-3', self.board)
         self.assertNotIn('h-8 w-full items-center justify-center rounded-xl bg-blue-600', self.board)
+        # С мышью кнопка проявляется с задержкой и до этого невидима и щелчков не берёт (visibility), на сенсорном видна всегда.
+        take = self.styles[self.styles.index('.hiring-take-btn {'):]
+        take = take[:take.index('\n}\n', take.index('.group:focus-within .hiring-take-btn')) + 3]
+        self.assertIn('@media (hover: hover) {\n    .hiring-take-btn {\n        visibility: hidden;\n        opacity: 0;', take)
+        self.assertIn('.group:hover .hiring-take-btn,\n    .group:focus-within .hiring-take-btn {\n        visibility: visible;', take)
+        self.assertIn('opacity 0.12s ease 0.15s, visibility 0s linear 0.15s;', take)
+        self.assertIn('height: 24px;', take)
+        self.assertIn('html[data-otp-theme="dark"] .hiring-take-btn:hover {', theme)
 
 
 class TransitionTests(unittest.TestCase):
@@ -217,6 +243,9 @@ class TransitionTests(unittest.TestCase):
         self.assertEqual(rules.seats_free(3, 5), 0)
         self.assertEqual(rules.seats_free(10, None), 10)
         self.assertIsNone(rules.seats_free(None, 4))    # группа до 18.11.2026: вместимость не задана
+        # До приглашения на обучение карточка — работа рекрутера: тренер её не видит, даже если она помнит группу.
+        self.assertEqual(rules.TRAINER_HIDDEN_STAGES, ('contacts', 'responses', 'in_work', 'invited_office'))
+        self.assertFalse(set(rules.TRAINER_HIDDEN_STAGES) & set(rules.SEAT_STAGES))
 
     def test_parse_capacity(self):
         for raw, expected in ((12, 12), ('12', 12), (' 7 ', 7), (12.0, 12), (1, 1), (500, 500)):
@@ -279,11 +308,25 @@ class AccessTests(unittest.TestCase):
         self.assertFalse(access.can_edit_group(trainer, {'trainer_id': None}))
         self.assertTrue(access.can_edit_group(ctx(grant='lead'), {'trainer_id': 8}))
         self.assertTrue(access.can_edit_group(ctx(role='super_admin'), {'trainer_id': None}))
-        # Рекрутер и руководитель отдела групп не ведут — ни своих, ни чужих.
+        # Рекрутер и руководитель отдела групп не ведут; свою группу правит её тренер, кем бы он ни был по роли.
         self.assertFalse(access.can_manage_groups(ctx(grant='staff')))
-        self.assertFalse(access.can_edit_group(ctx(grant='staff'), {'trainer_id': 7}))
+        self.assertFalse(access.can_edit_group(ctx(grant='staff'), {'trainer_id': 8}))
+        self.assertTrue(access.can_edit_group(ctx(grant='staff'), {'trainer_id': 7}))
         self.assertFalse(access.can_manage_groups(ctx(role='admin', headed_ids=[9], vacancy_department_ids=[9])))
         self.assertTrue(access.capabilities(ctx(grant='lead'))['groups'])
+
+    def test_who_creates_groups(self):
+        # Новые группы — руководитель и роль «тренер». Тренер группы без роли (его назначил руководитель) свою
+        # группу ведёт, но новыми группами продлевать себе раздел не может (разбор 18.11.2026).
+        self.assertTrue(access.can_create_groups(ctx(role='trainer')))
+        self.assertTrue(access.can_create_groups(ctx(grant='lead')))
+        self.assertTrue(access.can_create_groups(ctx(role='super_admin')))
+        appointed = ctx(role='operator', trainer_group_ids=[4])
+        self.assertTrue(access.can_manage_groups(appointed) and not access.can_create_groups(appointed))
+        self.assertFalse(access.can_create_groups(ctx(grant='staff')))
+        caps = access.capabilities(appointed)
+        self.assertTrue(caps['groups'] and not caps['create_groups'])
+        self.assertTrue(access.capabilities(ctx(role='trainer'))['create_groups'])
 
     def test_fired_sees_nothing(self):
         self.assertFalse(access.can_open_section(ctx(role='super_admin', status='fired')))

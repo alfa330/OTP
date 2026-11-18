@@ -124,7 +124,8 @@ class HiringService:
         # (в списках их уже нет — queries.scope_clause, и по card_id не должно быть).
         if caps['recruiter'] and card.get('recruiter_id') and int(card['recruiter_id']) == int(ctx['user_id']):
             return True
-        if card.get('group_id') and int(card['group_id']) in set(caps['trainer_group_ids']):
+        if (card.get('group_id') and int(card['group_id']) in set(caps['trainer_group_ids'])
+                and card.get('stage') not in rules.TRAINER_HIDDEN_STAGES):
             return True
         if card.get('department_id') and int(card['department_id']) in set(caps['headed_ids']):
             return True
@@ -677,10 +678,10 @@ class HiringService:
 
     def groups(self, ctx, pick=False):
         """pick — выбор группы при приглашении на обучение: действующие группы всех тренеров с местами,
-        ближний старт сверху."""
+        сначала предстоящие (ближний старт сверху), уже начавшиеся — ниже."""
         with self._cursor() as cursor:
             if pick:
-                return queries.list_groups(cursor, active_only=True, soonest_first=True)
+                return queries.list_groups(cursor, active_only=True, soonest_first=True, today=self._now().date())
             return self._groups_of(cursor, ctx)
 
     def _group_fields(self, cursor, ctx, payload, *, creating):
@@ -700,10 +701,15 @@ class HiringService:
             fields['capacity'] = rules.parse_capacity(payload.get('capacity'))
             if fields['capacity'] is None:
                 raise HiringError('HIRING_BAD_CAPACITY', 'Вместимость — целое число от 1 до %d' % rules.GROUP_CAPACITY_MAX)
-        if 'vacancy_id' in payload:
+        if 'vacancy_id' in payload or (creating and not lead):
             fields['vacancy_id'] = _int(payload.get('vacancy_id'))
             if fields['vacancy_id'] and not queries.get_vacancy(cursor, fields['vacancy_id']):
                 raise HiringError('HIRING_NOT_FOUND', 'Вакансия не найдена', 404)
+            # Группе тренера вакансия обязательна: отдел группе назначает только руководитель, и кандидат без своей
+            # вакансии берёт её от группы, а с ней — отдел, чей руководитель подтверждает «Отработал 7 дней».
+            # Без неё подтвердить найм было бы некому (разбор 18.11.2026).
+            if not fields['vacancy_id'] and not lead:
+                raise HiringError('HIRING_NEED_VACANCY', 'Укажите вакансию группы — по ней кандидат попадёт в отдел найма')
         if not creating and 'status' in payload:
             if payload.get('status') not in ('active', 'done'):
                 raise HiringError('HIRING_BAD_GROUP', 'Группа бывает только «идёт» или «завершена»')
@@ -722,8 +728,9 @@ class HiringService:
         return fields
 
     def create_group(self, ctx, payload):
-        """Новая группа: название, старт, вместимость (обязательно), вакансия. Тренер заводит на себя."""
-        if not access.can_manage_groups(ctx):
+        """Новая группа: название, старт, вместимость (обязательно), вакансия (тренеру обязательна). Тренер заводит
+        группу на себя."""
+        if not access.can_create_groups(ctx):
             raise _forbidden('Группы заводят тренер и руководитель рекрутинга')
         now = self._now()
         with self._cursor() as cursor:
@@ -734,9 +741,8 @@ class HiringService:
             return self._groups_of(cursor, ctx)
 
     def edit_group(self, ctx, group_id, payload):
-        """Правка группы. Вместимость не меньше занятых мест: уменьшить можно до числа кандидатов в группе."""
-        if not access.can_manage_groups(ctx):
-            raise _forbidden('Группы ведут тренер и руководитель рекрутинга')
+        """Правка группы — руководитель любую, тренер свою. Вместимость не меньше занятых мест: уменьшить можно
+        до числа кандидатов в группе."""
         now = self._now()
         with self._cursor() as cursor:
             group = queries.get_group(cursor, group_id, lock=True)

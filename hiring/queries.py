@@ -38,7 +38,12 @@ _ACCESS_CONTEXT_SQL = """
            ARRAY(SELECT lower(h.code) FROM departments h
                   WHERE h.head_user_id = u.id AND COALESCE(h.is_active, TRUE) AND h.code IS NOT NULL),
            (SELECT p.kind FROM hiring_people p WHERE p.user_id = u.id AND p.is_active),
-           ARRAY(SELECT g.id FROM hiring_groups g WHERE g.trainer_id = u.id AND g.status = 'active'),
+           -- Группы тренера: действующие и завершённые, где ещё идёт обучение (приглашён / вышел на обучение) —
+           -- тренер завершил группу, а отметить выход на линию и отсев ему всё ещё нужно (разбор 18.11.2026).
+           ARRAY(SELECT g.id FROM hiring_groups g WHERE g.trainer_id = u.id
+                    AND (g.status = 'active' OR EXISTS (
+                        SELECT 1 FROM hiring_cards c WHERE c.group_id = g.id AND NOT c.is_closed
+                           AND c.stage IN ('invited_training', 'on_training')))),
            ARRAY(SELECT DISTINCT v.department_id FROM hiring_vacancies v
                   WHERE v.is_active AND v.department_id IS NOT NULL)
       FROM users u
@@ -294,10 +299,12 @@ def update_channel(cursor, channel_id, now, **fields):
     return _update('hiring_channels', channel_id, fields, allowed=('name', 'color', 'is_active', 'updated_at'), cursor=cursor)
 
 
-def list_groups(cursor, active_only=False, trainer_id=None, soonest_first=False):
+def list_groups(cursor, active_only=False, trainer_id=None, soonest_first=False, today=None):
     """Группы на обучение с местами: seats_taken — кандидаты, занявшие место (rules.SEAT_STAGES),
-    seats_free — сколько ещё войдёт (None, если вместимость не задана). soonest_first — ближний старт
-    сверху: так их видит рекрутер, выбирая группу; в списке тренера и руководителя — свежие сверху."""
+    seats_free — сколько ещё войдёт (None, если вместимость не задана). soonest_first — так их видит
+    рекрутер, выбирая группу: сначала предстоящие (ближний старт сверху), уже начавшиеся (today — дата
+    Алматы) — ниже, свежие сверху; иначе первой строкой стояла бы группа, которая учится вторую неделю
+    (разбор 18.11.2026). В списке тренера и руководителя — свежие сверху."""
     where = ["TRUE"]
     params = [list(rules.SEAT_STAGES)]
     if active_only:
@@ -305,7 +312,12 @@ def list_groups(cursor, active_only=False, trainer_id=None, soonest_first=False)
     if trainer_id:
         where.append("g.trainer_id = %s")
         params.append(int(trainer_id))
-    order = "g.start_date ASC, g.id ASC" if soonest_first else "g.start_date DESC, g.id DESC"
+    if soonest_first:
+        today = today or rules.now_almaty().date()
+        order = "(g.start_date < %s), CASE WHEN g.start_date >= %s THEN g.start_date END ASC, g.start_date DESC, g.id ASC"
+        params.extend([today, today])
+    else:
+        order = "g.start_date DESC, g.id DESC"
     cursor.execute("""
         SELECT g.id, g.name, g.start_date, g.trainer_id, t.name AS trainer_name, g.department_id,
                d.name AS department_name, g.vacancy_id, v.name AS vacancy_name, g.status, g.capacity,
@@ -1016,8 +1028,12 @@ def scope_clause(caps, user_id):
         parts.append("c.recruiter_id = %s")
         params.append(int(user_id))
     if caps.get('trainer_group_ids'):
-        parts.append("c.group_id = ANY(%s)")
+        # Тренеру — кандидаты группы с приглашения на обучение и дальше. Карточка, вернувшаяся в работу
+        # (повторная активация) или в пул, помнит старую группу, но тренеру её не видно — там телефон и
+        # чужая работа рекрутера (разбор 18.11.2026; то же правило — HiringService.visible).
+        parts.append("(c.group_id = ANY(%s) AND c.stage <> ALL(%s))")
         params.append([int(x) for x in caps['trainer_group_ids']])
+        params.append(list(rules.TRAINER_HIDDEN_STAGES))
     if caps.get('headed_ids'):
         parts.append("COALESCE(v.department_id, g.department_id) = ANY(%s)")
         params.append([int(x) for x in caps['headed_ids']])

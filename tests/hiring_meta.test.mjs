@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 
 import {
     CHANNEL_COLORS, CHANNEL_COLOR_CODES, GROUP_CAPACITY_MAX, ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES,
-    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, groupNameFor, groupSeats,
-    joinDateTime, longTime, matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor,
-    shiftMonth, shortTime, splitDateTime,
+    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, groupNameAfterStart, groupNameFor,
+    groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull, matchesQuery, monthLabel,
+    openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime, stepCapacity,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -119,6 +119,60 @@ test('group name follows the start date until the trainer types own', () => {
     assert.equal(groupNameFor('2026-11-24'), 'Группа 24.11');
     assert.equal(groupNameFor(''), '');
     assert.equal(groupNameFor(null), '');
+    assert.equal(groupNameAfterStart('', '2026-11-24', false), 'Группа 24.11');
+    assert.equal(groupNameAfterStart('Группа 24.11', '2026-12-01', false), 'Группа 01.12');
+    assert.equal(groupNameAfterStart('Вечерняя', '2026-12-01', true), 'Вечерняя');   // своё название дата не затирает
+});
+
+test('tabs by rights: trainer starts with «Группы» and has no reports', () => {
+    assert.deepEqual(hiringTabs({ groups: true, trainer: true }), ['groups', 'board']);
+    assert.deepEqual(hiringTabs({ groups: true, dept_head: true }), ['groups', 'board', 'reports']);
+    assert.deepEqual(hiringTabs({ recruiter: true, take: true }), ['desk', 'board', 'reports']);
+    assert.deepEqual(hiringTabs({ recruiter: true, lead: true, groups: true, upload: true, manage: true }),
+        ['desk', 'board', 'groups', 'reports', 'upload', 'settings']);
+    assert.deepEqual(hiringTabs({ recruiter: true, groups: true }), ['desk', 'board', 'groups', 'reports']);
+    assert.deepEqual(hiringTabs({ dept_head: true }), ['board', 'reports']);
+    assert.deepEqual(hiringTabs(), ['board']);
+});
+
+test('capacity stepper: «+» from empty puts the taken seats, «−» never goes below them', () => {
+    assert.equal(stepCapacity('', 1, 0), '1');
+    assert.equal(stepCapacity('', 1, 5), '5');
+    assert.equal(stepCapacity('', -1, 5), '');
+    assert.equal(stepCapacity('12', 1, 0), '13');
+    assert.equal(stepCapacity('12', -1, 0), '11');
+    assert.equal(stepCapacity('5', -1, 5), '5');
+    assert.equal(stepCapacity('1', -1, 0), '1');
+    assert.equal(stepCapacity(String(GROUP_CAPACITY_MAX), 1, 0), String(GROUP_CAPACITY_MAX));
+    assert.equal(stepCapacity('', 1, 900), String(GROUP_CAPACITY_MAX));
+});
+
+test('group request body: trainer sends no trainer and department, lead does', () => {
+    const form = { name: '  ', start_date: '2026-11-24', capacity: '12', vacancy_id: '3', trainer_id: '20', department_id: '367' };
+    assert.deepEqual(groupRequestBody(form, { lead: false }),
+        { name: 'Группа 24.11', start_date: '2026-11-24', capacity: 12, vacancy_id: 3 });
+    assert.deepEqual(groupRequestBody({ ...form, name: 'Вечерняя', vacancy_id: '' }, { lead: true }),
+        { name: 'Вечерняя', start_date: '2026-11-24', capacity: 12, vacancy_id: null, trainer_id: 20, department_id: 367 });
+    assert.deepEqual(groupRequestBody({ ...form, trainer_id: '', department_id: '' }, { lead: true }),
+        { name: 'Группа 24.11', start_date: '2026-11-24', capacity: 12, vacancy_id: 3, trainer_id: null, department_id: null });
+    assert.equal(groupRequestBody({ capacity: '' }).capacity, 0);   // пустая вместимость — 0: отказ даст проверка окна
+});
+
+test('group date: upcoming start vs already running', () => {
+    assert.equal(groupWhen({ start_date: '2026-11-24' }, '2026-11-18'), 'старт 24 ноября');
+    assert.equal(groupWhen({ start_date: '2026-11-18' }, '2026-11-18'), 'старт 18 ноября');
+    assert.equal(groupWhen({ start_date: '2026-11-05' }, '2026-11-18'), 'идёт с 5 ноября');
+    assert.equal(groupWhen({}, '2026-11-18'), '');
+});
+
+test('«no seats» from the server greys the group at once, even if seats cannot be re-read', () => {
+    const groups = [{ id: 1, capacity: 12, seats_taken: 11, seats_free: 1 }, { id: 2, capacity: null, seats_taken: 3 }];
+    const next = markGroupFull(groups, 1);
+    assert.equal(groupSeats(next[0]).full, true);
+    assert.equal(next[0].seats_taken, 12);
+    assert.equal(next[1], groups[1]);                        // остальные строки — те же объекты
+    assert.deepEqual(markGroupFull(groups, 2), groups);      // группа без вместимости полной не бывает
+    assert.deepEqual(markGroupFull(null, 1), []);
 });
 
 test('status «Недозвон / не ответил» covers WhatsApp, the call outcome stays «Недозвон»', () => {

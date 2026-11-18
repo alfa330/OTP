@@ -25,10 +25,10 @@ import { ChannelPill, FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, 
 // Колонка растёт, когда экран широкий (на большом мониторе все десять этапов без прокрутки), но не уже 236 px.
 const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
-// Кнопка пула: высотой 24 px в строке из 16 — отрицательные поля не дают ей раздвинуть карточку.
-const TAKE_BTN = '-my-1 inline-flex h-6 shrink-0 items-center rounded-full bg-blue-50 px-2.5 text-[12px] font-semibold text-blue-700 '
-    + 'ring-1 ring-blue-100 transition hover:bg-blue-600 hover:text-white hover:ring-blue-600 active:scale-[0.97] '
-    + 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70';
+// Кнопка пула — свой класс в styles.css (.hiring-take-btn), а не утилиты: с мышью она проявляется с задержкой и до
+// этого щелчков не берёт (быстрый щелчок в угол открывает карточку, а не берёт её), а тёмная тема перекрашивает
+// bg-blue-50/text-blue-700 через !important — синеть под курсором утилиты бы перестали.
+const TAKE_BTN = 'hiring-take-btn';
 const EMPTY_FILTERS = { vacancy_id: '', city: '', source_id: '', recruiter_id: '' };
 
 const readCollapsed = () => {
@@ -55,7 +55,8 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
             onClick={() => onOpen(card.id)}
             role="button"
             tabIndex={0}
-            onKeyDown={(event) => { if (event.key === 'Enter') onOpen(card.id); }}
+            // Enter — только на самой карточке: на кнопке внутри (взять, позвонить) он делает своё и карточку не открывает.
+            onKeyDown={(event) => { if (event.key === 'Enter' && event.target === event.currentTarget) onOpen(card.id); }}
         >
             <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -80,13 +81,16 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
                 {overdue && <Pill tone="red">просрочено</Pill>}
             </div>
             <div className="mt-2 flex items-center justify-between gap-2 text-[11.5px] tabular-nums text-slate-400">
-                <span className="shrink-0">{card.candidate_no ? `№${card.candidate_no}` : shortTime(card.received_at)}</span>
+                {/* Вернувшаяся в пул карточка помнит номер кандидата — дату поступления держим рядом с ним, справа кнопка. */}
+                <span className="shrink-0">
+                    {card.candidate_no ? `№${card.candidate_no}${inPool ? ` · ${shortTime(card.received_at)}` : ''}` : shortTime(card.received_at)}
+                </span>
                 {canTake && inPool ? (
                     /* «Взять в работу» — маленькой кнопкой в правом углу (владелец 18.11.2026: широкая кнопка во всю
                        карточку ловила щелчки, которыми открывали карточку). С мышью — по наведению, на сенсорном —
                        всегда; светлая, синеет только под самим курсором. */
                     <button type="button" onClick={(event) => { event.stopPropagation(); onTake(card); }}
-                            className={`${TAKE_BTN} ${HOVER_REVEAL}`}>
+                            className={TAKE_BTN}>
                         Взять в работу
                     </button>
                 ) : (

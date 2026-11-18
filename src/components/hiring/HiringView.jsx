@@ -9,7 +9,7 @@ import GroupsTab from './GroupsTab';
 import ReportsTab from './ReportsTab';
 import SettingsTab from './SettingsTab';
 import UploadTab from './UploadTab';
-import { errorOf } from './hiringMeta';
+import { errorOf, hiringTabs } from './hiringMeta';
 import { Loading } from './hiringUi';
 
 /*
@@ -140,18 +140,8 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     useEffect(() => { writeCardParam(openCardId); }, [openCardId]);
 
     const caps = boot?.capabilities || {};
-    // Тренеру (не рекрутеру и не руководителю) «Группы» — первой вкладкой: группы он ведёт сам, а доска —
-    // его кандидаты по этапам. Отчётов у тренера нет: там цифры рекрутеров, по нему они пустые.
-    const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);
-    const tabs = useMemo(() => [
-        trainerOnly && 'groups',
-        caps.recruiter && 'desk',
-        'board',
-        caps.groups && !trainerOnly && 'groups',
-        (caps.recruiter || caps.lead || caps.dept_head) && 'reports',
-        caps.upload && 'upload',
-        caps.manage && 'settings',
-    ].filter(Boolean), [trainerOnly, caps.recruiter, caps.lead, caps.dept_head, caps.groups, caps.upload, caps.manage]);
+    // Набор и порядок вкладок по правам — hiringTabs (тренеру «Группы» первой, отчётов у тренера нет).
+    const tabs = useMemo(() => hiringTabs(caps), [caps]);
     const active = tabs.includes(tab) ? tab : tabs[0];
     const chooseTab = (value) => {
         setTab(value);

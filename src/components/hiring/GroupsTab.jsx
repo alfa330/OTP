@@ -1,16 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Minus, Plus } from 'lucide-react';
+import { Minus, Plus, RefreshCw } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosModal, IosSegmented, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
-import { GROUP_CAPACITY_MAX, errorOf, groupNameFor, groupSeats, longTime } from './hiringMeta';
-import { DATE_TRIGGER, Empty, FIELD, Label, Loading, TOOLBAR_BTN_PRIMARY } from './hiringUi';
+import {
+    GROUP_CAPACITY_MAX, codeOf, errorOf, groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, stepCapacity,
+} from './hiringMeta';
+import { DATE_TRIGGER, Empty, FIELD, Label, Loading, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
 /*
- * Вкладка «Группы» — группы на обучение (владелец 18.11.2026): тренер сам заводит группу, задаёт старт и
- * вместимость; рекрутер, приглашая на обучение, видит в каждой группе свободные места, а в полную пригласить
- * не может. Тренер видит и правит свои группы, руководитель рекрутинга — все, он же назначает группе тренера
- * и отдел. Место занимает приглашённый и не отпавший кандидат: отказ до обучения и отсев место освобождают.
+ * Вкладка «Группы» — группы на обучение (владелец 18.11.2026): тренер сам заводит группу, задаёт старт, вместимость
+ * и вакансию; рекрутер, приглашая на обучение, видит в каждой группе свободные места, а в полную пригласить не может.
+ * Тренер видит и правит свои группы, руководитель рекрутинга — все, он же назначает группе тренера и отдел. Место
+ * занимает приглашённый и не отпавший кандидат: отказ до обучения и отсев место освобождают.
+ *
+ * Места меняются у всех сразу — рекрутеры приглашают, — поэтому список перечитывается при любом изменении карточек
+ * в разделе (version), по кнопке «Обновить» и после отказа сервера «меньше занятых мест».
  */
 
 const STATUS_FILTERS = { active: (group) => group.status === 'active', done: (group) => group.status !== 'active' };
@@ -18,11 +23,11 @@ const STATUS_FILTERS = { active: (group) => group.status === 'active', done: (gr
 const byStart = (a, b) => String(a.start_date).localeCompare(String(b.start_date)) || a.id - b.id;
 const SORTS = { active: byStart, done: (a, b) => byStart(b, a) };
 
-/* Карточка группы: название и старт, крупно — сколько мест занято, полоса заполненности. Цвет — только у
-   полной группы. */
+/* Карточка группы: название и когда, крупно — сколько мест занято, полоса заполненности. Цвет — только у полной
+   группы, обычная полоса нейтральная. */
 const GroupCard = ({ group, showTrainer, onOpen }) => {
     const seats = groupSeats(group);
-    const details = [`старт ${longTime(group.start_date)}`, showTrainer ? (group.trainer_name || 'без тренера') : null, group.vacancy_name]
+    const details = [groupWhen(group), showTrainer ? (group.trainer_name || 'без тренера') : null, group.vacancy_name]
         .filter(Boolean).join(' · ');
     return (
         <button type="button" onClick={() => onOpen(group)}
@@ -43,7 +48,7 @@ const GroupCard = ({ group, showTrainer, onOpen }) => {
                 </div>
                 {seats.capacity !== null && (
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
-                        <div className={`h-full rounded-full ${seats.full ? 'bg-amber-500' : 'bg-blue-500'}`}
+                        <div className={`h-full rounded-full ${seats.full ? 'bg-amber-500' : 'bg-slate-400'}`}
                              style={{ width: `${Math.round(seats.share * 100)}%` }} />
                     </div>
                 )}
@@ -52,22 +57,21 @@ const GroupCard = ({ group, showTrainer, onOpen }) => {
     );
 };
 
-/* Вместимость — степпером, как в «Настройках» iOS: «−», число, «+». Набрать с клавиатуры тоже можно. */
+/* Вместимость — степпером, как в «Настройках» iOS: «−», число, «+». Набрать с клавиатуры тоже можно. Шаг — stepCapacity:
+   из пустого поля «+» ставит число занятых мест, «−» не опускает ниже занятых. */
 const CapacityStepper = ({ value, onChange, min }) => {
     const number = Number(value) || 0;
-    const set = (next) => onChange(String(Math.min(GROUP_CAPACITY_MAX, Math.max(1, next))));
     return (
         <div className="flex items-center gap-3">
             <div className="inline-flex h-[42px] items-center rounded-xl bg-slate-100">
-                <button type="button" aria-label="Меньше" onClick={() => set(number - 1)} disabled={number <= Math.max(1, min)}
+                <button type="button" aria-label="Меньше" onClick={() => onChange(stepCapacity(value, -1, min))} disabled={number <= Math.max(1, min)}
                         className="grid h-full w-10 place-items-center rounded-l-xl text-slate-600 transition hover:bg-slate-200/70 active:scale-95 disabled:opacity-35">
                     <Minus size={15} />
                 </button>
                 <input value={value} inputMode="numeric" aria-label="Вместимость" placeholder="—"
                        onChange={(event) => onChange(event.target.value.replace(/\D/g, '').slice(0, 3))}
                        className="h-full w-14 bg-transparent text-center text-[16px] font-semibold tabular-nums text-slate-900 placeholder-slate-400 focus:outline-none" />
-                {/* Из пустого поля «+» ставит число занятых мест (не меньше 1): меньше указать всё равно нельзя. */}
-                <button type="button" aria-label="Больше" onClick={() => set(number ? number + 1 : Math.max(1, min))} disabled={number >= GROUP_CAPACITY_MAX}
+                <button type="button" aria-label="Больше" onClick={() => onChange(stepCapacity(value, 1, min))} disabled={number >= GROUP_CAPACITY_MAX}
                         className="grid h-full w-10 place-items-center rounded-r-xl text-slate-600 transition hover:bg-slate-200/70 active:scale-95 disabled:opacity-35">
                     <Plus size={15} />
                 </button>
@@ -79,26 +83,35 @@ const CapacityStepper = ({ value, onChange, min }) => {
 
 const emptyForm = { name: '', start_date: '', capacity: '', vacancy_id: '', trainer_id: '', department_id: '' };
 
-/* Окно группы: новая или правка. Тренер заводит группу на себя; тренера и отдел назначает руководитель. */
-const GroupModal = ({ open, group, onClose, api, toast, boot, lead, users, onSaved }) => {
+/* Окно группы: новая или правка. Тренер заводит группу на себя и обязан указать вакансию — по ней кандидат без своей
+   вакансии попадёт в отдел найма; тренера и отдел назначает руководитель. onStale — места устарели (сервер отказал
+   «меньше занятых»): вкладка перечитывает список и подставляет в окно свежую строку группы. */
+const GroupModal = ({ open, group, onClose, api, toast, boot, lead, users, onSaved, onStale }) => {
     const editing = Boolean(group?.id);
     const [form, setForm] = useState(emptyForm);
     // Пока название не трогали руками, оно идёт за датой старта: «Группа 24.11».
     const [nameTouched, setNameTouched] = useState(false);
     const [saving, setSaving] = useState('');
+    const vacancies = useMemo(() => (boot.dictionaries?.vacancies || []).filter((v) => v.is_active !== false), [boot]);
     useEffect(() => {
         if (!open) return;
-        setForm(group?.id ? {
-            name: group.name || '', start_date: group.start_date || '', capacity: group.capacity ? String(group.capacity) : '',
-            vacancy_id: group.vacancy_id ? String(group.vacancy_id) : '', trainer_id: group.trainer_id ? String(group.trainer_id) : '',
-            department_id: group.department_id ? String(group.department_id) : '',
-        } : emptyForm);
+        if (group?.id) {
+            setForm((prev) => (prev.__id === group.id ? prev : {
+                __id: group.id, name: group.name || '', start_date: group.start_date || '',
+                capacity: group.capacity ? String(group.capacity) : '', vacancy_id: group.vacancy_id ? String(group.vacancy_id) : '',
+                trainer_id: group.trainer_id ? String(group.trainer_id) : '', department_id: group.department_id ? String(group.department_id) : '',
+            }));
+        } else {
+            // Вакансия одна — тренеру не нужно выбирать то, из чего нечего выбрать.
+            setForm({ ...emptyForm, vacancy_id: !lead && vacancies.length === 1 ? String(vacancies[0].id) : '' });
+        }
         setNameTouched(Boolean(group?.id));
-    }, [open, group]);
+    }, [open, group, lead, vacancies]);
+    useEffect(() => { if (!open) setForm(emptyForm); }, [open]);
     const taken = editing ? groupSeats(group).taken : 0;
     const set = (key) => (value) => setForm((prev) => ({ ...prev, [key]: value?.target ? value.target.value : value }));
-    const setStart = (value) => setForm((prev) => ({ ...prev, start_date: value, name: nameTouched ? prev.name : groupNameFor(value) }));
-    const vacancies = (boot.dictionaries?.vacancies || []).filter((v) => v.is_active !== false || String(v.id) === form.vacancy_id);
+    const setStart = (value) => setForm((prev) => ({ ...prev, start_date: value, name: groupNameAfterStart(prev.name, value, nameTouched) }));
+    const vacancyOptions = (boot.dictionaries?.vacancies || []).filter((v) => v.is_active !== false || String(v.id) === form.vacancy_id);
     const departments = boot.dictionaries?.departments || [];
     // Тренеры — первыми: группу почти всегда ведёт человек с ролью «тренер», но назначить можно любого.
     const trainerOptions = useMemo(() => [
@@ -115,22 +128,18 @@ const GroupModal = ({ open, group, onClose, api, toast, boot, lead, users, onSav
             onClose();
         } catch (error) {
             toast(errorOf(error, 'Не удалось сохранить группу'), 'error');
+            if (codeOf(error) === 'HIRING_CAPACITY_BELOW_TAKEN') onStale(group?.id);
         } finally {
             setSaving('');
         }
     };
     const save = () => {
-        const name = form.name.trim() || groupNameFor(form.start_date);
-        const capacity = Number(form.capacity);
-        if (!form.start_date) return toast('Укажите дату старта', 'error');
-        if (!name) return toast('Укажите название группы', 'error');
-        if (!Number.isInteger(capacity) || capacity < 1 || capacity > GROUP_CAPACITY_MAX) return toast(`Вместимость — от 1 до ${GROUP_CAPACITY_MAX} человек`, 'error');
-        if (capacity < taken) return toast(`В группе уже ${taken} — вместимость не может быть меньше`, 'error');
-        const body = { name, start_date: form.start_date, capacity, vacancy_id: form.vacancy_id ? Number(form.vacancy_id) : null };
-        if (lead) {
-            body.trainer_id = form.trainer_id ? Number(form.trainer_id) : null;
-            body.department_id = form.department_id ? Number(form.department_id) : null;
-        }
+        const body = groupRequestBody(form, { lead });
+        if (!body.start_date) return toast('Укажите дату старта', 'error');
+        if (!body.name) return toast('Укажите название группы', 'error');
+        if (!Number.isInteger(body.capacity) || body.capacity < 1 || body.capacity > GROUP_CAPACITY_MAX) return toast(`Вместимость — от 1 до ${GROUP_CAPACITY_MAX} человек`, 'error');
+        if (body.capacity < taken) return toast(`В группе уже ${taken} — вместимость не может быть меньше`, 'error');
+        if (!lead && !body.vacancy_id) return toast('Укажите вакансию группы', 'error');
         return request('save', body);
     };
     const toggleStatus = () => request('status', { status: group.status === 'active' ? 'done' : 'active' });
@@ -170,9 +179,12 @@ const GroupModal = ({ open, group, onClose, api, toast, boot, lead, users, onSav
                     {taken > 0 && <div className="mt-1 text-[12px] text-slate-500">Сейчас в группе {taken} — меньше указать нельзя</div>}
                 </div>
                 <div>
-                    <Label hint="Кандидату без вакансии подставится вакансия группы.">Вакансия</Label>
-                    <CustomSelect variant="ios" value={form.vacancy_id} onChange={set('vacancy_id')} placeholder="Не указана"
-                                  options={[{ value: '', label: 'Не указана' }, ...vacancies.map((v) => ({ value: String(v.id), label: v.name }))]} />
+                    <Label required={!lead} hint="Кандидату без вакансии подставится вакансия группы, а с ней — отдел, чей руководитель подтверждает «Отработал 7 дней».">
+                        Вакансия
+                    </Label>
+                    <CustomSelect variant="ios" value={form.vacancy_id} onChange={set('vacancy_id')} placeholder={lead ? 'Не указана' : 'Выберите вакансию'}
+                                  invalid={!lead && !form.vacancy_id}
+                                  options={[...(lead ? [{ value: '', label: 'Не указана' }] : []), ...vacancyOptions.map((v) => ({ value: String(v.id), label: v.name }))]} />
                 </div>
                 {lead && (
                     <div className="grid gap-3 sm:grid-cols-2">
@@ -193,18 +205,25 @@ const GroupModal = ({ open, group, onClose, api, toast, boot, lead, users, onSav
     );
 };
 
-const GroupsTab = ({ api, toast, boot, caps, reloadBoot }) => {
+const GroupsTab = ({ api, toast, boot, caps, reloadBoot, version }) => {
     const lead = Boolean(caps.lead);
     const [items, setItems] = useState(null);
+    const [loadError, setLoadError] = useState('');
+    const [loading, setLoading] = useState(false);
     const [filter, setFilter] = useState('active');
     // null — окно закрыто; {} — новая группа; строка списка — её правка.
     const [editing, setEditing] = useState(null);
     const [users, setUsers] = useState([]);
 
-    const load = useCallback(() => api.get('/groups')
-        .then(({ data }) => setItems(data.items))
-        .catch((error) => { setItems([]); toast(errorOf(error, 'Группы не загрузились'), 'error'); }), [api, toast]);
-    useEffect(() => { load(); }, [load]);
+    const load = useCallback(() => {
+        setLoading(true);
+        return api.get('/groups')
+            .then(({ data }) => { setItems(data.items); setLoadError(''); return data.items; })
+            .catch((error) => { setLoadError(errorOf(error, 'Группы не загрузились')); return null; })
+            .finally(() => setLoading(false));
+    }, [api]);
+    // Места меняют и рекрутеры: перечитываем при любом изменении карточек в разделе (version растёт).
+    useEffect(() => { load(); }, [load, version]);
     // Список сотрудников — только руководителю: тренера группе назначает он.
     useEffect(() => {
         if (!lead) return undefined;
@@ -222,6 +241,12 @@ const GroupsTab = ({ api, toast, boot, caps, reloadBoot }) => {
         if (kind === 'status') toast(editing?.status === 'active' ? 'Группа завершена — рекрутеры её больше не выбирают' : 'Группа снова принимает кандидатов', 'success');
         else toast(editing?.id ? 'Группа сохранена' : 'Группа создана', 'success');
     };
+    // Места устарели, пока окно было открыто: свежий список и свежая строка группы в окне (минимум степпера, «Сейчас в группе»).
+    const onStale = async (groupId) => {
+        const fresh = await load();
+        const row = (fresh || []).find((group) => group.id === groupId);
+        if (row) setEditing(row);
+    };
 
     return (
         <div className="space-y-3">
@@ -230,11 +255,23 @@ const GroupsTab = ({ api, toast, boot, caps, reloadBoot }) => {
                     <IosSegmented value={filter} onChange={setFilter} ariaLabel="Какие группы"
                                   options={[{ value: 'active', label: 'Идут' }, { value: 'done', label: `Завершены · ${done}` }]} />
                 )}
-                <button type="button" className={`${TOOLBAR_BTN_PRIMARY} ml-auto`} onClick={() => setEditing({})}>
-                    <Plus size={14} /> Новая группа
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                    <button type="button" className={TOOLBAR_BTN} onClick={load} disabled={loading} aria-label="Обновить" title="Обновить">
+                        <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+                    </button>
+                    {caps.create_groups && (
+                        <button type="button" className={TOOLBAR_BTN_PRIMARY} onClick={() => setEditing({})}>
+                            <Plus size={14} /> Новая группа
+                        </button>
+                    )}
+                </div>
             </div>
-            {!items ? <Loading text="Загружаем группы…" /> : shown.length === 0 ? (
+            {!items ? (loadError ? (
+                <div className={`${iosCard} flex flex-col items-center gap-3 py-10 text-[13px] text-slate-600`}>
+                    {loadError}
+                    <button type="button" className={TOOLBAR_BTN} onClick={load} disabled={loading}>Повторить</button>
+                </div>
+            ) : <Loading text="Загружаем группы…" />) : shown.length === 0 ? (
                 <div className={iosCard}>
                     <Empty>{items.length === 0 ? 'Групп пока нет' : 'Действующих групп нет'}</Empty>
                 </div>
@@ -246,7 +283,7 @@ const GroupsTab = ({ api, toast, boot, caps, reloadBoot }) => {
                 </div>
             )}
             <GroupModal open={Boolean(editing)} group={editing} onClose={() => setEditing(null)} api={api} toast={toast} boot={boot}
-                        lead={lead} users={users} onSaved={onSaved} />
+                        lead={lead} users={users} onSaved={onSaved} onStale={onStale} />
         </div>
     );
 };

@@ -104,9 +104,14 @@ def can_manage(ctx):
 
 
 def can_manage_groups(ctx):
-    """Вкладка «Группы»: заводить группы на обучение и задавать их вместимость. Руководитель рекрутинга —
-    любые группы и любому тренеру, тренер — свои (владелец 18.11.2026)."""
+    """Вкладка «Группы»: руководитель рекрутинга — все группы, тренер — свои (владелец 18.11.2026)."""
     return is_lead(ctx) or is_trainer(ctx)
+
+
+def can_create_groups(ctx):
+    """Заводить новые группы — руководитель и роль «тренер». Тренер группы без этой роли (его назначил
+    руководитель) свою группу ведёт, но новыми группами продлевать себе раздел не может (разбор 18.11.2026)."""
+    return is_lead(ctx) or str(ctx.get('role') or '').strip().lower() == TRAINER_ROLE
 
 
 def can_edit_group(ctx, group):
@@ -114,7 +119,7 @@ def can_edit_group(ctx, group):
     if is_lead(ctx):
         return True
     trainer_id = (group or {}).get('trainer_id')
-    return is_trainer(ctx) and bool(trainer_id) and int(trainer_id) == int(ctx['user_id'])
+    return bool(trainer_id) and int(trainer_id) == int(ctx['user_id'])
 
 
 def can_see_all_motivation(ctx):
@@ -148,6 +153,7 @@ def capabilities(ctx):
         'add_response': can_add_response(ctx),
         'manage': can_manage(ctx),
         'groups': can_manage_groups(ctx),
+        'create_groups': can_create_groups(ctx),
         'reports': can_see_reports(ctx),
         'headed_ids': sorted(_headed_ids(ctx)),
         'trainer_group_ids': sorted({int(x) for x in (ctx.get('trainer_group_ids') or ())}),
