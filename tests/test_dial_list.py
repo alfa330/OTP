@@ -591,10 +591,11 @@ class LeadsJournalTests(unittest.TestCase):
                           'sign_wait'})
         # «База на паузе» (точечная обработка, 17.11.2026): тот же признак отметок файлов, что у пула, и раньше
         # «Ждёт повтора» и «В очереди» — водителя неотмеченного файла пул не выдаст.
-        from dial_list import batch_focus
+        from dial_list import batch_focus, pins
         in_work = batch_focus.in_work_sql("l")
         self.assertIn(in_work, dial_service.DialListService._POOL_SQL)
-        self.assertIn("WHEN NOT " + in_work + " THEN 'parked'", sql)
+        # Закреплённого за оператором (18.11.2026) выдают мимо отметок — на паузе он не бывает.
+        self.assertIn("WHEN NOT " + pins.department_pool_sql("l") + " THEN 'parked'", sql)
         self.assertLess(sql.index("THEN 'parked'"), sql.index("THEN 'waiting'"))
         # Подписавший — первым: из пула он ушёл (signed_at в _POOL_SQL), и «В очереди»
         # у него было бы неправдой (владелец, 29.09.2026). Сразу за ним — «на проверке у
@@ -731,9 +732,12 @@ class LeadsJournalTests(unittest.TestCase):
 
     def test_pool_is_limited_to_active_period(self):
         self.assertIn('AND l.period = %s', dial_service.DialListService._POOL_SQL)
-        for name in ('get_state', 'issue_next_portion', 'leads_summary'):
+        # Сводка отдела считает пул без оператора (закреплённые водители, pins.py) — тем же месяцем.
+        self.assertIn('AND l.period = %s', dial_service.DialListService._POOL_DEPARTMENT_COUNT_SQL)
+        for name, sql in (('get_state', '_POOL_SQL'), ('issue_next_portion', '_POOL_SQL'),
+                          ('leads_summary', '_POOL_DEPARTMENT_COUNT_SQL')):
             src = inspect.getsource(getattr(dial_service.DialListService, name))
-            self.assertIn('_POOL_SQL', src)
+            self.assertIn(sql, src)
             self.assertIn('_period', src, f'{name} зовёт пул без месяца')
 
     def test_period_parsing(self):
@@ -1497,7 +1501,8 @@ class OutcomeSubtypesTests(unittest.TestCase):
         columns = [c.strip() for c in dial_service.DialListService._JOURNAL_COLUMNS.split(',')]
         # Новые — в конце: типы итога, за ними подписание документов (29.09.2026), за ним —
         # что телефон сообщил о последнем звонке (12.10.2026), за ним — автообзвон Тез (15.10.2026),
-        # за ним — город и аккаунт водителя в TEZ APP для карточки (06.11.2026).
+        # за ним — город и аккаунт водителя в TEZ APP для карточки (06.11.2026), за ними — за кем водитель
+        # закреплён (18.11.2026, pins.py).
         self.assertEqual(columns[37:39], ['last_outcome_subtype_id', 'last_outcome_subtype_name'])
         self.assertEqual(columns[39:50], ['iin', 'sign_status', 'sign_checked_at', 'sign_error', 'signed_at',
                                           'success_attempt_id', 'success_operator_id', 'success_operator_name',
@@ -1505,7 +1510,8 @@ class OutcomeSubtypesTests(unittest.TestCase):
         self.assertEqual(columns[50:59], ['due_kind', 'owner_call_at', 'promised_online_at', 'owner_operator_id',
                                           'owner_operator_name', 'month_first_order_at', 'last_order_before_at',
                                           'trip_checked_at', 'driver_id'])
-        self.assertEqual(columns[59:], ['city', 'account_registered_at', 'account_checked_at'])
+        self.assertEqual(columns[59:62], ['city', 'account_registered_at', 'account_checked_at'])
+        self.assertEqual(columns[62:], ['pinned_operator_id', 'pinned_operator_name'])
         # stage, outcome, subtype, for_stage, for_outcome
         summary = [['answered', self.R, self.S1, 2, 3], ['answered', self.R, None, 1, 1],
                    ['exhausted', self.R, self.S2, 0, 2], ['queue', None, None, 5, 5],
@@ -2914,8 +2920,9 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         self.assertTrue(0 < call['budget_sec'] <= dial_service.SIGN_PRECHECK_BUDGET_SEC)
         self.assertEqual([c['in_tx'] for c in checker.calls], [False, False])     # Sapar — вне транзакций
         selects = cur.sql_with('SELECT l.id, l.iin, l.period')
-        # Порция 4 + запас max(5, 4 // 2) = 9; остальное — как у выдачи.
-        self.assertEqual([p for _, p in selects], [(self.DEP, self.PERIOD, 24, 3, 9)] * 2)
+        # Порция 4 + запас max(5, 4 // 2) = 9; остальное — как у выдачи, с оператором (закреплённые водители:
+        # свои — первыми, чужие — никогда; 18.11.2026).
+        self.assertEqual([p for _, p in selects], [(self.DEP, self.PERIOD, 24, 3, 7, 7, 9)] * 2)
         self.assertEqual({k: totals[k] for k in ('rounds', 'checked', 'signed', 'processing', 'stopped')},
                          {'rounds': 2, 'checked': 5, 'signed': 1, 'processing': 1, 'stopped': ''})
 

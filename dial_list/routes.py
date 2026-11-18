@@ -173,6 +173,10 @@ phone_event, outcome и mode — без замка: идущий разгово�
     PUT     /api/dial_list/departments/<id>/batches/focus    точечная обработка: {batch_ids, period?} — ровно
                                                              эти файлы обзваниваемого месяца «в работе»
                                                              (пусто — вся база); ответ — сводка базы
+    PUT     /api/dial_list/departments/<id>/leads/pin        закрепить водителей за оператором (pins.py):
+                                                             {operator_id, lead_ids[≤1000], note?};
+                                                             operator_id null — снять закрепление; ответ —
+                                                             сколько закреплено, снято со списков, пропущено
     GET     /api/dial_list/departments/<id>/analytics        дашборд базы месяца: воронка, дни, операторы,
                                                              проверка подписания (?period=)
     GET     /api/dial_list/departments/<id>/funnel           «Воронка ОП» Тез: база → уже зарегистрированы →
@@ -944,6 +948,28 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         summary = svc.set_batch_focus(department_id, data.get('batch_ids'), requester_id=requester_id,
                                       period=period)
         return jsonify({"status": "success", **summary}), 200
+
+    @bp.route('/api/dial_list/departments/<int:department_id>/leads/pin', methods=['PUT', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def leads_pin(department_id):
+        """Закрепить водителей за оператором (владелец, 18.11.2026; правило — pins.py): {operator_id, lead_ids,
+        note?}; operator_id null — снять закрепление. Право — то же, что у загрузки базы и «Исключить»."""
+        requester_id, _scope = _manager(department_id)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get('lead_ids'), list):
+            raise DialListError("Ожидается JSON-объект {operator_id, lead_ids: [...]}")
+        operator_id = data.get('operator_id')
+        if operator_id is not None:
+            try:
+                if isinstance(operator_id, bool):
+                    raise ValueError(operator_id)
+                operator_id = int(operator_id)
+            except (TypeError, ValueError):
+                raise DialListError("operator_id: ожидается id сотрудника или null")
+        result = svc.pin_leads(department_id, operator_id, data['lead_ids'], actor_id=requester_id,
+                               note=data.get('note', ''))
+        return jsonify({"status": "success", **result}), 200
 
     @bp.route('/api/dial_list/departments/<int:department_id>/analytics', methods=['GET', 'OPTIONS'])
     @require_api_key

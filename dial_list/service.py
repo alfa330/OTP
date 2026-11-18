@@ -140,6 +140,7 @@ from . import batch_focus
 from . import live_calls
 from . import month_base
 from . import pay
+from . import pins
 from . import sign_report
 from . import signing
 from .sign_check import IN_FLIGHT_STATES, SignChecker
@@ -1330,6 +1331,8 @@ RECALL_REFUSALS = {
     "not_own": "Позвонить ещё раз можно только водителю, которому последним звонили вы",
     "taken": "Этим водителем уже занимается другой оператор",
 }
+# Водитель закреплён за другим оператором (18.11.2026, pins.py): «Позвонить ещё раз» — отказ, звонит только свой.
+RECALL_PINNED_OTHER = "Водитель закреплён за другим оператором"
 # Водитель из базы отдела, где оператор работал раньше (13.10.2026): строка на вкладке итогов
 # остаётся, «Позвонить ещё раз» — нет (operator_worked).
 RECALL_OTHER_DEPARTMENT = "Водитель из другого отдела"
@@ -3170,12 +3173,13 @@ class DialListService:
             for row in cur.fetchall():
                 by_status[row[0]] = int(row[1])
                 without_iin += int(row[2] or 0)
-            # «Доступно сейчас» имеет смысл только для обзваниваемого месяца.
+            # «Доступно сейчас» имеет смысл только для обзваниваемого месяца. Без оператора: закреплённые
+            # водители в числе — их выдадут своему оператору (pins.py).
             pool = 0
             if period == active:
-                cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
+                cur.execute(self._POOL_DEPARTMENT_COUNT_SQL, (
                     department_id, active, settings["retry_after_hours"], settings["max_attempts"]))
-                pool = len(cur.fetchall())
+                pool = int(cur.fetchone()[0])
             # Файлы месяца — все (точечная обработка, 17.11.2026): отмеченные — первыми в выборку, чтобы
             # предел BATCHES_SHOWN_MAX их не отрезал; на экран — от новых к старым.
             cur.execute("""
@@ -3203,6 +3207,7 @@ class DialListService:
             } for r in batch_rows]
             # Точечная обработка: отмечено ли что-то и сколько водителей можно было бы выдать из неотмеченных
             # файлов — экран предупредит, что операторы стоят, а звонить есть кому (только обзваниваемый месяц).
+            # Закреплённый водитель на паузе не стоит: его выдают своему оператору мимо отметок (pins.py).
             focus_files = sum(1 for b in batches if b["focused"])
             paused_ready = 0
             if focus_files and period == active:
@@ -3210,7 +3215,7 @@ class DialListService:
                     SELECT COUNT(*) FROM dial_list_leads l
                     WHERE l.department_id = %s AND l.period = %s
                       AND""" + self._POOL_READY_SQL + """
-                      AND NOT """ + batch_focus.in_work_sql("l"), (
+                      AND NOT """ + pins.department_pool_sql("l"), (
                     department_id, period, settings["retry_after_hours"], settings["max_attempts"]))
                 paused_ready = int(cur.fetchone()[0])
             cur.execute("""
@@ -3885,8 +3890,9 @@ class DialListService:
                        WHEN l.status = 'done' THEN 'exhausted'
                        WHEN l.attempts_total >= %(max_attempts)s THEN 'exhausted'
                        -- Точечная обработка (17.11.2026): файл водителя не отмечен, а другие в месяце
-                       -- отмечены — пул его не выдаст, пока файл не отметят («База на паузе»).
-                       WHEN NOT """ + batch_focus.in_work_sql("l") + """ THEN 'parked'
+                       -- отмечены — пул его не выдаст, пока файл не отметят («База на паузе»). Закреплённого
+                       -- за оператором (18.11.2026, pins.py) выдают мимо отметок — на паузе он не бывает.
+                       WHEN NOT """ + pins.department_pool_sql("l") + """ THEN 'parked'
                        WHEN l.next_call_at IS NOT NULL AND l.next_call_at > CURRENT_TIMESTAMP THEN 'waiting'
                        WHEN l.last_attempt_at IS NOT NULL
                             AND l.last_attempt_at >= CURRENT_TIMESTAMP - make_interval(hours => %(retry_hours)s)
@@ -3897,9 +3903,14 @@ class DialListService:
                             l.last_attempt_at + make_interval(hours => %(retry_hours)s)) AS next_retry_at,
                    l.due_kind, l.owner_call_at, l.promised_online_at, l.owner_operator_id,
                    owu.name AS owner_operator_name, l.month_first_order_at, l.last_order_before_at,
-                   l.trip_checked_at, l.driver_id, l.city, l.account_registered_at, l.account_checked_at
+                   l.trip_checked_at, l.driver_id, l.city, l.account_registered_at, l.account_checked_at,
+                   -- За кем закреплён водитель (pins.py) — только пока закрепление в силе: оператор
+                   -- уволен или снят с линии — водитель снова общий, и в журнале закрепления нет.
+                   CASE WHEN """ + pins.pinned_sql("l") + """ THEN l.pinned_operator_id END AS pinned_operator_id,
+                   CASE WHEN """ + pins.pinned_sql("l") + """ THEN pnu.name END AS pinned_operator_name
             FROM dial_list_leads l
             LEFT JOIN users owu ON owu.id = l.owner_operator_id
+            LEFT JOIN users pnu ON pnu.id = l.pinned_operator_id
             LEFT JOIN dial_list_lead_batches fb ON fb.id = l.first_batch_id
             LEFT JOIN dial_list_lead_batches lb ON lb.id = l.last_batch_id
             LEFT JOIN LATERAL (
@@ -3946,7 +3957,8 @@ class DialListService:
                last_auto_hangup, last_talk_detected,
                due_kind, owner_call_at, promised_online_at, owner_operator_id, owner_operator_name,
                month_first_order_at, last_order_before_at, trip_checked_at, driver_id,
-               city, account_registered_at, account_checked_at"""
+               city, account_registered_at, account_checked_at,
+               pinned_operator_id, pinned_operator_name"""
     # Сколько колонок у строки журнала: сразу за ними идёт total (индекс не
     # зашит числом — иначе новая колонка молча сдвигала бы «всего» на rn).
     _JOURNAL_COLUMN_COUNT = len([c for c in _JOURNAL_COLUMNS.split(",") if c.strip()])
@@ -4048,6 +4060,8 @@ class DialListService:
                                      r[46], r[47]),
             # Город — колонка «город» файла базы (или «Города по ИИН»); '' — не указан.
             "city": (r[59] or "").strip(),
+            # За кем закреплён водитель (pins.py), пока закрепление в силе; иначе None.
+            "pinned_operator": {"id": int(r[62]), "name": r[63] or ""} if r[62] is not None else None,
         }
         if tez:
             # Автообзвон Тез (15.10.2026): этапы со своими подписями («Вышел на линию»), срок
@@ -4569,6 +4583,156 @@ class DialListService:
             self._log_lead_event(cur, lead_id, row[0], actor_id, "note", note)
         return self.lead_card(lead_id)
 
+    # ------------------------------------------------------------ закреплённые водители (pins.py)
+    # Почему водителя не закрепили — ключ ответа pin_leads → подпись.
+    PIN_SKIPS = {
+        "not_found": "нет в базе отдела",
+        "other_month": "не из обзваниваемого месяца",
+        "signed": "уже подписал",
+        "excluded": "исключён из обзвона",
+        "no_phone": "нет номера",
+        "calling": "другой оператор звонит ему прямо сейчас — повторите позже",
+        "unchanged": "и так не закреплён",
+    }
+
+    def _pinned_to_other(self, cur, lead_id, operator_id):
+        """Водитель закреплён за ДРУГИМ оператором, и закрепление в силе (pins.py). В транзакции вызывающего."""
+        cur.execute("SELECT 1 FROM dial_list_leads l WHERE l.id = %s AND l.pinned_operator_id <> %s AND "
+                    + pins.pinned_sql("l"), (str(lead_id), int(operator_id)))
+        return cur.fetchone() is not None
+
+    def pin_leads(self, department_id, operator_id, lead_ids, actor_id=None, note=""):
+        """Закрепить водителей базы отдела за оператором (pins.py) или снять закрепление (operator_id None).
+
+        Закрепить можно за тем, кто работает в отделе сейчас (_active_member — то же правило, по которому
+        закрепление действует в пуле), и только водителя ОБЗВАНИВАЕМОГО месяца, который не подписал (и не «на
+        проверке у Яндекса»), не исключён и с номером. Строку водителя в списке другого оператора снимаем, как
+        «Исключить» (_close_row); во время идущего звонка водитель пропускается («calling») — повторить позже.
+        Попытки обнуляются, обработанный снова в обзвоне — как «Вернуть в список»: у оператора свой круг звонков.
+        Уже закреплённый за ним же — без изменений («kept»): повторный запуск ничего не обнуляет. В журнал
+        водителя — событие «Вернули в список» с пометкой, за кем закреплён.
+
+        Снять: закрепление стирается, статус и попытки не трогаются — водитель снова общий.
+
+        Каждый водитель — своей транзакцией под замком строки: за время обхода его могли выдать, исключить или он
+        подписал. Ответ — сколько закреплено, снято со списков других операторов, уже было, снято закрепление, и
+        пропущенные по причинам (PIN_SKIPS)."""
+        department_id = int(department_id)
+        ids = []
+        for raw in lead_ids or []:
+            try:
+                ids.append(str(uuid.UUID(str(raw))))
+            except (ValueError, AttributeError, TypeError):
+                raise DialListError("lead_ids: ожидаются id водителей журнала")
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            raise DialListError("lead_ids: укажите водителей")
+        if len(ids) > pins.PIN_BATCH_MAX:
+            raise DialListError(f"lead_ids: не больше {pins.PIN_BATCH_MAX} водителей за раз")
+        settings = self.department_settings(department_id)
+        if not settings.get("configured"):
+            raise DialListError("Отдел не подключён к разделу", 404)
+        if is_tez(settings):
+            raise DialListError("Закрепление водителей — только в удалённом КЦ", 409)
+        note = str(note or "").strip()[:300]
+        operator_name = ""
+        if operator_id is not None:
+            operator_id = int(operator_id)
+            with self.db._get_cursor() as cur:
+                if not self._active_member(cur, operator_id, department_id):
+                    raise DialListError("Оператор не работает в этом отделе: не сотрудник отдела и не сидит на его "
+                                        "линии", 409)
+                cur.execute("SELECT name FROM users WHERE id = %s", (operator_id,))
+                found = cur.fetchone()
+                operator_name = (found[0] if found else "") or f"№ {operator_id}"
+        result = {"operator_id": operator_id, "operator_name": operator_name, "requested": len(ids),
+                  "pinned": 0, "taken_from_lists": 0, "kept": 0, "unpinned": 0, "skipped": {}}
+        for lead_id in ids:
+            try:
+                how = self._pin_one(department_id, settings["_period"], lead_id, operator_id, operator_name,
+                                    actor_id, note)
+            except psycopg2.errors.DeadlockDetected:
+                # Встреча с выдачей или финалом звонка того же водителя: его транзакция откатилась целиком.
+                how = "calling"
+            if how in ("pinned", "pinned_taken"):
+                result["pinned"] += 1
+                result["taken_from_lists"] += how == "pinned_taken"
+            elif how in ("kept", "unpinned"):
+                result[how] += 1
+            else:
+                result["skipped"][how] = result["skipped"].get(how, 0) + 1
+        result["skipped_labels"] = {k: self.PIN_SKIPS.get(k, k) for k in result["skipped"]}
+        log.info("dial_list: закрепление в отделе %s за оператором %s (руководитель %s): водителей %d, закреплено %d "
+                 "(снято со списков %d), уже было %d, снято закрепление %d, пропущено %s", department_id,
+                 operator_id, actor_id, len(ids), result["pinned"], result["taken_from_lists"], result["kept"],
+                 result["unpinned"], result["skipped"] or "0")
+        return result
+
+    def _pin_one(self, department_id, period, lead_id, operator_id, operator_name, actor_id, note):
+        """Один водитель pin_leads — своей транзакцией → pinned | pinned_taken | kept | unpinned | ключ PIN_SKIPS.
+        Порядок замков — как у «Исключить» (exclude_lead): строка водителя, затем его открытая строка выдачи."""
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                SELECT department_id, period, status, signed_at, sign_status, phone_norm, pinned_operator_id
+                FROM dial_list_leads WHERE id = %s FOR UPDATE
+            """, (lead_id,))
+            row = cur.fetchone()
+            if not row or int(row[0]) != department_id:
+                return "not_found"
+            if row[1] != period:
+                return "other_month"
+            current = row[6]
+            if operator_id is None:
+                if current is None:
+                    return "unchanged"
+                cur.execute("""
+                    UPDATE dial_list_leads
+                    SET pinned_operator_id = NULL, pinned_at = NULL, pinned_by = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (lead_id,))
+                self._log_lead_event(cur, lead_id, department_id, actor_id, "note",
+                                     "Закрепление за оператором снято" + (f": {note}" if note else ""))
+                return "unpinned"
+            if current is not None and int(current) == operator_id:
+                return "kept"
+            if row[3] is not None or row[4] == signing.PROCESSING:
+                return "signed"
+            if row[2] == "excluded":
+                return "excluded"
+            if is_report_only_phone(row[5]):
+                return "no_phone"
+            cur.execute("""
+                SELECT a.id, a.operator_id FROM dial_list_assignments a
+                WHERE a.lead_id = %s AND a.state = 'issued' FOR UPDATE
+            """, (lead_id,))
+            open_row = cur.fetchone()
+            mine_open = bool(open_row) and int(open_row[1]) == operator_id
+            taken = False
+            if open_row and not mine_open:
+                # Звонок по строке ещё идёт или его исход едет от АТС (ended): снимать нельзя — исход закрыл бы
+                # водителя уже после закрепления (разговор = «обработан», и свой оператор его бы не получил).
+                cur.execute("""
+                    SELECT 1 FROM dial_list_attempts
+                    WHERE assignment_id = %s AND state IN ('requested', 'leg_ringing', 'leg_answered', 'ended')
+                """, (str(open_row[0]),))
+                if cur.fetchone():
+                    return "calling"
+                self._close_row(cur, open_row[0])
+                taken = True
+            # Строка уже в его списке — счётчик и статус не трогаем: она и так звонится.
+            cur.execute("""
+                UPDATE dial_list_leads
+                SET pinned_operator_id = %(operator_id)s, pinned_at = CURRENT_TIMESTAMP, pinned_by = %(actor_id)s,
+                    status = CASE WHEN %(keep)s THEN status ELSE 'new' END,
+                    attempts_total = CASE WHEN %(keep)s THEN attempts_total ELSE 0 END,
+                    last_attempt_at = CASE WHEN %(keep)s THEN last_attempt_at ELSE NULL END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %(lead_id)s
+            """, {"operator_id": operator_id, "actor_id": actor_id, "keep": mine_open, "lead_id": lead_id})
+            self._log_lead_event(cur, lead_id, department_id, actor_id, "requeue",
+                                 f"Закреплён за оператором {operator_name}" + (f": {note}" if note else ""))
+            return "pinned_taken" if taken else "pinned"
+
     # ------------------------------------------------------------ починка: разговоры, оборванные автосбросом
     # 12.10.2026 автосброс выпущенного телефона 3.22.33 обрывал живые разговоры: ответ Binotel на
     # вопрос «класть ли плечо» не успевал за пять секунд или был «нет данных», и телефон клал
@@ -4798,6 +4962,10 @@ class DialListService:
     # Точечная обработка (владелец, 17.11.2026, batch_focus.py): отмечен хоть один файл базы месяца —
     # только водители отмеченных файлов. Условие — внутри этого же текста: им пользуются и выдача, и
     # подсчёт, и проверки перед выдачей, и «В очереди» журнала (_JOURNAL_BASE_SQL).
+    # Закреплённые водители (владелец, 18.11.2026, pins.py): пул ОПЕРАТОРА — свои закреплённые первыми и
+    # мимо отметок файлов, чужие закреплённые — никогда, общие — как раньше. Поэтому у _POOL_SQL есть
+    # оператор: параметры — отдел, месяц, часы повтора, предел попыток, оператор, оператор (порядок «свои
+    # первыми»), предел строк. Сводка отдела считает без оператора (_POOL_DEPARTMENT_COUNT_SQL).
     # _POOL_READY_SQL — те же условия без месяца и без отметок файлов: «водителя можно выдать прямо
     # сейчас». Параметры — retry_after_hours, max_attempts. По нему же сводка базы считает, сколько
     # можно выдать из каждого файла (_BATCH_PROGRESS_SQL) — одни правила для выдачи и для экрана.
@@ -4817,9 +4985,20 @@ class DialListService:
         WHERE l.department_id = %s
           AND l.period = %s
           AND""" + _POOL_READY_SQL + """
-          AND """ + batch_focus.in_work_sql("l") + """
-        ORDER BY l.attempts_total ASC, l.last_attempt_at ASC NULLS FIRST, l.created_at ASC
+          AND """ + pins.pool_sql("l", "%s") + """
+        ORDER BY COALESCE(l.pinned_operator_id = %s, FALSE) DESC,
+                 l.attempts_total ASC, l.last_attempt_at ASC NULLS FIRST, l.created_at ASC
         LIMIT %s {lock}
+    """
+    # «Доступно сейчас» сводки отдела: кому-то из операторов выдадут — закреплённого в силе (своему), общего —
+    # по отметкам файлов (pins.department_pool_sql). Параметры — отдел, месяц, часы повтора, предел попыток.
+    _POOL_DEPARTMENT_COUNT_SQL = """
+        SELECT COUNT(*)
+        FROM dial_list_leads l
+        WHERE l.department_id = %s
+          AND l.period = %s
+          AND""" + _POOL_READY_SQL + """
+          AND """ + pins.department_pool_sql("l") + """
     """
     # Прогресс каждого файла базы месяца (точечная обработка, 17.11.2026): водители файла (batch_focus — все
     # его файлы: первая и последняя загрузки и записи загрузок), вышли на линию / подписали, ещё в обзвоне,
@@ -5182,8 +5361,10 @@ class DialListService:
                     if direct:
                         active["phone"] = self._lead_phone_display(cur, active["lead_id"])
             offers = self._offer_rows(cur, ctx["department_id"], active_only=True) if tez else []
+            # «В базе ещё» — пул ЭТОГО оператора: свои закреплённые и общие, без чужих закреплённых (pins.py).
             cur.execute(self._POOL_SQL.format(lock="").replace("LIMIT %s", ""), (
-                ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"]))
+                ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"],
+                ctx["user_id"], ctx["user_id"]))
             pool = len(cur.fetchall())
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
             pending_outcome = self._pending_outcome(cur, ctx["user_id"]) if outcomes else None
@@ -5936,7 +6117,7 @@ class DialListService:
         settings = ctx["settings"]
         size = int(settings["portion_size"])
         params = (ctx["department_id"], settings["_period"], settings["retry_after_hours"],
-                  settings["max_attempts"], size + max(5, size // 2))
+                  settings["max_attempts"], ctx["user_id"], ctx["user_id"], size + max(5, size // 2))
         checker = self.sign_checker
         totals = {"rounds": 0, "checked": 0, "signed": 0, "processing": 0, "errors": 0, "systemic": 0,
                   "stopped": "" if checker.configured() else "not_configured"}
@@ -6042,7 +6223,7 @@ class DialListService:
                                     (portion["id"],))
                     cur.execute(self._POOL_SQL.format(lock="FOR UPDATE SKIP LOCKED"), (
                         ctx["department_id"], settings["_period"], settings["retry_after_hours"],
-                        settings["max_attempts"], settings["portion_size"]))
+                        settings["max_attempts"], ctx["user_id"], ctx["user_id"], settings["portion_size"]))
                     lead_ids = [str(r[0]) for r in cur.fetchall()]
                     if not lead_ids:
                         raise DialListError("Список пуст: водителей для обзвона сейчас нет", 404)
@@ -6113,6 +6294,9 @@ class DialListService:
                     assignment_id = str(row[3])
                 elif verdict != RECALL_OK:
                     raise DialListError(RECALL_REFUSALS[verdict], 409)
+                elif self._pinned_to_other(cur, lead_id, ctx["user_id"]):
+                    # Последним звонил этот оператор, но руководитель закрепил водителя за другим (pins.py).
+                    raise DialListError(RECALL_PINNED_OTHER, 409)
                 else:
                     assignment_id, how = self._recall_row(cur, ctx, lead_id)
         except psycopg2.errors.UniqueViolation:
@@ -8787,7 +8971,7 @@ class DialListService:
         with self.db._get_cursor() as cur:
             cur.execute(self._POOL_SQL.format(lock=""), (
                 ctx["department_id"], settings["_period"], settings["retry_after_hours"], settings["max_attempts"],
-                size + max(5, size // 2)))
+                ctx["user_id"], ctx["user_id"], size + max(5, size // 2)))
             ids = [str(r[0]) for r in cur.fetchall()]
         summary = self.trip_checker.check_now(ids, fresh_minutes=TRIP_PRECHECK_FRESH_MINUTES,
                                               timeout=TRIP_PRECHECK_TIMEOUT_SEC, budget_sec=TRIP_PRECHECK_BUDGET_SEC)

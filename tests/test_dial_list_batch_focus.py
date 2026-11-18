@@ -50,8 +50,12 @@ class BatchFocusSqlTests(unittest.TestCase):
             self.assertIn(IN_WORK, getattr(S, name), name)
         # Выдача, подсчёт и проверка подписания перед выдачей — один текст; форматирование не ломается.
         self.assertIn(IN_WORK, S._POOL_SQL.format(lock='FOR UPDATE SKIP LOCKED'))
-        self.assertEqual(S._POOL_SQL.count('%s'), 5)          # отдел, месяц, часы повтора, попыток, предел
+        # отдел, месяц, часы повтора, попыток, оператор (закреплённые, pins.py), оператор (свои — первыми), предел
+        self.assertEqual(S._POOL_SQL.count('%s'), 7)
         self.assertIn(S._POOL_READY_SQL, S._POOL_SQL)
+        # Сводка отдела — без оператора, с теми же отметками для общих водителей.
+        self.assertIn(IN_WORK, S._POOL_DEPARTMENT_COUNT_SQL)
+        self.assertEqual(S._POOL_DEPARTMENT_COUNT_SQL.count('%s'), 4)
 
     def test_progress_ignores_marks_but_uses_pool_rules_and_month_base(self):
         # «Можно выдать сейчас» у файла — «если отметить этот файл»: без отметок, по правилам пула (тот же текст,
@@ -105,7 +109,10 @@ class BatchFocusSqlTests(unittest.TestCase):
     def test_journal_parks_only_those_the_pool_would_have_given(self):
         sql = S._JOURNAL_BASE_SQL
         parked = sql.index("THEN 'parked'")
-        self.assertIn('WHEN NOT ' + IN_WORK + " THEN 'parked'", sql)
+        # Закреплённый за оператором (18.11.2026, pins.py) на паузе не бывает: его выдают мимо отметок.
+        from dial_list import pins
+        self.assertIn('WHEN NOT ' + pins.department_pool_sql("l") + " THEN 'parked'", sql)
+        self.assertIn(IN_WORK, pins.department_pool_sql("l"))
         # Конечные этапы и свои сроки — раньше «паузы»: их пул не выдаёт и без отметок.
         for earlier in ("THEN 'signed'", "THEN 'sign_wait'", "THEN 'excluded'", "THEN 'issued'", "THEN 'callback'",
                         "THEN 'followup'", "THEN 'answered'"):

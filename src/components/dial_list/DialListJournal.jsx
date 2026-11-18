@@ -16,6 +16,7 @@ import { buildPeriodOptions, monthLabel } from './dialListPeriods';
 import { SIGN_FILTER_OPTIONS, signMeta } from './signStatus';
 import { operatorsForFilter } from './linePicker';
 import { PARKED_STAGE } from './batchFocus';
+import { responsibleOf, responsibleSub } from './leadPin';
 import {
     PROFILE_TEZ, TEZ_STAGES, WA_STATUS_LABEL, attemptDueText, attemptModeText, leadDue, normalizeProfile,
     registrationLabel, tezStageLabel, tezSuccessText, tripLabel,
@@ -333,7 +334,9 @@ const LeadRow = ({ lead, onOpen, showMonth, tez = false }) => {
     const stageLabel = tez ? tezStageLabel(lead) : lead.stage_label;
     // Срок перезвона или дожима наступил — пора звонить: подробность янтарная (цвет со смыслом).
     const detailTone = tez && leadDue(lead)?.overdue ? 'text-amber-600' : 'text-slate-500';
-    const operatorSub = lead.responsible_is_current ? 'в списке сейчас' : fmtWhen(lead.last_call?.at);
+    // Ответственный: в списке сейчас → за кем закреплён (leadPin.js) → кто звонил последним.
+    const responsible = responsibleOf(lead);
+    const operatorSub = responsibleSub(responsible, fmtWhen(lead.last_call?.at));
     const name = lead.full_name || 'Без имени';
     return (
         <button
@@ -403,8 +406,8 @@ const LeadRow = ({ lead, onOpen, showMonth, tez = false }) => {
                 {lead.comment && <div className="mt-0.5 truncate text-[12px] text-slate-500" title={lead.comment}>{lead.comment}</div>}
             </div>
             <div className="hidden min-w-0 lg:block">
-                {lead.responsible && <div className="truncate text-[13px] text-slate-800">{lead.responsible.name}</div>}
-                {lead.responsible && operatorSub && <div className="truncate text-[12px] text-slate-500">{operatorSub}</div>}
+                {responsible.person && <div className="truncate text-[13px] text-slate-800">{responsible.person.name}</div>}
+                {responsible.person && operatorSub && <div className="truncate text-[12px] text-slate-500">{operatorSub}</div>}
             </div>
             <ChevronRight size={14} className="hidden text-slate-300 lg:block" />
         </button>
@@ -1146,9 +1149,9 @@ const LeadSheet = ({
                                 <div className="ml-4 divide-y divide-slate-100">
                                     <InfoRow
                                         label="Ответственный"
-                                        sub={lead.responsible ? (lead.responsible_is_current ? 'в списке сейчас' : 'по последнему звонку') : ''}
+                                        sub={responsibleSub(responsibleOf(lead), 'по последнему звонку')}
                                     >
-                                        {lead.responsible?.name || <span className="text-slate-400">ещё не выдавался</span>}
+                                        {responsibleOf(lead).person?.name || <span className="text-slate-400">ещё не выдавался</span>}
                                     </InfoRow>
                                     <InfoRow
                                         label="База"

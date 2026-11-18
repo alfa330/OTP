@@ -25,6 +25,8 @@ oktell_guard. Порядок внутри: CREATE TABLE → ALTER → CREATE IND
                                    звонили, дозвонились ли. Номер уникален в
                                    пределах отдела: у каждого отдела-обзвонщика
                                    свои списки (решение владельца 22.09.2026).
+                                   pinned_operator_id — водитель закреплён за
+                                   оператором (pins.py).
     dial_list_portions             выдача: кому, когда, сколько строк, когда
                                    закрыта (все строки обработаны).
     dial_list_assignments          строка выдачи: лид → оператор; состояние
@@ -566,6 +568,14 @@ DDL = [
         PRIMARY KEY (batch_id, lead_id)
     )
     """,
+    # Закреплённые водители (владелец, 18.11.2026; правило — pins.py): водитель выдаётся только оператору
+    # pinned_operator_id — первым в его списке и мимо отметок файлов, остальным — никогда, пока тот работает в
+    # отделе. pinned_at / pinned_by — когда и кто закрепил. FK на users нет намеренно, как у focused_by: стартовый
+    # DDL не должен ждать блокировку users. Индекса нет: пул и так читает всю базу месяца отдела, а закреплённых —
+    # сотни из десятков тысяч.
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_operator_id INTEGER",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMP WITH TIME ZONE",
+    "ALTER TABLE dial_list_leads ADD COLUMN IF NOT EXISTS pinned_by INTEGER",
     # Индексов по отметкам проверок (sign_checked_at, trip_checked_at) нет НАМЕРЕННО.
     # Отметку пишет каждая проверка подписи и поездок — у каждого неподписавшего раз в
     # час-три, ~100 тыс. обновлений в сутки. Пока отметка стояла в индексе, обновление было
