@@ -74,9 +74,11 @@ def _ctx(uid, profile='remote_cc'):
 
 class LineGuardBlockTests(unittest.TestCase):
     def test_defaults(self):
-        """Линию занимать, отказ повторять дважды, неподтверждённое плечо класть через 4 с."""
+        """Линию занимать, отказ повторять дважды. Неподтверждённое плечо НЕ класть: проба на АТС
+        18.11.2026 показала, что BYE телефона она не слушает и ждёт свои 30 с, а плечи, которые
+        соединяются с опозданием, сброс оборвал бы."""
         block = guard()
-        self.assertEqual(block, {"claim": True, "retries": 2, "no_ack_drop_sec": 4})
+        self.assertEqual(block, {"claim": True, "retries": 2, "no_ack_drop_sec": 0})
         # Типы — как их читает телефон.
         self.assertIs(type(block["claim"]), bool)
         self.assertIs(type(block["retries"]), int)
@@ -90,6 +92,7 @@ class LineGuardBlockTests(unittest.TestCase):
         self.assertEqual(guard({dial_service.LINE_RETRIES_ENV: '1'})["retries"], 1)
         # 0 — не класть; меньше трёх секунд нельзя: ответ на плечо к этому времени ушёл всего дважды.
         self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: '0'})["no_ack_drop_sec"], 0)
+        self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: '4'})["no_ack_drop_sec"], 4)
         self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: '1'})["no_ack_drop_sec"], 3)
         self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: '7'})["no_ack_drop_sec"], 7)
 
@@ -97,7 +100,7 @@ class LineGuardBlockTests(unittest.TestCase):
         self.assertEqual(guard({dial_service.LINE_RETRIES_ENV: 'много'})["retries"], 2)
         self.assertEqual(guard({dial_service.LINE_RETRIES_ENV: '99'})["retries"], 3)
         self.assertEqual(guard({dial_service.LINE_RETRIES_ENV: '-5'})["retries"], 0)
-        self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: 'x'})["no_ack_drop_sec"], 4)
+        self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: 'x'})["no_ack_drop_sec"], 0)
         self.assertEqual(guard({dial_service.NO_ACK_DROP_ENV: '600'})["no_ack_drop_sec"], 15)
 
 
@@ -117,7 +120,7 @@ class StateCarriesGuardTests(unittest.TestCase):
         for profile, version in (('remote_cc', '3.22.59'), ('remote_cc', '3.22.58'), ('remote_cc', None),
                                  ('tez', '3.22.45')):
             state = self._state(profile, version)
-            self.assertEqual(state["line_guard"], {"claim": True, "retries": 2, "no_ack_drop_sec": 4},
+            self.assertEqual(state["line_guard"], {"claim": True, "retries": 2, "no_ack_drop_sec": 0},
                              (profile, version))
 
     def test_direct_dial_has_no_leg_and_no_block(self):
