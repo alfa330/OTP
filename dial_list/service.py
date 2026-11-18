@@ -643,6 +643,55 @@ def no_active_enabled():
     return (os.getenv(NO_ACTIVE_ENV) or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+# Защита линии (владелец 18.11.2026: «много подобных ошибок… операторы теряют время»). За 17–18.11
+# «Линия не на связи» получал каждый пятый запрос звонка удалённого КЦ (715 из 3 297 и 409 из 2 214).
+# По журналам восьми телефонов, сессиям и попыткам причин две:
+#   1. Линию держит другой телефон. АТС Binotel помнит одну регистрацию линии — последнюю. Оператор
+#      пересел, а iCORE Phone на прежнем месте остался открыт (или линию отдали другому, а телефон
+#      прежнего оператора не перезапущен): тот телефон каждые пять минут снова регистрирует линию,
+#      плечо уходит ему, он его отклоняет (не ждал), и Binotel за 2–5 с отвечает кодом 150. У
+#      запросов в первые 30 с после своей регистрации плечо не пришло в 1 случае из 180, после
+#      четырёх минут — в 52 из 170 (линия 946 — в 46 из 49).
+#   2. Ответ телефона на плечо не доходит до АТС (в офисе SIP переписывает роутер — SIP ALG): 7 %
+#      плеч не соединялись вовсе, ещё 3 % — через 5–27 с; Binotel ждёт 30 с и отвечает тем же
+#      кодом 150.
+# Телефон 3.22.59 по блоку line_guard состояния обзвона:
+#   claim           — перед «Позвонить» освежает свою регистрацию (REGISTER) и только потом просит
+#                     звонок: линия у АТС снова его;
+#   retries         — отказ вида line сам повторяет столько раз (оператор не нажимает ничего);
+#   no_ack_drop_sec — плечо, ответ на которое АТС не подтвердила за столько секунд, кладёт сам
+#                     (BYE), не дожидаясь 30 с; 0 — не кладёт.
+# Блок получают звонки через АТС (у прямого звонка Тез плеча нет). Телефон старше 3.22.59 блок не
+# читает. Рубильники читаются на каждый запрос состояния: DIAL_LINE_CLAIM=0, DIAL_LINE_RETRIES
+# (0..3), DIAL_NO_ACK_DROP_SEC (0 — выключить, иначе 3..15).
+LINE_CLAIM_ENV = "DIAL_LINE_CLAIM"
+LINE_RETRIES_ENV = "DIAL_LINE_RETRIES"
+LINE_RETRIES_DEFAULT = 2
+LINE_RETRIES_MAX = 3
+NO_ACK_DROP_ENV = "DIAL_NO_ACK_DROP_SEC"
+NO_ACK_DROP_DEFAULT_SEC = 4
+NO_ACK_DROP_MIN_SEC = 3
+NO_ACK_DROP_MAX_SEC = 15
+# Отказ кода 150 быстрее этого — линия ответила «занято» (её держит другой телефон); дольше —
+# АТС ждала ответа телефона и не дождалась.
+LINE_REFUSED_FAST_SEC = 12
+# Телефон «жив», если его сессию видели не раньше стольких минут назад (в фоне он ходит к iCORE
+# раз в несколько минут); прежнего оператора линии ищем среди снятых не раньше стольких часов.
+LINE_PHONE_LIVE_MINUTES = 15
+LINE_PREVIOUS_HOLDER_HOURS = 24
+PHONE_USER_AGENT_PREFIX = "iCORE Phone"
+
+
+def line_guard():
+    """Блок line_guard состояния обзвона — правила защиты линии для телефона (см. выше)."""
+    drop = _env_seconds(NO_ACK_DROP_ENV, NO_ACK_DROP_DEFAULT_SEC, NO_ACK_DROP_MAX_SEC)
+    return {
+        "claim": (os.getenv(LINE_CLAIM_ENV) or "1").strip().lower() not in ("0", "false", "no", "off"),
+        "retries": _env_seconds(LINE_RETRIES_ENV, LINE_RETRIES_DEFAULT, LINE_RETRIES_MAX),
+        "no_ack_drop_sec": 0 if drop <= 0 else max(NO_ACK_DROP_MIN_SEC, drop),
+    }
+
+
 # Звонки из телефона — в «Звонки» «Учёта часов» (задача SZOV-4; владелец 10.11.2026: «все звонки
 # нужно учитывать»). Время оператора СЗоВ на обзвоне с 10.11 считается по телефону, а «Звонки» дня
 # писал только синк Oktell: часы у человека на обзвоне росли, звонки нет, и «звонков в час» — до
@@ -2261,6 +2310,51 @@ class DialListService:
         except Exception as exc:
             log.warning("dial_list: статус линии %s у Binotel не получен: %s", number, exc)
         return "Телефон не зарегистрирован в Binotel — проверьте регистрацию и повторите"
+
+    def _line_taken_hint(self, ctx):
+        """Кто, кроме телефона оператора, держит его линию, — для быстрого отказа кода 150 (LINE_REFUSED_FAST_SEC).
+
+        АТС помнит одну регистрацию линии, последнюю: если её освежил другой телефон, плечо уходит
+        ему. Таких телефонов два вида, и оба видны по сессиям:
+          - iCORE Phone этого же сотрудника на другом компьютере: сессия телефона, которую видели
+            уже ПОСЛЕ его последнего входа. Просто «две свежие сессии» не годится: выход из
+            аккаунта сессию не отзывает, и после каждого перевхода их было бы две (линия 960,
+            18.11.2026: 25 перевходов за 2,5 часа);
+          - телефон прежнего оператора линии, не перезапущенный после пересадки (регистрацию он до
+            перезапуска не меняет). Перезапускал ли он телефон, по сессии не видно — поэтому «похоже».
+        Возвращает фразу для оператора или '' — никого не нашли. Подсказка, не условие: сбой гасится."""
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    WITH live AS (
+                        SELECT user_id, created_at, last_seen_at FROM user_sessions
+                        WHERE revoked_at IS NULL AND user_agent LIKE %s
+                          AND last_seen_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') - make_interval(mins => %s)
+                    ), own AS (
+                        SELECT max(created_at) AS entered_at FROM live WHERE user_id = %s
+                    )
+                    SELECT (SELECT count(*) FROM live, own
+                            WHERE live.user_id = %s AND live.created_at < own.entered_at
+                              AND live.last_seen_at > own.entered_at),
+                           (SELECT u.name FROM dial_list_line_members m
+                            JOIN users u ON u.id = m.user_id
+                            WHERE m.department_id = %s AND m.internal_number = %s AND m.user_id <> %s
+                              AND m.released_at > CURRENT_TIMESTAMP - make_interval(hours => %s)
+                              AND EXISTS (SELECT 1 FROM live WHERE live.user_id = m.user_id)
+                            ORDER BY m.released_at DESC LIMIT 1)
+                """, (PHONE_USER_AGENT_PREFIX + "%", LINE_PHONE_LIVE_MINUTES, ctx["user_id"], ctx["user_id"],
+                      ctx["department_id"], ctx["internal_number"], ctx["user_id"], LINE_PREVIOUS_HOLDER_HOURS))
+                row = cur.fetchone() or (0, None)
+        except Exception as exc:
+            log.warning("dial_list: кто держит линию %s, узнать не удалось: %s", ctx.get("internal_number"), exc)
+            return ""
+        if int(row[0] or 0) > 0:
+            return ("Её занял другой телефон: iCORE Phone под вашей учётной записью открыт ещё на одном "
+                    "компьютере. Закройте его там и позвоните ещё раз.")
+        if row[1]:
+            return (f"Похоже, её ещё держит телефон прежнего оператора линии ({row[1]}): пусть перезапустит "
+                    "iCORE Phone, затем позвоните ещё раз.")
+        return ""
 
     def department_users(self, department_id):
         """Операторы раздела у отдела: его сотрудники (все роли: тест ведёт и сам
@@ -5429,6 +5523,9 @@ class DialListService:
             # Прямой звонок (06.11.2026): «Позвонить» отдаст номер, телефон наберёт его сам — плечо от
             # АТС не ждать. Старому телефону ключа нет: он звонит через АТС, как раньше.
             state["direct_dial"] = direct
+        if not direct:
+            # Звонок через АТС: правила защиты линии (LINE_CLAIM_ENV и соседи) — телефону 3.22.59+.
+            state["line_guard"] = line_guard()
         return state
 
     # ------------------------------------------------------------ скрипт разговора
@@ -6501,6 +6598,7 @@ class DialListService:
         # внутренний номер самого оператора: нейтрально и всегда есть.
         caller_id = (settings.get("caller_id_for_employee") or "").strip() or ctx["internal_number"]
         extra = {"callerIdForEmployee": caller_id}
+        asked_at = time.monotonic()
         try:
             client = self._client(ctx["department_id"])
             general_call_id = client.originate_internal_to_external(
@@ -6525,9 +6623,15 @@ class DialListService:
             log.warning("dial_list: Binotel отказал оператору %s (строка %s, %s): %s", ctx["user_id"],
                         assignment_id, kind, raw[:500])
             if kind == CALL_ERROR_LINE:
-                # Код 150 «Can't call to the ext» — АТС не достучалась до ЛИНИИ оператора: телефон не
-                # зарегистрирован (неверный сервер/пароль, нет сети). Говорим оператору, что делать.
-                hint = self._line_status_hint(ctx["department_id"], ctx["internal_number"])
+                # Код 150 «Can't call to the ext» — АТС не достучалась до ЛИНИИ оператора. Отказ за
+                # секунды — линия ответила «занято»: её держит другой телефон (_line_taken_hint), и
+                # это говорим первым. Иначе — что Binotel думает о линии (не зарегистрирована, ответ
+                # телефона не дошёл). Говорим оператору, что делать.
+                hint = ""
+                if time.monotonic() - asked_at < LINE_REFUSED_FAST_SEC:
+                    hint = self._line_taken_hint(ctx)
+                if not hint:
+                    hint = self._line_status_hint(ctx["department_id"], ctx["internal_number"])
                 raise DialListError(
                     f"Линия {ctx['internal_number']} не на связи: АТС не смогла до неё дозвониться. {hint}", 409,
                     kind=kind)
