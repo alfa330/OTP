@@ -316,6 +316,9 @@ def build_knowledge_blueprint(*, db, client_ip=None, search=None, environ=None,
             'notes': result['notes'],
             'degraded': result['degraded'],
             'perimeter': {'articles': (result.get('perimeter') or {}).get('articles')},
+            # «Сегодня» по Алматы, на которое посчитаны пометки outdated: помощник
+            # даёт эту дату своей модели, без неё сроки во фрагментах не сравнить.
+            'today': result.get('today'),
         }
         if result['status'] == 'no_data':
             payload['message'] = 'Данных нет'

@@ -24,7 +24,9 @@ directory.match_parks), а сами сведения — нет. Журнал з
     и номера, на вопрос о выводе — ещё строки вывода, на «инфо про каждый» —
     первая фраза описания;
   * продолжение разговора («а номер?», «а при выводе?») — карточка или сводка
-    по последней реплике человека.
+    по последней реплике человека;
+  * парк известен заранее (ручка знаний для партнёрского ИИ, knowledge_api) —
+    только его карточка и только когда о парке спросили (pinned_plan).
 
 Где карточка лишняя. «Куда регистрировать водителя айтакси из Рудного» и
 «адрес айтакси в Шымкенте» отвечают справочники регистрации и офисов, а в
@@ -298,15 +300,78 @@ def wants_summary(analysis):
     return bool(analysis['park_all'] or wanted)
 
 
-def plan(analysis, parks, *, answered=()):
+# Что спрошено о парке, известном заранее (asks_about_park). Комиссия, вывод
+# средств и акции — сведения самой карточки: о них спрашивают и без названия
+# парка. Номер, сайт, пополнение, адрес и офис — слова широкие («как поменять
+# номер авто», «где посмотреть баланс»): засчитываются, только если в вопросе
+# есть слово «парк» или кроме них ничего нет. «Условия», «расскажи», «что такое»
+# — только со словом «парк»: «что такое смз» спрашивает не о парке.
+_PINNED_FACTS = frozenset(('commission', 'withdrawal', 'promo'))
+_PINNED_WIDE = frozenset(('phone', 'site', 'topup'))
+
+
+def asks_about_park(analysis, parks, pinned):
+    """Спросили ли о парке, известном заранее (pinned_plan).
+
+    Помощнику парк называют словами, и без названия о парке он не говорит —
+    разве что про все парки разом (сводка). Партнёрскому ИИ парк приходит
+    вместе с вопросом: водитель пишет в WhatsApp своего парка, и «какая
+    комиссия?», «где офис?», «какие акции?» спрашивают о нём, хотя названия в
+    них нет. Парк из запроса — названный, когда его назвали или спросили о нём
+    (_PINNED_FACTS, _PINNED_WIDE). Вопрос не о парке («как включить цепочку
+    заказов») карточки не получает — как и у помощника, где парк не назван."""
+    facts = set(analysis['park_facts'])
+    if analysis['park_yandex'] and not facts - {'commission'}:
+        # «Комиссия Яндекса в Алматы» — её дают «Города», а не карточка парка
+        # (то же исключение, что у сводки, wants_summary).
+        facts.discard('commission')
+    if facts & _PINNED_FACTS:
+        return True
+    if any(park['id'] == pinned['id'] for park in named_parks(analysis, parks)):
+        return True
+    if analysis['park_word']:
+        return bool(facts or analysis['park_place'])
+    return bool((facts & _PINNED_WIDE or analysis['park_place']) and not analysis['park_rest'])
+
+
+def pinned_plan(analysis, parks, pinned, *, answered=()):
+    """plan для парка, известного заранее: его карточка — или ничего.
+
+    Сводки всех парков и карточек парков из слов вопроса здесь нет: ручка
+    знаний отвечает за один парк, и чужая комиссия или чужой номер в её
+    ответе — ошибка водителю (knowledge_api/parks.py). Исключения — те же,
+    что у названного парка в plan: на «куда регистрировать» и «адрес в
+    Шымкенте» отвечают регистрация и офисы, и карточка со списком городов из
+    описания нужна, только если о парке спросили что-то ещё."""
+    result = {'cards': [], 'summary': None, 'extras': set()}
+    if not asks_about_park(analysis, parks, pinned):
+        return result
+    if not analysis['park_facts'] and (analysis['registration']
+                                       or set(answered or ()) & ANSWERED_ELSEWHERE):
+        return result
+    result['cards'] = [pinned]
+    return result
+
+
+def _pinned(parks, park):
+    """Парк запроса — строкой справочника (с комиссией, описанием, офисом) или None."""
+    if park is None:
+        return None
+    return next((item for item in parks or () if item['id'] == int(park['id'])), None)
+
+
+def plan(analysis, parks, *, answered=(), pinned=None):
     """Что показать: {'cards': [парк], 'summary': [парк] | None, 'extras': set()}.
 
     Пустые cards и summary — показывать нечего. answered — source_kind строк,
     которые к этому вопросу уже собрали другие справочники (routes_ai).
+    pinned — строка парка, известного заранее (ручка знаний, pinned_plan).
     """
     result = {'cards': [], 'summary': None, 'extras': set()}
     if not parks:
         return result
+    if pinned is not None:
+        return pinned_plan(analysis, parks, pinned, answered=answered)
     facts = analysis['park_facts']
     named = named_parks(analysis, parks)
     summary = False
@@ -581,9 +646,15 @@ def rows_for(decision, catalog, *, space_id, on_date=None):
     return rows
 
 
-def build_ai_rows(analysis, catalog, *, space_id, answered=(), on_date=None):
-    """Фрагменты помощника из уже прочитанного справочника. Без базы — для тестов."""
-    decision = plan(analysis, catalog.get('parks') or [], answered=answered)
+def build_ai_rows(analysis, catalog, *, space_id, answered=(), on_date=None, park=None):
+    """Фрагменты помощника из уже прочитанного справочника. Без базы — для тестов.
+
+    park — {'id', …} парка, известного заранее (ai_rows)."""
+    parks = catalog.get('parks') or []
+    pinned = _pinned(parks, park)
+    if park is not None and pinned is None:
+        return []
+    decision = plan(analysis, parks, answered=answered, pinned=pinned)
     if not decision['cards'] and not decision['summary']:
         return []
     return rows_for(decision, catalog, space_id=space_id, on_date=on_date)
@@ -603,17 +674,25 @@ def load_details(cursor, park_ids, *, space_id):
     }
 
 
-def ai_rows(cursor, ctx, question, *, space_id, search_query=None, answered=(), history=None):
+def ai_rows(cursor, ctx, question, *, space_id, search_query=None, answered=(), history=None,
+            park=None):
     """Фрагменты «Парков» к вопросу помощника — или [].
 
     Сначала только список парков (узнать парк в вопросе), офисы, номера и акции —
     одним заходом на каждое и только когда карточке или сводке быть.
-    history — прошлые реплики разговора, для продолжений (analyze)."""
+    history — прошлые реплики разговора, для продолжений (analyze).
+    park — {'id', 'name'} парка, известного заранее: ручка знаний для
+    партнёрского ИИ получает только его карточку и только когда о парке
+    спросили (pinned_plan). Парка нет среди действующих — карточки нет."""
     space = directory.directory_space(cursor, ctx, space_id, tabs=(SOURCE_TAB,))
     if space is None:
         return []
     parks = wiki_parks.list_parks(cursor, space_id=space['id'])
-    decision = plan(analyze(question, search_query, history), parks, answered=answered)
+    pinned = _pinned(parks, park)
+    if park is not None and pinned is None:
+        return []
+    decision = plan(analyze(question, search_query, history), parks, answered=answered,
+                    pinned=pinned)
     shown = decision['cards'] + (decision['summary'] or [])
     if not shown:
         return []

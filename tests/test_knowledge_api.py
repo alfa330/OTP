@@ -16,12 +16,14 @@
 админка проверяются в tests/test_partner_keys.py.
 """
 
+import ast
 import json
 import sys
 import unittest
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -83,6 +85,7 @@ def result(status='ok', fragments=None):
         if status == 'ok' else [],
         'notes': [], 'degraded': False, 'vector_error': None, 'branches': {},
         'perimeter': {'articles': 50, 'hash': 'x', 'space_id': 11} if status in ('ok', 'no_data') else None,
+        'today': '2026-11-19' if status in ('ok', 'no_data') else None,
     }
 
 
@@ -197,6 +200,296 @@ class SearchHelpersTests(unittest.TestCase):
         self.assertEqual([row['ref_id'] for row in kept], [1, 3, 4, 9])
         self.assertEqual([row['park_match'] for row in kept], ['named', 'general', 'named', 'general'])
         self.assertEqual(kept[1]['office'], {'id': 3, 'kind': 'partner', 'partner_label': 'Брендирование'})
+
+
+# ── Сборка ответа: материал помощника оператора ─────────────────────────────────
+
+TODAY = date(2026, 11, 19)
+SZOV_KEY = {'id': 7, 'name': 'Syntony', 'otp_role': 'operator', 'department_id': 1}
+GLOBAL = {'id': 5, 'slug': 'global', 'name': 'Global', 'city': None, 'status': 'active', 'space_id': 11}
+PERIMETER = {'article_ids': frozenset({33, 34, 35, 36, 37}), 'section_ids': frozenset(),
+             'hash': 'h', 'read_count': 9}
+
+
+class _RunPatches:
+    """Подмена всего, что ходит в базу и к провайдеру, вокруг knowledge_search.run.
+
+    Сборка справочников (routes_ai.directory_rows) остаётся настоящей, если
+    не подменить её отдельно (directory=…)."""
+
+    def __init__(self, test, *, articles=(), directory=None, classifier=(), park=GLOBAL):
+        self.test = test
+        self.calls = {}
+        self.patches = [
+            patch.object(knowledge_search.perimeter, 'service_context', side_effect=self.context),
+            patch.object(knowledge_search.perimeter, 'spaces', return_value=[11]),
+            patch.object(knowledge_search.perimeter, 'scope', return_value=PERIMETER),
+            patch.object(knowledge_search, 'resolve_park', return_value=dict(park)),
+            patch.object(knowledge_search, 'load_parks',
+                         return_value=[dict(item, status='active', space_id=11) for item in PARKS]),
+            patch.object(knowledge_search.ai_retrieve, 'search_hybrid', side_effect=self.search),
+            patch.object(knowledge_search.assistant, 'classifier_rows', side_effect=self.classifier),
+        ]
+        if directory is not None:
+            self.patches.append(patch.object(knowledge_search.assistant, 'directory_rows',
+                                             side_effect=self.directory))
+        self.articles, self.directory_result, self.classifier_result = (
+            list(articles), directory, list(classifier))
+
+    def context(self, cursor, *, otp_role, department_id):
+        self.calls['context'] = (otp_role, department_id)
+        return {'user_id': 0, 'otp_role': otp_role, 'department_id': department_id}
+
+    def search(self, cursor, *, article_ids, query, query_vector, limit, per_article):
+        self.calls['search'] = {'article_ids': article_ids, 'query': query, 'limit': limit}
+        return {'rows': [dict(row) for row in self.articles], 'branches': {'lexical': 1},
+                'degraded': False}
+
+    def directory(self, cursor, ctx, question, space_id, **kwargs):
+        self.calls['directory'] = dict(kwargs, question=question, space_id=space_id)
+        return [dict(row) for row in self.directory_result]
+
+    def classifier(self, cursor, question, article_ids, *args, **kwargs):
+        self.calls['classifier'] = article_ids
+        return [dict(row) for row in self.classifier_result]
+
+    def run(self, question, **kwargs):
+        for item in self.patches:
+            item.start()
+        try:
+            return knowledge_search.run(MagicMock(), key=SZOV_KEY, question=question, park_id=5,
+                                        embed=lambda _q: None, on_date=TODAY, **kwargs)
+        finally:
+            for item in reversed(self.patches):
+                item.stop()
+
+
+class RunTests(unittest.TestCase):
+    REGISTRATION = {'source_kind': 'registration', 'chunk_id': -3001, 'title': 'Города',
+                    'heading_path': 'Рудный › Регистрация водителей', 'found_by': [4],
+                    'text': 'Регистрация водителей из города Рудный, парк Global: …'}
+    OFFICE = {'source_kind': 'office', 'chunk_id': -1, 'title': 'Офисы', 'ref_id': 3,
+              'heading_path': 'Алматы › Офис', 'found_by': [4], 'text': 'Офис…',
+              'park_match': 'general'}
+    # Без park_match, как приходят из сборки: карточка встаёт после сита офисов.
+    CARD = {'source_kind': 'park', 'chunk_id': -4001, 'title': 'Парки', 'heading_path': 'Global',
+            'found_by': [4], 'text': 'Таксопарк «Global».\n(срок истёк 30.09.2026) акция до 30.09.2026'}
+    CAR = {'source_kind': 'classifier', 'chunk_id': -2001, 'title': 'Классификатор авто',
+           'heading_path': 'Toyota Camry', 'found_by': [4], 'text': 'Camry: Комфорт+ с 2019 г.'}
+
+    def test_material_is_the_assistant_assembly_with_the_park_of_the_call(self):
+        patches = _RunPatches(self, articles=[article_row()],
+                              directory=[self.REGISTRATION, self.OFFICE, self.CARD],
+                              classifier=[self.CAR])
+        result = patches.run('Какие акции?', limit=3)
+        self.assertEqual([(item['kind'], item['park_match']) for item in result['fragments']],
+                         [('registration', 'named'), ('office', 'general'), ('park', 'named'),
+                          ('classifier', 'general'), ('article', 'all_parks')])
+        self.assertEqual([item['rank'] for item in result['fragments']], [1, 2, 3, 4, 5])
+        call = patches.calls['directory']
+        self.assertEqual(call['park'], {'id': 5, 'name': 'Global'})
+        self.assertTrue(callable(call['narrow']))
+        self.assertEqual((call['question'], call['space_id']), ('Какие акции?', 11))
+        self.assertNotIn('history', call)
+        self.assertEqual(result['today'], '2026-11-19')
+        self.assertEqual((result['branches']['registration'], result['branches']['park'],
+                          result['branches']['classifier']), (1, 1, 1))
+
+    def test_rights_are_those_of_an_operator_of_the_key_department(self):
+        """Ни статьи, ни классификатор не выходят за периметр оператора отдела
+        ключа: владелец 19.11.2026 — «только для руководителей … не передавать»."""
+        patches = _RunPatches(self, articles=[article_row()], directory=[], classifier=[self.CAR])
+        patches.run('Какие акции?')
+        self.assertEqual(patches.calls['context'], ('operator', 1))
+        self.assertEqual(patches.calls['search']['article_ids'], PERIMETER['article_ids'])
+        self.assertEqual(patches.calls['classifier'], PERIMETER['article_ids'])
+        self.assertEqual(patches.calls['search']['limit'], 8 * knowledge_search.CANDIDATE_FACTOR)
+
+    def test_perimeter_is_the_assistant_one_without_master_key(self):
+        source = (ROOT / 'knowledge_api' / 'perimeter.py').read_text(encoding='utf-8')
+        self.assertIn('wiki_perimeter.assistant_perimeter(cursor, ctx, space_id)', source)
+        self.assertNotIn('master_key=True', source)
+        tree = ast.parse((ROOT / 'knowledge_api' / 'search.py').read_text(encoding='utf-8'))
+        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        names |= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        # «Списки Байги» (ФИО, ВУ, доход водителей) ручка не читает ни под каким видом.
+        self.assertFalse({'baiga_rows', 'baiga_assistant', 'baiga'} & names)
+
+    def test_articles_about_other_parks_are_dropped(self):
+        rows = [article_row(chunk_id=1, heading_path='Бонусы', text='№: 3; Парк: Jana Алматы; бонус'),
+                article_row(chunk_id=2, heading_path='Бонусы', text='Таксопарк: Global; бонус 5000'),
+                article_row(chunk_id=3, text='Как включить цепочку заказов', heading_path='Цепочка'),
+                article_row(chunk_id=4, heading_path='Бонусы', text='Парк: Все парки, кроме Ноль такси'),
+                article_row(chunk_id=5, heading_path='Бонусы', text='без опоры', found_by=[1],
+                            similarity=0.5)]
+        result = _RunPatches(self, articles=rows, directory=[]).run('бонусы')
+        kept = [(item['chunk_id'], item['park_match']) for item in result['fragments']]
+        self.assertEqual(kept, [(2, 'named'), (3, 'general'), (4, 'all_parks')])
+        self.assertEqual(result['branches']['dropped_other_park'], 1)
+
+    def test_freshness_is_the_assistant_rule(self):
+        rows = [article_row(chunk_id=1, historical=True, text='Парк: Global; акция'),
+                article_row(chunk_id=2, title='Архивные акции', text='Парк: Global'),
+                article_row(chunk_id=3, text='Парк: Global; Даты: по 30.09.2026'),
+                article_row(chunk_id=4, text='Парк: Global; Даты: по 30.09.2026\n'
+                                             'Парк: Global; Даты: по 31.12.2026'),
+                article_row(chunk_id=5, text='Парк: Global; Даты: по 31.12.2026')]
+        result = _RunPatches(self, articles=rows, directory=[self.CARD]).run('акции', limit=10)
+        marks = {item['chunk_id'] or item['kind']: (item['outdated'], item['outdated_note'])
+                 for item in result['fragments']}
+        self.assertEqual(marks[1], (True, 'АРХИВ — сведения уже не действуют'))
+        self.assertEqual(marks[2], (True, 'АРХИВ — сведения уже не действуют'))
+        self.assertEqual(marks[3], (True, 'СРОК ИСТЁК 30.09.2026'))
+        # Истекла часть сроков: фрагмент живой, пометка просит сверить даты.
+        self.assertFalse(marks[4][0])
+        self.assertIn('ЧАСТЬ СРОКОВ ИСТЕКЛА, последний 30.09.2026', marks[4][1])
+        self.assertEqual(marks[5], (False, None))
+        # Карточка парка — живые данные; истёкшую строку она помечает сама.
+        self.assertEqual(marks['park'], (False, None))
+
+    def test_no_fragments_is_no_data(self):
+        result = _RunPatches(self, articles=[], directory=[]).run('есть ли парковка у офиса?')
+        self.assertEqual((result['status'], result['fragments']), ('no_data', []))
+        self.assertEqual(result['perimeter']['space_id'], 11)
+
+
+class OfficeSieveTests(unittest.TestCase):
+    """Сито офисов стоит ДО решения «на вопрос уже ответили офисы» (routes_ai):
+    выброшенный чужой офис не должен снимать карточку парка."""
+
+    OTHER_OFFICE = {'source_kind': 'office', 'chunk_id': -1, 'ref_id': 2, 'title': 'Офисы',
+                    'heading_path': 'Алматы › Jana', 'text': 'Офис Jana', 'found_by': [4]}
+
+    def test_foreign_office_is_dropped_before_the_card_decision(self):
+        cursor = MagicMock()
+        seen = {}
+
+        def park_rows(*args, **kwargs):
+            seen.update(kwargs)
+            return [dict(RunTests.CARD)]
+
+        offices = [{'id': 2, 'kind': 'park', 'all_parks': False, 'parks': [{'park_id': 12}]}]
+        with patch.object(knowledge_search.assistant.wiki_registration, 'ai_rows', return_value=[]), \
+             patch.object(knowledge_search.assistant.wiki_directory, 'ai_rows',
+                          return_value=[dict(self.OTHER_OFFICE)]), \
+             patch.object(knowledge_search.assistant.wiki_park_cards, 'ai_rows', side_effect=park_rows), \
+             patch.object(knowledge_search.wiki_offices, 'list_offices', return_value=offices):
+            found = knowledge_search.assistant.directory_rows(
+                cursor, {}, 'где офис', 11, park={'id': 5, 'name': 'Global'},
+                narrow=knowledge_search.office_sieve(cursor, 11, GLOBAL))
+        self.assertEqual([row['source_kind'] for row in found], ['park'])
+        self.assertEqual(seen['answered'], set())
+        self.assertEqual(seen['park'], {'id': 5, 'name': 'Global'})
+
+    def test_unreadable_offices_are_not_handed_over(self):
+        cursor = MagicMock()
+        rows = [dict(self.OTHER_OFFICE), dict(RunTests.REGISTRATION)]
+        with patch.object(knowledge_search.wiki_offices, 'list_offices',
+                          side_effect=RuntimeError('база')), \
+             patch.object(knowledge_search.logging, 'exception'):
+            kept = knowledge_search.office_sieve(cursor, 11, GLOBAL)(rows)
+        self.assertEqual([(row['source_kind'], row['park_match']) for row in kept],
+                         [('registration', 'named')])
+        statements = [call.args[0] for call in cursor.execute.call_args_list]
+        self.assertIn('ROLLBACK TO SAVEPOINT knowledge_offices', statements)
+
+
+class OfficeSummaryTests(unittest.TestCase):
+    """Сводка «Все офисы» (вопрос про офисы без города) для парка, известного
+    заранее: его офисы и общие, офисов только чужих парков нет. Нашёл сквозной
+    прогон на стенде 19.11.2026: партнёру Global уходил адрес офиса Jana —
+    строка сводки шла мимо сита narrow_offices."""
+
+    OFFICES = [
+        {'id': 1, 'name': 'Офис Global', 'city': 'Алматы', 'address': 'Абая, 10', 'kind': 'park',
+         'all_parks': False, 'parks': [{'park_id': 5}], 'schedule': None},
+        {'id': 2, 'name': 'Офис Jana', 'city': 'Алматы', 'address': 'Сейфуллина, 5', 'kind': 'park',
+         'all_parks': False, 'parks': [{'park_id': 12}], 'schedule': None},
+        {'id': 3, 'name': 'Общий офис', 'city': 'Астана', 'address': 'Мира, 1', 'kind': 'park',
+         'all_parks': False, 'parks': [], 'schedule': None},
+        {'id': 4, 'name': 'Офис всех парков', 'city': 'Шымкент', 'address': 'Тауке хана, 2',
+         'kind': 'park', 'all_parks': True, 'parks': [], 'schedule': None},
+    ]
+
+    def summary(self, named_parks):
+        from datetime import datetime
+        from wiki import directory as wiki_directory
+        rows = wiki_directory.build_ai_rows(
+            wiki_directory.analyze_question('где офис?'), space={'id': 11, 'offices': True,
+                                                               'cities': True},
+            offices=self.OFFICES, cities=[], parks=[{'id': 5, 'name': 'Global'},
+                                                    {'id': 12, 'name': 'Jana такси'}],
+            day=TODAY, now=datetime(2026, 11, 19, 12, 0), named_parks=named_parks)
+        self.assertEqual([row['source_kind'] for row in rows], ['offices'])
+        return rows[0]['text']
+
+    def test_partner_summary_has_no_offices_of_other_parks(self):
+        text = self.summary([{'id': 5, 'name': 'Global'}])
+        for name in ('Офис Global', 'Общий офис', 'Офис всех парков'):
+            self.assertIn(name, text)
+        self.assertNotIn('Офис Jana', text)
+        self.assertNotIn('Сейфуллина', text)
+
+    def test_assistant_summary_keeps_every_office(self):
+        self.assertIn('Офис Jana', self.summary(None))
+
+
+class AssistantParityTests(unittest.TestCase):
+    """Тот же материал, что помощник даёт оператору (владелец 19.11.2026), — на
+    настоящей сборке routes_ai.directory_rows: регистрация и «Парки» читают
+    справочники тестов wiki, база подменена только на их входе."""
+
+    @classmethod
+    def setUpClass(cls):
+        import test_wiki_park_cards as cards_data
+        import test_wiki_registration as registration_data
+        cls.cards = cards_data
+        cls.registration = registration_data
+
+    def assembled(self, question, *, park=None):
+        """(строки ручки, строки помощника) на одном вопросе."""
+        from wiki import directory as wiki_directory
+        from wiki import park_cards, registration
+        from wiki import parks as wiki_parks
+
+        def space(_cursor, _ctx, requested, tabs=wiki_directory.DIRECTORY_TABS):
+            return dict({'id': requested}, **{tab: True for tab in tabs})
+
+        details = {key: value for key, value in self.cards.CATALOG.items() if key != 'parks'}
+        with patch.object(wiki_directory, 'directory_space', side_effect=space), \
+             patch.object(wiki_directory, 'ai_rows', return_value=[]), \
+             patch.object(registration, 'load', return_value=self.registration.CATALOG), \
+             patch.object(wiki_parks, 'list_parks', return_value=self.cards.PARKS), \
+             patch.object(park_cards, 'load_details', return_value=details), \
+             patch.object(park_cards.currency, 'today', return_value=self.cards.DAY):
+            cursor = MagicMock()
+            partner = knowledge_search.assistant.directory_rows(
+                cursor, {}, question, 11, park=park,
+                narrow=knowledge_search.office_sieve(cursor, 11, park))
+            operator = knowledge_search.assistant.directory_rows(cursor, {}, question, 11)
+        return partner, operator
+
+    def test_registration_text_is_the_assistant_one(self):
+        partner, _ = self.assembled('куда зарегистрироваться, я из рудного',
+                                    park={'id': 1, 'name': 'iTaxi'})
+        _, operator = self.assembled('куда зарегать водителя айтакси если он обращается с рудного')
+        self.assertEqual([row['source_kind'] for row in partner], ['registration'])
+        self.assertEqual(partner[0]['text'], operator[0]['text'])
+        self.assertEqual(partner[0]['park_match'], 'named')
+        self.assertIn('регистрировать в городе Костанай', partner[0]['text'])
+
+    def test_park_card_text_is_the_assistant_one(self):
+        partner, _ = self.assembled('какая комиссия при выводе?', park={'id': 4, 'name': 'Честный'})
+        _, operator = self.assembled('какая комиссия при выводе в парке честный')
+        self.assertEqual([row['source_kind'] for row in partner], ['park'])
+        self.assertEqual(partner[0]['text'], operator[0]['text'])
+        self.assertIn('При снятии суммы от 1000тг до 10 000тг', partner[0]['text'])
+
+    def test_no_summary_of_all_parks_for_the_partner(self):
+        partner, operator = self.assembled('комиссия всех парков', park={'id': 5, 'name': 'Global'})
+        self.assertEqual(operator[0]['heading_path'], 'Все парки')
+        self.assertEqual([row['heading_path'] for row in partner], ['Global'])
+        self.assertNotIn('iTaxi', partner[0]['text'])
 
 
 class RateLimiterTests(unittest.TestCase):
@@ -381,6 +674,9 @@ class AnswerTests(Harness):
         self.assertEqual(payload['question'], 'Какие акции?')
         self.assertEqual(payload['fragments'][0]['title'], 'Все акции')
         self.assertEqual(payload['perimeter'], {'articles': 50})
+        self.assertEqual(payload['today'], '2026-11-19')
+        self.assertEqual((payload['fragments'][0]['outdated'], payload['fragments'][0]['outdated_note']),
+                         (False, None))
         self.assertEqual(self.searches, [{'key': 7, 'park_id': 5, 'park': None,
                                           'question': 'Какие акции?', 'limit': 3}])
         entry = self.cursor.journal()[0]
@@ -480,8 +776,11 @@ class WiringTests(unittest.TestCase):
         for token in (SEARCH_URL, keys.HEADER, 'KNOWLEDGE_API_PER_MINUTE', 'KNOWLEDGE_API_LANES',
                       'docs/SYNTONY_KNOWLEDGE_API.md'):
             self.assertIn(token, readme, token)
-        for kind in ('article', 'park', 'office', 'offices', 'city', 'cities', 'classifier'):
+        for kind in ('article', 'park', 'office', 'offices', 'city', 'cities', 'classifier',
+                     'registration'):
             self.assertIn('`%s`' % kind, doc, kind)
+        for token in ('outdated_note', '`today`', 'Версия 1.2'):
+            self.assertIn(token, doc, token)
         for name in knowledge_search.FOUND_BY.values():
             self.assertIn('`%s`' % name, doc, name)
 

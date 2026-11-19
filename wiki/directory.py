@@ -1640,6 +1640,7 @@ def build_ai_rows(analysis, *, space, offices, cities, parks, day, now=None, nam
         return []
     decision = plan(analysis, offices=offices, cities=cities, parks=parks, features=space,
                     limit=AI_OFFICES, named_parks=named_parks)
+    pinned = named_parks is not None
     if named_parks is None:
         named_parks = match_parks(analysis, parks) if parks else []
     else:
@@ -1654,7 +1655,15 @@ def build_ai_rows(analysis, *, space, offices, cities, parks, day, now=None, nam
     # Все офисы — только когда спросили именно про офисы: «адреса» в вопросе
     # без города — не повод класть в промпт сорок адресов.
     if decision['offices_tab'] and not decision['offices'] and analysis.get('office_noun'):
-        text = _all_offices_text(offices, day, now)
+        listed = offices
+        if pinned:
+            # Парк известен заранее (ручка знаний): в сводке — его офисы и
+            # общие, без единой привязки; офис только чужих парков партнёру не
+            # отдаётся — то же сито, что у строк офиса
+            # (knowledge_api/search.py: narrow_offices). Помощнику — все.
+            listed = [office for office in offices
+                      if not office.get('parks') or _serves(office, named_parks)]
+        text = _all_offices_text(listed, day, now)
         if text:
             rows.append(_row(len(rows), kind='offices', tab='offices', title='Офисы',
                              heading='Все офисы', text=text, space_id=space['id']))

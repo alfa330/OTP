@@ -276,7 +276,7 @@ def historical_label(*parts):
 
 
 def chunk_currency(chunk, on_date=None):
-    """Свежесть одного куска: {'stale', 'kind', 'note', 'deadline'}.
+    """Свежесть одного куска: {'stale', 'kind', 'note', 'deadline', 'partial'}.
 
     kind:
       * 'historical' — статья помечена архивной (тумблером или названием);
@@ -290,6 +290,10 @@ def chunk_currency(chunk, on_date=None):
     note — готовая строка для подписи фрагмента и для оговорки под ответом.
     Собирается здесь, а не в двух местах: разойдись формулировки, оператор
     увидел бы в ответе одно, а в источниках другое.
+
+    partial — истекла только часть сроков, остальные строки живые. Помощнику
+    это сказано пометкой; ручке знаний (knowledge_api) — ещё и флагом: такой
+    фрагмент партнёру не «устаревший», иначе его ИИ выбросил бы живые строки.
     """
     if chunk.get('source_kind') == 'baiga':
         # Строка раздела «Списки Байги» (baiga/assistant.py) — итог ПРОШЕДШЕЙ
@@ -297,21 +301,21 @@ def chunk_currency(chunk, on_date=None):
         # не признак несвежести. В подпись и текст попадают слова из загруженного
         # файла (зачёт, приз, парк), и «Архив Алматы» или «сертификат до
         # 31.12.2025» подписали бы итог недели «сведения уже не действуют».
-        return {'stale': False, 'kind': None, 'deadline': None, 'note': ''}
+        return {'stale': False, 'kind': None, 'deadline': None, 'note': '', 'partial': False}
     if chunk.get('source_kind') == 'classifier':
         # Карточка «Классификатора авто» (wiki/classifier.py) — действующие
         # требования к году машины. Дата в ней стоит только в оговорке к ОДНОМУ
         # тарифу («до 15 августа 2025: от 2024 г.; после — не допускается»), и
         # пометка «срок истёк» на весь фрагмент объявила бы недействующими и
         # остальные тарифы модели. Оговорку модель получает дословно.
-        return {'stale': False, 'kind': None, 'deadline': None, 'note': ''}
+        return {'stale': False, 'kind': None, 'deadline': None, 'note': '', 'partial': False}
     if chunk.get('source_kind') == 'park':
         # Карточка вкладки «Парки» (wiki/park_cards.py) — живые данные: комиссия,
         # номера и офисы парка на сегодня. Срок в ней бывает только в описании
         # («акция до 30.09.2026»), и пометка на весь фрагмент объявила бы «уже не
         # действующими» и комиссию с номерами. Строку с прошедшим сроком карточка
         # помечает сама (park_cards._dated).
-        return {'stale': False, 'kind': None, 'deadline': None, 'note': ''}
+        return {'stale': False, 'kind': None, 'deadline': None, 'note': '', 'partial': False}
     marker = None
     if chunk.get('historical'):
         marker = 'помечена архивной'
@@ -321,7 +325,7 @@ def chunk_currency(chunk, on_date=None):
             marker = 'архивная по названию'
     if marker:
         return {'stale': True, 'kind': 'historical', 'deadline': None,
-                'note': 'АРХИВ — сведения уже не действуют'}
+                'note': 'АРХИВ — сведения уже не действуют', 'partial': False}
 
     # Срок ищем и в ПУТИ ЗАГОЛОВКОВ, а не только в теле. На проде у статьи
     # «Яндекс Заправка» (id 604) верхняя граница стоит именно там: heading_path
@@ -332,7 +336,7 @@ def chunk_currency(chunk, on_date=None):
     dead, alive = expiry('%s\n%s' % (chunk.get('heading_path') or '',
                                      chunk.get('text') or ''), on_date)
     if not dead:
-        return {'stale': False, 'kind': None, 'deadline': None, 'note': ''}
+        return {'stale': False, 'kind': None, 'deadline': None, 'note': '', 'partial': False}
     deadline = max(dead)
     if alive:
         # Смешанный кусок: часть строк живая. Называть его «срок истёк» целиком
@@ -340,9 +344,9 @@ def chunk_currency(chunk, on_date=None):
         # строки, а оператор не предложил бы водителю действующий бонус.
         return {'stale': True, 'kind': 'expired', 'deadline': deadline,
                 'note': 'ЧАСТЬ СРОКОВ ИСТЕКЛА, последний %s — сверь даты по строкам'
-                        % deadline.strftime('%d.%m.%Y')}
+                        % deadline.strftime('%d.%m.%Y'), 'partial': True}
     return {'stale': True, 'kind': 'expired', 'deadline': deadline,
-            'note': 'СРОК ИСТЁК %s' % deadline.strftime('%d.%m.%Y')}
+            'note': 'СРОК ИСТЁК %s' % deadline.strftime('%d.%m.%Y'), 'partial': False}
 
 
 def mark_chunks(chunks, on_date=None):

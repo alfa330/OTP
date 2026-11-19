@@ -33,7 +33,7 @@ const OUTCOMES = {
 
 const KINDS = {
     article: 'статья', park: 'парк', office: 'офис', offices: 'офисы', city: 'город',
-    cities: 'города', classifier: 'классификатор',
+    cities: 'города', classifier: 'классификатор', registration: 'регистрация',
 };
 
 const MATCH = { named: 'парк назван', general: 'общее', all_parks: 'все парки' };

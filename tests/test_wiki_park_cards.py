@@ -23,6 +23,7 @@
 """
 
 import ast
+import re
 import unittest
 from datetime import date
 from pathlib import Path
@@ -218,6 +219,92 @@ class AnsweredElsewhereTest(unittest.TestCase):
                          'сколько берет айтакси в шымкенте', '% айтакси в шымкенте'):
             with self.subTest(question=question):
                 self.assertEqual(cards(question, answered={'office'}), ['iTaxi'])
+
+
+def pinned_cards(question, park_id, answered=()):
+    """Карточки для парка, известного заранее (ручка знаний, knowledge_api)."""
+    pinned = next(item for item in PARKS if item['id'] == park_id)
+    decision = park_cards.plan(analysis_of(question), PARKS, answered=answered, pinned=pinned)
+    return [item['name'] for item in decision['cards']], decision['summary']
+
+
+class PinnedParkTest(unittest.TestCase):
+    """Партнёрский ИИ присылает парк вместе с вопросом (владелец 19.11.2026:
+    материал «как у помощника в роли оператора»). Водитель пишет в свой парк,
+    поэтому «какая комиссия?» спрашивает о нём, хотя названия в вопросе нет."""
+
+    def test_question_about_the_park_gets_its_card_without_the_name(self):
+        for question in ('какая комиссия?', 'сколько процентов берёт парк', 'номер телефона',
+                         'где офис?', 'адрес', 'какие акции сейчас действуют?',
+                         'есть бонусы для новичков?', 'условия работы в парке',
+                         'комиссия при выводе средств', 'как вывести деньги на карту', 'сайт',
+                         'как связаться с поддержкой', 'комиссия яндекса и номер парка'):
+            with self.subTest(question=question):
+                self.assertEqual(pinned_cards(question, 5), (['Global'], None))
+
+    def test_parks_in_general_mean_this_park_not_a_summary(self):
+        for question in ('комиссия всех парков', 'номера телефонов парков'):
+            with self.subTest(question=question):
+                self.assertEqual(pinned_cards(question, 5), (['Global'], None))
+        # Перечня парков ручка не даёт вовсе: она отвечает за один парк.
+        self.assertEqual(pinned_cards('какие у нас парки', 5), ([], None))
+
+    def test_another_park_in_the_question_never_gets_its_card(self):
+        for question in ('комиссия в Jana такси', 'расскажи о таксопарке честный'):
+            with self.subTest(question=question):
+                self.assertEqual(pinned_cards(question, 5), (['Global'], None))
+        # О своём парке не спросили ничего — и чужих карточек нет: «номер
+        # айтакси» в канале Global — вопрос про iTaxi, «номер» сам по себе широк.
+        for question in ('сравни iTaxi и iTaxi VIP', 'номер айтакси'):
+            with self.subTest(question=question):
+                self.assertEqual(pinned_cards(question, 5), ([], None))
+
+    def test_question_not_about_the_park_gets_no_card(self):
+        for question in ('как включить цепочку заказов', 'водитель не может выйти на линию',
+                         'пассажир забыл вещи в салоне', 'что такое смз', 'расскажи подробнее',
+                         'где посмотреть баланс', 'как поменять номер авто',
+                         'как пополнить баланс через каспи', 'ссылка на регистрацию',
+                         'комиссия яндекса в алматы', 'какие условия по смз'):
+            with self.subTest(question=question):
+                self.assertEqual(pinned_cards(question, 5), ([], None))
+
+    def test_the_park_named_by_itself_gets_its_card(self):
+        self.assertEqual(pinned_cards('Global', 5), (['Global'], None))
+        self.assertEqual(pinned_cards('я в глобал, как включить цепочку заказов', 5),
+                         (['Global'], None))
+
+    def test_registration_and_office_answers_drop_the_card_as_for_a_named_park(self):
+        self.assertEqual(pinned_cards('куда регистрировать водителя из рудного', 1), ([], None))
+        self.assertEqual(pinned_cards('адрес офиса в шымкенте', 1, answered={'office'}), ([], None))
+        # Спросили и о самом парке — карточка нужна (как в AnsweredElsewhereTest).
+        self.assertEqual(pinned_cards('номер парка, водитель из рудного, куда регать', 1),
+                         (['iTaxi'], None))
+        self.assertEqual(pinned_cards('сколько берет парк в шымкенте', 1, answered={'office'}),
+                         (['iTaxi'], None))
+
+    def test_rows_are_the_assistant_card_of_this_park_only(self):
+        promo = {'title': 'Неделя без комиссии', 'park_ids': [5], 'starts_at': '2026-10-01',
+                 'ends_at': '2026-12-31', 'description': 'для новичков'}
+        other = {'title': 'Бонус Jana', 'park_ids': [12], 'starts_at': None, 'ends_at': None,
+                 'description': 'только Jana'}
+        catalog = dict(CATALOG, promotions=[promo, other])
+        found = park_cards.build_ai_rows(analysis_of('какие акции сейчас действуют?'), catalog,
+                                         space_id=11, on_date=DAY, park={'id': 5, 'name': 'Global'})
+        self.assertEqual(len(found), 1)
+        self.assertEqual((found[0]['source_kind'], found[0]['heading_path'], found[0]['ref_id']),
+                         ('park', 'Global', 5))
+        self.assertIn('Акция парка Global «Неделя без комиссии», с 01.10.2026 по 31.12.2026',
+                      found[0]['text'])
+        self.assertNotIn('Jana', found[0]['text'])
+        # Тот же текст, что у помощника, когда парк назван словами.
+        named = park_cards.build_ai_rows(analysis_of('какие акции в глобал?'), catalog,
+                                         space_id=11, on_date=DAY)
+        self.assertEqual(found[0]['text'], named[0]['text'])
+
+    def test_unknown_or_archived_park_gets_nothing(self):
+        self.assertEqual(park_cards.build_ai_rows(analysis_of('какая комиссия?'), CATALOG,
+                                                  space_id=11, on_date=DAY,
+                                                  park={'id': 999, 'name': 'Нет такого'}), [])
 
 
 class FollowUpTest(unittest.TestCase):
@@ -748,10 +835,21 @@ class ArchivedHeadOfficeTest(unittest.TestCase):
         for sql in sqls:
             self.assertIn("AND ho.space_id = p.space_id AND ho.status = 'active'", sql)
 
-    def test_partner_park_card_joins_only_an_active_head_office(self):
+    def test_partner_park_card_is_the_assistant_card(self):
+        """С 19.11.2026 ручка знаний берёт карточку у помощника (park_cards через
+        routes_ai.directory_rows): своего SQL к офисам и номерам у неё нет, и
+        головной офис в ней — тот же, что выше, только действующий."""
         from knowledge_api import search as knowledge_search
-        sqls = self._sqls(lambda c: knowledge_search.park_card(c, {'id': 3, 'space_id': 1, 'name': 'X'}))
-        self.assertIn("ho.status = 'active'", sqls[0])
+        self.assertFalse(hasattr(knowledge_search, 'park_card'))
+        source = (ROOT / 'knowledge_api' / 'search.py').read_text(encoding='utf-8')
+        queries = [node.value for node in ast.walk(ast.parse(source))
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                   and re.search(r'\bSELECT\b', node.value)]
+        self.assertTrue(queries, 'страж не видит SQL ручки — проверка ослепла')
+        for sql in queries:
+            for table in ('wiki_offices', 'wiki_park_phones', 'head_office'):
+                self.assertNotIn(table, sql, table)
+        self.assertIn('assistant.directory_rows(', source)
 
     def test_link_to_an_archived_office_is_kept_but_not_shown(self):
         from wiki import parks as wiki_parks

@@ -102,16 +102,17 @@ def assistant_spaces(cursor, ctx):
     ]
 
 
-def registration_rows(cursor, ctx, question, space_id, search_query=None):
+def registration_rows(cursor, ctx, question, space_id, search_query=None, park=None):
     """«Куда регистрировать водителя» — город и диспетчерская (wiki/registration.py).
 
     Своим савпоинтом, а не общим со справочником: сбой одного не должен
-    отнимать у оператора адрес офиса или комиссию из другого.
+    отнимать у оператора адрес офиса или комиссию из другого. park — парк,
+    известный заранее (ручка знаний, см. directory_rows).
     """
     cursor.execute('SAVEPOINT wiki_ai_registration')
     try:
         rows = wiki_registration.ai_rows(cursor, ctx, question, space_id=space_id,
-                                         search_query=search_query)
+                                         search_query=search_query, park=park)
     except Exception:                                    # noqa: BLE001
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_registration')
         logging.exception('Помощник: справочник регистрации не ответил')
@@ -120,13 +121,15 @@ def registration_rows(cursor, ctx, question, space_id, search_query=None):
     return rows
 
 
-def park_rows(cursor, ctx, question, space_id, search_query=None, answered=(), history=None):
+def park_rows(cursor, ctx, question, space_id, search_query=None, answered=(), history=None,
+              park=None):
     """Карточки «Парков» к вопросу (wiki/park_cards.py) — или [].
 
     answered — source_kind строк, уже собранных регистрацией и справочником:
     на «куда регистрировать» и «адрес в Шымкенте» отвечают они, и карточка
     нужна, только если о парке спросили что-то ещё. history — прошлые реплики
-    разговора: продолжение «а номер?» берёт парк из последней.
+    разговора: продолжение «а номер?» берёт парк из последней. park — парк,
+    известный заранее (ручка знаний, см. directory_rows).
 
     Своим савпоинтом, как регистрация: сбой карточек не должен отнимать у
     оператора адрес офиса или комиссию из соседних справочников.
@@ -135,7 +138,7 @@ def park_rows(cursor, ctx, question, space_id, search_query=None, answered=(), h
     try:
         rows = wiki_park_cards.ai_rows(cursor, ctx, question, space_id=space_id,
                                        search_query=search_query, answered=answered,
-                                       history=history)
+                                       history=history, park=park)
     except Exception:                                    # noqa: BLE001
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_parks')
         logging.exception('Помощник: справочник парков не ответил')
@@ -144,7 +147,8 @@ def park_rows(cursor, ctx, question, space_id, search_query=None, answered=(), h
     return rows
 
 
-def directory_rows(cursor, ctx, question, space_id, search_query=None, history=None):
+def directory_rows(cursor, ctx, question, space_id, search_query=None, history=None, *,
+                   park=None, narrow=None):
     """Записи «Офисов», «Городов» и «Парков» к вопросу — или [].
 
     Регистрация водителей — первой: на «куда зарегистрировать» отвечает она, а
@@ -153,12 +157,20 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None, history=N
 
     Под савпоинтом: справочник — приставка к ответу, и его сбой не должен
     отнимать у оператора ответ по статьям.
+
+    Эту же сборку зовёт ручка знаний для партнёрского ИИ (knowledge_api/search.py):
+    владелец 19.11.2026 — материал «как у помощника в роли оператора». Ей парк
+    известен заранее (park — {'id', 'name'}): регистрация отвечает за его
+    диспетчерскую, офисы сужаются до него, карточка — его, а сводки всех парков
+    нет. narrow(rows) — её сито офисов чужих парков: стоит ДО решения «на
+    вопрос уже ответили офисы», иначе выброшенный чужой офис снимал бы карточку
+    парка и партнёр оставался бы ни с тем, ни с другим.
     """
-    registration = registration_rows(cursor, ctx, question, space_id, search_query)
+    registration = registration_rows(cursor, ctx, question, space_id, search_query, park=park)
     cursor.execute('SAVEPOINT wiki_ai_directory')
     try:
         rows = wiki_directory.ai_rows(cursor, ctx, question, space_id=space_id,
-                                      search_query=search_query)
+                                      search_query=search_query, park=park)
     except Exception:                                    # noqa: BLE001
         cursor.execute('ROLLBACK TO SAVEPOINT wiki_ai_directory')
         logging.exception('Помощник: справочник не ответил')
@@ -166,9 +178,11 @@ def directory_rows(cursor, ctx, question, space_id, search_query=None, history=N
     else:
         cursor.execute('RELEASE SAVEPOINT wiki_ai_directory')
     found = registration + rows
+    if narrow is not None:
+        found = narrow(found)
     return found + park_rows(cursor, ctx, question, space_id, search_query,
                              answered={row.get('source_kind') for row in found},
-                             history=history)
+                             history=history, park=park)
 
 
 def classifier_rows(cursor, question, article_ids, search_query=None, *, history=None):

@@ -694,6 +694,63 @@ class QuestionTest(unittest.TestCase):
 
 # ── 4. Помощник ──────────────────────────────────────────────────────────────
 
+def _pinned(question, name, catalog=CATALOG):
+    """Строки регистрации для парка, известного заранее (ручка знаний)."""
+    return registration.build_ai_rows(registration.analyze(question), catalog, space_id=SPACE,
+                                      park={'id': PARK[name], 'name': name})
+
+
+class PinnedParkTest(unittest.TestCase):
+    """Партнёрский ИИ присылает парк вместе с вопросом (владелец 19.11.2026:
+    материал «как у помощника в роли оператора»). Водитель пишет в свой парк, и
+    «куда регистрироваться, я из Рудного» спрашивает про его диспетчерскую."""
+
+    def test_city_question_is_answered_for_the_park_of_the_call(self):
+        rows = _pinned('куда зарегистрироваться, я из рудного', 'iTaxi')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['heading_path'], 'Рудный › Регистрация водителей')
+        self.assertIn('парк iTaxi: регистрировать в городе Костанай', rows[0]['text'])
+        self.assertIn('«iTaxi»', rows[0]['text'])
+        self.assertNotIn('зависит от парка водителя', rows[0]['text'])
+        for other in ('Аманат', 'Департамент', 'Jana'):
+            self.assertNotIn(other, rows[0]['text'])
+
+    def test_nearest_and_missing_dispatchers_of_the_park(self):
+        rows = _pinned('куда регистрировать водителя из рудного', 'Jana такси')
+        self.assertIn('ближайшая диспетчерская Jana такси — в городе Актобе', rows[0]['text'])
+        rows = _pinned('куда регистрировать водителя из рудного', 'Hokage (Wolt)')
+        self.assertIn('у парка Hokage (Wolt) нет ни одной диспетчерской', rows[0]['text'])
+
+    def test_the_answer_is_for_the_park_of_the_call_even_if_another_is_named(self):
+        rows = _pinned('водитель хочет в jana такси, куда регать из рудного', 'iTaxi')
+        self.assertEqual(len(rows), 1)
+        self.assertIn('парк iTaxi', rows[0]['text'])
+        self.assertNotIn('Jana', rows[0]['text'])
+
+    def test_whether_to_answer_is_decided_as_for_the_assistant(self):
+        """Парк из запроса поводом не служит: отвечает справочник ровно на те
+        вопросы, на которые ответил бы помощнику, — с теми же городами."""
+        answered = 0
+        for question in ('куда зарегать водителя с экибастуза', 'рудный регистрация',
+                         'кентау регистрация', 'регистрация водителей рудный',
+                         'водитель из Рудного хочет зарегистрироваться',
+                         'лимонопад регистрация алматы', 'регистрация на байгу алматы',
+                         'после регистрации две недели без комиссии в алматы',
+                         'как зарегать машину в алматы', 'зарегистрирован в шымкенте, не может выйти',
+                         'куда регистрировать водителя айтакси?', 'регистрация'):
+            with self.subTest(question=question):
+                plain = [row['heading_path'] for row in _rows(question)]
+                pinned = [row['heading_path'] for row in _pinned(question, 'Global')]
+                self.assertEqual(pinned, plain)
+                answered += bool(plain)
+        self.assertEqual(answered, 5, 'сверка «как у помощника» не должна идти по пустым ответам')
+
+    def test_park_outside_the_catalog_gets_nothing(self):
+        rows = registration.build_ai_rows(registration.analyze('куда регистрировать из рудного'),
+                                          CATALOG, space_id=SPACE, park={'id': 999, 'name': 'X'})
+        self.assertEqual(rows, [])
+
+
 class AssistantRowsTest(unittest.TestCase):
 
     def test_row_contract_of_the_retriever(self):

@@ -537,7 +537,7 @@ def _origin_cities(variants, named):
     return [name for name in named if name in found]
 
 
-def plan(analysis, catalog):
+def plan(analysis, catalog, *, park=None):
     """[{'city', 'brand', 'found'} | {'city', 'brand': None, 'block'}] или [].
 
     Справочник отвечает, когда спросили регистрацию и назвали город:
@@ -549,9 +549,24 @@ def plan(analysis, catalog):
         своя реплика называет город или парк и ничего больше.
     «Как зарегать машину» и «после регистрации две недели без комиссии» сюда
     не доходят — их вырезает _REGISTRATION_ELSEWHERE.
+
+    park — {'id', …} парка, известного заранее: ручка знаний для партнёрского
+    ИИ (knowledge_api) присылает парк вместе с вопросом — водитель пишет в свой
+    парк, и «куда регистрироваться, я из Рудного» спрашивает про него. Отвечать
+    ли вообще, решают те же правила, что у помощника, по словам вопроса: парк
+    из запроса поводом не служит. Он решает только, ЗА КОГО ответ — за его
+    диспетчерскую, а не «зависит от парка водителя». Другой парк из слов
+    вопроса ответом не становится: ручка отвечает за один парк.
     """
     if not analysis.get('registration') or not catalog.dispatchers:
         return []
+    pinned = None
+    if park is not None:
+        pinned = catalog.brands.get('p:%d' % int(park['id']))
+        if pinned is None:
+            # Парка нет в справочнике пространства: ответ «зависит от парка
+            # водителя» тому, кто парк уже назвал, — не ответ.
+            return []
     own_variants = analysis.get('own_variants') or analysis['variants']
     kazakh_own, origin_own = _kazakh_cases(own_variants, catalog.city_names)
     kazakh_all, origin_all = _kazakh_cases(analysis['variants'], catalog.city_names)
@@ -594,7 +609,10 @@ def plan(analysis, catalog):
         city = catalog.city(name)
         if city is None:
             continue
-        if named_brands:
+        if pinned is not None:
+            decisions.append({'city': city, 'brand': pinned,
+                              'found': catalog.resolve(city, pinned['key'])})
+        elif named_brands:
             for brand in named_brands[:MAX_BRANDS]:
                 decisions.append({'city': city, 'brand': brand,
                                   'found': catalog.resolve(city, brand['key'])})
@@ -754,10 +772,12 @@ def _row(index, *, city, text, space_id):
     }
 
 
-def build_ai_rows(analysis, catalog, *, space_id):
-    """Фрагменты помощника из уже прочитанного справочника. Без базы — для тестов."""
+def build_ai_rows(analysis, catalog, *, space_id, park=None):
+    """Фрагменты помощника из уже прочитанного справочника. Без базы — для тестов.
+
+    park — парк, известный заранее (см. plan)."""
     rows = []
-    for decision in plan(analysis, catalog):
+    for decision in plan(analysis, catalog, park=park):
         text = brand_text(decision, catalog) if decision['brand'] else city_text(decision)
         if text:
             rows.append(_row(len(rows), city=decision['city'], text=text, space_id=space_id))
@@ -815,15 +835,19 @@ def _space(cursor, ctx, requested):
     return space if space and space.get('cities') else None
 
 
-def ai_rows(cursor, ctx, question, *, space_id, search_query=None):
-    """Фрагменты «Регистрация водителей» к вопросу помощника — или []."""
+def ai_rows(cursor, ctx, question, *, space_id, search_query=None, park=None):
+    """Фрагменты «Регистрация водителей» к вопросу помощника — или [].
+
+    park — {'id', 'name'} парка, известного заранее (ручка знаний для
+    партнёрского ИИ): ответ — за его диспетчерскую (plan)."""
     analysis = analyze(question, search_query)
     if not analysis['registration']:
         return []
     space = _space(cursor, ctx, space_id)
     if space is None:
         return []
-    return build_ai_rows(analysis, load(cursor, space_id=space['id']), space_id=space['id'])
+    return build_ai_rows(analysis, load(cursor, space_id=space['id']), space_id=space['id'],
+                         park=park)
 
 
 def search(cursor, ctx, query, *, requested_space):
