@@ -1,11 +1,14 @@
-/* Запросы в другие отделы: список и переписка (задача #335, п. 8).
+/* Запросы в другие отделы: переписка по запросу и список запросов оператора (задача #335, п. 8).
  *
- * Один компонент на два места: вкладка «Запросы» страницы карточки в iCORE Phone и
- * раздел портала. Оператор видит свои запросы и ответы по ним, руководитель — все
- * запросы отдела (кто что видит, решает сервер; экран только рисует).
+ * Thread — запрос с перепиской, один на два места: окно запроса на доске «Запросы» раздела
+ * портала (variant="window") и вкладка «Запросы» страницы карточки в iCORE Phone
+ * (variant="phone": список, по нажатию — переписка с кнопкой «назад», окно телефона узкое).
+ * Кто что видит и кто переносит запрос по доске, решает сервер; экран только рисует.
  *
- * compact — одна колонка: список, по нажатию — переписка с кнопкой «назад» (окно
- * телефона узкое). Без него на широком экране список слева, переписка справа.
+ * Переписка. Запрос ушёл в Telegram-группу — пишем в группу, ответы приходят оттуда. Запрос
+ * только на доске — переписка остаётся в портале: оператор спрашивает, ведущие доску
+ * отвечают ему и просят недостающее. Переносы по доске стоят в переписке строками: оператор
+ * видит, кто и когда передал запрос дальше.
  *
  * Свежесть. У страницы телефона нет колокола портала, поэтому список перечитывается сам
  * раз в полминуты, открытая переписка — раз в 15 секунд, и обе — при возврате во вкладку.
@@ -13,14 +16,15 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    ArrowLeft, CornerUpLeft, ExternalLink, FileText, Film, Image as ImageIcon, Inbox, Loader2,
+    ArrowLeft, ArrowRight, CornerUpLeft, ExternalLink, FileText, Film, Image as ImageIcon, Inbox, Loader2,
     Paperclip, RotateCcw, Search, Send, X,
 } from 'lucide-react';
 
-import { IosBadge, IosSegmented, iosBtnGhost, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
+import { IosSegmented, iosBtnSecondary, iosInput } from '../ui/ios';
 import { resolveRequestFile } from './cardsApi';
 import {
-    REQUEST_FILTERS, errorText, fmtSize, fmtWhen, quoteOf, senderColor, uploadsProblem,
+    REQUEST_FILTERS, errorText, fmtSize, fmtWhen, isMine, quoteOf, requestTitle, senderColor, uploadsProblem,
 } from './cardRules';
 import { EmptyState, GrowingTextarea, PickedFiles, RequestBadge, Spinner } from './ui';
 
@@ -102,7 +106,24 @@ function MessageFile({ api, requestId, message, onError }) {
     );
 }
 
-function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, reloadKey }) {
+/* Перенос по доске — строкой посреди переписки: куда, кто, когда. */
+const StageLine = ({ message }) => (
+    <div className="flex justify-center py-0.5">
+        <span className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] text-slate-500">
+            <ArrowRight size={12} className="shrink-0 text-slate-400" aria-hidden="true" />
+            <span className="min-w-0 truncate">
+                <span className="font-medium text-slate-700">{message.stage_label}</span>
+                {message.author_name ? ` · ${message.author_name}` : ''}
+            </span>
+            <span className="shrink-0 tabular-nums text-slate-400">{fmtWhen(message.created_at)}</span>
+        </span>
+    </div>
+);
+
+export function Thread({
+    api, requestId, variant = 'phone', onBack = null, onChanged, toast, limits, reloadKey = 0, userId = null,
+    stages = [],
+}) {
     const [detail, setDetail] = useState(null);
     const [failed, setFailed] = useState('');
     const [text, setText] = useState('');
@@ -112,6 +133,7 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
     const endRef = useRef(null);
     const fileRef = useRef(null);
     const countRef = useRef(0);
+    const phone = variant === 'phone';
 
     const load = useCallback(async (quiet = false) => {
         try {
@@ -119,7 +141,7 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
             setDetail(data);
             setFailed('');
             // Автор открыл запрос — «непрочитано» погасло и в списке.
-            if (!quiet) onChanged();
+            if (!quiet) onChanged(data.request);
         } catch (error) {
             if (!quiet) setFailed(errorText(error, 'Запрос не открылся'));
         }
@@ -152,14 +174,14 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
     }, [messages.length]);
 
     const act = async (name, work, done) => {
-        if (busy) return;
+        if (busy) return false;
         setBusy(name);
         try {
             const { data } = await work();
             setDetail(data);
             if (data.delivery_error) toast(`Не всё дошло до группы: ${data.delivery_error}`, 'error');
-            else if (done) toast(done, 'success');
-            onChanged();
+            else if (done) toast(typeof done === 'function' ? done(data) : done, 'success');
+            onChanged(data.request);
             return true;
         } catch (error) {
             toast(errorText(error), 'error');
@@ -188,10 +210,12 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
         setFiles(next);
     };
 
+    const stageOptions = useMemo(() => (stages || []).map((item) => ({ value: item.value, label: item.label })), [stages]);
+
     if (failed) {
         return (
             <div className="flex h-full flex-col">
-                <div className={compact ? '' : 'md:hidden'}><BackRow onBack={onBack} /></div>
+                {phone && <BackRow onBack={onBack} />}
                 <EmptyState title={failed}>
                     <button type="button" onClick={() => load()} className={`${iosBtnSecondary} mt-4`}>Повторить</button>
                 </EmptyState>
@@ -201,27 +225,37 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
     if (!detail) return <Spinner text="Открываем запрос…" />;
 
     const request = detail.request;
-    const closed = request.status === 'resolved' || request.status === 'cancelled';
-    const undelivered = request.delivery_status !== 'sent';
+    const closed = Boolean(request.closed);
+    // Запрос с группой, который до неё не дошёл: писать некуда, пока не отправят заново.
+    const undelivered = request.delivery_status === 'failed' || request.delivery_status === 'pending';
+    const boardOnly = request.delivery_status === 'none';
+    const own = Number(request.created_by) === Number(userId);
+    const placeholder = !boardOnly ? 'Написать в группу отдела…'
+        : own ? 'Написать по запросу…' : 'Написать оператору…';
 
     return (
         <div className="flex h-full min-h-0 flex-col">
             <div className="shrink-0 border-b border-slate-200/70 px-4 py-3">
                 <div className="flex items-start gap-2">
-                    {/* В одной колонке (окно телефона, телефонный портал) список скрыт под перепиской. */}
-                    <button type="button" onClick={onBack} aria-label="К списку запросов"
-                            className={`-ml-1.5 mt-0.5 h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 ${
-                                compact ? 'grid' : 'grid md:hidden'}`}>
-                        <ArrowLeft size={17} />
-                    </button>
+                    {/* В телефоне список скрыт под перепиской — назад к нему стрелкой. */}
+                    {phone && (
+                        <button type="button" onClick={onBack} aria-label="К списку запросов"
+                                className="-ml-1.5 mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-slate-100">
+                            <ArrowLeft size={17} />
+                        </button>
+                    )}
                     <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span className="text-[15px] font-semibold text-slate-900">
-                                Запрос №{request.id} · {request.destination_title}
-                            </span>
-                            <RequestBadge request={request} />
-                        </div>
-                        {request.topic_title && <div className="mt-0.5 text-[12.5px] text-slate-600">{request.topic_title}</div>}
+                        {phone && (
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                <span className="text-[15px] font-semibold text-slate-900">{requestTitle(request)}</span>
+                                {!detail.can_move && <RequestBadge request={request} />}
+                            </div>
+                        )}
+                        {request.topic_title && (
+                            <div className={phone ? 'mt-0.5 text-[12.5px] text-slate-600' : 'text-[13.5px] font-medium text-slate-800'}>
+                                {request.topic_title}
+                            </div>
+                        )}
                         <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[12px] text-slate-500">
                             {request.account && (
                                 <a href={request.account.url} target="_blank" rel="noopener noreferrer"
@@ -234,6 +268,16 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
                             <span>{request.created_by_name} · {fmtWhen(request.created_at)}</span>
                         </div>
                     </div>
+                    {/* Стадию переносят те, кто ведёт доску; остальным она видна бейджем. */}
+                    {detail.can_move ? (
+                        <CustomSelect variant="ios" value={request.stage} options={stageOptions} className="w-52 shrink-0"
+                                      ariaLabel="Стадия запроса" disabled={Boolean(busy)}
+                                      onChange={(value) => {
+                                          if (!value || value === request.stage) return;
+                                          act('stage', () => api.setRequestStage(requestId, value),
+                                              (data) => `Запрос №${requestId} — «${data.request.stage_label}»`);
+                                      }} />
+                    ) : (!phone && <RequestBadge request={request} className="shrink-0" />)}
                 </div>
                 {undelivered && (
                     <div className="mt-2 flex flex-wrap items-center gap-2 rounded-xl bg-rose-50 px-3 py-2 text-[12.5px] text-rose-700 ring-1 ring-rose-100">
@@ -251,9 +295,10 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
                 )}
             </div>
 
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
+            <div className="thin-scroll min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
                 {messages.map((message) => {
-                    const mine = message.direction === 'out';
+                    if (message.direction === 'stage') return <StageLine key={message.id} message={message} />;
+                    const mine = isMine(message, userId);
                     const quote = quoteOf(message, messages);
                     return (
                         <div key={message.id} className={`group flex ${mine ? 'justify-end' : 'justify-start'}`}>
@@ -277,9 +322,6 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
                                                  onError={(problem) => toast(problem, 'error')} />
                                 )}
                                 <div className="mt-0.5 flex items-center justify-end gap-2 text-[10.5px] text-slate-400">
-                                    {mine && message.author_name && message.author_user_id !== request.created_by && (
-                                        <span>{message.author_name}</span>
-                                    )}
                                     {!mine && detail.can_act && !closed && message.tg_message_id && (
                                         <button type="button" onClick={() => setReplyTo(message)}
                                                 className="inline-flex items-center gap-0.5 text-slate-400 hover:text-blue-600">
@@ -298,15 +340,9 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
             {detail.can_act && (
                 <div className="shrink-0 space-y-2 border-t border-slate-200/70 px-4 py-3">
                     {closed ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-slate-500">
-                            <span>
-                                {request.status_label}{request.resolved_by_name ? ` · ${request.resolved_by_name}` : ''}
-                                {request.resolved_at ? ` · ${fmtWhen(request.resolved_at)}` : ''}
-                            </span>
-                            <button type="button" disabled={Boolean(busy)} className={iosBtnSecondary}
-                                    onClick={() => act('reopen', () => api.setRequestStatus(requestId, 'reopen'), 'Запрос снова в работе')}>
-                                Вернуть в работу
-                            </button>
+                        <div className="text-[12.5px] text-slate-500">
+                            {request.stage_label}{request.resolved_by_name ? ` · ${request.resolved_by_name}` : ''}
+                            {request.resolved_at ? ` · ${fmtWhen(request.resolved_at)}` : ''}
                         </div>
                     ) : (
                         <>
@@ -331,7 +367,7 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
                                             className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 hover:bg-slate-200">
                                         <Paperclip size={16} />
                                     </button>
-                                    <GrowingTextarea value={text} onChange={setText} placeholder="Написать в группу отдела…"
+                                    <GrowingTextarea value={text} onChange={setText} placeholder={placeholder}
                                                      className={`${iosInput} min-h-[40px] flex-1`}
                                                      onKeyDown={(event) => {
                                                          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) send();
@@ -343,16 +379,6 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
                                     </button>
                                 </div>
                             )}
-                            <div className="flex flex-wrap justify-end gap-1">
-                                <button type="button" disabled={Boolean(busy)} className={iosBtnGhost}
-                                        onClick={() => act('cancel', () => api.setRequestStatus(requestId, 'cancelled'), 'Запрос отменён')}>
-                                    Отменить запрос
-                                </button>
-                                <button type="button" disabled={Boolean(busy)} className={iosBtnSecondary}
-                                        onClick={() => act('resolve', () => api.setRequestStatus(requestId, 'resolved'), 'Запрос закрыт')}>
-                                    Вопрос решён
-                                </button>
-                            </div>
                         </>
                     )}
                 </div>
@@ -363,16 +389,20 @@ function Thread({ api, requestId, compact, onBack, onChanged, toast, limits, rel
 
 const BackRow = ({ onBack }) => (
     <div className="shrink-0 border-b border-slate-200/70 px-3 py-2">
-        <button type="button" onClick={onBack} className={iosBtnGhost}><ArrowLeft size={15} /> К списку</button>
+        <button type="button" onClick={onBack}
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[13px] font-medium text-slate-600 hover:bg-slate-100">
+            <ArrowLeft size={15} /> К списку
+        </button>
     </div>
 );
 
+/* Список запросов оператора в окне телефона: свои запросы со стадией доски, по нажатию —
+   переписка. Сам запрос по доске оператор не двигает — это делают те, кто её ведёт. */
 export default function RequestsPanel({
-    api, toast, limits = null, compact = false, canManage = false, departmentId = null,
+    api, toast, limits = null, userId = null, stages = [],
     focusRequestId = null, onFocusHandled = null, reloadKey = 0, onUnread = null,
 }) {
     const [filter, setFilter] = useState('active');
-    const [mine, setMine] = useState(false);
     const [query, setQuery] = useState('');
     const [search, setSearch] = useState('');
     const [list, setList] = useState(null);
@@ -389,10 +419,7 @@ export default function RequestsPanel({
         return () => clearTimeout(timer);
     }, [query]);
 
-    const params = useMemo(() => ({
-        status: filter || undefined, q: search || undefined, mine: mine ? 1 : undefined,
-        department_id: departmentId || undefined,
-    }), [filter, search, mine, departmentId]);
+    const params = useMemo(() => ({ status: filter || undefined, q: search || undefined }), [filter, search]);
 
     const load = useCallback(async (quiet = false) => {
         try {
@@ -418,7 +445,7 @@ export default function RequestsPanel({
     }, [load]);
     useEffect(() => { if (reloadKey) load(true); }, [reloadKey, load]);
 
-    // Ссылка из Telegram или колокола: открыть названный запрос.
+    // Ссылка из колокола или истории: открыть названный запрос.
     useEffect(() => {
         if (!focusRequestId) return;
         setOpenId(Number(focusRequestId));
@@ -442,17 +469,20 @@ export default function RequestsPanel({
 
     const onChanged = useCallback(() => { load(true); }, [load]);
 
-    const listPane = (
+    if (openId) {
+        return (
+            <div className="h-full min-h-0">
+                <Thread key={openId} api={api} requestId={openId} variant="phone" onBack={() => setOpenId(null)}
+                        onChanged={onChanged} toast={toast} limits={limits} reloadKey={reloadKey}
+                        userId={userId} stages={stages} />
+            </div>
+        );
+    }
+
+    return (
         <div className="flex h-full min-h-0 flex-col">
             <div className="shrink-0 space-y-2 px-3 pb-2 pt-3">
-                <div className="flex flex-wrap items-center gap-2">
-                    <IosSegmented value={filter} options={REQUEST_FILTERS} onChange={setFilter} ariaLabel="Какие запросы показать" />
-                    {canManage && (
-                        <IosSegmented value={mine ? 'mine' : 'all'} onChange={(value) => setMine(value === 'mine')}
-                                      options={[{ value: 'all', label: 'Все' }, { value: 'mine', label: 'Мои' }]}
-                                      ariaLabel="Чьи запросы показать" />
-                    )}
-                </div>
+                <IosSegmented value={filter} options={REQUEST_FILTERS} onChange={setFilter} ariaLabel="Какие запросы показать" />
                 <label className="relative block">
                     <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" aria-hidden="true" />
                     <input value={query} onChange={(event) => setQuery(event.target.value)}
@@ -468,56 +498,32 @@ export default function RequestsPanel({
                 {!failed && !list && <Spinner />}
                 {list && !list.length && (
                     <EmptyState icon={Inbox} title={search ? 'Ничего не нашлось' : 'Запросов нет'}
-                                text={search ? '' : 'Запрос в другой отдел создаётся из карточки звонка в iCORE Phone.'} />
+                                text={search ? '' : 'Запрос в другой отдел создаётся из карточки звонка.'} />
                 )}
-                {list?.map((item) => {
-                    const active = item.id === openId;
-                    return (
-                        <button key={item.id} type="button" onClick={() => setOpenId(item.id)}
-                                className={`mb-1 block w-full rounded-xl px-3 py-2.5 text-left transition active:scale-[0.995] ${
-                                    active ? 'bg-blue-50 ring-1 ring-blue-200/70' : 'hover:bg-slate-100/80'}`}>
-                            <div className="flex items-center gap-2">
-                                {item.unread > 0 && <span className="h-2 w-2 shrink-0 rounded-full bg-blue-600" aria-label="Есть непрочитанный ответ" />}
-                                <span className={`min-w-0 flex-1 truncate text-[13.5px] ${item.unread > 0 ? 'font-semibold text-slate-900' : 'font-medium text-slate-800'}`}>
-                                    {item.destination_title}
-                                    <span className="font-normal text-slate-400"> · №{item.id}</span>
-                                </span>
-                                <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">{fmtWhen(item.last_message_at)}</span>
-                            </div>
-                            <div className="mt-0.5 truncate text-[12.5px] text-slate-600">{item.topic_title || item.body}</div>
-                            <div className="mt-1 flex items-center gap-2">
-                                <span className="min-w-0 flex-1 truncate text-[11.5px] text-slate-400">
-                                    {item.account ? `${item.account.kind_label} · ${item.account.full_name || `ID ${item.account.tez_id}`}` : item.phone_text}
-                                    {canManage && !mine ? ` · ${item.created_by_name || ''}` : ''}
-                                </span>
-                                {item.delivery_status !== 'sent'
-                                    ? <IosBadge tone="red">Не доставлен</IosBadge>
-                                    : <RequestBadge request={item} />}
-                            </div>
-                        </button>
-                    );
-                })}
+                {list?.map((item) => (
+                    <button key={item.id} type="button" onClick={() => setOpenId(item.id)}
+                            className="mb-1 block w-full rounded-xl px-3 py-2.5 text-left transition hover:bg-slate-100/80 active:scale-[0.995]">
+                        <div className="flex items-center gap-2">
+                            {item.unread > 0 && <span className="h-2 w-2 shrink-0 rounded-full bg-blue-600" aria-label="Есть новое" />}
+                            <span className={`min-w-0 flex-1 truncate text-[13.5px] ${item.unread > 0 ? 'font-semibold text-slate-900' : 'font-medium text-slate-800'}`}>
+                                {requestTitle(item)}
+                            </span>
+                            <span className="shrink-0 text-[11.5px] tabular-nums text-slate-400">{fmtWhen(item.last_message_at)}</span>
+                        </div>
+                        <div className="mt-0.5 truncate text-[12.5px] text-slate-600">{item.topic_title || item.body}</div>
+                        <div className="mt-1 flex items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate text-[11.5px] text-slate-400">
+                                {item.account ? `${item.account.kind_label} · ${item.account.full_name || `ID ${item.account.tez_id}`}` : item.phone_text}
+                            </span>
+                            <RequestBadge request={item} />
+                        </div>
+                    </button>
+                ))}
                 {hasMore && (
                     <button type="button" onClick={more} disabled={loadingMore} className={`${iosBtnSecondary} mx-auto mt-2 flex`}>
                         {loadingMore ? 'Загружаем…' : 'Показать ещё'}
                     </button>
                 )}
-            </div>
-        </div>
-    );
-
-    const thread = openId ? (
-        <Thread key={openId} api={api} requestId={openId} compact={compact} onBack={() => setOpenId(null)}
-                onChanged={onChanged} toast={toast} limits={limits} reloadKey={reloadKey} />
-    ) : null;
-
-    if (compact) return <div className="h-full min-h-0">{thread || listPane}</div>;
-
-    return (
-        <div className={`${iosCard} grid h-[calc(100vh-190px)] min-h-[460px] grid-cols-1 overflow-hidden md:grid-cols-[minmax(300px,380px)_1fr]`}>
-            <div className={`min-h-0 border-slate-200/70 md:border-r ${openId ? 'hidden md:block' : ''}`}>{listPane}</div>
-            <div className={`min-h-0 ${openId ? '' : 'hidden md:block'}`}>
-                {thread || <EmptyState icon={Inbox} title="Выберите запрос" text="Здесь откроется переписка с отделом." />}
             </div>
         </div>
     );

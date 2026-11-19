@@ -40,9 +40,16 @@ def load_access_context(cursor, user_id):
     if not row:
         return None
     name, role, status, department_id, headed, groups = row
-    cursor.execute("SELECT department_id, enabled, group_ids FROM client_card_settings")
-    departments = {int(dep): {'enabled': bool(enabled), 'group_ids': [int(x) for x in (group_ids or [])]}
-                   for dep, enabled, group_ids in cursor.fetchall()}
+    # Код отдела — для поимённых допусков к доске (access.BOARD_USER_IDS): id отдела у копий
+    # базы свой, код — один.
+    cursor.execute("""
+        SELECT s.department_id, s.enabled, s.group_ids, d.code
+          FROM client_card_settings s
+          LEFT JOIN departments d ON d.id = s.department_id
+    """)
+    departments = {int(dep): {'enabled': bool(enabled), 'group_ids': [int(x) for x in (group_ids or [])],
+                              'code': str(code or '').strip().lower()}
+                   for dep, enabled, group_ids, code in cursor.fetchall()}
     return {
         'user_id': int(user_id),
         'name': name or '',
@@ -773,21 +780,21 @@ def journal(cursor, department_id, *, operator_id=None, date_from=None, date_to=
 
 
 def card_requests(cursor, card_ids):
-    """Запросы по карточкам: {card_id: [{id, destination_title, status, …}]}."""
+    """Запросы по карточкам: {card_id: [{id, destination_title, status, stage, …}]}."""
     ids = sorted({int(x) for x in card_ids if x})
     if not ids:
         return {}
     cursor.execute("""
-        SELECT r.card_id, r.id, r.destination_title, r.status, r.delivery_status, r.created_at,
+        SELECT r.card_id, r.id, r.destination_title, r.status, r.stage, r.delivery_status, r.created_at,
                r.last_inbound_at
           FROM client_card_requests r
          WHERE r.card_id = ANY(%s)
          ORDER BY r.id
     """, (ids,))
     result = {}
-    for card_id, request_id, title, status, delivery, created_at, inbound_at in cursor.fetchall():
+    for card_id, request_id, title, status, stage, delivery, created_at, inbound_at in cursor.fetchall():
         result.setdefault(int(card_id), []).append({
-            'id': int(request_id), 'destination_title': title, 'status': status,
+            'id': int(request_id), 'destination_title': title, 'status': status, 'stage': stage,
             'delivery_status': delivery, 'created_at': created_at, 'last_inbound_at': inbound_at})
     return result
 
@@ -892,6 +899,7 @@ def chat_title(cursor, chat_id):
 # ─── Запросы в другие отделы ─────────────────────────────────────────────────
 
 _REQUEST_COLUMNS = ('id', 'department_id', 'card_id', 'destination_id', 'destination_title', 'body', 'status',
+                    'stage', 'stage_changed_at', 'stage_changed_by_name',
                     'account_id', 'phone', 'topic_title', 'created_by', 'created_by_name', 'tg_chat_id',
                     'tg_chat_title', 'tg_message_id', 'delivery_status', 'delivery_error', 'first_reply_at',
                     'last_message_at', 'last_inbound_at', 'author_unread_count', 'author_unread_at',
@@ -907,14 +915,20 @@ def _request(row):
 
 def create_request(cursor, *, department_id, card_id, destination, body, account_id, phone, topic_title,
                    by, by_name, now):
+    """Новый запрос — в первую колонку доски. destination None — только на доске: в
+    Telegram ему уходить некуда (доставка 'none')."""
+    destination = destination or {}
+    delivery = rules.DELIVERY_PENDING if destination else rules.DELIVERY_NONE
     cursor.execute("""
         INSERT INTO client_card_requests (department_id, card_id, destination_id, destination_title, body,
                                           account_id, phone, topic_title, created_by, created_by_name,
-                                          tg_chat_id, tg_chat_title, last_message_at, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                          tg_chat_id, tg_chat_title, delivery_status, stage,
+                                          last_message_at, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
-    """, (int(department_id), card_id, destination['id'], destination['title'], body, account_id, phone,
-          topic_title, by, by_name, destination['chat_id'], destination['chat_title'], now, now, now))
+    """, (int(department_id), card_id, destination.get('id'), destination.get('title'), body, account_id, phone,
+          topic_title, by, by_name, destination.get('chat_id'), destination.get('chat_title'), delivery,
+          rules.STAGE_NEW, now, now, now))
     return int(cursor.fetchone()[0])
 
 
@@ -925,21 +939,13 @@ def get_request(cursor, request_id):
     return _request(row) if row else None
 
 
-def list_requests(cursor, department_ids, *, author_id=None, status=None, search=None, before=None, limit=40):
-    """Запросы отделов; author_id — только свои (оператор). Порядок — по свежести переписки.
-
-    before — (last_message_at, id) последней строки прошлой порции.
-    """
-    params = {'deps': [int(x) for x in department_ids], 'limit': int(limit) + 1}
+def _requests_where(department_ids, *, author_id=None, search=None):
+    """Общее условие списка и доски: отделы, «только свои», поиск. (where, params)."""
+    params = {'deps': [int(x) for x in department_ids]}
     where = ["r.department_id = ANY(%(deps)s)"]
     if author_id:
         params['author'] = int(author_id)
         where.append("r.created_by = %(author)s")
-    if status == 'active':
-        where.append("r.status IN ('open', 'answered')")
-    elif status in rules.REQUEST_STATUSES:
-        params['status'] = status
-        where.append("r.status = %(status)s")
     text = str(search or '').strip()
     if text:
         digits = ''.join(ch for ch in text if ch.isdigit())
@@ -961,6 +967,27 @@ def list_requests(cursor, department_ids, *, author_id=None, status=None, search
                              OR r.destination_title ILIKE %(text)s OR r.created_by_name ILIKE %(text)s
                              OR EXISTS (SELECT 1 FROM client_card_accounts sa
                                          WHERE sa.id = r.account_id AND sa.full_name ILIKE %(text)s))""")
+    return where, params
+
+
+def list_requests(cursor, department_ids, *, author_id=None, status=None, stage=None, search=None, before=None,
+                  limit=40):
+    """Запросы отделов; author_id — только свои (оператор). Порядок — по свежести переписки.
+
+    status: 'active' — открытые стадии, 'resolved' — «Решено»; stage — одна колонка доски
+    (её «Показать ещё»). before — (last_message_at, id) последней строки прошлой порции.
+    """
+    where, params = _requests_where(department_ids, author_id=author_id, search=search)
+    params['limit'] = int(limit) + 1
+    params['closed'] = list(rules.REQUEST_STAGES_CLOSED)
+    if status == 'active':
+        where.append("NOT (r.stage = ANY(%(closed)s))")
+    elif status == 'resolved':
+        params['status_stage'] = rules.STAGE_RESOLVED
+        where.append("r.stage = %(status_stage)s")
+    if stage in rules.REQUEST_STAGES:
+        params['stage'] = stage
+        where.append("r.stage = %(stage)s")
     if before:
         params['before_at'], params['before_id'] = before
         where.append("(r.last_message_at, r.id) < (%(before_at)s, %(before_id)s)")
@@ -969,6 +996,68 @@ def list_requests(cursor, department_ids, *, author_id=None, status=None, search
     rows = [_request(row) for row in cursor.fetchall()]
     has_more = len(rows) > int(limit)
     return rows[:int(limit)], has_more
+
+
+def board(cursor, department_ids, *, author_id=None, search=None, limit=rules.BOARD_COLUMN_LIMIT):
+    """Доска «Запросы»: {стадия: {'total': n, 'items': [первые limit по свежести]}}.
+
+    Колонка — отдельным проходом по индексу (отдел, стадия, свежесть): в «Решено» за год
+    накопятся тысячи строк, а на экран нужны первые полсотни каждой стадии и счётчик.
+    """
+    where, params = _requests_where(department_ids, author_id=author_id, search=search)
+    condition = ' AND '.join(where)
+    params['stages'] = list(rules.REQUEST_STAGES)
+    params['limit'] = int(limit)
+    result = {stage: {'total': 0, 'items': []} for stage in rules.REQUEST_STAGES}
+    cursor.execute("SELECT r.stage, COUNT(*) FROM client_card_requests r WHERE " + condition
+                   + " GROUP BY r.stage", params)
+    for stage, total in cursor.fetchall():
+        if stage in result:
+            result[stage]['total'] = int(total)
+    cursor.execute("SELECT " + _REQUEST_SELECT + """
+          FROM unnest(%(stages)s::text[]) AS s(stage)
+          CROSS JOIN LATERAL (
+              SELECT r.* FROM client_card_requests r
+               WHERE r.stage = s.stage AND """ + condition + """
+               ORDER BY r.last_message_at DESC, r.id DESC
+               LIMIT %(limit)s) r
+         ORDER BY r.last_message_at DESC, r.id DESC
+    """, params)
+    for row in cursor.fetchall():
+        item = _request(row)
+        if item['stage'] in result:
+            result[item['stage']]['items'].append(item)
+    return result
+
+
+def set_request_stage(cursor, request_id, stage, *, by, by_name, now):
+    """Перенести запрос в стадию доски. Возвращает True, если стадия сменилась.
+
+    Вместе со стадией: статус (закрыта ли и есть ли ответ), отметка закрытия, кто перенёс,
+    свежесть — перенесённая карточка встаёт наверх своей колонки, как в Битриксе. Автору
+    загорается «непрочитано», если от него ждут информацию или запрос закрыт
+    (rules.REQUEST_STAGES_NOTIFY_AUTHOR) и перенёс не он сам.
+    """
+    closed = stage in rules.REQUEST_STAGES_CLOSED
+    cursor.execute("""
+        UPDATE client_card_requests
+           SET stage = %(stage)s,
+               status = COALESCE(%(closed_status)s,
+                                 CASE WHEN last_inbound_at IS NOT NULL THEN 'answered' ELSE 'open' END),
+               resolved_at = CASE WHEN %(closed)s THEN %(now)s ELSE NULL END,
+               resolved_by = CASE WHEN %(closed)s THEN %(by)s ELSE NULL END,
+               resolved_by_name = CASE WHEN %(closed)s THEN %(by_name)s ELSE NULL END,
+               stage_changed_at = %(now)s, stage_changed_by = %(by)s, stage_changed_by_name = %(by_name)s,
+               author_unread_count = author_unread_count
+                   + CASE WHEN %(notify)s AND created_by IS DISTINCT FROM %(by)s THEN 1 ELSE 0 END,
+               author_unread_at = CASE WHEN %(notify)s AND created_by IS DISTINCT FROM %(by)s
+                                       THEN %(now)s ELSE author_unread_at END,
+               last_message_at = %(now)s, updated_at = %(now)s
+         WHERE id = %(id)s AND stage <> %(stage)s
+    """, {'stage': stage, 'closed_status': rules.closed_status_for_stage(stage), 'closed': closed,
+          'notify': stage in rules.REQUEST_STAGES_NOTIFY_AUTHOR, 'now': now, 'by': by, 'by_name': by_name,
+          'id': int(request_id)})
+    return cursor.rowcount > 0
 
 
 _MESSAGE_COLUMNS = ('id', 'request_id', 'direction', 'body', 'author_user_id', 'author_name', 'tg_chat_id',
@@ -1075,21 +1164,6 @@ def touch_outbound(cursor, request_id, *, now):
                    (now, now, int(request_id)))
 
 
-def set_request_status(cursor, request_id, status, *, by, by_name, now):
-    """Сменить статус. Возвращает True, если он изменился."""
-    closed = status in rules.REQUEST_CLOSED
-    cursor.execute("""
-        UPDATE client_card_requests
-           SET status = %(status)s,
-               resolved_at = CASE WHEN %(closed)s THEN %(now)s ELSE NULL END,
-               resolved_by = CASE WHEN %(closed)s THEN %(by)s ELSE NULL END,
-               resolved_by_name = CASE WHEN %(closed)s THEN %(by_name)s ELSE NULL END,
-               updated_at = %(now)s
-         WHERE id = %(id)s AND status <> %(status)s
-    """, {'status': status, 'closed': closed, 'now': now, 'by': by, 'by_name': by_name, 'id': int(request_id)})
-    return cursor.rowcount > 0
-
-
 def mark_seen(cursor, request_id, user_id, *, now):
     """Автор открыл запрос — непрочитанное гаснет. Чужой просмотр его не трогает."""
     cursor.execute("""
@@ -1108,12 +1182,12 @@ def unread_total(cursor, user_id):
 
 
 def unread_for_bell(cursor, user_id, limit):
-    """Для колокола: (сколько всего, строки [id, подпись, когда])."""
+    """Для колокола: (сколько всего, строки [id, группа, причина, когда, стадия])."""
     total = unread_total(cursor, user_id)
     if not total:
         return 0, []
     cursor.execute("""
-        SELECT r.id, r.destination_title, r.topic_title, r.author_unread_at
+        SELECT r.id, r.destination_title, r.topic_title, r.author_unread_at, r.stage
           FROM client_card_requests r
          WHERE r.created_by = %s AND r.author_unread_count > 0
          ORDER BY r.author_unread_at DESC, r.id DESC

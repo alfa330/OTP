@@ -557,12 +557,14 @@ class ClientCardsService:
             raise CardError('%s — запрос не отправлен' % error, 'REQUEST_STORAGE', 503)
         return stored
 
-    def create_request(self, ctx, *, card_id, destination_id, body, uploads=None):
+    def create_request(self, ctx, *, card_id, destination_id=None, body, uploads=None):
         """Запрос в другой отдел прямо из карточки (задача #335, п. 6–7).
 
-        В группу уходит сообщение с причиной обращения, аккаунтом, номером и текстом
-        оператора; файлы — следом реплаями на него. Возвращает (запрос, ошибка доставки):
-        Telegram недоступен — запрос сохранён и отправляется повторно кнопкой.
+        Запрос встаёт на доску «Запросы» отдела — в «Новое обращение»; дальше его ведут те,
+        кто разбирает доску (владелец, 19.11.2026). Выбрана Telegram-группа — туда ещё уходит
+        сообщение с причиной обращения, аккаунтом, номером и текстом оператора; файлы —
+        следом реплаями на него. Возвращает (запрос, ошибка доставки): Telegram недоступен —
+        запрос сохранён и отправляется повторно кнопкой.
         """
         text = rules.clean_text(body, rules.REQUEST_BODY_LIMIT)
         if len(text) < 3:
@@ -570,13 +572,15 @@ class ClientCardsService:
         uploads = self._check_uploads(uploads)
         with self._cursor() as cursor:
             card = self._card_for(cursor, ctx, card_id, edit=True, live=True)
-            destination = queries.get_destination(cursor, destination_id) if destination_id else None
-            if (not destination or destination['department_id'] != card['department_id']
-                    or not destination['is_active']):
-                raise CardError('Выберите, в какой отдел уходит запрос', 'REQUEST_BAD_DESTINATION')
-            if not destination['is_ready']:
-                raise CardError('У отдела «%s» не привязана Telegram-группа — запрос отправить некуда'
-                                % destination['title'], 'REQUEST_NO_CHAT', 409)
+            destination = None
+            if destination_id:
+                destination = queries.get_destination(cursor, destination_id)
+                if (not destination or destination['department_id'] != card['department_id']
+                        or not destination['is_active']):
+                    raise CardError('Такой группы для запросов нет — выберите другую', 'REQUEST_BAD_DESTINATION')
+                if not destination['is_ready']:
+                    raise CardError('У отдела «%s» не привязана Telegram-группа — запрос отправить некуда'
+                                    % destination['title'], 'REQUEST_NO_CHAT', 409)
         stored = self._store_uploads(uploads)
         now = self._now()
         topic = card['topics'][0] if card['topics'] else None
@@ -598,7 +602,7 @@ class ClientCardsService:
         except Exception:
             files.drop(self._gcs, [item['ref'] for item in stored])
             raise
-        _ok, error = self.deliver_request(request_id)
+        error = self.deliver_request(request_id)[1] if destination else None
         return self.request_detail(ctx, request_id), error
 
     def _send_following(self, chat_id, send):
@@ -632,6 +636,9 @@ class ClientCardsService:
             request = queries.get_request(cursor, request_id)
             if not request:
                 return False, 'Запрос не найден'
+            # Запрос только на доске: в Telegram ему уходить некуда, и это не сбой.
+            if request['delivery_status'] == rules.DELIVERY_NONE:
+                return True, None
             destination = queries.get_destination(cursor, request['destination_id'])
             account = queries.get_account(cursor, request['account_id']) if request['account_id'] else None
             messages = queries.request_messages(cursor, request_id)
@@ -717,30 +724,57 @@ class ClientCardsService:
             messages = queries.request_messages(cursor, request_id)
             account = queries.get_account(cursor, request['account_id']) if request['account_id'] else None
         return {'request': request, 'messages': messages, 'account': account,
-                'can_act': access.can_act_on_request(ctx, request)}
+                'can_act': access.can_act_on_request(ctx, request),
+                'can_move': access.can_move_request(ctx, request)}
 
-    def list_requests(self, ctx, *, department_id=None, mine=False, status=None, search=None, before=None):
-        """Запросы раздела: руководителю — все запросы отдела, остальным — свои."""
+    def _request_scope(self, ctx, department_id):
+        """(отделы, только свои) для списка и доски: кто ведёт доску отдела — видит все его
+        запросы, остальные — свои."""
         departments = access.section_department_ids(ctx)
         if department_id is not None:
             departments = [dep for dep in departments if dep == int(department_id)]
+        only_own = not all(access.works_board(ctx, dep) for dep in departments)
+        return departments, only_own
+
+    def list_requests(self, ctx, *, department_id=None, mine=False, status=None, stage=None, search=None,
+                      before=None):
+        """Запросы раздела: тем, кто ведёт доску отдела, — все запросы отдела, остальным — свои."""
+        departments, only_own = self._request_scope(ctx, department_id)
         if not departments:
             return [], False, {}
-        managed = set(access.managed_department_ids(ctx))
-        only_own = mine or not all(dep in managed for dep in departments)
         with self._cursor() as cursor:
             rows, has_more = queries.list_requests(
-                cursor, departments, author_id=ctx['user_id'] if only_own else None, status=status,
-                search=search, before=before, limit=REQUESTS_PAGE)
+                cursor, departments, author_id=ctx['user_id'] if (mine or only_own) else None, status=status,
+                stage=stage, search=search, before=before, limit=REQUESTS_PAGE)
             names = queries.account_names(cursor, [row['account_id'] for row in rows])
         return rows, has_more, names
 
-    def reply(self, ctx, request_id, *, body, uploads=None, reply_to=None):
-        """Оператор пишет в открытую нить запроса: текст и файлы уходят в группу реплаем.
+    def board(self, ctx, *, department_id=None, search=None):
+        """Доска «Запросы» отдела: колонки стадий с первыми карточками и счётчиками.
 
-        reply_to — строка переписки, на которую отвечают; номер сообщения в группе берётся
-        из базы и только в пределах этого запроса — номером с клиента бота можно было бы
-        заставить ответить на любое сообщение рабочей группы.
+        Возвращает (колонки {стадия: {'total', 'items'}}, аккаунты карточек, можно ли
+        переносить). Оператор видит на доске только свои запросы и не переносит их.
+        """
+        departments, only_own = self._request_scope(ctx, department_id)
+        if not departments:
+            return {stage: {'total': 0, 'items': []} for stage in rules.REQUEST_STAGES}, {}, False
+        with self._cursor() as cursor:
+            columns = queries.board(cursor, departments, author_id=ctx['user_id'] if only_own else None,
+                                    search=search)
+            names = queries.account_names(
+                cursor, [item['account_id'] for column in columns.values() for item in column['items']])
+        return columns, names, all(access.works_board(ctx, dep) for dep in departments)
+
+    def reply(self, ctx, request_id, *, body, uploads=None, reply_to=None):
+        """Пишут в открытую нить запроса.
+
+        Запрос с Telegram-группой: текст и файлы уходят в группу реплаем. reply_to — строка
+        переписки, на которую отвечают; номер сообщения в группе берётся из базы и только в
+        пределах этого запроса — номером с клиента бота можно было бы заставить ответить на
+        любое сообщение рабочей группы.
+
+        Запрос только на доске: переписка остаётся в портале — автор спрашивает и отвечает,
+        ведущие доску спрашивают у него недостающее (их сообщение автору — «непрочитано»).
         """
         text = rules.clean_text(body, 3000)
         uploads = self._check_uploads(uploads)
@@ -748,14 +782,19 @@ class ClientCardsService:
             raise CardError('Напишите сообщение или приложите файл', 'REQUEST_EMPTY')
         with self._cursor() as cursor:
             request = self._request_for(cursor, ctx, request_id, act=True)
-            if request['status'] in rules.REQUEST_CLOSED:
-                raise CardError('Запрос закрыт — верните его в работу, чтобы написать', 'REQUEST_CLOSED', 409)
-            if request['delivery_status'] != 'sent' or not request['tg_message_id']:
+            if request['stage'] in rules.REQUEST_STAGES_CLOSED:
+                raise CardError('Запрос закрыт — написать в него можно, когда его вернут в работу',
+                                'REQUEST_CLOSED', 409)
+            board_only = request['delivery_status'] == rules.DELIVERY_NONE
+            if not board_only and (request['delivery_status'] != 'sent' or not request['tg_message_id']):
                 raise CardError('Запрос ещё не доставлен в группу — отправьте его ещё раз',
                                 'REQUEST_NOT_DELIVERED', 409)
             target = queries.get_message(cursor, request_id, reply_to) if reply_to else None
-            if reply_to and not (target and target['tg_message_id']):
+            # У запроса без группы отвечать «реплаем» не на что: номеров сообщений Telegram нет.
+            if reply_to and (board_only or not (target and target['tg_message_id'])):
                 raise CardError('Сообщение, на которое отвечаете, не найдено', 'REQUEST_BAD_REPLY', 404)
+        if board_only:
+            return self._reply_on_board(ctx, request, text, uploads), None
         stored = self._store_uploads(uploads)
         chat_id = request['tg_chat_id']
         anchor = (target or {}).get('tg_message_id') or request['tg_message_id']
@@ -789,28 +828,57 @@ class ClientCardsService:
             error = self._send_files(request_id, chat_id, anchor, rows)
         return self.request_detail(ctx, request_id), error
 
-    def set_request_status(self, ctx, request_id, status):
-        """Закрыть запрос («Решён», «Отменён») или вернуть в работу.
+    def _reply_on_board(self, ctx, request, text, uploads):
+        """Сообщение в переписку запроса без группы: остаётся в портале.
 
-        Возврат в работу: «Есть ответ», если отдел уже отвечал, иначе «Ждёт ответа». О
-        закрытии группе уходит короткая отбивка — иначе там продолжат разбираться.
+        Пишет автор — строка out (его вопрос тем, кто ведёт доску). Пишет ведущий доску или
+        руководитель — строка in: это ответ автору, и у автора загорается «непрочитано».
         """
-        if status not in ('resolved', 'cancelled', 'reopen'):
-            raise CardError('Неизвестное действие', 'REQUEST_BAD_STATUS')
+        request_id = request['id']
+        stored = self._store_uploads(uploads)
+        own = request['created_by'] is not None and int(request['created_by']) == int(ctx['user_id'])
+        direction = 'out' if own else 'in'
+        now = self._now()
+        try:
+            with self._cursor() as cursor:
+                if text:
+                    queries.add_message(cursor, request_id=request_id, direction=direction, now=now, body=text,
+                                        author_user_id=ctx['user_id'], author_name=ctx['name'])
+                for item in stored:
+                    queries.add_message(cursor, request_id=request_id, direction=direction, now=now,
+                                        author_user_id=ctx['user_id'], author_name=ctx['name'], file=item)
+                if own:
+                    queries.touch_outbound(cursor, request_id, now=now)
+                else:
+                    queries.touch_inbound(cursor, request_id, now=now)
+        except Exception:
+            files.drop(self._gcs, [item['ref'] for item in stored])
+            raise
+        return self.request_detail(ctx, request_id)
+
+    def set_request_stage(self, ctx, request_id, stage):
+        """Перенести запрос по доске «Запросы» — в любую стадию, в том числе обратно в работу.
+
+        Переносят те, кто ведёт доску отдела (access.can_move_request). Перенос остаётся
+        строкой в переписке запроса: оператор видит, кто и когда передал его дальше. Запрос
+        закрыли («Решено», «Сделка провалена») — его Telegram-группе уходит короткая
+        отбивка, иначе там продолжат разбираться.
+        """
+        if stage not in rules.REQUEST_STAGES:
+            raise CardError('Такой стадии на доске нет', 'REQUEST_BAD_STAGE')
         now = self._now()
         with self._cursor() as cursor:
-            request = self._request_for(cursor, ctx, request_id, act=True)
-            target, changed = status, False
-            if status == 'reopen':
-                target = rules.REQUEST_ANSWERED if request['last_inbound_at'] else rules.REQUEST_OPEN
-            # «Вернуть в работу» у запроса, который и так в работе, ничего не меняет.
-            if status != 'reopen' or request['status'] in rules.REQUEST_CLOSED:
-                changed = queries.set_request_status(cursor, request_id, target, by=ctx['user_id'],
-                                                     by_name=ctx['name'], now=now)
-            if request['created_by'] == ctx['user_id']:
-                queries.mark_seen(cursor, request_id, ctx['user_id'], now=now)
-        if changed and target in rules.REQUEST_CLOSED and request['tg_chat_id'] and request['tg_message_id']:
-            notice = telegram.build_status_notice(request_id=request_id, status=target, actor_name=ctx['name'])
+            request = self._request_for(cursor, ctx, request_id)
+            if not access.can_move_request(ctx, request):
+                raise CardError('Переносить запросы по доске могут те, кто её ведёт', 'REQUEST_MOVE_FORBIDDEN', 403)
+            changed = queries.set_request_stage(cursor, request_id, stage, by=ctx['user_id'],
+                                                by_name=ctx['name'], now=now)
+            if changed:
+                queries.add_message(cursor, request_id=request_id, direction=rules.MESSAGE_STAGE, now=now,
+                                    body=stage, author_user_id=ctx['user_id'], author_name=ctx['name'])
+        if (changed and stage in rules.REQUEST_STAGES_CLOSED and request['tg_chat_id']
+                and request['tg_message_id']):
+            notice = telegram.build_stage_notice(request_id=request_id, stage=stage, actor_name=ctx['name'])
             self._send_following(request['tg_chat_id'], lambda dest: transport.send_message(
                 dest, notice, reply_to_message_id=request['tg_message_id']))
         return self.request_detail(ctx, request_id)

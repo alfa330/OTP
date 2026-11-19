@@ -13,6 +13,7 @@ import {
   reportReasonGroups, reportReasonRows, saveLabel, senderColor, toggleTopic,
   topicLabel, topicsOfAudience, topicsPayload,
   uploadsProblem, wrapupLeft,
+  appendToColumn, initialsOf, isMine, mergeBoard, moveOnBoard, replaceOnBoard, requestBadge, requestTitle,
 } from '../src/components/client_cards/cardRules.js';
 
 /* «Карточка клиента» (задача #335): правила экранов — страницы карточки в iCORE Phone
@@ -539,6 +540,101 @@ test('цвет имени держится на id отправителя, а н
   assert.equal(senderColor({ tg_from_id: 77, author_name: 'Айгуль Финансы' }), first);
   assert.match(first, /^text-[a-z]+-600$/);
   assert.match(senderColor({}), /^text-[a-z]+-600$/);
+  // Сотрудник портала (переписка без группы) — по id учётки: у двоих ведущих доску цвета разные.
+  assert.equal(senderColor({ author_user_id: 476, author_name: 'Другое имя' }), senderColor({ author_user_id: 476 }));
+  assert.notEqual(senderColor({ author_user_id: 1 }), senderColor({ author_user_id: 2 }));
+});
+
+// ─── Доска «Запросы» ─────────────────────────────────────────────────────────
+
+const board = () => ([
+  { stage: 'new', label: 'Новое обращение', total: 3, items: [{ id: 3, stage: 'new' }, { id: 2, stage: 'new' }] },
+  { stage: 'in_work', label: 'В работе', total: 1, items: [{ id: 1, stage: 'in_work' }] },
+  { stage: 'resolved', label: 'Решено', total: 0, items: [] },
+]);
+
+test('доска: перенесённая карточка встаёт наверх новой колонки, счётчики сходятся', () => {
+  const before = board();
+  const after = moveOnBoard(before, 2, 'resolved');
+  assert.deepEqual(after.map((column) => [column.stage, column.total, column.items.map((item) => item.id)]), [
+    ['new', 2, [3]], ['in_work', 1, [1]], ['resolved', 1, [2]],
+  ]);
+  assert.deepEqual(after[2].items[0], { id: 2, stage: 'resolved', stage_label: 'Решено', closed: true });
+  // Исходные колонки не тронуты — откат после отказа сервера берёт их из ответа, а не из памяти.
+  assert.deepEqual(before, board());
+  assert.deepEqual(moveOnBoard(after, 1, 'new')[0].items.map((item) => item.id), [1, 3]);
+  // Той же колонки, неизвестной карточки и неизвестной стадии перенос не меняет.
+  assert.equal(moveOnBoard(before, 3, 'new'), before);
+  assert.equal(moveOnBoard(before, 99, 'resolved'), before);
+  assert.equal(moveOnBoard(before, 3, 'nowhere'), before);
+  assert.deepEqual(moveOnBoard(null, 1, 'new'), []);
+});
+
+test('доска: свежий запрос заменяет карточку на месте, догрузка колонки без повторов', () => {
+  const updated = replaceOnBoard(board(), { id: 2, stage: 'new', unread: 0, stage_changed_by_name: 'Анна' });
+  assert.deepEqual(updated[0].items[1], { id: 2, stage: 'new', unread: 0, stage_changed_by_name: 'Анна' });
+  assert.equal(replaceOnBoard(board(), null).length, 3);
+  const more = appendToColumn(board(), 'new', [{ id: 2, stage: 'new' }, { id: 0, stage: 'new' }]);
+  assert.deepEqual(more[0].items.map((item) => item.id), [3, 2, 0]);
+  assert.deepEqual(more[1], board()[1]);
+});
+
+test('доска: фоновый опрос не сбрасывает «Показать ещё», а перенесённое уходит из хвоста', () => {
+  // На экране колонка догружена: 4 карточки при первой порции в 2.
+  const screen = [
+    { stage: 'new', label: 'Новое обращение', total: 4, items: [5, 4, 3, 2].map((id) => ({ id, stage: 'new' })) },
+    { stage: 'resolved', label: 'Решено', total: 0, items: [] },
+  ];
+  // Опрос: пришёл новый №6, а №3 тем временем закрыли — он наверху «Решено».
+  const fresh = [
+    { stage: 'new', label: 'Новое обращение', total: 4, items: [6, 5].map((id) => ({ id, stage: 'new' })) },
+    { stage: 'resolved', label: 'Решено', total: 1, items: [{ id: 3, stage: 'resolved' }] },
+  ];
+  const merged = mergeBoard(screen, fresh);
+  assert.deepEqual(merged[0].items.map((item) => item.id), [6, 5, 4, 2]);
+  assert.deepEqual(merged[1].items.map((item) => item.id), [3]);
+  assert.equal(merged[0].total, 4);
+  // Не догружали — колонка ровно как в опросе; доски ещё не было — берём ответ целиком.
+  const plain = mergeBoard(fresh, screen);
+  assert.deepEqual(plain[0].items.map((item) => item.id), [5, 4, 3, 2]);
+  assert.equal(mergeBoard(null, fresh), fresh);
+});
+
+test('запрос: название, бейдж стадии, «не доставлен» и моё сообщение', () => {
+  assert.equal(requestTitle({ id: 12, destination_title: null }), 'Запрос №12');
+  assert.equal(requestTitle({ id: 12, destination_title: 'Финансы' }), 'Запрос №12 · Финансы');
+  assert.deepEqual(requestBadge({ stage: 'new', stage_label: 'Новое обращение', delivery_status: 'none' }),
+    { tone: 'blue', label: 'Новое обращение' });
+  assert.deepEqual(requestBadge({ stage: 'developers', stage_label: 'Передано разработчикам', delivery_status: 'sent' }),
+    { tone: 'slate', label: 'Передано разработчикам' });
+  assert.deepEqual(requestBadge({ stage: 'resolved', stage_label: 'Решено', delivery_status: 'failed' }),
+    { tone: 'red', label: 'Не доставлен' });
+  // Своё — то, что написал я сам; ответ из группы — не моё; без учётки — по направлению.
+  assert.equal(isMine({ author_user_id: 30, direction: 'in' }, 30), true);
+  assert.equal(isMine({ author_user_id: 476, direction: 'in' }, 30), false);
+  assert.equal(isMine({ author_user_id: 30, direction: 'out' }, 476), false);
+  assert.equal(isMine({ direction: 'in', tg_from_id: 77 }, 30), false);
+  assert.equal(isMine({ direction: 'out', author_user_id: 30 }, null), true);
+  assert.equal(initialsOf('Анна  Оператор Иванова'), 'АО');
+  assert.equal(initialsOf(''), '');
+});
+
+test('доска подключена: вкладка «Запросы» — доска, окно запроса — та же переписка, что в телефоне', () => {
+  const view = source('../src/components/client_cards/ClientCardsView.jsx');
+  assert.match(view, /<RequestsBoard key=\{departmentId\}/);
+  assert.doesNotMatch(view, /RequestsPanel/);
+  assert.match(view, /canJournal && \{ value: 'journal', label: 'Обращения' \}/);
+  const boardCode = source('../src/components/client_cards/RequestsBoard.jsx');
+  assert.match(boardCode, /import \{ Thread \} from '\.\/RequestsPanel';/);
+  assert.match(boardCode, /api\.setRequestStage\(item\.id, stage\)/);
+  // Тянуть карточки и бросать в колонки можно только тем, кто ведёт доску.
+  assert.match(boardCode, /draggable=\{canMove\}/);
+  assert.match(boardCode, /const dropProps = canMove \?/);
+  const api = source('../src/components/client_cards/cardsApi.js');
+  assert.match(api, /board: \(params\) => axios\.get\(url\('\/requests\/board'\)/);
+  assert.doesNotMatch(api, /setRequestStatus/);
+  // Телефон показывает тот же список с бейджем стадии; номер учётки — чтобы различать «моё».
+  assert.match(source('../src/client_card_embed/ClientCardEmbed.jsx'), /userId=\{boot\.user\?\.id\} stages=\{boot\.request_stages \|\| \[\]\}/);
 });
 
 test('файлы проверяются до отправки по пределам сервера', () => {
@@ -601,7 +697,7 @@ test('раздел подключён в портал: меню, охрана д
 
 test('системных выпадашек и полей даты в разделе нет', () => {
   // Правило портала: <select> и input[type=date] рисует ОС — в интерфейсе iOS/macOS это чужая деталь.
-  for (const file of ['ClientCardsView', 'JournalTab', 'ReportTab', 'SettingsTab', 'RequestsPanel', 'RequestComposer', 'CardDetail']) {
+  for (const file of ['ClientCardsView', 'JournalTab', 'ReportTab', 'SettingsTab', 'RequestsPanel', 'RequestsBoard', 'RequestComposer', 'CardDetail']) {
     const code = source(`../src/components/client_cards/${file}.jsx`);
     assert.doesNotMatch(code, /<select\b/, file);
     assert.doesNotMatch(code, /type="date"/, file);

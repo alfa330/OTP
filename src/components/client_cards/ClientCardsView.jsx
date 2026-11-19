@@ -1,10 +1,11 @@
-/* Раздел «Карточка клиента» (задача #335): запросы в другие отделы, журнал обращений,
+/* Раздел «Карточка клиента» (задача #335): доска запросов в другие отделы, журнал обращений,
  * отчёт по причинам и настройки карточки звонка.
  *
  * Саму карточку оператор заполняет в iCORE Phone (страница client_card.html) — здесь то,
  * что вокруг неё: оператор видит свои запросы и ответы по ним и свои обращения,
- * руководитель отдела — всю картину, отчёт и настройки. Кто что видит, решает сервер
- * (client_cards/access.py); экран рисует вкладки по присланным правам.
+ * руководитель отдела — всю картину, отчёт и настройки, ведущий доску (поимённо) — только
+ * доску «Запросы» отдела. Кто что видит, решает сервер (client_cards/access.py); экран
+ * рисует вкладки по присланным правам.
  *
  * Ссылки. ?view=client_cards&cc_request=N — запрос из сообщения в группе отдела;
  * ?view=client_cards&cc_tab=report — отчёт из алерта (их читает сам раздел, readLink).
@@ -17,7 +18,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { APPLE_FONT, IosSegmented, iosCard } from '../ui/ios';
 import JournalTab from './JournalTab';
 import ReportTab from './ReportTab';
-import RequestsPanel from './RequestsPanel';
+import RequestsBoard from './RequestsBoard';
 import SettingsTab from './SettingsTab';
 import { createCardsApi } from './cardsApi';
 import { errorText } from './cardRules';
@@ -71,6 +72,7 @@ export default function ClientCardsView({ apiBaseUrl, withAccessTokenHeader, sho
     const [departmentId, setDepartmentId] = useState(null);
     const [tab, setTab] = useState(() => (link.request ? 'requests' : TABS.includes(link.tab) ? link.tab : readStoredTab()));
     const [focus, setFocus] = useState(link.request);
+    const clearFocus = useCallback(() => setFocus(null), []);
 
     const load = useCallback(async (department) => {
         try {
@@ -95,12 +97,14 @@ export default function ClientCardsView({ apiBaseUrl, withAccessTokenHeader, sho
     }, [focusRequest?.requestId, focusRequest?.nonce]);
 
     const canManage = Boolean(boot?.can_manage);
+    // «Обращения» — руководителю и оператору с карточкой; ведущему доску своих обращений нет.
+    const canJournal = boot?.can_journal !== false;
     const tabs = useMemo(() => [
         { value: 'requests', label: 'Запросы', count: boot?.unread_requests || undefined },
-        { value: 'journal', label: 'Обращения' },
+        canJournal && { value: 'journal', label: 'Обращения' },
         canManage && { value: 'report', label: 'Отчёт' },
         canManage && { value: 'settings', label: 'Настройки' },
-    ].filter(Boolean), [canManage, boot?.unread_requests]);
+    ].filter(Boolean), [canManage, canJournal, boot?.unread_requests]);
     const active = tabs.some((item) => item.value === tab) ? tab : 'requests';
     const chooseTab = (value) => {
         setTab(value);
@@ -143,13 +147,17 @@ export default function ClientCardsView({ apiBaseUrl, withAccessTokenHeader, sho
                                       options={departments.map((item) => ({ value: String(item.id), label: item.name }))}
                                       onChange={(value) => { setBoot(null); load(Number(value)); }} />
                     )}
-                    <IosSegmented value={active} options={tabs} onChange={chooseTab} slide ariaLabel="Вкладки раздела" />
+                    {/* Одна вкладка — переключатель ни к чему (у ведущего доску только «Запросы»). */}
+                    {tabs.length > 1 && (
+                        <IosSegmented value={active} options={tabs} onChange={chooseTab} slide ariaLabel="Вкладки раздела" />
+                    )}
                 </div>
             </div>
 
             {active === 'requests' && (
-                <RequestsPanel api={api} toast={toast} canManage={canManage} departmentId={departmentId}
-                               focusRequestId={focus} onFocusHandled={() => setFocus(null)}
+                <RequestsBoard key={departmentId} api={api} toast={toast} departmentId={departmentId}
+                               canMove={Boolean(boot.can_move)} userId={boot.user_id} stages={boot.request_stages || []}
+                               focusRequestId={focus} onFocusHandled={clearFocus}
                                onUnread={(count) => setBoot((prev) => (prev && prev.unread_requests !== count
                                    ? { ...prev, unread_requests: count } : prev))} />
             )}

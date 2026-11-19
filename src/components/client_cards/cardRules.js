@@ -463,22 +463,102 @@ export const eventIsForCall = (event, currentCallKey) => (
 
 // ─── Запросы ─────────────────────────────────────────────────────────────────
 
-export const REQUEST_TONES = { open: 'amber', answered: 'blue', resolved: 'green', cancelled: 'slate' };
+/* Стадии доски «Запросы» (подписи присылает сервер — client_cards/rules.py). Цвет — только
+   там, где он что-то значит: новый запрос ждёт, кто его возьмёт; от оператора ждут
+   информацию; запрос закрыт хорошо или плохо. Остальные стадии — нейтральные. */
+export const STAGE_TONES = { new: 'blue', needs_info: 'amber', failed: 'red', resolved: 'green' };
+export const CLOSED_STAGES = ['failed', 'resolved'];
+
+/** Бейдж запроса: стадия доски, а запрос, не дошедший до своей Telegram-группы, — красным. */
+export const requestBadge = (request) => {
+    if (request?.delivery_status === 'failed' || request?.delivery_status === 'pending') {
+        return { tone: 'red', label: 'Не доставлен' };
+    }
+    return { tone: STAGE_TONES[request?.stage] || 'slate', label: request?.stage_label || '' };
+};
+
+/** Как запрос называется в списках: «Запрос №12» и группа, если он ушёл в Telegram. */
+export const requestTitle = (request) => (
+    request?.destination_title ? `Запрос №${request.id} · ${request.destination_title}` : `Запрос №${request?.id}`
+);
 
 export const REQUEST_FILTERS = [
-    { value: 'active', label: 'В работе' },
+    { value: 'active', label: 'Открытые' },
     { value: 'resolved', label: 'Решённые' },
     { value: '', label: 'Все' },
 ];
 
-/** Цвет имени сотрудника группы — по его id в Telegram, а не по имени: имя он может
+/** Цвет имени в переписке — по id в Telegram или учётке портала, а не по имени: имя он может
  *  сменить, и цвет не должен переехать посреди переписки (как в «Обращениях»). */
 const NAME_COLORS = ['text-rose-600', 'text-orange-600', 'text-amber-600', 'text-emerald-600',
     'text-cyan-600', 'text-blue-600', 'text-violet-600'];
 export const senderColor = (message) => {
-    const seed = Number(message?.tg_from_id) || 0;
+    const seed = Number(message?.tg_from_id) || Number(message?.author_user_id) || 0;
     return NAME_COLORS[Math.abs(seed) % NAME_COLORS.length];
 };
+
+/** Моё ли сообщение (справа, без имени): написанное мной из портала. Без учётки (ответ из
+ *  группы) и без известного «я» — по направлению, как было до доски. */
+export const isMine = (message, userId) => {
+    if (userId && message?.author_user_id) return Number(message.author_user_id) === Number(userId);
+    return message?.direction === 'out';
+};
+
+/** Перенос карточки на доске до ответа сервера: из своей колонки — наверх новой (сервер
+ *  ставит перенесённый запрос первым: он самый свежий). Колонки — [{stage, label, total,
+ *  items}]; возвращает новые колонки, исходные не трогает. Карточки нет или она уже там —
+ *  колонки как были. */
+export const moveOnBoard = (columns, requestId, stage) => {
+    const list = Array.isArray(columns) ? columns : [];
+    const from = list.find((column) => column.items.some((item) => item.id === requestId));
+    const to = list.find((column) => column.stage === stage);
+    if (!from || !to || from.stage === stage) return list;
+    const card = from.items.find((item) => item.id === requestId);
+    const moved = { ...card, stage, stage_label: to.label, closed: CLOSED_STAGES.includes(stage) };
+    return list.map((column) => {
+        if (column.stage === from.stage) {
+            return { ...column, total: Math.max(0, column.total - 1), items: column.items.filter((item) => item.id !== requestId) };
+        }
+        if (column.stage === stage) return { ...column, total: column.total + 1, items: [moved, ...column.items] };
+        return column;
+    });
+};
+
+/** Запрос на доске заменить свежим (после переноса или ответа), не трогая остальное. */
+export const replaceOnBoard = (columns, request) => {
+    if (!request) return columns;
+    return (columns || []).map((column) => ({
+        ...column,
+        items: column.items.map((item) => (item.id === request.id ? { ...item, ...request } : item)),
+    }));
+};
+
+/** «Показать ещё» колонки: добавить следующую порцию без повторов (карточку мог уже
+ *  принести фоновый опрос). */
+export const appendToColumn = (columns, stage, items) => (columns || []).map((column) => {
+    if (column.stage !== stage) return column;
+    const seen = new Set(column.items.map((item) => item.id));
+    return { ...column, items: [...column.items, ...(items || []).filter((item) => !seen.has(item.id))] };
+});
+
+/** Свежая доска из фонового опроса поверх той, что на экране. Опрос приносит первые
+ *  карточки каждой колонки; догруженное «Показать ещё» не должно от этого пропадать — его
+ *  хвост остаётся под свежими карточками. Карточка, которую тем временем перенесли в другую
+ *  колонку, там и встала наверх (перенос делает её самой свежей) — из хвоста она уходит. */
+export const mergeBoard = (current, fresh) => {
+    if (!Array.isArray(current) || !current.length || !Array.isArray(fresh)) return fresh;
+    const freshIds = new Set(fresh.flatMap((column) => column.items.map((item) => item.id)));
+    return fresh.map((column) => {
+        const old = current.find((item) => item.stage === column.stage);
+        if (!old || old.items.length <= column.items.length) return column;
+        const tail = old.items.filter((item) => !freshIds.has(item.id));
+        return tail.length ? { ...column, items: [...column.items, ...tail] } : column;
+    });
+};
+
+/** «Анна Оператор» → «АО»: кружок того, кто последним перенёс запрос. */
+export const initialsOf = (name) => String(name || '').split(/\s+/).filter(Boolean).slice(0, 2)
+    .map((word) => word[0]).join('').toUpperCase();
 
 /** Цитата сообщения, на которое ответили: ищем в уже загруженной нити. */
 export const quoteOf = (message, messages) => {

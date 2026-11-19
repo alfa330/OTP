@@ -123,12 +123,14 @@ def build_reply_message(*, request_id, author_name, body):
     return _clip('\n'.join(lines), MESSAGE_LIMIT)
 
 
-def build_status_notice(*, request_id, status, actor_name=None):
-    """Короткая отбивка в группу: запрос закрыли из портала — разбираться больше не нужно."""
-    label = rules.REQUEST_STATUS_LABELS.get(status, status)
-    text = '✅ Запрос %s — %s' % (request_number(request_id), label.lower())
+def build_stage_notice(*, request_id, stage, actor_name=None):
+    """Короткая отбивка в группу: запрос закрыли на доске — разбираться больше не нужно.
+    Стадия — словами доски: «Решено», «Сделка провалена»."""
+    mark = '✅' if stage == rules.STAGE_RESOLVED else '⛔'
+    text = '%s Запрос %s — %s' % (mark, request_number(request_id), rules.stage_label(stage))
     if actor_name:
-        text += ' (%s)' % actor_name
+        # Сообщение уходит с разметкой HTML: «<» в имени сломал бы его целиком.
+        text += ' (%s)' % html.escape(str(actor_name))
     return text
 
 

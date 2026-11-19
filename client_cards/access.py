@@ -10,6 +10,9 @@
     глобальный админ           всё по всем выданным отделам
     глава отдела, супервайзер  всё по своему отделу: настройки, причины, адресаты,
                                все обращения и запросы, отчёт — «видит всю картину»
+    ведущий доску (поимённо)   доска «Запросы» отдела целиком: все запросы, перенос по
+                               стадиям, переписка с оператором; обращения, отчёт и
+                               настройки отдела — нет
     остальные сотрудники       карточка в телефоне; в портале — свои запросы и
     отдела                     ответы по ним, свои обращения
 
@@ -18,12 +21,21 @@
 
 Контекст (queries.load_access_context):
     user_id, name, role, status, department_id, headed_ids, group_ids,
-    departments — {department_id: {'enabled': bool, 'group_ids': [..]}} выданных отделов.
+    departments — {department_id: {'enabled': bool, 'group_ids': [..], 'code': str}}
+    выданных отделов.
 """
 
 _ADMIN_ROLES = ('super_admin', 'admin')
 _SUPERVISOR_ROLES = ('sv', 'supervisor')
 _INACTIVE_STATUSES = ('fired', 'dismissal')
+
+# Кто, кроме руководителей отдела, ведёт его доску «Запросы»: {код отдела: (id учёток)}.
+# Поимённо и только по слову владельца, как допуски других разделов. 19.11.2026 — глава
+# отдела обработки запросов (ООЗ): по доске Тез КЦ он разбирает запросы техподдержки.
+# Выдано учётке, а не должности: сменится глава ООЗ — новому доска сама не откроется.
+BOARD_USER_IDS = {
+    'tez': (476,),
+}
 
 
 def _role(ctx):
@@ -96,21 +108,39 @@ def phone_card_enabled(ctx):
     return bool(groups & {int(x) for x in (ctx.get('group_ids') or ()) if x})
 
 
+def board_department_ids(ctx):
+    """Отделы, доску «Запросы» которых человек ведёт поимённо (BOARD_USER_IDS)."""
+    if not is_working(ctx):
+        return []
+    user_id = int(ctx.get('user_id') or 0)
+    return sorted(department_id for department_id, settings in _provided(ctx).items()
+                  if user_id in BOARD_USER_IDS.get(str((settings or {}).get('code') or '').strip().lower(), ()))
+
+
+def works_board(ctx, department_id):
+    """Ведёт ли человек доску «Запросы» отдела: видит все его запросы и переносит их по
+    стадиям. Руководитель отдела — всегда, остальные — поимённо."""
+    if department_id is None:
+        return False
+    return can_manage(ctx, department_id) or int(department_id) in board_department_ids(ctx)
+
+
 def can_open_section(ctx):
     """Пускать ли в раздел портала. Проверяется на КАЖДОМ роуте; тот же ответ портал
     получает флагом client_cards_access в профиле и по нему рисует пункт меню.
 
-    Руководителю — всегда (ему настраивать раздел до включения). Сотруднику отдела —
-    когда карточка ему включена: до этого у него нет ни обращений, ни запросов.
+    Руководителю — всегда (ему настраивать раздел до включения). Ведущему доску — всегда:
+    запросы приходят к нему от операторов. Сотруднику отдела — когда карточка ему
+    включена: до этого у него нет ни обращений, ни запросов.
     """
     if not is_working(ctx):
         return False
-    return bool(managed_department_ids(ctx)) or phone_card_enabled(ctx)
+    return bool(managed_department_ids(ctx)) or bool(board_department_ids(ctx)) or phone_card_enabled(ctx)
 
 
 def section_department_ids(ctx):
-    """Отделы, данные которых человек видит в разделе: где руководит и свой."""
-    ids = set(managed_department_ids(ctx))
+    """Отделы, данные которых человек видит в разделе: где руководит, чью доску ведёт и свой."""
+    ids = set(managed_department_ids(ctx)) | set(board_department_ids(ctx))
     own = card_department_id(ctx)
     if own is not None and phone_card_enabled(ctx):
         ids.add(own)
@@ -122,17 +152,35 @@ def sees_all(ctx, department_id):
     return can_manage(ctx, department_id)
 
 
+def has_journal(ctx, department_id):
+    """Вкладка «Обращения» отдела: руководителю — все обращения, оператору с карточкой —
+    свои. Ведущему доску её не показываем: своих обращений у него нет, а чужие ему не
+    открыты (sees_all)."""
+    if can_manage(ctx, department_id):
+        return True
+    own = card_department_id(ctx)
+    return own is not None and department_id is not None and int(department_id) == own \
+        and phone_card_enabled(ctx)
+
+
 def can_view_request(ctx, request):
-    """Запрос виден автору и руководителю его отдела."""
+    """Запрос виден автору и тем, кто ведёт доску его отдела."""
     if request.get('created_by') is not None and int(request['created_by']) == int(ctx['user_id']):
         return True
-    return can_manage(ctx, request.get('department_id'))
+    return works_board(ctx, request.get('department_id'))
 
 
 def can_act_on_request(ctx, request):
-    """Ответить в нить, закрыть, вернуть в работу — тот же круг, что видит запрос:
-    руководитель подхватывает запрос оператора, который ушёл со смены."""
+    """Написать в переписку запроса — тот же круг, что видит запрос: руководитель
+    подхватывает запрос оператора, который ушёл со смены, ведущий доску спрашивает
+    у оператора недостающее."""
     return can_view_request(ctx, request)
+
+
+def can_move_request(ctx, request):
+    """Перенести запрос по доске — тем, кто её ведёт. Автор-оператор следит за стадией и
+    пишет в переписку, но сам запрос не двигает: решает тот, кто его разбирает."""
+    return works_board(ctx, request.get('department_id'))
 
 
 def can_edit_card(ctx, card):
@@ -168,6 +216,7 @@ def capabilities(ctx):
     return {
         'manage': bool(managed),
         'managed_department_ids': managed,
+        'board_department_ids': board_department_ids(ctx),
         'card': phone_card_enabled(ctx),
         'card_department_id': card_department_id(ctx),
         'global_admin': is_global_admin(ctx),

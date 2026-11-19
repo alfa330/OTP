@@ -6,7 +6,7 @@ import React, { useEffect, useRef } from 'react';
 import { Loader2, Paperclip, X } from 'lucide-react';
 
 import { IosBadge } from '../ui/ios';
-import { REQUEST_TONES, STATE_TONES, fmtSize } from './cardRules';
+import { STATE_TONES, fmtSize, requestBadge } from './cardRules';
 
 export const Spinner = ({ text = '' }) => (
     <div className="flex items-center justify-center gap-2.5 py-10 text-[13px] text-slate-500">
@@ -34,9 +34,11 @@ export const StateBadge = ({ card }) => {
     return <IosBadge tone={STATE_TONES[card.state] || 'slate'}>{card.state_label}</IosBadge>;
 };
 
-export const RequestBadge = ({ request }) => (
-    <IosBadge tone={REQUEST_TONES[request.status] || 'slate'}>{request.status_label}</IosBadge>
-);
+/** Стадия запроса на доске; не дошедший до своей группы — «Не доставлен». */
+export const RequestBadge = ({ request, className = '' }) => {
+    const badge = requestBadge(request);
+    return <IosBadge tone={badge.tone} className={className}>{badge.label}</IosBadge>;
+};
 
 /** Выбранные к отправке файлы — строками с размером и крестиком. */
 export const PickedFiles = ({ files, onRemove }) => {

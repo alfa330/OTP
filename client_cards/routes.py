@@ -25,12 +25,13 @@ Blueprint собирается фабрикой и получает зависи
     GET    /cards/<id>                       карточка целиком (история, журнал)
     GET    /history                          обращения человека / отдела с поиском
 
-Запросы в другие отделы:
-    GET    /requests                         список: оператору — свои, руководителю — все
+Запросы в другие отделы (доска «Запросы»):
+    GET    /requests                         список: оператору — свои, ведущим доску — все
+    GET    /requests/board                   доска: колонки стадий, первые карточки и счётчики
     POST   /requests                         создать из карточки (multipart: текст и файлы)
     GET    /requests/<id>                    запрос с перепиской
     POST   /requests/<id>/reply              написать в нить (multipart)
-    POST   /requests/<id>/status             resolved | cancelled | reopen
+    POST   /requests/<id>/stage              перенести по доске {stage}
     POST   /requests/<id>/retry              отправить ещё раз
     GET    /requests/<id>/files/<message>    вложение переписки
 
@@ -162,6 +163,7 @@ def public_card(card, now):
 def public_card_request(item):
     return {'id': item['id'], 'destination_title': item.get('destination_title'), 'status': item['status'],
             'status_label': rules.REQUEST_STATUS_LABELS.get(item['status'], item['status']),
+            'stage': item.get('stage'), 'stage_label': rules.stage_label(item.get('stage')),
             'delivery_status': item.get('delivery_status'), 'created_at': _iso(item.get('created_at')),
             'last_inbound_at': _iso(item.get('last_inbound_at'))}
 
@@ -170,9 +172,13 @@ def public_request(item, accounts=None, admin_url=None):
     account = (accounts or {}).get(item.get('account_id'))
     return {
         'id': item['id'], 'department_id': item['department_id'], 'card_id': item.get('card_id'),
-        'destination_id': item['destination_id'], 'destination_title': item.get('destination_title'),
+        'destination_id': item.get('destination_id'), 'destination_title': item.get('destination_title'),
         'body': item.get('body') or '', 'status': item['status'],
         'status_label': rules.REQUEST_STATUS_LABELS.get(item['status'], item['status']),
+        'stage': item.get('stage'), 'stage_label': rules.stage_label(item.get('stage')),
+        'closed': item.get('stage') in rules.REQUEST_STAGES_CLOSED,
+        'stage_changed_at': _iso(item.get('stage_changed_at')),
+        'stage_changed_by_name': item.get('stage_changed_by_name'),
         'phone': item.get('phone'), 'phone_text': rules.format_phone(item.get('phone')),
         'topic_title': item.get('topic_title'),
         'account': ({'kind': account['kind'], 'kind_label': rules.KIND_LABELS.get(account['kind']),
@@ -191,7 +197,8 @@ def public_request(item, accounts=None, admin_url=None):
     }
 
 
-def public_message(item):
+def public_message(item, delivered=True):
+    """delivered — запрос ходит через Telegram-группу (иначе «не дошло до группы» не бывает)."""
     return {
         'id': item['id'], 'direction': item['direction'], 'body': item.get('body') or '',
         'author_name': item.get('author_name'), 'author_user_id': item.get('author_user_id'),
@@ -201,7 +208,12 @@ def public_message(item):
         'file': ({'name': item.get('file_name'), 'mime': item.get('file_mime'), 'size': item.get('file_size'),
                   'kind': item.get('file_kind')} if item.get('file_ref') else None),
         # Наш файл, который ещё не дошёл до группы: оператор видит, что его надо дослать.
-        'pending': bool(item['direction'] == 'out' and item.get('file_ref') and not item.get('tg_message_id')),
+        # У запроса без группы в Telegram не уходит ничего — там «недосланных» нет.
+        'pending': bool(item['direction'] == 'out' and item.get('file_ref') and not item.get('tg_message_id')
+                        and delivered),
+        # Строка переноса по доске: body — код стадии, подпись — словами доски.
+        'stage_label': (rules.stage_label(item.get('body')) if item['direction'] == rules.MESSAGE_STAGE
+                        else None),
         'created_at': _iso(item.get('created_at')),
     }
 
@@ -344,7 +356,13 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
                 'capabilities': access.capabilities(ctx),
                 'departments': queries.departments(cursor, access.section_department_ids(ctx)),
                 'department_id': department_id,
+                'user_id': ctx['user_id'],
                 'can_manage': manage,
+                # Доска «Запросы»: переносить карточки — тем, кто её ведёт; вкладка «Обращения» —
+                # руководителю и оператору с карточкой (ведущему доску своих обращений нет).
+                'can_move': access.works_board(ctx, department_id),
+                'can_journal': access.has_journal(ctx, department_id),
+                'request_stages': rules.request_stages(),
                 'settings': public_settings(settings) if manage else {'enabled': bool(settings['enabled'])},
                 'categories': queries.categories(cursor, department_id, include_inactive=manage),
                 'destinations': [public_destination(item, manage=manage) for item in
@@ -400,6 +418,7 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
             # За сколько дней показаны черновики — экран говорит это оператору.
             'pending_days': PENDING_DAYS,
             'unread_requests': unread,
+            'request_stages': rules.request_stages(),
             'user': {'id': ctx['user_id'], 'name': ctx['name']},
             'tez': {'source': service.tez_source(), 'admin_url': admin_url},
             'link_example': rules.LINK_EXAMPLE,
@@ -509,21 +528,39 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
         rows, has_more, names = service.list_requests(
             ctx, department_id=_int(request.args.get('department_id')),
             mine=request.args.get('mine') in ('1', 'true'), status=request.args.get('status') or None,
-            search=request.args.get('q'), before=before)
+            stage=request.args.get('stage') or None, search=request.args.get('q'), before=before)
         admin_url = service.admin_url()
         with db._get_cursor() as cursor:
             unread = queries.unread_total(cursor, ctx['user_id'])
         return jsonify({'items': [public_request(row, names, admin_url) for row in rows],
                         'has_more': has_more, 'unread_requests': unread})
 
+    @cards_route('/requests/board')
+    def client_cards_requests_board(ctx):
+        """Доска «Запросы»: колонки в порядке стадий, в каждой — первые карточки и счётчик.
+        Колонку дальше листают списком: /requests?stage=…&before_at=…&before_id=…"""
+        department_id = _section_department(ctx, request.args.get('department_id'))
+        columns, names, can_move = service.board(ctx, department_id=department_id, search=request.args.get('q'))
+        admin_url = service.admin_url()
+        with db._get_cursor() as cursor:
+            unread = queries.unread_total(cursor, ctx['user_id'])
+        return jsonify({
+            'columns': [{'stage': stage, 'label': rules.stage_label(stage), 'total': columns[stage]['total'],
+                         'items': [public_request(row, names, admin_url) for row in columns[stage]['items']]}
+                        for stage in rules.REQUEST_STAGES],
+            'can_move': can_move, 'unread_requests': unread,
+        })
+
     def _request_detail(detail, delivery_error=None):
         admin_url = service.admin_url()
         account = detail.get('account')
         names = {account['id']: account} if account else {}
+        delivered = detail['request'].get('delivery_status') != rules.DELIVERY_NONE
         return {
             'request': public_request(detail['request'], names, admin_url),
-            'messages': [public_message(item) for item in detail['messages']],
+            'messages': [public_message(item, delivered) for item in detail['messages']],
             'can_act': bool(detail['can_act']),
+            'can_move': bool(detail.get('can_move')),
             'delivery_error': delivery_error,
         }
 
@@ -538,9 +575,9 @@ def build_client_cards_blueprint(*, db, require_api_key, build_cors_preflight_re
                                       reply_to=_int(form.get('reply_to')))
         return jsonify(_request_detail(detail, error))
 
-    @cards_route('/requests/<int:request_id>/status', methods=('POST',))
-    def client_cards_request_status(request_id, ctx):
-        return jsonify(_request_detail(service.set_request_status(ctx, request_id, _json().get('status'))))
+    @cards_route('/requests/<int:request_id>/stage', methods=('POST',))
+    def client_cards_request_stage(request_id, ctx):
+        return jsonify(_request_detail(service.set_request_stage(ctx, request_id, _json().get('stage'))))
 
     @cards_route('/requests/<int:request_id>/retry', methods=('POST',))
     def client_cards_request_retry(request_id, ctx):

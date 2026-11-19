@@ -209,15 +209,23 @@ _STATEMENTS = [
 
     # delivery_status отделён от status, как у «Обращений»: статус — про суть, доставка —
     # про Telegram. Не ушло — запрос остаётся и отправляется повторно кнопкой.
+    # stage — колонка доски «Запросы» (rules.REQUEST_STAGES), главное состояние запроса;
+    # stage_changed_* — кто и когда перенёс его последним (карточка доски показывает это).
+    # destination_id пуст — запрос только на доске: Telegram-группу оператор не выбирал
+    # (delivery_status = 'none').
     """
     CREATE TABLE IF NOT EXISTS client_card_requests (
         id                   SERIAL PRIMARY KEY,
         department_id        INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
         card_id              INTEGER REFERENCES client_cards(id) ON DELETE SET NULL,
-        destination_id       INTEGER NOT NULL REFERENCES client_card_destinations(id) ON DELETE RESTRICT,
+        destination_id       INTEGER REFERENCES client_card_destinations(id) ON DELETE RESTRICT,
         destination_title    VARCHAR(160),
         body                 TEXT NOT NULL,
         status               VARCHAR(16) NOT NULL DEFAULT 'open',
+        stage                VARCHAR(16) NOT NULL DEFAULT 'new',
+        stage_changed_at     TIMESTAMP,
+        stage_changed_by     INTEGER,
+        stage_changed_by_name VARCHAR(255),
         account_id           INTEGER REFERENCES client_card_accounts(id) ON DELETE SET NULL,
         phone                VARCHAR(20),
         topic_title          VARCHAR(400),
@@ -249,6 +257,11 @@ _STATEMENTS = [
         ON client_card_requests (department_id, last_message_at DESC, id DESC)
     """,
     "CREATE INDEX IF NOT EXISTS idx_client_card_requests_card ON client_card_requests (card_id)",
+    # Колонка доски: первые карточки стадии по свежести и счётчик — по отделу и стадии.
+    """
+    CREATE INDEX IF NOT EXISTS idx_client_card_requests_stage
+        ON client_card_requests (department_id, stage, last_message_at DESC, id DESC)
+    """,
     """
     CREATE INDEX IF NOT EXISTS idx_client_card_requests_unread
         ON client_card_requests (created_by, author_unread_at DESC) WHERE author_unread_count > 0
@@ -256,6 +269,8 @@ _STATEMENTS = [
 
     # direction: out — из портала в группу, in — из группы. Корневое сообщение бота лежит
     # здесь же строкой out: ответ в группе находит свой запрос одним поиском по (чат, номер).
+    # У запроса без группы: out — пишет автор, in — те, кто ведёт доску. stage — перенос по
+    # доске (body — код стадии, автор — кто перенёс): история запроса видна в его переписке.
     """
     CREATE TABLE IF NOT EXISTS client_card_request_messages (
         id                      SERIAL PRIMARY KEY,
@@ -333,6 +348,29 @@ _ADDED_COLUMNS = [
     ('client_cards', 'account_status', 'VARCHAR(64)'),
     ('client_cards', 'account_status_text', 'VARCHAR(120)'),
     ('client_cards', 'account_deleted_at', 'TIMESTAMP'),
+    # 19.11.2026: доска «Запросы» — стадия запроса и кто перенёс его последним.
+    ('client_card_requests', 'stage', "VARCHAR(16) NOT NULL DEFAULT 'new'"),
+    ('client_card_requests', 'stage_changed_at', 'TIMESTAMP'),
+    ('client_card_requests', 'stage_changed_by', 'INTEGER'),
+    ('client_card_requests', 'stage_changed_by_name', 'VARCHAR(255)'),
+]
+
+# Чем заполнить только что добавленный столбец у строк, живших до него: запросы, закрытые
+# до доски, должны встать в «Решено» и «Сделка провалена», а не в «Новое обращение».
+_BACKFILL = {
+    ('client_card_requests', 'stage'): """
+        UPDATE client_card_requests
+           SET stage = CASE status WHEN 'resolved' THEN 'resolved' WHEN 'cancelled' THEN 'failed'
+                                   WHEN 'answered' THEN 'in_work' ELSE 'new' END,
+               stage_changed_at = COALESCE(resolved_at, updated_at),
+               stage_changed_by = resolved_by, stage_changed_by_name = resolved_by_name
+    """,
+}
+
+# Столбцы, с которых снят NOT NULL после первой выкладки: (таблица, столбец).
+# 19.11.2026: запрос без Telegram-группы — только на доске.
+_NULLABLE_COLUMNS = [
+    ('client_card_requests', 'destination_id'),
 ]
 
 
@@ -341,13 +379,17 @@ def _is_table(statement):
 
 
 def _add_missing_columns(cursor):
-    """Добавляет столбцы из _ADDED_COLUMNS, которых в базе ещё нет.
+    """Добавляет столбцы из _ADDED_COLUMNS, которых в базе ещё нет, и снимает NOT NULL со
+    столбцов _NULLABLE_COLUMNS.
 
     ALTER TABLE берёт на таблицу исключительный замок до конца транзакции старта, поэтому
-    зовётся, только когда столбца правда нет: на развёрнутой базе каждый следующий старт
-    читает один каталог и ничего не запирает. Столбец с постоянным DEFAULT добавляется
-    без перезаписи таблицы.
+    зовётся, только когда столбца правда нет (и NOT NULL правда стоит): на развёрнутой базе
+    каждый следующий старт читает один каталог и ничего не запирает. Столбец с постоянным
+    DEFAULT добавляется без перезаписи таблицы; заполнение прежних строк (_BACKFILL) идёт
+    один раз — когда столбец только что добавлен, и после всех добавлений: заполнение
+    читает и соседние новые столбцы.
     """
+    added = set()
     for table, column, definition in _ADDED_COLUMNS:
         cursor.execute("""
             SELECT 1 FROM information_schema.columns
@@ -355,6 +397,18 @@ def _add_missing_columns(cursor):
         """, (table, column))
         if not cursor.fetchone():
             cursor.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, column, definition))
+            added.add((table, column))
+    for key, statement in _BACKFILL.items():
+        if key in added:
+            cursor.execute(statement)
+    for table, column in _NULLABLE_COLUMNS:
+        cursor.execute("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s
+               AND is_nullable = 'NO'
+        """, (table, column))
+        if cursor.fetchone():
+            cursor.execute('ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL' % (table, column))
 
 
 def init_client_cards_schema(cursor):

@@ -545,7 +545,8 @@ TEZ, OP = 560, 367
 def _ctx(user_id, role, department_id, *, headed=(), groups=(), status='working', departments=None):
     return {'user_id': user_id, 'name': 'Имя %s' % user_id, 'role': role, 'status': status,
             'department_id': department_id, 'headed_ids': list(headed), 'group_ids': list(groups),
-            'departments': {TEZ: {'enabled': True, 'group_ids': [34]}} if departments is None else departments}
+            'departments': ({TEZ: {'enabled': True, 'group_ids': [34], 'code': 'tez'}}
+                            if departments is None else departments)}
 
 
 def test_who_runs_the_section_and_who_gets_the_card():
@@ -596,12 +597,51 @@ def test_cards_and_requests_visibility():
     request = {'created_by': 30, 'department_id': TEZ}
     assert access.can_view_request(anna, request) and access.can_act_on_request(head, request)
     assert not access.can_view_request(boris, request) and not access.can_view_request(outsider, request)
+    # По доске запрос двигает руководитель; автор-оператор следит за стадией, но не переносит.
+    assert access.can_move_request(head, request) and not access.can_move_request(anna, request)
     manual = {'origin': 'manual', 'created_by': 30}
     assert access.can_unlink(anna, manual, TEZ) and access.can_unlink(head, manual, TEZ)
     assert not access.can_unlink(boris, manual, TEZ)
     assert not access.can_unlink(head, {'origin': 'tez', 'created_by': 30}, TEZ)
-    assert access.capabilities(head) == {'manage': True, 'managed_department_ids': [TEZ], 'card': True,
-                                         'card_department_id': TEZ, 'global_admin': False}
+    assert access.capabilities(head) == {'manage': True, 'managed_department_ids': [TEZ], 'board_department_ids': [],
+                                         'card': True, 'card_department_id': TEZ, 'global_admin': False}
+
+
+OOZ = 2008  # отдел обработки запросов
+
+
+def test_board_worker_runs_the_tez_board_and_nothing_else():
+    """Владелец, 19.11.2026: главе отдела обработки запросов открыть раздел — доску «Запросы»
+    Тез КЦ. Выдано учётке поимённо: тот же профиль с другим id закрыт."""
+    assert access.BOARD_USER_IDS == {'tez': (476,)}
+    boarder = _ctx(476, 'admin', OOZ, headed=[OOZ])
+    stranger = _ctx(477, 'admin', OOZ, headed=[OOZ])
+    request = {'created_by': 30, 'department_id': TEZ}
+    assert access.board_department_ids(boarder) == [TEZ] and access.can_open_section(boarder)
+    assert access.section_department_ids(boarder) == [TEZ]
+    assert access.works_board(boarder, TEZ) and access.can_view_request(boarder, request)
+    assert access.can_act_on_request(boarder, request) and access.can_move_request(boarder, request)
+    # Остальное в разделе — не его: настройки, отчёт, все обращения, карточка в телефоне.
+    assert not access.can_manage(boarder, TEZ) and not access.sees_all(boarder, TEZ)
+    assert not access.has_journal(boarder, TEZ) and not access.phone_card_enabled(boarder)
+    assert not access.can_view_card(boarder, {'operator_id': 30, 'department_id': TEZ})
+    assert access.capabilities(boarder)['board_department_ids'] == [TEZ]
+    assert not access.can_open_section(stranger) and not access.can_view_request(stranger, request)
+    # Уволен — закрыто; доски отдела, которому раздел не выдан, нет.
+    assert not access.can_open_section(_ctx(476, 'admin', OOZ, status='fired'))
+    assert access.board_department_ids(_ctx(476, 'admin', OOZ, departments={})) == []
+    assert not access.works_board(boarder, None)
+    # Код отдела — не id: у копии базы id другой, допуск тот же.
+    other_copy = _ctx(476, 'admin', OOZ, departments={999: {'enabled': False, 'group_ids': [], 'code': 'TEZ'}})
+    assert access.board_department_ids(other_copy) == [999]
+
+
+def test_journal_tab_is_for_managers_and_card_operators():
+    anna = _ctx(30, 'operator', TEZ, groups=[34])
+    head = _ctx(300, 'admin', TEZ, headed=[TEZ])
+    seller = _ctx(40, 'operator', TEZ, groups=[35])
+    assert access.has_journal(anna, TEZ) and access.has_journal(head, TEZ)
+    assert not access.has_journal(seller, TEZ) and not access.has_journal(anna, OP)
 
 
 # ─── Telegram ────────────────────────────────────────────────────────────────
@@ -634,9 +674,35 @@ def test_request_message_names_the_person_and_keeps_the_tail():
 def test_reply_and_status_texts():
     reply = telegram.build_reply_message(request_id=15, author_name='Анна', body='Уточнение <1>')
     assert reply.startswith('💬 <b>Уточнение по запросу №15</b>') and 'Уточнение &lt;1&gt;' in reply
-    assert telegram.build_status_notice(request_id=15, status='resolved', actor_name='Анна') == \
-        '✅ Запрос №15 — решён (Анна)'
-    assert telegram.build_status_notice(request_id=15, status='cancelled') == '✅ Запрос №15 — отменён'
+    assert telegram.build_stage_notice(request_id=15, stage='resolved', actor_name='Анна') == \
+        '✅ Запрос №15 — Решено (Анна)'
+    assert telegram.build_stage_notice(request_id=15, stage='failed') == '⛔ Запрос №15 — Сделка провалена'
+    assert telegram.build_stage_notice(request_id=15, stage='resolved', actor_name='<b>') == \
+        '✅ Запрос №15 — Решено (&lt;b&gt;)'
+
+
+# ─── Доска «Запросы» ─────────────────────────────────────────────────────────
+
+def test_board_columns_are_the_bitrix_ones_in_order():
+    """Владелец, 19.11.2026: «заголовки можно сделать такие же» — как на доске в Битрикс24."""
+    assert [item['label'] for item in rules.request_stages()] == [
+        'Новое обращение', 'В работе', 'Требует информацию', 'Передано разработчикам',
+        'Передано аналитикам', 'Передано в 2ГИС', 'Сделка провалена', 'Решено']
+    assert [item['value'] for item in rules.request_stages()] == list(rules.REQUEST_STAGES)
+    # Код стадии влезает в столбец client_card_requests.stage VARCHAR(16).
+    assert max(len(stage) for stage in rules.REQUEST_STAGES) <= 16
+    assert rules.REQUEST_STAGES_CLOSED == ('failed', 'resolved')
+    assert set(rules.REQUEST_STAGES_NOTIFY_AUTHOR) == {'needs_info', 'failed', 'resolved'}
+
+
+def test_status_follows_the_stage():
+    assert rules.request_status_for_stage('resolved') == rules.REQUEST_RESOLVED
+    assert rules.request_status_for_stage('failed', answered=True) == rules.REQUEST_CANCELLED
+    assert rules.request_status_for_stage('developers', answered=True) == rules.REQUEST_ANSWERED
+    assert rules.request_status_for_stage('new') == rules.REQUEST_OPEN
+    assert rules.closed_status_for_stage('in_work') is None
+    assert rules.closed_status_for_stage('resolved') == rules.REQUEST_RESOLVED
+    assert rules.stage_label('two_gis') == 'Передано в 2ГИС' and rules.stage_label(None) == ''
 
 
 def test_alert_message_is_one_message_for_all_reasons():

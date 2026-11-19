@@ -9,10 +9,10 @@ import { ExternalLink, PhoneIncoming, PhoneOutgoing } from 'lucide-react';
 import { IosBadge, IosModal, iosBtnPrimary, iosGroupLabel } from '../ui/ios';
 import CardRecord from './CardRecord';
 import {
-    ACCOUNT_STATUS_CLASSES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountTitle, cardAccountStatus, errorText, fmtSeconds,
-    fmtWhen, topicLabel,
+    ACCOUNT_STATUS_CLASSES, NO_ACCOUNT_LABEL, accountTitle, cardAccountStatus, errorText, fmtSeconds,
+    fmtWhen, requestTitle, topicLabel,
 } from './cardRules';
-import { Spinner, StateBadge } from './ui';
+import { RequestBadge, Spinner, StateBadge } from './ui';
 
 const Row = ({ label, children }) => (
     <div className="flex gap-3 py-1.5 text-[13px]">
@@ -116,8 +116,8 @@ export default function CardDetail({ api, cardId, onClose, onContinue = null, on
                                     <li key={request.id}>
                                         <button type="button" disabled={!onOpenRequest} onClick={() => onOpenRequest?.(request.id)}
                                                 className="flex w-full items-center justify-between gap-2 rounded-xl bg-slate-50 px-3 py-2 text-left text-[12.5px] enabled:hover:bg-slate-100">
-                                            <span className="min-w-0 truncate text-slate-700">№{request.id} · {request.destination_title}</span>
-                                            <IosBadge tone={REQUEST_TONES[request.status] || 'slate'}>{request.status_label}</IosBadge>
+                                            <span className="min-w-0 truncate text-slate-700">{requestTitle(request)}</span>
+                                            <RequestBadge request={request} />
                                         </button>
                                     </li>
                                 ))}

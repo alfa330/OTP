@@ -1,11 +1,14 @@
 /* Запрос в другой отдел прямо из карточки звонка (задача #335, п. 6–7).
  *
- * Оператор выбирает отдел, пишет, что нужно, и при необходимости прикладывает фото, видео
- * или документ; ссылку вставляет в текст. Кто звонил, по какому аккаунту и о чём — в
- * сообщение группы портал подставляет сам из карточки: оператору не нужно это повторять,
- * и об этом сказано одной строкой под заголовком, а не полями формы.
+ * Оператор пишет, что нужно, и при необходимости прикладывает фото, видео или документ;
+ * ссылку вставляет в текст. Запрос встаёт на доску «Запросы» в «Новое обращение» — дальше
+ * его ведут те, кто разбирает доску (владелец, 19.11.2026). Кто звонил, по какому аккаунту
+ * и о чём — портал подставляет сам из карточки: оператору не нужно это повторять, и об этом
+ * сказано одной строкой под заголовком, а не полями формы.
  *
- * Отдел без привязанной Telegram-группы показан, но выбрать его нельзя — с подписью почему.
+ * Если руководитель завёл Telegram-группы отделов, запрос можно отправить и туда — выбор
+ * необязательный. Группа без привязанного чата показана, но выбрать её нельзя — с подписью
+ * почему. Групп нет — блока нет вовсе.
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, Paperclip, Send } from 'lucide-react';
@@ -17,7 +20,6 @@ import { PickedFiles } from './ui';
 export default function RequestComposer({
     open, onClose, api, card, account, destinations, limits, toast, onCreated,
 }) {
-    const ready = (destinations || []).filter((item) => item.is_ready);
     const [destinationId, setDestinationId] = useState(null);
     const [text, setText] = useState('');
     const [files, setFiles] = useState([]);
@@ -27,12 +29,11 @@ export default function RequestComposer({
 
     useEffect(() => {
         if (!open) return;
-        setDestinationId(ready.length === 1 ? ready[0].id : null);
+        // Группа — необязательная добавка к доске: по умолчанию не выбрана.
+        setDestinationId(null);
         setText('');
         setFiles([]);
         setProblem('');
-        // Только на открытие: список адресатов за время работы окна не меняется.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [open]);
 
     const pickFiles = (event) => {
@@ -46,7 +47,6 @@ export default function RequestComposer({
 
     const send = async () => {
         if (busy) return;
-        if (!destinationId) { setProblem('Выберите отдел'); return; }
         if (text.trim().length < 3) { setProblem('Напишите, что нужно от отдела'); return; }
         setBusy(true);
         setProblem('');
@@ -54,9 +54,11 @@ export default function RequestComposer({
             const { data } = await api.createRequest(
                 { card_id: card.id, destination_id: destinationId, body: text.trim() }, files);
             if (data.delivery_error) {
-                toast(`Запрос сохранён, но не дошёл до группы: ${data.delivery_error}. Отправьте его ещё раз во вкладке «Запросы».`, 'error');
+                toast(`Запрос №${data.request.id} на доске, но не дошёл до группы: ${data.delivery_error}. Отправьте его ещё раз во вкладке «Запросы».`, 'error');
+            } else if (data.request.destination_title) {
+                toast(`Запрос №${data.request.id} создан и отправлен в группу «${data.request.destination_title}»`, 'success');
             } else {
-                toast(`Запрос №${data.request.id} отправлен: ${data.request.destination_title}`, 'success');
+                toast(`Запрос №${data.request.id} создан — он на доске «Запросы»`, 'success');
             }
             onCreated(data);
             onClose();
@@ -79,7 +81,7 @@ export default function RequestComposer({
             open={open}
             onClose={busy ? () => {} : onClose}
             title="Запрос в другой отдел"
-            subtitle={summary ? `В сообщение попадут: ${summary}` : 'Аккаунт и причина попадут в сообщение из карточки'}
+            subtitle={summary ? `В запрос попадут: ${summary}` : 'Аккаунт и причина попадут в запрос из карточки'}
             maxWidth="max-w-md"
             footer={(
                 <div className="flex justify-end gap-2">
@@ -91,15 +93,17 @@ export default function RequestComposer({
             )}
         >
             <div className="space-y-4">
-                <div className="space-y-1.5">
-                    <div className={iosGroupLabel}>Куда</div>
-                    {destinations?.length ? (
+                {destinations?.length > 0 && (
+                    <div className="space-y-1.5">
+                        {/* Запрос и так на доске; группа — если его надо продублировать в Telegram.
+                            Повторное нажатие снимает выбор. */}
+                        <div className={iosGroupLabel}>Отправить и в группу</div>
                         <div className="flex flex-wrap gap-1.5">
                             {destinations.map((item) => {
                                 const active = item.id === destinationId;
                                 return (
                                     <button key={item.id} type="button" disabled={!item.is_ready}
-                                            onClick={() => { setDestinationId(item.id); setProblem(''); }}
+                                            onClick={() => { setDestinationId(active ? null : item.id); setProblem(''); }}
                                             title={item.is_ready ? (item.chat_title || '') : 'К отделу не привязана Telegram-группа'}
                                             aria-pressed={active}
                                             className={`rounded-xl px-3 py-2 text-[13px] font-medium transition active:scale-[0.98] ${
@@ -111,12 +115,8 @@ export default function RequestComposer({
                                 );
                             })}
                         </div>
-                    ) : (
-                        <p className="text-[12.5px] text-slate-500">
-                            Отделы для запросов ещё не заведены — их добавляет руководитель в разделе «Карточка клиента».
-                        </p>
-                    )}
-                </div>
+                    </div>
+                )}
                 <div className="space-y-1.5">
                     <div className={iosGroupLabel}>Что нужно</div>
                     <textarea value={text} onChange={(event) => { setText(event.target.value); setProblem(''); }}

@@ -508,6 +508,70 @@ REQUEST_STATUS_LABELS = {
     REQUEST_RESOLVED: 'Решён', REQUEST_CANCELLED: 'Отменён',
 }
 
+# Стадии доски «Запросы» — колонки слева направо. Владелец, 19.11.2026: «такую канбан-доску
+# вместо раздела запросов, заголовки можно такие же» — доска отдела обработки запросов в
+# Битрикс24, по которой там ведут запросы техподдержки Тез КЦ.
+#
+# Стадия — главное состояние запроса: её видят оператор и доска, по ней запрос закрыт или
+# открыт. Статус (open/answered/resolved/cancelled) живёт рядом и выводится из неё
+# (request_status_for_stage): «есть ответ» по-прежнему отличает запрос, на который ответили.
+STAGE_NEW = 'new'
+STAGE_IN_WORK = 'in_work'
+STAGE_NEEDS_INFO = 'needs_info'
+STAGE_DEVELOPERS = 'developers'
+STAGE_ANALYSTS = 'analysts'
+STAGE_TWO_GIS = 'two_gis'
+STAGE_FAILED = 'failed'
+STAGE_RESOLVED = 'resolved'
+REQUEST_STAGES = (STAGE_NEW, STAGE_IN_WORK, STAGE_NEEDS_INFO, STAGE_DEVELOPERS, STAGE_ANALYSTS,
+                  STAGE_TWO_GIS, STAGE_FAILED, STAGE_RESOLVED)
+REQUEST_STAGE_LABELS = {
+    STAGE_NEW: 'Новое обращение', STAGE_IN_WORK: 'В работе', STAGE_NEEDS_INFO: 'Требует информацию',
+    STAGE_DEVELOPERS: 'Передано разработчикам', STAGE_ANALYSTS: 'Передано аналитикам',
+    STAGE_TWO_GIS: 'Передано в 2ГИС', STAGE_FAILED: 'Сделка провалена', STAGE_RESOLVED: 'Решено',
+}
+REQUEST_STAGES_CLOSED = (STAGE_FAILED, STAGE_RESOLVED)
+# О каких переносах автору запроса загорается «непрочитано»: от него ждут информацию или
+# запрос закрыт. Передачи внутри доски (в работу, разработчикам…) его не дёргают — это шум.
+REQUEST_STAGES_NOTIFY_AUTHOR = (STAGE_NEEDS_INFO, STAGE_FAILED, STAGE_RESOLVED)
+_CLOSED_STATUS = {STAGE_RESOLVED: REQUEST_RESOLVED, STAGE_FAILED: REQUEST_CANCELLED}
+
+
+def request_status_for_stage(stage, answered=False):
+    """Статус запроса по стадии доски: закрытая стадия — «решён» или «отменён», открытая —
+    «есть ответ», если отдел уже отвечал, иначе «ждёт ответа»."""
+    if stage in _CLOSED_STATUS:
+        return _CLOSED_STATUS[stage]
+    return REQUEST_ANSWERED if answered else REQUEST_OPEN
+
+
+def closed_status_for_stage(stage):
+    """Статус закрытой стадии или None — стадия открытая (статус тогда решает «есть ответ»)."""
+    return _CLOSED_STATUS.get(stage)
+
+
+def stage_label(stage):
+    return REQUEST_STAGE_LABELS.get(stage, stage or '')
+
+
+def request_stages():
+    """Стадии для экрана: [{value, label}] в порядке колонок."""
+    return [{'value': stage, 'label': REQUEST_STAGE_LABELS[stage]} for stage in REQUEST_STAGES]
+
+
+# Сколько карточек колонки доски приходит сразу; остальное — «Показать ещё».
+BOARD_COLUMN_LIMIT = 50
+
+# Доставка запроса в Telegram-группу. none — запрос только на доске: группу оператор не
+# выбирал (её и нет у отдела), доставлять нечего.
+DELIVERY_PENDING = 'pending'
+DELIVERY_SENT = 'sent'
+DELIVERY_FAILED = 'failed'
+DELIVERY_NONE = 'none'
+
+# Строка переписки о переносе запроса по доске (client_card_request_messages.direction).
+MESSAGE_STAGE = 'stage'
+
 REQUEST_BODY_LIMIT = 3500        # вместе с шапкой сообщение должно влезть в 4096 Telegram
 REQUEST_FILES_LIMIT = 6
 # Потолок файла — предел Bot API на отправку ботом (50 МБ): больше в группу не уйдёт.

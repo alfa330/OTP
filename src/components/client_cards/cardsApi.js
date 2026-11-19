@@ -52,12 +52,13 @@ export const createCardsApi = (apiBaseUrl, getHeaders = null) => {
         cardRecord: (cardId) => axios.get(url(`/cards/${cardId}/record`), config()),
         cardBundle: (cardId) => axios.get(url(`/cards/${cardId}`), config({ params: { bundle: 1 } })),
         history: (params) => axios.get(url('/history'), config({ params })),
-        // Запросы в другие отделы
+        // Запросы в другие отделы — доска «Запросы»
         requests: (params) => axios.get(url('/requests'), config({ params })),
+        board: (params) => axios.get(url('/requests/board'), config({ params })),
         request: (id) => axios.get(url(`/requests/${id}`), config()),
         createRequest: (fields, files) => axios.post(url('/requests'), form(fields, files), config()),
         replyRequest: (id, fields, files) => axios.post(url(`/requests/${id}/reply`), form(fields, files), config()),
-        setRequestStatus: (id, status) => axios.post(url(`/requests/${id}/status`), { status }, config()),
+        setRequestStage: (id, stage) => axios.post(url(`/requests/${id}/stage`), { stage }, config()),
         retryRequest: (id) => axios.post(url(`/requests/${id}/retry`), {}, config()),
         requestFileJson: (id, messageId) => axios.get(url(`/requests/${id}/files/${messageId}`), config({ responseType: 'blob' })),
     };

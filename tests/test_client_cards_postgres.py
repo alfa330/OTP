@@ -27,8 +27,11 @@ from client_cards.tez import SOURCE_ACCOUNTS, SOURCE_FIRST_ORDERS
 PORT = os.environ.get('CLIENT_CARDS_TEST_PORT')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (CLIENT_CARDS_TEST_PORT)')
 
-TEZ, OP = 560, 367
+TEZ, OP, OOZ = 560, 367, 2008
 SUPER, HEAD, SV, ANNA, BORIS, SALES, OUTSIDER = 1, 300, 3, 30, 31, 40, 50
+# Глава отдела обработки запросов: ведёт доску «Запросы» Тез КЦ поимённо (access.BOARD_USER_IDS
+# в тестах подменён на эту выдуманную учётку).
+BOARDER = 60
 GROUP_TP, GROUP_OP = 34, 35
 CHAT_FINANCE, CHAT_ALERTS = -1001, -1002
 PHONE = '77012345678'
@@ -48,7 +51,8 @@ BASE_DDL = '''
     CREATE TABLE it_ticket_channels (id serial PRIMARY KEY, chat_id bigint NOT NULL UNIQUE,
                                      title text, chat_type text, is_active boolean NOT NULL DEFAULT TRUE);
     INSERT INTO departments (id, code, name, head_user_id) VALUES
-        (560, 'tez', 'Тез КЦ', 300), (367, 'op', 'Отдел продаж', NULL);
+        (560, 'tez', 'Тез КЦ', 300), (367, 'op', 'Отдел продаж', NULL),
+        (2008, 'request_processing_department', 'Отдел обработки запросов', 60);
     INSERT INTO users (id, name, role, status, department_id, telegram_id) VALUES
         (1, 'Супер Админов', 'super_admin', 'working', NULL, NULL),
         (300, 'Глава Теза', 'admin', 'working', 560, 700300),
@@ -56,7 +60,8 @@ BASE_DDL = '''
         (30, 'Анна Оператор', 'operator', 'working', 560, NULL),
         (31, 'Борис Оператор', 'operator', 'working', 560, NULL),
         (40, 'Продавец Теза', 'operator', 'working', 560, NULL),
-        (50, 'Чужой Оператор', 'operator', 'working', 367, NULL);
+        (50, 'Чужой Оператор', 'operator', 'working', 367, NULL),
+        (60, 'Ведущий Доски', 'admin', 'working', 2008, NULL);
     UPDATE users SET sip_number = ' 930 ' WHERE id = 30;
     UPDATE users SET sip_number = '931' WHERE id = 31;
     INSERT INTO groups (id, name, department_id) VALUES
@@ -268,6 +273,7 @@ class _Blob:
 def world(db, monkeypatch):
     """Сервис с подставными TEZ APP, Telegram и хранилищем; раздел у Тез КЦ включён группе ТП."""
     outbox, storage = Outbox(), FakeStorage()
+    monkeypatch.setattr(access, 'BOARD_USER_IDS', {'tez': (BOARDER,)})
     monkeypatch.setattr(transport, 'send_message', outbox.send_message)
     monkeypatch.setattr(transport, 'send_file', outbox.send_file)
     clock = Clock(datetime(2026, 11, 12, 10, 0, 0))
@@ -994,6 +1000,8 @@ def test_request_goes_to_group_with_files_and_answers_come_back(world):
     assert error is None
     request = detail['request']
     assert request['delivery_status'] == 'sent' and request['status'] == rules.REQUEST_OPEN
+    # Запрос и в группе, и на доске — в первой колонке.
+    assert request['stage'] == rules.STAGE_NEW and detail['can_move'] is False
     assert request['topic_title'] == 'Заказы → Не приходят заказы'
     root = w.outbox.messages[0]
     assert root['chat_id'] == CHAT_FINANCE and request['tg_message_id'] == root['message_id']
@@ -1028,18 +1036,27 @@ def test_request_goes_to_group_with_files_and_answers_come_back(world):
     assert [m['direction'] for m in mine['messages']] == ['out', 'out', 'out', 'in']
     assert mine['messages'][-1]['author_name'] == 'Айгуль'
 
-    # Оператор уточняет реплаем на ответ отдела и закрывает запрос — группе уходит отбивка.
+    # Оператор уточняет реплаем на ответ отдела. Закрывает запрос тот, кто ведёт доску, — не
+    # автор; группе уходит отбивка словами доски.
     answer_row = mine['messages'][-1]
     detail, error = w.svc.reply(anna, request['id'], body='Спасибо, передам водителю', reply_to=answer_row['id'])
     assert error is None and w.outbox.messages[-1]['reply_to'] == 5001
-    closed = w.svc.set_request_status(anna, request['id'], 'resolved')
-    assert closed['request']['status'] == rules.REQUEST_RESOLVED
-    assert 'решён' in w.outbox.messages[-1]['text'] and w.outbox.messages[-1]['reply_to'] == root['message_id']
+    with pytest.raises(CardError) as error:
+        w.svc.set_request_stage(anna, request['id'], rules.STAGE_RESOLVED)
+    assert (error.value.code, error.value.status) == ('REQUEST_MOVE_FORBIDDEN', 403)
+    closed = w.svc.set_request_stage(w.ctx(HEAD), request['id'], rules.STAGE_RESOLVED)
+    assert closed['request']['status'] == rules.REQUEST_RESOLVED and closed['request']['stage'] == rules.STAGE_RESOLVED
+    assert closed['request']['resolved_by_name'] == 'Глава Теза'
+    assert w.outbox.messages[-1]['text'] == '✅ Запрос №%d — Решено (Глава Теза)' % request['id']
+    assert w.outbox.messages[-1]['reply_to'] == root['message_id']
     with pytest.raises(CardError) as error:
         w.svc.reply(anna, request['id'], body='ещё вопрос')
     assert error.value.code == 'REQUEST_CLOSED'
-    reopened = w.svc.set_request_status(anna, request['id'], 'reopen')
-    assert reopened['request']['status'] == rules.REQUEST_ANSWERED
+    # Вернуть в работу — тоже переносом; группе о возврате не пишем, «есть ответ» помнится.
+    sent = len(w.outbox.messages)
+    reopened = w.svc.set_request_stage(w.ctx(HEAD), request['id'], rules.STAGE_IN_WORK)
+    assert reopened['request']['status'] == rules.REQUEST_ANSWERED and reopened['request']['resolved_at'] is None
+    assert len(w.outbox.messages) == sent
 
     # Вложение: наш файл — ссылкой на хранилище.
     file_row = next(m for m in mine['messages'] if m['file_name'] == 'экран.mp4')
@@ -1110,6 +1127,147 @@ def test_group_migration_moves_destination(world):
     with w.db._get_cursor() as cursor:
         assert queries.get_destination(cursor, w.finance)['chat_id'] == new_chat
         assert queries.get_request(cursor, detail['request']['id'])['tg_chat_id'] == new_chat
+
+
+# ─── Доска «Запросы» ─────────────────────────────────────────────────────────
+
+def test_request_without_group_lives_on_the_board(world):
+    """Владелец, 19.11.2026: запросы ведут по доске. Telegram-группа необязательна: без неё запрос
+    только на доске, а переписка оператора с ведущими доску остаётся в портале."""
+    w = world
+    anna, boarder = w.ctx(ANNA), w.ctx(BOARDER)
+    card_id = _ready_card(w, anna)
+    detail, error = _request(w, anna, card_id, destination_id=None, uploads=[
+        {'name': 'Скрин.png', 'data': b'png-bytes', 'mime': 'image/png'}])
+    request = detail['request']
+    assert error is None and w.outbox.messages == [] and w.outbox.files == []
+    assert (request['delivery_status'], request['stage'], request['destination_id']) == ('none', 'new', None)
+    assert len(w.storage.blobs) == 1
+    # «Отправить ещё раз» доставлять нечего — и это не сбой.
+    assert w.svc.retry_delivery(anna, request['id'])[1] is None and w.outbox.messages == []
+
+    # Ведущий доску спрашивает у оператора недостающее — у автора «непрочитано».
+    seen = w.svc.request_detail(boarder, request['id'])
+    assert seen['can_act'] and seen['can_move']
+    asked, error = w.svc.reply(boarder, request['id'], body='Пришлите скрин ошибки целиком')
+    assert error is None and w.outbox.messages == []
+    assert [(m['direction'], m['author_name']) for m in asked['messages'][-1:]] == [('in', 'Ведущий Доски')]
+    assert asked['request']['author_unread_count'] == 1 and asked['request']['status'] == rules.REQUEST_ANSWERED
+    # Автор открыл — «непрочитано» погасло; отвечает файлом — строка out, в Telegram ничего.
+    mine = w.svc.request_detail(anna, request['id'])
+    assert mine['request']['author_unread_count'] == 0 and mine['can_move'] is False
+    replied, error = w.svc.reply(anna, request['id'], body='', uploads=[
+        {'name': 'весь экран.png', 'data': b'png2', 'mime': 'image/png'}])
+    assert error is None and replied['messages'][-1]['direction'] == 'out'
+    assert replied['messages'][-1]['file_name'] == 'весь экран.png' and w.outbox.files == []
+    assert replied['request']['author_unread_count'] == 0
+    # «Реплаем» в переписке без группы отвечать не на что.
+    with pytest.raises(CardError) as failure:
+        w.svc.reply(anna, request['id'], body='ещё', reply_to=asked['messages'][-1]['id'])
+    assert failure.value.code == 'REQUEST_BAD_REPLY'
+    # Вложение — нашей ссылкой, открывается и ведущему доску.
+    file_row = replied['messages'][-1]
+    assert w.svc.request_file(boarder, request['id'], file_row['id'])['url'].startswith('https://storage.example/')
+    # Группа, которой нет у отдела, — отказ, а не запрос «куда-то».
+    with pytest.raises(CardError) as failure:
+        _request(w, anna, card_id, destination_id=999999)
+    assert failure.value.code == 'REQUEST_BAD_DESTINATION'
+
+
+def test_board_moves_and_who_hears_about_them(world):
+    w = world
+    anna, boris, head, boarder = w.ctx(ANNA), w.ctx(BORIS), w.ctx(HEAD), w.ctx(BOARDER)
+    first = _request(w, anna, _ready_card(w, anna, key='b1'), destination_id=None)[0]['request']['id']
+    w.clock.tick(minutes=1)
+    second = _request(w, boris, _ready_card(w, boris, key='b2'), destination_id=None,
+                      body='Не списались бонусы за поездку')[0]['request']['id']
+
+    # Автор по доске не двигает, коллега и чужой отдел запрос даже не видят.
+    for ctx, code in ((anna, 'REQUEST_MOVE_FORBIDDEN'), (boris, 'REQUEST_FORBIDDEN'),
+                      (w.ctx(OUTSIDER), 'REQUEST_FORBIDDEN')):
+        with pytest.raises(CardError) as failure:
+            w.svc.set_request_stage(ctx, first, rules.STAGE_IN_WORK)
+        assert (failure.value.code, failure.value.status) == (code, 403)
+
+    w.clock.tick(minutes=1)
+    moved = w.svc.set_request_stage(boarder, first, rules.STAGE_IN_WORK)
+    assert moved['request']['stage'] == rules.STAGE_IN_WORK
+    assert moved['request']['stage_changed_by_name'] == 'Ведущий Доски'
+    assert moved['request']['last_message_at'] == w.clock()
+    stages = [(m['body'], m['author_name']) for m in moved['messages'] if m['direction'] == rules.MESSAGE_STAGE]
+    assert stages == [(rules.STAGE_IN_WORK, 'Ведущий Доски')]
+    # «В работу» автора не дёргает; перенос в ту же стадию ничего не меняет и строк не плодит.
+    again = w.svc.set_request_stage(boarder, first, rules.STAGE_IN_WORK)
+    assert len([m for m in again['messages'] if m['direction'] == rules.MESSAGE_STAGE]) == 1
+    with w.db._get_cursor() as cursor:
+        assert queries.unread_total(cursor, ANNA) == 0
+    # «Требует информацию» — от автора что-то ждут: у него «непрочитано» и строка в колоколе.
+    w.svc.set_request_stage(boarder, first, rules.STAGE_NEEDS_INFO)
+    with w.db._get_cursor() as cursor:
+        assert queries.unread_total(cursor, ANNA) == 1
+        total, rows = queries.unread_for_bell(cursor, ANNA, 5)
+        assert total == 1 and (rows[0][0], rows[0][4]) == (first, rules.STAGE_NEEDS_INFO)
+    with pytest.raises(CardError) as failure:
+        w.svc.set_request_stage(boarder, first, 'bogus')
+    assert failure.value.code == 'REQUEST_BAD_STAGE'
+
+    # Доска: ведущему и главе — все запросы отдела по колонкам.
+    columns, _names, can_move = w.svc.board(boarder)
+    assert can_move is True
+    assert {stage: [item['id'] for item in column['items']] for stage, column in columns.items() if column['items']} \
+        == {rules.STAGE_NEW: [second], rules.STAGE_NEEDS_INFO: [first]}
+    assert columns[rules.STAGE_NEW]['total'] == 1 and columns[rules.STAGE_RESOLVED]['total'] == 0
+    assert w.svc.board(head)[0][rules.STAGE_NEW]['total'] == 1
+    # Оператору — только свои и без переноса.
+    own, _names, own_move = w.svc.board(anna)
+    assert own_move is False
+    assert own[rules.STAGE_NEEDS_INFO]['total'] == 1 and own[rules.STAGE_NEW]['total'] == 0
+    # Поиск — по тем же правилам, что у списка.
+    found = w.svc.board(boarder, search='бонусы')[0]
+    assert found[rules.STAGE_NEW]['total'] == 1 and found[rules.STAGE_NEEDS_INFO]['total'] == 0
+    # Колонка дальше листается списком; «открытые» — все незакрытые стадии.
+    assert [row['id'] for row in w.svc.list_requests(boarder, stage=rules.STAGE_NEW)[0]] == [second]
+    w.svc.set_request_stage(boarder, second, rules.STAGE_FAILED)
+    assert [row['id'] for row in w.svc.list_requests(boarder, status='active')[0]] == [first]
+    assert w.svc.list_requests(boarder, status='resolved')[0] == []
+    failed = w.svc.request_detail(boarder, second)['request']
+    assert (failed['status'], failed['resolved_by_name']) == (rules.REQUEST_CANCELLED, 'Ведущий Доски')
+    with w.db._get_cursor() as cursor:
+        assert queries.unread_total(cursor, BORIS) == 1
+
+    # Ведущий доску — не руководитель Тез КЦ: обращение по запросу ему не открыто.
+    card_id = w.svc.request_detail(boarder, first)['request']['card_id']
+    with pytest.raises(CardError) as failure:
+        w.svc.card_detail(boarder, card_id)
+    assert failure.value.status == 403
+
+
+def test_board_column_shows_the_freshest_first_and_counts_all(world, monkeypatch):
+    w = world
+    anna, boarder = w.ctx(ANNA), w.ctx(BOARDER)
+    card_id = _ready_card(w, anna)
+    ids = []
+    for index in range(5):
+        w.clock.tick(minutes=1)
+        ids.append(_request(w, anna, card_id, destination_id=None, body='Запрос %d' % index)[0]['request']['id'])
+    with w.db._get_cursor() as cursor:
+        columns = queries.board(cursor, [TEZ], limit=2)
+    assert columns[rules.STAGE_NEW]['total'] == 5
+    assert [item['id'] for item in columns[rules.STAGE_NEW]['items']] == ids[:-3:-1]
+    # Перенесённый встаёт наверх новой колонки, даже самый старый.
+    w.clock.tick(minutes=1)
+    w.svc.set_request_stage(boarder, ids[0], rules.STAGE_RESOLVED)
+    w.clock.tick(minutes=1)
+    w.svc.set_request_stage(boarder, ids[1], rules.STAGE_RESOLVED)
+    with w.db._get_cursor() as cursor:
+        columns = queries.board(cursor, [TEZ], limit=2)
+    assert [item['id'] for item in columns[rules.STAGE_RESOLVED]['items']] == [ids[1], ids[0]]
+    assert columns[rules.STAGE_NEW]['total'] == 3
+    # «Показать ещё» колонки: следующая порция после последней показанной карточки.
+    last = columns[rules.STAGE_NEW]['items'][-1]
+    rows, _more, _names = w.svc.list_requests(boarder, stage=rules.STAGE_NEW,
+                                              before=(last['last_message_at'], last['id']))
+    assert [row['id'] for row in rows] == [ids[2]]
 
 
 # ─── Алерты ──────────────────────────────────────────────────────────────────
@@ -1553,6 +1711,48 @@ def test_audience_column_is_added_to_a_deployed_schema(db):
         assert nullable == 'NO' and "'driver'" in default
 
 
+def test_board_columns_are_added_to_a_deployed_schema(db):
+    """База, где запросы жили до доски: старт добавляет стадию, ставит закрытые запросы в
+    «Решено» и «Сделка провалена», а отвеченные — «В работе», и снимает обязательность группы."""
+    now = datetime(2026, 11, 12, 10, 0)
+    with db._get_cursor() as cursor:
+        destination = queries.create_destination(
+            cursor, TEZ, {'title': 'Финансы', 'chat_id': CHAT_FINANCE, 'chat_title': 'Тез · Финансы'}, by=HEAD, now=now)
+        cursor.execute('DROP INDEX idx_client_card_requests_stage')
+        cursor.execute('ALTER TABLE client_card_requests DROP COLUMN stage, DROP COLUMN stage_changed_at, '
+                       'DROP COLUMN stage_changed_by, DROP COLUMN stage_changed_by_name')
+        cursor.execute('ALTER TABLE client_card_requests ALTER COLUMN destination_id SET NOT NULL')
+        ids = {}
+        for status in ('open', 'answered', 'resolved', 'cancelled'):
+            closed = status in ('resolved', 'cancelled')
+            cursor.execute("""
+                INSERT INTO client_card_requests (department_id, destination_id, destination_title, body, status,
+                                                  created_by, last_message_at, created_at, updated_at,
+                                                  resolved_at, resolved_by, resolved_by_name)
+                VALUES (%s, %s, 'Финансы', 'Текст', %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (TEZ, destination, status, ANNA, now, now, now, now if closed else None,
+                  ANNA if closed else None, 'Анна Оператор' if closed else None))
+            ids[status] = cursor.fetchone()[0]
+        schema.init_client_cards_schema(cursor)
+        schema.init_client_cards_schema(cursor)
+        stages = {status: queries.get_request(cursor, request_id)['stage'] for status, request_id in ids.items()}
+        assert stages == {'open': 'new', 'answered': 'in_work', 'resolved': 'resolved', 'cancelled': 'failed'}
+        resolved = queries.get_request(cursor, ids['resolved'])
+        assert (resolved['stage_changed_by_name'], resolved['stage_changed_at']) == ('Анна Оператор', now)
+        cursor.execute("""SELECT is_nullable FROM information_schema.columns
+                           WHERE table_schema = current_schema() AND table_name = 'client_card_requests'
+                             AND column_name = 'destination_id'""")
+        assert cursor.fetchone()[0] == 'YES'
+        cursor.execute("SELECT to_regclass('idx_client_card_requests_stage') IS NOT NULL")
+        assert cursor.fetchone()[0] is True
+        # Запрос без группы теперь пишется — только на доску.
+        request_id = queries.create_request(cursor, department_id=TEZ, card_id=None, destination=None,
+                                            body='Без группы', account_id=None, phone=PHONE, topic_title=None,
+                                            by=ANNA, by_name='Анна', now=now)
+        fresh = queries.get_request(cursor, request_id)
+        assert (fresh['delivery_status'], fresh['stage'], fresh['destination_id']) == ('none', 'new', None)
+
+
 def test_journal_and_report(world):
     w = world
     anna, boris = w.ctx(ANNA), w.ctx(BORIS)
@@ -1903,8 +2103,10 @@ def test_api_requests_flow(api):
         'files': [(io.BytesIO(b'png'), 'Скрин.png', 'image/png'), (io.BytesIO(b''), 'пусто.txt')]},
         content_type='multipart/form-data')
     assert status == 201 and created['delivery_error'] is None and created['can_act'] is True
+    assert created['can_move'] is False
     request = created['request']
     assert request['status_label'] == 'Ждёт ответа' and request['chat_title'] == 'Тез · Финансы'
+    assert (request['stage'], request['stage_label'], request['closed']) == ('new', 'Новое обращение', False)
     assert request['account']['url'].endswith('/admin/drivers/12345') and request['unread'] == 0
     assert [(m['direction'], bool(m['file']), m['pending']) for m in created['messages']] == [
         ('out', False, False), ('out', True, False)]
@@ -1939,10 +2141,62 @@ def test_api_requests_flow(api):
                                json={'body': 'Спасибо!', 'reply_to': incoming['id']})
     assert status == 200 and w.outbox.messages[-1]['reply_to'] == 9001
     assert api.post('/requests/%d/reply' % request['id'], json={'body': ' '})[1]['code'] == 'REQUEST_EMPTY'
-    assert api.post('/requests/%d/status' % request['id'], json={'status': 'resolved'})[1]['request']['status'] == 'resolved'
-    assert api.post('/requests/%d/status' % request['id'], json={'status': 'bogus'})[1]['code'] == 'REQUEST_BAD_STATUS'
-    assert api.post('/requests/%d/status' % request['id'], json={'status': 'reopen'}, user=HEAD)[1]['request']['status'] == 'answered'
+    # Закрыть запрос — переносом по доске; автору это не открыто.
+    status, body = api.post('/requests/%d/stage' % request['id'], json={'stage': 'resolved'})
+    assert (status, body['code']) == (403, 'REQUEST_MOVE_FORBIDDEN')
+    status, moved = api.post('/requests/%d/stage' % request['id'], json={'stage': 'resolved'}, user=HEAD)
+    assert status == 200 and moved['can_move'] is True
+    assert (moved['request']['status'], moved['request']['stage_label'], moved['request']['closed']) == (
+        'resolved', 'Решено', True)
+    assert (moved['messages'][-1]['direction'], moved['messages'][-1]['stage_label']) == ('stage', 'Решено')
+    assert api.post('/requests/%d/stage' % request['id'], json={'stage': 'bogus'}, user=HEAD)[1]['code'] == 'REQUEST_BAD_STAGE'
+    assert api.post('/requests/%d/stage' % request['id'], json={'stage': 'in_work'},
+                    user=HEAD)[1]['request']['status'] == 'answered'
+    assert api.post('/requests/%d/status' % request['id'], json={'status': 'resolved'})[0] == 404
     assert api.post('/requests/%d/retry' % request['id'])[1]['delivery_error'] is None
+
+
+def test_api_board(api):
+    """Доска «Запросы»: колонки в порядке Битрикса; ведущему доску — все запросы и перенос,
+    оператору — свои; раздел у ведущего доску — одна вкладка."""
+    w = api.w
+    card_id = _ready_card(w, w.ctx(ANNA), key='bd1')
+    status, created = api.post('/requests', json={'card_id': card_id, 'body': 'Не может выйти на линию'})
+    assert status == 201 and created['request']['delivery_status'] == 'none' and w.outbox.messages == []
+    request_id = created['request']['id']
+
+    status, screen = api.get('', user=BOARDER)
+    assert status == 200 and screen['department_id'] == TEZ and screen['user_id'] == BOARDER
+    assert (screen['can_manage'], screen['can_move'], screen['can_journal']) == (False, True, False)
+    assert [item['label'] for item in screen['request_stages']][:3] == ['Новое обращение', 'В работе', 'Требует информацию']
+    # Настройки, отчёт и журнал отдела — не его.
+    assert api.put('/settings', json={'department_id': TEZ, 'enabled': False}, user=BOARDER)[0] == 403
+    assert api.get('/report', user=BOARDER)[0] == 403
+    assert api.get('/journal', user=BOARDER)[1]['items'] == []
+
+    status, board = api.get('/requests/board', user=BOARDER)
+    assert status == 200 and board['can_move'] is True
+    assert [column['stage'] for column in board['columns']] == list(rules.REQUEST_STAGES)
+    new = board['columns'][0]
+    assert (new['label'], new['total'], [item['id'] for item in new['items']]) == ('Новое обращение', 1, [request_id])
+    assert new['items'][0]['account']['tez_id'] == 12345 and new['items'][0]['created_by_name'] == 'Анна Оператор'
+    # Оператору — свои запросы без переноса; чужому оператору отдела — пусто.
+    status, own = api.get('/requests/board')
+    assert own['can_move'] is False and own['columns'][0]['total'] == 1
+    assert api.get('/requests/board', user=BORIS)[1]['columns'][0]['total'] == 0
+
+    status, moved = api.post('/requests/%d/stage' % request_id, json={'stage': 'developers'}, user=BOARDER)
+    assert status == 200 and moved['request']['stage_label'] == 'Передано разработчикам'
+    assert moved['request']['stage_changed_by_name'] == 'Ведущий Доски'
+    columns = {column['stage']: column for column in api.get('/requests/board', user=HEAD)[1]['columns']}
+    assert columns['new']['total'] == 0 and columns['developers']['items'][0]['id'] == request_id
+    # Колонка дальше листается списком со стадией.
+    assert [item['id'] for item in api.get('/requests?stage=developers', user=BOARDER)[1]['items']] == [request_id]
+    # Переписка без группы: ведущий доску пишет оператору — у того «непрочитано».
+    status, replied = api.post('/requests/%d/reply' % request_id, json={'body': 'Какая версия приложения?'},
+                               user=BOARDER)
+    assert status == 200 and replied['messages'][-1]['direction'] == 'in' and replied['messages'][-1]['pending'] is False
+    assert api.get('/requests/board')[1]['unread_requests'] == 1
 
 
 def test_api_management(api):

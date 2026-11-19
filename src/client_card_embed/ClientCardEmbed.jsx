@@ -662,7 +662,8 @@ export default function ClientCardEmbed() {
                 )}
                 {tab === 'requests' && (
                     <div className="mx-auto h-full w-full max-w-2xl bg-white">
-                        <RequestsPanel api={api} toast={toast} limits={boot.limits} compact
+                        <RequestsPanel api={api} toast={toast} limits={boot.limits}
+                                       userId={boot.user?.id} stages={boot.request_stages || []}
                                        focusRequestId={focusRequest} onFocusHandled={() => setFocusRequest(null)}
                                        onUnread={(count) => setBoot((prev) => (prev && prev.unread_requests !== count
                                            ? { ...prev, unread_requests: count } : prev))} />

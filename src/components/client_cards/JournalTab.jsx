@@ -13,7 +13,7 @@ import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosBadge, IosSegmented, iosBtnSecondary, iosCard, iosInput } from '../ui/ios';
 import CardDetail from './CardDetail';
 import {
-    REQUEST_TONES, almatyToday, cardAccountText, errorText, fmtWhen, periodPreset, reasonFilterOptions, topicLabel,
+    almatyToday, cardAccountText, errorText, fmtWhen, periodPreset, reasonFilterOptions, requestBadge, topicLabel,
 } from './cardRules';
 import { EmptyState, Spinner, StateBadge } from './ui';
 
@@ -138,11 +138,15 @@ export default function JournalTab({ api, departmentId, categories, toast, onOpe
                             </div>
                             <div className="flex flex-wrap items-center gap-1.5 md:justify-end">
                                 <StateBadge card={card} />
-                                {card.requests.map((request) => (
-                                    <IosBadge key={request.id} tone={REQUEST_TONES[request.status] || 'slate'}>
-                                        {request.destination_title}
-                                    </IosBadge>
-                                ))}
+                                {/* Запрос по обращению — номером и стадией доски. */}
+                                {card.requests.map((request) => {
+                                    const badge = requestBadge(request);
+                                    return (
+                                        <IosBadge key={request.id} tone={badge.tone}>
+                                            №{request.id} · {badge.label}
+                                        </IosBadge>
+                                    );
+                                })}
                             </div>
                         </button>
                     ))}

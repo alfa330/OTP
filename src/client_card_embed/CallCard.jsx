@@ -21,11 +21,12 @@ import {
 import CardRecord from '../components/client_cards/CardRecord';
 import RequestComposer from '../components/client_cards/RequestComposer';
 import {
-    ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, REQUEST_TONES, accountOriginHint, accountRowLines,
+    ACCOUNT_STATUS_CLASSES, AUDIENCES, NO_ACCOUNT_LABEL, accountOriginHint, accountRowLines,
     accountTitle, callerOptions, canAddTopic, cardAudience, countReasons,
     errorText, filterCategories, fmtDate, isTopicPicked, looksLikeAccountLink, pickedInBranch, reasonsOfAudience,
-    saveLabel, tezNotice, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
+    requestTitle, saveLabel, tezNotice, toggleTopic, topicLabel, topicsOfAudience, topicsPayload,
 } from '../components/client_cards/cardRules';
+import { RequestBadge } from '../components/client_cards/ui';
 import { KAZAKHSTAN_CITY_OPTIONS } from '../utils/kazakhstanCities';
 
 const AUTOSAVE_MS = 700;
@@ -535,10 +536,8 @@ export default function CallCard({
                         <ul className="space-y-1">
                             {requests.map((request) => (
                                 <li key={request.id} className={`${iosCard} flex items-center justify-between gap-2 px-3 py-2 text-[12.5px]`}>
-                                    <span className="min-w-0 truncate text-slate-700">Запрос №{request.id} · {request.destination_title}</span>
-                                    <IosBadge tone={request.delivery_status !== 'sent' ? 'red' : (REQUEST_TONES[request.status] || 'slate')}>
-                                        {request.delivery_status !== 'sent' ? 'Не доставлен' : request.status_label}
-                                    </IosBadge>
+                                    <span className="min-w-0 truncate text-slate-700">{requestTitle(request)}</span>
+                                    <RequestBadge request={request} />
                                 </li>
                             ))}
                         </ul>
