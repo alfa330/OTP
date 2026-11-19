@@ -77,6 +77,9 @@ _TOTALS_SQL = "WITH " + _LEADS_CTE + """,
         COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL AND l.success_resolved_at IS NOT NULL
                            AND l.success_attempt_id IS NULL AND l.signed_at < l.created_at),
         COUNT(*) FILTER (WHERE l.signed_at IS NOT NULL AND l.success_resolved_at IS NULL),
+        -- «На проверке у Яндекса» с 19.11.2026 — подписали (signed_at стоит, они в signed и в успешках);
+        -- здесь — только строки, которые проверка ещё не обновила. Отдельно, а не подмножеством signed:
+        -- полоса «Документы» складывает эти доли в итог.
         COUNT(*) FILTER (WHERE l.signed_at IS NULL AND l.iin <> '' AND l.sign_status = 'processing'),
         COUNT(*) FILTER (WHERE l.signed_at IS NULL AND l.iin <> ''
                            AND l.sign_status IN ('unsigned', 'not_formed', 'rejected')),

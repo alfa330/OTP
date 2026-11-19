@@ -5,6 +5,10 @@
  * Двойник серверного dial_list/signing.py::SIGN_STATUS_LABELS: набор ключей и
  * подписи сверяет tests/test_dial_list_signing.py.
  *
+ * С 19.11.2026 «на проверке у Яндекса» — это подписал: успешка засчитывается
+ * сразу, строка в журнале и в аналитике — среди подписавших. Синий статус и доля
+ * «На проверке у Яндекса» остались для строк, которые проверка ещё не обновила.
+ *
  * Цвет — только со смыслом и один на весь раздел: подписал — зелёный, на
  * проверке у Яндекса — синий (водитель уже подписал, ждём Яндекс), не подписал —
  * жёлтый, срок истёк — красный (звонить поздно). Серые — «ничего не известно»:
@@ -32,7 +36,8 @@ export const SIGN_FILTER_OPTIONS = [
     { value: '', label: 'Любые документы' },
     { value: 'success', label: 'Подписали — успешка' },
     { value: 'self', label: 'Подписали сами' },
-    { value: 'processing', label: 'На проверке у Яндекса' },
+    // Подписавшие, чьи документы ещё у Яндекса: успешка у них уже засчитана (19.11.2026).
+    { value: 'processing', label: 'Подписали — ждут Яндекса' },
     { value: 'unsigned', label: 'Не подписали' },
     { value: 'expired', label: 'Срок подписания истёк' },
     { value: 'no_docs', label: 'Документы не поступили' },
@@ -44,7 +49,9 @@ export const SIGN_FILTER_OPTIONS = [
    totals на сервере — в поле `total`; `sign` — фильтр журнала для перехода. */
 export const SIGN_BREAKDOWN = [
     { key: 'signed', total: 'signed', label: 'Подписали', sign: '' , stage: 'signed' },
-    { key: 'processing', total: 'processing', label: 'На проверке у Яндекса', sign: 'processing' },
+    // Только строки, которые проверка ещё не обновила (у остальных «на проверке у Яндекса» — уже «Подписали»):
+    // переход — на этап журнала, а не на фильтр «Подписали — ждут Яндекса», где и подписавшие.
+    { key: 'processing', total: 'processing', label: 'На проверке у Яндекса', sign: 'processing', stage: 'sign_wait' },
     { key: 'unsigned', total: 'unsigned', label: 'Не подписали', sign: 'unsigned' },
     { key: 'expired', total: 'expired', label: 'Срок подписания истёк', sign: 'expired' },
     { key: 'no_docs', total: 'no_docs', label: 'Документы не поступили', sign: 'no_docs' },

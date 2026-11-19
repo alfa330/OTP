@@ -13,11 +13,17 @@
      Реже, раз в EXPIRED_RECHECK_HOURS, и только в базе текущего месяца
      спрашиваем тех, у кого срок подписания истёк: подписать такой документ
      уже нельзя. Свежая база идёт в круге первой: у её строк проверки не было.
+     В круге остаются и подписавшие, чьи документы ещё «на проверке у Яндекса»:
+     у них круг только обновляет статус и документы до «Подписано» (момент
+     подписи и успешку не трогает никогда — _write).
   2. Один запрос в Sapar на пару (ИИН, месяц документов) — одного водителя в
      двух отделах спрашиваем один раз. Итог пишется пачками: оборвавшийся на
      середине прогон не теряет уже проверенное.
   3. Подписавшему — успешка: последний разговор ≥ SUCCESS_MIN_BILLSEC секунд,
-     НАЧАВШИЙСЯ ДО подписи. Разговор после подписи на неё не повлиял; подписал
+     НАЧАВШИЙСЯ ДО подписи. Подписавший — тот, кто подписал все документы:
+     пакет «Подписано» или «на проверке у Яндекса» (signing.SUCCESS_CODES;
+     владелец, 19.11.2026: «засчитывать ждут Яндекса сразу в успешки»).
+     Разговор после подписи на неё не повлиял; подписал
      без такого разговора — «подписал сам», успешки нет. Пока по водителю идёт
      звонок, начатый до подписи, решение откладывается: его billsec ещё не
      известен, а это как раз тот случай, когда оператор помогает подписать.
@@ -123,10 +129,10 @@ def _new_session():
 
 def _package_verdict(documents, now):
     """Документы Яндекса → (общий статус, документы для карточки, момент подписи —
-    только у подписавшего). Одно толкование у прогона и у проверки «сейчас»: итог
-    пишется одинаково."""
+    только у подписавшего: «Подписано» или «на проверке у Яндекса»). Одно толкование
+    у прогона и у проверки «сейчас»: итог пишется одинаково."""
     code = signing.aggregate(documents)
-    signed_at = signing.signed_moment(documents, now) if code == signing.SIGNED else None
+    signed_at = signing.signed_moment(documents, now) if signing.counts_as_signed(code) else None
     return code, json.dumps(signing.document_rows(documents), ensure_ascii=False), signed_at
 
 
@@ -219,10 +225,13 @@ class SignChecker:
                               refresh.get("reason") if refresh is not None else reason)
 
     # ------------------------------------------------------------ круг
+    # Неподписавшие и подписавшие «на проверке у Яндекса»: у вторых круг только обновляет статус и документы до
+    # «Подписано» (_write). Условие — именно этот статус, а не «не подписано»: signed_at стоит и у вышедших на
+    # линию водителей Тез (sign_status 'online'), Sapar о них не знает. Последняя колонка — подписал ли уже.
     _DUE_SQL = """
-        SELECT l.id, l.iin, l.period
+        SELECT l.id, l.iin, l.period, l.signed_at IS NOT NULL
         FROM dial_list_leads l
-        WHERE l.iin <> '' AND l.signed_at IS NULL
+        WHERE l.iin <> '' AND (l.signed_at IS NULL OR l.sign_status = %(processing)s)
           {due}
           {scope}
         ORDER BY l.sign_checked_at ASC NULLS FIRST, l.created_at ASC
@@ -235,8 +244,9 @@ class SignChecker:
                         "(l.sign_checked_at IS NULL OR l.sign_checked_at < %(expired_before)s)))")
 
     def run(self, reason="", now=None, lead_ids=None, force=False, budget_sec=None, lanes=PASS_LANES):
-        """Круг: спросить Sapar о неподписавших баз текущего и прошлого месяца (кого именно — шапка модуля и
-        _DUE_SQL) в `lanes` потоков. lead_ids — только об этих, из базы любого месяца, одним потоком («Проверить
+        """Круг: спросить Sapar о неподписавших баз текущего и прошлого месяца и о подписавших, чьи документы ещё
+        «на проверке у Яндекса» (кого именно — шапка модуля и _DUE_SQL), в `lanes` потоков. lead_ids — только
+        об этих, из базы любого месяца, одним потоком («Проверить
         сейчас» в карточке); force — и об истёкших, не глядя на время их прошлой проверки. `now` задают тесты:
         тогда им помечены все записи; без него у каждого ответа Sapar своё время. Возвращает сводку."""
         summary = {"reason": reason, "checked": 0, "signed": 0, "errors": 0, "stopped": "",
@@ -254,7 +264,7 @@ class SignChecker:
             self.sync_driver_ids(now)
         from_period, to_period = signing.check_window(now.astimezone(signing.PERIOD_TZ).date())
         params = {"from_period": from_period, "to_period": to_period, "limit": PASS_MAX_LEADS,
-                  "expired": signing.EXPIRED,
+                  "expired": signing.EXPIRED, "processing": signing.PROCESSING,
                   "expired_before": now - timedelta(hours=signing.EXPIRED_RECHECK_HOURS)
                   + timedelta(minutes=EXPIRED_SLACK_MINUTES)}
         due_filter = "" if force else self._EXPIRED_DUE_SQL
@@ -274,17 +284,21 @@ class SignChecker:
         if cycle:
             due = self._cycle_begin(due, now)
         # (ИИН, месяц документов) → строки: один водитель в двух базах одного
-        # месяца документов (разные отделы) — один запрос.
+        # месяца документов (разные отделы) — один запрос. already — уже подписавшие
+        # («на проверке у Яндекса»): их ответ лишь обновит статус, новой подписью он не будет.
         groups = OrderedDict()
-        for lead_id, iin, period in due:
+        already = set()
+        for lead_id, iin, period, signed in due:
             groups.setdefault((str(iin), signing.doc_month_for(period)), []).append(str(lead_id))
+            if signed:
+                already.add(str(lead_id))
 
         started = time.monotonic()
         try:
             # «Проверить сейчас» в карточке — время проверки пишем всегда: человек только что спросил сам.
             newly_signed = self._ask(groups, summary, fixed_now, lanes=lanes if cycle else 1,
                                      end=started + (PASS_BUDGET_SEC if budget_sec is None else budget_sec),
-                                     end_reason="budget", cycle=cycle, sparse=cycle)
+                                     end_reason="budget", cycle=cycle, sparse=cycle, already=already)
         except Exception:
             summary["stopped"] = summary["stopped"] or "error"
             raise
@@ -367,14 +381,16 @@ class SignChecker:
         return max(stored, seen)
 
     # ------------------------------------------------------------ запросы к Sapar
-    def _ask(self, groups, summary, fixed_now, *, lanes, end, end_reason, cycle=False, sparse=True):
+    def _ask(self, groups, summary, fixed_now, *, lanes, end, end_reason, cycle=False, sparse=True,
+             already=frozenset()):
         """Спросить Sapar обо всех `groups` {(ИИН, (месяц, год) документов): [id лидов]} в `lanes` потоков и
         записать ответы пачками (_write; sparse — см. там). У каждого потока свой requests.Session и пауза
         между запросами. `end` (time.monotonic) — после него новых запросов нет; что осталось неспрошенным —
         summary["stopped"] = end_reason. MAX_SYSTEMIC_ERRORS_IN_ROW сетевых сбоев подряд — Sapar лежит,
         остановка. cycle — это круг: ведём его счётчик и уступаем перепроверке перед отчётом, как только её
         поставили (у неё срок, а круг потом продолжится). fixed_now — время для всех записей (тесты); без него у
-        каждого ответа своё. Наполняет summary (checked, errors, lanes, stopped) → id подписавших."""
+        каждого ответа своё. already — id уже подписавших (круг обновляет им статус): новыми подписавшими они не
+        считаются. Наполняет summary (checked, errors, lanes, stopped) → id подписавших в этот раз."""
         work, answers, stop = queue.Queue(), queue.Queue(), threading.Event()
         for key in groups:
             work.put(key)
@@ -437,7 +453,7 @@ class SignChecker:
                     pending.append(("ok", lid, code, docs_json, signed_at, at))
                     summary["checked"] += 1
                     self._seen[lid] = at
-                    if signed_at is not None:
+                    if signed_at is not None and lid not in already:
                         newly_signed.append(lid)
                 if len(pending) >= WRITE_CHUNK:
                     self._write(pending, at, sparse)
@@ -551,9 +567,11 @@ class SignChecker:
         ним. Строки со списков операторов здесь не снимаются: это решает вызывающий
         (пул выдачи, проверка перед звонком).
 
-        Возвращает сводку: checked; signed и processing — id лидов (подписал / на
-        проверке у Яндекса); errors, systemic, successes; stopped — '' | not_configured |
-        backoff | sapar_unavailable | budget; elapsed_sec."""
+        Возвращает сводку: checked; signed — id подписавших (с 19.11.2026 и «на проверке
+        у Яндекса»: водитель всё подписал, успешка засчитывается сразу), processing — те
+        из signed, чьи документы ещё у Яндекса (только для слов в журнале сервера);
+        errors, systemic, successes; stopped — '' | not_configured | backoff |
+        sapar_unavailable | budget; elapsed_sec."""
         summary = {"checked": 0, "signed": [], "processing": [], "errors": 0, "systemic": 0,
                    "successes": 0, "stopped": "", "elapsed_sec": 0.0}
         if not self.configured():
@@ -628,8 +646,8 @@ class SignChecker:
                     self._seen[lid] = now
                     if signed_at is not None:
                         summary["signed"].append(lid)
-                    elif code == signing.PROCESSING:
-                        summary["processing"].append(lid)
+                        if code == signing.PROCESSING:
+                            summary["processing"].append(lid)
         finally:
             stop.set()
         if summary["stopped"] == "sapar_unavailable":
@@ -644,12 +662,20 @@ class SignChecker:
     # Запись круга (sparse): строку переписываем, только если есть что писать, — водитель подписал, сменился
     # статус или документы, была ошибка, проверяли впервые — либо времени проверки в строке уже STAMP_MINUTES.
     # Круг спрашивает каждого раз в несколько минут, и почти всегда ответ тот же: без этого условия он переписывал
-    # бы все строки базы каждый круг ради одной метки времени.
+    # бы все строки базы каждый круг ради одной метки времени. «Подписал» — только впервые: у подписавшего «на
+    # проверке у Яндекса» момент подписи приходит каждый круг, а писать ему нечего, пока статус тот же.
     _SPARSE_OK_SQL = """
-                      AND (v.signed_at IS NOT NULL OR l.sign_status <> v.code OR l.sign_docs <> v.docs
-                           OR l.sign_error <> '' OR l.sign_checked_at IS NULL
+                      AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR l.sign_status <> v.code
+                           OR l.sign_docs <> v.docs OR l.sign_error <> '' OR l.sign_checked_at IS NULL
                            OR l.sign_checked_at < v.now - make_interval(mins => {minutes}))
     """.format(minutes=STAMP_MINUTES)
+    # Чьи строки круг пишет: неподписавших и подписавших «на проверке у Яндекса» (_DUE_SQL). Подписавшему — только
+    # ответ не старше записанного: круг держит ответы до записи пачкой (WRITE_CHUNK, секунды), и за это время
+    # «Проверить на подписание» или проверка перед выдачей могли записать подпись. Старый ответ «не подписал»
+    # поверх неё сменил бы статус, а с ним водитель выпал бы из круга (_DUE_SQL) с документами до подписи навсегда.
+    _WRITABLE_SQL = ("(l.signed_at IS NULL OR (l.sign_status = '{processing}' "
+                     "AND (l.sign_checked_at IS NULL OR l.sign_checked_at <= v.now)))").format(
+                         processing=signing.PROCESSING)
     _SPARSE_ERROR_SQL = """
                       AND (l.sign_error <> v.error OR (NOT v.systemic AND (l.sign_checked_at IS NULL
                            OR l.sign_checked_at < v.now - make_interval(mins => {minutes}))))
@@ -657,26 +683,30 @@ class SignChecker:
 
     def _write(self, items, now, sparse=False):
         """Ответы Sapar → строки лидов. Запись — ("ok", id, статус, документы, момент подписи) или ("error", id,
-        текст, сетевой ли сбой); последним может идти время ответа, без него — `now`. Подписавшего не трогаем
-        повторно (signed_at только ставится). Сетевой сбой не сдвигает время проверки; отказ Sapar по конкретному
-        ИИН — сдвигает. sparse — запись круга: только если есть что писать (_SPARSE_OK_SQL). Проверка «сейчас» и
-        «Проверить сейчас» в карточке пишут время всегда: по нему видно, что человек только что спросил."""
+        текст, сетевой ли сбой); последним может идти время ответа, без него — `now`. Момент подписи только
+        ставится: у подписавшего его не сдвигает и не стирает ни новый ответ, ни «Подписано» после «на проверке у
+        Яндекса», ни откат статуса — круг лишь обновляет ему статус и документы (_WRITABLE_SQL), успешку не трогает
+        вовсе. Сетевой сбой не сдвигает время проверки; отказ Sapar по конкретному ИИН — сдвигает. sparse — запись
+        круга: только если есть что писать (_SPARSE_OK_SQL). Проверка «сейчас» и «Проверить сейчас» в карточке
+        пишут время всегда: по нему видно, что человек только что спросил."""
         ok = [(i[1], i[2], i[3], i[4], i[5] if len(i) > 5 else now) for i in items if i[0] == "ok"]
         errors = [(i[1], i[2], i[3], i[4] if len(i) > 4 else now) for i in items if i[0] == "error"]
         with self.db._get_cursor() as cur:
             if ok:
+                # Справа в SET — значения строки ДО обновления: «впервые подписал» — это l.signed_at IS NULL.
                 execute_values(cur, """
                     UPDATE dial_list_leads l
                     SET sign_status = v.code,
                         sign_docs = v.docs,
                         sign_checked_at = v.now,
                         sign_error = '',
-                        signed_at = v.signed_at,
-                        signed_detected_at = CASE WHEN v.signed_at IS NOT NULL THEN v.now END,
-                        updated_at = CASE WHEN v.signed_at IS NOT NULL THEN CURRENT_TIMESTAMP
+                        signed_at = COALESCE(l.signed_at, v.signed_at),
+                        signed_detected_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN v.now
+                                                  ELSE l.signed_detected_at END,
+                        updated_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN CURRENT_TIMESTAMP
                                           ELSE l.updated_at END
                     FROM (VALUES %s) AS v(id, code, docs, signed_at, now)
-                    WHERE l.id = v.id AND l.signed_at IS NULL
+                    WHERE l.id = v.id AND """ + self._WRITABLE_SQL + """
                 """ + (self._SPARSE_OK_SQL if sparse else ""), ok,
                     template="(%s::uuid, %s, %s::jsonb, %s::timestamptz, %s::timestamptz)", page_size=WRITE_CHUNK)
             if errors:
@@ -685,7 +715,7 @@ class SignChecker:
                     SET sign_error = v.error,
                         sign_checked_at = CASE WHEN v.systemic THEN l.sign_checked_at ELSE v.now END
                     FROM (VALUES %s) AS v(id, error, systemic, now)
-                    WHERE l.id = v.id AND l.signed_at IS NULL
+                    WHERE l.id = v.id AND """ + self._WRITABLE_SQL + """
                 """ + (self._SPARSE_ERROR_SQL if sparse else ""), errors,
                     template="(%s::uuid, %s, %s::boolean, %s::timestamptz)", page_size=WRITE_CHUNK)
 

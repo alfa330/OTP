@@ -9,6 +9,7 @@
 import contextlib
 import inspect
 import io
+import json
 import os
 import pathlib
 import re
@@ -97,6 +98,53 @@ class SignMomentTests(unittest.TestCase):
         without_date = [_doc('Подписано', '2026-09-18T10:00:00'), _doc('Подписано', None)]
         self.assertEqual(signing.signed_moment(without_date, detected), detected)
 
+    def test_waiting_for_yandex_time_is_almaty_and_the_rest_utc(self):
+        # Сверка 18–19.11.2026 (сырые ответы Sapar, 1042 пакета из 1042): у одной и той же подписи время документа
+        # «НаПодписанииУЯндекса» ровно на 5 часов больше, чем у «Подписано», — оно по Алматы, а не по UTC.
+        signed = _doc('Подписано', '2026-11-19T04:36:17.270766')
+        waiting = _doc('НаПодписанииУЯндекса', '2026-11-19T09:36:17.270766')
+        moment = datetime(2026, 11, 19, 4, 36, 17, 270766, tzinfo=timezone.utc)
+        self.assertEqual(signing.driver_sign_time(signed), moment)
+        self.assertEqual(signing.driver_sign_time(waiting), moment)
+        # Пояс, если Sapar его написал, сильнее статуса.
+        self.assertEqual(signing.driver_sign_time(_doc('НаПодписанииУЯндекса', '2026-11-19T04:36:17Z')),
+                         datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
+        self.assertEqual(signing.driver_sign_time(_doc('НаПодписанииУЯндекса', '2026-11-19T09:36:17+05:00')),
+                         datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
+        # «Идёт сохранение файла» в ответах Sapar не встречался ни разу — читается как UTC.
+        self.assertEqual(signing.driver_sign_time(_doc('ИдетСохранениеФайла', '2026-11-19T04:36:17')),
+                         datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
+        self.assertIsNone(signing.driver_sign_time(_doc('НаПодписанииУЯндекса')))
+        self.assertIsNone(signing.driver_sign_time(None))
+        self.assertEqual(signing.LOCAL_TIME_STATUSES, frozenset({'НаПодписанииУЯндекса'}))
+        # Смешанный пакет — момент подписи водителя, а не на 5 часов позже; без поправки было бы 09:36 UTC.
+        detected = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(signing.signed_moment([signed, waiting], detected), moment)
+        # В карточку — то же время, по UTC.
+        rows = signing.document_rows([signed, waiting])
+        self.assertEqual([r['signed_at'] for r in rows], [moment.isoformat(), moment.isoformat()])
+        self.assertEqual([r['group'] for r in rows], [signing.SIGNED, signing.PROCESSING])
+
+    def test_waiting_for_yandex_counts_as_signed(self):
+        # Владелец, 19.11.2026: «засчитывать ждут Яндекса сразу в успешки, в отчётах и везде тоже».
+        self.assertEqual(signing.SUCCESS_CODES, (signing.SIGNED, signing.PROCESSING))
+        for code in (signing.SIGNED, signing.PROCESSING):
+            self.assertTrue(signing.counts_as_signed(code))
+        for code in (signing.UNSIGNED, signing.NOT_FORMED, signing.EXPIRED, signing.REJECTED, signing.NO_DOCS,
+                     signing.NOT_CHECKED, signing.NO_IIN, '', None, 'online'):
+            self.assertFalse(signing.counts_as_signed(code))
+        now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+        # Пакет «на проверке у Яндекса» получает момент подписи водителя, как подписанный.
+        code, docs, signed_at = sign_check._package_verdict(
+            [_doc('Подписано', '2026-11-19T04:00:00'), _doc('НаПодписанииУЯндекса', '2026-11-19T10:00:00')], now)
+        self.assertEqual((code, signed_at), (signing.PROCESSING, datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc)))
+        self.assertEqual([d['signed_at'] for d in json.loads(docs)],
+                         ['2026-11-19T04:00:00+00:00', '2026-11-19T05:00:00+00:00'])
+        # Водитель подписал не всё — не подписал: момента нет.
+        code, _, signed_at = sign_check._package_verdict(
+            [_doc('НаПодписанииУЯндекса', '2026-11-19T10:00:00'), _doc('НаПодписанииУВодителя')], now)
+        self.assertEqual((code, signed_at), (signing.UNSIGNED, None))
+
     def test_stored_document_rows_carry_no_personal_data(self):
         rows = signing.document_rows([{'ServiceId': 7, 'Status': 'Подписано', 'DriverIin': VALID,
                                        'DriverFio': 'Иванов', 'Sum': 1000, 'DocSignDateByDriver': None}])
@@ -139,6 +187,8 @@ class DocumentMonthTests(unittest.TestCase):
         self.assertEqual(signing.status_code('', '', None), signing.NO_IIN)
         self.assertEqual(signing.status_code(VALID, '', None), signing.NOT_CHECKED)
         self.assertEqual(signing.status_code(VALID, 'processing', None), signing.PROCESSING)
+        # С 19.11.2026 у «на проверке у Яндекса» стоит момент подписи — в карточке и журнале это «Подписал».
+        self.assertEqual(signing.status_code(VALID, 'processing', now), signing.SIGNED)
 
 
 class IinInFileTests(unittest.TestCase):
@@ -410,7 +460,8 @@ class SignCheckRunTests(unittest.TestCase):
             calls.append((iin, month, year))
             return {'ok': True, 'yandex': [_doc('Подписано', '2026-09-20T10:00:00')]}
 
-        due = [('l1', VALID, date(2026, 9, 1)), ('l2', VALID, date(2026, 9, 1)), ('l3', VALID, date(2026, 8, 1))]
+        due = [('l1', VALID, date(2026, 9, 1), False), ('l2', VALID, date(2026, 9, 1), False),
+               ('l3', VALID, date(2026, 8, 1), False)]
         checker, written, _ = self._checker(due, fetch)
         summary = checker.run(now=self.NOW)
         self.assertEqual(sorted(calls), [(VALID, 7, 2026), (VALID, 8, 2026)])
@@ -426,7 +477,7 @@ class SignCheckRunTests(unittest.TestCase):
             time.sleep(0.02)                     # настоящий запрос идёт не мгновенно
             return {'ok': False, 'error': 'timeout', 'systemic': True}
 
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(60)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1), False) for i in range(60)]
         checker, written, _ = self._checker(due, fetch)
         summary = checker.run(now=self.NOW)
         self.assertEqual(summary['stopped'], 'sapar_unavailable')
@@ -447,7 +498,13 @@ class SignCheckRunTests(unittest.TestCase):
         checker.run(now=self.NOW)
         sql, params = cur.sql[0]
         flat = ' '.join(sql.split())
-        self.assertIn("WHERE l.iin <> '' AND l.signed_at IS NULL", flat)
+        # Неподписавшие и подписавшие «на проверке у Яндекса» (19.11.2026: их круг ведёт до «Подписано»). Именно
+        # этот статус, а не «не подписано»: signed_at стоит и у вышедших на линию водителей Тез ('online').
+        self.assertIn("SELECT l.id, l.iin, l.period, l.signed_at IS NOT NULL FROM dial_list_leads l "
+                      "WHERE l.iin <> '' AND (l.signed_at IS NULL OR l.sign_status = %(processing)s)", flat)
+        self.assertEqual(params['processing'], signing.PROCESSING)
+        self.assertNotIn("<> 'signed'", flat)
+        self.assertNotIn("<> %(signed)s", flat)
         # Истёкшие (подписать уже нельзя) — только в базе текущего месяца и не чаще раза в 3 часа; остальные —
         # каждый круг: условия на время прошлой проверки у них нет.
         self.assertIn('AND (l.sign_status <> %(expired)s OR (l.period = %(to_period)s AND '
@@ -466,7 +523,8 @@ class SignCheckRunTests(unittest.TestCase):
         checker.run(now=self.NOW, lead_ids=['l1'], force=True)
         sql, params = cur.sql[0]
         flat = ' '.join(sql.split())
-        self.assertIn("WHERE l.iin <> '' AND l.signed_at IS NULL AND l.id = ANY(%(lead_ids)s::uuid[]) ORDER BY", flat)
+        self.assertIn("WHERE l.iin <> '' AND (l.signed_at IS NULL OR l.sign_status = %(processing)s) "
+                      "AND l.id = ANY(%(lead_ids)s::uuid[]) ORDER BY", flat)
         self.assertEqual(params['lead_ids'], ['l1'])
         self.assertEqual(checker.ids_synced, [])        # сверка ID — дело круга
 
@@ -478,7 +536,7 @@ class SignCheckRunTests(unittest.TestCase):
             return self._unsigned()
 
         # Порядок запроса — по времени проверки из базы; оно переписывается не каждый круг.
-        due = [(f'l{i}', f'iin-{i}', date(2026, 9, 1)) for i in range(1, 6)]
+        due = [(f'l{i}', f'iin-{i}', date(2026, 9, 1), False) for i in range(1, 6)]
         checker, _, _ = self._checker(due, fetch)
         checker._seen = {'l1': self.NOW - timedelta(minutes=1), 'l3': self.NOW - timedelta(minutes=9),
                          'l4': self.NOW - timedelta(minutes=5), 'gone': self.NOW - timedelta(minutes=30)}
@@ -500,7 +558,7 @@ class SignCheckRunTests(unittest.TestCase):
                 active[0] -= 1
             return self._unsigned()
 
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(60)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1), False) for i in range(60)]
         checker, written, _ = self._checker(due, fetch)
         summary = checker.run(now=self.NOW)
         self.assertEqual(sign_check.PASS_LANES, 6)
@@ -521,7 +579,7 @@ class SignCheckRunTests(unittest.TestCase):
 
     def test_every_answer_gets_its_own_time(self):
         ticks = iter(datetime(2026, 9, 29, 12, 0, second, tzinfo=timezone.utc) for second in range(60))
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(3)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1), False) for i in range(3)]
         checker, written, _ = self._checker(due, self._unsigned)
         with unittest.mock.patch.object(sign_check, '_utcnow', lambda: next(ticks)):
             checker.run(lanes=1)
@@ -540,7 +598,7 @@ class SignCheckRunTests(unittest.TestCase):
             time.sleep(0.005)
             return self._unsigned()
 
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(40)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1), False) for i in range(40)]
         checker, written, _ = self._checker(due, fetch)
         summary = checker.run(now=self.NOW, lanes=1)
         self.assertEqual(summary['stopped'], 'refresh')
@@ -559,7 +617,7 @@ class SignCheckRunTests(unittest.TestCase):
                 gate.wait(5)                    # круг стоит на шестом водителе из десяти
             return self._unsigned()
 
-        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1)) for i in range(10)]
+        due = [(f'l{i}', f'{i:012d}', date(2026, 9, 1), False) for i in range(10)]
         checker, _, _ = self._checker(due, fetch)
         # Кругов ещё не было: «обновлено» нет, круг начнётся с запуском планировщика.
         self.assertEqual(checker.cycle_state(self.NOW), {
@@ -598,7 +656,7 @@ class SignCheckRunTests(unittest.TestCase):
         self.assertEqual(checker.cycle_state(end + timedelta(seconds=5))['eta_at'], end + timedelta(seconds=1200))
 
     def test_broken_write_is_not_a_full_cycle(self):
-        checker, _, _ = self._checker([('l1', VALID, date(2026, 9, 1))], self._unsigned)
+        checker, _, _ = self._checker([('l1', VALID, date(2026, 9, 1), False)], self._unsigned)
 
         def broken(items, now, sparse=False):
             raise RuntimeError('база недоступна')
@@ -623,8 +681,10 @@ class SignCheckRunTests(unittest.TestCase):
     def test_cycle_write_touches_a_row_only_when_there_is_something_to_write(self):
         # Настоящим SQL это прогоняет tests/test_dial_list_sign_cycle_postgres.py; здесь — что условие на месте.
         ok = ' '.join(sign_check.SignChecker._SPARSE_OK_SQL.split())
-        self.assertEqual(ok, "AND (v.signed_at IS NOT NULL OR l.sign_status <> v.code OR l.sign_docs <> v.docs "
-                             "OR l.sign_error <> '' OR l.sign_checked_at IS NULL "
+        # «Подписал» — повод писать только впервые: у подписавшего «на проверке у Яндекса» момент подписи приходит
+        # каждый круг, и без этого круг переписывал бы такие строки каждые несколько минут.
+        self.assertEqual(ok, "AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR l.sign_status <> v.code "
+                             "OR l.sign_docs <> v.docs OR l.sign_error <> '' OR l.sign_checked_at IS NULL "
                              "OR l.sign_checked_at < v.now - make_interval(mins => 30))")
         error = ' '.join(sign_check.SignChecker._SPARSE_ERROR_SQL.split())
         self.assertEqual(error, "AND (l.sign_error <> v.error OR (NOT v.systemic AND (l.sign_checked_at IS NULL "
@@ -634,6 +694,39 @@ class SignCheckRunTests(unittest.TestCase):
         self.assertIn('(self._SPARSE_OK_SQL if sparse else "")', write)
         self.assertIn('(self._SPARSE_ERROR_SQL if sparse else "")', write)
         self.assertIn('def _write(self, items, now, sparse=False)', write)
+        # Пишет строки неподписавших и подписавших «на проверке у Яндекса», и только их (у Тез — 'online'); подписавшему —
+        # только ответ не старше записанного (настоящим SQL — test_dial_list_sign_cycle_postgres).
+        self.assertEqual(sign_check.SignChecker._WRITABLE_SQL,
+                         "(l.signed_at IS NULL OR (l.sign_status = 'processing' "
+                         "AND (l.sign_checked_at IS NULL OR l.sign_checked_at <= v.now)))")
+        self.assertEqual(write.count('WHERE l.id = v.id AND """ + self._WRITABLE_SQL'), 2)
+        # Момент подписи только ставится: не сдвигается, не стирается; «обнаружили» и updated_at — лишь впервые.
+        flat = ' '.join(write.split())
+        self.assertIn('signed_at = COALESCE(l.signed_at, v.signed_at)', flat)
+        self.assertIn('signed_detected_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN v.now '
+                      'ELSE l.signed_detected_at END', flat)
+        self.assertIn('updated_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN CURRENT_TIMESTAMP '
+                      'ELSE l.updated_at END', flat)
+        self.assertNotIn('success_', write)                 # успешку круг не трогает вовсе
+
+    def test_already_signed_at_yandex_is_refreshed_but_not_signed_again(self):
+        # 19.11.2026: подписавший «на проверке у Яндекса» остаётся в круге до «Подписано» — круг обновляет ему
+        # статус, но новым подписавшим он не считается: строки со списков и успешка у него решены при подписи.
+        def fetch(iin, month, year, session=None):
+            return {'ok': True, 'yandex': [_doc('Подписано', '2026-09-20T04:00:00'),
+                                           _doc('НаПодписанииУЯндекса', '2026-09-20T09:00:00')]}
+
+        due = [('l1', 'iin-1', date(2026, 9, 1), False), ('l2', 'iin-2', date(2026, 9, 1), True)]
+        checker, written, _ = self._checker(due, fetch)
+        closed = []
+        checker.close_signed_rows = lambda ids: closed.extend(ids) or len(ids)
+        summary = checker.run(now=self.NOW)
+        self.assertEqual((summary['checked'], summary['signed']), (2, 1))
+        self.assertEqual(closed, ['l1'])
+        # Обоим ушло одно и то же: статус «на проверке у Яндекса» и момент подписи водителя (запись его не сдвинет).
+        moment = datetime(2026, 9, 20, 4, 0, tzinfo=timezone.utc)
+        self.assertEqual({(w[1], w[2], w[4]) for w in written},
+                         {('l1', signing.PROCESSING, moment), ('l2', signing.PROCESSING, moment)})
 
     def test_requests_coalesce_while_running(self):
         import threading
@@ -846,8 +939,10 @@ class CheckNowTests(unittest.TestCase):
         self.assertEqual((summary['stopped'], calls, written), ('not_configured', [], []))
 
     def test_one_request_per_iin_and_month_and_verdicts_like_the_run(self):
+        # «На проверке у Яндекса»: у подписанного документа время подписи по UTC, у ждущего Яндекса — по Алматы
+        # (та же подпись — 06:30 UTC).
         docs = {'iin-signed': [_doc('Подписано', '2026-10-10T05:00:00')],
-                'iin-wait': [_doc('Подписано'), _doc('НаПодписанииУЯндекса')],
+                'iin-wait': [_doc('Подписано', '2026-10-11T06:30:00'), _doc('НаПодписанииУЯндекса', '2026-10-11T11:30:00')],
                 'iin-no': [_doc('НаПодписанииУВодителя')]}
         calls, lock = [], threading.Lock()
 
@@ -863,7 +958,9 @@ class CheckNowTests(unittest.TestCase):
         # Один запрос на (ИИН, месяц документов): база октября — документы сентября; без ИИН — никак.
         self.assertEqual(sorted(calls), [('iin-no', 9, 2026, 3), ('iin-signed', 8, 2026, 3),
                                          ('iin-signed', 9, 2026, 3), ('iin-wait', 9, 2026, 3)])
-        self.assertEqual(sorted(summary['signed']), ['l1', 'l2', 'l6'])
+        # «На проверке у Яндекса» — подписал (владелец, 19.11.2026); processing — те из подписавших, чьи документы
+        # ещё у Яндекса: только для слов в журнале сервера.
+        self.assertEqual(sorted(summary['signed']), ['l1', 'l2', 'l3', 'l6'])
         self.assertEqual(summary['processing'], ['l3'])
         self.assertEqual((summary['checked'], summary['errors'], summary['stopped']), (5, 0, ''))
         # Записи для _write — те же, что у прогона: ok, лид, статус, документы, момент подписи.
@@ -871,10 +968,11 @@ class CheckNowTests(unittest.TestCase):
         self.assertEqual(set(by_lead), {'l1', 'l2', 'l3', 'l4', 'l6'})
         self.assertEqual(by_lead['l1'][2], signing.SIGNED)
         self.assertEqual(by_lead['l1'][4], datetime(2026, 10, 10, 5, 0, tzinfo=timezone.utc))
-        self.assertEqual((by_lead['l3'][2], by_lead['l3'][4]), (signing.PROCESSING, None))
+        self.assertEqual((by_lead['l3'][2], by_lead['l3'][4]),
+                         (signing.PROCESSING, datetime(2026, 10, 11, 6, 30, tzinfo=timezone.utc)))
         self.assertEqual(by_lead['l4'][2], signing.UNSIGNED)
-        # Успешка — сразу и только по новым подписавшим.
-        self.assertEqual([(now, sorted(ids)) for now, ids in resolved], [(self.NOW, ['l1', 'l2', 'l6'])])
+        # Успешка — сразу и только по новым подписавшим, «на проверке у Яндекса» — тоже.
+        self.assertEqual([(now, sorted(ids)) for now, ids in resolved], [(self.NOW, ['l1', 'l2', 'l3', 'l6'])])
         # Память круга знает и об этих ответах: очередь круга и карточка водителя видят точное время.
         self.assertEqual(checker._seen, {lead: self.NOW for lead in ('l1', 'l2', 'l3', 'l4', 'l6')})
 
@@ -1050,6 +1148,9 @@ class SchemaAndWiringTests(unittest.TestCase):
         waiting = signing.SIGN_STATUS_LABELS[signing.PROCESSING]
         self.assertEqual(dial_service.operator_sign_status(signing.PROCESSING, None)[2],
                          f"Подписал · {waiting[0].lower()}{waiting[1:]}")
+        # С 19.11.2026 у такой строки есть и момент подписи — телефону та же приписка, что ждём Яндекс.
+        self.assertEqual(dial_service.operator_sign_status(signing.PROCESSING, datetime.now(timezone.utc)),
+                         ('processing', True, f"Подписал · {waiting[0].lower()}{waiting[1:]}"))
 
     def test_analytics_has_no_phones_or_iin(self):
         src = inspect.getsource(dial_analytics)

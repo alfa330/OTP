@@ -10,7 +10,10 @@
     ошибка, подписал, проверяли впервые — либо времени проверки в строке уже полчаса;
   * «Проверить сейчас» в карточке и проверка перед выдачей пишут время всегда;
   * перепроверка перед отчётом не спрашивает тех, кого круг спросил только что, — это знает его память;
-  * «Аналитика» отдаёт круг для отсчёта, журнал — точное время проверки из памяти круга.
+  * «Аналитика» отдаёт круг для отсчёта, журнал — точное время проверки из памяти круга;
+  * «на проверке у Яндекса» — подписал (владелец, 19.11.2026): момент подписи водителя (время «ждущего Яндекса»
+    документа — по Алматы) и успешка сразу, везде — среди подписавших; круг ведёт таких до «Подписано», не
+    сдвигая ни подпись, ни успешку.
 
 Ни боевых учёток, ни сети: только 127.0.0.1, своя схема со случайным именем, в конце удаляется; Sapar подменён.
 Запуск на локальном кластере:
@@ -156,6 +159,35 @@ class _Env:
         return self.q("SELECT xmin::text, sign_status, sign_checked_at, sign_error, signed_at IS NOT NULL "
                       "FROM dial_list_leads WHERE id = %s", (self.ids[iin],))[0]
 
+    def signing(self, iin):
+        """(статус, момент подписи, когда увидели, кому успешка, решено ли)."""
+        return self.q("SELECT sign_status, signed_at, signed_detected_at, success_operator_id, "
+                      "success_resolved_at IS NOT NULL FROM dial_list_leads WHERE id = %s", (self.ids[iin],))[0]
+
+    def call(self, iin, operator, at, billsec):
+        """Разговор оператора с водителем: выдача, строка и законченная попытка с ответом Binotel."""
+        with self.db._get_cursor() as cur:
+            cur.execute("INSERT INTO dial_list_portions (operator_id, department_id, size, issued_at, closed_at) "
+                        "VALUES (%s, %s, 1, %s, %s) RETURNING id", (operator, RCC, at, at))
+            portion = cur.fetchone()[0]
+            cur.execute("INSERT INTO dial_list_assignments (portion_id, lead_id, operator_id, position, state, "
+                        "result, attempts, created_at, done_at) VALUES (%s, %s, %s, 1, 'done', 'answered', 1, %s, %s) "
+                        "RETURNING id", (portion, self.ids[iin], operator, at, at))
+            assignment = cur.fetchone()[0]
+            cur.execute("INSERT INTO dial_list_attempts (assignment_id, operator_id, requested_at, state, disposition, "
+                        "billsec, finished_at) VALUES (%s, %s, %s, 'finished', 'ANSWER', %s, %s)",
+                        (assignment, operator, at, billsec, at + timedelta(seconds=billsec + 20)))
+
+    def yandex_docs(self, minutes, signed_by_yandex=False):
+        """Пакет из двух документов, водитель подписал оба в момент at(minutes). Как отдаёт Sapar (сверка
+        18–19.11.2026): у «Подписано» время по UTC, у «НаПодписанииУЯндекса» — по Алматы, без пояса."""
+        moment = self.at(minutes)
+        utc = moment.astimezone(UTC).replace(tzinfo=None).isoformat()
+        local = moment.astimezone(signing.PERIOD_TZ).replace(tzinfo=None).isoformat()
+        waiting = ('Подписано', utc) if signed_by_yandex else ('НаПодписанииУЯндекса', local)
+        return [{'ServiceId': 1, 'Status': 'Подписано', 'DocSignDateByDriver': utc},
+                {'ServiceId': 2, 'Status': waiting[0], 'DocSignDateByDriver': waiting[1]}]
+
 
 @pytest.fixture
 def env():
@@ -189,15 +221,21 @@ def test_cycle_takes_the_whole_base_but_expired(env):
     env.lead('900101300006', sign_status='expired')                     # истёк, времени проверки нет — пора
     env.lead('900101300007', status='excluded', sign_status='unsigned', checked_min=300)   # не в списке — не в базе
     env.lead('900101300008', sign_status='unsigned', checked_min=300, signed=True)         # подписал — всё
-    env.roster([A, B, C, '900101300004', '900101300005', '900101300006', '900101300008'])
+    env.lead('900101300009', sign_status='signed', checked_min=300, signed=True)           # и Яндекс подписал — всё
+    env.lead('900101300010', sign_status='online', checked_min=300, signed=True)           # «вышел на линию» (Тез) — не Sapar
+    # Подписал, документы «на проверке у Яндекса» (19.11.2026): в круге до «Подписано» — обновить статус.
+    env.lead('900101300014', sign_status='processing', checked_min=20, signed=True)
+    env.roster([A, B, C, '900101300004', '900101300005', '900101300006', '900101300008', '900101300009',
+                '900101300010', '900101300014'])
     # Прошлый месяц (списка нет — база вся): ждём только подписи Яндекса; истёкшие там уже не изменятся.
     env.lead('900101300011', period=env.prev, sign_status='processing', checked_min=10)
     env.lead('900101300012', period=env.prev, sign_status='expired', checked_min=900)
     env.lead('900101300013', period=env.prev, sign_status='unsigned', checked_min=60)
 
     summary = env.checker().run(reason='тест', now=env.t0)
-    assert env.sapar.took() == [A, B, C, '900101300005', '900101300006', '900101300011', '900101300013']
-    assert (summary['checked'], summary['stopped'], summary['lanes']) == (7, '', sign_check.PASS_LANES)
+    assert env.sapar.took() == [A, B, C, '900101300005', '900101300006', '900101300011', '900101300013',
+                                '900101300014']
+    assert (summary['checked'], summary['stopped'], summary['lanes']) == (8, '', sign_check.PASS_LANES)
     # Запас в 15 минут: истёкший, проверенный 2 ч 50 мин назад, идёт в этот круг, а не ждёт следующего.
     env.q("UPDATE dial_list_leads SET sign_checked_at = %s WHERE id = %s", (env.at(-170), env.ids['900101300004']))
     env.checker().run(reason='тест', now=env.t0)
@@ -228,15 +266,16 @@ def test_cycle_rewrites_a_row_only_when_there_is_something_to_write(env):
     assert env.q("SELECT sign_docs->0->>'group' FROM dial_list_leads WHERE id = %s", (env.ids[B],))[0][0] == 'processing'
     assert (env.row(A), env.row(C)) == (first[A], first[C])
 
-    env.sapar.docs[B] = AT_YANDEX                               # сменился статус
-    checker.run(reason='тест', now=env.at(25))
-    assert env.row(B)[1:] == ('processing', env.at(25), '', False)
+    env.sapar.docs[B] = AT_YANDEX                               # сменился статус: «на проверке у Яндекса» — подписал
+    summary = checker.run(reason='тест', now=env.at(25))        # (19.11.2026), момент подписи пишется сразу
+    assert summary['signed'] == 1 and env.row(B)[1:] == ('processing', env.at(25), '', True)
     assert (env.row(A), env.row(C)) == (first[A], first[C])
 
-    checker.run(reason='тест', now=env.at(31))                  # времени проверки у A и C уже 31 минута — пишем его
+    summary = checker.run(reason='тест', now=env.at(31))        # времени проверки у A и C уже 31 минута — пишем его
     assert env.row(A)[1:] == ('unsigned', env.at(31), '', False) and env.row(A)[0] != first[A][0]
     assert env.row(C)[2] == env.at(31)
-    assert env.row(B)[2] == env.at(25)                          # у B — 6 минут, не трогаем
+    # B в круге до «Подписано», но ответ тот же и проверке 6 минут — строку не трогаем и подписавшим снова не считаем.
+    assert env.row(B)[2] == env.at(25) and summary['signed'] == 0
 
     env.sapar.errors[A] = 'ИИН не найден'                       # Sapar отказал по водителю — ошибка пишется сразу
     checker.run(reason='тест', now=env.at(35))
@@ -259,6 +298,91 @@ def test_cycle_rewrites_a_row_only_when_there_is_something_to_write(env):
     env.q("UPDATE dial_list_leads SET sign_status = 'no_docs' WHERE id = %s", (env.ids[A],))
     checker.run(reason='тест', now=env.at(58))
     assert env.row(A)[1:] == ('unsigned', env.at(58), '', False)
+
+
+def test_waiting_for_yandex_is_a_success_at_once_at_the_drivers_moment(env):
+    # Владелец, 19.11.2026: «засчитывать ждут Яндекса сразу в успешки, в отчётах и везде тоже».
+    env.q("INSERT INTO users (id, name) VALUES (7, 'Оператор Сава'), (8, 'Оператор Назар')")
+    for iin in (A, B):
+        env.lead(iin)
+    env.roster([A, B])
+    # A: Сава поговорил за час до подписи, водитель подписал за 30 минут до проверки, Назар звонил уже после подписи.
+    env.call(A, 7, env.at(-60), billsec=40)
+    env.call(A, 8, env.at(-10), billsec=40)
+    env.sapar.docs[A] = env.yandex_docs(-30)
+    env.sapar.docs[B] = env.yandex_docs(-20)                    # B подписал сам, без разговора
+    summary = env.checker().run(reason='тест', now=env.t0)
+    assert (summary['signed'], summary['successes']) == (2, 1)
+    # Момент подписи — водителя: время «ждущего Яндекса» документа по Алматы. Прочитанное по UTC, оно было бы на
+    # 5 часов позже (обрезалось бы до момента проверки), и успешка ушла бы Назару, звонившему уже после подписи.
+    assert env.signing(A) == ('processing', env.at(-30), env.t0, 7, True)
+    assert env.signing(B) == ('processing', env.at(-20), env.t0, None, True)
+    docs = env.q("SELECT sign_docs FROM dial_list_leads WHERE id = %s", (env.ids[A],))[0][0]
+    assert [_moment(d['signed_at']) for d in docs] == [env.at(-30), env.at(-30)]
+
+    # Везде — подписали: «Аналитика», журнал (этап и фильтры), карточка.
+    svc = dial_service.DialListService(env.db, client_factory=lambda dep: None, sign_checker=env.checker(),
+                                       calls_submit=lambda fn: fn())
+    with env.db._get_cursor() as cur:
+        totals = dial_analytics.department_analytics(cur, RCC, env.period, configured=True)['totals']
+    assert {k: totals[k] for k in ('signed', 'successes', 'self_signed', 'processing')} == \
+        {'signed': 2, 'successes': 1, 'self_signed': 1, 'processing': 0}
+    page = svc.leads_journal(RCC, period=env.period, limit=50)
+    assert {item['id']: item['stage'] for item in page['items']} == {env.ids[A]: 'signed', env.ids[B]: 'signed'}
+    assert {item['id'] for item in svc.leads_journal(RCC, period=env.period, sign='success')['items']} == {env.ids[A]}
+    assert {item['id'] for item in svc.leads_journal(RCC, period=env.period, sign='processing')['items']} == \
+        {env.ids[A], env.ids[B]}
+    card = svc.lead_card(env.ids[A])['sign']
+    assert (card['status'], card['success']['operator']['id']) == ('signed', 7)
+
+    # Круг ведёт их до «Подписано»: ответ тот же — строку не трогаем и подписавшими снова не считаем.
+    before = env.row(A)
+    summary = env.checker().run(reason='тест', now=env.at(10))
+    assert (summary['signed'], env.row(A)) == (0, before)
+    # Яндекс подписал — меняются статус и документы; момент подписи, «когда увидели» и успешка — нет.
+    env.sapar.docs[A] = env.yandex_docs(-30, signed_by_yandex=True)
+    summary = env.checker().run(reason='тест', now=env.at(20))
+    assert (summary['signed'], summary['successes']) == (0, 0)
+    assert env.signing(A) == ('signed', env.at(-30), env.t0, 7, True)
+    env.sapar.took()
+    env.checker().run(reason='тест', now=env.at(30))
+    assert env.sapar.took() == [B]                              # A подписан и Яндексом — из круга ушёл
+    # Откат у подписавшего (документы вернули водителю): статус пишется, подпись и решение по успешке остаются,
+    # и в круге он больше не нужен.
+    env.sapar.docs[B] = WAITING
+    env.checker().run(reason='тест', now=env.at(40))
+    assert env.signing(B) == ('unsigned', env.at(-20), env.t0, None, True)
+    env.sapar.took()
+    env.checker().run(reason='тест', now=env.at(50))
+    assert env.sapar.took() == []
+
+
+def test_older_answer_never_overwrites_a_newer_signature(env):
+    # Круг держит ответы Sapar до записи пачкой — секунды. За это время водитель подписал, а «Проверить на
+    # подписание» с телефона (check_now) уже записала подпись «на проверке у Яндекса». Запоздавший старый ответ
+    # «не подписал» не должен её перекрыть: иначе статус стал бы «не подписал», и круг больше не спрашивал бы
+    # водителя — документы до подписи остались бы в карточке навсегда.
+    env.lead(A)
+    env.roster([A])
+    checker = env.checker()
+    env.sapar.docs[A] = env.yandex_docs(3)
+    summary = checker.check_now([(env.ids[A], A, env.period)], timeout=3, workers=1, budget_sec=5, max_systemic=1,
+                                now=env.at(5))
+    assert summary['signed'] == [env.ids[A]] and summary['processing'] == [env.ids[A]]
+    signed = env.row(A)
+    assert signed[1:] == ('processing', env.at(5), '', True)
+    # Ответ круга от at(1) — до подписи — пришёл в базу позже.
+    checker._write([('ok', env.ids[A], signing.UNSIGNED, '[]', None, env.at(1))], env.at(1), sparse=True)
+    checker._write([('error', env.ids[A], 'ИИН не найден', False, env.at(2))], env.at(2), sparse=True)
+    assert env.row(A) == signed
+    # Водитель по-прежнему в круге — до «Подписано».
+    env.sapar.took()
+    checker.run(reason='тест', now=env.at(10))
+    assert env.sapar.took() == [A]
+    # Ответ не старше записанного — пишется как обычно.
+    env.sapar.docs[A] = env.yandex_docs(3, signed_by_yandex=True)
+    checker.run(reason='тест', now=env.at(20))
+    assert env.signing(A) == ('signed', env.at(3), env.at(5), None, True)
 
 
 def test_first_check_is_recorded_even_when_the_answer_equals_the_row(env):

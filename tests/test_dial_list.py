@@ -2906,11 +2906,12 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         lead = self._lead
         first = [lead('l1', 5), lead('l2'), lead('l3', 20), lead('l4', 2, 'Code 500'), lead('l5', iin=''),
                  lead('l6')]
-        # l3 подписал, l2 «на проверке у Яндекса» — из пула ушли, в голову встал l7.
+        # l3 подписал, l2 «на проверке у Яндекса» — тоже подписал (19.11.2026: check_now кладёт его в signed, а в
+        # processing — для слов в журнале), из пула ушли, в голову встал l7.
         second = [lead('l1', 5), lead('l4', 2, 'Code 500'), lead('l5', iin=''), lead('l7'), lead('l6'),
                   lead('l8', 1)]
         totals, cur, checker = self._precheck(
-            [first, second], answers=[{"checked": 4, "signed": ['l3'], "processing": ['l2']}, {"checked": 1}])
+            [first, second], answers=[{"checked": 4, "signed": ['l3', 'l2'], "processing": ['l2']}, {"checked": 1}])
         # l1 свежий и l5 без ИИН — не спрашиваем; l4 с ошибкой — спрашиваем; l6 — запас на замену.
         # Второй круг: l4 и l6 в этот раз уже спрашивали, l8 проверен минуту назад.
         self.assertEqual([[x[0] for x in c['leads']] for c in checker.calls], [['l2', 'l3', 'l4', 'l6'], ['l7']])
@@ -2924,7 +2925,7 @@ class SignedDriversNeverIssuedTests(unittest.TestCase):
         # свои — первыми, чужие — никогда; 18.11.2026).
         self.assertEqual([p for _, p in selects], [(self.DEP, self.PERIOD, 24, 3, 7, 7, 9)] * 2)
         self.assertEqual({k: totals[k] for k in ('rounds', 'checked', 'signed', 'processing', 'stopped')},
-                         {'rounds': 2, 'checked': 5, 'signed': 1, 'processing': 1, 'stopped': ''})
+                         {'rounds': 2, 'checked': 5, 'signed': 2, 'processing': 1, 'stopped': ''})
 
     def test_fresh_head_needs_no_sapar(self):
         # l5 стоит в запасе: в порцию не попадёт, его не спрашиваем.
@@ -3690,6 +3691,16 @@ class OperatorSignCheckTests(unittest.TestCase):
         self.assertEqual(self._check(svc)['sign']['fresh'], True)
         self.assertEqual(len(checker.calls), 1)
 
+    def test_signed_at_yandex_needs_no_sapar_and_keeps_the_yandex_note(self):
+        # 19.11.2026: у «на проверке у Яндекса» есть момент подписи — подпись окончательна, Sapar не спрашиваем;
+        # телефону — «Подписал · на проверке у Яндекса», строка снята, как у подписавшего.
+        svc, cur, db, checker = self._svc([self._lead('processing', checked_ago=timedelta(hours=1), signed=True)])
+        res = self._check(svc)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual((res['sign']['status'], res['sign']['signed'], res['sign']['label'], res['sign']['fresh']),
+                         ('processing', True, 'Подписал · на проверке у Яндекса', True))
+        self.assertEqual((res['row_closed'], res['text']), (True, dial_service.SIGNED_ROW_CLOSED))
+
     def test_signed_driver_needs_no_sapar_and_leaves_my_list(self):
         svc, cur, db, checker = self._svc([self._lead('signed', checked_ago=timedelta(hours=1), signed=True)])
         res = self._check(svc)
@@ -3729,8 +3740,10 @@ class OperatorSignCheckTests(unittest.TestCase):
     # ── Sapar сейчас ─────────────────────────────────────────────────────────
     def test_stale_check_asks_sapar_outside_transactions_and_closes_my_row(self):
         stale = self._lead('unsigned', checked_ago=timedelta(hours=2))
-        after = self._lead('processing', checked_ago=timedelta(0))
-        svc, cur, db, checker = self._svc([stale, after], answers=[{"checked": 1, "processing": [self.LEAD]}])
+        # С 19.11.2026 «на проверке у Яндекса» — подписал: проверка ставит момент подписи, check_now кладёт его в signed.
+        after = self._lead('processing', checked_ago=timedelta(0), signed=True)
+        svc, cur, db, checker = self._svc([stale, after], answers=[{"checked": 1, "signed": [self.LEAD],
+                                                                    "processing": [self.LEAD]}])
         with self.assertLogs('dial_list.service', level='INFO') as logs:
             res = self._check(svc)
         (call,) = checker.calls
@@ -3887,6 +3900,8 @@ class OperatorSignCheckTests(unittest.TestCase):
         self.assertEqual(status('unsigned', self.NOW), ('signed', True, 'Подписал'))     # решает signed_at
         self.assertEqual(status('signed', None), ('signed', True, 'Подписал'))
         self.assertEqual(status('processing', None), ('processing', True, 'Подписал · на проверке у Яндекса'))
+        # 19.11.2026: «на проверке у Яндекса» получает момент подписи сразу — приписка про Яндекс остаётся.
+        self.assertEqual(status('processing', self.NOW), ('processing', True, 'Подписал · на проверке у Яндекса'))
         self.assertEqual(status('unsigned', None), ('not_signed', False, 'Не подписал'))
         self.assertEqual(status('not_formed', None), ('not_signed', False, 'Не подписал · документы не сформированы'))
         self.assertEqual(status('expired', None), ('not_signed', False, 'Не подписал · срок подписания истёк'))

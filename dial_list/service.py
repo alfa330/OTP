@@ -93,9 +93,11 @@ last_comment_outcome — последний непустой комментар�
 любой его строки и за любое время (_LAST_COMMENT_JOIN_SQL): в строках пачки, на вкладках
 итогов, у идущего звонка в состоянии и в ответе «Позвонить».
 
-Подписавшим не звоним (владелец, 11.10.2026): из пула уходят и подписавшие
-(signed_at), и «на проверке у Яндекса» (sign_status 'processing' — водитель уже
-подписал, ждём Яндекс). Перед «Ещё» и перед звонком сервер сам спрашивает Sapar о
+Подписавшим не звоним (владелец, 11.10.2026): из пула уходят подписавшие (signed_at).
+С 19.11.2026 подписавший — и тот, чьи документы «на проверке у Яндекса»: проверка
+сразу ставит ему момент подписи и успешку (sign_check.py). Отдельные условия на
+sign_status 'processing' в запросах остались для строк, которые проверка ещё не
+обновила. Перед «Ещё» и перед звонком сервер сам спрашивает Sapar о
 тех, чья проверка устарела (SIGN_PRECHECK_*, SIGN_CALL_*), — тоже вне транзакций.
 Sapar лежит или не настроен — выдаём и звоним, как раньше. Оператор может спросить
 и сам — «Проверить на подписание» (operator_sign_check, владелец 12.10.2026), в том
@@ -363,7 +365,7 @@ SIGN_OPERATOR_NOT_CONFIGURED = "Проверка подписания не на�
 SIGN_OPERATOR_SAPAR_DOWN = "Сапар не ответил — показан последний известный статус"
 SIGN_OPERATOR_THROTTLED = "Только что проверяли — показан последний известный статус"
 # Подписание на телефоне — четыре состояния. «На проверке у Яндекса» — уже подписал (владелец,
-# 11.10.2026): Яндекс лишь подтверждает. Причина «не подписал» — словами SIGN_STATUS_LABELS
+# 11.10.2026): Яндекс лишь подтверждает; с 19.11.2026 это и успешка сразу. Причина «не подписал» — словами SIGN_STATUS_LABELS
 # (signing.py), у простого «не подписал» её нет (operator_sign_status).
 OPERATOR_SIGN_LABELS = {
     "signed": "Подписал",
@@ -1445,12 +1447,13 @@ def operator_sign_status(sign_status, signed_at):
     """Подписание для телефона из строки лида → (status, signed, label): status —
     'signed' | 'processing' | 'not_signed' | 'unknown', signed — True / False / None (не
     знаем). Причина «не подписал» — словами SIGN_STATUS_LABELS; не проверяли или статус
-    незнакомый — «Не удалось проверить»."""
+    незнакомый — «Не удалось проверить». «На проверке у Яндекса» — подписал (с 19.11.2026
+    у такой строки есть и signed_at): подпись та же, телефону — приписка, что ждём Яндекс."""
     code = str(sign_status or "").strip()
-    if signed_at is not None or code == signing.SIGNED:
-        return "signed", True, OPERATOR_SIGN_LABELS["signed"]
     if code == signing.PROCESSING:
         return "processing", True, OPERATOR_SIGN_LABELS["processing"]
+    if signed_at is not None or code == signing.SIGNED:
+        return "signed", True, OPERATOR_SIGN_LABELS["signed"]
     if code == signing.UNSIGNED:
         return "not_signed", False, OPERATOR_SIGN_LABELS["not_signed"]
     if code in OPERATOR_SIGN_DETAILED:
@@ -1733,19 +1736,22 @@ LEAD_STAGES = {
     "answered": "Дозвонились",
     "exhausted": "Не дозвонились",
     "excluded": "Исключён",
-    # Подписал документы (Sapar) — обзвон для него окончен, в пул не вернётся.
+    # Подписал документы (Sapar) — обзвон для него окончен, в пул не вернётся. С 19.11.2026 —
+    # и документы «на проверке у Яндекса»: водитель всё подписал, успешка засчитана сразу.
     "signed": "Подписал документы",
-    # Документы «на проверке у Яндекса»: водитель уже подписал (владелец, 11.10.2026),
-    # в пул не попадает; Яндекс подтвердит — станет «Подписал документы».
+    # «На проверке у Яндекса» без момента подписи — строка, которую проверка ещё не обновила
+    # по правилу 19.11.2026; на ближайшем круге она станет «Подписал документы».
     "sign_wait": "На проверке у Яндекса",
 }
 # Фильтр журнала «Документы» — по состоянию подписания (signing.py). «Не подписал»
 # собирает всё, где подписи нет и она ещё возможна или уже не будет по вине
 # документов (не сформированы / отклонены); истёкший срок — отдельно: звонить поздно.
+# «processing» — подписавшие, чьи документы ещё у Яндекса (успешка у них уже засчитана,
+# 19.11.2026), вместе со строками, которые проверка ещё не обновила.
 JOURNAL_SIGN_FILTERS = {
     "success": "signed_at IS NOT NULL AND success_attempt_id IS NOT NULL",
     "self": "signed_at IS NOT NULL AND success_resolved_at IS NOT NULL AND success_attempt_id IS NULL",
-    "processing": "signed_at IS NULL AND iin <> '' AND sign_status = 'processing'",
+    "processing": "iin <> '' AND sign_status = 'processing'",
     "unsigned": "signed_at IS NULL AND iin <> '' AND sign_status IN ('unsigned', 'not_formed', 'rejected')",
     "expired": "signed_at IS NULL AND iin <> '' AND sign_status = 'expired'",
     "no_docs": "signed_at IS NULL AND iin <> '' AND sign_status = 'no_docs'",
@@ -5056,8 +5062,10 @@ class DialListService:
     # совпадала с тем, что реально выдаётся. Подписавший документы (signed_at) в
     # пул не возвращается никогда: обрабатывать его незачем (владелец, 29.09.2026).
     # «На проверке у Яндекса» (sign_status 'processing') — тоже: водитель уже
-    # подписал, ждём только Яндекс (владелец, 11.10.2026). Те же условия — у этапа
-    # журнала (CASE в _JOURNAL_BASE_SQL) и у leads_open отдела.
+    # подписал, ждём только Яндекс (владелец, 11.10.2026); с 19.11.2026 проверка
+    # ставит таким и signed_at, а условие на статус держит строки, которые она ещё
+    # не обновила. Те же условия — у этапа журнала (CASE в _JOURNAL_BASE_SQL) и у
+    # leads_open отдела.
     # next_call_at (автообзвон Тез, 15.10.2026) — срок лида: повтор недозвона по расписанию,
     # перезвон и дожим «своего» оператора; раньше срока общий пул лида не выдаёт. У удалённого
     # КЦ он всегда NULL — условие прежнее.
@@ -6251,15 +6259,16 @@ class DialListService:
                                        max_systemic=SIGN_PRECHECK_MAX_SYSTEMIC - totals["systemic"])
             for key in ("checked", "errors", "systemic"):
                 totals[key] += result[key]
+            # processing — те из signed, чьи документы ещё у Яндекса (check_now): подписали и они.
             totals["signed"] += len(result["signed"])
             totals["processing"] += len(result["processing"])
             totals["stopped"] = result["stopped"]
-            if not result["signed"] and not result["processing"]:
+            if not result["signed"]:
                 # Из пула никто не выпал — голова та же, и спрашивать в ней больше некого.
                 break
         totals["elapsed_sec"] = round(time.monotonic() - started, 1)
-        log.info("dial_list: подписание перед выдачей оператору %s: проверено %d, подписали %d, на проверке "
-                 "у Яндекса %d, ошибок %d, %.1f с%s", ctx["user_id"], totals["checked"], totals["signed"],
+        log.info("dial_list: подписание перед выдачей оператору %s: проверено %d, подписали %d (из них на "
+                 "проверке у Яндекса %d), ошибок %d, %.1f с%s", ctx["user_id"], totals["checked"], totals["signed"],
                  totals["processing"], totals["errors"], totals["elapsed_sec"],
                  f"; {SIGN_NOW_STOPPED.get(totals['stopped'], totals['stopped'])} — выдаём как есть"
                  if totals["stopped"] else "")
@@ -6480,8 +6489,8 @@ class DialListService:
             return None
         summary = checker.check_now([(row[0], row[1], row[2])], now=now, timeout=SIGN_CALL_TIMEOUT_SEC,
                                     workers=1, budget_sec=SIGN_CALL_TIMEOUT_SEC, max_systemic=1)
-        if summary["signed"] or summary["processing"] or summary["errors"] or summary["stopped"]:
-            verdict = ("подписал" if summary["signed"] else "на проверке у Яндекса" if summary["processing"]
+        if summary["signed"] or summary["errors"] or summary["stopped"]:
+            verdict = ("подписал, на проверке у Яндекса" if summary["processing"] else "подписал" if summary["signed"]
                        else SIGN_NOW_STOPPED.get(summary["stopped"]) or "Sapar отказал")
             log.info("dial_list: подписание перед звонком, строка %s: %s (%.1f с)", assignment_id, verdict,
                      summary["elapsed_sec"])
@@ -7913,9 +7922,11 @@ class DialListService:
         """«Проверить на подписание» с телефона — в любой момент, и посреди разговора: ни
         идущий звонок, ни неуказанный итог не мешают.
 
-        Порядок: подписал (signed_at) — Sapar не спрашиваем, подпись окончательна; нет ИИН —
+        Порядок: подписал (signed_at; с 19.11.2026 и «на проверке у Яндекса» — проверка ставит
+        момент подписи сразу) — Sapar не спрашиваем, подпись окончательна; нет ИИН —
         «не удалось проверить»; Sapar не настроен — последнее известное из базы; «на проверке
-        у Яндекса» (уже подписал) по проверке моложе SIGN_OPERATOR_FRESH_SEC — ответ из базы.
+        у Яндекса» без момента подписи (строка, которую проверка ещё не обновила) по проверке
+        моложе SIGN_OPERATOR_FRESH_SEC — ответ из базы.
         Всё остальное — «не подписал» и «не удалось проверить» — из базы свежим не выдаём
         (13.10.2026: водитель мог подписать минуту назад): Sapar сейчас (SignChecker.check_now:
         итог в базу, успешка — новому подписавшему), вне транзакций, в пределах _sign_ask_slot
