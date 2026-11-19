@@ -240,7 +240,8 @@ def test_take_is_exclusive_and_visibility(world):
     assert not service.visible(ctx_of(world, REC2), taken)
     assert service.visible(ctx_of(world, LEAD_GRANT), taken)
     assert service.visible(ctx_of(world, OP_HEAD), taken)          # отдел вакансии — его
-    assert not service.visible(ctx_of(world, TRAINER), taken)      # группы ещё нет
+    # Тренер читает всю воронку (владелец 19.11.2026), но вести чужую карточку — без группы — не может.
+    assert service.visible(ctx_of(world, TRAINER), taken) and not service.involved(ctx_of(world, TRAINER), taken)
     with pytest.raises(HiringError) as caught:
         service.touch(ctx_of(world, REC2), card['id'], {'kind': 'comment', 'body': 'чужое'})
     assert caught.value.code == 'HIRING_NOT_FOUND'
@@ -703,32 +704,83 @@ def test_trainer_keeps_finished_group_while_training_goes_on(world):
     service.move(ctx_of(world, REC2), waiting['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_show['id']})
     trainer = ctx_of(world, TRAINER)
     assert trainer['trainer_group_ids'] == [] and access.can_open_section(trainer)
-    assert not service.visible(trainer, learning)
+    # Карточку он по-прежнему читает (вся воронка — тренеру, 19.11.2026), но уже не ведёт.
+    assert service.visible(trainer, learning) and not service.involved(trainer, learning)
 
 
-def test_trainer_does_not_see_group_cards_back_with_recruiters(world):
-    """Отказ из «Приглашен на обучение», потом повторная активация: карточка в «В работе» помнит группу, но тренер её
-    не видит — это снова работа рекрутера; в пуле (автовозврат группу не снимает) — тем более, там телефон."""
+def test_group_cards_back_with_recruiters_are_not_trainers_to_run(world):
+    """Отказ из «Приглашен на обучение», потом повторная активация: карточка в «В работе» помнит группу, но вести её
+    тренер группы уже не может — это снова работа рекрутера. Тренер по роли её читает (вся воронка ему открыта для
+    чтения), назначенный тренер без роли — не видит вовсе, и в пуле (автовозврат группу не снимает, там телефон) тоже."""
     from hiring import access
-    service, group_id = world['service'], world['group_id']
+    service = world['service']
+    items = service.create_group(ctx_of(world, LEAD_GRANT), {'name': 'Группа Н', 'start_date': '2026-10-24', 'capacity': 5,
+                                                             'trainer_id': STRANGER})
+    group_id = next(g['id'] for g in items if g['name'] == 'Группа Н')
     card = _invite(world, REC1, '8 705 730 00 01', group_id)
-    assert service.visible(ctx_of(world, TRAINER), card)
+    appointed = ctx_of(world, STRANGER)
+    assert service.visible(appointed, card) and service.involved(appointed, card)
     with world['db']._get_cursor() as cur:
         reason = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_SHOW_TRAINING)
     service.move(ctx_of(world, REC1), card['id'], 'refused', {'initiator': 'candidate', 'reason_id': reason['id']})
     card = service.move(ctx_of(world, LEAD_GRANT), card['id'], 'in_work', {'recruiter_id': REC1})
     assert card['stage'] == 'in_work' and card['group_id'] == group_id
-    trainer = ctx_of(world, TRAINER)
-    assert not service.visible(trainer, card)
+    appointed = ctx_of(world, STRANGER)
+    assert not service.visible(appointed, card)
     with pytest.raises(HiringError) as caught:
-        service.touch(trainer, card['id'], {'kind': 'comment', 'body': 'проверка'})
+        service.touch(appointed, card['id'], {'kind': 'comment', 'body': 'проверка'})
     assert caught.value.code == 'HIRING_NOT_FOUND'
+    trainer = ctx_of(world, TRAINER)
+    assert service.visible(trainer, card) and not service.involved(trainer, card)
     with world['db']._get_cursor() as cur:
-        assert queries.board(cur, access.capabilities(trainer), TRAINER, {})[1] == {}
+        assert queries.board(cur, access.capabilities(appointed), STRANGER, {})[1] == {}
         cur.execute("UPDATE hiring_cards SET stage = 'responses', recruiter_id = NULL WHERE id = %s", (card['id'],))
-        assert queries.board(cur, access.capabilities(trainer), TRAINER, {})[1] == {}
-        assert queries.list_cards(cur, access.capabilities(trainer), TRAINER, {})[0] == 0
-    assert not service.visible(trainer, dict(card, stage='responses', recruiter_id=None))
+        assert queries.board(cur, access.capabilities(appointed), STRANGER, {})[1] == {}
+        assert queries.list_cards(cur, access.capabilities(appointed), STRANGER, {})[0] == 0
+    assert not service.visible(appointed, dict(card, stage='responses', recruiter_id=None))
+
+
+def test_trainer_reads_whole_funnel_but_acts_only_in_own_groups(world):
+    """Владелец 19.11.2026: «открыть всех рекрутов для чтения для тренера». Тренер видит все карточки — пул, работу
+    рекрутеров, чужие группы, завершённые, с телефоном и перепиской, — но ничего в них не меняет. В своей группе
+    действует, как раньше."""
+    from hiring import access
+    service = world['service']
+    _outcome, pooled = add_response(world, REC1, '8 705 740 00 01', full_name='В пуле')
+    working = take_and_touch(world, REC2, '8 705 740 00 02')
+    foreign = service.create_group(ctx_of(world, LEAD_GRANT), {'name': 'Чужая', 'start_date': '2026-10-26', 'capacity': 5,
+                                                               'trainer_id': STRANGER})
+    foreign_id = next(g['id'] for g in foreign if g['name'] == 'Чужая')
+    other = _invite(world, REC1, '8 705 740 00 03', foreign_id)
+    own = _invite(world, REC2, '8 705 740 00 04', world['group_id'])
+    trainer = ctx_of(world, TRAINER)
+    caps = access.capabilities(trainer)
+    assert caps['read_all'] and not caps['lead']
+    with world['db']._get_cursor() as cur:
+        assert queries.board(cur, caps, TRAINER, {})[1] == {'responses': 1, 'in_work': 1, 'invited_training': 2}
+        total, rows = queries.list_cards(cur, caps, TRAINER, {'query': '7057400001'})
+        assert total == 1 and rows[0]['phone'] == '+77057400001'   # в пуле — с телефоном
+    for card in (pooled, working, other):
+        assert service.visible(trainer, card) and not service.involved(trainer, card)
+    assert service.involved(trainer, own)
+    # Читать — да, действовать — нет: ни комментария, ни перехода, ни взятия, ни правки, ни пересчёта смен.
+    for action in (lambda: service.touch(trainer, working['id'], {'kind': 'comment', 'body': 'x'}),
+                   lambda: service.touch(trainer, pooled['id'], {'kind': 'comment', 'body': 'x'}),
+                   lambda: service.move(trainer, other['id'], 'on_training', {}),
+                   lambda: service.move(trainer, working['id'], 'refused', {'initiator': 'ours', 'reason_id': 1}),
+                   lambda: service.take(trainer, pooled['id']),
+                   lambda: service.edit_card(trainer, working['id'], {'city': 'Астана'}),
+                   lambda: service.set_substage(trainer, working['id'], 'dial'),
+                   lambda: service.sync_card_shifts(trainer, other['id'])):
+        with pytest.raises(HiringError) as caught:
+            action()
+        assert caught.value.code == 'HIRING_FORBIDDEN', caught.value.code
+    # В своей группе — как раньше: комментарий и выход на обучение.
+    service.touch(trainer, own['id'], {'kind': 'comment', 'body': 'пришёл на инструктаж'})
+    assert service.move(trainer, own['id'], 'on_training', {})['stage'] == 'on_training'
+    with world['db']._get_cursor() as cur:
+        assert queries.get_card(cur, working['id'])['city'] != 'Астана'
+        assert queries.get_card(cur, other['id'])['stage'] == 'invited_training'
 
 
 def test_appointed_trainer_runs_own_group_but_creates_none(world):

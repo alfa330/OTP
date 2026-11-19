@@ -385,7 +385,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                 <CustomSelect variant="ios" value={filters.vacancy_id} onChange={(v) => setFilters((f) => ({ ...f, vacancy_id: v }))} options={options.vacancies} className="w-44" ariaLabel="Вакансия" />
                 <CustomSelect variant="ios" value={filters.city} onChange={(v) => setFilters((f) => ({ ...f, city: v }))} options={options.cities} className="w-40" ariaLabel="Город" searchable />
                 <CustomSelect variant="ios" value={filters.source_id} onChange={(v) => setFilters((f) => ({ ...f, source_id: v }))} options={options.sources} className="w-44" ariaLabel="Источник" />
-                {caps.lead && (
+                {(caps.lead || caps.read_all) && (
                     <CustomSelect variant="ios" value={filters.recruiter_id} onChange={(v) => setFilters((f) => ({ ...f, recruiter_id: v }))} options={options.recruiters} className="w-44" ariaLabel="Рекрутер" searchable />
                 )}
             </FiltersRow>

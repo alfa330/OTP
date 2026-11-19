@@ -691,6 +691,8 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
     const card = data?.card;
     const actor = data?.actor || [];
     const isOwnerOrLead = actor.includes('owner') || actor.includes('lead');
+    // Тренер читает всю воронку (владелец 19.11.2026): в чужой карточке — только просмотр, без комментария и пересчёта смен.
+    const readOnly = Boolean(data?.read_only);
     const canMoveTo = (target) => {
         if (!card) return false;
         if (!(card.targets || []).includes(target)) return false;
@@ -965,11 +967,13 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                     <CallPanel touch={activeTouch} call={activeCall} api={api} toast={toast} card={card} onDone={changed}
                                                onClose={() => setActiveCallId(null)} />
                                 )}
-                                <div className="flex gap-2 py-2">
-                                    <input className={FIELD} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий в ленту"
-                                           onKeyDown={(e) => { if (e.key === 'Enter') addComment(); }} />
-                                    <button type="button" className={iosBtnSecondary} onClick={addComment} disabled={savingComment || !comment.trim()}>Записать</button>
-                                </div>
+                                {!readOnly && (
+                                    <div className="flex gap-2 py-2">
+                                        <input className={FIELD} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Комментарий в ленту"
+                                               onKeyDown={(e) => { if (e.key === 'Enter') addComment(); }} />
+                                        <button type="button" className={iosBtnSecondary} onClick={addComment} disabled={savingComment || !comment.trim()}>Записать</button>
+                                    </div>
+                                )}
                                 <Timeline touches={data.touches || []} calls={data.calls || []} api={api}
                                           canEdit={isOwnerOrLead && !card.is_closed} onSetResult={setResult} />
                             </Section>
@@ -997,9 +1001,11 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                             {shiftsDone === 0 && <span className="text-[12.5px] text-slate-500">Смен пока нет</span>}
                                         </div>
                                         <div className="flex flex-wrap items-center gap-2 py-1.5">
-                                            <button type="button" className={TOOLBAR_BTN} onClick={syncShifts} disabled={syncingShifts}>
-                                                <RefreshCw size={14} className={syncingShifts ? 'animate-spin' : ''} /> Обновить из статусов
-                                            </button>
+                                            {!readOnly && (
+                                                <button type="button" className={TOOLBAR_BTN} onClick={syncShifts} disabled={syncingShifts}>
+                                                    <RefreshCw size={14} className={syncingShifts ? 'animate-spin' : ''} /> Обновить из статусов
+                                                </button>
+                                            )}
                                             {shiftsDone >= boot.meta.shifts_to_hire && canMoveTo('hired') && (
                                                 <button type="button" className={iosBtnPrimary} onClick={() => setMove('hired')}>Подтвердить «Отработал 7 дней»</button>
                                             )}

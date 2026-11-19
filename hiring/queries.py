@@ -1021,7 +1021,8 @@ def scope_clause(caps, user_id):
     """Что человек видит (ТЗ 2): руководитель — всё; рекрутер — пул и свои карточки; тренер —
     карточки своих групп; руководитель отдела — кандидатов своего отдела. Союзы — через OR."""
     parts, params = [], []
-    if caps.get('lead'):
+    # Тренер по роли читает всю воронку (владелец 19.11.2026) — действовать в чужих карточках ему не даёт сервис.
+    if caps.get('lead') or caps.get('read_all'):
         return "TRUE", []
     if caps.get('recruiter'):
         parts.append("(c.stage IN ('contacts', 'responses') AND NOT c.is_closed)")

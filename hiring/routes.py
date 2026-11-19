@@ -355,6 +355,8 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
                                             'close_reason_text': previous.get('close_reason_text')}
         caps = access.capabilities(ctx)
         payload['actor'] = sorted(rules.actor_kinds(caps, card, ctx['user_id'], ctx.get('trainer_group_ids') or ()))
+        # Тренер читает всю воронку (владелец 19.11.2026): в чужой карточке — ни комментария, ни пересчёта смен.
+        payload['read_only'] = not service.involved(ctx, card)
         return jsonify(payload)
 
     @hiring_route('/cards/<int:card_id>', methods=('PATCH',))

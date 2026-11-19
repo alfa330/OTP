@@ -135,6 +135,14 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('useEffect(() => { load(); }, [load, version]);', self.groups)
         self.assertIn("if (codeOf(error) === 'HIRING_CAPACITY_BELOW_TAKEN') onStale(group?.id);", self.groups)
 
+    def test_card_is_read_only_for_reader(self):
+        # Тренер в чужой карточке только читает: поля комментария и «Обновить из статусов» нет (сервер их и не примет).
+        self.assertIn('const readOnly = Boolean(data?.read_only);', self.sheet)
+        self.assertEqual(self.sheet.count('{!readOnly && ('), 2)
+        self.assertIn('placeholder="Комментарий в ленту"', self.sheet[self.sheet.index('{!readOnly && ('):])
+        # Рекрутер в отборе доски — и тренеру: он читает всю воронку.
+        self.assertIn('{(caps.lead || caps.read_all) && (', self.board)
+
     def test_recruiter_sees_free_seats_when_inviting(self):
         self.assertIn("api.get('/groups', { pick: 1 })", self.sheet)
         self.assertIn("if (!open || target !== 'invited_training') return;", self.sheet)
@@ -314,6 +322,18 @@ class AccessTests(unittest.TestCase):
         self.assertTrue(access.can_edit_group(ctx(grant='staff'), {'trainer_id': 7}))
         self.assertFalse(access.can_manage_groups(ctx(role='admin', headed_ids=[9], vacancy_department_ids=[9])))
         self.assertTrue(access.capabilities(ctx(grant='lead'))['groups'])
+
+    def test_trainer_reads_the_whole_funnel(self):
+        # Владелец 19.11.2026: тренеру — все кандидаты для чтения. Только роли «тренер»: назначенный тренер группы
+        # без роли, рекрутер и глава отдела читают, как раньше, свой круг.
+        self.assertTrue(access.can_read_all(ctx(role='trainer')))
+        self.assertTrue(access.capabilities(ctx(role=' Trainer '))['read_all'])
+        for other in (ctx(role='operator', trainer_group_ids=[4]), ctx(grant='staff'), ctx(grant='lead'),
+                      ctx(role='admin', headed_ids=[9], vacancy_department_ids=[9])):
+            self.assertFalse(access.capabilities(other)['read_all'], other)
+        # Читать — не действовать: брать в работу, добавлять отклики и вести справочники тренер не может.
+        caps = access.capabilities(ctx(role='trainer'))
+        self.assertFalse(caps['take'] or caps['pool'] or caps['add_response'] or caps['manage'] or caps['recruiter'])
 
     def test_who_creates_groups(self):
         # Новые группы — руководитель и роль «тренер». Тренер группы без роли (его назначил руководитель) свою

@@ -37,6 +37,9 @@ def _forbidden(message='Это действие вам не доступно'):
     return HiringError('HIRING_FORBIDDEN', message, 403)
 
 
+READ_ONLY_MESSAGE = 'Карточка открыта вам только для чтения'
+
+
 def _parse_moment(value, field='дата'):
     """ISO-строка ('2026-10-30T14:00' / '2026-10-30 14:00' / '2026-10-30') → наивное время Алматы."""
     if value is None or value == '':
@@ -114,7 +117,14 @@ class HiringService:
 
     @staticmethod
     def visible(ctx, card):
-        """Видит ли человек карточку — то же правило, что queries.scope_clause."""
+        """Видит ли человек карточку — то же правило, что queries.scope_clause. Тренер по роли видит все карточки,
+        но только читает (владелец 19.11.2026): кто вправе что-то в карточке делать — HiringService.involved."""
+        return access.can_read_all(ctx) or HiringService.involved(ctx, card)
+
+    @staticmethod
+    def involved(ctx, card):
+        """Карточка «своя» — человек в ней действует, а не только читает: руководитель, рекрутер в пуле и в своих,
+        тренер в своих группах с приглашения на обучение, глава отдела найма."""
         caps = access.capabilities(ctx)
         if caps['lead']:
             return True
@@ -474,6 +484,8 @@ class HiringService:
         now = self._now()
         with self._cursor() as cursor:
             card = self._load_visible(cursor, ctx, card_id, lock=True)
+            if not self.involved(ctx, card):
+                raise _forbidden(READ_ONLY_MESSAGE)
             if card['is_closed'] and kind != rules.TOUCH_COMMENT:
                 raise HiringError('HIRING_CLOSED', 'Карточка завершена — только комментарий', 409)
             if card['stage'] in rules.POOL_STAGES and not access.is_lead(ctx):
@@ -983,6 +995,8 @@ class HiringService:
         now = self._now()
         with self._cursor() as cursor:
             card = self._load_visible(cursor, ctx, card_id, lock=True)
+            if not self.involved(ctx, card):
+                raise _forbidden(READ_ONLY_MESSAGE)
             if card['stage'] != rules.ON_LINE:
                 raise HiringError('HIRING_NOT_ON_LINE', 'Смены считаются после выхода на линию', 409)
             self._sync_card_shifts(cursor, card, now)

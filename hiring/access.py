@@ -108,6 +108,12 @@ def can_manage_groups(ctx):
     return is_lead(ctx) or is_trainer(ctx)
 
 
+def can_read_all(ctx):
+    """Тренер (роль «тренер») читает всю воронку — все карточки на всех этапах, с телефонами и лентой, — но
+    действует только в своих группах (владелец 19.11.2026: «открыть всех рекрутов для чтения для тренера»)."""
+    return str(ctx.get('role') or '').strip().lower() == TRAINER_ROLE
+
+
 def can_create_groups(ctx):
     """Заводить новые группы — руководитель и роль «тренер». Тренер группы без этой роли (его назначил
     руководитель) свою группу ведёт, но новыми группами продлевать себе раздел не может (разбор 18.11.2026)."""
@@ -154,6 +160,7 @@ def capabilities(ctx):
         'manage': can_manage(ctx),
         'groups': can_manage_groups(ctx),
         'create_groups': can_create_groups(ctx),
+        'read_all': can_read_all(ctx),
         'reports': can_see_reports(ctx),
         'headed_ids': sorted(_headed_ids(ctx)),
         'trainer_group_ids': sorted({int(x) for x in (ctx.get('trainer_group_ids') or ())}),

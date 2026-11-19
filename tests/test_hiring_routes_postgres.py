@@ -258,6 +258,15 @@ def test_card_flow_through_routes(client):
     again = client.post('/api/hiring/cards/%s/take' % card['id'], headers=as_user(REC2))
     assert again.status_code == 409 and again.get_json()['code'] == 'HIRING_ALREADY_TAKEN'
     assert client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC2)).status_code == 404
+    # Тренер читает всю воронку (владелец 19.11.2026): чужую карточку видит с телефоном, но только для чтения.
+    seen = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(TRAINER))
+    assert seen.status_code == 200 and seen.get_json()['read_only'] is True and seen.get_json()['card']['phone_pretty'] == '+7 705 123 45 67'
+    refused = client.post('/api/hiring/cards/%s/touches' % card['id'], json={'kind': 'comment', 'body': 'x'}, headers=as_user(TRAINER))
+    assert refused.status_code == 403 and refused.get_json()['error'] == 'Карточка открыта вам только для чтения'
+    assert client.post('/api/hiring/cards/%s/take' % card['id'], headers=as_user(TRAINER)).status_code == 403
+    assert client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC1)).get_json()['read_only'] is False
+    trainer_board = client.get('/api/hiring/board', headers=as_user(TRAINER)).get_json()
+    assert next(c for c in trainer_board['columns'] if c['stage'] == 'in_work')['total'] == 1
 
     touched = client.post('/api/hiring/cards/%s/touches' % card['id'], json={'kind': 'call', 'result': 'no_answer',
                           'next_contact_at': '2026-10-30T10:00'}, headers=as_user(REC1))
