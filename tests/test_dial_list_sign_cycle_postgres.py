@@ -357,6 +357,34 @@ def test_waiting_for_yandex_is_a_success_at_once_at_the_drivers_moment(env):
     assert env.sapar.took() == []
 
 
+def test_clamped_moment_is_corrected_back_and_the_success_decided_again(env):
+    # Прод, 19.11.2026, первые минуты нового правила: время «ИдетСохранениеФайла» читалось по UTC (на 5 часов в
+    # будущем), и момент подписи обрезался до времени проверки. Более ранний момент из следующего ответа уточняет
+    # подпись назад, а успешка решается заново: разговор после настоящей подписи её не даёт.
+    env.q("INSERT INTO users (id, name) VALUES (7, 'Оператор Сава'), (8, 'Оператор Назар')")
+    env.lead(A)
+    env.roster([A])
+    env.call(A, 7, env.at(-60), billsec=40)                     # до подписи
+    env.call(A, 8, env.at(-10), billsec=40)                     # после подписи, до проверки
+    local = env.at(-30).astimezone(signing.PERIOD_TZ).replace(tzinfo=None).isoformat()
+    env.sapar.docs[A] = [{'ServiceId': 1, 'Status': 'НаПодписанииУЯндекса', 'DocSignDateByDriver': local},
+                         {'ServiceId': 2, 'Status': 'ИдетСохранениеФайла'}]     # без времени — момент проверки
+    env.checker().run(reason='тест', now=env.t0)
+    assert env.signing(A) == ('processing', env.t0, env.t0, 8, True)
+    env.sapar.docs[A] = [{'ServiceId': 1, 'Status': 'НаПодписанииУЯндекса', 'DocSignDateByDriver': local},
+                         {'ServiceId': 2, 'Status': 'ИдетСохранениеФайла', 'DocSignDateByDriver': local}]
+    summary = env.checker().run(reason='тест', now=env.at(15))
+    assert (summary['signed'], summary['successes']) == (0, 1)
+    assert env.signing(A) == ('processing', env.at(-30), env.t0, 7, True)
+    # Позже момент не сдвигается: документ с подписью позже ни подпись, ни успешку не меняет.
+    later = env.at(5).astimezone(signing.PERIOD_TZ).replace(tzinfo=None).isoformat()
+    env.sapar.docs[A] = [{'ServiceId': 1, 'Status': 'НаПодписанииУЯндекса', 'DocSignDateByDriver': local},
+                         {'ServiceId': 2, 'Status': 'НаПодписанииУЯндекса', 'DocSignDateByDriver': later}]
+    summary = env.checker().run(reason='тест', now=env.at(25))
+    assert summary['successes'] == 0
+    assert env.signing(A) == ('processing', env.at(-30), env.t0, 7, True)
+
+
 def test_older_answer_never_overwrites_a_newer_signature(env):
     # Круг держит ответы Sapar до записи пачкой — секунды. За это время водитель подписал, а «Проверить на
     # подписание» с телефона (check_now) уже записала подпись «на проверке у Яндекса». Запоздавший старый ответ

@@ -665,8 +665,9 @@ class SignChecker:
     # бы все строки базы каждый круг ради одной метки времени. «Подписал» — только впервые: у подписавшего «на
     # проверке у Яндекса» момент подписи приходит каждый круг, а писать ему нечего, пока статус тот же.
     _SPARSE_OK_SQL = """
-                      AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR l.sign_status <> v.code
-                           OR l.sign_docs <> v.docs OR l.sign_error <> '' OR l.sign_checked_at IS NULL
+                      AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR v.signed_at < l.signed_at
+                           OR l.sign_status <> v.code OR l.sign_docs <> v.docs OR l.sign_error <> ''
+                           OR l.sign_checked_at IS NULL
                            OR l.sign_checked_at < v.now - make_interval(mins => {minutes}))
     """.format(minutes=STAMP_MINUTES)
     # Чьи строки круг пишет: неподписавших и подписавших «на проверке у Яндекса» (_DUE_SQL). Подписавшему — только
@@ -683,26 +684,37 @@ class SignChecker:
 
     def _write(self, items, now, sparse=False):
         """Ответы Sapar → строки лидов. Запись — ("ok", id, статус, документы, момент подписи) или ("error", id,
-        текст, сетевой ли сбой); последним может идти время ответа, без него — `now`. Момент подписи только
-        ставится: у подписавшего его не сдвигает и не стирает ни новый ответ, ни «Подписано» после «на проверке у
-        Яндекса», ни откат статуса — круг лишь обновляет ему статус и документы (_WRITABLE_SQL), успешку не трогает
-        вовсе. Сетевой сбой не сдвигает время проверки; отказ Sapar по конкретному ИИН — сдвигает. sparse — запись
-        круга: только если есть что писать (_SPARSE_OK_SQL). Проверка «сейчас» и «Проверить сейчас» в карточке
-        пишут время всегда: по нему видно, что человек только что спросил."""
+        текст, сетевой ли сбой); последним может идти время ответа, без него — `now`. Момент подписи ставится один
+        раз: у подписавшего его не стирает и не сдвигает позже ни новый ответ, ни «Подписано» после «на проверке у
+        Яндекса», ни откат статуса — круг лишь обновляет ему статус и документы (_WRITABLE_SQL). Уточниться он может
+        только назад, раньше: ответ дал более ранний момент подписи водителя (тот был обрезан до времени проверки —
+        у документа не было времени или его пояс читался неверно). Тогда и решение по успешке принимается заново
+        (resolve_successes): разговор после настоящей подписи успешки не даёт. Сетевой сбой не сдвигает время
+        проверки; отказ Sapar по конкретному ИИН — сдвигает. sparse — запись круга: только если есть что писать
+        (_SPARSE_OK_SQL). Проверка «сейчас» и «Проверить сейчас» в карточке пишут время всегда: по нему видно, что
+        человек только что спросил."""
         ok = [(i[1], i[2], i[3], i[4], i[5] if len(i) > 5 else now) for i in items if i[0] == "ok"]
         errors = [(i[1], i[2], i[3], i[4] if len(i) > 4 else now) for i in items if i[0] == "error"]
         with self.db._get_cursor() as cur:
             if ok:
-                # Справа в SET — значения строки ДО обновления: «впервые подписал» — это l.signed_at IS NULL.
+                # Справа в SET — значения строки ДО обновления: «впервые подписал» — это l.signed_at IS NULL,
+                # «уточнили назад» — v.signed_at < l.signed_at (с NULL сравнение ложно — момент не трогаем).
                 execute_values(cur, """
                     UPDATE dial_list_leads l
                     SET sign_status = v.code,
                         sign_docs = v.docs,
                         sign_checked_at = v.now,
                         sign_error = '',
-                        signed_at = COALESCE(l.signed_at, v.signed_at),
+                        signed_at = CASE WHEN v.signed_at < l.signed_at THEN v.signed_at
+                                         ELSE COALESCE(l.signed_at, v.signed_at) END,
                         signed_detected_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN v.now
                                                   ELSE l.signed_detected_at END,
+                        success_attempt_id = CASE WHEN v.signed_at < l.signed_at THEN NULL
+                                                  ELSE l.success_attempt_id END,
+                        success_operator_id = CASE WHEN v.signed_at < l.signed_at THEN NULL
+                                                   ELSE l.success_operator_id END,
+                        success_resolved_at = CASE WHEN v.signed_at < l.signed_at THEN NULL
+                                                   ELSE l.success_resolved_at END,
                         updated_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN CURRENT_TIMESTAMP
                                           ELSE l.updated_at END
                     FROM (VALUES %s) AS v(id, code, docs, signed_at, now)

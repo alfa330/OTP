@@ -111,12 +111,17 @@ class SignMomentTests(unittest.TestCase):
                          datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
         self.assertEqual(signing.driver_sign_time(_doc('НаПодписанииУЯндекса', '2026-11-19T09:36:17+05:00')),
                          datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
-        # «Идёт сохранение файла» в ответах Sapar не встречался ни разу — читается как UTC.
-        self.assertEqual(signing.driver_sign_time(_doc('ИдетСохранениеФайла', '2026-11-19T04:36:17')),
-                         datetime(2026, 11, 19, 4, 36, 17, tzinfo=timezone.utc))
+        # «Идёт сохранение файла» (минуты, пока Яндекс ставит подпись) — тоже по Алматы: прод 19.11.2026, 4 пакета,
+        # время до микросекунд то же, что у «НаПодписанииУЯндекса» того же пакета.
+        self.assertEqual(signing.driver_sign_time(_doc('ИдетСохранениеФайла', '2026-11-19T11:30:01.041675')),
+                         datetime(2026, 11, 19, 6, 30, 1, 41675, tzinfo=timezone.utc))
         self.assertIsNone(signing.driver_sign_time(_doc('НаПодписанииУЯндекса')))
         self.assertIsNone(signing.driver_sign_time(None))
-        self.assertEqual(signing.LOCAL_TIME_STATUSES, frozenset({'НаПодписанииУЯндекса'}))
+        self.assertEqual(signing.LOCAL_TIME_STATUSES, frozenset({'НаПодписанииУЯндекса', 'ИдетСохранениеФайла'}))
+        saving = [_doc('ИдетСохранениеФайла', '2026-11-19T11:30:01.041675'),
+                  _doc('НаПодписанииУЯндекса', '2026-11-19T11:30:01.041675')]
+        self.assertEqual(signing.signed_moment(saving, datetime(2026, 11, 19, 7, 7, 34, tzinfo=timezone.utc)),
+                         datetime(2026, 11, 19, 6, 30, 1, 41675, tzinfo=timezone.utc))
         # Смешанный пакет — момент подписи водителя, а не на 5 часов позже; без поправки было бы 09:36 UTC.
         detected = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(signing.signed_moment([signed, waiting], detected), moment)
@@ -683,8 +688,10 @@ class SignCheckRunTests(unittest.TestCase):
         ok = ' '.join(sign_check.SignChecker._SPARSE_OK_SQL.split())
         # «Подписал» — повод писать только впервые: у подписавшего «на проверке у Яндекса» момент подписи приходит
         # каждый круг, и без этого круг переписывал бы такие строки каждые несколько минут.
-        self.assertEqual(ok, "AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR l.sign_status <> v.code "
-                             "OR l.sign_docs <> v.docs OR l.sign_error <> '' OR l.sign_checked_at IS NULL "
+        # Момент подписи уточнили назад — тоже повод писать.
+        self.assertEqual(ok, "AND ((l.signed_at IS NULL AND v.signed_at IS NOT NULL) OR v.signed_at < l.signed_at "
+                             "OR l.sign_status <> v.code OR l.sign_docs <> v.docs OR l.sign_error <> '' "
+                             "OR l.sign_checked_at IS NULL "
                              "OR l.sign_checked_at < v.now - make_interval(mins => 30))")
         error = ' '.join(sign_check.SignChecker._SPARSE_ERROR_SQL.split())
         self.assertEqual(error, "AND (l.sign_error <> v.error OR (NOT v.systemic AND (l.sign_checked_at IS NULL "
@@ -700,14 +707,18 @@ class SignCheckRunTests(unittest.TestCase):
                          "(l.signed_at IS NULL OR (l.sign_status = 'processing' "
                          "AND (l.sign_checked_at IS NULL OR l.sign_checked_at <= v.now)))")
         self.assertEqual(write.count('WHERE l.id = v.id AND """ + self._WRITABLE_SQL'), 2)
-        # Момент подписи только ставится: не сдвигается, не стирается; «обнаружили» и updated_at — лишь впервые.
+        # Момент подписи ставится один раз: не стирается и не сдвигается позже, уточняется только назад — и тогда
+        # решение по успешке принимается заново; «обнаружили» и updated_at — лишь впервые.
         flat = ' '.join(write.split())
-        self.assertIn('signed_at = COALESCE(l.signed_at, v.signed_at)', flat)
+        self.assertIn('signed_at = CASE WHEN v.signed_at < l.signed_at THEN v.signed_at '
+                      'ELSE COALESCE(l.signed_at, v.signed_at) END', flat)
+        for column in ('success_attempt_id', 'success_operator_id', 'success_resolved_at'):
+            self.assertIn(f'{column} = CASE WHEN v.signed_at < l.signed_at THEN NULL ELSE l.{column} END', flat)
+        self.assertEqual(flat.count('success_'), 6)
         self.assertIn('signed_detected_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN v.now '
                       'ELSE l.signed_detected_at END', flat)
         self.assertIn('updated_at = CASE WHEN l.signed_at IS NULL AND v.signed_at IS NOT NULL THEN CURRENT_TIMESTAMP '
                       'ELSE l.updated_at END', flat)
-        self.assertNotIn('success_', write)                 # успешку круг не трогает вовсе
 
     def test_already_signed_at_yandex_is_refreshed_but_not_signed_again(self):
         # 19.11.2026: подписавший «на проверке у Яндекса» остаётся в круге до «Подписано» — круг обновляет ему
