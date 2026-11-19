@@ -10,6 +10,8 @@
   * «Уточнить» — только у машин парка не в аренде, чужие машины GPS не шумят;
   * клиенты Yume, Wialon, ГЛОНАСС и Efir разбирают ответы так, как они приходят на самом деле
     (проверено на живых системах 27.10.2026), а сбой одного источника не роняет отчёт;
+  * инвентарь Yume читается в твёрдом порядке и целиком: 19.11.2026 у 147 машин с одной датой
+    заведения порядок плавал, и проход терял 18 машин «в аренде»;
   * Excel — столбцы ТЗ, «Статус аренды» только за 01:00, строки из внешних систем — текстом;
   * права: ООЗ и его глава, супер-админ; уволенный — нет; поимённый просмотр (#409) видит всё и
     не пишет ничего — каждая ручка записи из Blueprint отвечает ему отказом;
@@ -31,7 +33,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from rental import access, collect, plates, report, rules  # noqa: E402
-from rental.sources import EfirSource, GlonassSource, SourceError, WialonSource, YumeSource  # noqa: E402
+from rental.sources import (  # noqa: E402
+    YUME_INVENTORY_ORDERING, EfirSource, GlonassSource, SourceError, WialonSource, YumeSource)
 from tests import source_cache
 
 APP_JSX = ROOT / 'src' / 'App.jsx'
@@ -237,6 +240,60 @@ class YumeSourceTests(unittest.TestCase):
     def test_without_credentials_nothing_is_called(self):
         with self.assertRaises(SourceError):
             YumeSource('', '', session=FakeSession([])).fetch()
+
+    def _passes(self, passes, count):
+        """Каждый проход отдаёт свои страницы — как Yume при плавающем порядке. И журнал параметров."""
+        state, params = {'pass': -1}, []
+
+        def login(kwargs):
+            return FakeResponse(payload={'access': 'jwt'})
+
+        def inventories(kwargs):
+            params.append(dict(kwargs['params']))
+            page = kwargs['params']['page']
+            if page == 1:
+                state['pass'] += 1
+            pages = passes[state['pass']]
+            return FakeResponse(payload={'count': count, 'results': pages[page - 1],
+                                         'next': 'x' if page < len(pages) else None})
+
+        session = FakeSession([('POST', '/v1/auth/login/', login), ('GET', '/v1/crm/inventories/', inventories)])
+        return session, params
+
+    @staticmethod
+    def _car(inventory_id, number):
+        return {'id': inventory_id, 'name': 'HONGQI EQM5', 'status': 2, 'deleted': False,
+                'car': {'brand': 'Hongqi', 'model': 'E-QM5', 'number': number}}
+
+    def test_inventory_is_read_in_fixed_order_once_when_complete(self):
+        # 19.11.2026: без твёрдого порядка 147 машин с одной датой заведения терялись со страниц.
+        pages = [[self._car(1, '100AAA02'), self._car(2, '200AAA02')], [self._car(3, '300AAA02')]]
+        session, params = self._passes([pages], count=3)
+        cars = YumeSource('u', 'p', session=session).fetch()
+        self.assertEqual(set(cars), {'100AAA02', '200AAA02', '300AAA02'})
+        self.assertEqual([p['page'] for p in params], [1, 2])
+        self.assertEqual({p['ordering'] for p in params}, {YUME_INVENTORY_ORDERING})
+        # id и updated_at Yume в ordering не принимает — с ними порядок опять плавал бы молча.
+        self.assertNotIn('id', YUME_INVENTORY_ORDERING.replace('unique_id', '').split(','))
+        self.assertNotIn('updated_at', YUME_INVENTORY_ORDERING)
+
+    def test_short_read_gets_second_pass_merged_by_id(self):
+        # Первый проход: машина 2 пришла дважды, машины 3 нет — ровно так терялись машины в аренде.
+        first = [[self._car(1, '100AAA02'), self._car(2, '200AAA02')], [self._car(2, '200AAA02')]]
+        second = [[self._car(1, '100AAA02'), self._car(3, '300AAA02')], [self._car(2, '200AAA02')]]
+        session, params = self._passes([first, second], count=3)
+        cars = YumeSource('u', 'p', session=session).fetch()
+        self.assertEqual(set(cars), {'100AAA02', '200AAA02', '300AAA02'})
+        self.assertEqual([p['page'] for p in params], [1, 2, 1, 2])
+
+    def test_still_short_after_two_passes_is_logged_and_data_kept(self):
+        pages = [[self._car(1, '100AAA02')], [self._car(1, '100AAA02')]]
+        session, params = self._passes([pages, pages], count=2)
+        with self.assertLogs(level='WARNING') as logs:
+            cars = YumeSource('u', 'p', session=session).fetch()
+        self.assertEqual(set(cars), {'100AAA02'})
+        self.assertEqual(len(params), 4)
+        self.assertIn('1 записей инвентаря из 2', '\n'.join(logs.output))
 
 
 class WialonSourceTests(unittest.TestCase):

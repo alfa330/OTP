@@ -6,7 +6,8 @@
 
     Yume Cloud     POST /v1/auth/login/ → JWT; GET /v1/crm/inventories/ — весь парк со статусом
                    машины (2 — «В аренде») и госномером в car.number. Нужна учётка с правом
-                   «просмотр инвентаря»: группа «ООЗ» его не имела, «Менеджер» — имеет.
+                   «просмотр инвентаря»: группа «ООЗ» его не имела, «Менеджер» — имеет. Список
+                   читается только в твёрдом порядке (YUME_INVENTORY_ORDERING), иначе теряет машины.
     Wialon         токен на просмотр формой oauth/authorize.html (или готовый токен учётки) →
                    token/login → core/search_items: имя объекта и последняя точка. Адрес —
                    геокодер Wialon gis_geocode по id пользователя учётки.
@@ -22,6 +23,7 @@
 """
 
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlsplit
@@ -72,6 +74,17 @@ def _list(payload):
 
 YUME_API = 'https://api.yume.cloud'
 _YUME_STATUS_RANK = {2: 0, 1: 1, 0: 2}
+
+# Порядок списка инвентаря. Сам Yume сортирует по статусу и дате заведения, а у 147 машин импорта
+# 18.09.2025 дата одна до микросекунды: каждая страница выбирает из них «своих», и проход терял
+# машины (19.11.2026: 18 из 230 «в аренде» — в ночном отчёте у них стояло «Нет», в «Наличии авто»
+# их не было) и брал другие по два раза. id и updated_at Yume в ordering не принимает и молча
+# сортирует по-своему; это сочетание разрешённых полей различает все записи парка (421 на 19.11),
+# а новая машина — со свежей датой — встаёт в конец и не сдвигает уже прочитанные страницы.
+YUME_INVENTORY_ORDERING = 'created_at,car__number,unique_id,name'
+# Проходов, если записей пришло меньше, чем назвал сам Yume (count): между страницами машину
+# завели или удалили, и страницы сдвинулись. Второй проход дочитывает, оба сливаются по id.
+YUME_INVENTORY_PASSES = 2
 
 
 def yume_model(car, fallback_name):
@@ -125,32 +138,51 @@ class YumeSource:
             raise SourceError('Yume не выдал токен')
         headers = {'Authorization': 'Bearer ' + token}
         cars = {}
-        for page in range(1, self.max_pages + 1):
-            response = http.get(self.api + '/v1/crm/inventories/', params={'page': page},
-                                headers=headers, timeout=TIMEOUT)
-            if response.status_code == 403:
-                raise SourceError('учётке Yume закрыт инвентарь — нужно право «просмотр инвентаря»')
-            if response.status_code != 200:
-                raise SourceError('Yume: инвентарь не открылся (HTTP %s)' % response.status_code)
-            payload = _json(response, 'Yume')
-            for item in payload.get('results') or []:
-                car = item.get('car') or {}
-                plate = plates.normalize(car.get('number'))
-                if not plates.is_plate(plate):
-                    continue
-                model = yume_model(car, item.get('name'))
-                entry = {'plate': plate, 'status': item.get('status'), 'deleted': bool(item.get('deleted')),
-                         'model': model, 'label': model or 'Без названия',
-                         'keys': sorted(car_keys({'brand': car.get('brand'), 'model': car.get('model'),
-                                                  'name': item.get('name')}))}
-                current = cars.get(plate)
-                if current is None or _yume_better(entry, current):
-                    cars[plate] = entry
-            if not payload.get('next'):
-                break
-        else:
-            raise SourceError('Yume: страниц инвентаря больше %d' % self.max_pages)
+        for item in self._inventory(http, headers):
+            car = item.get('car') or {}
+            plate = plates.normalize(car.get('number'))
+            if not plates.is_plate(plate):
+                continue
+            model = yume_model(car, item.get('name'))
+            entry = {'plate': plate, 'status': item.get('status'), 'deleted': bool(item.get('deleted')),
+                     'model': model, 'label': model or 'Без названия',
+                     'keys': sorted(car_keys({'brand': car.get('brand'), 'model': car.get('model'),
+                                              'name': item.get('name')}))}
+            current = cars.get(plate)
+            if current is None or _yume_better(entry, current):
+                cars[plate] = entry
         return list(cars.values())
+
+    def _inventory(self, http, headers):
+        """Все записи инвентаря, каждая по разу (по id), в твёрдом порядке YUME_INVENTORY_ORDERING.
+
+        Пришло меньше, чем назвал Yume, — ещё проход, записи сливаются по id. Недобор и после
+        него — в журнал: данные всё равно лучше, чем отчёт без Yume вовсе.
+        """
+        items, expected = {}, None
+        for _ in range(YUME_INVENTORY_PASSES):
+            for page in range(1, self.max_pages + 1):
+                response = http.get(self.api + '/v1/crm/inventories/', headers=headers, timeout=TIMEOUT,
+                                    params={'page': page, 'ordering': YUME_INVENTORY_ORDERING})
+                if response.status_code == 403:
+                    raise SourceError('учётке Yume закрыт инвентарь — нужно право «просмотр инвентаря»')
+                if response.status_code != 200:
+                    raise SourceError('Yume: инвентарь не открылся (HTTP %s)' % response.status_code)
+                payload = _json(response, 'Yume')
+                if isinstance(payload.get('count'), int):
+                    expected = payload['count']
+                for item in payload.get('results') or []:
+                    key = item.get('id')
+                    items[key if key is not None else ('без id', len(items))] = item
+                if not payload.get('next'):
+                    break
+            else:
+                raise SourceError('Yume: страниц инвентаря больше %d' % self.max_pages)
+            if expected is None or len(items) >= expected:
+                break
+        if expected is not None and len(items) < expected:
+            logging.warning('rental: Yume отдал %d записей инвентаря из %d', len(items), expected)
+        return list(items.values())
 
 
 # ─── Wialon ────────────────────────────────────────────────────────────────────
