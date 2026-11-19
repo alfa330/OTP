@@ -157,7 +157,7 @@ class SchemaTests(unittest.TestCase):
 
     def test_result_vocabulary_covers_all_branches(self):
         self.assertEqual(
-            {'lead_created', 'duplicate', 'manual_review', 'canned_reply',
+            {'received', 'lead_created', 'duplicate', 'manual_review', 'canned_reply',
              'needs_human', 'human_reply', 'skipped', 'error'},
             set(schema.JOURNAL_RESULTS))
 

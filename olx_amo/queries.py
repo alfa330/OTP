@@ -627,6 +627,9 @@ def find_recent_lead(cursor, cabinet_code, phone_normalized, day=None):
     Дешёвая проверка ПЕРЕД походом в amoCRM. Она не заменяет уникальный индекс —
     девять кабинетов опрашиваются параллельно, и гонку ловит только база, — но
     экономит лишний запрос на запись в CRM в самом частом случае.
+
+    `received` — номер, принятый без сделки (сделки выключены с 19.11.2026): его
+    повтор за день — тоже повтор, как и при сделках.
     """
     cursor.execute(
         """
@@ -634,7 +637,7 @@ def find_recent_lead(cursor, cabinet_code, phone_normalized, day=None):
           FROM olx_journal
          WHERE cabinet_code = %(cabinet_code)s
            AND phone_normalized = %(phone)s
-           AND result IN ('lead_created', 'manual_review')
+           AND result IN ('lead_created', 'manual_review', 'received')
            AND message_at::date = %(day)s
          ORDER BY id DESC
          LIMIT 1
@@ -687,7 +690,8 @@ def daily_summary(cursor, day=None):
         """
         SELECT cabinet_code,
                COUNT(*)                                          AS total,
-               COUNT(*) FILTER (WHERE result = 'lead_created')    AS leads,
+               -- «С номером»: сделка (до 19.11.2026) или номер без сделки — после.
+               COUNT(*) FILTER (WHERE result IN ('lead_created', 'received')) AS leads,
                COUNT(*) FILTER (WHERE result = 'duplicate')       AS duplicates,
                COUNT(*) FILTER (WHERE result = 'manual_review')   AS manual,
                COUNT(*) FILTER (WHERE result = 'canned_reply')    AS replies,
@@ -703,6 +707,29 @@ def daily_summary(cursor, day=None):
         {'day': day or today_almaty()},
     )
     return _all(cursor)
+
+
+def received_between(cursor, start, end):
+    """Обращения с номером, принятые без сделки (`received`), за [start, end).
+
+    Для отбивки «Лиды по источникам»: до 19.11.2026 эти обращения были сделками
+    робота в amoCRM и считались в строке OLX по тегу кабинета. Время — когда робот
+    разобрал обращение, стенные часы Алматы, как во всём журнале. Таблицы нет
+    (стенд без робота) — пусто.
+    """
+    cursor.execute("SELECT to_regclass('olx_journal') IS NOT NULL")
+    if not cursor.fetchone()[0]:
+        return []
+    cursor.execute(
+        """
+        SELECT cabinet_code, created_at
+          FROM olx_journal
+         WHERE result = 'received'
+           AND created_at >= %(start)s AND created_at < %(end)s
+        """,
+        {'start': start, 'end': end},
+    )
+    return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
 def pending_retries(cursor, older_than_minutes=1, limit=200):

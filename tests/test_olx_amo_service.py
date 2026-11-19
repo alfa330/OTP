@@ -17,12 +17,14 @@
     а кабинеты опрашиваются девятью потоками сразу.
 """
 
+import os
 import sys
 import threading
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -85,7 +87,7 @@ class FakeQueries(object):
         for row in self.db.journal:
             if (row['cabinet_code'] == cabinet_code
                     and row.get('phone_normalized') == phone
-                    and row['result'] in ('lead_created', 'manual_review')):
+                    and row['result'] in ('lead_created', 'manual_review', 'received')):
                 return row
         return None
 
@@ -200,9 +202,17 @@ def message(text='', phone=None, mid='1', minutes_ago=0):
 
 
 class HandleMessageTests(unittest.TestCase):
-    """Три ветки ТЗ на одном сообщении."""
+    """Три ветки ТЗ на одном сообщении — при включённых сделках и автоответе.
+
+    С 19.11.2026 оба выключены по умолчанию (см. SwitchedOffTests), но
+    возвращаются переменными окружения — и тогда работают как здесь.
+    """
 
     def setUp(self):
+        switches = mock.patch.dict(os.environ, {'OLX_CANNED_REPLY_ENABLED': '1',
+                                                'OLX_AMO_LEADS_ENABLED': '1'})
+        switches.start()
+        self.addCleanup(switches.stop)
         self.db = FakeDb()
         self.queries = FakeQueries(self.db)
         self._real_queries = service.queries
@@ -359,6 +369,138 @@ class HandleMessageTests(unittest.TestCase):
         """Ни одна транзакция не охватывает больше одного шага."""
         self.handle(message('мой номер 87757025144'))
         self.assertEqual(1, self.db.max_open)
+
+
+class SwitchedOffTests(unittest.TestCase):
+    """По умолчанию с 19.11.2026: ни сделок в amoCRM, ни автоответа.
+
+    Решение владельца — обращения OLX ведёт Syntony по событиям для партнёров. Робот
+    опрашивает, пишет журнал и шлёт события как прежде; номер становится строкой
+    журнала `received`, сообщение без номера — сразу «ждёт ответа человека».
+    """
+
+    def setUp(self):
+        switches = mock.patch.dict(os.environ)
+        switches.start()
+        self.addCleanup(switches.stop)
+        os.environ.pop('OLX_CANNED_REPLY_ENABLED', None)
+        os.environ.pop('OLX_AMO_LEADS_ENABLED', None)
+
+        self.db = FakeDb()
+        self.queries = FakeQueries(self.db)
+        real = service.queries
+        service.queries = self.queries
+        self.addCleanup(lambda: setattr(service, 'queries', real))
+
+        self.cab = cabinets.BY_CODE['itaxi']
+        self.olx = FakeOlx(self.db)
+        # Так собирает пару poll_cabinet при выключенных сделках: клиента amoCRM нет.
+        self.writers = service._Writers(self.olx, None)
+        self.counters = service.CabinetResult(self.cab.code)
+
+    def handle(self, msg):
+        return service._handle_message(self.db, self.writers, self.cab,
+                                       {'id': '77'}, msg, self.counters)
+
+    def test_both_switches_are_off_by_default(self):
+        self.assertFalse(service.amo_leads_enabled())
+        self.assertFalse(service.canned_replies_enabled())
+
+    def test_switch_turns_on_only_by_an_explicit_yes(self):
+        for value, expected in (('1', True), ('true', True), ('on', True),
+                                ('0', False), ('', False), ('нет', False)):
+            with mock.patch.dict(os.environ, {'OLX_AMO_LEADS_ENABLED': value}):
+                self.assertEqual(expected, service.amo_leads_enabled(), value)
+
+    def test_number_is_journaled_as_received_without_a_deal(self):
+        outcome = self.handle(message('Здравствуйте, мой номер 8 775 702 51 44'))
+
+        self.assertEqual('received', outcome)
+        row = self.db.journal[-1]
+        self.assertEqual('received', row['result'])
+        self.assertEqual('77757025144', row['phone_normalized'])
+        self.assertEqual('8 775 702 51 44', row['phone_raw'])
+        self.assertEqual('forma_olx_itaxi', row['tag'])
+        self.assertIsNone(row.get('amo_lead_id'))
+        self.assertEqual(1, self.counters.received)
+        self.assertEqual(0, self.counters.leads_created)
+        self.assertEqual('77757025144', self.db.threads[(self.cab.code, '77')]['phone_normalized'])
+        self.assertEqual([], self.olx.sent)
+
+    def test_same_number_the_same_day_is_a_duplicate_as_before(self):
+        self.handle(message('мой номер 87757025144', mid='1'))
+        outcome = self.handle(message('ещё раз: 8 775 702 51 44', mid='2'))
+
+        self.assertEqual('duplicate', outcome)
+        self.assertEqual(['received', 'duplicate'], [r['result'] for r in self.db.journal])
+        self.assertEqual(1, self.counters.received)
+
+    def test_broken_number_is_received_with_what_the_candidate_wrote(self):
+        """Терять обращение нельзя и без сделки: номер как написан — в журнал."""
+        outcome = self.handle(message('мой номер +996 555 123456'))
+
+        self.assertEqual('received', outcome)
+        row = self.db.journal[-1]
+        self.assertIsNone(row.get('phone_normalized'))
+        self.assertTrue(row['phone_raw'])
+
+    def test_message_without_a_number_waits_for_a_human_without_a_reply(self):
+        outcome = self.handle(message('А какие условия работы?', mid='1'))
+
+        self.assertEqual('needs_human', outcome)
+        self.assertEqual([], self.olx.sent, 'автоответ выключен')
+        self.assertEqual(0, self.counters.replies_sent)
+        state = self.db.threads[(self.cab.code, '77')]
+        self.assertIsNotNone(state.get('awaiting_human_since'))
+        self.assertIsNone(state.get('canned_reply_sent_at'))
+        self.assertEqual(['needs_human'], [r['result'] for r in self.db.journal])
+
+    def test_further_questions_do_not_pile_up_journal_rows(self):
+        self.handle(message('Здравствуйте', mid='1'))
+        outcome = self.handle(message('Ау', mid='2'))
+
+        self.assertEqual('needs_human', outcome)
+        self.assertEqual(1, len(self.db.journal))
+        self.assertEqual([], self.olx.sent)
+
+    def test_retry_does_not_create_deals_while_they_are_off(self):
+        """Старые строки `error` при выключенных сделках не превращаются в сделки."""
+        class _NoDb(object):
+            def _get_cursor(self):
+                raise AssertionError('повтор не должен даже читать очередь')
+
+        with mock.patch.object(service, 'amo_client_for_thread',
+                               side_effect=AssertionError('amoCRM не нужна')):
+            self.assertEqual({'retried': 0, 'recovered': 0}, service.retry_failed(_NoDb()))
+
+    def test_robot_is_enabled_without_amocrm_credentials(self):
+        """Опрос нужен Syntony и без amoCRM: без него заявки OLX туда не приходят."""
+        with mock.patch.object(service.cabinets, 'configured', return_value=(self.cab,)), \
+                mock.patch('amocrm.leads.is_configured', return_value=False):
+            self.assertTrue(service.is_enabled())
+            with mock.patch.dict(os.environ, {'OLX_AMO_LEADS_ENABLED': '1'}):
+                self.assertFalse(service.is_enabled())
+
+    def test_poll_does_not_log_in_to_amocrm_while_deals_are_off(self):
+        """Конструктор клиента amoCRM входит по логину — роботу туда больше незачем."""
+        class _Olx(object):
+            def __init__(self, token_provider=None):
+                pass
+
+            def threads(self, offset=0, limit=50):
+                return [], None, None
+
+        class _Queries(object):
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+
+        with mock.patch.object(service, 'ensure_access_token', return_value=('t', None)), \
+                mock.patch.object(service, 'OlxClient', _Olx), \
+                mock.patch.object(service, 'queries', _Queries()), \
+                mock.patch.object(service, 'amo_client_for_thread',
+                                  side_effect=AssertionError('вход в amoCRM')):
+            result = service.poll_cabinet(FakeDb(), self.cab)
+        self.assertEqual(0, result.errors)
 
 
 class JournalWriteTests(unittest.TestCase):

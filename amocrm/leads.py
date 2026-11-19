@@ -19,8 +19,13 @@ Google (C3) и Звонков (C11) перенесены дословно, ос�
   * дата сделки считается в Asia/Almaty явно, а не в часовом поясе книги;
   * обрыв соединения или зависшая на середине страница повторяются, а не
     выбрасывают все уже вычитанные страницы.
+
+С 19.11.2026 в тех же цифрах — заявки CRM Syntony (syntony_leads/): лиды туда
+переехали из amoCRM. Считаются теми же правилами, один лид в обеих CRM — один
+раз; см. раздел «Заявки Syntony и склейка с amoCRM» ниже.
 """
 
+import bisect
 import html
 import logging
 import os
@@ -518,6 +523,155 @@ def count_by_source(rows):
     return counts
 
 
+# ==== Заявки Syntony и склейка с amoCRM ======================================
+#
+# С ноября 2026 лиды переезжают из amoCRM в CRM Syntony (syntony_leads/), и
+# отбивка считает обе CRM вместе — ТЕМИ ЖЕ правилами `count_by_source`. Две
+# вещи, без которых сумма врала бы:
+#
+#   * Переезд шёл с параллелью: лид-формы FB 12–17.11 и TikTok 06–17.11, звонки
+#     с 19.11 приходили в ОБЕ CRM. Один лид — две записи («близнецы»), и неделя-
+#     база в отбивке удвоилась бы. Близнецов склеиваем (`drop_twins`).
+#   * У заявок Syntony свои привычки: теги дописываются в открытую заявку при
+#     повторных обращениях, лид-формы аренды до 18.11 приходили без тега аренды.
+#     Это выравнивает `syntony_row`.
+
+# Близнецы находятся по времени. Замер 19.11.2026 по выгрузкам обеих CRM за
+# 06–19.11: лид-формы и чаты OLX доходят в обе CRM за секунды (кампания
+# «iTaxi/16.09.2026»: 207 пар из 211 сделок и 213 заявок — в пределах 10 с), а в
+# дни переключения форм сайтов, где лиды НЕ дублировались, пар в 10 с почти нет
+# (Google 18.11: 2 из 39, Яндекс и SEO — ни одной). Звонок Syntony заводит позже
+# amoCRM — через 6 с…4 мин; для него и для формы с той же кампанией допуск
+# шире, но только при общем ключе: тот же тег линии или та же кампания.
+TWIN_SECONDS = 10
+TWIN_KEYED_SECONDS = 600
+# Насколько шире окна отбивки читать обе CRM, чтобы близнец на краю окна нашёл
+# пару и не посчитался дважды — в этом окне и в соседнем.
+TWIN_MARGIN = timedelta(seconds=TWIN_KEYED_SECONDS)
+
+# Кампании аренды. В amoCRM их лиды несут тег с «arenda» (forma_itaxi_arenda,
+# forma_itaxi_tiktok_arenda_avto) и правилами отбивки отсекаются; в Syntony до
+# 18.11 те же лиды приходили без тегов, только с кампанией «iTaxi / Аренда авто /
+# Видео / 06.04.2026» — 65 заявок FB за 12–16.11.
+_RENTAL_RE = re.compile(r"аренд|arenda", re.IGNORECASE)
+# Лид-формы рекламных кабинетов: источник однозначен и без utm-метки.
+SYNTONY_AD_SOURCES = ("facebook", "tiktok")
+
+
+def syntony_row(lead):
+    """Заявка Syntony (строка таблицы syntony_leads) → строка для `count_by_source`.
+
+    Три отличия от сделки amoCRM, и каждое — чтобы заявка попала в ту же строку
+    отбивки, куда попала бы такая же сделка:
+
+      * берётся только ПЕРВЫЙ тег — тот, с которым заявка заведена. Пока заявка
+        открыта, Syntony не заводит новую на повторное обращение с того же
+        номера, а дописывает тег: 19.11 проверочный номер прозвонил линии
+        парков, и у одной заявки набралось 15 тегов `call_itaxi_*` — по всем
+        тегам она посчиталась бы в пяти строках сразу;
+      * заявка рекламной кампании аренды без тега аренды получает пометку
+        «arenda» — как её сделка в amoCRM, которую правила отсекают;
+      * лид-форма Facebook/TikTok без utm_source считается по своему источнику.
+    """
+    tags = [t.strip() for t in (lead.get("tags") or "").split(",") if t.strip()]
+    first = tags[0] if tags else ""
+    campaign = (lead.get("utm_campaign") or "").strip()
+    marks = [first] if first else []
+    if campaign and _RENTAL_RE.search(campaign) and not _RENTAL_RE.search(first):
+        marks.append("arenda")
+    utm_source = (lead.get("utm_source") or "").strip()
+    if not utm_source and (lead.get("source") or "") in SYNTONY_AD_SOURCES:
+        utm_source = lead["source"]
+    return {
+        "tags": ", ".join(marks),
+        "utm_source": utm_source,
+        "utm_campaign": campaign,
+        "created_at": lead.get("created_at"),
+        "first_tag": first.lower(),
+    }
+
+
+def _hits(row):
+    """В каких строках отбивки посчитается строка."""
+    counts = count_by_source([row])
+    return frozenset(name for name in SOURCE_ORDER if counts[name])
+
+
+def _same_key(syntony, amo):
+    """Общий ключ близнецов: тег линии/формы или кампания совпадают."""
+    first = syntony.get("first_tag") or ""
+    if first and first in {t.strip().lower() for t in (amo.get("tags") or "").split(",")}:
+        return True
+    campaign = (syntony.get("utm_campaign") or "").strip().lower()
+    return bool(campaign) and campaign == (amo.get("utm_campaign") or "").strip().lower()
+
+
+def drop_twins(amo_rows, syntony_rows):
+    """Заявки Syntony без близнецов в amoCRM.
+
+    Близнец — сделка, которая считается в ТОЙ ЖЕ строке отбивки и заведена в
+    пределах `TWIN_SECONDS`, либо в пределах `TWIN_KEYED_SECONDS` при общем ключе
+    (`_same_key`). Пары жадные, от самой близкой, и одна сделка — пара не
+    больше чем одной заявке: в параллельные дни обе CRM получали каждый лид, и
+    ближайший сосед — это и есть он.
+
+    Из пары считается сделка amoCRM: её теги размечены интеграцией, по которой
+    отбивка считала всё время, и сравнение с прошлыми неделями остаётся честным.
+    """
+    amo = []
+    for row in amo_rows or []:
+        hits = _hits(row) if row.get("created_at") else frozenset()
+        if hits:
+            amo.append((row["created_at"], row, hits))
+    amo.sort(key=lambda item: item[0])
+    times = [item[0] for item in amo]
+    window = timedelta(seconds=TWIN_KEYED_SECONDS)
+
+    candidates = []
+    for index, row in enumerate(syntony_rows or []):
+        created = row.get("created_at")
+        hits = _hits(row) if created else frozenset()
+        if not hits:
+            continue
+        low = bisect.bisect_left(times, created - window)
+        high = bisect.bisect_right(times, created + window)
+        for position in range(low, high):
+            _, deal, deal_hits = amo[position]
+            if not hits & deal_hits:
+                continue
+            gap = abs((created - deal["created_at"]).total_seconds())
+            if gap <= TWIN_SECONDS or (gap <= TWIN_KEYED_SECONDS and _same_key(row, deal)):
+                candidates.append((gap, index, position))
+
+    candidates.sort()
+    paired, taken = set(), set()
+    for _gap, index, position in candidates:
+        if index in paired or position in taken:
+            continue
+        paired.add(index)
+        taken.add(position)
+    return [row for index, row in enumerate(syntony_rows or []) if index not in paired]
+
+
+def combined_counts(amo_rows, syntony_rows, start, end, extra_rows=()):
+    """Лиды по источникам за [start, end) из обеих CRM.
+
+    `amo_rows` и `syntony_rows` читаются шире окна на `TWIN_MARGIN` с обеих
+    сторон — только ради пар на краю; считаются строки внутри окна. Заявки
+    Syntony — уже через `syntony_row`. `extra_rows` — строки не из CRM (журнал
+    робота OLX, когда сделки он больше не заводит), считаются как есть.
+    """
+    def inside(row):
+        created = row.get("created_at")
+        return created is not None and start <= created < end
+
+    kept = drop_twins(amo_rows, syntony_rows)
+    rows = [r for r in amo_rows or [] if inside(r)]
+    rows += [r for r in kept if inside(r)]
+    rows += [r for r in extra_rows or [] if inside(r)]
+    return count_by_source(rows)
+
+
 # ==== Алерты по отклонению от нормы ==========================================
 #
 # Перенос методики из файла «анализ_лидов_алерты.xlsx». База сравнения — тот же
@@ -608,7 +762,8 @@ def _pct(value):
 
 
 def render_alert_report(rows, window_label="", base_label="",
-                        synced_at=None, sync_error=None, failed_at=None):
+                        synced_at=None, sync_error=None, failed_at=None,
+                        more_sources=None):
     """Текст отбивки: таблица с отклонениями и список того, что требует реакции.
 
     `synced_at` — время последней УДАЧНОЙ выгрузки, то есть настоящий возраст
@@ -616,6 +771,9 @@ def render_alert_report(rows, window_label="", base_label="",
     время последней завершённой выгрузки любой судьбы, и при сбое подпись
     сообщала свежесть, которой нет: «Данные обновлены 09:10» рядом с ⚠️ о том,
     что выгрузка 09:10 не удалась, а в таблице лежали цифры от 06:11.
+
+    `more_sources` — другие CRM в тех же цифрах (Syntony): список словарей
+    {name, synced_at, error, failed_at}. С ними подпись называет каждую CRM.
     """
     lines = ["<b>Лиды: проверка за %s</b>" % window_label]
     if base_label:
@@ -648,12 +806,28 @@ def render_alert_report(rows, window_label="", base_label="",
     else:
         lines.append("🟢 Отклонений нет.")
 
-    if synced_at:
-        lines.append("Данные обновлены %s." % synced_at.astimezone(TZ).strftime("%H:%M"))
-    if sync_error:
-        when = " (%s)" % failed_at.astimezone(TZ).strftime("%H:%M") if failed_at else ""
-        lines.append("⚠️ Последняя выгрузка%s не удалась: %s"
-                     % (when, html.escape(str(sync_error)[:160])))
+    def clock(value):
+        return value.astimezone(TZ).strftime("%H:%M")
+
+    if not more_sources:
+        if synced_at:
+            lines.append("Данные обновлены %s." % clock(synced_at))
+        if sync_error:
+            when = " (%s)" % clock(failed_at) if failed_at else ""
+            lines.append("⚠️ Последняя выгрузка%s не удалась: %s"
+                         % (when, html.escape(str(sync_error)[:160])))
+        return "\n".join(lines)
+
+    sources = [{"name": "amoCRM", "synced_at": synced_at, "error": sync_error,
+                "failed_at": failed_at}] + list(more_sources)
+    lines.append("Данные обновлены: %s." % ", ".join(
+        "%s %s" % (s["name"], clock(s["synced_at"]) if s.get("synced_at") else "—")
+        for s in sources))
+    for s in sources:
+        if s.get("error"):
+            when = " (%s)" % clock(s["failed_at"]) if s.get("failed_at") else ""
+            lines.append("⚠️ %s: выгрузка%s не удалась: %s"
+                         % (s["name"], when, html.escape(str(s["error"])[:160])))
     return "\n".join(lines)
 
 

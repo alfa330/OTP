@@ -39,6 +39,9 @@ import html
 from concurrent.futures import ThreadPoolExecutor
 import group_late
 from amocrm import leads as amo_leads
+# Заявки CRM Syntony в той же отбивке «Лиды по источникам» (19.11.2026). Модуль
+# без базы и без побочных действий на импорте — только клиент API.
+from syntony_leads import client as syntony_leads_client
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
@@ -36814,6 +36817,62 @@ async def amo_leads_sync_job():
         logging.error("amoCRM: плановая выгрузка лидов не удалась: %s", exc, exc_info=True)
 
 
+# --- Заявки Syntony: выгрузка для той же отбивки ------------------------------------------------
+# Лиды переехали из amoCRM в CRM Syntony (лид-формы, формы сайтов, звонки — 12–19.11.2026), и
+# отбивка «Лиды по источникам» считает обе CRM (amocrm/leads.py, «склейка»). Выгрузка дешёвая —
+# API отдаёт 500 заявок за 0,4 с, — но предел 60 запросов в минуту на ключ, поэтому полное окно
+# берётся раз в сутки, а между ними — только изменённое с прошлой удачной выгрузки.
+
+SYNTONY_LEADS_FULL_EVERY = timedelta(hours=24)
+# Запас на расхождение часов: лишняя заявка в выгрузке безвредна, запись идёт по id.
+SYNTONY_LEADS_OVERLAP = timedelta(minutes=10)
+# Чаще не ходим: /leads подряд или отбивка сразу после плановой выгрузки ничего нового не принесут.
+SYNTONY_LEADS_RESYNC_PAUSE = timedelta(minutes=2)
+
+
+def syntony_leads_sync(force=False):
+    """Выгрузить заявки Syntony в БД; вернуть число записанных. None — ключ не задан.
+
+    Глубина полного окна — как у amoCRM (amo_leads.SYNC_DAYS) плюс сутки: день в фильтре
+    API — сутки UTC, а сутки Алматы начинаются в 19:00 UTC накануне.
+    """
+    if not syntony_leads_client.is_configured():
+        return None
+    now = datetime.now(timezone.utc)
+    if not force:
+        attempt = db.get_last_syntony_lead_sync(finished=False) or {}
+        if attempt.get('started_at') and now - attempt['started_at'] < SYNTONY_LEADS_RESYNC_PAUSE:
+            return 0
+    last_ok = db.get_last_syntony_lead_sync(status='ok')
+    last_full = db.get_last_syntony_lead_sync(status='ok', mode='full')
+    full = (not last_ok or not last_full
+            or now - last_full['started_at'] > SYNTONY_LEADS_FULL_EVERY)
+    sync_id = db.start_syntony_lead_sync('full' if full else 'updated')
+    try:
+        if full:
+            items = syntony_leads_client.fetch(
+                created_from=(now - timedelta(days=amo_leads.SYNC_DAYS + 1)).date())
+        else:
+            items = syntony_leads_client.fetch(
+                updated_since=last_ok['started_at'] - SYNTONY_LEADS_OVERLAP)
+        written = db.upsert_syntony_leads(syntony_leads_client.map_leads(items))
+        db.finish_syntony_lead_sync(sync_id, leads_fetched=written)
+        return written
+    except Exception as exc:
+        db.finish_syntony_lead_sync(sync_id, error=str(exc)[:500])
+        raise
+
+
+async def syntony_leads_sync_job():
+    """Плановая выгрузка заявок Syntony — раз в 3 часа, сутки — полное окно."""
+    try:
+        written = await asyncio.get_event_loop().run_in_executor(executor_pool, syntony_leads_sync)
+        if written:
+            logging.info("Syntony: выгрузка заявок завершена, записано: %s", written)
+    except Exception as exc:
+        logging.error("Syntony: плановая выгрузка заявок не удалась: %s", exc)
+
+
 # ── Робот «Лиды OLX» (задача #223) ───────────────────────────────────────────
 # Переносит отклики из чатов девяти кабинетов OLX в amoCRM. ТЗ требует опрос не
 # реже раза в 30 секунд и доставку лида за минуту, поэтому джоба идёт дважды в
@@ -36855,14 +36914,15 @@ async def olx_amo_poll_job():
         results.append(outcome)
 
     leads = sum(r.leads_created for r in results)
+    received = sum(r.received for r in results)
     replies = sum(r.replies_sent for r in results)
     errors = sum(r.errors for r in results)
     # В лог пишем ТОЛЬКО когда что-то произошло: джоба будит себя 2880 раз в
     # сутки, и строка «обращений нет» превратила бы лог в шум, в котором не
     # видно настоящих ошибок.
-    if leads or replies or errors:
-        logging.info("Лиды OLX: сделок %s, автоответов %s, ошибок %s",
-                     leads, replies, errors)
+    if leads or received or replies or errors:
+        logging.info("Лиды OLX: номеров без сделки %s, сделок %s, автоответов %s, ошибок %s",
+                     received, leads, replies, errors)
 
 
 async def olx_amo_retry_job():
@@ -37127,16 +37187,82 @@ def _amo_leads_journal():
     return last, failed, fresh
 
 
+def _syntony_leads_journal():
+    """Как `_amo_leads_journal`, для выгрузок Syntony."""
+    last = db.get_last_syntony_lead_sync() or {}
+    failed = last.get('status') == 'error'
+    fresh = (db.get_last_syntony_lead_sync(status='ok') or {}) if failed else last
+    return last, failed, fresh
+
+
+def _leads_data_until(amo_fresh, syntony_fresh):
+    """До какого момента выгружены ОБЕ CRM — по нему режется окно (amo_leads.clamp_windows).
+
+    Syntony, которую ни разу не выгрузили, окно не режет: её цифр нет вовсе, и об этом
+    говорит подпись отбивки, а резать amoCRM до пустоты незачем.
+    """
+    moments = [m for m in ((amo_fresh or {}).get('started_at'),
+                           (syntony_fresh or {}).get('started_at')) if m]
+    return min(moments) if moments else None
+
+
+def _olx_received_rows(start, end):
+    """Обращения OLX с номером, по которым робот больше не заводит сделку в amoCRM.
+
+    До 19.11.2026 такие обращения считались в строке OLX сделками робота с тегом кабинета
+    (forma_olx_<кабинет>). Сделки выключены по решению владельца — то же обращение теперь
+    строка журнала робота с исходом `received`, и считается оно тем же тегом.
+    """
+    try:
+        from olx_amo import cabinets as olx_amo_cabinets
+        from olx_amo import queries as olx_amo_queries
+        naive = lambda value: value.astimezone(amo_leads.TZ).replace(tzinfo=None)
+        with db._get_cursor() as cursor:
+            found = olx_amo_queries.received_between(cursor, naive(start), naive(end))
+    except Exception as exc:
+        logging.warning("Лиды: обращения OLX из журнала робота не прочитались: %s", exc)
+        return []
+    rows = []
+    for code, created_at in found:
+        cabinet = olx_amo_cabinets.BY_CODE.get(code)
+        if cabinet and created_at:
+            rows.append({'tags': cabinet.tag_form, 'utm_source': '',
+                         'created_at': created_at.replace(tzinfo=amo_leads.TZ)})
+    return rows
+
+
+def _leads_counts_between(start, end):
+    """Лиды по источникам за [start, end): amoCRM + Syntony без близнецов + журнал OLX."""
+    margin = amo_leads.TWIN_MARGIN
+    amo_rows = db.get_amo_leads_between(start - margin, end + margin)
+    syntony_rows = [amo_leads.syntony_row(lead)
+                    for lead in db.get_syntony_leads_between(start - margin, end + margin)]
+    return amo_leads.combined_counts(amo_rows, syntony_rows, start, end,
+                                     extra_rows=_olx_received_rows(start, end))
+
+
 def _amo_leads_alert_text(now=None, day=None):
     """Текст отбивки с анализом отклонений — по методике из «анализ_лидов_алерты».
 
     Без даты берём текущее окно: в полночь это прошедшие сутки, в остальные часы
     — время с начала суток до сейчас. С датой — полные указанные сутки. База в
     обоих случаях одна и та же: тот же отрезок ровно неделю назад.
+
+    Цифры — из обеих CRM, amoCRM и Syntony (лиды переехали туда в ноябре 2026), плюс
+    обращения OLX из журнала робота: см. `_leads_counts_between`.
     """
     asked = amo_leads.day_windows(day) if day else amo_leads.alert_windows(now)
+    syntony_on = syntony_leads_client.is_configured()
+    if syntony_on:
+        # Дёшево (изменённое с прошлого раза — одна-две страницы), поэтому перед каждым
+        # ответом; чаще раза в две минуты не ходит сама выгрузка.
+        try:
+            syntony_leads_sync()
+        except Exception as exc:
+            logging.warning("Лиды: выгрузка Syntony перед ответом не удалась: %s", exc)
+    s_last, s_failed, s_fresh = _syntony_leads_journal()
     last, failed, fresh = _amo_leads_journal()
-    windows = amo_leads.clamp_windows(asked, fresh.get('started_at'))
+    windows = amo_leads.clamp_windows(asked, _leads_data_until(fresh, s_fresh))
     current = db.get_amo_leads_between(windows["current_start"], windows["current_end"])
 
     # Досинк перед ответом нужен в двух случаях: данных за окно нет вовсе (первый
@@ -37165,16 +37291,21 @@ def _amo_leads_alert_text(now=None, day=None):
             logging.warning("Лиды: досинк перед ответом не удался: %s", exc)
         else:
             last, failed, fresh = _amo_leads_journal()
-            windows = amo_leads.clamp_windows(asked, fresh.get('started_at'))
-        current = db.get_amo_leads_between(
-            windows["current_start"], windows["current_end"])
+            windows = amo_leads.clamp_windows(asked, _leads_data_until(fresh, s_fresh))
 
-    base = db.get_amo_leads_between(windows["base_start"], windows["base_end"])
     rows = amo_leads.analyze(
-        amo_leads.count_by_source(current),
-        amo_leads.count_by_source(base),
+        _leads_counts_between(windows["current_start"], windows["current_end"]),
+        _leads_counts_between(windows["base_start"], windows["base_end"]),
         period=amo_leads.PERIOD_12H,
     )
+    more_sources = None
+    if syntony_on or s_last:
+        more_sources = [{
+            'name': 'Syntony',
+            'synced_at': s_fresh.get('finished_at'),
+            'error': s_last.get('error') if s_failed else None,
+            'failed_at': s_last.get('finished_at') if s_failed else None,
+        }]
     return amo_leads.render_alert_report(
         rows,
         window_label=windows["window_label"],
@@ -37182,6 +37313,7 @@ def _amo_leads_alert_text(now=None, day=None):
         synced_at=fresh.get('finished_at'),
         sync_error=last.get('error') if failed else None,
         failed_at=last.get('finished_at') if failed else None,
+        more_sources=more_sources,
     )
 
 
@@ -60058,6 +60190,24 @@ if __name__ == '__main__':
         logging.warning(
             "⏰ Лиды amoCRM выключены: не заданы AMO_ACCESS_TOKEN "
             "или AMO_CRM_LOGIN / AMO_CRM_PASSWORD")
+
+    # Заявки Syntony для той же отбивки: раз в 3 часа (в :20 — не вместе с amoCRM в :10,
+    # обе идут в общем пуле бота), раз в сутки — полное окно. Отбивка и /leads сверх того
+    # догружают изменённое сами, перед ответом. Первый раз — через 3 минуты после старта, когда
+    # схлынет выкладка: пустая таблица после первого запуска не должна ждать до :20.
+    if syntony_leads_client.is_configured():
+        scheduler.add_job(
+            syntony_leads_sync_job,
+            CronTrigger(hour='*/3', minute=20, timezone=amo_leads.TZ),
+            id='syntony_leads_sync',
+            next_run_time=datetime.now(amo_leads.TZ) + timedelta(minutes=3),
+            misfire_grace_time=1800,
+            max_instances=1,
+            coalesce=True
+        )
+        logging.info("⏰ Заявки Syntony: выгрузка каждые 3 часа")
+    else:
+        logging.warning("⏰ Заявки Syntony в отбивке лидов выключены: не задан SYNTONY_LEADS_API_KEY")
 
     # ── Робот «Лиды OLX» (задача #223) ───────────────────────────────────
     # Дважды в минуту: ТЗ требует опрашивать чаты не реже раза в 30 секунд и

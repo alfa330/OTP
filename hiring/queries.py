@@ -994,7 +994,8 @@ def olx_tables_exist(cursor):
 
 def olx_responses_since(cursor, last_journal_id, cabinets, limit=200):
     """Обращения робота OLX с номером из кабинетов «для найма»: журнал после закладки, с именем и
-    объявлением чата. Кабинеты лидов (таксопарки) сюда не попадают — список задаёт руководитель."""
+    объявлением чата. Кабинеты лидов (таксопарки) сюда не попадают — список задаёт руководитель.
+    `received` — номер, принятый без сделки в amoCRM (сделки робота выключены с 19.11.2026)."""
     codes = [str(code) for code in (cabinets or ()) if code]
     if not codes:
         return []
@@ -1004,7 +1005,7 @@ def olx_responses_since(cursor, last_journal_id, cabinets, limit=200):
           FROM olx_journal j
           LEFT JOIN olx_threads t ON t.cabinet_code = j.cabinet_code AND t.thread_id = j.thread_id
          WHERE j.id > %s AND j.phone_normalized IS NOT NULL AND j.cabinet_code = ANY(%s)
-           AND j.result IN ('lead_created', 'manual_review', 'duplicate')
+           AND j.result IN ('lead_created', 'manual_review', 'duplicate', 'received')
          ORDER BY j.id LIMIT %s
     """, (int(last_journal_id or 0), codes, int(limit)))
     return _all(cursor)

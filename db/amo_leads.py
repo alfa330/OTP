@@ -78,15 +78,95 @@ class AmoLeadsMixin:
         """Сделки, созданные в интервале [start, end). Нужно для окон 6ч/12ч.
 
         Границы — по created_at, а не по created_date: дневная проверка в 12:00
-        сравнивает половину суток с той же половиной суток неделю назад.
+        сравнивает половину суток с той же половиной суток неделю назад. Время и
+        кампания нужны склейке с заявками Syntony (amocrm.leads.drop_twins).
         """
         with self._get_cursor() as cursor:
             cursor.execute("""
-                SELECT tags, utm_source
+                SELECT created_at, tags, utm_source, utm_campaign
                 FROM amo_leads
                 WHERE created_at >= %s AND created_at < %s
             """, (start, end))
-            return [{"tags": r[0], "utm_source": r[1]} for r in cursor.fetchall()]
+            return [{"created_at": r[0], "tags": r[1], "utm_source": r[2],
+                     "utm_campaign": r[3]} for r in cursor.fetchall()]
+
+    # --- Заявки Syntony (та же отбивка «Лиды по источникам») -------------------
+
+    _SYNTONY_LEAD_COLUMNS = (
+        "lead_id", "created_at", "updated_at", "park", "pipeline_kind", "source",
+        "created_by_channel", "created_by", "tags", "utm_source", "utm_medium",
+        "utm_campaign", "form_name", "stage_type",
+    )
+
+    def upsert_syntony_leads(self, rows):
+        """Записать заявки Syntony (syntony_leads.client.map_leads). Ключ — lead_id.
+
+        Неизменившуюся заявку не переписываем — по той же причине, что и сделки
+        amoCRM: холостые UPDATE раздувают WAL.
+        """
+        columns = self._SYNTONY_LEAD_COLUMNS
+        payload = [tuple(r.get(c) for c in columns) for r in rows or [] if r.get("lead_id")]
+        if not payload:
+            return 0
+        updated = [c for c in columns if c != "lead_id"]
+        with self._get_cursor() as cursor:
+            execute_values(cursor, """
+                INSERT INTO syntony_leads (%s) VALUES %%s
+                ON CONFLICT (lead_id) DO UPDATE SET %s, synced_at = NOW()
+                WHERE (%s) IS DISTINCT FROM (%s)
+            """ % (
+                ", ".join(columns),
+                ", ".join("%s = EXCLUDED.%s" % (c, c) for c in updated),
+                ", ".join("syntony_leads.%s" % c for c in updated),
+                ", ".join("EXCLUDED.%s" % c for c in updated),
+            ), payload, page_size=500)
+        return len(payload)
+
+    def get_syntony_leads_between(self, start, end):
+        """Заявки Syntony, созданные в [start, end) — для подсчёта и склейки."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT created_at, tags, utm_source, utm_campaign, source
+                FROM syntony_leads
+                WHERE created_at >= %s AND created_at < %s
+            """, (start, end))
+            return [{"created_at": r[0], "tags": r[1], "utm_source": r[2],
+                     "utm_campaign": r[3], "source": r[4]} for r in cursor.fetchall()]
+
+    def start_syntony_lead_sync(self, mode):
+        with self._get_cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO syntony_lead_syncs (mode) VALUES (%s) RETURNING id", (mode,))
+            return cursor.fetchone()[0]
+
+    def finish_syntony_lead_sync(self, sync_id, leads_fetched=None, error=None):
+        if not sync_id:
+            return
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                UPDATE syntony_lead_syncs
+                SET finished_at = NOW(), status = %s, leads_fetched = %s, error = %s
+                WHERE id = %s
+            """, ("error" if error else "ok", leads_fetched, error, sync_id))
+
+    def get_last_syntony_lead_sync(self, status=None, mode=None, finished=True):
+        """Последняя выгрузка Syntony. `finished=False` — последняя ПОПЫТКА, в том
+        числе идущая: по ней решают, не рано ли запускать следующую."""
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT id, started_at, finished_at, status, mode, leads_fetched, error
+                FROM syntony_lead_syncs
+                WHERE (NOT %s OR finished_at IS NOT NULL)
+                  AND (%s IS NULL OR status = %s)
+                  AND (%s IS NULL OR mode = %s)
+                ORDER BY started_at DESC
+                LIMIT 1
+            """, (bool(finished), status, status, mode, mode))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            keys = ("id", "started_at", "finished_at", "status", "mode", "leads_fetched", "error")
+            return dict(zip(keys, row))
 
     def start_amo_lead_sync(self, days):
         with self._get_cursor() as cursor:

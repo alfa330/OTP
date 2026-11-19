@@ -12,6 +12,8 @@
  * кроме служебного `skipped`. */
 export const RESULTS = [
     { value: '', label: 'Все исходы' },
+    /* С 19.11.2026 сделки в amoCRM робот не заводит: номер — строка журнала без сделки. */
+    { value: 'received', label: 'Номер получен' },
     { value: 'lead_created', label: 'Сделка создана' },
     { value: 'canned_reply', label: 'Отправлен ответ' },
     { value: 'human_reply', label: 'Ответил сотрудник' },
@@ -34,6 +36,7 @@ export const RESULT_TONE = {
     manual_review: 'amber',
     needs_human: 'blue',
     lead_created: 'green',
+    received: 'green',
 };
 
 export const STATE_LABEL = {
@@ -56,6 +59,7 @@ export const STATE_TONE = {
  * должна спорить с самими сообщениями за внимание. Красим только то, что
  * требует действия или означает потерю. */
 export const EVENT_TONE = {
+    received: 'green',
     lead_created: 'green',
     manual_review: 'amber',
     needs_human: 'blue',

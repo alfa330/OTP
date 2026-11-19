@@ -916,7 +916,7 @@ const SummaryPanel = ({ apiBaseUrl, headers, toast, visible }) => {
                             <tr>
                                 <th className="px-3 py-2 font-medium">Кабинет</th>
                                 <th className="px-3 py-2 text-right font-medium">Обращений</th>
-                                <th className="px-3 py-2 text-right font-medium">Сделок</th>
+                                <th className="px-3 py-2 text-right font-medium">С номером</th>
                                 <th className="px-3 py-2 text-right font-medium">Повторов</th>
                                 <th className="px-3 py-2 text-right font-medium">На проверку</th>
                                 <th className="px-3 py-2 text-right font-medium">Автоответов</th>

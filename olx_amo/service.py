@@ -10,6 +10,12 @@
         ├─ номер писали, но кривой    → та же сделка + пометка «ручная проверка»
         └─ номера нет вовсе           → заготовленный ответ с телефоном кабинета
 
+С 19.11.2026 сделки и заготовленный ответ выключены решением владельца
+(`amo_leads_enabled`, `canned_replies_enabled`): обращения OLX ведёт Syntony по
+событиям для партнёров. Тогда номер — строка журнала `received` без сделки, а
+сообщение без номера — сразу «ждёт ответа человека». Опрос, журнал и события
+партнёрам работают как прежде.
+
 Три решения, которые стоит понимать до чтения кода
 ---------------------------------------------------
 
@@ -84,6 +90,25 @@ SLA_MS = 60 * 1000
 # минуты, посмотреть журнал и только потом отпустить.
 HORIZON = timedelta(hours=float(os.getenv('OLX_MESSAGE_HORIZON_HOURS') or 6))
 
+
+# Автоответ и сделки в amoCRM выключены решением владельца 19.11.2026: обращения OLX ведёт
+# Syntony — она заводит заявку на каждый чат из событий для партнёров (partner_events) и
+# отвечает кандидату сама. Робот продолжает опрашивать кабинеты, вести журнал и слать
+# события: без них заявки OLX в Syntony перестанут появляться. Вернуть любое из двух —
+# переменная окружения со значением 1.
+def _env_flag(name):
+    return (os.getenv(name) or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def canned_replies_enabled():
+    """Отвечать ли кандидату без номера заготовкой с телефоном кабинета."""
+    return _env_flag('OLX_CANNED_REPLY_ENABLED')
+
+
+def amo_leads_enabled():
+    """Заводить ли сделку в amoCRM по обращению с номером."""
+    return _env_flag('OLX_AMO_LEADS_ENABLED')
+
 # Смещение Алматы от UTC. Время в журнале хранится этим сдвигом (см. queries.py),
 # а amoCRM отдаёт unix-время — единственное место, где они встречаются, это
 # проверка повтора `_lead_already_there`.
@@ -94,13 +119,16 @@ class CabinetResult(object):
     """Итог опроса одного кабинета. Складывается в olx_poll_runs и в лог."""
 
     __slots__ = ('code', 'threads_seen', 'messages_seen', 'leads_created',
-                 'replies_sent', 'errors', 'error_text', 'skipped')
+                 'received', 'replies_sent', 'errors', 'error_text', 'skipped')
 
     def __init__(self, code):
         self.code = code
         self.threads_seen = 0
         self.messages_seen = 0
         self.leads_created = 0
+        # Обращения с номером, принятые без сделки (сделки выключены, см.
+        # `amo_leads_enabled`).
+        self.received = 0
         self.replies_sent = 0
         self.errors = 0
         self.error_text = None
@@ -110,6 +138,7 @@ class CabinetResult(object):
         return {
             'cabinet': self.code, 'threads': self.threads_seen,
             'messages': self.messages_seen, 'leads': self.leads_created,
+            'received': self.received,
             'replies': self.replies_sent, 'errors': self.errors,
             'error': self.error_text, 'skipped': self.skipped,
         }
@@ -233,10 +262,12 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
     if phone is None and not found.rejected:
         with db._get_cursor() as cursor:
             state = queries.get_thread(cursor, cabinet.code, thread_id) or {}
-        if state.get('canned_reply_sent_at'):
+        if state.get('canned_reply_sent_at') or not canned_replies_enabled():
             # Автоответ этому человеку уже уходил, и второго робот не шлёт: ТЗ
             # запрещает повторную отправку, а другой автоматический текст
             # раздражает и читается как поломка (решение владельца 02.09.2026).
+            # С 19.11.2026 автоответ выключен вовсе (`canned_replies_enabled`) —
+            # тогда так же с первого сообщения.
             #
             # Но и молчать вникуда нельзя — человек задал живой вопрос. Помечаем
             # чат «ждёт ответа человека»: он всплывёт в разделе, и маркетолог
@@ -314,6 +345,21 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
                     phone_normalized=phone, tag=tag_name, message_excerpt=excerpt,
                     amo_lead_id=already.get('amo_lead_id'))
             return 'duplicate'
+
+    # ── сделки в amoCRM выключены (19.11.2026) → только журнал ────────────
+    # Номер получен, сделку не заводим: обращение ведёт Syntony по событию
+    # партнёру. Строка журнала остаётся — по ней «Воронка найма» берёт отклики
+    # своих кабинетов, отбивка «Лиды по источникам» считает строку OLX, а
+    # повтор того же номера за день станет `duplicate`, как и при сделках.
+    if writers.amo is None:
+        with db._get_cursor() as cursor:
+            queries.write_journal(
+                cursor, cabinet.code, 'received', thread_id=thread_id,
+                message_id=message_id, message_at=sent_at, phone_raw=raw,
+                phone_normalized=phone, tag=tag_name, message_excerpt=excerpt)
+            queries.upsert_thread(cursor, cabinet.code, thread_id, phone_normalized=phone)
+        counters.received += 1
+        return 'received'
 
     # ── создание сделки (СЕТЬ, вне транзакции) ────────────────────────────
     try:
@@ -425,7 +471,11 @@ def poll_cabinet(db, cabinet, amo_client=None):
         return result
 
     client = OlxClient(token_provider=lambda: token)
-    writers = _Writers(client, AmoWriter(amo_client or amo_client_for_thread()))
+    # Без сделок клиента amoCRM не заводим вовсе: его конструктор входит в amoCRM
+    # по логину и паролю, а ходить туда роботу больше незачем.
+    amo_writer = (AmoWriter(amo_client or amo_client_for_thread())
+                  if amo_leads_enabled() else None)
+    writers = _Writers(client, amo_writer)
 
     with db._get_cursor() as cursor:
         run_id = queries.start_poll_run(cursor, cabinet.code)
@@ -494,7 +544,7 @@ def poll_cabinet(db, cabinet, amo_client=None):
             error_text=result.error_text)
         queries.mark_polled(cursor, cabinet.code,
                             saw_message=bool(result.messages_seen),
-                            made_lead=bool(result.leads_created))
+                            made_lead=bool(result.leads_created or result.received))
         if not result.errors:
             queries.set_account_state(cursor, cabinet.code, 'ok')
     return result
@@ -698,9 +748,11 @@ def _text(value):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def is_enabled():
-    """Есть ли хоть один кабинет, которым можно ходить, и настроена ли amoCRM."""
+    """Есть ли хоть один кабинет, которым можно ходить, и настроена ли amoCRM —
+    если сделки в ней вообще заводятся."""
     from amocrm import leads as amo_leads
-    return bool(cabinets.configured()) and amo_leads.is_configured()
+    return bool(cabinets.configured()) and (
+        not amo_leads_enabled() or amo_leads.is_configured())
 
 
 def poll_all(db, pool=None):
@@ -753,7 +805,12 @@ def retry_failed(db, limit=100):
     ТЗ: «при ошибке обращение должно повторно ставиться в очередь на отправку, а
     не удаляться». Очередь — это строки журнала с `result='error'`; повтор
     переводит их в нормальный исход и увеличивает счётчик попыток.
+
+    Пока сделки в amoCRM выключены (`amo_leads_enabled`), повторять нечего:
+    старые ошибки сделок не заводят — обращения ведёт Syntony.
     """
+    if not amo_leads_enabled():
+        return {'retried': 0, 'recovered': 0}
     with db._get_cursor() as cursor:
         pending = queries.pending_retries(cursor, limit=limit)
     if not pending:
@@ -1028,6 +1085,7 @@ def read_conversation(db, cabinet, thread_id):
 # уже стоят в ленте пузырями, и отметка «отправлен ответ» рядом с ним была бы
 # той же информацией дважды.
 _EVENT_LABELS = {
+    'received': 'Номер получен',
     'lead_created': 'Создана сделка',
     'manual_review': 'Создана сделка, номер требует проверки',
     'duplicate': 'Повтор за сутки — сделку не заводили',

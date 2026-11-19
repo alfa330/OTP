@@ -317,6 +317,7 @@ def build_olx_amo_blueprint(*, db, require_api_key, build_cors_preflight_respons
         sheet.freeze_panes(1, 0)
 
         labels = {
+            'received': 'Номер получен',
             'lead_created': 'Сделка создана', 'duplicate': 'Повтор за день',
             'manual_review': 'Нужна проверка', 'canned_reply': 'Отправлен ответ',
             'skipped': 'Пропущено', 'error': 'Ошибка',

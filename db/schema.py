@@ -6664,6 +6664,45 @@ class SchemaMixin:
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_sent_at  TIMESTAMPTZ
             );
+
+            -- Заявки CRM Syntony для той же отбивки (19.11.2026: лиды переехали туда
+            -- из amoCRM). Только то, по чему отбивка считает и склеивает с amoCRM:
+            -- без имени и телефона, без заявок, у которых нет ни тега, ни метки
+            -- (syntony_leads/client.py). id — GUID заявки в Syntony.
+            CREATE TABLE IF NOT EXISTS syntony_leads (
+                lead_id            TEXT PRIMARY KEY,
+                created_at         TIMESTAMPTZ NOT NULL,
+                updated_at         TIMESTAMPTZ,
+                park               TEXT,
+                pipeline_kind      TEXT,
+                source             TEXT,
+                created_by_channel TEXT,
+                created_by         TEXT,
+                tags               TEXT,
+                utm_source         TEXT,
+                utm_medium         TEXT,
+                utm_campaign       TEXT,
+                form_name          TEXT,
+                stage_type         TEXT,
+                synced_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_syntony_leads_created_at
+                ON syntony_leads(created_at);
+
+            -- Журнал выгрузок Syntony — как amo_lead_syncs: возраст цифр и сбой
+            -- видны в отбивке. mode: full — окно по дате создания, updated —
+            -- изменённое с прошлой удачной выгрузки.
+            CREATE TABLE IF NOT EXISTS syntony_lead_syncs (
+                id            BIGSERIAL PRIMARY KEY,
+                started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                finished_at   TIMESTAMPTZ,
+                status        TEXT NOT NULL DEFAULT 'running',
+                mode          TEXT,
+                leads_fetched INTEGER,
+                error         TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_syntony_lead_syncs_started
+                ON syntony_lead_syncs(started_at DESC);
         """)
 
     def _init_chat_hourly_schema_tx(self, cursor):
