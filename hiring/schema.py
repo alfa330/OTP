@@ -440,6 +440,87 @@ _STATEMENTS = [
     # или руководитель; рекрутер видит свободные места при приглашении, в полную группу не пригласить.
     # NULL — у групп, заведённых до 18.11.2026: ограничения нет, пока вместимость не укажут.
     "ALTER TABLE hiring_groups ADD COLUMN IF NOT EXISTS capacity INTEGER",
+
+    # Переписка из портала (владелец 19.11.2026: окно «Чаты» как в «Чатах ОП», hiring/wa_chat.py). У сообщения —
+    # автор (кто ответил из портала; у ответов с телефона его нет), отметка доставки наших сообщений и цитата.
+    "ALTER TABLE hiring_wa_messages ADD COLUMN IF NOT EXISTS author_id INTEGER",
+    "ALTER TABLE hiring_wa_messages ADD COLUMN IF NOT EXISTS author_name VARCHAR(200)",
+    "ALTER TABLE hiring_wa_messages ADD COLUMN IF NOT EXISTS status VARCHAR(16)",
+    "ALTER TABLE hiring_wa_messages ADD COLUMN IF NOT EXISTS quote_wa_id VARCHAR(128)",
+    # «Ждут ответа» у чата — счётчик, а не подзапрос на строку списка: сколько сообщений кандидата пришло после
+    # нашего последнего ответа (автоответ WhatsApp Business не в счёт) и с какого момента ждёт. «Ответ не нужен»
+    # гасит счётчик (handled_*). NULL — чат до этой правки: досчитывается один раз ниже.
+    "ALTER TABLE hiring_wa_chats ADD COLUMN IF NOT EXISTS waiting INTEGER",
+    "ALTER TABLE hiring_wa_chats ADD COLUMN IF NOT EXISTS waiting_since TIMESTAMP",
+    "ALTER TABLE hiring_wa_chats ADD COLUMN IF NOT EXISTS last_outbound_at TIMESTAMP",
+    "ALTER TABLE hiring_wa_chats ADD COLUMN IF NOT EXISTS handled_at TIMESTAMP",
+    "ALTER TABLE hiring_wa_chats ADD COLUMN IF NOT EXISTS handled_by INTEGER",
+    """
+    WITH outs AS (
+        SELECT m.chat_key, MAX(m.sent_at) AS last_out FROM hiring_wa_messages m
+         WHERE m.from_me AND m.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM hiring_wa_messages i
+                            WHERE i.chat_key = m.chat_key AND NOT i.from_me
+                              AND i.sent_at <= m.sent_at AND i.sent_at > m.sent_at - interval '15 seconds')
+         GROUP BY m.chat_key
+    ), ins AS (
+        SELECT m.chat_key, COUNT(*) AS n, MIN(m.sent_at) AS since FROM hiring_wa_messages m
+          LEFT JOIN outs o ON o.chat_key = m.chat_key
+         WHERE NOT m.from_me AND m.deleted_at IS NULL AND (o.last_out IS NULL OR m.sent_at > o.last_out)
+         GROUP BY m.chat_key
+    )
+    UPDATE hiring_wa_chats w
+       SET last_outbound_at = o.last_out, waiting = COALESCE(i.n, 0), waiting_since = i.since
+      FROM hiring_wa_chats w2
+      LEFT JOIN outs o ON o.chat_key = w2.key
+      LEFT JOIN ins i ON i.chat_key = w2.key
+     WHERE w.key = w2.key AND w.waiting IS NULL
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_card ON hiring_wa_chats (card_id) WHERE card_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_chats_last ON hiring_wa_chats (last_at DESC)",
+    # Очередь отправки: сообщение из окна «Чаты» ждёт, пока сервис шлюза заберёт его в ответе на опрос. client_id —
+    # повтор нажатия «Отправить» (обрыв сети) не даёт второго сообщения. media — файл в бакете (object, mime, имя).
+    """
+    CREATE TABLE IF NOT EXISTS hiring_wa_outbox (
+        id               BIGSERIAL PRIMARY KEY,
+        client_id        VARCHAR(64),
+        chat_key         VARCHAR(48) NOT NULL,
+        card_id          INTEGER,
+        author_id        INTEGER NOT NULL,
+        author_name      VARCHAR(200),
+        kind             VARCHAR(16) NOT NULL DEFAULT 'text',
+        body             TEXT,
+        quote_wa_id      VARCHAR(128),
+        media            JSONB,
+        status           VARCHAR(16) NOT NULL,
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        handed_at        TIMESTAMP,
+        wa_id            VARCHAR(128),
+        error            TEXT,
+        created_at       TIMESTAMP NOT NULL,
+        sent_at          TIMESTAMP,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_hiring_wa_outbox_client ON hiring_wa_outbox (author_id, client_id) WHERE client_id IS NOT NULL",
+    # Причина отказа, о котором сообщил шлюз (он этот номер закрыл: «Повторить» — новой строкой); отказы, которые
+    # ставит сам портал (просрочка, «не подтверждено»), — без неё.
+    "ALTER TABLE hiring_wa_outbox ADD COLUMN IF NOT EXISTS fail_reason VARCHAR(32)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_outbox_due ON hiring_wa_outbox (id) WHERE status IN ('queued', 'handed')",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_wa_outbox_chat ON hiring_wa_outbox (chat_key, id)",
+    # Шаблоны ответов команды найма — общие (рекрутеры пишут одни и те же приглашения и описания вакансий).
+    """
+    CREATE TABLE IF NOT EXISTS hiring_wa_templates (
+        id               SERIAL PRIMARY KEY,
+        title            VARCHAR(80) NOT NULL,
+        body             TEXT NOT NULL,
+        is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by       INTEGER,
+        created_by_name  VARCHAR(200),
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL
+    )
+    """,
 ]
 
 

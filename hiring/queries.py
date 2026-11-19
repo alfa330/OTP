@@ -1232,7 +1232,8 @@ def recruiters_with_cards(cursor):
 
 # ─── Номер WhatsApp найма (сервис на шлюзе, hiring/whatsapp.py) ───────────────
 
-_WA_CHAT_COLUMNS = "key, jid, phone, lid, push_name, card_id, first_at, last_at, last_inbound_at, messages"
+_WA_CHAT_COLUMNS = ("key, jid, phone, lid, push_name, card_id, first_at, last_at, last_inbound_at, messages, "
+                    "COALESCE(waiting, 0) AS waiting, waiting_since, last_outbound_at, handled_at")
 
 
 def wa_get_chat(cursor, key, lock=False):
@@ -1267,8 +1268,8 @@ def wa_touch_chat(cursor, key, jid, phone, lid, push_name, at, inbound, now):
     в исходящем «имя отправителя» — наше собственное."""
     cursor.execute("""
         INSERT INTO hiring_wa_chats (key, jid, phone, lid, push_name, first_at, last_at, last_inbound_at,
-                                     messages, created_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s)
+                                     messages, created_at, updated_at, waiting)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, %s, %s, 0)
         ON CONFLICT (key) DO UPDATE SET
             jid = EXCLUDED.jid,
             phone = COALESCE(EXCLUDED.phone, hiring_wa_chats.phone),
@@ -1301,11 +1302,14 @@ def wa_move_chat(cursor, old_key, new_key, now):
             push_name = COALESCE(n.push_name, o.push_name),
             lid = COALESCE(n.lid, o.lid),
             messages = (SELECT COUNT(*) FROM hiring_wa_messages WHERE chat_key = n.key),
+            last_outbound_at = GREATEST(n.last_outbound_at, o.last_outbound_at),
+            handled_at = GREATEST(n.handled_at, o.handled_at),
             updated_at = %s
           FROM hiring_wa_chats o
          WHERE n.key = %s AND o.key = %s
     """, (now, new_key, old_key))
     cursor.execute("DELETE FROM hiring_wa_chats WHERE key = %s", (old_key,))
+    wa_recount_waiting(cursor, new_key)
 
 
 def wa_set_chat_card(cursor, key, card_id, now):
@@ -1478,7 +1482,8 @@ def wa_messages(cursor, keys, limit=400):
     if not keys:
         return []
     cursor.execute("""
-        SELECT id, chat_key, wa_id, from_me, sent_at, kind, body, media, ad, edited_at, deleted_at FROM (
+        SELECT id, chat_key, wa_id, from_me, sent_at, kind, body, media, ad, edited_at, deleted_at, author_name, status,
+               quote_wa_id FROM (
             SELECT * FROM hiring_wa_messages WHERE chat_key = ANY(%s) ORDER BY sent_at DESC, id DESC LIMIT %s
         ) recent ORDER BY sent_at, id
     """, (list(keys), int(limit)))
@@ -1591,7 +1596,7 @@ def wa_phone_replies(cursor):
           FROM hiring_wa_messages m
           JOIN hiring_wa_chats w ON w.key = m.chat_key AND w.card_id IS NOT NULL
           JOIN hiring_cards c ON c.id = w.card_id AND NOT c.is_closed
-         WHERE m.from_me AND m.deleted_at IS NULL
+         WHERE m.from_me AND m.deleted_at IS NULL AND m.author_id IS NULL
          ORDER BY m.sent_at, m.id
     """)
     return _all(cursor)
@@ -1608,3 +1613,378 @@ def wa_save_state(cursor, state, detail, error, now, *, heartbeat=True, ok=False
          WHERE code = 'whatsapp'
     """, (state, json.dumps(detail or {}, ensure_ascii=False, default=str), error,
           bool(heartbeat), now, bool(ok), now, now))
+
+
+# ─── Переписка из портала: окно «Чаты» (hiring/wa_chat.py) ──────────────────────
+
+def wa_recount_waiting(cursor, key):
+    """«Ждут ответа» у чата заново по переписке: сообщения кандидата после нашего последнего ответа и после
+    «Ответ не нужен». Пересчёт, а не +1: события шлюза приходят не по порядку (досылка после простоя)."""
+    cursor.execute("""
+        UPDATE hiring_wa_chats w
+           SET waiting = s.n, waiting_since = s.since
+          FROM (
+              SELECT COUNT(*) AS n, MIN(m.sent_at) AS since
+                FROM hiring_wa_messages m, hiring_wa_chats c
+               WHERE c.key = %(key)s AND m.chat_key = c.key AND NOT m.from_me AND m.deleted_at IS NULL
+                 AND m.sent_at > GREATEST(COALESCE(c.last_outbound_at, '-infinity'::timestamp),
+                                          COALESCE(c.handled_at, '-infinity'::timestamp))
+          ) s
+         WHERE w.key = %(key)s
+    """, {'key': key})
+
+
+def wa_mark_outbound(cursor, key, at):
+    """Наш ответ в чате (с телефона или из портала): сообщения кандидата до него ответа больше не ждут."""
+    cursor.execute("""
+        UPDATE hiring_wa_chats SET last_outbound_at = GREATEST(COALESCE(last_outbound_at, %(at)s), %(at)s)
+         WHERE key = %(key)s
+    """, {'key': key, 'at': at})
+    wa_recount_waiting(cursor, key)
+
+
+def wa_mark_handled(cursor, key, user_id, now):
+    """«Ответ не нужен»: всё, что кандидат написал до сих пор (по времени сообщений), ответа не ждёт; новое —
+    и дошедшее позже, но написанное после, — снова ждёт."""
+    cursor.execute("""
+        UPDATE hiring_wa_chats
+           SET handled_at = GREATEST(last_inbound_at, handled_at), handled_by = %(user)s, updated_at = %(now)s
+         WHERE key = %(key)s
+    """, {'key': key, 'user': int(user_id), 'now': now})
+    wa_recount_waiting(cursor, key)
+
+
+def wa_recount_outbound(cursor, key, auto_gap):
+    """Наш последний ответ заново по переписке — после удаления «у всех» нашего сообщения чат снова ждёт ответа."""
+    cursor.execute("""
+        UPDATE hiring_wa_chats w SET last_outbound_at = (
+            SELECT MAX(m.sent_at) FROM hiring_wa_messages m
+             WHERE m.chat_key = w.key AND m.from_me AND m.deleted_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM hiring_wa_messages i
+                                WHERE i.chat_key = m.chat_key AND NOT i.from_me
+                                  AND i.sent_at <= m.sent_at AND i.sent_at > m.sent_at - %s))
+         WHERE w.key = %s
+    """, (auto_gap, key))
+    wa_recount_waiting(cursor, key)
+
+
+def wa_recount_recent(cursor, since):
+    """Сторож: «ждут ответа» заново у чатов, менявшихся с since — лечит сообщения, которые принял прежний процесс в
+    окне выкладки (он счётчик не вёл)."""
+    cursor.execute("SELECT key FROM hiring_wa_chats WHERE updated_at >= %s ORDER BY updated_at DESC LIMIT 500", (since,))
+    keys = [row[0] for row in cursor.fetchall()]
+    for key in keys:
+        wa_recount_waiting(cursor, key)
+    return len(keys)
+
+
+def wa_chat_by_card(cursor, card_id, lock=False):
+    """Чат карточки (адрес 'card:<id>' — для того, кому номер не виден): последний по переписке."""
+    cursor.execute("SELECT " + _WA_CHAT_COLUMNS + " FROM hiring_wa_chats WHERE card_id = %s ORDER BY last_at DESC LIMIT 1"
+                   + (" FOR UPDATE" if lock else ""), (int(card_id),))
+    return _one(cursor)
+
+
+_CHAT_LIST_FROM = """
+      FROM hiring_wa_chats w
+      LEFT JOIN hiring_cards c ON c.id = w.card_id
+      LEFT JOIN hiring_vacancies v ON v.id = c.vacancy_id
+      LEFT JOIN hiring_groups g ON g.id = c.group_id
+      LEFT JOIN users r ON r.id = c.recruiter_id
+"""
+
+
+def _like(text):
+    return '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+
+
+def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_only, search, phone_own_only=False):
+    """Чаты, куда кандидат писал сам, в пределах видимости карточек (queries.scope_clause); чаты без карточки
+    (иностранный номер, скрытый) — только руководителю."""
+    where = ["w.last_inbound_at IS NOT NULL",
+             "((c.id IS NOT NULL AND %s)%s)" % (scope_sql, " OR c.id IS NULL" if lead else "")]
+    params = list(scope_params)
+    if mode == 'mine':
+        where.append("c.recruiter_id = %s")
+        params.append(int(user_id))
+    elif mode == 'pool':
+        where.append("c.stage IN ('contacts', 'responses') AND NOT c.is_closed")
+    if waiting_only:
+        where.append("COALESCE(w.waiting, 0) > 0")
+    text = ' '.join(str(search or '').split())[:80]
+    if text:
+        digits = ''.join(ch for ch in text if ch.isdigit())
+        parts = ["c.full_name ILIKE %s", "w.push_name ILIKE %s"]
+        params.extend([_like(text), _like(text)])
+        if len(digits) >= 4:
+            if phone_own_only:
+                parts.append("(regexp_replace(COALESCE(w.phone, ''), '[^0-9]', '', 'g') LIKE %s AND c.recruiter_id = %s)")
+                params.extend(['%' + digits + '%', int(user_id)])
+            else:
+                parts.append("regexp_replace(COALESCE(w.phone, ''), '[^0-9]', '', 'g') LIKE %s")
+                params.append('%' + digits + '%')
+        if digits and digits == text and len(digits) <= 9:
+            parts.append("c.candidate_no = %s")
+            params.append(int(digits))
+        where.append("(" + " OR ".join(parts) + ")")
+    return " AND ".join(where), params
+
+
+def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', waiting_only=False, search='',
+                 limit=50, offset=0, phone_own_only=False):
+    """Страница списка чатов: ждущие ответа сверху (дольше всех ждущий — первым), дальше — по последнему
+    сообщению, как в «Чатах ОП». Последнее сообщение — только у строк страницы (LATERAL по индексу чата)."""
+    where, params = _chat_list_where(scope_sql, scope_params, lead=lead, user_id=user_id, mode=mode,
+                                     waiting_only=waiting_only, search=search, phone_own_only=phone_own_only)
+    cursor.execute("""
+        WITH page AS (
+            SELECT w.key, w.jid, w.phone, w.push_name, w.card_id, w.last_at, w.last_inbound_at,
+                   COALESCE(w.waiting, 0) AS waiting, w.waiting_since, c.full_name, c.stage, c.substage,
+                   c.recruiter_id, r.name AS recruiter_name, c.is_closed, c.candidate_no
+            """ + _CHAT_LIST_FROM + """
+             WHERE """ + where + """
+             ORDER BY (COALESCE(w.waiting, 0) > 0) DESC,
+                      CASE WHEN COALESCE(w.waiting, 0) > 0 THEN w.waiting_since END ASC NULLS LAST,
+                      w.last_at DESC, w.key
+             LIMIT %s OFFSET %s
+        )
+        SELECT p.*, lm.from_me AS last_from_me, lm.kind AS last_kind, lm.body AS last_body, lm.status AS last_status,
+               lm.deleted_at IS NOT NULL AS last_deleted, lm.author_name AS last_author
+          FROM page p
+          LEFT JOIN LATERAL (
+              SELECT from_me, kind, body, status, deleted_at, author_name FROM hiring_wa_messages m
+               WHERE m.chat_key = p.key ORDER BY m.sent_at DESC, m.id DESC LIMIT 1
+          ) lm ON TRUE
+         ORDER BY (p.waiting > 0) DESC, CASE WHEN p.waiting > 0 THEN p.waiting_since END ASC NULLS LAST,
+                  p.last_at DESC, p.key
+    """, params + [int(limit), int(offset)])
+    return _all(cursor)
+
+
+def wa_chat_totals(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', search='', phone_own_only=False):
+    """Сколько чатов в выборке и сколько из них ждут ответа (счётчик «Ждут ответа» и вкладки)."""
+    where, params = _chat_list_where(scope_sql, scope_params, lead=lead, user_id=user_id, mode=mode,
+                                     waiting_only=False, search=search, phone_own_only=phone_own_only)
+    cursor.execute("SELECT COUNT(*), COUNT(*) FILTER (WHERE COALESCE(w.waiting, 0) > 0), "
+                   "COALESCE(SUM(COALESCE(w.waiting, 0)), 0) " + _CHAT_LIST_FROM + " WHERE " + where, params)
+    total, waiting_chats, waiting_messages = cursor.fetchone()
+    return {'total': int(total or 0), 'waiting_chats': int(waiting_chats or 0),
+            'waiting_messages': int(waiting_messages or 0)}
+
+
+_THREAD_COLUMNS = ("id, chat_key, wa_id, from_me, sent_at, kind, body, media, ad, edited_at, deleted_at, author_id, "
+                   "author_name, status, quote_wa_id")
+
+
+def wa_thread(cursor, key, *, before_id=None, after_id=None, limit=60):
+    """Лента чата, старые сверху: последние limit сообщений (на одно больше — признак «есть раньше»); before_id —
+    страница раньше; after_id — новое после него (опрос открытого чата)."""
+    if after_id:
+        cursor.execute("SELECT " + _THREAD_COLUMNS + " FROM hiring_wa_messages WHERE chat_key = %s AND id > %s "
+                       "ORDER BY sent_at, id LIMIT %s", (key, int(after_id), int(limit) * 4))
+    elif before_id:
+        cursor.execute("SELECT " + _THREAD_COLUMNS + " FROM (SELECT * FROM hiring_wa_messages WHERE chat_key = %s "
+                       "AND (sent_at, id) < (SELECT sent_at, id FROM hiring_wa_messages WHERE id = %s) "
+                       "ORDER BY sent_at DESC, id DESC LIMIT %s) recent ORDER BY sent_at, id",
+                       (key, int(before_id), int(limit) + 1))
+    else:
+        cursor.execute("SELECT " + _THREAD_COLUMNS + " FROM (SELECT * FROM hiring_wa_messages WHERE chat_key = %s "
+                       "ORDER BY sent_at DESC, id DESC LIMIT %s) recent ORDER BY sent_at, id", (key, int(limit) + 1))
+    rows = _all(cursor)
+    for row in rows:
+        _parse_json_fields(row, 'media', 'ad')
+    return rows
+
+
+def wa_messages_by_wa_ids(cursor, key, wa_ids):
+    """Сообщения чата по id WhatsApp — цитаты ответов, которых нет на загруженной странице."""
+    ids = [wa_id for wa_id in dict.fromkeys(wa_ids or ()) if wa_id]
+    if not ids:
+        return []
+    cursor.execute("SELECT wa_id, from_me, kind, body, author_name, deleted_at IS NOT NULL AS deleted "
+                   "FROM hiring_wa_messages WHERE chat_key = %s AND wa_id = ANY(%s)", (key, ids))
+    return _all(cursor)
+
+
+_OUTBOX_COLUMNS = ("id, client_id, chat_key, card_id, author_id, author_name, kind, body, quote_wa_id, media, status, "
+                   "attempts, handed_at, wa_id, error, created_at, sent_at, updated_at, fail_reason")
+
+
+def wa_outbox_insert(cursor, fields):
+    """Сообщение в очередь отправки. Повтор того же client_id того же автора — та же строка, второй нет."""
+    params = dict(fields)
+    params['media'] = json.dumps(fields['media'], ensure_ascii=False) if fields.get('media') else None
+    cursor.execute("""
+        INSERT INTO hiring_wa_outbox (client_id, chat_key, card_id, author_id, author_name, kind, body, quote_wa_id,
+                                      media, status, created_at, updated_at)
+        VALUES (%(client_id)s, %(chat_key)s, %(card_id)s, %(author_id)s, %(author_name)s, %(kind)s, %(body)s,
+                %(quote_wa_id)s, %(media)s::jsonb, 'queued', %(now)s, %(now)s)
+        ON CONFLICT (author_id, client_id) WHERE client_id IS NOT NULL DO NOTHING
+        RETURNING """ + _OUTBOX_COLUMNS, params)
+    row = _one(cursor)
+    fresh = row is not None
+    if row is None and fields.get('client_id'):
+        cursor.execute("SELECT " + _OUTBOX_COLUMNS + " FROM hiring_wa_outbox WHERE author_id = %s AND client_id = %s",
+                       (int(fields['author_id']), fields['client_id']))
+        row = _one(cursor)
+    return _parse_json_fields(row, 'media'), fresh
+
+
+def wa_outbox_get(cursor, outbox_id, lock=False):
+    cursor.execute("SELECT " + _OUTBOX_COLUMNS + " FROM hiring_wa_outbox WHERE id = %s" + (" FOR UPDATE" if lock else ""),
+                   (int(outbox_id),))
+    return _parse_json_fields(_one(cursor), 'media')
+
+
+def wa_outbox_pending(cursor, key):
+    """Ещё не легшие в переписку сообщения чата из портала: в очереди, у шлюза, не отправленные."""
+    cursor.execute("SELECT " + _OUTBOX_COLUMNS + " FROM hiring_wa_outbox WHERE chat_key = %s "
+                   "AND status NOT IN ('sent', 'discarded') ORDER BY id", (key,))
+    rows = _all(cursor)
+    for row in rows:
+        _parse_json_fields(row, 'media')
+    return rows
+
+
+def wa_outbox_update(cursor, outbox_id, **fields):
+    allowed = ('status', 'attempts', 'handed_at', 'wa_id', 'error', 'sent_at', 'updated_at', 'card_id', 'created_at',
+               'fail_reason', 'client_id')
+    return _update('hiring_wa_outbox', outbox_id, fields, allowed=allowed, cursor=cursor)
+
+
+def wa_outbox_clone(cursor, row, now):
+    """«Повторить» после отказа, о котором сообщил шлюз: он этот номер уже закрыл и повтор с ним отбросил бы —
+    новая строка с тем же содержимым и файлом, номер повтора переезжает к ней."""
+    cursor.execute("""
+        INSERT INTO hiring_wa_outbox (client_id, chat_key, card_id, author_id, author_name, kind, body, quote_wa_id, media,
+                                      status, created_at, updated_at)
+        SELECT client_id, chat_key, card_id, author_id, author_name, kind, body, quote_wa_id, media, 'queued', %s, %s
+          FROM hiring_wa_outbox WHERE id = %s
+        RETURNING id
+    """, (now, now, int(row['id'])))
+    return int(cursor.fetchone()[0])
+
+
+def wa_outbox_expire(cursor, created_before, handed_before, now, error):
+    """Очередь, которую шлюз так и не забрал вовремя, и взятое шлюзом, срок которого прошёл (шлюз позже срока не
+    отправляет): «Не отправлено» с «Повторить»."""
+    cursor.execute("""
+        UPDATE hiring_wa_outbox SET status = 'failed', error = %s, updated_at = %s
+         WHERE (status = 'queued' AND created_at < %s) OR (status = 'handed' AND created_at < %s)
+    """, (error, now, created_before, handed_before))
+    return cursor.rowcount
+
+
+def wa_outbox_unconfirmed(cursor, handed_before, attempts, now, error):
+    """Шлюз брал сообщение attempts раз и ни разу не ответил: «не подтверждено» (могло и уйти — повтор руками)."""
+    cursor.execute("""
+        UPDATE hiring_wa_outbox SET status = 'failed', error = %s, updated_at = %s
+         WHERE status = 'handed' AND handed_at < %s AND attempts >= %s
+    """, (error, now, handed_before, int(attempts)))
+    return cursor.rowcount
+
+
+def wa_outbox_due(cursor, handed_before, attempts, limit):
+    """Что отдать шлюзу в этом опросе: новое из очереди и взятое шлюзом без ответа (повтор он отбросит сам по id).
+    Строки — под блокировкой со SKIP LOCKED: два опроса подряд не выдают одно сообщение дважды за раз."""
+    cursor.execute("""
+        SELECT o.id, o.kind, o.body, o.quote_wa_id, o.media, o.created_at, w.jid, q.from_me AS quote_from_me,
+               q.kind AS quote_kind, q.body AS quote_body
+          FROM hiring_wa_outbox o
+          JOIN hiring_wa_chats w ON w.key = o.chat_key
+          LEFT JOIN hiring_wa_messages q ON q.chat_key = o.chat_key AND q.wa_id = o.quote_wa_id
+         WHERE o.status = 'queued' OR (o.status = 'handed' AND o.handed_at < %s AND o.attempts < %s)
+         ORDER BY o.id LIMIT %s
+           FOR UPDATE OF o SKIP LOCKED
+    """, (handed_before, int(attempts), int(limit)))
+    rows = _all(cursor)
+    for row in rows:
+        _parse_json_fields(row, 'media')
+    return rows
+
+
+def wa_outbox_handed(cursor, ids, now):
+    if not ids:
+        return
+    cursor.execute("UPDATE hiring_wa_outbox SET status = 'handed', attempts = attempts + 1, handed_at = %s, "
+                   "updated_at = %s WHERE id = ANY(%s)", (now, now, [int(x) for x in ids]))
+
+
+def wa_outbox_busy(cursor):
+    """Есть что отправлять — шлюз опрашивает чаще."""
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_wa_outbox WHERE status IN ('queued', 'handed'))")
+    return bool(cursor.fetchone()[0])
+
+
+def wa_insert_outbound(cursor, key, wa_id, at, outbox, now):
+    """Сообщение, отправленное из портала, — в переписку: с автором, отметкой «отправлено» и цитатой. Если оно
+    уже пришло другим путём (эхо от телефона), автор и отметка дописываются к нему. → (id строки, вставлено ли)."""
+    media = None
+    if outbox.get('media'):
+        media = {k: outbox['media'][k] for k in ('object', 'mime', 'size', 'file_name', 'stored_type', 'stored_size')
+                 if outbox['media'].get(k) is not None}
+    cursor.execute("""
+        INSERT INTO hiring_wa_messages (chat_key, wa_id, from_me, sent_at, kind, body, media, author_id, author_name,
+                                        status, quote_wa_id, created_at)
+        VALUES (%s, %s, TRUE, %s, %s, %s, %s::jsonb, %s, %s, 'sent', %s, %s)
+        ON CONFLICT (chat_key, wa_id) DO UPDATE SET
+            author_id = EXCLUDED.author_id, author_name = EXCLUDED.author_name,
+            status = COALESCE(hiring_wa_messages.status, EXCLUDED.status),
+            quote_wa_id = COALESCE(hiring_wa_messages.quote_wa_id, EXCLUDED.quote_wa_id),
+            media = COALESCE(hiring_wa_messages.media, EXCLUDED.media)
+        RETURNING id, (xmax = 0) AS inserted
+    """, (key, wa_id, at, outbox['kind'], outbox.get('body'), json.dumps(media, ensure_ascii=False) if media else None,
+          outbox['author_id'], outbox.get('author_name'), outbox.get('quote_wa_id'), now))
+    row = cursor.fetchone()
+    return int(row[0]), bool(row[1])
+
+
+def wa_apply_receipt(cursor, wa_ids, status):
+    """Отметка доставки на наши сообщения — только вперёд (sent < delivered < read < played)."""
+    if not wa_ids:
+        return 0
+    cursor.execute("""
+        UPDATE hiring_wa_messages SET status = %(status)s
+         WHERE wa_id = ANY(%(ids)s) AND from_me AND deleted_at IS NULL
+           AND (CASE COALESCE(status, '') WHEN 'played' THEN 4 WHEN 'read' THEN 3 WHEN 'delivered' THEN 2
+                                          WHEN 'sent' THEN 1 ELSE 0 END)
+               < (CASE %(status)s WHEN 'played' THEN 4 WHEN 'read' THEN 3 WHEN 'delivered' THEN 2 ELSE 1 END)
+    """, {'status': status, 'ids': list(wa_ids)})
+    return cursor.rowcount
+
+
+def wa_whatsapp_touched(cursor, card_id, day_start, day_end):
+    """Касание WhatsApp по переписке (с телефона или из портала) за эти сутки уже есть: одно в день."""
+    cursor.execute("""
+        SELECT 1 FROM hiring_touches
+         WHERE card_id = %s AND kind = 'whatsapp' AND meta->>'source' IN ('wa_phone', 'wa_portal')
+           AND at >= %s AND at < %s
+         LIMIT 1
+    """, (int(card_id), day_start, day_end))
+    return cursor.fetchone() is not None
+
+
+def wa_templates(cursor):
+    cursor.execute("SELECT id, title, body, created_by, created_by_name, created_at, updated_at FROM hiring_wa_templates "
+                   "WHERE is_active ORDER BY lower(title), id")
+    return _all(cursor)
+
+
+def wa_template_insert(cursor, title, body, by, by_name, now):
+    cursor.execute("""
+        INSERT INTO hiring_wa_templates (title, body, created_by, created_by_name, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+    """, (title, body, by, by_name, now, now))
+    return int(cursor.fetchone()[0])
+
+
+def wa_template_update(cursor, template_id, title, body, now):
+    cursor.execute("UPDATE hiring_wa_templates SET title = %s, body = %s, updated_at = %s WHERE id = %s AND is_active",
+                   (title, body, now, int(template_id)))
+    return cursor.rowcount
+
+
+def wa_template_delete(cursor, template_id, now):
+    cursor.execute("UPDATE hiring_wa_templates SET is_active = FALSE, updated_at = %s WHERE id = %s AND is_active",
+                   (now, int(template_id)))
+    return cursor.rowcount

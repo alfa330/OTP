@@ -18,9 +18,17 @@ const (
 )
 
 type spool struct {
-	db        *sql.DB
-	wake      chan struct{}
-	mediaWake chan struct{}
+	db         *sql.DB
+	wake       chan struct{}
+	mediaWake  chan struct{}
+	outboxWake chan struct{}
+}
+
+// outboxJob — сообщение портала в очереди отправки (sender.go): тело — JSON элемента опроса.
+type outboxJob struct {
+	ID       int64
+	Body     string
+	Attempts int
 }
 
 // mediaJob — файл сообщения в очереди: часть protobuf с ключами (по ней whatsmeow качает файл) и попытки.
@@ -45,13 +53,19 @@ func openSpool(path string) (*spool, error) {
 		`CREATE TABLE IF NOT EXISTS media (
 			id INTEGER PRIMARY KEY AUTOINCREMENT, wa_id TEXT NOT NULL, kind TEXT NOT NULL, part BLOB NOT NULL,
 			attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`,
+		// Ответы из портала: id — номер сообщения в портале; отправленные помнятся неделю (done_at), чтобы
+		// повтор того же номера в опросе не ушёл кандидату второй раз.
+		`CREATE TABLE IF NOT EXISTS outbox (
+			id INTEGER PRIMARY KEY, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+			next_at INTEGER NOT NULL, done_at INTEGER, created_at INTEGER NOT NULL)`,
 	} {
 		if _, err := db.Exec(ddl); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	return &spool{db: db, wake: make(chan struct{}, 1), mediaWake: make(chan struct{}, 1)}, nil
+	return &spool{db: db, wake: make(chan struct{}, 1), mediaWake: make(chan struct{}, 1),
+		outboxWake: make(chan struct{}, 1)}, nil
 }
 
 // pushMedia — файл в очередь; первая попытка — чуть позже события, чтобы сообщение успело дойти до портала.
@@ -98,6 +112,62 @@ func (s *spool) delayMedia(id int64, attempts int, at time.Time) error {
 
 func (s *spool) dropMedia(id int64) error {
 	_, err := s.db.Exec("DELETE FROM media WHERE id = ?", id)
+	return err
+}
+
+// pushOutbox — сообщение портала в очередь отправки; false — этот номер уже был (повтор опроса).
+func (s *spool) pushOutbox(id int64, body string, now time.Time) (bool, error) {
+	result, err := s.db.Exec("INSERT OR IGNORE INTO outbox (id, body, next_at, created_at) VALUES (?, ?, ?, ?)",
+		id, body, now.Unix(), now.Unix())
+	if err != nil {
+		return false, err
+	}
+	added, _ := result.RowsAffected()
+	if added > 0 {
+		select {
+		case s.outboxWake <- struct{}{}:
+		default:
+		}
+	}
+	return added > 0, nil
+}
+
+// nextOutbox — старейшее неотправленное сообщение, чья очередь подошла, или nil.
+func (s *spool) nextOutbox(now time.Time) (*outboxJob, error) {
+	job := &outboxJob{}
+	err := s.db.QueryRow("SELECT id, body, attempts FROM outbox WHERE done_at IS NULL AND next_at <= ? ORDER BY id LIMIT 1",
+		now.Unix()).Scan(&job.ID, &job.Body, &job.Attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+// nextOutboxAt — когда подойдёт ближайшее отложенное (false — очередь пуста).
+func (s *spool) nextOutboxAt() (time.Time, bool) {
+	var at sql.NullInt64
+	if err := s.db.QueryRow("SELECT MIN(next_at) FROM outbox WHERE done_at IS NULL").Scan(&at); err != nil || !at.Valid {
+		return time.Time{}, false
+	}
+	return time.Unix(at.Int64, 0), true
+}
+
+func (s *spool) delayOutbox(id int64, attempts int, at time.Time) error {
+	_, err := s.db.Exec("UPDATE outbox SET attempts = ?, next_at = ? WHERE id = ?", attempts, at.Unix(), id)
+	return err
+}
+
+func (s *spool) doneOutbox(id int64, now time.Time) error {
+	_, err := s.db.Exec("UPDATE outbox SET done_at = ?, body = '' WHERE id = ?", now.Unix(), id)
+	return err
+}
+
+// pruneOutbox — забыть номера, отправленные раньше before (портал их больше не предложит).
+func (s *spool) pruneOutbox(before time.Time) error {
+	_, err := s.db.Exec("DELETE FROM outbox WHERE done_at IS NOT NULL AND done_at < ?", before.Unix())
 	return err
 }
 

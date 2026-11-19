@@ -305,13 +305,15 @@ export const markGroupFull = (groups, groupId) => (groups || []).map((group) => 
 
 /** Вкладки раздела по правам (hiring/access.py, capabilities). Тренеру — не рекрутеру и не руководителю —
  *  «Группы» первой: группы он ведёт сам, а доска — его кандидаты по этапам. Отчётов у тренера нет: там цифры
- *  рекрутеров, по нему пустые. */
+ *  рекрутеров, по нему пустые. «Чаты» (переписка WhatsApp найма, владелец 19.11.2026) — тем, кто отвечает
+ *  кандидатам: рекрутерам и руководителю рекрутинга. */
 export const hiringTabs = (caps = {}) => {
     const trainerOnly = Boolean(caps.groups && !caps.recruiter && !caps.lead);
     return [
         trainerOnly && 'groups',
         caps.recruiter && 'desk',
         'board',
+        (caps.recruiter || caps.lead) && 'chats',
         caps.groups && !trainerOnly && 'groups',
         (caps.recruiter || caps.lead || caps.dept_head) && 'reports',
         caps.upload && 'upload',

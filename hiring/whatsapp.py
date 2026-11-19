@@ -59,6 +59,9 @@ TEMP_BAN_CODES = {
 # Привязку и отвязку решает человек. «Возобновить» снимает остановку — кроме «вторая копия»:
 # её снимает только остановка лишнего контейнера на шлюзе.
 COMMANDS = ('pair', 'resume', 'logout')
+# Что умеет версия сервиса (features опроса): resend — просить телефон прислать старое заново (1.2.0),
+# send — отправлять ответы из окна «Чаты» (1.3.0, владелец 19.11.2026).
+BRIDGE_FEATURES = ('resend', 'send')
 
 OFFLINE_AFTER = timedelta(minutes=3)          # без опроса дольше — сервис не на связи
 QR_FRESH = timedelta(seconds=70)              # код QR живёт 20–60 с, сервис присылает новый
@@ -151,6 +154,8 @@ def clean_detail(raw):
             'until': _text(park.get('until'), 32),
         } if park else None,
         'timelock': {'active': bool(timelock.get('active')), 'until': _text(timelock.get('until'), 32)} if timelock else None,
+        'features': sorted({str(item) for item in raw.get('features') if str(item) in BRIDGE_FEATURES})
+        if isinstance(raw.get('features'), list) else None,
     }
     return {name: value for name, value in detail.items() if value is not None}
 
@@ -394,6 +399,8 @@ def view(row, now):
         'received_total': int(row.get('received_total') or 0),
         'phone_recruiter_id': _int(settings.get('phone_recruiter_id')),
         'actions': {action: can_command(action, state, detail)[0] for action in COMMANDS},
+        # Ответы из портала: сервис этой версии умеет отправлять (пока он не на связи, ответ ждёт в очереди).
+        'send_ready': 'send' in (detail.get('features') or ()),
     }
 
 

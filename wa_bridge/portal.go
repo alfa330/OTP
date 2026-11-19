@@ -24,6 +24,8 @@ const (
 	eventsPath = "/api/hiring/wa/agent/events"
 	// Файл сообщения: id сообщения — в пути (путь подписан), сам файл — телом.
 	mediaPathPrefix = "/api/hiring/wa/agent/media/"
+	// Файл ответа из портала (sender.go): номер сообщения портала — в пути, тело запроса пустое.
+	outboxPathPrefix = "/api/hiring/wa/agent/outbox/"
 )
 
 type portal struct {
@@ -90,6 +92,40 @@ func (p *portal) upload(ctx context.Context, path string, data []byte) error {
 	return p.send(ctx, p.files, path, data, "application/octet-stream", nil)
 }
 
+// fetchOutboxFile — файл ответа из портала, чтобы отправить его кандидату.
+func (p *portal) fetchOutboxFile(ctx context.Context, outboxID int64) ([]byte, error) {
+	path := fmt.Sprintf("%s%d/file", outboxPathPrefix, outboxID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+path, bytes.NewReader(nil))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("User-Agent", "otp-wa-bridge/"+bridgeVersion)
+	for name, value := range p.signer.headers(http.MethodPost, path, nil, time.Now(), randomNonce()) {
+		req.Header.Set(name, value)
+	}
+	resp, err := p.files.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxSendFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := strings.TrimSpace(string(data))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, &httpError{Status: resp.StatusCode, Body: snippet}
+	}
+	if len(data) > maxSendFile {
+		return nil, errors.New("файл больше 16 МБ")
+	}
+	return data, nil
+}
+
 func (p *portal) send(ctx context.Context, client *http.Client, path string, body []byte, contentType string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.base+path, bytes.NewReader(body))
 	if err != nil {
@@ -129,4 +165,6 @@ type pollReply struct {
 	NextPollSec int          `json:"next_poll_sec"`
 	// Сообщения без файла: попросить телефон прислать их заново (resend.go).
 	Resend []resendItem `json:"resend"`
+	// Ответы кандидатам из портала (sender.go).
+	Send []sendItem `json:"send"`
 }

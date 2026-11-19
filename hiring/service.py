@@ -11,12 +11,13 @@
 
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 
 import psycopg2
 
-from . import access, calls, hh, notices, queries, rules, upload, wa_media, whatsapp
+from . import access, calls, hh, notices, queries, rules, upload, wa_chat, wa_media, whatsapp
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +99,9 @@ class HiringService:
         self._spawn = spawn or _spawn_thread
         self._pull_lock = threading.Lock()
         self._calls_lock = threading.Lock()
+        # Когда последний раз открывали окно «Чаты»: пока в нём работают, шлюз опрашивает чаще (ответ уходит за
+        # секунды, а не за 10 с опроса). В памяти процесса — подсказка скорости, не состояние.
+        self._wa_ui_seen = 0.0
 
     def _dial_list_service(self):
         try:
@@ -1281,6 +1285,8 @@ class HiringService:
         detail = whatsapp.clean_detail(payload.get('detail'))
         ack = str(payload.get('ack') or '').strip() or None
         features = payload.get('features') if isinstance(payload.get('features'), list) else []
+        # Что умеет эта версия сервиса — окно «Чаты» принимает ответы, только если шлюз умеет их отправлять.
+        detail['features'] = sorted({str(item) for item in features if str(item) in whatsapp.BRIDGE_FEATURES})
         now = self._now()
         with self._cursor() as cursor:
             row = queries.wa_lock_integration(cursor, now)
@@ -1299,6 +1305,12 @@ class HiringService:
             recipients = notices.whatsapp_alert(cursor, alert, now, tone='default' if state == whatsapp.CONNECTED else 'warning') \
                 if alert else []
             chats = queries.telegram_chats(cursor, recipients) if alert and state == whatsapp.PARKED else {}
+        send, outbox_busy = [], False
+        try:
+            with self._cursor() as cursor:
+                send, outbox_busy = self._wa_send_batch(cursor, now, state == whatsapp.CONNECTED and 'send' in features)
+        except Exception:  # noqa: BLE001 — состояние и команды сервиса важнее очереди отправки
+            log.exception('WhatsApp найма: очередь отправки не выдана шлюзу')
         resend = []
         if state == whatsapp.CONNECTED and 'resend' in features:
             try:
@@ -1309,11 +1321,13 @@ class HiringService:
                 resend = []
         for chat_id in chats.values():
             self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
-        busy = command or state in (whatsapp.PAIRING, whatsapp.CONNECTING)
+        busy = command or state in (whatsapp.PAIRING, whatsapp.CONNECTING) or outbox_busy
         reply = {'command': {'id': command['id'], 'action': command['action']} if command else None,
-                 'next_poll_sec': 2 if busy else 10}
+                 'next_poll_sec': 2 if busy else (3 if self._wa_ui_active() else 10)}
         if resend:
             reply['resend'] = resend
+        if send:
+            reply['send'] = send
         return reply
 
     def _wa_resend_batch(self, cursor, now):
@@ -1344,17 +1358,33 @@ class HiringService:
             raise HiringError('HIRING_WA_BAD_EVENTS', 'Ожидается список событий (1–%d)' % whatsapp.EVENTS_MAX)
         messages = [message for message in (whatsapp.parse_message(item) for item in events) if message]
         failures = [failure for failure in (whatsapp.parse_media_failure(item) for item in events) if failure]
+        sent = [event for event in (wa_chat.parse_sent(item) for item in events) if event]
+        not_sent = [event for event in (wa_chat.parse_send_failed(item) for item in events) if event]
+        receipts = [event for event in (wa_chat.parse_receipt(item) for item in events) if event]
         now = self._now()
         outcomes = {}
         trash = []
+
+        def count(outcome):
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
         with self._cursor() as cursor:
             source = queries.source_by_code(cursor, whatsapp.SOURCE_CODE)
             for message in messages:
-                outcome = self._wa_message(cursor, message, source, now, trash)
-                outcomes[outcome] = outcomes.get(outcome, 0) + 1
+                count(self._wa_message(cursor, message, source, now, trash))
             for failure in failures:
                 if queries.wa_media_failed(cursor, failure['id'], failure['reason'], now):
-                    outcomes['media_failed'] = outcomes.get('media_failed', 0) + 1
+                    count('media_failed')
+            # Отправленное из портала — после сообщений пачки, отметки доставки — после отправленного: отметка может
+            # прийти в той же пачке, что и сам ответ.
+            for event in sent:
+                count(self._wa_sent(cursor, event, now))
+            for event in not_sent:
+                if self._wa_send_failed(cursor, event, now):
+                    count('send_failed')
+            for event in receipts:
+                if queries.wa_apply_receipt(cursor, event['ids'], event['status']):
+                    count('receipt')
             queries.wa_add_received(cursor, outcomes.get('created', 0), now)
         self._wa_drop_files(trash)
         return {'accepted': len(events), 'outcomes': outcomes}
@@ -1365,6 +1395,8 @@ class HiringService:
             count, objects = queries.wa_revoke_message(cursor, key, message['revoke_of'], now)
             if trash is not None:
                 trash.extend(objects)
+            if count:
+                queries.wa_recount_outbound(cursor, key, whatsapp.AUTO_REPLY_GAP)
             return 'revoked' if count else 'missing'
         if message['edit_of']:
             return 'edited' if queries.wa_edit_message(cursor, key, message['edit_of'], message['text'], now) else 'missing'
@@ -1379,7 +1411,13 @@ class HiringService:
             queries.wa_move_chat(cursor, 'lid:' + message['lid'], key, now)
             chat = queries.wa_get_chat(cursor, key)
         if not inbound:
+            # «Ждут ответа» гасит наш ответ с телефона — не автоответ WhatsApp Business (окно «Чаты», wa_chat.py).
+            at = message['at'] or now
+            last_in = queries.wa_last_inbound(cursor, key, at)
+            if last_in is None or at - last_in >= whatsapp.AUTO_REPLY_GAP:
+                queries.wa_mark_outbound(cursor, key, at)
             return self._wa_phone_reply(cursor, chat, message, now) if chat.get('card_id') else 'stored'
+        queries.wa_recount_waiting(cursor, key)
         if not message['phone'] or not source or not source['is_active']:
             self._wa_candidate_answered(cursor, chat.get('card_id'), message, now)
             return 'stored'
@@ -1441,7 +1479,7 @@ class HiringService:
         if not card.get('recruiter_id'):
             return outcome
         day_start = datetime.combine(at.date(), datetime.min.time())
-        if queries.wa_phone_touched(cursor, card['id'], day_start, day_start + timedelta(days=1)):
+        if queries.wa_whatsapp_touched(cursor, card['id'], day_start, day_start + timedelta(days=1)):
             return outcome
         author = int(card['recruiter_id'])
         queries.add_touch(cursor, card['id'], rules.TOUCH_WHATSAPP, None, whatsapp.phone_reply_text(message), author,
@@ -1534,6 +1572,408 @@ class HiringService:
             if message['kind'] != 'text' and not message.get('deleted_at'):
                 message['media'] = wa_media.public_view(message['kind'], message.get('media'), sign)
         return {'chats': chats, 'messages': messages}
+
+    # ─── Окно «Чаты»: переписка из портала (владелец 19.11.2026, wa_chat.py) ──
+    # Рекрутер отвечает кандидату прямо в разделе: сообщение встаёт в очередь (hiring_wa_outbox), сервис шлюза
+    # забирает его в ответе на опрос и отправляет связанным устройством номера найма, а портал узнаёт итог
+    # событием (sent / send_failed) и отметки доставки (receipt). Писать можно только в чат, куда кандидат
+    # написал сам, и только в свою карточку: отклик из пула сначала берут в работу.
+
+    WA_UI_ACTIVE_SEC = 90
+    WA_CHAT_PAGE = 50
+    WA_THREAD_PAGE = 60
+
+    def _wa_ui_touch(self):
+        self._wa_ui_seen = time.monotonic()
+
+    def _wa_ui_active(self):
+        return time.monotonic() - self._wa_ui_seen < self.WA_UI_ACTIVE_SEC
+
+    @staticmethod
+    def _wa_connection(cursor, now):
+        view = whatsapp.view(queries.get_integration(cursor, whatsapp.INTEGRATION), now)
+        return {'state': view['state'], 'label': view['label'], 'tone': view['tone'],
+                'connected': view['state'] == whatsapp.CONNECTED, 'send_ready': view['send_ready']}
+
+    @staticmethod
+    def _wa_chat_reader(ctx):
+        caps = access.capabilities(ctx)
+        if not (caps['lead'] or caps['recruiter'] or caps['read_all'] or caps['trainer_group_ids'] or caps['headed_ids']):
+            raise _forbidden('Переписка с кандидатами открыта рекрутерам и руководителю рекрутинга')
+        return caps
+
+    def _wa_chat_access(self, cursor, ctx, key, lock=False):
+        """Чат и его карточка, если человеку можно их видеть. Чат без карточки — только руководителю. Адрес — ключ
+        чата или 'card:<id>' (у того, кому номер не виден, ключ-номер наружу не уходит)."""
+        card_id = wa_chat.card_ref(key)
+        if card_id:
+            chat = queries.wa_chat_by_card(cursor, card_id, lock=lock)
+        else:
+            chat = queries.wa_get_chat(cursor, str(key or '')[:48], lock=lock)
+        if not chat:
+            raise HiringError('HIRING_NOT_FOUND', 'Чат не найден', 404)
+        card = queries.get_card(cursor, chat['card_id'], lock=lock) if chat.get('card_id') else None
+        if card is None:
+            if not access.is_lead(ctx):
+                raise HiringError('HIRING_NOT_FOUND', 'Чат не найден', 404)
+        elif not self.visible(ctx, card):
+            raise HiringError('HIRING_NOT_FOUND', 'Чат не найден', 404)
+        return chat, card
+
+    def _wa_send_block(self, ctx, card):
+        return wa_chat.send_block(card, involved=bool(card) and self.involved(ctx, card),
+                                  owner_or_lead=bool(card) and bool(self._is_owner_or_lead(ctx, card)),
+                                  can_take=access.can_take(ctx), connected=True)
+
+    @staticmethod
+    def _wa_chat_row(ctx, row):
+        hidden = bool(row.get('card_id')) and not access.sees_phone(ctx, row)
+        return {
+            'key': wa_chat.chat_ref(row, hidden), 'title': wa_chat.chat_title(row, hidden),
+            'phone': None if hidden else row.get('phone'),
+            'phone_pretty': None if hidden or not row.get('phone') else rules.pretty_phone(row.get('phone')),
+            'card_id': row.get('card_id'), 'candidate_no': row.get('candidate_no'), 'stage': row.get('stage'),
+            'stage_label': rules.STAGE_LABELS.get(row.get('stage')) if row.get('stage') else None,
+            'substage': row.get('substage'), 'recruiter_id': row.get('recruiter_id'),
+            'recruiter_name': row.get('recruiter_name'), 'is_closed': bool(row.get('is_closed')),
+            'waiting': int(row.get('waiting') or 0), 'waiting_since': row.get('waiting_since'),
+            'last_at': row.get('last_at'),
+            'last': {'from_me': bool(row.get('last_from_me')), 'kind': row.get('last_kind'),
+                     'text': wa_chat.preview(row.get('last_kind'), None if hidden else row.get('last_body'),
+                                             bool(row.get('last_deleted'))),
+                     'status': row.get('last_status'), 'author': row.get('last_author')},
+        }
+
+    def wa_chats(self, ctx, params):
+        """Список чатов окна «Чаты»: в пределах видимости карточек, ждущие ответа сверху."""
+        caps = self._wa_chat_reader(ctx)
+        params = params or {}
+        mode = params.get('mode') if params.get('mode') in ('all', 'mine', 'pool') else 'all'
+        waiting_only = str(params.get('waiting') or '').strip().lower() in ('1', 'true', 'yes')
+        search = str(params.get('q') or '')[:80]
+        offset = max(0, _int(params.get('offset')) or 0)
+        scope_sql, scope_params = queries.scope_clause(caps, ctx['user_id'])
+        remote = access.is_remote(ctx)
+        now = self._now()
+        with self._cursor() as cursor:
+            rows = queries.wa_chat_list(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'],
+                                        mode=mode, waiting_only=waiting_only, search=search,
+                                        limit=self.WA_CHAT_PAGE, offset=offset, phone_own_only=remote)
+            totals = queries.wa_chat_totals(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'],
+                                            mode=mode, search=search, phone_own_only=remote)
+            connection = self._wa_connection(cursor, now)
+        self._wa_ui_touch()
+        return {'items': [self._wa_chat_row(ctx, row) for row in rows], 'totals': totals, 'connection': connection,
+                'has_more': len(rows) >= self.WA_CHAT_PAGE, 'offset': offset}
+
+    def wa_chat_summary(self, ctx):
+        """Счётчик «ждут ответа» для вкладки раздела — по всем видимым чатам."""
+        caps = access.capabilities(ctx)
+        if not (caps['lead'] or caps['recruiter'] or caps['read_all'] or caps['trainer_group_ids'] or caps['headed_ids']):
+            return {'waiting_chats': 0, 'waiting_messages': 0, 'total': 0}
+        scope_sql, scope_params = queries.scope_clause(caps, ctx['user_id'])
+        with self._cursor() as cursor:
+            return queries.wa_chat_totals(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'])
+
+    def _wa_message_view(self, message, sign):
+        media = None
+        if message['kind'] != 'text' and not message.get('deleted_at'):
+            media = wa_media.public_view(message['kind'], message.get('media'), sign)
+        return {
+            'id': message['id'], 'wa_id': message['wa_id'], 'from_me': bool(message['from_me']),
+            'at': message['sent_at'], 'kind': message['kind'],
+            'text': None if message.get('deleted_at') else message.get('body'), 'media': media,
+            'deleted': bool(message.get('deleted_at')), 'edited': bool(message.get('edited_at')),
+            'author': message.get('author_name'), 'status': message.get('status') if message['from_me'] else None,
+            'quote_id': message.get('quote_wa_id'),
+            'ad_label': whatsapp.campaign_of(message['ad']) if message.get('ad') else None,
+        }
+
+    @staticmethod
+    def _wa_pending_view(row, ctx=None):
+        media = row.get('media') or {}
+        mine = bool(ctx) and (int(row.get('author_id') or 0) == int(ctx['user_id']) or access.is_lead(ctx))
+        return {'outbox_id': row['id'], 'client_id': row.get('client_id'), 'status': row['status'], 'mine': mine,
+                'kind': row['kind'], 'text': row.get('body'), 'quote_id': row.get('quote_wa_id'),
+                'file_name': media.get('file_name'), 'size': media.get('size'), 'author': row.get('author_name'),
+                'author_id': row.get('author_id'), 'error': row.get('error'), 'at': row.get('created_at')}
+
+    def wa_thread(self, ctx, key, params):
+        """Лента открытого чата: сообщения (страницами), ждущие отправки из портала, можно ли писать и почему нет."""
+        self._wa_chat_reader(ctx)
+        params = params or {}
+        before_id, after_id = _int(params.get('before_id')), _int(params.get('after_id'))
+        now = self._now()
+        hidden = False
+        with self._cursor() as cursor:
+            chat, card = self._wa_chat_access(cursor, ctx, key)
+            if card is not None and not access.sees_phone(ctx, card):
+                # Удалённому рекрутеру переписка отклика из пула — после «Взять в работу», как и телефон (ТЗ 2).
+                hidden, rows, extra, pending = True, [], [], []
+            else:
+                rows = queries.wa_thread(cursor, chat['key'], before_id=before_id, after_id=after_id,
+                                         limit=self.WA_THREAD_PAGE)
+                pending = queries.wa_outbox_pending(cursor, chat['key']) if not before_id else []
+                known = {row['wa_id'] for row in rows}
+                missing = [row['quote_wa_id'] for row in rows if row.get('quote_wa_id') and row['quote_wa_id'] not in known]
+                missing += [row['quote_wa_id'] for row in pending if row.get('quote_wa_id') and row['quote_wa_id'] not in known]
+                extra = queries.wa_messages_by_wa_ids(cursor, chat['key'], missing)
+            connection = self._wa_connection(cursor, now)
+        has_more = False
+        if not after_id and len(rows) > self.WA_THREAD_PAGE:
+            rows, has_more = rows[1:], True
+        sign = self._storage.sign if self._storage is not None else None
+        quotes = {row['wa_id']: {'from_me': bool(row['from_me']), 'author': row.get('author_name'),
+                                 'text': 'Сообщение удалено' if row.get('deleted') else wa_chat.preview(row['kind'], row.get('body'))}
+                  for row in extra}
+        for row in rows:
+            quotes.setdefault(row['wa_id'], {'from_me': bool(row['from_me']), 'author': row.get('author_name'),
+                                             'text': 'Сообщение удалено' if row.get('deleted_at')
+                                             else wa_chat.preview(row['kind'], row.get('body'))})
+        block = self._wa_send_block(ctx, card)
+        if hidden:
+            block = 'take' if access.can_take(ctx) else 'read_only'
+        if block is None and not connection['send_ready']:
+            block = 'bridge'
+        self._wa_ui_touch()
+        used = {row.get('quote_wa_id') for row in rows} | {row.get('quote_wa_id') for row in pending}
+        titled = dict(chat, full_name=(card or {}).get('full_name'), candidate_no=(card or {}).get('candidate_no'))
+        waiting = int(chat.get('waiting') or 0)
+        return {
+            'chat': {'key': wa_chat.chat_ref(titled, hidden), 'title': wa_chat.chat_title(titled, hidden),
+                     'push_name': None if hidden else chat.get('push_name'), 'waiting': waiting,
+                     'last_inbound_at': chat.get('last_inbound_at')},
+            'card': card, 'hidden': hidden,
+            'messages': [self._wa_message_view(row, sign) for row in rows],
+            'pending': [self._wa_pending_view(row, ctx) for row in pending],
+            'quotes': {wa_id: value for wa_id, value in quotes.items() if wa_id in used},
+            'has_more': has_more, 'block': block, 'block_text': wa_chat.SEND_BLOCK_TEXTS.get(block),
+            'can_handle': wa_chat.can_handle(block, lead=access.is_lead(ctx), hidden=hidden, waiting=waiting),
+            'connection': connection,
+        }
+
+    def wa_send(self, ctx, key, payload, upload=None):
+        """Ответ кандидату из окна «Чаты» — в очередь отправки. upload — (байты, тип, имя файла) или None.
+        Файл — в бакет до транзакции (долгая загрузка не держит соединение с базой)."""
+        self._wa_chat_reader(ctx)
+        payload = payload or {}
+        text = wa_chat.clean_text(payload.get('text'))
+        if len(text) > wa_chat.MAX_TEXT:
+            raise HiringError('HIRING_WA_TOO_LONG', 'Сообщение длиннее %d знаков' % wa_chat.MAX_TEXT)
+        client_id = wa_chat.valid_client_id(payload.get('client_id'))
+        quote_id = whatsapp.clean_message_id(payload.get('quote_id'))
+        if not text and not upload:
+            raise HiringError('HIRING_WA_EMPTY', 'Пустое сообщение')
+        now = self._now()
+        media, kind = None, 'text'
+        if upload:
+            data, mime, file_name = upload
+            if not data:
+                raise HiringError('HIRING_WA_EMPTY', 'Пустой файл')
+            if len(data) > wa_chat.MAX_FILE:
+                raise HiringError('HIRING_WA_FILE_TOO_LARGE', 'Файл больше 16 МБ', 413)
+            if self._storage is None or not self._storage.available():
+                raise HiringError('HIRING_WA_NO_STORAGE', 'Хранилище файлов не настроено', 503)
+            ctype = wa_media.content_type(mime)
+            kind = wa_chat.send_kind(ctype)
+            if kind == 'audio' and text:
+                kind = 'document'      # у аудио в WhatsApp нет подписи — с текстом уходит документом
+            name = ' '.join(str(file_name or '').split())[:200] or None
+            path = wa_media.object_path(0, ctype, name, now).replace(wa_media.PREFIX + '/', wa_media.PREFIX + '/out/', 1)
+            self._storage.upload(path, data, ctype)
+            media = {'object': path, 'mime': ctype, 'stored_type': ctype, 'size': len(data), 'stored_size': len(data),
+                     'file_name': name}
+        try:
+            with self._cursor() as cursor:
+                chat, card = self._wa_chat_access(cursor, ctx, key, lock=True)
+                if card is not None and not access.sees_phone(ctx, card):
+                    raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS['take'], 409)
+                block = self._wa_send_block(ctx, card)
+                if block is None and not self._wa_connection(cursor, now)['send_ready']:
+                    block = 'bridge'
+                if block:
+                    raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS[block],
+                                      409 if block in ('take', 'bridge') else 403)
+                if quote_id and not queries.wa_messages_by_wa_ids(cursor, chat['key'], [quote_id]):
+                    quote_id = None
+                row, fresh = queries.wa_outbox_insert(cursor, {
+                    'client_id': client_id, 'chat_key': chat['key'], 'card_id': card['id'], 'author_id': ctx['user_id'],
+                    'author_name': ctx.get('name') or '', 'kind': kind, 'body': text or None, 'quote_wa_id': quote_id,
+                    'media': media, 'now': now})
+        except Exception:
+            if media:
+                self._wa_drop_files([media['object']])
+            raise
+        if media and not fresh:
+            self._wa_drop_files([media['object']])
+        self._wa_ui_touch()
+        return {'item': self._wa_pending_view(row, ctx)}
+
+    def _wa_own_outbox(self, cursor, ctx, outbox_id):
+        row = queries.wa_outbox_get(cursor, outbox_id, lock=True)
+        if not row or (int(row['author_id']) != int(ctx['user_id']) and not access.is_lead(ctx)):
+            raise HiringError('HIRING_NOT_FOUND', 'Сообщение не найдено', 404)
+        return row
+
+    def wa_outbox_retry(self, ctx, outbox_id):
+        """«Повторить» у неотправленного: снова в очередь, если писать в этот чат по-прежнему можно. Отказ, о котором
+        сообщил шлюз, — новой строкой (этот номер шлюз закрыл); просрочку и «не подтверждено» — тем же номером: если
+        шлюз его всё же держит, второй раз не отправит."""
+        now = self._now()
+        with self._cursor() as cursor:
+            row = self._wa_own_outbox(cursor, ctx, outbox_id)
+            if row['status'] != wa_chat.FAILED:
+                raise HiringError('HIRING_WA_NOT_FAILED', 'Сообщение не в ошибке', 409)
+            _chat, card = self._wa_chat_access(cursor, ctx, row['chat_key'], lock=True)
+            block = self._wa_send_block(ctx, card)
+            if block is None and not self._wa_connection(cursor, now)['send_ready']:
+                block = 'bridge'
+            if block:
+                raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS[block], 403)
+            if row.get('fail_reason'):
+                client_id = row.get('client_id')
+                queries.wa_outbox_update(cursor, row['id'], status=wa_chat.DISCARDED, client_id=None, updated_at=now)
+                new_id = queries.wa_outbox_clone(cursor, dict(row), now)
+                if client_id:
+                    queries.wa_outbox_update(cursor, new_id, client_id=client_id)
+                row = queries.wa_outbox_get(cursor, new_id)
+            else:
+                queries.wa_outbox_update(cursor, row['id'], status=wa_chat.QUEUED, attempts=0, handed_at=None, error=None,
+                                         created_at=now, updated_at=now)
+                row = queries.wa_outbox_get(cursor, row['id'])
+        self._wa_ui_touch()
+        return {'item': self._wa_pending_view(row, ctx)}
+
+    def wa_outbox_discard(self, ctx, outbox_id):
+        """«Убрать» неотправленное. Сообщение, которое шлюз уже взял, не убрать: оно может уйти. Строка остаётся
+        (скрытой): если шлюз всё же сообщит, что отправил, сообщение ляжет в переписку."""
+        now = self._now()
+        with self._cursor() as cursor:
+            row = self._wa_own_outbox(cursor, ctx, outbox_id)
+            if row['status'] not in (wa_chat.FAILED, wa_chat.QUEUED):
+                raise HiringError('HIRING_WA_HANDED', 'Сообщение уже отправляется — убрать его нельзя', 409)
+            queries.wa_outbox_update(cursor, row['id'], status=wa_chat.DISCARDED, client_id=None, updated_at=now)
+        return {'deleted': True}
+
+    def wa_handled(self, ctx, key):
+        """«Ответ не нужен»: чат перестаёт ждать ответа, пока кандидат не напишет снова."""
+        self._wa_chat_reader(ctx)
+        now = self._now()
+        with self._cursor() as cursor:
+            chat, card = self._wa_chat_access(cursor, ctx, key, lock=True)
+            if card is None and not access.is_lead(ctx):
+                raise _forbidden()
+            if card is not None and not access.sees_phone(ctx, card):
+                raise _forbidden('Отметить чат можно, когда возьмёте отклик в работу')
+            if card is not None and self._wa_send_block(ctx, card) not in (None, 'take'):
+                raise _forbidden('Отметить чат может закреплённый рекрутер')
+            queries.wa_mark_handled(cursor, chat['key'], ctx['user_id'], now)
+            chat = queries.wa_get_chat(cursor, chat['key'])
+        return {'waiting': int(chat.get('waiting') or 0)}
+
+    def _wa_send_batch(self, cursor, now, can_send):
+        """Очередь отправки в ответе на опрос шлюза: просроченное — в «Не отправлено», новое — шлюзу. Возвращает
+        (что отдать, есть ли ещё что отправлять — тогда опрос чаще)."""
+        queries.wa_outbox_expire(cursor, now - wa_chat.SEND_EXPIRE, now - wa_chat.HANDED_EXPIRE, now,
+                                 wa_chat.failure_text('expired'))
+        queries.wa_outbox_unconfirmed(cursor, now - wa_chat.HAND_RETRY, wa_chat.HAND_ATTEMPTS, now,
+                                      wa_chat.failure_text('unconfirmed'))
+        if not can_send:
+            return [], False
+        rows = queries.wa_outbox_due(cursor, now - wa_chat.HAND_RETRY, wa_chat.HAND_ATTEMPTS, wa_chat.HAND_BATCH)
+        queries.wa_outbox_handed(cursor, [row['id'] for row in rows], now)
+        return [wa_chat.bridge_item(row, now) for row in rows], bool(rows) or queries.wa_outbox_busy(cursor)
+
+    def _wa_sent(self, cursor, event, now):
+        """Шлюз отправил сообщение из портала: в переписку с автором, касание WhatsApp карточке (одно в день), чат
+        больше не ждёт ответа."""
+        outbox = queries.wa_outbox_get(cursor, event['outbox'], lock=True)
+        if not outbox:
+            return 'sent_unknown'
+        if outbox['status'] == wa_chat.SENT:
+            return 'sent_duplicate'
+        at = event['at'] or now
+        chat = queries.wa_get_chat(cursor, outbox['chat_key'], lock=True)
+        _message_id, inserted = queries.wa_insert_outbound(cursor, outbox['chat_key'], event['wa_id'], at, outbox, now)
+        queries.wa_outbox_update(cursor, outbox['id'], status=wa_chat.SENT, wa_id=event['wa_id'], sent_at=at, error=None,
+                                 updated_at=now)
+        if chat and inserted:
+            queries.wa_touch_chat(cursor, chat['key'], chat['jid'], chat.get('phone'), chat.get('lid'), None, at, False, now)
+        if chat:
+            queries.wa_mark_outbound(cursor, chat['key'], at)
+        card_id = outbox.get('card_id') or (chat or {}).get('card_id')
+        card = queries.get_card(cursor, card_id, lock=True) if card_id else None
+        if card and not card['is_closed']:
+            start, end = wa_chat.day_bounds(at)
+            if not queries.wa_whatsapp_touched(cursor, card['id'], start, end):
+                queries.add_touch(cursor, card['id'], rules.TOUCH_WHATSAPP, None,
+                                  wa_chat.touch_text(outbox['kind'], outbox.get('body')), outbox['author_id'],
+                                  outbox.get('author_name'), at,
+                                  meta={'source': wa_chat.PORTAL_TOUCH, 'wa_id': event['wa_id'], 'outbox': outbox['id']})
+            fields = {'updated_at': now}
+            if not card.get('last_touch_at') or card['last_touch_at'] < at:
+                fields['last_touch_at'] = at
+            # Как у касания «Написать в WhatsApp»: наше сообщение — переписка, но «не ответил» снимает только ответ
+            # кандидата (владелец 09.11.2026).
+            if card['stage'] == rules.IN_WORK and not card['is_closed'] and card.get('substage') != 'no_answer':
+                fields['substage'] = 'whatsapp'
+            queries.update_card(cursor, card['id'], **fields)
+        return 'sent'
+
+    @staticmethod
+    def _wa_send_failed(cursor, event, now):
+        outbox = queries.wa_outbox_get(cursor, event['outbox'], lock=True)
+        if not outbox or outbox['status'] in (wa_chat.SENT, wa_chat.DISCARDED):
+            return False
+        queries.wa_outbox_update(cursor, outbox['id'], status=wa_chat.FAILED, fail_reason=event['reason'],
+                                 error=wa_chat.failure_text(event['reason'], event.get('error')), updated_at=now)
+        return True
+
+    def wa_outbox_file(self, outbox_id):
+        """Файл исходящего сообщения — шлюзу, чтобы отправить его кандидату."""
+        if self._storage is None or not self._storage.available():
+            raise HiringError('HIRING_WA_NO_STORAGE', 'Хранилище файлов не настроено', 503)
+        with self._cursor() as cursor:
+            row = queries.wa_outbox_get(cursor, outbox_id)
+        media = (row or {}).get('media') or {}
+        if not row or not media.get('object'):
+            raise HiringError('HIRING_NOT_FOUND', 'Файла нет', 404)
+        return self._storage.download(media['object']), media.get('stored_type') or media.get('mime') or 'application/octet-stream'
+
+    # Шаблоны ответов — общие для команды найма.
+
+    def wa_templates_list(self, ctx):
+        self._wa_chat_reader(ctx)
+        with self._cursor() as cursor:
+            return {'items': queries.wa_templates(cursor)}
+
+    @staticmethod
+    def _wa_template_editor(ctx):
+        if not (access.can_take(ctx) or access.can_manage(ctx)):
+            raise _forbidden('Шаблоны ведут рекрутеры и руководитель рекрутинга')
+
+    def wa_template_save(self, ctx, template_id, payload):
+        self._wa_template_editor(ctx)
+        try:
+            clean = wa_chat.clean_template(payload)
+        except ValueError as exc:
+            raise HiringError('HIRING_WA_TEMPLATE', str(exc))
+        now = self._now()
+        with self._cursor() as cursor:
+            if template_id:
+                if not queries.wa_template_update(cursor, template_id, clean['title'], clean['body'], now):
+                    raise HiringError('HIRING_NOT_FOUND', 'Шаблон не найден', 404)
+            else:
+                queries.wa_template_insert(cursor, clean['title'], clean['body'], ctx['user_id'], ctx.get('name') or '', now)
+            return {'items': queries.wa_templates(cursor)}
+
+    def wa_template_delete(self, ctx, template_id):
+        self._wa_template_editor(ctx)
+        now = self._now()
+        with self._cursor() as cursor:
+            if not queries.wa_template_delete(cursor, template_id, now):
+                raise HiringError('HIRING_NOT_FOUND', 'Шаблон не найден', 404)
+            return {'items': queries.wa_templates(cursor)}
 
     # ─── Файлы сообщений и расшифровка голосовых (владелец 09.11.2026) ───────
 
@@ -1664,6 +2104,11 @@ class HiringService:
             self._wa_sweep_transcripts(now)
         except Exception:  # noqa: BLE001 — сторож состояния важнее повтора расшифровки
             log.exception('WhatsApp найма: повтор расшифровок не запустился')
+        try:
+            with self._cursor() as cursor:
+                queries.wa_recount_recent(cursor, now - timedelta(minutes=10))
+        except Exception:  # noqa: BLE001
+            log.exception('WhatsApp найма: «ждут ответа» не пересчитаны')
         return alert[0] if alert else None
 
     def _telegram(self, chat_id, html_text, reply_markup):

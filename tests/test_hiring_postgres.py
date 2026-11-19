@@ -2051,3 +2051,245 @@ def test_whatsapp_poll_commands_alerts_and_watchdog(world):
     assert service.wa_status(lead)['state'] == 'offline' and len(world['sent']) == 3
     with pytest.raises(HiringError):
         service.wa_command(lead, 'logout')
+
+
+# ─── Окно «Чаты»: переписка из портала (владелец 19.11.2026, hiring/wa_chat.py) ─────────────────────────────
+
+def _chat_poll(service, features=('resend', 'send')):
+    return service.wa_poll({'state': 'connected', 'detail': {'paired': True}, 'features': list(features)})
+
+
+def _thread(world, user_id, key, **params):
+    return world['service'].wa_thread(ctx_of(world, user_id), key, params)
+
+
+def test_chat_window_waiting_counter_and_take_before_reply(world):
+    """Кандидат написал — чат «ждёт ответа» сверху списка. Ответить из окна можно только в свою карточку: отклик из
+    пула сначала «Взять в работу». Автоответ WhatsApp Business ожидание не гасит, ответ рекрутера — гасит;
+    «Ответ не нужен» гасит до следующего сообщения кандидата."""
+    service = world['service']
+    me, other = ctx_of(world, REC1), ctx_of(world, REC2)
+    _chat_poll(service)
+    service.wa_events({'events': [wa_event('q1', phone='77055558801', text='Есть работа?'),
+                                  wa_event('q2', phone='77055558802', ts=WA_TS + 60, text='Здравствуйте')]})
+    service.wa_events({'events': [wa_event('q3', phone='77055558801', ts=WA_TS + 30, text='Можно онлайн?')]})
+    listed = service.wa_chats(me, {})
+    assert [item['key'] for item in listed['items']] == ['+77055558801', '+77055558802']   # дольше ждёт — выше
+    first = listed['items'][0]
+    assert (first['waiting'], first['stage'], first['stage_label'], first['title']) == (2, 'responses', 'Отклики', 'Айгерим')
+    assert first['last']['text'] == 'Можно онлайн?'
+    assert listed['totals'] == {'total': 2, 'waiting_chats': 2, 'waiting_messages': 3}
+    thread = _thread(world, REC1, '+77055558801')
+    assert thread['block'] == 'take' and thread['can_handle']
+    assert [m['text'] for m in thread['messages']] == ['Есть работа?', 'Можно онлайн?']
+    with pytest.raises(HiringError) as refused:
+        service.wa_send(me, '+77055558801', {'text': 'Здравствуйте!'})
+    assert refused.value.code == 'HIRING_WA_SEND_BLOCKED' and refused.value.status == 409
+    card_id = thread['card']['id']
+    service.take(me, card_id)
+    assert _thread(world, REC1, '+77055558801')['block'] is None
+    # Взятую карточку второй рекрутер больше не видит — и чат тоже.
+    assert [item['key'] for item in service.wa_chats(other, {})['items']] == ['+77055558802']
+    with pytest.raises(HiringError):
+        service.wa_thread(other, '+77055558801', {})
+    # Автоответ с телефона (через 5 с) — не ответ, рекрутер через 10 минут — ответ.
+    service.wa_events({'events': [wa_event('q4', phone='77055558801', from_me=True, ts=WA_TS + 35, text='Спасибо, ответим')]})
+    assert service.wa_chats(me, {'mode': 'mine'})['items'][0]['waiting'] == 2
+    service.wa_events({'events': [wa_event('q5', phone='77055558801', from_me=True, ts=WA_TS + 600, text='Да, можно')]})
+    row = service.wa_chats(me, {'mode': 'mine'})['items'][0]
+    assert row['waiting'] == 0 and row['last']['from_me']
+    # Кандидат пишет снова — ждёт; «Ответ не нужен» — не ждёт; новое сообщение — снова ждёт.
+    service.wa_events({'events': [wa_event('q6', phone='77055558801', ts=WA_TS + 900, text='Спасибо!')]})
+    assert service.wa_chat_summary(me)['waiting_chats'] == 2
+    assert service.wa_handled(me, '+77055558801') == {'waiting': 0}
+    assert [i['key'] for i in service.wa_chats(me, {'waiting': '1'})['items']] == ['+77055558802']
+    service.wa_events({'events': [wa_event('q7', phone='77055558801', ts=WA_TS + 1200, text='А адрес?')]})
+    assert service.wa_chats(me, {'mode': 'mine'})['items'][0]['waiting'] == 1
+    # Поиск: по имени и по хвосту номера.
+    assert [i['key'] for i in service.wa_chats(me, {'q': '8802'})['items']] == ['+77055558802']
+    assert len(service.wa_chats(me, {'q': 'айгерим'})['items']) == 2
+
+
+def test_chat_reply_goes_through_bridge_queue(world):
+    """Ответ из окна → очередь → шлюз забирает в ответе на опрос → событие sent: сообщение в переписке с автором,
+    касание WhatsApp от автора, чат не ждёт. Отметки доставки — только вперёд. Ошибка шлюза — «Не отправлено» с
+    «Повторить»; пролежавшее в очереди дольше 30 минут не уходит."""
+    service, clock = world['service'], world['clock']
+    me, lead = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT)
+    service.wa_events({'events': [wa_event('r1', phone='77055558811', text='Хочу на собеседование')]})
+    card_id = _thread(world, REC1, '+77055558811')['card']['id']
+    service.take(me, card_id)
+    # Старый сервис на шлюзе (без send) — ответ из портала не принимается: он бы молча не ушёл.
+    _chat_poll(service, features=('resend',))
+    assert _thread(world, REC1, '+77055558811')['block'] == 'bridge'
+    with pytest.raises(HiringError) as old_bridge:
+        service.wa_send(me, '+77055558811', {'text': 'Здравствуйте!'})
+    assert old_bridge.value.status == 409 and 'шлюзе' in old_bridge.value.message
+    _chat_poll(service)
+    assert _thread(world, REC1, '+77055558811')['block'] is None
+    first = service.wa_send(me, '+77055558811', {'text': '  Здравствуйте!\r\nЗавтра в 14:00 удобно?  ',
+                                                 'client_id': 'cli-0001', 'quote_id': 'r1'})['item']
+    again = service.wa_send(me, '+77055558811', {'text': 'Здравствуйте!', 'client_id': 'cli-0001'})['item']
+    assert first['outbox_id'] == again['outbox_id'] and first['text'] == 'Здравствуйте!\nЗавтра в 14:00 удобно?'
+    assert first['status'] == 'queued' and first['author'] == 'Первый Рекрутер'
+    reply = _chat_poll(service)
+    assert reply['next_poll_sec'] == 2
+    assert reply['send'] == [{'id': first['outbox_id'], 'chat': '77055558811@s.whatsapp.net', 'kind': 'text',
+                              'text': 'Здравствуйте!\nЗавтра в 14:00 удобно?', 'expires_in': 1800,
+                              'quote': {'id': 'r1', 'from_me': False, 'text': 'Хочу на собеседование'}}]
+    assert 'send' not in _chat_poll(service)          # взятое шлюзом сразу второй раз не отдаётся
+    thread = _thread(world, REC1, '+77055558811')
+    assert [p['status'] for p in thread['pending']] == ['handed']
+    assert thread['quotes']['r1']['text'] == 'Хочу на собеседование'
+    clock.now = NOW + timedelta(minutes=1)
+    result = service.wa_events({'events': [
+        {'type': 'sent', 'outbox': first['outbox_id'], 'id': '3EB0AA11', 'ts': WA_TS + 60},
+        {'type': 'receipt', 'ids': ['3EB0AA11'], 'status': 'delivered', 'ts': WA_TS + 61}]})
+    assert result['outcomes'] == {'sent': 1, 'receipt': 1}
+    duplicate = service.wa_events({'events': [{'type': 'sent', 'outbox': first['outbox_id'], 'id': '3EB0AA11',
+                                               'ts': WA_TS + 60}]})
+    assert duplicate['outcomes'] == {'sent_duplicate': 1}
+    service.wa_events({'events': [{'type': 'receipt', 'ids': ['3EB0AA11'], 'status': 'read', 'ts': WA_TS + 90}]})
+    service.wa_events({'events': [{'type': 'receipt', 'ids': ['3EB0AA11'], 'status': 'delivered', 'ts': WA_TS + 95}]})
+    thread = _thread(world, REC1, '+77055558811')
+    ours = thread['messages'][-1]
+    assert (ours['wa_id'], ours['from_me'], ours['author'], ours['status'], ours['quote_id']) == \
+        ('3EB0AA11', True, 'Первый Рекрутер', 'read', 'r1')
+    assert thread['pending'] == [] and thread['chat']['waiting'] == 0
+    with world['db']._get_cursor() as cur:
+        touches = [t for t in queries.card_touches(cur, card_id) if t['kind'] == 'whatsapp']
+        card = queries.get_card(cur, card_id)
+    assert [(t['author_id'], t['meta']['source'], t['body']) for t in touches] == \
+        [(REC1, 'wa_portal', 'Ответ в чате: «Здравствуйте! Завтра в 14:00 удобно?»')]
+    assert card['substage'] == 'whatsapp' and card['last_touch_at'] == NOW + timedelta(minutes=1)
+    # Ошибка шлюза — «Не отправлено», «Повторить» — снова в очередь, чужое сообщение повторить нельзя.
+    second = service.wa_send(me, '+77055558811', {'text': 'Адрес: Нурлы Тау'})['item']
+    assert _chat_poll(service)['send'][0]['id'] == second['outbox_id']
+    service.wa_events({'events': [{'type': 'send_failed', 'outbox': second['outbox_id'], 'reason': 'rejected',
+                                   'error': 'server returned error 463'}]})
+    failed = _thread(world, REC1, '+77055558811')['pending'][0]
+    assert failed['status'] == 'failed' and failed['error'] == 'WhatsApp не принял сообщение' and failed['mine']
+    assert _thread(world, LEAD_GRANT, '+77055558811')['pending'][0]['mine']          # руководителю — можно
+    with pytest.raises(HiringError):
+        service.wa_outbox_retry(ctx_of(world, REC2), second['outbox_id'])
+    # Отказ сообщил шлюз — он этот номер закрыл: «Повторить» — новой строкой, старая скрыта.
+    retried = service.wa_outbox_retry(me, second['outbox_id'])['item']
+    assert retried['status'] == 'queued' and retried['outbox_id'] != second['outbox_id']
+    assert [p['outbox_id'] for p in _thread(world, REC1, '+77055558811')['pending']] == [retried['outbox_id']]
+    # Шлюз не на связи: через 30 минут очередь не уходит, а становится «Не отправлено».
+    clock.now = NOW + timedelta(minutes=45)
+    assert 'send' not in _chat_poll(service)
+    expired = _thread(world, REC1, '+77055558811')['pending'][0]
+    assert expired['status'] == 'failed' and 'дольше 30 минут' in expired['error']
+    assert service.wa_outbox_discard(me, retried['outbox_id']) == {'deleted': True}
+    assert _thread(world, REC1, '+77055558811')['pending'] == []
+    # Руководитель рекрутинга пишет в любую карточку; ответ в тот же день касания не добавляет.
+    third = service.wa_send(lead, '+77055558811', {'text': 'Ждём вас'})['item']
+    _chat_poll(service)
+    service.wa_events({'events': [{'type': 'sent', 'outbox': third['outbox_id'], 'id': '3EB0AA33', 'ts': WA_TS + 2800}]})
+    with world['db']._get_cursor() as cur:
+        assert len([t for t in queries.card_touches(cur, card_id) if t['kind'] == 'whatsapp']) == 1
+    assert _thread(world, LEAD_GRANT, '+77055558811')['messages'][-1]['author'] == 'Выданный Руководитель'
+
+
+def test_chat_bridge_that_never_answers_is_unconfirmed(world):
+    """Шлюз трижды взял сообщение и не ответил (потерянные ответы опроса) — «не подтверждено», без новой выдачи:
+    сообщение могло и уйти, повторяет человек. Ответ шлюза, пришедший позже, всё равно засчитывается."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    _chat_poll(service)
+    service.wa_events({'events': [wa_event('u1', phone='77055558822')]})
+    service.take(me, _thread(world, REC1, '+77055558822')['card']['id'])
+    item = service.wa_send(me, '+77055558822', {'text': 'Здравствуйте'})['item']
+    for minutes in (0, 3, 6):
+        clock.now = NOW + timedelta(minutes=minutes)
+        assert [i['id'] for i in _chat_poll(service)['send']] == [item['outbox_id']]
+    clock.now = NOW + timedelta(minutes=9)
+    assert 'send' not in _chat_poll(service)
+    pending = _thread(world, REC1, '+77055558822')['pending'][0]
+    assert pending['status'] == 'failed' and 'не подтвердил' in pending['error']
+    # «Не подтверждено» повторяется тем же номером: если шлюз его держит, второй раз не отправит.
+    assert service.wa_outbox_retry(me, item['outbox_id'])['item']['outbox_id'] == item['outbox_id']
+    service.wa_outbox_discard(me, item['outbox_id'])
+    # Ответ шлюза пришёл позже «Убрать» — сообщение всё равно ложится в переписку.
+    service.wa_events({'events': [{'type': 'sent', 'outbox': item['outbox_id'], 'id': '3EB0BB01', 'ts': WA_TS + 30}]})
+    thread = _thread(world, REC1, '+77055558822')
+    assert thread['pending'] == [] and thread['messages'][-1]['wa_id'] == '3EB0BB01'
+
+
+def test_chat_handed_message_expires_when_bridge_goes_quiet(world):
+    """Шлюз взял сообщение и пропал со связи: позже срока (30 минут) он его не отправит сам, а портал с запасом
+    переводит его в «Не отправлено» — «Убрать» и «Повторить» становятся доступны."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    _chat_poll(service)
+    service.wa_events({'events': [wa_event('h1', phone='77055558866')]})
+    service.take(me, _thread(world, REC1, '+77055558866')['card']['id'])
+    item = service.wa_send(me, '+77055558866', {'text': 'Сегодня в 14:00?'})['item']
+    assert _chat_poll(service)['send'][0]['expires_in'] == 1800
+    clock.now = NOW + timedelta(minutes=20)
+    service.wa_poll({'state': 'connecting', 'detail': {'paired': True}, 'features': ['resend', 'send']})
+    assert _thread(world, REC1, '+77055558866')['pending'][0]['status'] == 'handed'
+    clock.now = NOW + timedelta(minutes=34)
+    service.wa_poll({'state': 'connecting', 'detail': {'paired': True}, 'features': ['resend', 'send']})
+    stale = _thread(world, REC1, '+77055558866')['pending'][0]
+    assert stale['status'] == 'failed' and 'дольше 30 минут' in stale['error']
+    assert service.wa_outbox_discard(me, item['outbox_id']) == {'deleted': True}
+
+
+def test_chat_remote_recruiter_sees_pool_chat_after_take_only(world):
+    """Удалённый рекрутер видит отклик из пула в списке без телефона и текста; переписка — после «Взять в работу»."""
+    service = world['service']
+    remote = ctx_of(world, REMOTE)
+    _chat_poll(service)
+    service.wa_events({'events': [wa_event('x1', phone='77055558833', text='Мой номер 87055558833', push_name='.')]})
+    row = service.wa_chats(remote, {})['items'][0]
+    # Номер не уходит ни полем, ни ключом чата, ни заголовком, ни превью.
+    assert row['phone'] is None and row['phone_pretty'] is None and row['last']['text'] == 'Сообщение'
+    assert row['key'] == 'card:%d' % row['card_id'] and row['title'].startswith('Кандидат')
+    assert '8833' not in str(row)
+    # Поиск по цифрам номера — только в своих карточках: не оракул скрытого номера.
+    assert service.wa_chats(remote, {'q': '558833'})['items'] == []
+    assert service.wa_chats(ctx_of(world, REC1), {'q': '558833'})['items'][0]['key'] == '+77055558833'
+    thread = service.wa_thread(remote, row['key'], {})
+    assert thread['hidden'] and thread['messages'] == [] and thread['block'] == 'take' and not thread['can_handle']
+    assert thread['chat']['key'] == row['key'] and '8833' not in thread['chat']['title']
+    with pytest.raises(HiringError):
+        service.wa_handled(remote, row['key'])
+    service.take(remote, thread['card']['id'])
+    thread = service.wa_thread(remote, row['key'], {})
+    assert not thread['hidden'] and thread['messages'][0]['text'] == 'Мой номер 87055558833' and thread['block'] is None
+    assert service.wa_chats(remote, {'q': '558833'})['items'][0]['card_id'] == row['card_id']
+
+
+def test_chat_templates_are_shared_and_edited_by_recruiters(world):
+    service = world['service']
+    me, lead, trainer = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT), ctx_of(world, TRAINER)
+    with pytest.raises(HiringError):
+        service.wa_template_save(me, None, {'title': '  ', 'body': 'Текст'})
+    items = service.wa_template_save(me, None, {'title': 'Приглашение', 'body': 'Ждём вас в офисе\r\n📍 Нурлы Тау  '})['items']
+    assert [(t['title'], t['body'], t['created_by_name']) for t in items] == \
+        [('Приглашение', 'Ждём вас в офисе\n📍 Нурлы Тау', 'Первый Рекрутер')]
+    template_id = items[0]['id']
+    service.wa_template_save(lead, template_id, {'title': 'Приглашение в офис', 'body': 'Ждём вас'})
+    assert [t['title'] for t in service.wa_templates_list(ctx_of(world, REC2))['items']] == ['Приглашение в офис']
+    with pytest.raises(HiringError):
+        service.wa_template_save(trainer, None, {'title': 'Тренер', 'body': 'Текст'})
+    assert service.wa_template_delete(me, template_id)['items'] == []
+
+
+def test_chat_waiting_backfill_on_schema_upgrade(world):
+    """Чаты до этой правки (waiting NULL) досчитываются при старте: сообщения кандидата после нашего последнего
+    ответа; автоответ (быстрее 15 с) ответом не считается."""
+    service = world['service']
+    service.wa_events({'events': [wa_event('y1', phone='77055558844', text='Привет'),
+                                  wa_event('y2', phone='77055558844', from_me=True, ts=WA_TS + 5, text='Автоответ'),
+                                  wa_event('y3', phone='77055558844', ts=WA_TS + 100, text='Вы тут?'),
+                                  wa_event('z1', phone='77055558855', text='Здравствуйте'),
+                                  wa_event('z2', phone='77055558855', from_me=True, ts=WA_TS + 300, text='Добрый день')]})
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_wa_chats SET waiting = NULL, waiting_since = NULL, last_outbound_at = NULL")
+        schema.init_hiring_schema(cur)
+        cur.execute("SELECT key, waiting, waiting_since, last_outbound_at FROM hiring_wa_chats ORDER BY key")
+        rows = cur.fetchall()
+    assert rows == [('+77055558844', 2, NOW, None), ('+77055558855', 0, None, NOW + timedelta(minutes=5))]

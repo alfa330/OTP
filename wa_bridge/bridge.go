@@ -9,9 +9,10 @@ package main
 //   * обрывы установленного соединения чаще 12 в час — тоже остановка: шторм переподключений —
 //     сигнал для антиспама; при недоступной сети пауза между попытками растёт до 5 минут;
 //   * сразу после подключения — статус «не в сети»: так телефон рекрутера получает уведомления;
-//   * отметки «прочитано» и «печатает» не ставятся, людям ничего не отправляется: единственный запрос
-//     от сервиса — своему телефону, прислать заново старое сообщение с файлом или историю чата с ним
-//     (resend.go), как в WhatsApp Web; по одному с паузой и не больше 60 в час;
+//   * отметки «прочитано» и «печатает» не ставятся. Людям сервис пишет только то, что рекрутер отправил из
+//     окна «Чаты» портала (sender.go, с 1.3.0 — владелец 19.11.2026), и только в чат, куда кандидат написал
+//     сам: по одному с паузой, не больше 20 в минуту и 300 в час. Своему телефону — просьба прислать заново
+//     старое сообщение с файлом или историю чата с ним (resend.go), как в WhatsApp Web, не больше 60 в час;
 //   * файлы сообщений качаются по одному, с паузой, как в WhatsApp Web (media.go).
 
 import (
@@ -31,7 +32,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-const bridgeVersion = "1.2.1"
+const bridgeVersion = "1.3.0"
 
 const (
 	stateUnpaired   = "unpaired"
@@ -50,6 +51,7 @@ type bridge struct {
 	spool     *spool
 	portal    *portal
 	resend    *resender
+	sender    *sender
 	drops     dropCounter
 	ctx       context.Context
 	pollNow   chan struct{}
@@ -73,6 +75,7 @@ func newBridge(ctx context.Context, cfg config, log waLog.Logger, container *sql
 	b := &bridge{cfg: cfg, log: log, clientLog: waLog.Stdout("WhatsApp", cfg.logLevel, false), container: container,
 		guard: g, spool: sp, portal: p, ctx: ctx, pollNow: make(chan struct{}, 1)}
 	b.resend = newResender(log, func() bool { return b.currentState() == stateConnected }, b.requestFromPhone)
+	b.sender = newSender(sp, log, func() bool { return b.currentState() == stateConnected }, b.sendItem)
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		return nil, err
@@ -325,6 +328,12 @@ func (b *bridge) handle(raw any) {
 		if evt.IsFromMe && evt.Sender.Device == 0 {
 			_ = b.guard.phoneSeen(now) // рекрутер прочитал на телефоне
 		}
+		// Кандидат получил или прочитал наше сообщение (из портала или с телефона) — галочки в окне «Чаты».
+		if event := receiptEvent(evt); event != nil {
+			if err := b.spool.push(event); err != nil {
+				b.log.Errorf("отметка доставки не записана в очередь: %v", err)
+			}
+		}
 	case *events.HistorySync:
 		// Только история по нашей просьбе (resend.go); первичная при привязке сервису не нужна.
 		if evt.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND {
@@ -568,7 +577,7 @@ func (b *bridge) pollLoop() {
 		ack := b.ack
 		b.mu.Unlock()
 		// features — что умеет эта версия: портал не просит лишнего у старой.
-		payload := map[string]any{"state": b.currentState(), "detail": b.detail(), "features": []string{"resend"}}
+		payload := map[string]any{"state": b.currentState(), "detail": b.detail(), "features": []string{"resend", "send"}}
 		if ack != "" {
 			payload["ack"] = ack
 		}
@@ -585,6 +594,9 @@ func (b *bridge) pollLoop() {
 			}
 			if len(reply.Resend) > 0 {
 				b.resend.offer(reply.Resend)
+			}
+			if len(reply.Send) > 0 && b.sender.offer(reply.Send) > 0 {
+				b.log.Infof("ответов из портала в очереди: +%d", len(reply.Send))
 			}
 		} else if b.ctx.Err() == nil {
 			failures++

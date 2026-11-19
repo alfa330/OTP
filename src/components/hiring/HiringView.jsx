@@ -4,6 +4,7 @@ import { UserPlus } from 'lucide-react';
 import { APPLE_FONT, IosHint, IosSegmented, iosCard } from '../ui/ios';
 import BoardTab from './BoardTab';
 import CardSheet from './CardSheet';
+import ChatsTab from './ChatsTab';
 import DeskTab from './DeskTab';
 import GroupsTab from './GroupsTab';
 import ReportsTab from './ReportsTab';
@@ -20,6 +21,8 @@ import { Loading } from './hiringUi';
  *                  моя воронка, моя мотивация;
  *   Воронка        канбан-доска — всем, кому раздел открыт: тренер читает всю воронку, а действует
  *                  только в своих группах (владелец 19.11.2026); руководитель отдела видит своих;
+ *   Чаты           переписка с кандидатами в WhatsApp найма «как в Чатах ОП» (владелец 19.11.2026):
+ *                  рекрутеры и руководитель рекрутинга, ответ уходит через сервис на шлюзе;
  *   Группы         группы на обучение с вместимостью — тренер ведёт свои, руководитель рекрутинга —
  *                  все (владелец 18.11.2026); у тренера это первая вкладка;
  *   Отчёты         дашборд и отчёты: руководителю целиком, рекрутеру — по себе; тренеру их нет —
@@ -43,18 +46,31 @@ const HOW_IT_WORKS =
 const TAB_META = {
     desk: { label: 'Рабочий стол', short: 'Стол', subtitle: 'План найма, задачи на сегодня, моя воронка и мотивация' },
     board: { label: 'Воронка', short: 'Воронка', subtitle: 'Канбан-доска: общий пул и карточки по этапам', hint: HOW_IT_WORKS },
+    chats: { label: 'Чаты', short: 'Чаты', subtitle: 'Переписка с кандидатами в WhatsApp найма' },
     groups: { label: 'Группы', short: 'Группы', subtitle: 'Группы на обучение: старт, вместимость и свободные места' },
     reports: { label: 'Отчёты', short: 'Отчёты', subtitle: 'Дашборд воронки, потери, рекрутеры, источники, мотивация' },
     upload: { label: 'Загрузки', short: 'Загрузки', subtitle: 'База контактов файлом и партии загрузок' },
     settings: { label: 'Настройки', short: 'Настройки', subtitle: 'Рекрутеры, источники, каналы, вакансии, причины, план и интеграции' },
 };
 
-const tabLabel = ({ label, short }) => (short === label ? label : (
-    <>
-        <span className="sm:hidden">{short}</span>
-        <span className="hidden sm:inline">{label}</span>
-    </>
-));
+const tabLabel = ({ label, short }, count = 0) => {
+    const text = short === label ? label : (
+        <>
+            <span className="sm:hidden">{short}</span>
+            <span className="hidden sm:inline">{label}</span>
+        </>
+    );
+    if (!count) return text;
+    // «Ждут ответа» — оранжевым счётчиком, как в меню «Чатов ОП».
+    return (
+        <span className="inline-flex items-center gap-1.5">
+            {text}
+            <span className="rounded-full bg-orange-600 px-1.5 text-[11px] font-semibold leading-[18px] text-white">{count > 99 ? '99+' : count}</span>
+        </span>
+    );
+};
+
+const SUMMARY_POLL_MS = 30000;
 
 const readStoredTab = () => {
     try {
@@ -142,6 +158,22 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     const caps = boot?.capabilities || {};
     // Набор и порядок вкладок по правам — hiringTabs (тренеру «Группы» первой, отчётов у тренера нет).
     const tabs = useMemo(() => hiringTabs(caps), [caps]);
+    // Сколько чатов ждут ответа — на вкладке «Чаты», раз в 30 секунд (одна лёгкая выборка).
+    const [waitingChats, setWaitingChats] = useState(0);
+    const chatsTab = tabs.includes('chats');
+    useEffect(() => {
+        if (!chatsTab) return undefined;
+        let alive = true;
+        let timer = null;
+        const tick = () => {
+            const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+            (hidden ? Promise.resolve() : api.get('/wa/chats/summary').then(({ data }) => {
+                if (alive) setWaitingChats(Number(data.waiting_chats) || 0);
+            }).catch(() => {})).finally(() => { if (alive) timer = setTimeout(tick, SUMMARY_POLL_MS); });
+        };
+        tick();
+        return () => { alive = false; clearTimeout(timer); };
+    }, [api, chatsTab, version]);
     const active = tabs.includes(tab) ? tab : tabs[0];
     const chooseTab = (value) => {
         setTab(value);
@@ -163,7 +195,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
 
     // Доска — на всю ширину экрана (владелец 30.10.2026: на большом мониторе видеть все этапы), остальные
     // вкладки — в обычной ширине раздела.
-    const wide = (tabs.includes(tab) ? tab : tabs[0]) === 'board';
+    const wide = ['board', 'chats'].includes(tabs.includes(tab) ? tab : tabs[0]);
     const shell = (children) => (
         <div className={`relative mx-auto min-h-screen w-full ${wide ? 'max-w-none' : 'max-w-[1600px]'} bg-gray-50 px-3 py-4 sm:px-5 sm:py-6 md:min-h-0`}
              style={{ fontFamily: APPLE_FONT }}>
@@ -197,12 +229,13 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                 {tabs.length > 1 && (
                     <div className="-mx-1 max-w-full overflow-x-auto px-1 [scrollbar-width:none]">
                         <IosSegmented value={active} onChange={chooseTab} ariaLabel="Вкладка раздела"
-                                      options={tabs.map((value) => ({ value, label: tabLabel(TAB_META[value]) }))} />
+                                      options={tabs.map((value) => ({ value, label: tabLabel(TAB_META[value], value === 'chats' ? waitingChats : 0) }))} />
                     </div>
                 )}
             </header>
             {active === 'desk' && <DeskTab {...shared} />}
             {active === 'board' && <BoardTab {...shared} />}
+            {active === 'chats' && <ChatsTab {...shared} onWaiting={setWaitingChats} />}
             {active === 'groups' && <GroupsTab {...shared} />}
             {active === 'reports' && <ReportsTab {...shared} />}
             {active === 'upload' && <UploadTab {...shared} />}

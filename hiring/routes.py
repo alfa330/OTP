@@ -33,6 +33,12 @@ Blueprint собирается фабрикой и получает зависи
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
     PUT    /whatsapp/settings                кто отвечает с телефона (его первый ответ берёт карточку в работу)
     GET    /cards/<id>/whatsapp              переписка карточки с номером найма
+    GET    /wa/chats[/summary]               окно «Чаты»: список чатов (ждущие ответа сверху), счётчик для вкладки
+    GET    /wa/chats/<key>/messages          лента чата, неотправленное, можно ли писать
+    POST   /wa/chats/<key>/send              ответ кандидату (JSON или multipart с файлом) — в очередь шлюза
+    POST   /wa/chats/<key>/handled           «Ответ не нужен»
+    POST   /wa/outbox/<id>/retry, DELETE     «Повторить» / «Убрать» неотправленное
+    …/wa/templates                           общие шаблоны ответов команды найма
 
 Внешний вход откликов (Kaspi, таргет, любой интегратор) — отдельный Blueprint
 /api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма».
@@ -46,7 +52,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, notices, queries, reports, rules
+from . import access, notices, queries, reports, rules, wa_chat
 from .service import HiringError
 
 log = logging.getLogger(__name__)
@@ -917,6 +923,62 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_card_whatsapp(card_id, ctx):
         return jsonify(_json(service.card_whatsapp(ctx, card_id)))
 
+    # Окно «Чаты»: переписка с кандидатами из портала (владелец 19.11.2026, hiring/wa_chat.py). Ключ чата —
+    # номер «+7…», «wa:…» или «lid:…»: в адресе он кодируется целиком (encodeURIComponent).
+    @hiring_route('/wa/chats')
+    def hiring_wa_chats(ctx):
+        return jsonify(_json(service.wa_chats(ctx, request.args)))
+
+    @hiring_route('/wa/chats/summary')
+    def hiring_wa_chat_summary(ctx):
+        return jsonify(_json(service.wa_chat_summary(ctx)))
+
+    @hiring_route('/wa/chats/<key>/messages')
+    def hiring_wa_thread(key, ctx):
+        data = service.wa_thread(ctx, key, request.args)
+        data['card'] = public_card(data['card'], ctx) if data.get('card') else None
+        return jsonify(_json(data))
+
+    @hiring_route('/wa/chats/<key>/send', methods=('POST',))
+    def hiring_wa_send(key, ctx):
+        upload = None
+        # Предел — до чтения тела: файл больше 16 МБ не грузится в память процесса.
+        if (request.content_length or 0) > wa_chat.MAX_FILE + 512 * 1024:
+            return _bad('Файл больше 16 МБ', 'HIRING_WA_FILE_TOO_LARGE', 413)
+        if request.files:
+            file_storage = request.files.get('file')
+            if file_storage is None or not file_storage.filename:
+                return _bad('Приложите файл', 'HIRING_WA_EMPTY')
+            upload = (file_storage.read(), file_storage.mimetype, file_storage.filename)
+            payload = request.form.to_dict()
+        else:
+            payload = _body()
+        return jsonify(_json(service.wa_send(ctx, key, payload, upload))), 201
+
+    @hiring_route('/wa/chats/<key>/handled', methods=('POST',))
+    def hiring_wa_handled(key, ctx):
+        return jsonify(_json(service.wa_handled(ctx, key)))
+
+    @hiring_route('/wa/outbox/<int:outbox_id>/retry', methods=('POST',))
+    def hiring_wa_outbox_retry(outbox_id, ctx):
+        return jsonify(_json(service.wa_outbox_retry(ctx, outbox_id)))
+
+    @hiring_route('/wa/outbox/<int:outbox_id>', methods=('DELETE',))
+    def hiring_wa_outbox_discard(outbox_id, ctx):
+        return jsonify(_json(service.wa_outbox_discard(ctx, outbox_id)))
+
+    @hiring_route('/wa/templates', methods=('GET', 'POST'))
+    def hiring_wa_templates(ctx):
+        if request.method == 'POST':
+            return jsonify(_json(service.wa_template_save(ctx, None, _body()))), 201
+        return jsonify(_json(service.wa_templates_list(ctx)))
+
+    @hiring_route('/wa/templates/<int:template_id>', methods=('PATCH', 'DELETE'))
+    def hiring_wa_template(template_id, ctx):
+        if request.method == 'DELETE':
+            return jsonify(_json(service.wa_template_delete(ctx, template_id)))
+        return jsonify(_json(service.wa_template_save(ctx, template_id, _body())))
+
     @hiring_route('/notifications/seen', methods=('POST',))
     def hiring_notifications_seen(ctx):
         with db._get_cursor() as cursor:
@@ -953,6 +1015,7 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
         POST /api/hiring/wa/agent/poll          {state, detail, ack, features} → {command, next_poll_sec, resend?}
         POST /api/hiring/wa/agent/events        {events: [...]}      → {accepted, outcomes}
         POST /api/hiring/wa/agent/media/<id>    файл сообщения телом → {stored}; 404 — сообщение ещё не дошло
+        POST /api/hiring/wa/agent/outbox/<id>/file  файл ответа из окна «Чаты» — шлюзу для отправки кандидату
     """
     from cdr import agent_auth
     from cdr import config as cdr_config
@@ -1017,6 +1080,24 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
         except Exception:  # noqa: BLE001
             log.exception('WhatsApp найма: файл сообщения не сохранён')
             return _bad('Внутренняя ошибка', 'HIRING_WA_INTERNAL', 500)
+
+    # Файл исходящего сообщения (окно «Чаты»): шлюз забирает его, чтобы отправить кандидату. POST — как у всех
+    # ручек шлюза: подпись покрывает метод, путь и тело (пустое).
+    @bp.route('/outbox/<int:outbox_id>/file', methods=['POST', 'OPTIONS'], endpoint='hiring_wa_agent_outbox_file')
+    def outbox_file(outbox_id):
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        refusal = _authenticate()
+        if refusal is not None:
+            return refusal
+        try:
+            data, ctype = service.wa_outbox_file(outbox_id)
+        except HiringError as exc:
+            return _bad(exc.message, exc.code, exc.status)
+        except Exception:  # noqa: BLE001
+            log.exception('WhatsApp найма: файл исходящего сообщения не отдан шлюзу')
+            return _bad('Внутренняя ошибка', 'HIRING_WA_INTERNAL', 500)
+        return Response(data, mimetype=ctype)
 
     return bp
 

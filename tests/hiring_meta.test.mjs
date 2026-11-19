@@ -127,10 +127,12 @@ test('group name follows the start date until the trainer types own', () => {
 test('tabs by rights: trainer starts with «Группы» and has no reports', () => {
     assert.deepEqual(hiringTabs({ groups: true, trainer: true }), ['groups', 'board']);
     assert.deepEqual(hiringTabs({ groups: true, dept_head: true }), ['groups', 'board', 'reports']);
-    assert.deepEqual(hiringTabs({ recruiter: true, take: true }), ['desk', 'board', 'reports']);
+    assert.deepEqual(hiringTabs({ recruiter: true, take: true }), ['desk', 'board', 'chats', 'reports']);
     assert.deepEqual(hiringTabs({ recruiter: true, lead: true, groups: true, upload: true, manage: true }),
-        ['desk', 'board', 'groups', 'reports', 'upload', 'settings']);
-    assert.deepEqual(hiringTabs({ recruiter: true, groups: true }), ['desk', 'board', 'groups', 'reports']);
+        ['desk', 'board', 'chats', 'groups', 'reports', 'upload', 'settings']);
+    // Руководитель рекрутинга без выдачи рекрутера (глава HR) — тоже отвечает кандидатам.
+    assert.deepEqual(hiringTabs({ lead: true, manage: true }), ['board', 'chats', 'reports', 'settings']);
+    assert.deepEqual(hiringTabs({ recruiter: true, groups: true }), ['desk', 'board', 'chats', 'groups', 'reports']);
     assert.deepEqual(hiringTabs({ dept_head: true }), ['board', 'reports']);
     assert.deepEqual(hiringTabs(), ['board']);
 });

@@ -1,0 +1,14 @@
+/* Окно «Чаты» «Воронки найма»: высота — по экрану, лента и список прокручиваются внутри.
+   Высота классом h-[calc…] на телефоне не держится: оболочка (mobile-shell.css) снимает такие высоты, и окно
+   вырастало по содержимому на тысячи пикселей. Свой класс и своя высота для телефона — как у .wz-columns
+   «Чатов ОП» (wazzup/workspace.css). */
+.hiring-chats {
+    height: calc(100dvh - 150px);
+    min-height: 520px;
+}
+
+body.mobile-shell .hiring-chats {
+    flex: none;
+    height: calc(100dvh - 210px);
+    min-height: 420px;
+}
