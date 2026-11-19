@@ -2,9 +2,13 @@
 """HTTP-эндпоинты табеля фронт-офисов (Flask Blueprint /api/front_office_timesheet).
 
     GET /scope     id отдела фронт-офисов — по нему «Учет часов» узнаёт группу «Регионов»
-    GET /options   отборы окна выгрузки за месяц (?month=YYYY-MM): города, люди, должности
-    GET /data      тот же табель для экрана «Учета часов», JSON (?month=…, отборы как у export)
-    GET /export    файл Excel (?month=YYYY-MM&city=…&user_id=…&job_title=…, отборы повторяются)
+    GET /options   отборы табеля за период: города, люди, должности
+    GET /data      тот же табель для экрана «Учета часов», JSON (отборы как у export)
+    GET /export    файл Excel (&city=…&user_id=…&job_title=…, отборы повторяются)
+
+Период (кроме /scope): ?date_from=ГГГГ-ММ-ДД&date_to=ГГГГ-ММ-ДД — от одного дня
+до месяца (просьба владельца 19.11.2026), иначе ?month=ГГГГ-ММ — месяц целиком,
+как было. Фронт шлёт и месяц: сервер без периода просто строит табель за месяц.
 
 Кому: глава отдела «Фронт офисы» и суперадмины — решение владельца 06.11.2026.
 Остальным, в том числе главам и СВ других отделов и админам без отдела, — 403:
@@ -37,8 +41,12 @@ def today_almaty():
         return date.today()
 
 
-def export_file_name(month):
-    return f'Табель фронт-офисы {month}.xlsx'
+def export_file_name(period):
+    """«Табель фронт-офисы 2026-10.xlsx» за месяц, как было; за период —
+    «Табель фронт-офисы 01.11.2026 — 15.11.2026.xlsx». Строка месяца — тоже месяц."""
+    if not isinstance(period, dict):
+        period = rules.resolve_period(month=period)
+    return f'Табель фронт-офисы {rules.period_file_label(period["start"], period["end"])}.xlsx'
 
 
 def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_preflight_response,
@@ -46,7 +54,7 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
     """can_export(requester_id, requester) -> bool."""
     bp = Blueprint('front_office_timesheet', __name__, url_prefix='/api/front_office_timesheet')
 
-    def route(rule, needs_month=True):
+    def route(rule, needs_period=True):
         def decorator(handler):
             @bp.route(rule, methods=['GET', 'OPTIONS'], endpoint=handler.__name__)
             @require_api_key
@@ -61,13 +69,17 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
                         return jsonify({"error": message}), status
                     if not can_export(requester_id, requester):
                         return jsonify({"error": FORBIDDEN_MESSAGE, "code": "TIMESHEET_FORBIDDEN"}), 403
-                    if not needs_month:
+                    if not needs_period:
                         return handler(*args, **kwargs)
-                    month = str(request.args.get('month') or '').strip()
-                    if not rules.parse_month(month):
-                        return jsonify({"error": "Месяц нужен в виде ГГГГ-ММ",
-                                        "code": "TIMESHEET_BAD_MONTH"}), 400
-                    return handler(*args, month=month, today=today_fn(), **kwargs)
+                    try:
+                        period = rules.resolve_period(
+                            month=request.args.get('month'),
+                            date_from=request.args.get('date_from'),
+                            date_to=request.args.get('date_to'),
+                        )
+                    except rules.PeriodError as exc:
+                        return jsonify({"error": exc.message, "code": exc.code}), 400
+                    return handler(*args, period=period, today=today_fn(), **kwargs)
                 except data.TimesheetError as exc:
                     return jsonify({"error": exc.message, "code": exc.code}), exc.status
                 except Exception:  # noqa: BLE001
@@ -76,9 +88,9 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
             return wrapper
         return decorator
 
-    def _model(month, today):
-        """Табель месяца с отборами запроса — один для экрана и для файла."""
-        inputs = data.collect(db, month, today, with_facts=True)
+    def _model(period, today):
+        """Табель периода с отборами запроса — один для экрана и для файла."""
+        inputs = data.collect(db, period, today, with_facts=True)
         if inputs['pending_days']:
             # Дни, которые «Отметки» не смогли собрать из Workpace: в табеле они
             # выглядели бы неявками. Лучше честный отказ, чем табель с дырами.
@@ -92,29 +104,31 @@ def build_front_office_timesheet_blueprint(*, db, require_api_key, build_cors_pr
         )
         return inputs, rules.build_model(inputs, filters)
 
-    @route('/scope', needs_month=False)
+    @route('/scope', needs_period=False)
     def timesheet_scope():
         return jsonify(data.scope(db)), 200
 
     @route('/options')
-    def timesheet_options(*, month, today):
-        inputs = data.collect(db, month, today, with_facts=False)
+    def timesheet_options(*, period, today):
+        inputs = data.collect(db, period, today, with_facts=False)
         return jsonify(data.options_payload(inputs)), 200
 
     @route('/data')
-    def timesheet_data(*, month, today):
-        inputs, model = _model(month, today)
+    def timesheet_data(*, period, today):
+        inputs, model = _model(period, today)
         payload = rules.model_payload(model)
-        payload['without_card'] = inputs['without_card']
+        # Строка «Нет карточки Workpace» — только про тех, кто в табеле: выбрали
+        # двух человек — чужие имена над таблицей были бы шумом.
+        payload['without_card'] = data.without_card_names(inputs, model)
         return jsonify(payload), 200
 
     @route('/export')
-    def timesheet_export(*, month, today):
-        _inputs, model = _model(month, today)
+    def timesheet_export(*, period, today):
+        _inputs, model = _model(period, today)
         if not model['cities']:
             raise data.TimesheetError('Под выбранный отбор никто не попал', status=404,
                                       code='TIMESHEET_EMPTY')
         return send_file(BytesIO(workbook.build(model)), mimetype=XLSX_MIME, as_attachment=True,
-                         download_name=export_file_name(month))
+                         download_name=export_file_name(period))
 
     return bp

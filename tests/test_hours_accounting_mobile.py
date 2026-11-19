@@ -211,7 +211,14 @@ class PhoneScreenTests(unittest.TestCase):
         # Раскрыт ли список, запоминаем в фазе перехвата: к обработчику окна React
         # список уже убрал.
         self.assertIn("window.addEventListener('keydown', remember, true);", dialog)
-        self.assertIn("if (escapeFromListRef.current || hasOpenListbox()) return;", dialog)
+        self.assertIn("if (escapeFromListRef.current || hasOpenPicker()) return;", dialog)
+        # И календарь периода табеля (19.11.2026): Esc в нём закрывал всё окно.
+        # Подпись панели — общая константа календаря, а не копия строки.
+        self.assertIn('[role="dialog"][aria-label="${PERIOD_PICKER_LABEL}"]', dialog)
+        self.assertIn("import { PERIOD_PICKER_LABEL } from '../ui/periodRange.js';", dialog)
+        picker = (HOURS.parent / 'ui' / 'DateRangePicker.jsx').read_text(encoding='utf-8')
+        self.assertEqual(picker.count('role="dialog" aria-label={PERIOD_PICKER_LABEL}'), 2)
+        self.assertNotIn('aria-label="Выбор периода"', picker)
         self.assertIn("ref={checked ? selectedRef : undefined}", dialog)
         self.assertIn("if (open) selectedRef.current?.focus({ preventScroll: true });", dialog)
 

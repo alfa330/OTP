@@ -1,24 +1,31 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useId, useMemo, useRef } from 'react';
 import CustomSelect from '../ui/CustomSelect';
+import { IosDateRangePicker } from '../ui/DateRangePicker';
 import HoursFold from './HoursFold';
 import {
-    pruneTimesheetFilters,
-    sameTimesheetFilters,
+    TIMESHEET_PERIOD_HINT,
+    timesheetPeriodFieldLabel,
+    timesheetPeriodPresets,
     timesheetSelectOptions,
+    timesheetSpanLimit,
+    timesheetWithoutCard,
 } from './frontOfficeTimesheet';
-import { fetchTimesheetOptions } from './frontOfficeTimesheetApi';
 
 /*
- * Отбор табеля фронт-офисов: город, сотрудник, должность (ТЗ, п. 6). Месяц —
- * тот, что выбран на странице. Пустой отбор — все: без отборов табель общий по
- * всем городам и сотрудникам, как требует ТЗ.
+ * Отбор табеля фронт-офисов: город, сотрудник, должность (ТЗ, п. 6), а в окне
+ * «Сформировать отчёт» ещё и период. Пустой отбор — все: без отборов табель
+ * общий по всем городам и сотрудникам, как требует ТЗ.
  *
- * Списки — состав выбранного месяца с сервера (/api/front_office_timesheet/options):
- * уволенный в этом месяце в нём есть, он и в табеле есть. Сменили месяц — из
- * отбора отпадает то, чего в новом месяце нет.
+ * С 19.11.2026 (просьба владельца: период от дня до месяца и «точечно выбирать
+ * сотрудников») отбор один на экран и на файл: строкой над табелем
+ * (layout="row") и колонкой в окне (layout="stack") — оба вида держат одно и то
+ * же состояние раздела, поэтому скачивается ровно то, что видно на экране.
+ * Списки (состав периода с сервера) грузит раздел один раз — useTimesheetOptions,
+ * сюда они приходят готовыми.
  *
  * Пикеры — общий CustomSelect в виде iOS (эталон пикеров портала), выбор
- * нескольких значений с поиском.
+ * нескольких значений с поиском; период — общий календарь сайта
+ * (IosDateRangePicker, «Дни · Месяцы»), дни дальше месяца от начала погашены.
  */
 function pickedLabel(options, emptyText) {
     return (values) => {
@@ -40,46 +47,42 @@ function PickerRow({ id, label, children }) {
     );
 }
 
-export default function FrontOfficeTimesheetFilters({ month, apiBaseUrl, authHeaders, value, onChange }) {
-    const [state, setState] = useState({ status: 'loading', error: '', payload: null });
-    const latest = useRef({ value, onChange, authHeaders });
-    latest.current = { value, onChange, authHeaders };
+// Поле периода в окне — во всю ширину, как списки под ним (тот же вид, что у
+// CustomSelect variant="ios"); шеврон справа.
+const PERIOD_FIELD_CLASS = 'flex w-full items-center gap-2 rounded-xl bg-white px-3 py-2 text-left text-[12.5px] '
+    + 'font-medium text-slate-700 ring-1 ring-slate-200/70 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all '
+    + 'hover:bg-slate-50 active:scale-[0.99] aria-expanded:ring-2 aria-expanded:ring-blue-500/60 [&>span]:flex-1';
+
+export default function FrontOfficeTimesheetFilters({
+    optionsState,
+    value,
+    onChange,
+    layout = 'stack',
+    period = null,
+    onPeriodChange = null,
+}) {
     const idBase = useId();
-
-    useEffect(() => {
-        if (!month) return undefined;
-        const controller = new AbortController();
-        setState((previous) => ({ ...previous, status: 'loading', error: '' }));
-        fetchTimesheetOptions({
-            apiBaseUrl,
-            headers: latest.current.authHeaders?.() || {},
-            month,
-            signal: controller.signal,
-        })
-            .then((payload) => {
-                setState({ status: 'ready', error: '', payload });
-                const pruned = pruneTimesheetFilters(latest.current.value, timesheetSelectOptions(payload));
-                if (!sameTimesheetFilters(pruned, latest.current.value)) latest.current.onChange?.(pruned);
-            })
-            .catch((error) => {
-                if (error?.name === 'AbortError') return;
-                setState({ status: 'error', error: error?.message || 'Не удалось загрузить списки', payload: null });
-            });
-        return () => controller.abort();
-    }, [month, apiBaseUrl]);
-
-    const options = useMemo(() => timesheetSelectOptions(state.payload), [state.payload]);
-    const ready = state.status === 'ready';
-    const loadingText = state.status === 'loading' ? 'Загрузка…' : null;
-    const withoutCard = ready ? (state.payload?.without_card || []) : [];
+    const payload = optionsState?.payload || null;
+    const status = optionsState?.status || 'idle';
+    const options = useMemo(() => timesheetSelectOptions(payload), [payload]);
+    // Пока грузится новый период, прежние списки остаются: выключать пикеры на
+    // каждую смену дат — мигание ради мигания. Ждём только самый первый ответ.
+    const ready = Boolean(payload);
+    const loadingText = !payload && status === 'loading' ? 'Загрузка…' : null;
+    const errorText = status === 'error' ? (optionsState?.error || 'Не удалось загрузить списки') : '';
+    const current = value || {};
+    // Только про тех, кто попадёт в файл при текущем отборе.
+    const withoutCard = ready ? timesheetWithoutCard(payload, current) : [];
     // Пока строка сворачивается, в ней остаются прежние имена, а не пустой список.
     const shownWithoutCard = useRef([]);
     if (withoutCard.length) shownWithoutCard.current = withoutCard;
-    const current = value || {};
+    const row = layout === 'row';
 
-    return (
-        <div className="flex flex-col gap-3">
-            <PickerRow id={`${idBase}-city`} label="Город">
+    const pickers = [
+        {
+            key: 'city',
+            label: 'Город',
+            node: (
                 <CustomSelect
                     id={`${idBase}-city`}
                     variant="ios"
@@ -93,9 +96,14 @@ export default function FrontOfficeTimesheetFilters({ month, apiBaseUrl, authHea
                     renderValue={pickedLabel(options.cities, 'Все города')}
                     disabled={!ready}
                     ariaLabel="Город"
+                    className={row ? 'w-[176px]' : ''}
                 />
-            </PickerRow>
-            <PickerRow id={`${idBase}-person`} label="Сотрудник">
+            ),
+        },
+        {
+            key: 'person',
+            label: 'Сотрудник',
+            node: (
                 <CustomSelect
                     id={`${idBase}-person`}
                     variant="ios"
@@ -109,9 +117,14 @@ export default function FrontOfficeTimesheetFilters({ month, apiBaseUrl, authHea
                     renderValue={pickedLabel(options.people, 'Все сотрудники')}
                     disabled={!ready}
                     ariaLabel="Сотрудник"
+                    className={row ? 'w-[236px]' : ''}
                 />
-            </PickerRow>
-            <PickerRow id={`${idBase}-job`} label="Должность">
+            ),
+        },
+        {
+            key: 'job',
+            label: 'Должность',
+            node: (
                 <CustomSelect
                     id={`${idBase}-job`}
                     variant="ios"
@@ -123,10 +136,49 @@ export default function FrontOfficeTimesheetFilters({ month, apiBaseUrl, authHea
                     renderValue={pickedLabel(options.jobs, 'Все должности')}
                     disabled={!ready}
                     ariaLabel="Должность"
+                    className={row ? 'w-[176px]' : ''}
                 />
-            </PickerRow>
-            {state.status === 'error' && (
-                <p className="text-[12.5px] leading-snug text-rose-600">{state.error}</p>
+            ),
+        },
+    ];
+
+    if (row) {
+        return (
+            <>
+                {pickers.map((picker) => <React.Fragment key={picker.key}>{picker.node}</React.Fragment>)}
+                {errorText && <span className="text-[12px] leading-snug text-rose-600">{errorText}</span>}
+            </>
+        );
+    }
+
+    return (
+        <div className="flex flex-col gap-3">
+            {period && onPeriodChange && (
+                <div>
+                    <span className="mb-1 block text-[12.5px] font-medium text-slate-600">Период</span>
+                    <IosDateRangePicker
+                        from={period.from}
+                        to={period.to}
+                        onChange={(next) => {
+                            if (next?.from && next?.to) onPeriodChange(next);
+                        }}
+                        views={['days', 'months']}
+                        presets={timesheetPeriodPresets()}
+                        spanLimit={timesheetSpanLimit}
+                        startHint={TIMESHEET_PERIOD_HINT}
+                        formatLabel={(from, to) => timesheetPeriodFieldLabel({ from, to })}
+                        triggerClassName={PERIOD_FIELD_CLASS}
+                        portal
+                    />
+                </div>
+            )}
+            {pickers.map((picker) => (
+                <PickerRow key={picker.key} id={`${idBase}-${picker.key}`} label={picker.label}>
+                    {picker.node}
+                </PickerRow>
+            ))}
+            {errorText && (
+                <p className="text-[12.5px] leading-snug text-rose-600">{errorText}</p>
             )}
             <HoursFold open={withoutCard.length > 0}>
                 <p className="text-[12px] leading-snug text-slate-500">

@@ -17,13 +17,12 @@ from front_office_timesheet import data, routes, rules
 from tests import source_cache
 
 
-def _inputs(pending=()):
-    start, end = date(2026, 10, 1), date(2026, 10, 31)
+def _inputs(pending=(), start=date(2026, 10, 1), end=date(2026, 10, 31)):
     people = [{'user_id': 1, 'name': 'Альфа Анна', 'city': 'Астана', 'job_title': '', 'active': True},
               {'user_id': 2, 'name': 'Бета Болат', 'city': 'Алматы', 'job_title': 'техперсонал', 'active': True}]
     spans = {(1, date(2026, 10, 1)): rules.shift_span(date(2026, 10, 1), time(9), time(19))}
     return {
-        'month': '2026-10', 'start': start, 'end': end, 'window_start': date(2026, 9, 1),
+        'month': rules.whole_month_of(start, end), 'start': start, 'end': end, 'window_start': date(2026, 9, 1),
         'today': date(2026, 11, 6), 'fact_until': end, 'department_id': 909, 'people': people,
         'spans': spans, 'shift_days': {}, 'days_off': set(), 'periods': {}, 'membership': {},
         'facts': {}, 'has_card': {1}, 'holidays': set(), 'pending_days': list(pending),
@@ -61,6 +60,56 @@ class RoutesTests(unittest.TestCase):
     def test_month_is_required(self):
         response = self.client().get('/api/front_office_timesheet/export?month=10-2026')
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'TIMESHEET_BAD_MONTH')
+
+    def test_period_dates_win_over_the_month(self):
+        """Фронт шлёт и месяц, и даты: сервер строит табель за даты (19.11.2026)."""
+        period_inputs = _inputs(start=date(2026, 11, 1), end=date(2026, 11, 15))
+        with mock.patch.object(data, 'collect', return_value=period_inputs) as collect:
+            response = self.client().get(
+                '/api/front_office_timesheet/export?month=2026-11&date_from=2026-11-01&date_to=2026-11-15')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(collect.call_args.args[1],
+                         {'start': date(2026, 11, 1), 'end': date(2026, 11, 15), 'month': None})
+        disposition = unquote(response.headers['Content-Disposition'])
+        self.assertIn('Табель фронт-офисы 01.11.2026 — 15.11.2026.xlsx', disposition)
+
+    def test_period_longer_than_a_month_is_refused_before_the_database(self):
+        with mock.patch.object(data, 'collect') as collect:
+            response = self.client().get(
+                '/api/front_office_timesheet/data?month=2026-11&date_from=2026-11-01&date_to=2026-12-01')
+            reversed_dates = self.client().get(
+                '/api/front_office_timesheet/options?date_from=2026-11-10&date_to=2026-11-01')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'], 'TIMESHEET_PERIOD_TOO_LONG')
+        self.assertIn('по 30.11.2026', response.get_json()['error'])
+        self.assertEqual(reversed_dates.status_code, 400)
+        self.assertEqual(reversed_dates.get_json()['code'], 'TIMESHEET_BAD_PERIOD')
+        with mock.patch.object(data, 'collect') as edge_collect:
+            far = self.client().get('/api/front_office_timesheet/export?date_from=9999-12-15&date_to=9999-12-20')
+        self.assertEqual((far.status_code, far.get_json()['code']), (400, 'TIMESHEET_BAD_PERIOD'))
+        edge_collect.assert_not_called()
+        collect.assert_not_called()
+
+    def test_screen_and_options_carry_the_period(self):
+        period_inputs = _inputs(start=date(2026, 10, 1), end=date(2026, 10, 7))
+        with mock.patch.object(data, 'collect', return_value=period_inputs):
+            screen = self.client().get('/api/front_office_timesheet/data?date_from=2026-10-01&date_to=2026-10-07')
+            options = self.client().get('/api/front_office_timesheet/options?date_from=2026-10-01&date_to=2026-10-07')
+        payload = screen.get_json()
+        self.assertEqual((payload['month'], payload['date_from'], payload['date_to'], payload['title']),
+                         (None, '2026-10-01', '2026-10-07', '1–7 октября 2026'))
+        self.assertEqual(len(payload['days']), 7)
+        self.assertEqual((options.get_json()['date_from'], options.get_json()['date_to']), ('2026-10-01', '2026-10-07'))
+
+    def test_file_names_match_the_frontend_twin(self):
+        """Content-Disposition браузер фронту не отдаёт — имя собирает и фронт
+        (timesheetFileName), строки обязаны совпадать (tests/front_office_timesheet.test.mjs)."""
+        self.assertEqual(routes.export_file_name('2026-10'), 'Табель фронт-офисы 2026-10.xlsx')
+        self.assertEqual(routes.export_file_name(rules.resolve_period(date_from='2026-11-05', date_to='2026-11-05')),
+                         'Табель фронт-офисы 05.11.2026.xlsx')
+        self.assertEqual(routes.export_file_name(rules.resolve_period(date_from='2026-10-25', date_to='2026-11-05')),
+                         'Табель фронт-офисы 25.10.2026 — 05.11.2026.xlsx')
 
     def test_export_returns_the_workbook_with_a_readable_name(self):
         with mock.patch.object(data, 'collect', return_value=_inputs()) as collect:
@@ -68,6 +117,8 @@ class RoutesTests(unittest.TestCase):
                 '/api/front_office_timesheet/export?month=2026-10&city=Астана&job_title=менеджер')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(collect.call_args.kwargs, {'with_facts': True})
+        self.assertEqual(collect.call_args.args[1],
+                         {'start': date(2026, 10, 1), 'end': date(2026, 10, 31), 'month': '2026-10'})
         self.assertEqual(response.mimetype, routes.XLSX_MIME)
         self.assertTrue(response.data.startswith(b'PK'))
         disposition = unquote(response.headers['Content-Disposition'])
@@ -94,6 +145,7 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual(payload['cities'], [{'value': 'Алматы', 'label': 'Алматы'},
                                              {'value': 'Астана', 'label': 'Астана'}])
         self.assertEqual([p['name'] for p in payload['people']], ['Бета Болат', 'Альфа Анна'])
+        self.assertEqual([p['card'] for p in payload['people']], [False, True])
         self.assertEqual(payload['job_titles'], ['менеджер', 'техперсонал'])
         self.assertEqual(payload['without_card'], ['Бета Болат'])
 
@@ -124,7 +176,11 @@ class RoutesTests(unittest.TestCase):
         self.assertEqual((person['name'], person['active'], person['job_title']), ('Альфа Анна', True, 'менеджер'))
         self.assertEqual(person['cells'][0]['code'], 'н')
         self.assertEqual(person['totals'], {'worked': 0, 'missed': 1, 'late': 0, 'early': 0})
-        self.assertEqual(payload['without_card'], ['Бета Болат'])
+        # «Нет карточки» — только про попавших в отбор: Бета в Алматы, отбор — Астана.
+        self.assertEqual(payload['without_card'], [])
+        with mock.patch.object(data, 'collect', return_value=_inputs()):
+            everyone = self.client().get('/api/front_office_timesheet/data?month=2026-10').get_json()
+        self.assertEqual(everyone['without_card'], ['Бета Болат'])
 
     def test_data_refuses_days_the_attendance_section_did_not_collect(self):
         with mock.patch.object(data, 'collect', return_value=_inputs(pending=['2026-10-30'])):

@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 import {
-    YEAR_PAGE, dayCells, initialPeriodView, monthCells, monthRange, parseIso, periodHeader, periodLabel,
+    YEAR_PAGE, dayBounds, dayCells, initialPeriodView, monthCells, monthRange, parseIso, periodHeader, periodLabel,
     portalTabStep, presetMatches, quickPeriods, shiftIso, visibleYearCells, wholeMonthOf, wholeMonthsOf,
     wholeYearOf, yearCells, yearPageEnd, yearRange,
 } from '../src/components/ui/periodRange.js';
@@ -145,6 +145,29 @@ test('шапка «Месяцев» и «Дней»: год и месяц сло
     assert.deepEqual([days.prevLabel, months.prevLabel], ['Предыдущий месяц', 'Предыдущий год']);
 });
 
+test('предел длины периода (spanLimit) гасит дни только на втором нажатии и не шире min/max', () => {
+    // Табель «Регионов» (19.11.2026): период от дня до месяца.
+    const limit = (anchor) => ({ min: shiftIso(anchor, -30), max: shiftIso(anchor, 30) });
+    assert.deepEqual(dayBounds({ min: '', max: '', step: 0, anchor: '2026-11-05', spanLimit: limit }), { min: '', max: '' });
+    assert.deepEqual(dayBounds({ min: '', max: '', step: 1, anchor: '2026-11-05', spanLimit: limit }),
+        { min: '2026-10-06', max: '2026-12-05' });
+    // Своя граница раздела уже — она и остаётся.
+    assert.deepEqual(dayBounds({ min: '2026-11-01', max: '2026-11-20', step: 1, anchor: '2026-11-05', spanLimit: limit }),
+        { min: '2026-11-01', max: '2026-11-20' });
+    // Без предела, в одиночном режиме и без первого дня — прежние границы.
+    assert.deepEqual(dayBounds({ min: 'a', max: 'b', step: 1, anchor: '2026-11-05' }), { min: 'a', max: 'b' });
+    assert.deepEqual(dayBounds({ min: '', max: '', step: 1, anchor: '2026-11-05', spanLimit: limit, single: true }),
+        { min: '', max: '' });
+    assert.deepEqual(dayBounds({ min: '', max: '', step: 1, anchor: '', spanLimit: limit }), { min: '', max: '' });
+    // Через новый год: с 10 декабря до 9 января доступно, 10 января — уже нет.
+    const january = dayCells(2027, 0, dayBounds({ step: 1, anchor: '2026-12-10', spanLimit: limit }));
+    assert.equal(january.find((cell) => cell.iso === '2027-01-09').disabled, false);
+    assert.equal(january.find((cell) => cell.iso === '2027-01-10').disabled, true);
+    const december = dayCells(2026, 11, dayBounds({ step: 1, anchor: '2026-11-05', spanLimit: limit }));
+    assert.equal(december.find((cell) => cell.iso === '2026-12-05').disabled, false);
+    assert.equal(december.find((cell) => cell.iso === '2026-12-06').disabled, true);
+});
+
 test('Tab у календаря в портале: с кнопки — в панель, с первой назад — на кнопку, с последней — дальше', () => {
     // Разбор #389: в журнале Tab с открытой кнопки уходил мимо панели, а та висела открытой.
     assert.equal(portalTabStep({ onTrigger: true, count: 20 }), 'first');
@@ -209,6 +232,17 @@ test('четыре быстрых периода — сеткой 2 × 2, сов
     assert.ok(html.includes('grid grid-cols-2 gap-2'));
     assert.match(html, /aria-pressed="true"[^>]*>Весь период</, '«Весь период» подсвечен при пустом выборе');
     assert.equal((html.match(/aria-pressed="true"/g) || []).length, 1);
+});
+
+test('startHint заменяет только подсказку первого нажатия; без него — прежняя', () => {
+    const plain = render({ from: '2026-11-01', to: '2026-11-15' });
+    assert.ok(plain.includes('Выберите начало периода'));
+    const hinted = render({ from: '2026-11-01', to: '2026-11-15', startHint: 'Выберите начало: от дня до месяца',
+        spanLimit: () => ({ min: '2026-11-01', max: '2026-11-02' }) });
+    assert.ok(hinted.includes('Выберите начало: от дня до месяца'));
+    assert.ok(!hinted.includes('Выберите начало периода'));
+    // На первом нажатии предел ничего не гасит: дни ноября доступны.
+    assert.equal(hinted.split('cursor-not-allowed').length, plain.split('cursor-not-allowed').length);
 });
 
 test('без views — прежний календарь: ни переключателя, ни сетки 2 × 2, ни подсветки', () => {

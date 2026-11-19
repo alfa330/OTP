@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Сбор месяца для табеля: график из базы, факт — из кэша раздела «Отметки».
+"""Сбор периода для табеля: график из базы, факт — из кэша раздела «Отметки».
 
-Состав — свой, за месяц: план «Отметок» (glb_icore_plan_snapshot) берёт только
+Период — месяц или даты «с — по» от одного дня до месяца (rules.resolve_period).
+Состав — свой, за период: план «Отметок» (glb_icore_plan_snapshot) берёт только
 работающих по ТЕКУЩЕМУ отделу, а табелю за прошлый месяц нужны и уволенные в нём,
 и переведённые. Карточки Workpace сшиваются с людьми тем же правилом по ФИО, что
 у «Отметок» (_glb_name_keys / _glb_resolve_entry), плюс ручные привязки
@@ -14,6 +15,7 @@ from datetime import date, timedelta
 
 from group_late import attendance_cache
 from group_late import config as glb_config
+from group_late.departments import clean_department_filters, department_matches
 
 from . import rules
 
@@ -75,8 +77,8 @@ def scope(db):
 
 
 def _roster_candidates(cursor, department_id, start, end):
-    """Кто мог быть в отделе в этом месяце: числится в отделе сейчас или состоял в
-    его группе хоть день месяца. Перевёрнутые членства (конец раньше начала —
+    """Кто мог быть в отделе в этом периоде: числится в отделе сейчас или состоял в
+    его группе хоть день периода. Перевёрнутые членства (конец раньше начала —
     след перевода) не в счёт: это призраки, а не люди группы."""
     cursor.execute("""
         WITH dept_members AS (
@@ -234,7 +236,7 @@ def match_cards(people, cards, rows, links, *, name_keys, resolve, index_put):
 
 
 def _active_user_ids(start, end, spans, days_off, periods, facts):
-    """У кого в месяце что-то есть: смена, выходной, период графика (кроме
+    """У кого в периоде что-то есть: смена, выходной, период графика (кроме
     увольнения), отметка."""
     active = {uid for uid, _day in spans}
     active.update(uid for uid, _day in days_off)
@@ -247,15 +249,15 @@ def _active_user_ids(start, end, spans, days_off, periods, facts):
 
 
 def _include(person, start, end, activity):
-    """Попадает ли человек в табель месяца.
+    """Попадает ли человек в табель периода (месяца или дат «с — по»).
 
-    Уволенный или переведённый — только если в месяце у него что-то есть
+    Уволенный или переведённый — только если в периоде у него что-то есть
     (смена, выходной, период графика, отметка): членство в группе при увольнении
     не закрывают, и без этой проверки в табель октября 2026 попали четверо
     ушедших ещё в июле–начале октября, все строки пустые (сверка на проде
-    06.11.2026). Работающий: состоял в группе отдела хоть день месяца — да; был в
-    группах отдела, но не в этом месяце — только если в месяце что-то есть;
-    членства нет вовсе (группу не завели) — если принят не позже конца месяца."""
+    06.11.2026). Работающий: состоял в группе отдела хоть день периода — да; был в
+    группах отдела, но не в этом периоде — только если в периоде что-то есть;
+    членства нет вовсе (группу не завели) — если принят не позже конца периода."""
     if not person['active']:
         return activity
     if person['member_in_month']:
@@ -270,17 +272,45 @@ def _include(person, start, end, activity):
     return hire is None or hire <= end
 
 
-def collect(db, month, today, *, with_facts=True):
-    """Всё для табеля за месяц. `with_facts=False` — без строк «Отметок»: так
-    быстро собирается состав для отборов окна выгрузки."""
-    bounds = rules.parse_month(month)
-    if not bounds:
-        raise TimesheetError('Месяц нужен в виде ГГГГ-ММ', status=400, code='TIMESHEET_BAD_MONTH')
-    start, end = bounds
-    # Окно графика «5.2»: прошлый месяц, выбранный и две недели следующего — у
-    # пришедшего в конце месяца иначе не нашлось бы ни одной полной недели.
-    window_start = (start - timedelta(days=1)).replace(day=1)
-    label_end = end + timedelta(days=13)
+def _cached_rows(db, start, end, department):
+    """Строки «Отметок» периода только из кэша — без сборки дней из Workpace.
+
+    Нужны спискам отбора: сшивка карточек по ФИО из строк плана и состав (кто
+    отмечался) должны быть теми же, что у табеля, иначе в отборе не найти
+    человека, который в табеле есть, а строка «Нет карточки Workpace» в окне
+    называла бы того, кого табель над ним не называет (разбор 19.11.2026).
+    Подразделение — тем же нестрогим сравнением, что у «Отметок»."""
+    filters = clean_department_filters(department)
+    rows = [attendance_cache.row_from_cache(record) for record in db.glb_read_attendance_rows(start, end)]
+    if filters:
+        rows = [row for row in rows if department_matches(row.get('department'), filters)]
+    return rows
+
+
+def resolve(period):
+    """Период из `rules.resolve_period` или строка месяца 'ГГГГ-ММ' (так звали до периода)."""
+    if isinstance(period, dict):
+        return period
+    try:
+        return rules.resolve_period(month=period)
+    except rules.PeriodError as exc:
+        raise TimesheetError(exc.message, status=400, code=exc.code) from None
+
+
+def collect(db, period, today, *, with_facts=True):
+    """Всё для табеля за период — месяц или даты «с — по» (rules.resolve_period).
+    `with_facts=False` — для списков отбора: строки «Отметок» только из кэша, без
+    сборки недостающих дней из Workpace (окно открывается сразу)."""
+    period = resolve(period)
+    start, end = period['start'], period['end']
+    # Окно графика «5.2»: прошлый месяц, месяц периода и две недели следующего —
+    # у пришедшего в конце месяца иначе не нашлось бы ни одной полной недели.
+    # Окно берётся по МЕСЯЦАМ периода, а не по его дням: у человека в табеле за
+    # день, за неделю и за месяц один и тот же график. Период через границу
+    # месяцев берёт оба месяца сразу (от прошлого месяца начала до двух недель
+    # после месяца конца) — график тогда может отличаться от табеля одного из них.
+    window_start = (start.replace(day=1) - timedelta(days=1)).replace(day=1)
+    label_end = rules.month_end(end) + timedelta(days=13)
     fact_until = rules.last_fact_day(end, today)
     workpace_name = workpace_department_name()
 
@@ -308,10 +338,13 @@ def collect(db, month, today, *, with_facts=True):
     spans = {key: rules.merge_spans(value) for key, value in spans_by_day.items()}
 
     rows, pending_days = [], []
-    if with_facts and workpace_name and fact_until >= start:
-        payload = attendance_cache.rows_for(db, start, fact_until, department=workpace_name)
-        rows = payload.get('rows') or []
-        pending_days = list(payload.get('pending_days') or [])
+    if workpace_name and fact_until >= start:
+        if with_facts:
+            payload = attendance_cache.rows_for(db, start, fact_until, department=workpace_name)
+            rows = payload.get('rows') or []
+            pending_days = list(payload.get('pending_days') or [])
+        else:
+            rows = _cached_rows(db, start, fact_until, workpace_name)
 
     owners = match_cards(
         candidates, cards, rows, links,
@@ -341,7 +374,7 @@ def collect(db, month, today, *, with_facts=True):
     has_card = {user_id for user_id in owners.values() if user_id in included}
 
     return {
-        'month': month,
+        'month': period.get('month'),
         'start': start,
         'end': end,
         'window_start': window_start,
@@ -366,8 +399,18 @@ def collect(db, month, today, *, with_facts=True):
     }
 
 
+def without_card_names(inputs, model):
+    """Работающие без карточки Workpace — из тех, кто попал в модель (отбор)."""
+    has_card = inputs.get('has_card') or set()
+    shown = [person for city in model['cities'] for person in city['people']]
+    return sorted(
+        (person['name'] for person in shown if person.get('active') and person['user_id'] not in has_card),
+        key=str.casefold,
+    )
+
+
 def options_payload(inputs):
-    """Отборы окна выгрузки: города, люди и должности месяца."""
+    """Отборы табеля: города, люди и должности периода."""
     people = sorted(inputs['people'], key=lambda person: (
         rules.city_order_key(rules.city_of(person)), rules.person_order_key(person)))
     cities, seen_cities = [], set()
@@ -386,11 +429,14 @@ def options_payload(inputs):
         seen_jobs.add(job.casefold())
         jobs.append(job)
     return {
-        'month': inputs['month'],
+        'month': inputs.get('month'),
+        'date_from': inputs['start'].isoformat(),
+        'date_to': inputs['end'].isoformat(),
         'cities': cities,
         'people': [
             {'id': person['user_id'], 'name': person['name'], 'city': rules.city_of(person),
-             'job_title': rules.job_title_of(person), 'active': bool(person['active'])}
+             'job_title': rules.job_title_of(person), 'active': bool(person['active']),
+             'card': person['user_id'] in inputs.get('has_card', ())}
             for person in people
         ],
         'job_titles': jobs,

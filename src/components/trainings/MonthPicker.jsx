@@ -27,7 +27,9 @@ const shiftMonth = (month, delta) => {
 
 /* allowFuture — будущие месяцы доступны. Тренингам наперёд не место, а учёт
  * часов открывают и на следующий месяц: там уже стоят нормы и графики. */
-export default function MonthPicker({ value, onChange, minYear = 2024, allowFuture = false }) {
+/* widthClass — ширина кнопки месяца; «Учет часов» при табеле фронт-офисов
+ * держит её равной кнопке периода, чтобы шапка не прыгала. */
+export default function MonthPicker({ value, onChange, minYear = 2024, allowFuture = false, widthClass = 'min-w-[148px]' }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const buttonRef = useRef(null);
@@ -102,7 +104,7 @@ export default function MonthPicker({ value, onChange, minYear = 2024, allowFutu
                 onClick={toggle}
                 aria-haspopup="dialog"
                 aria-expanded={open}
-                className={`flex h-[34px] min-w-[148px] items-center justify-center gap-2 bg-white px-3 text-[12.5px] font-semibold text-slate-700 ring-1 transition active:scale-[0.99] ${
+                className={`flex h-[34px] ${widthClass} items-center justify-center gap-2 bg-white px-3 text-[12.5px] font-semibold text-slate-700 ring-1 transition active:scale-[0.99] ${
                     open ? 'ring-2 ring-blue-500/60' : 'ring-slate-200/70 hover:bg-slate-50'
                 }`}
                 style={{ marginLeft: -4, marginRight: -4 }}

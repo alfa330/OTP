@@ -19,6 +19,11 @@ export const MONTH_SHORT = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', '�
 const MONTH_SHORT_LOWER = ['янв', 'фев', 'мар', 'апр', 'май', 'июн',
     'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
+/* Подпись панели календаря (aria-label): по ней окна узнают раскрытый календарь —
+   окно «Сформировать отчёт» «Учета часов» не закрывается по Esc, пока он открыт
+   (HoursReportDialog). Одна константа, чтобы переименование не разорвало связь. */
+export const PERIOD_PICKER_LABEL = 'Выбор периода';
+
 /* Виды календаря периода: дни (день или диапазон), месяцы, годы. */
 export const PERIOD_VIEWS = ['days', 'months', 'years'];
 export const PERIOD_VIEW_LABELS = { days: 'Дни', months: 'Месяцы', years: 'Годы' };
@@ -175,6 +180,19 @@ export const dayCells = (year, month0, { lo = '', hi = '', min = '', max = '', t
     }
     if (fill) while (cells.length < 42) cells.push({ key: `t${cells.length}`, iso: null });
     return cells;
+};
+
+/** Границы доступных дней с пределом длины периода (`spanLimit` календаря):
+    на втором нажатии дни дальше разрешённого от первого (anchor) гаснут, как дни
+    за min/max. spanLimit(anchor) → { min, max }; без него и на первом нажатии —
+    прежние min/max. Табель «Регионов» так держит период не длиннее месяца. */
+export const dayBounds = ({ min = '', max = '', step = 0, anchor = '', spanLimit = null, single = false } = {}) => {
+    if (single || step !== 1 || !anchor || typeof spanLimit !== 'function') return { min, max };
+    const span = spanLimit(anchor) || {};
+    return {
+        min: span.min && (!min || span.min > min) ? span.min : min,
+        max: span.max && (!max || span.max < max) ? span.max : max,
+    };
 };
 
 /** Выбор дня в диапазоне: первое нажатие — начало (шаг 1), второе — конец;

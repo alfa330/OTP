@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Calendar, Check, ChevronUp, ChevronLeft, ChevronRight } from 'lucide-react';
 import {
-    PERIOD_VIEW_LABELS, YEAR_PAGE, dayCells, initialPeriodView, monthCells, periodHeader, periodLabel,
+    PERIOD_PICKER_LABEL, PERIOD_VIEW_LABELS, YEAR_PAGE, dayBounds, dayCells, initialPeriodView, monthCells, periodHeader, periodLabel,
     pickDayStep, portalTabStep, presetMatches, selectionBand, visibleYearCells, yearPageEnd,
 } from './periodRange.js';
 
@@ -74,11 +74,19 @@ export const rangeLabel = (from, to) => {
  * карточка прыгала бы при переключении вида и при листании месяцев. Быстрых
  * периодов здесь четыре — они встают сеткой 2 × 2 (в одну строку «Весь
  * период» не помещается), а совпавший с выбором подсвечен. Без `views`
- * календарь ровно прежний — его используют два десятка разделов. */
+ * календарь ровно прежний — его используют два десятка разделов.
+ *
+ * `spanLimit` — предел длины периода: функция (день первого нажатия) →
+ * { min, max }, какие дни разрешены вторым нажатием. Табель «Регионов» (просьба
+ * владельца 19.11.2026: период от дня до месяца) гасит так дни дальше месяца от
+ * начала — человек видит границу сразу, а не отказ сервера после выбора.
+ * `startHint` — подсказка первого нажатия вместо «Выберите начало периода»:
+ * там и сказать о пределе. Без обоих календарь прежний. */
 const VIEW_BODY_HEIGHT = 258;   // строка дней недели (32) + шесть недель (6 × 36 + 5 × 2)
 
 export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = null, footer = null,
-                                      single = false, initialMonth = null, roomy = false, views = null }) {
+                                      single = false, initialMonth = null, roomy = false, views = null,
+                                      spanLimit = null, startHint = '' }) {
     const today = isoDate(new Date());
     const [draft, setDraft] = useState({ from, to });   // выбор внутри календаря
     const [step, setStep] = useState(0);                // 0 — ждём начало, 1 — конец
@@ -159,7 +167,9 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
        Календарь периода держит шесть недель всегда: месяц в пять недель
        иначе был бы ниже соседнего, и карточка прыгала бы при листании. */
     const cellSize = roomy ? ' 2xl:h-[42px] 2xl:w-full' : '';
-    const cells = dayCells(view.y, view.m, { lo, hi, min, max, today, fill: Boolean(viewList) }).map((cell) => {
+    // Предел длины (spanLimit) — на втором нажатии: дни дальше разрешённого гаснут.
+    const bounds = dayBounds({ min, max, step, anchor: draft.from, spanLimit, single });
+    const cells = dayCells(view.y, view.m, { lo, hi, min: bounds.min, max: bounds.max, today, fill: Boolean(viewList) }).map((cell) => {
         if (!cell.iso) return <div key={cell.key} className={`h-9 w-9${cellSize}`} />;
         const { iso, disabled } = cell;
         let wrap = `relative flex h-9 w-9 items-center justify-center${cellSize}`;
@@ -195,7 +205,7 @@ export function IosDateRangeCalendar({ from, to, max, min, onChange, presets = n
     const presetGrid = Boolean(viewList) && footerPresets.length > 3;
     const hint = mode === 'months' ? 'Выберите месяц'
         : mode === 'years' ? 'Выберите год'
-            : step === 0 ? 'Выберите начало периода'
+            : step === 0 ? (startHint || 'Выберите начало периода')
                 /* «Конкретный день» (#389) — тот же день вторым нажатием; без
                    подсказки до этого не догадаться. */
                 : viewList ? 'Выберите конец или тот же день ещё раз' : 'Выберите конец периода';
@@ -314,7 +324,7 @@ const EDGE_GAP = 8;
  * лишние слушатели прокрутки. */
 export function IosDateRangePicker({ from, to, max, min, onChange, presets = null,
                                     triggerClassName = '', portal = false, roomy = false, views = null,
-                                    disabled = false }) {
+                                    disabled = false, spanLimit = null, startHint = '', formatLabel = null }) {
     const [open, setOpen] = useState(false);
     const [coords, setCoords] = useState(null);
     const ref = useRef(null);
@@ -428,6 +438,7 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
     const calendar = (
         <IosDateRangeCalendar
             from={from} to={to} max={max} min={min} presets={presets} roomy={roomy} views={views}
+            spanLimit={spanLimit} startHint={startHint}
             onChange={(next) => {
                 onChange(next);
                 setOpen(false);
@@ -450,15 +461,17 @@ export function IosDateRangePicker({ from, to, max, min, onChange, presets = nul
                 <Calendar size={14} className="text-slate-400" />
                 {/* У календаря периода целый месяц и год подписаны словами
                     («Октябрь 2026», «2026 год»), а не двумя датами. */}
-                <span>{views ? periodLabel(from, to) : rangeLabel(from, to)}</span>
+                {/* formatLabel — своя подпись вызывающего: табель «Регионов» пишет
+                    период так же, как заголовок окна отчёта. Без него — прежняя. */}
+                <span>{formatLabel ? formatLabel(from, to) : (views ? periodLabel(from, to) : rangeLabel(from, to))}</span>
                 <ChevronUp size={13} className={`text-slate-400 transition-transform ${open ? '' : 'rotate-180'}`} />
             </button>
             {open && !portal && (
-                <div role="dialog" aria-label="Выбор периода"
+                <div role="dialog" aria-label={PERIOD_PICKER_LABEL}
                      className="absolute left-0 top-full z-50 mt-2 motion-safe:animate-popover-in">{calendar}</div>
             )}
             {open && portal && coords && createPortal(
-                <div ref={popRef} role="dialog" aria-label="Выбор периода" className="motion-safe:animate-popover-in"
+                <div ref={popRef} role="dialog" aria-label={PERIOD_PICKER_LABEL} className="motion-safe:animate-popover-in"
                      style={{ position: 'fixed', left: coords.left, top: coords.top,
                               maxHeight: coords.maxHeight, zIndex: 99999 }}>
                     {calendar}

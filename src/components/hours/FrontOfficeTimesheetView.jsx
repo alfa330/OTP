@@ -1,6 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import InfoHint from '../common/InfoHint';
-import { TIMESHEET_LEGEND, timesheetCellTitle, timesheetCellView, timesheetColumnTotals } from './frontOfficeTimesheet';
+import {
+    TIMESHEET_LEGEND,
+    hasTimesheetFilters,
+    timesheetCellTitle,
+    timesheetCellView,
+    timesheetColumnTotals,
+    timesheetPeriodKey,
+} from './frontOfficeTimesheet';
 import { fetchTimesheetData } from './frontOfficeTimesheetApi';
 
 /*
@@ -14,10 +21,18 @@ import { fetchTimesheetData } from './frontOfficeTimesheetApi';
  * Рабочий день нейтральный — его большинство, красить нечего; выходной
  * приглушён; отсутствия — мягкими плашками; опоздание — красным числом, ранний
  * уход — оранжевым. Расшифровка — под «i» в шапке, а не строкой над таблицей.
+ *
+ * С 19.11.2026 — за период от одного дня до месяца и с отбором (город,
+ * сотрудники, должность) из строки над табелем: тот же период и отбор уходят и
+ * в файл окна «Сформировать отчёт».
  */
 const NAME_COL = 'w-56 shrink-0 px-3 py-2 border-r border-slate-100';
 const SMALL_COL = 'w-16 shrink-0 px-1 py-2 text-center border-r border-slate-100';
-const DAY_COL = 'w-11 shrink-0 px-0.5 py-1.5 text-center border-l border-slate-100';
+/* День — от 44 до 72 px (72 — колонка дня таблицы часов): за месяц дни узкие и
+   таблица листается вбок, как раньше, а за короткий период (с 19.11.2026 — от
+   одного дня) колонки шире, и строка не обрывается посреди карточки. Строки при
+   этом во всю ширину: линии и полосы городов идут до края, а не до последнего дня. */
+const DAY_COL = 'min-w-[44px] max-w-[72px] flex-1 shrink-0 px-0.5 py-1.5 text-center border-l border-slate-100';
 const TOTAL_COL = 'w-[92px] shrink-0 px-2 py-2 text-center border-l border-slate-100';
 
 const TONE_CLASS = {
@@ -69,20 +84,21 @@ function DayCell({ day, cell }) {
     );
 }
 
-export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeaders, filters = null, reloadKey = 0 }) {
+export default function FrontOfficeTimesheetView({ period, apiBaseUrl, authHeaders, filters = null, reloadKey = 0 }) {
     const [state, setState] = useState({ status: 'loading', error: '', payload: null });
-    const latest = useRef({ authHeaders, filters });
-    latest.current = { authHeaders, filters };
+    const latest = useRef({ authHeaders, filters, period });
+    latest.current = { authHeaders, filters, period };
     const filtersKey = JSON.stringify(filters || {});
+    const periodKey = timesheetPeriodKey(period);
 
     useEffect(() => {
-        if (!month) return undefined;
+        if (!periodKey) return undefined;
         const controller = new AbortController();
         setState((previous) => ({ ...previous, status: 'loading', error: '' }));
         fetchTimesheetData({
             apiBaseUrl,
             headers: latest.current.authHeaders?.() || {},
-            month,
+            period: latest.current.period,
             filters: latest.current.filters,
             signal: controller.signal,
         })
@@ -92,13 +108,14 @@ export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeader
                 setState({ status: 'error', error: error?.message || 'Не удалось загрузить табель', payload: null });
             });
         return () => controller.abort();
-    }, [month, apiBaseUrl, filtersKey, reloadKey]);
+    }, [periodKey, apiBaseUrl, filtersKey, reloadKey]);
 
     const payload = state.payload;
     const days = useMemo(() => (Array.isArray(payload?.days) ? payload.days : []), [payload]);
     const totals = useMemo(() => timesheetColumnTotals(payload), [payload]);
     const today = todayIso();
     const withoutCard = Array.isArray(payload?.without_card) ? payload.without_card : [];
+    const refreshing = state.status === 'loading' && Boolean(payload);
 
     let body;
     if (state.status === 'loading' && !payload) {
@@ -106,7 +123,11 @@ export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeader
     } else if (state.status === 'error') {
         body = <div className="px-4 py-12 text-[13px] text-rose-600">{state.error}</div>;
     } else if (!payload?.cities?.length) {
-        body = <div className="px-4 py-12 text-[13px] text-slate-400">Сотрудников за этот месяц нет.</div>;
+        body = (
+            <div className="px-4 py-12 text-[13px] text-slate-400">
+                {hasTimesheetFilters(filters) ? 'Под выбранный отбор никто не попал.' : 'Сотрудников за этот период нет.'}
+            </div>
+        );
     } else {
         body = (
             <>
@@ -119,7 +140,7 @@ export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeader
                             </span>
                         </div>
                         {city.people.map((person) => (
-                            <div key={person.user_id} className="group relative flex w-max items-center border-b border-slate-100 transition-colors hover:bg-slate-50">
+                            <div key={person.user_id} className="group relative flex w-full min-w-max items-center border-b border-slate-100 transition-colors hover:bg-slate-50">
                                 <div className={`${NAME_COL} sticky left-0 z-20 bg-white transition-colors group-hover:bg-slate-50`}>
                                     <div className="flex min-w-0 items-center gap-1.5">
                                         <span className="truncate text-[13px] font-medium text-slate-800">{person.name}</span>
@@ -145,7 +166,7 @@ export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeader
                         ))}
                     </div>
                 ))}
-                <div className="sticky bottom-0 z-30 flex w-max border-t border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
+                <div className="sticky bottom-0 z-30 flex w-full min-w-max border-t border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
                     <div className={`${NAME_COL} sticky left-0 z-40 bg-slate-50 text-slate-700`}>
                         Итого <span className="font-normal text-slate-400">· {totals.people}</span>
                     </div>
@@ -173,9 +194,18 @@ export default function FrontOfficeTimesheetView({ month, apiBaseUrl, authHeader
                     {`Нет карточки Workpace: ${withoutCard.join(', ')} — дни без отметок у них пустые.`}
                 </div>
             )}
-            <div className="hours-scroll hours-table-scroll isolate min-h-[240px] overflow-auto rounded-b-2xl border-t border-slate-200/70">
+            {/* Пока идёт запрос нового периода или отбора, прежний табель остаётся,
+                но приглушён: под подписью «Март 2027» не должен читаться ноябрь как
+                новый (разбор 19.11.2026). Приглушается с задержкой — быстрый ответ
+                не мигает; возвращается сразу. */}
+            <div
+                aria-busy={refreshing || undefined}
+                className={`hours-scroll hours-table-scroll isolate min-h-[240px] overflow-auto rounded-b-2xl border-t border-slate-200/70 transition-opacity duration-200 ${
+                    refreshing ? 'opacity-50 [transition-delay:200ms]' : 'opacity-100 [transition-delay:0ms]'
+                }`}
+            >
                 <div className="min-w-max tabular-nums">
-                    <div className="sticky top-0 z-30 flex w-max border-b border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
+                    <div className="sticky top-0 z-30 flex w-full min-w-max border-b border-slate-200/80 bg-slate-50 text-[12px] font-medium text-slate-500">
                         <div className={`${NAME_COL} sticky left-0 z-40 flex items-center gap-1.5 bg-slate-50`}>
                             Сотрудник
                             <InfoHint title="Табель" side="right">

@@ -309,5 +309,108 @@ class BuildModelTests(unittest.TestCase):
         self.assertEqual([city['city'] for city in model['cities']], ['Астана'])
 
 
+
+class PeriodTests(unittest.TestCase):
+    """Просьба владельца 19.11.2026: табель не только за месяц, а за период —
+    от одного дня до месяца («месяц это максимум»)."""
+
+    def test_a_month_counts_from_the_start_day(self):
+        cases = {
+            date(2026, 11, 1): date(2026, 11, 30),    # с 1-го — ровно этот месяц, 30 дней
+            date(2026, 10, 1): date(2026, 10, 31),
+            date(2027, 2, 1): date(2027, 2, 28),
+            date(2026, 10, 15): date(2026, 11, 14),
+            date(2026, 12, 15): date(2027, 1, 14),    # через новый год
+            date(2026, 10, 31): date(2026, 11, 30),   # 31-го в ноябре нет — последний день
+            date(2027, 1, 31): date(2027, 2, 28),
+            date(2028, 1, 30): date(2028, 2, 29),
+        }
+        for start, end in cases.items():
+            self.assertEqual(rules.period_max_end(start), end, start)
+            self.assertLessEqual((end - start).days + 1, 31, start)
+
+    def test_dates_win_over_the_month_and_a_whole_month_keeps_its_name(self):
+        period = rules.resolve_period(month='2026-10', date_from='2026-11-05', date_to='2026-11-05')
+        self.assertEqual(period, {'start': date(2026, 11, 5), 'end': date(2026, 11, 5), 'month': None})
+        self.assertEqual(rules.resolve_period(date_from='2026-11-01', date_to='2026-11-30')['month'], '2026-11')
+        self.assertEqual(rules.resolve_period(month='2026-10'),
+                         {'start': date(2026, 10, 1), 'end': date(2026, 10, 31), 'month': '2026-10'})
+
+    def test_longer_than_a_month_reversed_and_broken_dates_are_refused(self):
+        bad = [
+            (dict(date_from='2026-11-01', date_to='2026-12-01'), 'TIMESHEET_PERIOD_TOO_LONG'),
+            (dict(date_from='2026-10-15', date_to='2026-11-15'), 'TIMESHEET_PERIOD_TOO_LONG'),
+            (dict(date_from='2026-11-05', date_to='2026-11-04'), 'TIMESHEET_BAD_PERIOD'),
+            (dict(date_from='2026-11-31', date_to='2026-12-01'), 'TIMESHEET_BAD_PERIOD'),
+            (dict(date_from='2026-11-05'), 'TIMESHEET_BAD_PERIOD'),
+            (dict(month='2026-13'), 'TIMESHEET_BAD_MONTH'),
+            (dict(), 'TIMESHEET_BAD_MONTH'),
+            # Крайние годы — 400, а не 500 на «месяце от начала» и окне графика.
+            (dict(date_from='9999-12-15', date_to='9999-12-20'), 'TIMESHEET_BAD_PERIOD'),
+            (dict(date_from='0001-01-01', date_to='0001-01-02'), 'TIMESHEET_BAD_PERIOD'),
+            (dict(month='0001-01'), 'TIMESHEET_BAD_MONTH'),
+            (dict(month='9999-12'), 'TIMESHEET_BAD_MONTH'),
+        ]
+        for kwargs, code in bad:
+            with self.assertRaises(rules.PeriodError, msg=kwargs) as caught:
+                rules.resolve_period(**kwargs)
+            self.assertEqual(caught.exception.code, code, kwargs)
+        with self.assertRaises(rules.PeriodError) as too_long:
+            rules.resolve_period(date_from='2026-10-15', date_to='2026-11-15')
+        self.assertIn('по 14.11.2026', too_long.exception.message)
+        self.assertEqual(rules.resolve_period(date_from='2026-10-15', date_to='2026-11-14')['end'],
+                         date(2026, 11, 14))
+
+    def test_titles_and_file_labels(self):
+        cases = [
+            ((date(2026, 10, 1), date(2026, 10, 31)), 'октябрь 2026', '2026-10'),
+            ((date(2026, 11, 5), date(2026, 11, 5)), '5 ноября 2026', '05.11.2026'),
+            ((date(2026, 11, 1), date(2026, 11, 15)), '1–15 ноября 2026', '01.11.2026 — 15.11.2026'),
+            ((date(2026, 10, 25), date(2026, 11, 5)), '25 октября – 5 ноября 2026', '25.10.2026 — 05.11.2026'),
+            ((date(2026, 12, 25), date(2027, 1, 5)), '25 декабря 2026 – 5 января 2027', '25.12.2026 — 05.01.2027'),
+        ]
+        for (start, end), title, label in cases:
+            self.assertEqual(rules.period_title(start, end), title)
+            self.assertEqual(rules.period_file_label(start, end), label)
+
+
+class PeriodModelTests(unittest.TestCase):
+    def inputs(self, start, end, **overrides):
+        people = [{'user_id': 1, 'name': 'Альфа Анна', 'city': 'Астана', 'job_title': '', 'active': True}]
+        shift_days = {day for day in rules.month_days(date(2026, 9, 1), date(2026, 12, 13)) if day.weekday() < 5}
+        spans = {(1, day): rules.shift_span(day, time(9), time(19)) for day in shift_days if start <= day <= end}
+        data = {
+            'month': rules.whole_month_of(start, end), 'start': start, 'end': end,
+            'window_start': date(2026, 9, 1), 'label_end': date(2026, 12, 13),
+            'fact_until': date(2026, 11, 18), 'people': people, 'spans': spans, 'shift_days': {1: shift_days},
+            'days_off': set(), 'periods': {}, 'membership': {}, 'facts': {}, 'has_card': {1}, 'holidays': set(),
+        }
+        data.update(overrides)
+        return data
+
+    def test_days_norm_and_totals_are_of_the_period(self):
+        """1–15 ноября: 15 колонок, норма 5.2 — будни периода, итоги — по ним же."""
+        start, end = date(2026, 11, 1), date(2026, 11, 15)
+        day = date(2026, 11, 3)
+        model = rules.build_model(self.inputs(start, end, facts={(1, day): fact(day, (9, 10), (19, 0))}))
+        person = model['cities'][0]['people'][0]
+        self.assertEqual([d.day for d in model['days']], list(range(1, 16)))
+        self.assertEqual((person['schedule'], person['plan']), ('5.2', 10))
+        self.assertEqual(len(person['cells']), 15)
+        self.assertEqual(person['totals'], {'worked': 1, 'missed': 9, 'late': 10, 'early': 0})
+        payload = rules.model_payload(model)
+        self.assertEqual((payload['month'], payload['date_from'], payload['date_to'], payload['title']),
+                         (None, '2026-11-01', '2026-11-15', '1–15 ноября 2026'))
+
+    def test_one_day_and_a_period_across_months(self):
+        one = rules.build_model(self.inputs(date(2026, 11, 4), date(2026, 11, 4)))
+        person = one['cities'][0]['people'][0]
+        self.assertEqual((len(one['days']), person['plan'], person['cells'][0]['code']), (1, 1, 'н'))
+        across = rules.build_model(self.inputs(date(2026, 10, 26), date(2026, 11, 8)))
+        self.assertEqual([d.day for d in across['days']][4:8], [30, 31, 1, 2])
+        self.assertEqual(across['cities'][0]['people'][0]['plan'], 10)
+        self.assertEqual(rules.model_payload(across)['title'], '26 октября – 8 ноября 2026')
+
+
 if __name__ == '__main__':
     unittest.main()

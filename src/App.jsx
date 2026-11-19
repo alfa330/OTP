@@ -149,7 +149,19 @@ import HoursReportDialog from './components/hours/HoursReportDialog';
 import { buildHoursReportOptions } from './components/hours/hoursReportOptions';
 import FrontOfficeTimesheetFilters from './components/hours/FrontOfficeTimesheetFilters';
 import FrontOfficeTimesheetView from './components/hours/FrontOfficeTimesheetView';
-import { TIMESHEET_SCOPE, canExportFrontOfficeTimesheet, emptyTimesheetFilters, timesheetAvailable } from './components/hours/frontOfficeTimesheet';
+import TimesheetPeriodPicker from './components/hours/TimesheetPeriodPicker';
+import useTimesheetOptions from './components/hours/useTimesheetOptions';
+import {
+    TIMESHEET_PERIOD_BUTTON_WIDTH,
+    TIMESHEET_SCOPE,
+    canExportFrontOfficeTimesheet,
+    emptyTimesheetFilters,
+    isValidTimesheetPeriod,
+    periodMonth,
+    timesheetAvailable,
+    timesheetPeriodTitle,
+    wholeMonthPeriod,
+} from './components/hours/frontOfficeTimesheet';
 import { downloadTimesheet, fetchTimesheetScope } from './components/hours/frontOfficeTimesheetApi';
 import { getHoursGroupLeave } from './components/hours/hoursGroupLeave';
 import { calculateOperatorSalary, calculateChatSalary, resolveMonthlySalaryQuality, calculateTezOpMonthlyPlan, calculateTezOpSalary, calculateTezLineSalary, calculateOsnovaSalary, calculatePotokSalary, calculateVerificatorSalary, calculateYandexRegSalary } from './utils/salaryFormula';
@@ -4694,9 +4706,19 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         const reportAbortRef = useRef(null); // выгрузка из окна отчёта — «Отмена» её прерывает
         // Табель фронт-офисов — третья плитка окна отчёта: только суперадмину и
         // главе фронт-офисов (решение владельца 06.11.2026); отбор — город,
-        // сотрудник, должность за месяц страницы.
+        // сотрудник, должность.
         const canExportTimesheet = canExportFrontOfficeTimesheet(user);
         const [timesheetFilters, setTimesheetFilters] = useState(emptyTimesheetFilters);
+        // Период табеля «с — по» — просьба владельца 19.11.2026: «не только по месяцу,
+        // но и по периоду, месяц — это максимум, от 1 дня». Период и отбор одни на
+        // экран табеля и на файл. По умолчанию — месяц страницы; сменили месяц (в
+        // режиме часов, синхронизацией метрик) — период снова этот месяц целиком.
+        // Выбрали период — месяц страницы встаёт на месяц его начала: вернувшись к
+        // показателям, человек видит тот же месяц.
+        const [timesheetPeriod, setTimesheetPeriod] = useState(() => wholeMonthPeriod(month));
+        useEffect(() => {
+            setTimesheetPeriod((current) => (periodMonth(current) === month ? current : wholeMonthPeriod(month)));
+        }, [month]);
         const [isLoading, setIsLoading] = useState(false);
 
         // NEW: filter active/fired + counters
@@ -4755,6 +4777,30 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             setReportScope(TIMESHEET_SCOPE);
         }, [isTimesheetContext, selectedGroupId]);
         const showTimesheetView = isTimesheetContext && hoursTimesheetMode;
+        // Месяц страницы встаёт на месяц начала периода, только когда период выбран
+        // при табеле на экране. Период, выбранный в окне отчёта при показателях
+        // (суперадмин без группы «Регионов»), месяц страницы не трогает — иначе
+        // вместе с ним молча менялись бы «Общий», «По СВ» и таблица за окном
+        // (разбор 19.11.2026).
+        const changeTimesheetPeriod = (next) => {
+            if (!isValidTimesheetPeriod(next)) return;
+            setTimesheetPeriod(next);
+            const nextMonth = periodMonth(next);
+            if (showTimesheetView && !isHoursPhone && nextMonth && nextMonth !== month) setMonth(nextMonth);
+        };
+        // Списки отбора табеля — одним запросом на период для строки над табелем и
+        // для окна отчёта; пока нет ни табеля на экране (на телефоне его нет вовсе),
+        // ни окна с его плиткой, не грузятся.
+        const timesheetOptionsState = useTimesheetOptions({
+            enabled: canExportTimesheet && ((showTimesheetView && !isHoursPhone)
+                || (isReportDialogOpen && reportScope === TIMESHEET_SCOPE)),
+            period: timesheetPeriod,
+            apiBaseUrl: API_BASE_URL,
+            authHeaders: () => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? '') }),
+            filters: timesheetFilters,
+            onFiltersChange: setTimesheetFilters,
+            reloadKey: timesheetReloadKey,
+        });
         const selectedGroupHasSupervisorHours = !selectedHoursGroup
             || supervisorHoursDeptIds.includes(Number(selectedHoursGroup?.department_id ?? selectedHoursGroup?.departmentId));
         const showSupervisorHoursTabs = selectedGroupHasSupervisorHours && (
@@ -8606,14 +8652,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }
         }
 
-        // Табель фронт-офисов за месяц страницы с отбором окна. true — файл скачан.
+        // Табель фронт-офисов за период и с отбором — теми же, что над табелем на
+        // экране и в окне отчёта. true — файл скачан.
         async function downloadFrontOfficeTimesheet(signal = undefined) {
             if (!user) {
             fallbackToast('Пользователь не авторизован', 'error');
             return false;
             }
-            if (!month) {
-            fallbackToast('Выберите месяц', 'error');
+            if (!isValidTimesheetPeriod(timesheetPeriod)) {
+            fallbackToast('Выберите период — от дня до месяца', 'error');
             return false;
             }
             setIsDownloadingReport(true);
@@ -8621,7 +8668,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             await downloadTimesheet({
                 apiBaseUrl: API_BASE_URL,
                 headers: withAccessTokenHeader({ 'X-User-Id': String(user.id) }),
-                month,
+                period: timesheetPeriod,
                 filters: timesheetFilters,
                 signal,
             });
@@ -8669,6 +8716,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // звонки линии, фронт-офисам они не нужны (владелец, 06.11.2026).
             timesheetOnly: isHoursDepartmentHead && timesheetDepartmentId != null
                 && Number(hoursDepartmentScopeId) === Number(timesheetDepartmentId),
+            timesheetPeriodTitle: timesheetPeriodTitle(timesheetPeriod),
         });
         // Закрыть окно во время «Формируется…» — значит отказаться от файла: выгрузка
         // прерывается, файл не скачивается.
@@ -8699,11 +8747,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     value: TIMESHEET_SCOPE,
                     node: (
                         <FrontOfficeTimesheetFilters
-                            month={month}
-                            apiBaseUrl={API_BASE_URL}
-                            authHeaders={() => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? '') })}
+                            optionsState={timesheetOptionsState}
                             value={timesheetFilters}
                             onChange={setTimesheetFilters}
+                            period={timesheetPeriod}
+                            onPeriodChange={changeTimesheetPeriod}
                         />
                     ),
                 } : null}
@@ -9321,12 +9369,20 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     >
                         <FaIcon className={`fas fa-arrows-rotate ${isLoading ? 'fa-spin' : ''}`} />
                     </button>
-                    <MonthPicker value={month} onChange={setMonth} allowFuture />
+                    {/* Пока на экране табель фронт-офисов — период «с — по» на месте
+                        месяца (от дня до месяца, 19.11.2026); в показателях — месяц. */}
+                    {showTimesheetView ? (
+                        <TimesheetPeriodPicker period={timesheetPeriod} onChange={changeTimesheetPeriod} />
+                    ) : isTimesheetContext ? (
+                        <MonthPicker value={month} onChange={setMonth} allowFuture widthClass={TIMESHEET_PERIOD_BUTTON_WIDTH} />
+                    ) : (
+                        <MonthPicker value={month} onChange={setMonth} allowFuture />
+                    )}
                     <button
                         type="button"
                         onClick={() => setIsReportDialogOpen(true)}
                         disabled={isDownloadingReport}
-                        title="Выбрать отчёт за месяц и скачать в Excel"
+                        title="Выбрать отчёт и скачать в Excel"
                         className="inline-flex h-[34px] items-center gap-2 rounded-xl bg-slate-100 px-3.5 text-[13px] font-semibold text-slate-700 transition-all hover:bg-slate-200 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
                     >
                         <FaIcon className={`fas ${isDownloadingReport ? 'fa-spinner fa-spin' : 'fa-file-excel'} text-slate-500`} />
@@ -9363,6 +9419,17 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                         searchable
                         ariaLabel="Группа"
                         className="w-[248px]"
+                    />
+                    )}
+
+                    {/* Отбор табеля — город, сотрудники, должность (19.11.2026: «точечно
+                        выбирать сотрудников»): тот же, что в окне отчёта, и уходит в файл. */}
+                    {showTimesheetView && (
+                    <FrontOfficeTimesheetFilters
+                        layout="row"
+                        optionsState={timesheetOptionsState}
+                        value={timesheetFilters}
+                        onChange={setTimesheetFilters}
                     />
                     )}
 
@@ -10426,7 +10493,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 внутри таблицы — иначе шапка дней накрывала подсказку «i». */}
             {showTimesheetView ? (
                 <FrontOfficeTimesheetView
-                    month={month}
+                    period={timesheetPeriod}
+                    filters={timesheetFilters}
                     apiBaseUrl={API_BASE_URL}
                     authHeaders={() => withAccessTokenHeader({ 'X-User-Id': String(user?.id ?? '') })}
                     reloadKey={timesheetReloadKey}

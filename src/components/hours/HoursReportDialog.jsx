@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import { Check, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { IosModal, iosBtnPrimary, iosBtnSecondary } from '../ui/ios';
 import useEscapeClose from '../trainings/useEscapeClose';
+import { PERIOD_PICKER_LABEL } from '../ui/periodRange.js';
 import HoursFold from './HoursFold';
 import { HOURS_REPORT_SUBTITLE, hoursReportTitle, pickHoursReportScope } from './hoursReportOptions';
 
@@ -19,13 +20,19 @@ import { HOURS_REPORT_SUBTITLE, hoursReportTitle, pickHoursReportScope } from '.
  * С клавиатуры: при открытии фокус встаёт на выбранную плитку (общий IosModal
  * фокус не переносит, и Tab шёл по странице под затемнением), Esc закрывает.
  *
+ * Заголовок — «Отчёт за <месяц>»; у плитки со своим title (табель за период
+ * «с — по») — её заголовок.
+ *
  * extra — { value, node }: блок под плитками, который раскрывается по высоте,
- * когда выбрана плитка value (отборы табеля фронт-офисов). Esc в раскрытом
- * списке такого блока закрывает только список, а не всё окно с выгрузкой.
- * Был ли список раскрыт, смотрим в фазе перехвата: к обработчику окна React
- * уже успевает убрать список (CustomSelect закрывает его на document).
+ * когда выбрана плитка value (период и отборы табеля фронт-офисов). Esc в раскрытом
+ * списке или календаре периода такого блока закрывает только их, а не всё окно с
+ * выгрузкой. Был ли список раскрыт, смотрим в фазе перехвата: к обработчику окна
+ * React уже успевает убрать список (CustomSelect закрывает его на document).
+ * Календарь периода (IosDateRangePicker) — панель role="dialog" «Выбор периода»:
+ * без неё в списке Esc в календаре закрывал всё окно (стенд, 19.11.2026).
  */
-const hasOpenListbox = () => typeof document !== 'undefined' && Boolean(document.querySelector('[role="listbox"]'));
+const OPEN_PICKER_SELECTOR = `[role="listbox"], [role="dialog"][aria-label="${PERIOD_PICKER_LABEL}"]`;
+const hasOpenPicker = () => typeof document !== 'undefined' && Boolean(document.querySelector(OPEN_PICKER_SELECTOR));
 
 export default function HoursReportDialog({
     open,
@@ -45,13 +52,13 @@ export default function HoursReportDialog({
     useEffect(() => {
         if (!open) return undefined;
         const remember = (event) => {
-            if (event.key === 'Escape') escapeFromListRef.current = hasOpenListbox();
+            if (event.key === 'Escape') escapeFromListRef.current = hasOpenPicker();
         };
         window.addEventListener('keydown', remember, true);
         return () => window.removeEventListener('keydown', remember, true);
     }, [open]);
     const closeOnEscape = useCallback(() => {
-        if (escapeFromListRef.current || hasOpenListbox()) return;
+        if (escapeFromListRef.current || hasOpenPicker()) return;
         onClose?.();
     }, [onClose]);
     useEscapeClose(open, closeOnEscape);
@@ -62,7 +69,7 @@ export default function HoursReportDialog({
         <IosModal
             open={open}
             onClose={onClose}
-            title={hoursReportTitle(month)}
+            title={selectedOption?.title || hoursReportTitle(month)}
             subtitle={selectedOption?.subtitle || HOURS_REPORT_SUBTITLE}
             maxWidth="max-w-md"
             footer={(

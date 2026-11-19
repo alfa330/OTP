@@ -1,12 +1,14 @@
 /*
- * Запросы табеля фронт-офисов: отборы месяца и сам файл.
+ * Запросы табеля фронт-офисов: отборы периода, табель для экрана и сам файл.
+ * period — { from, to } строками ГГГГ-ММ-ДД, от одного дня до месяца
+ * (timesheetQuery кладёт в запрос и месяц начала — для сервера без периода).
  *
  * Файл качается тем же путём, что «Сформировать отчёт» «Учета часов»
  * (downloadMonthlyReport в App.jsx): fetch с токеном → blob → <a download> в
  * этом же окне. startFileDownload здесь не годится: он для подписанных ссылок
  * хранилища через скрытый фрейм — ответ ручки с ошибкой ушёл бы во фрейм молча.
  */
-import { downloadFileName, timesheetFallbackName, timesheetQuery } from './frontOfficeTimesheet';
+import { downloadFileName, timesheetFileName, timesheetQuery } from './frontOfficeTimesheet';
 
 const API_PATH = '/api/front_office_timesheet';
 
@@ -30,8 +32,8 @@ export async function fetchTimesheetScope({ apiBaseUrl, headers, signal }) {
     return response.json();
 }
 
-export async function fetchTimesheetData({ apiBaseUrl, headers, month, filters, signal }) {
-    const response = await fetch(`${apiBaseUrl}${API_PATH}/data?${timesheetQuery(month, filters)}`, {
+export async function fetchTimesheetData({ apiBaseUrl, headers, period, filters, signal }) {
+    const response = await fetch(`${apiBaseUrl}${API_PATH}/data?${timesheetQuery(period, filters)}`, {
         method: 'GET',
         credentials: 'include',
         signal,
@@ -41,9 +43,8 @@ export async function fetchTimesheetData({ apiBaseUrl, headers, month, filters, 
     return response.json();
 }
 
-export async function fetchTimesheetOptions({ apiBaseUrl, headers, month, signal }) {
-    const query = new URLSearchParams({ month: String(month || '') }).toString();
-    const response = await fetch(`${apiBaseUrl}${API_PATH}/options?${query}`, {
+export async function fetchTimesheetOptions({ apiBaseUrl, headers, period, signal }) {
+    const response = await fetch(`${apiBaseUrl}${API_PATH}/options?${timesheetQuery(period, null)}`, {
         method: 'GET',
         credentials: 'include',
         signal,
@@ -53,8 +54,8 @@ export async function fetchTimesheetOptions({ apiBaseUrl, headers, month, signal
     return response.json();
 }
 
-export async function downloadTimesheet({ apiBaseUrl, headers, month, filters, signal }) {
-    const response = await fetch(`${apiBaseUrl}${API_PATH}/export?${timesheetQuery(month, filters)}`, {
+export async function downloadTimesheet({ apiBaseUrl, headers, period, filters, signal }) {
+    const response = await fetch(`${apiBaseUrl}${API_PATH}/export?${timesheetQuery(period, filters)}`, {
         method: 'GET',
         credentials: 'include',
         signal,
@@ -64,7 +65,7 @@ export async function downloadTimesheet({ apiBaseUrl, headers, month, filters, s
     const blob = await response.blob();
     const name = downloadFileName(
         response.headers.get('Content-Disposition') || response.headers.get('content-disposition'),
-        timesheetFallbackName(month),
+        timesheetFileName(period),
     );
     const link = document.createElement('a');
     const url = window.URL.createObjectURL(blob);

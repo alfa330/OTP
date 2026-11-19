@@ -42,7 +42,10 @@ export function hoursReportTitle(month) {
  *       окна прежние;
  *   timesheetOnly — в окне один табель, без «По СВ» и «Общего». Так у главы
  *       фронт-офисов (владелец 06.11.2026: «зачем ей выгрузка по СВ и по
- *       общему»): это отчёты часов и звонков линии, фронт-офисам они не нужны.
+ *       общему»): это отчёты часов и звонков линии, фронт-офисам они не нужны;
+ *   timesheetPeriodTitle — период табеля словами («1–15 ноября 2026»): табель с
+ *       19.11.2026 строится за период от дня до месяца, а не только за месяц
+ *       страницы, и заголовок окна при его плитке называет этот период.
  */
 export function buildHoursReportOptions({
     group = null,
@@ -51,6 +54,7 @@ export function buildHoursReportOptions({
     withSupervisorRows = false,
     timesheet = false,
     timesheetOnly = false,
+    timesheetPeriodTitle = '',
 } = {}) {
     const groupName = String(group?.name || '').trim();
     const supervisorName = String(supervisor?.name || '').trim();
@@ -87,6 +91,7 @@ export function buildHoursReportOptions({
             label: 'Табель фронт-офисов',
             description: 'По образцу из ТЗ: города, график, статус каждого дня, опоздания и ранний уход по «Отметкам».',
             subtitle: 'Excel, лист «табель»',
+            ...(timesheetPeriodTitle ? { title: `Отчёт за ${timesheetPeriodTitle}` } : {}),
             disabled: false,
         });
     }

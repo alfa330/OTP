@@ -47,8 +47,17 @@ NO_CITY_VALUE = '__none__'
 WEEKDAY_SHORT = ('пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс')
 
 MONTH_RE = re.compile(r'^(\d{4})-(0[1-9]|1[0-2])$')
+DAY_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})$')
 MONTHS_NOMINATIVE = ('январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль',
                      'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь')
+MONTHS_GENITIVE = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
+                   'августа', 'сентября', 'октября', 'ноября', 'декабря')
+
+
+# Годы, за которые табель вообще строится. Шире — не данные, а опечатка или
+# подбор адреса: у 9999-12 «месяц от начала» и окно графика выходят за пределы
+# date, и вместо внятного 400 был бы 500 (разбор 19.11.2026).
+MIN_YEAR, MAX_YEAR = 2000, 2099
 
 
 def parse_month(value):
@@ -57,7 +66,114 @@ def parse_month(value):
     if not match:
         return None
     year, month = int(match.group(1)), int(match.group(2))
+    if not MIN_YEAR <= year <= MAX_YEAR:
+        return None
     return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+
+
+def parse_day(value):
+    """'2026-11-05' → date или None (в том числе за пределами MIN_YEAR…MAX_YEAR)."""
+    match = DAY_RE.match(str(value or '').strip())
+    if not match:
+        return None
+    try:
+        day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return None
+    return day if MIN_YEAR <= day.year <= MAX_YEAR else None
+
+
+def month_end(day):
+    return day.replace(day=calendar.monthrange(day.year, day.month)[1])
+
+
+# ── Период «с — по» ─────────────────────────────────────────────────────────
+# Просьба владельца 19.11.2026: табель «Регионов» не только за месяц, а за
+# период — от одного дня до месяца («месяц это максимум»). Месяц считается от
+# дня начала: с 1-го числа — ровно этот месяц, с 15 октября — по 14 ноября.
+# Двойник правила во фронте — periodMaxEnd в frontOfficeTimesheet.js (по нему
+# календарь гасит дни, которые сервер не примет).
+
+class PeriodError(ValueError):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+def period_max_end(start):
+    """Последний день периода не длиннее месяца, который начинается в `start`:
+    день перед тем же числом следующего месяца. Такого числа в следующем месяце
+    нет (с 31 октября: в ноябре 30 дней) — его последний день."""
+    year, month = (start.year + 1, 1) if start.month == 12 else (start.year, start.month + 1)
+    last = calendar.monthrange(year, month)[1]
+    if start.day <= last:
+        return date(year, month, start.day) - timedelta(days=1)
+    return date(year, month, last)
+
+
+def whole_month_of(start, end):
+    """'ГГГГ-ММ', если период — ровно календарный месяц, иначе None."""
+    if start.day == 1 and end == month_end(start):
+        return f'{start.year}-{start.month:02d}'
+    return None
+
+
+def ru_date(day):
+    return day.strftime('%d.%m.%Y')
+
+
+def resolve_period(month=None, date_from=None, date_to=None):
+    """Период табеля из запроса → {'start', 'end', 'month'}.
+
+    Даты «с — по» — от одного дня до месяца; без дат — месяц `month`, как до
+    периода (фронт шлёт месяц всегда: сервер без этой правки строит табель за
+    месяц, а не падает). `month` в ответе — 'ГГГГ-ММ', если период ровно
+    календарный месяц: так файл за месяц называется по-прежнему."""
+    if str(date_from or '').strip() or str(date_to or '').strip():
+        start, end = parse_day(date_from), parse_day(date_to)
+        if not start or not end:
+            raise PeriodError('Период нужен датами в виде ГГГГ-ММ-ДД', 'TIMESHEET_BAD_PERIOD')
+        if end < start:
+            raise PeriodError('Конец периода раньше начала', 'TIMESHEET_BAD_PERIOD')
+        limit = period_max_end(start)
+        if end > limit:
+            raise PeriodError(
+                'Период — не больше месяца: с %s самое позднее по %s' % (ru_date(start), ru_date(limit)),
+                'TIMESHEET_PERIOD_TOO_LONG')
+        return {'start': start, 'end': end, 'month': whole_month_of(start, end)}
+    bounds = parse_month(month)
+    if not bounds:
+        raise PeriodError('Месяц нужен в виде ГГГГ-ММ', 'TIMESHEET_BAD_MONTH')
+    return {'start': bounds[0], 'end': bounds[1], 'month': whole_month_of(*bounds)}
+
+
+def period_title(start, end):
+    """Подпись периода: «октябрь 2026», «5 ноября 2026», «1–15 ноября 2026»,
+    «25 октября – 5 ноября 2026», через год — с годом у обеих дат."""
+    if whole_month_of(start, end):
+        return f'{MONTHS_NOMINATIVE[start.month - 1]} {start.year}'
+    if start == end:
+        return f'{start.day} {MONTHS_GENITIVE[start.month - 1]} {start.year}'
+    if (start.year, start.month) == (end.year, end.month):
+        return f'{start.day}–{end.day} {MONTHS_GENITIVE[end.month - 1]} {end.year}'
+    if start.year == end.year:
+        return (f'{start.day} {MONTHS_GENITIVE[start.month - 1]} – '
+                f'{end.day} {MONTHS_GENITIVE[end.month - 1]} {end.year}')
+    return (f'{start.day} {MONTHS_GENITIVE[start.month - 1]} {start.year} – '
+            f'{end.day} {MONTHS_GENITIVE[end.month - 1]} {end.year}')
+
+
+def period_file_label(start, end):
+    """Часть имени файла: месяц — «2026-10», как было; период — «01.11.2026 — 15.11.2026»,
+    один день — «05.11.2026». Двойник — timesheetFileName в frontOfficeTimesheet.js:
+    Content-Disposition браузер фронту не отдаёт, имя собирается с двух сторон."""
+    month = whole_month_of(start, end)
+    if month:
+        return month
+    if start == end:
+        return ru_date(start)
+    return f'{ru_date(start)} — {ru_date(end)}'
 
 
 def month_days(start, end):
@@ -68,13 +184,13 @@ def month_days(start, end):
     return days
 
 
-def last_fact_day(month_end, today):
-    """Последний день, за который табель показывает факт: вчера (или конец месяца).
+def last_fact_day(period_end, today):
+    """Последний день, за который табель показывает факт: вчера (или конец периода).
 
     Сегодняшний день ещё идёт — отметки ухода нет почти ни у кого, а смены на
     будущие дни уже стоят в графике: без этой границы табель текущего месяца
     вышел бы полным неявок."""
-    return min(month_end, today - timedelta(days=1))
+    return min(period_end, today - timedelta(days=1))
 
 
 def shift_span(shift_date, start_time, end_time):
@@ -323,7 +439,11 @@ def membership_allows(envelope, day):
 
 
 def build_model(inputs, filters=None):
-    """Входы месяца (data.collect) → модель листа для workbook.build."""
+    """Входы периода (data.collect) → модель листа для workbook.build.
+
+    Период — от одного дня до месяца; дни листа — ровно дни периода, норма
+    «кол-во рабочих дней план» — по дням периода, а график («5.2») — по тому же
+    окну, что у табеля за месяц: у человека в отчёте за день и за месяц он один."""
     start, end = inputs['start'], inputs['end']
     days = month_days(start, end)
     fact_until = inputs['fact_until']
@@ -387,19 +507,14 @@ def build_model(inputs, filters=None):
             cities.append({'city': label, 'people': []})
         cities[-1]['people'].append(row)
     return {
-        'month': inputs['month'],
+        'month': inputs.get('month'),
+        'start': start,
+        'end': end,
         'days': days,
         'holidays': holidays,
         'fact_until': fact_until,
         'cities': cities,
     }
-
-
-def month_title(month):
-    bounds = parse_month(month)
-    if not bounds:
-        return str(month or '')
-    return f'{MONTHS_NOMINATIVE[bounds[0].month - 1]} {bounds[0].year}'
 
 
 def _hhmm(value):
@@ -412,8 +527,10 @@ def model_payload(model):
     holidays = set(model.get('holidays') or ())
     fact_until = model['fact_until']
     return {
-        'month': model['month'],
-        'title': month_title(model['month']),
+        'month': model.get('month'),
+        'date_from': model['start'].isoformat(),
+        'date_to': model['end'].isoformat(),
+        'title': period_title(model['start'], model['end']),
         'fact_until': fact_until.isoformat(),
         'days': [{
             'date': day.isoformat(),

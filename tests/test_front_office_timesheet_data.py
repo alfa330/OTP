@@ -15,6 +15,7 @@ from datetime import date, datetime, time
 from unittest import mock
 
 from front_office_timesheet import data, rules
+from group_late.config import TZ
 from tests import source_cache
 
 MEMBERS = ("_glb_name_keys", "_glb_index_put", "_glb_one_edit_apart", "_glb_resolve_entry", "_GLB_NAME_FOLD")
@@ -134,8 +135,14 @@ class FakeCursor:
 
 
 class FakeDb(StubDatabase):
-    def __init__(self, cursor):
+    def __init__(self, cursor, cached=()):
         self.cursor = cursor
+        self.cached = list(cached)
+        self.cache_reads = []
+
+    def glb_read_attendance_rows(self, day_from, day_to, query=None, days=None):
+        self.cache_reads.append((day_from, day_to))
+        return [dict(record) for record in self.cached]
 
     def _get_cursor(self):
         cursor = self.cursor
@@ -196,17 +203,84 @@ class CollectTests(unittest.TestCase):
         self.assertEqual([c['code'] for c in bolat[11:14]], ['Б/С', 'Б/С', 'Б/С'])
         self.assertEqual([city['city'] for city in model['cities']], ['Астана', 'Город не указан'])
 
+    def test_period_reads_only_its_days_but_keeps_the_month_window_of_the_schedule(self):
+        """Период 3–9 ноября (просьба владельца 19.11.2026): отметки и выходные — за
+        дни периода, смены и периоды графика — за то же окно, что у табеля за
+        месяц (октябрь — 13 декабря): у человека в отчёте за неделю и за месяц
+        один и тот же график."""
+        november_4 = date(2026, 11, 4)
+        tables = [
+            ("FROM departments", [(909, 'Фронт офисы')]),
+            ("WITH dept_members", [(1, 'Альфа Анна', 'Астана', '', 'working', 909, None, True, True)]),
+            ("FROM work_shifts", [(1, november_4, time(9), time(19)), (1, date(2026, 11, 20), time(9), time(19))]),
+            ("FROM glb_employees", [('card-a', 'Альфа Анна')]),
+        ]
+        cursor = FakeCursor(tables)
+        period = rules.resolve_period(date_from='2026-11-03', date_to='2026-11-09')
+        with mock.patch.object(data.attendance_cache, 'rows_for',
+                               return_value={'rows': [], 'pending_days': []}) as rows_for, \
+                mock.patch.object(data, 'kz_holidays', return_value=set()):
+            inputs = data.collect(FakeDb(cursor), period, date(2026, 11, 19))
+        self.assertEqual(rows_for.call_args.args[1:], (date(2026, 11, 3), date(2026, 11, 9)))
+        self.assertEqual((inputs['start'], inputs['end'], inputs['month']),
+                         (date(2026, 11, 3), date(2026, 11, 9), None))
+        self.assertEqual((inputs['window_start'], inputs['label_end']), (date(2026, 10, 1), date(2026, 12, 13)))
+        params = {flat.split(' FROM ')[1].split()[0]: args for flat, args in cursor.calls if ' FROM ' in flat}
+        self.assertEqual(params['work_shifts'][1:], (date(2026, 10, 1), date(2026, 12, 13)))
+        self.assertEqual(params['days_off'][1:], (date(2026, 11, 3), date(2026, 11, 9)))
+        self.assertEqual(set(inputs['spans']), {(1, november_4)})   # смена 20 ноября — вне периода
+        self.assertEqual(inputs['shift_days'][1], {november_4, date(2026, 11, 20)})
+
     def test_options_do_not_read_attendance(self):
         cursor = FakeCursor([("FROM departments", [(909, 'Фронт офисы')])])
+        db = FakeDb(cursor)
         with mock.patch.object(data.attendance_cache, 'rows_for') as rows_for:
-            inputs = data.collect(FakeDb(cursor), '2026-10', date(2026, 11, 6), with_facts=False)
-        rows_for.assert_not_called()
+            inputs = data.collect(db, '2026-10', date(2026, 11, 6), with_facts=False)
+        rows_for.assert_not_called()                      # дни из Workpace не собираются
+        self.assertEqual(db.cache_reads, [(date(2026, 10, 1), date(2026, 10, 31))])
         self.assertEqual(data.options_payload(inputs)['people'], [])
+
+    def test_options_match_cards_and_people_like_the_timesheet(self):
+        """Разбор 19.11.2026: списки отбора считались без строк «Отметок» — карточка,
+        сшитая по ФИО из строки плана, в окне выходила «без карточки», а уволенный,
+        у которого в периоде только отметки, в табеле был, а в отборе — нет. Теперь
+        строки берутся из кэша (без сборки дней), и всё как у табеля."""
+        cursor = FakeCursor([
+            ("FROM departments", [(909, 'Фронт офисы')]),
+            ("WITH dept_members", [
+                (1, 'Сарсенова Айгерим', 'Астана', '', 'working', 909, None, True, True),
+                (2, 'Тулеген Тимур', 'Алматы', '', 'fired', 909, None, True, True),
+            ]),
+            ("FROM glb_employees", [('card-1', 'САРСЕН АЙГЕРИМ ЕРЛАНКЫЗЫ'), ('card-2', 'Тулеген Тимур')]),
+        ])
+        cached = [
+            {'day': date(2026, 11, 3), 'employee_id': 'card-1', 'seq': 0, 'employee_name': 'Сарсенова Айгерим',
+             'department_name': 'Регионы', 'schedule_name': 'График iCore', 'system': 'workpace',
+             'fact_in': None, 'fact_out': None, 'marks': []},
+            {'day': date(2026, 11, 4), 'employee_id': 'card-2', 'seq': 0, 'employee_name': 'Тулеген Тимур',
+             'department_name': 'Регионы', 'schedule_name': '', 'system': 'workpace',
+             'fact_in': datetime(2026, 11, 4, 4, 0, tzinfo=TZ), 'fact_out': datetime(2026, 11, 4, 13, 0, tzinfo=TZ),
+             'marks': [{'at': '2026-11-04T09:00:00+05:00', 'kind': 'in'}]},
+            {'day': date(2026, 11, 4), 'employee_id': 'other', 'seq': 0, 'employee_name': 'Чужой Отдел',
+             'department_name': 'СЗоВ', 'schedule_name': '', 'system': 'workpace',
+             'fact_in': datetime(2026, 11, 4, 4, 0, tzinfo=TZ), 'fact_out': None, 'marks': []},
+        ]
+        db = FakeDb(cursor, cached=cached)
+        period = rules.resolve_period(date_from='2026-11-02', date_to='2026-11-08')
+        with mock.patch.object(data.attendance_cache, 'rows_for') as rows_for, \
+                mock.patch.object(data, 'kz_holidays', return_value=set()):
+            inputs = data.collect(db, period, date(2026, 11, 19), with_facts=False)
+        rows_for.assert_not_called()
+        payload = data.options_payload(inputs)
+        by_name = {person['name']: person for person in payload['people']}
+        self.assertEqual(set(by_name), {'Сарсенова Айгерим', 'Тулеген Тимур'})   # уволенный с отметкой — в отборе
+        self.assertTrue(by_name['Сарсенова Айгерим']['card'])                      # сшита по строке плана
+        self.assertEqual(payload['without_card'], [])
 
     def test_bad_month_and_missing_department(self):
         with self.assertRaises(data.TimesheetError) as bad:
             data.collect(FakeDb(FakeCursor([])), '2026-13', date(2026, 11, 6))
-        self.assertEqual(bad.exception.status, 400)
+        self.assertEqual((bad.exception.status, bad.exception.code), (400, 'TIMESHEET_BAD_MONTH'))
         with self.assertRaises(data.TimesheetError) as missing:
             data.collect(FakeDb(FakeCursor([])), '2026-10', date(2026, 11, 6))
         self.assertEqual(missing.exception.status, 404)
