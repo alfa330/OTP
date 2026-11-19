@@ -116,7 +116,7 @@ const FilePreview = ({ file, api, toast, onClose }) => {
                         return;
                     }
                     saveBlob(blob, file.name);
-                    toast('Этот браузер не показывает фото HEIC — файл скачан. В Safari оно откроется здесь же.');
+                    toast('Этот браузер не показывает фото HEIC — файл скачан. В Safari оно откроется здесь же.', 'info');
                     onClose();
                     return;
                 }

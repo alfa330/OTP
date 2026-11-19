@@ -114,6 +114,31 @@ def test_measure_is_removed_from_a_closed_record_too(db):
         assert item['permissions']['can_remove_measure'] is False
 
 
+def test_measure_removed_from_closed_record_does_not_redden_active_control(db):
+    """Разбор 19.11.2026: мера снята с ЗАКРЫТОЙ записи, контроль ещё идёт — строка
+    контроля не горит «нарушение без меры» (назначить меру в закрытой записи нечем),
+    а открытая запись без меры по-прежнему красит."""
+    with db.cursor() as cur:
+        _ids, _act, control = _act_and_control(cur)
+        head = ctx_of(cur, HEAD_SZOV)
+        reprimand = measure_id(cur, SZOV, 'Выговор')
+        closed = create(cur, SV_A, OP_A, NOW - timedelta(hours=3), measure_id=reprimand)
+        service.add_explanation(cur, ctx_of(cur, OP_A), service.load_record(cur, ctx_of(cur, OP_A), closed, TODAY),
+                                upload(), now=NOW)
+        service.approve_measure(cur, head, _load(cur, HEAD_SZOV, closed), now=NOW)
+        service.close_record(cur, head, _load(cur, HEAD_SZOV, closed), now=NOW)
+        service.remove_measure(cur, head, _load(cur, HEAD_SZOV, closed), 'Взыскание снято досрочно', now=NOW)
+
+        def row():
+            controls = queries.list_controls(cur, [SZOV], state='active')
+            return next(r for r in service.control_rows(cur, head, controls, TODAY) if r['id'] == control['id'])
+
+        assert row()['violations'] == 1 and row()['violations_without_measure'] == 0 and row()['tone'] != 'red'
+        # Открытая запись без утверждённой меры — по-прежнему «нарушение без меры».
+        create(cur, SV_A, OP_A, NOW - timedelta(hours=1), measure_id=reprimand)
+        assert row()['violations_without_measure'] == 1 and row()['tone'] == 'red'
+
+
 # ── П. 13: недействительная вторая версия акта возвращает первую ───────────
 
 def test_invalid_second_act_version_restores_the_first(db):

@@ -4,7 +4,7 @@ import { IosSegmented } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { apiError } from './disciplineApi';
 import {
-    Chip, dBtnPrimary, dBtnSecondary, EmptyState, FileList, FileName, Group, LoadingRows, OVERDUE_ROW, StateBadge,
+    Chip, dBtnPrimary, dBtnSecondary, EmptyState, FileList, FileName, Group, LoadingRows, rowTone, StateBadge,
     StepChip, T,
 } from './disciplineUi';
 import { daysLeftText, fmtDate, fmtMoney, fmtShort, fmtTime, pluralViolations } from './disciplineRules';
@@ -55,7 +55,7 @@ const CardRecord = ({ item, documents, internal, onOpenRecord, onOpenFile }) => 
     return (
         <li>
             <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
-                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100 xl:px-5 2xl:py-3.5 ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
+                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition xl:px-5 2xl:py-3.5 ${rowTone(item.explanation_overdue)}`}>
                 <span className={`w-[50px] shrink-0 text-[12.5px] tabular-nums text-slate-500 xl:w-[64px] ${T.sub}`}>
                     {fmtShort(item.occurred_at)}
                     <span className="block text-[11px] text-slate-400 2xl:text-[12px]">{fmtTime(item.occurred_at)}</span>

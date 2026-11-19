@@ -995,14 +995,20 @@ def controls_by_ids(cursor, control_ids):
 
 
 def violations_in_controls(cursor, control_ids):
-    """{контроль: число записей, заведённых под ним (неотменённых)}."""
+    """{контроль: число записей, заведённых под ним (неотменённых)}.
+
+    «Без меры» — только ОТКРЫТЫЕ записи: закрыть запись под контролем без
+    утверждённой меры нельзя, а меру, которую руководитель потом снял с уже
+    закрытой записи (service.remove_measure), назначить в ней снова нечем — такая
+    запись красила бы строку контроля «нарушение без меры» до самого решения."""
     ids = _int_list(control_ids)
     if not ids:
         return {}
     cursor.execute(
         """
         SELECT control_id, COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE measure_state IS DISTINCT FROM 'approved') AS without_measure
+               COUNT(*) FILTER (WHERE measure_state IS DISTINCT FROM 'approved' AND closed_at IS NULL)
+                   AS without_measure
           FROM discipline_records
          WHERE control_id = ANY(%s) AND cancelled_at IS NULL
          GROUP BY control_id

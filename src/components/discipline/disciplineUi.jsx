@@ -342,8 +342,13 @@ export const ACCEPT_ACT = '.pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application
 export { iosBtnPrimary, iosBtnSecondary, iosCard };
 
 /* Строка просроченной объяснительной (ТЗ п. 8.3: «запись подсвечивается
-   красным в журнале») — лёгкая заливка, а не красный текст одной строкой. */
-export const OVERDUE_ROW = 'bg-rose-50/70 hover:!bg-rose-50';
+   красным в журнале») — лёгкая заливка, а не красный текст одной строкой.
+   Цвета строки — набором целиком (rowTone), а не «серое наведение + красное
+   поверх с !important»: тёмная тема портала (theme-dark.css собирается
+   скриптом) перекрывает обычные утилиты, а вариант с ! и has-[…] — нет, и в
+   тёмном режиме строка вспыхивала бы светлым пятном. */
+export const OVERDUE_ROW = 'bg-rose-50/70 hover:bg-rose-50';
+export const rowTone = (overdue) => (overdue ? OVERDUE_ROW : 'hover:bg-slate-50 active:bg-slate-100');
 
 /* Строка записи в списках: дата, кто, что, ступень. Нажатие открывает запись,
    а ФИО — карточку сотрудника (ТЗ п. 11: «открывается кликом по ФИО из любого
@@ -353,7 +358,7 @@ export const RecordRow = ({ item, onOpen, onOpenOperator = null, showOperator = 
     const cancelled = item.state === 'cancelled';
     const nameClass = `block truncate text-[13.5px] font-semibold text-slate-900 ${T.body} ${cancelled ? 'line-through opacity-60' : ''}`;
     return (
-        <div className={`relative flex w-full items-center gap-3 px-4 text-left transition hover:bg-slate-50 has-[button:active]:bg-slate-100 ${dense ? 'py-2.5' : 'py-3'} xl:px-5 2xl:py-3.5 ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
+        <div className={`relative flex w-full items-center gap-3 px-4 text-left transition ${rowTone(item.explanation_overdue)} ${dense ? 'py-2.5' : 'py-3'} xl:px-5 2xl:py-3.5`}>
             <button type="button" onClick={() => onOpen?.(item.id)} className="absolute inset-0 rounded-[inherit]"
                     aria-label={[item.number, item.operator_name, item.type_title].filter(Boolean).join(', ')} />
             <span className={`w-[50px] shrink-0 text-[12.5px] tabular-nums text-slate-500 xl:w-[64px] ${T.sub}`}>

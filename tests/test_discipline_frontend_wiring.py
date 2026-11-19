@@ -575,7 +575,24 @@ class TzGapWiringTests(unittest.TestCase):
     def test_overdue_row_is_highlighted(self):
         # П. 8.3: «запись подсвечивается красным в журнале».
         for name in ('JournalPanel.jsx', 'disciplineUi.jsx', 'OperatorCard.jsx'):
-            self.assertIn('item.explanation_overdue ? OVERDUE_ROW', self._src(name), name)
+            self.assertIn('rowTone(item.explanation_overdue)', self._src(name), name)
+        # В журнале два вида — «Записи» (таблица) и «По сотрудникам»: подсвечены оба
+        # (разбор 19.11.2026: второй вид сначала остался белым).
+        journal = self._src('JournalPanel.jsx')
+        grouped = journal[journal.index("mode === 'operators' ?"):journal.index('<table')]
+        self.assertIn('rowTone(item.explanation_overdue)', grouped)
+        self.assertIn('срок объяснительной прошёл', grouped)
+        self.assertIn('rowTone(item.explanation_overdue)', journal[journal.index('<table'):])
+        # Тёмная тема (theme-dark.css собирается скриптом) перекрывает только обычные
+        # утилиты: ни вариантов с «!», ни has-[…] в цветах строки быть не должно.
+        ui = self._src('disciplineUi.jsx')
+        tone = ui[ui.index('export const OVERDUE_ROW'):ui.index('export const RecordRow')]
+        self.assertNotIn('!bg-', tone)
+        self.assertNotIn('has-[', ui[ui.index('export const RecordRow'):])
+        dark = (ROOT / 'src' / 'theme-dark.css').read_text(encoding='utf-8')
+        for selector in (r'.bg-rose-50\/70', r'.hover\:bg-rose-50:hover', r'.active\:bg-slate-100:active',
+                         r'.hover\:bg-slate-50:hover'):
+            self.assertIn(selector, dark, selector)
 
     def test_journal_filters_by_line(self):
         journal = self._src('JournalPanel.jsx')

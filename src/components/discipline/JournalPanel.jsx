@@ -5,7 +5,7 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
 import { apiError, saveBlob } from './disciplineApi';
 import {
-    Chip, dBtnSecondary, dLabel, EmptyState, Group, LoadingRows, OVERDUE_ROW, RecordRow, SearchField, StateBadge,
+    Chip, dBtnSecondary, dLabel, EmptyState, Group, LoadingRows, RecordRow, rowTone, SearchField, StateBadge,
     StepChip, T,
 } from './disciplineUi';
 import {
@@ -259,10 +259,11 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
                                 {group.items.map((item) => (
                                     <li key={item.id}>
                                         <button type="button" onClick={() => openRecord(item.id)}
-                                                className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-slate-50 xl:px-5">
+                                                className={`flex w-full items-center gap-3 px-4 py-2.5 text-left xl:px-5 ${rowTone(item.explanation_overdue)}`}>
                                             <span className={`w-[44px] shrink-0 text-[12.5px] tabular-nums text-slate-500 ${T.sub}`}>{fmtShort(item.occurred_at)}</span>
                                             <span className={`min-w-0 flex-1 truncate text-[13px] text-slate-800 ${T.sub} ${item.state === 'cancelled' ? 'line-through opacity-60' : ''}`}>
                                                 {item.type_title}
+                                                {item.explanation_overdue ? <span className="ml-1.5 font-medium text-rose-600">· срок объяснительной прошёл</span> : null}
                                             </span>
                                             <StepChip item={item} />
                                             {item.files_count > 0
@@ -297,7 +298,7 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
                             <tbody className="divide-y divide-slate-100">
                                 {items.map((item) => (
                                     <tr key={item.id} onClick={() => openRecord(item.id)}
-                                        className={`cursor-pointer transition hover:bg-slate-50 ${item.state === 'cancelled' ? 'opacity-60' : ''} ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
+                                        className={`cursor-pointer transition ${rowTone(item.explanation_overdue)} ${item.state === 'cancelled' ? 'opacity-60' : ''}`}>
                                         <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600 2xl:px-5 2xl:py-3.5">{fmtDateTime(item.occurred_at)}</td>
                                         <td className="px-4 py-2.5 font-medium text-slate-900 2xl:px-5">
                                             <button type="button" className="block max-w-[220px] truncate text-left hover:text-blue-600 hover:underline"
