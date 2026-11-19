@@ -41,14 +41,16 @@ function formFromCard(card) {
     return { data, contract };
 }
 
-/* ТЗ п. 3: умолчание для нового оформления (СЗоВ и ОП — ГПХ на Eazy Go Rent, Тез — GaBa).
+/* ТЗ п. 3: умолчание для нового оформления — правила вкладки «Настройки» (вид, компания, должность).
    Подставляется в форму, но не в «исходное»: иначе форма считалась бы несохранённой без
-   правок, «Сохранить» была бы серой и умолчание не сохранилось бы (разбор 10.11.2026). */
+   правок, «Сохранить» была бы серой и умолчание не сохранилось бы (разбор 10.11.2026). Каждое поле —
+   само по себе: вид уже стоит (выбрали при создании учётки) — компания всё равно подставится. */
 function withSuggestion(form, card) {
     const contract = { ...form.contract };
-    if (!contract.employment_type && card.suggestion?.employment_type) {
-        contract.employment_type = card.suggestion.employment_type;
-        if (!contract.company_id && card.suggestion.company_id) contract.company_id = card.suggestion.company_id;
+    const suggestion = card.suggestion || {};
+    if (!card.contract?.id) {
+        if (!contract.employment_type && suggestion.employment_type) contract.employment_type = suggestion.employment_type;
+        if (!contract.company_id && suggestion.company_id) contract.company_id = suggestion.company_id;
     }
     return { ...form, contract };
 }
@@ -159,10 +161,15 @@ export default function HrPersonSheet({ open = true, api, boot, toast, userId, o
             </button>
         </div>
     );
+    /* Что пришло из правила «Настроек» — по каждому полю: вид у человека мог быть уже выбран (при создании учётки),
+       и тогда подставлена только компания. Пояснение называет ровно подставленное, а не всё правило. */
     const suggestion = card?.suggestion;
-    const usesDefault = Boolean(card && !card.contract?.id && suggestion?.employment_type
-        && form?.contract.employment_type === suggestion.employment_type
-        && (!suggestion.company_id || form?.contract.company_id === suggestion.company_id));
+    const fresh = Boolean(card && !card.contract?.id && initial && form && suggestion);
+    const typeFromRule = fresh && Boolean(suggestion.employment_type) && !initial.contract.employment_type
+        && form.contract.employment_type === suggestion.employment_type;
+    const companyFromRule = fresh && Boolean(suggestion.company_id) && !initial.contract.company_id
+        && form.contract.company_id === suggestion.company_id;
+    const usesDefault = typeFromRule || companyFromRule;
     const chosenType = form?.contract.employment_type || '';
     /* Чего не хватает документам — по тому, что сейчас в форме: подставленное умолчание (вид и
        компания) сохранится перед скачиванием, и «не хватает: договор, компания» было бы неправдой. */
@@ -238,8 +245,8 @@ export default function HrPersonSheet({ open = true, api, boot, toast, userId, o
                         <div className={iosGroupLabel}>Оформление</div>
                         {usesDefault && (
                             <div className="px-1 text-[12.5px] text-blue-700" data-hr-default-hiring>
-                                По умолчанию для {suggestion.for || 'этого отдела'}: {EMPLOYMENT_SHORT[suggestion.employment_type]}, {suggestion.company_name}
-                                {suggestion.company_id ? ' — подставлено, можно поменять.' : ' — такой компании нет в справочнике, заведите её в «Справочнике».'}
+                                По умолчанию для {suggestion.for || 'этого отдела'}: {[typeFromRule && EMPLOYMENT_SHORT[suggestion.employment_type], companyFromRule && suggestion.company_name].filter(Boolean).join(', ')}
+                                {' — подставлено, можно поменять. Правило — в «Настройках».'}
                             </div>
                         )}
                         <div className={`${iosCard} grid gap-3 p-4 sm:grid-cols-2`}>

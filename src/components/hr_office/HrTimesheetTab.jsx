@@ -5,7 +5,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosMenu, IosModal, IosPager, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import { blobErrorText, cellTone, dateText, errorText, monthBounds, monthLabel, shiftMonth, todayIso } from './hrOffice';
-import { CELL_TONE, Empty, FIELD, Loading, PAGE_SIZE, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, pagerProps, useNarrowScreen, useSheetState } from './hrUi';
+import { CELL_TONE, Empty, FIELD, Loading, PAGE_SIZE, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, pagerProps, useNarrowScreen, useReloadOnRules, useSheetState } from './hrUi';
 import { PersonMonthSheet, TimesheetPhoneList } from './HrTimesheetPhone';
 import HrJournalSheet from './HrJournalSheet';
 
@@ -207,7 +207,7 @@ function NoteEditor({ open = true, api, toast, target, onClose, onSaved }) {
     );
 }
 
-export default function HrTimesheetTab({ api, boot, toast }) {
+export default function HrTimesheetTab({ api, boot, toast, rulesVersion }) {
     const [month, setMonth] = useState(defaultMonth);
     const [project, setProject] = useState('ЦО');
     const [until, setUntil] = useState('');
@@ -242,6 +242,7 @@ export default function HrTimesheetTab({ api, boot, toast }) {
             .finally(() => { if (requestRef.current === request) setLoading(false); });
     }, [api, params]);
     useEffect(() => { load(); }, [load]);
+    useReloadOnRules(rulesVersion, load);
     // Месяц и проект меняются вместе с отбором людей и датой «по» — одним обновлением, чтобы
     // не уходил запрос со старой датой «по», которая уже вне нового месяца.
     const changeMonth = (delta) => { setChosen([]); setUntil(''); setMonth((value) => shiftMonth(value, delta)); };

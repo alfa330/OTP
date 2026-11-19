@@ -25,6 +25,7 @@ const TITLES = {
     intake: 'Журнал «Приема»',
     timesheet: 'Журнал табеля',
     acts: 'Журнал АВР',
+    settings: 'Журнал настроек',
 };
 
 const ACTIONS = {

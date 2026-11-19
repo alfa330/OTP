@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from hr_office import queries, rules, schema, service
+from hr_office import defaults, queries, rules, schema, service
 
 ROOT = Path(__file__).resolve().parents[1]
 BIRTH = date(1990, 1, 1)
@@ -103,11 +103,24 @@ class DefaultCompaniesTests(unittest.TestCase):
         self.assertEqual(cursor.inserted, [('GaBa', 'ip')])
         self.assertEqual(schema.seed_default_companies(cursor), [])         # второй запуск — ничего
 
-    def test_defaults_point_to_seeded_companies(self):
+    def test_seeded_rules_point_to_seeded_companies(self):
+        # Правила, в которые при выкладке переносятся прежние умолчания кода, ссылаются только на компании,
+        # которые справочник заводит сам, — иначе правило осталось бы без компании.
         keys = {rules.company_key(name) for name, _kind in schema.DEFAULT_COMPANIES}
-        for code in ('op', 'szov', 'tez'):
-            self.assertIn(rules.default_hiring(code)[1], keys)
-            self.assertTrue(rules.DEFAULT_HIRING_FOR[code])
+        for _codes, _scope, _kind, company_key, _title in defaults.SEED:
+            if company_key:
+                self.assertIn(company_key, keys)
+
+
+EGR = {'id': 1, 'name': 'Eazy Go Rent', 'kind': 'ip', 'is_active': True}
+GABA = {'id': 2, 'name': 'GaBa', 'kind': 'ip', 'is_active': True}
+DEPARTMENTS = {2: 'Отдел продаж', 3: 'СЗоВ — Служба заботы о водителях', 4: 'Тез КЦ'}
+
+
+def seeded_book():
+    """Правила, которыми выкладка заменяет прежние умолчания кода (defaults.SEED), на отделах теста."""
+    rows = defaults.seed_rows({'op': 2, 'szov': 3, 'tez': 4}, queries.company_index([EGR, GABA]))
+    return service.RuleBook.of([dict(row, id=index + 1) for index, row in enumerate(rows)], DEPARTMENTS)
 
 
 class SummaryTests(unittest.TestCase):
@@ -119,18 +132,40 @@ class SummaryTests(unittest.TestCase):
         base.update(fields)
         return base
 
+    def summary(self, **fields):
+        return service.person_summary(self.person(**fields), {1: EGR, 2: GABA}, queries.company_index([EGR, GABA]),
+                                      seeded_book())
+
     def test_new_hire_shows_the_default(self):
-        egr = {'id': 1, 'name': 'Eazy Go Rent', 'kind': 'ip', 'is_active': True}
-        summary = service.person_summary(self.person(), {1: egr}, queries.company_index([egr]))
+        summary = self.summary()
         self.assertFalse(summary['has_contract'])
+        # Названия отделов не склоняются — в кавычках после «отделов» («для Отдел продаж» было ошибкой).
         self.assertEqual(summary['default_hiring'], {'employment_type': 'gph', 'company': 'ИП «Eazy Go Rent»',
-                                                     'for': 'ОП и СЗоВ'})
+                                                     'for': 'отделов «Отдел продаж» и «СЗоВ»'})
+        self.assertEqual(summary['job_title_default'], 'Менеджер по привлечению водителей')
+
+    def test_tez_default_is_for_operators_only(self):
+        # ТЗ п. 3: GaBa — «операторам TEZ»; раньше код давал её всему отделу (сверка 11.11.2026).
+        operator = self.summary(department_id=4, department_code='tez')
+        self.assertEqual(operator['default_hiring']['company'], 'ИП «GaBa»')
+        self.assertEqual(operator['default_hiring']['for'], 'операторов отдела «Тез КЦ»')
+        self.assertIsNone(self.summary(department_id=4, department_code='tez', role='sv')['default_hiring'])
+
+    def test_supervisor_keeps_company_but_not_operator_title(self):
+        sv = self.summary(department_id=3, department_code='szov', role='sv')
+        self.assertEqual(sv['default_hiring']['company'], 'ИП «Eazy Go Rent»')
+        self.assertEqual(sv['job_title_default'], '')            # было «Оператор службы заботы…» и в АВР
 
     def test_no_default_once_there_is_a_company_or_contract(self):
-        index = queries.company_index([])
-        self.assertIsNone(service.person_summary(self.person(company_name='ИП Алиева'), {}, index)['default_hiring'])
-        self.assertIsNone(service.person_summary(self.person(contract_id=3), {}, index)['default_hiring'])
-        self.assertIsNone(service.person_summary(self.person(department_code='hr'), {}, index)['default_hiring'])
+        self.assertIsNone(self.summary(company_name='ИП Алиева')['default_hiring'])
+        self.assertIsNone(self.summary(contract_id=3)['default_hiring'])
+
+    def test_own_type_is_kept_and_only_the_company_comes_from_the_rule(self):
+        # Вид выбрали при создании учётки — строка «Приема» обещает только компанию, как и карточка.
+        summary = self.summary(employment_type='smz')
+        self.assertEqual(summary['default_hiring']['employment_type'], None)
+        self.assertEqual(summary['default_hiring']['company'], 'ИП «Eazy Go Rent»')
+        self.assertIsNone(self.summary(department_id=99, department_code='hr')['default_hiring'])
 
 
 class AddUserEndpointTests(unittest.TestCase):
@@ -202,14 +237,13 @@ class WiringTests(unittest.TestCase):
         edit = modal[modal.index('{!isCreateMode && ('):]
         self.assertIn('Наименование ТОО/ИП', edit)                           # в заведённой карточке — как было
 
-    def test_frontend_defaults_mirror_the_server(self):
-        source = (ROOT / 'src' / 'utils' / 'employmentStatus.js').read_text(encoding='utf-8')
-        for code, (kind, key) in rules.DEFAULT_HIRING.items():
-            row = re.search(rf"{code}: \{{ type: '([^']+)', company: '([^']+)', for: '([^']+)' \}}", source)
-            self.assertIsNotNone(row, code)
-            self.assertEqual(row.group(1), rules.EMPLOYMENT_SHORT[kind])
-            self.assertEqual(rules.company_key(row.group(2)), key)
-            self.assertEqual(row.group(3), rules.DEFAULT_HIRING_FOR[code])
+    def test_create_window_takes_defaults_from_settings(self):
+        # Умолчание в окне создания учётки — с сервера (правила «Настроек»), а не зашитой строкой.
+        modal = (ROOT / 'src' / 'components' / 'modals' / 'UserEditModal.jsx').read_text(encoding='utf-8')
+        self.assertIn('/api/hr_office/defaults', modal)
+        self.assertNotIn('Eazy Go Rent', modal)
+        status = (ROOT / 'src' / 'utils' / 'employmentStatus.js').read_text(encoding='utf-8')
+        self.assertNotIn('DEFAULT_HIRING', status)
 
     def test_intake_card_shows_documents_first(self):
         card = (ROOT / 'src' / 'components' / 'hr_office' / 'HrPersonSheet.jsx').read_text(encoding='utf-8')

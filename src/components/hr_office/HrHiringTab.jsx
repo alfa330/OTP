@@ -8,7 +8,7 @@ import HrTemplatesSheet from './HrTemplatesSheet';
 import HrImportSheet from './HrImportSheet';
 import HrJournalSheet from './HrJournalSheet';
 import { EMPLOYMENT_SHORT, blobErrorText, contractLine, dateText, initials } from './hrOffice';
-import { Empty, Loading, PAGE_SIZE, TOOLBAR_BTN, pagerProps, useNarrowScreen, useServerPage, useSheetState } from './hrUi';
+import { Empty, Loading, PAGE_SIZE, TOOLBAR_BTN, pagerProps, useNarrowScreen, useReloadOnRules, useServerPage, useSheetState } from './hrUi';
 
 /*
  * «Прием» (ТЗ п. 1–4): кадровик видит всех — по 50 на странице — кто ждёт оформления и чего не хватает
@@ -68,7 +68,7 @@ function PersonRow({ person, onOpen, onDownload, downloading }) {
                             <span className="block text-[13px] font-medium text-blue-700">Ждёт оформления</span>
                             <span className="block truncate text-[12px] text-slate-500">
                                 {hiring
-                                    ? `по умолчанию: ${EMPLOYMENT_SHORT[hiring.employment_type] || ''} · ${hiring.company}`
+                                    ? `по умолчанию: ${[EMPLOYMENT_SHORT[hiring.employment_type], hiring.company].filter(Boolean).join(' · ')}`
                                     : (contract ? `в карточке: ${contract}` : 'вид и компания не выбраны')}
                             </span>
                         </>
@@ -87,7 +87,7 @@ function PersonRow({ person, onOpen, onDownload, downloading }) {
     );
 }
 
-export default function HrHiringTab({ api, boot, toast, reloadBoot }) {
+export default function HrHiringTab({ api, boot, toast, reloadBoot, rulesVersion }) {
     const [query, setQuery] = useState('');
     const [project, setProject] = useState('');
     const [view, setView] = useState('all');
@@ -101,6 +101,7 @@ export default function HrHiringTab({ api, boot, toast, reloadBoot }) {
     const total = list.data?.total || 0;
     const counts = list.data?.counts || {};
     const load = list.reload;
+    useReloadOnRules(rulesVersion, load);
     const error = list.data ? '' : list.error;
 
     const projectOptions = useMemo(() => [{ value: '', label: 'Все проекты' }]

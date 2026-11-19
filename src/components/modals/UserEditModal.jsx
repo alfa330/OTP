@@ -1,4 +1,5 @@
 ﻿import React, { useEffect, useState } from 'react';
+import axios from 'axios';
 import { createPortal } from 'react-dom';
 import FaIcon from '../common/FaIcon';
 import useIsMobileShell from '../common/useIsMobileShell';
@@ -10,7 +11,8 @@ import { KAZAKHSTAN_CITY_OPTIONS, isKnownKazakhstanCity } from '../../utils/kaza
 import { directionForPickedGroup } from '../../utils/groupDirection';
 import CustomSelect from '../ui/CustomSelect';
 import InfoHint from '../common/InfoHint';
-import { LEGACY_STATUS_OPTIONS, defaultHiringFor, employmentStatusOptions } from '../../utils/employmentStatus';
+import { LEGACY_STATUS_OPTIONS, employmentStatusOptions } from '../../utils/employmentStatus';
+import { API_BASE_URL } from '../../utils/apiBase';
 import './user-edit-mobile.css';
 
 const PERIOD_STATUS_VALUES = new Set(['bs', 'sick_leave', 'annual_leave', 'dismissal']);
@@ -394,10 +396,31 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
     // «Прием», ТЗ п. 2–3: данные для документов новой учётки и умолчание оформления её отдела.
     const intake = editedUser?.hr_intake || {};
     const setIntake = (key, value) => setEditedUser((prev) => ({ ...prev, hr_intake: { ...(prev?.hr_intake || {}), [key]: value } }));
-    const createHiring = defaultHiringFor(effectiveDeptCode);
     /* Пилот «Кадров» (профиль hr_office_features): данные для документов при создании учётки и
        статусы по виду оформления — только его учёткам; остальные видят окно как до ТЗ. */
     const hrFeatures = user?.hr_office_features === true;
+    /* ТЗ п. 3: что «Прием» подставит новому сотруднику этого отдела и роли — по правилам вкладки «Настройки»
+       «Кадров» (раньше — зашитым в код). Только подсказка: вид и компанию выбирает кадровик. */
+    const [createHiring, setCreateHiring] = useState(null);
+    const createRole = editedUser?.role || '';
+    useEffect(() => {
+        if (!hrFeatures || editedUser?.id || effectiveDeptId == null || effectiveDeptId === '') {
+            setCreateHiring(null);
+            return undefined;
+        }
+        let alive = true;
+        // Пока идёт запрос, под новым отделом или ролью не висит умолчание прежних — нейтральная подсказка.
+        setCreateHiring(null);
+        axios.get(`${API_BASE_URL}/api/hr_office/defaults`,
+                  { params: { department_id: effectiveDeptId, role: createRole || undefined } })
+            .then(({ data }) => { if (alive) setCreateHiring(data?.default || null); })
+            .catch(() => { if (alive) setCreateHiring(null); });
+        return () => { alive = false; };
+    }, [hrFeatures, editedUser?.id, effectiveDeptId, createRole]);
+    const createHiringText = createHiring
+        ? [createHiring.employment_label, createHiring.company,
+            createHiring.job_title && `должность «${createHiring.job_title}»`].filter(Boolean).join(', ')
+        : '';
     const statusOptions = hrFeatures
         ? employmentStatusOptions(editedUser?.employment_type, editedUser?.status, { withFired: true })
         : LEGACY_STATUS_OPTIONS;
@@ -1757,9 +1780,9 @@ const UserEditModal = ({ isOpen, onClose, userToEdit, svList = [], directions = 
                     {hrFeatures ? (
                     <div className="rounded-xl bg-gray-50 px-3 py-2.5 text-sm leading-relaxed text-gray-600" data-hr-hiring-note>
                         <div className="font-medium text-gray-800">Вид оформления и компания</div>
-                        {createHiring
-                            ? <div>Выберет кадровик в разделе «Прием». По умолчанию для {createHiring.for} — {createHiring.type}, {createHiring.company}.</div>
-                            : <div>Выберет кадровик в разделе «Прием». По умолчанию для ОП и СЗоВ — ГПХ, ИП «Eazy Go Rent»; для операторов TEZ — ГПХ, ИП «GaBa».</div>}
+                        {createHiringText
+                            ? <div>Выберет кадровик в разделе «Прием». По умолчанию{createHiring.for ? ` для ${createHiring.for}` : ''}: {createHiringText}.</div>
+                            : <div>Выберет кадровик в разделе «Прием». Правила по умолчанию — в «Кадры» → «Настройки».</div>}
                     </div>
                     ) : (
                     <>

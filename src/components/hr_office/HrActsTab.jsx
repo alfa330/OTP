@@ -5,7 +5,7 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosPager, IosSegmented, iosCard } from '../ui/ios';
 import { blobErrorText, dateText, moneyText } from './hrOffice';
-import { Empty, Loading, PAGE_SIZE, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, pagerProps, useNarrowScreen, useServerPage, useSheetState } from './hrUi';
+import { Empty, Loading, PAGE_SIZE, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY, pagerProps, useNarrowScreen, useReloadOnRules, useServerPage, useSheetState } from './hrUi';
 import HrJournalSheet from './HrJournalSheet';
 
 /*
@@ -76,7 +76,7 @@ function PersonRow({ person, checked, onToggle, override, onOverride }) {
     );
 }
 
-export default function HrActsTab({ api, boot, toast }) {
+export default function HrActsTab({ api, boot, toast, rulesVersion }) {
     const [periodKind, setPeriodKind] = useState('current');
     const [custom, setCustom] = useState({ from: boot.act_periods?.current?.from || '', to: boot.act_periods?.current?.to || '' });
     const [query, setQuery] = useState('');
@@ -95,6 +95,7 @@ export default function HrActsTab({ api, boot, toast }) {
     const total = list.data?.total || 0;
     const error = list.data ? '' : list.error;
     const load = list.reload;
+    useReloadOnRules(rulesVersion, load);
     const amounts = useRef(new Map());
     useEffect(() => {
         (list.data?.selection || []).forEach((item) => amounts.current.set(item.user_id, item.amount));

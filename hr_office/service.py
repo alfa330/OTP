@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import documents, importer, journal, queries, reconcile, rules
+from . import defaults, documents, importer, journal, queries, reconcile, rules, schema
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,8 @@ def capabilities(ctx):
     hr = bool(ctx.get('is_hr') or ctx.get('is_super'))
     acts = bool(hr or ctx.get('headed_department_ids') or ctx.get('is_supervisor'))
     statuses = bool(hr or ctx.get('is_global_admin') or ctx.get('headed_department_ids') or ctx.get('is_supervisor'))
-    return {'hiring': hr, 'timesheet': hr, 'acts': acts, 'acts_all': hr, 'companies': hr, 'statuses': statuses}
+    return {'hiring': hr, 'timesheet': hr, 'acts': acts, 'acts_all': hr, 'companies': hr, 'statuses': statuses,
+            'settings': hr}
 
 
 def require(ctx, capability):
@@ -178,22 +179,65 @@ def completeness(person, company):
     return missing
 
 
-def _default_for(person, index):
-    """Умолчание ТЗ п. 3 для того, у кого ещё нет ни договора, ни компании: (вид, компания из
-    справочника или None, название, для кого) — либо None."""
-    default = rules.default_hiring(person.get('department_code'))
-    if not default or person.get('contract_id') or person.get('company_name'):
+class RuleBook:
+    """Правила «Настроек» и всё, что нужно для их подписей, — читается один раз на запрос. companies — справочник,
+    если он уже прочитан: недействующие компании правила не подставляют (defaults.resolve)."""
+
+    def __init__(self, cursor, companies=None):
+        self.rules = queries.list_default_rules(cursor)
+        self.department_names = {row['id']: row['name'] for row in queries.department_rows(cursor)}
+        if companies is None:
+            companies = queries.list_companies(cursor)
+        self.inactive_companies = frozenset(company['id'] for company in companies if company.get('is_active') is False)
+
+    @classmethod
+    def of(cls, rules_list, department_names, inactive_companies=()):
+        """Готовые правила и имена отделов — без базы (тесты, табель)."""
+        book = cls.__new__(cls)
+        book.rules = list(rules_list)
+        book.department_names = dict(department_names)
+        book.inactive_companies = frozenset(inactive_companies)
+        return book
+
+    def resolve(self, person):
+        return defaults.resolve(self.rules, person.get('department_id'), person.get('role'), self.inactive_companies)
+
+    def job_title(self, person):
+        return self.resolve(person)['job_title'] or ''
+
+
+def _hiring_open(person):
+    """Вид и компанию правило подставляет, пока у человека нет ни договора, ни компании."""
+    return not (person.get('contract_id') or person.get('company_name'))
+
+
+def _title_open(person):
+    """Должность правило подставляет, пока своей нет ни в договоре, ни в карточке."""
+    return not (person.get('contract_job_title') or person.get('job_title'))
+
+
+def _default_for(person, companies_by_id, book):
+    """Умолчание ТЗ п. 3 (правила «Настроек») для того, у кого ещё нет ни договора, ни компании:
+    (вид или None, компания из справочника или None, её название, для кого) — либо None. Вид — только если своего
+    у человека нет (его выбрали при создании учётки): карточка подставляет поля по отдельности, строка — так же."""
+    if not _hiring_open(person):
         return None
-    kind, key = default
-    company = index.get(key)
-    name = rules.company_display_name(company) if company else key
-    return kind, company, name, rules.DEFAULT_HIRING_FOR.get(str(person.get('department_code') or '').lower(), '')
+    resolved = book.resolve(person)
+    company = companies_by_id.get(resolved['company_id']) if resolved['company_id'] else None
+    if company and company.get('is_active') is False:
+        company = None
+    kind = None if rules.clean_employment_type(person.get('employment_type')) else resolved['employment_type']
+    if not kind and not company:
+        return None
+    name = rules.company_display_name(company) if company else ''
+    return (kind, company, name,
+            defaults.label(resolved['hiring_rule'], book.department_names) if resolved['hiring_rule'] else '')
 
 
-def person_summary(person, companies_by_id, index):
+def person_summary(person, companies_by_id, index, book):
     company, linked = _company_for(person, companies_by_id, index)
     kind = rules.clean_employment_type(person.get('contract_employment_type') or person.get('employment_type'))
-    default = _default_for(person, index)
+    default = _default_for(person, companies_by_id, book)
     return {
         'user_id': person['user_id'],
         'name': person['name'],
@@ -205,6 +249,8 @@ def person_summary(person, companies_by_id, index):
         'hire_date': _iso(person.get('hire_date')),
         'status': person.get('status'),
         'job_title': person.get('contract_job_title') or person.get('job_title') or '',
+        # Должность по правилам «Настроек» — для АВР, когда своей нет (так же, как в выгрузке АВР).
+        'job_title_default': book.job_title(person),
         'employment_type': kind,
         'company_id': company['id'] if company else None,
         'company': rules.company_display_name(company) if company else (person.get('company_name') or ''),
@@ -223,6 +269,7 @@ def list_people(cursor, ctx, *, query='', project='', department_id=None, scope=
     companies = queries.list_companies(cursor)
     by_id = {company['id']: company for company in companies}
     index = queries.company_index(companies)
+    book = RuleBook(cursor, companies)
     needle = importer.name_tokens(query)
     out = []
     for person in people:
@@ -236,7 +283,7 @@ def list_people(cursor, ctx, *, query='', project='', department_id=None, scope=
             tokens = set(importer.name_tokens(person['name']))
             if not all(any(token.startswith(part) for token in tokens) for part in needle):
                 continue
-        out.append(person_summary(person, by_id, index))
+        out.append(person_summary(person, by_id, index, book))
     return out
 
 
@@ -337,7 +384,8 @@ def acts_page(cursor, ctx, *, project='', department_id=None, query='', offset=0
     for person in page:
         act = last.get(person['user_id'])
         person['last_act'] = {key: _iso(value) for key, value in act.items()} if act else None
-        person['work_name'] = rules.act_work_name(person['job_title']) if person['job_title'] else ''
+        title = person['job_title'] or person.get('job_title_default') or ''
+        person['work_name'] = rules.act_work_name(title) if title else ''
     return {
         'people': page, 'total': len(rows), 'offset': offset, 'limit': limit,
         'departments': [{'value': key, 'label': name}
@@ -399,13 +447,14 @@ def person_card(cursor, ctx, user_id, today):
     by_id = {company['id']: company for company in companies}
     index = queries.company_index(companies)
     company, linked = _company_for(person, by_id, index)
-    summary = person_summary(person, by_id, index)
-    default = _default_for(person, index)
+    book = RuleBook(cursor, companies)
+    summary = person_summary(person, by_id, index, book)
+    default = _default_for(person, by_id, book)
     suggestion = {'employment_type': None, 'company_id': None}
-    # Умолчание ТЗ п. 3 — только когда у человека ещё нет ни договора, ни компании.
+    # Умолчание ТЗ п. 3 (правила «Настроек») — только когда у человека ещё нет ни договора, ни компании.
     if default:
         suggestion['employment_type'] = default[0]
-        suggestion['company_id'] = default[1]['id'] if default[1] and default[1].get('is_active') is not False else None
+        suggestion['company_id'] = default[1]['id'] if default[1] else None
         suggestion['company_name'] = default[2]
         suggestion['for'] = default[3]
     intake = queries.last_intake(cursor, person['user_id'])
@@ -446,8 +495,7 @@ def person_card(cursor, ctx, user_id, today):
             'signed_on': _iso(person.get('contract_signed_on')),
             'liability_number': person.get('contract_liability_number') or '',
             'amount': float(person['contract_amount']) if person.get('contract_amount') is not None else None,
-            'job_title': person.get('contract_job_title') or person.get('job_title')
-                         or rules.default_job_title(person.get('department_code')),
+            'job_title': person.get('contract_job_title') or person.get('job_title') or book.job_title(person),
             'next_number': rules.contract_number(next_number, year) if next_number else None,
         },
         'suggestion': suggestion,
@@ -734,7 +782,8 @@ def acts_people(cursor, ctx, *, project='', department_id=None, query=''):
     for person in people:
         act = last.get(person['user_id'])
         person['last_act'] = {key: _iso(value) for key, value in act.items()} if act else None
-        person['work_name'] = rules.act_work_name(person['job_title']) if person['job_title'] else ''
+        title = person['job_title'] or person.get('job_title_default') or ''
+        person['work_name'] = rules.act_work_name(title) if title else ''
     return people
 
 
@@ -766,6 +815,7 @@ def build_acts(cursor, ctx, payload, today):
     companies = queries.list_companies(cursor)
     by_id = {company['id']: company for company in companies}
     index = queries.company_index(companies)
+    book = RuleBook(cursor, companies)
     acts = []
     for item in items:
         person = people.get(int(item['user_id']))
@@ -773,8 +823,7 @@ def build_acts(cursor, ctx, payload, today):
             raise HrError('Среди выбранных есть сотрудник не из вашего отдела', status=403, code='HR_ACT_SCOPE')
         company, _linked = _company_for(person, by_id, index)
         contract = {'number': person.get('contract_number'), 'signed_on': person.get('contract_signed_on'),
-                    'job_title': person.get('contract_job_title') or person.get('job_title')
-                    or rules.default_job_title(person.get('department_code'))}
+                    'job_title': person.get('contract_job_title') or person.get('job_title') or book.job_title(person)}
         work_name = ' '.join(str(item.get('work_name') or '').split()) or rules.act_work_name(contract['job_title'])
         if len(work_name) > 300:
             raise HrError('Наименование работ — не длиннее 300 знаков', code='HR_ACT_NAME')
@@ -1223,3 +1272,146 @@ def import_apply(cursor, ctx, payload):
                                'skipped': skipped, 'missing': missing, 'unresolved': unresolved,
                                'duplicates': duplicates, 'conflicts': conflicts})
     return updates, dict(counts, conflicts=conflicts, duplicates=duplicates, names=names)
+
+
+# ── «Настройки»: правила оформления по умолчанию (defaults.py) ─────────────────
+
+def _rule_payload(rule, book, companies_by_id, waiting):
+    company = companies_by_id.get(rule.get('company_id')) if rule.get('company_id') else None
+    kind = rule.get('employment_type')
+    return {
+        'id': rule['id'],
+        'department_ids': rule['department_ids'],
+        'departments': [defaults.short_department(book.department_names.get(value, '')) or f'Отдел №{value}'
+                        for value in rule['department_ids']],
+        'role_scope': rule['role_scope'],
+        'role_title': defaults.ROLE_SCOPE_TITLES[rule['role_scope']],
+        'employment_type': kind,
+        'employment_label': rules.EMPLOYMENT_SHORT.get(kind, '') if kind else '',
+        'company_id': rule.get('company_id'),
+        'company': rules.company_display_name(company) if company else '',
+        'company_inactive': bool(company and company.get('is_active') is False),
+        'job_title': rule.get('job_title') or '',
+        'for': defaults.label(rule, book.department_names),
+        'waiting': waiting.get(rule['id'], 0),
+        'updated_at': _iso(rule.get('updated_at')),
+    }
+
+
+def settings_payload(cursor, ctx):
+    """Вкладка «Настройки»: правила (с числом ждущих оформления, кому правило подставляется сейчас)
+    и справочники для формы — активные отделы и компании."""
+    require(ctx, 'settings')
+    companies = queries.list_companies(cursor)
+    book = RuleBook(cursor, companies)
+    by_id = {company['id']: company for company in companies}
+    # Кому правило подставляет что-то сейчас — по каждому полю, как в «Приеме», договоре, табеле и АВР:
+    # вид — без договора, компании и своего вида; компания — без договора и компании; должность — без своей.
+    waiting = Counter()
+    for person in queries.list_people(cursor):
+        resolved = book.resolve(person)
+        hiring = _hiring_open(person)
+        applied = {
+            'employment_type': hiring and not rules.clean_employment_type(person.get('employment_type')),
+            'company_id': hiring,
+            'job_title': _title_open(person),
+        }
+        for rule_id in {rule_id for field, rule_id in resolved['sources'].items() if applied[field]}:
+            waiting[rule_id] += 1
+    # Сначала правила с видом оформления или компанией («этим — этот ИП»), за ними — только с должностью;
+    # внутри — по отделам, в отделе «Всем», потом «Операторам» и «Супервайзерам».
+    scope_order = {key: index for index, key in enumerate(defaults.ROLE_SCOPES)}
+    rows = sorted(book.rules, key=lambda rule: (
+        not (rule.get('employment_type') or rule.get('company_id')),
+        [book.department_names.get(value, '').casefold() for value in rule['department_ids']],
+        scope_order.get(rule['role_scope'], 9), rule['id']))
+    return {
+        'rules': [_rule_payload(rule, book, by_id, waiting) for rule in rows],
+        'departments': [{'id': row['id'], 'name': defaults.short_department(row['name']), 'full_name': row['name']}
+                        for row in queries.department_rows(cursor, active_only=True)],
+        'companies': [{'id': company['id'], 'name': rules.company_display_name(company)}
+                      for company in companies if company.get('is_active') is not False],
+        'role_scopes': [{'value': key, 'label': title} for key, title in defaults.ROLE_SCOPE_TITLES.items()],
+        'employment_types': [{'value': key, 'label': rules.EMPLOYMENT_SHORT[key]} for key in rules.EMPLOYMENT_TYPES],
+    }
+
+
+def _rule_or_404(rules_list, rule_id):
+    for rule in rules_list:
+        if rule['id'] == int(rule_id):
+            return rule
+    raise HrError('Правило не найдено — обновите страницу', status=404, code='HR_RULE_NOT_FOUND')
+
+
+def save_default_rule(cursor, ctx, rule_id, payload):
+    require(ctx, 'settings')
+    companies = queries.list_companies(cursor)
+    book = RuleBook(cursor, companies)
+    current = _rule_or_404(book.rules, rule_id) if rule_id else None
+    departments = queries.department_rows(cursor)
+    # Активные отделы — для выбора; отдел, который уже стоит в правиле, но стал неактивным, не выкидываем.
+    allowed_departments = {row['id'] for row in departments if row['active']} | set((current or {}).get('department_ids') or [])
+    by_id = {company['id']: company for company in companies}
+    allowed_companies = {company['id'] for company in companies if company.get('is_active') is not False}
+    if current and current.get('company_id'):
+        allowed_companies.add(current['company_id'])
+    fields, errors = defaults.clean(payload, department_ids=allowed_departments, company_ids=allowed_companies)
+    if not errors:
+        others = [rule for rule in book.rules if not current or rule['id'] != current['id']]
+        clash = defaults.conflicts(fields, others, book.department_names)
+        if clash:
+            errors['department_ids'] = clash
+    if errors:
+        raise HrError(next(iter(errors.values())), code='HR_RULE_INVALID', fields=errors)
+    # Сохранили, ничего не поменяв, — ни записи в базе (updated_at), ни строки в журнале.
+    if current and defaults.normalized(current) == defaults.normalized(fields):
+        return current['id']
+    saved_id = queries.save_default_rule(cursor, current['id'] if current else None, fields, ctx['user_id'])
+    after = defaults.describe(dict(fields, id=saved_id), book.department_names, by_id)
+    before = defaults.describe(current, book.department_names, by_id) if current else None
+    # «Было / стало» словами: в describe уже есть стрелка «кому → что», вторая стрелка путала бы.
+    queries.audit(cursor, section=schema.SETTINGS_AUDIT_SECTION[0], action='rule', actor_id=ctx['user_id'],
+                  summary=(f'Правило оформления изменено. Было: {before}. Стало: {after}' if current
+                           else f'Правило оформления добавлено: {after}'),
+                  details={'rule_id': saved_id, 'before': before, 'after': after})
+    return saved_id
+
+
+def delete_default_rule(cursor, ctx, rule_id):
+    require(ctx, 'settings')
+    companies = queries.list_companies(cursor)
+    book = RuleBook(cursor, companies)
+    current = _rule_or_404(book.rules, rule_id)
+    by_id = {company['id']: company for company in companies}
+    queries.delete_default_rule(cursor, current['id'])
+    text = defaults.describe(current, book.department_names, by_id)
+    queries.audit(cursor, section=schema.SETTINGS_AUDIT_SECTION[0], action='rule', actor_id=ctx['user_id'],
+                  summary=f'Правило оформления удалено: {text}', details={'rule_id': current['id'], 'before': text})
+
+
+def default_for_new(cursor, ctx, department_id, role):
+    """Окно создания учётки: что «Прием» подставит новому сотруднику этого отдела и роли — подсказкой."""
+    if not any(capabilities(ctx).values()):
+        raise HrError('Раздел вам не открыт', status=403, code='HR_FORBIDDEN')
+    try:
+        department_id = int(department_id)
+    except (TypeError, ValueError):
+        return None
+    book = RuleBook(cursor)
+    resolved = defaults.resolve(book.rules, department_id, role, book.inactive_companies)
+    company = None
+    if resolved['company_id']:
+        company = queries.get_company(cursor, resolved['company_id'])
+        if company and company.get('is_active') is False:
+            company = None
+    kind = resolved['employment_type']
+    if not (kind or company or resolved['job_title']):
+        return None
+    rule = resolved['hiring_rule']
+    return {
+        'employment_type': kind,
+        'employment_label': rules.EMPLOYMENT_SHORT.get(kind, '') if kind else '',
+        'company': rules.company_display_name(company) if company else '',
+        'job_title': resolved['job_title'] or '',
+        'for': defaults.label(rule, book.department_names) if rule else '',
+    }

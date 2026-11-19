@@ -283,12 +283,17 @@ class WiringTests(unittest.TestCase):
                       ' || userLike?.hr_acts_access === true;', source)
 
     def test_tabs_are_named_as_in_tz(self):
-        """Вкладки — дословно разделы ТЗ: «Прием» (п. 1), «Табель учета рабочего времени» (п. 6), «АВР» (п. 11)."""
+        """Вкладки — дословно разделы ТЗ: «Прием» (п. 1), «Табель учета рабочего времени» (п. 6), «АВР» (п. 11).
+        «Настройки» (правила оформления по умолчанию) — не вкладка за ними, а кнопка в углу шапки и своё окно
+        (владелец 19.11.2026: «настройки не должны идти за ними … отдельной кнопкой в углу»)."""
         source = (ROOT / 'src' / 'components' / 'hr_office' / 'HrOfficeView.jsx').read_text(encoding='utf-8')
         titles = [line.split("'")[1] for line in source.splitlines() if line.strip().startswith("title: '")]
         self.assertEqual(titles, ['Прием', 'Табель учета рабочего времени', 'АВР'])
         self.assertIn('>Кадры</h1>', source)
         self.assertIn('available.length > 1 && (', source)            # одна вкладка — без переключателя
+        self.assertIn('aria-label="Настройки"', source)               # кнопка в углу, только у кого есть «settings»
+        self.assertIn("import('./HrSettingsView')", source)            # в рамках раздела, вкладки на месте (19.11.2026)
+        self.assertIn("const SETTINGS_ID = 'settings';", source)        # ?hr_tab=settings — обновление их не теряет
 
     def test_history_labels_for_masked_fields(self):
         source = (ROOT / 'src' / 'components' / 'modals' / 'historyFieldLabels.js').read_text(encoding='utf-8')

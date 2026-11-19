@@ -21,7 +21,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 
-from . import queries, rules
+from . import defaults, queries, rules
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +346,7 @@ def collect(db, *, month, project, until=None, user_ids=None, today=None, with_f
         people = roster(everyone, project, start, end, user_ids)
         ids = [person['user_id'] for person in people]
         companies = queries.list_companies(cursor)
+        default_rules = queries.list_default_rules(cursor)
         periods = queries.status_periods(cursor, ids, start, end)
         shift_rows = queries.shifts(cursor, ids, start, end)
         day_offs = queries.days_off(cursor, ids, start, end)
@@ -384,7 +385,7 @@ def collect(db, *, month, project, until=None, user_ids=None, today=None, with_f
         user_id = person['user_id']
         person['has_card'] = user_id in with_card
         person['job_title_value'] = (person.get('contract_job_title') or person.get('job_title')
-                                     or rules.default_job_title(person.get('department_code')))
+                                     or defaults.job_title_for(default_rules, person))
         person['contract_label'] = _contract_label(person, companies_by_id, company_index)
         person['group_value'] = person.get('timesheet_group') or person.get('department_name') or 'Без отдела'
         facts = {}

@@ -107,6 +107,17 @@ export function useServerPage(api, path, params, {
  */
 const LEAVE_MS = Math.max(WINDOW_LEAVE_MS, SCREEN_LEAVE_MS) + 60;
 
+/* Правила «Настроек» поменялись (HrOfficeView: rulesVersion) — вкладка перечитывает строки: умолчания «Приема»,
+   должность по правилу в табеле и АВР. Первая отрисовка не в счёт — данные и так только что загружены. */
+export function useReloadOnRules(rulesVersion, reload) {
+    const seen = useRef(rulesVersion);
+    useEffect(() => {
+        if (seen.current === rulesVersion) return;
+        seen.current = rulesVersion;
+        reload?.();
+    }, [rulesVersion, reload]);
+}
+
 export function useSheetState(initial = null) {
     const [value, setValue] = useState(initial);
     const [kept, setKept] = useState(initial);

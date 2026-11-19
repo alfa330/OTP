@@ -206,33 +206,8 @@ def project_of(person):
     return clean_project(person.get('project')) or default_project(person.get('department_code'))
 
 
-# ── Оформление по умолчанию (ТЗ п. 3) ───────────────────────────────────────
-# Только для нового оформления: у кого компания уже записана, не переписываем.
-DEFAULT_HIRING = {
-    'szov': ('gph', 'eazy go rent'),
-    'op': ('gph', 'eazy go rent'),
-    'tez': ('gph', 'gaba'),
-}
-# Должность по умолчанию у линейных отделов: в карточке их поле «Должность» скрыто.
-DEFAULT_JOB_TITLES = {
-    'szov': 'Оператор службы заботы о водителях',
-    'op': 'Менеджер по привлечению водителей',
-    'tez': 'Оператор колл-центра',
-    'remote_cc': 'Оператор колл-центра',
-    'front_office': 'Менеджер фронт офиса',
-}
-
-
-# Чьё это умолчание — подписью для карточки и списка «Приема».
-DEFAULT_HIRING_FOR = {'szov': 'ОП и СЗоВ', 'op': 'ОП и СЗоВ', 'tez': 'операторов TEZ'}
-
-
-def default_hiring(department_code):
-    return DEFAULT_HIRING.get(str(department_code or '').strip().lower())
-
-
-def default_job_title(department_code):
-    return DEFAULT_JOB_TITLES.get(str(department_code or '').strip().lower(), '')
+# Оформление по умолчанию (ТЗ п. 3) и должности по умолчанию — правила вкладки «Настройки»
+# (hr_office/defaults.py, таблица hr_default_rules); прежние умолчания кода перенесены туда при создании.
 
 
 _COMPANY_FORMS = re.compile(r'^(ип|тоо|too|ао|ооо|ип\.|тоо\.)\s+', re.IGNORECASE)

@@ -27,7 +27,12 @@
     POST   /acts/export                   собрать АВР {period_from, period_to, act_date, items}
     POST   /import/preview                таблица HR → сверка с iCORE: что поменяется (multipart file, project)
     POST   /import/apply                  записать подтверждённое (строки с confirm: {поле: «было»})
-    GET    /journal                       журнал раздела (?section=intake|timesheet|acts&q&offset)
+    GET    /settings/rules                «Настройки»: правила оформления по умолчанию и справочники формы
+    POST   /settings/rules                добавить правило {department_ids, role_scope, employment_type, company_id, job_title}
+    PUT    /settings/rules/<id>           изменить
+    DELETE /settings/rules/<id>           удалить
+    GET    /defaults                      умолчание для окна создания учётки (?department_id&role)
+    GET    /journal                       журнал раздела (?section=intake|timesheet|acts|settings&q&offset)
 """
 
 import json
@@ -52,7 +57,7 @@ COMPANY_LABELS = {
     'bank_name': 'банк', 'iik': 'счёт', 'bik': 'БИК', 'kbe': 'КБе', 'in_person': '«в лице»',
     'signer_name': 'подписант', 'signer_position': 'должность подписанта', 'city': 'город', 'is_active': 'действует',
 }
-JOURNAL_SECTIONS = {'intake': 'hiring', 'timesheet': 'timesheet', 'acts': 'acts'}
+JOURNAL_SECTIONS = {'intake': 'hiring', 'timesheet': 'timesheet', 'acts': 'acts', 'settings': 'settings'}
 DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 ZIP_MIME = 'application/zip'
 
@@ -535,6 +540,32 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
 
     # ── Журнал ──────────────────────────────────────────────────────────────
 
+    # ── «Настройки»: правила оформления по умолчанию ───────────────────────
+
+    @route('/settings/rules', methods=('GET', 'POST'))
+    def hr_settings_rules(*, ctx, today):
+        with db._get_cursor() as cursor:
+            saved_id = service.save_default_rule(cursor, ctx, None, _body()) if request.method == 'POST' else None
+            # saved_id — какое правило только что сохранено: «Настройки» оставляют его выбранным в списке.
+            return jsonify(dict(service.settings_payload(cursor, ctx), saved_id=saved_id)), 200
+
+    @route('/settings/rules/<int:rule_id>', methods=('PUT', 'DELETE'))
+    def hr_settings_rule(rule_id, *, ctx, today):
+        with db._get_cursor() as cursor:
+            saved_id = None
+            if request.method == 'DELETE':
+                service.delete_default_rule(cursor, ctx, rule_id)
+            else:
+                saved_id = service.save_default_rule(cursor, ctx, rule_id, _body())
+            return jsonify(dict(service.settings_payload(cursor, ctx), saved_id=saved_id)), 200
+
+    @route('/defaults')
+    def hr_defaults(*, ctx, today):
+        with db._get_cursor() as cursor:
+            payload = service.default_for_new(cursor, ctx, request.args.get('department_id'),
+                                              request.args.get('role'))
+        return jsonify({'default': payload}), 200
+
     @route('/journal')
     def hr_journal(*, ctx, today):
         section = request.args.get('section') or 'intake'
@@ -547,8 +578,11 @@ def build_hr_office_blueprint(*, db, require_api_key, build_cors_preflight_respo
             offset = max(0, int(request.args.get('offset') or 0))
         except ValueError:
             offset = 0
+        # Журнал «Настроек»: пока CHECK журнала не расширен (выкладка встык), правила пишутся в «Прием» (action
+        # 'rule', schema.ensure_audit_sections) — читаем оттуда же, чтобы журнал не был пуст.
+        stored, action = (schema.SETTINGS_AUDIT_SECTION[0], 'rule') if section == 'settings' else (section, None)
         with db._get_cursor() as cursor:
-            items, total = queries.list_audit(cursor, section=section, query=request.args.get('q', ''),
+            items, total = queries.list_audit(cursor, section=stored, query=request.args.get('q', ''), action=action,
                                               actor_id=ctx['user_id'] if actor_only else None, limit=50, offset=offset)
         for item in items:
             item['created_at'] = _iso(item['created_at'])

@@ -398,10 +398,13 @@ def last_import(cursor, digest):
 AUDIT_FIELDS = ('id', 'action', 'user_id', 'user_name', 'summary', 'details', 'actor_id', 'actor_name', 'created_at')
 
 
-def list_audit(cursor, *, section, actor_id=None, query='', limit=50, offset=0):
+def list_audit(cursor, *, section, actor_id=None, query='', limit=50, offset=0, action=None):
     """(записи, всего) журнала раздела, свежие первыми. actor_id — только записи этого человека
-    (глава или СВ в «АВР» видит свои выгрузки)."""
+    (глава или СВ в «АВР» видит свои выгрузки); action — только записи этого действия."""
     where, params = ['l.section = %s'], [section]
+    if action:
+        where.append('l.action = %s')
+        params.append(action)
     if actor_id:
         where.append('l.actor_id = %s')
         params.append(int(actor_id))
@@ -445,3 +448,49 @@ def save_template(cursor, kind, file_name, content, actor_id):
 def delete_template(cursor, kind):
     cursor.execute("DELETE FROM hr_templates WHERE kind = %s", (kind,))
     return cursor.rowcount
+
+
+# ── «Настройки»: правила оформления по умолчанию (defaults.py) ─────────────
+
+_RULE_FIELDS = ('id', 'department_ids', 'role_scope', 'employment_type', 'company_id', 'job_title',
+                'created_at', 'created_by', 'updated_at', 'updated_by')
+
+
+def list_default_rules(cursor):
+    cursor.execute('SELECT ' + ', '.join(_RULE_FIELDS) + ' FROM hr_default_rules ORDER BY id')
+    out = []
+    for row in cursor.fetchall():
+        rule = dict(zip(_RULE_FIELDS, row))
+        rule['department_ids'] = [int(value) for value in rule['department_ids'] or []]
+        out.append(rule)
+    return out
+
+
+def save_default_rule(cursor, rule_id, fields, actor_id):
+    values = (fields['department_ids'], fields['role_scope'], fields['employment_type'], fields['company_id'],
+              fields['job_title'], actor_id)
+    if rule_id:
+        cursor.execute(
+            "UPDATE hr_default_rules SET department_ids = %s, role_scope = %s, employment_type = %s, company_id = %s, "
+            "job_title = %s, updated_by = %s, updated_at = (now() AT TIME ZONE 'Asia/Almaty') WHERE id = %s RETURNING id",
+            values + (int(rule_id),))
+    else:
+        cursor.execute(
+            "INSERT INTO hr_default_rules (department_ids, role_scope, employment_type, company_id, job_title, "
+            "created_by, updated_by) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            values + (actor_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def delete_default_rule(cursor, rule_id):
+    cursor.execute('DELETE FROM hr_default_rules WHERE id = %s RETURNING id', (int(rule_id),))
+    return cursor.fetchone() is not None
+
+
+def department_rows(cursor, active_only=False):
+    """Отделы для правил: id, название, код (все — для подписей старых правил, активные — для выбора)."""
+    cursor.execute("SELECT id, name, lower(code), COALESCE(is_active, TRUE) FROM departments ORDER BY name")
+    rows = [{'id': row[0], 'name': row[1] or '', 'code': row[2] or '', 'active': bool(row[3])}
+            for row in cursor.fetchall()]
+    return [row for row in rows if row['active']] if active_only else rows

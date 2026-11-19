@@ -8,7 +8,7 @@
 
 import logging
 
-from . import rules
+from . import defaults, queries, rules
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +156,7 @@ STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS hr_audit_log (
         id          SERIAL PRIMARY KEY,
-        section     VARCHAR(16) NOT NULL CHECK (section IN ('intake', 'timesheet', 'acts')),
+        section     VARCHAR(16) NOT NULL CHECK (section IN ('intake', 'timesheet', 'acts', 'settings')),
         action      VARCHAR(32) NOT NULL,
         user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
         summary     TEXT NOT NULL,
@@ -178,6 +178,30 @@ STATEMENTS = (
     """,
 )
 
+# «Настройки» → правила оформления по умолчанию (hr_office/defaults.py). Создаётся отдельно от STATEMENTS:
+# первое создание таблицы переносит в неё умолчания, которые до этого были зашиты в код.
+# Кто создал и правил — без внешнего ключа на users: CREATE с REFERENCES users при первой выкладке взял бы блокировку
+# users (SHARE ROW EXCLUSIVE) и встал бы в очередь за чужой пишущей транзакцией, а за ним — входы и правки учёток.
+# Ссылка на hr_companies осталась: справочник маленький, пишут в него редко.
+DEFAULT_RULES_TABLE = """
+    CREATE TABLE IF NOT EXISTS hr_default_rules (
+        id              SERIAL PRIMARY KEY,
+        department_ids  INTEGER[] NOT NULL,
+        role_scope      VARCHAR(8) NOT NULL DEFAULT 'all' CHECK (role_scope IN ('all', 'line', 'sv')),
+        employment_type VARCHAR(8) CHECK (employment_type IS NULL OR employment_type IN ('gph', 'of', 'smz')),
+        company_id      INTEGER REFERENCES hr_companies(id) ON DELETE SET NULL,
+        job_title       VARCHAR(200),
+        created_at      TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Almaty'),
+        created_by      INTEGER,
+        updated_at      TIMESTAMP NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Almaty'),
+        updated_by      INTEGER
+    )
+"""
+AUDIT_SECTIONS = ('intake', 'timesheet', 'acts', 'settings')
+# Журнал «Настроек» пишется в свою секцию, если CHECK базы её уже знает (ensure_audit_sections);
+# иначе — в журнал «Приема»: правила — это его умолчания, а сохранение не должно падать из-за журнала.
+SETTINGS_AUDIT_SECTION = ['settings']
+
 
 def seed_default_companies(cursor):
     """Компании умолчаний ТЗ п. 3 — если их ещё нет (сверка по ключу названия: «ИП Eazy Go Rent»,
@@ -193,11 +217,55 @@ def seed_default_companies(cursor):
     return added
 
 
+def seed_default_rules(cursor):
+    """Правила из прежних умолчаний кода (defaults.SEED) — только при создании таблицы. Возвращает число правил."""
+    cursor.execute("SELECT id, lower(code) FROM departments WHERE code IS NOT NULL")
+    by_code = {code: department_id for department_id, code in cursor.fetchall()}
+    index = queries.company_index(queries.list_companies(cursor))
+    rows = defaults.seed_rows(by_code, index)
+    for row in rows:
+        cursor.execute(
+            "INSERT INTO hr_default_rules (department_ids, role_scope, employment_type, company_id, job_title) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (row['department_ids'], row['role_scope'], row['employment_type'], row['company_id'], row['job_title']))
+    return len(rows)
+
+
+def ensure_audit_sections(cursor):
+    """Секция журнала «settings» в CHECK уже созданной таблицы. Короткое ожидание блокировки: таблица мала,
+    но выкладка встык с чужой может держать её (55P03). Не вышло — журнал «Настроек» пишется в «Прием»
+    (action='rule'); при следующем удачном запуске эти записи переезжают в «settings»."""
+    cursor.execute("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'hr_audit_log_section_check'")
+    row = cursor.fetchone()
+    if row and "'settings'" in str(row[0]):
+        return True
+    cursor.execute("SET LOCAL lock_timeout = '5s'")
+    cursor.execute("ALTER TABLE hr_audit_log DROP CONSTRAINT IF EXISTS hr_audit_log_section_check")
+    cursor.execute("ALTER TABLE hr_audit_log ADD CONSTRAINT hr_audit_log_section_check CHECK (section IN ("
+                   + ', '.join(f"'{section}'" for section in AUDIT_SECTIONS) + "))")
+    cursor.execute("UPDATE hr_audit_log SET section = 'settings' WHERE section = 'intake' AND action = 'rule'")
+    return True
+
+
 def ensure(db):
     with db._get_cursor() as cursor:
         for statement in STATEMENTS:
             cursor.execute(statement)
         added = seed_default_companies(cursor)
+        cursor.execute("SELECT to_regclass('public.hr_default_rules') IS NOT NULL")
+        row = cursor.fetchone()
+        had_rules = bool(row and row[0])
+        cursor.execute(DEFAULT_RULES_TABLE)
+        seeded = 0 if had_rules else seed_default_rules(cursor)
     if added:
         logger.info('Прием: в справочник компаний добавлены умолчания ТЗ п. 3: %s', ', '.join(added))
+    if seeded:
+        logger.info('Настройки: прежние умолчания оформления перенесены в правила (%s)', seeded)
+    try:
+        with db._get_cursor() as cursor:
+            ensure_audit_sections(cursor)
+        SETTINGS_AUDIT_SECTION[0] = 'settings'
+    except Exception:  # noqa: BLE001 — раздел должен подняться и без отдельного журнала «Настроек»
+        SETTINGS_AUDIT_SECTION[0] = 'intake'
+        logger.exception('Настройки: секцию журнала не добавить — правила пишутся в журнал «Приема»')
     logger.info('Прием, табель, АВР: таблицы на месте')

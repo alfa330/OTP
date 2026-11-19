@@ -51,20 +51,6 @@ export function employmentStatusOptions(employmentType, current, { withFired = f
     return options.concat(codes.map((code) => ({ value: code, label: employmentStatusLabel(code, kind) })));
 }
 
-/* Оформление по умолчанию (ТЗ HR «iCore 4», п. 3): «для ОП и СЗоВ — договор ГПХ на ИП Eazy Go
-   Rent, для операторов TEZ — ИП GaBa». Вид и компанию выбирает кадровик в «Приеме», это —
-   подстановка и подсказка в окне создания учётки. Зеркало hr_office/rules.py (DEFAULT_HIRING,
-   DEFAULT_HIRING_FOR) — тест сверяет их. */
-export const DEFAULT_HIRING_BY_DEPARTMENT = {
-    szov: { type: 'ГПХ', company: 'ИП «Eazy Go Rent»', for: 'ОП и СЗоВ' },
-    op: { type: 'ГПХ', company: 'ИП «Eazy Go Rent»', for: 'ОП и СЗоВ' },
-    tez: { type: 'ГПХ', company: 'ИП «GaBa»', for: 'операторов TEZ' },
-};
-
-export function defaultHiringFor(departmentCode) {
-    return DEFAULT_HIRING_BY_DEPARTMENT[String(departmentCode || '').trim().toLowerCase()] || null;
-}
-
 /* Статусы карточки до ТЗ «iCore 4» — для всех вне пилота «Кадров» (профиль hr_office_features):
    пока идёт проверка, остальным окно учётки показывает прежние пункты и подписи. */
 export const LEGACY_STATUS_OPTIONS = [
