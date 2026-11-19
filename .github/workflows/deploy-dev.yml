@@ -1,0 +1,245 @@
+# Сборка образов iCore и выкладка их на dev-стенд в кластере yataxi.
+#
+# Повторяет cicd/app-image-deploy.gitlab-ci.yml из itaxi3/infra/k8s-yc —
+# репозиторий конфигурации владеет шагами развёртывания, репозиторий приложения
+# своими проверками. Здесь оба шага в одном файле, потому что include из чужого
+# GitLab в GitHub Actions не сделать.
+#
+# ПОЧЕМУ ДВА РАЗНЫХ РАННЕРА. Сборка идёт на раннерах GitHub: репозиторий
+# публичный, значит они бесплатны и безлимитны, и там 4 ядра против двух у
+# нашего. Выкладка — на self-hosted внутри VPC, потому что Argo CD отвечает на
+# приватном адресе за VPN и раннеры GitHub до него не достают. Это и есть
+# единственная причина, по которой та машина существует.
+#
+# ЗЕЛЁНАЯ ДЖОБА ОЗНАЧАЕТ «РАСКАТАНО», а не «тег записан»: после правки тега
+# джоба синхронизирует приложения и ждёт, пока они станут здоровыми.
+name: Выкладка в dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Две выкладки подряд не должны обгонять друг друга: вторая запишет свой тег
+# поверх первой и будет ждать здоровья приложения, которое катится к третьему.
+concurrency:
+  group: icore-deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Адрес стенда. Вшивается в бандл фронта при сборке — см. комментарий к
+  # VITE_API_BASE_URL ниже, это не просто ссылка в настройках.
+  STAND_URL: https://dev.icorehub.kz
+  CONFIG_REPO: itaxi3/infra/k8s-yc
+  # Ключ хоста gitlab.com, закреплённый. ssh-keyscan в джобе — это доверие при
+  # первом подключении на каждом запуске, то есть никакой защиты.
+  # Отпечаток SHA256:eUXGGm1YGsMAS7vkcx6JOJdOGHPem5gQp4taiCfCLB8.
+  GITLAB_HOST_KEY: "gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf"
+
+jobs:
+  build:
+    name: Собрать и опубликовать образы
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      web_tag: ${{ steps.meta.outputs.web_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Определить теги
+        id: meta
+        run: |
+          tag="${GITHUB_SHA::8}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # Суффикс окружения у фронта — не косметика. web.Dockerfile вшивает
+          # VITE_API_BASE_URL в бандл, поэтому один и тот же коммит даёт разный
+          # артефакт для разных контуров, и тег обязан говорить, какой именно.
+          # Без суффикса два разных образа делили бы имя, и откат пришлось бы
+          # угадывать.
+          echo "web_tag=$tag-dev" >> "$GITHUB_OUTPUT"
+
+      - name: Войти в Cloud Registry
+        env:
+          YC_CI_KEY: ${{ secrets.YC_CI_KEY }}
+          YC_REGISTRY: ${{ vars.YC_REGISTRY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$YC_CI_KEY" > /tmp/ci-key.json
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /opt/yc -n
+          export PATH="/opt/yc/bin:$PATH"
+          yc config profile create ci
+          # У казахстанской инсталляции свой эндпоинт; с умолчанием ключ
+          # сервисного аккаунта не аутентифицируется.
+          yc config set endpoint api.yandexcloud.kz
+          yc config set service-account-key /tmp/ci-key.json
+          # Cloud Registry принимает docker login только как `iam` с IAM-токеном.
+          # Имя пользователя json_key, которое работает у Container Registry,
+          # отвечает unauthorized — проверено против живого реестра.
+          yc iam create-token | docker login --username iam --password-stdin "${YC_REGISTRY%%/*}"
+          rm -f /tmp/ci-key.json
+
+      - name: Образ API
+        env:
+          YC_REGISTRY: ${{ vars.YC_REGISTRY }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker build . --platform linux/amd64 \
+            -f deploy/yandex/api.Dockerfile \
+            -t "$YC_REGISTRY/itaxi-icore:$TAG"
+
+      - name: Образ фронта
+        env:
+          YC_REGISTRY: ${{ vars.YC_REGISTRY }}
+          WEB_TAG: ${{ steps.meta.outputs.web_tag }}
+        run: |
+          set -euo pipefail
+          # Адрес API попадает внутрь бандла: src/App.jsx и ещё четыре входа
+          # читают import.meta.env.VITE_API_BASE_URL. Фронт и API живут на одном
+          # домене, поэтому это адрес самого стенда.
+          docker build . --platform linux/amd64 \
+            -f deploy/yandex/web.Dockerfile \
+            --build-arg VITE_API_BASE_URL="$STAND_URL" \
+            --build-arg VITE_BASE_PATH=/ \
+            -t "$YC_REGISTRY/itaxi-icore-web:$WEB_TAG"
+
+      - name: Опубликовать
+        env:
+          YC_REGISTRY: ${{ vars.YC_REGISTRY }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          WEB_TAG: ${{ steps.meta.outputs.web_tag }}
+        run: |
+          set -euo pipefail
+          # Повтор: реестр изредка отвечает "Blobs with digests ... not found"
+          # на манифест, когда слой ещё не дописан. Со второй попытки проходит.
+          for image in "itaxi-icore:$TAG" "itaxi-icore-web:$WEB_TAG"; do
+            for attempt in 1 2 3; do
+              docker push "$YC_REGISTRY/$image" && break
+              echo "попытка $attempt не прошла, повтор"
+              sleep 10
+            done
+          done
+
+  deploy:
+    name: Выложить на стенд
+    needs: build
+    # Внутри VPC: отсюда и только отсюда достаётся Argo CD. Метки совпадают с
+    # тегом раннера GitLab на той же машине, плюс `yc` — чтобы workflow мог
+    # попросить именно эту инсталляцию.
+    runs-on: [self-hosted, yataxi-deploy, yc]
+    # Защита в глубину. Триггеры выше и так не включают pull_request, так что
+    # форк сюда не попадёт; строка стоит, чтобы правка триггеров не открыла
+    # дверь молча.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Ключ для репозитория конфигурации
+        env:
+          K8S_YC_SSH_KEY: ${{ secrets.K8S_YC_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s' "$K8S_YC_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$GITLAB_HOST_KEY" > ~/.ssh/known_hosts
+
+      - name: Записать теги в k8s-yc
+        id: push_tags
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+          WEB_TAG: ${{ needs.build.outputs.web_tag }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/config"
+          rm -rf "$work"
+          git clone --depth 1 "git@gitlab.com:$CONFIG_REPO.git" "$work"
+          cd "$work"
+          git config user.name "alfa330/OTP CI"
+          git config user.email "ci@yataxi.kz"
+
+          api_values=dev/apps/portal/values.yaml
+          web_values=dev/apps/portal-web/values.yaml
+
+          # Весь шаг внутри повтора, и каждая попытка начинается с чистой ветки,
+          # а не с ребейза поверх собственного коммита. Повторы нужны: несколько
+          # сервисов могут двигать теги в одну минуту, и проигравший получает
+          # non-fast-forward. fetch плюс reset --hard, а не pull --rebase —
+          # клон поверхностный, и ребейз на нём падает так, что лог не объясняет.
+          written=
+          for attempt in 1 2 3 4 5; do
+            git fetch --depth 1 origin main
+            git reset --hard FETCH_HEAD
+
+            for f in "$api_values" "$web_values"; do
+              if [ ! -f "$f" ]; then
+                echo "нет $f в $CONFIG_REPO — стенд там не описан"
+                exit 1
+              fi
+            done
+
+            sed -i "s|^  tag: .*|  tag: \"$TAG\"|" "$api_values"
+            sed -i "s|^  tag: .*|  tag: \"$WEB_TAG\"|" "$web_values"
+
+            if git diff --quiet; then
+              echo "теги уже $TAG и $WEB_TAG"
+              written=yes
+              break
+            fi
+
+            git commit -qam "icore dev -> $TAG"
+            if git push origin HEAD:main; then
+              written=yes
+              break
+            fi
+            echo "push отклонён, перечитываю и повторяю ($attempt/5)"
+          done
+          [ -n "$written" ] || { echo "не удалось записать теги за пять попыток"; exit 1; }
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Синхронизировать и дождаться здоровья
+        env:
+          ARGOCD_SERVER: ${{ vars.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          REVISION: ${{ steps.push_tags.outputs.revision }}
+        run: |
+          set -euo pipefail
+          # CLI берётся у самого сервера, поэтому её версия всегда совпадает с
+          # серверной и нечему расходиться. Качается через VPC, не через интернет.
+          bin="$RUNNER_TEMP/argocd"
+          curl -sSfL -o "$bin" "https://$ARGOCD_SERVER/download/argocd-linux-amd64"
+          chmod +x "$bin"
+          # --grpc-web: маршрут перед Argo CD не h2c.
+          export ARGOCD_OPTS="--grpc-web"
+          "$bin" version --client --short
+
+          for app in dev-icore-portal dev-icore-portal-web; do
+            echo "── $app"
+            # Дождаться, пока Argo CD увидит именно наш коммит. Без явного
+            # обновления sync может сработать против закэшированной ревизии,
+            # которая старше только что отправленной, и джоба отчитается
+            # об успехе для предыдущего образа.
+            for attempt in $(seq 1 20); do
+              seen=$("$bin" app get "$app" --refresh -o json \
+                     | python3 -c 'import json,sys; d=json.load(sys.stdin)["status"]["sync"]; print((d.get("revisions") or [d.get("revision") or ""])[0])')
+              [ "$seen" = "$REVISION" ] && break
+              echo "Argo CD на ${seen:-неизвестно}, жду $REVISION ($attempt/20)"
+              sleep 6
+            done
+
+            "$bin" app sync "$app" --timeout 300
+            "$bin" app wait "$app" --health --timeout 600
+          done
+
+      - name: Проверить стенд снаружи
+        run: |
+          set -euo pipefail
+          # Последняя проверка, и она отвечает на другой вопрос, чем `app wait`:
+          # здоровые поды и работающий стенд — не одно и то же, между ними ещё
+          # шлюз, маршрут и сертификат.
+          for path in / /api/health; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$STAND_URL$path")
+            echo "$STAND_URL$path -> $code"
+            [ "$code" = "200" ] || { echo "ожидался 200"; exit 1; }
+          done
