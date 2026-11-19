@@ -336,7 +336,7 @@ export default function RequestsBoard({
             <IosModal open={Boolean(openId)} onClose={() => setOpenId(null)} maxWidth="max-w-3xl"
                       title={openId ? `Запрос №${openId}` : ''}
                       subtitle={openItem?.destination_title ? `Telegram-группа: ${openItem.destination_title}` : ''}
-                      bodyClassName="flex min-h-0 flex-1 flex-col sm:h-[min(78vh,760px)] sm:flex-none">
+                      bodyClassName="thin-scroll flex min-h-0 flex-1 flex-col sm:h-[min(78vh,760px)] sm:flex-none">
                 {openId && (
                     <Thread key={openId} api={api} requestId={openId} variant="window" onChanged={onThreadChanged}
                             toast={toast} limits={limits} userId={userId} stages={stages} />
