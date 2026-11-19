@@ -135,5 +135,13 @@ export function pendingStatus(item) {
     return 'queued';
 }
 
+/** Буквы для кружка аватара: по первой букве или цифре двух первых слов. Эмодзи и знаки не режутся пополам
+ *  (у «💌» первая «буква» строки — половинка суррогатной пары) — пустая строка, кружок покажет значок. */
+export function chatInitials(name) {
+    return String(name || '').trim().split(/\s+/)
+        .map((word) => Array.from(word).find((ch) => /[\p{L}\p{N}]/u.test(ch)))
+        .filter(Boolean).slice(0, 2).join('').toUpperCase();
+}
+
 /** Галочки «Чатов ОП» не знают «прослушано» — для них это «прочитано». */
 export const tickStatus = (status) => (status === 'played' ? 'read' : status || 'sent');

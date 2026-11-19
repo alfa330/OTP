@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    dayLabel, insertAt, listTime, localStamp, matchTemplates, mergeMessages, mergeThread, newClientId, pendingStatus,
+    chatInitials, dayLabel, insertAt, listTime, localStamp, matchTemplates, mergeMessages, mergeThread, newClientId, pendingStatus,
     pendingTail, showAuthor, slashQuery, tickStatus, withDays,
 } from '../src/components/hiring/hiringChats.js';
 
@@ -98,4 +98,13 @@ test('ticks: «played» is shown as read; own fresh message time is local Almaty
         { key: 'o:5', at: '2026-11-18T22:31:00' }], '2026-11-19');
     const keys = rows.filter((r) => r.dayKey).map((r) => r.dayKey);
     assert.equal(new Set(keys).size, keys.length);
+});
+
+test('avatar letters: real letters only — an emoji name is not cut in half', () => {
+    assert.equal(chatInitials('Асель Нурланова'), 'АН');
+    assert.equal(chatInitials('💌'), '');
+    assert.equal(chatInitials('❤️ Айгерим'), 'А');
+    assert.equal(chatInitials('~Meruert~'), 'M');
+    assert.equal(chatInitials('Кандидат №12'), 'К1');
+    assert.equal(chatInitials(''), '');
 });

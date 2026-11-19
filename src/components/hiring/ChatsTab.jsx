@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
     AlertCircle, ArrowLeft, Download, FileText, IdCard, Loader2, MessageSquare, Paperclip, Pencil, Plus, Reply,
-    Search, Send, Slash, Smile, Trash2, X,
+    Search, Send, Slash, Smile, Trash2, UserRound, X,
 } from 'lucide-react';
 import { IosLightbox, IosModal, IosSegmented, iosInput } from '../ui/ios';
 import { startFileDownload } from '../../utils/fileDownload';
@@ -12,9 +12,9 @@ import ChatAudioPlayer from '../wazzup/ChatAudioPlayer';
 import { loadChatEmojiPicker } from '../wazzup/chatEmojiLoading';
 import '../wazzup/chatThread.css';
 import './hiringChats.css';
-import { errorOf, initials, STAGE_LABELS, SUBSTAGE_LABELS } from './hiringMeta';
+import { errorOf, STAGE_LABELS, SUBSTAGE_LABELS } from './hiringMeta';
 import {
-    BLOCK_ACTIONS, MAX_FILE, MAX_TEXT, fileSize, insertAt, listTime, localStamp, matchTemplates, mergeMessages,
+    BLOCK_ACTIONS, MAX_FILE, MAX_TEXT, chatInitials, fileSize, insertAt, listTime, localStamp, matchTemplates, mergeMessages,
     newClientId, pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, timeOf, withDays,
 } from './hiringChats';
 import { ConfirmDialog, FIELD, Label, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
@@ -50,11 +50,15 @@ const ROW = (columns, extra = {}) => ({ display: 'grid', gridTemplateColumns: co
 
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
 
-const Avatar = ({ name, size = 'h-11 w-11' }) => (
-    <div className={`${size} flex shrink-0 items-center justify-center rounded-full bg-slate-200 text-[13px] font-medium text-slate-600`}>
-        {initials(name) || '?'}
-    </div>
-);
+// Буквы имени — только буквы и цифры: имя из одного эмодзи («💌») давало половинку символа «�».
+const Avatar = ({ name, size = 'h-11 w-11' }) => {
+    const letters = chatInitials(name);
+    return (
+        <div className={`${size} flex shrink-0 items-center justify-center rounded-full bg-slate-200 text-[13px] font-medium text-slate-600`}>
+            {letters || <UserRound size={17} aria-hidden="true" />}
+        </div>
+    );
+};
 
 const stageText = (chat) => {
     const label = chat?.stage_label || STAGE_LABELS[chat?.stage];
@@ -164,7 +168,7 @@ const Bubble = React.memo(function Bubble({ message, quote, showName, onReply, o
     const canFix = pending && message.status === 'failed' && (message.mine || !message.outbox_id);
     const replyButton = onReply && !message.deleted && !pending ? (
         <button type="button" onClick={() => onReply(message)} aria-label="Ответить на сообщение" title="Ответить на сообщение"
-                className="wazzup-message-reply mt-1 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70">
+                className="wazzup-message-reply mt-1 shrink-0 rounded-full p-1.5 text-slate-500 hover:bg-slate-200/70">
             <Reply size={17} />
         </button>
     ) : null;
@@ -211,21 +215,14 @@ const Bubble = React.memo(function Bubble({ message, quote, showName, onReply, o
         </div>
     );
     return (
-        <div data-message-id={message.id || message.key} className="wazzup-message-row px-3 sm:px-4"
-             style={ROW(out ? 'minmax(0, 1fr) auto' : 'auto minmax(0, 1fr)', { alignItems: 'start', columnGap: 6 })}>
-            {out ? (
-                <>
-                    <div className="flex min-w-0 justify-end">
-                        <div className="min-w-0 max-w-[85%] sm:max-w-[min(78%,720px)]">{body}</div>
-                    </div>
-                    {replyButton || <span />}
-                </>
-            ) : (
-                <>
-                    <div className="min-w-0 max-w-[85%] sm:max-w-[min(78%,720px)]" style={{ gridColumn: 1 }}>{body}</div>
-                    <div style={{ gridColumn: 2 }}>{replyButton}</div>
-                </>
-            )}
+        // Ряд — flex по ширине ленты: «не шире 85 %» считается от неё. В сетке с колонкой «по содержимому» процент
+        // считался от самой колонки, и пузырь сжимался до буквы в строке («ку/да», «а/х/а»). Без gap и без flex-1 —
+        // оболочка телефона такой ряд не переносит и не ставит колонкой (mobile-shell.css).
+        <div data-message-id={message.id || message.key}
+             className={`wazzup-message-row flex items-start px-3 sm:px-4 ${out ? 'justify-end' : 'justify-start'}`}>
+            {out && replyButton}
+            <div className={`min-w-0 max-w-[85%] sm:max-w-[min(78%,720px)] ${out ? 'ml-1.5' : 'mr-1.5'}`}>{body}</div>
+            {!out && replyButton}
         </div>
     );
 });
