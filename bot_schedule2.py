@@ -36859,7 +36859,11 @@ def syntony_leads_sync(force=False):
         db.finish_syntony_lead_sync(sync_id, leads_fetched=written)
         return written
     except Exception as exc:
-        db.finish_syntony_lead_sync(sync_id, error=str(exc)[:500])
+        # Текст ошибки уходит в журнал и в подпись отбивки в группе: свой текст клиента
+        # безопасен (без ключа и адреса), у прочих исключений — только тип.
+        safe = (str(exc) if isinstance(exc, syntony_leads_client.SyntonyLeadsError)
+                else type(exc).__name__)
+        db.finish_syntony_lead_sync(sync_id, error=safe[:500])
         raise
 
 
@@ -36870,6 +36874,7 @@ async def syntony_leads_sync_job():
         if written:
             logging.info("Syntony: выгрузка заявок завершена, записано: %s", written)
     except Exception as exc:
+        # Ключа здесь быть не может: клиент выпускает только свой текст без него.
         logging.error("Syntony: плановая выгрузка заявок не удалась: %s", exc)
 
 
@@ -37263,30 +37268,35 @@ def _amo_leads_alert_text(now=None, day=None):
     s_last, s_failed, s_fresh = _syntony_leads_journal()
     last, failed, fresh = _amo_leads_journal()
     windows = amo_leads.clamp_windows(asked, _leads_data_until(fresh, s_fresh))
-    current = db.get_amo_leads_between(windows["current_start"], windows["current_end"])
 
-    # Досинк перед ответом нужен в двух случаях: данных за окно нет вовсе (первый
-    # запуск, рестарт) или «сегодня» обрезано намного раньше «сейчас» — плановая
+    # Досинк amoCRM перед ответом нужен в двух случаях: удачной выгрузки ещё не было
+    # (первый запуск) или «сегодня» обрезано намного раньше «сейчас» — плановая
     # выгрузка идёт раз в три часа, и без досинка ручной /leads сравнивал бы
     # неполный день с полным. Оба раза — только если окно попадает в глубину
     # выгрузки: для дат постарше синк ничего не принесёт. Повторно не дёргаем:
     # если попытка была только что, второй заход ничего не изменит.
-    stale = windows["current_end"] < asked["current_end"] - timedelta(
-        minutes=AMO_LEADS_STALE_MINUTES)
+    #
+    # Свежесть — СВОЯ, amoCRM: окно режется и по Syntony, но лежащая Syntony не повод
+    # гонять полторы минуты выгрузку amoCRM на каждый /leads. И пустое окно amoCRM —
+    # не «данных нет»: лиды ушли в Syntony (опыты разбора 19.11).
+    amo_end = amo_leads.clamp_windows(asked, fresh.get('started_at'))["current_end"]
+    stale = amo_end < asked["current_end"] - timedelta(minutes=AMO_LEADS_STALE_MINUTES)
     attempted = last.get('started_at')
     just_tried = bool(attempted) and (
         datetime.now(amo_leads.TZ) - attempted
         <= timedelta(minutes=AMO_LEADS_RESYNC_PAUSE_MINUTES))
     horizon = datetime.now(amo_leads.TZ) - timedelta(days=amo_leads.SYNC_DAYS)
-    if ((not current or (day is None and stale))
+    if ((not fresh.get('started_at') or (day is None and stale))
             and asked["current_start"] >= horizon and not just_tried):
         try:
             amo_leads_sync()
         except Exception as exc:
             # Данные есть, просто несвежие — отвечаем тем, что есть: возраст цифр
-            # и текст сбоя видно в подписи. А вот когда за окно нет ничего,
-            # показывать нули нельзя: это читалось бы как «лидов не было».
-            if not current:
+            # и текст сбоя видно в подписи. А вот когда за окно нет ничего ни в
+            # одной CRM, показывать нули нельзя: это читалось бы как «лидов не было».
+            start, end = windows["current_start"], windows["current_end"]
+            if not (db.get_amo_leads_between(start, end)
+                    or db.get_syntony_leads_between(start, end)):
                 raise
             logging.warning("Лиды: досинк перед ответом не удался: %s", exc)
         else:

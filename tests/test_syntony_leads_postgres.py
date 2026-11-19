@@ -172,6 +172,7 @@ def test_received_rows_feed_the_report_and_only_them(olx):
         _write(cursor, 'received', '77010000002', noon - timedelta(minutes=1), 'arenda')
         _write(cursor, 'duplicate', '77010000001', noon - timedelta(minutes=50), 'itaxi')
         _write(cursor, 'lead_created', '77010000003', noon - timedelta(hours=2), 'jana')
+        _write(cursor, 'manual_review', '77010000005', noon - timedelta(hours=3), 'jana')
         _write(cursor, 'received', '77010000004', noon, 'jana')
         rows = queries.received_between(cursor, datetime(2026, 11, 19, 0, 0), noon)
     assert sorted(rows) == [('arenda', noon - timedelta(minutes=1)), ('itaxi', noon - timedelta(hours=1))]
@@ -194,9 +195,61 @@ def test_daily_summary_counts_numbers_with_or_without_a_deal(olx):
         _write(cursor, 'received', '77010000001', day, 'itaxi')
         _write(cursor, 'lead_created', '77010000002', day, 'itaxi')
         _write(cursor, 'needs_human', None, day, 'itaxi')
+        _write(cursor, 'duplicate', '77010000001', day, 'itaxi')
         summary = queries.daily_summary(cursor, day=day.date())
     row = next(r for r in summary if r['cabinet_code'] == 'itaxi')
-    assert (row['total'], row['leads']) == (3, 2)
+    assert (row['total'], row['leads'], row['duplicates']) == (4, 2, 1)
+
+
+def test_waiting_mark_is_set_once_on_the_real_table(olx):
+    from olx_amo import queries
+    with olx.cursor() as cursor:
+        assert not queries.mark_awaiting_human(cursor, 'itaxi', 'нет-такого'), 'строки чата нет — метки нет'
+        queries.upsert_thread(cursor, 'itaxi', 't-1')
+        assert queries.mark_awaiting_human(cursor, 'itaxi', 't-1')
+        assert not queries.mark_awaiting_human(cursor, 'itaxi', 't-1')
+
+
+def test_first_message_of_a_new_chat_waits_for_a_human_without_the_canned_reply(olx, monkeypatch):
+    """Автоответ выключен: первое сообщение без номера в совсем новом чате обязано попасть и
+    в журнал, и в «ждут ответа». Раньше строку чата заводил автоответ, а метка ставится
+    UPDATE'ом этой строки (опыт разбора 19.11 на настоящей базе)."""
+    from olx_amo import cabinets, queries, service
+    monkeypatch.delenv('OLX_CANNED_REPLY_ENABLED', raising=False)
+    monkeypatch.delenv('OLX_AMO_LEADS_ENABLED', raising=False)
+
+    class Db(object):
+        """Как Database._get_cursor: курсор внутри транзакции (журнал ставит SAVEPOINT)."""
+        @contextlib.contextmanager
+        def _get_cursor(self):
+            with olx.cursor() as cursor:
+                cursor.execute('BEGIN')
+                try:
+                    yield cursor
+                except Exception:
+                    cursor.execute('ROLLBACK')
+                    raise
+                cursor.execute('COMMIT')
+
+    class Olx(object):
+        sent = []
+
+        def send_message(self, thread_id, text):
+            self.sent.append(text)
+
+    cabinet = cabinets.BY_CODE['itaxi']
+    counters = service.CabinetResult(cabinet.code)
+    message = {'id': 'm1', 'type': 'received', 'text': 'Здравствуйте, какие условия?',
+               'created_at': datetime.now(timezone.utc).isoformat()}
+    outcome = service._handle_message(Db(), service._Writers(Olx(), None), cabinet,
+                                      {'id': 'новый-чат'}, message, counters)
+    assert outcome == 'needs_human'
+    assert Olx.sent == []
+    with olx.cursor() as cursor:
+        cursor.execute("SELECT result FROM olx_journal WHERE thread_id = 'новый-чат'")
+        assert [r[0] for r in cursor.fetchall()] == ['needs_human']
+        state = queries.get_thread(cursor, 'itaxi', 'новый-чат')
+    assert state and state['awaiting_human_since'] is not None
 
 
 def test_hiring_takes_received_numbers_of_its_cabinets(olx):

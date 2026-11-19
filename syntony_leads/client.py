@@ -31,6 +31,7 @@ OLX (source=olx) не храним намеренно. Syntony заводит т
 
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -58,6 +59,11 @@ AD_SOURCES = ('facebook', 'tiktok')
 # Источники, которые отбивка берёт не из Syntony (см. docstring модуля).
 SKIPPED_SOURCES = ('olx',)
 
+# Ключ Syntony — slk_ и латиница с цифрами. Проверяем заранее: значение с пробелом или
+# переводом строки (кривая вставка в окружение) requests отвергает исключением, В ТЕКСТЕ
+# которого — само значение заголовка, то есть ключ (опыт разбора 19.11).
+_KEY_RE = re.compile(r'^[A-Za-z0-9_\-]{8,200}$')
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +80,10 @@ def config():
     key = (os.getenv(ENV_KEY) or '').strip()
     url = (os.getenv(ENV_URL) or '').strip() or DEFAULT_URL
     if not key:
+        return None
+    if not _KEY_RE.match(key):
+        logger.error('Syntony: %s не похож на ключ (пробелы, перевод строки или чужие знаки) — '
+                     'выгрузка заявок выключена', ENV_KEY)
         return None
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
@@ -96,18 +106,29 @@ def _iso_utc(value):
 
 
 def _get(session, url, key, params):
-    """Одна страница. Обрыв соединения повторяется один раз: запрос только читает."""
+    """Одна страница. Обрыв соединения повторяется один раз: запрос только читает.
+
+    Переадресации не выполняются: requests понёс бы заголовок X-Api-Key и на чужой
+    хост (Authorization он при смене хоста снимает, свои заголовки — нет), и ответ
+    чужого хоста принялся бы за заявки (опыт разбора 19.11). Любой сбой запроса —
+    только тип исключения: в тексте requests бывают заголовки с ключом.
+    """
     headers = {'X-Api-Key': key, 'Accept': 'application/json'}
     for attempt in (1, 2):
         try:
-            response = session.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+            response = session.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT,
+                                   allow_redirects=False)
             break
+        except requests.exceptions.Timeout:
+            raise SyntonyLeadsError('Syntony не ответила вовремя') from None
         except requests.exceptions.ConnectionError as exc:
             if attempt == 2:
                 raise SyntonyLeadsError('Syntony не отвечает: %s' % type(exc).__name__) from None
             time.sleep(1.0)
-        except requests.exceptions.Timeout:
-            raise SyntonyLeadsError('Syntony не ответила вовремя') from None
+        except Exception as exc:                            # noqa: BLE001 — текст не выпускаем
+            raise SyntonyLeadsError('Syntony: сбой запроса (%s)' % type(exc).__name__) from None
+    if 300 <= response.status_code < 400:
+        raise SyntonyLeadsError('Syntony: переадресация HTTP %s — не идём' % response.status_code)
     if response.status_code == 429:
         raise SyntonyLeadsError('Syntony: превышен предел запросов (429)')
     try:

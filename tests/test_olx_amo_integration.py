@@ -177,6 +177,18 @@ class SchemaTests(unittest.TestCase):
         # 'skipped' наружу не показывается: это наше же сообщение в чате.
         self.assertEqual(set(schema.JOURNAL_RESULTS) - {'skipped'}, labelled)
 
+    def test_number_without_a_deal_looks_like_the_deal_it_replaced(self):
+        """С 19.11.2026 «Номер получен» — обычный исход вместо «Сделка создана»: тот же
+        тон в журнале и в ленте, своя подпись в выгрузке Excel."""
+        view = (ROOT / 'src' / 'components' / 'olx' / 'olxMeta.js').read_text(encoding='utf-8')
+        for name in ('RESULT_TONE', 'EVENT_TONE'):
+            block = view[view.index('export const %s = {' % name):]
+            block = block[:block.index('};')]
+            tones = dict(re.findall(r"(\w+): '(\w+)'", block))
+            self.assertEqual(tones.get('lead_created'), tones.get('received'), name)
+        routes = (ROOT / 'olx_amo' / 'routes.py').read_text(encoding='utf-8')
+        self.assertIn("'received': 'Номер получен'", routes)
+
 
 class AmoWriterTests(unittest.TestCase):
     def test_ids_match_the_live_account(self):

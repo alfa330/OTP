@@ -537,12 +537,13 @@ def count_by_source(rows):
 #     Это выравнивает `syntony_row`.
 
 # Близнецы находятся по времени. Замер 19.11.2026 по выгрузкам обеих CRM за
-# 06–19.11: лид-формы и чаты OLX доходят в обе CRM за секунды (кампания
-# «iTaxi/16.09.2026»: 207 пар из 211 сделок и 213 заявок — в пределах 10 с), а в
-# дни переключения форм сайтов, где лиды НЕ дублировались, пар в 10 с почти нет
-# (Google 18.11: 2 из 39, Яндекс и SEO — ни одной). Звонок Syntony заводит позже
-# amoCRM — через 6 с…4 мин; для него и для формы с той же кампанией допуск
-# шире, но только при общем ключе: тот же тег линии или та же кампания.
+# 06–19.11: лид-формы доходят в обе CRM за секунды (кампания «iTaxi/16.09.2026»:
+# 207 пар из 211 сделок и 213 заявок — в пределах 10 с, в пределах 2 мин — 209),
+# а в дни переключения форм сайтов, где лиды НЕ дублировались, пар в 10 с почти
+# нет (Google 18.11: 2 из 39, Яндекс и SEO — ни одной). Звонок Syntony заводит
+# позже amoCRM — через 6 с…4 мин (один раз 8,6 мин), и тег линии у обоих один:
+# для него допуск шире, но только при общем теге. Кампания ключом не служит: по
+# ней в 10 минутах идут десятки разных лидов, а близнецы лид-форм и так в 10 с.
 TWIN_SECONDS = 10
 TWIN_KEYED_SECONDS = 600
 # Насколько шире окна отбивки читать обе CRM, чтобы близнец на краю окна нашёл
@@ -558,10 +559,15 @@ _RENTAL_RE = re.compile(r"аренд|arenda", re.IGNORECASE)
 SYNTONY_AD_SOURCES = ("facebook", "tiktok")
 
 
+def _is_call_tag(tag):
+    """Тег линии звонка: call_<парк>_<канал> (бывает и с заглавной: Call_Dongelek)."""
+    return (tag or "").strip().lower().startswith("call")
+
+
 def syntony_row(lead):
     """Заявка Syntony (строка таблицы syntony_leads) → строка для `count_by_source`.
 
-    Три отличия от сделки amoCRM, и каждое — чтобы заявка попала в ту же строку
+    Отличия от сделки amoCRM, и каждое — чтобы заявка попала в ту же строку
     отбивки, куда попала бы такая же сделка:
 
       * берётся только ПЕРВЫЙ тег — тот, с которым заявка заведена. Пока заявка
@@ -569,11 +575,17 @@ def syntony_row(lead):
         номера, а дописывает тег: 19.11 проверочный номер прозвонил линии
         парков, и у одной заявки набралось 15 тегов `call_itaxi_*` — по всем
         тегам она посчиталась бы в пяти строках сразу;
+      * тег звонка у заявки, заведённой НЕ звонком, не считается вовсе: это тот
+        же повтор — звонок с номера, у которого уже открыт чат. 19.11 так чат
+        ИИ-агента от 15.11 получил тег `call_цр_wb` и посчитался бы звонком за
+        15.11, а сам звонок 19.11 есть ещё и сделкой amoCRM;
       * заявка рекламной кампании аренды без тега аренды получает пометку
         «arenda» — как её сделка в amoCRM, которую правила отсекают;
       * лид-форма Facebook/TikTok без utm_source считается по своему источнику.
     """
     tags = [t.strip() for t in (lead.get("tags") or "").split(",") if t.strip()]
+    if (lead.get("source") or "") != "phone":
+        tags = [t for t in tags if not _is_call_tag(t)]
     first = tags[0] if tags else ""
     campaign = (lead.get("utm_campaign") or "").strip()
     marks = [first] if first else []
@@ -597,60 +609,97 @@ def _hits(row):
     return frozenset(name for name in SOURCE_ORDER if counts[name])
 
 
-def _same_key(syntony, amo):
-    """Общий ключ близнецов: тег линии/формы или кампания совпадают."""
-    first = syntony.get("first_tag") or ""
-    if first and first in {t.strip().lower() for t in (amo.get("tags") or "").split(",")}:
-        return True
-    campaign = (syntony.get("utm_campaign") or "").strip().lower()
-    return bool(campaign) and campaign == (amo.get("utm_campaign") or "").strip().lower()
+def _deal_tags(deal):
+    return {t.strip().lower() for t in (deal.get("tags") or "").split(",") if t.strip()}
+
+
+def _max_pairs(edges, order, blocked=frozenset()):
+    """Наибольшее паросочетание «заявка → сделка» (дополняющие цепочки, алгоритм Куна).
+
+    `edges[i]` — сделки-кандидаты заявки i от ближайшей; `blocked` — сделки, уже
+    занятые прошлым проходом. Жадное «ближайшие первыми» здесь ошибается: два
+    звонка одной линии с задержкой Syntony 4 мин — и ближайшая к первой заявке
+    оказывается сделка ВТОРОГО звонка, а вторая заявка остаётся без пары (опыт
+    разбора 19.11). Цепочки короткие: рёбра только в пределах 10 минут.
+    """
+    owner = {}
+
+    def augment(index, seen):
+        for position in edges.get(index, ()):
+            if position in blocked or position in seen:
+                continue
+            seen.add(position)
+            if position not in owner or augment(owner[position], seen):
+                owner[position] = index
+                return True
+        return False
+
+    for index in order:
+        augment(index, set())
+    return owner
 
 
 def drop_twins(amo_rows, syntony_rows):
     """Заявки Syntony без близнецов в amoCRM.
 
-    Близнец — сделка, которая считается в ТОЙ ЖЕ строке отбивки и заведена в
-    пределах `TWIN_SECONDS`, либо в пределах `TWIN_KEYED_SECONDS` при общем ключе
-    (`_same_key`). Пары жадные, от самой близкой, и одна сделка — пара не
-    больше чем одной заявке: в параллельные дни обе CRM получали каждый лид, и
-    ближайший сосед — это и есть он.
+    Близнец — сделка, которая считается в ТОЙ ЖЕ строке отбивки. Два прохода, и
+    порядок важен:
+      1. общий тег (линии звонка, формы сайта) и не дальше `TWIN_KEYED_SECONDS`:
+         так склеиваются звонки, которые Syntony заводит на минуты позже;
+      2. среди оставшихся — не дальше `TWIN_SECONDS` без общего тега: лид-формы, у
+         которых теги в двух CRM названы по-разному (forma_itaxi_общая и
+         fb_forma_itaxi_obshchaya). Звонок так не склеивается: два звонка — это два
+         лида, если линии разные, а одна линия склеивается первым проходом.
+    Первый проход идёт до второго, иначе заявка звонка в 5 с от сделке ЧУЖОЙ
+    линии отнимала бы её у своей заявки (опыт разбора 19.11). Внутри прохода —
+    наибольшее число пар (`_max_pairs`), одна сделка — пара не больше чем одной
+    заявке.
 
     Из пары считается сделка amoCRM: её теги размечены интеграцией, по которой
     отбивка считала всё время, и сравнение с прошлыми неделями остаётся честным.
     """
+    syntony_rows = list(syntony_rows or [])
     amo = []
     for row in amo_rows or []:
         hits = _hits(row) if row.get("created_at") else frozenset()
         if hits:
-            amo.append((row["created_at"], row, hits))
+            tags = _deal_tags(row)
+            amo.append((row["created_at"], hits, tags, any(_is_call_tag(t) for t in tags)))
     amo.sort(key=lambda item: item[0])
     times = [item[0] for item in amo]
     window = timedelta(seconds=TWIN_KEYED_SECONDS)
 
-    candidates = []
-    for index, row in enumerate(syntony_rows or []):
+    keyed, loose = {}, {}
+    for index, row in enumerate(syntony_rows):
         created = row.get("created_at")
         hits = _hits(row) if created else frozenset()
         if not hits:
             continue
+        first = row.get("first_tag") or ""
+        is_call = _is_call_tag(first)
         low = bisect.bisect_left(times, created - window)
         high = bisect.bisect_right(times, created + window)
         for position in range(low, high):
-            _, deal, deal_hits = amo[position]
+            when, deal_hits, deal_tags, deal_is_call = amo[position]
             if not hits & deal_hits:
                 continue
-            gap = abs((created - deal["created_at"]).total_seconds())
-            if gap <= TWIN_SECONDS or (gap <= TWIN_KEYED_SECONDS and _same_key(row, deal)):
-                candidates.append((gap, index, position))
+            gap = abs((created - when).total_seconds())
+            if first and first in deal_tags:
+                keyed.setdefault(index, []).append((gap, position))
+            elif gap <= TWIN_SECONDS and not is_call and not deal_is_call:
+                loose.setdefault(index, []).append((gap, position))
 
-    candidates.sort()
-    paired, taken = set(), set()
-    for _gap, index, position in candidates:
-        if index in paired or position in taken:
-            continue
-        paired.add(index)
-        taken.add(position)
-    return [row for index, row in enumerate(syntony_rows or []) if index not in paired]
+    def ordered(edges):
+        return {i: [p for _g, p in sorted(found)] for i, found in edges.items()}
+
+    by_time = sorted((i for i in range(len(syntony_rows)) if syntony_rows[i].get("created_at")),
+                     key=lambda i: syntony_rows[i]["created_at"])
+    first_pass = _max_pairs(ordered(keyed), [i for i in by_time if i in keyed])
+    paired = set(first_pass.values())
+    second_pass = _max_pairs(ordered(loose), [i for i in by_time if i in loose and i not in paired],
+                             blocked=frozenset(first_pass))
+    paired |= set(second_pass.values())
+    return [row for index, row in enumerate(syntony_rows) if index not in paired]
 
 
 def combined_counts(amo_rows, syntony_rows, start, end, extra_rows=()):

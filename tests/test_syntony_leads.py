@@ -57,9 +57,9 @@ class FakeSession(object):
         self.responses = list(responses)
         self.calls = []
 
-    def get(self, url, params=None, headers=None, timeout=None):
+    def get(self, url, params=None, headers=None, timeout=None, allow_redirects=True):
         self.calls.append({'url': url, 'params': dict(params or {}), 'headers': dict(headers or {}),
-                           'timeout': timeout})
+                           'timeout': timeout, 'allow_redirects': allow_redirects})
         reply = self.responses.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -104,6 +104,13 @@ class ConfigTests(unittest.TestCase):
                     'https://evilsyntony.kz/leads'):
             with mock.patch.dict(os.environ, {client.ENV_KEY: KEY, client.ENV_URL: url}):
                 self.assertIsNone(client.config(), url)
+
+    def test_crooked_key_is_refused_before_it_can_reach_an_error_text(self):
+        """requests отвергает заголовок с переводом строки исключением, в тексте которого —
+        сам ключ (опыт разбора 19.11)."""
+        for bad in ('slk_live_SECRET0123\nabcdef', 'slk_live SECRET0123456', 'slk_ключ0123456789'):
+            with mock.patch.dict(os.environ, {client.ENV_KEY: bad, client.ENV_URL: ''}):
+                self.assertIsNone(client.config(), repr(bad))
 
 
 class FetchTests(unittest.TestCase):
@@ -170,6 +177,21 @@ class FetchTests(unittest.TestCase):
             with self.assertRaises(client.SyntonyLeadsError) as caught:
                 self.fetch(FakeSession([drop, drop]), created_from=date(2026, 11, 3))
         self.assertNotIn(KEY, str(caught.exception))
+
+    def test_redirect_is_not_followed_and_the_key_does_not_travel(self):
+        """requests несёт свои заголовки и на чужой хост; ответ чужого хоста — не заявки."""
+        session = FakeSession([FakeResponse(302, {'data': [], 'nextOffset': None})])
+        with self.assertRaises(client.SyntonyLeadsError) as caught:
+            self.fetch(session, created_from=date(2026, 11, 3))
+        self.assertIn('302', str(caught.exception))
+        self.assertIs(False, session.calls[0]['allow_redirects'])
+
+    def test_any_request_failure_keeps_its_text_to_itself(self):
+        leak = requests.exceptions.InvalidHeader("bad header value: 'X-Api-Key: %s'" % KEY)
+        with self.assertRaises(client.SyntonyLeadsError) as caught:
+            self.fetch(FakeSession([leak]), created_from=date(2026, 11, 3))
+        self.assertNotIn(KEY, str(caught.exception))
+        self.assertIn('InvalidHeader', str(caught.exception))
 
     def test_broken_pagination_does_not_loop_forever(self):
         session = FakeSession([page([{'id': 'a'}], next_offset=0)])
@@ -303,11 +325,45 @@ class TwinTests(unittest.TestCase):
                         [syn(at(12, 9, 40), tags='call_jana_wb1', source='phone')])
         self.assertEqual(2, result['Звонки'])
 
-    def test_same_campaign_lead_form_a_minute_apart_counts_once(self):
+    def test_same_campaign_is_not_a_twin_key(self):
+        """По кампании в 10 минутах идут десятки разных лидов; близнецы лид-форм — в 10 с."""
         result = counts([amo(at(12, 11, 0, 0), tags='forma_itaxi_общая', utm='fb',
                              campaign='iTaxi/16.09.2026')],
                         [syn(at(12, 11, 1, 10), utm='facebook', campaign='iTaxi/16.09.2026')])
-        self.assertEqual(1, result['FB'])
+        self.assertEqual(2, result['FB'])
+
+    def test_call_does_not_steal_the_deal_of_another_line(self):
+        """Опыт разбора 19.11: заявка звонка jana в 5 с от сделки itaxi не отнимает её у
+        своей пары — сперва склеиваются звонки одной линии, потом остальное."""
+        deals = [amo(at(19, 10, 0, 0), tags='call_jana_wb1'), amo(at(19, 10, 0, 25), tags='call_itaxi_wb')]
+        leads = [syn(at(19, 10, 0, 30), tags='call_jana_wb1', source='phone'),
+                 syn(at(19, 10, 1, 10), tags='call_itaxi_wb', source='phone')]
+        self.assertEqual(2, counts(deals, leads, window=(at(19, 0), at(20, 0)))['Звонки'])
+
+    def test_two_calls_of_one_line_with_a_late_syntony_are_two(self):
+        """Опыт разбора 19.11: ближайшая к первой заявке сделка — второго звонка; жадные
+        «ближайшие первыми» оставили бы вторую заявку без пары."""
+        base = at(20, 10, 0, 0)
+        deals = [amo(base, tags='call_jana_wb1'), amo(base + timedelta(seconds=420), tags='call_jana_wb1')]
+        leads = [syn(base + timedelta(seconds=240), tags='call_jana_wb1', source='phone'),
+                 syn(base + timedelta(seconds=660), tags='call_jana_wb1', source='phone')]
+        self.assertEqual(2, counts(deals, leads, window=(at(20, 0), at(21, 0)))['Звонки'])
+
+    def test_call_and_site_form_seconds_apart_are_two_leads(self):
+        result = counts([amo(at(12, 10, 0, 0), tags='call_jana_google')],
+                        [syn(at(12, 10, 0, 3), tags='forma_jana_sait', utm='google', source='website')])
+        self.assertEqual(2, result['Google'])
+
+    def test_call_tag_added_to_an_open_chat_is_not_a_call(self):
+        """Опыт разбора 19.11: чат ИИ-агента 15.11 получил тег линии от звонка 19.11.
+        Звонок — сделкой amoCRM 19.11, а чат звонком за 15.11 не становится."""
+        chat = syn(at(15, 14, 19), tags='call_цр_wb', source='whatsapp')
+        self.assertEqual('', chat['tags'])
+        deal = amo(at(19, 10, 0), tags='call_jana_wb1')
+        self.assertEqual(0, counts([deal], [chat], window=(at(15, 0), at(16, 0)))['Звонки'])
+        self.assertEqual(1, counts([deal], [chat], window=(at(19, 0), at(20, 0)))['Звонки'])
+        mixed = syn(at(15, 14, 19), tags='call_цр_wb, whatsapp_itaxi_sait', source='whatsapp')
+        self.assertEqual('whatsapp_itaxi_sait', mixed['tags'], 'метка сайта остаётся')
 
     def test_twin_must_count_in_the_same_row(self):
         """FB-заявка и звонок в одну секунду — разные лиды."""
@@ -396,11 +452,25 @@ class FooterTests(unittest.TestCase):
 
 
 # ── бот: выгрузка и текст отбивки на подставной базе ──────────────────────────
+#
+# Часы заморожены: досинк amoCRM и пауза выгрузки Syntony зависят от «сейчас», и тест,
+# написанный 19.11, не должен поменять смысл через 16 дней, когда окно уйдёт за глубину
+# выгрузки.
 
 BOT_PATH = ROOT / 'bot_schedule2.py'
 BOT_FUNCTIONS = ('syntony_leads_sync', '_syntony_leads_journal', '_leads_data_until',
                  '_olx_received_rows', '_leads_counts_between', '_amo_leads_alert_text',
                  '_amo_leads_journal')
+CLOCK = at(19, 12, 5)
+
+
+def frozen_datetime(clock):
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = clock['now']
+            return moment.astimezone(tz) if tz else moment.astimezone(TZ).replace(tzinfo=None)
+    return Frozen
 
 
 class FakeCursor(object):
@@ -425,13 +495,17 @@ class FakeCursor(object):
 
 
 class FakeDb(object):
-    def __init__(self, amo_rows=(), syntony_rows=(), olx_received=()):
+    def __init__(self, amo_rows=(), syntony_rows=(), olx_received=(), clock=None, amo_synced_ago=1):
+        self.clock = clock or {'now': CLOCK}
         self.amo_rows = list(amo_rows)
         self.syntony_rows = list(syntony_rows)
         self.olx_received = list(olx_received)
         self.syncs = []
-        self.amo_syncs = [{'id': 1, 'started_at': datetime.now(timezone.utc) - timedelta(minutes=1),
-                           'finished_at': datetime.now(timezone.utc), 'status': 'ok', 'error': None}]
+        now = self.clock['now']
+        self.amo_syncs = [] if amo_synced_ago is None else [
+            {'id': 1, 'started_at': now - timedelta(minutes=amo_synced_ago),
+             'finished_at': now - timedelta(minutes=amo_synced_ago) + timedelta(seconds=90),
+             'status': 'ok', 'error': None}]
         self.upserted = []
 
     @contextmanager
@@ -451,14 +525,13 @@ class FakeDb(object):
     # Журнал выгрузок Syntony
     def start_syntony_lead_sync(self, mode):
         self.syncs.append({'id': len(self.syncs) + 1, 'mode': mode, 'status': 'running',
-                           'started_at': datetime.now(timezone.utc), 'finished_at': None,
-                           'error': None})
+                           'started_at': self.clock['now'], 'finished_at': None, 'error': None})
         return len(self.syncs)
 
     def finish_syntony_lead_sync(self, sync_id, leads_fetched=None, error=None):
         sync = self.syncs[sync_id - 1]
         sync.update(status='error' if error else 'ok', error=error, leads_fetched=leads_fetched,
-                    finished_at=datetime.now(timezone.utc))
+                    finished_at=self.clock['now'] + timedelta(seconds=20))
 
     def get_last_syntony_lead_sync(self, status=None, mode=None, finished=True):
         rows = [s for s in self.syncs
@@ -472,6 +545,8 @@ class FakeDb(object):
 
 
 class FakeSyntonyClient(object):
+    SyntonyLeadsError = client.SyntonyLeadsError
+
     def __init__(self, configured=True, items=(), fail=None):
         self.configured = configured
         self.items = list(items)
@@ -483,8 +558,10 @@ class FakeSyntonyClient(object):
 
     def fetch(self, created_from=None, updated_since=None):
         self.calls.append({'created_from': created_from, 'updated_since': updated_since})
+        if isinstance(self.fail, Exception):
+            raise self.fail
         if self.fail:
-            raise RuntimeError(self.fail)
+            raise client.SyntonyLeadsError(self.fail)
         return list(self.items)
 
     @staticmethod
@@ -500,20 +577,25 @@ class Log(object):
         return lambda message, *args, **kwargs: self.lines.append((level, message % args if args else message))
 
 
-def bot_namespace(db, syntony_client):
+def bot_namespace(db, syntony_client, amo_sync=None):
     tree = source_cache.parse(source_cache.read(BOT_PATH))
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in BOT_FUNCTIONS]
     missing = set(BOT_FUNCTIONS) - {n.name for n in nodes}
     if missing:
         raise AssertionError('в боте нет функций: %s' % ', '.join(sorted(missing)))
+
+    def amo_sync_not_expected():
+        raise AssertionError('досинк amoCRM здесь не нужен')
+
     namespace = {
         'db': db, 'amo_leads': amo_leads, 'syntony_leads_client': syntony_client,
-        'datetime': datetime, 'timedelta': timedelta, 'timezone': timezone, 'logging': Log(),
+        'datetime': frozen_datetime(db.clock), 'timedelta': timedelta, 'timezone': timezone,
+        'logging': Log(),
         'AMO_LEADS_STALE_MINUTES': 30, 'AMO_LEADS_RESYNC_PAUSE_MINUTES': 10,
         'SYNTONY_LEADS_FULL_EVERY': timedelta(hours=24),
         'SYNTONY_LEADS_OVERLAP': timedelta(minutes=10),
         'SYNTONY_LEADS_RESYNC_PAUSE': timedelta(minutes=2),
-        'amo_leads_sync': lambda: (_ for _ in ()).throw(AssertionError('amoCRM свежая')),
+        'amo_leads_sync': amo_sync or amo_sync_not_expected,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOT_PATH), 'exec'), namespace)
     return namespace
@@ -526,40 +608,56 @@ class SyncTests(unittest.TestCase):
         ns = bot_namespace(db, fake)
 
         self.assertEqual(1, ns['syntony_leads_sync']())
-        first = fake.calls[0]
-        self.assertIsNotNone(first['created_from'])
-        self.assertEqual((datetime.now(timezone.utc) - timedelta(days=amo_leads.SYNC_DAYS + 1)).date(),
-                         first['created_from'])
+        self.assertEqual(date(2026, 11, 2), fake.calls[0]['created_from'],
+                         '17 суток назад в UTC: сутки Алматы начинаются в 19:00 UTC накануне')
         self.assertEqual(['full'], [s['mode'] for s in db.syncs])
         self.assertEqual(['L1'], [r['lead_id'] for r in db.upserted], 'чат без меток не хранится')
 
-        # Сразу второй раз — пауза: API не дёргаем.
+        # Через минуту — пауза: API не дёргаем.
+        db.clock['now'] += timedelta(minutes=1)
         self.assertEqual(0, ns['syntony_leads_sync']())
         self.assertEqual(1, len(fake.calls))
 
-        # Через пять минут — только изменённое с прошлой удачной, с запасом.
-        db.syncs[-1]['started_at'] -= timedelta(minutes=5)
+        # Ещё через пять минут — только изменённое с прошлой удачной, с запасом.
+        db.clock['now'] += timedelta(minutes=5)
         ns['syntony_leads_sync']()
         self.assertEqual('updated', db.syncs[-1]['mode'])
-        self.assertEqual(db.syncs[0]['started_at'] - timedelta(minutes=10),
-                         fake.calls[-1]['updated_since'])
+        self.assertEqual(CLOCK - timedelta(minutes=10), fake.calls[-1]['updated_since'])
 
     def test_full_window_again_after_a_day(self):
         db = FakeDb()
-        fake = FakeSyntonyClient()
-        ns = bot_namespace(db, fake)
+        ns = bot_namespace(db, FakeSyntonyClient())
         ns['syntony_leads_sync']()
-        db.syncs[-1]['started_at'] -= timedelta(hours=25)
+        db.clock['now'] += timedelta(hours=25)
         ns['syntony_leads_sync']()
         self.assertEqual(['full', 'full'], [s['mode'] for s in db.syncs])
+
+    def test_after_a_failed_full_window_the_next_one_is_full_again(self):
+        db = FakeDb()
+        fake = FakeSyntonyClient(fail='Syntony не ответила вовремя')
+        ns = bot_namespace(db, fake)
+        with self.assertRaises(client.SyntonyLeadsError):
+            ns['syntony_leads_sync']()
+        db.clock['now'] += timedelta(minutes=3)
+        fake.fail = None
+        ns['syntony_leads_sync']()
+        self.assertEqual([('full', 'error'), ('full', 'ok')], [(s['mode'], s['status']) for s in db.syncs])
 
     def test_failure_is_journaled_and_raised(self):
         db = FakeDb()
         ns = bot_namespace(db, FakeSyntonyClient(fail='Syntony: HTTP 401 invalid_api_key'))
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(client.SyntonyLeadsError):
             ns['syntony_leads_sync']()
         self.assertEqual('error', db.syncs[-1]['status'])
-        self.assertIn('401', db.syncs[-1]['error'])
+        self.assertEqual('Syntony: HTTP 401 invalid_api_key', db.syncs[-1]['error'])
+
+    def test_foreign_exception_leaves_only_its_type_in_the_journal(self):
+        """Текст ошибки уходит в подпись отбивки в группе — чужой текст туда не пускаем."""
+        db = FakeDb()
+        ns = bot_namespace(db, FakeSyntonyClient(fail=ValueError('X-Api-Key: %s' % KEY)))
+        with self.assertRaises(ValueError):
+            ns['syntony_leads_sync']()
+        self.assertEqual('ValueError', db.syncs[-1]['error'])
 
     def test_without_a_key_nothing_happens(self):
         db = FakeDb()
@@ -579,6 +677,10 @@ class AlertTextTests(unittest.TestCase):
         row.update(fields)
         return row
 
+    @staticmethod
+    def line(text, source):
+        return next(line for line in text.splitlines() if line.startswith(source)).split()
+
     def test_today_from_syntony_against_the_parallel_week(self):
         # База 12.11: 10 лид-форм в обеих CRM (близнецы) + 2 только в amoCRM.
         amo_rows, syn_rows = [], []
@@ -596,11 +698,9 @@ class AlertTextTests(unittest.TestCase):
 
         text = ns['_amo_leads_alert_text'](now=self.NOW)
 
-        fb = next(line for line in text.splitlines() if line.startswith('FB'))
-        self.assertEqual(['FB', '12', '12', '+0%'], fb.split())
-        olx = next(line for line in text.splitlines() if line.startswith('OLX'))
-        self.assertEqual(['OLX', '1', '0', '—'], olx.split())
-        self.assertIn('Syntony', text.splitlines()[-1])
+        self.assertEqual(['FB', '12', '12', '+0%'], self.line(text, 'FB'))
+        self.assertEqual(['OLX', '1', '0', '—'], self.line(text, 'OLX'))
+        self.assertIn('Данные обновлены: amoCRM 12:05, Syntony 12:05.', text)
         self.assertNotIn('Критично', text)
         self.assertEqual(1, len(fake.calls), 'перед ответом Syntony догружается')
 
@@ -608,8 +708,7 @@ class AlertTextTests(unittest.TestCase):
         db = FakeDb(amo_rows=[amo(at(19, 9), tags='forma_itaxi_общая', utm='fb')])
         ns = bot_namespace(db, FakeSyntonyClient(fail='Syntony: HTTP 401 invalid_api_key'))
         text = ns['_amo_leads_alert_text'](now=self.NOW)
-        self.assertIn('⚠️ Syntony: выгрузка', text)
-        self.assertIn('401', text)
+        self.assertIn('⚠️ Syntony: выгрузка (12:05) не удалась: Syntony: HTTP 401 invalid_api_key', text)
         self.assertIn('Syntony —', text, 'удачной выгрузки Syntony не было')
 
     def test_without_syntony_the_report_is_as_before(self):
@@ -617,7 +716,46 @@ class AlertTextTests(unittest.TestCase):
         ns = bot_namespace(db, FakeSyntonyClient(configured=False))
         text = ns['_amo_leads_alert_text'](now=self.NOW)
         self.assertNotIn('Syntony', text)
-        self.assertIn('Данные обновлены ', text)
+        self.assertIn('Данные обновлены 12:05.', text)
+
+    def test_empty_amocrm_window_is_not_a_reason_to_fail_when_syntony_has_leads(self):
+        """Опыт разбора 19.11: лиды ушли в Syntony, в окне amoCRM пусто, досинк amoCRM упал —
+        отбивка всё равно уходит по тому, что есть."""
+        calls = []
+
+        def amo_down():
+            calls.append(1)
+            raise RuntimeError('amoCRM: HTTP 401')
+
+        db = FakeDb(syntony_rows=[self.stored(at(19, 9), utm_source='facebook')], amo_synced_ago=None)
+        ns = bot_namespace(db, FakeSyntonyClient(), amo_sync=amo_down)
+        text = ns['_amo_leads_alert_text'](now=self.NOW)
+        self.assertEqual(1, len(calls), 'выгрузки amoCRM не было — досинк пробуем')
+        self.assertEqual(['FB', '1', '0', '—'], self.line(text, 'FB'))
+
+    def test_nothing_in_either_crm_and_a_failed_resync_is_an_error_not_zeros(self):
+        def amo_down():
+            raise RuntimeError('amoCRM: HTTP 401')
+
+        db = FakeDb(amo_synced_ago=None)
+        ns = bot_namespace(db, FakeSyntonyClient(configured=False), amo_sync=amo_down)
+        with self.assertRaises(RuntimeError):
+            ns['_amo_leads_alert_text'](now=self.NOW)
+
+    def test_lying_syntony_does_not_make_every_leads_command_reload_amocrm(self):
+        """Опыт разбора 19.11: Syntony лежит с 09:20, amoCRM свежая — окно режется по
+        Syntony, но гонять полторы минуты выгрузку amoCRM на каждый /leads незачем."""
+        calls = []
+        # amoCRM выгружена 20 минут назад: свежая, и пауза между досинками уже прошла.
+        db = FakeDb(amo_rows=[amo(at(19, 9), tags='forma_itaxi_общая', utm='fb')], amo_synced_ago=20)
+        db.syncs = [{'id': 1, 'mode': 'full', 'status': 'ok', 'error': None,
+                     'started_at': at(19, 9, 20), 'finished_at': at(19, 9, 21)}]
+        ns = bot_namespace(db, FakeSyntonyClient(fail='Syntony: HTTP 502'),
+                           amo_sync=lambda: calls.append(1))
+        text = ns['_amo_leads_alert_text'](now=self.NOW)
+        self.assertEqual([], calls, 'amoCRM свежая — досинк не нужен')
+        self.assertIn('19.11, 00:00–09:20', text, 'окно — по самой несвежей CRM')
+        self.assertIn('⚠️ Syntony: выгрузка', text)
 
 
 class WiringTests(unittest.TestCase):

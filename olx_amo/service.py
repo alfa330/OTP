@@ -275,6 +275,12 @@ def _handle_message(db, writers, cabinet, thread, message, counters):
             # журнала появляется только на ПЕРВОЕ такое сообщение, а не на
             # каждое следующее «ау?».
             with db._get_cursor() as cursor:
+                if not state:
+                    # Метка ставится UPDATE'ом строки чата, а у совсем нового чата строки
+                    # ещё нет: без неё первое сообщение без номера не попало бы ни в
+                    # журнал, ни в «ждут ответа». Раньше строку заводил автоответ
+                    # (mark_canned_reply_sent) — с его отключением заводим здесь.
+                    queries.upsert_thread(cursor, cabinet.code, thread_id)
                 if queries.mark_awaiting_human(cursor, cabinet.code, thread_id):
                     queries.write_journal(
                         cursor, cabinet.code, 'needs_human', thread_id=thread_id,

@@ -136,8 +136,9 @@ class FakeQueries(object):
         state.setdefault('canned_reply_sent_at', self.now_almaty())
 
     def mark_awaiting_human(self, cursor, cabinet_code, thread_id):
-        state = self.db.threads.setdefault((cabinet_code, str(thread_id)), {})
-        if state.get('awaiting_human_since'):
+        # Как настоящий SQL: UPDATE строки чата — нет строки, нет и метки.
+        state = self.db.threads.get((cabinet_code, str(thread_id)))
+        if state is None or state.get('awaiting_human_since'):
             return False               # метка ставится ОДИН раз на обращение
         state['awaiting_human_since'] = self.now_almaty()
         return True
@@ -421,6 +422,9 @@ class SwitchedOffTests(unittest.TestCase):
         self.assertEqual('77757025144', row['phone_normalized'])
         self.assertEqual('8 775 702 51 44', row['phone_raw'])
         self.assertEqual('forma_olx_itaxi', row['tag'])
+        # По времени сообщения работает повтор за день (message_at::date в SQL).
+        self.assertEqual(service.message_time(message('x')), row['message_at'])
+        self.assertIsNotNone(row['message_at'])
         self.assertIsNone(row.get('amo_lead_id'))
         self.assertEqual(1, self.counters.received)
         self.assertEqual(0, self.counters.leads_created)
@@ -454,6 +458,28 @@ class SwitchedOffTests(unittest.TestCase):
         self.assertIsNotNone(state.get('awaiting_human_since'))
         self.assertIsNone(state.get('canned_reply_sent_at'))
         self.assertEqual(['needs_human'], [r['result'] for r in self.db.journal])
+
+    def test_reply_without_deals_still_answers_when_only_the_reply_is_on(self):
+        """Флаги независимы: автоответ включён, сделки — нет."""
+        with mock.patch.dict(os.environ, {'OLX_CANNED_REPLY_ENABLED': '1'}):
+            self.assertEqual('canned_reply', self.handle(message('А условия?', mid='1')))
+            self.assertEqual('received', self.handle(message('мой номер 87757025144', mid='2')))
+        self.assertEqual(1, len(self.olx.sent))
+
+    def test_deals_without_reply_when_only_deals_are_on(self):
+        """Флаги независимы: сделки включены, автоответ — нет."""
+        amo = FakeAmo(self.db)
+        self.writers = service._Writers(self.olx, amo)
+        with mock.patch.dict(os.environ, {'OLX_AMO_LEADS_ENABLED': '1'}):
+            self.assertEqual('needs_human', self.handle(message('А условия?', mid='1')))
+            self.assertEqual('lead_created', self.handle(message('мой номер 87757025144', mid='2')))
+        self.assertEqual([], self.olx.sent)
+        self.assertEqual(1, len(amo.created))
+
+    def test_received_has_its_own_mark_in_the_conversation(self):
+        events = service._timeline_events([{'id': 7, 'result': 'received', 'created_at': None,
+                                            'message_at': None}])
+        self.assertEqual(['Номер получен'], [e['text'] for e in events])
 
     def test_further_questions_do_not_pile_up_journal_rows(self):
         self.handle(message('Здравствуйте', mid='1'))
@@ -494,13 +520,54 @@ class SwitchedOffTests(unittest.TestCase):
             def __getattr__(self, name):
                 return lambda *args, **kwargs: None
 
-        with mock.patch.object(service, 'ensure_access_token', return_value=('t', None)), \
+        for reply in ('', '1'):         # и при включённом автоответе — флаги независимы
+            with mock.patch.dict(os.environ, {'OLX_CANNED_REPLY_ENABLED': reply}), \
+                    mock.patch.object(service, 'ensure_access_token', return_value=('t', None)), \
+                    mock.patch.object(service, 'OlxClient', _Olx), \
+                    mock.patch.object(service, 'queries', _Queries()), \
+                    mock.patch.object(service, 'amo_client_for_thread',
+                                      side_effect=AssertionError('вход в amoCRM')):
+                result = service.poll_cabinet(FakeDb(), self.cab)
+            self.assertEqual(0, result.errors)
+
+    def test_poll_with_a_number_marks_the_cabinet_as_bringing_leads(self):
+        """last_lead_at кабинета (его видят партнёры) идёт и от номеров без сделки."""
+        db = self.db
+        fake_queries = self.queries
+        polled = []
+        thread = {'id': '77', 'unread_count': 1, 'total_count': 1,
+                  'created_at': '2026-08-31T07:00:00'}
+        msg = message('мой номер 87757025144', mid='m1')
+
+        class _Olx(object):
+            def __init__(self, token_provider=None):
+                self.pages = 0
+
+            def threads(self, offset=0, limit=50):
+                self.pages += 1
+                return ([thread] if offset == 0 else []), None, None
+
+            def messages(self, thread_id, limit=30):
+                return [msg], None, None
+
+            def mark_read(self, thread_id):
+                pass
+
+        extra = {
+            'start_poll_run': lambda cursor, code: 1,
+            'finish_poll_run': lambda cursor, run_id, **kw: None,
+            'set_account_state': lambda cursor, code, state, error=None: None,
+            'threads_state': lambda cursor, code, ids: [],
+            'mark_polled': lambda cursor, code, saw_message=False, made_lead=False:
+                polled.append((saw_message, made_lead)),
+        }
+        with mock.patch.multiple(fake_queries, create=True, **extra), \
+                mock.patch.object(service, 'ensure_access_token', return_value=('t', None)), \
                 mock.patch.object(service, 'OlxClient', _Olx), \
-                mock.patch.object(service, 'queries', _Queries()), \
-                mock.patch.object(service, 'amo_client_for_thread',
-                                  side_effect=AssertionError('вход в amoCRM')):
-            result = service.poll_cabinet(FakeDb(), self.cab)
-        self.assertEqual(0, result.errors)
+                mock.patch.object(service.partner_events, 'message_received', return_value=0):
+            result = service.poll_cabinet(db, self.cab)
+        self.assertEqual((0, 1), (result.errors, result.received))
+        self.assertEqual([(True, True)], polled)
 
 
 class JournalWriteTests(unittest.TestCase):
