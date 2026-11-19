@@ -31,48 +31,29 @@ class BillingExportChoiceTests(unittest.TestCase):
         # Общей выгрузке и отчёту СЗоВ нужен сформированный отчёт, эффективности — нет.
         self.assertIn("billingExportChoice !== 'efficiency' && !billingReport", source)
 
-    def test_park_only_formats_are_offered_only_on_parks(self):
-        """Ежедневный отчёт СЗоВ (#380, п. 4) и накопительный итог (образец СЗоВ, 19.11.2026) —
-        дополнительные форматы и только у «Таксопарков»."""
+    def test_szov_daily_format_is_offered_only_on_parks(self):
+        """#380, п. 4: формат ежедневного отчёта СЗоВ — дополнительный и только у «Таксопарков»."""
         source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
         self.assertIn(
             "{billingMode === 'park' ? <option value=\"szov_daily\">Ежедневный отчёт СЗоВ</option> : null}",
             source,
         )
-        self.assertIn(
-            "{billingMode === 'park' ? <option value=\"cumulative\">Накопительный итог</option> : null}",
-            source,
-        )
-        self.assertIn(
-            "...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ'], ['cumulative', 'Накопительный итог']] : []),",
-            source,
-        )
+        self.assertIn("...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ']] : []),", source)
         # Ушли с «Таксопарков» — уходит общий вид, а не запрос, на который сервер ответит 400.
-        self.assertIn("const BILLING_PARK_ONLY_EXPORTS = new Set(['szov_daily', 'cumulative']);", source)
         self.assertRegex(
             source,
-            r"const billingExportChoice = BILLING_PARK_ONLY_EXPORTS\.has\(billingExportType\) && billingMode !== 'park'\s*"
+            r"const billingExportChoice = billingExportType === 'szov_daily' && billingMode !== 'park'\s*"
             r"\?\s*'general'\s*:\s*billingExportType;",
         )
         self.assertIn("oktell_billing_park_szov_${billingApplied.from}_${billingApplied.to}.xlsx", source)
-        # Имя файла привязано к своему виду, а в запрос уходит сам выбор, без подмен. Накопительный
-        # итог — с 1-го числа месяца последнего дня (решение владельца 19.11.2026), как и на сервере.
-        self.assertRegex(
-            source,
-            r"billingExportChoice === 'cumulative'\s*\?\s*"
-            r"`oktell_billing_park_cumulative_\$\{isoMonthStart\(billingApplied\.to\)\}_\$\{billingApplied\.to\}\.xlsx`",
-        )
-        self.assertIn("const isoMonthStart = (iso) => (iso ? `${String(iso).slice(0, 8)}01` : iso);", source)
-        self.assertIn("Накопительный итог — с {formatDate(isoMonthStart(billingTo))} по {formatDate(billingTo)}", source)
-        self.assertIn("? `С ${formatDate(isoMonthStart(billingTo))} по ${formatDate(billingTo)}`", source)
-        self.assertIn("report_type: billingExportChoice,", source)
         self.assertIn("В отчёте СЗоВ часы и комментарии дня вписываются вручную", source)
         # Сырой выбор читают только его объявление и производное значение.
         self.assertEqual(len(re.findall(r"\bbillingExportType\b", source)), 3)
 
     def test_excel_waits_for_the_period_to_be_formed(self):
         """Выгрузка берёт сформированный период. Пока в календаре или времени другое, Excel ждёт
-        «Сформировать» — иначе файл молча ушёл бы за прежние даты (на компьютере и на телефоне)."""
+        «Сформировать» — иначе файл молча ушёл бы за прежние даты (на компьютере и на телефоне,
+        у линии и у чата: разметка общая)."""
         source = FRONTEND_PATH.read_text(encoding="utf-8-sig")
         self.assertRegex(
             source,
@@ -87,7 +68,7 @@ class BillingExportChoiceTests(unittest.TestCase):
 
     def test_backend_routes_efficiency_to_grouped_workbook(self):
         source = BOT_PATH.read_text(encoding="utf-8-sig")
-        self.assertIn("report_type not in ('general', 'efficiency', 'szov_daily', 'cumulative')", source)
+        self.assertIn("report_type not in ('general', 'efficiency', 'szov_daily')", source)
         self.assertIn("_oktell_billing_parse_date_args()", source)
         self.assertIn("db.get_billing_operator_efficiency_report(", source)
         self.assertIn("department_id=department_id", source)

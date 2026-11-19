@@ -10487,8 +10487,8 @@ def api_resource_fte_oktell_billing_export():
         return guard_response, guard_status
 
     report_type = str(request.args.get('report_type') or 'general').strip().lower()
-    if report_type not in ('general', 'efficiency', 'szov_daily', 'cumulative'):
-        return jsonify({"error": "report_type должен быть general, efficiency, szov_daily или cumulative"}), 400
+    if report_type not in ('general', 'efficiency', 'szov_daily'):
+        return jsonify({"error": "report_type должен быть general, efficiency или szov_daily"}), 400
 
     if report_type == 'efficiency':
         params, error_response, error_status = _oktell_billing_parse_date_args()
@@ -10536,12 +10536,6 @@ def api_resource_fte_oktell_billing_export():
         return jsonify({"error": "mode должен быть park, line, operator, detail или grouping"}), 400
     if report_type == 'szov_daily' and mode != 'park':
         return jsonify({"error": "Формат ежедневного отчёта СЗоВ есть только у «Таксопарков»"}), 400
-    if report_type == 'cumulative' and mode != 'park':
-        return jsonify({"error": "Накопительный итог есть только у «Таксопарков»"}), 400
-    if report_type == 'cumulative':
-        # Накопительный итог — с 1-го числа месяца по последний выбранный день (решение владельца
-        # 19.11.2026), начало периода с экрана здесь не действует. Месяц в предел 31 день укладывается.
-        params = {**params, 'start_day': params['end_day'].replace(day=1)}
 
     direction, direction_error = _oktell_billing_parse_direction()
     if direction_error is not None:
@@ -10588,17 +10582,11 @@ def api_resource_fte_oktell_billing_export():
         output = _oktell_billing_grouping_workbook(report)
     elif report_type == 'szov_daily':
         output = _oktell_billing_szov_daily_workbook(report)
-    elif report_type == 'cumulative':
-        # Данные — те же, что у общей выгрузки «Таксопарков»; другой только вид книги.
-        output = _oktell_billing_cumulative_workbook(
-            report, params['start_day'], params['end_day'], params['minute_from'], params['minute_to'])
     else:
         output = _oktell_billing_export_workbook(mode, params, report, sl_seconds, direction)
     mode_part = f"{mode}_{direction}" if mode == 'operator' else mode
     if report_type == 'szov_daily':
         mode_part = 'park_szov'
-    elif report_type == 'cumulative':
-        mode_part = 'park_cumulative'
     filename = (
         f"oktell_billing_{mode_part}_"
         f"{params['start_day'].strftime('%Y-%m-%d')}_{params['end_day'].strftime('%Y-%m-%d')}.xlsx"
@@ -11205,8 +11193,10 @@ def _chat_billing_daily_visible_day(day):
     return {**day, 'parks': visible, 'totals': totals}
 
 
-def _chat_billing_daily_workbook(params, report):
+def _chat_billing_daily_workbook(params, report, cumulative=None):
     """«Ежедневный отчёт по чатам» в формате файла СЗоВ: лист на месяц, блок на день.
+    cumulative — отчёт get_chat_billing_report с 1-го числа месяца: он ложится последним листом
+    «Накопительный итог» (_chat_billing_cumulative_sheet).
 
     В блоке строка на таксопарк (кроме _CHAT_BILLING_DAILY_HIDDEN_PARKS) и строка итога дня
     на голубой подложке; дата, часы работы и
@@ -11348,9 +11338,111 @@ def _chat_billing_daily_workbook(params, report):
                          (total_values['chats'] or 0) / day_plan, fill)
             else:
                 _put(ws, total_row, key, total_values.get(key), fill)
+    if cumulative is not None:
+        _chat_billing_cumulative_sheet(workbook, cumulative, params['minute_from'], params['minute_to'])
     workbook.close()
     output.seek(0)
     return output
+
+
+# --- «Накопительный итог» — второй лист выгрузки «Таксопарков» чата ---------------------------------
+# Владелец 19.11.2026: «накопительный сделай просто вторым листом, первый лист как обычно». Вид — его
+# скриншота таблицы СЗоВ: тёмно-синяя шапка, белый жирный текст по центру; парки по убыванию
+# поступивших; «Итого за период» жирным; рамок нет, только сетка; числа по центру, парки слева.
+# Колонки — биллинга чатов (его выбор: AR, «Сброса на IVR» и средней оценки у чатов нет, время — в
+# минутах), значения — как на экране биллинга, без формул: таблицу вставляют в свой отчёт.
+# Период — с 1-го числа месяца по последний выбранный день (ручка выгрузки). Global скрыт, как и на
+# первом листе (_CHAT_BILLING_DAILY_HIDDEN_PARKS), итог — по обращениям видимых строк, а не среднее
+# строк.
+# (подпись, ширина в пикселях, формат). Ширины «Поступило», «Обслужено» и «SL» — образца; остальные —
+# по тексту жирным Calibri 11 с полями, как в образце: названия парков чата длиннее («Техподдержка
+# iTaxi», «Центр регистрации» — ~120 пикселей против 113 у колонки образца).
+_CHAT_BILLING_CUMULATIVE_COLUMNS = (
+    ('Таксопарк', 130, None),
+    ('Поступило', 75, '#,##0'),
+    ('Обслужено', 81, '#,##0'),
+    ('Без ответа', 75, '#,##0'),
+    ('SL', 52, '0%'),
+    ('Ср. реакция на 1 сообщение, мин', 226, None),
+    ('Ср. время ответа внутри чата, мин', 230, None),
+)
+_CHAT_BILLING_CUMULATIVE_SHEET = 'Накопительный итог'
+_CHAT_BILLING_CUMULATIVE_HEADER_FILL = '#1F4E78'
+
+
+def _chat_billing_cumulative_values(item, label):
+    """Строка листа — та же математика, что у экрана биллинга чата. Нечего считать — прочерк."""
+    item = item or {}
+    chats = int(item.get('chats') or 0)
+    avg_first = _chat_billing_export_ratio(item.get('first_reply_seconds'), item.get('answered'))
+    avg_inner = _chat_billing_export_ratio(item.get('inner_reply_seconds'), item.get('inner_replied'))
+
+    def _dash(value):
+        return '—' if value is None else value
+
+    return [
+        label,
+        chats,
+        int(item.get('answered') or 0),
+        int(item.get('no_reply') or 0),
+        _dash(_chat_billing_export_ratio(item.get('answered_sl'), chats)),
+        _dash(_chat_billing_minutes(avg_first)),
+        _dash(_chat_billing_minutes(avg_inner)),
+    ]
+
+
+def _chat_billing_cumulative_sheet_title(minute_from=0, minute_to=1439):
+    """Имя листа. Окно времени не на все сутки — и оно: в таблице образца периода нет, и часть суток
+    иначе не отличить от целых (30 знаков из 31 допустимого)."""
+    if minute_from <= 0 and minute_to >= 1439:
+        return _CHAT_BILLING_CUMULATIVE_SHEET
+    return (f"{_CHAT_BILLING_CUMULATIVE_SHEET} {minute_from // 60:02d}.{minute_from % 60:02d}-"
+            f"{minute_to // 60:02d}.{minute_to % 60:02d}")
+
+
+def _chat_billing_cumulative_sheet(workbook, report, minute_from=0, minute_to=1439):
+    """Дописывает в книгу xlsxwriter лист «Накопительный итог» по отчёту get_chat_billing_report."""
+    ws = workbook.add_worksheet(_chat_billing_cumulative_sheet_title(minute_from, minute_to))
+    styles = {}
+
+    def _style(num_format=None, bold=False, header=False):
+        style_key = (num_format, bold, header)
+        if style_key not in styles:
+            # Шрифт целиком: без имени и размера вид ячейки решала бы программа, которой открыли.
+            props = {'font_name': 'Calibri', 'font_size': 11, 'bold': bold or header}
+            if header:
+                props.update(font_color='#FFFFFF', bg_color=_CHAT_BILLING_CUMULATIVE_HEADER_FILL,
+                             align='center', valign='vcenter')
+            elif num_format is not False:
+                props.update(align='center', valign='vcenter')
+                if num_format:
+                    props['num_format'] = num_format
+            styles[style_key] = workbook.add_format(props)
+        return styles[style_key]
+
+    for column, (title, pixels, _fmt) in enumerate(_CHAT_BILLING_CUMULATIVE_COLUMNS):
+        ws.write_string(0, column, title, _style(header=True))
+        ws.set_column_pixels(column, column, pixels)
+
+    parks = [item for item in (report or {}).get('parks') or []
+             if item.get('park') not in _CHAT_BILLING_DAILY_HIDDEN_PARKS]
+    if not parks:
+        ws.write_string(1, 0, 'За выбранный период и окно времени обращений не нашлось')
+        return ws
+    totals = {key: sum(item.get(key) or 0 for item in parks) for key in CHAT_BILLING_METRICS}
+    rows = [(item, str(item.get('park') or ''), False) for item in parks]
+    rows.append((totals, 'Итого за период', True))
+    for row, (item, label, is_total) in enumerate(rows, start=1):
+        for column, value in enumerate(_chat_billing_cumulative_values(item, label)):
+            fmt = _CHAT_BILLING_CUMULATIVE_COLUMNS[column][2]
+            if column == 0:
+                # Парк слева и по нижнему краю, как в образце; имя всегда текст, даже с «=» в начале.
+                ws.write_string(row, column, value, _style(False, bold=is_total))
+            elif isinstance(value, str):
+                ws.write_string(row, column, value, _style(None, bold=is_total))
+            else:
+                ws.write_number(row, column, value, _style(fmt, bold=is_total))
+    return ws
 
 
 def _chat_billing_hourly_workbook(params, reports):
@@ -11579,9 +11671,12 @@ def api_resource_fte_chat_billing_export():
         workbook = None
         if mode == 'park':
             # Формат «Ежедневного отчёта по чатам» СЗоВ. Книга с формулами плана собирается
-            # xlsxwriter и приходит уже готовым файлом.
+            # xlsxwriter и приходит уже готовым файлом. Вторым листом — «Накопительный итог» с 1-го
+            # числа месяца по последний выбранный день (владелец 19.11.2026: «первый лист как обычно»).
+            cumulative = get_chat_billing_report(
+                db, params['end_day'].replace(day=1), params['end_day'], **window)
             output = _chat_billing_daily_workbook(params, get_chat_billing_daily(
-                db, params['start_day'], params['end_day'], **window))
+                db, params['start_day'], params['end_day'], **window), cumulative=cumulative)
         elif mode == 'grouping':
             # Формат «Отчёта с группировкой по часам»: выбран таксопарк — только его лист,
             # не выбран — весь чат с сотрудниками и по листу на каждый парк.
@@ -29909,113 +30004,6 @@ def _oktell_billing_szov_daily_workbook(daily):
     _highlight(ws, first_row, total_row, rating_dark_first=True)
 
     workbook.close()
-    output.seek(0)
-    return output
-
-
-# --- «Таксопарки» с накопительным итогом -----------------------------------------------------------
-# Образец владельца 19.11.2026 — таблица СЗоВ за 01–18.11.2026: строка на таксопарк по убыванию
-# поступивших и «Итого за период». Сверено с боевыми данными за тот же период: все 19 парков и итог
-# совпали с экраном «Таксопарков» во всех колонках, то есть это его «Итого за период» в формате СЗоВ.
-# Накопительный итог — с 1-го числа месяца по последний выбранный день (ручка сама сдвигает начало).
-#   AR и SL — от поступивших, как на экране; «Ср. разговор, сек» — усечение, как в Oktell (#380);
-#   «Сброс на IVR» — сбросы на приветствии; оценка — сумма баллов / число оценок, до сотых с половиной
-#   вверх. Итог считается из сумм периода, а не средним строк: оценка 4,66 образца — общее среднее
-#   по оценкам (31 004 / 6 648), среднее парков дало бы 4,65.
-# Значения пишутся числами, без формул: таблицу вставляют в свой отчёт.
-# (подпись, ширина в пикселях, формат) — подписи образца и ширины его колонок, замеренные по сетке при
-# 100 %. Числа по центру, парки — слева, как в образце. В файл ширина идёт в единицах Excel вместе с
-# полями ячейки — пиксели / 7 (цифра Calibri 11 — 7 пикселей): openpyxl, в отличие от xlsxwriter
-# книги СЗоВ, поправку на поля сам не добавляет, и 15,43 вместо 16,14 дали бы колонку на 5 пикселей уже.
-_OKTELL_BILLING_CUMULATIVE_COLUMNS = (
-    ('Таксопарк', 113, None),
-    ('Поступило', 75, '#,##0'),
-    ('Обслужено', 81, '#,##0'),
-    ('Потеряно', 69, '#,##0'),
-    ('AR', 52, '0%'),
-    ('SL', 52, '0%'),
-    ('Ср. разговор, сек', 116, '0'),
-    ('Сброс на IVR', 87, '0'),
-    ('Ср. оценка', 76, '0.00'),
-)
-
-
-def _oktell_billing_cumulative_sheet_title(start_day, end_day, minute_from=0, minute_to=1439):
-    """Имя листа — период. Окно времени не на все сутки — и оно: в самой таблице образца периода нет,
-    и часть суток иначе не отличить от целых суток. Excel режет имя листа на 31 знаке, поэтому с окном
-    год пишется один раз, а у периода через Новый год — двумя цифрами."""
-    if minute_from <= 0 and minute_to >= 1439:
-        return f"{start_day.strftime('%d.%m.%Y')}-{end_day.strftime('%d.%m.%Y')}"
-    window = f"{minute_from // 60:02d}.{minute_from % 60:02d}-{minute_to // 60:02d}.{minute_to % 60:02d}"
-    if start_day.year == end_day.year:
-        return f"{start_day.strftime('%d.%m')}-{end_day.strftime('%d.%m.%Y')} {window}"
-    return f"{start_day.strftime('%d.%m.%y')}-{end_day.strftime('%d.%m.%y')} {window}"
-
-
-def _oktell_billing_cumulative_values(item, label):
-    """Строка таблицы: та же математика, что у экрана «Таксопарков». Нечего считать — прочерк."""
-    arrived = int(item.get('arrived') or 0)
-    lost = int(item.get('lost') or 0)
-
-    def _dash(value):
-        return '—' if value is None else value
-
-    return [
-        label,
-        arrived,
-        int(item.get('served') or 0),
-        lost,
-        _dash(_oktell_billing_ratio(lost, arrived)),
-        _dash(_oktell_billing_ratio(item.get('served_sl'), arrived)),
-        _dash(_oktell_billing_szov_att(item)),
-        int(item.get('greet_drop') or 0),
-        _dash(_oktell_billing_szov_rating(item.get('rating_sum'), item.get('rating_count'))),
-    ]
-
-
-def _oktell_billing_cumulative_workbook(report, start_day, end_day, minute_from=0, minute_to=1439):
-    """Книга «Таксопарки · накопительный итог»: один лист с таблицей образца за период."""
-    wb = Workbook()
-    ws = wb.active
-    ws.title = _oktell_billing_cumulative_sheet_title(start_day, end_day, minute_from, minute_to)
-    header_fill = PatternFill(start_color='1F4E78', end_color='1F4E78', fill_type='solid')
-    # Шрифт целиком, а не только «жирный»: без имени и размера его вид решает программа, которой открыли.
-    header_font = Font(name='Calibri', size=11, color='FFFFFF', bold=True)
-    bold_font = Font(name='Calibri', size=11, bold=True)
-    center = Alignment(horizontal='center', vertical='center')
-
-    ws.append([title for title, _width, _fmt in _OKTELL_BILLING_CUMULATIVE_COLUMNS])
-    for column in range(1, len(_OKTELL_BILLING_CUMULATIVE_COLUMNS) + 1):
-        cell = ws.cell(row=1, column=column)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
-
-    parks = (report or {}).get('parks') or []
-    rows = [(item, _oktell_billing_park_label(item.get('park') or ''), False) for item in parks]
-    if parks:
-        rows.append(((report or {}).get('totals') or {}, 'Итого за период', True))
-    for item, label, is_total in rows:
-        ws.append(_oktell_billing_cumulative_values(item, label))
-        row = ws.max_row
-        # Имя парка — всегда текст: начни оно с «=», openpyxl записал бы его формулой.
-        ws.cell(row=row, column=1).data_type = 's'
-        for column, (_title, _width, fmt) in enumerate(_OKTELL_BILLING_CUMULATIVE_COLUMNS, start=1):
-            cell = ws.cell(row=row, column=column)
-            if fmt:
-                cell.alignment = center
-                if isinstance(cell.value, (int, float)):
-                    cell.number_format = fmt
-            if is_total:
-                cell.font = bold_font
-    if not parks:
-        ws.append(['За выбранный период и окно времени звонков не нашлось'])
-
-    for column, (_title, pixels, _fmt) in enumerate(_OKTELL_BILLING_CUMULATIVE_COLUMNS, start=1):
-        ws.column_dimensions[get_column_letter(column)].width = round(pixels / 7, 2)
-
-    output = BytesIO()
-    wb.save(output)
     output.seek(0)
     return output
 

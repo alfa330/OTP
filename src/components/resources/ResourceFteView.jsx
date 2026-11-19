@@ -176,9 +176,6 @@ const formatDate = (iso) => {
   return day && month && year ? `${day}.${month}.${year}` : iso;
 };
 
-// Первое число месяца той же ISO-даты — строкой: через Date и toISOString пояс +5 дал бы прошлый месяц.
-const isoMonthStart = (iso) => (iso ? `${String(iso).slice(0, 8)}01` : iso);
-
 const parseIsoDate = (iso) => {
   const [year, month, day] = String(iso || '').split('-').map(Number);
   if (!year || !month || !day) return null;
@@ -438,10 +435,6 @@ const BILLING_MODES = [
   { key: 'detail', label: 'Детализация' },
   { key: 'grouping', label: 'Группировка' },
 ];
-
-// Виды Excel, которые есть только у «Таксопарков»: ежедневный отчёт СЗоВ (#380) и таблица
-// с накопительным итогом за период (образец СЗоВ, 19.11.2026).
-const BILLING_PARK_ONLY_EXPORTS = new Set(['szov_daily', 'cumulative']);
 
 const BILLING_DETAIL_PAGE_SIZE = 25;
 
@@ -3533,14 +3526,13 @@ const ResourceFteView = ({
   const [isBillingLoading, setIsBillingLoading] = useState(false);
   const [isBillingExporting, setIsBillingExporting] = useState(false);
   const [billingExportType, setBillingExportType] = useState('general');
-  // Ежедневный отчёт СЗоВ (#380) и накопительный итог есть только у «Таксопарков»: на других
-  // вкладках выгружается общий вид, а вернулись на «Таксопарки» — выбор снова в силе.
-  const billingExportChoice = BILLING_PARK_ONLY_EXPORTS.has(billingExportType) && billingMode !== 'park'
+  // Формат ежедневного отчёта СЗоВ есть только у «Таксопарков» (#380): на других вкладках
+  // выгружается общий вид, а вернулись на «Таксопарки» — выбор СЗоВ снова в силе.
+  const billingExportChoice = billingExportType === 'szov_daily' && billingMode !== 'park'
     ? 'general'
     : billingExportType;
   // Период или время в выборе уже другие, а отчёт за них ещё не сформирован. Выгрузка берёт
-  // сформированный период, и файл молча ушёл бы за прежние даты (у «Накопительного итога» их в
-  // таблице не видно), поэтому Excel ждёт «Сформировать».
+  // сформированный период, и файл молча ушёл бы за прежние даты, поэтому Excel ждёт «Сформировать».
   const billingPeriodPending = billingFrom !== billingApplied.from || billingTo !== billingApplied.to
     || billingTimeFrom !== billingApplied.timeFrom || billingTimeTo !== billingApplied.timeTo;
   const [billingErrors, setBillingErrors] = useState({ park: '', line: '', operator: '', detail: '', grouping: '' });
@@ -3838,9 +3830,7 @@ const ResourceFteView = ({
         ? `operator_efficiency_${billingApplied.from}_${billingApplied.to}.xlsx`
         : billingExportChoice === 'szov_daily'
           ? `oktell_billing_park_szov_${billingApplied.from}_${billingApplied.to}.xlsx`
-          : billingExportChoice === 'cumulative'
-            ? `oktell_billing_park_cumulative_${isoMonthStart(billingApplied.to)}_${billingApplied.to}.xlsx`
-            : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark, billingOperatorDirection);
+          : cfg.billing.exportFileName(billingMode, billingApplied, billingGroupingPark, billingOperatorDirection);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -6174,15 +6164,11 @@ const ResourceFteView = ({
               label="Выгрузка Excel"
               subtitle={billingExportChoice === 'efficiency'
                 ? 'За полные дни, без фильтра времени'
-                : billingExportChoice === 'szov_daily'
-                  ? 'Часы и комментарии дня СЗоВ вписывает сама'
-                  : billingExportChoice === 'cumulative'
-                    ? `С ${formatDate(isoMonthStart(billingTo))} по ${formatDate(billingTo)}`
-                    : null}
+                : billingExportChoice === 'szov_daily' ? 'Часы и комментарии дня СЗоВ вписывает сама' : null}
               value={billingExportChoice}
               options={[
                 ['general', 'Общая'],
-                ...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ'], ['cumulative', 'Накопительный итог']] : []),
+                ...(billingMode === 'park' ? [['szov_daily', 'Отчёт СЗоВ']] : []),
                 ['efficiency', 'По эффективности'],
               ]}
               onChange={setBillingExportType}
@@ -8237,7 +8223,6 @@ const ResourceFteView = ({
                   >
                     <option value="general">Общая (текущая)</option>
                     {billingMode === 'park' ? <option value="szov_daily">Ежедневный отчёт СЗоВ</option> : null}
-                    {billingMode === 'park' ? <option value="cumulative">Накопительный итог</option> : null}
                     <option value="efficiency">По эффективности операторов</option>
                   </select>
                   )}
@@ -8257,9 +8242,7 @@ const ResourceFteView = ({
                         ? 'Скачать эффективность операторов по группам'
                         : billingExportChoice === 'szov_daily'
                           ? 'Скачать «Таксопарки» в формате ежедневного отчёта СЗоВ за применённый период'
-                          : billingExportChoice === 'cumulative'
-                            ? 'Скачать «Таксопарки» с накопительным итогом — с 1-го числа месяца по последний день периода'
-                            : 'Скачать текущий разрез в Excel за применённый период'}
+                          : 'Скачать текущий разрез в Excel за применённый период'}
                     className="inline-flex h-14 items-center gap-2 rounded-xl border-2 border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <FileDown size={16} className={isBillingExporting ? 'animate-pulse text-emerald-600' : 'text-emerald-600'} />
@@ -8328,9 +8311,6 @@ const ResourceFteView = ({
                   ) : null}
                   {cfg.hasBillingExportTypes && billingExportChoice === 'szov_daily' ? (
                     <span>В отчёте СЗоВ часы и комментарии дня вписываются вручную</span>
-                  ) : null}
-                  {cfg.hasBillingExportTypes && billingExportChoice === 'cumulative' ? (
-                    <span className="tabular-nums">Накопительный итог — с {formatDate(isoMonthStart(billingTo))} по {formatDate(billingTo)}</span>
                   ) : null}
                   {cfg.billing.modeHint ? (
                     <span>{cfg.billing.modeHint(billingMode, billingSlSeconds)}</span>
