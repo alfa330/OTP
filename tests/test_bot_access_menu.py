@@ -12,7 +12,9 @@
   * нажатие каждой кнопки пути первым забирает её обработчик — по ВСЕМ message_handler бота
     в порядке файла: перехватчик выше по файлу снова оставил бы человека без выхода;
   * путь маркетолога: вход → «Доступ🔑» → «Назад 🔙» → «Выход🚪» отвязывает Telegram;
-  * после «Сменить логин» и «Сменить пароль» человек снова в меню с «Доступ🔑».
+  * после «Сменить логин» и «Сменить пароль» человек снова в меню с «Доступ🔑»;
+  * сразу после входа — задачи, которые ждут человека (19.11.2026): поставленные до входа
+    иначе не доходили в Telegram никогда; сбой этого письма вход не ломает.
 Данные — выдуманные: репозиторий публичный.
 """
 
@@ -34,6 +36,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from twofa import rules  # noqa: E402
+from tasks import waiting_digest  # noqa: E402
 from tests import source_cache
 
 BOT_PY = source_cache.monolith_flat_path()
@@ -51,6 +54,8 @@ NAMES = ('_normalize_user_role', 'ROLE_HIERARCHY', '_get_role_level', '_has_min_
 HANDLERS = ('cancel_handler', 'start_command', 'start_auth', 'process_password', 'back_to_admin',
             'change_credentials_menu', 'change_login_start', 'process_new_login', 'change_password_start',
             'verify_current_password', 'process_new_password', 'logout_user')
+# Асинхронные помощники обработчиков — без декоратора, берутся как есть.
+ASYNC_HELPERS = ('_send_waiting_tasks_after_login',)
 
 # Обработчики с фильтром-функцией, которые тест умеет исполнить. Любой другой такой фильтр выше
 # обработчика кнопки пути роняет тест: статически не понять, не забирает ли он нажатие.
@@ -74,6 +79,12 @@ class FakeDb:
     def __init__(self, *users):
         self.users = {user[0]: list(user) + [None] * (9 - len(user)) for user in users}
         self.executed = []
+        self.waiting = {'total': 0, 'items': []}
+        self.waiting_asked = []
+
+    def get_tasks_waiting_for_assignee(self, user_id, limit=10):
+        self.waiting_asked.append((user_id, limit))
+        return self.waiting
 
     def get_user(self, telegram_id=None, id=None):
         for user in self.users.values():
@@ -141,6 +152,8 @@ class BotAccessMenuTest(unittest.TestCase):
                 cls.filters[node.name] = {k.arg: ast.unparse(k.value) for k in decorator.keywords}
                 node.decorator_list = []
                 body.append(node)
+            elif isinstance(node, ast.AsyncFunctionDef) and node.name in ASYNC_HELPERS:
+                body.append(node)
         cls.granted = set()
         cls.namespace = {
             'ReplyKeyboardMarkup': ReplyKeyboardMarkup, 'KeyboardButton': KeyboardButton,
@@ -148,9 +161,13 @@ class BotAccessMenuTest(unittest.TestCase):
             '_twofa_can_request_for': lambda user_id: user_id in cls.granted,
             'types': mock.MagicMock(), 'FSMContext': object, 'html': html, 'logging': logging,
             'pbkdf2_sha256': SimpleNamespace(hash=lambda password: 'hash:' + password),
+            # Письмо с задачами после входа: настоящий текст, ссылка — как у _build_task_deep_link.
+            'asyncio': asyncio, 'executor_pool': None, 'task_waiting_digest': waiting_digest,
+            '_build_task_deep_link': lambda task_id, task_key=None: (
+                'https://portal.test/?view=tasks&' + (f'task={task_key}' if task_key else f'task_id={task_id}')),
         }
         exec(compile(ast.Module(body=body, type_ignores=[]), str(BOT_PY), 'exec'), cls.namespace)
-        missing = [name for name in NAMES + HANDLERS if name not in cls.namespace]
+        missing = [name for name in NAMES + HANDLERS + ASYNC_HELPERS if name not in cls.namespace]
         if missing:
             raise AssertionError('не найдено в bot_schedule2.py: %s' % missing)
 
@@ -324,6 +341,59 @@ class BotAccessMenuTest(unittest.TestCase):
 
     def test_login_answer_carries_the_menu_with_the_access_row(self):
         self.assertEqual(self._log_in(), [[ACCESS]])  # кодов не выдано — одна строка, но выйти можно
+
+    # ─── Задачи, поставленные до входа ───────────────────────────────────────
+
+    def _log_in_answers(self):
+        state = self._state(user={'id': MARKETER, 'name': MARKETER_NAME, 'role': 'marketing_manager',
+                                  'login': 'test.marketer'})
+        message = self._message('верный пароль')
+        self._run('process_password', message, state)
+        state.finish.assert_awaited_once()
+        self.assertEqual(self.db.users[MARKETER][1], TG)  # вход состоялся
+        return message.answer.await_args_list
+
+    def test_login_sends_the_tasks_waiting_for_the_person(self):
+        self.db.waiting = {'total': 2, 'items': [
+            {'id': 7001, 'subject': 'Контент к празднику', 'status': 'assigned', 'priority': 'normal',
+             'due_at': None, 'key': 'PR-7', 'creator_name': 'Постановщик Тестовый'},
+            {'id': 7002, 'subject': 'Креативы', 'status': 'returned', 'priority': 'normal',
+             'due_at': None, 'key': None, 'creator_name': 'Постановщик Тестовый'},
+        ]}
+        with self.assertNoLogs(level='WARNING'):
+            welcome, digest = self._log_in_answers()
+        self.assertEqual(self._rows(welcome.kwargs['reply_markup']), [[ACCESS]])  # приветствие — первым
+        self.assertEqual(self.db.waiting_asked, [(MARKETER, waiting_digest.DIGEST_LIMIT)])
+        [text] = digest.args
+        self.assertTrue(text.startswith('<b>📋 Вас ждут задачи: 2</b>'))
+        self.assertIn('1. PR-7 · <a href="https://portal.test/?view=tasks&amp;task=PR-7">Контент к празднику</a>',
+                      text)
+        self.assertIn('2. <a href="https://portal.test/?view=tasks&amp;task_id=7002">Креативы</a>', text)
+        self.assertEqual(digest.kwargs, {'parse_mode': 'HTML', 'reply_markup': None,
+                                         'disable_web_page_preview': True})
+
+    def test_single_waiting_task_comes_with_the_open_button(self):
+        self.db.waiting = {'total': 1, 'items': [
+            {'id': 7001, 'subject': 'Контент', 'status': 'assigned', 'priority': 'normal', 'due_at': None,
+             'key': 'PR-7', 'creator_name': 'Постановщик Тестовый'}]}
+        _welcome, digest = self._log_in_answers()
+        self.assertEqual(digest.kwargs['reply_markup'], {'inline_keyboard': [[
+            {'text': 'Открыть задачу', 'url': 'https://portal.test/?view=tasks&task=PR-7'}]]})
+
+    def test_nothing_waiting_means_only_the_welcome(self):
+        with self.assertNoLogs(level='WARNING'):
+            answers = self._log_in_answers()
+        self.assertEqual(len(answers), 1)
+        self.assertEqual(self.db.waiting_asked, [(MARKETER, waiting_digest.DIGEST_LIMIT)])
+
+    def test_failed_tasks_letter_does_not_break_the_login(self):
+        broken = mock.patch.object(FakeDb, 'get_tasks_waiting_for_assignee', side_effect=RuntimeError('база'))
+        with broken, self.assertLogs(level='WARNING') as logs:
+            answers = self._log_in_answers()
+        self.assertEqual(len(answers), 1)  # только приветствие, без «Произошла ошибка»
+        self.assertEqual(self._rows(answers[0].kwargs['reply_markup']), [[ACCESS]])
+        self.assertTrue(any('не удалось прислать задачи' in line for line in logs.output), logs.output)
+        self.assertFalse(any(level == 'ERROR' for level in (r.levelname for r in logs.records)))
 
     def test_already_logged_in_answer_names_the_way_out_without_role_codes(self):
         self.db.users[MARKETER][1] = TG

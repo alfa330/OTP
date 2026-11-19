@@ -799,6 +799,48 @@ class TasksMixin:
             row = cursor.fetchone()
         return task_projects.format_task_key(row[0], row[1]) if row else None
 
+    def get_tasks_waiting_for_assignee(self, user_id, limit=10):
+        """Задачи, которые ждут человека, — бот присылает их сразу после входа.
+
+        Уведомление о постановке уходит один раз и только на уже привязанный Telegram:
+        вошедший в бота позже о поставленном раньше иначе не узнал бы ничем
+        (tasks/waiting_digest.py). «Ждут» — человек в составе исполнителей, задача
+        «Поставлена» или «Возвращена» и не в бэклоге (бэклог исполнителя не тревожит).
+        Свои задачи себе не в счёт: о них человек знает и так.
+
+        {"total": всего таких, "items": первые limit — ближний срок первым}.
+        """
+        with self._get_cursor() as cursor:
+            cursor.execute("""
+                SELECT t.id, t.subject, t.status, t.priority, t.due_at,
+                       p.code, t.project_number, creator.name,
+                       COUNT(*) OVER () AS total
+                  FROM task_assignees ta
+                  JOIN tasks t ON t.id = ta.task_id
+                  LEFT JOIN task_projects p ON p.id = t.project_id
+                  LEFT JOIN users creator ON creator.id = t.created_by
+                 WHERE ta.user_id = %s
+                   AND t.status IN ('assigned', 'returned')
+                   AND t.is_backlog = FALSE
+                   AND t.created_by IS DISTINCT FROM ta.user_id
+                 ORDER BY t.due_at ASC NULLS LAST, t.created_at DESC, t.id DESC
+                 LIMIT %s
+            """, (int(user_id), int(limit)))
+            rows = cursor.fetchall()
+        items = [
+            {
+                "id": row[0],
+                "subject": row[1],
+                "status": row[2],
+                "priority": row[3],
+                "due_at": row[4],
+                "key": task_projects.format_task_key(row[5], row[6]),
+                "creator_name": row[7],
+            }
+            for row in rows
+        ]
+        return {"total": int(rows[0][8]) if rows else 0, "items": items}
+
     def _task_now(self):
         return datetime.now()
 

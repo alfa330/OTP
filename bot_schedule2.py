@@ -53,6 +53,8 @@ from trainings import reports as training_reports
 from work_schedules import change_digest as schedule_change_digest
 # Проекты-доски «Задач» (задача #401): ключи и тексты ошибок, только stdlib.
 import task_projects
+# Задачи, поставленные до входа в бота, — одним сообщением сразу после входа. Только stdlib.
+from tasks import waiting_digest as task_waiting_digest
 from yataxi import reg_contest
 from yataxi import front_office_calls
 from database import (
@@ -44186,7 +44188,32 @@ async def process_login(message: types.Message, state: FSMContext):
             parse_mode='HTML'
         )
         await state.finish()
-        
+
+
+async def _send_waiting_tasks_after_login(message, user_id):
+    """Сразу после входа — задачи, которые ждут человека (tasks/waiting_digest.py).
+
+    Уведомление о постановке уходит только на уже привязанный Telegram, поэтому
+    поставленное до входа иначе не дошло бы никогда. Сбой этого письма вход не
+    отменяет: человек уже вошёл, задачи видны в портале.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        digest = await loop.run_in_executor(
+            executor_pool,
+            lambda: db.get_tasks_waiting_for_assignee(user_id, limit=task_waiting_digest.DIGEST_LIMIT),
+        )
+        built = task_waiting_digest.build_message(
+            digest, lambda task_id, key: _build_task_deep_link(task_id, task_key=key))
+        if not built:
+            return
+        text, reply_markup = built
+        await message.answer(text, parse_mode='HTML', reply_markup=reply_markup,
+                             disable_web_page_preview=True)
+    except Exception as error:
+        logging.warning(f"Вход в бота: не удалось прислать задачи пользователя {user_id}: {error}")
+
+
 @dp.message_handler(state=Auth.password)
 async def process_password(message: types.Message, state: FSMContext):
     password = message.text.strip()
@@ -44255,6 +44282,7 @@ async def process_password(message: types.Message, state: FSMContext):
         logging.info(f"Успешная авторизация: login={user['login']}, role={role}, chat_id={message.chat.id}")
         await state.finish()
         await dp.storage.reset_data(chat=message.chat.id)
+        await _send_waiting_tasks_after_login(message, user['id'])
 
     except Exception as e:
         logging.error(f"Ошибка при обработке пароля для login {user.get('login')}: {str(e)}")
