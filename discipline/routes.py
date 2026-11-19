@@ -215,6 +215,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 by_operator.setdefault(item['operator_id'], []).append(item)
             histories = queries.operator_histories(cursor, by_operator.keys(),
                                                    since=now - timedelta(days=service.HISTORY_DAYS))
+            # Период, уже покрытый актом, второго акта не потребует: человека,
+            # у которого контроль после акта сняли досрочно, жёлтый блок не держит.
+            act_triggers, act_members = service.history_act_sets(cursor, histories.values())
             pre_act = []
             on_control = {row['operator_id'] for row in control_rows}
             for operator_id, items in by_operator.items():
@@ -222,7 +225,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 act_index = catalog.act_step(settings.get('ladder'))
                 if not act_index or operator_id in on_control:
                     continue
-                step = catalog.next_step(histories.get(operator_id, []), now, settings)
+                step = catalog.next_step(histories.get(operator_id, []), now, settings, settings_for=settings_for,
+                                         act_triggers=act_triggers, act_members=act_members)
                 if step['action'] == catalog.STEP_ACT:
                     last = max(items, key=lambda i: i['occurred_at'])
                     pre_act.append({'operator_id': operator_id, 'operator_name': last.get('operator_name'),
@@ -269,6 +273,10 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 filters[key] = int(args[key])
         if args.get('type_title'):
             filters['type_title'] = args['type_title'][:200]
+        # Линия (п. 4.2: «группа/линия») — как она записана в записи на момент
+        # нарушения: человека могли перевести, а журнал ищет, где он нарушил.
+        if args.get('direction'):
+            filters['direction'] = args['direction'][:200]
         if args.get('search'):
             filters['search'] = args['search'][:100]
         department_id = _dept_param(ctx)
@@ -306,7 +314,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             choices = queries.journal_choices(cursor, ctx, today, filters) if not access.is_operator(ctx) else {}
         return jsonify({'items': _public(items, ctx), 'truncated': len(records) >= JOURNAL_LIMIT,
                         'types': choices.get('types', []), 'groups': choices.get('groups', []),
-                        'creators': choices.get('creators', []),
+                        'directions': choices.get('directions', []), 'creators': choices.get('creators', []),
                         'date_from': _iso(filters.get('date_from').date()) if filters.get('date_from') else None})
 
     @route('/records/export')
@@ -360,8 +368,10 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 moments = {r['id']: r['occurred_at'] for r in members if r}
                 act_records.sort(key=lambda r: (moments[r['id']], r['id']))
                 act_payload = {key: _iso(value) for key, value in act.items() if key not in ('record_ids',)}
+                trigger = next((r for r in [record] + members if r and r['id'] == act['trigger_record_id']), None)
                 act_payload.update({'files': [_file_payload(f, ctx, record) for f in act_files], 'records': act_records,
-                                    'basis_check': (item.get('act') or {}).get('basis_check')})
+                                    'basis_check': (item.get('act') or {}).get('basis_check'),
+                                    'composer_name': service.act_composer_name(cursor, act, trigger)})
             if internal:
                 perms = item.get('permissions') or {}
                 # Справочники — отдела самой записи: сервер сверяет меру и тип с
@@ -574,6 +584,15 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             service.approve_measure(cursor, ctx, record, now=now, base_url=web_app_base_url, outbox=outbox)
         return jsonify({'ok': True})
 
+    @route('/records/<int:record_id>/measure/remove', methods=('POST',))
+    def discipline_measure_remove(ctx, today, record_id, outbox, **_kw):
+        now = service.now_almaty()
+        with db._get_cursor() as cursor:
+            record = service.load_record(cursor, ctx, record_id, today, for_update=True)
+            service.remove_measure(cursor, ctx, record, _payload().get('reason'), now=now,
+                                   base_url=web_app_base_url, outbox=outbox)
+        return jsonify({'ok': True})
+
     # ── Файлы ───────────────────────────────────────────────────────────────
 
     def _file_access(cursor, ctx, row, today):
@@ -719,6 +738,22 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
 
     # ── Карточка оператора ─────────────────────────────────────────────────
 
+    def _card_audit_departments(ctx, profile, records):
+        """В журнал каких отделов лечь просмотру карточки (п. 14: «кто смотрел»).
+        Журнал читает руководитель СВОИХ отделов (queries.list_audit), поэтому
+        строка пишется туда, чьи сведения показаны: в нынешний отдел человека,
+        если он в разделе, и в отделы записей, которые карточка открыла, — по
+        строке на отдел. Человека, переведённого из трёх отделов, иначе никто бы
+        в журнале не увидел: строка ушла бы в отдел, которого у раздела нет; а
+        переведённого между ними — не увидел бы руководитель, чьи записи открыли."""
+        departments = {int(r['department_id']) for r in records if r.get('department_id') is not None}
+        department = profile.get('department_id')
+        if department is not None and int(department) in access.section_department_ids(ctx):
+            departments.add(int(department))
+        if not departments:
+            return [int(department) if department is not None else None]
+        return sorted(departments)
+
     @route('/operators/<int:operator_id>')
     def discipline_operator_card(ctx, today, operator_id, **_kw):
         now = service.now_almaty()
@@ -744,7 +779,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 # считает период по тому, что ему видно.
                 visible_ids = {r['id'] for r in records}
                 history = [h for h in history if h['id'] in visible_ids]
-            step = catalog.next_step(history, now, settings, settings_for=service.SettingsCache(cursor))
+            act_triggers, act_members = service.history_act_sets(cursor, [history])
+            step = catalog.next_step(history, now, settings, settings_for=service.SettingsCache(cursor),
+                                     act_triggers=act_triggers, act_members=act_members)
             control = queries.active_controls(cursor, [operator_id]).get(operator_id)
             if control and not (in_scope or own_card or access.can_manage_department(
                     ctx, control.get('department_id') or control.get('operator_department_id'))):
@@ -773,8 +810,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                 if in_scope or access.can_manage_department(
                                     ctx, c.get('department_id') or c.get('operator_department_id'))]
                 controls = service.control_rows(cursor, ctx, own_controls, today)
-                queries.audit(cursor, ctx, 'view_card', 'card', entity_id=operator_id, operator_id=operator_id,
-                              department_id=profile.get('department_id'))
+                for department in _card_audit_departments(ctx, profile, records):
+                    queries.audit(cursor, ctx, 'view_card', 'card', entity_id=operator_id, operator_id=operator_id,
+                                  department_id=department)
         photo = None
         if avatar_url and profile.get('avatar_bucket') and profile.get('avatar_blob_path'):
             try:
@@ -1022,7 +1060,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
         elif kind == 'types':
             result['rows'], result['columns'] = report.report_types([service.public_record(i, ctx) for i in items])
         elif kind == 'supervisors':
-            result['rows'] = report.report_supervisors(items)
+            departments = [department_id] if department_id else sorted(access.managed_department_ids(ctx))
+            result['rows'] = report.report_supervisors(items, queries.department_supervisors(cursor, departments, today))
             result['columns'] = report.SUPERVISORS_COLUMNS
         elif kind == 'groups':
             result['rows'] = report.report_groups(items)
@@ -1071,6 +1110,7 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 summary = data['summary']
                 context += [('Поставлено на контроль', summary['started']),
                             ('Прошли срок без нарушений', summary['clean']),
+                            ('Сняты досрочно', summary['removed_early']),
                             ('Дошли до расторжения', summary['termination']),
                             ('Ещё на контроле', summary['active'])]
             return _xlsx(report.workbook(title, context, sheets),

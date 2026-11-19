@@ -6,6 +6,7 @@ import useScreenBackGesture from '../common/useScreenBackGesture';
 import { apiError, saveBlob } from './disciplineApi';
 import { isPreviewable } from './disciplineRules';
 import { FileName, Spinner } from './disciplineUi';
+import { heicToJpeg, isHeic } from './heicImage';
 
 /*
  * Предпросмотр файла без скачивания (ТЗ п. 13): картинки — в общем окне
@@ -14,8 +15,11 @@ import { FileName, Spinner } from './disciplineUi';
  * iPhone во встроенном окне показывает только первую страницу, и акт на трёх
  * листах там не прочитать. Файл приходит с авторизацией через ручку раздела, а
  * не по ссылке хранилища: так каждое открытие попадает в журнал действий
- * (п. 14). Остальные виды (DOC, HEIC, видео) браузер показать не может — они
- * сразу скачиваются.
+ * (п. 14). HEIC с iPhone окно переводит в JPEG и показывает как картинку —
+ * если браузер его прочёл (Safari читает; Chrome — нет, тогда файл
+ * скачивается с подсказкой). Новые HEIC переводятся в JPEG ещё при загрузке
+ * (heicImage.js), так что здесь это путь для уже загруженных. Остальные виды
+ * (DOC, видео) браузер показать не может — они сразу скачиваются.
  *
  * Выход есть всегда — и пока файл грузится: крестик, Esc и жест «назад» на
  * телефоне; загрузка при этом обрывается (на зависшей мобильной сети экран
@@ -94,13 +98,28 @@ const FilePreview = ({ file, api, toast, onClose }) => {
         if (!file) { setState({ url: null, blob: null }); return undefined; }
         const controller = new AbortController();
         let objectUrl = null;
+        const heic = isHeic(file);
         const inline = isPreviewable(file);
         setState({ url: null, blob: null });
         setPdfFailed(false);
         setZoom(1);
         api.file(file.id, inline, controller.signal)
-            .then((blob) => {
+            .then(async (blob) => {
                 if (controller.signal.aborted) return;
+                if (heic) {
+                    // Показываем JPEG-копию, а «Скачать» отдаёт исходный HEIC.
+                    const jpeg = await heicToJpeg(blob);
+                    if (controller.signal.aborted) return;
+                    if (jpeg) {
+                        objectUrl = URL.createObjectURL(jpeg);
+                        setState({ url: objectUrl, blob });
+                        return;
+                    }
+                    saveBlob(blob, file.name);
+                    toast('Этот браузер не показывает фото HEIC — файл скачан. В Safari оно откроется здесь же.');
+                    onClose();
+                    return;
+                }
                 if (!inline) {
                     saveBlob(blob, file.name);
                     onClose();

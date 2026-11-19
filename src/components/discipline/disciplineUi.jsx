@@ -6,6 +6,7 @@ import MobileActionSheet from '../common/MobileActionSheet';
 import useIsMobileShell from '../common/useIsMobileShell';
 import DocumentScanner from './DocumentScanner';
 import { scanFormats } from './docScan';
+import { isHeic, prepareUploads } from './heicImage';
 import {
     fileSizeText, fmtDateTime, fmtShort as fmtShortDate, fmtTime as fmtClock, PLATE_TONES, stepChip, STATE_LABELS,
     STATE_TONES, TONE_CHIP,
@@ -265,10 +266,18 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
     const formats = React.useMemo(() => scanFormats(accept), [accept]);
     const [sheetOpen, setSheetOpen] = React.useState(false);
     const [scanning, setScanning] = React.useState(false);
+    // HEIC с iPhone переводится в JPEG до отправки (heicImage.js) — пока идёт
+    // перевод, у кнопки спиннер, как при загрузке.
+    const [converting, setConverting] = React.useState(false);
     const pick = () => inputRef.current?.click();
-    const off = disabled || busy;
+    const off = disabled || busy || converting;
     const className = `${dLinkAction} ${edge ? dLinkEdge : ''} ${invalid ? `!text-rose-600 ${INVALID_RING}` : ''}`;
-    const icon = busy ? <Spinner size={14} /> : <Paperclip size={14} />;
+    const icon = busy || converting ? <Spinner size={14} /> : <Paperclip size={14} />;
+    const take = (files) => {
+        if (!files.some(isHeic)) { onFiles(files); return; }
+        setConverting(true);
+        prepareUploads(files).then(onFiles).finally(() => setConverting(false));
+    };
     let trigger;
     if (!formats.any) {
         trigger = <button type="button" disabled={off} onClick={pick} className={className}>{icon}{label}</button>;
@@ -299,7 +308,7 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
                 onChange={(event) => {
                     const files = Array.from(event.target.files || []);
                     event.target.value = '';
-                    if (files.length) onFiles(files);
+                    if (files.length) take(files);
                 }}
             />
             <span ref={triggerRef} className="contents">{trigger}</span>
@@ -332,25 +341,32 @@ export const ACCEPT_ACT = '.pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application
 
 export { iosBtnPrimary, iosBtnSecondary, iosCard };
 
-/* Строка записи в списках: дата, кто, что, ступень. Нажатие открывает запись. */
-export const RecordRow = ({ item, onOpen, showOperator = true, dense = false }) => {
+/* Строка просроченной объяснительной (ТЗ п. 8.3: «запись подсвечивается
+   красным в журнале») — лёгкая заливка, а не красный текст одной строкой. */
+export const OVERDUE_ROW = 'bg-rose-50/70 hover:!bg-rose-50';
+
+/* Строка записи в списках: дата, кто, что, ступень. Нажатие открывает запись,
+   а ФИО — карточку сотрудника (ТЗ п. 11: «открывается кликом по ФИО из любого
+   списка»), когда есть onOpenOperator. Запись открывает кнопка на всю строку
+   под содержимым, ФИО — своя кнопка поверх неё: вложить кнопку в кнопку нельзя. */
+export const RecordRow = ({ item, onOpen, onOpenOperator = null, showOperator = true, dense = false }) => {
     const cancelled = item.state === 'cancelled';
+    const nameClass = `block truncate text-[13.5px] font-semibold text-slate-900 ${T.body} ${cancelled ? 'line-through opacity-60' : ''}`;
     return (
-        <button
-            type="button"
-            onClick={() => onOpen?.(item.id)}
-            className={`flex w-full items-center gap-3 px-4 text-left transition hover:bg-slate-50 active:bg-slate-100 ${dense ? 'py-2.5' : 'py-3'} xl:px-5 2xl:py-3.5`}
-        >
+        <div className={`relative flex w-full items-center gap-3 px-4 text-left transition hover:bg-slate-50 has-[button:active]:bg-slate-100 ${dense ? 'py-2.5' : 'py-3'} xl:px-5 2xl:py-3.5 ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
+            <button type="button" onClick={() => onOpen?.(item.id)} className="absolute inset-0 rounded-[inherit]"
+                    aria-label={[item.number, item.operator_name, item.type_title].filter(Boolean).join(', ')} />
             <span className={`w-[50px] shrink-0 text-[12.5px] tabular-nums text-slate-500 xl:w-[64px] ${T.sub}`}>
                 {fmtShortDate(item.occurred_at)}
                 <span className="block text-[11px] text-slate-400 2xl:text-[12px]">{fmtClock(item.occurred_at)}</span>
             </span>
             <span className="min-w-0 flex-1">
-                {showOperator && (
-                    <span className={`block truncate text-[13.5px] font-semibold text-slate-900 ${T.body} ${cancelled ? 'line-through opacity-60' : ''}`}>
+                {showOperator && (onOpenOperator ? (
+                    <button type="button" onClick={() => onOpenOperator(item.operator_id)}
+                            className={`relative z-[1] max-w-full text-left hover:text-blue-600 hover:underline ${nameClass}`}>
                         {item.operator_name}
-                    </span>
-                )}
+                    </button>
+                ) : <span className={nameClass}>{item.operator_name}</span>)}
                 <span className={`block truncate text-[12.5px] ${showOperator ? 'text-slate-500' : 'text-slate-800'} ${T.sub} ${cancelled ? 'line-through opacity-60' : ''}`}>
                     {item.type_title}
                     {item.explanation_overdue ? <span className="ml-1.5 font-medium text-rose-600">· срок объяснительной прошёл</span> : null}
@@ -361,6 +377,6 @@ export const RecordRow = ({ item, onOpen, showOperator = true, dense = false }) 
                 <StepChip item={item} />
             </span>
             <ChevronRight size={15} className="shrink-0 text-slate-300" />
-        </button>
+        </div>
     );
 };

@@ -23,7 +23,7 @@ const REPORTS = [
     { key: 'supervisors', title: 'По супервайзерам', text: 'Кто сколько зафиксировал — перекос видно сразу' },
     { key: 'groups', title: 'По группам и линиям', text: 'Где с дисциплиной хуже' },
     { key: 'measures', title: 'По мерам (удержания)', text: 'Утверждённые меры с суммами — файл для расчёта' },
-    { key: 'controls', title: 'Особый контроль', text: 'Поставлено, прошли без нарушений, дошли до расторжения' },
+    { key: 'controls', title: 'Особый контроль', text: 'Поставлено, прошли без нарушений, сняты досрочно, до расторжения' },
     { key: 'audit', title: 'Журнал действий', text: 'Кто что сделал и что открывал', icon: History },
 ];
 
@@ -149,10 +149,14 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
                 </div>
 
                 {selected === 'controls' && data?.summary && (
-                    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-                        {[['Поставлено', data.summary.started], ['Без нарушений', data.summary.clean],
-                            ['До расторжения', data.summary.termination], ['Ещё на контроле', data.summary.active]].map(([label, value]) => (
-                            <div key={label} className="rounded-2xl bg-white px-4 py-3 ring-1 ring-slate-200/70">
+                    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-5">
+                        {/* «Прошли без нарушений» — дошли до конца срока; снятые раньше
+                            срока — своей плиткой, а не успехом. Пятая плитка на телефоне —
+                            во всю ширину: ряд из двух не обрывается одной карточкой. */}
+                        {[['Поставлено', data.summary.started], ['Прошли без нарушений', data.summary.clean],
+                            ['Сняты досрочно', data.summary.removed_early], ['До расторжения', data.summary.termination],
+                            ['Ещё на контроле', data.summary.active]].map(([label, value], index, all) => (
+                            <div key={label} className={`rounded-2xl bg-white px-4 py-3 ring-1 ring-slate-200/70 ${index === all.length - 1 ? 'col-span-2 sm:col-span-1' : ''}`}>
                                 <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
                                 <div className="mt-1 text-[22px] font-semibold tabular-nums text-slate-900">{value ?? 0}</div>
                             </div>

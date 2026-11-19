@@ -63,6 +63,7 @@ export const createDisciplineApi = (apiBaseUrl, headers) => {
         training: (id, body) => send('post', `/records/${id}/training`, body),
         measure: (id, body) => send('post', `/records/${id}/measure`, body),
         approveMeasure: (id) => send('post', `/records/${id}/measure/approve`, {}),
+        removeMeasure: (id, reason) => send('post', `/records/${id}/measure/remove`, { reason }),
         file: (id, inline = false, signal) => blob(`/files/${id}`, inline ? { inline: 1 } : undefined, signal),
         invalidateFile: (id, reason) => send('post', `/files/${id}/invalidate`, { reason }),
         updateAct: (id, body) => send('patch', `/acts/${id}`, body),

@@ -308,13 +308,31 @@ def can_propose_measure(ctx, record, *, under_control=False):
     «Мера» обязательно уже при фиксации (п. 10.4) — тогда он её ПРЕДЛАГАЕТ, а
     утверждает руководитель. Утверждённую руководителем меру СВ не меняет;
     меру, применённую без утверждения (устное замечание), поправить может.
-    Руководитель назначает меру любой записи."""
+    Руководитель назначает меру любой записи.
+
+    Мера в записи — её поле, поэтому у СВ та же граница, что у правки
+    (can_edit_record, критерий приёмки 10): только в СВОЕЙ записи. Второй СВ
+    группы закрывает запись коллеги и оформляет отказ, но меру в ней не
+    меняет — иначе он подменил бы предложенное взыскание «устным замечанием»,
+    которое применяется сразу."""
     if not _open(record) or measure_locked(record):
         return False
     if manages_record(ctx, record):
         return True
     approved_by_head = record.get('measure_state') == 'approved' and record.get('measure_approved_by')
-    return under_control and supervises_record(ctx, record) and not approved_by_head
+    return (under_control and supervises_record(ctx, record) and _same(record.get('created_by'), _me(ctx))
+            and not approved_by_head)
+
+
+def can_remove_measure(ctx, record):
+    """Снять меру (п. 3: руководитель «назначает и снимает меры») — только
+    руководитель записи и с причиной. Снимают и у закрытой записи: взыскание
+    живёт дольше записи, досрочное снятие — его обычная судьба. И утверждённое
+    удержание тоже: тихо его не поправить (measure_locked), а снятие громкое —
+    причина в истории записи и в журнале, уведомление тем, кто получал весть
+    об утверждении. У отменённой записи мер нет."""
+    return (not record.get('cancelled_at') and bool(record.get('measure_title'))
+            and manages_record(ctx, record))
 
 
 def can_approve_measure(ctx, record):

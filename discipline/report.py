@@ -239,16 +239,26 @@ def _month_label(key):
         return key
 
 
-def report_supervisors(items):
-    """Сколько зафиксировал каждый: перекос в любую сторону — сигнал (п. 15.3)."""
-    counter = Counter()
-    operators = defaultdict(set)
+def report_supervisors(items, supervisors=()):
+    """Сколько зафиксировал каждый: перекос в любую сторону — сигнал (п. 15.3).
+
+    supervisors — СВ групп отдела (queries.department_supervisors): у кого за
+    период ни одной записи, тот тоже строка с нулём, иначе «не фиксирует» в
+    отчёте просто не видно. Счёт — по человеку, а не по ФИО: у двух СВ одно
+    имя бывает."""
+    totals, operators, names = OrderedDict(), defaultdict(set), {}
     for item in items:
-        name = item.get('created_by_name') or '—'
-        counter[name] += 1
-        operators[name].add(item['operator_id'])
-    return [{'name': name, 'total': total, 'operators': len(operators[name])}
-            for name, total in counter.most_common()]
+        key = item.get('created_by') or item.get('created_by_name') or '—'
+        names.setdefault(key, item.get('created_by_name') or '—')
+        totals[key] = totals.get(key, 0) + 1
+        operators[key].add(item['operator_id'])
+    for person in supervisors or ():
+        key = int(person['id'])
+        names.setdefault(key, person.get('name') or '—')
+        totals.setdefault(key, 0)
+    rows = [{'name': names[key], 'total': total, 'operators': len(operators[key])} for key, total in totals.items()]
+    rows.sort(key=lambda row: (-row['total'], row['name']))
+    return rows
 
 
 SUPERVISORS_COLUMNS = [('Зафиксировал', 'name', 32), ('Нарушений', 'total', 11), ('Операторов', 'operators', 12)]
@@ -322,14 +332,28 @@ MEASURE_TOTALS_COLUMNS = [('Мера', 'measure_title', 40), ('Финансов�
                           ('Применено', 'count', 11), ('Сумма, ₸', 'amount', 14)]
 
 
+def decided_early(control):
+    """Решение по контролю принято раньше срока окончания."""
+    decided = str(control.get('decided_at') or '')[:10]
+    end = str(control.get('end_date') or '')[:10]
+    return bool(decided and end and decided < end)
+
+
 def report_controls(controls, date_from, date_to):
     """Сколько поставлено, сколько прошло срок без нарушений, сколько дошло до
-    расторжения (п. 15.6) — по контролям, начавшимся в периоде."""
+    расторжения (п. 15.6) — по контролям, начавшимся в периоде.
+
+    «Прошли срок без нарушений» — те, по кому решение принято НЕ раньше срока
+    окончания и в период не было ни одного нарушения. Снятые досрочно — своей
+    цифрой: срока они не прошли, и в «прошли без нарушений» отчёт выдавал бы за
+    успех то, что контроль просто сняли."""
     started = [c for c in controls if date_from <= (c.get('start_date') or '') < date_to]
     summary = {
         'started': len(started),
         'by_source': Counter(c.get('source_label') for c in started),
-        'clean': sum(1 for c in started if c.get('decided_at') and not c.get('violations')),
+        'clean': sum(1 for c in started if c.get('decided_at') and not decided_early(c)
+                     and not c.get('violations') and c.get('decision') != 'termination'),
+        'removed_early': sum(1 for c in started if c.get('decision') == 'removed' and decided_early(c)),
         'termination': sum(1 for c in started if c.get('decision') == 'termination'),
         'active': sum(1 for c in started if not c.get('decided_at')),
     }
@@ -363,6 +387,7 @@ AUDIT_ACTIONS = {
     'measure_propose': 'Мера предложена',
     'measure_approve': 'Мера утверждена',
     'measure_apply': 'Мера применена (без утверждения)',
+    'measure_remove': 'Мера снята',
     'explanation_reset': 'Объяснительная снова нужна',
     'version_restored': 'Действующей снова стала прежняя версия файла',
     'act_draft': 'Черновик акта',
@@ -402,7 +427,9 @@ CHANGE_LABELS = {
     'file': 'Файл', 'witnesses': 'Свидетели', 'date': 'Дата', 'start': 'С', 'end': 'До',
     'description': 'Описание', 'shift_label': 'Смена', 'evidence_note': 'Тайм-код', 'manager_comment': 'Комментарий',
     'decision': 'Решение', 'comment': 'Комментарий', 'days': 'Дней', 'amount': 'Сумма', 'percent': 'Процент',
-    'composed_on': 'Дата составления', 'decision_title': 'Решение', 'approved_at': 'Утверждён', 'weight': 'Вес',
+    'state': 'Была', 'approved_by_name': 'Утвердил',
+    'composed_on': 'Дата составления', 'decision_title': 'Решение', 'decision_amount': 'Сумма',
+    'decision_percent': 'Процент', 'approved_at': 'Утверждён', 'weight': 'Вес',
     'needs_explanation': 'Нужна объяснительная', 'needs_evidence': 'Нужно доказательство', 'act': 'Акт',
     'report': 'Отчёт', 'rows': 'Строк', 'title': 'Название', 'severity': 'Тяжесть', 'is_other': '«Иное»',
     'is_archived': 'В архиве', 'needs_approval': 'Требует утверждения', 'finance': 'Финансовый эффект',
@@ -412,9 +439,12 @@ CHANGE_LABELS = {
     'explanation_addressee': 'Бланк объяснительной: кому',
     'telegram': 'Telegram', 'version': None, 'sha256': None, 'training_id': None, 'file_id': None,
     'type_id': None, 'approved_by': None, 'composed_by': None, 'decision_measure_id': None,
+    # Вид удержания и чем выражена мера — повтор названия меры: шум в строке журнала.
+    'decision_finance': None, 'decision_value_kind': None,
 }
 
 _VALUE_LABELS = {
+    'state': {'approved': 'утверждена', 'proposed': 'на утверждении'},
     'source': dict(catalog.CONTROL_SOURCES),
     'severity': catalog.SEVERITY_LABELS,
     'finance': catalog.FINANCE_LABELS,

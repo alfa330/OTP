@@ -160,7 +160,7 @@ const SummaryPanel = ({ api, toast, departmentId, version, openRecord, openOpera
             <Group title="Последние записи" cardClassName="p-0 overflow-hidden">
                 {(data.latest || []).length ? (
                     <div className="divide-y divide-slate-100">
-                        {data.latest.map((item) => <RecordRow key={item.id} item={item} onOpen={openRecord} />)}
+                        {data.latest.map((item) => <RecordRow key={item.id} item={item} onOpen={openRecord} onOpenOperator={openOperator} />)}
                     </div>
                 ) : (
                     <EmptyState title="Записей пока нет" text="Зафиксированные нарушения появятся здесь." />

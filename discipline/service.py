@@ -293,6 +293,7 @@ def enrich(cursor, ctx, records, now, *, settings_for=None):
                 'can_upload_explanation': access.can_upload_explanation(ctx, record),
                 'can_propose_measure': access.can_propose_measure(ctx, record, under_control=under_control),
                 'can_approve_measure': access.can_approve_measure(ctx, record),
+                'can_remove_measure': access.can_remove_measure(ctx, record),
                 'can_manage': access.manages_record(ctx, record),
             },
         })
@@ -352,7 +353,9 @@ def operator_context(cursor, ctx, operator_id, at, today, *, type_weight=1):
     department_id = profile['department_id']
     settings = queries.get_settings(cursor, department_id)
     history = queries.operator_histories(cursor, [operator_id]).get(int(operator_id), [])
-    step = catalog.next_step(history, at, settings, new_weight=type_weight, settings_for=SettingsCache(cursor))
+    triggers, members = history_act_sets(cursor, [history])
+    step = catalog.next_step(history, at, settings, new_weight=type_weight, settings_for=SettingsCache(cursor),
+                             act_triggers=triggers, act_members=members)
     control = queries.active_controls(cursor, [operator_id]).get(int(operator_id))
     if control and control['start_date'] > at.date():
         control = None
@@ -566,8 +569,8 @@ def create_record(cursor, ctx, payload, uploads, *, now, today, base_url=None, o
     }
     data.update(measure_changes)
     record_id = queries.insert_record(cursor, data)
-    for upload in uploads or ():
-        queries.insert_file(cursor, _file_row(upload, 'evidence', ctx, record_id=record_id, now=now))
+    evidence = [(queries.insert_file(cursor, _file_row(upload, 'evidence', ctx, record_id=record_id, now=now)), upload)
+                for upload in uploads or ()]
 
     settings_for = SettingsCache(cursor)
     settings = settings_for(department_id)
@@ -584,6 +587,13 @@ def create_record(cursor, ctx, payload, uploads, *, now, today, base_url=None, o
                       'step': catalog.step_title(info.get('action'), info.get('explanation_no')),
                       'ordinal': info.get('ordinal'), 'files': len(uploads or ()),
                       'measure': measure_changes.get('measure_title')})
+    # Каждый файл доказательства — своей строкой, как при добавлении позже
+    # (п. 14: «загрузка … любого файла»): одно число «Файлов: 2» не говорит, что
+    # именно легло в запись, а сверить имя и хеш потом не с чем.
+    for file_id, upload in evidence:
+        queries.audit(cursor, ctx, 'upload_evidence', 'file', entity_id=file_id, operator_id=operator_id,
+                      department_id=department_id, record_id=record_id,
+                      changes={'file': upload['name'], 'sha256': upload.get('sha256')})
 
     settle_ladder(cursor, ctx, operator_id, before, since=occurred_at, now=now, today=today,
                   base_url=base_url, outbox=outbox, new_record_id=record_id)
@@ -600,6 +610,14 @@ def _file_row(upload, kind, ctx, *, record_id=None, act_id=None, department_id=N
         'bucket': upload.get('bucket'), 'blob_path': upload['blob_path'], 'uploaded_by': ctx['user_id'],
         'uploaded_at': now or now_almaty(),
     }
+
+
+def history_act_sets(cursor, histories):
+    """Записи-основания актов и записи из их состава по истории людей — для
+    catalog.next_step: «что будет со следующей записью» считается с теми же
+    актами, что и сохранённая запись (operator_actions)."""
+    record_ids = [record['id'] for history in histories for record in history or ()]
+    return _act_sets(queries.acts_by_record(cursor, record_ids))
 
 
 def _act_sets(acts_map):
@@ -1101,15 +1119,74 @@ def set_measure(cursor, ctx, record, payload, *, now, base_url=None, outbox=None
                                         _int(payload.get('measure_id'), 'мера'), payload, manager=manager, now=now)
     queries.update_record(cursor, record['id'], changes)
     applied = changes.get('measure_state') == 'approved'
+    # Прежние сумма и процент — парой «было → стало», как мера: замена меры с
+    # 5 000 на 15 000 ₸ иначе выглядела бы в журнале назначением с нуля (п. 14:
+    # «назначение, изменение и отмена меры» — со старым и новым значением).
     queries.audit(cursor, ctx, 'measure_approve' if manager else ('measure_apply' if applied else 'measure_propose'),
                   'measure',
                   entity_id=record['id'], operator_id=record['operator_id'], department_id=record['department_id'],
                   record_id=record['id'], changes={
                       'measure': [record.get('measure_title'), measure['title']],
-                      'amount': changes.get('measure_amount'), 'percent': changes.get('measure_percent')})
+                      'amount': _money_pair(record.get('measure_amount'), changes.get('measure_amount')),
+                      'percent': _money_pair(record.get('measure_percent'), changes.get('measure_percent'))})
     if manager:
         _notify_finance(cursor, ctx, record, measure, changes, base_url=base_url, outbox=outbox)
     queries.clear_kind(cursor, record_id=record['id'], kinds=['under_control'] if manager else [])
+
+
+def _money(value):
+    """Сумма или процент из базы (Decimal) — числом для журнала; ноль и пусто — None."""
+    if value in (None, ''):
+        return None
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
+def _money_pair(before, after):
+    """«Было → стало», если что-то из двух есть: пустая пара журнал не засоряет."""
+    before, after = _money(before), _money(after)
+    if before is None and after is None:
+        return None
+    return [before, after]
+
+
+MEASURE_FIELDS_CLEARED = {
+    'measure_id': None, 'measure_title': None, 'measure_finance': None, 'measure_value_kind': None,
+    'measure_amount': None, 'measure_percent': None, 'measure_state': None, 'measure_proposed_by': None,
+    'measure_approved_by': None, 'measure_approved_at': None,
+}
+
+
+def remove_measure(cursor, ctx, record, reason, *, now, base_url=None, outbox=None):
+    """Снять меру (п. 3 и 14: «назначение, изменение и отмена меры»). Поля меры
+    у записи очищаются, а всё, что было — мера, сумма, процент, кто утвердил, —
+    ложится в историю записи вместе с причиной. На особом контроле запись
+    снова ждёт меру: закрыть её без утверждённой меры по-прежнему нельзя.
+
+    Снятое утверждённое удержание — событие для тех же людей, кому ушла весть
+    об утверждении (выгрузка за месяц утверждения могла его уже забрать)."""
+    if not access.can_remove_measure(ctx, record):
+        raise DisciplineError('Снимает меру руководитель', 403)
+    reason = _text(reason, 1000)
+    if len(reason) < 5:
+        raise DisciplineError('Укажите причину снятия меры', code='REASON')
+    queries.update_record(cursor, record['id'], dict(MEASURE_FIELDS_CLEARED))
+    queries.audit(cursor, ctx, 'measure_remove', 'measure', entity_id=record['id'],
+                  operator_id=record['operator_id'], department_id=record['department_id'], record_id=record['id'],
+                  changes={'measure': record.get('measure_title'), 'amount': _money(record.get('measure_amount')),
+                           'percent': _money(record.get('measure_percent')),
+                           'state': 'approved' if record.get('measure_state') == 'approved' else 'proposed',
+                           'approved_by_name': record.get('measure_approved_by_name'), 'reason': reason})
+    if record.get('measure_state') == 'approved' and (record.get('measure_finance') or 'none') != 'none':
+        value = money_text(record.get('measure_amount'), record.get('measure_percent'))
+        value = (' · ' + value) if value else ''
+        settings = queries.get_settings(cursor, record['department_id'])
+        managers = queries.department_managers(cursor, [record['department_id']])
+        notify.push(cursor, outbox, event='measure_finance', user_ids=managers, settings=settings,
+                    title='Снята мера с финансовым эффектом: %s%s' % (record.get('measure_title') or '', value),
+                    body='%s — причина: %s. Если удержание уже ушло в выгрузку, сообщите бухгалтерии'
+                    % (record.get('operator_name', ''), reason),
+                    record_id=record['id'], tone='warning', base_url=base_url, exclude=[ctx['user_id']])
 
 
 def invalidate_file(cursor, ctx, row, record, reason, *, now, base_url=None, outbox=None):
@@ -1124,6 +1201,9 @@ def invalidate_file(cursor, ctx, row, record, reason, *, now, base_url=None, out
                   department_id=(record or {}).get('department_id') or row.get('department_id'),
                   record_id=(record or {}).get('id'), changes={'file': row['file_name'], 'reason': reason})
     kind = row['kind']
+    if kind == 'act' and row.get('act_id'):
+        _restore_act_version(cursor, ctx, row, record)
+        return
     if (kind not in ('explanation', 'refusal_act') or not record or row.get('record_id') != record['id']
             or record.get('closed_at') or record.get('cancelled_at')):
         return
@@ -1164,6 +1244,23 @@ def invalidate_file(cursor, ctx, row, record, reason, *, now, base_url=None, out
                 title='Нужна объяснительная', body='%s. Прежний файл признан недействительным: %s. Срок — до %s'
                 % (notify.describe(record), reason, due.strftime('%d.%m %H:%M') if due else ''),
                 record_id=record['id'], tone='warning', base_url=base_url, exclude=[ctx['user_id']])
+
+
+def _restore_act_version(cursor, ctx, row, record):
+    """Подписанный акт признан недействительным. Если это была последняя
+    действующая версия, а прежняя цела, — действует снова прежняя, как у
+    объяснительной: иначе акт, подписанный и приложенный раньше, пропадал бы,
+    и запись-основание снова требовала бы акт. Прежней нет — акт ждёт файл."""
+    current = [f for f in queries.files_for(cursor, act_ids=[row['act_id']], kind='act')
+               if not f.get('invalid_at') and not f.get('superseded_at')]
+    if current:
+        return
+    restored = queries.restore_previous_version(cursor, None, 'act', act_id=row['act_id'])
+    if restored:
+        queries.audit(cursor, ctx, 'version_restored', 'file', entity_id=restored['id'],
+                      operator_id=(record or {}).get('operator_id'),
+                      department_id=(record or {}).get('department_id') or row.get('department_id'),
+                      record_id=(record or {}).get('id'), changes={'file': restored['file_name']})
 
 
 def approve_measure(cursor, ctx, record, *, now, base_url=None, outbox=None):
@@ -1216,6 +1313,24 @@ def act_leader_id(approved_by, head_id):
     if approved_by is not None and int(approved_by) in access.MANAGER_GRANTS and int(approved_by) != head_id:
         return head_id
     return approved_by or head_id
+
+
+def act_composer_name(cursor, act, trigger):
+    """«Кто составил» акт (п. 9: обязательное поле акта) — тот же человек, что
+    в черновике DOCX (act_draft_context): СВ, зафиксировавший нарушение-основание.
+    Основание завёл не СВ (глава, супер-админ) — тот, кто отметил составление
+    (дату или подписанный файл, composed_by). Отметка composed_by сама по себе —
+    не составитель: её ставит руководитель вместе с датой, и он вышел бы в
+    карточке и составителем, и утвердившим."""
+    department_id = act.get('department_id')
+    head_id = (queries.department_heads(cursor, [department_id]).get(int(department_id))
+               if department_id is not None else None)
+    author_id = (trigger or {}).get('created_by')
+    if author_id is not None:
+        author = queries.people(cursor, [author_id]).get(int(author_id)) or {}
+        if access.normalize_role(author.get('role')) == 'sv' and int(author_id) != head_id:
+            return author.get('name')
+    return act.get('composed_by_name')
 
 
 def act_draft_context(cursor, ctx, act, trigger, *, settings_for):

@@ -550,3 +550,59 @@ class FileNameDisplayTests(unittest.TestCase):
         self.assertIn('<FileName name={file.name} className="flex-1 text-[14px] font-medium" />', preview)
         settings = (self.DIR / 'SettingsPanel.jsx').read_text(encoding='utf-8')
         self.assertIn('<FileName name={data.template.name} />', settings)
+
+
+class TzGapWiringTests(unittest.TestCase):
+    """Сверка 23.10.2026, мелочи интерфейса: проводка, которую сборка не ловит."""
+
+    @staticmethod
+    def _src(name):
+        return (ROOT / 'src' / 'components' / 'discipline' / name).read_text(encoding='utf-8')
+
+    def test_name_opens_the_card_from_journal_and_feed(self):
+        # П. 11: карточка «открывается кликом по ФИО из любого списка».
+        journal = self._src('JournalPanel.jsx')
+        self.assertIn('event.stopPropagation(); openOperator(item.operator_id);', journal)
+        self.assertIn('<RecordRow key={item.id} item={item} onOpen={openRecord} onOpenOperator={openOperator} />', journal)
+        self.assertIn('onOpenOperator={openOperator}', self._src('SummaryPanel.jsx'))
+        ui = self._src('disciplineUi.jsx')
+        self.assertIn('onClick={() => onOpenOperator(item.operator_id)}', ui)
+        # Кнопка в кнопке недопустима — строка открывает запись кнопкой под содержимым.
+        row = ui[ui.index('export const RecordRow'):]
+        self.assertIn('<div className={`relative flex w-full', row)
+        self.assertIn('className="absolute inset-0', row)
+
+    def test_overdue_row_is_highlighted(self):
+        # П. 8.3: «запись подсвечивается красным в журнале».
+        for name in ('JournalPanel.jsx', 'disciplineUi.jsx', 'OperatorCard.jsx'):
+            self.assertIn('item.explanation_overdue ? OVERDUE_ROW', self._src(name), name)
+
+    def test_journal_filters_by_line(self):
+        journal = self._src('JournalPanel.jsx')
+        self.assertIn("direction: value || ''", journal)
+        self.assertIn('data?.directions', journal)
+
+    def test_card_records_expand_with_author_status_and_files(self):
+        card = self._src('OperatorCard.jsx')
+        self.assertIn('aria-expanded={open}', card)
+        self.assertIn('Зафиксировал {item.created_by_name}', card)
+        self.assertIn('recordFiles(item, documents)', card)
+        self.assertIn('Открыть запись', card)
+
+    def test_act_shows_composer_and_measure_can_be_removed(self):
+        sheet = self._src('RecordSheet.jsx')
+        self.assertIn('act.composer_name', sheet)
+        self.assertIn('api.removeMeasure(item.id, reason.trim())', sheet)
+        self.assertIn('perms.can_remove_measure', sheet)
+        self.assertIn("removeMeasure: (id, reason) => send('post', `/records/${id}/measure/remove`, { reason }),",
+                      self._src('disciplineApi.js'))
+
+    def test_heic_is_converted_on_upload_and_shown_in_preview(self):
+        ui = self._src('disciplineUi.jsx')
+        self.assertIn("import { isHeic, prepareUploads } from './heicImage';", ui)
+        self.assertIn('prepareUploads(files).then(onFiles)', ui)
+        preview = self._src('FilePreview.jsx')
+        self.assertIn('const jpeg = await heicToJpeg(blob);', preview)
+        # Пережатый HEIC уходит JPEG-ом, а JPEG сервер принимает у каждого вида с фото.
+        for kind in ('evidence', 'explanation'):
+            self.assertIn('jpg', catalog.FILE_KINDS[kind]['ext'])

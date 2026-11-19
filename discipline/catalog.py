@@ -630,16 +630,48 @@ def current_window(records, at, settings):
                    and in_window(r['occurred_at'], at, settings)), key=_order_key)
 
 
-def next_step(records, at, settings, new_weight=1, settings_for=None):
+# Запись, которой ещё нет: для «что будет, если зафиксировать сейчас». Номер
+# больше любого настоящего — при равном времени она встаёт последней, как и
+# встанет после сохранения (новый id всегда больше прежних).
+NEW_RECORD_ID = 2 ** 62
+_NEW_RECORD_DEPARTMENT = '__new__'
+
+
+def _new_record_covered(records, at, settings, new_weight, settings_for, act_triggers, act_members):
+    """Будет ли новая запись на ступени «акт» покрыта уже составленным актом —
+    тем же правилом, что сохранённая (covered_by_act): её окно и окна актов
+    пересчитываются вместе с ней."""
+    virtual = {'id': NEW_RECORD_ID, 'occurred_at': at, 'created_at': None, 'weight': new_weight,
+               'department_id': _NEW_RECORD_DEPARTMENT, 'cancelled': False}
+
+    def rules(department_id, created_at):
+        if department_id == _NEW_RECORD_DEPARTMENT:
+            return settings
+        return settings_for(department_id, created_at)
+
+    steps = compute_steps(list(records or ()) + [virtual], rules)
+    return covered_by_act(NEW_RECORD_ID, steps, act_triggers, act_members)
+
+
+def next_step(records, at, settings, new_weight=1, settings_for=None, act_triggers=(), act_members=()):
     """Что будет, если зафиксировать нарушение сейчас: номер, ступень, № объяснительной.
 
     records — вся история человека: ступени записей окна считаются так же, как
     после сохранения (по всей истории и по правилам своего дня), иначе номер
-    объяснительной на плашке расходился бы с номером в журнале."""
+    объяснительной на плашке расходился бы с номером в журнале.
+
+    act_triggers / act_members — записи-основания актов и записи из их состава
+    (service._act_sets). Период, уже покрытый актом, второго акта не требует
+    (covered_by_act): без них плашка обещала бы «потребуется акт», а сохранённая
+    запись шла бы объяснительной — так и было после досрочного снятия контроля."""
     window = current_window(records, at, settings)
-    infos = compute_steps(records, settings_for or (lambda *_: settings))
+    settings_for = settings_for or (lambda *_: settings)
+    infos = compute_steps(records, settings_for)
     weighted = sum(_weight(item) for item in window) + max(1, int(new_weight or 1))
     action = step_action(weighted, settings.get('ladder'))
+    if action == STEP_ACT and act_triggers and _new_record_covered(
+            records, at, settings, max(1, int(new_weight or 1)), settings_for, act_triggers, act_members):
+        action = STEP_EXPLANATION
     explanation_no = None
     if action in EXPLANATION_STEPS:
         explanation_no = 1 + sum(1 for item in window

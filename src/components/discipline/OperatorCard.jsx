@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Plus, ShieldAlert } from 'lucide-react';
+import { ChevronRight, FileText, Plus, ShieldAlert } from 'lucide-react';
 import { IosSegmented } from '../ui/ios';
 import useIsMobileShell from '../common/useIsMobileShell';
 import { apiError } from './disciplineApi';
-import { Chip, dBtnPrimary, EmptyState, FileList, Group, LoadingRows, RecordRow, T } from './disciplineUi';
-import { daysLeftText, fmtDate, fmtMoney, pluralViolations } from './disciplineRules';
+import {
+    Chip, dBtnPrimary, dBtnSecondary, EmptyState, FileList, FileName, Group, LoadingRows, OVERDUE_ROW, StateBadge,
+    StepChip, T,
+} from './disciplineUi';
+import { daysLeftText, fmtDate, fmtMoney, fmtShort, fmtTime, pluralViolations } from './disciplineRules';
 
 /*
  * Карточка оператора (ТЗ п. 11): открывается кликом по ФИО из любого списка.
@@ -27,6 +30,75 @@ const initials = (name) => String(name || '').split(/\s+/).filter(Boolean).slice
 
 const measureValue = (row) => (row.measure_amount ? fmtMoney(row.measure_amount)
     : row.measure_percent ? `${Number(row.measure_percent)} %` : null);
+
+const currentFile = (file) => !file.superseded && !file.invalid;
+
+/* Файлы записи для раскрытой строки (п. 11): действующие версии объяснительной
+   (или акта об отказе) и подписанного акта. Документы карточки приходят одним
+   списком — свои у записи по record_id, у акта по act_id. */
+export const recordFiles = (item, documents = []) => {
+    const own = documents.filter((f) => currentFile(f) && f.record_id === item.id
+        && (f.kind === 'explanation' || f.kind === 'refusal_act'));
+    const actId = item.act?.id;
+    const act = actId ? documents.filter((f) => currentFile(f) && f.act_id === actId && f.kind === 'act') : [];
+    return [...own, ...act];
+};
+
+/* Запись во вкладке «Нарушения» (п. 11): «каждая запись сворачиваемая: дата,
+   тип, кто зафиксировал, статус, ссылки на файлы объяснительной и акта».
+   Свёрнутая — дата, тип и ступень, как строка журнала; раскрытая — остальное и
+   переход к самой записи. */
+const CardRecord = ({ item, documents, internal, onOpenRecord, onOpenFile }) => {
+    const [open, setOpen] = useState(false);
+    const cancelled = item.state === 'cancelled';
+    const files = internal ? recordFiles(item, documents) : [];
+    return (
+        <li>
+            <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}
+                    className={`flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 active:bg-slate-100 xl:px-5 2xl:py-3.5 ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
+                <span className={`w-[50px] shrink-0 text-[12.5px] tabular-nums text-slate-500 xl:w-[64px] ${T.sub}`}>
+                    {fmtShort(item.occurred_at)}
+                    <span className="block text-[11px] text-slate-400 2xl:text-[12px]">{fmtTime(item.occurred_at)}</span>
+                </span>
+                <span className={`min-w-0 flex-1 truncate text-[13px] text-slate-800 ${T.sub} ${cancelled ? 'line-through opacity-60' : ''}`}>
+                    {item.type_title}
+                    {item.explanation_overdue ? <span className="ml-1.5 font-medium text-rose-600">· срок объяснительной прошёл</span> : null}
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                    {item.under_control && !cancelled ? <Chip tone="red">Контроль</Chip> : null}
+                    <StepChip item={item} />
+                </span>
+                <ChevronRight size={15} className={`shrink-0 text-slate-300 transition-transform ${open ? 'rotate-90' : ''}`} />
+            </button>
+            {open && (
+                <div className="space-y-2.5 px-4 pb-3.5 xl:px-5 sm:pl-[78px] xl:pl-[96px]">
+                    <div className={`flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-slate-600 ${T.sub}`}>
+                        <StateBadge state={item.state} />
+                        <span className="tabular-nums text-slate-400">{item.number}</span>
+                        {internal && item.created_by_name ? <span>Зафиксировал {item.created_by_name}</span> : null}
+                    </div>
+                    {files.length > 0 && (
+                        <ul className="flex flex-wrap gap-1.5">
+                            {files.map((file) => (
+                                <li key={file.id} className="min-w-0 max-w-full">
+                                    <button type="button" onClick={() => onOpenFile?.(file)}
+                                            className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[12px] text-slate-700 hover:bg-slate-200">
+                                        <FileText size={12} className="shrink-0 text-slate-400" />
+                                        <span className="shrink-0 text-slate-500">{file.kind_label}:</span>
+                                        <FileName name={file.name} className="min-w-0" />
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    <button type="button" className={`${dBtnSecondary} !py-1.5 !text-[12.5px]`} onClick={() => onOpenRecord(item.id)}>
+                        Открыть запись
+                    </button>
+                </div>
+            )}
+        </li>
+    );
+};
 
 export const useOperatorCard = ({ operatorId, open = true, api, version, onOpenRecord, onOpenFile, onCreate }) => {
     const mobile = useIsMobileShell();
@@ -123,9 +195,12 @@ export const useOperatorCard = ({ operatorId, open = true, api, version, onOpenR
             {tab === 'records' && (
                 <Group cardClassName="p-0 overflow-hidden">
                     {(shown.records || []).length ? (
-                        <div className="divide-y divide-slate-100">
-                            {shown.records.map((item) => <RecordRow key={item.id} item={item} onOpen={onOpenRecord} showOperator={false} />)}
-                        </div>
+                        <ul className="divide-y divide-slate-100">
+                            {shown.records.map((item) => (
+                                <CardRecord key={item.id} item={item} documents={shown.documents || []}
+                                            internal={'description' in item} onOpenRecord={onOpenRecord} onOpenFile={onOpenFile} />
+                            ))}
+                        </ul>
                     ) : <EmptyState title="Нарушений нет" />}
                 </Group>
             )}

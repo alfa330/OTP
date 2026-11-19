@@ -382,6 +382,7 @@ def test_hidden_act_records_are_stubs_but_the_act_draft_lists_all(client, db):
 
 
 def test_card_does_not_show_other_departments_control(client, db):
+    from discipline import service
     from tests.test_discipline_postgres import NOW as T0, create
 
     with db.cursor() as cur:
@@ -391,9 +392,11 @@ def test_card_does_not_show_other_departments_control(client, db):
                     (T0.date() - timedelta(days=1), OP_A))
         cur.execute('INSERT INTO group_operator_memberships (group_id, operator_id, start_date) VALUES (20, %s, %s)',
                     (OP_A, T0.date()))
+    # Срок — от сегодняшнего дня: ручка ставит контроль с сегодня, и срок от
+    # зашитой даты теста (NOW) с 31.10.2026 стал «окончанием раньше начала».
     response = client.post('/api/discipline/controls', headers=h(200), json={
         'operator_id': OP_A, 'source': 'manual', 'reason': 'Решение главы ОП',
-        'end_date': (T0.date() + timedelta(days=10)).isoformat()})
+        'end_date': (service.today_almaty() + timedelta(days=10)).isoformat()})
     assert response.status_code in (200, 201), response.get_json()
     card = client.get('/api/discipline/operators/%d' % OP_A, headers=h(HEAD_SZOV)).get_json()
     assert card['control'] is None and card['controls'] == []

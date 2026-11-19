@@ -450,6 +450,12 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
     };
 
     const approvedValue = measureValue(act.decision_amount, act.decision_percent);
+    // «Составлен …, составил …» (п. 9: обязательные поля акта). Пока руководитель
+    // правит акт, дата стоит в поле формы ниже — второй раз её не пишем.
+    const formShown = manage && !act.approved_at;
+    let composedLine = null;
+    if (act.composed_on && formShown) composedLine = act.composer_name ? `Составил ${act.composer_name}` : null;
+    else if (act.composed_on) composedLine = `Составлен ${fmtDate(act.composed_on)}${act.composer_name ? `, составил ${act.composer_name}` : ''}`;
     return (
         <Group title={`Акт ${act.number}`}
                right={<Chip tone={signed ? 'blue' : 'red'}>{act.approved_at ? 'Утверждён' : signed ? 'Подписан' : 'Черновик'}</Chip>}>
@@ -494,6 +500,7 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
                     </div>
                     {errors.file && <div className={`px-1 text-[12px] font-medium text-rose-600 ${T.note}`}>{errors.file}</div>}
                 </div>
+                {composedLine ? <div className={`text-[12.5px] text-slate-500 ${T.sub}`}>{composedLine}</div> : null}
                 {act.approved_at && act.decision_title ? (
                     <div className={`text-[13px] text-slate-700 ${T.sub}`}>
                         Решение: <span className="font-semibold text-slate-900">{act.decision_title}</span>
@@ -543,6 +550,49 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
 
 const MEASURE_FIELD_CODES = { MEASURE_AMOUNT: 'amount', MEASURE_PERCENT: 'percent' };
 
+/* «Снять меру» (ТЗ п. 3: руководитель «назначает и снимает меры»): причина
+   обязательна — она ложится в историю записи и журнал действий вместе со всем,
+   что было у меры. Утверждённое удержание тоже снимается, но с предупреждением:
+   выгрузка за месяц утверждения могла его уже забрать. */
+const RemoveMeasure = ({ item, api, toast, reload, onCancel }) => {
+    const [reason, setReason] = useState('');
+    const [error, setError] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const money = item.measure_state === 'approved' && item.measure_finance && item.measure_finance !== 'none';
+    const submit = async () => {
+        if (reason.trim().length < 5) { setError('Причина — минимум 5 символов'); return; }
+        setBusy(true);
+        try {
+            await api.removeMeasure(item.id, reason.trim());
+            toast('Мера снята');
+            reload();
+        } catch (err) {
+            setError(apiError(err));
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <div className="space-y-2.5 rounded-2xl bg-slate-50 p-3.5">
+            {money && (
+                <div className="flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-900 ring-1 ring-amber-200/70">
+                    <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                    <span>Удержание уже утверждено и могло попасть в выгрузку на удержания — после снятия сообщите бухгалтерии.</span>
+                </div>
+            )}
+            <Field label="Причина снятия" error={error}>
+                <textarea rows={2} autoFocus className={`${dInput} resize-y ${error ? INVALID_RING : ''}`}
+                          placeholder="Например: взыскание снято досрочно приказом" value={reason}
+                          onChange={(e) => { setReason(e.target.value); setError(null); }} />
+            </Field>
+            <div className="flex justify-end gap-2">
+                <button type="button" className={dBtnSecondary} onClick={onCancel} disabled={busy}>Не снимать</button>
+                <button type="button" className={dBtnDanger} onClick={submit} disabled={busy}>Снять меру</button>
+            </div>
+        </div>
+    );
+};
+
 const MeasureSection = ({ item, api, toast, reload, measures }) => {
     const perms = item.permissions || {};
     const [form, setForm] = useState({ measure_id: null, measure_amount: '', measure_percent: '' });
@@ -550,6 +600,9 @@ const MeasureSection = ({ item, api, toast, reload, measures }) => {
     const [errors, setErrors] = useState({});
     // Мера на записи без контроля не обязательна — поле прячется за кнопку.
     const [open, setOpen] = useState(false);
+    const [removing, setRemoving] = useState(false);
+    // Сняли меру или запись сменилась — поле причины закрыто.
+    useEffect(() => { setRemoving(false); }, [item.id, item.measure_title]);
     const selected = measures.find((m) => m.id === form.measure_id) || null;
     const show = item.under_control || item.measure_title || perms.can_manage;
     if (!show) return null;
@@ -602,23 +655,33 @@ const MeasureSection = ({ item, api, toast, reload, measures }) => {
                 : item.under_control ? <Chip tone="red">Обязательна</Chip> : null}>
             <div className="space-y-3">
                 {item.measure_title ? (
-                    <div className="space-y-0.5">
-                        <div className={`text-[14px] font-semibold text-slate-900 ${T.body}`}>
-                            {item.measure_title}{value ? <span className="font-normal text-slate-600"> · {value}</span> : null}
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-0.5">
+                            <div className={`text-[14px] font-semibold text-slate-900 ${T.body}`}>
+                                {item.measure_title}{value ? <span className="font-normal text-slate-600"> · {value}</span> : null}
+                            </div>
+                            <div className={`text-[12px] text-slate-500 ${T.note}`}>
+                                {item.measure_state === 'approved'
+                                    ? (item.measure_approved_by_name
+                                        ? `Утвердил ${item.measure_approved_by_name}, ${fmtDate(item.measure_approved_at)}`
+                                        : `Применена без утверждения, ${fmtDate(item.measure_approved_at)}`)
+                                    : `Предложил ${item.measure_proposed_by_name || ''}`}
+                            </div>
                         </div>
-                        <div className={`text-[12px] text-slate-500 ${T.note}`}>
-                            {item.measure_state === 'approved'
-                                ? (item.measure_approved_by_name
-                                    ? `Утвердил ${item.measure_approved_by_name}, ${fmtDate(item.measure_approved_at)}`
-                                    : `Применена без утверждения, ${fmtDate(item.measure_approved_at)}`)
-                                : `Предложил ${item.measure_proposed_by_name || ''}`}
-                        </div>
+                        {perms.can_remove_measure && !removing && (
+                            <button type="button" className={`${dLinkAction} shrink-0 !text-rose-600`} onClick={() => setRemoving(true)}>
+                                Снять меру
+                            </button>
+                        )}
                     </div>
                 ) : null}
-                {item.measure_state === 'proposed' && perms.can_approve_measure && (
+                {removing && (
+                    <RemoveMeasure item={item} api={api} toast={toast} reload={reload} onCancel={() => setRemoving(false)} />
+                )}
+                {!removing && item.measure_state === 'proposed' && perms.can_approve_measure && (
                     <button type="button" className={dBtnPrimary} onClick={approve} disabled={busy}>Утвердить меру</button>
                 )}
-                {canChange && (
+                {canChange && !removing && (
                     <div className="grid gap-3 sm:grid-cols-[1fr_180px_auto] sm:items-start">
                         <Field label={item.measure_title ? 'Другая мера' : (perms.can_manage ? 'Назначить меру' : 'Предложить меру')} error={errors.measure}>
                             <CustomSelect variant="ios" value={form.measure_id} placeholder="Выберите меру" invalid={!!errors.measure}

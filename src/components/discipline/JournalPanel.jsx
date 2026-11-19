@@ -5,7 +5,8 @@ import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker } from '../ui/DateRangePicker';
 import { apiError, saveBlob } from './disciplineApi';
 import {
-    Chip, dBtnSecondary, dLabel, EmptyState, Group, LoadingRows, RecordRow, SearchField, StateBadge, StepChip, T,
+    Chip, dBtnSecondary, dLabel, EmptyState, Group, LoadingRows, OVERDUE_ROW, RecordRow, SearchField, StateBadge,
+    StepChip, T,
 } from './disciplineUi';
 import {
     fmtDateTime, fmtShort, groupSummary, groupTone, ROW_STATES_BESIDE_STEP, shiftIsoDays, STATE_LABELS, todayIso,
@@ -13,8 +14,10 @@ import {
 
 /*
  * «Журнал нарушений» (ТЗ п. 4.2): все записи с фильтрами — оператор (поиск по
- * ФИО и номеру), период, тип, группа, кто зафиксировал (СВ), статус, наличие
- * объяснительной и акта; сортировка по любому столбцу; выгрузка в Excel.
+ * ФИО и номеру), период, тип, группа, линия, кто зафиксировал (СВ), статус,
+ * наличие объяснительной и акта; сортировка по любому столбцу; выгрузка в Excel.
+ * Строка открывает запись, ФИО — карточку сотрудника (п. 11); запись с
+ * просроченной объяснительной подсвечена красным (п. 8.3).
  * Варианты в списках — по записям периода без самих этих фильтров: выбрали
  * один тип — остальные в списке остаются.
  *
@@ -71,8 +74,8 @@ const defaultFrom = () => shiftIsoDays(todayIso(), -89);
 
 const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOperator, caps }) => {
     const [filters, setFilters] = useState({
-        date_from: defaultFrom(), date_to: todayIso(), search: '', type_title: '', group_id: '', created_by: '',
-        state: '', explanation: '', act: '', include_cancelled: false,
+        date_from: defaultFrom(), date_to: todayIso(), search: '', type_title: '', group_id: '', direction: '',
+        created_by: '', state: '', explanation: '', act: '', include_cancelled: false,
     });
     const [searchDraft, setSearchDraft] = useState('');
     const [moreOpen, setMoreOpen] = useState(false);
@@ -135,6 +138,8 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
         ...(data?.types || []).map((title) => ({ value: title, label: title }))], [data?.types]);
     const groupOptions = useMemo(() => [{ value: '', label: 'Все группы' },
         ...(data?.groups || []).map((g) => ({ value: String(g.id), label: g.name }))], [data?.groups]);
+    const directionOptions = useMemo(() => [{ value: '', label: 'Все линии' },
+        ...(data?.directions || []).map((name) => ({ value: name, label: name }))], [data?.directions]);
     const creatorOptions = useMemo(() => [{ value: '', label: 'Все' },
         ...(data?.creators || []).map((c) => ({ value: String(c.id), label: c.name }))], [data?.creators]);
     const stateOptions = useMemo(() => [{ value: '', label: 'Все статусы' },
@@ -155,7 +160,7 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
         }
     };
 
-    const activeExtra = ['group_id', 'created_by', 'explanation', 'act'].filter((key) => filters[key]).length
+    const activeExtra = ['group_id', 'direction', 'created_by', 'explanation', 'act'].filter((key) => filters[key]).length
         + (filters.include_cancelled ? 1 : 0);
 
     return (
@@ -187,6 +192,13 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
                             <div className={`${dLabel} px-1`}>Группа</div>
                             <CustomSelect variant="ios" value={filters.group_id} options={groupOptions} ariaLabel="Группа" searchable
                                           onChange={(value) => setFilters((prev) => ({ ...prev, group_id: value || '' }))} />
+                        </div>
+                    )}
+                    {(directionOptions.length > 2 || filters.direction) && (
+                        <div className="space-y-1.5">
+                            <div className={`${dLabel} px-1`}>Линия</div>
+                            <CustomSelect variant="ios" value={filters.direction} options={directionOptions} ariaLabel="Линия" searchable
+                                          onChange={(value) => setFilters((prev) => ({ ...prev, direction: value || '' }))} />
                         </div>
                     )}
                     {(creatorOptions.length > 2 || filters.created_by) && (
@@ -285,10 +297,13 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
                             <tbody className="divide-y divide-slate-100">
                                 {items.map((item) => (
                                     <tr key={item.id} onClick={() => openRecord(item.id)}
-                                        className={`cursor-pointer transition hover:bg-slate-50 ${item.state === 'cancelled' ? 'opacity-60' : ''}`}>
+                                        className={`cursor-pointer transition hover:bg-slate-50 ${item.state === 'cancelled' ? 'opacity-60' : ''} ${item.explanation_overdue ? OVERDUE_ROW : ''}`}>
                                         <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-slate-600 2xl:px-5 2xl:py-3.5">{fmtDateTime(item.occurred_at)}</td>
                                         <td className="px-4 py-2.5 font-medium text-slate-900 2xl:px-5">
-                                            <span className="block max-w-[220px] truncate">{item.operator_name}</span>
+                                            <button type="button" className="block max-w-[220px] truncate text-left hover:text-blue-600 hover:underline"
+                                                    onClick={(event) => { event.stopPropagation(); openOperator(item.operator_id); }}>
+                                                {item.operator_name}
+                                            </button>
                                             <span className="block text-[11.5px] font-normal text-slate-400">{item.number}</span>
                                         </td>
                                         <td className="px-4 py-2.5 text-slate-600 2xl:px-5">{item.group_name || '—'}</td>
@@ -330,7 +345,7 @@ const JournalPanel = ({ api, toast, departmentId, version, openRecord, openOpera
                             </div>
                         </div>
                         <div className="divide-y divide-slate-100 overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
-                            {items.map((item) => <RecordRow key={item.id} item={item} onOpen={openRecord} />)}
+                            {items.map((item) => <RecordRow key={item.id} item={item} onOpen={openRecord} onOpenOperator={openOperator} />)}
                         </div>
                     </div>
                     {data.truncated && (

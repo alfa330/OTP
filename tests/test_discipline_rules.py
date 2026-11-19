@@ -467,9 +467,12 @@ class ManagerGrantTests(unittest.TestCase):
                 for node in ast.walk(top):
                     if isinstance(node, ast.Attribute) and node.attr in callers:
                         callers[node.attr].add(top.name)
-        self.assertEqual(callers['department_heads'], {'_auto_control', 'act_draft_context'})
+        # act_composer_name — не рассылка: «кто составил» акт по тому же правилу,
+        # что черновик (составитель не глава); remove_measure — весть о снятом удержании.
+        self.assertEqual(callers['department_heads'], {'_auto_control', 'act_draft_context', 'act_composer_name'})
         self.assertEqual(callers['department_managers'], {'_push_act_basis', 'settle_ladder', '_notify_new_record',
-                                                          'record_refusal', '_notify_finance', 'run_reminders'})
+                                                          'record_refusal', '_notify_finance', 'run_reminders',
+                                                          'remove_measure'})
 
     def test_act_leader_is_the_head_when_she_approves(self):
         """Разбор 29.10.2026: акт утверждает и поимённый руководитель, но строка
@@ -561,3 +564,81 @@ class LadderLibraryTests(unittest.TestCase):
         legacy = catalog.normalize_settings({'ladder': ['training', 'act']}, base=stored)
         self.assertEqual((legacy['ladder'], legacy['ladders'][0]['steps']), (['training', 'act'], ['training', 'act']))
 
+
+
+class TzGapFixesTests(unittest.TestCase):
+    """Расхождения с ТЗ из сверки 23.10.2026 — чистые правила без базы (в CI
+    Postgres-тесты пропускаются; там же сценарии на схеме:
+    tests/test_discipline_tz_gaps_postgres.py)."""
+
+    def test_second_supervisor_does_not_change_colleagues_measure(self):
+        # Критерий 10: мера — поле записи; второй СВ группы её не меняет.
+        sv = ctx('sv', groups=[5])
+        own = {'operator_id': 1, 'department_id': 1, 'created_by': 10, 'operator_group_ids': [5],
+               'measure_state': 'proposed'}
+        self.assertTrue(access.can_propose_measure(sv, own, under_control=True))
+        self.assertFalse(access.can_propose_measure(sv, dict(own, created_by=99), under_control=True))
+        self.assertTrue(access.can_propose_measure(ctx('sv', headed=[1]), dict(own, created_by=99), under_control=True))
+
+    def test_only_head_removes_measure_and_not_from_cancelled(self):
+        head = ctx('admin', headed=[1])
+        record = {'operator_id': 1, 'department_id': 1, 'created_by': 10, 'operator_group_ids': [5],
+                  'measure_title': 'Выговор', 'measure_state': 'approved', 'measure_finance': 'yes'}
+        self.assertTrue(access.can_remove_measure(head, record))
+        # Закрытая запись — тоже: взыскание снимают и после её закрытия.
+        self.assertTrue(access.can_remove_measure(head, dict(record, closed_at=AT)))
+        self.assertFalse(access.can_remove_measure(head, dict(record, cancelled_at=AT)))
+        self.assertFalse(access.can_remove_measure(head, dict(record, measure_title=None)))
+        self.assertFalse(access.can_remove_measure(ctx('sv', groups=[5]), record))
+
+    def test_next_violation_in_period_covered_by_act_is_explanation(self):
+        records = [rec(1, 12), rec(2, 10), rec(3, 8)]
+        plain = catalog.next_step(records, AT, TZ)
+        self.assertEqual(plain['action'], catalog.STEP_ACT)
+        covered = catalog.next_step(records, AT, TZ, act_triggers={3}, act_members={1, 2})
+        self.assertEqual((covered['action'], covered['explanation_no'], covered['ordinal']),
+                         (catalog.STEP_EXPLANATION, 4, 4))
+        self.assertEqual(catalog.plate(covered)['tone'], 'yellow')
+        self.assertNotIn('акт', catalog.plate(covered)['text'])
+        # Задним числом — внутрь окна уже составленного акта: тоже без второго акта.
+        backdated = catalog.next_step([rec(1, 12), rec(2, 11), rec(3, 2)], AT - timedelta(days=5), TZ,
+                                      act_triggers={3}, act_members={1, 2})
+        self.assertEqual(backdated['action'], catalog.STEP_EXPLANATION)
+        # Акт другого окна (давно) нынешний период не покрывает.
+        old_act = catalog.next_step([rec(9, 60), rec(1, 12), rec(2, 10)], AT, TZ, act_triggers={9})
+        self.assertEqual(old_act['action'], catalog.STEP_ACT)
+
+    def test_supervisors_report_shows_zero_and_splits_namesakes(self):
+        from discipline import report
+        items = [{'created_by': 300, 'created_by_name': 'Иванов И.', 'operator_id': 1},
+                 {'created_by': 300, 'created_by_name': 'Иванов И.', 'operator_id': 2},
+                 {'created_by': 301, 'created_by_name': 'Иванов И.', 'operator_id': 1}]
+        rows = report.report_supervisors(items, [{'id': 300, 'name': 'Иванов И.'}, {'id': 302, 'name': 'Петров П.'}])
+        self.assertEqual([(r['name'], r['total'], r['operators']) for r in rows],
+                         [('Иванов И.', 2, 2), ('Иванов И.', 1, 1), ('Петров П.', 0, 0)])
+
+    def test_controls_report_early_removal_is_not_clean(self):
+        from discipline import report
+        base = {'start_date': '2026-10-01', 'end_date': '2026-10-31', 'violations': 0}
+        controls = [
+            dict(base, decision='removed', decided_at='2026-10-10T12:00:00'),
+            dict(base, decision='removed', decided_at='2026-10-31T09:00:00'),
+            dict(base, decision='removed', decided_at='2026-11-02T09:00:00', violations=1),
+            dict(base, decision='termination', decided_at='2026-11-01T09:00:00'),
+            dict(base, decision=None, decided_at=None),
+        ]
+        _rows, summary = report.report_controls(controls, '2026-10-01', '2026-11-01')
+        self.assertEqual((summary['started'], summary['clean'], summary['removed_early'], summary['termination'],
+                          summary['active']), (5, 1, 1, 1, 1))
+
+    def test_journal_keeps_old_measure_amount_and_names_removal(self):
+        from discipline import report
+        text = report.changes_text({'measure': ['Лишение (сумма)', 'Лишение (сумма)'], 'amount': [5000, 15000]})
+        self.assertIn('Сумма: 5000 → 15000', text)
+        self.assertEqual(report.audit_label('measure_remove'), 'Мера снята')
+        text = report.changes_text({'measure': 'Выговор', 'state': 'approved', 'reason': 'Снято досрочно'})
+        self.assertIn('Была: утверждена', text)
+        self.assertIn('Причина: Снято досрочно', text)
+        # Сумма решения по акту — по-русски, служебные поля — не в строке.
+        text = report.changes_text({'decision_amount': [None, 15000], 'decision_finance': [None, 'yes']})
+        self.assertEqual(text, 'Сумма: — → 15000')

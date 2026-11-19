@@ -149,6 +149,28 @@ def group_supervisors(cursor, group_ids, today):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def department_supervisors(cursor, department_ids, today):
+    """Кто сегодня ведёт группы отделов — СВ отчёта «По супервайзерам». СВ без
+    единой записи за период — тоже строка: п. 15.3 называет сигналом перекос «в
+    любую сторону», а «не фиксирует вовсе» — самый частый его вид. Уволенные
+    не берутся — так же, как в group_supervisors."""
+    ids = _int_list(department_ids)
+    if not ids:
+        return []
+    cursor.execute(
+        """
+        SELECT DISTINCT u.id, u.name
+          FROM group_supervisor_memberships gsm
+          JOIN groups g ON g.id = gsm.group_id
+          JOIN users u ON u.id = gsm.supervisor_id
+         WHERE g.department_id = ANY(%s)
+           AND gsm.start_date <= %s AND (gsm.end_date IS NULL OR gsm.end_date >= %s)
+           AND COALESCE(u.status, 'working') NOT IN ('fired', 'dismissal')
+         ORDER BY u.name
+        """, (ids, today, today))
+    return _rows(cursor)
+
+
 def user_names(cursor, user_ids):
     ids = _int_list(user_ids)
     if not ids:
@@ -625,6 +647,9 @@ def _record_where(ctx, today, filters):
     if filters.get('type_title'):
         clauses.append('r.type_title = %(type_title)s')
         params['type_title'] = str(filters['type_title'])
+    if filters.get('direction'):
+        clauses.append('r.direction_name = %(direction)s')
+        params['direction'] = str(filters['direction'])
     if filters.get('created_by'):
         clauses.append('r.created_by = %(created_by)s')
         params['created_by'] = int(filters['created_by'])
@@ -657,11 +682,11 @@ def list_records(cursor, ctx, today, filters=None, limit=500):
 
 # Фильтры, которые сами выбираются из списков журнала: варианты считаются без
 # них, иначе после выбора одного типа в списке остался бы только он.
-_CHOICE_FILTERS = ('type_title', 'group_id', 'created_by', 'search')
+_CHOICE_FILTERS = ('type_title', 'group_id', 'direction', 'created_by', 'search')
 
 
 def journal_choices(cursor, ctx, today, filters=None):
-    """Что предложить в фильтрах журнала: виды нарушений, группы и кто
+    """Что предложить в фильтрах журнала: виды нарушений, группы, линии и кто
     фиксировал — среди видимых записей периода."""
     base = {key: value for key, value in (filters or {}).items() if key not in _CHOICE_FILTERS}
     clauses, params = _record_where(ctx, today, base)
@@ -672,10 +697,13 @@ def journal_choices(cursor, ctx, today, filters=None):
     cursor.execute('SELECT DISTINCT r.group_id, r.group_name' + joins + where
                    + ' AND r.group_id IS NOT NULL ORDER BY r.group_name', params)
     groups = [{'id': int(row[0]), 'name': row[1] or 'Группа'} for row in cursor.fetchall()]
+    cursor.execute('SELECT DISTINCT r.direction_name' + joins + where
+                   + " AND COALESCE(r.direction_name, '') <> '' ORDER BY r.direction_name", params)
+    directions = [row[0] for row in cursor.fetchall()]
     cursor.execute('SELECT DISTINCT r.created_by, cb.name' + joins + where
                    + ' AND r.created_by IS NOT NULL ORDER BY cb.name', params)
     creators = [{'id': int(row[0]), 'name': row[1] or '—'} for row in cursor.fetchall()]
-    return {'types': types, 'groups': groups, 'creators': creators}
+    return {'types': types, 'groups': groups, 'directions': directions, 'creators': creators}
 
 
 def decision_measures(cursor, department_ids, *, date_from=None, date_to=None, operator_id=None):
@@ -1041,17 +1069,20 @@ def get_file(cursor, file_id):
     return _row(cursor)
 
 
-def restore_previous_version(cursor, record_id, kind):
+def restore_previous_version(cursor, record_id, kind, *, act_id=None):
     """Последняя действующая версия признана недействительной — действующей снова
-    становится предыдущая (если она сама не признана недействительной)."""
+    становится предыдущая (если она сама не признана недействительной). Файл
+    записи ищется по записи, подписанный акт — по акту (act_id)."""
+    owner, value = ('act_id', int(act_id)) if act_id is not None else ('record_id', int(record_id))
     cursor.execute(
         """
         UPDATE discipline_files SET superseded_at = NULL
          WHERE id = (SELECT id FROM discipline_files
-                      WHERE record_id = %s AND kind = %s AND invalid_at IS NULL AND superseded_at IS NOT NULL
+                      WHERE """ + owner + """ = %s AND kind = %s AND invalid_at IS NULL
+                        AND superseded_at IS NOT NULL
                       ORDER BY uploaded_at DESC, id DESC LIMIT 1)
         RETURNING id, file_name
-        """, (int(record_id), kind))
+        """, (value, kind))
     return _row(cursor)
 
 
