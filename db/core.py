@@ -815,6 +815,46 @@ _TASK_EMPLOYEE_SQL = (
     + ", ".join(f"'{code}'" for code in sorted(TASK_EMPLOYEE_DEPARTMENT_CODES)) + "))"
 )
 
+# Отделы, где участник доски не видит задачи своего руководителя, к которым сам не
+# причастен. Решение владельца 19.11.2026 для маркетинга: «подчинённые не должны
+# видеть задачи своего руководителя, если не имеют к ним отношения». Все сотрудники
+# маркетинга — «Участники» доски MKT, участник видит всю доску
+# (_TASK_PROJECT_MEMBER_SQL в database.py), а глава отдела ведёт на ней и свои
+# задачи — условия сотрудников, KPI на следующий год.
+#   Руководитель — глава отдела смотрящего (departments.head_user_id) и
+#     «Руководитель» из его карточки (users.supervisor_id).
+#   Задача руководителя — где он постановщик, поручитель или любой из исполнителей:
+#     владелец выбрал прятать и задачи, которые руководитель дал коллегам, а не
+#     только те, что делает сам.
+#   Отношение к задаче — смотрящий её постановщик, поручитель, исполнитель или
+#     наблюдатель. Эти пути стоят в охвате рядом, через OR, и правило их не трогает:
+#     оно режет только «участник доски видит всё».
+# Новый отдел — код в этом наборе; смысл SQL — tests/test_task_manager_private_postgres.py.
+TASK_MANAGER_PRIVATE_DEPARTMENT_CODES = frozenset({'marketing'})
+# «t — задача руководителя смотрящего, и смотрящий — из отдела набора». Смотрящий —
+# task_pm_me.user_id внешнего _TASK_PROJECT_MEMBER_SQL: подзапрос коррелированный,
+# своих плейсхолдеров у него нет, и вызывающие (охват списка и чтение карточки по
+# ссылке) не меняются. Глава отдела сам себе не руководитель (task_boss.id <>
+# смотрящий): свои задачи он и так видит участником, но фрагмент не должен на это
+# опираться — он значит «чужой руководитель» сам по себе. Исполнитель — и по колонке
+# assigned_to, и по составу task_assignees: колонка закрывает окно деплоя, как в
+# _TASK_ASSIGNEE_EXISTS_SQL. Код отдела — без регистра и пробелов по краям, как
+# в _TASK_EMPLOYEE_SQL.
+_TASK_MANAGER_PRIVATE_SQL = (
+    "EXISTS (SELECT 1 FROM users task_boss_viewer"
+    " JOIN departments task_boss_dept ON task_boss_dept.id = task_boss_viewer.department_id"
+    " JOIN users task_boss"
+    " ON task_boss.id IN (task_boss_dept.head_user_id, task_boss_viewer.supervisor_id)"
+    " AND task_boss.id <> task_boss_viewer.id"
+    " WHERE task_boss_viewer.id = task_pm_me.user_id"
+    " AND LOWER(BTRIM(task_boss_dept.code)) IN ("
+    + ", ".join(f"'{code}'" for code in sorted(TASK_MANAGER_PRIVATE_DEPARTMENT_CODES)) + ")"
+    " AND (t.created_by = task_boss.id OR t.requested_by_id = task_boss.id"
+    " OR t.assigned_to = task_boss.id"
+    " OR EXISTS (SELECT 1 FROM task_assignees task_boss_ta"
+    " WHERE task_boss_ta.task_id = t.id AND task_boss_ta.user_id = task_boss.id)))"
+)
+
 # Типы задачи («Тип» в форме). Один список на CHECK, создание, правку и фильтр
 # списка: до «Продакшна» он был переписан литералом в четырёх местах, и новый
 # тип пришлось бы не забыть ни в одном. Продакшн — задача #354, бриф к нему

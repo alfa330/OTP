@@ -37,7 +37,12 @@ SV_AUTHOR, SV_COLLEAGUE, HR_MEMBER, HR_BOARD, OUTSIDER, ADMIN = 1, 2, 3, 4, 5, 6
 HR, ACC = 10, 20
 
 BASE_DDL = '''
-    CREATE TABLE users (id integer PRIMARY KEY, role text NOT NULL, department_id integer);
+    -- departments и supervisor_id читает правило «задачи руководителя» в пути участника
+    -- доски (маркетинг, tests/test_task_manager_private_postgres.py); здесь отделов в
+    -- таблице нет — правило молчит, и доска видна участнику целиком, как была.
+    CREATE TABLE departments (id integer PRIMARY KEY, code text NOT NULL, head_user_id integer);
+    CREATE TABLE users (id integer PRIMARY KEY, role text NOT NULL, department_id integer,
+                        supervisor_id integer);
     CREATE TABLE tasks (id integer PRIMARY KEY, created_by integer, assigned_to integer NOT NULL,
                         requested_by_id integer, project_id integer, project_number integer,
                         section_id integer);
@@ -82,7 +87,8 @@ def _build_database():
     module = source_cache.parse(DATABASE_SOURCE)
     namespace = {'Optional': Optional, 'List': List, 'task_projects': task_projects}
     wanted = {'normalize_role_value', 'role_has_min', 'ROLE_ALIASES', 'ROLE_HIERARCHY', '_UNSET',
-              'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_ROLES', 'TASK_PERSONAL_SCOPE_ROLES'}
+              'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_ROLES', 'TASK_PERSONAL_SCOPE_ROLES',
+              'TASK_MANAGER_PRIVATE_DEPARTMENT_CODES', '_TASK_MANAGER_PRIVATE_SQL'}
     for node in module.body:
         names = ([node.name] if isinstance(node, ast.FunctionDef)
                  else [t.id for t in getattr(node, 'targets', []) if isinstance(t, ast.Name)])

@@ -101,7 +101,8 @@ def _build_database():
     # Аннотации в вытащенных функциях ссылаются на typing — кладём его в пространство имён.
     namespace = {"task_projects": task_projects, "Optional": Optional, "List": List}
     for source in _module_members(
-        ["normalize_role_value", "role_has_min", "ROLE_ALIASES", "ROLE_HIERARCHY", "_UNSET"]
+        ["normalize_role_value", "role_has_min", "ROLE_ALIASES", "ROLE_HIERARCHY", "_UNSET",
+         "TASK_MANAGER_PRIVATE_DEPARTMENT_CODES", "_TASK_MANAGER_PRIVATE_SQL"]
     ).values():
         exec(source, namespace)
     body = _database_members(NAMES)
@@ -385,6 +386,31 @@ class ProjectSqlContractTests(unittest.TestCase):
         self.assertIn('project_sql = f"{self._TASK_PROJECT_MEMBER_SQL} OR {self._TASK_WATCHER_SQL}"', block)
         self.assertIn("(t.project_id IS NULL AND {self._TASK_COLLEAGUE_SV_SQL}) OR {project_sql}", block)
         self.assertIn('conditions.append(f"({participant_sql} OR {project_sql})")', block)
+
+    def test_marketing_member_does_not_see_tasks_of_own_manager(self):
+        """Решение владельца 19.11.2026: участник доски из маркетинга не видит задачи
+        своего руководителя, к которым сам не причастен. Смысл SQL исполняется в
+        tests/test_task_manager_private_postgres.py (локальный Postgres, в CI пропуск);
+        здесь — что правило стоит внутри пути участника и устроено как решили."""
+        self.assertEqual(frozenset({"marketing"}), DB_NAMESPACE["TASK_MANAGER_PRIVATE_DEPARTMENT_CODES"])
+        source = _database_members(["_TASK_PROJECT_MEMBER_SQL"])["_TASK_PROJECT_MEMBER_SQL"]
+        # Внутри EXISTS участника: смотрящий — task_pm_me.user_id, плейсхолдер один, и
+        # оба вызывающих (охват списка и _task_observable_tx) параметров не меняют.
+        self.assertIn('" AND NOT " + _TASK_MANAGER_PRIVATE_SQL + ")"', source)
+        member_sql = FakeDatabase._TASK_PROJECT_MEMBER_SQL
+        self.assertEqual(1, member_sql.count("%s"))
+        self.assertIn("WHERE task_boss_viewer.id = task_pm_me.user_id", member_sql)
+        self.assertIn("LOWER(BTRIM(task_boss_dept.code)) IN ('marketing')", member_sql)
+        # Руководитель — глава отдела и «Руководитель» из карточки, но не сам смотрящий.
+        self.assertIn("task_boss.id IN (task_boss_dept.head_user_id, task_boss_viewer.supervisor_id)", member_sql)
+        self.assertIn("task_boss.id <> task_boss_viewer.id", member_sql)
+        # Задача руководителя — постановщик, поручитель, исполнитель (колонка и состав).
+        for marker in ("t.created_by = task_boss.id", "t.requested_by_id = task_boss.id",
+                       "t.assigned_to = task_boss.id", "task_boss_ta.user_id = task_boss.id"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, member_sql)
+        # Наблюдатель видит свою задачу и у руководителя: его путь правило не режет.
+        self.assertNotIn("task_boss", FakeDatabase._TASK_WATCHER_SQL)
 
     def test_member_sees_all_board_level_sees_only_watched(self):
         member_sql = _database_members(["_TASK_PROJECT_MEMBER_SQL"])["_TASK_PROJECT_MEMBER_SQL"]

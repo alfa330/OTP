@@ -142,6 +142,7 @@ from db.core import (  # noqa: F401 — реэкспорт модульных и
     TASK_PERSONAL_SCOPE_ROLES,
     TASK_RECIPIENT_ROLES,
     _TASK_RECIPIENT_ROLES_SQL,
+    _TASK_MANAGER_PRIVATE_SQL,
     TASK_TAG_CODES,
     CALCULATION_MODEL_OPERATOR,
     CALCULATION_MODEL_CHAT_MANAGER,
@@ -1188,10 +1189,15 @@ class Database(CoreMixin, SchemaMixin, ShiftAuctionMixin, ShiftSwapsMixin, Break
     # доски — и задача пропала у него сама, без чистки списков наблюдателей.
     # По одному плейсхолдеру — id смотрящего. Оба — только на чтение, как и
     # коллега-СВ: действия решает _task_visible_for_requester.
+    # Участник из отдела TASK_MANAGER_PRIVATE_DEPARTMENT_CODES (маркетинг, решение
+    # владельца 19.11.2026) этим путём не видит задачи своего руководителя
+    # (_TASK_MANAGER_PRIVATE_SQL, db/core.py); где он сам участник или наблюдатель,
+    # задачу открывают соседние пути охвата.
     _TASK_PROJECT_MEMBER_SQL = (
         "EXISTS (SELECT 1 FROM task_project_members task_pm_me"
         " WHERE task_pm_me.project_id = t.project_id"
-        " AND task_pm_me.user_id = %s AND task_pm_me.access_level = 'member')"
+        " AND task_pm_me.user_id = %s AND task_pm_me.access_level = 'member'"
+        " AND NOT " + _TASK_MANAGER_PRIVATE_SQL + ")"
     )
     _TASK_WATCHER_SQL = (
         "EXISTS (SELECT 1 FROM task_watchers task_w_me"
