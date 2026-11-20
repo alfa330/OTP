@@ -30,6 +30,10 @@ import {
  * экран того же раздела: переключатель направления стоит в шапке, раскладка повторяет «Линию»,
  * чтобы взгляд не переучивался.
  *
+ * Цель (2 мин) по регламенту СЗоВ — у ПЕРВОГО ответа: он и горит зелёным/красным на плитке, у
+ * людей справа и на графике по часам; ответ внутри чата показывается без оценки (правка
+ * владельца 20.11.2026, до неё по цели красился ответ внутри чата).
+ *
  * У Syntony нет статусов операторов (занят, тренинг, перерыв) и счётчика открытых чатов:
  * снимок приходит со `statuses: false`, и этих плиток на экране нет — нули на их месте
  * читались бы как «все свободны». Онлайн у Syntony — ответил водителю за последние 15 минут.
@@ -50,7 +54,7 @@ import {
 // Ряды графика. Цвета проверены валидатором палитры на различимость при дальтонизме.
 const CHART_COLORS = {
     online: '#3b82f6',
-    inner: '#e11d48',
+    first: '#e11d48',
     target: '#059669',
 };
 
@@ -171,17 +175,17 @@ export const ChatPeopleColumn = ({ people, offlinePeople, day, targetSeconds, sc
                                     <div className="mt-1 flex flex-wrap items-baseline gap-x-2 text-[13px] tabular-nums text-slate-400">
                                         <span className="whitespace-nowrap">
                                             первый{' '}
-                                            <span className="font-medium text-slate-600">
+                                            {/* Единственный оценочный цвет в колонке: по регламенту
+                                                цель у первого ответа, у ответа внутри чата её нет. */}
+                                            <span className={`font-medium ${WALLBOARD_TONE_TEXT[
+                                                chatReplyTone(item.first_reply_seconds, targetSeconds)]}`}>
                                                 {formatMinutes(item.first_reply_seconds, 1, false)}
                                             </span>
                                         </span>
                                         <span className="text-slate-300">·</span>
                                         <span className="whitespace-nowrap">
                                             внутри{' '}
-                                            {/* Единственный оценочный цвет в колонке: у ответа
-                                                внутри чата есть цель, у первого ответа — нет. */}
-                                            <span className={`font-medium ${WALLBOARD_TONE_TEXT[
-                                                chatReplyTone(item.inner_reply_seconds, targetSeconds)]}`}>
+                                            <span className="font-medium text-slate-600">
                                                 {formatMinutes(item.inner_reply_seconds, 1, false)}
                                             </span>
                                         </span>
@@ -303,15 +307,15 @@ const ChartTooltip = ({ active, payload, label }) => {
                     </>
                 )}
                 <div>
-                    Ответ внутри чата:{' '}
-                    <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.inner }}>
-                        {formatMinutes(row.innerSeconds)}
+                    Первый ответ:{' '}
+                    <span className="font-medium tabular-nums" style={{ color: CHART_COLORS.first }}>
+                        {formatMinutes(row.firstSeconds)}
                     </span>
                 </div>
                 <div>
-                    Первый ответ:{' '}
+                    Ответ внутри чата:{' '}
                     <span className="font-medium tabular-nums text-slate-900">
-                        {formatMinutes(row.firstSeconds)}
+                        {formatMinutes(row.innerSeconds)}
                     </span>
                 </div>
                 <div>
@@ -338,8 +342,9 @@ const ChartTooltip = ({ active, payload, label }) => {
 };
 
 /*
- * График по часам. Слева минуты — как быстро отвечали внутри чата, справа люди — сколько
- * чатников держало линию в этот час. Пунктир — цель по времени ответа.
+ * График по часам. Слева минуты — первый ответ (по регламенту цель — у него, правка владельца
+ * 20.11.2026; до неё линией шёл ответ внутри чата, он теперь в подсказке), справа люди —
+ * сколько чатников держало линию в этот час. Пунктир — цель по первому ответу.
  * Столбик «сколько людей нужно под цель» отсюда убран: пропорция от факта завышала в разы,
  * и на стене это читалось как план найма, которым оно не было (решение владельца 18.08.2026).
  */
@@ -348,8 +353,8 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1, tooltipMode = 'metrics' }
         hour: hourLabel(row.hour),
         chats: row.chats,
         chatsNew: row.chats_new ?? null,
-        innerMinutes: row.inner_reply_seconds === null || row.inner_reply_seconds === undefined
-            ? null : Number((row.inner_reply_seconds / 60).toFixed(2)),
+        firstMinutes: row.first_reply_seconds === null || row.first_reply_seconds === undefined
+            ? null : Number((row.first_reply_seconds / 60).toFixed(2)),
         innerSeconds: row.inner_reply_seconds ?? null,
         firstSeconds: row.first_reply_seconds ?? null,
         online: row.operators_online ?? null,
@@ -398,8 +403,8 @@ const HourlyChart = ({ rows, targetSeconds, scale = 1, tooltipMode = 'metrics' }
                                    strokeDasharray="5 4" strokeWidth={2}
                                    label={{ value: `цель ${formatMinutes(targetSeconds, 0)}`, position: 'right',
                                             fontSize: 11 * scale, fill: CHART_COLORS.target }} />
-                    <Line yAxisId="left" type="monotone" dataKey="innerMinutes" name="Ответ внутри чата"
-                          stroke={CHART_COLORS.inner} strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
+                    <Line yAxisId="left" type="monotone" dataKey="firstMinutes" name="Первый ответ"
+                          stroke={CHART_COLORS.first} strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
                 </ComposedChart>
             </ResponsiveContainer>
         </div>
@@ -418,8 +423,10 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
     const today = snapshot?.today || {};
     const targetSeconds = Number(snapshot?.target_seconds) || 120;
     const inner = today.inner_reply_seconds;
-    const innerTone = inner === null || inner === undefined
-        ? 'neutral' : (Number(inner) <= targetSeconds ? 'good' : 'bad');
+    const first = today.first_reply_seconds;
+    // Единственный оценочный цвет табло — у первого ответа (регламент СЗоВ, 20.11.2026).
+    const firstTone = first === null || first === undefined
+        ? 'neutral' : (Number(first) <= targetSeconds ? 'good' : 'bad');
     // Syntony (SZOV-12): статусов операторов и открытых чатов нет — снимок говорит это сам.
     const statuses = snapshot?.statuses !== false;
 
@@ -484,9 +491,9 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                             <StatTile label="Поступивших" value={formatInt(today.chats_new)} scale={scale} />
                         )}
                         <StatTile label="Ответ внутри чата" value={formatMinutes(inner, 1, false)} unit="мин"
-                                  tone={innerTone} scale={scale} />
-                        <StatTile label="Первый ответ" value={formatMinutes(today.first_reply_seconds, 1, false)}
-                                  unit="мин" scale={scale} />
+                                  scale={scale} />
+                        <StatTile label="Первый ответ" value={formatMinutes(first, 1, false)}
+                                  unit="мин" tone={firstTone} scale={scale} />
                     </Grid>
                 </Section>
 
@@ -498,7 +505,7 @@ export default function SzovChatWallboardBody({ snapshot, scale = 1 }) {
                             <span className="hidden text-[12.5px] text-slate-400 xl:inline">
                                 {tooltipMode === 'people'
                                     ? 'наведите на час — покажем, кто держал линию'
-                                    : `время ответа внутри чата и сколько чатников держало линию; цель ${
+                                    : `время первого ответа и сколько чатников держало линию; цель ${
                                         formatMinutes(targetSeconds, 0)}`}
                             </span>
                             <SegmentedSwitch

@@ -1076,8 +1076,9 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("{pluralRu(item.open_chats, 'чат', 'чата', 'чатов')} в работе", column)
         self.assertIn('{formatMinutes(item.first_reply_seconds, 1, false)}', column)
         self.assertIn('{formatMinutes(item.inner_reply_seconds, 1, false)}', column)
-        # Оценочный цвет — только у ответа внутри чата: цель задана ему одному.
-        self.assertIn('chatReplyTone(item.inner_reply_seconds, targetSeconds)', column)
+        # Оценочный цвет — только у первого ответа: по регламенту цель задана ему одному.
+        self.assertIn('chatReplyTone(item.first_reply_seconds, targetSeconds)', column)
+        self.assertNotIn('chatReplyTone(item.inner_reply_seconds', column)
         # Строка появляется только у того, кто сегодня брал чаты: иначе это пара прочерков.
         self.assertIn('{item.chats ? (', column)
 
@@ -1106,12 +1107,15 @@ class ChatWallboardWiringTests(unittest.TestCase):
     def test_chart_pairs_minutes_with_people_on_the_line(self):
         self.assertIn('yAxisId="left"', self.board)
         self.assertIn('yAxisId="right"', self.board)
-        self.assertIn('dataKey="innerMinutes"', self.board)
+        # Линией против цели — первый ответ: по регламенту СЗоВ цель у него (правка владельца
+        # 20.11.2026); ответ внутри чата остаётся в подсказке часа.
+        self.assertIn('dataKey="firstMinutes"', self.board)
+        self.assertNotIn('dataKey="innerMinutes"', self.board)
         self.assertIn('dataKey="online"', self.board)
         self.assertIn('<ReferenceLine yAxisId="left" y={targetSeconds / 60}', self.board)
         # У каждого ряда подпись: две оси без легенды прочитать невозможно.
         self.assertIn('<Legend', self.board)
-        for name in ('name="Чатников на линии"', 'name="Ответ внутри чата"'):
+        for name in ('name="Чатников на линии"', 'name="Первый ответ"'):
             self.assertIn(name, self.board, name)
 
     def test_the_hour_hint_pairs_people_with_minutes_on_the_line(self):
@@ -1467,7 +1471,7 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         sheet = self._workbook(self._today())['Показатели']
         self.assertEqual(self._find_row(sheet, 'Дата')[1], '2026-08-19')
         self.assertEqual(self._find_row(sheet, 'Данные Chat2Desk на')[1], '2026-08-19 15:20:30')
-        self.assertEqual(self._find_row(sheet, 'Цель по ответу внутри чата, мин')[1], 2.0)
+        self.assertEqual(self._find_row(sheet, 'Цель по первому ответу, мин')[1], 2.0)
         self.assertEqual(self._find_row(sheet, 'Онлайн')[1], 3)
         self.assertEqual(self._find_row(sheet, 'Не в системе')[1], 4)
         self.assertEqual(self._find_row(sheet, 'Открыто чатов')[1], 12)
@@ -1552,9 +1556,10 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertIsNone(empty[3])
         self.assertEqual(empty[4], 0)
         current = [cell.value for cell in sheet[5]]
-        # Уложились в цель (105 c против 120 c) — теперь это видно цветом самой минуты,
-        # а не отдельной колонкой «В цели».
-        self.assertEqual(sheet.cell(row=5, column=3).font.color.rgb[-6:], '15803D')
+        # Первый ответ уложился в цель (75 c против 120 c) — это видно цветом самой минуты, а
+        # не отдельной колонкой «В цели». Ответ внутри чата по регламенту не оценивается.
+        self.assertEqual(sheet.cell(row=5, column=4).font.color.rgb[-6:], '15803D')
+        self.assertEqual(sheet.cell(row=5, column=3).font.color.type, 'theme')
         self.assertEqual(current[7], 'час идёт')
 
     def test_daily_total_row_keeps_heads_out_of_the_sum(self):
@@ -1673,16 +1678,16 @@ class ChatWallboardExcelExportTests(unittest.TestCase):
         self.assertEqual(rows[0], [ALIA, 78, 1.3, 0.8, 1.6, 1.2])
         self.assertEqual(rows[1], [BEK, 33, 2.5, None, 2.6, 1.5])
 
-    def test_inner_reply_cells_are_coloured_against_the_goal(self):
-        """Цвет — только у ответа внутри чата: цель задана ему, у первого ответа её нет."""
+    def test_first_reply_cells_are_coloured_against_the_goal(self):
+        """Цвет — только у первого ответа: по регламенту СЗоВ цель задана ему (правка
+        владельца 20.11.2026), у ответа внутри чата её нет."""
         wb = self._workbook(self._today())
         inner, first = wb['Ответ внутри чата по часам'], wb['Первый ответ по часам']
-        # Час 09 у ALIA — 1,3 мин при цели 2 мин: зелёный; час 10 — 3,0 мин: красный.
-        self.assertEqual(inner.cell(row=2, column=4).font.color.rgb[-6:], '15803D')
-        self.assertEqual(inner.cell(row=2, column=5).font.color.rgb[-6:], 'B91C1C')
-        # У первого ответа нормы нет — красить его той же меркой значило бы её выдумать:
-        # цвет шрифта остаётся темой книги, а не зелёным/красным вердиктом.
-        self.assertEqual(first.cell(row=2, column=5).font.color.type, 'theme')
+        # Час 09 у ALIA — первый ответ 0,8 мин при цели 2 мин: зелёный; у BEK в 10-м — 2,6: красный.
+        self.assertEqual(first.cell(row=2, column=4).font.color.rgb[-6:], '15803D')
+        self.assertEqual(first.cell(row=3, column=5).font.color.rgb[-6:], 'B91C1C')
+        # Ответ внутри чата той же меркой не красим — нормы у него нет.
+        self.assertEqual(inner.cell(row=2, column=5).font.color.type, 'theme')
 
     def test_day_people_follow_the_same_threshold_as_hours(self):
         """Атом счёта один: день складывается из тех же людей, что стоят в подсказке часа."""
@@ -1825,33 +1830,47 @@ class ChatBroadcastTests(unittest.TestCase):
 
     # --- отклонения ---
 
-    def test_slow_inner_reply_is_a_deviation(self):
-        """Единственный оценочный показатель направления — тот же, что красит плитку."""
-        ns, data = self._data()
+    def test_slow_first_reply_is_a_deviation(self):
+        """Единственный оценочный показатель направления — тот же, что красит плитку: по
+        регламенту СЗоВ цель у первого ответа (правка владельца 20.11.2026)."""
+        ns, data = self._data(self._with(first_reply_seconds=187.5))
         notes = ns['_szov_chat_broadcast_deviations'](data)
         self.assertEqual(len(notes), 1)
+        self.assertIn('первый ответ дольше цели', notes[0])
         self.assertIn('3:07', notes[0])
         self.assertIn('2:00', notes[0])
 
+    def test_slow_inner_reply_alone_is_not_a_deviation(self):
+        """Ответ внутри чата оценки больше не несёт: 3:07 при первом ответе 1:14 — норма."""
+        ns, data = self._data()
+        self.assertEqual(self.SNAPSHOT['today']['inner_reply_seconds'], 187.5)
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
+
     def test_reply_within_the_goal_is_not_a_deviation(self):
-        ns, data = self._data(self._with(inner_reply_seconds=90.0))
+        ns, data = self._data(self._with(first_reply_seconds=90.0))
         self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
 
     def test_exactly_on_the_goal_is_still_within_norm(self):
         """Граница включительная — как chatReplyTone на фронте (value <= target)."""
-        ns, data = self._data(self._with(inner_reply_seconds=120))
+        ns, data = self._data(self._with(first_reply_seconds=120))
         self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
 
     def test_a_handful_of_night_chats_does_not_raise_an_alarm(self):
-        """«Ответ внутри чата» — среднее по суткам: в 00:30 оно стоит на паре обращений, и
-        один медленный ответ поднял бы тревогу там, где нет ни очереди, ни проблемы."""
-        ns, data = self._data(self._with(chats=2, inner_reply_seconds=600.0))
+        """Первый ответ — среднее по суткам: в 00:30 оно стоит на паре обращений, и один
+        медленный ответ поднял бы тревогу там, где нет ни очереди, ни проблемы."""
+        ns, data = self._data(self._with(chats=2, first_reply_seconds=600.0))
         self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
 
     def test_the_same_delay_on_a_full_day_does_raise_it(self):
         """Порог выборки не должен глушить настоящую проблему."""
-        ns, data = self._data(self._with(chats=200, inner_reply_seconds=600.0))
+        ns, data = self._data(self._with(chats=200, first_reply_seconds=600.0))
         self.assertEqual(len(ns['_szov_chat_broadcast_deviations'](data)), 1)
+
+    def test_sample_is_the_chats_with_a_first_reply(self):
+        """Выборка первого ответа — чаты, по которым он посчитан (reply_sums.first_count)."""
+        sums = {'first_sum': 2400.0, 'first_count': 4, 'inner_sum': 0.0, 'inner_count': 0}
+        ns, data = self._data(self._with(chats=300, first_reply_seconds=600.0, reply_sums=sums))
+        self.assertEqual(ns['_szov_chat_broadcast_deviations'](data), [])
 
     def test_missing_reply_time_is_not_a_deviation(self):
         """Обращений не было — сравнивать нечего; ноль здесь означал бы «отвечаем мгновенно»."""
@@ -1884,7 +1903,7 @@ class ChatBroadcastTests(unittest.TestCase):
         snapshot = dict(self.SNAPSHOT)
         snapshot['now'] = dict(snapshot['now'], operators_busy=0, operators_on_training=0)
         ns, data = self._data(snapshot)
-        line = ns['_szov_chat_broadcast_notes'](data)[1]
+        line = next(note for note in ns['_szov_chat_broadcast_notes'](data) if 'на линии' in note)
         self.assertIn('на перерыве', line)
         self.assertNotIn('заняты', line)
         self.assertNotIn('на тренинге', line)
@@ -1898,11 +1917,11 @@ class ChatBroadcastTests(unittest.TestCase):
         self.assertFalse(any('Первый ответ' in note for note in notes), notes)
 
     def test_text_leads_with_the_deviation(self):
-        ns, data = self._data()
+        ns, data = self._data(self._with(first_reply_seconds=187.5))
         text = ns['_szov_chat_broadcast_text'](data)
         self.assertTrue(text.startswith('<b>Чаты сейчас</b>'))
-        self.assertIn('ответ внутри чата дольше цели', text)
-        self.assertIn('Первый ответ — 1:14', text)
+        self.assertIn('первый ответ дольше цели', text)
+        self.assertIn('Первый ответ — 3:07', text)
 
     def test_frozen_note_goes_last(self):
         """Замершие данные упоминаем после дежурных строк, а не вместо них."""

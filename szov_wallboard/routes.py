@@ -613,9 +613,11 @@ def build_szov_wallboard_blueprint(
         period_first = (_sum_key('first_sum') / first_count) if first_count else None
         period_inner = (_sum_key('inner_sum') / inner_count) if inner_count else None
         period_inner_minutes = _szov_chat_export_minutes(period_inner)
-        period_inner_font = None
-        if period_inner is not None:
-            period_inner_font = good_font if period_inner <= target_seconds else bad_font
+        # Цвет — у первого ответа: по регламенту СЗоВ цель у него (правка владельца
+        # 20.11.2026; до неё по цели красился ответ внутри чата).
+        period_first_font = None
+        if period_first is not None:
+            period_first_font = good_font if period_first <= target_seconds else bad_font
 
         hour_rows = [(day.get('day') or '', row) for day in days for row in (day.get('hourly') or [])]
         chats_total = sum(_int(day.get('chats')) for day in days)
@@ -699,7 +701,7 @@ def build_szov_wallboard_blueprint(
         if payload.get('chat2desk_now'):
             head_rows.append(('Данные %s на' % (payload.get('source_label') or 'Chat2Desk'),
                               payload['chat2desk_now']))
-        head_rows.append(('Цель по ответу внутри чата, мин', target_minutes))
+        head_rows.append(('Цель по первому ответу, мин', target_minutes))
         head_rows.append(('Выгружено', payload.get('generated_at') or ''))
 
         row = 3
@@ -785,8 +787,8 @@ def build_szov_wallboard_blueprint(
         if len(days) == 1 and days[0].get('chats_open') is not None:
             period_rows.append(('Открыто сейчас', _int(days[0].get('chats_open')), None))
         period_rows.extend([
-            ('Ответ внутри чата, мин', period_inner_minutes, period_inner_font),
-            ('Первый ответ, мин', _szov_chat_export_minutes(period_first), None),
+            ('Ответ внутри чата, мин', period_inner_minutes, None),
+            ('Первый ответ, мин', _szov_chat_export_minutes(period_first), period_first_font),
             ('Людей на линии', len(people_seconds), None),
             ('Максимум людей в часе', peak_online, None),
             ('На линии, мин', _szov_chat_export_minutes(online_seconds_total, 0), None),
@@ -817,7 +819,7 @@ def build_szov_wallboard_blueprint(
                 headers.insert(2, 'Поступивших')
                 widths.insert(2, 14)
             _sheet_head(ws_days, headers, widths)
-            day_inner_column = headers.index('Ответ внутри чата, мин') + 1
+            day_first_column = headers.index('Первый ответ, мин') + 1
             for offset, day in enumerate(days):
                 inner = day.get('inner_reply_seconds')
                 note = []
@@ -841,8 +843,9 @@ def build_szov_wallboard_blueprint(
                     cell = ws_days.cell(row=2 + offset, column=index, value=value)
                     cell.border = border
                     cell.alignment = center if 1 < index < len(headers) else left
-                    if index == day_inner_column and inner is not None:
-                        cell.font = good_font if float(inner) <= target_seconds else bad_font
+                    first_value = day.get('first_reply_seconds')
+                    if index == day_first_column and first_value is not None:
+                        cell.font = good_font if float(first_value) <= target_seconds else bad_font
             ws_days.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), len(days) + 1)
 
         # ── Лист «По часам» ──────────────────────────────────────────────────────────────────────
@@ -863,11 +866,12 @@ def build_szov_wallboard_blueprint(
         # Колонки ищем по подписи, а не по номеру: у периода слева добавляется «День», и любой
         # арифметикой по индексам красились бы соседние столбцы.
         names_column = headers.index('Кто на линии') + 1
-        inner_column = headers.index('Ответ внутри чата, мин') + 1
+        first_column = headers.index('Первый ответ, мин') + 1
         for offset, (day_str, hour_row) in enumerate(hour_rows):
             excel_row = 2 + offset
             inner_seconds = hour_row.get('inner_reply_seconds')
-            in_target = None if inner_seconds is None else float(inner_seconds) <= target_seconds
+            first_seconds = hour_row.get('first_reply_seconds')
+            in_target = None if first_seconds is None else float(first_seconds) <= target_seconds
             under = _int(hour_row.get('operators_under_minute'))
             note = []
             if hour_row.get('partial'):
@@ -898,7 +902,7 @@ def build_szov_wallboard_blueprint(
                     cell.alignment = wrap
                 else:
                     cell.alignment = center if index > (2 if multi else 1) else left
-                if in_target is not None and index == inner_column:
+                if in_target is not None and index == first_column:
                     cell.font = good_font if in_target else bad_font
 
         last_hour_row = max(1, len(hour_rows) + 1)
@@ -956,8 +960,9 @@ def build_szov_wallboard_blueprint(
                 cell.alignment = center
                 if bold:
                     cell.font = total_font
-                # Цветом красим только ответ внутри чата: цель задана ему одному, а красить
-                # первый ответ той же меркой значило бы придумать ему норму, которой нет.
+                # Цветом красим только первый ответ: по регламенту СЗоВ цель задана ему одному
+                # (правка владельца 20.11.2026), а красить ответ внутри чата той же меркой
+                # значило бы придумать ему норму, которой нет.
                 if against_target and seconds is not None:
                     cell.font = good_font if seconds <= target_seconds else bad_font
                 return cell
@@ -1013,8 +1018,8 @@ def build_szov_wallboard_blueprint(
                 sheet.cell(row=total_row + 2, column=1,
                            value='Чатов без оператора: %d' % unassigned_chats).font = hint_font
 
-        _reply_sheet('Первый ответ по часам', 'first')
-        _reply_sheet('Ответ внутри чата по часам', 'inner', against_target=True)
+        _reply_sheet('Первый ответ по часам', 'first', against_target=True)
+        _reply_sheet('Ответ внутри чата по часам', 'inner')
 
         # ── Лист «Чатники» (состав смены сейчас) ─────────────────────────────────────────────────
         if now_block:
@@ -1055,8 +1060,9 @@ def build_szov_wallboard_blueprint(
                         fill = _SZOV_CHAT_EXPORT_STATUS_FILL.get(item.get('status_key'))
                         if fill:
                             cell.fill = PatternFill('solid', fgColor=fill)
-                    if index == len(headers) and inner_seconds is not None:
-                        cell.font = good_font if float(inner_seconds) <= target_seconds else bad_font
+                    first_seconds = item.get('first_reply_seconds')
+                    if index == len(headers) - 1 and first_seconds is not None:
+                        cell.font = good_font if float(first_seconds) <= target_seconds else bad_font
             ws_shift.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)),
                                                     max(1, len(people) + 1))
             # Вышедшие в список смены не идут (на табло они на своей вкладке «Не в системе»), но

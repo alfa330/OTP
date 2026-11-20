@@ -141,8 +141,9 @@ export const CHAT_STATUS_STYLE = {
 };
 
 /*
- * Ответ внутри чата: уложились в цель или нет. Порог приходит из снимка (`target_seconds`),
- * а не задан здесь, чтобы цель правилась в одном месте — на сервере.
+ * Первый ответ: уложились в цель или нет (по регламенту СЗоВ цель у первого ответа, правка
+ * владельца 20.11.2026). Порог приходит из снимка (`target_seconds`), а не задан здесь,
+ * чтобы цель правилась в одном месте — на сервере.
  */
 export const chatReplyTone = (seconds, targetSeconds) => {
     const value = Number(seconds);
@@ -553,17 +554,19 @@ export const CHAT_WALLBOARD_METRICS = [
         group: 'today',
         label: 'Ответ внутри чата',
         hint: 'Среднее время ответа на сообщение водителя',
-        // Единственный оценочный цвет направления: уложились в цель или нет.
-        read: (now, today, snapshot) => ({
-            value: formatMinutes(today.inner_reply_seconds),
-            tone: chatReplyTone(today.inner_reply_seconds, snapshot?.target_seconds),
-        }),
+        read: (now, today) => ({ value: formatMinutes(today.inner_reply_seconds) }),
     },
     {
         key: 'chat_first',
         group: 'today',
         label: 'Первый ответ',
-        read: (now, today) => ({ value: formatMinutes(today.first_reply_seconds) }),
+        hint: 'От первого сообщения водителя до ответа сотрудника',
+        // Единственный оценочный цвет направления: по регламенту СЗоВ цель у первого ответа
+        // (правка владельца 20.11.2026).
+        read: (now, today, snapshot) => ({
+            value: formatMinutes(today.first_reply_seconds),
+            tone: chatReplyTone(today.first_reply_seconds, snapshot?.target_seconds),
+        }),
     },
     {
         key: 'chat_shift_list',

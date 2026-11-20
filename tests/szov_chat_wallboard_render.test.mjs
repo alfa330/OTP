@@ -167,3 +167,25 @@ test('Chat2Desk (откат): прежние плитки на месте', () =
     }
     assert.doesNotMatch(html, />Поступивших</);
 });
+
+// Регламент СЗоВ (правка владельца 20.11.2026): цель 2 мин — у первого ответа. Красным горит
+// он, ответ внутри чата — без оценки, сколько бы ни было.
+const tileValueClass = (html, label) => {
+    const at = html.indexOf(`>${label}<`);
+    assert.ok(at > 0, label);
+    const value = html.slice(at).match(/<div class="([^"]*tabular-nums[^"]*)"/);
+    return value ? value[1] : '';
+};
+
+test('цель — у первого ответа: он красный, ответ внутри чата без оценки', () => {
+    const slow = { ...SYNTONY_SNAPSHOT,
+        today: { ...SYNTONY_SNAPSHOT.today, first_reply_seconds: 600, inner_reply_seconds: 900 } };
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: slow }));
+    assert.match(tileValueClass(html, 'Первый ответ'), /text-rose-600/);
+    assert.match(tileValueClass(html, 'Ответ внутри чата'), /text-slate-900/);
+    const fast = { ...SYNTONY_SNAPSHOT,
+        today: { ...SYNTONY_SNAPSHOT.today, first_reply_seconds: 60, inner_reply_seconds: 900 } };
+    const ok = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: fast }));
+    assert.match(tileValueClass(ok, 'Первый ответ'), /text-emerald-600/);
+    assert.doesNotMatch(tileValueClass(ok, 'Ответ внутри чата'), /text-rose-600/);
+});

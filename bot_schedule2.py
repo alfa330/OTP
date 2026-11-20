@@ -33306,6 +33306,8 @@ async def chat_hourly_broadcast_job():
 # Цель по времени ответа осталась: она стоит пунктиром на левой оси и красит минуты —
 # и в плитке дня, и в выгрузке. Плитки «Часов в цели» и одноимённой колонки в файле
 # больше нет (решение владельца 20.08.2026), а сама цель работает как работала.
+# С 20.11.2026 цель — у ПЕРВОГО ответа (регламент СЗоВ, правка владельца): красным горит
+# первый ответ, а ответ внутри чата показывается без оценки.
 SZOV_CHAT_WALLBOARD_TARGET_SECONDS = _env_int(
     'SZOV_CHAT_WALLBOARD_TARGET_SECONDS', 120, minimum=10, maximum=3600)
 # Квота Chat2Desk общая на компанию (~100 000 запросов/мес), а табло висит на стене весь день,
@@ -36094,9 +36096,10 @@ def _szov_chat_broadcast_deviations(data):
 
     По нему решается, получит ли сообщение чат в режиме «только при отклонениях». Норма
     здесь ровно та, что красит плитки на табло: у направления один оценочный показатель —
-    «ответ внутри чата» против цели (SZOV_CHAT_WALLBOARD_TARGET_SECONDS). Придумывать
-    второй порог нельзя: одна и та же цифра стала бы отклонением в Telegram и нормой на
-    экране.
+    «первый ответ» против цели (SZOV_CHAT_WALLBOARD_TARGET_SECONDS; по регламенту СЗоВ
+    цель у первого ответа, правка владельца 20.11.2026 — до неё оценивался ответ внутри
+    чата). Придумывать второй порог нельзя: одна и та же цифра стала бы отклонением в
+    Telegram и нормой на экране.
 
     Единственная поправка — размер выборки (SZOV_CHAT_BROADCAST_MIN_CHATS): среднее по
     двум ночным обращениям это не показатель, а случай, и будить им людей нельзя. Норму
@@ -36106,13 +36109,15 @@ def _szov_chat_broadcast_deviations(data):
     notes = []
     today = data.get('today') or {}
     target = _szov_wallboard_int(data.get('target_seconds'))
-    inner = today.get('inner_reply_seconds')
-    chats = _szov_wallboard_int(today.get('chats'))
-    if (target and inner is not None and inner > target
+    first = today.get('first_reply_seconds')
+    # Выборка — чаты, по которым посчитан первый ответ; без сумм — все чаты суток.
+    sums = today.get('reply_sums') or {}
+    chats = _szov_wallboard_int(sums.get('first_count')) if sums else _szov_wallboard_int(today.get('chats'))
+    if (target and first is not None and first > target
             and chats >= SZOV_CHAT_BROADCAST_MIN_CHATS):
         notes.append(
-            f"Обратите внимание: ответ внутри чата дольше цели "
-            f"({_szov_format_seconds_mmss(target)}) — {_szov_format_seconds_mmss(inner)} "
+            f"Обратите внимание: первый ответ дольше цели "
+            f"({_szov_format_seconds_mmss(target)}) — {_szov_format_seconds_mmss(first)} "
             f"на {chats} {_szov_plural(chats, 'обращении', 'обращениях', 'обращениях')} за сутки."
         )
     stale = _szov_broadcast_stale_note(
@@ -36180,25 +36185,26 @@ def _szov_render_chat_wallboard_png(data):
     now = data.get('now') or {}
     today = data.get('today') or {}
     target = _szov_wallboard_int(data.get('target_seconds'))
+    first = today.get('first_reply_seconds')
     inner = today.get('inner_reply_seconds')
+    neutral = ('#f1f5f9', '#334155')
     # Цвет единственного оценочного показателя направления — как на табло: уложились или нет.
-    if inner is None:
-        inner_colors = ('#f1f5f9', '#334155')
-    elif target and inner > target:
-        inner_colors = ('#ffe4e6', '#be123c')
+    # По регламенту СЗоВ цель у ПЕРВОГО ответа (правка владельца 20.11.2026).
+    if first is None:
+        first_colors = neutral
+    elif target and first > target:
+        first_colors = ('#ffe4e6', '#be123c')
     else:
-        inner_colors = ('#d1fae5', '#047857')
+        first_colors = ('#d1fae5', '#047857')
 
     if data.get('source') == 'syntony':
         # Syntony (SZOV-12): статусов и открытых чатов у неё нет — плиток из нулей не рисуем.
         key_tiles = [
             ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
-            ('Ответ внутри чата', _szov_chat_broadcast_duration(inner),
-             inner_colors[0], inner_colors[1]),
-            ('Первый ответ', _szov_chat_broadcast_duration(today.get('first_reply_seconds')),
-             '#f1f5f9', '#334155'),
+            ('Первый ответ', _szov_chat_broadcast_duration(first), first_colors[0], first_colors[1]),
+            ('Ответ внутри чата', _szov_chat_broadcast_duration(inner), neutral[0], neutral[1]),
             ('Не в системе', str(_szov_wallboard_int(now.get('operators_offline'))),
-             '#f1f5f9', '#334155'),
+             neutral[0], neutral[1]),
         ]
         stat_tiles = [
             ('Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
@@ -36208,14 +36214,13 @@ def _szov_render_chat_wallboard_png(data):
             'Табло СЗоВ · чаты', f"Чаты · {data['generated_at']}", key_tiles, stat_tiles)
     key_tiles = [
         ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
-        ('Ответ внутри чата', _szov_chat_broadcast_duration(inner),
-         inner_colors[0], inner_colors[1]),
-        ('Открыто чатов', str(_szov_wallboard_int(now.get('open_chats'))), '#f1f5f9', '#334155'),
+        ('Первый ответ', _szov_chat_broadcast_duration(first), first_colors[0], first_colors[1]),
+        ('Открыто чатов', str(_szov_wallboard_int(now.get('open_chats'))), neutral[0], neutral[1]),
         ('Перерыв', str(_szov_wallboard_int(now.get('operators_on_break'))), '#fef3c7', '#b45309'),
     ]
     stat_tiles = [
         ('Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
-        ('Первый ответ', _szov_chat_broadcast_duration(today.get('first_reply_seconds'))),
+        ('Ответ внутри чата', _szov_chat_broadcast_duration(inner)),
         ('Занят', str(_szov_wallboard_int(now.get('operators_busy')))),
         ('Тренинг', str(_szov_wallboard_int(now.get('operators_on_training')))),
         ('Не в системе', str(_szov_wallboard_int(now.get('operators_offline')))),
