@@ -172,31 +172,50 @@ def deactivate_person(cursor, user_id, now):
 # ─── Справочники ──────────────────────────────────────────────────────────────
 
 def list_sources(cursor, active_only=False):
-    cursor.execute("SELECT id, code, name, kind, platform, is_active, position FROM hiring_sources"
+    """Источники в порядке справочника: сначала откликов, потом контактов. color — цвет источника (владелец
+    20.11.2026: каналы слиты с источниками), None — серый."""
+    cursor.execute("SELECT id, code, name, kind, platform, is_active, position, color FROM hiring_sources"
                    + (" WHERE is_active" if active_only else "") + " ORDER BY kind DESC, position, id")
     return _all(cursor)
 
 
 def source_by_code(cursor, code):
-    cursor.execute("SELECT id, code, name, kind, platform, is_active FROM hiring_sources WHERE code = %s", (code,))
+    cursor.execute("SELECT id, code, name, kind, platform, is_active, color FROM hiring_sources WHERE code = %s", (code,))
     return _one(cursor)
 
 
 def get_source(cursor, source_id):
-    cursor.execute("SELECT id, code, name, kind, platform, is_active FROM hiring_sources WHERE id = %s", (int(source_id),))
+    cursor.execute("SELECT id, code, name, kind, platform, is_active, color FROM hiring_sources WHERE id = %s", (int(source_id),))
     return _one(cursor)
 
 
-def create_source(cursor, code, name, kind, now):
+def source_by_name(cursor, name, kind, exclude_id=None):
+    """Источник того же вида с таким именем без учёта регистра: «Таргет» и «таргет» — один источник."""
     cursor.execute("""
-        INSERT INTO hiring_sources (code, name, kind, position, created_at)
-        VALUES (%s, %s, %s, COALESCE((SELECT MAX(position) + 1 FROM hiring_sources), 0), %s) RETURNING id
-    """, (code, name, kind, now))
+        SELECT id, code, name, kind, is_active FROM hiring_sources
+         WHERE kind = %s AND lower(name) = lower(%s) AND (%s::int IS NULL OR id <> %s) ORDER BY id LIMIT 1
+    """, (kind, name, exclude_id, exclude_id))
+    return _one(cursor)
+
+
+def create_source(cursor, code, name, kind, now, color=None):
+    cursor.execute("""
+        INSERT INTO hiring_sources (code, name, kind, position, created_at, color)
+        VALUES (%s, %s, %s, COALESCE((SELECT MAX(position) + 1 FROM hiring_sources), 0), %s, %s) RETURNING id
+    """, (code, name, kind, now, color))
     return int(cursor.fetchone()[0])
 
 
 def update_source(cursor, source_id, **fields):
-    _update('hiring_sources', source_id, fields, allowed=('name', 'is_active', 'position'), cursor=cursor)
+    return _update('hiring_sources', source_id, fields, allowed=('name', 'is_active', 'position', 'color'), cursor=cursor)
+
+
+def switch_card_source(cursor, card_id, from_source_id, to_source_id):
+    """Сменить источник карточки, только если он всё ещё from_source_id (повторный отклик по рекламе у карточки,
+    пришедшей в WhatsApp без рекламы: она становится «Таргетом», а выбор рекрутера не перетирается)."""
+    cursor.execute("UPDATE hiring_cards SET source_id = %s WHERE id = %s AND source_id = %s",
+                   (int(to_source_id), int(card_id), int(from_source_id)))
+    return cursor.rowcount
 
 
 def list_vacancies(cursor, active_only=False):
@@ -253,50 +272,6 @@ def create_reason(cursor, kind, name, requires_comment, now):
 
 def update_reason(cursor, reason_id, **fields):
     _update('hiring_reasons', reason_id, fields, allowed=('name', 'requires_comment', 'is_active', 'position'), cursor=cursor)
-
-
-def list_channels(cursor, active_only=False):
-    """Каналы — метки откликов с цветом (владелец 09.11.2026), в порядке справочника. code — у стартовых."""
-    cursor.execute("SELECT id, code, name, color, is_active, position FROM hiring_channels"
-                   + (" WHERE is_active" if active_only else "") + " ORDER BY position, id")
-    return _all(cursor)
-
-
-def get_channel(cursor, channel_id):
-    cursor.execute("SELECT id, code, name, color, is_active FROM hiring_channels WHERE id = %s", (int(channel_id),))
-    return _one(cursor)
-
-
-def channel_by_code(cursor, code):
-    """Стартовый канал по постоянному коду (target, hh, kaspi) — им система ставит метку сама."""
-    cursor.execute("SELECT id, code, name, color, is_active FROM hiring_channels WHERE code = %s", (code,))
-    return _one(cursor)
-
-
-def set_card_channel_if_empty(cursor, card_id, channel_id):
-    """Метка, поставленная системой, — только карточке без метки: выбор рекрутера не перетирается."""
-    cursor.execute("UPDATE hiring_cards SET channel_id = %s WHERE id = %s AND channel_id IS NULL",
-                   (int(channel_id), int(card_id)))
-    return cursor.rowcount
-
-
-def channel_by_name(cursor, name):
-    """Канал с таким именем без учёта регистра — имя в справочнике уникально так же (индекс по lower)."""
-    cursor.execute("SELECT id, name, color, is_active FROM hiring_channels WHERE lower(name) = lower(%s)", (name,))
-    return _one(cursor)
-
-
-def create_channel(cursor, name, color, by, now):
-    cursor.execute("""
-        INSERT INTO hiring_channels (name, color, position, created_by, created_at, updated_at)
-        VALUES (%s, %s, COALESCE((SELECT MAX(position) + 1 FROM hiring_channels), 0), %s, %s, %s) RETURNING id
-    """, (name, color, by, now, now))
-    return int(cursor.fetchone()[0])
-
-
-def update_channel(cursor, channel_id, now, **fields):
-    fields['updated_at'] = now
-    return _update('hiring_channels', channel_id, fields, allowed=('name', 'color', 'is_active', 'updated_at'), cursor=cursor)
 
 
 def list_groups(cursor, active_only=False, trainer_id=None, soonest_first=False, today=None):
@@ -478,7 +453,7 @@ _CARD_COLUMNS = """
     v.name AS vacancy_name, COALESCE(v.department_id, g.department_id) AS department_id,
     s.name AS source_name, s.code AS source_code, r.name AS recruiter_name, g.name AS group_name,
     g.start_date AS group_start_date, g.trainer_id AS trainer_id, b.file_name AS batch_file,
-    c.channel_id, ch.name AS channel_name, ch.color AS channel_color
+    s.color AS source_color
 """
 _CARD_FROM = """
     FROM hiring_cards c
@@ -488,7 +463,6 @@ _CARD_FROM = """
     LEFT JOIN users r ON r.id = c.recruiter_id
     LEFT JOIN hiring_batches b ON b.id = c.batch_id
     LEFT JOIN users e ON e.id = c.employee_user_id
-    LEFT JOIN hiring_channels ch ON ch.id = c.channel_id
 """
 
 
@@ -528,7 +502,7 @@ def insert_card(cursor, fields):
     psycopg2.errors.UniqueViolation, вызывающий ловит её под SAVEPOINT."""
     columns = ('kind', 'full_name', 'phone', 'whatsapp', 'city', 'vacancy_id', 'vacancy_text', 'source_id', 'batch_id',
                'platform_ref', 'campaign', 'referred_by', 'received_at', 'stage', 'repeat_of_card_id', 'comment',
-               'created_by', 'created_at', 'updated_at', 'channel_id')
+               'created_by', 'created_at', 'updated_at')
     cursor.execute(
         "INSERT INTO hiring_cards (%s) VALUES (%s) RETURNING id" % (", ".join(columns), ", ".join(['%s'] * len(columns))),
         [fields.get(column) for column in columns])
@@ -541,7 +515,7 @@ def update_card(cursor, card_id, **fields):
                'last_touch_at', 'no_answer_streak', 'office_visit_at', 'group_id', 'training_started_at',
                'line_started_at', 'shifts_done', 'hired_at', 'hired_by', 'close_initiator', 'close_reason_id',
                'close_reason_text', 'close_stage', 'close_day', 'close_comment', 'is_closed', 'closed_at',
-               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id', 'channel_id')
+               'reactivations', 'comment', 'updated_at', 'candidate_no', 'employee_user_id')
     return _update('hiring_cards', card_id, fields, allowed=allowed, cursor=cursor)
 
 
@@ -1089,29 +1063,51 @@ def _filters(filters):
     return where, params
 
 
-def board(cursor, caps, user_id, filters, per_column=60):
-    """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху,
-    остальные — по последнему изменению."""
+def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000):
+    """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху, остальные — по последнему
+    изменению.
+
+    «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
+    кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать все»
+    (порция expanded_limit). Период — только у «Откликов» (тогда же: «остальные статусы не должны по периоду
+    фильтроваться»): responses_period = (с, по) по дате поступления, «по» не включительно, любая граница может быть
+    None. Возвращает (колонки, число по этапам, число откликов по источникам)."""
     scope_sql, scope_params = scope_clause(caps, user_id)
     where, params = _filters(filters)
+    start, end = responses_period or (None, None)
+    bounds, bound_params = [], []
+    if start:
+        bounds.append("c.received_at >= %s")
+        bound_params.append(start)
+    if end:
+        bounds.append("c.received_at < %s")
+        bound_params.append(end)
+    if bounds:
+        where.append("(c.stage <> 'responses' OR (" + " AND ".join(bounds) + "))")
+        params.extend(bound_params)
     base_where = " AND ".join([scope_sql] + where)
     cursor.execute("SELECT c.stage, COUNT(*) " + _CARD_FROM + " WHERE " + base_where + " GROUP BY c.stage",
                    scope_params + params)
     counts = {stage: int(count) for stage, count in cursor.fetchall()}
+    cursor.execute("SELECT c.source_id, COUNT(*) " + _CARD_FROM + " WHERE " + base_where
+                   + " AND c.stage = 'responses' GROUP BY c.source_id", scope_params + params)
+    by_source = {source_id: int(count) for source_id, count in cursor.fetchall()}
     cursor.execute("""
         SELECT * FROM (
             SELECT """ + _CARD_COLUMNS + """,
-                   ROW_NUMBER() OVER (PARTITION BY c.stage ORDER BY
+                   ROW_NUMBER() OVER (PARTITION BY c.stage, CASE WHEN c.stage = 'responses' THEN c.source_id END ORDER BY
                        CASE WHEN c.stage IN ('contacts', 'responses') THEN c.received_at ELSE c.updated_at END DESC, c.id DESC) AS rn
             """ + _CARD_FROM + " WHERE " + base_where + """
-        ) ranked WHERE rn <= %s ORDER BY stage, rn
-    """, scope_params + params + [int(per_column)])
+        ) ranked
+         WHERE rn <= CASE WHEN stage = 'responses' AND source_id = ANY(%s::int[]) THEN %s ELSE %s END
+         ORDER BY stage, CASE WHEN stage IN ('contacts', 'responses') THEN received_at ELSE updated_at END DESC, id DESC
+    """, scope_params + params + [_ids(expand_sources), int(expanded_limit), int(per_column)])
     rows = _all(cursor)
     columns = {stage: [] for stage in rules.STAGE_CODES}
     for row in rows:
         row.pop('rn', None)
         columns.setdefault(row['stage'], []).append(row)
-    return columns, counts
+    return columns, counts, by_source
 
 
 def list_cards(cursor, caps, user_id, filters, limit=200, offset=0, order='c.updated_at DESC, c.id DESC'):

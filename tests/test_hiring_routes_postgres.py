@@ -441,37 +441,85 @@ def test_trainer_groups_through_routes(client):
     assert (legacy['capacity'], legacy['seats_free']) == (8, 8)
 
 
-def test_channels_through_routes(client):
-    """Каналы — метки откликов с цветом (владелец 09.11.2026): справочник руководителя и метка карточки ручками."""
+def test_sources_with_color_through_routes(client):
+    """Владелец 20.11.2026: каналы слиты с источниками, цвет — у источника. Справочник руководителя с цветом, источник
+    карточки — PATCH карточки; ручек каналов больше нет."""
     lead, rec = as_user(HR_HEAD), as_user(REC1)
     boot = client.get('/api/hiring', headers=rec).get_json()
-    assert [(c['name'], c['color']) for c in boot['dictionaries']['channels']] == [('Таргет', 'blue'), ('hh', 'red'), ('Каспи', 'pink')]
-    added = client.post('/api/hiring/channels', json={'name': 'OLX', 'color': 'green'}, headers=lead)
-    assert added.status_code == 201 and added.get_json()['items'][-1]['name'] == 'OLX'
-    olx = added.get_json()['items'][-1]
-    assert client.post('/api/hiring/channels', json={'name': 'olx', 'color': 'green'}, headers=lead).status_code == 409
-    assert client.post('/api/hiring/channels', json={'name': 'X', 'color': 'black'}, headers=lead).get_json()['code'] == 'HIRING_BAD_CHANNEL'
-    assert client.post('/api/hiring/channels', json={'name': 'X', 'color': 'red'}, headers=rec).status_code == 403
-    assert client.patch('/api/hiring/channels/%s' % olx['id'], json={'color': 'teal'}, headers=rec).status_code == 403
-    off = client.patch('/api/hiring/channels/%s' % olx['id'], json={'is_active': False}, headers=lead).get_json()['items']
-    assert [c['is_active'] for c in off if c['id'] == olx['id']] == [False]
-    # Рекрутер видит в выборе только включённые; руководитель — все (выключенные нужны настройкам).
-    assert 'OLX' not in [c['name'] for c in client.get('/api/hiring', headers=rec).get_json()['dictionaries']['channels']]
-    assert 'OLX' in [c['name'] for c in client.get('/api/hiring', headers=lead).get_json()['dictionaries']['channels']]
+    assert 'channels' not in boot['dictionaries']
+    colors = {s['code']: s['color'] for s in boot['dictionaries']['sources']}
+    assert (colors['target'], colors['hh'], colors['kaspi'], colors['whatsapp']) == ('blue', 'red', 'pink', None)
+    assert client.post('/api/hiring/channels', json={'name': 'OLX', 'color': 'green'}, headers=lead).status_code == 404
+
+    added = client.post('/api/hiring/sources', json={'name': 'Instagram', 'kind': 'responses', 'color': 'violet'}, headers=lead)
+    assert added.status_code == 201
+    insta = next(s for s in added.get_json()['items'] if s['name'] == 'Instagram')
+    assert (insta['kind'], insta['color'], insta['is_active']) == ('responses', 'violet', True)
+    assert client.post('/api/hiring/sources', json={'name': 'instagram', 'kind': 'responses'}, headers=lead).status_code == 409
+    bad = client.post('/api/hiring/sources', json={'name': 'X', 'kind': 'responses', 'color': 'black'}, headers=lead)
+    assert bad.status_code == 400 and bad.get_json()['code'] == 'HIRING_BAD_SOURCE'
+    assert client.post('/api/hiring/sources', json={'name': 'X', 'kind': 'responses'}, headers=rec).status_code == 403
+    assert client.patch('/api/hiring/sources/%s' % insta['id'], json={'color': 'teal'}, headers=rec).status_code == 403
+    recolored = client.patch('/api/hiring/sources/%s' % insta['id'], json={'color': 'teal'}, headers=lead).get_json()['items']
+    assert [s['color'] for s in recolored if s['id'] == insta['id']] == ['teal']
+    assert client.patch('/api/hiring/sources/999999', json={'color': 'teal'}, headers=lead).status_code == 404
 
     manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
+    target = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'target')
+    base = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'base_bought')
     card = client.post('/api/hiring/cards', json={'phone': '8 705 321 00 01', 'source_id': manual['id']}, headers=rec).get_json()['card']
-    assert card['channel_id'] is None and client.post('/api/hiring/cards/%s/take' % card['id'], headers=rec).status_code == 200
-    target = boot['dictionaries']['channels'][0]
-    labeled = client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': target['id']}, headers=rec)
-    assert labeled.status_code == 200
-    assert (labeled.get_json()['card']['channel_name'], labeled.get_json()['card']['channel_color']) == ('Таргет', 'blue')
-    refused = client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': olx['id']}, headers=rec)
-    assert refused.status_code == 400 and refused.get_json()['code'] == 'HIRING_BAD_CHANNEL'
+    assert (card['source_name'], card['source_color']) == ('Вручную', None) and 'channel_id' not in card
+    assert client.post('/api/hiring/cards/%s/take' % card['id'], headers=rec).status_code == 200
+    moved = client.patch('/api/hiring/cards/%s' % card['id'], json={'source_id': target['id']}, headers=rec)
+    assert moved.status_code == 200 and (moved.get_json()['card']['source_name'], moved.get_json()['card']['source_color']) == ('Таргет', 'blue')
+    refused = client.patch('/api/hiring/cards/%s' % card['id'], json={'source_id': base['id']}, headers=rec)
+    assert refused.status_code == 400 and refused.get_json()['code'] == 'HIRING_BAD_SOURCE'
     in_work = next(column for column in client.get('/api/hiring/board', headers=rec).get_json()['columns'] if column['stage'] == 'in_work')
-    assert [(c['channel_name'], c['channel_color']) for c in in_work['cards']] == [('Таргет', 'blue')]
-    assert client.get('/api/hiring/cards/%s' % card['id'], headers=rec).get_json()['card']['channel_name'] == 'Таргет'
-    assert client.patch('/api/hiring/cards/%s' % card['id'], json={'channel_id': None}, headers=rec).get_json()['card']['channel_id'] is None
+    assert [(c['source_name'], c['source_color']) for c in in_work['cards']] == [('Таргет', 'blue')] and 'groups' not in in_work
+
+
+def test_board_responses_groups_and_period_through_routes(client):
+    """Владелец 20.11.2026: «Отклики» поделены по источникам с названием и числом; период — только у «Откликов» (по дате
+    поступления, «по» — включительно), остальные этапы им не режутся; «Показать ещё» — expand."""
+    rec = as_user(REC1)
+    boot = client.get('/api/hiring', headers=rec).get_json()
+    by_code = {s['code']: s for s in boot['dictionaries']['sources']}
+
+    def response(phone, code, received):
+        card = client.post('/api/hiring/cards', json={'phone': phone, 'source_id': by_code[code]['id']}, headers=rec).get_json()['card']
+        with client.world['db']._get_cursor() as cur:
+            cur.execute("UPDATE hiring_cards SET received_at = %s WHERE id = %s", (received, card['id']))
+        return card['id']
+
+    ids = [response('8 705 400 00 0%d' % n, code, datetime(2026, 11, day, 12, 0))
+           for n, (code, day) in enumerate((('whatsapp', 10), ('target', 12), ('target', 18), ('hh', 19)), start=1)]
+    old = response('8 705 400 00 05', 'hh', datetime(2026, 11, 1, 12, 0))
+    assert client.post('/api/hiring/cards/%s/take' % old, headers=rec).status_code == 200
+
+    def board(**query):
+        columns = client.get('/api/hiring/board', query_string=query, headers=rec).get_json()['columns']
+        return {column['stage']: column for column in columns}
+
+    full = board()
+    responses = full['responses']
+    assert responses['total'] == 4 and [c['id'] for c in responses['cards']] == ids[::-1]
+    # Группы — в порядке справочника источников (HeadHunter, Таргет, WhatsApp), с цветом, числом и карточками группы.
+    assert [(g['name'], g['color'], g['total'], [c['id'] for c in g['cards']]) for g in responses['groups']] == [
+        ('HeadHunter', 'red', 1, [ids[3]]), ('Таргет', 'blue', 2, [ids[2], ids[1]]), ('WhatsApp', None, 1, [ids[0]])]
+    assert full['in_work']['total'] == 1 and 'groups' not in full['in_work']
+
+    # Период 12.11–18.11 включительно: «Отклики» — только поступившие в эти дни, «В работе» — как было.
+    cut = board(responses_from='2026-11-12', responses_to='2026-11-18')
+    assert cut['responses']['total'] == 2 and [(g['name'], g['total']) for g in cut['responses']['groups']] == [('Таргет', 2)]
+    assert cut['in_work']['total'] == 1 and [c['id'] for c in cut['in_work']['cards']] == [old]
+    assert board(responses_from='2026-11-19')['responses']['total'] == 1
+    assert board(responses_to='2026-11-10')['responses']['total'] == 1
+    assert board(responses_from='мусор', responses_to='2026-13-45')['responses']['total'] == 4     # неразборчивое — без периода
+    assert board(responses_from='2026-12-01')['responses']['groups'] == []
+    # Общий отбор доски (from / to) по-прежнему режет все колонки — период «Откликов» отдельный параметр.
+    assert board(**{'from': '2026-11-12'})['in_work']['total'] == 0
+    # expand принимает только числа и не ломает ответ.
+    assert board(expand='%s,abc,' % by_code['target']['id'])['responses']['total'] == 4
 
 
 def test_external_responses(client):

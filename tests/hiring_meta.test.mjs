@@ -4,10 +4,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    CHANNEL_COLORS, CHANNEL_COLOR_CODES, GROUP_CAPACITY_MAX, ICORE_PHONE_FRAME_ID, STAGES, STAGE_LABELS, FUNNEL_STAGES,
-    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, buildICorePhoneUrl, channelTone, daysSince, groupNameAfterStart, groupNameFor,
-    groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull, matchesQuery, monthLabel,
-    openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, splitDateTime, stepCapacity,
+    GROUP_CAPACITY_MAX, ICORE_PHONE_FRAME_ID, SOURCE_COLORS, SOURCE_COLOR_CODES, STAGES, STAGE_LABELS, FUNNEL_STAGES,
+    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, boardQuery, buildICorePhoneUrl, daysSince, groupKey, groupNameAfterStart,
+    groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull, matchesQuery,
+    monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices, sourceTone,
+    splitDateTime, stepCapacity, toggleInList,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -86,16 +87,58 @@ test('client-side search matches name, phone and candidate number', () => {
     assert.ok(!matchesQuery(card, '99'));
 });
 
-test('channel labels: palette from the owner (blue, red, pink) with whole Tailwind classes', () => {
-    // Владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый; свои каналы — цветом из палитры.
-    assert.deepEqual(CHANNEL_COLOR_CODES, ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'violet', 'pink', 'gray']);
-    assert.equal(CHANNEL_COLORS.blue.dot, 'bg-blue-500');
-    assert.equal(CHANNEL_COLORS.red.dot, 'bg-red-500');
-    assert.equal(CHANNEL_COLORS.pink.dot, 'bg-pink-500');
-    for (const code of CHANNEL_COLOR_CODES) {
-        assert.ok(CHANNEL_COLORS[code].label && /^bg-\S+ text-\S+ ring-1 ring-\S+$/.test(CHANNEL_COLORS[code].pill), code);
+test('source colors: palette from the owner (blue, red, pink) with whole Tailwind classes', () => {
+    // Владелец 20.11.2026: каналы слиты с источниками, цвет выбирается в источниках; стартовые — Таргет синий, hh красный,
+    // Каспи розовый (его слова 09.11.2026). Источник без цвета — серый.
+    assert.deepEqual(SOURCE_COLOR_CODES, ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'violet', 'pink', 'gray']);
+    assert.equal(SOURCE_COLORS.blue.dot, 'bg-blue-500');
+    assert.equal(SOURCE_COLORS.red.dot, 'bg-red-500');
+    assert.equal(SOURCE_COLORS.pink.dot, 'bg-pink-500');
+    for (const code of SOURCE_COLOR_CODES) {
+        assert.ok(SOURCE_COLORS[code].label && /^bg-\S+ text-\S+ ring-1 ring-\S+$/.test(SOURCE_COLORS[code].pill), code);
     }
-    assert.equal(channelTone('unknown'), CHANNEL_COLORS.gray);       // цвет из будущего — серый, не падение
+    assert.equal(sourceTone('unknown'), SOURCE_COLORS.gray);       // цвет из будущего — серый, не падение
+    assert.equal(sourceTone(null), SOURCE_COLORS.gray);            // источник без цвета
+});
+
+test('card source choices: same kind, switched on, directory order', () => {
+    const sources = [
+        { id: 1, kind: 'responses', name: 'HeadHunter', is_active: true },
+        { id: 4, kind: 'responses', name: 'Таргет', is_active: true },
+        { id: 9, kind: 'responses', name: 'Старый', is_active: false },
+        { id: 7, kind: 'contacts', name: 'База бывших водителей', is_active: true },
+        { id: 10, kind: 'responses', name: 'WhatsApp' },                      // рекрутеру is_active не приходит — включён
+    ];
+    assert.deepEqual(sourceChoices({ kind: 'response' }, sources).map((s) => s.id), [1, 4, 10]);
+    assert.deepEqual(sourceChoices({ kind: 'contact' }, sources).map((s) => s.id), [7]);
+    assert.deepEqual(sourceChoices({}, sources).map((s) => s.id), [1, 4, 10]);
+    assert.deepEqual(sourceChoices({ kind: 'response' }, null), []);
+});
+
+test('board query: period goes only to «Отклики», empty filters are not sent', () => {
+    // Владелец 20.11.2026: «именно в отклики надо добавить возможность фильтровать по периоду, остальные статусы не
+    // должны по периоду фильтроваться» — отдельные responses_from / responses_to, а не общие from / to.
+    assert.deepEqual(boardQuery(), {});
+    assert.deepEqual(boardQuery({ mine: true, query: '  Асель ', filters: { vacancy_id: '3', city: '', source_id: '4', recruiter_id: '' } }),
+        { mine: '1', q: 'Асель', vacancy_id: '3', source_id: '4' });
+    const withPeriod = boardQuery({ period: { from: '2026-11-12', to: '2026-11-18' } });
+    assert.deepEqual(withPeriod, { responses_from: '2026-11-12', responses_to: '2026-11-18' });
+    assert.ok(!('from' in withPeriod) && !('to' in withPeriod));
+    assert.deepEqual(boardQuery({ period: { from: '', to: '2026-11-18' } }), { responses_to: '2026-11-18' });
+    // «Показать ещё» — только числовые id источников; группа без источника не раскрывается.
+    assert.deepEqual(boardQuery({ expanded: ['4', 'none', '10', 'x1'] }), { expand: '4,10' });
+    assert.deepEqual(boardQuery({ expanded: ['none'] }), {});
+});
+
+test('collapsed lists toggle without touching the original; group keys', () => {
+    const list = ['in_work'];
+    assert.deepEqual(toggleInList(list, 'refused'), ['in_work', 'refused']);
+    assert.deepEqual(toggleInList(list, 'in_work'), []);
+    assert.deepEqual(list, ['in_work']);
+    assert.deepEqual(toggleInList(null, '4'), ['4']);
+    assert.equal(groupKey({ source_id: 4 }), '4');
+    assert.equal(groupKey({ source_id: null }), 'none');
+    assert.equal(groupKey({}), 'none');
 });
 
 test('group seats: how many more fit, full group, groups without capacity', () => {

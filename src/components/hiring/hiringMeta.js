@@ -37,12 +37,12 @@ export const SUBSTAGE_LABELS = {
 };
 export const TOUCH_RESULT_LABELS = { dial: 'Дозвон', no_answer: 'Недозвон' };
 
-/* Каналы — метки откликов (владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый; справочник
-   с цветом — в «Настройках → Каналы»). Цвет — из палитры, как у списков «Напоминаний»: коды те же, что
-   rules.CHANNEL_COLORS на сервере. Метка — светлая плашка с цветной точкой: оттенок различим и у близких
-   цветов (красный и розовый), а плашка не кричит рядом с подстатусом. Классы — целыми строками, иначе
-   сборка Tailwind их не увидит. */
-export const CHANNEL_COLORS = {
+/* Цвет источника (владелец 20.11.2026: «понятие Канал надо убрать и всё запихать в источник… выбрать цвет прямо в
+   источниках»; стартовые цвета — его же слова о каналах 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый).
+   Палитра — как у списков «Напоминаний»: коды те же, что rules.SOURCE_COLORS на сервере; без цвета — серый. Источник
+   на карточке — светлая плашка с цветной точкой: оттенок различим и у близких цветов (красный и розовый), а плашка не
+   кричит рядом с подстатусом. Классы — целыми строками, иначе сборка Tailwind их не увидит. */
+export const SOURCE_COLORS = {
     red: { label: 'Красный', pill: 'bg-red-50 text-red-700 ring-1 ring-red-200/80', dot: 'bg-red-500' },
     orange: { label: 'Оранжевый', pill: 'bg-orange-50 text-orange-700 ring-1 ring-orange-200/80', dot: 'bg-orange-500' },
     yellow: { label: 'Жёлтый', pill: 'bg-yellow-50 text-yellow-800 ring-1 ring-yellow-200/80', dot: 'bg-yellow-400' },
@@ -53,8 +53,45 @@ export const CHANNEL_COLORS = {
     pink: { label: 'Розовый', pill: 'bg-pink-50 text-pink-700 ring-1 ring-pink-200/80', dot: 'bg-pink-500' },
     gray: { label: 'Серый', pill: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200/80', dot: 'bg-slate-400' },
 };
-export const CHANNEL_COLOR_CODES = Object.keys(CHANNEL_COLORS);
-export const channelTone = (color) => CHANNEL_COLORS[color] || CHANNEL_COLORS.gray;
+export const SOURCE_COLOR_CODES = Object.keys(SOURCE_COLORS);
+export const sourceTone = (color) => SOURCE_COLORS[color] || SOURCE_COLORS.gray;
+
+/** Источники, которые можно поставить карточке: включённые и того же вида — отклику источники откликов, контакту
+ *  базы (сервер проверяет то же, HiringService._card_source). Порядок — справочника. */
+export const sourceChoices = (card, sources) => {
+    const kind = card?.kind === 'contact' ? 'contacts' : 'responses';
+    return (sources || []).filter((source) => source.kind === kind && source.is_active !== false);
+};
+
+/** Добавить или убрать значение из списка (свёрнутые колонки и группы доски); исходный массив не меняется. */
+export const toggleInList = (list, value) => {
+    const items = Array.isArray(list) ? list : [];
+    return items.includes(value) ? items.filter((item) => item !== value) : [...items, value];
+};
+
+/** Ключ группы «Откликов» в списке свёрнутых: id источника, у карточек без источника — 'none'. */
+export const groupKey = (group) => (group?.source_id === null || group?.source_id === undefined ? 'none' : String(group.source_id));
+
+/*
+ * Запрос доски. Период — только «Откликам» (владелец 20.11.2026: «именно в отклики надо добавить возможность
+ * фильтровать по периоду, остальные статусы не должны по периоду фильтроваться»): уходит отдельными
+ * responses_from / responses_to, а не общими from / to, которые сервер применил бы ко всем колонкам. expand —
+ * источники «Откликов», где нажали «Показать ещё». Пустые отборы не отправляются.
+ */
+export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}, expanded = [] } = {}) => {
+    const params = {
+        mine: mine ? '1' : undefined,
+        q: String(query || '').trim() || undefined,
+        vacancy_id: filters.vacancy_id || undefined,
+        city: filters.city || undefined,
+        source_id: filters.source_id || undefined,
+        recruiter_id: filters.recruiter_id || undefined,
+        responses_from: period?.from || undefined,
+        responses_to: period?.to || undefined,
+        expand: (expanded || []).filter((key) => /^\d+$/.test(String(key))).join(',') || undefined,
+    };
+    return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
+};
 
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),
    просрочка — янтарный. Рабочие этапы не красятся. */

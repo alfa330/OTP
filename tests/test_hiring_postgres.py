@@ -274,9 +274,9 @@ def test_take_is_exclusive_and_visibility(world):
     assert caught.value.code == 'HIRING_NOT_FOUND'
     with world['db']._get_cursor() as cur:
         # Доска второго рекрутера: его карточка (взятая через move) и пул; чужая закреплённая — нет.
-        columns, counts = queries.board(cur, {'recruiter': True}, REC2, {})
+        columns, counts, _by_source = queries.board(cur, {'recruiter': True}, REC2, {})
         assert counts == {'in_work': 1, 'responses': 1} and columns['in_work'][0]['id'] == other['id']
-        columns, counts = queries.board(cur, {'recruiter': True}, REC1, {})
+        columns, counts, _by_source = queries.board(cur, {'recruiter': True}, REC1, {})
         assert counts == {'in_work': 1, 'responses': 1} and columns['in_work'][0]['id'] == card['id']
         assert queries.card_assignments(cur, card['id'])[0]['reason'] == 'take'
 
@@ -1101,180 +1101,329 @@ def test_dashboard_counts_no_answer_status(world):
     assert dict(rules.CALL_RESULTS)['no_answer'] == 'Недозвон'
 
 
-# ─── Каналы — метки откликов (владелец 09.11.2026) ─────────────────────────────
+# ─── Источники с цветом — каналы слиты с ними (владелец 20.11.2026) ────────────
 
-def test_channels_directory_and_card_label(world):
-    """Владелец 09.11.2026: каждому отклику — метка-канал с цветом (Таргет — синий, hh — красный, Каспи —
-    розовый); справочник в «Настройках», где руководитель сам добавляет канал и ставит ему цвет."""
+def test_source_colors_and_card_source(world):
+    """Владелец 20.11.2026: «понятие Канал надо убрать и всё запихать в источник… добавить возможность выбрать цвет
+    прямо в источниках». Цвет — у источника (стартовые — его слова о каналах 09.11.2026: Таргет синий, hh красный,
+    Каспи розовый), справочник ведёт руководитель; источник карточки меняет закреплённый рекрутер или руководитель —
+    только на включённый источник того же вида."""
     service = world['service']
     lead, me, other = ctx_of(world, LEAD_GRANT), ctx_of(world, REC1), ctx_of(world, REC2)
-    with world['db']._get_cursor() as cur:
-        seeded = queries.list_channels(cur)
-    # Засев один раз: фикстура разворачивает схему дважды, как перезапуск прода.
-    assert [(c['name'], c['color'], c['is_active'], c['position']) for c in seeded] \
-        == [('Таргет', 'blue', True, 0), ('hh', 'red', True, 1), ('Каспи', 'pink', True, 2)]
-    target, hh_channel = seeded[0], seeded[1]
+    sources = world['sources']
+    assert {code: sources[code]['color'] for code in ('target', 'hh', 'kaspi', 'whatsapp', 'manual')} == {
+        'target': 'blue', 'hh': 'red', 'kaspi': 'pink', 'whatsapp': None, 'manual': None}
 
-    # Справочник ведёт руководитель: имя без лишних пробелов, цвет из палитры, без дублей по регистру.
+    # Справочник ведёт руководитель: имя без лишних пробелов, вид, цвет из палитры, без дублей по регистру в своём виде.
     with pytest.raises(HiringError) as caught:
-        service.add_channel(me, {'name': 'OLX', 'color': 'green'})
+        service.add_source(me, {'name': 'Instagram', 'kind': 'responses', 'color': 'violet'})
     assert caught.value.status == 403
-    for bad in ({'name': '  ', 'color': 'green'}, {'name': 'OLX', 'color': '#00ff00'}, {'name': 'x' * 41, 'color': 'green'},
-                {'name': 'OLX'}):
+    for bad in ({'name': '  ', 'kind': 'responses'}, {'name': 'X', 'kind': 'nope'},
+                {'name': 'X', 'kind': 'responses', 'color': '#00ff00'}, {'name': 'x' * 121, 'kind': 'responses'}):
         with pytest.raises(HiringError) as caught:
-            service.add_channel(lead, bad)
-        assert caught.value.code == 'HIRING_BAD_CHANNEL'
+            service.add_source(lead, bad)
+        assert caught.value.code == 'HIRING_BAD_SOURCE'
     with pytest.raises(HiringError) as caught:
-        service.add_channel(lead, {'name': 'HH', 'color': 'green'})
+        service.add_source(lead, {'name': 'таргет', 'kind': 'responses', 'color': 'green'})
     assert caught.value.code == 'HIRING_DUPLICATE' and caught.value.status == 409
-    items = service.add_channel(lead, {'name': '  OLX   объявления ', 'color': 'green'})
-    olx = items[-1]
-    assert (olx['name'], olx['color'], olx['position'], olx['is_active']) == ('OLX объявления', 'green', 3, True)
-    items = service.edit_channel(lead, olx['id'], {'name': 'OLX', 'color': 'orange'})
-    assert [(c['name'], c['color']) for c in items if c['id'] == olx['id']] == [('OLX', 'orange')]
+    items = service.add_source(lead, {'name': '  Instagram   реклама ', 'kind': 'responses', 'color': 'violet'})
+    insta = next(s for s in items if s['name'] == 'Instagram реклама')
+    assert (insta['kind'], insta['color'], insta['is_active']) == ('responses', 'violet', True)
+    assert insta['code'].startswith('custom_') and insta['platform'] is None
+    # Без цвета — серый (NULL); то же имя в базах контактов — другой вид, не дубль.
+    items = service.add_source(lead, {'name': 'Instagram реклама', 'kind': 'contacts'})
+    assert [s['color'] for s in items if s['name'] == 'Instagram реклама' and s['kind'] == 'contacts'] == [None]
+    items = service.edit_source(lead, insta['id'], {'name': 'Instagram', 'color': 'orange'})
+    assert [(s['name'], s['color']) for s in items if s['id'] == insta['id']] == [('Instagram', 'orange')]
     with pytest.raises(HiringError) as caught:
-        service.edit_channel(lead, olx['id'], {'name': 'hh'})
+        service.edit_source(lead, insta['id'], {'name': 'headhunter'})
     assert caught.value.code == 'HIRING_DUPLICATE'
     with pytest.raises(HiringError) as caught:
-        service.edit_channel(lead, olx['id'], {'color': 'black'})
-    assert caught.value.code == 'HIRING_BAD_CHANNEL'
+        service.edit_source(lead, insta['id'], {'color': 'black'})
+    assert caught.value.code == 'HIRING_BAD_SOURCE'
+    assert [s['color'] for s in service.edit_source(lead, insta['id'], {'color': ''}) if s['id'] == insta['id']] == [None]
+    service.edit_source(lead, insta['id'], {'color': 'orange'})
     with pytest.raises(HiringError) as caught:
-        service.edit_channel(lead, 999999, {'color': 'red'})
+        service.edit_source(lead, 999999, {'color': 'red'})
     assert caught.value.status == 404
     with pytest.raises(HiringError) as caught:
-        service.edit_channel(me, olx['id'], {'is_active': False})
+        service.edit_source(me, insta['id'], {'is_active': False})
     assert caught.value.status == 403
 
-    # Метку ставит закреплённый рекрутер или руководитель; карточка отдаёт имя и цвет канала.
+    # Источник карточки меняет закреплённый рекрутер или руководитель; карточка отдаёт имя и цвет источника.
     _outcome, card = add_response(world, REC1, '8 705 300 00 01')
+    assert (card['source_name'], card['source_color']) == ('Вручную', None)
     with pytest.raises(HiringError) as caught:            # в пуле карточку правит только руководитель
-        service.edit_card(me, card['id'], {'channel_id': target['id']})
+        service.edit_card(me, card['id'], {'source_id': sources['target']['id']})
     assert caught.value.status == 403
-    assert service.edit_card(lead, card['id'], {'channel_id': target['id']})['channel_name'] == 'Таргет'
+    assert service.edit_card(lead, card['id'], {'source_id': sources['target']['id']})['source_name'] == 'Таргет'
     card = service.take(me, card['id'])
-    assert (card['channel_id'], card['channel_name'], card['channel_color']) == (target['id'], 'Таргет', 'blue')
-    card = service.edit_card(me, card['id'], {'channel_id': str(hh_channel['id'])})
-    assert (card['channel_name'], card['channel_color']) == ('hh', 'red')
+    assert (card['source_id'], card['source_name'], card['source_color']) == (sources['target']['id'], 'Таргет', 'blue')
+    card = service.edit_card(me, card['id'], {'source_id': str(sources['hh']['id'])})
+    assert (card['source_name'], card['source_color']) == ('HeadHunter', 'red')
     with pytest.raises(HiringError) as caught:
-        service.edit_card(other, card['id'], {'channel_id': target['id']})
+        service.edit_card(other, card['id'], {'source_id': sources['target']['id']})
     assert caught.value.code == 'HIRING_NOT_FOUND'
-    for bad in ('abc', 999999, True):
+    # Источник обязателен и того же вида: снять нельзя, отклику базу контактов — нельзя.
+    for bad in ('abc', 999999, True, None, '', sources['base_bought']['id']):
         with pytest.raises(HiringError) as caught:
-            service.edit_card(me, card['id'], {'channel_id': bad})
-        assert caught.value.code == 'HIRING_BAD_CHANNEL'
+            service.edit_card(me, card['id'], {'source_id': bad})
+        assert caught.value.code == 'HIRING_BAD_SOURCE'
+    assert service.edit_card(me, card['id'], {'city': 'Алматы'})['source_name'] == 'HeadHunter'   # без source_id не трогается
 
-    # Выключенный канал новым карточкам не ставится, а у помеченных остаётся — и с новым цветом.
-    service.edit_channel(lead, hh_channel['id'], {'is_active': False, 'color': 'violet'})
+    # Выключенный источник новым не ставится, а у карточки, где стоит, остаётся — и с новым цветом.
+    card = service.edit_card(me, card['id'], {'source_id': insta['id']})
+    service.edit_source(lead, insta['id'], {'is_active': False, 'color': 'teal'})
     with world['db']._get_cursor() as cur:
-        assert [c['name'] for c in queries.list_channels(cur, active_only=True)] == ['Таргет', 'Каспи', 'OLX']
         kept = queries.get_card(cur, card['id'])
-        assert (kept['channel_name'], kept['channel_color']) == ('hh', 'violet')
-    assert service.edit_card(me, card['id'], {'channel_id': hh_channel['id'], 'city': 'Астана'})['channel_id'] == hh_channel['id']
+        assert (kept['source_name'], kept['source_color']) == ('Instagram', 'teal')
+        assert 'Instagram' not in [s['name'] for s in queries.list_sources(cur, active_only=True)]
+    assert service.edit_card(me, card['id'], {'source_id': insta['id'], 'city': 'Астана'})['source_id'] == insta['id']
     _outcome, fresh = add_response(world, REC1, '8 705 300 00 02')
     fresh = service.take(me, fresh['id'])
     with pytest.raises(HiringError) as caught:
-        service.edit_card(me, fresh['id'], {'channel_id': hh_channel['id']})
-    assert caught.value.code == 'HIRING_BAD_CHANNEL'
-    # Имя выключенного канала включает его заново, а не заводит второй с тем же именем.
-    items = service.add_channel(lead, {'name': 'HH', 'color': 'red'})
-    assert len(items) == 4
-    assert [(c['name'], c['color'], c['is_active']) for c in items if c['id'] == hh_channel['id']] == [('HH', 'red', True)]
-    # Снять метку — None или пустое значение.
-    assert service.edit_card(me, card['id'], {'channel_id': None})['channel_id'] is None
-    assert service.edit_card(me, fresh['id'], {'channel_id': target['id']})['channel_id'] == target['id']
-    assert service.edit_card(me, fresh['id'], {'channel_id': ''})['channel_name'] is None
+        service.edit_card(me, fresh['id'], {'source_id': insta['id']})
+    assert caught.value.code == 'HIRING_BAD_SOURCE'
+    # Имя выключенного источника включает его заново, а не заводит второй.
+    items = service.add_source(lead, {'name': 'INSTAGRAM', 'kind': 'responses', 'color': 'pink'})
+    assert [(s['name'], s['color'], s['is_active']) for s in items if s['id'] == insta['id']] == [('INSTAGRAM', 'pink', True)]
+    assert sum(1 for s in items if s['name'].lower() == 'instagram' and s['kind'] == 'responses') == 1
 
-    # Доска и рабочий стол отдают метку вместе с карточкой.
-    service.edit_card(me, fresh['id'], {'channel_id': target['id'], 'next_contact_at': NOW.isoformat()})
+    # Доска и рабочий стол отдают источник с цветом вместе с карточкой.
+    service.edit_card(me, fresh['id'], {'source_id': sources['target']['id'], 'next_contact_at': NOW.isoformat()})
     with world['db']._get_cursor() as cur:
-        columns, counts = queries.board(cur, {'lead': True}, LEAD_GRANT, {})
+        columns, counts, _by_source = queries.board(cur, {'lead': True}, LEAD_GRANT, {})
         assert counts['in_work'] == 2
-        assert [(c['channel_name'], c['channel_color']) for c in columns['in_work'] if c['id'] == fresh['id']] == [('Таргет', 'blue')]
+        assert [(c['source_name'], c['source_color']) for c in columns['in_work'] if c['id'] == fresh['id']] == [('Таргет', 'blue')]
         tasks = queries.desk_tasks(cur, REC1, datetime(2026, 10, 15), datetime(2026, 10, 16))
-        assert [(c['id'], c['channel_name']) for c in tasks] == [(fresh['id'], 'Таргет')]
+        assert [(c['id'], c['source_name'], c['source_color']) for c in tasks] == [(fresh['id'], 'Таргет', 'blue')]
 
 
 TARGET_AD = {'title': 'Напишите нам!', 'body': 'Требуются операторы', 'source_id': '120250535993810050',
              'source_app': 'instagram', 'conversion_source': 'FB_Ads', 'entry_point': 'ctwa_ad', 'ctwa_clid': 'x'}
 
 
-def test_target_label_is_set_automatically(world):
-    """Владелец 09.11.2026: «Те что пришли с таргета нужно автоматом отмечать как Таргет»: отклик WhatsApp по рекламе и
-    отклик с источником «Таргет» получают метку сами. Выбор рекрутера не перетирается; переименованный «Таргет»
-    ставится по-прежнему (по коду), выключенный — нет."""
+def test_target_source_is_set_automatically(world):
+    """Владелец 09.11.2026: «Те что пришли с таргета нужно автоматом отмечать как Таргет»; с 20.11.2026 это источник, а не
+    метка: отклик WhatsApp по рекламе приходит «Таргетом», без рекламы — «WhatsApp». Повторный отклик с «Таргета» делает
+    «Таргетом» карточку, пришедшую в WhatsApp без рекламы, а источник площадки или рекрутера не трогает. Переименованный
+    «Таргет» ставится по-прежнему (по коду), выключенный — нет: отклик остаётся «WhatsApp»."""
     service = world['service']
     lead, me = ctx_of(world, LEAD_GRANT), ctx_of(world, REC1)
-    with world['db']._get_cursor() as cur:
-        target, hh_channel = queries.channel_by_code(cur, 'target'), queries.channel_by_code(cur, 'hh')
-    assert (target['name'], target['color'], hh_channel['name']) == ('Таргет', 'blue', 'hh')
+    sources = world['sources']
 
-    def label(phone):
+    def source_of(phone):
         with world['db']._get_cursor() as cur:
-            return queries.open_card_by_phone(cur, phone)['channel_name']
+            return queries.open_card_by_phone(cur, phone)['source_name']
 
-    # WhatsApp: по объявлению — «Таргет»; по ссылке на номер (так пишут с hh, сайта) и без рекламы — без метки.
+    # WhatsApp: по объявлению — «Таргет»; по ссылке на номер (так пишут с hh, сайта) и без рекламы — «WhatsApp».
     service.wa_events({'events': [wa_event('g1', phone='77055553001', ad=TARGET_AD),
                                   wa_event('g2', phone='77055553002', ad={'entry_point': 'phone_number_hyperlink'}),
                                   wa_event('g3', phone='77055553003')]})
-    assert [label('+7705555300%d' % n) for n in (1, 2, 3)] == ['Таргет', None, None]
-    # Источник «Таргет» — вебхук партнёра и отклик вручную; Kaspi — без метки (её ставит рекрутер).
+    assert [source_of('+7705555300%d' % n) for n in (1, 2, 3)] == ['Таргет', 'WhatsApp', 'WhatsApp']
+    # Вебхук партнёра с источником «Таргет» — «Таргет»; Kaspi — Kaspi.
     results = service.external_intake([{'phone': '8 705 555 30 04', 'name': 'Из рекламы'}], source_code='target',
                                       actor_label='Партнёр: тест')
-    assert results[0]['status'] == 'created' and label('+77055553004') == 'Таргет'
+    assert results[0]['status'] == 'created' and source_of('+77055553004') == 'Таргет'
     service.external_intake([{'phone': '8 705 555 30 05'}], source_code='kaspi', actor_label='Партнёр: тест')
-    assert label('+77055553005') is None
-    add_response(world, REC1, '8 705 555 30 06', source_id=world['sources']['target']['id'])
-    assert label('+77055553006') == 'Таргет'
+    assert source_of('+77055553005') == 'Kaspi'
 
-    # Повторный отклик по рекламе: карточке без метки — «Таргет», метку рекрутера не трогает.
-    _outcome, base = add_response(world, REC1, '8 705 555 30 07')
+    # Повторный отклик с «Таргета»: «WhatsApp» становится «Таргетом»; источник рекрутера и «Вручную» остаются.
+    service.wa_events({'events': [wa_event('g7', phone='77055553007')]})
     _outcome, chosen = add_response(world, REC1, '8 705 555 30 08')
     service.take(me, chosen['id'])
-    service.edit_card(me, chosen['id'], {'channel_id': hh_channel['id']})
-    assert service.wa_events({'events': [wa_event('g7', phone='77055553007', ad=TARGET_AD),
-                                         wa_event('g8', phone='77055553008', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
-    assert (label('+77055553007'), label('+77055553008')) == ('Таргет', 'hh')
+    service.edit_card(me, chosen['id'], {'source_id': sources['hh']['id']})
+    _outcome, manual = add_response(world, REC1, '8 705 555 30 11')
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055553007'")
+        before = cur.fetchone()[0]
+    world['clock'].now = NOW + timedelta(minutes=5)
+    assert [r['status'] for r in service.external_intake([{'phone': '8 705 555 30 07'}], source_code='target',
+                                                         actor_label='Партнёр: тест')] == ['repeat']
+    assert service.wa_events({'events': [wa_event('g8', phone='77055553008', ad=TARGET_AD),
+                                         wa_event('g11', phone='77055553011', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
+    assert [source_of(phone) for phone in ('+77055553007', '+77055553008', '+77055553011')] == ['Таргет', 'HeadHunter', 'Вручную']
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055553007'")
+        assert cur.fetchone()[0] > before                           # повторный отклик поднимает карточку, как и раньше
+    # Повторный отклик без рекламы источник не меняет.
+    _outcome, plain = add_response(world, REC1, '8 705 555 30 12', source_id=sources['whatsapp']['id'])
+    service.external_intake([{'phone': '8 705 555 30 12'}], source_code='kaspi', actor_label='Партнёр: тест')
+    assert source_of('+77055553012') == 'WhatsApp'
 
-    # Переименование не ломает автометку (канал — по коду); выключенный канал сам не ставится.
-    service.edit_channel(lead, target['id'], {'name': 'Реклама'})
+    # Переименование «Таргета» автоисточник не ломает (по коду); выключенный «Таргет» сам не ставится.
+    service.edit_source(lead, sources['target']['id'], {'name': 'Реклама'})
     service.wa_events({'events': [wa_event('g9', phone='77055553009', ad=TARGET_AD)]})
-    assert label('+77055553009') == 'Реклама'
-    service.edit_channel(lead, target['id'], {'is_active': False})
+    assert source_of('+77055553009') == 'Реклама'
+    service.edit_source(lead, sources['target']['id'], {'is_active': False})
     service.wa_events({'events': [wa_event('g10', phone='77055553010', ad=TARGET_AD)]})
-    assert label('+77055553010') is None
+    assert source_of('+77055553010') == 'WhatsApp'
+    # Выключенный «WhatsApp» по-прежнему останавливает приём: переписка пишется, карточки нет — и по рекламе тоже.
+    service.edit_source(lead, sources['target']['id'], {'is_active': True})
+    service.edit_source(lead, sources['whatsapp']['id'], {'is_active': False})
+    assert service.wa_events({'events': [wa_event('g13', phone='77055553013', ad=TARGET_AD)]})['outcomes'] == {'stored': 1}
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77055553013') is None
 
 
-def test_target_backfill_runs_once_when_the_code_appears(world):
-    """Выкладка 09.11.2026: справочник засеян до кодов. На первом старте с кодами «Таргет» получает код, и уже
-    пришедшие с таргета (WhatsApp по рекламе, повторный отклик по рекламе, источник «Таргет») размечаются один раз:
-    метки рекрутера не трогаются, а снятая потом метка следующим стартом не возвращается."""
+def _channel(cur, name, color, code=None, is_active=True, position=0):
+    """Канал так, как он лежит на проде до слияния (выкладки 40037a92 и 0c53eaa0)."""
+    cur.execute("""
+        INSERT INTO hiring_channels (code, name, color, is_active, position, created_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
+    """, (code, name, color, is_active, position, NOW, NOW))
+    return cur.fetchone()[0]
+
+
+def test_channels_merge_into_sources(world):
+    """Владелец 20.11.2026: «каналы надо убрать/объединить с тем, что есть в источниках». Старт с этой правкой сливает
+    каналы прода в источники: стартовые — по коду (target, hh, kaspi), свои — по имени, иначе новым источником; цвет
+    канала — цветом источника, если своего у источника нет; карточка с меткой получает источником канал, метка
+    снимается, updated_at не трогается. Повторный старт ничего не двигает, кроме меток, которые за время выкладки
+    поставил старый экземпляр."""
     service = world['service']
-    me = ctx_of(world, REC1)
+    sources = world['sources']
     with world['db']._get_cursor() as cur:
-        cur.execute("UPDATE hiring_channels SET code = NULL")          # как засеяла выкладка 40037a92
-        hh_id = next(c['id'] for c in queries.list_channels(cur) if c['name'] == 'hh')
-    service.wa_events({'events': [wa_event('h1', phone='77055554001', ad=TARGET_AD), wa_event('h2', phone='77055554002')]})
-    add_response(world, REC1, '8 705 555 40 03', source_id=world['sources']['target']['id'])
-    add_response(world, REC1, '8 705 555 40 04')
-    service.wa_events({'events': [wa_event('h4', phone='77055554004', ad=TARGET_AD)]})     # повторный отклик по рекламе
-    _outcome, chosen = add_response(world, REC1, '8 705 555 40 05', source_id=world['sources']['target']['id'])
-    service.take(me, chosen['id'])
-    service.edit_card(me, chosen['id'], {'channel_id': hh_id})                            # рекрутер решил сам
-    with world['db']._get_cursor() as cur:
-        def label(phone):
-            return queries.open_card_by_phone(cur, phone)['channel_name']
+        # До слияния у источников цвета не было (колонки не было) — как на проде; Kaspi руководитель уже покрасил сам.
+        cur.execute("UPDATE hiring_sources SET color = NULL")
+        cur.execute("UPDATE hiring_sources SET color = 'violet' WHERE code = 'kaspi'")
+        target = _channel(cur, 'Таргет', 'blue', 'target', position=0)
+        hh = _channel(cur, 'hh', 'red', 'hh', position=1)
+        kaspi = _channel(cur, 'Каспи', 'pink', 'kaspi', position=2)
+        olx = _channel(cur, 'olx', 'green', position=3)                       # свой канал с именем источника
+        insta = _channel(cur, 'Instagram', 'orange', position=4)              # свой канал без пары
+        old = _channel(cur, 'Старый', 'gray', is_active=False, position=5)    # выключенный свой
 
-        assert [label('+7705555400%d' % n) for n in range(1, 6)] == [None, None, None, None, 'hh']
-        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055554001'")
-        updated_before = cur.fetchone()[0]
+    phones = {}
+
+    def card_with(phone, source_code, channel_id):
+        _outcome, card = add_response(world, REC1, phone)
+        with world['db']._get_cursor() as cur:
+            cur.execute("UPDATE hiring_cards SET source_id = %s, channel_id = %s WHERE id = %s",
+                        (sources[source_code]['id'], channel_id, card['id']))
+        phones[phone] = card['id']
+        return card['id']
+
+    card_with('8 705 600 00 01', 'whatsapp', target)      # WhatsApp по рекламе с меткой «Таргет»
+    card_with('8 705 600 00 02', 'hh', hh)                # hh с меткой hh — источник тот же
+    card_with('8 705 600 00 03', 'manual', kaspi)
+    card_with('8 705 600 00 04', 'whatsapp', olx)
+    card_with('8 705 600 00 05', 'whatsapp', insta)
+    card_with('8 705 600 00 06', 'whatsapp', old)
+    card_with('8 705 600 00 07', 'whatsapp', None)        # без метки — не трогается
+    service.take(ctx_of(world, REC1), phones['8 705 600 00 01'])
+
+    def snapshot(cur):
+        cur.execute("""
+            SELECT c.phone, s.name, s.code, c.channel_id, c.updated_at FROM hiring_cards c
+              JOIN hiring_sources s ON s.id = c.source_id WHERE c.phone LIKE '+7705600000%' ORDER BY c.phone
+        """)
+        return cur.fetchall()
+
+    with world['db']._get_cursor() as cur:
+        updated_before = {row[0]: row[4] for row in snapshot(cur)}
         schema.init_hiring_schema(cur)
-        assert {c['name']: c['code'] for c in queries.list_channels(cur)} == {'Таргет': 'target', 'hh': 'hh', 'Каспи': 'kaspi'}
-        assert [label('+7705555400%d' % n) for n in range(1, 6)] == ['Таргет', None, 'Таргет', 'Таргет', 'hh']
-        cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055554001'")
-        assert cur.fetchone()[0] == updated_before                                            # доска не перемешивается
-        cur.execute("UPDATE hiring_cards SET channel_id = NULL WHERE phone = '+77055554001'")
+        rows = snapshot(cur)
+        assert [(phone[-1], name, channel) for phone, name, _code, channel, _at in rows] == [
+            ('1', 'Таргет', None), ('2', 'HeadHunter', None), ('3', 'Kaspi', None), ('4', 'OLX', None),
+            ('5', 'Instagram', None), ('6', 'Старый', None), ('7', 'WhatsApp', None)]
+        assert {row[0]: row[4] for row in rows} == updated_before                  # доска не перемешивается
+        colors = {row['name']: row['color'] for row in queries.list_sources(cur)}
+        assert (colors['Таргет'], colors['HeadHunter'], colors['Kaspi'], colors['OLX']) == ('blue', 'red', 'violet', 'green')
+        assert (colors['Instagram'], colors['Старый'], colors['WhatsApp']) == ('orange', 'gray', None)
+        made = {row['name']: row for row in queries.list_sources(cur) if row['code'].startswith('channel_')}
+        assert set(made) == {'Instagram', 'Старый'}
+        assert (made['Instagram']['kind'], made['Instagram']['is_active'], made['Старый']['is_active']) == ('responses', True, False)
+        cur.execute("SELECT id, source_id FROM hiring_channels ORDER BY id")
+        assert dict(cur.fetchall()) == {target: sources['target']['id'], hh: sources['hh']['id'], kaspi: sources['kaspi']['id'],
+                                        olx: sources['olx']['id'], insta: made['Instagram']['id'], old: made['Старый']['id']}
+        # Повторный старт ничего не двигает и источников не плодит.
+        cur.execute("SELECT COUNT(*) FROM hiring_sources")
+        total = cur.fetchone()[0]
         schema.init_hiring_schema(cur)
-        assert label('+77055554001') is None
+        cur.execute("SELECT COUNT(*) FROM hiring_sources")
+        assert cur.fetchone()[0] == total and snapshot(cur) == rows
+        # Руководитель перекрасил «Таргет», а старый экземпляр во время выкладки успел пометить карточку каналом:
+        # следующий старт доносит метку в источник и цвет руководителя не трогает.
+        cur.execute("UPDATE hiring_sources SET color = 'teal' WHERE code = 'target'")
+        cur.execute("UPDATE hiring_cards SET channel_id = %s WHERE phone = '+77056000007'", (target,))
+        schema.init_hiring_schema(cur)
+        assert [(name, channel) for phone, name, _code, channel, _at in snapshot(cur) if phone.endswith('7')] == [('Таргет', None)]
+        assert queries.source_by_code(cur, 'target')['color'] == 'teal'
+    # Карточка с источником из канала — обычная карточка: доска отдаёт её имя и цвет, «Отклики» делятся по источникам.
+    with world['db']._get_cursor() as cur:
+        columns, _counts, by_source = queries.board(cur, {'lead': True}, LEAD_GRANT, {})
+        assert [(c['source_name'], c['source_color']) for c in columns['in_work']] == [('Таргет', 'teal')]
+        assert by_source == {sources['hh']['id']: 1, sources['kaspi']['id']: 1, sources['olx']['id']: 1,
+                             made['Instagram']['id']: 1, made['Старый']['id']: 1, sources['target']['id']: 1}
+
+
+def test_board_responses_by_source_and_period(world):
+    """Владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и кол-вом» и «именно в отклики надо добавить
+    возможность фильтровать по периоду, остальные статусы не должны по периоду фильтроваться». Доска считает отклики по
+    источникам, режет по периоду только «Отклики» (по дате поступления, «по» не включительно), порция — на источник, а
+    «Показать ещё» (expand) отдаёт источник целиком."""
+    service = world['service']
+    sources = world['sources']
+    me = ctx_of(world, REC1)
+
+    def response(phone, source_code, received):
+        _outcome, card = add_response(world, REC1, phone, source_id=sources[source_code]['id'])
+        with world['db']._get_cursor() as cur:
+            cur.execute("UPDATE hiring_cards SET received_at = %s WHERE id = %s", (received, card['id']))
+        return card['id']
+
+    t1 = response('8 705 700 00 01', 'target', datetime(2026, 10, 10, 9, 0))
+    t2 = response('8 705 700 00 02', 'target', datetime(2026, 10, 12, 23, 59))
+    t3 = response('8 705 700 00 03', 'target', datetime(2026, 10, 14, 8, 0))
+    w1 = response('8 705 700 00 04', 'whatsapp', datetime(2026, 10, 11, 10, 0))
+    h1 = response('8 705 700 00 05', 'hh', datetime(2026, 10, 1, 10, 0))
+    # В работе — отклики давнего числа: период «Откликов» их не режет.
+    taken = response('8 705 700 00 06', 'hh', datetime(2026, 9, 1, 10, 0))
+    taken2 = response('8 705 700 00 07', 'hh', datetime(2026, 9, 2, 10, 0))
+    service.take(me, taken)
+    service.take(me, taken2)
+    lead_caps = {'lead': True}
+    with world['db']._get_cursor() as cur:
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {})
+        assert counts == {'responses': 5, 'in_work': 2}
+        assert by_source == {sources['target']['id']: 3, sources['whatsapp']['id']: 1, sources['hh']['id']: 1}
+        # Карточки «Откликов» — свежие сверху, и внутри источника тоже.
+        assert [c['id'] for c in columns['responses']] == [t3, t2, w1, t1, h1]
+
+        # Период 10.10–12.10 включительно (сервер получает «по» = 13.10 00:00).
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
+                                                   responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
+        assert counts == {'responses': 3, 'in_work': 2}
+        assert by_source == {sources['target']['id']: 2, sources['whatsapp']['id']: 1}
+        assert [c['id'] for c in columns['responses']] == [t2, w1, t1] and {c['id'] for c in columns['in_work']} == {taken, taken2}
+        # «По» в запросе — не включительно: отклик ровно на границе в период не входит (день целиком прибавляет ручка).
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
+                                                     responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 12, 23, 59)))
+        assert counts['responses'] == 2
+        # Одна граница — тоже период.
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(datetime(2026, 10, 12), None))
+        assert counts == {'responses': 2, 'in_work': 2}
+        _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(None, datetime(2026, 10, 2)))
+        assert counts == {'responses': 1, 'in_work': 2}
+        # Период вместе с отбором по источнику.
+        _columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {'source_id': sources['target']['id']},
+                                                    responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
+        assert counts == {'responses': 2} and by_source == {sources['target']['id']: 2}
+
+        # Порция — на источник: по две карточки, «Показать ещё» у «Таргета» отдаёт его целиком.
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=2)
+        assert [c['id'] for c in columns['responses']] == [t3, t2, w1, h1] and counts['responses'] == 5
+        columns, _counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=2,
+                                                     expand_sources=[sources['target']['id']])
+        assert [c['id'] for c in columns['responses']] == [t3, t2, w1, t1, h1]
+        # expand — только «Откликам»: «В работе» с тем же источником по-прежнему режется порцией.
+        columns, _counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=1,
+                                                     expand_sources=[sources['hh']['id']])
+        assert [c['id'] for c in columns['responses']] == [t3, w1, h1] and len(columns['in_work']) == 1
+        # Рекрутер видит пул по источникам так же (scope — пул и свои).
+        _columns, counts, by_source = queries.board(cur, {'recruiter': True}, REC2, {})
+        assert counts == {'responses': 5} and sum(by_source.values()) == 5
 
 
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────
@@ -1491,7 +1640,8 @@ def test_whatsapp_first_message_becomes_response(world):
         assert card['comment'] == 'WhatsApp: «Хочу работать»'
         # Ссылка на площадку — без телефона: её видят и удалённые рекрутеры, которым телефон пула скрыт.
         assert card['platform_ref'] == 'wa:m1'
-        assert queries.get_source(cur, card['source_id'])['code'] == 'whatsapp'
+        # Сообщение по рекламе — источник «Таргет» (владелец 20.11.2026: каналы слиты с источниками).
+        assert queries.get_source(cur, card['source_id'])['code'] == 'target'
         chat = queries.wa_get_chat(cur, '+77055552233')
         assert chat['card_id'] == card['id'] and chat['messages'] == 1
         cur.execute("SELECT user_id FROM hiring_notifications WHERE kind = 'new_response' AND card_id = %s ORDER BY user_id",

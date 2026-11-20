@@ -171,20 +171,18 @@ class HiringService:
 
     def _intake_one(self, cursor, *, phone, kind, source, now, by=None, by_name=None, full_name='', city=None,
                     vacancy_id=None, vacancy_text=None, platform_ref=None, campaign=None, referred_by=None,
-                    received_at=None, comment=None, batch_id=None, whatsapp=None, notify=True, from_ads=False):
+                    received_at=None, comment=None, batch_id=None, whatsapp=None, notify=True):
         """Одна запись из любого источника. Возвращает (исход, card_id):
         created — новая карточка в пуле; repeat — повторный отклик по открытой карточке;
         employee — телефон действующего сотрудника, карточки нет (ТЗ 5.3).
-        from_ads — человек пришёл по рекламе (WhatsApp по объявлению): карточка получает метку «Таргет»."""
+        Источник решает вызывающий: отклик WhatsApp по рекламе приходит уже «Таргетом» (_wa_message)."""
         employee = queries.employee_by_phone_key(cursor, phone[-10:])
         if employee and str(employee['status'] or '').lower() not in ('fired', 'dismissal'):
             return 'employee', None
-        auto_channel = self._auto_channel_id(cursor, source, from_ads)
         open_card = queries.open_card_by_phone(cursor, phone, lock=True)
         if open_card:
             self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
-            if auto_channel:
-                queries.set_card_channel_if_empty(cursor, open_card['id'], auto_channel)
+            self._target_over_plain_whatsapp(cursor, open_card, source)
             return 'repeat', open_card['id']
         closed = queries.last_closed_card_by_phone(cursor, phone)
         fields = {
@@ -195,7 +193,6 @@ class HiringService:
             'referred_by': _text(referred_by, 200), 'received_at': received_at or now,
             'stage': rules.pool_stage_for(kind), 'repeat_of_card_id': closed['id'] if closed else None,
             'comment': _text(comment, 4000), 'created_by': by, 'created_at': now, 'updated_at': now,
-            'channel_id': auto_channel,
         }
         cursor.execute("SAVEPOINT hiring_intake")
         try:
@@ -205,8 +202,7 @@ class HiringService:
             open_card = queries.open_card_by_phone(cursor, phone, lock=True)
             if open_card:
                 self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
-                if auto_channel:
-                    queries.set_card_channel_if_empty(cursor, open_card['id'], auto_channel)
+                self._target_over_plain_whatsapp(cursor, open_card, source)
                 return 'repeat', open_card['id']
             raise
         cursor.execute("RELEASE SAVEPOINT hiring_intake")
@@ -225,14 +221,14 @@ class HiringService:
         return 'created', card_id
 
     @staticmethod
-    def _auto_channel_id(cursor, source, from_ads):
-        """Метка, которую отклик получает сам (владелец 09.11.2026: «те что пришли с таргета нужно автоматом
-        отмечать как Таргет»): «Таргет» — пришедшему по рекламе WhatsApp или с источником «Таргет». Канал
-        найден по постоянному коду, так что переименование его не ломает; выключен руководителем — метки нет."""
-        if not from_ads and (source or {}).get('code') != rules.SOURCE_TARGET:
-            return None
-        channel = queries.channel_by_code(cursor, rules.CHANNEL_TARGET)
-        return channel['id'] if channel and channel['is_active'] else None
+    def _target_over_plain_whatsapp(cursor, card, source):
+        """Повторный отклик с «Таргета» (WhatsApp по рекламе или вебхук с источником target) у открытой карточки,
+        пришедшей в WhatsApp без рекламы, делает её «Таргетом» (владелец 09.11.2026: «те что пришли с таргета нужно
+        автоматом отмечать как Таргет»; с 20.11.2026 это источник, а не метка-канал). Источник, выбранный
+        рекрутером или пришедший с площадки (hh, OLX, вручную), не трогается — как раньше не трогалась чужая метка."""
+        if (source or {}).get('code') != rules.SOURCE_TARGET or card.get('source_code') != whatsapp.SOURCE_CODE:
+            return 0
+        return queries.switch_card_source(cursor, card['id'], card['source_id'], source['id'])
 
     def _repeat(self, cursor, card, source, received_at, now, platform_ref=None, vacancy_text=None):
         body = 'Повторный отклик · %s' % (source.get('name') or '')
@@ -563,7 +559,7 @@ class HiringService:
 
     def edit_card(self, ctx, card_id, payload):
         """Поля карточки: ФИО, WhatsApp, город, вакансия, «кто привёл», комментарий, дата следующего контакта,
-        метка-канал."""
+        источник."""
         payload = payload or {}
         now = self._now()
         with self._cursor() as cursor:
@@ -598,85 +594,98 @@ class HiringService:
                     raise HiringError('HIRING_NEED_OFFICE_DATE', 'Укажите дату и время визита')
                 fields['office_visit_at'] = moment
                 fields['substage'] = 'expected'
-            if 'channel_id' in payload:
-                fields['channel_id'] = self._card_channel(cursor, card, payload.get('channel_id'))
+            if 'source_id' in payload:
+                fields['source_id'] = self._card_source(cursor, card, payload.get('source_id'))
             queries.update_card(cursor, card_id, **fields)
             return queries.get_card(cursor, card_id)
 
     @staticmethod
-    def _card_channel(cursor, card, raw):
-        """Метка-канал карточки (владелец 09.11.2026): канал из справочника или None — снять метку.
-        Выключенный канал новым карточкам не ставится, а уже стоящий остаётся, пока его не сменят."""
-        if raw in (None, ''):
-            return None
-        channel_id = _int(raw)
-        if channel_id and channel_id == card.get('channel_id'):
-            return channel_id
-        channel = queries.get_channel(cursor, channel_id) if channel_id else None
-        if not channel:
-            raise HiringError('HIRING_BAD_CHANNEL', 'Такого канала нет в справочнике')
-        if not channel['is_active']:
-            raise HiringError('HIRING_BAD_CHANNEL', 'Канал «%s» выключен руководителем — выберите другой' % channel['name'])
-        return channel_id
+    def _card_source(cursor, card, raw):
+        """Источник карточки (владелец 20.11.2026: каналы слиты с источниками — то, что рекрутер ставил меткой-каналом,
+        теперь источник). Источник обязателен и того же вида, что карточка: отклику — источник откликов, контакту —
+        база. Выключенный руководителем источник не выбирается, а у карточки, где он уже стоит, остаётся."""
+        source_id = _int(raw)
+        if source_id and card.get('source_id') and source_id == int(card['source_id']):
+            return source_id
+        source = queries.get_source(cursor, source_id) if source_id else None
+        if not source:
+            raise HiringError('HIRING_BAD_SOURCE', 'Такого источника нет в справочнике')
+        kind = rules.SOURCE_CONTACTS if card.get('kind') == rules.KIND_CONTACT else rules.SOURCE_RESPONSES
+        if source['kind'] != kind:
+            raise HiringError('HIRING_BAD_SOURCE', 'Отклику подходит источник откликов, контакту — база контактов'
+                              if kind == rules.SOURCE_RESPONSES else 'Контакту подходит только база контактов')
+        if not source['is_active']:
+            raise HiringError('HIRING_BAD_SOURCE', 'Источник «%s» выключен руководителем — выберите другой' % source['name'])
+        return source_id
 
-    # ─── Каналы — метки откликов (владелец 09.11.2026) ──────────────────────
+    # ─── Источники (владелец 20.11.2026: каналы слиты с источниками, цвет — у источника) ─────
 
     @staticmethod
-    def _channel_fields(payload, *, partial):
-        """Имя и цвет канала из запроса: имя — до CHANNEL_NAME_MAX знаков, цвет — из палитры."""
+    def _source_fields(payload, *, partial):
+        """Имя, вид и цвет источника из запроса: имя — до SOURCE_NAME_MAX знаков без лишних пробелов, вид — отклики или
+        контакты, цвет — из палитры (пусто — серый)."""
         fields = {}
         if not partial or 'name' in payload:
             name = ' '.join(str(payload.get('name') or '').split())
             if not name:
-                raise HiringError('HIRING_BAD_CHANNEL', 'Название канала пустое')
-            if len(name) > rules.CHANNEL_NAME_MAX:
-                raise HiringError('HIRING_BAD_CHANNEL', 'Название канала — не длиннее %d знаков' % rules.CHANNEL_NAME_MAX)
+                raise HiringError('HIRING_BAD_SOURCE', 'Название источника пустое')
+            if len(name) > rules.SOURCE_NAME_MAX:
+                raise HiringError('HIRING_BAD_SOURCE', 'Название источника — не длиннее %d знаков' % rules.SOURCE_NAME_MAX)
             fields['name'] = name
-        if not partial or 'color' in payload:
-            color = str(payload.get('color') or '').strip()
-            if color not in rules.CHANNEL_COLORS:
-                raise HiringError('HIRING_BAD_CHANNEL', 'Цвет канала — один из палитры')
+        if not partial:
+            kind = str(payload.get('kind') or '').strip()
+            if kind not in (rules.SOURCE_CONTACTS, rules.SOURCE_RESPONSES):
+                raise HiringError('HIRING_BAD_SOURCE', 'Укажите вид источника: отклики или контакты')
+            fields['kind'] = kind
+        if 'color' in payload:
+            color = str(payload.get('color') or '').strip() or None
+            if color is not None and color not in rules.SOURCE_COLORS:
+                raise HiringError('HIRING_BAD_SOURCE', 'Цвет источника — один из палитры')
             fields['color'] = color
         if partial and 'is_active' in payload:
             fields['is_active'] = bool(payload.get('is_active'))
         return fields
 
-    def add_channel(self, ctx, payload):
-        """Новый канал. Имя выключенного канала включает его заново (с новым цветом) — второй строкой
-        с тем же именем он не заводится."""
+    def add_source(self, ctx, payload):
+        """Новый источник руководителя. Имя, которое у источника того же вида уже есть (без учёта регистра), второй
+        строкой не заводится: выключенный такой — включается заново с новым цветом."""
         if not access.can_manage(ctx):
             raise _forbidden('Справочники ведёт руководитель рекрутинга')
-        fields = self._channel_fields(payload or {}, partial=False)
+        fields = self._source_fields(payload or {}, partial=False)
         now = self._now()
         with self._cursor() as cursor:
-            cursor.execute("LOCK TABLE hiring_channels IN SHARE ROW EXCLUSIVE MODE")
-            same = queries.channel_by_name(cursor, fields['name'])
+            cursor.execute("LOCK TABLE hiring_sources IN SHARE ROW EXCLUSIVE MODE")
+            same = queries.source_by_name(cursor, fields['name'], fields['kind'])
             if same and same['is_active']:
-                raise HiringError('HIRING_DUPLICATE', 'Канал «%s» уже есть' % same['name'], 409)
+                raise HiringError('HIRING_DUPLICATE', 'Источник «%s» уже есть' % same['name'], 409)
             if same:
-                queries.update_channel(cursor, same['id'], now, name=fields['name'], color=fields['color'], is_active=True)
+                queries.update_source(cursor, same['id'], name=fields['name'], is_active=True,
+                                      **({'color': fields['color']} if 'color' in fields else {}))
             else:
-                queries.create_channel(cursor, fields['name'], fields['color'], ctx['user_id'], now)
-            return queries.list_channels(cursor)
+                # Код — для вебхука площадок (source в теле запроса партнёра); свой источник руководителя — без кода.
+                code = str((payload or {}).get('code') or '').strip().lower()[:40] or 'custom_%s' % uuid.uuid4().hex[:12]
+                if queries.source_by_code(cursor, code):
+                    raise HiringError('HIRING_DUPLICATE', 'Источник с таким кодом уже есть', 409)
+                queries.create_source(cursor, code, fields['name'], fields['kind'], now, fields.get('color'))
+            return queries.list_sources(cursor)
 
-    def edit_channel(self, ctx, channel_id, payload):
-        """Имя, цвет или «выключен». Карточки с меткой видят новое имя и цвет сразу — метка ссылкой."""
+    def edit_source(self, ctx, source_id, payload):
+        """Имя, цвет или «выключен». Карточки видят новое имя и цвет сразу — источник у них ссылкой."""
         if not access.can_manage(ctx):
             raise _forbidden('Справочники ведёт руководитель рекрутинга')
-        fields = self._channel_fields(payload or {}, partial=True)
-        now = self._now()
+        fields = self._source_fields(payload or {}, partial=True)
         with self._cursor() as cursor:
-            cursor.execute("LOCK TABLE hiring_channels IN SHARE ROW EXCLUSIVE MODE")
-            channel = queries.get_channel(cursor, channel_id)
-            if not channel:
-                raise HiringError('HIRING_NOT_FOUND', 'Канал не найден', 404)
+            cursor.execute("LOCK TABLE hiring_sources IN SHARE ROW EXCLUSIVE MODE")
+            source = queries.get_source(cursor, source_id)
+            if not source:
+                raise HiringError('HIRING_NOT_FOUND', 'Источник не найден', 404)
             if 'name' in fields:
-                same = queries.channel_by_name(cursor, fields['name'])
-                if same and int(same['id']) != int(channel_id):
-                    raise HiringError('HIRING_DUPLICATE', 'Канал «%s» уже есть' % same['name'], 409)
+                same = queries.source_by_name(cursor, fields['name'], source['kind'], exclude_id=source_id)
+                if same:
+                    raise HiringError('HIRING_DUPLICATE', 'Источник «%s» уже есть' % same['name'], 409)
             if fields:
-                queries.update_channel(cursor, channel_id, now, **fields)
-            return queries.list_channels(cursor)
+                queries.update_source(cursor, source_id, **fields)
+            return queries.list_sources(cursor)
 
     # ─── Группы на обучение (владелец 18.11.2026) ───────────────────────────
     # Группу заводит тренер — сам, без руководителя — и задаёт её вместимость; руководитель рекрутинга
@@ -1370,8 +1379,9 @@ class HiringService:
 
         with self._cursor() as cursor:
             source = queries.source_by_code(cursor, whatsapp.SOURCE_CODE)
+            target = queries.source_by_code(cursor, rules.SOURCE_TARGET)
             for message in messages:
-                count(self._wa_message(cursor, message, source, now, trash))
+                count(self._wa_message(cursor, message, source, now, trash, target=target))
             for failure in failures:
                 if queries.wa_media_failed(cursor, failure['id'], failure['reason'], now):
                     count('media_failed')
@@ -1389,7 +1399,10 @@ class HiringService:
         self._wa_drop_files(trash)
         return {'accepted': len(events), 'outcomes': outcomes}
 
-    def _wa_message(self, cursor, message, source, now, trash=None):
+    def _wa_message(self, cursor, message, source, now, trash=None, target=None):
+        """Сообщение номера найма. source — источник «WhatsApp»: выключен руководителем — переписка пишется, а карточки
+        не заводятся. target — источник «Таргет»: отклик по рекламе приходит с ним (владелец 09.11.2026 «те что пришли
+        с таргета — Таргет», 20.11.2026 каналы слиты с источниками); выключен «Таргет» — отклик остаётся «WhatsApp»."""
         key = message['key']
         if message['revoke_of']:
             count, objects = queries.wa_revoke_message(cursor, key, message['revoke_of'], now)
@@ -1426,11 +1439,12 @@ class HiringService:
             if card and not card['is_closed']:
                 self._wa_candidate_answered(cursor, card['id'], message, now)
                 return 'stored'
+        intake_source = target if target and target['is_active'] and whatsapp.from_ads(message['ad']) else source
         outcome, card_id = self._intake_one(
-            cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=source, now=now, by_name='WhatsApp',
+            cursor, phone=message['phone'], kind=rules.KIND_RESPONSE, source=intake_source, now=now, by_name='WhatsApp',
             full_name=chat.get('push_name') or '', platform_ref='wa:%s' % message['id'],
             campaign=whatsapp.campaign_of(message['ad']), received_at=message['at'] or now,
-            comment=whatsapp.first_message_comment(message), from_ads=whatsapp.from_ads(message['ad']))
+            comment=whatsapp.first_message_comment(message))
         if card_id:
             queries.wa_set_chat_card(cursor, key, card_id, now)
         if outcome == 'repeat':

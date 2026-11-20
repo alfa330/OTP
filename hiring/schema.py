@@ -23,10 +23,9 @@ SAVEPOINT'ом, как у «Аренды авто»: не развернулас
   одному человеку, колокол читает её, триггер bell будит адресата.
 """
 
-import json
 import logging
 
-from . import rules, whatsapp
+from . import rules
 
 log = logging.getLogger(__name__)
 
@@ -415,8 +414,9 @@ _STATEMENTS = [
     """,
 
     # Каналы — метки откликов с цветом (владелец 09.11.2026): откуда кандидат узнал о вакансии (таргет,
-    # hh, Kaspi). Справочник ведёт руководитель, выключенный канал карточки помнят; у карточки — одна
-    # метка или ни одной. Имя уникально без учёта регистра: «Таргет» и «таргет» — один канал.
+    # hh, Kaspi). С 20.11.2026 слиты с источниками (_merge_channels_into_sources) и в работе не участвуют:
+    # таблица и hiring_cards.channel_id остаются следом слияния — старый экземпляр во время выкладки ещё
+    # читает их, а hiring_channels.source_id помнит, в какой источник ушёл каждый канал.
     """
     CREATE TABLE IF NOT EXISTS hiring_channels (
         id               SERIAL PRIMARY KEY,
@@ -521,6 +521,12 @@ _STATEMENTS = [
         updated_at       TIMESTAMP NOT NULL
     )
     """,
+
+    # Каналы слиты с источниками (владелец 20.11.2026: «понятие Канал надо убрать и всё запихать в источник… выбрать
+    # цвет прямо в источниках»). Цвет — у источника (rules.SOURCE_COLORS; NULL — серый), а канал помнит, в какой
+    # источник ушёл: по этой связи следующий старт доносит метки, которые успел поставить старый экземпляр.
+    "ALTER TABLE hiring_sources ADD COLUMN IF NOT EXISTS color VARCHAR(16)",
+    "ALTER TABLE hiring_channels ADD COLUMN IF NOT EXISTS source_id INTEGER",
 ]
 
 
@@ -538,9 +544,9 @@ def _seed(cursor):
     if not cursor.fetchone()[0]:
         for position, (code, name, kind, platform) in enumerate(rules.SEED_SOURCES):
             cursor.execute("""
-                INSERT INTO hiring_sources (code, name, kind, platform, position, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (code) DO NOTHING
-            """, (code, name, kind, platform, position, now))
+                INSERT INTO hiring_sources (code, name, kind, platform, position, created_at, color)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (code) DO NOTHING
+            """, (code, name, kind, platform, position, now, rules.SEED_SOURCE_COLORS.get(code)))
     cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_reasons)")
     if not cursor.fetchone()[0]:
         for kind, names in rules.SEED_REASONS.items():
@@ -557,27 +563,9 @@ def _seed(cursor):
             VALUES (%s, %s, %s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s)
             ON CONFLICT (code) DO NOTHING
         """, (code, name, kind, platform, now))
-    # Каналы — один раз, в пустой справочник: дальше его ведёт руководитель (удалять нельзя, только
-    # выключать — поэтому пустым после засева он не станет и метки не вернутся сами).
-    cursor.execute("SELECT EXISTS (SELECT 1 FROM hiring_channels)")
-    if not cursor.fetchone()[0]:
-        for position, (code, name, color) in enumerate(rules.SEED_CHANNELS):
-            cursor.execute("""
-                INSERT INTO hiring_channels (code, name, color, position, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
-            """, (code, name, color, position, now, now))
-    # Справочник засеян до кодов (выкладка 40037a92) — стартовым каналам код по имени засева, пока кода ни у кого
-    # нет. «Таргет» получает код один раз, и в этот момент размечаются уже пришедшие с таргета.
-    for code, name, _color in rules.SEED_CHANNELS:
-        cursor.execute("""
-            UPDATE hiring_channels SET code = %s
-             WHERE code IS NULL AND name = %s AND NOT EXISTS (SELECT 1 FROM hiring_channels WHERE code = %s)
-            RETURNING id
-        """, (code, name, code))
-        row = cursor.fetchone()
-        if row and code == rules.CHANNEL_TARGET:
-            labeled = _label_target_cards(cursor, row[0])
-            log.info('hiring: метка «Таргет» проставлена %d карточкам, пришедшим с таргета', labeled)
+    merged = _merge_channels_into_sources(cursor, now)
+    if merged:
+        log.info('hiring: каналы слиты с источниками — перенесено карточек с меткой: %d', merged)
     for code in ('hh', 'olx', 'webhook', 'whatsapp'):
         cursor.execute("""
             INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s)
@@ -585,29 +573,45 @@ def _seed(cursor):
         """, (code, now))
 
 
-def _label_target_cards(cursor, channel_id):
-    """Разметка «Таргетом» уже пришедших с таргета — один раз, когда у канала появился код: первое сообщение
-    WhatsApp по рекламе (whatsapp.from_ads — то же правило, что у новых откликов), повторный отклик WhatsApp по
-    рекламе, источник «Таргет». Метки, поставленные руками, не трогаются; updated_at — тоже: доска не
-    перемешивается. Возвращает, скольким карточкам поставлена метка."""
+def _merge_channels_into_sources(cursor, now):
+    """Каналы — в источники (владелец 20.11.2026: «понятие Канал надо убрать и всё запихать в источник. То есть каналы
+    надо убрать/объединить с тем, что есть в источниках, и добавить возможность выбрать цвет прямо в источниках»).
+
+    Канал уходит в источник с тем же кодом (стартовые target, hh, kaspi — те же коды, что у источников), иначе — в
+    источник откликов с тем же именем без учёта регистра, иначе становится новым источником откликов (выключенный —
+    выключенным). Цвет канала становится цветом источника, если у источника своего ещё нет. Карточка с меткой получает
+    источником канал: WhatsApp по рекламе с меткой «Таргет» — теперь «Таргет»; метка снимается. Путь, которым отклик
+    пришёл (wa:… у WhatsApp, ссылка у площадок), остаётся в platform_ref.
+
+    Новых меток код больше не ставит, поэтому каждый следующий старт находит только то, что во время выкладки успел
+    пометить старый экземпляр, и доносит это по той же связи канал → источник. updated_at карточек не трогается:
+    доска не перемешивается. Возвращает, сколько карточек с меткой перенесено в источник."""
+    cursor.execute("SELECT id, code, name, color, is_active FROM hiring_channels WHERE source_id IS NULL ORDER BY position, id")
+    for channel_id, code, name, color, is_active in cursor.fetchall():
+        row = None
+        if code:
+            cursor.execute("SELECT id FROM hiring_sources WHERE code = %s", (code,))
+            row = cursor.fetchone()
+        if row is None:
+            cursor.execute("SELECT id FROM hiring_sources WHERE kind = %s AND lower(name) = lower(%s) ORDER BY id LIMIT 1",
+                           (rules.SOURCE_RESPONSES, name))
+            row = cursor.fetchone()
+        if row is None:
+            own_code = 'channel_%d' % int(channel_id)
+            cursor.execute("""
+                INSERT INTO hiring_sources (code, name, kind, platform, is_active, position, created_at)
+                VALUES (%s, %s, %s, NULL, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM hiring_sources), %s)
+                ON CONFLICT (code) DO NOTHING
+            """, (own_code, name, rules.SOURCE_RESPONSES, bool(is_active), now))
+            cursor.execute("SELECT id FROM hiring_sources WHERE code = %s", (own_code,))
+            row = cursor.fetchone()
+        source_id = int(row[0])
+        if color in rules.SOURCE_COLORS:
+            cursor.execute("UPDATE hiring_sources SET color = %s WHERE id = %s AND color IS NULL", (color, source_id))
+        cursor.execute("UPDATE hiring_channels SET source_id = %s WHERE id = %s", (source_id, int(channel_id)))
     cursor.execute("""
-        SELECT c.id, m.ad FROM hiring_cards c
-          JOIN hiring_wa_messages m ON m.wa_id = substr(c.platform_ref, 4) AND NOT m.from_me AND m.ad IS NOT NULL
-         WHERE c.channel_id IS NULL AND c.platform_ref LIKE %s
-        UNION ALL
-        SELECT t.card_id, m.ad FROM hiring_touches t
-          JOIN hiring_cards c ON c.id = t.card_id AND c.channel_id IS NULL
-          JOIN hiring_wa_messages m ON m.wa_id = substr(t.meta->>'platform_ref', 4) AND NOT m.from_me AND m.ad IS NOT NULL
-         WHERE t.kind = 'repeat_response' AND t.meta->>'platform_ref' LIKE %s
-    """, ('wa:%', 'wa:%'))
-    ids = {int(card_id) for card_id, ad in cursor.fetchall()
-           if whatsapp.from_ads(ad if isinstance(ad, dict) else json.loads(ad or 'null'))}
-    cursor.execute("""
-        SELECT c.id FROM hiring_cards c JOIN hiring_sources s ON s.id = c.source_id
-         WHERE c.channel_id IS NULL AND s.code = %s
-    """, (rules.SOURCE_TARGET,))
-    ids.update(int(row[0]) for row in cursor.fetchall())
-    if ids:
-        cursor.execute("UPDATE hiring_cards SET channel_id = %s WHERE id = ANY(%s) AND channel_id IS NULL",
-                       (int(channel_id), sorted(ids)))
-    return len(ids)
+        UPDATE hiring_cards c SET source_id = ch.source_id, channel_id = NULL
+          FROM hiring_channels ch
+         WHERE c.channel_id = ch.id AND ch.source_id IS NOT NULL
+    """)
+    return cursor.rowcount

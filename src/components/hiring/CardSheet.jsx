@@ -1,20 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ArrowRight, Check, ChevronDown, ExternalLink, Info, Loader2, MessageCircle, MessageSquareText, Pencil, Phone, PhoneIncoming,
-    PhoneMissed, PhoneOutgoing, Play, Plus, RefreshCw, Repeat, UserCog, X,
+    PhoneMissed, PhoneOutgoing, Play, RefreshCw, Repeat, UserCog, X,
 } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
 import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
-    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, CHANNEL_COLOR_CODES, FINAL_STAGES,
-    MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, TOUCH_LABELS,
-    TOUCH_RESULT_LABELS, addDays, channelTone, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, joinDateTime, longTime,
+    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES,
+    MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, SOURCE_COLOR_CODES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES,
+    TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, joinDateTime, longTime,
     markGroupFull,
-    openICorePhoneCall, reasonKindFor, shortTime, splitDateTime, todayIso,
+    openICorePhoneCall, reasonKindFor, shortTime, sourceChoices, sourceTone, splitDateTime, todayIso,
 } from './hiringMeta';
-import { ChannelPill, DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
+import { DATE_TRIGGER, FIELD, ICON_BTN, Label, Loading, Pill, ReasonDialog, SourcePill, TIME_INPUT, TOOLBAR_BTN } from './hiringUi';
 import { WhatsAppThread } from './WhatsAppPanel';
 
 /*
@@ -55,35 +55,28 @@ const DateTimeField = ({ date, time, onDate, onTime }) => (
     </div>
 );
 
-/* Метка-канал отклика (владелец 09.11.2026): откуда кандидат узнал о вакансии — таргет, hh, Kaspi.
-   Меню из справочника «Настройки → Каналы» ставит закреплённый рекрутер или руководитель; остальным
-   метка видна плашкой. Меню есть и у контактов из баз: человек из базы тоже может прийти по рекламе. */
-const CHANNEL_DOT_ICONS = Object.fromEntries(CHANNEL_COLOR_CODES.map((code) => [code, () => (
-    <span aria-hidden="true" className={`mx-[3px] h-2.5 w-2.5 shrink-0 rounded-full ${channelTone(code).dot}`} />
+/* Источник карточки (владелец 20.11.2026: «понятие Канал убрать и всё запихать в источник» — откуда пришёл кандидат,
+   теперь одно поле с цветом). Меню из справочника «Настройки → Источники» у закреплённого рекрутера и руководителя:
+   отклику — источники откликов, контакту — базы (сервер проверяет то же); остальным источник виден плашкой. */
+const SOURCE_DOT_ICONS = Object.fromEntries(SOURCE_COLOR_CODES.map((code) => [code, () => (
+    <span aria-hidden="true" className={`mx-[3px] h-2.5 w-2.5 shrink-0 rounded-full ${sourceTone(code).dot}`} />
 )]));
 
-const ChannelPicker = ({ card, channels, canEdit, onChange }) => {
-    const current = card.channel_id ? <ChannelPill name={card.channel_name} color={card.channel_color} /> : null;
-    const offered = channels.filter((channel) => channel.is_active !== false);
-    if (!canEdit || (!card.channel_id && offered.length === 0)) return current;
-    const items = [
-        ...offered.map((channel) => ({
-            key: `channel-${channel.id}`, label: channel.name, icon: CHANNEL_DOT_ICONS[channel.color] || CHANNEL_DOT_ICONS.gray,
-            checked: channel.id === card.channel_id, onSelect: () => onChange(channel.id),
-        })),
-        card.channel_id ? { key: 'channel-none', label: 'Без метки', separatorBefore: offered.length > 0, onSelect: () => onChange(null) } : null,
-    ];
+const SourcePicker = ({ card, sources, canEdit, onChange }) => {
+    if (!card.source_name) return null;
+    const current = <SourcePill name={card.source_name} color={card.source_color} />;
+    const offered = sourceChoices(card, sources);
+    if (!canEdit || offered.length === 0) return current;
+    const items = offered.map((source) => ({
+        key: `source-${source.id}`, label: source.name, icon: SOURCE_DOT_ICONS[source.color] || SOURCE_DOT_ICONS.gray,
+        checked: Number(source.id) === Number(card.source_id),
+        onSelect: () => { if (Number(source.id) !== Number(card.source_id)) onChange(source.id); },
+    }));
     return (
-        <IosMenu label="Канал отклика" align="left" items={items}
+        <IosMenu label="Источник" align="left" items={items}
                  trigger={{
                      className: 'inline-flex rounded-full transition active:scale-[0.98] focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70',
-                     text: card.channel_id
-                         ? <ChannelPill name={card.channel_name} color={card.channel_color}><ChevronDown size={12} className="-mr-0.5 shrink-0 opacity-60" /></ChannelPill>
-                         : (
-                             <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[12px] font-medium text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-700">
-                                 <Plus size={12} /> Канал
-                             </span>
-                         ),
+                     text: <SourcePill name={card.source_name} color={card.source_color}><ChevronDown size={12} className="-mr-0.5 shrink-0 opacity-60" /></SourcePill>,
                  }} />
     );
 };
@@ -788,15 +781,15 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
             toast(errorOf(requestError, 'Подстатус не изменён'), 'error');
         }
     };
-    const setChannel = async (channelId) => {
+    const setSource = async (sourceId) => {
         try {
-            await api.patch(`/cards/${card.id}`, { channel_id: channelId });
+            await api.patch(`/cards/${card.id}`, { source_id: sourceId });
             changed();
         } catch (requestError) {
-            toast(errorOf(requestError, 'Метка не изменена'), 'error');
-            // Справочник у открытой страницы мог устареть (руководитель выключил канал или добавил новый) —
+            toast(errorOf(requestError, 'Источник не изменён'), 'error');
+            // Справочник у открытой страницы мог устареть (руководитель выключил источник или добавил новый) —
             // перечитываем, чтобы меню показало то, что есть сейчас.
-            if (codeOf(requestError) === 'HIRING_BAD_CHANNEL') reloadBoot?.();
+            if (codeOf(requestError) === 'HIRING_BAD_SOURCE') reloadBoot?.();
         }
     };
     const take = async () => {
@@ -865,7 +858,7 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                         <div className="flex flex-wrap items-center gap-2">
                             <Pill tone={STAGE_TONES[card.stage]} className="text-[13px]">{STAGE_LABELS[card.stage]}</Pill>
                             {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
-                            <ChannelPicker card={card} channels={boot.dictionaries?.channels || []} canEdit={isOwnerOrLead} onChange={setChannel} />
+                            <SourcePicker card={card} sources={boot.dictionaries?.sources || []} canEdit={isOwnerOrLead} onChange={setSource} />
                             {card.repeat_of_card_id && <Pill tone="blue"><Repeat size={11} /> повторное обращение</Pill>}
                             {card.no_answer_suggest && <Pill tone="amber">3 недозвона подряд — предложить «Отказ: не выходит на связь»</Pill>}
                             <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -918,7 +911,8 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                         <InfoRow label="Город">{card.city}</InfoRow>
                                         <InfoRow label="Вакансия">{card.vacancy_name || card.vacancy_text}</InfoRow>
                                         <InfoRow label="Тип">{card.kind === 'contact' ? 'Контакт' : 'Отклик'}</InfoRow>
-                                        <InfoRow label="Источник">{card.source_name}{card.batch_file ? ` · ${card.batch_file}` : ''}</InfoRow>
+                                        {/* Источник — плашкой над вкладками (там же его меняют); здесь — только файл базы контакта. */}
+                                        {card.batch_file && <InfoRow label="Файл базы">{card.batch_file}</InfoRow>}
                                         {card.campaign && <InfoRow label="Кампания">{card.campaign}</InfoRow>}
                                         {card.referred_by && <InfoRow label="Кто привёл">{card.referred_by}</InfoRow>}
                                         <InfoRow label="Поступил">{longTime(card.received_at)}</InfoRow>

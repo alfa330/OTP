@@ -7,7 +7,7 @@ import {
     errorOf, fullDate, openICorePhoneCall, percent, plural, shortTime,
 } from './hiringMeta';
 import {
-    ChannelPill, Empty, FiltersRow, FiltersToggle, Group, GroupHeading, HOVER_REVEAL, ICON_BTN, Loading, MonthSwitch, Pill, Stat,
+    Empty, FiltersRow, FiltersToggle, Group, GroupHeading, HOVER_REVEAL, ICON_BTN, Loading, MonthSwitch, Pill, SourcePill, Stat,
 } from './hiringUi';
 
 /*
@@ -40,10 +40,10 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
                     <div className="truncate text-[13.5px] font-medium text-slate-900">
                         {card.full_name || 'Без имени'}{card.candidate_no ? <span className="ml-1.5 text-[12px] font-normal text-slate-400">№{card.candidate_no}</span> : null}
                     </div>
-                    {/* Метка канала и подстатус — второй строкой, под именем: справа на узкой строке они съедали
+                    {/* Источник и подстатус — второй строкой, под именем: справа на узкой строке они съедали
                         ФИО целиком («Недозвон / не ответил» длиннее прежнего «Недозвон»). */}
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] text-slate-500">
-                        {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} className="shrink-0" />}
+                        {card.source_name && <SourcePill name={card.source_name} color={card.source_color} className="shrink-0" />}
                         {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]} className="shrink-0">{SUBSTAGE_LABELS[card.substage]}</Pill>}
                         <span className="min-w-0 truncate">
                             {[card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') || STAGE_LABELS[card.stage]}

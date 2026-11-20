@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronsLeft, ChevronsRight, Phone, Plus, RefreshCw, Repeat, Search, X } from 'lucide-react';
+import { ChevronRight, ChevronsLeft, ChevronsRight, Phone, Plus, RefreshCw, Repeat, Search, X } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
+import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
+import { quickPeriods } from '../ui/periodRange';
 import {
-    POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, codeOf, daysSince, errorOf, initials, openICorePhoneCall,
-    shortTime,
+    POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, daysSince, errorOf, groupKey, initials,
+    openICorePhoneCall, shortTime, sourceTone, todayIso, toggleInList,
 } from './hiringMeta';
-import { ChannelPill, FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
+import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, SourcePill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
 /*
  * Вкладка «Воронка» (ТЗ 4): канбан из десяти колонок ТЗ 4.1 в его порядке. Карточка идёт
@@ -20,27 +22,51 @@ import { ChannelPill, FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, 
  * курсором. Рекрутер видит пул и свои карточки; у удалённого рекрутера в пуле нет телефонов (сервер
  * их не присылает). «Взять в работу» — маленькой кнопкой в углу карточки пула, по наведению;
  * «Позвонить» — с карточки в работе, в iCore Phone.
+ *
+ * «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
+ * кол-вом», каналы слиты с источниками): у группы — цвет источника, название и сколько откликов, группа
+ * сворачивается (запоминается в браузере), у длинной — «Показать ещё». Период — только у «Откликов», в их
+ * шапке: остальные этапы им не режутся (так и просил владелец).
  */
 
 // Колонка растёт, когда экран широкий (на большом мониторе все десять этапов без прокрутки), но не уже 236 px.
 const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
+const COLLAPSED_GROUPS_KEY = 'hiring.board.collapsedSources';
+// Быстрые периоды — как у остальных разделов сайта: «Сегодня», «Неделя», «Месяц», «Весь период»; виды — дни и месяцы.
+const PERIOD_PRESETS = quickPeriods();
+const PERIOD_VIEWS = ['days', 'months'];
+const PERIOD_TRIGGER = 'flex h-8 w-full items-center gap-1.5 rounded-lg px-2.5 text-[12px] font-medium transition '
+    + 'focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70 [&>span]:min-w-0 [&>span]:flex-1 [&>span]:truncate [&>span]:text-left';
+// Отбор по периоду включён — шапка «Откликов» это показывает: иначе меньшее число читалось бы как «откликов мало».
+const periodTrigger = (active) => `${PERIOD_TRIGGER} ${active
+    ? 'bg-blue-50 text-blue-700 ring-1 ring-blue-200'
+    : 'bg-white/70 text-slate-600 ring-1 ring-slate-200/70 hover:bg-white'}`;
 // Кнопка пула — свой класс в styles.css (.hiring-take-btn), а не утилиты: с мышью она проявляется с задержкой и до
 // этого щелчков не берёт (быстрый щелчок в угол открывает карточку, а не берёт её), а тёмная тема перекрашивает
 // bg-blue-50/text-blue-700 через !important — синеть под курсором утилиты бы перестали.
 const TAKE_BTN = 'hiring-take-btn';
 const EMPTY_FILTERS = { vacancy_id: '', city: '', source_id: '', recruiter_id: '' };
 
-const readCollapsed = () => {
+const readList = (key) => {
     try {
-        const raw = JSON.parse(window.localStorage.getItem(COLLAPSED_KEY) || '[]');
+        const raw = JSON.parse(window.localStorage.getItem(key) || '[]');
         return Array.isArray(raw) ? raw : [];
     } catch (error) {
         return [];
     }
 };
 
-const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, onDragStart, onDragEnd }) => {
+const saveList = (key, list) => {
+    try {
+        window.localStorage.setItem(key, JSON.stringify(list));
+    } catch (error) {
+        // Приватное окно: свёрнутое просто не запомнится.
+    }
+};
+
+/* showSource — плашка источника на карточке; в группах «Откликов» её нет: источник уже в шапке группы. */
+const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, onDragStart, onDragEnd, showSource = true }) => {
     const idle = card.last_touch_at || card.taken_at;
     const idleDays = idle && !POOL_STAGES.includes(card.stage) && !card.is_closed ? daysSince(idle) : null;
     const overdue = card.next_contact_at && !card.is_closed && daysSince(card.next_contact_at) > 0;
@@ -72,10 +98,9 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
                     </span>
                 )}
             </div>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                {card.channel_id && <ChannelPill name={card.channel_name} color={card.channel_color} />}
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 empty:hidden">
+                {showSource && card.source_name && <SourcePill name={card.source_name} color={card.source_color} />}
                 {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
-                {card.source_name && <Pill>{card.source_name}</Pill>}
                 {card.repeat_of_card_id && <Pill tone="blue" title="Повторное обращение"><Repeat size={11} /> повторно</Pill>}
                 {card.no_answer_suggest && <Pill tone="amber">3 недозвона</Pill>}
                 {overdue && <Pill tone="red">просрочено</Pill>}
@@ -111,8 +136,51 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
     );
 };
 
-const Column = ({ column, caps, dropState, collapsed, onToggle, onOpen, onTake, onCall, canDrag, canCall, onDragStart, onDragEnd, onDrop }) => {
+/* Группа «Откликов» одного источника: шапка — стрелка, цвет источника, название и сколько откликов (всего, с учётом
+   отборов и периода, а не только показанных); шапка липнет к верху колонки, пока листаешь её карточки. Свёрнутая
+   группа — одна строка. Не все карточки пришли — «Показать ещё N». */
+const SourceGroup = ({ group, collapsed, onToggle, onExpand, children }) => {
+    const hidden = Math.max(0, Number(group.total || 0) - group.cards.length);
+    return (
+        <div className="flex flex-col gap-2">
+            <button type="button" onClick={onToggle} aria-expanded={!collapsed}
+                    title={collapsed ? `Развернуть «${group.name}»` : `Свернуть «${group.name}»`}
+                    className="sticky top-0 z-10 flex w-full items-center gap-2 rounded-xl bg-slate-100/95 px-2 py-1.5 text-left backdrop-blur-sm transition hover:bg-slate-200/70 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/70">
+                <ChevronRight size={13} className={`shrink-0 text-slate-400 transition-transform ${collapsed ? '' : 'rotate-90'}`} />
+                <span aria-hidden="true" className={`h-2.5 w-2.5 shrink-0 rounded-full ${sourceTone(group.color).dot}`} />
+                <span className="min-w-0 truncate text-[12.5px] font-semibold text-slate-700">{group.name}</span>
+                <span className="ml-auto shrink-0 rounded-full bg-white px-2 py-0.5 text-[11.5px] font-semibold tabular-nums text-slate-500 ring-1 ring-slate-200/70">
+                    {group.total}
+                </span>
+            </button>
+            {!collapsed && children}
+            {!collapsed && hidden > 0 && (
+                <button type="button" onClick={onExpand}
+                        className="rounded-xl py-1.5 text-center text-[12px] font-medium text-blue-700 transition hover:bg-white/70">
+                    Показать ещё {hidden}
+                </button>
+            )}
+        </div>
+    );
+};
+
+/* Период «Откликов» — в их шапке и только у них (владелец 20.11.2026: «остальные статусы не должны по периоду
+   фильтроваться»). Календарь — общий сайта; в портале: доска прокручивается вбок и обрезала бы его. */
+const ResponsesPeriod = ({ period, onChange }) => (
+    <div className="px-1 pb-2">
+        <IosDateRangePicker portal from={period.from} to={period.to} max={todayIso()} presets={PERIOD_PRESETS} views={PERIOD_VIEWS}
+                            triggerClassName={periodTrigger(Boolean(period.from || period.to))}
+                            onChange={({ from, to }) => onChange({ from: from || '', to: to || '' })} />
+    </div>
+);
+
+const Column = ({
+    column, caps, dropState, collapsed, onToggle, onOpen, onTake, onCall, canDrag, canCall, onDragStart, onDragEnd, onDrop,
+    period, onPeriod, collapsedGroups = [], onToggleGroup, onExpandGroup,
+}) => {
     const [over, setOver] = useState(false);
+    const grouped = Array.isArray(column.groups);
+    const periodActive = Boolean(onPeriod && (period?.from || period?.to));
     const tone = STAGE_TONES[column.stage];
     const titleClass = tone === 'red' ? 'text-rose-700' : tone === 'green' ? 'text-emerald-700' : 'text-slate-700';
     const surface = over && dropState !== 'invalid' ? 'bg-blue-50 ring-2 ring-blue-400'
@@ -125,14 +193,19 @@ const Column = ({ column, caps, dropState, collapsed, onToggle, onOpen, onTake, 
     };
     if (collapsed) {
         return (
-            <button type="button" onClick={onToggle} title={`Развернуть «${column.label}»`} {...dragProps}
+            <button type="button" onClick={onToggle} title={`Развернуть «${column.label}»${periodActive ? ' — включён отбор по периоду' : ''}`} {...dragProps}
                     className={`flex min-h-[220px] w-11 min-w-[44px] flex-col items-center gap-2 rounded-2xl py-3 transition hover:bg-slate-200/70 ${surface}`}>
                 <ChevronsRight size={14} className="text-slate-400" />
-                <span className="rounded-full bg-white px-1.5 py-0.5 text-[11.5px] font-semibold tabular-nums text-slate-500 ring-1 ring-slate-200/70">{column.total}</span>
+                <span className={`rounded-full px-1.5 py-0.5 text-[11.5px] font-semibold tabular-nums ring-1 ${periodActive
+                    ? 'bg-blue-50 text-blue-700 ring-blue-200' : 'bg-white text-slate-500 ring-slate-200/70'}`}>{column.total}</span>
                 <span className={`text-[12.5px] font-semibold [writing-mode:vertical-rl] ${titleClass}`}>{column.label}</span>
             </button>
         );
     }
+    const tile = (card, showSource) => (
+        <CardTile key={card.id} card={card} canTake={caps.take} canCall={canCall(card)} onOpen={onOpen} onTake={onTake} onCall={onCall}
+                  draggable={canDrag(card)} onDragStart={onDragStart} onDragEnd={onDragEnd} showSource={showSource} />
+    );
     return (
         <section className={`${COLUMN_WIDTH} group/column flex max-h-[calc(100vh-220px)] flex-col rounded-2xl p-2 transition ${surface}`} {...dragProps}>
             <header className="flex items-center gap-1.5 px-2 pb-2 pt-1">
@@ -145,13 +218,18 @@ const Column = ({ column, caps, dropState, collapsed, onToggle, onOpen, onTake, 
                     <ChevronsLeft size={14} />
                 </button>
             </header>
+            {onPeriod && <ResponsesPeriod period={period} onChange={onPeriod} />}
             <div className="thin-scroll flex flex-col gap-2 overflow-y-auto px-0.5 pb-1">
-                {column.cards.map((card) => (
-                    <CardTile key={card.id} card={card} canTake={caps.take} canCall={canCall(card)} onOpen={onOpen} onTake={onTake} onCall={onCall}
-                              draggable={canDrag(card)} onDragStart={onDragStart} onDragEnd={onDragEnd} />
-                ))}
-                {column.cards.length === 0 && <div className="py-6 text-center text-[12px] text-slate-400">Пусто</div>}
-                {column.total > column.cards.length && (
+                {grouped ? column.groups.map((group) => (
+                    <SourceGroup key={groupKey(group)} group={group} collapsed={collapsedGroups.includes(groupKey(group))}
+                                 onToggle={() => onToggleGroup(groupKey(group))} onExpand={() => onExpandGroup(group)}>
+                        {group.cards.map((card) => tile(card, false))}
+                    </SourceGroup>
+                )) : column.cards.map((card) => tile(card, true))}
+                {column.cards.length === 0 && (
+                    <div className="py-6 text-center text-[12px] text-slate-400">{periodActive ? 'За этот период откликов нет' : 'Пусто'}</div>
+                )}
+                {!grouped && column.total > column.cards.length && (
                     <div className="py-2 text-center text-[11.5px] text-slate-400">
                         Показаны {column.cards.length} из {column.total} — уточните отбор
                     </div>
@@ -252,7 +330,11 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
     const [loading, setLoading] = useState(true);
     const [adding, setAdding] = useState(false);
     const [dragging, setDragging] = useState(null);
-    const [collapsed, setCollapsed] = useState(readCollapsed);
+    const [collapsed, setCollapsed] = useState(() => readList(COLLAPSED_KEY));
+    // «Отклики»: период (только у них), свёрнутые группы источников и группы, где нажали «Показать ещё».
+    const [period, setPeriod] = useState({ from: '', to: '' });
+    const [collapsedGroups, setCollapsedGroups] = useState(() => readList(COLLAPSED_GROUPS_KEY).map(String));
+    const [expanded, setExpanded] = useState([]);
     const timer = useRef(null);
     const [debounced, setDebounced] = useState('');
 
@@ -264,15 +346,11 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
 
     const load = useCallback(() => {
         setLoading(true);
-        return api.get('/board', {
-            mine: scope === 'mine' ? '1' : undefined, q: debounced || undefined,
-            vacancy_id: filters.vacancy_id || undefined, city: filters.city || undefined,
-            source_id: filters.source_id || undefined, recruiter_id: filters.recruiter_id || undefined,
-        })
+        return api.get('/board', boardQuery({ mine: scope === 'mine', query: debounced, filters, period, expanded }))
             .then(({ data }) => setColumns(data.columns))
             .catch((error) => toast(errorOf(error, 'Не удалось загрузить доску'), 'error'))
             .finally(() => setLoading(false));
-    }, [api, scope, debounced, filters, toast]);
+    }, [api, scope, debounced, filters, period, expanded, toast]);
 
     useEffect(() => { load(); }, [load, version]);
 
@@ -344,14 +422,20 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
         return targetsOf(dragging).includes(stage) ? 'valid' : 'invalid';
     };
     const toggleCollapsed = (stage) => setCollapsed((prev) => {
-        const next = prev.includes(stage) ? prev.filter((item) => item !== stage) : [...prev, stage];
-        try {
-            window.localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
-        } catch (error) {
-            // Приватное окно: свёрнутые колонки просто не запомнятся.
-        }
+        const next = toggleInList(prev, stage);
+        saveList(COLLAPSED_KEY, next);
         return next;
     });
+    const toggleGroup = (key) => setCollapsedGroups((prev) => {
+        const next = toggleInList(prev, key);
+        saveList(COLLAPSED_GROUPS_KEY, next);
+        return next;
+    });
+    // «Показать ещё» — источник уходит в expand, сервер отдаёт его отклики целиком (до тысячи).
+    const expandGroup = (group) => {
+        if (group.source_id === null || group.source_id === undefined) return;
+        setExpanded((prev) => (prev.includes(String(group.source_id)) ? prev : [...prev, String(group.source_id)]));
+    };
 
     const activeFilters = Object.values(filters).filter(Boolean).length;
     return (
@@ -398,7 +482,10 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                             <Column key={column.stage} column={column} caps={caps} dropState={dropStateOf(column.stage)}
                                     collapsed={collapsed.includes(column.stage)} onToggle={() => toggleCollapsed(column.stage)}
                                     onOpen={onOpenCard} onTake={take} onCall={call} canDrag={canDrag} canCall={canCall}
-                                    onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop} />
+                                    onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop}
+                                    {...(column.stage === 'responses' ? {
+                                        period, onPeriod: setPeriod, collapsedGroups, onToggleGroup: toggleGroup, onExpandGroup: expandGroup,
+                                    } : {})} />
                         ))}
                     </div>
                 </div>

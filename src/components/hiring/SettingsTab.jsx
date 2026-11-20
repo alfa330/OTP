@@ -4,8 +4,8 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { IosHint, IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import {
-    CHANNEL_COLORS, CHANNEL_COLOR_CODES, GRANT_LABELS, INTEGRATION_LABELS, INTEGRATION_STATE_LABELS, REASON_KIND_LABELS,
-    channelTone, currentMonth, errorOf, fullDate, shortTime,
+    GRANT_LABELS, INTEGRATION_LABELS, INTEGRATION_STATE_LABELS, REASON_KIND_LABELS, SOURCE_COLORS, SOURCE_COLOR_CODES,
+    currentMonth, errorOf, fullDate, shortTime, sourceTone,
 } from './hiringMeta';
 import {
     ConfirmDialog, DATE_TRIGGER, Empty, FIELD, Group, Label, Loading, MonthSwitch, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY,
@@ -15,8 +15,8 @@ import { WhatsAppIntegration } from './WhatsAppPanel';
 /*
  * Вкладка «Настройки» — руководитель рекрутинга (ТЗ 2: «настраивать справочники»):
  *   рекрутеры   кому раздел выдан и кем (штатный, удалённый, руководитель);
- *   источники   контактов и откликов (ТЗ 5);
- *   каналы      метки откликов с цветом — откуда кандидат узнал о вакансии (владелец 09.11.2026);
+ *   источники   контактов и откликов (ТЗ 5) с цветом — каналы слиты с ними (владелец 20.11.2026: «понятие Канал
+ *               надо убрать и всё запихать в источник… выбрать цвет прямо в источниках»);
  *   вакансии    куда идёт найм, есть ли собеседование в офисе (ТЗ 4.2);
  *   причины     отказа и отсева по инициаторам (ТЗ 6.2, 6.3), не трогают закрытые карточки;
  *   план        месячные задачи на найм в FTE (ТЗ 1.2, 3);
@@ -31,7 +31,6 @@ import { WhatsAppIntegration } from './WhatsAppPanel';
 const SECTIONS = [
     { value: 'people', label: 'Рекрутеры' },
     { value: 'sources', label: 'Источники' },
-    { value: 'channels', label: 'Каналы' },
     { value: 'vacancies', label: 'Вакансии' },
     { value: 'reasons', label: 'Причины' },
     { value: 'plans', label: 'План найма' },
@@ -292,21 +291,52 @@ const PeopleSection = ({ api, toast, boot, reloadBoot }) => {
 };
 
 /* ─── Источники ─────────────────────────────────────────────────────────── */
+/* Источник — откуда пришёл кандидат; с 20.11.2026 у него цвет, а каналов отдельно нет (владелец: «понятие Канал
+   надо убрать и всё запихать в источник… добавить возможность выбрать цвет прямо в источниках»). Цвет виден на доске
+   (группы «Откликов»), в карточке и на рабочем столе. Нажатие на источник — окно с названием и цветом; источник не
+   удаляется, а выключается: карточки его помнят. Цвет — из палитры кружками, как у списков «Напоминаний»: любой цвет
+   пикером дал бы источники, неотличимые друг от друга и чужие стилю раздела; без цвета — серый. */
+const ColorSwatches = ({ value, onChange }) => (
+    <div role="radiogroup" aria-label="Цвет источника" className="flex flex-wrap gap-2.5">
+        {SOURCE_COLOR_CODES.map((code) => {
+            const active = (value || 'gray') === code;
+            return (
+                <button key={code} type="button" role="radio" aria-checked={active} aria-label={SOURCE_COLORS[code].label}
+                        title={SOURCE_COLORS[code].label} onClick={() => onChange(code)}
+                        className={`grid h-8 w-8 place-items-center rounded-full ${SOURCE_COLORS[code].dot} transition active:scale-95 ${
+                            active ? 'ring-2 ring-slate-400 ring-offset-2' : 'hover:opacity-80'}`}>
+                    {active && <Check size={15} strokeWidth={3} className="text-white" />}
+                </button>
+            );
+        })}
+    </div>
+);
+
+const SOURCE_HINTS = {
+    responses: 'Откликнулись сами: площадка, реклама, вручную. Цвет источника виден на доске, в карточке и на рабочем столе — '
+        + 'нажмите на источник, чтобы сменить название или цвет. Выключенный источник пропадает из выбора, старые карточки его помнят.',
+    contacts: 'Люди из загруженной базы — сами не откликались. Нажмите на источник, чтобы сменить название или цвет.',
+};
+
 const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
     const [items, setItems] = useState(boot.dictionaries?.sources || []);
-    const [adding, setAdding] = useState(false);
-    const [name, setName] = useState('');
-    const [kind, setKind] = useState('contacts');
-    const [saving, submit] = useSubmit(toast, 'Не удалось добавить');
-    useEffect(() => { if (adding) { setName(''); setKind('contacts'); } }, [adding]);
-    const add = async () => {
-        if (!name.trim()) return toast('Название пустое', 'error');
+    // null — окно закрыто; {} — новый источник; строка справочника — её правка.
+    const [editing, setEditing] = useState(null);
+    const [form, setForm] = useState({ name: '', kind: 'responses', color: 'gray' });
+    const [saving, submit] = useSubmit(toast, 'Не удалось сохранить');
+    useEffect(() => {
+        if (editing) setForm({ name: editing.name || '', kind: editing.kind || 'responses', color: editing.color || 'gray' });
+    }, [editing]);
+    const save = async () => {
+        if (!form.name.trim()) return toast('Название пустое', 'error');
         const done = await submit(async () => {
-            const { data } = await api.post('/sources', { name: name.trim(), kind });
+            const { data } = editing.id
+                ? await api.patch(`/sources/${editing.id}`, { name: form.name.trim(), color: form.color })
+                : await api.post('/sources', { name: form.name.trim(), kind: form.kind, color: form.color });
             setItems(data.items);
             reloadBoot();
         });
-        if (done) setAdding(false);
+        if (done) setEditing(null);
         return undefined;
     };
     const toggle = async (row) => {
@@ -320,15 +350,21 @@ const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
     };
     return (
         <div className="space-y-3">
-            <Toolbar onAdd={() => setAdding(true)} />
+            <Toolbar onAdd={() => setEditing({})} />
             {['responses', 'contacts'].map((group) => (
                 <Group key={group} title={group === 'contacts' ? 'Источники контактов' : 'Источники откликов'}
-                       right={<IosHint align="right" text={group === 'contacts' ? 'Люди из загруженной базы — сами не откликались.' : 'Откликнулись сами: площадка, реклама, вручную. Выключенный источник пропадает из выбора, старые карточки его помнят.'} />}>
+                       right={<IosHint align="right" text={SOURCE_HINTS[group]} />}>
                     <div className={`${iosCard} overflow-hidden`}>
                         <ul className="divide-y divide-slate-100">
                             {items.filter((s) => s.kind === group).map((row) => (
                                 <Row key={row.id} muted={!row.is_active}>
-                                    <div className="min-w-0 grow basis-0 text-[13.5px] text-slate-900">{row.name}</div>
+                                    <button type="button" onClick={() => setEditing(row)}
+                                            className="flex min-w-0 grow basis-0 items-center gap-2.5 text-left text-[13.5px] text-slate-900 transition hover:text-blue-700">
+                                        <span aria-hidden="true" className={`h-3 w-3 shrink-0 rounded-full ${sourceTone(row.color).dot}`} />
+                                        <span className="truncate">{row.name}</span>
+                                        {/* Владелец 09.11.2026: пришедших с таргета отмечать сами — отклик WhatsApp по рекламе приходит «Таргетом». */}
+                                        {row.code === 'target' && <span className="shrink-0 text-[11.5px] text-slate-400">ставится сам откликам WhatsApp с рекламы</span>}
+                                    </button>
                                     {row.platform && <Pill>{PLATFORM_LABELS[row.platform] || row.platform}</Pill>}
                                     <IosToggle checked={row.is_active} onChange={() => toggle(row)} />
                                 </Row>
@@ -337,98 +373,20 @@ const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
                     </div>
                 </Group>
             ))}
-            <FormModal open={adding} onClose={() => setAdding(false)} title="Новый источник" onSubmit={add} saving={saving}>
-                <div><Label required>Название</Label><input className={FIELD} value={name} onChange={(e) => setName(e.target.value)} placeholder="Например, База партнёров 2026" /></div>
-                <div>
-                    <Label hint="Контакты — люди из загруженной базы, сами не откликались. Отклики — откликнулись сами (площадка, реклама, вручную).">Вид</Label>
-                    <IosSegmented stretch value={kind} onChange={setKind} ariaLabel="Вид источника" options={[{ value: 'contacts', label: 'Контакты' }, { value: 'responses', label: 'Отклики' }]} />
-                </div>
-            </FormModal>
-        </div>
-    );
-};
-
-/* ─── Каналы — метки откликов (владелец 09.11.2026) ─────────────────────── */
-/* Откуда кандидат узнал о вакансии: таргет, hh, Kaspi. Метку ставит рекрутер в карточке, на доске она
-   видна цветом. Здесь — название и цвет; канал не удаляется, а выключается: помеченные карточки его
-   помнят. Цвет — из палитры кружками, как у списков «Напоминаний»: любой цвет пикером дал бы метки,
-   неотличимые друг от друга и чужие стилю раздела. */
-const ColorSwatches = ({ value, onChange }) => (
-    <div role="radiogroup" aria-label="Цвет канала" className="flex flex-wrap gap-2.5">
-        {CHANNEL_COLOR_CODES.map((code) => {
-            const active = value === code;
-            return (
-                <button key={code} type="button" role="radio" aria-checked={active} aria-label={CHANNEL_COLORS[code].label}
-                        title={CHANNEL_COLORS[code].label} onClick={() => onChange(code)}
-                        className={`grid h-8 w-8 place-items-center rounded-full ${CHANNEL_COLORS[code].dot} transition active:scale-95 ${
-                            active ? 'ring-2 ring-slate-400 ring-offset-2' : 'hover:opacity-80'}`}>
-                    {active && <Check size={15} strokeWidth={3} className="text-white" />}
-                </button>
-            );
-        })}
-    </div>
-);
-
-const ChannelsSection = ({ api, toast, boot, reloadBoot }) => {
-    const [items, setItems] = useState(boot.dictionaries?.channels || []);
-    // null — окно закрыто; {} — новый канал; строка справочника — её правка.
-    const [editing, setEditing] = useState(null);
-    const [form, setForm] = useState({ name: '', color: 'blue' });
-    const [saving, submit] = useSubmit(toast, 'Не удалось сохранить');
-    useEffect(() => {
-        if (editing) setForm({ name: editing.name || '', color: editing.color || 'blue' });
-    }, [editing]);
-    const save = async () => {
-        if (!form.name.trim()) return toast('Название пустое', 'error');
-        const done = await submit(async () => {
-            const body = { name: form.name.trim(), color: form.color };
-            const { data } = editing.id ? await api.patch(`/channels/${editing.id}`, body) : await api.post('/channels', body);
-            setItems(data.items);
-            reloadBoot();
-        });
-        if (done) setEditing(null);
-        return undefined;
-    };
-    const toggle = async (row) => {
-        try {
-            const { data } = await api.patch(`/channels/${row.id}`, { is_active: !row.is_active });
-            setItems(data.items);
-            reloadBoot();
-        } catch (error) {
-            toast(errorOf(error, 'Не удалось изменить'), 'error');
-        }
-    };
-    return (
-        <div className="space-y-3">
-            <Toolbar onAdd={() => setEditing({})} />
-            <Group title="Каналы откликов"
-                   right={<IosHint align="right" text="Метка отклика: откуда кандидат узнал о вакансии. Рекрутер ставит её в карточке, на доске она видна цветом. Нажмите на канал, чтобы сменить название или цвет. Выключенный канал пропадает из выбора, помеченные карточки его помнят." />}>
-                <div className={`${iosCard} overflow-hidden`}>
-                    {items.length === 0 ? <Empty>Каналов пока нет</Empty> : (
-                        <ul className="divide-y divide-slate-100">
-                            {items.map((row) => (
-                                <Row key={row.id} muted={!row.is_active}>
-                                    <button type="button" onClick={() => setEditing(row)}
-                                            className="flex min-w-0 grow basis-0 items-center gap-2.5 text-left text-[13.5px] text-slate-900 transition hover:text-blue-700">
-                                        <span aria-hidden="true" className={`h-3 w-3 shrink-0 rounded-full ${channelTone(row.color).dot}`} />
-                                        <span className="truncate">{row.name}</span>
-                                        {/* Владелец 09.11.2026: пришедших с таргета отмечать сами — канал с кодом target. */}
-                                        {row.code === 'target' && <span className="shrink-0 text-[11.5px] text-slate-400">ставится сам откликам с рекламы</span>}
-                                    </button>
-                                    <IosToggle checked={row.is_active} onChange={() => toggle(row)} />
-                                </Row>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-            </Group>
-            <FormModal open={Boolean(editing)} onClose={() => setEditing(null)} title={editing?.id ? 'Канал' : 'Новый канал'}
+            <FormModal open={Boolean(editing)} onClose={() => setEditing(null)} title={editing?.id ? 'Источник' : 'Новый источник'}
                        onSubmit={save} saving={saving} submitLabel={editing?.id ? 'Сохранить' : 'Добавить'}>
                 <div>
                     <Label required>Название</Label>
-                    <input className={FIELD} value={form.name} maxLength={40} placeholder="Например, Таргет"
+                    <input className={FIELD} value={form.name} maxLength={120} placeholder="Например, Instagram"
                            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
                 </div>
+                {!editing?.id && (
+                    <div>
+                        <Label hint="Отклики — откликнулись сами (площадка, реклама, вручную). Контакты — люди из загруженной базы, сами не откликались.">Вид</Label>
+                        <IosSegmented stretch value={form.kind} onChange={(kind) => setForm((f) => ({ ...f, kind }))} ariaLabel="Вид источника"
+                                      options={[{ value: 'responses', label: 'Отклики' }, { value: 'contacts', label: 'Контакты' }]} />
+                    </div>
+                )}
                 <div>
                     <Label>Цвет</Label>
                     <ColorSwatches value={form.color} onChange={(color) => setForm((f) => ({ ...f, color }))} />
@@ -754,7 +712,6 @@ const SettingsTab = ({ api, toast, boot, reloadBoot }) => {
             </div>
             {section === 'people' && <PeopleSection {...shared} />}
             {section === 'sources' && <SourcesSection {...shared} />}
-            {section === 'channels' && <ChannelsSection {...shared} />}
             {section === 'vacancies' && <VacanciesSection {...shared} />}
             {section === 'reasons' && <ReasonsSection {...shared} />}
             {section === 'plans' && <PlansSection {...shared} />}

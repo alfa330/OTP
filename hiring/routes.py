@@ -8,11 +8,12 @@ Blueprint собирается фабрикой и получает зависи
 
     GET    ''                               экран: права, справочники, состояние интеграций
     GET    /desk                             рабочий стол: план найма, задачи на сегодня, моя воронка, мотивация
-    GET    /board                            канбан: колонки с порцией карточек и счётчиками
+    GET    /board                            канбан: колонки с порцией карточек и счётчиками; «Отклики» — по источникам
+                                             (groups) и с периодом responses_from/responses_to, expand — «Показать все»
     GET    /cards                            список по фильтрам (и по ids — для клика по цифре дашборда)
     POST   /cards                            отклик вручную
     GET    /cards/<id>                       карточка целиком (гасит уведомления по ней)
-    PATCH  /cards/<id>                       поля карточки
+    PATCH  /cards/<id>                       поля карточки, источник (source_id)
     POST   /cards/<id>/take                  «Взять в работу»
     POST   /cards/<id>/touches               касание: звонок (исход можно не указывать — ждём телефонию), WhatsApp, комментарий
     PATCH  /cards/<id>/touches/<touch_id>    дописать касание: комментарий, следующий контакт, исход звонка без телефонии
@@ -26,10 +27,10 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/dashboard[/export]       итоговый дашборд (ТЗ 8.1), выгрузка
     GET    /reports/cards?key=               список карточек за цифрой дашборда
     GET    /reports/motivation[/export]      начисления месяца
-    …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки
+    …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки; у источника — цвет (каналы слиты
+                                             с источниками 20.11.2026, своих ручек у каналов больше нет)
     GET    /groups[?pick=1], POST /groups,   группы на обучение с вместимостью: тренер ведёт свои, руководитель —
     PATCH  /groups/<id>                      любые; pick — выбор при приглашении (действующие, свободные места)
-    POST   /channels, PATCH /channels/<id>   каналы — метки откликов с цветом; ставятся PATCH /cards/<id> {channel_id}
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
     PUT    /whatsapp/settings                кто отвечает с телефона (его первый ответ берёт карточку в работу)
     GET    /cards/<id>/whatsapp              переписка карточки с номером найма
@@ -87,6 +88,31 @@ def _int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _day_arg(value, next_day=False):
+    """«2026-11-19» из строки запроса → полночь этого дня (next_day — следующего: граница «по» включительно). Иначе None."""
+    try:
+        day = datetime.strptime(str(value or '').strip()[:10], '%Y-%m-%d')
+    except ValueError:
+        return None
+    return day + timedelta(days=1) if next_day else day
+
+
+def response_groups(cards, counts, sources):
+    """«Отклики» по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и кол-вом»):
+    только непустые, в порядке справочника источников; карточки без источника — последней группой. cards — порция
+    колонки (уже наружу), counts — {source_id: сколько всего с учётом отборов и периода}, sources — справочник целиком:
+    выключенный источник у карточек остаётся и группу свою держит."""
+    order = {row['id']: index for index, row in enumerate(sources)}
+    by_id = {row['id']: row for row in sources}
+    groups = []
+    for source_id, total in counts.items():
+        source = by_id.get(source_id) or {}
+        groups.append({'source_id': source_id, 'name': source.get('name') or 'Без источника', 'color': source.get('color'),
+                       'total': int(total), 'cards': [card for card in cards if card.get('source_id') == source_id]})
+    groups.sort(key=lambda group: (group['source_id'] not in order, order.get(group['source_id'], 0), group['source_id'] or 0))
+    return groups
 
 
 def public_card(card, ctx):
@@ -165,7 +191,6 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             'sources': _json(queries.list_sources(cursor, active_only=not caps['manage'])),
             'vacancies': _json(queries.list_vacancies(cursor, active_only=not caps['manage'])),
             'reasons': _json(queries.list_reasons(cursor, active_only=not caps['manage'])),
-            'channels': _json(queries.list_channels(cursor, active_only=not caps['manage'])),
             'groups': _json(queries.list_groups(cursor, active_only=not caps['manage'])),
             'recruiters': _json(queries.recruiters_with_cards(cursor)),
             'cities': queries.distinct_cities(cursor),
@@ -305,13 +330,22 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_board(ctx):
         caps = access.capabilities(ctx)
         filters = _filters_from_args(ctx)
+        # Период — только у «Откликов» (владелец 20.11.2026: «остальные статусы не должны по периоду фильтроваться»):
+        # по дате поступления, «по» — включительно (день целиком).
+        period = (_day_arg(request.args.get('responses_from')), _day_arg(request.args.get('responses_to'), next_day=True))
+        expand = [x for x in (_int(part) for part in str(request.args.get('expand') or '').split(',')[:50]) if x]
         with db._get_cursor() as cursor:
-            columns, counts = queries.board(cursor, caps, ctx['user_id'], filters)
-        return jsonify({
-            'columns': [{'stage': code, 'label': label, 'total': counts.get(code, 0),
-                         'cards': [public_card(card, ctx) for card in columns.get(code, [])]}
-                        for code, label in rules.STAGES],
-        })
+            columns, counts, by_source = queries.board(cursor, caps, ctx['user_id'], filters, responses_period=period,
+                                                       expand_sources=expand)
+            sources = queries.list_sources(cursor)
+        payload = []
+        for code, label in rules.STAGES:
+            column = {'stage': code, 'label': label, 'total': counts.get(code, 0),
+                      'cards': [public_card(card, ctx) for card in columns.get(code, [])]}
+            if code == rules.RESPONSES:
+                column['groups'] = response_groups(column['cards'], by_source, sources)
+            payload.append(column)
+        return jsonify({'columns': payload})
 
     @hiring_route('/cards')
     def hiring_cards(ctx):
@@ -661,37 +695,14 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = _people_payload(cursor)
         return jsonify({'items': rows, 'returned_to_pool': returned, 'lines_available': lines is not None})
 
+    # Источники — с цветом (владелец 20.11.2026: каналы слиты с источниками, цвет выбирается прямо в источниках).
     @hiring_route('/sources', methods=('POST',))
     def hiring_source_add(ctx):
-        _manage_only(ctx)
-        body = _body()
-        name = str(body.get('name') or '').strip()[:120]
-        kind = str(body.get('kind') or '').strip()
-        if not name or kind not in (rules.SOURCE_CONTACTS, rules.SOURCE_RESPONSES):
-            return _bad('Нужны название и вид источника', 'HIRING_BAD_SOURCE')
-        code = str(body.get('code') or '').strip().lower()[:40] or ('custom_%d' % int(rules.now_almaty().timestamp()))
-        with db._get_cursor() as cursor:
-            if queries.source_by_code(cursor, code):
-                return _bad('Источник с таким кодом уже есть', 'HIRING_DUPLICATE', 409)
-            queries.create_source(cursor, code, name, kind, rules.now_almaty())
-            rows = queries.list_sources(cursor)
-        return jsonify({'items': _json(rows)}), 201
+        return jsonify({'items': _json(service.add_source(ctx, _body()))}), 201
 
     @hiring_route('/sources/<int:source_id>', methods=('PATCH',))
     def hiring_source_edit(source_id, ctx):
-        _manage_only(ctx)
-        body = _body()
-        fields = {}
-        if 'name' in body:
-            fields['name'] = str(body.get('name') or '').strip()[:120] or None
-            if not fields['name']:
-                return _bad('Название пустое', 'HIRING_BAD_SOURCE')
-        if 'is_active' in body:
-            fields['is_active'] = bool(body.get('is_active'))
-        with db._get_cursor() as cursor:
-            queries.update_source(cursor, source_id, **fields)
-            rows = queries.list_sources(cursor)
-        return jsonify({'items': _json(rows)})
+        return jsonify({'items': _json(service.edit_source(ctx, source_id, _body()))})
 
     @hiring_route('/vacancies', methods=('POST',))
     def hiring_vacancy_add(ctx):
@@ -756,15 +767,6 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             queries.update_reason(cursor, reason_id, **fields)
             rows = queries.list_reasons(cursor)
         return jsonify({'items': _json(rows)})
-
-    @hiring_route('/channels', methods=('POST',))
-    def hiring_channel_add(ctx):
-        """Канал — метка откликов с цветом (владелец 09.11.2026): имя и цвет из палитры."""
-        return jsonify({'items': _json(service.add_channel(ctx, _body()))}), 201
-
-    @hiring_route('/channels/<int:channel_id>', methods=('PATCH',))
-    def hiring_channel_edit(channel_id, ctx):
-        return jsonify({'items': _json(service.edit_channel(ctx, channel_id, _body()))})
 
     # Группы на обучение (владелец 18.11.2026): тренер заводит свои и задаёт вместимость, руководитель
     # рекрутинга — любые. ?pick=1 — выбор при приглашении на обучение: действующие группы всех тренеров

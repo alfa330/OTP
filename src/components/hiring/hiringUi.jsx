@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, CircleAlert, Loader2, SlidersHorizontal } from 'lucide-react';
 import { IosHint, IosModal, iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
-import { channelTone, monthLabel, shiftMonth } from './hiringMeta';
+import { monthLabel, shiftMonth, sourceTone } from './hiringMeta';
 
 /*
  * Общие детали интерфейса раздела «Воронка найма» — одни на все вкладки.
@@ -52,12 +52,12 @@ export const Pill = ({ tone = 'slate', children, className = '', title }) => (
     </span>
 );
 
-/* Метка-канал отклика (владелец 09.11.2026): цветная точка и название — цвет из справочника «Каналы».
-   children — хвост внутри плашки (стрелка меню у того, кто может сменить метку). */
-export const ChannelPill = ({ name, color, className = '', children }) => (
-    <span title={`Канал: ${name}`}
-          className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${channelTone(color).pill} ${className}`}>
-        <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${channelTone(color).dot}`} />
+/* Источник карточки (владелец 20.11.2026: каналы слиты с источниками): цветная точка и название — цвет из справочника
+   «Настройки → Источники». children — хвост внутри плашки (стрелка меню у того, кто может сменить источник). */
+export const SourcePill = ({ name, color, className = '', children }) => (
+    <span title={`Источник: ${name}`}
+          className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${sourceTone(color).pill} ${className}`}>
+        <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${sourceTone(color).dot}`} />
         <span className="truncate">{name}</span>
         {children}
     </span>

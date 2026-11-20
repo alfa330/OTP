@@ -83,17 +83,27 @@ class StageTests(unittest.TestCase):
         self.assertEqual(codes[:6], ['hh', 'kaspi', 'olx', 'target', 'manual', 'referral'])
         self.assertEqual({kind for _c, _n, kind, _p in rules.SEED_SOURCES}, {'responses', 'contacts'})
 
-    def test_channels_seed_and_palette_match_the_interface(self):
-        # Владелец 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый.
-        self.assertEqual(rules.SEED_CHANNELS, (('target', 'Таргет', 'blue'), ('hh', 'hh', 'red'), ('kaspi', 'Каспи', 'pink')))
-        self.assertTrue({color for _code, _name, color in rules.SEED_CHANNELS} <= set(rules.CHANNEL_COLORS))
-        # «Таргет» ставится сам по коду канала и коду источника (владелец 09.11.2026).
-        self.assertEqual((rules.CHANNEL_TARGET, rules.SOURCE_TARGET), ('target', 'target'))
-        self.assertIn(rules.SOURCE_TARGET, [code for code, *_ in rules.SEED_SOURCES])
+    def test_source_colors_match_the_interface(self):
+        # Владелец 20.11.2026: каналы слиты с источниками, цвет — у источника; стартовые цвета — его слова о каналах
+        # 09.11.2026: Таргет — синий, hh — красный, Каспи — розовый.
+        self.assertEqual(rules.SEED_SOURCE_COLORS, {'target': 'blue', 'hh': 'red', 'kaspi': 'pink'})
+        self.assertTrue(set(rules.SEED_SOURCE_COLORS.values()) <= set(rules.SOURCE_COLORS))
+        self.assertTrue(set(rules.SEED_SOURCE_COLORS) <= {code for code, *_ in rules.SEED_SOURCES})
+        # «Таргет» ставится сам по коду источника (владелец 09.11.2026).
+        self.assertEqual(rules.SOURCE_TARGET, 'target')
         # Цвет проверяет сервер, рисует интерфейс — коды палитры одни и те же и в том же порядке.
         meta = (ROOT / 'src' / 'components' / 'hiring' / 'hiringMeta.js').read_text(encoding='utf-8')
-        block = re.search(r'export const CHANNEL_COLORS = \{(.*?)\n\};', meta, re.S).group(1)
-        self.assertEqual(tuple(re.findall(r'^\s+(\w+): \{ label:', block, re.M)), rules.CHANNEL_COLORS)
+        block = re.search(r'export const SOURCE_COLORS = \{(.*?)\n\};', meta, re.S).group(1)
+        self.assertEqual(tuple(re.findall(r'^\s+(\w+): \{ label:', block, re.M)), rules.SOURCE_COLORS)
+
+    def test_channels_are_gone_from_code(self):
+        """Понятия «Канал» больше нет (владелец 20.11.2026): ни ручек, ни меток в карточке, ни раздела настроек."""
+        ui = ROOT / 'src' / 'components' / 'hiring'
+        for path in [*ui.glob('*.jsx'), *ui.glob('*.js'), *(ROOT / 'hiring').glob('*.py')]:
+            text = path.read_text(encoding='utf-8')
+            if path.name == 'schema.py':      # таблица и колонка остаются следом слияния — только там
+                continue
+            self.assertNotRegex(text, r'channel_id|channel_name|channel_color|ChannelPill|/channels|list_channels', path.name)
 
 
 class GroupsAndBoardInterfaceTests(unittest.TestCase):
