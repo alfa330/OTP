@@ -1063,13 +1063,16 @@ def _filters(filters):
     return where, params
 
 
-def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000):
+def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, expand_sources=(), expanded_limit=1000,
+          responses_open=None):
     """Колонки доски: порция карточек на колонку и полное число. Пул — свежие сверху, остальные — по последнему
     изменению.
 
     «Отклики» поделены по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и
-    кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать все»
-    (порция expanded_limit). Период — только у «Откликов» (тогда же: «остальные статусы не должны по периоду
+    кол-вом»): порция и число — у каждого источника своё; expand_sources — источники, у которых «Показать ещё»
+    (порция expanded_limit). Группы свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): responses_open —
+    (id источников, раскрыта ли группа без источника) — карточки отдаются только раскрытым группам, остальным — одно
+    число; None — всем (как до свёртки). Период — только у «Откликов» («остальные статусы не должны по периоду
     фильтроваться»): responses_period = (с, по) по дате поступления, «по» не включительно, любая граница может быть
     None. Возвращает (колонки, число по этапам, число откликов по источникам)."""
     scope_sql, scope_params = scope_clause(caps, user_id)
@@ -1100,8 +1103,11 @@ def board(cursor, caps, user_id, filters, per_column=60, responses_period=None, 
             """ + _CARD_FROM + " WHERE " + base_where + """
         ) ranked
          WHERE rn <= CASE WHEN stage = 'responses' AND source_id = ANY(%s::int[]) THEN %s ELSE %s END
+           AND (stage <> 'responses' OR %s OR source_id = ANY(%s::int[]) OR (source_id IS NULL AND %s))
          ORDER BY stage, CASE WHEN stage IN ('contacts', 'responses') THEN received_at ELSE updated_at END DESC, id DESC
-    """, scope_params + params + [_ids(expand_sources), int(expanded_limit), int(per_column)])
+    """, scope_params + params + [_ids(expand_sources), int(expanded_limit), int(per_column),
+                                  responses_open is None, _ids((responses_open or ((), False))[0]),
+                                  bool(responses_open and responses_open[1])])
     rows = _all(cursor)
     columns = {stage: [] for stage in rules.STAGE_CODES}
     for row in rows:

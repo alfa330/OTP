@@ -1149,6 +1149,14 @@ def test_source_colors_and_card_source(world):
     with pytest.raises(HiringError) as caught:
         service.edit_source(me, insta['id'], {'is_active': False})
     assert caught.value.status == 403
+    # Только цвет: окно источника шлёт имя вместе с цветом — своё же имя дублем не считается.
+    items = service.edit_source(lead, sources['target']['id'], {'name': 'Таргет', 'color': 'green'})
+    assert [s['color'] for s in items if s['id'] == sources['target']['id']] == ['green']
+    service.edit_source(lead, sources['target']['id'], {'color': 'blue'})
+    # Код источника (для вебхука площадок) — один на справочник: занятый — 409, а не падение.
+    with pytest.raises(HiringError) as caught:
+        service.add_source(lead, {'name': 'Партнёрский вебхук', 'kind': 'responses', 'code': 'kaspi'})
+    assert caught.value.code == 'HIRING_DUPLICATE' and caught.value.status == 409
 
     # Источник карточки меняет закреплённый рекрутер или руководитель; карточка отдаёт имя и цвет источника.
     _outcome, card = add_response(world, REC1, '8 705 300 00 01')
@@ -1170,6 +1178,29 @@ def test_source_colors_and_card_source(world):
             service.edit_card(me, card['id'], {'source_id': bad})
         assert caught.value.code == 'HIRING_BAD_SOURCE'
     assert service.edit_card(me, card['id'], {'city': 'Алматы'})['source_name'] == 'HeadHunter'   # без source_id не трогается
+    # Источник — разрез отчёта: смена видна в ленте карточки — кто и с какого на какой (разбор 20.11.2026).
+    with world['db']._get_cursor() as cur:
+        changes = [t for t in queries.card_touches(cur, card['id']) if t['result'] == 'source_changed']
+    assert [(t['kind'], t['body'], t['author_id']) for t in changes] == [
+        ('system', 'Источник: Вручную → Таргет', LEAD_GRANT), ('system', 'Источник: Таргет → HeadHunter', REC1)]
+    # У завершённой карточки источник правит только руководитель.
+    closed = take_and_touch(world, REC1, '8 705 300 00 03')
+    with world['db']._get_cursor() as cur:
+        reason = queries.reason_by_name(cur, rules.REASON_REFUSAL_OURS, 'Языковой барьер')
+    service.move(me, closed['id'], 'refused', {'initiator': 'ours', 'reason_id': reason['id']})
+    with pytest.raises(HiringError) as caught:
+        service.edit_card(me, closed['id'], {'source_id': sources['target']['id']})
+    assert caught.value.status == 403
+    assert service.edit_card(lead, closed['id'], {'source_id': sources['target']['id']})['source_name'] == 'Таргет'
+    # Контакту из базы — только база: другую базу можно, «Таргет» — нет.
+    _outcome, contact = add_response(world, REC1, '8 705 300 00 04')
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_cards SET kind = 'contact', stage = 'contacts', source_id = %s WHERE id = %s",
+                    (sources['base_bought']['id'], contact['id']))
+    assert service.edit_card(lead, contact['id'], {'source_id': sources['base_partners']['id']})['source_name'] == 'База партнеров'
+    with pytest.raises(HiringError) as caught:
+        service.edit_card(lead, contact['id'], {'source_id': sources['target']['id']})
+    assert caught.value.code == 'HIRING_BAD_SOURCE'
 
     # Выключенный источник новым не ставится, а у карточки, где стоит, остаётся — и с новым цветом.
     card = service.edit_card(me, card['id'], {'source_id': insta['id']})
@@ -1188,6 +1219,10 @@ def test_source_colors_and_card_source(world):
     items = service.add_source(lead, {'name': 'INSTAGRAM', 'kind': 'responses', 'color': 'pink'})
     assert [(s['name'], s['color'], s['is_active']) for s in items if s['id'] == insta['id']] == [('INSTAGRAM', 'pink', True)]
     assert sum(1 for s in items if s['name'].lower() == 'instagram' and s['kind'] == 'responses') == 1
+    # Включение заново без цвета цвет не стирает.
+    service.edit_source(lead, insta['id'], {'is_active': False})
+    items = service.add_source(lead, {'name': 'instagram', 'kind': 'responses'})
+    assert [(s['name'], s['color'], s['is_active']) for s in items if s['id'] == insta['id']] == [('instagram', 'pink', True)]
 
     # Доска и рабочий стол отдают источник с цветом вместе с карточкой.
     service.edit_card(me, fresh['id'], {'source_id': sources['target']['id'], 'next_contact_at': NOW.isoformat()})
@@ -1206,8 +1241,9 @@ TARGET_AD = {'title': 'Напишите нам!', 'body': 'Требуются о
 def test_target_source_is_set_automatically(world):
     """Владелец 09.11.2026: «Те что пришли с таргета нужно автоматом отмечать как Таргет»; с 20.11.2026 это источник, а не
     метка: отклик WhatsApp по рекламе приходит «Таргетом», без рекламы — «WhatsApp». Повторный отклик с «Таргета» делает
-    «Таргетом» карточку, пришедшую в WhatsApp без рекламы, а источник площадки или рекрутера не трогает. Переименованный
-    «Таргет» ставится по-прежнему (по коду), выключенный — нет: отклик остаётся «WhatsApp»."""
+    «Таргетом» карточку, пришедшую в WhatsApp без рекламы или заведённую руками («Вручную» — способ ввода, а не канал),
+    а источник площадки, «Приведи друга» и выбор рекрутера не трогает. Переименованный «Таргет» ставится по-прежнему
+    (по коду), выключенный — нет: отклик остаётся «WhatsApp»."""
     service = world['service']
     lead, me = ctx_of(world, LEAD_GRANT), ctx_of(world, REC1)
     sources = world['sources']
@@ -1228,12 +1264,14 @@ def test_target_source_is_set_automatically(world):
     service.external_intake([{'phone': '8 705 555 30 05'}], source_code='kaspi', actor_label='Партнёр: тест')
     assert source_of('+77055553005') == 'Kaspi'
 
-    # Повторный отклик с «Таргета»: «WhatsApp» становится «Таргетом»; источник рекрутера и «Вручную» остаются.
+    # Повторный отклик с «Таргета»: «WhatsApp» и «Вручную» становятся «Таргетом»; выбор рекрутера и «Приведи друга» —
+    # остаются.
     service.wa_events({'events': [wa_event('g7', phone='77055553007')]})
     _outcome, chosen = add_response(world, REC1, '8 705 555 30 08')
     service.take(me, chosen['id'])
     service.edit_card(me, chosen['id'], {'source_id': sources['hh']['id']})
     _outcome, manual = add_response(world, REC1, '8 705 555 30 11')
+    _outcome, friend = add_response(world, REC1, '8 705 555 30 14', source_id=sources['referral']['id'])
     with world['db']._get_cursor() as cur:
         cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055553007'")
         before = cur.fetchone()[0]
@@ -1241,8 +1279,10 @@ def test_target_source_is_set_automatically(world):
     assert [r['status'] for r in service.external_intake([{'phone': '8 705 555 30 07'}], source_code='target',
                                                          actor_label='Партнёр: тест')] == ['repeat']
     assert service.wa_events({'events': [wa_event('g8', phone='77055553008', ad=TARGET_AD),
-                                         wa_event('g11', phone='77055553011', ad=TARGET_AD)]})['outcomes'] == {'repeat': 2}
-    assert [source_of(phone) for phone in ('+77055553007', '+77055553008', '+77055553011')] == ['Таргет', 'HeadHunter', 'Вручную']
+                                         wa_event('g11', phone='77055553011', ad=TARGET_AD),
+                                         wa_event('g14', phone='77055553014', ad=TARGET_AD)]})['outcomes'] == {'repeat': 3}
+    assert [source_of(phone) for phone in ('+77055553007', '+77055553008', '+77055553011', '+77055553014')] == [
+        'Таргет', 'HeadHunter', 'Таргет', 'Приведи друга']
     with world['db']._get_cursor() as cur:
         cur.execute("SELECT updated_at FROM hiring_cards WHERE phone = '+77055553007'")
         assert cur.fetchone()[0] > before                           # повторный отклик поднимает карточку, как и раньше
@@ -1264,6 +1304,26 @@ def test_target_source_is_set_automatically(world):
     assert service.wa_events({'events': [wa_event('g13', phone='77055553013', ad=TARGET_AD)]})['outcomes'] == {'stored': 1}
     with world['db']._get_cursor() as cur:
         assert queries.open_card_by_phone(cur, '+77055553013') is None
+
+
+def test_target_upgrade_survives_intake_race(world, monkeypatch):
+    """Повторный отклик с «Таргета», проигравший гонку вставки (две записи одного телефона разом: первый поиск открытой
+    карточки ещё пуст, вставка ловит уникальный индекс), тоже делает «WhatsApp» «Таргетом» — ветка UniqueViolation."""
+    service = world['service']
+    service.wa_events({'events': [wa_event('r1', phone='77055553101')]})
+    real = queries.open_card_by_phone
+    calls = []
+
+    def first_lookup_misses(cur, phone, lock=False):
+        calls.append(phone)
+        return None if len(calls) == 1 else real(cur, phone, lock=lock)
+
+    monkeypatch.setattr(queries, 'open_card_by_phone', first_lookup_misses)
+    results = service.external_intake([{'phone': '8 705 555 31 01'}], source_code='target', actor_label='Партнёр: тест')
+    monkeypatch.undo()
+    assert results[0]['status'] == 'repeat' and len(calls) == 2
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77055553101')['source_name'] == 'Таргет'
 
 
 def _channel(cur, name, color, code=None, is_active=True, position=0):
@@ -1350,6 +1410,10 @@ def test_channels_merge_into_sources(world):
         schema.init_hiring_schema(cur)
         assert [(name, channel) for phone, name, _code, channel, _at in snapshot(cur) if phone.endswith('7')] == [('Таргет', None)]
         assert queries.source_by_code(cur, 'target')['color'] == 'teal'
+        # Снятый руководителем цвет следующий старт не возвращает: слитый канал больше не трогается.
+        cur.execute("UPDATE hiring_sources SET color = NULL WHERE code = 'hh'")
+        schema.init_hiring_schema(cur)
+        assert queries.source_by_code(cur, 'hh')['color'] is None
     # Карточка с источником из канала — обычная карточка: доска отдаёт её имя и цвет, «Отклики» делятся по источникам.
     with world['db']._get_cursor() as cur:
         columns, _counts, by_source = queries.board(cur, {'lead': True}, LEAD_GRANT, {})
@@ -1378,15 +1442,19 @@ def test_board_responses_by_source_and_period(world):
     t3 = response('8 705 700 00 03', 'target', datetime(2026, 10, 14, 8, 0))
     w1 = response('8 705 700 00 04', 'whatsapp', datetime(2026, 10, 11, 10, 0))
     h1 = response('8 705 700 00 05', 'hh', datetime(2026, 10, 1, 10, 0))
-    # В работе — отклики давнего числа: период «Откликов» их не режет.
+    # В работе — отклики давнего числа (разных источников) и контакт из базы: период «Откликов» их не режет.
     taken = response('8 705 700 00 06', 'hh', datetime(2026, 9, 1, 10, 0))
-    taken2 = response('8 705 700 00 07', 'hh', datetime(2026, 9, 2, 10, 0))
+    taken2 = response('8 705 700 00 07', 'target', datetime(2026, 9, 2, 10, 0))
     service.take(me, taken)
     service.take(me, taken2)
+    contact = response('8 705 700 00 08', 'manual', datetime(2026, 9, 3, 10, 0))
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_cards SET kind = 'contact', stage = 'contacts', source_id = %s WHERE id = %s",
+                    (sources['base_bought']['id'], contact))
     lead_caps = {'lead': True}
     with world['db']._get_cursor() as cur:
         columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {})
-        assert counts == {'responses': 5, 'in_work': 2}
+        assert counts == {'responses': 5, 'in_work': 2, 'contacts': 1}
         assert by_source == {sources['target']['id']: 3, sources['whatsapp']['id']: 1, sources['hh']['id']: 1}
         # Карточки «Откликов» — свежие сверху, и внутри источника тоже.
         assert [c['id'] for c in columns['responses']] == [t3, t2, w1, t1, h1]
@@ -1394,22 +1462,23 @@ def test_board_responses_by_source_and_period(world):
         # Период 10.10–12.10 включительно (сервер получает «по» = 13.10 00:00).
         columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
                                                    responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
-        assert counts == {'responses': 3, 'in_work': 2}
+        assert counts == {'responses': 3, 'in_work': 2, 'contacts': 1}
         assert by_source == {sources['target']['id']: 2, sources['whatsapp']['id']: 1}
         assert [c['id'] for c in columns['responses']] == [t2, w1, t1] and {c['id'] for c in columns['in_work']} == {taken, taken2}
+        assert [c['id'] for c in columns['contacts']] == [contact]
         # «По» в запросе — не включительно: отклик ровно на границе в период не входит (день целиком прибавляет ручка).
         _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {},
                                                      responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 12, 23, 59)))
         assert counts['responses'] == 2
         # Одна граница — тоже период.
         _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(datetime(2026, 10, 12), None))
-        assert counts == {'responses': 2, 'in_work': 2}
+        assert counts == {'responses': 2, 'in_work': 2, 'contacts': 1}
         _columns, counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_period=(None, datetime(2026, 10, 2)))
-        assert counts == {'responses': 1, 'in_work': 2}
-        # Период вместе с отбором по источнику.
+        assert counts == {'responses': 1, 'in_work': 2, 'contacts': 1}
+        # Период вместе с отбором по источнику: «В работе» режет только источник (taken2 — «Таргет»), не период.
         _columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {'source_id': sources['target']['id']},
                                                     responses_period=(datetime(2026, 10, 10), datetime(2026, 10, 13)))
-        assert counts == {'responses': 2} and by_source == {sources['target']['id']: 2}
+        assert counts == {'responses': 2, 'in_work': 1} and by_source == {sources['target']['id']: 2}
 
         # Порция — на источник: по две карточки, «Показать ещё» у «Таргета» отдаёт его целиком.
         columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=2)
@@ -1417,13 +1486,29 @@ def test_board_responses_by_source_and_period(world):
         columns, _counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=2,
                                                      expand_sources=[sources['target']['id']])
         assert [c['id'] for c in columns['responses']] == [t3, t2, w1, t1, h1]
-        # expand — только «Откликам»: «В работе» с тем же источником по-прежнему режется порцией.
+        # Порция на источник и expand — только «Откликам»: «В работе» (два источника) режется порцией колонки.
         columns, _counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=1,
                                                      expand_sources=[sources['hh']['id']])
         assert [c['id'] for c in columns['responses']] == [t3, w1, h1] and len(columns['in_work']) == 1
         # Рекрутер видит пул по источникам так же (scope — пул и свои).
         _columns, counts, by_source = queries.board(cur, {'recruiter': True}, REC2, {})
-        assert counts == {'responses': 5} and sum(by_source.values()) == 5
+        assert counts == {'responses': 5, 'contacts': 1} and sum(by_source.values()) == 5
+
+        # Группы свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): карточки — только раскрытым, числа — всем.
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_open=([sources['target']['id']], False))
+        assert [c['id'] for c in columns['responses']] == [t3, t2, t1] and counts['responses'] == 5
+        assert by_source[sources['hh']['id']] == 1 and len(columns['in_work']) == 2 and len(columns['contacts']) == 1
+        columns, counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_open=([], False))
+        assert columns['responses'] == [] and counts['responses'] == 5 and sum(by_source.values()) == 5
+        # Раскрытая группа с «Показать ещё» — целиком; свёрнутая с expand карточек всё равно не получает.
+        columns, _counts, _by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, per_column=1,
+                                                     expand_sources=[sources['target']['id'], sources['hh']['id']],
+                                                     responses_open=([sources['target']['id']], False))
+        assert [c['id'] for c in columns['responses']] == [t3, t2, t1]
+        # Группа без источника раскрывается своим признаком.
+        cur.execute("UPDATE hiring_cards SET source_id = NULL WHERE id = %s", (w1,))
+        columns, _counts, by_source = queries.board(cur, lead_caps, LEAD_GRANT, {}, responses_open=([], True))
+        assert [c['id'] for c in columns['responses']] == [w1] and by_source[None] == 1
 
 
 # ─── Звонки из телефонии Binotel (владелец 30.10.2026) ────────────────────────

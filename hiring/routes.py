@@ -103,16 +103,24 @@ def response_groups(cards, counts, sources):
     """«Отклики» по источникам (владелец 20.11.2026: «столбец Отклики разделить на каналы с названием и кол-вом»):
     только непустые, в порядке справочника источников; карточки без источника — последней группой. cards — порция
     колонки (уже наружу), counts — {source_id: сколько всего с учётом отборов и периода}, sources — справочник целиком:
-    выключенный источник у карточек остаётся и группу свою держит."""
+    выключенный источник у карточек остаётся и группу свою держит. Карточки группы — номерами (card_ids): сами карточки
+    лежат в колонке, второй их копией ответ доски вырос бы вдвое."""
     order = {row['id']: index for index, row in enumerate(sources)}
     by_id = {row['id']: row for row in sources}
     groups = []
     for source_id, total in counts.items():
         source = by_id.get(source_id) or {}
         groups.append({'source_id': source_id, 'name': source.get('name') or 'Без источника', 'color': source.get('color'),
-                       'total': int(total), 'cards': [card for card in cards if card.get('source_id') == source_id]})
+                       'total': int(total), 'card_ids': [card['id'] for card in cards if card.get('source_id') == source_id]})
     groups.sort(key=lambda group: (group['source_id'] not in order, order.get(group['source_id'], 0), group['source_id'] or 0))
     return groups
+
+
+def _source_ids_arg(value, limit=50):
+    """«4,10,none» из строки запроса → ([4, 10], True): id источников (в пределах int4) и группа без источника."""
+    tokens = [part.strip() for part in str(value or '').split(',')[:limit]]
+    ids = [number for number in (_int(token) for token in tokens) if number and 0 < number < 2 ** 31]
+    return ids, 'none' in tokens
 
 
 def public_card(card, ctx):
@@ -333,10 +341,13 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         # Период — только у «Откликов» (владелец 20.11.2026: «остальные статусы не должны по периоду фильтроваться»):
         # по дате поступления, «по» — включительно (день целиком).
         period = (_day_arg(request.args.get('responses_from')), _day_arg(request.args.get('responses_to'), next_day=True))
-        expand = [x for x in (_int(part) for part in str(request.args.get('expand') or '').split(',')[:50]) if x]
+        expand = _source_ids_arg(request.args.get('expand'))[0]
+        # Группы «Откликов» свёрнуты, пока их не раскрыли (решение владельца 20.11.2026): open — раскрытые, карточки
+        # приходят только им. Без open — всем группам (старая страница во время выкладки).
+        opened = _source_ids_arg(request.args.get('open')) if 'open' in request.args else None
         with db._get_cursor() as cursor:
             columns, counts, by_source = queries.board(cursor, caps, ctx['user_id'], filters, responses_period=period,
-                                                       expand_sources=expand)
+                                                       expand_sources=expand, responses_open=opened)
             sources = queries.list_sources(cursor)
         payload = []
         for code, label in rules.STAGES:

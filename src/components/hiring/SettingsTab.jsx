@@ -5,7 +5,7 @@ import IosDatePicker from '../ui/DatePicker';
 import { IosHint, IosModal, IosSegmented, IosToggle, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import {
     GRANT_LABELS, INTEGRATION_LABELS, INTEGRATION_STATE_LABELS, REASON_KIND_LABELS, SOURCE_COLORS, SOURCE_COLOR_CODES,
-    currentMonth, errorOf, fullDate, shortTime, sourceTone,
+    currentMonth, errorOf, fullDate, shortTime, sourceRequestBody, sourceTone,
 } from './hiringMeta';
 import {
     ConfirmDialog, DATE_TRIGGER, Empty, FIELD, Group, Label, Loading, MonthSwitch, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY,
@@ -330,9 +330,8 @@ const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
     const save = async () => {
         if (!form.name.trim()) return toast('Название пустое', 'error');
         const done = await submit(async () => {
-            const { data } = editing.id
-                ? await api.patch(`/sources/${editing.id}`, { name: form.name.trim(), color: form.color })
-                : await api.post('/sources', { name: form.name.trim(), kind: form.kind, color: form.color });
+            const body = sourceRequestBody(form, editing);
+            const { data } = editing.id ? await api.patch(`/sources/${editing.id}`, body) : await api.post('/sources', body);
             setItems(data.items);
             reloadBoot();
         });
@@ -361,9 +360,13 @@ const SourcesSection = ({ api, toast, boot, reloadBoot }) => {
                                     <button type="button" onClick={() => setEditing(row)}
                                             className="flex min-w-0 grow basis-0 items-center gap-2.5 text-left text-[13.5px] text-slate-900 transition hover:text-blue-700">
                                         <span aria-hidden="true" className={`h-3 w-3 shrink-0 rounded-full ${sourceTone(row.color).dot}`} />
-                                        <span className="truncate">{row.name}</span>
-                                        {/* Владелец 09.11.2026: пришедших с таргета отмечать сами — отклик WhatsApp по рекламе приходит «Таргетом». */}
-                                        {row.code === 'target' && <span className="shrink-0 text-[11.5px] text-slate-400">ставится сам откликам WhatsApp с рекламы</span>}
+                                        {/* Имя с нулевым базисом: оболочка телефона переносит flex-ряды с gap, и длинное имя
+                                            уезжало бы на вторую строку, оставив точку одну. */}
+                                        <span className="min-w-0 flex-1 truncate">
+                                            {row.name}
+                                            {/* Владелец 09.11.2026: пришедших с таргета отмечать сами — отклик WhatsApp по рекламе приходит «Таргетом». */}
+                                            {row.code === 'target' && <span className="ml-2 text-[11.5px] text-slate-400">ставится сам откликам WhatsApp с рекламы</span>}
+                                        </span>
                                     </button>
                                     {row.platform && <Pill>{PLATFORM_LABELS[row.platform] || row.platform}</Pill>}
                                     <IosToggle checked={row.is_active} onChange={() => toggle(row)} />

@@ -43,7 +43,7 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
                     {/* Источник и подстатус — второй строкой, под именем: справа на узкой строке они съедали
                         ФИО целиком («Недозвон / не ответил» длиннее прежнего «Недозвон»). */}
                     <div className="mt-0.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] text-slate-500">
-                        {card.source_name && <SourcePill name={card.source_name} color={card.source_color} className="shrink-0" />}
+                        {card.source_name && <SourcePill name={card.source_name} color={card.source_color} className="min-w-0" />}
                         {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]} className="shrink-0">{SUBSTAGE_LABELS[card.substage]}</Pill>}
                         <span className="min-w-0 truncate">
                             {[card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ') || STAGE_LABELS[card.stage]}

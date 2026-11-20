@@ -462,6 +462,9 @@ def test_sources_with_color_through_routes(client):
     assert client.patch('/api/hiring/sources/%s' % insta['id'], json={'color': 'teal'}, headers=rec).status_code == 403
     recolored = client.patch('/api/hiring/sources/%s' % insta['id'], json={'color': 'teal'}, headers=lead).get_json()['items']
     assert [s['color'] for s in recolored if s['id'] == insta['id']] == ['teal']
+    # Окно источника шлёт имя вместе с цветом — своё имя не дубль.
+    same_name = client.patch('/api/hiring/sources/%s' % insta['id'], json={'name': 'Instagram', 'color': 'green'}, headers=lead)
+    assert same_name.status_code == 200 and [s['color'] for s in same_name.get_json()['items'] if s['id'] == insta['id']] == ['green']
     assert client.patch('/api/hiring/sources/999999', json={'color': 'teal'}, headers=lead).status_code == 404
 
     manual = next(s for s in boot['dictionaries']['sources'] if s['code'] == 'manual')
@@ -479,8 +482,9 @@ def test_sources_with_color_through_routes(client):
 
 
 def test_board_responses_groups_and_period_through_routes(client):
-    """Владелец 20.11.2026: «Отклики» поделены по источникам с названием и числом; период — только у «Откликов» (по дате
-    поступления, «по» — включительно), остальные этапы им не режутся; «Показать ещё» — expand."""
+    """Владелец 20.11.2026: «Отклики» поделены по источникам с названием и числом; группы свёрнуты, пока их не раскрыли
+    (open — карточки только раскрытым); период — только у «Откликов» (по дате поступления, «по» — включительно),
+    остальные этапы им не режутся; «Показать ещё» — expand. Карточки группы — номерами: сами они в колонке, один раз."""
     rec = as_user(REC1)
     boot = client.get('/api/hiring', headers=rec).get_json()
     by_code = {s['code']: s for s in boot['dictionaries']['sources']}
@@ -503,10 +507,30 @@ def test_board_responses_groups_and_period_through_routes(client):
     full = board()
     responses = full['responses']
     assert responses['total'] == 4 and [c['id'] for c in responses['cards']] == ids[::-1]
-    # Группы — в порядке справочника источников (HeadHunter, Таргет, WhatsApp), с цветом, числом и карточками группы.
-    assert [(g['name'], g['color'], g['total'], [c['id'] for c in g['cards']]) for g in responses['groups']] == [
+    # Группы — в порядке справочника источников (HeadHunter, Таргет, WhatsApp), с цветом, числом и номерами карточек.
+    assert [(g['name'], g['color'], g['total'], g['card_ids']) for g in responses['groups']] == [
         ('HeadHunter', 'red', 1, [ids[3]]), ('Таргет', 'blue', 2, [ids[2], ids[1]]), ('WhatsApp', None, 1, [ids[0]])]
+    assert all('cards' not in g for g in responses['groups'])                  # карточка в ответе — один раз
     assert full['in_work']['total'] == 1 and 'groups' not in full['in_work']
+
+    # Свёрнутые группы: open — раскрытые; карточки только им, числа — всем; '-' — ни одной; мусор не ломает ответ.
+    target_id, hh_id = by_code['target']['id'], by_code['hh']['id']
+    opened = board(open=str(target_id))['responses']
+    assert [c['id'] for c in opened['cards']] == [ids[2], ids[1]] and opened['total'] == 4
+    assert [(g['name'], g['total'], g['card_ids']) for g in opened['groups']] == [
+        ('HeadHunter', 1, []), ('Таргет', 2, [ids[2], ids[1]]), ('WhatsApp', 1, [])]
+    closed = board(open='-')
+    assert closed['responses']['cards'] == [] and closed['responses']['total'] == 4 and closed['in_work']['total'] == 1
+    assert [c['id'] for c in board(open='%s,abc,99999999999,none' % hh_id)['responses']['cards']] == [ids[3]]
+    # Выключенный источник группу держит — со своим именем и цветом.
+    client.patch('/api/hiring/sources/%s' % hh_id, json={'is_active': False}, headers=as_user(HR_HEAD))
+    assert [(g['name'], g['color']) for g in board()['responses']['groups']][0] == ('HeadHunter', 'red')
+    client.patch('/api/hiring/sources/%s' % hh_id, json={'is_active': True}, headers=as_user(HR_HEAD))
+    # Удалённый рекрутер: в группах только номера, телефоны пула скрыты в карточках колонки.
+    remote = client.get('/api/hiring/board', headers=as_user(REC2)).get_json()['columns']
+    remote_responses = next(column for column in remote if column['stage'] == 'responses')
+    assert remote_responses['cards'] and all(c['phone'] is None and c['phone_hidden'] for c in remote_responses['cards'])
+    assert all(set(g) == {'source_id', 'name', 'color', 'total', 'card_ids'} for g in remote_responses['groups'])
 
     # Период 12.11–18.11 включительно: «Отклики» — только поступившие в эти дни, «В работе» — как было.
     cut = board(responses_from='2026-11-12', responses_to='2026-11-18')
@@ -518,8 +542,22 @@ def test_board_responses_groups_and_period_through_routes(client):
     assert board(responses_from='2026-12-01')['responses']['groups'] == []
     # Общий отбор доски (from / to) по-прежнему режет все колонки — период «Откликов» отдельный параметр.
     assert board(**{'from': '2026-11-12'})['in_work']['total'] == 0
-    # expand принимает только числа и не ломает ответ.
-    assert board(expand='%s,abc,' % by_code['target']['id'])['responses']['total'] == 4
+    # expand принимает только числа (в пределах int4) и не ломает ответ.
+    assert board(expand='%s,abc,99999999999' % by_code['target']['id'])['responses']['total'] == 4
+
+    # «Показать ещё»: порция — 60 карточек на группу, expand отдаёт группу целиком.
+    with client.world['db']._get_cursor() as cur:
+        now = rules.now_almaty()
+        for n in range(60):
+            queries.insert_card(cur, {'kind': 'response', 'full_name': 'Кандидат %d' % n, 'phone': '+7705410%04d' % n,
+                                      'source_id': target_id, 'received_at': now, 'stage': 'responses',
+                                      'created_at': now, 'updated_at': now})
+    portion = board(open=str(target_id))['responses']
+    target_group = next(g for g in portion['groups'] if g['source_id'] == target_id)
+    assert (target_group['total'], len(target_group['card_ids'])) == (62, 60)
+    whole = board(open=str(target_id), expand=str(target_id))['responses']
+    assert len(next(g for g in whole['groups'] if g['source_id'] == target_id)['card_ids']) == 62
+    assert len(whole['cards']) == 62
 
 
 def test_external_responses(client):

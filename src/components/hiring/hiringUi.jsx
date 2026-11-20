@@ -54,9 +54,10 @@ export const Pill = ({ tone = 'slate', children, className = '', title }) => (
 
 /* Источник карточки (владелец 20.11.2026: каналы слиты с источниками): цветная точка и название — цвет из справочника
    «Настройки → Источники». children — хвост внутри плашки (стрелка меню у того, кто может сменить источник). */
+// Не шире 14rem: имя источника теперь до 120 знаков (у каналов было до 40) и не должно выдавливать соседей в строке.
 export const SourcePill = ({ name, color, className = '', children }) => (
     <span title={`Источник: ${name}`}
-          className={`inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${sourceTone(color).pill} ${className}`}>
+          className={`inline-flex max-w-[min(100%,14rem)] items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] font-medium ${sourceTone(color).pill} ${className}`}>
         <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${sourceTone(color).dot}`} />
         <span className="truncate">{name}</span>
         {children}

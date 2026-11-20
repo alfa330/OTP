@@ -361,6 +361,10 @@ SOURCE_NAME_MAX = 120
 # «Таргет» ставится сам (владелец 09.11.2026: «те что пришли с таргета нужно автоматом отмечать как Таргет»): отклик
 # WhatsApp по рекламе (whatsapp.from_ads) приходит с источником «Таргет», а не «WhatsApp».
 SOURCE_TARGET = 'target'
+# Источники, которые говорят, КАК отклик пришёл, а не откуда человек узнал о вакансии: номер WhatsApp найма и ввод
+# руками. Повторный отклик с «Таргета» делает такую карточку «Таргетом» — как раньше ставилась метка «Таргет» карточке
+# без метки; площадки (hh, OLX, Kaspi) и «Приведи друга» — уже канал, их источник не перетирается.
+SOURCES_WITHOUT_CHANNEL = ('whatsapp', 'manual')
 
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (
     'pending', 'counted', 'paid', 'cancelled')

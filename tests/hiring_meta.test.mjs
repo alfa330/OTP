@@ -5,10 +5,10 @@ import assert from 'node:assert/strict';
 
 import {
     GROUP_CAPACITY_MAX, ICORE_PHONE_FRAME_ID, SOURCE_COLORS, SOURCE_COLOR_CODES, STAGES, STAGE_LABELS, FUNNEL_STAGES,
-    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, boardQuery, buildICorePhoneUrl, daysSince, groupKey, groupNameAfterStart,
-    groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull, matchesQuery,
-    monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices, sourceTone,
-    splitDateTime, stepCapacity, toggleInList,
+    SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, boardQuery, buildICorePhoneUrl, daysSince, groupCards, groupKey,
+    groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull,
+    matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
+    sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -125,9 +125,32 @@ test('board query: period goes only to «Отклики», empty filters are not
     assert.deepEqual(withPeriod, { responses_from: '2026-11-12', responses_to: '2026-11-18' });
     assert.ok(!('from' in withPeriod) && !('to' in withPeriod));
     assert.deepEqual(boardQuery({ period: { from: '', to: '2026-11-18' } }), { responses_to: '2026-11-18' });
+    // Остальные отборы доски уходят как были: город и рекрутер тоже.
+    assert.deepEqual(boardQuery({ filters: { city: 'Алматы', recruiter_id: '10' } }), { city: 'Алматы', recruiter_id: '10' });
     // «Показать ещё» — только числовые id источников; группа без источника не раскрывается.
     assert.deepEqual(boardQuery({ expanded: ['4', 'none', '10', 'x1'] }), { expand: '4,10' });
     assert.deepEqual(boardQuery({ expanded: ['none'] }), {});
+});
+
+test('collapsed groups: open goes with every board request, «-» when nothing is open', () => {
+    // Решение владельца 20.11.2026: группы «Откликов» свёрнуты, пока их не раскрыли — карточки сервер шлёт только раскрытым.
+    assert.deepEqual(boardQuery({ open: [] }), { open: '-' });
+    assert.deepEqual(boardQuery({ open: ['4', 'none', 'x', '10'] }), { open: '4,none,10' });
+    assert.ok(!('open' in boardQuery({})));                           // без списка — сервер отдаёт карточки всем, как раньше
+    const cards = new Map([[1, { id: 1 }], [2, { id: 2 }], [5, { id: 5 }]]);
+    assert.deepEqual(groupCards({ card_ids: [2, 1, 9] }, cards), [{ id: 2 }, { id: 1 }]);   // пропавшую (9) — без дыр
+    assert.deepEqual(groupCards({}, cards), []);
+    assert.deepEqual(withExpanded(['4'], { source_id: 10 }), ['4', '10']);
+    assert.deepEqual(withExpanded(['4'], { source_id: 4 }), ['4']);
+    assert.deepEqual(withExpanded(['4'], { source_id: null }), ['4']);
+});
+
+test('source window body: new source has a kind, existing one sends only name and color', () => {
+    assert.deepEqual(sourceRequestBody({ name: '  Instagram ', kind: 'contacts', color: 'violet' }),
+        { name: 'Instagram', color: 'violet', kind: 'contacts' });
+    assert.deepEqual(sourceRequestBody({ name: 'Таргет', kind: 'responses', color: 'green' }, { id: 4, kind: 'responses' }),
+        { name: 'Таргет', color: 'green' });
+    assert.deepEqual(sourceRequestBody({ name: 'X', kind: 'weird' }), { name: 'X', color: null, kind: 'responses' });
 });
 
 test('collapsed lists toggle without touching the original; group keys', () => {

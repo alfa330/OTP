@@ -858,7 +858,9 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                         <div className="flex flex-wrap items-center gap-2">
                             <Pill tone={STAGE_TONES[card.stage]} className="text-[13px]">{STAGE_LABELS[card.stage]}</Pill>
                             {card.substage && <Pill tone={SUBSTAGE_TONES[card.substage]}>{SUBSTAGE_LABELS[card.substage]}</Pill>}
-                            <SourcePicker card={card} sources={boot.dictionaries?.sources || []} canEdit={isOwnerOrLead} onChange={setSource} />
+                            {/* Источник завершённой карточки — разрез отчёта: его правит только руководитель (сервер — так же). */}
+                            <SourcePicker card={card} sources={boot.dictionaries?.sources || []} canEdit={isOwnerOrLead && (!card.is_closed || Boolean(caps.lead))}
+                                          onChange={setSource} />
                             {card.repeat_of_card_id && <Pill tone="blue"><Repeat size={11} /> повторное обращение</Pill>}
                             {card.no_answer_suggest && <Pill tone="amber">3 недозвона подряд — предложить «Отказ: не выходит на связь»</Pill>}
                             <div className="ml-auto flex flex-wrap items-center gap-2">

@@ -182,7 +182,7 @@ class HiringService:
         open_card = queries.open_card_by_phone(cursor, phone, lock=True)
         if open_card:
             self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
-            self._target_over_plain_whatsapp(cursor, open_card, source)
+            self._target_over_plain_source(cursor, open_card, source)
             return 'repeat', open_card['id']
         closed = queries.last_closed_card_by_phone(cursor, phone)
         fields = {
@@ -202,7 +202,7 @@ class HiringService:
             open_card = queries.open_card_by_phone(cursor, phone, lock=True)
             if open_card:
                 self._repeat(cursor, open_card, source, received_at or now, now, platform_ref, vacancy_text)
-                self._target_over_plain_whatsapp(cursor, open_card, source)
+                self._target_over_plain_source(cursor, open_card, source)
                 return 'repeat', open_card['id']
             raise
         cursor.execute("RELEASE SAVEPOINT hiring_intake")
@@ -221,12 +221,12 @@ class HiringService:
         return 'created', card_id
 
     @staticmethod
-    def _target_over_plain_whatsapp(cursor, card, source):
+    def _target_over_plain_source(cursor, card, source):
         """Повторный отклик с «Таргета» (WhatsApp по рекламе или вебхук с источником target) у открытой карточки,
-        пришедшей в WhatsApp без рекламы, делает её «Таргетом» (владелец 09.11.2026: «те что пришли с таргета нужно
-        автоматом отмечать как Таргет»; с 20.11.2026 это источник, а не метка-канал). Источник, выбранный
-        рекрутером или пришедший с площадки (hh, OLX, вручную), не трогается — как раньше не трогалась чужая метка."""
-        if (source or {}).get('code') != rules.SOURCE_TARGET or card.get('source_code') != whatsapp.SOURCE_CODE:
+        пришедшей в WhatsApp без рекламы или заведённой руками, делает её «Таргетом» (владелец 09.11.2026: «те что
+        пришли с таргета нужно автоматом отмечать как Таргет»; с 20.11.2026 это источник, а не метка-канал). Источник
+        площадки (hh, OLX, Kaspi) и «Приведи друга» не трогается — это уже канал (rules.SOURCES_WITHOUT_CHANNEL)."""
+        if (source or {}).get('code') != rules.SOURCE_TARGET or card.get('source_code') not in rules.SOURCES_WITHOUT_CHANNEL:
             return 0
         return queries.switch_card_source(cursor, card['id'], card['source_id'], source['id'])
 
@@ -595,7 +595,16 @@ class HiringService:
                 fields['office_visit_at'] = moment
                 fields['substage'] = 'expected'
             if 'source_id' in payload:
-                fields['source_id'] = self._card_source(cursor, card, payload.get('source_id'))
+                source_id = self._card_source(cursor, card, payload.get('source_id'))
+                if source_id != card.get('source_id'):
+                    # Источник — разрез отчёта «Источники»: у завершённой карточки его правит только руководитель, а
+                    # смена видна в ленте карточки — кто и с какого на какой (разбор 20.11.2026).
+                    if card['is_closed'] and not access.capabilities(ctx)['lead']:
+                        raise _forbidden('Источник завершённой карточки меняет руководитель рекрутинга')
+                    fields['source_id'] = source_id
+                    queries.add_touch(cursor, card_id, rules.TOUCH_SYSTEM, 'source_changed', 'Источник: %s → %s' % (
+                        card.get('source_name') or '—', queries.get_source(cursor, source_id)['name']),
+                        ctx['user_id'], ctx['name'], now, meta={'from_source_id': card.get('source_id'), 'to_source_id': source_id})
             queries.update_card(cursor, card_id, **fields)
             return queries.get_card(cursor, card_id)
 

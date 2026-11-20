@@ -69,16 +69,20 @@ export const toggleInList = (list, value) => {
     return items.includes(value) ? items.filter((item) => item !== value) : [...items, value];
 };
 
-/** Ключ группы «Откликов» в списке свёрнутых: id источника, у карточек без источника — 'none'. */
+/** Ключ группы «Откликов» в списке раскрытых: id источника, у карточек без источника — 'none'. */
 export const groupKey = (group) => (group?.source_id === null || group?.source_id === undefined ? 'none' : String(group.source_id));
+
+const GROUP_KEY_RE = /^(\d+|none)$/;
 
 /*
  * Запрос доски. Период — только «Откликам» (владелец 20.11.2026: «именно в отклики надо добавить возможность
  * фильтровать по периоду, остальные статусы не должны по периоду фильтроваться»): уходит отдельными
- * responses_from / responses_to, а не общими from / to, которые сервер применил бы ко всем колонкам. expand —
- * источники «Откликов», где нажали «Показать ещё». Пустые отборы не отправляются.
+ * responses_from / responses_to, а не общими from / to, которые сервер применил бы ко всем колонкам. open — раскрытые
+ * группы «Откликов» (группы свёрнуты по умолчанию — решение владельца 20.11.2026): карточки сервер отдаёт только им,
+ * '-' — ни одной; без open сервер отдал бы карточки всем. expand — источники, где нажали «Показать ещё». Пустые отборы
+ * не отправляются.
  */
-export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}, expanded = [] } = {}) => {
+export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}, expanded = [], open } = {}) => {
     const params = {
         mine: mine ? '1' : undefined,
         q: String(query || '').trim() || undefined,
@@ -88,9 +92,27 @@ export const boardQuery = ({ mine = false, query = '', filters = {}, period = {}
         recruiter_id: filters.recruiter_id || undefined,
         responses_from: period?.from || undefined,
         responses_to: period?.to || undefined,
+        open: Array.isArray(open) ? (open.filter((key) => GROUP_KEY_RE.test(String(key))).join(',') || '-') : undefined,
         expand: (expanded || []).filter((key) => /^\d+$/.test(String(key))).join(',') || undefined,
     };
     return Object.fromEntries(Object.entries(params).filter(([, value]) => value !== undefined));
+};
+
+/** Карточки группы «Откликов»: сервер присылает их номера (card_ids), сами карточки лежат в колонке. */
+export const groupCards = (group, cardsById) => (group?.card_ids || []).map((id) => cardsById.get(id)).filter(Boolean);
+
+/** «Показать ещё» у группы: её источник добавляется в expand один раз; у группы без источника раскрывать нечем. */
+export const withExpanded = (list, group) => {
+    const items = Array.isArray(list) ? list : [];
+    if (group?.source_id === null || group?.source_id === undefined) return items;
+    const key = String(group.source_id);
+    return items.includes(key) ? items : [...items, key];
+};
+
+/** Тело запроса окна источника: новому — название, вид и цвет, существующему — название и цвет (вид не меняется). */
+export const sourceRequestBody = (form, existing = null) => {
+    const body = { name: String(form?.name || '').trim(), color: form?.color || null };
+    return existing?.id ? body : { ...body, kind: form?.kind === 'contacts' ? 'contacts' : 'responses' };
 };
 
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),

@@ -96,6 +96,20 @@ class StageTests(unittest.TestCase):
         block = re.search(r'export const SOURCE_COLORS = \{(.*?)\n\};', meta, re.S).group(1)
         self.assertEqual(tuple(re.findall(r'^\s+(\w+): \{ label:', block, re.M)), rules.SOURCE_COLORS)
 
+    def test_response_group_total_is_the_count_not_the_portion(self):
+        """Число у группы «Откликов» — сколько всего (с отборами и периодом), а не сколько карточек пришло порцией; карточки
+        группы — номерами, без копий; порядок — справочника, «Без источника» — последней, выключенный источник — с именем."""
+        from hiring import routes
+        cards = [{'id': 1, 'source_id': 4}, {'id': 2, 'source_id': 4}, {'id': 3, 'source_id': None}, {'id': 5, 'source_id': 7}]
+        sources = [{'id': 1, 'name': 'HeadHunter', 'color': 'red', 'is_active': True},
+                   {'id': 7, 'name': 'Старый', 'color': 'teal', 'is_active': False},
+                   {'id': 4, 'name': 'Таргет', 'color': 'blue', 'is_active': True}]
+        groups = routes.response_groups(cards, {None: 1, 4: 198, 7: 1}, sources)
+        self.assertEqual([(g['name'], g['color'], g['total'], g['card_ids']) for g in groups],
+                         [('Старый', 'teal', 1, [5]), ('Таргет', 'blue', 198, [1, 2]), ('Без источника', None, 1, [3])])
+        self.assertEqual(routes._source_ids_arg('4, 10,abc,none,99999999999,-1'), ([4, 10], True))
+        self.assertEqual(routes._source_ids_arg('-'), ([], False))
+
     def test_channels_are_gone_from_code(self):
         """Понятия «Канал» больше нет (владелец 20.11.2026): ни ручек, ни меток в карточке, ни раздела настроек."""
         ui = ROOT / 'src' / 'components' / 'hiring'
@@ -165,6 +179,27 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('{pickStale && (', self.sheet)
         self.assertIn('sm:max-h-[272px] sm:overflow-y-auto', self.sheet)
         self.assertNotIn("boot.dictionaries?.groups || []).filter((g) => g.status === 'active');\n    const kind", self.sheet)
+
+    def test_board_and_card_wiring_for_sources(self):
+        """Связки интерфейса правки 20.11.2026 (каналы → источники, «Отклики» группами, период только у них)."""
+        # Доска перезагружается по периоду, раскрытым группам и «Показать ещё»; на доске — ответ на последний запрос.
+        self.assertIn("boardQuery({ mine: scope === 'mine', query: debounced, filters, period, expanded, open: openGroups })", self.board)
+        self.assertIn('}, [api, scope, debounced, filters, period, expanded, openGroups, toast]);', self.board)
+        self.assertIn('.then(({ data }) => { if (seq === requestSeq.current) setColumns(data.columns); })', self.board)
+        # Группы свёрнуты по умолчанию: раскрытые — список в браузере, карточки группы — по номерам из колонки.
+        self.assertIn("const [openGroups, setOpenGroups] = useState(() => readList(OPEN_GROUPS_KEY).map(String));", self.board)
+        self.assertIn('open={openGroups.includes(groupKey(group))} cards={cards}', self.board)
+        self.assertIn('const cards = groupCards(group, cardsById);', self.board)
+        self.assertIn('onExpand={() => onExpandGroup(group)}', self.board)
+        self.assertIn('const expandGroup = (group) => setExpanded((prev) => withExpanded(prev, group));', self.board)
+        # Внутри групп плашки источника нет — он в шапке группы; период — только у «Откликов».
+        self.assertIn('{cards.map((card) => tile(card, false))}', self.board)
+        self.assertIn("{...(column.stage === 'responses' ? {", self.board)
+        # Карточка меняет источник полем source_id, у завершённой — только руководитель; окно источника — sourceRequestBody.
+        self.assertIn('await api.patch(`/cards/${card.id}`, { source_id: sourceId });', self.sheet)
+        self.assertIn('canEdit={isOwnerOrLead && (!card.is_closed || Boolean(caps.lead))}', self.sheet)
+        self.assertIn('const body = sourceRequestBody(form, editing);', self.settings)
+        self.assertNotIn("value: 'channels'", self.settings)
 
     def test_board_scrollbar_and_take_button(self):
         self.assertIn('className="board-scroll -mx-3 overflow-x-auto', self.board)
