@@ -450,6 +450,20 @@ SIGN_LINKS_API_LANES=4              # одновременных обращен�
 | Чаты OLX | чаты девяти кабинетов OLX: кабинеты, список чатов, переписка живьём, ответ кандидату, журнал откликов робота и подписка на события вебхуком (`olx_amo/partner_routes.py`, инструкция партнёру — `docs/OLX_PARTNER_API.md`) | `GET /api/olx/cabinets`, `GET /api/olx/threads…`, `POST /api/olx/threads/{cabinet}/{thread}/messages`, `GET /api/olx/journal`, `GET|PUT|DELETE /api/olx/webhook` |
 
 Ключ без нужной области получает `403`, неизвестный или отозванный — `401`.
+
+## Вебхуки чатов Syntony
+
+Syntony шлёт каждое новое сообщение во всех чатах сети и каждую смену статуса
+доставки на `https://api.icorehub.kz/api/syntony/chats/webhook` (пакет
+`syntony_chats/`, документ Syntony «API истории чатов и вебхуки чатов», версия 1).
+Адрес вписывает владелец аккаунта сети в Syntony: «Настройки → API и ключи →
+Вебхуки чатов», события `message.created` и `message.status`. Секрет подписи
+Syntony показывает один раз — он кладётся в `SYNTONY_CHATS_WEBHOOK_SECRET` на
+Render (несколько — через запятую); пока его нет, приёмник отвечает `503`, и
+Syntony повторяет события до суток. Подпись чужая или старше 5 минут — `403`.
+Пишется строка на диалог (`syntony_chat_conversations`) и на сообщение
+(`syntony_chat_messages`); повтор события безопасен, статус идёт только вперёд,
+моменты sent/delivered/read/failed — отдельными колонками.
 Ключи из окружения (`SIGN_LINKS_API_KEY`, `POTOK_CRM_WEBHOOK_API_KEY`) пока
 принимаются наравне — это переход: партнёр переходит на ключ из «Ключей», и
 переменную можно убрать. Ключ CRM в окружении нужен и дальше: им пересылка

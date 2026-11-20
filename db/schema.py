@@ -5907,6 +5907,7 @@ class SchemaMixin:
             self._init_rental_schema_tx(cursor)
             self._init_hiring_schema_tx(cursor)
             self._init_syntony_window_schema_tx(cursor)
+            self._init_syntony_chats_schema_tx(cursor)
             self._init_client_cards_schema_tx(cursor)
             self._init_wazzup_workspace_schema_tx(cursor)
             self._init_dress_code_schema_tx(cursor)
@@ -8786,6 +8787,30 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT syntony_window_schema")
+
+    def _init_syntony_chats_schema_tx(self, cursor):
+        """Схема чатов Syntony (вебхуки чатов, 20.11.2026) — своим SAVEPOINT'ом.
+
+        DDL живёт в пакете syntony_chats/schema.py; импорт локальный, иначе цикл. Не
+        развернулась — приёмник вебхуков отвечает 503 и Syntony повторяет события,
+        остальное приложение работает штатно.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT syntony_chats_schema")
+        try:
+            from syntony_chats.schema import init_syntony_chats_schema
+            init_syntony_chats_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT syntony_chats_schema")
+            logging.exception(
+                "Схема чатов Syntony не применилась — приёмник вебхуков чатов будет отвечать 503, "
+                "остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT syntony_chats_schema")
 
     def _init_dress_code_schema_tx(self, cursor):
         """Схема раздела «Дресс-код» (#418) — своим SAVEPOINT'ом, как у «Карточки клиента».

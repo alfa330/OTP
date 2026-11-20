@@ -54896,6 +54896,18 @@ try:
 except Exception:
     logging.exception("Окно Syntony: Blueprint НЕ подключён")
 
+# ── Чаты Syntony: вебхуки чатов сети (документ Syntony «API истории чатов и вебхуки чатов») ──
+# Syntony шлёт каждое новое сообщение и каждую смену статуса доставки на
+# https://api.icorehub.kz/api/syntony/chats/webhook; подпись — HMAC секретом из окружения
+# (SYNTONY_CHATS_WEBHOOK_SECRET). Пишем диалоги и сообщения в базу (syntony_chats/).
+try:
+    from syntony_chats.routes import build_syntony_chats_blueprint  # noqa: E402
+
+    app.register_blueprint(build_syntony_chats_blueprint(db=db))
+    logging.info("Чаты Syntony: приёмник вебхуков подключён на /api/syntony/chats/webhook")
+except Exception:
+    logging.exception("Чаты Syntony: приёмник вебхуков НЕ подключён")
+
 # Новые сотрудники ОП и СЗоВ попадают в список окна Syntony сами (владелец, 20.11.2026:
 # «автоматом новые добавлялись»): сторож раз в 15 минут, своим потоком (syntony_window/autogrant.py).
 try:
