@@ -814,10 +814,10 @@ def test_act_draft_window_and_term_follow_department_settings(client, db):
     assert 'испытательный срок продолжительностью 40 дней для контроля соблюдения' in text
 
 
-def test_act_draft_term_runs_to_the_end_of_a_linked_probation(client):
-    """Акт во время испытательного срока привязывается к нему: срок в акте — от
-    дня нарушения до конца этого контроля, а не срок «после акта» из настроек и
-    не от начала испытательного."""
+def test_act_draft_term_during_probation_is_the_after_act_control(client):
+    """Акт во время испытательного срока заводит свой контроль (п. 19.5): срок в
+    акте — срок «после акта» из настроек от дня нарушения, а не конец
+    испытательного срока по договору."""
     from discipline import docx_layout
 
     now = datetime.now().replace(second=0, microsecond=0)
@@ -834,9 +834,10 @@ def test_act_draft_term_runs_to_the_end_of_a_linked_probation(client):
     act = client.get('/api/discipline/records/%d' % created[2].get_json()['id'],
                      headers=h(HEAD_SZOV)).get_json()['act_full']
     text = _docx_text(client.get('/api/discipline/acts/%d/draft.docx' % act['id'], headers=h(SV_A)).data)
-    days = (end - (now - timedelta(days=1)).date()).days
-    assert 'испытательный срок продолжительностью %d %s (до %s)' % (
-        days, docx_layout.plural(days, 'день', 'дня', 'дней'), end.strftime('%d.%m.%Y')) in text
+    act_day = (now - timedelta(days=1)).date()
+    assert 'испытательный срок продолжительностью 30 %s (до %s)' % (
+        docx_layout.plural(30, 'день', 'дня', 'дней'), (act_day + timedelta(days=30)).strftime('%d.%m.%Y')) in text
+    assert end.strftime('%d.%m.%Y') not in text
 
 
 def test_rollout_named_operator_works_as_an_operator(client, db, monkeypatch):

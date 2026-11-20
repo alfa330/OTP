@@ -63,7 +63,7 @@ def push(cursor, outbox, *, event, user_ids, settings, title, body=None, record_
     if not chats:
         return created
     link = record_link(base_url, record_id) if record_id else (
-        '%s/?view=discipline&tab=controls' % str(base_url).rstrip('/') if base_url else None)
+        '%s/?view=discipline&disc_tab=controls' % str(base_url).rstrip('/') if base_url else None)
     text = '<b>%s</b>' % _esc(title)
     if body:
         text += '\n%s' % _esc(body)

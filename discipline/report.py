@@ -174,14 +174,22 @@ JOURNAL_COLUMNS = [
 
 # ── Отчёты п. 15 ─────────────────────────────────────────────────────────────
 
-def report_operators(items):
+def _operator_row(groups, operator_id, name, group_name):
+    return groups.setdefault(operator_id, {
+        'operator_id': operator_id, 'operator_name': name, 'group_name': group_name,
+        'total': 0, 'types': Counter(), 'explanations': 0, 'refusals': 0, 'acts': 0, 'measures': Counter(),
+    })
+
+
+def report_operators(items, decisions=()):
+    """Сводка по операторам за период (п. 15.1). Меры — утверждённые меры
+    нарушений периода и меры решением по акту и по особому контролю, принятые в
+    периоде (queries.decision_measures): у них нет своей записи, но это тоже
+    применённые к человеку меры — как во вкладке «Меры» и в выгрузке «По мерам».
+    operator_id — для перехода в карточку по ФИО (п. 11)."""
     groups = OrderedDict()
     for item in sorted(items, key=lambda i: (i.get('operator_name') or '', i.get('occurred_at') or '')):
-        key = item['operator_id']
-        row = groups.setdefault(key, {
-            'operator_name': item.get('operator_name'), 'group_name': item.get('group_name'),
-            'total': 0, 'types': Counter(), 'explanations': 0, 'refusals': 0, 'acts': 0, 'measures': Counter(),
-        })
+        row = _operator_row(groups, item['operator_id'], item.get('operator_name'), item.get('group_name'))
         row['total'] += 1
         row['types'][item.get('type_title') or ''] += 1
         if item.get('explanation_received_at'):
@@ -193,9 +201,15 @@ def report_operators(items):
             row['acts'] += 1
         if item.get('measure_state') == 'approved' and item.get('measure_title'):
             row['measures'][item['measure_title']] += 1
+    for decision in decisions or ():
+        if not decision.get('measure_title'):
+            continue
+        row = _operator_row(groups, decision['operator_id'], decision.get('operator_name'), decision.get('group_name'))
+        row['measures'][decision['measure_title']] += 1
     result = []
     for row in groups.values():
         result.append({
+            'operator_id': row['operator_id'],
             'operator_name': row['operator_name'], 'group_name': row['group_name'], 'total': row['total'],
             'types': ', '.join('%s — %d' % (t, n) for t, n in row['types'].most_common()),
             'explanations': row['explanations'], 'refusals': row['refusals'], 'acts': row['acts'],
@@ -299,7 +313,7 @@ def report_measures(items, decisions=()):
             'measure_percent': float(item['measure_percent']) if item.get('measure_percent') is not None else None,
             'approved_by': item.get('measure_approved_by_name') or ('без утверждения'
                                                                      if item.get('measure_approved_at') else None),
-            'record_id': item.get('id'),
+            'record_id': item.get('id'), 'operator_id': item.get('operator_id'),
         })
     for row in decisions or ():
         basis = 'Акт %s' % row['number'] if row['source'] == 'act' else 'Решение по особому контролю'
@@ -311,6 +325,7 @@ def report_measures(items, decisions=()):
             'measure_amount': float(row['measure_amount']) if row.get('measure_amount') is not None else None,
             'measure_percent': float(row['measure_percent']) if row.get('measure_percent') is not None else None,
             'approved_by': row.get('applied_by_name'), 'record_id': row.get('record_id'),
+            'operator_id': row.get('operator_id'),
         })
     rows.sort(key=lambda row: (row['approved_at'] is None, row['approved_at'] or 0))
     totals = OrderedDict()
@@ -427,7 +442,7 @@ CHANGE_LABELS = {
     'file': 'Файл', 'witnesses': 'Свидетели', 'date': 'Дата', 'start': 'С', 'end': 'До',
     'description': 'Описание', 'shift_label': 'Смена', 'evidence_note': 'Тайм-код', 'manager_comment': 'Комментарий',
     'decision': 'Решение', 'comment': 'Комментарий', 'days': 'Дней', 'amount': 'Сумма', 'percent': 'Процент',
-    'state': 'Была', 'approved_by_name': 'Утвердил',
+    'state': 'Была', 'approved_by_name': 'Утвердил', 'basis': 'Основание',
     'composed_on': 'Дата составления', 'decision_title': 'Решение', 'decision_amount': 'Сумма',
     'decision_percent': 'Процент', 'approved_at': 'Утверждён', 'weight': 'Вес',
     'needs_explanation': 'Нужна объяснительная', 'needs_evidence': 'Нужно доказательство', 'act': 'Акт',

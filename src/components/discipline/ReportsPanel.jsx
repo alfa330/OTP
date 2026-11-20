@@ -42,7 +42,11 @@ const formatCell = (key, value) => {
     return text;
 };
 
-const ReportsPanel = ({ api, toast, departmentId, version }) => {
+/* ФИО в строке отчёта и журнала действий открывает карточку сотрудника — как в
+   любом другом списке раздела (ТЗ п. 11: «кликом по ФИО из любого списка»). */
+const OPERATOR_KEY = 'operator_name';
+
+const ReportsPanel = ({ api, toast, departmentId, version, openOperator }) => {
     const [period, setPeriod] = useState({ from: monthStart(), to: todayIso() });
     const [selected, setSelected] = useState('operators');
     const [data, setData] = useState(null);
@@ -178,7 +182,12 @@ const ReportsPanel = ({ api, toast, departmentId, version }) => {
                                     <tr key={row.id || index} className="align-top">
                                         {columns.map((c) => (
                                             <td key={c.key} className={`px-4 py-2.5 text-slate-700 ${typeof row[c.key] === 'number' ? 'tabular-nums' : ''} ${WRAP_KEYS.has(c.key) ? 'min-w-[220px]' : 'whitespace-nowrap'}`}>
-                                                {formatCell(c.key, row[c.key])}
+                                                {c.key === OPERATOR_KEY && row.operator_id && row[c.key] && openOperator ? (
+                                                    <button type="button" onClick={() => openOperator(row.operator_id)}
+                                                            className="text-left font-medium text-slate-900 transition hover:text-blue-700">
+                                                        {row[c.key]}
+                                                    </button>
+                                                ) : formatCell(c.key, row[c.key])}
                                             </td>
                                         ))}
                                     </tr>

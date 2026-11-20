@@ -160,12 +160,18 @@ _STATEMENTS = [
         CONSTRAINT discipline_controls_dates CHECK (end_date >= start_date)
     )
     """,
-    # Один ДЕЙСТВУЮЩИЙ контроль на человека: второй источник (испытательный
-    # срок поверх контроля после акта) не плодит вторую строку в красном блоке,
-    # а продлевает или переписывает основание существующей.
+    # Действующих контролей у человека не больше двух: испытательный срок по
+    # договору и один контроль раздела (после акта или решением руководителя).
+    # ТЗ п. 19.5: контроль после акта юридически не равен испытательному сроку —
+    # основания разные, список общий; акт во время испытательного срока заводит
+    # свою строку, а не переписывает основание испытательного срока.
     """
-    CREATE UNIQUE INDEX IF NOT EXISTS ux_discipline_controls_active
-        ON discipline_controls (operator_id) WHERE decided_at IS NULL
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_discipline_controls_active_probation
+        ON discipline_controls (operator_id) WHERE decided_at IS NULL AND source = 'probation'
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_discipline_controls_active_other
+        ON discipline_controls (operator_id) WHERE decided_at IS NULL AND source <> 'probation'
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_discipline_controls_department
@@ -390,6 +396,24 @@ _MIGRATIONS = [
     "ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_value_kind VARCHAR(16)",
     "ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_amount NUMERIC(12, 2)",
     "ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_percent NUMERIC(5, 2)",
+    # Мера решением по акту и по контролю снимается так же, как мера записи
+    # (ТЗ п. 3: руководитель «назначает и снимает меры»; п. 14). Сам акт —
+    # утверждённый документ и не меняется: снятие лежит рядом с решением.
+    "ALTER TABLE discipline_acts ADD COLUMN IF NOT EXISTS decision_removed_at TIMESTAMP",
+    """
+    ALTER TABLE discipline_acts ADD COLUMN IF NOT EXISTS decision_removed_by INTEGER
+        REFERENCES users(id) ON DELETE SET NULL
+    """,
+    "ALTER TABLE discipline_acts ADD COLUMN IF NOT EXISTS decision_removed_reason TEXT",
+    "ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_measure_removed_at TIMESTAMP",
+    """
+    ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_measure_removed_by INTEGER
+        REFERENCES users(id) ON DELETE SET NULL
+    """,
+    "ALTER TABLE discipline_controls ADD COLUMN IF NOT EXISTS decision_measure_removed_reason TEXT",
+    # Прежнее правило «один действующий контроль на человека» — его индекс
+    # заменён двумя (испытательный срок и остальные, см. выше).
+    "DROP INDEX IF EXISTS ux_discipline_controls_active",
     # Ссылка контроля на акт — после того, как таблица актов существует.
     """
     DO $$

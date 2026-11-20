@@ -562,9 +562,11 @@ def test_manual_control_and_decisions(db):
         control_id = service.create_control(cur, ctx_of(cur, HEAD_SZOV), {
             'operator_id': OP_B, 'source': 'probation', 'end_date': (TODAY + timedelta(days=2)).isoformat()},
             now=NOW, today=TODAY)
+        # Второй испытательный срок не заводится — продлевают действующий
+        # (контроль решением руководителя рядом с ним — другое основание, п. 19.5).
         with pytest.raises(service.DisciplineError) as error:
             service.create_control(cur, ctx_of(cur, HEAD_SZOV), {
-                'operator_id': OP_B, 'source': 'manual', 'reason': 'Повторно',
+                'operator_id': OP_B, 'source': 'probation', 'reason': 'Повторно',
                 'end_date': (TODAY + timedelta(days=5)).isoformat()}, now=NOW, today=TODAY)
         assert error.value.code == 'CONTROL_EXISTS'
         rows = service.control_rows(cur, ctx_of(cur, HEAD_SZOV), service.visible_controls(
@@ -741,27 +743,43 @@ def test_backdated_record_moves_later_one_to_act_with_control(db):
         assert error.value.code == 'MEASURE_REQUIRED'
 
 
-def test_act_during_probation_is_linked_to_that_control(db):
+def test_act_during_probation_gets_its_own_control(db):
+    """ТЗ п. 19.5: контроль после акта юридически не равен испытательному сроку по
+    договору — основания разные, список общий. Акт во время испытательного срока
+    заводит свой контроль «После акта», а испытательный срок остаётся как был."""
     with db.cursor() as cur:
+        probation_end = TODAY + timedelta(days=1)
         control_id = service.create_control(cur, ctx_of(cur, HEAD_SZOV), {
             'operator_id': OP_A, 'source': 'probation', 'start_date': (TODAY - timedelta(days=20)).isoformat(),
-            'end_date': (TODAY + timedelta(days=1)).isoformat()}, now=NOW, today=TODAY)
+            'end_date': probation_end.isoformat()}, now=NOW, today=TODAY)
         remark = measure_id(cur, SZOV, 'Устное замечание')
         ids = [create(cur, HEAD_SZOV, OP_A, NOW - timedelta(days=days), measure_id=remark) for days in (6, 4, 2)]
         item = enriched(cur, HEAD_SZOV, ids[2])
         assert item['action'] == 'act' and item['act']['is_trigger']
-        control = queries.get_control(cur, control_id)
-        # Контроль один, теперь он держится на акте — не короче срока «после акта»,
-        # и основание «После акта»: снять его, не заметив акт, нельзя.
-        assert control['act_id'] == item['act']['id']
-        assert control['end_date'] == (NOW - timedelta(days=2)).date() + timedelta(days=30)
-        assert control['source'] == 'act' and control['reason'].startswith('Акт ' + item['act']['number'])
-        assert 'Испытательный срок' in control['reason']
-        # Следующее нарушение — мера, а не второй акт.
+        probation = queries.get_control(cur, control_id)
+        assert (probation['source'], probation['act_id'], probation['end_date']) == ('probation', None, probation_end)
+        assert probation['reason'] == 'Испытательный срок нового сотрудника'
+        actives = queries.active_controls_list(cur, [OP_A])[OP_A]
+        assert [c['source'] for c in actives] == ['act', 'probation']
+        after_act = actives[0]
+        assert after_act['act_id'] == item['act']['id']
+        assert after_act['start_date'] == (NOW - timedelta(days=2)).date()
+        assert after_act['end_date'] == (NOW - timedelta(days=2)).date() + timedelta(days=30)
+        assert after_act['reason'].startswith('Акт ' + item['act']['number'])
+        # В списке — две строки одного человека с разными основаниями.
+        rows = service.control_rows(cur, ctx_of(cur, HEAD_SZOV), service.visible_controls(
+            cur, ctx_of(cur, HEAD_SZOV), TODAY), TODAY)
+        assert sorted(r['source_label'] for r in rows) == ['Испытательный срок', 'После акта']
+        # Следующее нарушение — мера под контролем после акта, а не второй акт.
         fourth = create(cur, HEAD_SZOV, OP_A, NOW - timedelta(hours=1), measure_id=remark)
         assert enriched(cur, HEAD_SZOV, fourth)['action'] == 'explanation'
+        assert queries.get_record(cur, fourth, TODAY)['control_id'] == after_act['id']
         cur.execute('SELECT COUNT(*) FROM discipline_acts')
         assert cur.fetchone()[0] == 1
+        # Решение по одному контролю другой не трогает.
+        service.decide_control(cur, ctx_of(cur, HEAD_SZOV), after_act['id'], {'decision': 'removed'},
+                               now=NOW, today=TODAY)
+        assert [c['id'] for c in queries.active_controls_list(cur, [OP_A])[OP_A]] == [control_id]
 
 
 def test_edit_that_drops_act_basis_tells_the_head(db):

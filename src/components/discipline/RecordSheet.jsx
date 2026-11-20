@@ -7,8 +7,8 @@ import { IosTimePicker } from '../ui/TimePicker';
 import { apiCode, apiError, saveBlob } from './disciplineApi';
 import {
     ACCEPT_ACT, ACCEPT_DOCS, ACCEPT_EVIDENCE, AttachButton, Chip, dBtnDanger, dBtnPrimary, dBtnSecondary, dInput,
-    dLinkAction, dLinkEdge, EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, SearchField, Spinner,
-    StateBadge, StepChip, T,
+    dLinkAction, dLinkEdge, EmptyState, Field, FileList, Group, INVALID_RING, LoadingRows, RemoveMeasureForm,
+    SearchField, Spinner, StateBadge, StepChip, T,
 } from './disciplineUi';
 import {
     CARD_STATES_BESIDE_STEP, DESCRIPTION_MIN, filesProblem, fmtDate, fmtDateTime, fmtMoney, FILE_LIMITS,
@@ -392,7 +392,10 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
     });
     const [form, setForm] = useState(blank);
     const [errors, setErrors] = useState({});
+    // Мера решением по утверждённому акту снимается с причиной (п. 3, 14).
+    const [removing, setRemoving] = useState(false);
     useEffect(() => { setForm(blank()); setErrors({}); }, [act?.composed_on, act?.decision_measure_id, act?.decision_amount, act?.decision_percent]); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => { setRemoving(false); }, [act?.id, act?.decision_removed_at]);
     if (!act) return null;
     const manage = item.permissions?.can_manage;
     const signed = (act.files || []).some((f) => f.kind === 'act' && !f.superseded && !f.invalid);
@@ -502,11 +505,32 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
                 </div>
                 {composedLine ? <div className={`text-[12.5px] text-slate-500 ${T.sub}`}>{composedLine}</div> : null}
                 {act.approved_at && act.decision_title ? (
-                    <div className={`text-[13px] text-slate-700 ${T.sub}`}>
-                        Решение: <span className="font-semibold text-slate-900">{act.decision_title}</span>
-                        {approvedValue ? <span className="text-slate-600"> · {approvedValue}</span> : null}
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                        <div className={`text-[13px] text-slate-700 ${T.sub}`}>
+                            Решение: <span className={`font-semibold ${act.decision_removed_at ? 'text-slate-500 line-through' : 'text-slate-900'}`}>{act.decision_title}</span>
+                            {approvedValue ? <span className="text-slate-600"> · {approvedValue}</span> : null}
+                        </div>
+                        {act.can_remove_measure && !removing && (
+                            <button type="button" className={`${dLinkAction} shrink-0 !text-rose-600`} onClick={() => setRemoving(true)}>
+                                Снять меру
+                            </button>
+                        )}
                     </div>
                 ) : null}
+                {act.decision_removed_at ? (
+                    <div className={`text-[12.5px] text-slate-500 ${T.sub}`}>
+                        Мера снята {fmtDate(act.decision_removed_at)}{act.decision_removed_by_name ? `, ${act.decision_removed_by_name}` : ''}: {act.decision_removed_reason}
+                    </div>
+                ) : null}
+                {removing && (
+                    <RemoveMeasureForm money={Boolean(act.decision_finance && act.decision_finance !== 'none')}
+                                       onCancel={() => setRemoving(false)}
+                                       onRemove={async (reason) => {
+                                           await api.removeActMeasure(act.id, reason);
+                                           toast('Мера по акту снята');
+                                           reload();
+                                       }} />
+                )}
                 {act.approved_at ? (
                     <div className={`text-[12.5px] text-slate-500 ${T.sub}`}>
                         Утвердил {act.approved_by_name}, {fmtDate(act.approved_at)} · утверждённый акт не меняется
@@ -550,48 +574,17 @@ const ActSection = ({ item, api, toast, reload, onOpenFile, onOpenRecord, measur
 
 const MEASURE_FIELD_CODES = { MEASURE_AMOUNT: 'amount', MEASURE_PERCENT: 'percent' };
 
-/* «Снять меру» (ТЗ п. 3: руководитель «назначает и снимает меры»): причина
-   обязательна — она ложится в историю записи и журнал действий вместе со всем,
-   что было у меры. Утверждённое удержание тоже снимается, но с предупреждением:
-   выгрузка за месяц утверждения могла его уже забрать. */
-const RemoveMeasure = ({ item, api, toast, reload, onCancel }) => {
-    const [reason, setReason] = useState('');
-    const [error, setError] = useState(null);
-    const [busy, setBusy] = useState(false);
-    const money = item.measure_state === 'approved' && item.measure_finance && item.measure_finance !== 'none';
-    const submit = async () => {
-        if (reason.trim().length < 5) { setError('Причина — минимум 5 символов'); return; }
-        setBusy(true);
-        try {
-            await api.removeMeasure(item.id, reason.trim());
-            toast('Мера снята');
-            reload();
-        } catch (err) {
-            setError(apiError(err));
-        } finally {
-            setBusy(false);
-        }
-    };
-    return (
-        <div className="space-y-2.5 rounded-2xl bg-slate-50 p-3.5">
-            {money && (
-                <div className="flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-900 ring-1 ring-amber-200/70">
-                    <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-                    <span>Удержание уже утверждено и могло попасть в выгрузку на удержания — после снятия сообщите бухгалтерии.</span>
-                </div>
-            )}
-            <Field label="Причина снятия" error={error}>
-                <textarea rows={2} autoFocus className={`${dInput} resize-y ${error ? INVALID_RING : ''}`}
-                          placeholder="Например: взыскание снято досрочно приказом" value={reason}
-                          onChange={(e) => { setReason(e.target.value); setError(null); }} />
-            </Field>
-            <div className="flex justify-end gap-2">
-                <button type="button" className={dBtnSecondary} onClick={onCancel} disabled={busy}>Не снимать</button>
-                <button type="button" className={dBtnDanger} onClick={submit} disabled={busy}>Снять меру</button>
-            </div>
-        </div>
-    );
-};
+/* «Снять меру» записи — общая форма раздела (RemoveMeasureForm): причина
+   обязательна, утверждённое удержание — с предупреждением про бухгалтерию. */
+const RemoveMeasure = ({ item, api, toast, reload, onCancel }) => (
+    <RemoveMeasureForm money={Boolean(item.measure_state === 'approved' && item.measure_finance && item.measure_finance !== 'none')}
+                       onCancel={onCancel}
+                       onRemove={async (reason) => {
+                           await api.removeMeasure(item.id, reason);
+                           toast('Мера снята');
+                           reload();
+                       }} />
+);
 
 const MeasureSection = ({ item, api, toast, reload, measures }) => {
     const perms = item.permissions || {};

@@ -16,6 +16,9 @@ import { fmtDate, fmtDateTime, fmtMoney } from './disciplineRules';
 
 const MyRecords = ({ api, toast, version, reload, openRecord }) => {
     const [data, setData] = useState(null);
+    // Меры решением по акту и по итогам особого контроля: у них нет своей записи,
+    // но это тоже применённые к человеку меры (п. 3).
+    const [decisions, setDecisions] = useState([]);
     const [error, setError] = useState(null);
     // Занятость — у каждой записи своя ({id: 'blank' | 'upload'}): бланк по одной
     // записи не снимает спиннер загрузки по другой.
@@ -32,7 +35,12 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
     useEffect(() => {
         let alive = true;
         api.records({ date_from: '2000-01-01' })
-            .then((payload) => { if (alive) { setData(payload.items || []); setError(null); } })
+            .then((payload) => {
+                if (!alive) return;
+                setData(payload.items || []);
+                setDecisions(payload.decision_measures || []);
+                setError(null);
+            })
             .catch((err) => { if (alive) setError(apiError(err, 'Записи не загрузились')); });
         return () => { alive = false; };
     }, [api, version]);
@@ -56,7 +64,7 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
 
     if (error) return <Group><EmptyState title={error} /></Group>;
     if (!data) return <LoadingRows rows={4} />;
-    if (!data.length) {
+    if (!data.length && !decisions.length) {
         return <Group><EmptyState icon={CheckCircle2} title="Записей о нарушениях нет" /></Group>;
     }
 
@@ -93,6 +101,25 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
                     </ul>
                 </Group>
             )}
+            {decisions.length > 0 && (
+                <Group title="Меры по решениям" cardClassName="p-0 overflow-hidden">
+                    <ul className="divide-y divide-slate-100">
+                        {decisions.map((item) => (
+                            <li key={`${item.source}-${item.id}`} className="space-y-0.5 px-4 py-3 xl:px-5">
+                                <span className={`block text-[13.5px] text-slate-900 ${T.body}`}>
+                                    {item.measure_title}
+                                    {item.measure_amount ? ` · ${fmtMoney(item.measure_amount)}` : ''}
+                                    {item.measure_percent ? ` · ${item.measure_percent} %` : ''}
+                                </span>
+                                <span className={`block text-[12.5px] text-slate-500 ${T.sub}`}>
+                                    {item.basis} · {fmtDate(item.applied_at)}
+                                </span>
+                            </li>
+                        ))}
+                    </ul>
+                </Group>
+            )}
+            {data.length > 0 && (
             <Group title="Мои записи" cardClassName="p-0 overflow-hidden">
                 <ul className="divide-y divide-slate-100">
                     {data.map((item) => (
@@ -115,6 +142,7 @@ const MyRecords = ({ api, toast, version, reload, openRecord }) => {
                     ))}
                 </ul>
             </Group>
+            )}
         </div>
     );
 };

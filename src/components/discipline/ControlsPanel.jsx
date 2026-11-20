@@ -5,7 +5,8 @@ import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
 import { apiCode, apiError } from './disciplineApi';
 import {
-    Chip, dBtnPrimary, dBtnSecondary, dInput, EmptyState, Field, Group, INVALID_RING, LoadingRows, T,
+    Chip, dBtnPrimary, dBtnSecondary, dInput, dLinkAction, EmptyState, Field, Group, INVALID_RING, LoadingRows,
+    RemoveMeasureForm, T,
 } from './disciplineUi';
 import { controlReason, daysLeftText, fmtDate, fmtDateTime, pluralViolations, shiftIsoDays, todayIso } from './disciplineRules';
 import { OperatorPicker, useOperatorSearch } from './OperatorPicker';
@@ -196,6 +197,8 @@ const ControlsPanel = ({ api, toast, departmentId, version, reload, openOperator
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
     const [deciding, setDeciding] = useState(null);
+    // Мера решением по контролю снимается с причиной (п. 3, 14) — форма под строкой.
+    const [removing, setRemoving] = useState(null);
     const [createOpen, setCreateOpen] = useState(false);
 
     useEffect(() => {
@@ -232,10 +235,12 @@ const ControlsPanel = ({ api, toast, departmentId, version, reload, openOperator
                     </Group>
                 ) : (
                     <div className="overflow-hidden rounded-2xl bg-white ring-1 ring-slate-200/70">
-                        <ul className="divide-y divide-slate-100">
+                        {/* Колонки общие на весь список (subgrid): строки с кнопками и без
+                            них не сдвигают основание и срок соседей. */}
+                        <ul className="divide-y divide-slate-100 sm:grid sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto]">
                             {rows.map((row) => (
-                                <li key={row.id} className={ROW_TONES[row.tone] || ''}>
-                                    <div className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_auto] sm:items-center sm:gap-4 xl:px-5 2xl:py-4">
+                                <li key={row.id} className={`${ROW_TONES[row.tone] || ''} sm:col-span-3 sm:grid sm:grid-cols-subgrid`}>
+                                    <div className="grid gap-2 px-4 py-3 sm:col-span-3 sm:grid-cols-subgrid sm:items-center sm:gap-4 xl:px-5 2xl:py-4">
                                         <button type="button" className="min-w-0 text-left" onClick={() => openOperator(row.operator_id)}>
                                             <span className={`block truncate text-[13.5px] font-semibold text-slate-900 hover:text-blue-700 ${T.body}`}>{row.operator_name}</span>
                                             <span className={`block truncate text-[12px] text-slate-500 ${T.note}`}>
@@ -253,19 +258,39 @@ const ControlsPanel = ({ api, toast, departmentId, version, reload, openOperator
                                             </span>
                                         </span>
                                         <span className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-                                            {row.violations > 0 && <Chip tone="red">{row.violations} {pluralViolations(row.violations)}</Chip>}
+                                            {/* Число нарушений в период — поле строки (п. 10.2); ноль — серым словом, без плашки. */}
+                                            {row.violations > 0
+                                                ? <Chip tone="red">{row.violations} {pluralViolations(row.violations)}</Chip>
+                                                : <span className={`px-1 text-[12px] text-slate-400 ${T.note}`}>нарушений нет</span>}
                                             {!row.decided_at && <Chip tone={row.tone === 'normal' ? 'slate' : 'amber'}>{daysLeftText(row.days_left)}</Chip>}
                                             {row.can_decide && deciding !== row.id && (
                                                 <button type="button" className={`${dBtnSecondary} !px-3 !py-1.5`} onClick={() => setDeciding(row.id)}>
                                                     Решение
                                                 </button>
                                             )}
+                                            {row.can_remove_measure && removing !== row.id && (
+                                                <button type="button" className={`${dLinkAction} !text-rose-600`} onClick={() => setRemoving(row.id)}>
+                                                    Снять меру
+                                                </button>
+                                            )}
                                         </span>
                                     </div>
                                     {deciding === row.id && (
-                                        <div className="px-4 pb-3 xl:px-5">
+                                        <div className="px-4 pb-3 sm:col-span-3 xl:px-5">
                                             <DecisionPanel row={row} api={api} toast={toast} measures={data.measures || []}
                                                            onDone={(changed = true) => { setDeciding(null); if (changed) reload(); }} />
+                                        </div>
+                                    )}
+                                    {removing === row.id && (
+                                        <div className="px-4 pb-3 sm:col-span-3 xl:px-5">
+                                            <RemoveMeasureForm money={Boolean(row.decision_finance && row.decision_finance !== 'none')}
+                                                               onCancel={() => setRemoving(null)}
+                                                               onRemove={async (reason) => {
+                                                                   await api.removeControlMeasure(row.id, reason);
+                                                                   toast('Мера по контролю снята');
+                                                                   setRemoving(null);
+                                                                   reload();
+                                                               }} />
                                         </div>
                                     )}
                                 </li>

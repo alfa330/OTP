@@ -30,6 +30,9 @@ const ROW_TONES = {
 };
 
 export const ControlBlock = ({ rows, onOpenOperator, onShowAll }) => {
+    // «N человек» — людей, а не строк: испытательный срок и контроль после акта
+    // у одного человека — две строки с разными основаниями (п. 19.5).
+    const peopleCount = new Set(rows.map((row) => row.operator_id)).size;
     if (!rows.length) {
         return (
             <div className="flex items-center gap-3 rounded-2xl border-l-4 border-emerald-500 bg-emerald-50 px-4 py-3.5 ring-1 ring-emerald-200/70 xl:px-5 2xl:py-4">
@@ -44,7 +47,7 @@ export const ControlBlock = ({ rows, onOpenOperator, onShowAll }) => {
                 <div className="flex items-center gap-2.5">
                     <ShieldAlert size={18} className="shrink-0 text-rose-600" />
                     <h2 className={`text-[14.5px] font-semibold text-rose-900 ${T.body}`}>
-                        На особом контроле — <span className="tabular-nums">{rows.length}</span> {people(rows.length)}
+                        На особом контроле — <span className="tabular-nums">{peopleCount}</span> {people(peopleCount)}
                     </h2>
                 </div>
                 {onShowAll && (
@@ -53,11 +56,13 @@ export const ControlBlock = ({ rows, onOpenOperator, onShowAll }) => {
                     </button>
                 )}
             </div>
-            <ul className="divide-y divide-rose-200/60 border-t border-rose-200/60">
+            {/* Колонки общие на весь список (subgrid): ширину правой задаёт самая широкая
+                строка, и ФИО, основание и срок у всех строк встают ровно друг под другом. */}
+            <ul className="divide-y divide-rose-200/60 border-t border-rose-200/60 sm:grid sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1.4fr)_auto]">
                 {rows.map((row) => (
-                    <li key={row.id} className={`${ROW_TONES[row.tone] || ROW_TONES.normal}`}>
+                    <li key={row.id} className={`${ROW_TONES[row.tone] || ROW_TONES.normal} sm:col-span-3 sm:grid sm:grid-cols-subgrid`}>
                         <button type="button" onClick={() => onOpenOperator(row.operator_id)}
-                                className="grid w-full grid-cols-1 gap-1 px-4 py-3 text-left sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1.4fr)_auto] sm:items-center sm:gap-4 xl:px-5 2xl:py-3.5">
+                                className="grid w-full grid-cols-1 gap-1 px-4 py-3 text-left sm:col-span-3 sm:grid-cols-subgrid sm:items-center sm:gap-4 xl:px-5 2xl:py-3.5">
                             <span className="min-w-0">
                                 <span className={`block truncate text-[13.5px] font-semibold text-slate-900 ${T.body}`}>{row.operator_name}</span>
                                 <span className={`block truncate text-[12px] text-slate-500 ${T.sub}`}>
@@ -74,9 +79,10 @@ export const ControlBlock = ({ rows, onOpenOperator, onShowAll }) => {
                                 </span>
                             </span>
                             <span className="flex flex-wrap items-center gap-1.5 sm:justify-end">
-                                {row.violations > 0 && (
+                                {/* Число нарушений в период — поле строки (п. 10.2); ноль — серым словом. */}
+                                {row.violations > 0 ? (
                                     <Chip tone="red">{row.violations} {pluralViolations(row.violations)} в период</Chip>
-                                )}
+                                ) : <span className={`px-1 text-[12px] text-slate-400 ${T.note}`}>нарушений нет</span>}
                                 <Chip tone={row.tone === 'yellow' || row.days_left < 0 ? 'amber' : 'slate'}>
                                     <span className="tabular-nums">{daysLeftText(row.days_left)}</span>
                                 </Chip>

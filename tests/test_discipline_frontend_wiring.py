@@ -609,7 +609,9 @@ class TzGapWiringTests(unittest.TestCase):
     def test_act_shows_composer_and_measure_can_be_removed(self):
         sheet = self._src('RecordSheet.jsx')
         self.assertIn('act.composer_name', sheet)
-        self.assertIn('api.removeMeasure(item.id, reason.trim())', sheet)
+        # Причину обрезает общая форма раздела — одна у меры записи, акта и контроля.
+        self.assertIn('await onRemove(reason.trim());', self._src('disciplineUi.jsx'))
+        self.assertIn('await api.removeMeasure(item.id, reason);', sheet)
         self.assertIn('perms.can_remove_measure', sheet)
         self.assertIn("removeMeasure: (id, reason) => send('post', `/records/${id}/measure/remove`, { reason }),",
                       self._src('disciplineApi.js'))
@@ -623,3 +625,65 @@ class TzGapWiringTests(unittest.TestCase):
         # Пережатый HEIC уходит JPEG-ом, а JPEG сервер принимает у каждого вида с фото.
         for kind in ('evidence', 'explanation'):
             self.assertIn('jpg', catalog.FILE_KINDS[kind]['ext'])
+
+
+class TzFinalWiringTests(unittest.TestCase):
+    """Сверка ТЗ 20.11.2026: экраны того, что закрыто на сервере
+    (tests/test_discipline_tz_final_postgres.py)."""
+
+    @staticmethod
+    def _src(name):
+        return (ROOT / 'src' / 'components' / 'discipline' / name).read_text(encoding='utf-8')
+
+    def test_decision_measures_are_removed_where_they_are_shown(self):
+        api = self._src('disciplineApi.js')
+        routes = (ROOT / 'discipline' / 'routes.py').read_text(encoding='utf-8')
+        # Пути клиента совпадают с ручками сервера.
+        self.assertIn("removeActMeasure: (id, reason) => send('post', `/acts/${id}/measure/remove`, { reason }),", api)
+        self.assertIn("@route('/acts/<int:act_id>/measure/remove', methods=('POST',))", routes)
+        self.assertIn("removeControlMeasure: (id, reason) => send('post', `/controls/${id}/measure/remove`, { reason }),",
+                      api)
+        self.assertIn("@route('/controls/<int:control_id>/measure/remove', methods=('POST',), manager=True)", routes)
+        sheet = self._src('RecordSheet.jsx')
+        self.assertIn('act.can_remove_measure && !removing', sheet)
+        self.assertIn('await api.removeActMeasure(act.id, reason);', sheet)
+        self.assertIn('act.decision_removed_reason', sheet)
+        controls = self._src('ControlsPanel.jsx')
+        self.assertIn('row.can_remove_measure && removing !== row.id', controls)
+        self.assertIn('await api.removeControlMeasure(row.id, reason);', controls)
+
+    def test_control_plate_lies_over_the_count_plate(self):
+        ui = self._src('disciplineUi.jsx')
+        self.assertIn('if (plate.under) {', ui)
+        self.assertIn('<Plate plate={plate.under} previous={previous} expanded={expanded} onToggle={onToggle} />', ui)
+
+    def test_people_on_control_and_zero_violations(self):
+        summary = self._src('SummaryPanel.jsx')
+        self.assertIn('const peopleCount = new Set(rows.map((row) => row.operator_id)).size;', summary)
+        self.assertIn('{peopleCount}</span> {people(peopleCount)}', summary)
+        for name in ('SummaryPanel.jsx', 'ControlsPanel.jsx'):
+            self.assertIn('нарушений нет', self._src(name), name)
+
+    def test_report_names_open_the_card(self):
+        reports = self._src('ReportsPanel.jsx')
+        self.assertIn('const ReportsPanel = ({ api, toast, departmentId, version, openOperator }) => {', reports)
+        self.assertIn('onClick={() => openOperator(row.operator_id)}', reports)
+        # Панель получает openOperator из общего набора пропсов раздела.
+        self.assertIn('body = <ReportsPanel {...shared} />;', self._src('DisciplineView.jsx'))
+        self.assertIn('openRecord, openOperator, openForm', self._src('DisciplineView.jsx'))
+
+    def test_telegram_link_opens_the_controls_tab(self):
+        view = self._src('DisciplineView.jsx')
+        self.assertIn("const LINK_TABS = ['summary', 'journal', 'controls', 'reports', 'settings'];", view)
+        self.assertIn('useState(() => readLinkTab() || readStoredTab())', view)
+        self.assertIn("const LINK_TAB_PARAM = 'disc_tab';", view)
+        notify = (ROOT / 'discipline' / 'notify.py').read_text(encoding='utf-8')
+        self.assertIn("'%s/?view=discipline&disc_tab=controls'", notify)
+        # Портал снимает метку раздела при уходе в другой раздел — в обоих местах смены вида.
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        self.assertEqual(app.count("url.searchParams.delete('disc_tab');"), 2)
+
+    def test_operator_sees_decision_measures(self):
+        mine = self._src('MyRecords.jsx')
+        self.assertIn('setDecisions(payload.decision_measures || []);', mine)
+        self.assertIn('Меры по решениям', mine)

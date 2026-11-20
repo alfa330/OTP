@@ -240,7 +240,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 # завела сама, ещё не акт (у записи статус «Требуется акт»).
                 'acts': sum(1 for i in enriched if (i.get('act') or {}).get('is_trigger')
                             and (i.get('act') or {}).get('has_file')),
-                'on_control': len(control_rows),
+                # «Сколько операторов на контроле» — людей: у человека бывает две
+                # строки (испытательный срок и контроль после акта, п. 19.5).
+                'on_control': len({row['operator_id'] for row in control_rows}),
             }
             latest = queries.list_records(cursor, ctx, today, {'department_id': department_id}, limit=20)
             latest_items = service.enrich(cursor, ctx, latest, now, settings_for=settings_for)
@@ -312,7 +314,11 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             records = queries.list_records(cursor, ctx, today, filters, limit=JOURNAL_LIMIT)
             items = _post_filter(service.enrich(cursor, ctx, records, now))
             choices = queries.journal_choices(cursor, ctx, today, filters) if not access.is_operator(ctx) else {}
+            # П. 3: оператор видит применённую меру — и ту, что назначена решением
+            # по акту или по итогам особого контроля (у записи её поля нет).
+            own_decisions = service.own_decision_measures(cursor, ctx) if access.is_operator(ctx) else None
         return jsonify({'items': _public(items, ctx), 'truncated': len(records) >= JOURNAL_LIMIT,
+                        **({'decision_measures': own_decisions} if own_decisions is not None else {}),
                         'types': choices.get('types', []), 'groups': choices.get('groups', []),
                         'directions': choices.get('directions', []), 'creators': choices.get('creators', []),
                         'date_from': _iso(filters.get('date_from').date()) if filters.get('date_from') else None})
@@ -371,7 +377,12 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                 trigger = next((r for r in [record] + members if r and r['id'] == act['trigger_record_id']), None)
                 act_payload.update({'files': [_file_payload(f, ctx, record) for f in act_files], 'records': act_records,
                                     'basis_check': (item.get('act') or {}).get('basis_check'),
-                                    'composer_name': service.act_composer_name(cursor, act, trigger)})
+                                    'composer_name': service.act_composer_name(cursor, act, trigger),
+                                    # Меру решением по утверждённому акту снимает руководитель (п. 3, 14).
+                                    'can_remove_measure': bool(
+                                        act.get('approved_at') and act.get('decision_title')
+                                        and not act.get('decision_removed_at')
+                                        and access.manages_record(ctx, trigger or record))})
             if internal:
                 perms = item.get('permissions') or {}
                 # Справочники — отдела самой записи: сервер сверяет меру и тип с
@@ -663,11 +674,21 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
     # ── Акт ─────────────────────────────────────────────────────────────────
 
     @route('/acts/<int:act_id>', methods=('PATCH',))
-    def discipline_act_update(ctx, today, act_id, **_kw):
+    def discipline_act_update(ctx, today, act_id, outbox, **_kw):
         now = service.now_almaty()
         with db._get_cursor() as cursor:
             act, record = service.load_act(cursor, ctx, act_id, today)
-            service.update_act(cursor, ctx, act, record, _payload(), now=now)
+            service.update_act(cursor, ctx, act, record, _payload(), now=now, base_url=web_app_base_url,
+                               outbox=outbox)
+        return jsonify({'ok': True})
+
+    @route('/acts/<int:act_id>/measure/remove', methods=('POST',))
+    def discipline_act_measure_remove(ctx, today, act_id, outbox, **_kw):
+        now = service.now_almaty()
+        with db._get_cursor() as cursor:
+            act, record = service.load_act(cursor, ctx, act_id, today, for_update=True)
+            service.remove_act_measure(cursor, ctx, act, record, _payload().get('reason'), now=now,
+                                       base_url=web_app_base_url, outbox=outbox)
         return jsonify({'ok': True})
 
     @route('/acts/<int:act_id>/file', methods=('POST',), upload='act')
@@ -793,8 +814,12 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
             # старые записи.
             decision_departments = (access.section_department_ids(ctx) if in_scope
                                     else access.managed_department_ids(ctx))
-            decisions = (queries.decision_measures(cursor, sorted(decision_departments), operator_id=operator_id)
-                         if internal else [])
+            if internal:
+                decisions = queries.decision_measures(cursor, sorted(decision_departments), operator_id=operator_id)
+            elif own_card:
+                decisions = service.own_decision_rows(cursor, ctx)
+            else:
+                decisions = []
             measures, _totals = report.report_measures([i for i in items if not i.get('cancelled_at')], decisions)
             if not internal:
                 measures = [{key: row.get(key) for key in ('approved_at', 'basis', 'measure_title', 'measure_amount',
@@ -860,11 +885,20 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
         return jsonify({'ok': True, 'id': control_id}), 201
 
     @route('/controls/<int:control_id>/decide', methods=('POST',), manager=True)
-    def discipline_control_decide(ctx, today, control_id, **_kw):
+    def discipline_control_decide(ctx, today, control_id, outbox, **_kw):
         now = service.now_almaty()
         with db._get_cursor() as cursor:
-            service.decide_control(cursor, ctx, control_id, _payload(), now=now, today=today)
+            service.decide_control(cursor, ctx, control_id, _payload(), now=now, today=today,
+                                   base_url=web_app_base_url, outbox=outbox)
             queries.mark_seen(cursor, ctx['user_id'], control_id=control_id)
+        return jsonify({'ok': True})
+
+    @route('/controls/<int:control_id>/measure/remove', methods=('POST',), manager=True)
+    def discipline_control_measure_remove(ctx, today, control_id, outbox, **_kw):
+        now = service.now_almaty()
+        with db._get_cursor() as cursor:
+            service.remove_control_measure(cursor, ctx, control_id, _payload().get('reason'), now=now,
+                                           base_url=web_app_base_url, outbox=outbox)
         return jsonify({'ok': True})
 
     # ── Настройки и справочники ────────────────────────────────────────────
@@ -1055,7 +1089,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
                                                                 'department_id': department_id}, limit=20000)
             items = service.enrich(cursor, ctx, records, now)
         if kind == 'operators':
-            result['rows'] = report.report_operators(items)
+            departments = [department_id] if department_id else sorted(access.managed_department_ids(ctx))
+            decisions = queries.decision_measures(cursor, departments, date_from=date_from, date_to=date_to)
+            result['rows'] = report.report_operators(items, decisions)
             result['columns'] = report.OPERATORS_COLUMNS
         elif kind == 'types':
             result['rows'], result['columns'] = report.report_types([service.public_record(i, ctx) for i in items])
@@ -1153,7 +1189,8 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
         items = [{
             'id': row['id'], 'created_at': _iso(row['created_at']), 'actor_name': row['actor_name'],
             'action': row['action'], 'action_label': report.audit_label(row['action']),
-            'operator_name': row.get('operator_name'), 'entity': row['entity'], 'entity_id': row['entity_id'],
+            'operator_id': row.get('operator_id'), 'operator_name': row.get('operator_name'),
+            'entity': row['entity'], 'entity_id': row['entity_id'],
             'record_id': row.get('record_id'), 'changes_text': report.changes_text(row.get('changes')),
         } for row in rows]
         if export:

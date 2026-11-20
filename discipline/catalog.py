@@ -514,7 +514,8 @@ def effective_action(action, control=None, record_id=None):
     читается как объяснительная: второй акт на тот же период не составляется,
     а закрыть запись нельзя без утверждённой меры. Испытательный срок и
     контроль по решению руководителя акт не заменяют — там лестница как есть,
-    пока по ней не составлен акт (тогда акт привязывается к этому контролю).
+    пока по ней не составлен акт: контроль решением руководителя акт продолжает,
+    а во время испытательного срока у акта свой контроль рядом (п. 19.5).
     Сама запись-основание акта остаётся актом."""
     if action == STEP_ACT and control and control.get('act_id') and (
             record_id is None or control.get('act_record_id') != record_id):
@@ -698,28 +699,46 @@ def _short_date(value):
     return value.strftime('%d.%m') if hasattr(value, 'strftime') else ''
 
 
-def plate(step, control=None):
+def _day_text(value):
+    return value.strftime('%d.%m.%Y') if hasattr(value, 'strftime') else str(value or '')
+
+
+def plate(step, control=None, also=()):
     """Плашка под полем «Оператор» (ТЗ п. 6.2): тон, заголовок, текст.
 
-    step — результат next_step; control — активный особый контроль человека
-    ({'end_date', 'reason'}) или None. Особый контроль кладётся «поверх
-    остальных»: при нём речь уже не о номере, а об обязательной мере.
+    step — результат next_step; control — главный действующий особый контроль
+    человека ({'end_date', 'reason', 'act_id'}) или None; also — второй
+    действующий контроль (испытательный срок рядом с контролем после акта).
+
+    Особый контроль кладётся «поверх остальных»: красная плашка контроля сверху,
+    а обычная плашка счёта остаётся под ней (under) — число нарушений за период
+    и «потребуется акт» под контролем не пропадают. Под контролем после акта
+    второй акт не составляется (effective_action), и плашка счёта его не обещает.
     """
+    if not control:
+        return _count_plate(step)
+    reason = str(control.get('reason') or '').strip()
+    text = 'Причина: %s. ' % reason if reason else ''
+    text += 'Обязательно назначение меры. Уведомление уйдёт руководителю.'
+    for other in also or ():
+        text += ' %s — до %s.' % (CONTROL_SOURCE_LABELS.get(other.get('source'), 'Особый контроль'),
+                                  _day_text(other.get('end_date')))
+    under = _count_plate(dict(step, action=effective_action(step['action'], control)))
+    return {
+        'tone': 'red',
+        'title': 'Оператор на особом контроле до %s' % _day_text(control.get('end_date')),
+        'text': text,
+        'count': step['count'],
+        'under': under,
+    }
+
+
+def _count_plate(step):
+    """Плашка счёта за период: 0, 1, 2 и «потребуется акт» (ТЗ п. 6.2)."""
     count = step['count']
     action = step['action']
     ordinal = ordinal_word(step['ordinal'])
     window = step['window']
-    if control:
-        end = control.get('end_date')
-        end_text = end.strftime('%d.%m.%Y') if hasattr(end, 'strftime') else str(end or '')
-        reason = str(control.get('reason') or '').strip()
-        text = 'Причина: %s. ' % reason if reason else ''
-        return {
-            'tone': 'red',
-            'title': 'Оператор на особом контроле до %s' % end_text,
-            'text': text + 'Обязательно назначение меры. Уведомление уйдёт руководителю.',
-            'count': count,
-        }
     if action == STEP_ACT:
         return {
             'tone': 'red',
@@ -749,14 +768,33 @@ def plate(step, control=None):
 
 # ── Сроки ────────────────────────────────────────────────────────────────────
 
+def _holidays():
+    """Праздники и выходные дни по постановлениям РК — общий календарь портала
+    (resource_fte.calendar_model, им же считают «Почта» и прогноз нагрузки).
+    Модуль тянет numpy, поэтому берётся лениво; не нашёлся — без праздников,
+    как было: срок от этого раньше, а не позже."""
+    try:
+        from resource_fte.calendar_model import KZ_HOLIDAYS
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    return KZ_HOLIDAYS
+
+
+def is_working_day(day):
+    """Рабочий день: пн–пт и не праздник РК."""
+    return day.weekday() < 5 and day.isoformat()[:10] not in _holidays()
+
+
 def add_working_days(moment, days):
-    """Плюс N рабочих дней (пн–пт), время суток сохраняется. Срок объяснительной
-    по умолчанию — 2 рабочих дня с фиксации (ТЗ п. 8.3)."""
+    """Плюс N рабочих дней (пн–пт без праздников РК), время суток сохраняется.
+    Срок объяснительной по умолчанию — 2 рабочих дня с фиксации (ТЗ п. 8.3):
+    запись перед 16 декабря или мартовскими праздниками не становится
+    просроченной в праздник."""
     result = moment
     left = int(days or 0)
     while left > 0:
         result = result + timedelta(days=1)
-        if result.weekday() < 5:
+        if is_working_day(result.date() if isinstance(result, datetime) else result):
             left -= 1
     return result
 

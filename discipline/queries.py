@@ -708,7 +708,9 @@ def journal_choices(cursor, ctx, today, filters=None):
 
 def decision_measures(cursor, department_ids, *, date_from=None, date_to=None, operator_id=None):
     """Меры, применённые решением по акту (п. 9) и по окончании особого контроля
-    (п. 10.5): вкладка «Меры» и выгрузка на удержания. Период — по дате решения."""
+    (п. 10.5): вкладка «Меры» и выгрузка на удержания. Период — по дате решения.
+    Снятые руководителем (service.remove_decision_measure) сюда не входят — как
+    и снятая мера записи, у которой поля меры очищаются."""
     ids = _int_list(department_ids)
     if not ids:
         return []
@@ -729,7 +731,7 @@ def decision_measures(cursor, department_ids, *, date_from=None, date_to=None, o
           JOIN users op ON op.id = a.operator_id
           JOIN discipline_records r ON r.id = a.trigger_record_id AND r.cancelled_at IS NULL
           LEFT JOIN users ab ON ab.id = a.approved_by
-         WHERE a.approved_at IS NOT NULL AND a.decision_title IS NOT NULL
+         WHERE a.approved_at IS NOT NULL AND a.decision_title IS NOT NULL AND a.decision_removed_at IS NULL
            AND a.department_id = ANY(%(departments)s)""" + window % {'col': 'a.approved_at', 'op': 'a.operator_id'}
         + """
         UNION ALL
@@ -742,6 +744,7 @@ def decision_measures(cursor, department_ids, *, date_from=None, date_to=None, o
           JOIN users op ON op.id = c.operator_id
           LEFT JOIN users db ON db.id = c.decided_by
          WHERE c.decision = 'measure' AND c.decision_measure_title IS NOT NULL
+           AND c.decision_measure_removed_at IS NULL
            AND c.department_id = ANY(%(departments)s)""" + window % {'col': 'c.decided_at', 'op': 'c.operator_id'}
         + """
          ORDER BY applied_at, id
@@ -803,7 +806,7 @@ def update_record(cursor, record_id, changes):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _ACT_SELECT = """
-SELECT a.*, cb.name AS composed_by_name, ab.name AS approved_by_name,
+SELECT a.*, cb.name AS composed_by_name, ab.name AS approved_by_name, rb.name AS decision_removed_by_name,
        COALESCE((SELECT array_agg(ar.record_id ORDER BY ar.record_id)
                    FROM discipline_act_records ar WHERE ar.act_id = a.id), '{}') AS record_ids,
        EXISTS (SELECT 1 FROM discipline_files f
@@ -812,6 +815,7 @@ SELECT a.*, cb.name AS composed_by_name, ab.name AS approved_by_name,
   FROM discipline_acts a
   LEFT JOIN users cb ON cb.id = a.composed_by
   LEFT JOIN users ab ON ab.id = a.approved_by
+  LEFT JOIN users rb ON rb.id = a.decision_removed_by
 """
 
 
@@ -838,8 +842,8 @@ def acts_by_record(cursor, record_ids):
     return result
 
 
-def get_act(cursor, act_id):
-    cursor.execute(_ACT_SELECT + ' WHERE a.id = %s', (int(act_id),))
+def get_act(cursor, act_id, for_update=False):
+    cursor.execute(_ACT_SELECT + ' WHERE a.id = %s' + (' FOR UPDATE OF a' if for_update else ''), (int(act_id),))
     act = _row(cursor)
     if act:
         act['record_ids'] = list(act.get('record_ids') or [])
@@ -867,7 +871,8 @@ def insert_act(cursor, *, number, operator_id, department_id, trigger_record_id,
 
 def update_act(cursor, act_id, changes):
     allowed = {'composed_on', 'composed_by', 'approved_by', 'approved_at', 'decision_measure_id',
-               'decision_title', 'decision_finance', 'decision_value_kind', 'decision_amount', 'decision_percent'}
+               'decision_title', 'decision_finance', 'decision_value_kind', 'decision_amount', 'decision_percent',
+               'decision_removed_at', 'decision_removed_by', 'decision_removed_reason'}
     fields = {key: value for key, value in (changes or {}).items() if key in allowed}
     if not fields:
         return
@@ -882,21 +887,37 @@ def update_act(cursor, act_id, changes):
 
 _CONTROL_SELECT = """
 SELECT c.*, op.name AS operator_name, rs.name AS responsible_name, db.name AS decided_by_name,
-       cb.name AS created_by_name, op.department_id AS operator_department_id
+       cb.name AS created_by_name, op.department_id AS operator_department_id,
+       mr.name AS decision_measure_removed_by_name
   FROM discipline_controls c
   JOIN users op ON op.id = c.operator_id
   LEFT JOIN users rs ON rs.id = c.responsible_id
   LEFT JOIN users db ON db.id = c.decided_by
   LEFT JOIN users cb ON cb.id = c.created_by
+  LEFT JOIN users mr ON mr.id = c.decision_measure_removed_by
 """
 
 
-def active_controls(cursor, operator_ids):
+def active_controls_list(cursor, operator_ids):
+    """{человек: [действующие контроли]} — контроль раздела (после акта или
+    решением руководителя) первым, испытательный срок за ним. Их у человека не
+    больше двух (schema: ux_discipline_controls_active_*): испытательный срок по
+    договору и контроль после акта — разные основания (ТЗ п. 19.5)."""
     ids = _int_list(operator_ids)
     if not ids:
         return {}
-    cursor.execute(_CONTROL_SELECT + ' WHERE c.operator_id = ANY(%s) AND c.decided_at IS NULL', (ids,))
-    return {int(row['operator_id']): row for row in _rows(cursor)}
+    cursor.execute(_CONTROL_SELECT + " WHERE c.operator_id = ANY(%s) AND c.decided_at IS NULL"
+                   " ORDER BY c.operator_id, c.source = 'probation', c.start_date, c.id", (ids,))
+    result = {}
+    for row in _rows(cursor):
+        result.setdefault(int(row['operator_id']), []).append(row)
+    return result
+
+
+def active_controls(cursor, operator_ids):
+    """{человек: главный действующий контроль} — контроль раздела, если он есть,
+    иначе испытательный срок (порядок active_controls_list)."""
+    return {operator_id: rows[0] for operator_id, rows in active_controls_list(cursor, operator_ids).items()}
 
 
 def get_control(cursor, control_id, for_update=False):
@@ -968,7 +989,8 @@ def update_control(cursor, control_id, changes):
     allowed = {'start_date', 'end_date', 'reason', 'source', 'act_id', 'responsible_id', 'decision', 'decision_comment',
                'decided_by', 'decided_at', 'warned_for', 'due_notified_for', 'decision_measure_id',
                'decision_measure_title', 'decision_finance', 'decision_value_kind', 'decision_amount',
-               'decision_percent'}
+               'decision_percent', 'decision_measure_removed_at', 'decision_measure_removed_by',
+               'decision_measure_removed_reason'}
     fields = {key: value for key, value in (changes or {}).items() if key in allowed}
     if not fields:
         return

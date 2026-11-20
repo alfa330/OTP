@@ -1,9 +1,12 @@
 import React from 'react';
-import { ChevronRight, FileText, FileUp, Image as ImageIcon, Loader2, Paperclip, ScanLine, Search, Video } from 'lucide-react';
+import {
+    AlertTriangle, ChevronRight, FileText, FileUp, Image as ImageIcon, Loader2, Paperclip, ScanLine, Search, Video,
+} from 'lucide-react';
 import { iosBtnGhost, iosBtnPrimary, iosBtnSecondary, iosCard, iosGroupLabel, iosInput, IosHint, IosMenu, IosSegmented } from '../ui/ios';
 import CustomSelect from '../ui/CustomSelect';
 import MobileActionSheet from '../common/MobileActionSheet';
 import useIsMobileShell from '../common/useIsMobileShell';
+import { apiError } from './disciplineApi';
 import DocumentScanner from './DocumentScanner';
 import { scanFormats } from './docScan';
 import { isHeic, prepareUploads } from './heicImage';
@@ -99,9 +102,22 @@ export const StateBadge = ({ state }) => (
 );
 
 /* Плашка у поля «Оператор» (ТЗ п. 6.2). Кликабельна: раскрывает прошлые
-   нарушения, не покидая форму. */
+   нарушения, не покидая форму. Особый контроль ложится «поверх остальных»:
+   красная плашка контроля сверху, а плашка счёта за период (plate.under) —
+   под ней, со своим списком прошлых нарушений. */
 export const Plate = ({ plate, previous = [], expanded = false, onToggle }) => {
     if (!plate) return null;
+    if (plate.under) {
+        return (
+            <div className="space-y-2">
+                <div className={`rounded-2xl px-4 py-3 ${PLATE_TONES[plate.tone] || PLATE_TONES.gray}`}>
+                    <span className={`block text-[13.5px] font-semibold ${T.body}`}>{plate.title}</span>
+                    <span className={`mt-0.5 block text-[12.5px] leading-snug opacity-90 ${T.sub}`}>{plate.text}</span>
+                </div>
+                <Plate plate={plate.under} previous={previous} expanded={expanded} onToggle={onToggle} />
+            </div>
+        );
+    }
     const tone = PLATE_TONES[plate.tone] || PLATE_TONES.gray;
     const canExpand = previous.length > 0;
     return (
@@ -130,6 +146,47 @@ export const Plate = ({ plate, previous = [], expanded = false, onToggle }) => {
                     ))}
                 </ul>
             )}
+        </div>
+    );
+};
+
+/* «Снять меру» (ТЗ п. 3: руководитель «назначает и снимает меры»; п. 14):
+   причина обязательна — она ложится в историю и журнал действий вместе со
+   всем, что было у меры. Одна форма на три места: мера записи, решение по акту
+   и решение по особому контролю. Удержание с деньгами — с предупреждением:
+   выгрузка за месяц утверждения могла его уже забрать. */
+export const RemoveMeasureForm = ({ money = false, onRemove, onCancel }) => {
+    const [reason, setReason] = React.useState('');
+    const [error, setError] = React.useState(null);
+    const [busy, setBusy] = React.useState(false);
+    const submit = async () => {
+        if (reason.trim().length < 5) { setError('Причина — минимум 5 символов'); return; }
+        setBusy(true);
+        try {
+            await onRemove(reason.trim());
+        } catch (err) {
+            setError(apiError(err));
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <div className="space-y-2.5 rounded-2xl bg-slate-50 p-3.5">
+            {money && (
+                <div className="flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-[12.5px] text-amber-900 ring-1 ring-amber-200/70">
+                    <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                    <span>Удержание уже утверждено и могло попасть в выгрузку на удержания — после снятия сообщите бухгалтерии.</span>
+                </div>
+            )}
+            <Field label="Причина снятия" error={error}>
+                <textarea rows={2} autoFocus className={`${dInput} resize-y ${error ? INVALID_RING : ''}`}
+                          placeholder="Например: взыскание снято досрочно приказом" value={reason}
+                          onChange={(e) => { setReason(e.target.value); setError(null); }} />
+            </Field>
+            <div className="flex justify-end gap-2">
+                <button type="button" className={dBtnSecondary} onClick={onCancel} disabled={busy}>Не снимать</button>
+                <button type="button" className={dBtnDanger} onClick={submit} disabled={busy}>Снять меру</button>
+            </div>
         </div>
     );
 };

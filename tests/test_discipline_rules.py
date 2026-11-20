@@ -468,11 +468,12 @@ class ManagerGrantTests(unittest.TestCase):
                     if isinstance(node, ast.Attribute) and node.attr in callers:
                         callers[node.attr].add(top.name)
         # act_composer_name — не рассылка: «кто составил» акт по тому же правилу,
-        # что черновик (составитель не глава); remove_measure — весть о снятом удержании.
+        # что черновик (составитель не глава); remove_measure — весть о снятом удержании;
+        # _notify_decision_finance — денежная мера решением по акту и по контролю и её снятие.
         self.assertEqual(callers['department_heads'], {'_auto_control', 'act_draft_context', 'act_composer_name'})
         self.assertEqual(callers['department_managers'], {'_push_act_basis', 'settle_ladder', '_notify_new_record',
                                                           'record_refusal', '_notify_finance', 'run_reminders',
-                                                          'remove_measure'})
+                                                          'remove_measure', '_notify_decision_finance'})
 
     def test_act_leader_is_the_head_when_she_approves(self):
         """Разбор 29.10.2026: акт утверждает и поимённый руководитель, но строка
@@ -642,3 +643,87 @@ class TzGapFixesTests(unittest.TestCase):
         # Сумма решения по акту — по-русски, служебные поля — не в строке.
         text = report.changes_text({'decision_amount': [None, 15000], 'decision_finance': [None, 'yes']})
         self.assertEqual(text, 'Сумма: — → 15000')
+
+
+class TzFinalRulesTests(unittest.TestCase):
+    """Сверка ТЗ 20.11.2026 перед сдачей: плашка контроля поверх плашки счёта (п. 6.2),
+    праздники в сроке объяснительной (п. 8.3), оператор в строках отчётов (п. 11),
+    меры решениями в «Сводке по операторам» (п. 15.1), снятая мера решения (п. 3, 14)."""
+
+    PROBATION = {'end_date': date(2026, 11, 3), 'reason': 'Испытательный срок нового сотрудника',
+                 'source': 'probation'}
+    AFTER_ACT = {'end_date': date(2026, 11, 3), 'reason': 'Акт А-2026-0001: 3 нарушения за период',
+                 'source': 'act', 'act_id': 7}
+
+    def test_control_plate_keeps_the_count_plate_under_it(self):
+        # Испытательный срок и два нарушения в окне: сверху красная плашка контроля,
+        # под ней — «это третье — потребуется акт»: под таким контролем акт составляется.
+        plate = catalog.plate(catalog.next_step([rec(1, 6), rec(2, 4)], AT, TZ), self.PROBATION)
+        self.assertEqual((plate['tone'], plate['title']), ('red', 'Оператор на особом контроле до 03.11.2026'))
+        self.assertIn('Обязательно назначение меры', plate['text'])
+        self.assertEqual(plate['under']['tone'], 'red')
+        self.assertTrue(plate['under']['title'].startswith('За период уже 2 нарушения'))
+        self.assertIn('Это третье — потребуется акт', plate['under']['text'])
+
+    def test_after_act_control_does_not_promise_a_second_act(self):
+        plate = catalog.plate(catalog.next_step([rec(1, 6), rec(2, 4)], AT, TZ), self.AFTER_ACT)
+        self.assertEqual(plate['under']['tone'], 'yellow')
+        self.assertEqual(plate['under']['text'], 'Это будет третье — объяснительная №3.')
+
+    def test_second_active_control_is_named_on_the_control_plate(self):
+        plate = catalog.plate(catalog.next_step([], AT, SAMPLE), self.AFTER_ACT,
+                              also=[{'source': 'probation', 'end_date': date(2026, 12, 1)}])
+        self.assertTrue(plate['text'].endswith('Испытательный срок — до 01.12.2026.'))
+        self.assertEqual((plate['under']['tone'], plate['under']['title']), ('gray', 'Нарушений за период нет'))
+
+    def test_plate_without_control_is_a_single_plate(self):
+        self.assertNotIn('under', catalog.plate(catalog.next_step([rec(1, 3)], AT, SAMPLE)))
+
+    def test_explanation_deadline_skips_kz_holidays(self):
+        # Пн 14.12.2026 + 2 рабочих дня: 16.12 — праздник, срок — чт 17.12, время то же.
+        self.assertEqual(catalog.add_working_days(datetime(2026, 12, 14, 10, 0), 2), datetime(2026, 12, 17, 10, 0))
+        # Пт 20.03.2026: выходные и 23–24.03 (Наурыз) не в счёт — срок в чт 26.03.
+        self.assertEqual(catalog.add_working_days(datetime(2026, 3, 20, 9, 30), 2), datetime(2026, 3, 26, 9, 30))
+        # Обычная неделя — как раньше: чт + 2 рабочих = пн.
+        self.assertEqual(catalog.add_working_days(datetime(2026, 11, 19, 12, 0), 2), datetime(2026, 11, 23, 12, 0))
+        self.assertFalse(catalog.is_working_day(date(2026, 12, 16)))
+        self.assertTrue(catalog.is_working_day(date(2026, 12, 17)))
+        # Срок объяснительной считается тем же календарём.
+        due = catalog.explanation_due({'created_at': datetime(2026, 12, 14, 10, 0), 'needs_explanation': True},
+                                      catalog.normalize_settings({}))
+        self.assertEqual(due, datetime(2026, 12, 17, 10, 0))
+
+    def test_operator_summary_has_decision_measures_and_the_operator(self):
+        from discipline import report
+        items = [{'operator_id': 5, 'operator_name': 'Иванов', 'group_name': 'Группа 1', 'type_title': 'Сон',
+                  'occurred_at': '2026-11-02T10:00:00', 'measure_state': 'approved', 'measure_title': 'Выговор'}]
+        decisions = [{'operator_id': 5, 'operator_name': 'Иванов', 'group_name': None, 'measure_title': 'Лишение'},
+                     {'operator_id': 6, 'operator_name': 'Петров', 'group_name': None, 'measure_title': 'Выговор'},
+                     {'operator_id': 6, 'operator_name': 'Петров', 'group_name': None, 'measure_title': None}]
+        rows = {row['operator_id']: row for row in report.report_operators(items, decisions)}
+        self.assertEqual((rows[5]['total'], rows[5]['measures']), (1, 'Выговор — 1, Лишение — 1'))
+        # Мера решением в периоде без нарушений в периоде — тоже строка человека.
+        self.assertEqual((rows[6]['total'], rows[6]['measures']), (0, 'Выговор — 1'))
+        # Excel по-прежнему без служебного id.
+        self.assertNotIn('operator_id', [key for _title, key, _width in report.OPERATORS_COLUMNS])
+
+    def test_measure_rows_carry_the_operator_for_the_card(self):
+        from discipline import report
+        rows, _totals = report.report_measures(
+            [{'measure_state': 'approved', 'measure_title': 'Выговор', 'operator_id': 5, 'id': 1}],
+            [{'source': 'act', 'number': 'А-2026-0001', 'operator_id': 6, 'measure_title': 'Лишение'}])
+        self.assertEqual(sorted(row['operator_id'] for row in rows), [5, 6])
+
+    def test_removed_control_measure_is_marked_in_the_decision(self):
+        detail = service._decision_detail({'decision': 'measure', 'decision_measure_title': 'Выговор',
+                                           'decision_measure_removed_at': datetime(2026, 11, 20, 10, 0),
+                                           'decision_measure_removed_reason': 'Ошибка в приказе'})
+        self.assertEqual(detail, 'Мера: Выговор (снята 20.11.2026: Ошибка в приказе)')
+
+    def test_journal_names_the_basis_and_the_refusal_file(self):
+        from discipline import report
+        text = report.changes_text({'measure': 'Выговор', 'basis': 'Акт А-2026-0001', 'reason': 'Ошибка в акте'})
+        self.assertEqual(text, 'Мера: Выговор; Причина: Ошибка в акте; Основание: Акт А-2026-0001')
+        text = report.changes_text({'file_id': 9, 'file': 'акт об отказе.pdf', 'sha256': 'f' * 64,
+                                    'witnesses': ['Иванов', 'Петров']})
+        self.assertEqual(text, 'Файл: акт об отказе.pdf; Свидетели: Иванов, Петров')

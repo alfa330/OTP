@@ -238,6 +238,13 @@ def _iso(value):
     return value
 
 
+def controls_on(controls, day):
+    """Действующие контроли, начатые не позже дня нарушения, — главный первым
+    (контроль раздела, потом испытательный срок: queries.active_controls_list).
+    Контроль, поставленный позже, к записи задним числом не относится."""
+    return [control for control in controls or () if control['start_date'] <= day]
+
+
 def enrich(cursor, ctx, records, now, *, settings_for=None):
     """Номер, ступень, статус, просрочка, акт и права — к каждой записи."""
     if not records:
@@ -356,10 +363,9 @@ def operator_context(cursor, ctx, operator_id, at, today, *, type_weight=1):
     triggers, members = history_act_sets(cursor, [history])
     step = catalog.next_step(history, at, settings, new_weight=type_weight, settings_for=SettingsCache(cursor),
                              act_triggers=triggers, act_members=members)
-    control = queries.active_controls(cursor, [operator_id]).get(int(operator_id))
-    if control and control['start_date'] > at.date():
-        control = None
-    plate = catalog.plate(step, control)
+    active = controls_on(queries.active_controls_list(cursor, [operator_id]).get(int(operator_id)), at.date())
+    control = active[0] if active else None
+    plate = catalog.plate(step, control, also=active[1:])
     group = queries.group_at(cursor, operator_id, at.date())
     return {
         'operator': {
@@ -527,9 +533,8 @@ def create_record(cursor, ctx, payload, uploads, *, now, today, base_url=None, o
     if type_row['needs_evidence'] and not uploads and not evidence_note:
         raise DisciplineError('Для этого типа нужно доказательство: файл или тайм-код записи экрана', code='EVIDENCE')
 
-    control = queries.active_controls(cursor, [operator_id]).get(operator_id)
-    if control and control['start_date'] > occurred_at.date():
-        control = None
+    active = controls_on(queries.active_controls_list(cursor, [operator_id]).get(operator_id), occurred_at.date())
+    control = active[0] if active else None
     manager = access.can_manage_department(ctx, department_id)
     measure_changes = {}
     if control:
@@ -711,12 +716,13 @@ def _auto_control(cursor, ctx, record, info, act_id, settings, *, now, today):
 
 
 def _link_act_to_control(cursor, ctx, control, record, act_id, settings, *, now):
-    """Акт во время испытательного срока или ручного контроля. Действующий
-    контроль у человека один, поэтому акт привязывается к нему: основание —
-    «После акта» (снять испытательный срок, не заметив, что на нём держится
-    акт, теперь нельзя), начало — не позже акта, конец — не раньше срока «после
-    акта» (п. 7.3, 10.3). Контроль, по которому уже приняли решение, не трогаем.
-    Возвращает (привязан ли, записи, попавшие под контроль задним числом)."""
+    """Акт во время контроля по решению руководителя. Контроль раздела у
+    человека один, поэтому акт продолжает его: основание — «После акта» (снять
+    контроль, не заметив, что на нём держится акт, нельзя), начало — не позже
+    акта, конец — не раньше срока «после акта» (п. 7.3, 10.3). Испытательный
+    срок сюда не попадает: у акта во время испытательного срока свой контроль
+    (п. 19.5, settle_ladder). Контроль, по которому уже приняли решение, не
+    трогаем. Возвращает (привязан ли, записи, попавшие под контроль задним числом)."""
     locked = queries.get_control(cursor, control['id'], for_update=True)
     if not locked or locked.get('decided_at') or locked.get('act_id'):
         return False, []
@@ -791,7 +797,11 @@ def settle_ladder(cursor, ctx, operator_id, before, *, since, now, today, base_u
         settings = settings_for(record.get('department_id'))
         info = after['steps'].get(record_id) or {}
         managers = queries.department_managers(cursor, [record.get('department_id')])
-        control = queries.active_controls(cursor, [operator_id]).get(int(operator_id))
+        # Испытательный срок акт не переписывает (п. 19.5: основания разные,
+        # список общий) — у акта свой контроль рядом с ним. Контроль решением
+        # руководителя акт продолжает: второй строки раздела у человека нет.
+        control = next((c for c in queries.active_controls_list(cursor, [operator_id]).get(int(operator_id), [])
+                        if c['source'] != 'probation'), None)
         attached = []
         if control and not control.get('act_id'):
             linked, attached = _link_act_to_control(cursor, ctx, control, record, act_id, settings, now=now)
@@ -848,6 +858,22 @@ def settle_ladder(cursor, ctx, operator_id, before, *, since, now, today, base_u
                             settings_for, base_url)
 
 
+def _next_is_act(cursor, operator_id, settings, now):
+    """Следующее нарушение человека потребует акта — то же правило, что у жёлтого
+    блока «Сводки» (routes.discipline_summary): человек не на особом контроле, а
+    период, уже покрытый составленным актом, второго акта не требует. Иначе СВ
+    получал «следующее нарушение — акт», а следующая запись шла объяснительной
+    или мерой под контролем."""
+    if queries.active_controls(cursor, [operator_id]).get(int(operator_id)):
+        return False
+    history = queries.operator_histories(cursor, [operator_id], since=now - timedelta(days=HISTORY_DAYS)).get(
+        int(operator_id), [])
+    triggers, members = history_act_sets(cursor, [history])
+    step = catalog.next_step(history, now, settings, settings_for=SettingsCache(cursor),
+                             act_triggers=triggers, act_members=members)
+    return step['action'] == catalog.STEP_ACT
+
+
 def _notify_new_record(cursor, ctx, record, info, profile, settings, control, *, now, today, base_url, outbox):
     record_id = record['id']
     action = info.get('action')
@@ -880,7 +906,8 @@ def _notify_new_record(cursor, ctx, record, info, profile, settings, control, *,
         notify.push(cursor, outbox, event='act', user_ids=managers, settings=settings,
                     title='%s: %s — нужен акт' % (name, notify.ordinal_text(info).lower()),
                     body=line, record_id=record_id, tone='warning', base_url=base_url, exclude=[me])
-    elif act_index and info.get('weighted') == act_index - 1:
+    elif (act_index and info.get('weighted') == act_index - 1 and not control
+          and _next_is_act(cursor, record['operator_id'], settings, now)):
         supervisors = queries.group_supervisors(cursor, [record.get('group_id')], today)
         notify.push(cursor, outbox, event='pre_act', user_ids=supervisors, settings=settings,
                     title='%s: следующее нарушение — акт' % name, body=line, record_id=record_id,
@@ -1053,9 +1080,13 @@ def record_refusal(cursor, ctx, record, upload, witness_ids, *, now, base_url=No
     file_id = queries.insert_file(cursor, _file_row(upload, 'refusal_act', ctx, record_id=record['id'], now=now))
     queries.update_record(cursor, record['id'], {'refused_at': now, 'refusal_witness_ids': witnesses})
     queries.clear_kind(cursor, record_id=record['id'], kinds=['explanation_required', 'explanation_overdue'])
+    # Имя и хеш акта об отказе — как у остальных загрузок (п. 14: «загрузка,
+    # замена … любого файла»): повторный отказ заменяет прежний акт, и без имени
+    # обе строки журнала выглядели бы одинаково.
     queries.audit(cursor, ctx, 'refusal', 'record', entity_id=record['id'], operator_id=record['operator_id'],
                   department_id=record['department_id'], record_id=record['id'],
-                  changes={'file_id': file_id, 'witnesses': [names[w] for w in witnesses]})
+                  changes={'file_id': file_id, 'file': upload['name'], 'sha256': upload.get('sha256'),
+                           'witnesses': [names[w] for w in witnesses]})
     settings = queries.get_settings(cursor, record['department_id'])
     managers = queries.department_managers(cursor, [record['department_id']])
     notify.push(cursor, outbox, event='refusal', user_ids=managers, settings=settings,
@@ -1296,12 +1327,100 @@ def _notify_finance(cursor, ctx, record, measure, changes, *, base_url, outbox):
                 record_id=record['id'], base_url=base_url, exclude=[ctx['user_id']])
 
 
+def _notify_decision_finance(cursor, ctx, *, department_id, operator_id, title, finance, amount, percent, basis,
+                             record_id, base_url, outbox, removed_reason=None):
+    """Весть руководителям о мере с финансовым эффектом, назначенной решением по
+    акту или по особому контролю (п. 12), и о её снятии. Мера без денег — молча,
+    как у меры записи (_notify_finance)."""
+    if (finance or 'none') == 'none':
+        return
+    value = money_text(amount, percent)
+    value = (' · ' + value) if value else ''
+    name = queries.user_names(cursor, [operator_id]).get(int(operator_id)) or 'Сотрудник'
+    settings = queries.get_settings(cursor, department_id)
+    managers = queries.department_managers(cursor, [department_id])
+    if removed_reason is None:
+        title_text = 'Мера с финансовым эффектом: %s%s' % (title or '', value)
+        body = '%s — %s, попадёт в выгрузку на удержания' % (name, basis)
+    else:
+        title_text = 'Снята мера с финансовым эффектом: %s%s' % (title or '', value)
+        body = ('%s — %s, причина: %s. Если удержание уже ушло в выгрузку, сообщите бухгалтерии'
+                % (name, basis, removed_reason))
+    notify.push(cursor, outbox, event='measure_finance', user_ids=managers, settings=settings, title=title_text,
+                body=body, record_id=record_id, tone='warning' if removed_reason else 'default', base_url=base_url,
+                exclude=[ctx['user_id']])
+
+
+def _removal_reason(reason):
+    reason = _text(reason, 1000)
+    if len(reason) < 5:
+        raise DisciplineError('Укажите причину снятия меры', code='REASON')
+    return reason
+
+
+def remove_act_measure(cursor, ctx, act, record, reason, *, now, base_url=None, outbox=None):
+    """Снять меру, назначенную решением по акту (п. 3: руководитель «назначает и
+    снимает меры»; п. 14: «отмена меры»). Утверждённый акт — документ и не
+    меняется (ACT_APPROVED): решение остаётся в нём, а снятие ложится рядом —
+    кто, когда и почему. Мера уходит из вкладки «Меры» и из выгрузки «По мерам»,
+    как снятая мера записи; утверждённое удержание — с вестью «сообщите
+    бухгалтерии» тем же людям, кому ушла весть об утверждении."""
+    if not access.manages_record(ctx, record):
+        raise DisciplineError('Снимает меру руководитель', 403)
+    if not act.get('approved_at') or not act.get('decision_title'):
+        raise DisciplineError('По акту ещё нет утверждённого решения')
+    if act.get('decision_removed_at'):
+        raise DisciplineError('Мера по акту уже снята')
+    reason = _removal_reason(reason)
+    queries.update_act(cursor, act['id'], {'decision_removed_at': now, 'decision_removed_by': ctx['user_id'],
+                                           'decision_removed_reason': reason})
+    queries.audit(cursor, ctx, 'measure_remove', 'act', entity_id=act['id'], operator_id=act['operator_id'],
+                  department_id=act.get('department_id'), record_id=act['trigger_record_id'],
+                  changes={'measure': act.get('decision_title'), 'basis': 'Акт %s' % act['number'],
+                           'amount': _money(act.get('decision_amount')),
+                           'percent': _money(act.get('decision_percent')), 'reason': reason})
+    _notify_decision_finance(cursor, ctx, department_id=act.get('department_id'), operator_id=act['operator_id'],
+                             title=act.get('decision_title'), finance=act.get('decision_finance'),
+                             amount=act.get('decision_amount'), percent=act.get('decision_percent'),
+                             basis='по акту %s' % act['number'], record_id=act['trigger_record_id'],
+                             base_url=base_url, outbox=outbox, removed_reason=reason)
+
+
+def remove_control_measure(cursor, ctx, control_id, reason, *, now, base_url=None, outbox=None):
+    """Снять меру, применённую решением по особому контролю (п. 10.5) — как меру
+    по акту: решение «Мера» остаётся в истории контроля, снятие — рядом с ним."""
+    control = queries.get_control(cursor, control_id, for_update=True)
+    if not control:
+        raise DisciplineError('Контроль не найден', 404)
+    department = control.get('department_id') or control.get('operator_department_id')
+    if department is None or not access.can_manage_department(ctx, department):
+        raise DisciplineError('Снимает меру руководитель', 403)
+    if control.get('decision') != 'measure' or not control.get('decision_measure_title'):
+        raise DisciplineError('По контролю мера не применялась')
+    if control.get('decision_measure_removed_at'):
+        raise DisciplineError('Мера по контролю уже снята')
+    reason = _removal_reason(reason)
+    queries.update_control(cursor, control['id'], {'decision_measure_removed_at': now,
+                                                   'decision_measure_removed_by': ctx['user_id'],
+                                                   'decision_measure_removed_reason': reason})
+    queries.audit(cursor, ctx, 'measure_remove', 'control', entity_id=control['id'],
+                  operator_id=control['operator_id'], department_id=department,
+                  changes={'measure': control.get('decision_measure_title'), 'basis': 'Решение по особому контролю',
+                           'amount': _money(control.get('decision_amount')),
+                           'percent': _money(control.get('decision_percent')), 'reason': reason})
+    _notify_decision_finance(cursor, ctx, department_id=department, operator_id=control['operator_id'],
+                             title=control.get('decision_measure_title'), finance=control.get('decision_finance'),
+                             amount=control.get('decision_amount'), percent=control.get('decision_percent'),
+                             basis='по итогам особого контроля', record_id=None, base_url=base_url, outbox=outbox,
+                             removed_reason=reason)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Акт
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_act(cursor, ctx, act_id, today):
-    act = queries.get_act(cursor, act_id)
+def load_act(cursor, ctx, act_id, today, *, for_update=False):
+    act = queries.get_act(cursor, act_id, for_update=for_update)
     if not act:
         raise DisciplineError('Акт не найден', 404)
     record = load_record(cursor, ctx, act['trigger_record_id'], today)
@@ -1382,7 +1501,7 @@ def act_draft_context(cursor, ctx, act, trigger, *, settings_for):
     }
 
 
-def update_act(cursor, ctx, act, record, payload, *, now):
+def update_act(cursor, ctx, act, record, payload, *, now, base_url=None, outbox=None):
     if not access.manages_record(ctx, record):
         raise DisciplineError('Акт оформляет руководитель', 403)
     if act.get('approved_at'):
@@ -1420,6 +1539,15 @@ def update_act(cursor, ctx, act, record, payload, *, now):
     queries.audit(cursor, ctx, 'act_approve' if payload.get('approve') else 'act_update', 'act', entity_id=act['id'],
                   operator_id=act['operator_id'], department_id=act.get('department_id'),
                   record_id=act['trigger_record_id'], changes=diff)
+    if payload.get('approve'):
+        decided = dict(act, **changes)
+        # Утверждённый акт с денежным решением — та же весть, что у меры записи
+        # (п. 12: «мера с финансовым эффектом утверждена»): мера уже в выгрузке.
+        _notify_decision_finance(cursor, ctx, department_id=act.get('department_id'),
+                                 operator_id=act['operator_id'], title=decided.get('decision_title'),
+                                 finance=decided.get('decision_finance'), amount=decided.get('decision_amount'),
+                                 percent=decided.get('decision_percent'), basis='по акту %s' % act['number'],
+                                 record_id=act['trigger_record_id'], base_url=base_url, outbox=outbox)
     return True
 
 
@@ -1463,8 +1591,14 @@ def create_control(cursor, ctx, payload, *, now, today):
     # Та же очередь на человека, что у фиксации: два руководителя одновременно
     # не ставят двух контролей (второй получает понятный отказ, а не 500).
     queries.lock_operator(cursor, operator_id)
-    if queries.active_controls(cursor, [operator_id]).get(operator_id):
-        raise DisciplineError('Сотрудник уже на особом контроле — продлите действующий', code='CONTROL_EXISTS')
+    # Испытательный срок и контроль раздела — разные основания (п. 19.5): у
+    # человека может идти по одному каждого вида, но не два одного вида.
+    for active in queries.active_controls_list(cursor, [operator_id]).get(operator_id, []):
+        if (active['source'] == 'probation') == (source == 'probation'):
+            raise DisciplineError('Испытательный срок у сотрудника уже идёт — продлите действующий'
+                                  if source == 'probation'
+                                  else 'Сотрудник уже на особом контроле — продлите действующий',
+                                  code='CONTROL_EXISTS')
     control_id = queries.insert_control(cursor, {
         'operator_id': operator_id, 'department_id': profile['department_id'], 'source': source,
         'reason': reason, 'start_date': start, 'end_date': end, 'responsible_id': ctx['user_id'],
@@ -1476,7 +1610,7 @@ def create_control(cursor, ctx, payload, *, now, today):
     return control_id
 
 
-def decide_control(cursor, ctx, control_id, payload, *, now, today):
+def decide_control(cursor, ctx, control_id, payload, *, now, today, base_url=None, outbox=None):
     control = queries.get_control(cursor, control_id, for_update=True)
     if not control:
         raise DisciplineError('Контроль не найден', 404)
@@ -1522,6 +1656,12 @@ def decide_control(cursor, ctx, control_id, payload, *, now, today):
                            'measure': measure_fields.get('decision_measure_title'),
                            'amount': measure_fields.get('decision_amount'),
                            'percent': measure_fields.get('decision_percent')})
+    if measure_fields:
+        _notify_decision_finance(cursor, ctx, department_id=department, operator_id=control['operator_id'],
+                                 title=measure_fields['decision_measure_title'],
+                                 finance=measure_fields['decision_finance'], amount=measure_fields['decision_amount'],
+                                 percent=measure_fields['decision_percent'], basis='по итогам особого контроля',
+                                 record_id=None, base_url=base_url, outbox=outbox)
 
 
 def control_rows(cursor, ctx, controls, today):
@@ -1565,9 +1705,19 @@ def control_rows(cursor, ctx, controls, today):
             'decision_amount': float(control['decision_amount']) if control.get('decision_amount') is not None else None,
             'decision_percent': float(control['decision_percent']) if control.get('decision_percent') is not None else None,
             'decision_detail': _decision_detail(control),
+            'decision_finance': control.get('decision_finance'),
+            'decision_measure_removed_at': _iso(control.get('decision_measure_removed_at')),
+            'decision_measure_removed_by_name': control.get('decision_measure_removed_by_name'),
+            'decision_measure_removed_reason': control.get('decision_measure_removed_reason'),
             'tone': tone,
             'can_decide': active and access.can_manage_department(
                 ctx, control.get('department_id') or control.get('operator_department_id')),
+            # Мера решением по контролю снимается так же, как мера записи (п. 3, 14).
+            'can_remove_measure': bool(
+                control.get('decision') == 'measure' and control.get('decision_measure_title')
+                and not control.get('decision_measure_removed_at')
+                and access.can_manage_department(ctx, control.get('department_id')
+                                                 or control.get('operator_department_id'))),
         })
     # Действующие — по п. 10.1 (сначала с нарушением в период, потом по сроку);
     # закрытые — свежие решения первыми.
@@ -1587,13 +1737,41 @@ def money_text(amount=None, percent=None):
 
 
 def _decision_detail(control):
-    """Решение по контролю одной строкой: мера с суммой и комментарий."""
+    """Решение по контролю одной строкой: мера с суммой и комментарий; снятая
+    мера — с пометкой, когда и почему сняли."""
     comment = control.get('decision_comment') or ''
     if control.get('decision') == 'measure' and control.get('decision_measure_title'):
         value = money_text(control.get('decision_amount'), control.get('decision_percent'))
         text = 'Мера: %s%s' % (control['decision_measure_title'], (' · ' + value) if value else '')
+        if control.get('decision_measure_removed_at'):
+            removed = control['decision_measure_removed_at']
+            text += ' (снята %s: %s)' % (removed.strftime('%d.%m.%Y') if hasattr(removed, 'strftime') else removed,
+                                         control.get('decision_measure_removed_reason') or '')
         return '%s. %s' % (text, comment) if comment else text
     return comment or None
+
+
+def own_decision_rows(cursor, ctx):
+    """Меры решением по акту и по особому контролю, назначенные самому человеку:
+    оператор видит применённую к нему меру (п. 3), а у такой меры нет записи, в
+    которой она лежала бы. Снятые руководителем сюда не входят."""
+    return queries.decision_measures(cursor, sorted(access.section_department_ids(ctx)), operator_id=ctx['user_id'])
+
+
+def own_decision_measures(cursor, ctx):
+    """Те же меры для экрана оператора: что за мера, на каком основании и когда."""
+    result = []
+    for row in own_decision_rows(cursor, ctx):
+        result.append({
+            'source': row['source'], 'id': row['id'],
+            'basis': 'Акт %s' % row['number'] if row['source'] == 'act' else 'Решение по особому контролю',
+            'measure_title': row.get('measure_title'),
+            'measure_amount': float(row['measure_amount']) if row.get('measure_amount') is not None else None,
+            'measure_percent': float(row['measure_percent']) if row.get('measure_percent') is not None else None,
+            'applied_at': _iso(row.get('applied_at')),
+            'record_id': row.get('record_id'),
+        })
+    return result
 
 
 def visible_controls(cursor, ctx, today, state='active', **period):

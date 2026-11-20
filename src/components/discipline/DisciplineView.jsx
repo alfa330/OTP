@@ -34,12 +34,40 @@ import FilePreview from './FilePreview';
  */
 
 const TAB_KEY = 'otp.discipline.tab';
+const LINK_TABS = ['summary', 'journal', 'controls', 'reports', 'settings'];
 
 const readStoredTab = () => {
     try {
         return window.localStorage.getItem(TAB_KEY) || 'summary';
     } catch {
         return 'summary';
+    }
+};
+
+/* Вкладка из ссылки: «Открыть в iCore» в Telegram у событий особого контроля
+   ведёт на ?view=discipline&disc_tab=controls — раздел открывается на нужном
+   экране, а не на последнем запомненном. Своя метка, а не «tab»: «tab» — вкладка
+   вики, портал снимает её при входе в любой другой раздел (как у «Кадров» hr_tab).
+   После чтения метка из адреса убирается. */
+const LINK_TAB_PARAM = 'disc_tab';
+
+const readLinkTab = () => {
+    try {
+        const tab = new URLSearchParams(window.location.search).get(LINK_TAB_PARAM);
+        return LINK_TABS.includes(tab) ? tab : null;
+    } catch {
+        return null;
+    }
+};
+
+const clearLinkTab = () => {
+    try {
+        const url = new URL(window.location.href);
+        if (!url.searchParams.has(LINK_TAB_PARAM)) return;
+        url.searchParams.delete(LINK_TAB_PARAM);
+        window.history.replaceState(window.history.state, '', url.toString());
+    } catch {
+        /* адрес не трогаем — это только чистка */
     }
 };
 
@@ -127,7 +155,7 @@ const DisciplineView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
 
     const [ping, setPing] = useState(null);
     const [pingError, setPingError] = useState(null);
-    const [tab, setTab] = useState(readStoredTab);
+    const [tab, setTab] = useState(() => readLinkTab() || readStoredTab());
     const [departmentId, setDepartmentId] = useState(null);
     const [version, setVersion] = useState(0);
     const [formOpen, setFormOpen] = useState(false);
@@ -172,6 +200,8 @@ const DisciplineView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusReq
     useEffect(() => {
         if (top?.type === 'record') clearLinkRecord();
     }, [top?.type]);
+
+    useEffect(() => { clearLinkTab(); }, []);
 
     const caps = ping?.capabilities || {};
     const departments = ping?.departments || [];

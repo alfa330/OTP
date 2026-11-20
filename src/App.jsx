@@ -3457,8 +3457,11 @@ const buildAppViewUrl = (nextView) => {
         if (nextView !== 'payments') stripPaymentsParams(url);
         /* То же с открытой оценкой «ИИ-оценки» (eval=…, evalLink.js). */
         if (nextView !== 'ai_qa') stripAiQaParams(url);
-        /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
-        if (nextView !== 'discipline') url.searchParams.delete('record');
+        /* И метки «Дисциплины» (record=… и вкладка disc_tab=… — ссылки из Telegram). */
+        if (nextView !== 'discipline') {
+            url.searchParams.delete('record');
+            url.searchParams.delete('disc_tab');
+        }
         /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
         if (nextView !== 'hiring') url.searchParams.delete('card');
         /* И метки «Карточки клиента» (cc_request=…, cc_tab=… — ссылки из группы и алерта). */
@@ -3535,8 +3538,11 @@ const syncAppViewWithUrl = (nextView) => {
            закрытую карточку. Условие «не ai_qa»: иначе ссылка на оценку стиралась бы
            сразу после входа, раньше, чем раздел её откроет. */
         if (nextView !== 'ai_qa') stripAiQaParams(url);
-        /* И метка записи «Дисциплины» (record=…, ссылка из Telegram). */
-        if (nextView !== 'discipline') url.searchParams.delete('record');
+        /* И метки «Дисциплины» (record=… и вкладка disc_tab=… — ссылки из Telegram). */
+        if (nextView !== 'discipline') {
+            url.searchParams.delete('record');
+            url.searchParams.delete('disc_tab');
+        }
         /* И метка карточки «Воронки найма» (card=…, ссылка из колокола и Telegram). */
         if (nextView !== 'hiring') url.searchParams.delete('card');
         /* И метки «Карточки клиента» (cc_request=…, cc_tab=… — ссылки из группы и алерта). */
