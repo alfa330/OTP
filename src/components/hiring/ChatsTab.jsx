@@ -719,7 +719,9 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
                             <div className="px-6 py-10 text-center text-sm text-slate-500">Переписка откроется, когда возьмёте отклик в работу</div>
                         )}
                         {!data.hidden && rows.length === 0 && (
-                            <div className="py-8 text-center text-sm text-slate-400">Сообщений нет</div>
+                            <div className="py-8 text-center text-sm text-slate-400">
+                                {data.first_contact && !data.block ? 'Кандидат вам ещё не писал — напишите первым' : 'Сообщений нет'}
+                            </div>
                         )}
                         {rows.map((row, index) => (row.dayKey ? (
                             <div key={row.dayKey} className="flex justify-center py-1.5">
@@ -777,7 +779,7 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
 
 // ─── Вкладка ──────────────────────────────────────────────────────────────
 
-const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting }) => {
+const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting, focus, onFocusConsumed }) => {
     const [mode, setMode] = useState('all');
     const [waitingOnly, setWaitingOnly] = useState(false);
     const [search, setSearch] = useState('');
@@ -796,6 +798,16 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting 
         const timer = setTimeout(() => setQuery(search.trim()), 350);
         return () => clearTimeout(timer);
     }, [search]);
+
+    // Переход из карточки («WhatsApp», владелец 20.11.2026): сервер отдаёт адрес её чата — переписки нет, заводит
+    // пустой, кандидату можно написать первым.
+    useEffect(() => {
+        if (!focus?.cardId) return;
+        onFocusConsumed?.();
+        api.post(`/cards/${focus.cardId}/chat`)
+            .then(({ data }) => { if (data?.key) setSelectedKey(data.key); })
+            .catch((error) => toast(errorOf(error, 'Чат не открылся'), 'error'));
+    }, [focus, api, toast, onFocusConsumed]);
 
     const loadList = useCallback(() => {
         const mine = ++listSeq.current;

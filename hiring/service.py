@@ -1599,8 +1599,9 @@ class HiringService:
     # ─── Окно «Чаты»: переписка из портала (владелец 19.11.2026, wa_chat.py) ──
     # Рекрутер отвечает кандидату прямо в разделе: сообщение встаёт в очередь (hiring_wa_outbox), сервис шлюза
     # забирает его в ответе на опрос и отправляет связанным устройством номера найма, а портал узнаёт итог
-    # событием (sent / send_failed) и отметки доставки (receipt). Писать можно только в чат, куда кандидат
-    # написал сам, и только в свою карточку: отклик из пула сначала берут в работу.
+    # событием (sent / send_failed) и отметки доставки (receipt). Писать можно только в свою карточку: отклик из
+    # пула сначала берут в работу. Чат, куда кандидат ещё не писал, открывает кнопка «WhatsApp» карточки
+    # (wa_open_card_chat, владелец 20.11.2026) — первое сообщение тогда наше.
 
     WA_UI_ACTIVE_SEC = 90
     WA_CHAT_PAGE = 50
@@ -1616,7 +1617,8 @@ class HiringService:
     def _wa_connection(cursor, now):
         view = whatsapp.view(queries.get_integration(cursor, whatsapp.INTEGRATION), now)
         return {'state': view['state'], 'label': view['label'], 'tone': view['tone'],
-                'connected': view['state'] == whatsapp.CONNECTED, 'send_ready': view['send_ready']}
+                'connected': view['state'] == whatsapp.CONNECTED, 'send_ready': view['send_ready'],
+                'reachout_lock': view['reachout_lock']}
 
     @staticmethod
     def _wa_chat_reader(ctx):
@@ -1647,6 +1649,22 @@ class HiringService:
         return wa_chat.send_block(card, involved=bool(card) and self.involved(ctx, card),
                                   owner_or_lead=bool(card) and bool(self._is_owner_or_lead(ctx, card)),
                                   can_take=access.can_take(ctx), connected=True)
+
+    def _wa_write_block(self, ctx, chat, card, connection):
+        """Почему в чат сейчас нельзя написать (None — можно): правила карточки, старый сервис на шлюзе, запрет
+        WhatsApp писать первым незнакомым — в чат, куда кандидат ещё не писал (открыт из карточки)."""
+        block = self._wa_send_block(ctx, card)
+        if block is None and not connection['send_ready']:
+            block = 'bridge'
+        if block is None and not chat.get('last_inbound_at') and connection.get('reachout_lock'):
+            block = 'first_lock'
+        return block
+
+    @staticmethod
+    def _wa_block_text(block, connection):
+        if block == 'first_lock' and connection.get('reachout_lock'):
+            return connection['reachout_lock'] + ' — кандидат вам ещё не писал, написать первым пока нельзя'
+        return wa_chat.SEND_BLOCK_TEXTS.get(block)
 
     @staticmethod
     def _wa_chat_row(ctx, row):
@@ -1697,6 +1715,52 @@ class HiringService:
         scope_sql, scope_params = queries.scope_clause(caps, ctx['user_id'])
         with self._cursor() as cursor:
             return queries.wa_chat_totals(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'])
+
+    def wa_open_card_chat(self, ctx, card_id):
+        """Кнопка «WhatsApp» карточки — переписка в окне «Чаты» (владелец 20.11.2026: «при нажатии на ватсап … полноценный
+        чат, мб просто переход на чаты»). Чат карточки; иначе чат её номера (WhatsApp, потом телефон): ничей или
+        завершённой карточки этого номера переходит к открытой — как при новом сообщении кандидата; иначе пустой чат —
+        кандидату можно написать первым с номера найма (владелец 20.11.2026). Пустой чат в списке не появляется, пока в
+        нём нет сообщений. Возвращает адрес чата для окна."""
+        self._wa_chat_reader(ctx)
+        now = self._now()
+        created = False
+        with self._cursor() as cursor:
+            card = self._load_visible(cursor, ctx, card_id)
+            if not access.sees_phone(ctx, card):
+                raise HiringError('HIRING_PHONE_HIDDEN', 'Переписка откроется, когда возьмёте карточку в работу', 403)
+            chat = queries.wa_chat_by_card(cursor, card['id'])
+            numbers = [number for number in dict.fromkeys((card.get('whatsapp'), card.get('phone'))) if number]
+            keys = [key for key in dict.fromkeys(whatsapp.chat_key(number, None) for number in numbers) if key]
+            for key in keys if chat is None else ():
+                found = queries.wa_get_chat(cursor, key, lock=True)
+                if found is None:
+                    continue
+                owner = queries.get_card(cursor, found['card_id']) if found.get('card_id') else None
+                if owner is None or (owner['is_closed'] and not card['is_closed']):
+                    queries.wa_set_chat_card(cursor, key, card['id'], now)
+                    chat = dict(found, card_id=card['id'])
+                    break
+                if owner['is_closed'] and self.visible(ctx, owner):
+                    chat = found
+                    break
+                raise HiringError('HIRING_WA_OTHER_CARD', 'Переписка с этим номером — в карточке кандидата №%s'
+                                  % (owner.get('candidate_no') or owner['id']), 409)
+            if chat is None:
+                if not keys:
+                    raise HiringError('HIRING_WA_NO_PHONE', 'У карточки нет номера для WhatsApp', 409)
+                key = keys[0]
+                digits = ''.join(ch for ch in key if ch.isdigit())
+                chat = queries.wa_create_chat(cursor, key, digits + '@s.whatsapp.net', key, card['id'], now)
+                if chat is None:
+                    # Второе нажатие (или первое сообщение кандидата) в ту же секунду уже завело чат — открыть его.
+                    chat = queries.wa_get_chat(cursor, key, lock=True)
+                    if not chat.get('card_id'):
+                        queries.wa_set_chat_card(cursor, key, card['id'], now)
+                        chat = dict(chat, card_id=card['id'])
+                created = True
+        self._wa_ui_touch()
+        return {'key': wa_chat.chat_ref(chat, False), 'created': created}
 
     def _wa_message_view(self, message, sign):
         media = None
@@ -1753,11 +1817,9 @@ class HiringService:
             quotes.setdefault(row['wa_id'], {'from_me': bool(row['from_me']), 'author': row.get('author_name'),
                                              'text': 'Сообщение удалено' if row.get('deleted_at')
                                              else wa_chat.preview(row['kind'], row.get('body'))})
-        block = self._wa_send_block(ctx, card)
+        block = self._wa_write_block(ctx, chat, card, connection)
         if hidden:
             block = 'take' if access.can_take(ctx) else 'read_only'
-        if block is None and not connection['send_ready']:
-            block = 'bridge'
         self._wa_ui_touch()
         used = {row.get('quote_wa_id') for row in rows} | {row.get('quote_wa_id') for row in pending}
         titled = dict(chat, full_name=(card or {}).get('full_name'), candidate_no=(card or {}).get('candidate_no'))
@@ -1770,7 +1832,9 @@ class HiringService:
             'messages': [self._wa_message_view(row, sign) for row in rows],
             'pending': [self._wa_pending_view(row, ctx) for row in pending],
             'quotes': {wa_id: value for wa_id, value in quotes.items() if wa_id in used},
-            'has_more': has_more, 'block': block, 'block_text': wa_chat.SEND_BLOCK_TEXTS.get(block),
+            'has_more': has_more, 'block': block, 'block_text': self._wa_block_text(block, connection),
+            # Кандидат в этот чат ещё не писал (открыт из карточки): первое сообщение — наше.
+            'first_contact': not hidden and not chat.get('last_inbound_at'),
             'can_handle': wa_chat.can_handle(block, lead=access.is_lead(ctx), hidden=hidden, waiting=waiting),
             'connection': connection,
         }
@@ -1811,12 +1875,11 @@ class HiringService:
                 chat, card = self._wa_chat_access(cursor, ctx, key, lock=True)
                 if card is not None and not access.sees_phone(ctx, card):
                     raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS['take'], 409)
-                block = self._wa_send_block(ctx, card)
-                if block is None and not self._wa_connection(cursor, now)['send_ready']:
-                    block = 'bridge'
+                connection = self._wa_connection(cursor, now)
+                block = self._wa_write_block(ctx, chat, card, connection)
                 if block:
-                    raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS[block],
-                                      409 if block in ('take', 'bridge') else 403)
+                    raise HiringError('HIRING_WA_SEND_BLOCKED', self._wa_block_text(block, connection),
+                                      409 if block in ('take', 'bridge', 'first_lock') else 403)
                 if quote_id and not queries.wa_messages_by_wa_ids(cursor, chat['key'], [quote_id]):
                     quote_id = None
                 row, fresh = queries.wa_outbox_insert(cursor, {
@@ -1847,12 +1910,11 @@ class HiringService:
             row = self._wa_own_outbox(cursor, ctx, outbox_id)
             if row['status'] != wa_chat.FAILED:
                 raise HiringError('HIRING_WA_NOT_FAILED', 'Сообщение не в ошибке', 409)
-            _chat, card = self._wa_chat_access(cursor, ctx, row['chat_key'], lock=True)
-            block = self._wa_send_block(ctx, card)
-            if block is None and not self._wa_connection(cursor, now)['send_ready']:
-                block = 'bridge'
+            chat, card = self._wa_chat_access(cursor, ctx, row['chat_key'], lock=True)
+            connection = self._wa_connection(cursor, now)
+            block = self._wa_write_block(ctx, chat, card, connection)
             if block:
-                raise HiringError('HIRING_WA_SEND_BLOCKED', wa_chat.SEND_BLOCK_TEXTS[block], 403)
+                raise HiringError('HIRING_WA_SEND_BLOCKED', self._wa_block_text(block, connection), 403)
             if row.get('fail_reason'):
                 client_id = row.get('client_id')
                 queries.wa_outbox_update(cursor, row['id'], status=wa_chat.DISCARDED, client_id=None, updated_at=now)

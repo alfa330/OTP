@@ -1318,6 +1318,18 @@ def wa_set_chat_card(cursor, key, card_id, now):
     cursor.execute("UPDATE hiring_wa_chats SET card_id = %s, updated_at = %s WHERE key = %s", (card_id, now, key))
 
 
+def wa_create_chat(cursor, key, jid, phone, card_id, now):
+    """Пустой чат карточки — написать кандидату первым (владелец 20.11.2026). Чат с этим ключом уже есть (второе
+    нажатие в ту же секунду) — None: вызывающий перечитает его."""
+    cursor.execute("""
+        INSERT INTO hiring_wa_chats (key, jid, phone, card_id, first_at, last_at, messages, created_at, updated_at,
+                                     waiting)
+        VALUES (%s, %s, %s, %s, %s, %s, 0, %s, %s, 0)
+        ON CONFLICT (key) DO NOTHING
+        RETURNING """ + _WA_CHAT_COLUMNS, (key, jid, phone, int(card_id), now, now, now, now))
+    return _one(cursor)
+
+
 def wa_edit_message(cursor, key, wa_id, body, now):
     cursor.execute("""UPDATE hiring_wa_messages SET body = %s, edited_at = %s
                        WHERE chat_key = %s AND wa_id = %s AND deleted_at IS NULL""", (body, now, key, wa_id))
@@ -1701,9 +1713,10 @@ def _like(text):
 
 
 def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_only, search, phone_own_only=False):
-    """Чаты, куда кандидат писал сам, в пределах видимости карточек (queries.scope_clause); чаты без карточки
-    (иностранный номер, скрытый) — только руководителю."""
-    where = ["w.last_inbound_at IS NOT NULL",
+    """Чаты, куда кандидат писал сам, и чаты карточек, где уже есть сообщения (кандидату написали первыми из карточки,
+    владелец 20.11.2026; пустой чат, открытый кнопкой и брошенный, в списке не висит), — в пределах видимости карточек
+    (queries.scope_clause); чаты без карточки (иностранный номер, скрытый) — только руководителю."""
+    where = ["(w.last_inbound_at IS NOT NULL OR (w.card_id IS NOT NULL AND w.messages > 0))",
              "((c.id IS NOT NULL AND %s)%s)" % (scope_sql, " OR c.id IS NULL" if lead else "")]
     params = list(scope_params)
     if mode == 'mine':

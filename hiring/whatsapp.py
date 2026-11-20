@@ -342,6 +342,22 @@ def can_command(action, state, detail):
     return True, None
 
 
+def reachout_lock(detail, now):
+    """Запрет WhatsApp писать первым незнакомым (reachout timelock) — текст, пока он действует, иначе None. Срок
+    прошёл, а сервис ещё не сообщил о снятии, — запрета уже нет."""
+    timelock = (detail or {}).get('timelock') or {}
+    if not timelock.get('active'):
+        return None
+    until = str(timelock.get('until') or '')[:19]
+    try:
+        if until and datetime.fromisoformat(until) <= now:
+            return None
+    except ValueError:
+        until = ''
+    return 'WhatsApp ограничил номеру первые сообщения незнакомым%s' % (
+        (' до ' + until[:16].replace('T', ' ')) if until else '')
+
+
 def phone_seen_days(detail, now):
     seen = (detail or {}).get('phone_seen_at')
     if not seen:
@@ -375,10 +391,9 @@ def view(row, now):
     if days is not None and days >= PHONE_WARN_DAYS:
         warnings.append('Телефон с номером не выходил в WhatsApp %d дн. — откройте на нём WhatsApp Business: '
                         'через 14 дней без телефона привязка слетает' % days)
-    timelock = detail.get('timelock') or {}
-    if timelock.get('active'):
-        warnings.append('WhatsApp ограничил номеру первые сообщения незнакомым%s — отвечать на входящие можно'
-                        % ((' до ' + str(timelock.get('until'))[:16].replace('T', ' ')) if timelock.get('until') else ''))
+    lock = reachout_lock(detail, now)
+    if lock:
+        warnings.append(lock + ' — отвечать на входящие можно')
     command = settings.get('command') or None
     return {
         'state': state,
@@ -401,6 +416,8 @@ def view(row, now):
         'actions': {action: can_command(action, state, detail)[0] for action in COMMANDS},
         # Ответы из портала: сервис этой версии умеет отправлять (пока он не на связи, ответ ждёт в очереди).
         'send_ready': 'send' in (detail.get('features') or ()),
+        # Написать кандидату первым (чат из карточки, владелец 20.11.2026) нельзя, пока действует запрет WhatsApp.
+        'reachout_lock': reachout_lock(detail, now),
     }
 
 

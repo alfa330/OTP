@@ -936,6 +936,11 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     def hiring_card_whatsapp(card_id, ctx):
         return jsonify(_json(service.card_whatsapp(ctx, card_id)))
 
+    # Кнопка «WhatsApp» карточки: адрес её чата в окне «Чаты» (нет переписки — пустой чат, написать первым).
+    @hiring_route('/cards/<int:card_id>/chat', methods=('POST',))
+    def hiring_card_chat(card_id, ctx):
+        return jsonify(_json(service.wa_open_card_chat(ctx, card_id)))
+
     # Окно «Чаты»: переписка с кандидатами из портала (владелец 19.11.2026, hiring/wa_chat.py). Ключ чата —
     # номер «+7…», «wa:…» или «lid:…»: в адресе он кодируется целиком (encodeURIComponent).
     @hiring_route('/wa/chats')

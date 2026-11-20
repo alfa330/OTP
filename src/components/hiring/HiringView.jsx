@@ -192,6 +192,17 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
     }, []);
     const moveConsumed = useCallback(() => setOpenMove(null), []);
     const callConsumed = useCallback(() => setOpenCall(false), []);
+    // «WhatsApp» в карточке и на столе — переписка в окне «Чаты», а не WhatsApp Web (владелец 20.11.2026:
+    // «при нажатии на ватсап … полноценный чат, мб просто переход на чаты»). Окно само спросит у сервера адрес чата.
+    const [chatFocus, setChatFocus] = useState(null);
+    const focusConsumed = useCallback(() => setChatFocus(null), []);
+    const openChat = (id) => {
+        setOpenCardId(null);
+        setOpenMove(null);
+        setOpenCall(false);
+        setChatFocus({ cardId: Number(id) });
+        chooseTab('chats');
+    };
 
     // Доска — на всю ширину экрана (владелец 30.10.2026: на большом мониторе видеть все этапы), остальные
     // вкладки — в обычной ширине раздела.
@@ -208,6 +219,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
 
     const meta = TAB_META[active] || TAB_META.board;
     const shared = { api, toast, boot, caps, onOpenCard: openCard, version, onChanged, reloadBoot };
+    const onOpenChat = tabs.includes('chats') ? openChat : undefined;
     return shell(
         <>
             <header className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
@@ -233,9 +245,9 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                     </div>
                 )}
             </header>
-            {active === 'desk' && <DeskTab {...shared} />}
+            {active === 'desk' && <DeskTab {...shared} onOpenChat={onOpenChat} />}
             {active === 'board' && <BoardTab {...shared} />}
-            {active === 'chats' && <ChatsTab {...shared} onWaiting={setWaitingChats} />}
+            {active === 'chats' && <ChatsTab {...shared} onWaiting={setWaitingChats} focus={chatFocus} onFocusConsumed={focusConsumed} />}
             {active === 'groups' && <GroupsTab {...shared} />}
             {active === 'reports' && <ReportsTab {...shared} />}
             {active === 'upload' && <UploadTab {...shared} />}
@@ -249,6 +261,7 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
                 cardId={openCardId}
                 onClose={() => { setOpenCardId(null); setOpenMove(null); setOpenCall(false); }}
                 onChanged={onChanged}
+                onOpenChat={onOpenChat}
                 initialMove={openMove}
                 onMoveConsumed={moveConsumed}
                 initialCall={openCall}

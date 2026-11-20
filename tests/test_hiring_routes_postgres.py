@@ -258,6 +258,10 @@ def test_card_flow_through_routes(client):
     again = client.post('/api/hiring/cards/%s/take' % card['id'], headers=as_user(REC2))
     assert again.status_code == 409 and again.get_json()['code'] == 'HIRING_ALREADY_TAKEN'
     assert client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(REC2)).status_code == 404
+    # «WhatsApp» карточки — адрес её чата в окне «Чаты» (переписки нет — пустой чат); чужому — карточки нет.
+    opened = client.post('/api/hiring/cards/%s/chat' % card['id'], headers=as_user(REC1))
+    assert opened.status_code == 200 and opened.get_json() == {'key': '+77051234567', 'created': True}
+    assert client.post('/api/hiring/cards/%s/chat' % card['id'], headers=as_user(REC2)).status_code == 404
     # Тренер читает всю воронку (владелец 19.11.2026): чужую карточку видит с телефоном, но только для чтения.
     seen = client.get('/api/hiring/cards/%s' % card['id'], headers=as_user(TRAINER))
     assert seen.status_code == 200 and seen.get_json()['read_only'] is True and seen.get_json()['card']['phone_pretty'] == '+7 705 123 45 67'

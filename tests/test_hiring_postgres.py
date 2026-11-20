@@ -2500,6 +2500,94 @@ def test_chat_remote_recruiter_sees_pool_chat_after_take_only(world):
     assert service.wa_chats(remote, {'q': '558833'})['items'][0]['card_id'] == row['card_id']
 
 
+def test_card_whatsapp_opens_chat_and_writes_first(world):
+    """«WhatsApp» в карточке — чат в окне «Чаты» (владелец 20.11.2026). Переписки нет — пустой чат: кандидату можно
+    написать первым; в списке он появляется, когда сообщение ушло. Чат номера без карточки и чат завершённой карточки
+    переходят к открытой; чат другой открытой карточки — нет. Пока WhatsApp запретил номеру писать первым незнакомым —
+    первым не написать, а в чат, куда кандидат писал сам, — можно."""
+    service, clock = world['service'], world['clock']
+    me, remote = ctx_of(world, REC1), ctx_of(world, REMOTE)
+    _chat_poll(service)
+    card = take_and_touch(world, REC1, '+77055558850', full_name='Асель Первая')
+    opened = service.wa_open_card_chat(me, card['id'])
+    assert opened == {'key': '+77055558850', 'created': True}
+    assert service.wa_open_card_chat(me, card['id']) == {'key': '+77055558850', 'created': False}
+    with world['db']._get_cursor() as cur:
+        chat = queries.wa_get_chat(cur, '+77055558850')
+    assert (chat['jid'], chat['phone'], chat['card_id'], chat['messages'], chat['last_inbound_at']) == \
+        ('77055558850@s.whatsapp.net', '+77055558850', card['id'], 0, None)
+    # Пустой чат в списке не висит; лента — «напишите первым», писать можно.
+    assert service.wa_chats(me, {})['items'] == []
+    thread = _thread(world, REC1, '+77055558850')
+    assert (thread['messages'], thread['block'], thread['first_contact'], thread['can_handle']) == ([], None, True, False)
+    first = service.wa_send(me, '+77055558850', {'text': 'Здравствуйте! Вы оставляли отклик'})['item']
+    assert _chat_poll(service)['send'][0] == {'id': first['outbox_id'], 'chat': '77055558850@s.whatsapp.net',
+                                              'kind': 'text', 'text': 'Здравствуйте! Вы оставляли отклик',
+                                              'expires_in': 1800}
+    clock.now = NOW + timedelta(minutes=1)
+    service.wa_events({'events': [{'type': 'sent', 'outbox': first['outbox_id'], 'id': '3EB0BB01', 'ts': WA_TS + 60}]})
+    listed = service.wa_chats(me, {})['items']
+    assert [(i['key'], i['waiting'], i['title'], i['last']['from_me']) for i in listed] == \
+        [('+77055558850', 0, 'Асель Первая', True)]
+    # Ответ кандидата ложится в тот же чат и ту же карточку — нового отклика нет.
+    service.wa_events({'events': [wa_event('f1', phone='77055558850', ts=WA_TS + 120, text='Да, интересно')]})
+    thread = _thread(world, REC1, '+77055558850')
+    assert [m['text'] for m in thread['messages']] == ['Здравствуйте! Вы оставляли отклик', 'Да, интересно']
+    assert thread['card']['id'] == card['id'] and not thread['first_contact']
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77055558850')['id'] == card['id']
+
+    # Номер писал, пока источник «WhatsApp» был выключен: чат без карточки переходит к карточке номера.
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_sources SET is_active = FALSE WHERE code = 'whatsapp'")
+    service.wa_events({'events': [wa_event('f2', phone='77055558851', text='Добрый день')]})
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_sources SET is_active = TRUE WHERE code = 'whatsapp'")
+        assert queries.wa_get_chat(cur, '+77055558851')['card_id'] is None
+    loose = take_and_touch(world, REC1, '+77055558851')
+    assert service.wa_open_card_chat(me, loose['id']) == {'key': '+77055558851', 'created': False}
+    assert [m['text'] for m in _thread(world, REC1, '+77055558851')['messages']] == ['Добрый день']
+
+    # Чат завершённой карточки — к новой открытой карточке того же номера.
+    old = take_and_touch(world, REC1, '+77055558852')
+    service.wa_open_card_chat(me, old['id'])
+    with world['db']._get_cursor() as cur:
+        no_contact = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_CONTACT)
+    service.move(me, old['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    renewed = take_and_touch(world, REC1, '+77055558852')
+    assert renewed['id'] != old['id']
+    assert service.wa_open_card_chat(me, renewed['id']) == {'key': '+77055558852', 'created': False}
+    with world['db']._get_cursor() as cur:
+        assert queries.wa_get_chat(cur, '+77055558852')['card_id'] == renewed['id']
+
+    # WhatsApp карточки — номер, по которому идёт переписка другой открытой карточки: не перехватывается.
+    taken = take_and_touch(world, REC1, '+77055558853')
+    service.edit_card(me, taken['id'], {'whatsapp': '+77055558850'})
+    with pytest.raises(HiringError) as foreign:
+        service.wa_open_card_chat(me, taken['id'])
+    assert foreign.value.code == 'HIRING_WA_OTHER_CARD' and foreign.value.status == 409
+
+    # Удалённому рекрутеру отклик из пула — без телефона и без чата.
+    _outcome, pooled = add_response(world, REC1, '+77055558854')
+    with pytest.raises(HiringError) as hidden:
+        service.wa_open_card_chat(remote, pooled['id'])
+    assert hidden.value.status == 403
+
+    # Запрет WhatsApp писать первым: в пустой чат — нельзя, в чат, где кандидат писал, — можно; срок прошёл — можно.
+    fresh = take_and_touch(world, REC1, '+77055558855')
+    service.wa_open_card_chat(me, fresh['id'])
+    service.wa_poll({'state': 'connected', 'features': ['resend', 'send'],
+                     'detail': {'paired': True, 'timelock': {'active': True, 'until': '2026-10-15T18:30:00'}}})
+    thread = _thread(world, REC1, '+77055558855')
+    assert thread['block'] == 'first_lock' and '18:30' in thread['block_text']
+    with pytest.raises(HiringError) as locked:
+        service.wa_send(me, '+77055558855', {'text': 'Здравствуйте!'})
+    assert locked.value.status == 409 and 'первым' in locked.value.message
+    assert _thread(world, REC1, '+77055558850')['block'] is None
+    clock.now = datetime(2026, 10, 15, 18, 31)
+    assert _thread(world, REC1, '+77055558855')['block'] is None
+
+
 def test_chat_templates_are_shared_and_edited_by_recruiters(world):
     service = world['service']
     me, lead, trainer = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT), ctx_of(world, TRAINER)

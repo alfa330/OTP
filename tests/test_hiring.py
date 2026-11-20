@@ -211,6 +211,24 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         header = chats[chats.index('<div className="flex flex-wrap items-center gap-2">'):chats.index('<div className="relative min-h-0 flex-1">')]
         self.assertNotIn('handled', header)
 
+    def test_card_whatsapp_opens_portal_chat(self):
+        """Владелец 20.11.2026: «при нажатии на ватсап … полноценный чат, мб просто переход на чаты» — кнопка карточки и
+        значок рабочего стола открывают окно «Чаты» с чатом карточки, а не WhatsApp Web; касание пишет отправка."""
+        ui = ROOT / 'src' / 'components' / 'hiring'
+        desk = (ui / 'DeskTab.jsx').read_text(encoding='utf-8')
+        chats = (ui / 'ChatsTab.jsx').read_text(encoding='utf-8')
+        for text in (self.sheet, desk):
+            self.assertNotIn('window.open(card.whatsapp_link', text)
+            self.assertNotIn("{ kind: 'whatsapp' }", text)
+        self.assertIn("const whatsapp = () => { if (card?.id) onOpenChat?.(card.id); };", self.sheet)
+        self.assertIn("...(whatsappCount && !onOpenChat ? [{ value: 'whatsapp'", self.sheet)
+        self.assertIn('const whatsapp = onOpenChat ? (card) => onOpenChat(card.id) : null;', desk)
+        self.assertIn("const onOpenChat = tabs.includes('chats') ? openChat : undefined;", self.view)
+        self.assertIn('focus={chatFocus} onFocusConsumed={focusConsumed}', self.view)
+        self.assertIn('onOpenChat={onOpenChat}', self.view)
+        self.assertIn('api.post(`/cards/${focus.cardId}/chat`)', chats)
+        self.assertIn('.then(({ data }) => { if (data?.key) setSelectedKey(data.key); })', chats)
+
     def test_board_scrollbar_and_take_button(self):
         self.assertIn('className="board-scroll -mx-3 overflow-x-auto', self.board)
         block = self.styles[self.styles.index('.board-scroll::-webkit-scrollbar {'):]

@@ -23,9 +23,10 @@ import { WhatsAppThread } from './WhatsAppPanel';
  * смены на линии и подтверждение «Отработал 7 дней» (руководитель отдела), мотивация.
  *
  * Связь с кандидатом — кнопками «Позвонить» (icore-phone:call — звонок уходит в iCore Phone на
- * этом компьютере) и «Написать в WhatsApp» (WhatsApp Web). Касание пишется в ленту при нажатии:
- * звонок — с результатом, который спрашивается сразу (дозвон / недозвон), переписка — фактом
- * открытия чата; звонок из телефонии потом дописывает отметку исходом, длительностью и записью.
+ * этом компьютере) и «Написать в WhatsApp» — переписка в окне «Чаты» раздела с номера найма (владелец
+ * 20.11.2026, вместо WhatsApp Web). Звонок пишет касание сразу — с результатом, который спрашивается
+ * (дозвон / недозвон), телефония потом дописывает исход, длительность и запись; переписка — касанием
+ * WhatsApp, когда сообщение ушло (одно в день).
  * Телефон удалённому рекрутеру виден только в своих карточках — сервер его иначе не присылает.
  */
 
@@ -639,7 +640,7 @@ const StageHistory = ({ stages, assignments }) => (
     </div>
 );
 
-const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChanged, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
+const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChanged, onOpenChat, initialMove = null, onMoveConsumed, initialCall = false, onCallConsumed }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [tab, setTab] = useState('card');
@@ -742,16 +743,8 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
         }
         startCall();
     };
-    const whatsapp = async () => {
-        if (!card?.whatsapp_link) return;
-        window.open(card.whatsapp_link, '_blank', 'noopener');
-        try {
-            await api.post(`/cards/${card.id}/touches`, { kind: 'whatsapp' });
-            changed();
-        } catch (requestError) {
-            toast(errorOf(requestError, 'Переписка не записана'), 'error');
-        }
-    };
+    // Переписка — в окне «Чаты» (карточка закрывается); касание пишет отправленное сообщение, а не нажатие.
+    const whatsapp = () => { if (card?.id) onOpenChat?.(card.id); };
     const addComment = async () => {
         if (!comment.trim()) return;
         setSavingComment(true);
@@ -832,13 +825,16 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
     const shiftsDone = data?.shifts?.length || 0;
     const touchCount = (data?.touches || []).length;
     const showHire = Boolean(card && (card.stage === 'on_line' || data?.motivation));
-    // Переписка с номером WhatsApp найма — вкладкой, только когда она есть (и телефон виден человеку).
+    // Переписка с номером WhatsApp найма — вкладкой (только чтение), только когда она есть и телефон виден человеку.
+    // У кого есть окно «Чаты», тому вместо вкладки — кнопка в чат: там можно и ответить (владелец 20.11.2026).
     const whatsappCount = data?.whatsapp?.messages || 0;
+    const canContact = Boolean(card?.phone && !POOL_STAGES.includes(card.stage) && isOwnerOrLead && !card.is_closed);
+    const chatButton = Boolean(onOpenChat && card?.whatsapp_link && (canContact || whatsappCount));
     // Вкладки карточки (владелец 30.10.2026: карточка перегружена — поделить хотя бы на табы).
     const tabs = card ? [
         { value: 'card', label: 'Карточка' },
         { value: 'touches', label: touchCount ? `Касания · ${touchCount}` : 'Касания' },
-        ...(whatsappCount ? [{ value: 'whatsapp', label: `WhatsApp · ${whatsappCount}` }] : []),
+        ...(whatsappCount && !onOpenChat ? [{ value: 'whatsapp', label: `WhatsApp · ${whatsappCount}` }] : []),
         ...(showHire ? [{ value: 'hire', label: 'Смены и мотивация' }] : []),
         { value: 'history', label: 'История' },
     ] : [];
@@ -867,11 +863,13 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
                                 {POOL_STAGES.includes(card.stage) && caps.take && !card.is_closed && (
                                     <button type="button" className={iosBtnPrimary} onClick={take}>Взять в работу</button>
                                 )}
-                                {card.phone && !POOL_STAGES.includes(card.stage) && isOwnerOrLead && !card.is_closed && (
-                                    <>
-                                        <button type="button" className={TOOLBAR_BTN} onClick={call}><Phone size={14} /> Позвонить</button>
-                                        <button type="button" className={TOOLBAR_BTN} onClick={whatsapp}><MessageCircle size={14} /> Написать в WhatsApp</button>
-                                    </>
+                                {canContact && (
+                                    <button type="button" className={TOOLBAR_BTN} onClick={call}><Phone size={14} /> Позвонить</button>
+                                )}
+                                {chatButton && (
+                                    <button type="button" className={TOOLBAR_BTN} onClick={whatsapp}>
+                                        <MessageCircle size={14} /> {canContact ? 'Написать в WhatsApp' : `WhatsApp · ${whatsappCount}`}
+                                    </button>
                                 )}
                                 {caps.manage && !card.is_closed && !POOL_STAGES.includes(card.stage) && (
                                     <button type="button" className={TOOLBAR_BTN} onClick={() => setReassigning(true)}><UserCog size={14} /> Переназначить</button>

@@ -57,8 +57,8 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
                     <button type="button" className={ICON_BTN} aria-label="Позвонить" title="Позвонить из iCore Phone" onClick={() => onCall(card)}>
                         <Phone size={15} />
                     </button>
-                    {card.whatsapp_link && (
-                        <button type="button" className={ICON_BTN} aria-label="Написать в WhatsApp" title="Написать в WhatsApp" onClick={() => onWhatsapp(card)}>
+                    {onWhatsapp && card.whatsapp_link && (
+                        <button type="button" className={ICON_BTN} aria-label="Написать в WhatsApp" title="Написать в WhatsApp — откроется чат" onClick={() => onWhatsapp(card)}>
                             <MessageCircle size={15} />
                         </button>
                     )}
@@ -68,7 +68,7 @@ const TaskRow = ({ card, onOpen, onCall, onWhatsapp }) => {
     );
 };
 
-const DeskTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => {
+const DeskTab = ({ api, toast, boot, caps, onOpenCard, onOpenChat, version }) => {
     const [month, setMonth] = useState(currentMonth);
     const [recruiterId, setRecruiterId] = useState('');
     // Фильтры рабочего стола (ТЗ 3): вакансия, город, источник, этап — на задачи и воронку.
@@ -113,15 +113,8 @@ const DeskTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) => 
         }
         onOpenCard(card.id, { call: true });
     };
-    const whatsapp = async (card) => {
-        window.open(card.whatsapp_link, '_blank', 'noopener');
-        try {
-            await api.post(`/cards/${card.id}/touches`, { kind: 'whatsapp' });
-            onChanged();
-        } catch (error) {
-            toast(errorOf(error, 'Переписка не записана'), 'error');
-        }
-    };
+    // Переписка — в окне «Чаты» раздела (владелец 20.11.2026), касание пишет отправленное сообщение.
+    const whatsapp = onOpenChat ? (card) => onOpenChat(card.id) : null;
 
     const tasks = data?.tasks || {};
     const taskTotal = Object.values(tasks).reduce((sum, items) => sum + items.length, 0);
