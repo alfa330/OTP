@@ -7,6 +7,8 @@
 - пустой строке подставляется почта из карточки, вписанная руками — никогда;
 - без ключа Syntony — ни одной записи; отказ подключения целиком останавливает прогон,
   остальные отказы — пауза 6 часов для этого человека;
+- «не связан» переспрашиваем раз в сутки (время проверки отмечается и при прежнем ответе),
+  связанных — нет; новые люди идут первыми, перепроверка добирает партию;
 - за прогон — не больше партии людей и бюджета времени разговоров с Syntony;
 - курсор закрыт, пока Syntony отвечает; поток — один на процесс.
 
@@ -20,17 +22,39 @@ import unittest.mock
 
 from syntony_window import autogrant, client, rules
 from tests.test_syntony_window import (
-    ADMIN, CONFIG, FIRED, NOT_LINKED, OPERATOR, SUPER, SV, TRAINEE, FakeResponse, FakeStore, Recorder,
+    ADMIN, CONFIG, FIRED, NOT_LINKED, OK_REPLY, OPERATOR, SUPER, SV, TRAINEE, FakeResponse, FakeStore,
+    Recorder,
 )
+
+DAY = 24 * 3600
 
 
 class Store(FakeStore):
-    """Склад с отделами и следом снятий — всё, что читает сторож."""
+    """Склад с отделами, следом снятий и временем ответов Syntony — всё, что читает сторож."""
 
     def __init__(self):
         super().__init__()
         self.departments = {SUPER: 'development', ADMIN: 'szov', SV: 'op', OPERATOR: 'op',
                             TRAINEE: 'szov', FIRED: 'op'}
+        self.now = 10.0 * DAY             # часы склада: link_checked_at — в них
+
+    def add(self, user_id, email='', link_state='unknown', checked_ago=0):
+        """checked_ago — сколько секунд назад Syntony ответила о связи (у «не проверено» — нет ответа)."""
+        super().add(user_id, email, link_state)
+        self.access[user_id]['checked'] = None if link_state == 'unknown' else self.now - checked_ago
+
+    def set_link_state(self, cursor, user_id, state):
+        if user_id not in self.access:
+            return False
+        self.access[user_id].update(link_state=state, checked=self.now)
+        return True
+
+    def stale_not_linked(self, cursor, older_than_seconds, limit):
+        found = [(row.get('checked'), uid) for uid, row in self.access.items()
+                 if row['link_state'] == 'not_linked' and self._working(uid)
+                 and (row.get('checked') is None or row['checked'] < self.now - older_than_seconds)]
+        found.sort(key=lambda item: (item[0] is not None, item[0] or 0, item[1]))
+        return [uid for _, uid in found][:limit]
 
     def _row(self, uid):
         return {'id': uid, 'name': self.users[uid]['name'],
@@ -53,7 +77,7 @@ class Store(FakeStore):
         row = self.access.get(user_id)
         if not row or row['email']:
             return False
-        row.update(email=email, link_state='unknown')
+        row.update(email=email, link_state='unknown', checked=None)
         return True
 
     def unregistered(self, cursor, limit):
@@ -183,6 +207,58 @@ class AutograntTests(unittest.TestCase):
         clock.now += autogrant.RETRY_AFTER_SECONDS + 1
         self.assertEqual(run()['registered'], {'not_linked': 1})
         self.assertEqual(len(run.asked), 2)
+
+    def test_not_linked_answered_over_a_day_ago_is_asked_again_and_linked_never(self):
+        store = Store()
+        store.departments = {}                    # новых людей нет: только перепроверка
+        store.add(OPERATOR, 'aigerim@icore.kz', link_state='not_linked', checked_ago=DAY + 60)
+        store.add(SV, 'sv@icore.kz', link_state='not_linked', checked_ago=3600)
+        store.add(ADMIN, '', link_state='linked', checked_ago=10 * DAY)
+        store.add(FIRED, 'gleb@icore.kz', link_state='not_linked', checked_ago=10 * DAY)
+        run = Run(OK_REPLY, store=store)
+        summary = run()
+        self.assertEqual((summary['registered'], summary['rechecked']), ({}, {'linked': 1}))
+        self.assertEqual([body['partnerUserId'] for body in run.asked], [str(OPERATOR)])
+        self.assertEqual(run.asked[0]['partnerUserEmail'], 'aigerim@icore.kz')
+        self.assertEqual(store.access[OPERATOR]['link_state'], 'linked', '«Ждёт связи» в «Доступе» сменилось')
+        self.assertEqual(run()['rechecked'], {}, 'связанного больше не спрашиваем')
+        self.assertEqual(len(run.asked), 1)
+
+    def test_the_same_answer_still_stamps_the_check_and_the_next_one_waits_a_day(self):
+        store = Store()
+        store.departments = {}
+        store.add(OPERATOR, 'aigerim@icore.kz', link_state='not_linked', checked_ago=2 * DAY)
+        run = Run(NOT_LINKED, NOT_LINKED, store=store)
+        self.assertEqual(run()['rechecked'], {'not_linked': 1})
+        self.assertEqual(store.access[OPERATOR]['checked'], store.now)
+        self.assertEqual(run()['rechecked'], {}, 'через 15 минут не переспрашиваем')
+        store.now += autogrant.RECHECK_AFTER_SECONDS + 1
+        self.assertEqual(run()['rechecked'], {'not_linked': 1})
+        self.assertEqual(len(run.asked), 2)
+
+    def test_a_refused_recheck_also_rests_six_hours(self):
+        store = Store()
+        store.departments = {}
+        store.add(OPERATOR, 'aigerim@icore.kz', link_state='not_linked', checked_ago=2 * DAY)
+        bad = FakeResponse(400, {'error': {'code': 'invalid_request', 'message': 'плохое имя'}})
+        clock = Clock()
+        run = Run(bad, NOT_LINKED, store=store, clock=clock)
+        self.assertEqual(run()['rechecked'], {'invalid_request': 1})
+        self.assertEqual(run()['rechecked'], {}, 'время проверки не отмечено, но в паузе не спрашиваем')
+        clock.now += autogrant.RETRY_AFTER_SECONDS + 1
+        self.assertEqual(run()['rechecked'], {'not_linked': 1})
+        self.assertEqual(len(run.asked), 2)
+
+    def test_newcomers_go_first_and_the_recheck_fills_the_rest_of_the_batch(self):
+        store = Store()
+        store.departments = {SV: 'op', OPERATOR: 'op'}
+        store.add(TRAINEE, '', link_state='not_linked', checked_ago=2 * DAY)
+        store.add(ADMIN, '', link_state='not_linked', checked_ago=3 * DAY)
+        run = Run(store=store)
+        summary = run(batch=3)
+        self.assertEqual([body['partnerUserId'] for body in run.asked], [str(SV), str(OPERATOR), str(ADMIN)])
+        self.assertEqual((summary['registered'], summary['rechecked']), ({'not_linked': 2}, {'not_linked': 1}))
+        self.assertIn('перепроверка связи: not_linked×1', autogrant._describe(summary))
 
     def test_a_run_is_limited_by_the_batch_and_by_the_talk_budget(self):
         run = Run()

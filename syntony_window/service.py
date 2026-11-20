@@ -49,13 +49,17 @@ def ask(window, *, user_id, name, email, load_config=client.load_config,
     return request_window(config, body)
 
 
-def remember_link(db, store, user_id, reply, known_state, *, log=None):
+def remember_link(db, store, user_id, reply, known_state, *, log=None, always=False):
     """Записать, что Syntony ответила о связи, — только если ответ о ней и он новый.
+
+    always=True — и прежний ответ: так отмечается время проверки (сторож переспрашивает
+    «не связан» раз в сутки, считая от неё). Окно портала и CRM пишут только перемену — на
+    каждое открытие окна запись в базу не нужна.
 
     log — журнал того, кто выдал окно (ручка портала пишет в свой): по строке видно, откуда
     окно открывали."""
     state = rules.link_state_of(reply.status, reply.body)
-    if not state or state == known_state:
+    if not state or (state == known_state and not always):
         return
     try:
         with db._get_cursor() as cursor:

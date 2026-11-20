@@ -392,5 +392,59 @@ def test_autogrant_run_adds_newcomers_registers_them_and_leaves_the_rest(db):
             ('grant', BORIS, '', None, 'Автоматически'), ('email', SV, 'sv@icore.kz', None, 'Автоматически')]
         states = {item['id']: item['link_state'] for item in queries.list_access(cur)}
     assert states == {HEAD: 'not_linked', ANNA: 'not_linked', BORIS: 'not_linked', SV: 'not_linked'}
-    assert run() == {'granted': [], 'emails': [], 'registered': {}, 'stopped': ''}
+    assert run() == {'granted': [], 'emails': [], 'registered': {}, 'rechecked': {}, 'stopped': ''}
     assert len(calls) == 4, 'второй прогон Syntony не беспокоит'
+
+
+def test_stale_not_linked_are_working_rows_answered_not_linked_long_ago(db):
+    with db._get_cursor() as cur:
+        for user_id in (HEAD, SV, ANNA, BORIS, FIRED):
+            queries.grant(cur, user_id, '', SUPER)
+            queries.set_link_state(cur, user_id, rules.LINK_NOT_LINKED)
+        queries.set_link_state(cur, HEAD, rules.LINK_LINKED)
+        cur.execute("UPDATE syntony_window_access SET link_checked_at = link_checked_at - INTERVAL '3 days' "
+                    "WHERE user_id IN (%s, %s, %s)", (HEAD, ANNA, FIRED))
+        cur.execute("UPDATE syntony_window_access SET link_checked_at = NULL WHERE user_id = %s", (BORIS,))
+    with db._get_cursor() as cur:
+        # SV ответили только что, глава связан, Глеб уволен; без времени ответа — первым.
+        assert queries.stale_not_linked(cur, 24 * 3600, 10) == [BORIS, ANNA]
+        assert queries.stale_not_linked(cur, 24 * 3600, 1) == [BORIS]
+        assert queries.stale_not_linked(cur, 0, 10) == [BORIS, ANNA, SV]
+
+
+def test_autogrant_asks_again_about_not_linked_once_a_day_over_real_sql(db):
+    from syntony_window import autogrant
+
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs['json']['partnerUserId'])
+        if kwargs['json']['partnerUserId'] == str(ANNA):
+            return _Reply(200, {'url': WINDOW_URL, 'expiresAt': '2026-11-21T09:12:00Z'})
+        return _Reply(409, {'error': {'code': 'operator_not_linked', 'message': 'не связан'}})
+
+    def run():
+        return autogrant.run_once(
+            db, load_config=lambda: client.Config(url=client.DEFAULT_URL, key=KEY),
+            request_window=lambda config, body: client.request_window(config, body, post=post),
+            sleep=lambda seconds: None, backoff={})
+
+    with db._get_cursor() as cur:
+        # Почты — как в карточках (или их нет): сторожу нечего подставлять, новых людей нет.
+        for user_id, email in ((HEAD, ''), (SV, 'sv@icore.kz'), (ANNA, 'anna@icore.kz'), (BORIS, '')):
+            queries.grant(cur, user_id, email, SUPER)
+            queries.set_link_state(cur, user_id, rules.LINK_NOT_LINKED)
+        cur.execute("UPDATE syntony_window_access SET link_checked_at = link_checked_at - INTERVAL '2 days' "
+                    "WHERE user_id IN (%s, %s)", (ANNA, BORIS))
+    first = run()
+    assert (first['granted'], first['emails'], first['registered']) == ([], [], {})
+    assert first['rechecked'] == {'linked': 1, 'not_linked': 1}
+    assert sorted(calls) == sorted([str(ANNA), str(BORIS)]), 'кого спрашивали меньше суток назад — не трогаем'
+    with db._get_cursor() as cur:
+        states = {item['id']: item['link_state'] for item in queries.list_access(cur)}
+        cur.execute("SELECT link_checked_at > (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Almaty') - INTERVAL '1 minute' "
+                    "FROM syntony_window_access WHERE user_id = %s", (BORIS,))
+        boris_stamped = cur.fetchone()[0]
+    assert states == {HEAD: 'not_linked', SV: 'not_linked', ANNA: 'linked', BORIS: 'not_linked'}
+    assert boris_stamped, 'прежний ответ тоже отмечает время проверки'
+    assert run()['rechecked'] == {} and len(calls) == 2

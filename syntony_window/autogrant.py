@@ -15,7 +15,12 @@
    ПУСТЫМ строкам, вписанное руками не трогает: по почте Syntony свяжет оператора с
    сотрудником, без неё связи не будет;
 3. записывает у Syntony всех из списка, о чьей связи она ещё не отвечала (ТЗ, задача 6):
-   запрос ссылки «Чаты», ссылку не открывает; 409 operator_not_linked — ожидаемый ответ.
+   запрос ссылки «Чаты», ссылку не открывает; 409 operator_not_linked — ожидаемый ответ;
+4. раз в сутки переспрашивает о тех, кого Syntony назвала «не связан», — тем же запросом.
+   Связывает оператора её администратор у себя и нам об этом не сообщает; раньше ответ
+   обновлялся, только когда человек сам открывал окно, и в «Доступе» у связанных неделями
+   висело «Ждёт связи» (20.11.2026: у Syntony в одном отделе 34 связанных, у нас — 16).
+   Новые люди — первыми, перепроверка добирает партию до конца.
 
 След выдач — те же строки grant / email, что у кнопки, с actor_name «Автоматически».
 
@@ -45,6 +50,7 @@ BATCH = 10
 TALK_BUDGET_SECONDS = 60
 PAUSE_SECONDS = 0.7          # Syntony: 60 ссылок в секунду; идём по одному с запасом
 RETRY_AFTER_SECONDS = 6 * 3600
+RECHECK_AFTER_SECONDS = 24 * 3600
 UNREGISTERED_SCAN = 200
 # Ответы не про человека, а про подключение целиком: идти дальше незачем.
 STOP_CODES = frozenset({
@@ -98,18 +104,22 @@ def _fill_emails(db, store, limit):
     return filled
 
 
-def _register(db, store, user_ids, *, load_config, request_window, backoff, budget, pause,
-              sleep, clock):
-    """Записать людей у Syntony. Курсор закрыт, пока Syntony отвечает."""
+def _register(db, store, user_ids, *, rechecks=frozenset(), load_config, request_window, backoff,
+              budget, pause, sleep, clock):
+    """Записать людей у Syntony; кто в rechecks — переспросить о связи. Курсор закрыт, пока
+    Syntony отвечает. → (ответы записи, ответы перепроверки, причина остановки)."""
     started = clock()
-    outcomes, stopped, asked = {}, '', 0
+    outcomes, rechecked, stopped, asked = {}, {}, '', 0
     for user_id in user_ids:
         if clock() - started >= budget:
             break
+        recheck = user_id in rechecks
         with db._get_cursor() as cursor:
             ctx = store.load_access_context(cursor, user_id)
-        # Пока сторож шёл, человека могли убрать, уволить или Syntony уже ответила о нём.
-        if not ctx or not access.can_request_window(ctx) or ctx['link_state'] != rules.LINK_UNKNOWN:
+        # Пока сторож шёл, человека могли убрать, уволить или Syntony уже ответила о нём
+        # (связанного переспрашивать незачем: окно у него открывается).
+        expected = (rules.LINK_UNKNOWN, rules.LINK_NOT_LINKED) if recheck else (rules.LINK_UNKNOWN,)
+        if not ctx or not access.can_request_window(ctx) or ctx['link_state'] not in expected:
             continue
         if asked:
             sleep(pause)
@@ -119,23 +129,27 @@ def _register(db, store, user_ids, *, load_config, request_window, backoff, budg
         if reply is None:
             stopped = rules.CODE_NOT_CONFIGURED
             break
-        service.remember_link(db, store, ctx['user_id'], reply, ctx['link_state'], log=logger)
-        service.note_reply('запись оператора сторожем', ctx['user_id'], reply, log=logger)
+        # Перепроверка отмечает время и тогда, когда ответ прежний: следующая — через сутки.
+        service.remember_link(db, store, ctx['user_id'], reply, ctx['link_state'], log=logger,
+                              always=recheck)
+        service.note_reply('перепроверка связи сторожем' if recheck else 'запись оператора сторожем',
+                           ctx['user_id'], reply, log=logger)
         state = rules.link_state_of(reply.status, reply.body)
         key = state or reply.code or 'unknown'
-        outcomes[key] = outcomes.get(key, 0) + 1
+        tally = rechecked if recheck else outcomes
+        tally[key] = tally.get(key, 0) + 1
         if reply.code in STOP_CODES:
             stopped = reply.code
             break
         if not state:
             backoff[ctx['user_id']] = clock() + RETRY_AFTER_SECONDS
-    return outcomes, stopped
+    return outcomes, rechecked, stopped
 
 
 def run_once(db, *, load_config=client.load_config, request_window=client.request_window,
              store=queries, batch=BATCH, budget=TALK_BUDGET_SECONDS, pause=PAUSE_SECONDS,
              sleep=time.sleep, clock=time.monotonic, backoff=None):
-    """Один прогон сторожа → сводка {'granted', 'emails', 'registered', 'stopped'}
+    """Один прогон сторожа → сводка {'granted', 'emails', 'registered', 'rechecked', 'stopped'}
     или {'skipped': 'not_configured'}."""
     if load_config() is None:
         return {'skipped': 'not_configured'}
@@ -144,15 +158,19 @@ def run_once(db, *, load_config=client.load_config, request_window=client.reques
     filled = _fill_emails(db, store, batch)
     with db._get_cursor() as cursor:
         candidates = store.unregistered(cursor, UNREGISTERED_SCAN)
+        stale = store.stale_not_linked(cursor, RECHECK_AFTER_SECONDS, UNREGISTERED_SCAN)
     now = clock()
     with _backoff_lock:
         for user_id in [uid for uid, until in backoff.items() if until <= now]:
             del backoff[user_id]
         waiting = [uid for uid in candidates if uid not in backoff][:batch]
-    registered, stopped = _register(db, store, waiting, load_config=load_config,
-                                    request_window=request_window, backoff=backoff, budget=budget,
-                                    pause=pause, sleep=sleep, clock=clock)
-    return {'granted': granted, 'emails': filled, 'registered': registered, 'stopped': stopped}
+        rechecks = [uid for uid in stale if uid not in backoff and uid not in waiting][:batch - len(waiting)]
+    registered, rechecked, stopped = _register(
+        db, store, waiting + rechecks, rechecks=frozenset(rechecks), load_config=load_config,
+        request_window=request_window, backoff=backoff, budget=budget, pause=pause, sleep=sleep,
+        clock=clock)
+    return {'granted': granted, 'emails': filled, 'registered': registered, 'rechecked': rechecked,
+            'stopped': stopped}
 
 
 def _describe(summary):
@@ -165,6 +183,9 @@ def _describe(summary):
         parts.append('почта из карточки: %s' % ', '.join(map(str, summary['emails'])))
     if summary['registered']:
         parts.append('ответы Syntony: %s' % ', '.join('%s×%d' % item for item in sorted(summary['registered'].items())))
+    if summary.get('rechecked'):
+        parts.append('перепроверка связи: %s' % ', '.join(
+            '%s×%d' % item for item in sorted(summary['rechecked'].items())))
     if summary['stopped']:
         parts.append('прогон остановлен: %s' % summary['stopped'])
     return '; '.join(parts)

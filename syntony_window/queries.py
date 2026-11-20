@@ -271,6 +271,29 @@ def unregistered(cursor, limit):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def stale_not_linked(cursor, older_than_seconds, limit):
+    """id работающих людей из списка, о ком Syntony ответила «не связан» раньше, чем
+    older_than_seconds назад (или время ответа неизвестно). Давние — первыми.
+
+    Связывает оператора администратор Syntony у себя и нам об этом не сообщает: узнать можно,
+    только спросив снова. Пока спрашивали лишь тогда, когда человек сам открывал окно, в
+    «Доступе» неделями висело «Ждёт связи» у уже связанных (20.11.2026 Syntony насчитала
+    34 связанных в одном своём отделе, а в нашем списке связанных было 16)."""
+    cursor.execute("""
+        SELECT a.user_id
+          FROM syntony_window_access a
+          JOIN users u ON u.id = a.user_id
+         WHERE a.link_state = %s
+           AND (a.link_checked_at IS NULL
+                OR a.link_checked_at < {now} - %s * INTERVAL '1 second')
+           AND {working}
+         ORDER BY a.link_checked_at NULLS FIRST, a.user_id
+         LIMIT %s
+    """.format(now=_NOW, working=_WORKING),
+        (rules.LINK_NOT_LINKED, int(older_than_seconds), int(limit)))
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
 def log(cursor, action, *, user_id, user_name, email, actor_id, actor_name):
     cursor.execute("""
         INSERT INTO syntony_window_access_log (action, user_id, user_name, email, actor_id, actor_name)
