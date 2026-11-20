@@ -1,0 +1,976 @@
+/* Личная раскладка сайдбара: папки, режим правки, перетаскивание.
+ *
+ * Строки папок — обычные строки списка (прямые дети .sidebar-menu-scroll),
+ * поэтому вид строки, рельс, тёмная тема и шторка телефона достаются им из
+ * styles.css и mobile-shell.css как есть. Здесь только то, чего там нет:
+ * отступ разделов в папке, шеврон папки, ручки и поднятая строка.
+ *
+ * Цвета — только токенами панели (--otp-bar-*) и шторки (--sheet-*): их
+ * переопределяет тёмная тема, своего цвета полотна здесь нет. Настольные
+ * правила заперты в body:not(.mobile-shell), телефонные — в
+ * body.mobile-shell: специфичность у них равна, и порядок файлов не решает. */
+
+body:not(.mobile-shell) {
+    --sb-pad: 10px;
+    --sb-tile: 26px;
+    --sb-gap: 10px;
+    --sb-indent: 20px;
+}
+
+/* Обводка цели броска (папка, раздел «станет папкой», место в пустом меню).
+   В тёмной теме цвет выделения панели — графит, на чёрном его не видно:
+   там обводка — системный синий. */
+:root {
+    --sb-target-ring: var(--otp-bar-select, #3b82f6);
+}
+
+html[data-otp-theme="dark"] {
+    --sb-target-ring: #0a84ff;
+}
+
+body.mobile-shell {
+    --sb-pad: 14px;
+    --sb-tile: 29px;
+    --sb-gap: 12px;
+    --sb-indent: 22px;
+}
+
+.sidebar-menu-scroll > li[data-sb-kind] {
+    position: relative;
+}
+
+/* ── Папка ───────────────────────────────────────────────────────────── */
+
+/* Шеврон папки поворачивается тем же ходом, что раскрываются её строки. */
+.sidebar-menu-scroll .sb-folder-chevron,
+.sidebar-menu-scroll .sb-folder-toggle > svg {
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar-menu-scroll > li[data-sb-open="1"] .sb-folder-chevron,
+.sidebar-menu-scroll > li[data-sb-open="1"] .sb-folder-toggle > svg {
+    transform: rotate(90deg);
+}
+
+/* Раздел в папке — строка с отступом, как вложенный пункт боковой панели
+   macOS. Волосяная линия начинается от подписи, как у остальных строк. */
+body:not(.mobile-shell) .sidebar-menu-scroll > li[data-sb-depth="1"] > button,
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-drag-nested > button {
+    padding-left: calc(var(--sb-pad) + var(--sb-indent));
+}
+
+body:not(.mobile-shell) .sidebar-menu-scroll > li[data-sb-depth="1"]:not(.sidebar-run-first)::before {
+    left: calc(var(--sb-pad) + var(--sb-indent) + var(--sb-tile) + var(--sb-gap));
+}
+
+/* Открытая панель (колокол, отделы, аккаунт) держит рельс развёрнутым —
+   отступ папки остаётся. В самом рельсе отступа нет: там плитки по центру. */
+body:not(.mobile-shell) .sidebar.collapsed:has(.sidebar-holds-open) .sidebar-menu-scroll > li[data-sb-depth="1"] > button {
+    padding-left: calc(var(--sb-pad) + var(--sb-indent));
+}
+
+/* Свёрнутая папка, в которой открытый раздел, — мягкая подсветка: синяя
+   заливка остаётся у самого раздела, а шапка лишь показывает, где он. */
+body:not(.mobile-shell) .sidebar-menu-scroll > li > button.sb-folder-has-active {
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
+}
+
+body:not(.mobile-shell) .sidebar-menu-scroll > li > button.sb-folder-has-active > svg:first-child {
+    background: rgba(255, 255, 255, 0.28) !important;
+}
+
+body:not(.mobile-shell) .sb-folder-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Режим правки ─────────────────────────────────────────────────────── */
+
+/* Строка в режиме правки не ведёт в раздел: её накрывает слой с ручкой.
+   Курсор «рука» — строку берут целиком; пальцем — только за ручку, чтобы
+   лист можно было листать. */
+.sb-edit-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    cursor: grab;
+    outline: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.sb-edit-overlay:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--otp-bar-select, #3b82f6);
+    border-radius: 11px;
+}
+
+body.mobile-shell .sb-edit-overlay:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--sheet-accent, #0a84ff);
+    border-radius: var(--sheet-radius, 10px);
+}
+
+.sb-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 100%;
+    flex: none;
+    color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
+    touch-action: none;
+    animation: sb-slide-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+body.mobile-shell .sb-grip {
+    width: 48px;
+    color: var(--sheet-muted, #8e8e93);
+}
+
+.sb-grip > svg {
+    width: 18px !important;
+    height: 18px !important;
+}
+
+@keyframes sb-slide-in {
+    from { opacity: 0; transform: translateX(10px); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes sb-pop-in {
+    from { opacity: 0; transform: scale(0.4); }
+    to { opacity: 1; transform: none; }
+}
+
+/* Под последним разделом — место, куда бросить раздел новой карточкой: у
+   длинного меню иначе ниже последней строки не было бы ни пикселя. */
+body.sidebar-editing:not(.mobile-shell) .sidebar-menu-scroll {
+    padding-bottom: 88px;
+}
+
+/* Подпись не уходит под ручку, а стрелки подменю уступают ей место. */
+body.sidebar-editing .sidebar-menu-scroll > li[data-sb-kind] > button {
+    padding-right: 44px !important;
+}
+
+body.sidebar-editing:not(.mobile-shell) .sidebar-menu-scroll > li[data-sb-kind] > button > svg:not(:first-child) {
+    opacity: 0;
+}
+
+body.sidebar-editing.mobile-shell .sidebar-menu-scroll > li[data-sb-kind] > button::after {
+    opacity: 0;
+}
+
+/* Шапка папки в правке: слева красный «минус», справа шеврон и ручка. */
+body.sidebar-editing .sidebar-menu-scroll > li[data-sb-kind="folder"] > button {
+    padding-left: calc(var(--sb-pad) + 30px) !important;
+    padding-right: 84px !important;
+}
+
+.sb-folder-delete {
+    position: absolute;
+    left: var(--sb-pad);
+    top: 50%;
+    width: 22px;
+    height: 22px;
+    margin-top: -11px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: #ff3b30 !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    animation: sb-pop-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.sb-folder-delete > span {
+    width: 10px;
+    height: 2px;
+    border-radius: 1px;
+    background: #fff;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sb-folder-delete.is-confirming > span {
+    transform: rotate(90deg);
+}
+
+.sb-folder-toggle {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background: transparent !important;
+    color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
+    cursor: pointer;
+}
+
+body.mobile-shell .sb-folder-toggle {
+    color: var(--sheet-muted, #8e8e93);
+}
+
+.sb-folder-delete-confirm {
+    margin-right: 8px;
+    height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 8px;
+    background: #ff3b30 !important;
+    color: #fff !important;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    animation: sb-slide-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Поле имени — поверх подписи, во всю её ширину. */
+.sb-rename-input {
+    position: absolute;
+    left: calc(var(--sb-pad) + 30px + var(--sb-tile) + var(--sb-gap) - 6px);
+    right: 84px;
+    top: 50%;
+    height: 28px;
+    margin-top: -14px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 7px;
+    outline: none;
+    font: inherit;
+    font-size: 14px;
+    color: var(--otp-bar-ink, #eef2ff);
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16));
+    box-shadow: 0 0 0 2px var(--otp-bar-select, #3b82f6);
+    cursor: text;
+    animation: sb-pop-in 0.18s ease both;
+}
+
+body.mobile-shell .sb-rename-input {
+    font-size: 16px;
+    color: var(--sheet-text, #000);
+    background: var(--sheet-bg, #f2f2f7);
+    box-shadow: 0 0 0 2px var(--sheet-accent, #0a84ff);
+}
+
+.sidebar-menu-scroll > li[data-sb-kind="folder"]:has(.sb-rename-input) .sb-folder-name {
+    visibility: hidden;
+}
+
+/* ── Перетаскивание ───────────────────────────────────────────────────── */
+
+body.sb-drag-active,
+body.sb-drag-active * {
+    cursor: grabbing !important;
+}
+
+body.sb-drag-active {
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Строки сайдбара расступаются плавно; возврат на места (бросили мимо) —
+   тем же ходом. Саму строку несёт «парящая» копия (.sb-ghost), а её место в
+   списке держит невидимый оригинал. */
+.sidebar-menu-scroll.sb-dragging > *,
+.sidebar-menu-scroll.sb-settling > * {
+    transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+}
+
+.sidebar-menu-scroll > li.sb-drag-source {
+    opacity: 0;
+}
+
+.sb-palette-row.sb-drag-source > button {
+    opacity: 0.35;
+}
+
+/* Парящая строка — той же ширины и вида, что строка меню, поверх всего. */
+.sb-ghost {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 70;
+    pointer-events: none;
+    will-change: transform;
+    /* Над сайдбаром — размер строки, над панелью — карточки. */
+    transition: width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sb-ghost-card.is-card {
+    border-radius: 12px;
+}
+
+.sb-ghost-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    border-radius: 11px;
+    /* Поднятая строка — цвета строки под курсором. */
+    --sb-wash: var(--otp-bar-hover, rgba(255, 255, 255, 0.16));
+    background: linear-gradient(var(--sb-wash), var(--sb-wash)), var(--otp-bar-bg, #1e3a8a);
+    color: var(--otp-bar-ink, #eef2ff);
+    font-size: 14px;
+    line-height: 20px;
+    box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    transform-origin: 30% 50%;
+    transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease,
+                box-shadow 0.2s ease, padding-left 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.sb-ghost-card.is-lifted {
+    transform: scale(1.03);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.32), 0 3px 10px rgba(0, 0, 0, 0.18);
+}
+
+.sb-ghost-card.is-nested {
+    padding-left: calc(10px + 20px);
+}
+
+/* Над папкой или над разделом («станет папкой») — сжимается, отходит вправо
+   и тускнеет: слева из-под неё видны значок и подпись того, на что кладут. */
+.sb-ghost-card.is-into {
+    transform: translateX(34px) scale(0.84);
+    opacity: 0.7;
+}
+
+/* Над панелью — «положу обратно». */
+.sb-ghost-card.is-leaving {
+    transform: scale(0.97);
+    opacity: 0.9;
+}
+
+.sb-ghost-tile {
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    background: var(--otp-bar-tile, rgba(255, 255, 255, 0.16));
+    color: #fff;
+}
+
+.sb-ghost-tile > svg {
+    width: 15px !important;
+    height: 15px !important;
+}
+
+.sb-ghost-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+
+/* Летун — копия строки на перелёте между сайдбаром и панелью, поверх всего.
+   Цвет — ровно цвет строки сайдбара: садится он и на строку, и на карточку,
+   и подмена при посадке не видна. */
+.sb-flyer {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 65;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    border-radius: 11px;
+    --sb-wash: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+    background: linear-gradient(var(--sb-wash), var(--sb-wash)), var(--otp-bar-bg, #1e3a8a);
+    color: var(--otp-bar-ink, #eef2ff);
+    font-size: 14px;
+    line-height: 20px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22);
+    pointer-events: none;
+    will-change: transform;
+}
+
+/* Летун, садящийся на карточку панели, — её форма: скругление и рамка. */
+.sb-flyer.is-card {
+    border-radius: 12px;
+    border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
+}
+
+/* Только что положенная строка садится: тень и лёгкое увеличение уходят. */
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-landing > button {
+    animation: sb-land 0.32s ease forwards;
+}
+
+@keyframes sb-land {
+    from {
+        transform: scale(1.03);
+        box-shadow: 0 16px 36px rgba(0, 0, 0, 0.32), 0 3px 10px rgba(0, 0, 0, 0.18);
+    }
+    to {
+        transform: none;
+        box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+    }
+}
+
+/* Строку держат над папкой — папка обводится: «положу сюда». Обводкой, а
+   не заливкой: синяя заливка — это открытый раздел, и рядом с ним цель
+   броска сливалась бы с ним в одно пятно. */
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-drop-into > button {
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
+    box-shadow: inset 0 0 0 2px var(--sb-target-ring);
+    border-radius: 11px !important;
+}
+
+body.mobile-shell .sidebar-menu-scroll > li.sb-drop-into > button {
+    background: var(--sheet-active, #e5e5ea) !important;
+    box-shadow: inset 0 0 0 2px var(--sheet-accent, #0a84ff);
+    border-radius: var(--sheet-radius, 10px) !important;
+}
+
+/* Пустой сайдбар в правке — место, куда бросать. */
+.sidebar-menu-scroll > li.sb-drop-hint {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 84px;
+    margin: 0;
+    padding: 12px;
+    border: 1.5px dashed var(--otp-bar-sep, rgba(255, 255, 255, 0.28));
+    border-radius: 11px;
+    color: var(--otp-bar-muted, rgba(238, 242, 255, 0.62));
+    font-size: 13px;
+    line-height: 18px;
+    text-align: center;
+    transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+    animation: sb-fade-up 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) 0.15s both;
+}
+
+.sidebar-menu-scroll > li.sb-drop-hint::before {
+    content: none !important;
+}
+
+.sidebar-menu-scroll > li.sb-drop-hint.is-target {
+    border-color: var(--sb-target-ring);
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16));
+    color: var(--otp-bar-ink, #eef2ff);
+}
+
+/* Пустая строка там, куда ляжет поднятое: карточка держит место своим цветом
+   и не рвётся (соседи у неё не скругляются — это считает список). Лежит
+   первым узлом списка, поэтому строки, проезжая, идут поверх неё. Отступы —
+   как у строк: у списка поля по 10 px. */
+.sidebar-menu-scroll > .sb-slot {
+    position: absolute;
+    top: 0;
+    left: 10px;
+    right: 10px;
+    height: 42px;
+    margin: 0 !important;
+    box-sizing: border-box;
+    border: 1.5px dashed transparent;
+    border-radius: 0;
+    background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* Переходы — свои: общее правило списка в перетаскивании оставляет детям
+   только transform. */
+.sidebar-menu-scroll.sb-dragging > .sb-slot,
+.sidebar-menu-scroll.sb-settling > .sb-slot {
+    transition: transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease,
+                border-radius 0.2s ease, border-color 0.2s ease, background-color 0.2s ease,
+                height 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+}
+
+.sidebar-menu-scroll > .sb-slot.is-shown {
+    opacity: 1;
+}
+
+.sidebar-menu-scroll > .sb-slot.round-top {
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+}
+
+.sidebar-menu-scroll > .sb-slot.round-bottom {
+    border-bottom-left-radius: 11px;
+    border-bottom-right-radius: 11px;
+}
+
+/* Ниже последнего раздела — новая карточка: отдельная, пунктиром. */
+.sidebar-menu-scroll > .sb-slot.is-new {
+    border-radius: 11px;
+    border-color: rgba(255, 255, 255, 0.42);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+html[data-otp-theme="dark"] .sidebar-menu-scroll > .sb-slot.is-new {
+    border-color: rgba(235, 235, 245, 0.32);
+}
+
+/* Строку кладут в папку или на раздел — места в карточке ей уже не нужно. */
+.sidebar-menu-scroll > .sb-slot.is-shown.is-muted {
+    opacity: 0.35;
+}
+
+/* Скругления карточек, пока строку держат, меняются плавно: пустая строка
+   переезжает — края карточки следуют за ней. */
+body:not(.mobile-shell) .sidebar-menu-scroll.sb-dragging > li > button {
+    transition: padding-left 0.3s ease, padding-right 0.3s ease, background-color 0.2s ease,
+                color 0.2s ease, border-radius 0.2s ease, box-shadow 0.2s ease,
+                transform 0.22s cubic-bezier(0.24, 1.12, 0.36, 1);
+}
+
+/* Раздел, на который кладут другой, — «будет папкой», как значок на iPhone:
+   чуть вырастает и обводится. */
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-stack-target {
+    z-index: 2;
+}
+
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-stack-target > button {
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
+    box-shadow: inset 0 0 0 2px var(--sb-target-ring), 0 6px 16px rgba(0, 0, 0, 0.18);
+    border-radius: 11px !important;
+    transform: scale(1.03);
+}
+
+body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-stack-target > button > svg:first-child {
+    background: rgba(255, 255, 255, 0.28) !important;
+}
+
+/* Копия исчезающей строки (опустевшая папка) сворачивается на её месте. */
+.sidebar-menu-scroll.sb-vanish {
+    position: fixed !important;
+    z-index: 60;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    list-style: none;
+    pointer-events: none;
+    transform-origin: 50% 0;
+}
+
+/* ── Панель разделов справа ──────────────────────────────────────────── */
+
+/* Цвет карточек панели, летунов и поднятой строки — ровно цвет строки
+   сайдбара: его заливка (--otp-bar-card, на светлой теме — белая на 10 %,
+   оттуда «блик») поверх полотна (--otp-bar-bg). Лежат они не на полотне, а на
+   размытой странице, поэтому полотно подкладываем под заливку сами — иначе
+   карточка выходит либо голым тёмно-синим полотном, либо серой от страницы.
+   Темы (тёмная, сезонные) меняют те же два токена, и карточки идут за ними.
+   Заливка — своим свойством, чтобы подсветка под курсором менялась плавно:
+   градиент сам по себе не анимируется, а зарегистрированный цвет — да. */
+@property --sb-wash {
+    syntax: '<color>';
+    inherits: false;
+    initial-value: transparent;
+}
+
+/* Стекло над страницей и подписи на нём. Стекло прозрачное (просьба владельца
+   20.11: «как стекло, прозрачнее») — страница видна, но размыта настолько,
+   что её текст не отвлекает. На светлой странице стекло светлое, и подписи на
+   нём тёмные: белый текст на нём терялся бы. */
+:root {
+    --sb-glass: rgba(255, 255, 255, 0.10);
+    --sb-glass-ink: #0f172a;
+    --sb-glass-muted: rgba(15, 23, 42, 0.62);
+    --sb-glass-ring: #3b82f6;
+    --sb-glass-button: rgba(255, 255, 255, 0.72);
+    --sb-glass-button-hover: rgba(255, 255, 255, 0.92);
+    --sb-glass-edge: rgba(15, 23, 42, 0.10);
+}
+
+html[data-otp-theme="dark"] {
+    --sb-glass: rgba(0, 0, 0, 0.16);
+    --sb-glass-ink: #ffffff;
+    --sb-glass-muted: rgba(235, 235, 245, 0.62);
+    --sb-glass-ring: #0a84ff;
+    --sb-glass-button: rgba(44, 44, 46, 0.72);
+    --sb-glass-button-hover: rgba(58, 58, 60, 0.92);
+    --sb-glass-edge: rgba(255, 255, 255, 0.10);
+}
+
+/* Страница под правкой — за стеклом, щелчков не принимает. Сайдбар выше
+   этого слоя и остаётся чётким — в него и кладут. */
+.sb-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: var(--sb-glass);
+    -webkit-backdrop-filter: blur(8px) saturate(165%);
+    backdrop-filter: blur(8px) saturate(165%);
+    animation: sb-fade 0.32s ease both;
+}
+
+.sb-scrim.is-closing {
+    animation: sb-fade-out 0.3s ease both;
+}
+
+@keyframes sb-fade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes sb-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+/* Шарик помощника висит выше всех слоёв страницы — на время правки уходит. */
+body.sidebar-editing .aorb-button {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transition: opacity 0.2s ease;
+}
+
+/* Область панели — всё справа от сайдбара (left ставит компонент). Своего
+   фона у неё нет: карточки лежат прямо на размытой странице. Появляется только
+   прозрачностью — разделы садятся на свои места с первого кадра, и сдвиг
+   области увёл бы места из-под них. */
+.sb-palette {
+    position: fixed;
+    z-index: 55;
+    top: 24px;
+    right: 24px;
+    bottom: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    border-radius: 20px;
+    color: var(--sb-glass-ink);
+    pointer-events: none;
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
+    animation: sb-fade 0.3s ease both;
+}
+
+.sb-palette > * {
+    pointer-events: auto;
+}
+
+.sb-palette.is-closing {
+    animation: sb-fade-out 0.3s ease both;
+}
+
+.sb-palette.is-scroll {
+    overflow-y: auto;
+    pointer-events: auto;
+}
+
+/* Раздел из сайдбара держат над панелью — «положу обратно». Обводка акцентом:
+   белая на прозрачном стекле светлой страницы не видна. */
+.sb-palette.is-drop-target {
+    background: rgba(59, 130, 246, 0.08);
+    box-shadow: inset 0 0 0 2px var(--sb-glass-ring);
+}
+
+/* Заголовок по центру, «Обнулить» — в правом углу, как кнопка в шапке окна
+   macOS. Колонки по краям равные, пока хватает места; на узком окне левая
+   уступает первой, и кнопка не наезжает на текст. */
+.sb-palette-head {
+    flex: none;
+    display: grid;
+    grid-template-columns: 1fr minmax(0, 640px) 1fr;
+    align-items: start;
+    width: 100%;
+    padding: 2px 0 18px;
+}
+
+.sb-palette-heading {
+    grid-column: 2;
+    text-align: center;
+}
+
+.sb-palette-reset {
+    grid-column: 3;
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    margin-left: 12px;
+    padding: 0 14px;
+    border: 1px solid var(--sb-glass-edge);
+    border-radius: 999px;
+    background: var(--sb-glass-button);
+    color: var(--sb-glass-ink);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 18px;
+    white-space: nowrap;
+    -webkit-backdrop-filter: blur(12px) saturate(180%);
+    backdrop-filter: blur(12px) saturate(180%);
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.2s ease;
+}
+
+.sb-palette-reset > svg {
+    width: 14px !important;
+    height: 14px !important;
+}
+
+.sb-palette-reset:hover:not(:disabled) {
+    background: var(--sb-glass-button-hover);
+}
+
+.sb-palette-reset:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
+.sb-palette-reset:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--sb-glass-ring), 0 4px 14px rgba(15, 23, 42, 0.12);
+}
+
+.sb-palette-reset:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.sb-palette-title {
+    margin: 0;
+    font-size: 20px;
+    line-height: 26px;
+    font-weight: 600;
+    color: var(--sb-glass-ink);
+}
+
+.sb-palette-note {
+    margin: 4px 0 0;
+    font-size: 13px;
+    line-height: 18px;
+    color: var(--sb-glass-muted);
+}
+
+/* Каждая карточка — отдельно, с промежутком; число колонок, ширину и высоту
+   карточек ставит компонент так, чтобы все помещались в окно. */
+.sb-palette-grid {
+    display: grid;
+    gap: 10px;
+    justify-content: center;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.sb-palette-row {
+    min-width: 0;
+}
+
+.sb-palette-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+    padding: 0 12px 0 9px;
+    border: 1px solid var(--otp-bar-sep, rgba(255, 255, 255, 0.12));
+    border-radius: 12px;
+    --sb-wash: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+    background: linear-gradient(var(--sb-wash), var(--sb-wash)), var(--otp-bar-bg, #1e3a8a);
+    color: var(--otp-bar-ink, #eef2ff);
+    font-size: 14px;
+    line-height: 20px;
+    text-align: left;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: --sb-wash 0.2s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1),
+                box-shadow 0.2s ease, opacity 0.2s ease;
+}
+
+.sb-palette .sb-palette-btn:hover {
+    --sb-wash: var(--otp-bar-hover, rgba(255, 255, 255, 0.16));
+    transform: translateY(-1px);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.3);
+}
+
+.sb-palette-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--otp-bar-select, #3b82f6), 0 6px 18px rgba(0, 0, 0, 0.24);
+}
+
+.sb-palette-btn > svg:first-child,
+.sb-palette-dot {
+    flex: 0 0 26px !important;
+    width: 26px !important;
+    height: 26px !important;
+    min-width: 26px !important;
+    padding: 5.5px;
+    box-sizing: border-box;
+    border-radius: 7px;
+    background: var(--otp-bar-tile, rgba(255, 255, 255, 0.16));
+    color: #fff;
+}
+
+.sb-palette-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sb-palette-empty {
+    padding: 40px 0;
+    text-align: center;
+    font-size: 15px;
+    color: var(--sb-glass-muted);
+    animation: sb-fade-up 0.3s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.sb-palette-empty > p {
+    margin: 0;
+}
+
+.sb-palette-empty > .sb-palette-empty-note {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 18px;
+    opacity: 0.85;
+}
+
+/* ── Подвал: «Изменить меню» и панель правки ──────────────────────────── */
+
+.sb-edit-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px;
+    background: var(--otp-bar-card, rgba(255, 255, 255, 0.10));
+    animation: sb-fade-up 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes sb-fade-up {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+}
+
+.sb-tool {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--otp-bar-ink, #eef2ff);
+    font-size: 14px;
+    line-height: 20px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.2s ease, opacity 0.2s ease;
+}
+
+.sb-tool > svg {
+    flex: 0 0 16px !important;
+    width: 16px !important;
+    height: 16px !important;
+    min-width: 16px !important;
+}
+
+.sidebar .sb-tool:hover:not(:disabled) {
+    background: var(--otp-bar-hover, rgba(255, 255, 255, 0.16)) !important;
+}
+
+.sb-tool:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.sb-tool--icon {
+    width: 30px;
+    padding: 0;
+    justify-content: center;
+}
+
+.sidebar .sb-tool--done,
+.sidebar .sb-tool--done:hover:not(:disabled) {
+    margin-left: auto;
+    background: var(--otp-bar-select, #3b82f6) !important;
+    color: var(--otp-bar-select-ink, #fff);
+    font-weight: 600;
+}
+
+/* ── Шторка телефона ─────────────────────────────────────────────────── */
+
+body.mobile-shell .sidebar-menu-scroll > li[data-sb-depth="1"] > button,
+body.mobile-shell .sidebar-menu-scroll > li.sb-drag-nested > button {
+    padding-left: calc(var(--sb-pad) + var(--sb-indent));
+}
+
+body.mobile-shell .sidebar-menu-scroll > li[data-sb-depth="1"] + li::before,
+body.mobile-shell .sidebar-menu-scroll > li + li[data-sb-depth="1"]::before {
+    left: calc(var(--sb-pad) + var(--sb-indent) + var(--sb-tile) + var(--sb-gap));
+}
+
+/* Шторка скругляет карточку по строению (`li:last-of-type`, `li:has(+ hr)`),
+   а у свёрнутой папки последней строкой стоит спрятанный раздел. Классы
+   прохода по списку считаются по ВИДИМЫМ строкам — по ним и скругляем. */
+body.mobile-shell .sidebar-menu-scroll > li.sidebar-run-first > button {
+    border-top-left-radius: var(--sheet-radius);
+    border-top-right-radius: var(--sheet-radius);
+}
+
+body.mobile-shell .sidebar-menu-scroll > li.sidebar-run-last > button {
+    border-bottom-left-radius: var(--sheet-radius);
+    border-bottom-right-radius: var(--sheet-radius);
+}
+
+/* У шапки папки своя стрелка — поворотный шеврон, а не уголок «внутрь». */
+body.mobile-shell .sidebar-menu-scroll > li[data-sb-kind="folder"] > button::after {
+    content: none;
+}
+
+body.mobile-shell .sidebar-menu-scroll > li[data-sb-kind="folder"] > button > svg.sb-folder-chevron {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    margin-left: auto;
+    color: var(--sheet-muted, #8e8e93);
+    opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .sidebar-menu-scroll .sb-folder-chevron,
+    .sidebar-menu-scroll .sb-folder-toggle > svg,
+    .sb-grip,
+    .sb-folder-delete,
+    .sb-folder-delete > span,
+    .sb-folder-delete-confirm,
+    .sb-rename-input,
+    .sb-edit-toolbar,
+    .sb-ghost-card,
+    .sb-scrim,
+    .sb-palette,
+    .sb-palette-empty,
+    .sb-palette-reset,
+    .sidebar-menu-scroll > li.sb-drop-hint,
+    .sidebar-menu-scroll.sb-dragging > *,
+    .sidebar-menu-scroll.sb-settling > *,
+    .sidebar-menu-scroll.sb-dragging > .sb-slot,
+    .sidebar-menu-scroll.sb-dragging > li > button,
+    .sidebar-menu-scroll > li.sb-landing > button {
+        transition: none !important;
+        animation: none !important;
+    }
+
+    body:not(.mobile-shell) .sidebar-menu-scroll > li.sb-stack-target > button {
+        transform: none;
+    }
+}

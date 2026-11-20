@@ -5877,6 +5877,7 @@ class SchemaMixin:
             self._init_driver_chats_schema_tx(cursor)
             self._init_sign_links_schema_tx(cursor)
             self._init_partner_keys_schema_tx(cursor)
+            self._init_sidebar_layout_schema_tx(cursor)
             self._init_calls_api_schema_tx(cursor)
             self._init_line_watch_schema_tx(cursor)
             self._init_oktell_guard_schema_tx(cursor)
@@ -7080,6 +7081,31 @@ class SchemaMixin:
             )
         else:
             cursor.execute("RELEASE SAVEPOINT partner_keys_schema")
+
+    def _init_sidebar_layout_schema_tx(self, cursor):
+        """Личная раскладка сайдбара — свой порядок разделов и папки
+        (sidebar_layout/schema.py, одна строка JSONB на сотрудника).
+
+        Внешний ключ — только на users, место в порядке безразлично. Не
+        развернулась — меню у всех стандартное (ручка отвечает 500, клиент
+        держит раскладку в своей копии), остальное приложение стартует.
+        """
+        import logging
+
+        cursor.execute("SAVEPOINT sidebar_layout_schema")
+        try:
+            from sidebar_layout.schema import init_sidebar_layout_schema
+            init_sidebar_layout_schema(cursor)
+        except Exception as exc:
+            if _is_schema_lock_conflict(exc):
+                raise
+            cursor.execute("ROLLBACK TO SAVEPOINT sidebar_layout_schema")
+            logging.exception(
+                "Схема личной раскладки сайдбара не применилась — меню будет "
+                "стандартным, остальное приложение работает штатно"
+            )
+        else:
+            cursor.execute("RELEASE SAVEPOINT sidebar_layout_schema")
 
     def _init_calls_api_schema_tx(self, cursor):
         """Схема «Звонков Binotel» для партнёров (calls_api/schema.py): копия звонков

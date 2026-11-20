@@ -28,6 +28,11 @@ import NotificationsBell from './components/notifications/NotificationsBell';
    примитивы iOS в бандле и так есть. */
 import NewsOfDayModal from './components/news/NewsOfDayModal';
 import { emitNewsPoke } from './components/news/newsShared';
+/* Личная раскладка меню (свой порядок и папки) — обычным импортом: список
+   разделов рисуется ею с первого кадра, ленивый чанк дал бы перестройку меню. */
+import SidebarMenuArranger from './components/sidebar/SidebarMenuArranger';
+import { SidebarEditFooterRow } from './components/sidebar/SidebarEditControls';
+import { sidebarLayoutStore } from './components/sidebar/sidebarLayoutStore';
 /* Стили «Задач» и «Курсов» — здесь, на местах прежних импортов самих разделов,
    хотя код разделов грузится отдельными чанками (lazySection ниже). Стили
    весят ~10 КБ сжатыми, а порядок каскада решает: отдельный чанк вставил бы
@@ -731,6 +736,12 @@ const SidebarDeptScope = ({ section, activeCode, children }) => {
     if (codes && !codes.includes(activeCode)) return null;
     return children;
 };
+
+/* Обёртки пунктов меню без своей разметки. Личная раскладка (свой порядок и
+   папки) разбирает уже собранное меню на строки и такие обёртки раскрывает
+   вызовом — иначе пункт под фильтром отдела стал бы для неё неизвестным
+   компонентом, который нельзя перенести. Обёртка с хуками сюда не годится. */
+const SIDEBAR_TRANSPARENT_WRAPPERS = Object.freeze([SidebarDeptScope]);
 
 /* Что попадает в нижний бар на телефоне.
  *
@@ -47189,12 +47200,35 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 }
                 if (run.rows.length) blocks.push(run);
 
+                /* Папки личной раскладки (components/sidebar): разделы свёрнутой
+                   папки спрятаны (data-sb-folded), пока нет запроса. По запросу
+                   найденное видно и в свёрнутой папке, а её шапка — если найдено
+                   её имя или хоть один её раздел; имя шапки — в data-sb-search,
+                   в тексте у неё ещё и счётчик. */
+                const rowText = (row) => (row.dataset.sbSearch ?? row.textContent ?? '').toLowerCase();
+                const foldersHit = new Set();
+                const foldersNamed = new Set();
+                if (query) {
+                    for (const node of list.children) {
+                        if (node.dataset.sbFolder && rowText(node).includes(query)) foldersHit.add(node.dataset.sbFolder);
+                        if (node.dataset.sbKind === 'folder' && rowText(node).includes(query)) foldersNamed.add(node.dataset.sbFolderId);
+                    }
+                }
+                const rowMatches = (row) => {
+                    if (!query) return row.dataset.sbFolded !== '1';
+                    if (row.dataset.sbKind === 'folder') {
+                        return foldersNamed.has(row.dataset.sbFolderId) || foldersHit.has(row.dataset.sbFolderId);
+                    }
+                    if (row.dataset.sbFolder && foldersNamed.has(row.dataset.sbFolder)) return true;
+                    return rowText(row).includes(query);
+                };
+
                 blocks.forEach((block, index) => {
                     const tint = SIDEBAR_BLOCK_TINTS[index % SIDEBAR_BLOCK_TINTS.length];
                     let first = null;
                     let last = null;
                     block.rows.forEach((row) => {
-                        const hit = !query || (row.textContent || '').toLowerCase().includes(query);
+                        const hit = rowMatches(row);
                         row.classList.toggle('sidebar-menu-hidden', !hit);
                         row.style.setProperty('--tint', tint);
                         if (!hit) return;
@@ -47263,6 +47297,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             useEffect(() => {
                 if ((sidebarCollapsed || isMobileShell) && showSidebarSearch) handleToggleSidebarSearch();
             }, [sidebarCollapsed, isMobileShell, showSidebarSearch, handleToggleSidebarSearch]);
+
+            /* «Изменить меню» (личная раскладка, components/sidebar). Правят в
+               развёрнутой панели: в рельсе подписей нет, и таскать пришлось бы
+               плитки вслепую. Поиск закрываем — он прятал бы часть строк, между
+               которыми человек переставляет. */
+            const handleSidebarEditStart = useCallback(() => {
+                setSidebarCollapsed(false);
+                if (showSidebarSearch) handleToggleSidebarSearch();
+            }, [showSidebarSearch, handleToggleSidebarSearch]);
+
+            /* Свернули панель или окно сузилось до шторки посреди правки — правка
+               завершается, как по «Готово»: сделанное уже видно на экране, и молча
+               выбросить его было бы хуже. */
+            useEffect(() => {
+                if (sidebarCollapsed || isMobileShell) sidebarLayoutStore.finishEditing();
+            }, [sidebarCollapsed, isMobileShell]);
 
             const openAppViewInNewTab = useCallback((nextView) => {
                 if (!nextView || typeof window === 'undefined') return;
@@ -56366,6 +56416,22 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     </div>
                                 )}
                                 <ul ref={sidebarMenuScrollRef} className={`space-y-2 flex-1 min-h-0 sidebar-menu-scroll`}>
+                                    {/* ЛИЧНАЯ РАСКЛАДКА: пункты ниже — как были, со всеми
+                                        ролевыми ветками и гейтами; SidebarMenuArranger
+                                        получает уже собранные строки и ставит их в порядке
+                                        человека, с его папками (components/sidebar).
+                                        Отступ строк внутри обёртки оставлен прежним
+                                        намеренно: сдвиг двух тысяч строк ради красоты
+                                        отступов — дифф на всё меню и конфликт со второй
+                                        машиной. */}
+                                    <SidebarMenuArranger
+                                        listRef={sidebarMenuScrollRef}
+                                        onArranged={paintSidebarMenu}
+                                        transparent={SIDEBAR_TRANSPARENT_WRAPPERS}
+                                        userId={user?.id ?? null}
+                                        apiBaseUrl={API_BASE_URL}
+                                        getHeaders={stableNotificationsHeaders}
+                                    >
                                     {/* «Отметки» стоят в ОБЩЕЙ части меню, а не в ветке роли: раздел выдаётся
                                         разнородной аудитории (глобальные админы, глава фронт-офисов, весь отдел
                                         кадрового учёта), и ни одна ветка сайдбара их всех не покрывает — у роли
@@ -58236,6 +58302,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         </li>
                                     )}
 
+                                    </SidebarMenuArranger>
                                 </ul>
                                 {/* Пусто по запросу поиска. Живёт ВНЕ списка: внутри
                                     он попал бы в карточку последнего блока и в проход
@@ -58356,6 +58423,10 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </div>
                                         )}
                                     </li>
+                                    {/* «Изменить меню» — свой порядок разделов и папки.
+                                        В режиме правки строка становится панелью
+                                        «Отменить · шаг назад · Готово». */}
+                                    <SidebarEditFooterRow onStart={handleSidebarEditStart} />
                                     <li>
                                         <button onClick={stableSidebarHandleLogout} className="w-full text-left py-3 px-4 rounded-lg hover:bg-red-700 bg-red-600 transition-all duration-200 flex items-center gap-3">
                                             <FaIcon className="fas fa-sign-out-alt"></FaIcon> <span className="sidebar-text">Выход</span>
@@ -58453,6 +58524,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 showSidebarSearch,
                 handleToggleSidebarSearch,
                 handleSidebarSearchInput,
+                paintSidebarMenu,
+                handleSidebarEditStart,
             ]);
 
             /* Плитки и фильтр поиска — после каждой пересборки меню. Дерево

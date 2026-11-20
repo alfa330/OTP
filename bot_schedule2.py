@@ -54946,6 +54946,23 @@ except Exception:
     logging.exception("«Мои данные»: Blueprint НЕ подключён")
 
 
+# ── Личная раскладка сайдбара: свой порядок разделов и папки (20.11.2026) ────
+# Чья раскладка — только из сессии; раскладка ничего не открывает (порядок
+# того, что человеку и так выдано), поэтому ручка открыта любой учётке.
+try:
+    from sidebar_layout.routes import build_sidebar_layout_blueprint  # noqa: E402
+
+    app.register_blueprint(build_sidebar_layout_blueprint(
+        db=db,
+        require_api_key=require_api_key,
+        build_cors_preflight_response=_build_cors_preflight_response,
+        resolve_requester=_resolve_requester,
+    ))
+    logging.info("Раскладка сайдбара: Blueprint подключён на /api/sidebar_layout")
+except Exception:
+    logging.exception("Раскладка сайдбара: Blueprint НЕ подключён")
+
+
 # ── Раздел «Библиотека» (задача #282) ────────────────────────────────────────
 # Каталог книг EPUB, веб-ридер и мониторинг чтения. Ведут библиотеку (загрузка,
 # жанры, архив, мониторинг) тренер, руководители и супер-админ — все отделы, СВ —
