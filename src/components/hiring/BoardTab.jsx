@@ -138,9 +138,11 @@ const CardTile = ({ card, canTake, canCall, onOpen, onTake, onCall, draggable, o
 
 /* Группа «Откликов» одного источника: шапка — стрелка, цвет источника, название и сколько откликов (всего, с учётом
    отборов и периода, а не только показанных); шапка липнет к верху колонки, пока листаешь её карточки. Свёрнутая
-   группа — одна строка. Не все карточки пришли — «Показать ещё N». */
+   группа — одна строка. Не все карточки пришли — «Показать ещё N» (у карточек без источника раскрывать нечем —
+   сервер раскрывает группу по id источника, поэтому там кнопки нет). */
 const SourceGroup = ({ group, collapsed, onToggle, onExpand, children }) => {
-    const hidden = Math.max(0, Number(group.total || 0) - group.cards.length);
+    const expandable = group.source_id !== null && group.source_id !== undefined;
+    const hidden = expandable ? Math.max(0, Number(group.total || 0) - group.cards.length) : 0;
     return (
         <div className="flex flex-col gap-2">
             <button type="button" onClick={onToggle} aria-expanded={!collapsed}
