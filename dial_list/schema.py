@@ -491,6 +491,17 @@ DDL = [
         sent_at TIMESTAMP WITH TIME ZONE
     )
     """,
+    # Ответственный в чате ChatApp (20.11.2026: «когда сообщение отправляется через айкор фон в чатап, то не
+    # видно ответственного»): шаблон, отправленный через API, ChatApp никому не назначает — после отправки
+    # сервер ставит ответственным сотрудника ChatApp этого оператора (chatapp_operator_map).
+    #   responsible_status         '' — не назначали (строки до 20.11.2026 и неотправленные), 'set' —
+    #                              назначен, 'no_employee' — оператор не привязан к сотруднику ChatApp,
+    #                              'failed' — ChatApp отказал или не ответил (текст — responsible_error)
+    #   responsible_employee_id    кого назначили (или пытались) — id сотрудника ChatApp
+    "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_status VARCHAR(16) NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_employee_id BIGINT",
+    "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_error TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_at TIMESTAMP WITH TIME ZONE",
     # Файл шаблона WhatsApp с вложением (владелец 06.11.2026): картинку, видео или PDF к шаблону типа
     # IMAGE / VIDEO / DOCUMENT загружает руководитель, при отправке он уходит в ChatApp вместе с шаблоном
     # (поле file). Ключ — лицензия и шаблон: у каждой лицензии ChatApp свои шаблоны. Файлов единицы

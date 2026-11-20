@@ -292,6 +292,52 @@ class ChatAppClient:
             raise error
         raise ChatAppError('ChatApp: отправка не удалась')
 
+    def set_chat_responsible(self, license_id, chat_id, employee_id, messenger_type='caWhatsApp',
+                             timeout=None):
+        """Назначить ответственного в чате (v1.chats.responsible.edit, PATCH …/chats/{chatId}/responsible,
+        тело {responsible: "<id сотрудника ChatApp>"}). chat_id у caWhatsApp — номер цифрами без «+».
+
+        Шаблон, отправленный через API, ChatApp никому не назначает (20.11.2026: «не видно
+        ответственного») — его ставим этим запросом. Запрос идемпотентный: при 429/5xx и обрыве сети
+        повторяем, как _get; протухший токен — refresh и повтор."""
+        chat = ''.join(ch for ch in str(chat_id or '') if ch.isdigit())
+        if not chat:
+            raise ChatAppError('ChatApp: пустой номер чата')
+        try:
+            employee = int(employee_id)
+        except (TypeError, ValueError):
+            raise ChatAppError('ChatApp: нет сотрудника для ответственного')
+        if employee <= 0:
+            raise ChatAppError('ChatApp: нет сотрудника для ответственного')
+        path = (f'/v1/licenses/{int(license_id)}/messengers/{messenger_type}'
+                f'/chats/{chat}/responsible')
+        token = self.access_token()
+        retry_auth = True
+        last_error = None
+        for attempt in range(4):
+            try:
+                r = self.session.patch(f'{self.api_url}{path}', json={'responsible': str(employee)},
+                                       headers={'Authorization': token, 'Lang': 'ru'},
+                                       timeout=timeout or HTTP_TIMEOUT)
+            except requests.RequestException as exc:
+                last_error = ChatAppError(f'ChatApp: нет ответа ({exc.__class__.__name__})')
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            if r.status_code in RETRY_STATUSES:
+                last_error = ChatAppError(f'ChatApp HTTP {r.status_code}', status=r.status_code)
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            body = _json_or_raise(r)
+            if body.get('success'):
+                return True
+            error = _error_from_body(body, r.status_code)
+            if error.code == 'ApiInvalidTokenError' and retry_auth:
+                token = self.access_token(force_new=True)
+                retry_auth = False
+                continue
+            raise error
+        raise last_error or ChatAppError('ChatApp: ответственный не назначен')
+
     # ── чаты и сообщения ─────────────────────────────────────────────────────
 
     def iter_chats(self, company_id, license_ids=None, since_ts=None):

@@ -231,6 +231,35 @@ class OperatorRoutesTests(unittest.TestCase):
         self.assertIn('return not _sensitive_access_granted_for_user(', lock)
         self.assertIn('return True', lock)   # сбой проверки — закрыт
 
+    def test_wa_employee_refresh_is_wired_and_defined_before_the_service_is_built(self):
+        """Ответственный в чате ChatApp (20.11.2026): освежение справочника сотрудников ChatApp приходит в
+        сервис из bot_schedule2 и объявлено до сборки раздела (иначе NameError — раздел не подключился бы)."""
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bot_schedule2.py'),
+                   encoding='utf-8').read()
+        self.assertLess(src.index('def _dial_list_wa_employee_refresh():'),
+                        src.index('_dial_list_bp = build_dial_list_blueprint('))
+        self.assertIn('wa_employee_refresh=_dial_list_wa_employee_refresh),', src)
+        body = src[src.index('def _dial_list_wa_employee_refresh():'):src.index('def _dial_list_tez_leads_mirror(')]
+        self.assertIn('db.sync_chatapp_employees(client.list_employees(company_id))', body)
+        self.assertIn('return _chatapp_automatch_authors()', body)
+
+    def test_wa_responsible_runs_off_the_request_thread_by_default(self):
+        """Назначение ответственного не задерживает ответ телефону: без подмены — свой поток-демон."""
+        import threading
+        svc = dial_service.DialListService(db=None, wa_client_factory=lambda: None)
+        self.assertIs(svc._wa_spawn, dial_service._spawn_daemon)
+        done = threading.Event()
+        seen = {}
+
+        def work():
+            seen['thread'] = threading.current_thread()
+            done.set()
+
+        dial_service._spawn_daemon(work)
+        self.assertTrue(done.wait(5))
+        self.assertIsNot(seen['thread'], threading.current_thread())
+        self.assertTrue(seen['thread'].daemon)
+
     def test_call_passes_auto_and_status_only_when_the_phone_sent_them(self):
         svc = _Svc()
         client = _client(svc)

@@ -43,6 +43,11 @@ BASE_DDL = '''
         (1, 'Админ', 'admin', 'admin', 'working', NULL, NULL),
         (530, 'Ашимова Айгерим', 'aigerim', 'operator', 'working', 560, '601'),
         (531, 'Серикова Сауле', 'saule', 'operator', 'working', 560, '602');
+    -- Привязка сотрудников ChatApp к нашим (db/schema.py, ведёт сбор чатов ChatApp).
+    CREATE TABLE chatapp_operator_map (employee_id bigint PRIMARY KEY, employee_name text, email text,
+                                       role_name text, user_id integer REFERENCES users(id) ON DELETE SET NULL,
+                                       is_bot boolean NOT NULL DEFAULT FALSE, updated_by integer,
+                                       updated_at timestamptz NOT NULL DEFAULT now());
 '''
 
 
@@ -104,6 +109,9 @@ class _TezApp:
 class _ChatApp:
     def __init__(self):
         self.sent, self.files = [], []
+        # Назначения ответственного: (лицензия, чат, сотрудник, таймаут); responsible_errors — что бросить
+        # на очередной вызов (по порядку; пусто — успех).
+        self.responsible, self.responsible_errors = [], []
         self.templates = [{"id": "tpl-bonus", "elementName": "bonus", "data": "Здравствуйте, {{1}}! Бонус за выход",
                            "languageCode": "ru", "status": "APPROVED", "templateType": "TEXT"}]
 
@@ -119,9 +127,31 @@ class _ChatApp:
         self.files.append(file)
         return 'wa-%d' % len(self.sent)
 
+    def set_chat_responsible(self, license_id, chat_id, employee_id, messenger_type='caWhatsApp', timeout=None):
+        self.responsible.append((license_id, chat_id, employee_id, timeout))
+        if self.responsible_errors:
+            raise self.responsible_errors.pop(0)
+        return True
+
 
 def _sync(fn):
     fn()
+
+
+class _EmployeeRefresh:
+    """wa_employee_refresh без ChatApp: on_call — привязка, которую «найдёт» освежение справочника
+    ({employee_id: user_id}); calls — сколько раз его звали."""
+
+    def __init__(self, db):
+        self.db, self.on_call, self.calls = db, {}, 0
+
+    def __call__(self):
+        self.calls += 1
+        with self.db._get_cursor() as cur:
+            for employee_id, user_id in self.on_call.items():
+                cur.execute("INSERT INTO chatapp_operator_map (employee_id, employee_name, user_id) VALUES (%s, %s, %s)",
+                            (employee_id, 'Новичок', user_id))
+        return len(self.on_call)
 
 
 class _Env:
@@ -205,15 +235,19 @@ def env():
         cur.execute("INSERT INTO dial_list_leads (department_id, phone_norm, full_name, iin) "
                     "VALUES (1954, '77019999999', 'Чужой Водитель', '')")
     binotel, tez, chatapp = _Binotel(), _TezApp(), _ChatApp()
+    refresh = _EmployeeRefresh(db)
     svc = dial_service.DialListService(db, client_factory=lambda dep: binotel, sign_checker=SignChecker(db),
                                        calls_submit=_sync, trips_fetch=tez.fetch, trips_configured=lambda: True,
-                                       wa_client_factory=lambda: chatapp)
+                                       wa_client_factory=lambda: chatapp, wa_employee_refresh=refresh,
+                                       wa_spawn=_sync)
     svc.operator_context = lambda uid: {
         "user_id": int(uid), "name": {OPERATOR: 'Айгерим', OTHER: 'Сауле'}[int(uid)], "department_id": TEZ,
         "internal_number": {OPERATOR: '601', OTHER: '602'}[int(uid)],
         "settings": svc.department_settings(TEZ)}
     try:
-        yield _Env(db, svc, binotel, tez, chatapp)
+        env = _Env(db, svc, binotel, tez, chatapp)
+        env.refresh = refresh
+        yield env
     finally:
         with admin.cursor() as cur:
             cur.execute('DROP SCHEMA ' + schema + ' CASCADE')
@@ -569,6 +603,86 @@ def test_whatsapp_template_goes_to_own_driver_once_a_day(env):
     assert env.refused(env.svc.send_whatsapp, OPERATOR, lead, 'tpl-bonus')[1] == 409
     assert len(env.chatapp.sent) == 1
     assert env.svc.analytics(TEZ)["whatsapp"] == {"sent": 1, "failed": 0}
+
+
+def _allow_bonus(env):
+    env.svc.save_whatsapp(TEZ, {"license_id": 70651, "allowed": [
+        {"id": "tpl-bonus", "title": "Бонус", "text": "Здравствуйте, {{1}}! Бонус за выход",
+         "params": ["{first_name}"]}]}, changed_by=1)
+
+
+def _responsible_rows(env):
+    return env.q("SELECT responsible_status, responsible_employee_id, responsible_error, responsible_at IS NOT NULL "
+                 "FROM dial_list_wa_messages ORDER BY created_at")
+
+
+def test_whatsapp_sender_becomes_the_responsible_in_chatapp(env):
+    """20.11.2026: «когда сообщение отправляется через айкор фон в чатап, то не видно ответственного». После
+    отправки ответственный в чате водителя — сотрудник ChatApp этого оператора: новейшая привязка (человека
+    пересоздавали в ChatApp), не бот и не чужая. Итог — в строке отправки."""
+    env.enroll()
+    lead = env.leads(1)['77010000001']
+    _allow_bonus(env)
+    env.q("INSERT INTO chatapp_operator_map (employee_id, employee_name, user_id, is_bot) VALUES "
+          "(103000, 'Айгерим (старая)', 530, FALSE), (103888, 'Айгерим', 530, FALSE), "
+          "(199999, 'Интеграция', 530, TRUE), (104000, 'Сауле', 531, FALSE)")
+    env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)
+    assert env.svc.send_whatsapp(OPERATOR, lead, 'tpl-bonus')["sent"] is True
+    assert env.chatapp.responsible == [(70651, '77010000001', 103888, dial_service.WA_RESPONSIBLE_TIMEOUT_SEC)]
+    assert _responsible_rows(env) == [('set', 103888, '', True)]
+    assert env.refresh.calls == 0
+
+
+def test_whatsapp_responsible_for_an_unmapped_operator_refreshes_employees_at_most_every_10_minutes(env):
+    """Оператор не привязан к сотруднику ChatApp (новичок до ночного сбора чатов) — справочник сотрудников
+    освежается, привязка ищется снова. Не нашлось — 'no_employee' и ChatApp не спрошен; следующие 10 минут
+    справочник не дёргаем, потом — снова, и найденного назначаем."""
+    env.enroll()
+    leads = env.leads(3)
+    _allow_bonus(env)
+    env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)
+    env.svc.send_whatsapp(OPERATOR, leads['77010000001'], 'tpl-bonus')
+    assert (env.refresh.calls, env.chatapp.responsible) == (1, [])
+    env.refresh.on_call = {105000: OPERATOR}
+    env.svc.send_whatsapp(OPERATOR, leads['77010000002'], 'tpl-bonus')
+    assert (env.refresh.calls, env.chatapp.responsible) == (1, [])
+    env.svc._wa_employees_refreshed_at -= dial_service.WA_EMPLOYEES_REFRESH_SEC + 1
+    env.svc.send_whatsapp(OPERATOR, leads['77010000003'], 'tpl-bonus')
+    assert env.refresh.calls == 2
+    assert env.chatapp.responsible == [(70651, '77010000003', 105000, dial_service.WA_RESPONSIBLE_TIMEOUT_SEC)]
+    assert [r[:2] for r in _responsible_rows(env)] == [('no_employee', None), ('no_employee', None), ('set', 105000)]
+    # Сбой освежения — тоже 'no_employee', отправка удалась.
+    env.svc._wa_employees_refreshed_at = None
+    env.q("DELETE FROM chatapp_operator_map")
+
+    def broken_refresh():
+        raise RuntimeError('ChatApp не ответил')
+
+    env.svc._wa_employee_refresh = broken_refresh
+    assert env.svc._assign_wa_responsible(str(uuid.uuid4()), 70651, '77010000009', OPERATOR) == 'no_employee'
+    assert len(env.chatapp.responsible) == 1
+
+
+def test_whatsapp_responsible_is_retried_and_a_failure_is_recorded(env, monkeypatch):
+    """ChatApp не назначил с первого раза — повтор; не назначил вовсе — 'failed' с причиной без длинных чисел
+    (номер водителя руководителю не виден), а отправка шаблона всё равно удалась."""
+    monkeypatch.setattr(dial_service, 'WA_RESPONSIBLE_AT_SEC', (0, 0))
+    env.enroll()
+    leads = env.leads(2)
+    _allow_bonus(env)
+    env.q("INSERT INTO chatapp_operator_map (employee_id, employee_name, user_id) VALUES (103888, 'Айгерим', 530)")
+    env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)
+    env.chatapp.responsible_errors = [RuntimeError('ChatApp HTTP 404')]
+    env.svc.send_whatsapp(OPERATOR, leads['77010000001'], 'tpl-bonus')
+    assert len(env.chatapp.responsible) == 2
+    env.chatapp.responsible_errors = [RuntimeError('чат 77010000002 не найден')] * 2
+    assert env.svc.send_whatsapp(OPERATOR, leads['77010000002'], 'tpl-bonus')["sent"] is True
+    assert len(env.chatapp.responsible) == 4
+    rows = _responsible_rows(env)
+    assert rows[0] == ('set', 103888, '', True)
+    assert rows[1][:2] == ('failed', 103888) and rows[1][3] is True
+    assert '77010000002' not in rows[1][2] and 'не найден' in rows[1][2]
+    assert env.one("SELECT COUNT(*) FROM dial_list_wa_messages WHERE status = 'sent'")[0] == 2
 
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'\x00' * 64

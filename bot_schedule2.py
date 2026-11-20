@@ -55155,6 +55155,17 @@ def _dial_list_wa_client_factory():
     return lambda: chatapp_client.ChatAppClient.from_config(cfg, token_store=_ChatAppDbTokenStore())
 
 
+def _dial_list_wa_employee_refresh():
+    """Ответственный в чате ChatApp после отправки шаблона из iCORE Phone (20.11.2026): оператора нет в
+    привязке chatapp_operator_map (новичок, сбор чатов привяжет его только ночью) — освежить справочник
+    сотрудников ChatApp и автопривязку по ФИО, как сбор чатов. Возвращает, сколько привязано новых."""
+    client, _cfg, company_id = _chatapp_client()
+    if client is None or not company_id:
+        return 0
+    db.sync_chatapp_employees(client.list_employees(company_id))
+    return _chatapp_automatch_authors()
+
+
 def _dial_list_tez_leads_mirror(department_id, requester_id, file_name, raw_bytes, file_ext, period):
     """Файл базы автообзвона Тез КЦ — ещё и в «Базу лидов ОП TEZ» того же месяца: там считаются
     успешки и зарплата ОП (одна загрузка на обе базы, владелец 15.10.2026). Файл, который её
@@ -55226,7 +55237,8 @@ try:
         # tez разделу не зависимость, клиенты приходят отсюда.
         service=DialListService(db, trips_fetch=_dial_list_trips_fetch,
                                 trips_configured=_dial_list_trips_configured,
-                                wa_client_factory=_dial_list_wa_client_factory()),
+                                wa_client_factory=_dial_list_wa_client_factory(),
+                                wa_employee_refresh=_dial_list_wa_employee_refresh),
         tez_leads_mirror=_dial_list_tez_leads_mirror,
         # Телефон автообзвона Тез закрыт до QR (владелец 06.11.2026): номера и база водителей — только
         # сессии телефона, которую подтвердил руководитель сканом в «QR доступ».

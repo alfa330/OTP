@@ -823,6 +823,13 @@ WA_TEMPLATES_CACHE_SEC = 600
 # Одному водителю — не больше одной отправки (отправляется или отправлено) за столько часов.
 WA_RESEND_HOURS = 24
 WA_RESENT_TODAY = "Сообщение этому водителю уже отправляли сегодня"
+# Ответственный в чате ChatApp (20.11.2026): назначаем после отправки шаблона попытками в эти секунды от
+# неё (чат у ChatApp появляется вместе с сообщением, но запрос мог с ним разминуться), у каждой свой
+# таймаут; 429/5xx и обрыв сети клиент ChatApp повторяет и сам. Справочник сотрудников ChatApp ради
+# непривязанного оператора освежаем не чаще WA_EMPLOYEES_REFRESH_SEC.
+WA_RESPONSIBLE_AT_SEC = (0, 5)
+WA_RESPONSIBLE_TIMEOUT_SEC = 15
+WA_EMPLOYEES_REFRESH_SEC = 600
 # Отдать ChatApp можно одобренный шаблон: текстовый или с вложением, файл к которому загрузил
 # руководитель (владелец 06.11.2026). Форматы — те, что принимает ChatApp (v1.messages.send.template,
 # поле file); предел картинки — как у WhatsApp, видео и PDF — наш потолок (файл лежит в базе).
@@ -1234,6 +1241,11 @@ def scrub_digits(text):
     """Длинные числа (6+ цифр подряд: номер телефона, ИИН) → «…». Для api_error попытки — его
     видит руководитель в журнале и карточке водителя."""
     return _LONG_DIGITS_RE.sub("…", str(text or ""))
+
+
+def _spawn_daemon(fn):
+    """Фоновая работа после ответа (ответственный в ChatApp): свой поток-демон, без общего пула."""
+    threading.Thread(target=fn, name="dial-list-wa-responsible", daemon=True).start()
 
 
 def parse_phone_version(value):
@@ -1783,7 +1795,8 @@ class DialListService:
     """Вся логика раздела. `db` — экземпляр Database из database.py."""
 
     def __init__(self, db, client_factory=None, sign_checker=None, calls_submit=None, trip_checker=None,
-                 trips_fetch=None, trips_configured=None, wa_client_factory=None, telegram_send=None):
+                 trips_fetch=None, trips_configured=None, wa_client_factory=None, telegram_send=None,
+                 wa_employee_refresh=None, wa_spawn=None):
         self.db = db
         # Отчёт о подписании в группы (19.10.2026): telegram_send(chat_id, png) -> (result, error);
         # не передан — бот портала (crm.transport). Рассылка — свой поток, одна за раз.
@@ -1806,6 +1819,15 @@ class DialListService:
         # Шаблоны ChatApp по лицензии — кэш на WA_TEMPLATES_CACHE_SEC: руководитель листает настройки.
         self._wa_cache = {}
         self._wa_cache_lock = threading.Lock()
+        # Ответственный в чате ChatApp после отправки шаблона (20.11.2026): кого назначать — привязка
+        # chatapp_operator_map (её ведёт сбор чатов ChatApp); оператора в ней нет — wa_employee_refresh()
+        # (bot_schedule2) освежает справочник сотрудников ChatApp и автопривязку по ФИО, не чаще
+        # WA_EMPLOYEES_REFRESH_SEC. Назначение идёт после ответа телефону своим потоком (wa_spawn;
+        # тесты — синхронно).
+        self._wa_employee_refresh = wa_employee_refresh
+        self._wa_employees_refreshed_at = None
+        self._wa_employees_lock = threading.Lock()
+        self._wa_spawn = wa_spawn or _spawn_daemon
         # Живые звонки у Binotel: опрос call-details и его кэш — по одному на компанию
         # (live_calls.CompanyCalls). Сервис в процессе один (bot_schedule2 собирает один
         # blueprint), поэтому кэш сервиса и есть общий кэш процесса. calls_submit — где
@@ -9079,7 +9101,100 @@ class DialListService:
             """, (str(provider_id or "")[:128], message_id))
             sent_at = cur.fetchone()[0]
         log.info("dial_list: WhatsApp водителю %s отправлен (оператор %s, шаблон %s)", lead_id, ctx["user_id"], title)
+        # Ответственный в чате ChatApp — этот оператор (20.11.2026). После ответа телефону: отправка уже
+        # удалась, назначение её не задерживает и не отменяет.
+        operator_id = ctx["user_id"]
+        self._wa_spawn(lambda: self._assign_wa_responsible(message_id, int(license_id), phone, operator_id))
         return {"sent": True, "sent_at": _iso(sent_at), "template_title": title}
+
+    def _wa_employee_of(self, user_id):
+        """Сотрудник ChatApp оператора по привязке chatapp_operator_map (is_bot — не человек) или None.
+        Привязок у человека бывает две (сотрудника пересоздали в ChatApp) — берём новейшую. Таблицы нет
+        (стенд без сбора чатов ChatApp) — None."""
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    SELECT employee_id FROM chatapp_operator_map
+                    WHERE user_id = %s AND NOT is_bot
+                    ORDER BY employee_id DESC LIMIT 1
+                """, (int(user_id),))
+                row = cur.fetchone()
+        except psycopg2.errors.UndefinedTable:
+            return None
+        return int(row[0]) if row else None
+
+    def _wa_employee_for(self, user_id):
+        """_wa_employee_of, а оператора в привязке нет — освежить справочник сотрудников ChatApp
+        (wa_employee_refresh: новичок появился в ChatApp днём, а сбор чатов привяжет его только ночью) и
+        спросить снова. Освежаем не чаще WA_EMPLOYEES_REFRESH_SEC на процесс: если ChatApp не знает
+        человека с таким ФИО, дёргать его на каждой отправке незачем."""
+        employee = self._wa_employee_of(user_id)
+        if employee is not None or self._wa_employee_refresh is None:
+            return employee
+        with self._wa_employees_lock:
+            now = time.monotonic()
+            last = self._wa_employees_refreshed_at
+            if last is not None and now - last < WA_EMPLOYEES_REFRESH_SEC:
+                return None
+            self._wa_employees_refreshed_at = now
+        try:
+            matched = self._wa_employee_refresh()
+            log.info("dial_list: справочник сотрудников ChatApp освежён ради оператора %s (привязано новых: %s)",
+                     user_id, matched)
+        except Exception as exc:
+            log.warning("dial_list: справочник сотрудников ChatApp не освежён: %s", scrub_digits(str(exc))[:300])
+            return None
+        return self._wa_employee_of(user_id)
+
+    def _assign_wa_responsible(self, message_id, license_id, phone, user_id, sleep=time.sleep):
+        """Ответственный в чате водителя в ChatApp — оператор, который отправил шаблон из телефона
+        (20.11.2026: «когда сообщение отправляется через айкор фон в чатап, то не видно ответственного»):
+        шаблон, отправленный через API, ChatApp никому не назначает. Ставим всегда, даже если в чате был
+        другой ответственный: водителю пишет этот оператор, и ответ водителя должен прийти к нему.
+
+        Итог — в строке отправки (responsible_status 'set' | 'no_employee' | 'failed', кого и почему),
+        попытки — в секунды WA_RESPONSIBLE_AT_SEC от отправки. Сбой отправку не отменяет."""
+        status, error, employee = "failed", "", None
+        try:
+            employee = self._wa_employee_for(user_id)
+            if employee is None:
+                status = "no_employee"
+            else:
+                client = self._wa_client()
+                waited = 0
+                for at in WA_RESPONSIBLE_AT_SEC:
+                    if at > waited:
+                        sleep(at - waited)
+                        waited = at
+                    try:
+                        client.set_chat_responsible(int(license_id), phone, employee,
+                                                    timeout=WA_RESPONSIBLE_TIMEOUT_SEC)
+                        status, error = "set", ""
+                        break
+                    except Exception as exc:
+                        error = scrub_digits(str(exc))[:500] or exc.__class__.__name__
+        except Exception as exc:
+            error = scrub_digits(str(exc))[:500] or exc.__class__.__name__
+        try:
+            with self.db._get_cursor() as cur:
+                cur.execute("""
+                    UPDATE dial_list_wa_messages
+                    SET responsible_status = %s, responsible_employee_id = %s, responsible_error = %s,
+                        responsible_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (status, employee, error, message_id))
+        except Exception:
+            log.exception("dial_list: итог назначения ответственного в ChatApp (отправка %s) не записан", message_id)
+        if status == "set":
+            log.info("dial_list: ChatApp — ответственный в чате отправки %s: сотрудник %s (оператор %s)",
+                     message_id, employee, user_id)
+        elif status == "no_employee":
+            log.warning("dial_list: ChatApp — ответственного в чате отправки %s нет: оператор %s не привязан к "
+                        "сотруднику ChatApp", message_id, user_id)
+        else:
+            log.warning("dial_list: ChatApp — ответственный в чате отправки %s не назначен (оператор %s, "
+                        "сотрудник %s): %s", message_id, user_id, employee, error)
+        return status
 
     # ------------------------------------------------------------ поездки (TEZ APP)
     def request_trip_check(self, reason=""):

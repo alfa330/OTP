@@ -25,8 +25,8 @@ class _Resp:
 class _Session:
     """Ответы — по очереди из posts/gets; исключение в очереди — бросается."""
 
-    def __init__(self, posts=(), gets=()):
-        self.posts, self.gets, self.sent = list(posts), list(gets), []
+    def __init__(self, posts=(), gets=(), patches=()):
+        self.posts, self.gets, self.patches, self.sent = list(posts), list(gets), list(patches), []
 
     def _next(self, queue):
         item = queue.pop(0)
@@ -38,6 +38,11 @@ class _Session:
         self.sent.append(('POST', url, json, dict(headers or {})))
         self.forms = getattr(self, 'forms', []) + [(data, files)]
         return self._next(self.posts)
+
+    def patch(self, url, json=None, headers=None, timeout=None):
+        self.sent.append(('PATCH', url, json, dict(headers or {})))
+        self.timeouts = getattr(self, 'timeouts', []) + [timeout]
+        return self._next(self.patches)
 
     def get(self, url, params=None, headers=None, timeout=None):
         self.sent.append(('GET', url, params, dict(headers or {})))
@@ -125,6 +130,54 @@ class ChatAppTemplatesTests(unittest.TestCase):
         client, _store = _client(session)
         with self.assertRaises(chatapp_client.ChatAppError):
             client.send_template(70651, '', 'tpl')
+        self.assertEqual(session.sent, [])
+
+    def test_set_chat_responsible_patches_the_chat_with_the_employee_id(self):
+        """Ответственный в чате (20.11.2026): PATCH …/chats/<номер цифрами>/responsible с id сотрудника
+        строкой (v1.chats.responsible.edit), заголовок — токен без Bearer, свой таймаут."""
+        session = _Session(patches=[_Resp({"success": True, "data": []})])
+        client, _store = _client(session)
+        self.assertTrue(client.set_chat_responsible(70651, '+7 701 000 00 01', 103888, timeout=15))
+        method, url, payload, headers = session.sent[0]
+        self.assertEqual((method, url), ('PATCH', 'https://api.example/v1/licenses/70651/messengers/caWhatsApp'
+                                                  '/chats/77010000001/responsible'))
+        self.assertEqual(payload, {"responsible": "103888"})
+        self.assertEqual(headers["Authorization"], 'tok-1')
+        self.assertEqual(session.timeouts, [15])
+
+    def test_set_chat_responsible_retries_busy_answers_and_stale_token(self):
+        """Назначение идемпотентно: 429/5xx и обрыв сети — повтор (как у чтения), протухший токен —
+        refresh и повтор; отказ по делу («сотрудник не найден») — ошибка без повторов."""
+        future = int(time.time()) + 3600
+        session = _Session(
+            patches=[_Resp({}, 429), requests.ConnectionError('reset'),
+                     _Resp({"success": False, "error": {"code": "ApiInvalidTokenError", "message": "token"}}, 401),
+                     _Resp({"success": True, "data": []})],
+            posts=[_Resp({"success": True, "data": {"accessToken": "tok-2", "accessTokenEndTime": future,
+                                                    "refreshToken": "ref-2"}})])
+        client, _store = _client(session)
+        original_sleep = chatapp_client.time.sleep
+        chatapp_client.time.sleep = lambda _s: None
+        try:
+            self.assertTrue(client.set_chat_responsible(70651, '77010000001', 5))
+        finally:
+            chatapp_client.time.sleep = original_sleep
+        self.assertEqual([s[0] for s in session.sent], ['PATCH', 'PATCH', 'PATCH', 'POST', 'PATCH'])
+        self.assertEqual(session.sent[-1][3]["Authorization"], 'tok-2')
+        session = _Session(patches=[_Resp({"success": False, "error": {"code": "ApiCompanyError",
+                                                                       "message": "Сотрудник не был найден"}}, 400)])
+        client, _store = _client(session)
+        with self.assertRaises(chatapp_client.ChatAppError) as ctx:
+            client.set_chat_responsible(70651, '77010000001', 5)
+        self.assertIn('Сотрудник не был найден', str(ctx.exception))
+        self.assertEqual(len(session.sent), 1)
+
+    def test_set_chat_responsible_without_a_chat_or_employee_makes_no_request(self):
+        session = _Session()
+        client, _store = _client(session)
+        for chat, employee in (('', 5), ('77010000001', None), ('77010000001', 0), ('77010000001', 'abc')):
+            with self.assertRaises(chatapp_client.ChatAppError):
+                client.set_chat_responsible(70651, chat, employee)
         self.assertEqual(session.sent, [])
 
     def test_list_templates(self):
