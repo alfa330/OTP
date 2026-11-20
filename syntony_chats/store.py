@@ -144,6 +144,42 @@ def apply_message_created(cursor, data, occurred_at):
     return upsert_message(cursor, message)
 
 
+def get_marks(cursor):
+    """Отметки сторожа API: {имя: время}."""
+    cursor.execute('SELECT name, mark FROM syntony_chat_sync_marks')
+    return {name: mark for name, mark in cursor.fetchall()}
+
+
+def set_mark(cursor, name, mark):
+    cursor.execute("""
+        INSERT INTO syntony_chat_sync_marks (name, mark) VALUES (%s, %s)
+        ON CONFLICT (name) DO UPDATE SET mark = EXCLUDED.mark, updated_at = now()
+    """, (name, mark))
+
+
+def delete_old_messages(cursor, cutoff, limit):
+    """Сообщения старше cutoff, не больше limit за раз → сколько убрано. Заготовка без
+    содержимого меряется моментом первого известия о ней."""
+    cursor.execute("""
+        DELETE FROM syntony_chat_messages
+         WHERE id IN (SELECT id FROM syntony_chat_messages
+                       WHERE COALESCE(created_at, first_seen_at) < %s
+                       LIMIT %s)
+    """, (cutoff, int(limit)))
+    return cursor.rowcount
+
+
+def delete_old_conversations(cursor, cutoff, limit):
+    """Диалоги, в которых последнее сообщение старше cutoff, → сколько убрано."""
+    cursor.execute("""
+        DELETE FROM syntony_chat_conversations
+         WHERE id IN (SELECT id FROM syntony_chat_conversations
+                       WHERE COALESCE(last_message_at, created_at, first_seen_at) < %s
+                       LIMIT %s)
+    """, (cutoff, int(limit)))
+    return cursor.rowcount
+
+
 def apply_message_status(cursor, data, occurred_at):
     """Событие message.status → 'inserted' (сообщения ещё нет — строка-заготовка со
     статусом, содержимое дольёт message.created) / 'updated' / 'unchanged'."""

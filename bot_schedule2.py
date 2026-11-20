@@ -54908,6 +54908,17 @@ try:
 except Exception:
     logging.exception("Чаты Syntony: приёмник вебхуков НЕ подключён")
 
+# Рядом с вебхуками — забор через API истории чатов ключом SYNTONY_HISTORY_API_KEY: раз в
+# 3 минуты лента новых сообщений и снимки диалогов, ночью перечитка суток и чистка старше
+# 30 дней (syntony_chats/sync.py). Закрывает всё, чего вебхук не принёс.
+try:
+    from syntony_chats import sync as syntony_chats_sync  # noqa: E402
+
+    if syntony_chats_sync.start_worker(db):
+        logging.info("Чаты Syntony: забор из API запущен — раз в 3 минуты")
+except Exception:
+    logging.exception("Чаты Syntony: забор из API НЕ запущен")
+
 # Новые сотрудники ОП и СЗоВ попадают в список окна Syntony сами (владелец, 20.11.2026:
 # «автоматом новые добавлялись»): сторож раз в 15 минут, своим потоком (syntony_window/autogrant.py).
 try:

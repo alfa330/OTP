@@ -30,6 +30,7 @@ EVENT_TEST = 'webhook.test'
 
 VIA_WEBHOOK = 'webhook'
 VIA_STATUS = 'status'          # строка заведена событием статуса раньше самого сообщения
+VIA_API = 'api'                # забрано сторожем из API истории чатов (sync.py)
 
 # Статус исходящего — только «вперёд»: sent → delivered → read, failed — конечный (§9.5).
 # received (входящее), pending, unknown и незнакомые новые значения — нулевой ранг: в новую

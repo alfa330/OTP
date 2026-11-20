@@ -95,6 +95,16 @@ _STATEMENTS = [
         updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
     ) WITH (fillfactor = 90)
     """,
+
+    # Отметки сторожа API (sync.py): с какого момента читать ленту и диалоги, когда были
+    # ночная перечитка и чистка. Несколько строк, переписываются раз в 3 минуты.
+    """
+    CREATE TABLE IF NOT EXISTS syntony_chat_sync_marks (
+        name        TEXT PRIMARY KEY,
+        mark        TIMESTAMPTZ NOT NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 
