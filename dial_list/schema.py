@@ -502,6 +502,26 @@ DDL = [
     "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_employee_id BIGINT",
     "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_error TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE dial_list_wa_messages ADD COLUMN IF NOT EXISTS responsible_at TIMESTAMP WITH TIME ZONE",
+    # Звонки с префиксом (#451, своя маршрутизация исходящих Тез, 20.11.2026): оператор набрал префикс и номер,
+    # сервер попросил Binotel позвонить с номера Тез этого префикса (service.route_call). Строка — на каждый
+    # запрос, и удавшийся, и нет: сколько так звонят и сколько ждал ответа Binotel (api_ms — «никаких задержек»).
+    #   status   'started' — Binotel принял звонок (general_call_id), 'failed' — отказал или не ответил (error)
+    """
+    CREATE TABLE IF NOT EXISTS dial_list_routed_calls (
+        id BIGSERIAL PRIMARY KEY,
+        department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+        operator_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        internal_number VARCHAR(16) NOT NULL DEFAULT '',
+        prefix VARCHAR(8) NOT NULL,
+        pbx_number VARCHAR(16) NOT NULL,
+        phone_norm VARCHAR(16) NOT NULL,
+        status VARCHAR(16) NOT NULL CHECK (status IN ('started', 'failed')),
+        general_call_id VARCHAR(64),
+        error TEXT NOT NULL DEFAULT '',
+        api_ms INTEGER,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     # Файл шаблона WhatsApp с вложением (владелец 06.11.2026): картинку, видео или PDF к шаблону типа
     # IMAGE / VIDEO / DOCUMENT загружает руководитель, при отправке он уходит в ChatApp вместе с шаблоном
     # (поле file). Ключ — лицензия и шаблон: у каждой лицензии ChatApp свои шаблоны. Файлов единицы
@@ -685,6 +705,8 @@ DDL = [
     "CREATE INDEX IF NOT EXISTS idx_dial_list_leads_owner_due ON dial_list_leads(owner_operator_id, owner_call_at)"
     " WHERE owner_operator_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_wa_messages_lead ON dial_list_wa_messages(lead_id, created_at)",
+    # Звонки с префиксом (#451) — по оператору и времени: сколько и как быстро Binotel их начинал.
+    "CREATE INDEX IF NOT EXISTS idx_dial_list_routed_calls_operator ON dial_list_routed_calls(operator_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_attempt_offers_offer ON dial_list_attempt_offers(offer_id)",
     "CREATE INDEX IF NOT EXISTS idx_dial_list_offers_department ON dial_list_offers(department_id, position)",
     # Отмеченные файлы месяца (batch_focus.in_work_sql): пул на каждой выдаче спрашивает, отмечен ли в

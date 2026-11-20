@@ -128,6 +128,13 @@
                                                              телефон перевёл оператора в «Офлайн»
     POST /api/operator/dial_list/leads/<lead_id>/whatsapp    {template_id, attempt_id?} — шаблон WhatsApp своему
                                                              водителю (ChatApp); не чаще раза в сутки водителю
+    POST /api/operator/dial_list/route_call                  {prefix, number} — звонок с номера Тез этого
+                                                             префикса (#451, своя маршрутизация): Binotel
+                                                             звонит на линию оператора, потом клиенту
+                                                             (pbxNumber); любому оператору Тез на Binotel,
+                                                             режим обзвона не нужен, замка до QR нет — это
+                                                             ручной набор. Ответ {general_call_id, from_title,
+                                                             number, api_ms}
 Телефон Тез закрыт до QR (владелец 06.11.2026): роли, которой нужен QR (как у вики и обращений), пока
 сессию телефона не подтвердил руководитель сканом в «QR доступ», ручки с данными и звонком (состояние,
 progress, rating, worked, script, live, next, call, auto/next, whatsapp, recall, sign_check) — 403
@@ -565,6 +572,18 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         payload = request.get_json(silent=True) or {}
         return jsonify({"status": "success", **svc.auto_next(user_id, status=payload.get('status'),
                                                              phone_version=_phone_version())}), 200
+
+    @bp.route('/api/operator/dial_list/route_call', methods=['POST', 'OPTIONS'])
+    @require_api_key
+    @_guard
+    def operator_route_call():
+        """Своя маршрутизация исходящих Тез (#451): оператор набрал префикс и номер — звонок с номера Тез этого
+        префикса через Binotel API. Телефон снял префикс и уже ждёт плечо от АТС. Без замка до QR: это ручной
+        набор, а не данные обзвона (в режиме обзвона ручной набор до QR закрывает сам телефон)."""
+        user_id, _ = _operator()
+        payload = request.get_json(silent=True) or {}
+        return jsonify({"status": "success", **svc.route_call(user_id, payload.get('prefix'),
+                                                              payload.get('number'))}), 200
 
     @bp.route('/api/operator/dial_list/leads/<lead_id>/whatsapp', methods=['POST', 'OPTIONS'])
     @require_api_key

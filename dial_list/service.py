@@ -836,6 +836,24 @@ WA_RESENT_TODAY = "Сообщение этому водителю уже отп�
 WA_RESPONSIBLE_AT_SEC = (0, 5)
 WA_RESPONSIBLE_TIMEOUT_SEC = 15
 WA_EMPLOYEES_REFRESH_SEC = 600
+# Своя маршрутизация исходящих Тез (#451, владелец 20.11.2026: «давай просто свою маршрутизацию делаем
+# только у тез… эти два номера заведены в тез»; префикс — 4 цифры, 1111 или 2222). Оператор Тез набирает в
+# iCORE Phone префикс и номер — телефон снимает префикс и просит сервер (route_call); сервер просит Binotel
+# позвонить с номера Тез этого префикса (calls/internal-number-to-external-number, pbxNumber): Binotel
+# звонит на линию оператора, телефон принимает это плечо сам и сразу, потом Binotel звонит клиенту с
+# выбранного номера. Префикс клиенту не уходит. Без префикса — обычный звонок, как раньше. Сообщения
+# «ожидайте соединения» оператору нет (playbackWaiting): «никаких задержек вообще» (владелец).
+#   prefix      что оператор набирает перед номером
+#   pbx_number  номер Тез в Binotel, с которого звонит АТС (формат Binotel — 11 цифр)
+#   title       как его показать оператору
+OUTGOING_ROUTES = {PROFILE_TEZ: (
+    {"prefix": "1111", "pbx_number": "77003000770", "title": "8 700 300 07 70"},
+    {"prefix": "2222", "pbx_number": "77070800080", "title": "8 707 080 00 80 (пассажиры)"},
+)}
+ROUTE_PREFIX_RE = re.compile(r"^\d{4}$")
+ROUTE_ONLY_TEZ = "Выбор номера префиксом — только у Тез КЦ"
+ROUTE_UNKNOWN_PREFIX = "Такого префикса нет: 1111 — с 8 700 300 07 70, 2222 — с 8 707 080 00 80"
+ROUTE_BAD_NUMBER = "Номер после префикса — казахстанский, 11 цифр (например, 2222 8 701 234 56 78)"
 # Отдать ChatApp можно одобренный шаблон: текстовый или с вложением, файл к которому загрузил
 # руководитель (владелец 06.11.2026). Форматы — те, что принимает ChatApp (v1.messages.send.template,
 # поле file); предел картинки — как у WhatsApp, видео и PDF — наш потолок (файл лежит в базе).
@@ -9232,6 +9250,77 @@ class DialListService:
             log.warning("dial_list: ChatApp — ответственный в чате отправки %s не назначен (оператор %s, "
                         "сотрудник %s): %s", message_id, user_id, employee, error)
         return status
+
+    # ------------------------------------------------------------ своя маршрутизация исходящих (#451)
+    def _route_operator(self, user_id):
+        """Оператор отдела с маршрутами префиксов (OUTGOING_ROUTES по профилю отдела) — (оператор, профиль) или
+        None. Режим обзвона не нужен: техподдержка Тез звонит пассажирам обычным телефоном. Сидящему на линии
+        другого отдела — отдел и номер линии (dial_operator)."""
+        operator = self.dial_operator(user_id)
+        if not operator or (operator.get("department_provider") or "") != "binotel":
+            return None
+        department_id = operator.get("department_id")
+        if department_id is None:
+            return None
+        profile = self.department_profile(department_id)
+        if profile not in OUTGOING_ROUTES:
+            return None
+        return operator, profile
+
+    def outgoing_routes_for(self, user_id):
+        """Префиксы номеров для iCORE Phone (ключ outgoing_routes настроек SIP): [{prefix, title}] — только
+        отделу с маршрутами (Тез КЦ) на Binotel, остальным None. Номера Binotel телефону не нужны: их знает
+        сервер (route_call)."""
+        found = self._route_operator(user_id)
+        if not found:
+            return None
+        return [{"prefix": r["prefix"], "title": r["title"]} for r in OUTGOING_ROUTES[found[1]]]
+
+    def route_call(self, user_id, prefix, number):
+        """Звонок с выбранного номера (#451): Binotel звонит на линию оператора (плечо телефон принимает сам),
+        потом клиенту — с номера Тез этого префикса (pbxNumber). Префикс клиенту не уходит. Без «ожидайте
+        соединения» оператору (playbackWaiting FALSE). Каждый запрос — строкой dial_list_routed_calls."""
+        found = self._route_operator(user_id)
+        if not found:
+            raise DialListError(ROUTE_ONLY_TEZ, 403)
+        operator, profile = found
+        prefix = str(prefix or "").strip()
+        route = next((r for r in OUTGOING_ROUTES[profile] if r["prefix"] == prefix), None)
+        if not ROUTE_PREFIX_RE.match(prefix) or route is None:
+            raise DialListError(ROUTE_UNKNOWN_PREFIX, 400)
+        phone = normalize_kz_phone(number)
+        if not phone:
+            raise DialListError(ROUTE_BAD_NUMBER, 400)
+        internal = str(operator.get("sip_number") or "").strip()
+        if not internal:
+            raise DialListError("У сотрудника не указан внутренний номер Binotel (SIP-номер)", 409)
+        department_id = int(operator["department_id"])
+        started = time.monotonic()
+        general_call_id, error, kind = None, "", CALL_ERROR_PBX
+        try:
+            client = self._client(department_id)
+            general_call_id = client.originate_internal_to_external(
+                internal, phone, pbxNumber=route["pbx_number"], playbackWaiting="FALSE")
+        except Exception as exc:
+            error = scrub_digits(str(exc))[:500] or exc.__class__.__name__
+            kind = exc.kind if isinstance(exc, DialListError) and getattr(exc, "kind", None) else call_error_kind(exc)
+        api_ms = int((time.monotonic() - started) * 1000)
+        with self.db._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO dial_list_routed_calls (department_id, operator_id, internal_number, prefix, pbx_number,
+                                                    phone_norm, status, general_call_id, error, api_ms)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (department_id, int(user_id), internal, prefix, route["pbx_number"], phone,
+                  "started" if general_call_id else "failed", general_call_id, error, api_ms))
+        if not general_call_id:
+            log.warning("dial_list: звонок с префиксом %s (оператор %s, линия %s) не начался за %d мс: %s", prefix,
+                        user_id, internal, api_ms, error)
+            raise DialListError(f"Звонок с номера {route['title']} не начался: {error or 'Binotel не ответил'}",
+                                502, kind=kind)
+        log.info("dial_list: звонок с префиксом %s (оператор %s, линия %s) — Binotel начал за %d мс", prefix,
+                 user_id, internal, api_ms)
+        return {"general_call_id": str(general_call_id), "prefix": prefix, "from_title": route["title"],
+                "number": phone_display(phone), "api_ms": api_ms}
 
     # ------------------------------------------------------------ поездки (TEZ APP)
     def request_trip_check(self, reason=""):

@@ -75,6 +75,11 @@ class _Svc:
         self.calls.append(('wa', lead_id, template_id, attempt_id))
         return {"sent": True, "template_title": "Бонус"}
 
+    def route_call(self, user_id, prefix, number):
+        self.calls.append(('route_call', user_id, prefix, number))
+        return {"general_call_id": "gc-1", "prefix": prefix, "from_title": "8 707 080 00 80 (пассажиры)",
+                "number": "+7 747 352 42 48", "api_ms": 120}
+
     # руководитель
     def list_departments(self, department_ids=None, profile=None):
         self.calls.append(('list', department_ids, profile))
@@ -243,6 +248,28 @@ class OperatorRoutesTests(unittest.TestCase):
         self.assertIn('not in SENSITIVE_QR_GATED_ROLES', lock)
         self.assertIn('return not _sensitive_access_granted_for_user(', lock)
         self.assertIn('return True', lock)   # сбой проверки — закрыт
+
+    def test_route_call_reaches_the_service_without_the_qr_lock(self):
+        """#451: звонок с префиксом — ручной набор, а не данные обзвона: замок до QR его не держит, prefix и
+        number уходят сервису как пришли; ответ сервиса — телефону целиком."""
+        svc = _Svc()
+        client = _client(svc, qr_locked=lambda uid: True)
+        resp = client.post('/api/operator/dial_list/route_call', json={"prefix": "2222", "number": "87473524248"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(svc.calls[-1], ('route_call', 7, '2222', '87473524248'))
+        self.assertEqual((resp.get_json()["general_call_id"], resp.get_json()["api_ms"]), ('gc-1', 120))
+
+    def test_outgoing_routes_go_to_the_phone_settings(self):
+        """#451: префиксы — в настройках SIP телефона (ключ outgoing_routes), их сборка не роняет регистрацию."""
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'bot_schedule2.py'),
+                   encoding='utf-8').read()
+        settings = src[src.index("def operator_sip_settings_endpoint():"):src.index("ICORE_PHONE_PUBLISH_TOKEN_ENV = ")]
+        self.assertIn('"outgoing_routes": _dial_list_outgoing_routes(requester_id),', settings)
+        helper = src[src.index('def _dial_list_outgoing_routes(user_id):'):
+                     src.index('def _dial_list_outgoing_routes(user_id):') + 700]
+        self.assertIn('return _dial_list_service.outgoing_routes_for(int(user_id))', helper)
+        self.assertIn('except Exception:', helper)
+        self.assertIn('return None', helper)
 
     def test_outcomes_route_carries_the_version_both_ways(self):
         """Редактор итогов сохраняет сам (20.11.2026): GET отдаёт версию справочника, PUT передаёт присланную

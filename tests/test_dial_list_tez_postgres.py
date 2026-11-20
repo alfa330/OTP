@@ -84,10 +84,13 @@ class _Db:
 
 class _Binotel:
     def __init__(self):
-        self.live, self.originated = {}, []
+        self.live, self.originated, self.extras, self.refuse = {}, [], [], None
 
     def originate_internal_to_external(self, internal_number, external_number, **extra):
+        if self.refuse is not None:
+            raise self.refuse
         self.originated.append((internal_number, external_number))
+        self.extras.append(dict(extra))
         return 'gc-%d-%s' % (len(self.originated), uuid.uuid4().hex[:6])
 
     def call_details(self, general_call_ids, max_wait=None, timeout=None):
@@ -642,6 +645,55 @@ def test_outcomes_save_from_a_stale_editor_is_refused_and_loses_nothing(env):
     # Старая сборка сайта (без версии) — без проверки, список целиком, как раньше.
     env.svc.save_outcomes(TEZ, tab_b, changed_by=1)
     assert env.one("SELECT color FROM dial_list_outcomes WHERE id = %s", (refusal["id"],))[0] == '#000000'
+
+
+def _route_operators(env, monkeypatch):
+    """Карточки SIP глазами раздела: OPERATOR — Тез КЦ на Binotel с линией 601, OTHER — удалённый КЦ."""
+    cards = {OPERATOR: {"id": OPERATOR, "name": 'Айгерим', "department_id": TEZ, "department_provider": 'binotel',
+                        "sip_number": '601'},
+             OTHER: {"id": OTHER, "name": 'Сауле', "department_id": RCC, "department_provider": 'binotel',
+                     "sip_number": '602'}}
+    monkeypatch.setattr(env.svc, 'dial_operator', lambda uid, *a, **k: cards.get(int(uid)))
+
+
+def test_route_call_dials_from_the_number_of_the_prefix_only_for_tez(env, monkeypatch):
+    """#451 (владелец 20.11.2026: «давай просто свою маршрутизацию делаем только у тез»): оператор Тез набрал
+    префикс и номер — Binotel звонит на его линию, потом клиенту с номера Тез этого префикса (pbxNumber), без
+    «ожидайте соединения» (playbackWaiting FALSE). Префикс клиенту не уходит. Каждый запрос — строкой журнала
+    с временем ответа Binotel. Чужой отдел, чужой префикс и не номер — отказ без запроса к Binotel."""
+    env.enroll()
+    _route_operators(env, monkeypatch)
+    assert env.svc.outgoing_routes_for(OPERATOR) == [
+        {"prefix": '1111', "title": '8 700 300 07 70'}, {"prefix": '2222', "title": '8 707 080 00 80 (пассажиры)'}]
+    assert env.svc.outgoing_routes_for(OTHER) is None
+    assert env.svc.outgoing_routes_for(999) is None
+
+    res = env.svc.route_call(OPERATOR, '2222', '8 747 352 42 48')
+    assert env.binotel.originated == [('601', '77473524248')]
+    assert env.binotel.extras == [{"pbxNumber": '77070800080', "playbackWaiting": 'FALSE'}]
+    assert (res["prefix"], res["from_title"], res["number"]) == ('2222', '8 707 080 00 80 (пассажиры)',
+                                                                 dial_service.phone_display('77473524248'))
+    assert res["general_call_id"].startswith('gc-1-') and res["api_ms"] >= 0
+    env.svc.route_call(OPERATOR, ' 1111 ', '+7 747 352 42 48')
+    assert env.binotel.extras[-1]["pbxNumber"] == '77003000770'
+    rows = env.q("SELECT prefix, pbx_number, phone_norm, internal_number, status, general_call_id IS NOT NULL, "
+                 "operator_id, department_id FROM dial_list_routed_calls ORDER BY id")
+    assert rows == [('2222', '77070800080', '77473524248', '601', 'started', True, OPERATOR, TEZ),
+                    ('1111', '77003000770', '77473524248', '601', 'started', True, OPERATOR, TEZ)]
+
+    for args, status in (((OTHER, '2222', '87473524248'), 403), ((OPERATOR, '3333', '87473524248'), 400),
+                         ((OPERATOR, '22', '87473524248'), 400), ((OPERATOR, '2222', '12345'), 400),
+                         ((OPERATOR, '2222', ''), 400)):
+        assert env.refused(env.svc.route_call, *args)[1] == status, args
+    assert len(env.binotel.originated) == 2
+
+    # Binotel отказал — 502 с видом ошибки, строка журнала «failed» без длинных чисел.
+    env.binotel.refuse = RuntimeError('Binotel: code 150 Can\'t call to the ext 601 (77473524248)')
+    message, status, kind = env.refused(env.svc.route_call, OPERATOR, '2222', '87473524248')
+    assert (status, kind) == (502, dial_service.CALL_ERROR_LINE)
+    assert message.startswith('Звонок с номера 8 707 080 00 80 (пассажиры) не начался:')
+    failed = env.one("SELECT status, general_call_id, error FROM dial_list_routed_calls ORDER BY id DESC LIMIT 1")
+    assert failed[0] == 'failed' and failed[1] is None and '77473524248' not in failed[2] and '150' in failed[2]
 
 
 def _allow_bonus(env):

@@ -21899,6 +21899,10 @@ def operator_sip_settings_endpoint():
                 # секунд без звонка телефон сам ставит «Офлайн». null — правила нет; телефон до
                 # 3.22.57 ключ не читает. Сбой расчёта — null.
                 "idle_offline": _icore_phone_idle_offline(requester_id, provider),
+                # Своя маршрутизация исходящих Тез (#451, 20.11.2026): префиксы, которыми оператор выбирает
+                # номер Тез для звонка ([{prefix, title}]; номер с префиксом телефон звонит через сервер).
+                # null — префиксов нет, набор как раньше; телефон до 3.22.61 ключ не читает.
+                "outgoing_routes": _dial_list_outgoing_routes(requester_id),
             }
         }
         # Набор посчитать не удалось (сбой базы) — ключ не шлём вовсе. null телефон
@@ -55713,6 +55717,18 @@ def _dial_list_phone_settings(user_id):
     except Exception:
         logging.exception("dial_list: не удалось собрать настройки для телефона %s", user_id)
         return {"enabled": False}
+
+
+def _dial_list_outgoing_routes(user_id):
+    """Префиксы номеров для iCORE Phone (#451, своя маршрутизация исходящих Тез): [{prefix, title}] оператору
+    Тез КЦ на Binotel, остальным и при сбое — None (телефон набирает как раньше)."""
+    if _dial_list_service is None:
+        return None
+    try:
+        return _dial_list_service.outgoing_routes_for(int(user_id))
+    except Exception:
+        logging.exception("dial_list: префиксы номеров для телефона %s не собраны", user_id)
+        return None
 
 
 # ── iCORE Phone: статусы по группе ОП и автоофлайн ───────────────────────────
