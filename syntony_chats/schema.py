@@ -105,6 +105,14 @@ _STATEMENTS = [
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+
+    # Запросы, которым индексы нужны (табло СЗоВ «Чат» и почасовой отчёт по чатам, SZOV-12):
+    # сообщения сети за сутки — по времени создания, диалоги за сутки — так же; самое раннее
+    # сообщение (с какого момента данные есть) — тот же индекс. Остальное читается по ключам.
+    "CREATE INDEX IF NOT EXISTS idx_syntony_chat_messages_created "
+    "ON syntony_chat_messages (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_syntony_chat_conversations_created "
+    "ON syntony_chat_conversations (created_at)",
 ]
 
 

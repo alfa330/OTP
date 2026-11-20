@@ -42,6 +42,9 @@ from amocrm import leads as amo_leads
 # Заявки CRM Syntony в той же отбивке «Лиды по источникам» (19.11.2026). Модуль
 # без базы и без побочных действий на импорте — только клиент API.
 from syntony_leads import client as syntony_leads_client
+# Чаты СЗоВ по Syntony (SZOV-12, 20.11.2026): сборка табло «Чат» и почасового отчёта из
+# таблиц, которые пишут вебхук и сторож API истории. Без побочных действий на импорте.
+from syntony_chats import szov as syntony_chats_szov
 # Автоотчёт по проведённым тренингам (задача #261): чистая логика периода,
 # выборки и книги Excel. Импорт обычный, а не ленивый, как у остальных
 # модулей пакета: этот ничего не знает ни про базу, ни про схему раздела —
@@ -32796,7 +32799,12 @@ def _chat_hourly_operator_name(row):
 
 
 def _chat_hourly_collect(now=None):
-    """Данные отчёта: чаты за час и за сутки, время ответа — общее и по каждому чатнику."""
+    """Данные отчёта: чаты за час и за сутки, время ответа — общее и по каждому чатнику.
+
+    С 20.11.2026 — по Syntony (SZOV-12): те же ключи плюс офлайн числом и «поступивших»
+    (новых) чатов за час и за сутки; Chat2Desk — только откатом (SZOV_CHAT_SOURCE)."""
+    if _szov_chat_source_is_syntony():
+        return syntony_chats_szov.hourly_report(db, _szov_syntony_context(), now=now)
     tz = ZoneInfo(CHAT_HOURLY_TIMEZONE)
     now = now or datetime.now(tz)
     # Отчёт уходит в начале часа и рассказывает про ЗАКОНЧИВШИЙСЯ час, а не про начавшуюся минуту.
@@ -32927,6 +32935,9 @@ def _chat_hourly_text(data):
         return (f"{_chat_hourly_seconds(hour_value)} (за час), "
                 f"{_chat_hourly_seconds(day_value)} (сутки)")
 
+    if data.get('source') == 'syntony':
+        return _chat_hourly_text_syntony(data, hour_label, day_words, _pair)
+
     lines = [f"<b>Чаты</b> — {data['generated_at']}", ""]
     lines.append(f"<b>Количество чатов:</b> {data['chats_hour']} за {hour_label}, "
                  f"{data['chats_day']} {day_words}")
@@ -32964,6 +32975,40 @@ def _chat_hourly_text(data):
     if on_status:
         lines.append("<b>На статусе:</b> " + ", ".join(
             f"{item['name']} — {item['status']}" for item in on_status))
+    return "\n".join(lines)
+
+
+def _chat_hourly_text_syntony(data, hour_label, day_words, pair):
+    """Текст отчёта по Syntony (SZOV-12): первыми — пять показателей из ТЗ, в его порядке.
+
+    Онлайн — ответил водителю за последние 15 минут (статусов у Syntony нет); «всего» — чаты,
+    где водитель писал, «поступивших» — начатые в этом промежутке. Открытых чатов у Syntony нет."""
+    lines = [f"<b>Чаты</b> — {data['generated_at']}", ""]
+    lines.append(f"<b>Операторов онлайн:</b> {len(data.get('online') or [])}")
+    lines.append(f"<b>Операторов офлайн:</b> {int(data.get('offline_count') or 0)}")
+    lines.append(f"<b>Всего чатов:</b> {data['chats_hour']} за {hour_label}, "
+                 f"{data['chats_day']} {day_words}")
+    lines.append(f"<b>Поступивших чатов:</b> {data.get('chats_new_hour') or 0} за {hour_label}, "
+                 f"{data.get('chats_new_day') or 0} {day_words}")
+    lines.append(f"<b>Время первой реакции:</b> "
+                 f"{pair(data['first_reply_hour'], data['first_reply_day'])}")
+    lines.append(f"<b>Ответ внутри чата:</b> "
+                 f"{pair(data['inner_reply_hour'], data['inner_reply_day'])}")
+    if data.get('coverage_error'):
+        lines.append(data['coverage_error'])
+
+    operators = data.get('operators') or []
+    lines.append("")
+    if operators:
+        lines.append(f"<b>Чатники за сутки ({len(operators)}):</b>")
+        for item in operators:
+            suffix = f" (за час {item['chats_hour']})" if item['chats_hour'] else ""
+            lines.append(
+                f"• {item['name']} — {item['status']}, {item['chats']}{suffix}, "
+                f"первая реакция {_chat_hourly_seconds(item.get('first_reply_day'))}, "
+                f"внутри чата {_chat_hourly_seconds(item.get('inner_reply_day'))}")
+    else:
+        lines.append("<b>Чатники за сутки:</b> чатов пока не было")
     return "\n".join(lines)
 
 
@@ -33013,10 +33058,26 @@ def _chat_hourly_render_table_png(data):
     font_bold = _szov_font(20, bold=True)
     # Час есть в любом отчёте, включая полуночный (он про 23:00–00:00 вчерашних
     # суток), поэтому часовые колонки больше не пропадают.
-    columns = _CHAT_HOURLY_TABLE_COLUMNS
+    syntony = data.get('source') == 'syntony'
+    # У Syntony нет счётчика открытых чатов — колонка из прочерков была бы шумом.
+    columns = tuple(col for col in _CHAT_HOURLY_TABLE_COLUMNS
+                    if not (syntony and col[0] == 'open_chats'))
+    if syntony:
+        # Показатель в ТЗ называется «время первой реакции» — одним словом на всей картинке.
+        renamed = {'first_hour': 'Первая\nреакция\nза час', 'first_day': 'Первая\nреакция\nза сутки'}
+        columns = tuple((key, renamed.get(key, title), width) for key, title, width in columns)
     operators = data.get('operators') or []
+    # Колонка ФИО — по самому длинному имени: у Syntony это ФИО из карточки iCORE, бывает и с
+    # отчеством, и в 250 px оно заезжало на «Статус». Потолок — чтобы одно имя не растянуло
+    # картинку; что не влезло и в него, обрезается многоточием (draw_row).
+    name_w = max([250] + [int(font_bold.getlength(str(item.get('name') or ''))) + 18
+                          for item in operators])
+    name_w = min(name_w, 420)
+    columns = tuple((key, title, name_w if key == 'name' else width) for key, title, width in columns)
 
-    row_h, head_h, title_h = 34, 74, 76
+    # Под заголовком у Syntony — строка показателей из ТЗ SZOV-12 (онлайн, офлайн, всего и
+    # поступивших чатов, первая реакция): офлайна и «поступивших» в таблице нет.
+    row_h, head_h, title_h = 34, 74, (114 if syntony else 76)
     width = sum(col[2] for col in columns)
     height = title_h + head_h + row_h * (len(operators) + 1)
     image = Image.new('RGB', (width + 2, height + 2), '#ffffff')
@@ -33030,6 +33091,31 @@ def _chat_hourly_render_table_png(data):
     subtitle = f"за час {data['hour_label']} и {_chat_hourly_day_words(data)}"
     draw.text((4, 6), f"Чаты — {data['generated_at']}", font=_szov_font(26, bold=True), fill='#0f172a')
     draw.text((4, 42), subtitle, font=_szov_font(17), fill='#64748b')
+    if syntony:
+        # Подпись — серым, число — тёмным: строка читается как ряд «показатель — значение».
+        label_font, value_font = _szov_font(18), _szov_font(18, bold=True)
+        parts = (
+            ('Онлайн ', str(len(data.get('online') or []))),
+            ('   Офлайн ', str(int(data.get('offline_count') or 0))),
+            ('   Всего чатов ', f"{data['chats_day']} (за час {data['chats_hour']})"),
+            ('   Поступивших ', f"{data.get('chats_new_day') or 0} "
+                                f"(за час {data.get('chats_new_hour') or 0})"),
+            ('   Первая реакция ', f"{_chat_hourly_seconds(data.get('first_reply_day'))} "
+                                   f"(за час {_chat_hourly_seconds(data.get('first_reply_hour'))})"),
+        )
+        # Кегль — по ширине картинки: при больших числах строка не должна уходить за край.
+        for size in (18, 17, 16, 15, 14, 13):
+            label_font, value_font = _szov_font(size), _szov_font(size, bold=True)
+            total = sum(draw.textlength(label, font=label_font) + draw.textlength(value, font=value_font)
+                        for label, value in parts)
+            if total <= width - 8:
+                break
+        tx = 4
+        for label, value in parts:
+            draw.text((tx, 74), label, font=label_font, fill='#64748b')
+            tx += draw.textlength(label, font=label_font)
+            draw.text((tx, 74), value, font=value_font, fill='#0f172a')
+            tx += draw.textlength(value, font=value_font)
 
     x = 1
     for key, title, col_w in columns:
@@ -33055,6 +33141,11 @@ def _chat_hourly_render_table_png(data):
             draw.rectangle([x, y, x + col_w, y + row_h], fill=cell_fill, outline=border)
             text = values.get(key, '')
             cell_font = font_bold if (bold or key == 'name') else font
+            if key == 'name' and draw.textlength(text, font=cell_font) > col_w - 12:
+                # Не влезло и в потолок колонки — обрезаем многоточием, а не залезаем на «Статус».
+                while text and draw.textlength(text + '…', font=cell_font) > col_w - 12:
+                    text = text[:-1]
+                text = text.rstrip() + '…'
             tw = draw.textlength(text, font=cell_font)
             # Имя прижимаем влево — колонка узкая, а по центру фамилии «прыгают».
             tx = x + 8 if key == 'name' else x + (col_w - tw) / 2
@@ -33090,6 +33181,8 @@ def _chat_hourly_caption(data):
              + (f" ({_chat_hourly_day_words(data)})" if data.get('is_previous_day') else "")]
     if data.get('online_error'):
         lines.append("Статусы операторов Chat2Desk не отдал — колонка «Статус» пустая.")
+    if data.get('coverage_error'):
+        lines.append(data['coverage_error'])
     return "\n".join(lines)
 
 
@@ -34030,7 +34123,11 @@ def _szov_chat_wallboard_display_names(chat2desk_names, lookup):
 
 
 def _szov_chat_wallboard_fetch_snapshot():
-    """Свежий снимок табло по чатам: три источника Chat2Desk, все под общим кэшем дня."""
+    """Свежий снимок табло по чатам: Syntony (SZOV-12) или три источника Chat2Desk под общим
+    кэшем дня."""
+    if _szov_chat_source_is_syntony():
+        return syntony_chats_szov.wallboard_snapshot(
+            db, _szov_syntony_context(), target_seconds=SZOV_CHAT_WALLBOARD_TARGET_SECONDS)
     now = datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE))
     day_str = now.strftime('%Y-%m-%d')
     now_seconds = max(1, now.hour * 3600 + now.minute * 60 + now.second)
@@ -34075,6 +34172,9 @@ def _szov_chat_wallboard_fetch_snapshot():
     first_sum, first_count, inner_sum, inner_count = _chat_hourly_response_sums(request_rows)
     return {
         'day': day_str,
+        # Источник снимок называет сам: экран и виджет пишут «данные … на» по нему (SZOV-12).
+        'source': 'chat2desk',
+        'source_label': 'Chat2Desk',
         'chat2desk_now': now.strftime('%Y-%m-%d %H:%M:%S'),
         'target_seconds': SZOV_CHAT_WALLBOARD_TARGET_SECONDS,
         'now': now_block,
@@ -34166,6 +34266,10 @@ def _szov_chat_break_violations_scan(now=None):
     Своих суток из Chat2Desk не выкачиваем: события за день лежат в общем кэше табло и
     догружаются по водяному знаку, поэтому заход стоит одну страницу. Квота Chat2Desk общая
     на компанию — см. _szov_chat_wallboard_fetch_events."""
+    if _szov_chat_source_is_syntony():
+        # Перерыв — статус Chat2Desk; у Syntony статусов операторов нет (SZOV-12), сверять
+        # с графиком нечего. Журнал прошлых нарушений остаётся как был.
+        return 0
     now = now or datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).replace(tzinfo=None, microsecond=0)
     lookup, _department_id = _szov_chat_wallboard_operator_lookup()
     if not lookup:
@@ -34194,6 +34298,8 @@ def _szov_chat_break_violations_scan(now=None):
 
 def _szov_chat_broadcast_break_violations(scheduled=False, now=None):
     """Нарушения перерывов чатников для одного сообщения отбивки «Чата»."""
+    if _szov_chat_source_is_syntony():
+        return []   # статусов у Syntony нет — и нарушений по ним нет (SZOV-12)
     try:
         moment = now or datetime.now(ZoneInfo(CHAT_HOURLY_TIMEZONE)).replace(tzinfo=None)
         if scheduled:
@@ -34219,19 +34325,66 @@ async def _szov_chat_break_violations_mark_reported(data):
 
 
 def _szov_chat_wallboard_snapshot():
-    """Снимок направления «Чат»: Chat2Desk.
+    """Снимок направления «Чат»: Syntony (SZOV-12), при откате — Chat2Desk.
 
-    Кэш тут длиннее, чем у «Линии»: квота Chat2Desk общая на компанию, а не наш собственный
-    прокси. Правила устаревания — общие с «Основой», см. _wallboard_snapshot_with_cache."""
+    У Chat2Desk кэш длиннее, чем у «Линии»: квота общая на компанию. Syntony читается из своей
+    базы (вебхук + догрузка раз в минуту), поэтому её снимок живёт минуту. Правила устаревания —
+    общие с «Основой», см. _wallboard_snapshot_with_cache."""
+    syntony = _szov_chat_source_is_syntony()
     return _wallboard_snapshot_with_cache(
         cache=_szov_chat_wallboard_cache,
         lock=_szov_chat_wallboard_lock,
         fetch=_szov_chat_wallboard_fetch_snapshot,
-        source='Chat2Desk',
-        ttl=SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS,
+        source=_szov_chat_source_label(),
+        ttl=(min(SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS, SZOV_SYNTONY_WALLBOARD_TTL_SECONDS)
+             if syntony else SZOV_CHAT_WALLBOARD_CACHE_TTL_SECONDS),
         stale_max=SZOV_CHAT_WALLBOARD_STALE_MAX_SECONDS,
         retry_after=SZOV_CHAT_WALLBOARD_RETRY_AFTER_FAIL_SECONDS,
         lock_wait=SZOV_CHAT_WALLBOARD_LOCK_WAIT_SECONDS)
+
+
+# ── Чаты СЗоВ по Syntony (SZOV-12) ──────────────────────────────────────────────────────────
+# С 20.11.2026 табло «Чат», его отбивка и выгрузка, почасовой отчёт по чатам считают по Syntony:
+# Chat2Desk отключается, номера СЗоВ уже там. Правила счёта — syntony_chats/metrics.py, сборка —
+# syntony_chats/szov.py; здесь только переключатель и кто такие чатники СЗоВ. Откат —
+# SZOV_CHAT_SOURCE=chat2desk (без ключа истории и секрета вебхука Syntony — тоже Chat2Desk).
+# Статусов операторов у Syntony нет: онлайн — ответ водителю за последние 15 минут (решение
+# владельца 20.11.2026), перерывов вне графика по чату не разобрать.
+SZOV_SYNTONY_WALLBOARD_TTL_SECONDS = _env_int('SZOV_SYNTONY_WALLBOARD_TTL_SECONDS', 60,
+                                              minimum=15, maximum=600)
+
+
+def _szov_chat_source_is_syntony():
+    return syntony_chats_szov.source_enabled()
+
+
+def _szov_chat_source_label():
+    return syntony_chats_szov.SOURCE_LABEL if _szov_chat_source_is_syntony() else 'Chat2Desk'
+
+
+def _szov_syntony_context():
+    """Кто чатник СЗоВ для Syntony: тот же справочник, что у Chat2Desk (отдел СЗоВ + модель
+    чат-менеджера), и то же сопоставление по ФИО — казахские буквы и отчество сводятся."""
+    lookup, _department_id = _szov_chat_wallboard_operator_lookup()
+    roster = {}
+    for infos in lookup.values():
+        for info in infos:
+            roster.setdefault(int(info['id']), info)
+    from test_numbers import keys as test_keys
+    return syntony_chats_szov.Context(
+        resolve=lambda name: _szov_chat_wallboard_resolve(name, lookup),
+        roster=sorted(roster.values(), key=lambda info: info.get('name') or ''),
+        is_test_sql=test_keys.sql_is_test)
+
+
+def _szov_chat_syntony_export_day(day_str):
+    """Прошедшие сутки выгрузки по Syntony → (часы, итоги, ошибка); None — источник не Syntony."""
+    if not _szov_chat_source_is_syntony():
+        return None
+    day = _chat_metrics_parse_date(day_str)
+    if day is None:
+        return [], {}, 'Дата не разобралась'
+    return syntony_chats_szov.day_block(db, _szov_syntony_context(), day)
 
 
 
@@ -35926,6 +36079,7 @@ def _szov_chat_broadcast_collect(scheduled=False):
                            or SZOV_CHAT_WALLBOARD_TARGET_SECONDS),
         'now': (snapshot or {}).get('now') or {},
         'today': (snapshot or {}).get('today') or {},
+        'source': (snapshot or {}).get('source'),
         'snapshot_stale': bool((snapshot or {}).get('stale')),
         'snapshot_age_seconds': _szov_wallboard_int((snapshot or {}).get('age_seconds')),
     }
@@ -35957,7 +36111,8 @@ def _szov_chat_broadcast_deviations(data):
             f"({_szov_format_seconds_mmss(target)}) — {_szov_format_seconds_mmss(inner)} "
             f"на {chats} {_szov_plural(chats, 'обращении', 'обращениях', 'обращениях')} за сутки."
         )
-    stale = _szov_broadcast_stale_note(data, 'Chat2Desk')
+    stale = _szov_broadcast_stale_note(
+        data, 'Syntony' if data.get('source') == 'syntony' else 'Chat2Desk')
     if stale:
         notes.append(stale)
     return notes
@@ -35968,7 +36123,8 @@ def _szov_chat_broadcast_notes(data):
 
     Дежурные строки (кто на линии, время ответа) отклонениями НЕ считаются — иначе чат в
     режиме «только при отклонениях» получал бы сообщение каждый раз."""
-    stale = _szov_broadcast_stale_note(data, 'Chat2Desk')
+    stale = _szov_broadcast_stale_note(
+        data, 'Syntony' if data.get('source') == 'syntony' else 'Chat2Desk')
     # Замершие данные упоминаем последними, после дежурных строк.
     notes = [note for note in _szov_chat_broadcast_deviations(data) if note != stale]
     now = data.get('now') or {}
@@ -36029,6 +36185,23 @@ def _szov_render_chat_wallboard_png(data):
     else:
         inner_colors = ('#d1fae5', '#047857')
 
+    if data.get('source') == 'syntony':
+        # Syntony (SZOV-12): статусов и открытых чатов у неё нет — плиток из нулей не рисуем.
+        key_tiles = [
+            ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
+            ('Ответ внутри чата', _szov_chat_broadcast_duration(inner),
+             inner_colors[0], inner_colors[1]),
+            ('Первый ответ', _szov_chat_broadcast_duration(today.get('first_reply_seconds')),
+             '#f1f5f9', '#334155'),
+            ('Не в системе', str(_szov_wallboard_int(now.get('operators_offline'))),
+             '#f1f5f9', '#334155'),
+        ]
+        stat_tiles = [
+            ('Чатов за сутки', str(_szov_wallboard_int(today.get('chats')))),
+            ('Поступивших', str(_szov_wallboard_int(today.get('chats_new')))),
+        ]
+        return _szov_render_tiles_png(
+            'Табло СЗоВ · чаты', f"Чаты · {data['generated_at']}", key_tiles, stat_tiles)
     key_tiles = [
         ('Онлайн', str(_szov_wallboard_int(now.get('operators_online'))), '#dbeafe', '#1d4ed8'),
         ('Ответ внутри чата', _szov_chat_broadcast_duration(inner),
@@ -44026,7 +44199,7 @@ async def chat_hourly_command(message: types.Message):
         data, caption, image = await _chat_hourly_prepare()
     except Exception as exc:
         logging.error("Команда /chats: не удалось собрать отчёт: %s", exc, exc_info=True)
-        await message.reply("Не удалось собрать отчёт — Chat2Desk не ответил.")
+        await message.reply(f"Не удалось собрать отчёт — {_szov_chat_source_label()} не отвечает.")
         return
     await _chat_hourly_deliver(message.chat.id, data, caption, image)
 

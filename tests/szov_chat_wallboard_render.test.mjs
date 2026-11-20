@@ -121,3 +121,49 @@ test('никого не в системе — «Никого», а не пуст
     assert.match(html, />Никого</);
     assert.doesNotMatch(html, /<li/);
 });
+
+// Syntony (SZOV-12): статусов операторов и открытых чатов у неё нет, снимок приходит со
+// statuses: false. Нули на месте «Занят» или «Открыто чатов» читались бы как «все свободны».
+const SYNTONY_SNAPSHOT = {
+    ...SNAPSHOT,
+    source: 'syntony',
+    source_label: 'Syntony',
+    statuses: false,
+    now: { ...SNAPSHOT.now, operators_busy: null, operators_on_training: null, operators_on_break: null,
+           open_chats: null, operators: ON_SHIFT.map((item) => ({ ...item, open_chats: null })) },
+    today: { ...SNAPSHOT.today, chats_new: 31 },
+};
+
+test('Syntony: «сейчас» — только «Онлайн» и «Не в системе», без статусов и открытых чатов', () => {
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: SYNTONY_SNAPSHOT }));
+    assert.match(html, />Онлайн</);
+    assert.match(html, /title="Показать, кто не в системе"/);
+    for (const label of ['Занят', 'Тренинг', 'Открыто чатов', 'на перерыве']) {
+        assert.doesNotMatch(html, new RegExp(`>${label}<`), label);
+    }
+    assert.match(html, /ответили за 15 минут/);
+});
+
+test('Syntony: за день — всего, поступивших, ответ внутри чата и первый ответ', () => {
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: SYNTONY_SNAPSHOT }));
+    const labels = ['Чатов за сутки', 'Поступивших', 'Ответ внутри чата', 'Первый ответ'];
+    const positions = labels.map((label) => html.indexOf(`>${label}<`));
+    assert.ok(positions.every((index) => index > 0), JSON.stringify(positions));
+    assert.deepEqual([...positions].sort((a, b) => a - b), positions);
+    assert.match(html, />31</);
+});
+
+test('Syntony: у человека на смене — чаты за сутки, а не «в работе»', () => {
+    const html = column('shift', { statuses: false, people: SYNTONY_SNAPSHOT.now.operators });
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    assert.match(text, /12 чатов за сутки/);
+    assert.doesNotMatch(text, /в работе/);
+});
+
+test('Chat2Desk (откат): прежние плитки на месте', () => {
+    const html = renderToStaticMarkup(React.createElement(SzovChatWallboardBody, { snapshot: SNAPSHOT }));
+    for (const label of ['Занят', 'Тренинг', 'Открыто чатов']) {
+        assert.match(html, new RegExp(`>${label}<`), label);
+    }
+    assert.doesNotMatch(html, />Поступивших</);
+});

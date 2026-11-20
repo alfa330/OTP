@@ -454,9 +454,17 @@ export default function SzovWallboardWidget({
         wallboardStaleNotice(snapshot, error, config.source)
         || (snapshot && config.freshnessNotice ? config.freshnessNotice(snapshot) : null)
     ), [snapshot, error, config]);
+    // Чего у источника снимка нет (статусов у Syntony), того в виджете нет — ни плиткой, ни
+    // строкой в выборе показателей: ноль на месте «Занят» читался бы как «никто не занят».
+    const settingsConfig = useMemo(() => (
+        config.metricAvailable
+            ? { ...config, metrics: config.metrics.filter((metric) => config.metricAvailable(metric, snapshot)) }
+            : config
+    ), [config, snapshot]);
     const visibleMetrics = useMemo(
-        () => metrics.map((key) => config.metricMap[key]).filter(Boolean),
-        [metrics, config]
+        () => metrics.map((key) => settingsConfig.metricMap[key])
+            .filter((metric) => metric && settingsConfig.metrics.includes(metric)),
+        [metrics, settingsConfig]
     );
 
     if (!pipContainer) return null;
@@ -502,7 +510,7 @@ export default function SzovWallboardWidget({
             <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-2.5">
                 {settingsOpen ? (
                     <SettingsPanel
-                        config={config}
+                        config={settingsConfig}
                         selected={metrics}
                         onToggle={toggleMetric}
                         onReset={resetMetrics}

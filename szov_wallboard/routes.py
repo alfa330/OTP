@@ -105,10 +105,15 @@ def _szov_chat_export_finish_day(day_str, hourly, totals, *, events_truncated=Fa
         'day': day_str,
         'hourly': hourly,
         'chats': int(totals.get('chats') or 0),
+        # Поступивших (начатых за сутки) — только у Syntony: у Chat2Desk обращение и есть чат.
+        'chats_new': (None if totals.get('chats_new') is None else int(totals['chats_new'])),
         'chats_open': (None if totals.get('chats_open') is None else int(totals['chats_open'])),
         'first_reply_seconds': totals.get('first_reply_seconds'),
         'inner_reply_seconds': totals.get('inner_reply_seconds'),
         'reply_sums': totals.get('reply_sums') or {},
+        # Syntony (SZOV-12): разрез по сотрудникам за сутки — итоги листов «оператор × час»
+        # берутся из него, а не складываются из часов (чат живёт в нескольких часах).
+        'operators_day': totals.get('operators_day'),
         'people': _szov_chat_export_day_people(hourly),
         'online_seconds': sum(int(row.get('online_seconds') or 0) for row in hourly),
         'peak_online': max((int(row.get('operators_online') or 0) for row in hourly), default=0),
@@ -126,10 +131,12 @@ def _szov_chat_export_today_block(snapshot):
     return _szov_chat_export_finish_day(
         snapshot.get('day') or '', snapshot.get('hourly') or [], {
             'chats': today.get('chats'),
+            'chats_new': today.get('chats_new'),
             'chats_open': today.get('chats_open'),
             'first_reply_seconds': today.get('first_reply_seconds'),
             'inner_reply_seconds': today.get('inner_reply_seconds'),
             'reply_sums': today.get('reply_sums'),
+            'operators_day': today.get('operators_day'),
         },
         events_truncated=diagnostics.get('events_truncated'),
         unmatched_names=diagnostics.get('unmatched_names') or [])
@@ -445,6 +452,12 @@ def build_szov_wallboard_blueprint(
             "font_path": regular,
         })
 
+    def _szov_chat_syntony_source():
+        """Чаты СЗоВ считаются по Syntony (SZOV-12)? Переключатель живёт в монолите — ищем по
+    имени в момент запроса, как резолверы отделов выше."""
+        check = monolith_namespace.get('_szov_chat_source_is_syntony')
+        return bool(check()) if check is not None else False
+
     def _szov_chat_export_period(date_from, date_to, today):
         """Дни периода по возрастанию. ValueError — если период не разобрался или слишком велик.
 
@@ -471,12 +484,19 @@ def build_szov_wallboard_blueprint(
         length = (end - start).days + 1
         if length > SZOV_CHAT_EXPORT_MAX_DAYS:
             # «суток», а не «дней»: число подставляется, а «больше 31 дней» — не по-русски.
-            raise ValueError('Период больше %d суток: Chat2Desk качается по дню на день'
-                             % SZOV_CHAT_EXPORT_MAX_DAYS)
+            raise ValueError('Период больше %d суток' % SZOV_CHAT_EXPORT_MAX_DAYS)
         return [(start + timedelta(days=offset)).strftime('%Y-%m-%d') for offset in range(length)]
 
     def _szov_chat_export_past_block(day_str, lookup):
-        """Прошедший день из Chat2Desk. Сутки закрыты, поэтому часы считаются все 24 и целиком."""
+        """Прошедший день: из Syntony (SZOV-12), при откате — из Chat2Desk. Сутки закрыты,
+    поэтому часы считаются все 24 и целиком."""
+        syntony_day = monolith_namespace.get('_szov_chat_syntony_export_day')
+        syntony = syntony_day(day_str) if syntony_day is not None else None
+        if syntony is not None:
+            hourly, totals, error = syntony
+            return _szov_chat_export_finish_day(
+                day_str, hourly, totals, unmatched_names=(totals or {}).get('unmatched_names') or [],
+                error=error)
         events_cache = {'day': None, 'rows': {}, 'newest': None, 'truncated': False}
         events = _szov_chat_wallboard_fetch_events(day_str, cache=events_cache)
         request_rows = _chat_hourly_fetch_requests(day_str, cache={'day': None, 'rows': {}})
@@ -538,7 +558,11 @@ def build_szov_wallboard_blueprint(
             'days': [blocks[day] for day in days if day in blocks],
             'target_seconds': SZOV_CHAT_WALLBOARD_TARGET_SECONDS,
             'now': (snapshot or {}).get('now'),
-            'chat2desk_now': (snapshot or {}).get('chat2desk_now'),
+            # Статусов операторов у Syntony нет (SZOV-12): книга не пишет их нулями.
+            'statuses': (snapshot or {}).get('statuses', True) if snapshot else None,
+            'source_label': ('Syntony' if _szov_chat_syntony_source() else 'Chat2Desk'),
+            'chat2desk_now': ((snapshot or {}).get('chat2desk_now')
+                              or (snapshot or {}).get('source_now')),
             'stale': bool((snapshot or {}).get('stale')),
             'age_seconds': (snapshot or {}).get('age_seconds'),
             'error': (snapshot or {}).get('error'),
@@ -595,6 +619,10 @@ def build_szov_wallboard_blueprint(
 
         hour_rows = [(day.get('day') or '', row) for day in days for row in (day.get('hourly') or [])]
         chats_total = sum(_int(day.get('chats')) for day in days)
+        # Syntony (SZOV-12): «поступивших» есть, статусов операторов и открытых чатов нет.
+        has_new = any(day.get('chats_new') is not None for day in days)
+        new_total = sum(_int(day.get('chats_new')) for day in days)
+        no_statuses = payload.get('statuses') is False
         online_seconds_total = sum(_int(day.get('online_seconds')) for day in days)
         peak_online = max((_int(day.get('peak_online')) for day in days), default=0)
 
@@ -630,6 +658,25 @@ def build_szov_wallboard_blueprint(
         # Чаты, которые никто не взял (бот закрыл сам): в разрез по людям они не идут, и разница
         # между итогом дня и суммой колонки «Чатов» должна быть подписана, а не оставлена загадкой.
         unassigned_chats = chats_total - sum(_int(sums.get('chats')) for sums in reply_totals.values())
+        # Syntony: диалог живёт днями и часами — чат, где человек отвечал в разные часы, стоит в
+        # каждом из них. Итог по сотруднику поэтому берём из суток, а «без оператора» не
+        # считаем: вычитание здесь дало бы не ту величину.
+        day_people = [day.get('operators_day') for day in days]
+        if days and all(isinstance(items, list) for items in day_people):
+            reply_totals = {}
+            for items in day_people:
+                for item in items:
+                    name = str((item or {}).get('name') or '').strip()
+                    if not name:
+                        continue
+                    bucket = reply_totals.setdefault(name, {})
+                    for key in ('chats', 'first_count', 'inner_count'):
+                        bucket[key] = _int(bucket.get(key)) + _int(item.get(key))
+                    for key in ('first_sum', 'inner_sum'):
+                        bucket[key] = float(bucket.get(key) or 0.0) + float(item.get(key) or 0.0)
+            reply_order = sorted(reply_totals,
+                                 key=lambda name: (-_int(reply_totals[name].get('chats')), name))
+            unassigned_chats = 0
 
         wb = Workbook()
 
@@ -650,7 +697,8 @@ def build_szov_wallboard_blueprint(
              f'{period_from} — {period_to}' if multi else (period_from or period_to)),
         ]
         if payload.get('chat2desk_now'):
-            head_rows.append(('Данные Chat2Desk на', payload['chat2desk_now']))
+            head_rows.append(('Данные %s на' % (payload.get('source_label') or 'Chat2Desk'),
+                              payload['chat2desk_now']))
         head_rows.append(('Цель по ответу внутри чата, мин', target_minutes))
         head_rows.append(('Выгружено', payload.get('generated_at') or ''))
 
@@ -676,8 +724,8 @@ def build_szov_wallboard_blueprint(
                          'часах этих дней может быть меньше, чем было' % ', '.join(truncated))
         unmatched = sorted({name for day in days for name in (day.get('unmatched_names') or [])})
         if unmatched:
-            notes.append('Имена Chat2Desk без сотрудника в OTP (в счётчики не вошли): '
-                         + ', '.join(unmatched))
+            notes.append('Имена %s без сотрудника в OTP (в счётчики не вошли): '
+                         % (payload.get('source_label') or 'Chat2Desk') + ', '.join(unmatched))
         for text in notes:
             ws.cell(row=row, column=1, value='Внимание').font = label_font
             ws.cell(row=row, column=2, value=text).font = note_font
@@ -713,19 +761,27 @@ def build_szov_wallboard_blueprint(
             # `holiday` — это «Закрытие чатов»), и отдельной строкой он не нужен — решение владельца
             # 20.08.2026. Сами люди из этого статуса никуда не деваются: они стоят на листе
             # «Чатники» со своим статусом, как и все остальные.
-            _block('Чатники · сейчас', [
-                ('Онлайн', _int(now_block.get('operators_online')), None),
-                ('Занят', _int(now_block.get('operators_busy')), None),
-                ('Тренинг', _int(now_block.get('operators_on_training')), None),
-                ('На перерыве', _int(now_block.get('operators_on_break')), None),
-                ('В прочих статусах', _int(now_block.get('operators_other')), None),
-                ('Не в системе', _int(now_block.get('operators_offline')), None),
-                ('Открыто чатов', _int(now_block.get('open_chats')), None),
-            ])
+            if no_statuses:
+                _block('Чатники · сейчас', [
+                    ('Онлайн', _int(now_block.get('operators_online')), None),
+                    ('Не в системе', _int(now_block.get('operators_offline')), None),
+                ])
+            else:
+                _block('Чатники · сейчас', [
+                    ('Онлайн', _int(now_block.get('operators_online')), None),
+                    ('Занят', _int(now_block.get('operators_busy')), None),
+                    ('Тренинг', _int(now_block.get('operators_on_training')), None),
+                    ('На перерыве', _int(now_block.get('operators_on_break')), None),
+                    ('В прочих статусах', _int(now_block.get('operators_other')), None),
+                    ('Не в системе', _int(now_block.get('operators_offline')), None),
+                    ('Открыто чатов', _int(now_block.get('open_chats')), None),
+                ])
 
         period_rows = [
             ('Чатов', chats_total, None),
         ]
+        if has_new:
+            period_rows.append(('Поступивших', new_total, None))
         if len(days) == 1 and days[0].get('chats_open') is not None:
             period_rows.append(('Открыто сейчас', _int(days[0].get('chats_open')), None))
         period_rows.extend([
@@ -756,7 +812,12 @@ def build_szov_wallboard_blueprint(
             ws_days = wb.create_sheet('По дням')
             headers = ['День', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
                        'Людей на линии', 'Максимум в часе', 'На линии, мин', 'Примечание']
-            _sheet_head(ws_days, headers, [13, 10, 22, 20, 16, 17, 15, 34])
+            widths = [13, 10, 22, 20, 16, 17, 15, 34]
+            if has_new:
+                headers.insert(2, 'Поступивших')
+                widths.insert(2, 14)
+            _sheet_head(ws_days, headers, widths)
+            day_inner_column = headers.index('Ответ внутри чата, мин') + 1
             for offset, day in enumerate(days):
                 inner = day.get('inner_reply_seconds')
                 note = []
@@ -774,11 +835,13 @@ def build_szov_wallboard_blueprint(
                     _szov_chat_export_minutes(day.get('online_seconds'), 0),
                     ' · '.join(note),
                 ]
+                if has_new:
+                    values.insert(2, day.get('chats_new'))
                 for index, value in enumerate(values, start=1):
                     cell = ws_days.cell(row=2 + offset, column=index, value=value)
                     cell.border = border
                     cell.alignment = center if 1 < index < len(headers) else left
-                    if index == 3 and inner is not None:
+                    if index == day_inner_column and inner is not None:
                         cell.font = good_font if float(inner) <= target_seconds else bad_font
             ws_days.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), len(days) + 1)
 
@@ -790,6 +853,9 @@ def build_szov_wallboard_blueprint(
         headers = ['Час', 'Чатов', 'Ответ внутри чата, мин', 'Первый ответ, мин',
                    'Людей на линии', 'На линии, мин', 'Кто на линии', 'Примечание']
         widths = [15, 10, 22, 20, 16, 15, 62, 26]
+        if has_new:
+            headers.insert(2, 'Поступивших')
+            widths.insert(2, 14)
         if multi:
             headers.insert(0, 'День')
             widths.insert(0, 13)
@@ -821,6 +887,8 @@ def build_szov_wallboard_blueprint(
                           for item in (hour_row.get('operators') or [])),
                 ' · '.join(note),
             ]
+            if has_new:
+                values.insert(2, _int(hour_row.get('chats_new')))
             if multi:
                 values.insert(0, day_str)
             for index, value in enumerate(values, start=1):
@@ -846,6 +914,8 @@ def build_szov_wallboard_blueprint(
             'разных людей: %d' % len(people_seconds),
             '',
         ]
+        if has_new:
+            totals.insert(2, new_total)
         if multi:
             totals.insert(0, '%s — %s' % (period_from, period_to))
         total_row = last_hour_row + 1
@@ -857,6 +927,11 @@ def build_szov_wallboard_blueprint(
             cell.alignment = center if index > (2 if multi else 1) else left
         # Фильтр — только по часам: итоговая строка под ним и в отбор попадать не должна.
         ws_hours.auto_filter.ref = 'A1:%s%d' % (get_column_letter(len(headers)), last_hour_row)
+        if has_new:
+            # Syntony: «Чатов» в часе — где водитель писал в этот час; итог — за сутки целиком.
+            ws_hours.cell(row=total_row + 2, column=1,
+                          value='Чат, где водитель писал в разные часы, стоит в каждом из них — '
+                                'сумма часов больше итога за сутки').font = hint_font
 
         # ── Листы «оператор × час» ───────────────────────────────────────────────────────────────
         # Два листа одной раскладки: строка — чатник, колонка — час, в клетке минуты. Первый ответ
@@ -949,7 +1024,12 @@ def build_szov_wallboard_blueprint(
             # это разные семь чатов. Время ответа тут за СУТКИ, а не «сейчас», как и на стене.
             headers = ['Сотрудник', 'Статус', 'В статусе, мин', 'Чатов в работе', 'Чатов за сутки',
                        'Первый ответ, мин', 'Ответ внутри чата, мин']
-            _sheet_head(ws_shift, headers, [34, 18, 16, 16, 16, 20, 22])
+            widths = [34, 18, 16, 16, 16, 20, 22]
+            if no_statuses:
+                # Открытых чатов у Syntony нет; «в статусе» — сколько человек на линии подряд.
+                headers[2] = 'На линии подряд, мин'
+                del headers[3], widths[3]
+            _sheet_head(ws_shift, headers, widths)
             people = [item for item in (now_block.get('operators') or []) if isinstance(item, dict)]
             for offset, item in enumerate(people):
                 # seconds=None — событий за сутки не было: человек в этом статусе с начала суток, и
@@ -965,6 +1045,8 @@ def build_szov_wallboard_blueprint(
                     _szov_chat_export_minutes(item.get('first_reply_seconds')),
                     _szov_chat_export_minutes(inner_seconds),
                 ]
+                if no_statuses:
+                    del values[3]
                 for index, value in enumerate(values, start=1):
                     cell = ws_shift.cell(row=2 + offset, column=index, value=value)
                     cell.border = border
@@ -1247,13 +1329,21 @@ def build_szov_wallboard_blueprint(
         requester_id, err = _szov_wallboard_guard()
         if err:
             return err
-        if not _chat2desk_authorization_header():
+        syntony = _szov_chat_syntony_source()
+        if not syntony and not _chat2desk_authorization_header():
             return jsonify({"error": "Интеграция с Chat2Desk недоступна: CHAT2DESK_API_TOKEN не задан"}), 503
         try:
             return jsonify(_szov_chat_wallboard_snapshot())
         except Exception as exc:
+            reason = str(exc)
+            if syntony and reason.startswith('Syntony'):
+                # Своё состояние источника (первая загрузка, догрузка, молчание) — его текст и
+                # показываем на экране; это не сбой кода, трейсбек журналу не нужен.
+                logging.warning("Табло СЗоВ (чат): %s", reason[:300])
+                return jsonify({"error": reason[:300]}), 503
             logging.error("Табло СЗоВ (чат): снимок недоступен: %s", exc, exc_info=True)
-            return jsonify({"error": "Chat2Desk недоступен", "detail": str(exc)[:300]}), 503
+            return jsonify({"error": "%s не отвечает" % ('Syntony' if syntony else 'Chat2Desk'),
+                            "detail": reason[:300]}), 503
 
     @bp.route('/szov_wallboard/chat_export', methods=['GET', 'OPTIONS'])
     @require_api_key
@@ -1264,7 +1354,7 @@ def build_szov_wallboard_blueprint(
         requester_id, err = _szov_wallboard_guard()
         if err:
             return err
-        if not _chat2desk_authorization_header():
+        if not _szov_chat_syntony_source() and not _chat2desk_authorization_header():
             return jsonify({"error": "Интеграция с Chat2Desk недоступна: CHAT2DESK_API_TOKEN не задан"}), 503
         try:
             payload = _szov_chat_export_collect(request.args.get('date_from'),

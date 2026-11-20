@@ -90,6 +90,8 @@ def _namespace(fake_requests=None):
         'CHAT2DESK_API_MAX_PAGES': 50,
         'CHAT2DESK_API_TIMEOUT_SECONDS': 30,
         'CHAT2DESK_STATISTICS_REPORT_REQUEST_STATS': 'request_stats',
+        # Источник чатов СЗоВ (SZOV-12): сценарии этого файла — про прежний Chat2Desk-путь.
+        '_szov_chat_source_is_syntony': lambda: False,
     }
     exec(compile(module, "<chat-hourly>", "exec"), ns)
     missing = sorted(name for name in NAMES if name not in ns)

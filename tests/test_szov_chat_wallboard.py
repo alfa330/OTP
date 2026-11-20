@@ -155,6 +155,10 @@ class _Harness:
                 [matched[name]] if name in matched and any(
                     info['id'] == matched[name]['id'] for info in lookup.get('lookup', [])) else []
             ),
+            # Источник чатов СЗоВ (SZOV-12): сценарии этого файла — про Chat2Desk-путь
+            # (откат); Syntony проверяют tests/test_syntony_chats_*.py.
+            '_szov_chat_source_is_syntony': lambda: False,
+            '_szov_chat_source_label': lambda: 'Chat2Desk',
         }
         # Ответ внутри чата считает боевая функция отчёта по чатам — берём её как есть.
         _load_names(source, {'_chat_hourly_response_times', '_chat_hourly_response_sums'}, ns)
@@ -1084,12 +1088,12 @@ class ChatWallboardWiringTests(unittest.TestCase):
         # Ищем именно плитку, а не слова: почему её убрали, в файле остаётся комментарием.
         self.assertNotIn('label="Часов в цели"', self.board)
         self.assertNotIn('hoursInTarget', self.board)
-        self.assertIn('<Grid cols={3}>', self.board)
+        self.assertIn('<Grid cols={statuses ? 3 : 4}>', self.board)
         tiles = (ROOT / "src" / "components" / "monitoring" / "SzovWallboardTiles.jsx").read_text(
             encoding="utf-8-sig")
         # Классы перечислены целиком: собранное в рантайме имя Tailwind в бандл не положит.
-        self.assertIn("const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'xl:grid-cols-5' };",
-                      tiles)
+        self.assertIn("const GRID_COLS = { 2: 'lg:grid-cols-2', 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', "
+                      "5: 'xl:grid-cols-5' };", tiles)
 
     def test_holiday_is_closing_chats_not_a_vacation(self):
         """Подпись из справочника Chat2Desk (GET /v1/operators/statuses): `holiday` — это
@@ -1185,7 +1189,7 @@ class ChatWallboardWiringTests(unittest.TestCase):
         self.assertIn("const chatExportFileName = (snapshot, from, to) => {", self.view)
         self.assertIn("if (from && to && from !== to) return `szov_wallboard_chat_${day(from)}_${day(to)}.xlsx`;",
                       self.view)
-        self.assertIn("String(snapshot?.chat2desk_now || '').slice(11, 16)", self.view)
+        self.assertIn("String(snapshot?.source_now || snapshot?.chat2desk_now || '').slice(11, 16)", self.view)
 
     def test_export_failure_is_reported_by_toast(self):
         """showToast держим в ref: он новый на каждом рендере, а табло рендерится по опросу."""
@@ -1989,3 +1993,54 @@ class ChatBroadcastWiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ChatWallboardExcelSyntonyTests(unittest.TestCase):
+    """Выгрузка по Syntony (SZOV-12): чат живёт в нескольких часах, итоги — за сутки."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ns = _export_namespace()
+
+    def _day(self):
+        # Один чат: Алия отвечала в 9-м и в 10-м часу. В часах он стоит дважды, в сутках — один.
+        hourly = [
+            _export_hour(9, 1, 180.0, 120.0, [(ALIA, 3600)], replies=[(ALIA, 1, 120.0, 180.0)]),
+            _export_hour(10, 1, 720.0, None, [(ALIA, 1800)], replies=[(ALIA, 1, 0.0, 720.0)]),
+        ]
+        # В 10-м часу первой реакции у Алии нет (чат начат в 9-м): разрез часа — без неё.
+        hourly[1]['operators_reply'][0].update(first_sum=0.0, first_count=0)
+        for row, new in zip(hourly, (1, 0)):
+            row['chats_new'] = new
+        return self.ns['_szov_chat_export_finish_day']('2026-11-20', hourly, {
+            'chats': 1, 'chats_new': 1, 'chats_open': None,
+            'first_reply_seconds': 120.0, 'inner_reply_seconds': 360.0,
+            'reply_sums': {'first_sum': 120.0, 'first_count': 1, 'inner_sum': 360.0, 'inner_count': 1},
+            'operators_day': [{'name': ALIA, 'chats': 1, 'first_sum': 120.0, 'first_count': 1,
+                               'inner_sum': 360.0, 'inner_count': 1}],
+        })
+
+    def _workbook(self):
+        from openpyxl import load_workbook
+        payload = {'from': '2026-11-20', 'to': '2026-11-20', 'today': '2026-11-21',
+                   'days': [self._day()], 'target_seconds': 120, 'now': None, 'statuses': None,
+                   'chat2desk_now': None, 'stale': False, 'generated_at': '2026-11-21 09:00'}
+        return load_workbook(BytesIO(self.ns['_szov_chat_wallboard_workbook'](payload)))
+
+    def test_operator_totals_come_from_the_day_not_the_sum_of_hours(self):
+        sheet = self._workbook()['Ответ внутри чата по часам']
+        rows = list(sheet.iter_rows(min_row=2, max_row=3, values_only=True))
+        self.assertEqual(rows[0][:3], (ALIA, 1, 6.0))           # сутки: 1 чат, 6 мин
+        self.assertEqual(rows[1][:3], ('Все чатники', 1, 6.0))
+        self.assertEqual(rows[0][3:5], (3.0, 12.0))             # часы — как были
+        texts = [cell for row in sheet.iter_rows(values_only=True) for cell in row if cell]
+        self.assertFalse(any(str(text).startswith('Чатов без оператора') for text in texts))
+
+    def test_hours_sheet_has_new_chats_and_a_note(self):
+        sheet = self._workbook()['По часам']
+        header = [cell.value for cell in sheet[1]]
+        self.assertEqual(header[:3], ['Час', 'Чатов', 'Поступивших'])
+        self.assertEqual([row[2] for row in sheet.iter_rows(min_row=2, max_row=3, values_only=True)], [1, 0])
+        texts = [cell for row in sheet.iter_rows(values_only=True) for cell in row if cell]
+        self.assertIn('Чат, где водитель писал в разные часы, стоит в каждом из них — '
+                      'сумма часов больше итога за сутки', texts)

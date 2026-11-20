@@ -154,7 +154,7 @@ const BROADCAST_DEVIATION_HINT = {
     chat: (targetSeconds) => (
         <>
             Отклонением считаем то же, что подсвечено на табло: ответ внутри чата дольше цели
-            {' '}{formatMinutes(targetSeconds || 120)} или Chat2Desk не отвечает и цифры на
+            {' '}{formatMinutes(targetSeconds || 120)} или источник чатов не отвечает и цифры на
             табло замерли. Ночные часы с единичными обращениями в тревогу не идут: среднее
             по паре чатов — это случай, а не показатель.
         </>
@@ -1050,7 +1050,7 @@ const chatExportFileName = (snapshot, from, to) => {
     if (from && to && from !== to) return `szov_wallboard_chat_${day(from)}_${day(to)}.xlsx`;
     const single = day(from || to || snapshot?.day);
     const clock = single === day(snapshot?.day)
-        ? String(snapshot?.chat2desk_now || '').slice(11, 16).replace(':', '')
+        ? String(snapshot?.source_now || snapshot?.chat2desk_now || '').slice(11, 16).replace(':', '')
         : '';
     const stamp = [single, clock].filter(Boolean).join('_');
     return `szov_wallboard_chat_${stamp || 'now'}.xlsx`;
@@ -1081,6 +1081,11 @@ const rangeDays = (from, to) => {
 const CHAT_EXPORT_HINTS = {
     single: 'Сводка, по часам, люди на линии и состав смены',
     multi: 'Прошедшие дни качаются из Chat2Desk по дню — это займёт до минуты',
+};
+// Syntony (SZOV-12): прошедшие дни лежат в своей базе — ждать нечего.
+const CHAT_EXPORT_HINTS_SYNTONY = {
+    single: CHAT_EXPORT_HINTS.single,
+    multi: 'Сводка, по дням, по часам и люди на линии',
 };
 
 /*
@@ -1205,18 +1210,23 @@ export const ChatExportControls = ({ apiBaseUrl, withAccessTokenHeader, showToas
     );
 };
 
-/** Направление «Чат»: Chat2Desk. */
+/** Направление «Чат»: Syntony (SZOV-12), при откате на сервере — Chat2Desk. */
 const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManageBroadcast,
                         direction, onDirectionChange, widgetOpen, onToggleWidget }) => {
     const { snapshot, error, loading, refresh } = useSzovChatWallboardSnapshot({ apiBaseUrl, withAccessTokenHeader });
     const [fullscreen, setFullscreen] = useState(false);
 
-    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, 'Chat2Desk'), [error, snapshot]);
+    // Источник называет сам снимок: Syntony или (откатом) Chat2Desk.
+    const sourceLabel = snapshot?.source_label || 'Chat2Desk';
+    const sourceClock = snapshot?.source_now || snapshot?.chat2desk_now;
+    // У Syntony нет статусов операторов — нет и перерывов, которые сверялись бы с графиком.
+    const statuses = snapshot?.statuses !== false;
+    const staleNotice = useMemo(() => wallboardStaleNotice(snapshot, error, sourceLabel), [error, snapshot, sourceLabel]);
 
     const header = (
         <WallboardHeader
             subtitle={`Чаты в реальном времени${
-                snapshot?.chat2desk_now ? ` · данные Chat2Desk на ${formatClock(snapshot.chat2desk_now)}` : ''}`}
+                sourceClock ? ` · данные ${sourceLabel} на ${formatClock(sourceClock)}` : ''}`}
             direction={direction}
             onDirectionChange={onDirectionChange}
             staleNotice={staleNotice}
@@ -1229,12 +1239,14 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
             {/* Отбивка настраивается и без снимка: получатели и расписание живут на сервере,
                 а цифры для сообщения он берёт сам. Цель времени ответа передаём из снимка,
                 когда он есть, — иначе подсказка о норме назвала бы значение по умолчанию. */}
-            <BreakViolationsControls
-                direction="chat"
-                apiBaseUrl={apiBaseUrl}
-                withAccessTokenHeader={withAccessTokenHeader}
-                showToast={showToast}
-            />
+            {statuses ? (
+                <BreakViolationsControls
+                    direction="chat"
+                    apiBaseUrl={apiBaseUrl}
+                    withAccessTokenHeader={withAccessTokenHeader}
+                    showToast={showToast}
+                />
+            ) : null}
             {canManageBroadcast ? (
                 <BroadcastControls
                     direction={direction}
@@ -1251,6 +1263,7 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
                     withAccessTokenHeader={withAccessTokenHeader}
                     showToast={showToast}
                     snapshot={snapshot}
+                    hints={statuses ? CHAT_EXPORT_HINTS : CHAT_EXPORT_HINTS_SYNTONY}
                 />
             ) : null}
         </WallboardHeader>
@@ -1260,7 +1273,7 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
         return (
             <WallboardPlaceholder
                 header={header}
-                message={loading ? 'Загружаем данные Chat2Desk…' : (error || 'Данные недоступны')}
+                message={loading ? 'Загружаем данные чатов…' : (error || 'Данные недоступны')}
                 tone={loading ? 'muted' : 'error'}
             />
         );
@@ -1277,7 +1290,7 @@ const ChatWallboard = ({ apiBaseUrl, withAccessTokenHeader, showToast, canManage
                     z={FULLSCREEN_Z}
                     icon="fa-comments"
                     title="Табло СЗоВ · чаты"
-                    subtitle={`${snapshot?.chat2desk_now ? `Данные Chat2Desk на ${formatClock(snapshot.chat2desk_now)} · ` : ''}Esc чтобы выйти`}
+                    subtitle={`${sourceClock ? `Данные ${sourceLabel} на ${formatClock(sourceClock)} · ` : ''}Esc чтобы выйти`}
                     onClose={() => setFullscreen(false)}
                 >
                     <SzovChatWallboardBody snapshot={snapshot} scale={1.35} />

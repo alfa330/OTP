@@ -296,7 +296,8 @@ class ChatReportJobTests(unittest.TestCase):
             return {}, 'подпись', b'png'
 
         ns = _namespace('chat_hourly_broadcast_job', '_telegram_follow_migration', db=db,
-                        _chat_hourly_deliver=deliver, _chat_hourly_prepare=prepare)
+                        _chat_hourly_deliver=deliver, _chat_hourly_prepare=prepare,
+                        _szov_chat_source_is_syntony=lambda: False)
         asyncio.run(ns['chat_hourly_broadcast_job']())
         return db, delivered, ns['logging']
 

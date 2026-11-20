@@ -492,6 +492,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_busy',
         group: 'now',
+        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        statusOnly: true,
         label: 'Занят',
         hint: 'В системе, но не на линии',
         tone: 'violet',
@@ -500,6 +502,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_training',
         group: 'now',
+        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        statusOnly: true,
         label: 'Тренинг',
         tone: 'good',
         read: (now) => ({ value: formatInt(now.operators_on_training) }),
@@ -507,6 +511,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_break',
         group: 'now',
+        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        statusOnly: true,
         label: 'Перерыв',
         tone: 'warn',
         read: (now) => ({ value: formatInt(now.operators_on_break) }),
@@ -514,6 +520,8 @@ export const CHAT_WALLBOARD_METRICS = [
     {
         key: 'chat_open',
         group: 'now',
+        // Статус Chat2Desk: у Syntony статусов и открытых чатов нет (SZOV-12) — показатель прячется.
+        statusOnly: true,
         label: 'Открыто чатов',
         hint: 'В работе у чатников',
         read: (now) => ({ value: formatInt(now.open_chats) }),
@@ -532,10 +540,19 @@ export const CHAT_WALLBOARD_METRICS = [
         read: (now, today) => ({ value: formatInt(today.chats) }),
     },
     {
+        // Только у Syntony: диалог там живёт днями, и начатые сегодня — отдельное число.
+        key: 'chat_new',
+        group: 'today',
+        label: 'Поступивших',
+        hint: 'Чаты, начатые сегодня',
+        syntonyOnly: true,
+        read: (now, today) => ({ value: formatInt(today.chats_new) }),
+    },
+    {
         key: 'chat_inner',
         group: 'today',
         label: 'Ответ внутри чата',
-        hint: 'Колонка average_replies_time — по ней сверяются супервайзеры',
+        hint: 'Среднее время ответа на сообщение водителя',
         // Единственный оценочный цвет направления: уложились в цель или нет.
         read: (now, today, snapshot) => ({
             value: formatMinutes(today.inner_reply_seconds),
@@ -573,12 +590,25 @@ export const CHAT_WALLBOARD_METRIC_MAP = CHAT_WALLBOARD_METRICS.reduce((acc, met
 /** По умолчанию в виджете чатов — то же, что крупными плитками на стене, плюс время ответа. */
 export const DEFAULT_CHAT_WIDGET_METRICS = [
     'chat_online',
-    'chat_busy',
-    'chat_training',
-    'chat_open',
+    'chat_offline',
+    'chat_chats',
+    'chat_new',
     'chat_inner',
     'chat_first',
 ];
+
+/*
+ * Есть ли показатель у источника этого снимка. Syntony (SZOV-12) приходит со `statuses: false`:
+ * статусов операторов и открытых чатов у неё нет. «Поступивших», наоборот, есть только у неё.
+ * Без снимка показываем всё — источника ещё не знаем.
+ */
+export const chatMetricAvailable = (metric, snapshot) => {
+    if (!snapshot) return true;
+    const syntony = snapshot.statuses === false;
+    if (metric.statusOnly && syntony) return false;
+    if (metric.syntonyOnly && !syntony) return false;
+    return true;
+};
 
 /** Отфильтровать сохранённый набор: ключи, которых больше нет в каталоге, молча выбрасываем. */
 export const sanitizeWidgetMetrics = (keys, map = WALLBOARD_METRIC_MAP) => {
@@ -773,10 +803,16 @@ export const WALLBOARD_DIRECTIONS = {
     chat: {
         key: 'chat',
         label: 'Чат',
-        hint: 'Чаты: Chat2Desk',
+        hint: 'Чаты: Syntony',
         title: 'Табло СЗоВ · чаты',
-        source: 'Chat2Desk',
+        // С 20.11.2026 — Syntony (SZOV-12); сам источник снимок называет в source_label.
+        source: 'Syntony',
         clockField: 'chat2desk_now',
+        clockLabel: (snapshot) => {
+            const clock = snapshot?.source_now || snapshot?.chat2desk_now;
+            return clock ? `Данные ${snapshot?.source_label || 'Chat2Desk'} на ${formatClock(clock)}` : null;
+        },
+        metricAvailable: chatMetricAvailable,
         icon: 'fa-comments',
         useSnapshot: useSzovChatWallboardSnapshot,
         metrics: CHAT_WALLBOARD_METRICS,
@@ -795,7 +831,8 @@ export const wallboardStaleNotice = (snapshot, error, source = 'Oktell') => {
     if (error) return error;
     if (snapshot?.stale) {
         const age = Number(snapshot.age_seconds);
-        return `${source} не отвечает, данные ${Number.isFinite(age) ? `${formatDuration(age)} назад` : 'устарели'}`;
+        // Источник называет сам снимок, если знает (чаты СЗоВ: Syntony или Chat2Desk).
+        return `${snapshot.source_label || source} не отвечает, данные ${Number.isFinite(age) ? `${formatDuration(age)} назад` : 'устарели'}`;
     }
     return null;
 };

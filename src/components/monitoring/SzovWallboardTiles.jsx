@@ -79,7 +79,7 @@ export const Section = ({ icon, title, right = null, children }) => (
  * Классы перечислены целиком, а не склеены из числа: Tailwind собирает их по тексту файла и
  * имени, собранного в рантайме, в бандле просто не окажется.
  */
-const GRID_COLS = { 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'xl:grid-cols-5' };
+const GRID_COLS = { 2: 'lg:grid-cols-2', 3: 'lg:grid-cols-3', 4: 'lg:grid-cols-4', 5: 'xl:grid-cols-5' };
 
 export const Grid = ({ cols = 4, children }) => (
     <div className={`grid grid-cols-2 gap-4 ${GRID_COLS[cols] || GRID_COLS[4]}`}>{children}</div>
