@@ -60,13 +60,20 @@ export const compactBottom = (compact, rows = []) => {
 };
 
 /** Что под КУРСОРОМ (pointerY — в координатах содержимого списка) при щели
- *  shownGap, по которой строки расставлены на экране сейчас (null — щели
- *  нет). Возвращает { gap, into, center, newBlock }:
+ *  shownGap или раздвинутой черте shownSplit, по которым строки расставлены на
+ *  экране сейчас (null — нет). Возвращает { gap, into, center, newBlock, split }:
  *    gap — щель, куда встанет поднятое (null — щели нет);
  *    into — id папки, в которую кладут (курсор над серединой её шапки);
  *    center — номер раздела верхнего уровня, над серединой которого курсор:
  *      подержать — и выйдет папка из двух (выдержку считает список);
- *    newBlock — курсор заметно ниже последней строки: новая карточка.
+ *    newBlock — курсор заметно ниже последней строки: новая карточка в конце;
+ *    split — номер черты между карточками, на которой курсор: новая карточка
+ *      МЕЖДУ ними (просьба владельца 20.11: «перенести в центр к двум блокам —
+ *      должен создаваться новый блок»). Черта узкая (10 px), поэтому, пока
+ *      курсор на ней, нижние карточки раздвинуты на пустую карточку с воздухом
+ *      под ней, и всё это пространство — то же место: курсор, попавший на
+ *      черту, с неё не соскальзывает. Конец верхней карточки и начало нижней
+ *      по-прежнему берутся четвертями их крайних строк.
  *
  *  ПО КУРСОРУ, А НЕ ПО КРАЮ ПОДНЯТОЙ СТРОКИ. Строки расступаются от курсора: у
  *  верхней четверти строки щель встаёт перед ней, у нижней — за ней, а над
@@ -80,44 +87,61 @@ export const compactBottom = (compact, rows = []) => {
 export const pointerZone = (compact, {
     pointerY,
     shownGap = null,
+    shownSplit = null,
     height,
     dragged,
     wasNewBlock = false,
 }) => {
-    const plain = (gap) => ({ gap, into: null, center: null, newBlock: false });
+    const zone = (gap, extra = {}) => ({ gap, into: null, center: null, newBlock: false, split: null, ...extra });
+    const plain = (gap) => zone(gap);
     if (!compact.length) return plain(0);
     const isItem = dragged?.kind === 'item';
     const endTop = compactBottom(compact);
+    const spread = splitSpread(height);
     // Щель — пустое место строки: курсор в ней ничего не меняет.
     if (shownGap !== null) {
         const slotTop = shownGap < compact.length ? compact[shownGap].ctop : endTop;
         if (pointerY >= slotTop && pointerY < slotTop + height) return plain(shownGap);
     }
+    // Раздвинутая черта: сама черта, пустая карточка и воздух под ней — одно место.
+    if (shownSplit !== null && compact[shownSplit]?.kind === 'hr') {
+        const top = compact[shownSplit].ctop;
+        if (pointerY >= top && pointerY < top + compact[shownSplit].height + spread) return zone(null, { split: shownSplit });
+    }
     for (let i = 0; i < compact.length; i += 1) {
         const row = compact[i];
-        const top = row.ctop + (shownGap !== null && i >= shownGap ? height : 0);
+        const top = row.ctop + shownShift(i, shownGap, shownSplit, height);
         if (pointerY < top) return plain(i);
         if (pointerY >= top + row.height) continue;
+        // Черта между карточками — новая карточка на этом месте.
+        if (row.kind === 'hr') return zone(null, { split: i });
         const f = (pointerY - top) / row.height;
-        // Черта между карточками: верхняя половина — в конец карточки над ней, нижняя — в начало следующей.
-        if (row.kind === 'hr') return plain(f < 0.5 ? i : i + 1);
         if (f < ZONE_EDGE) return plain(i);
         if (f > 1 - ZONE_EDGE) return plain(i + 1);
         const halves = f < 0.5 ? i : i + 1;
         const adjacent = shownGap === null || shownGap === i || shownGap === i + 1;
         if (!adjacent) return plain(halves);
-        if (isItem && row.kind === 'folder') return { gap: shownGap, into: row.id, center: null, newBlock: false };
+        if (isItem && row.kind === 'folder') return zone(shownGap, { into: row.id });
         if (shownGap === null) return plain(halves);
-        if (isItem && row.kind === 'item' && !row.folder && !row.fixed) {
-            return { gap: shownGap, into: null, center: i, newBlock: false };
-        }
+        if (isItem && row.kind === 'item' && !row.folder && !row.fixed) return zone(shownGap, { center: i });
         return plain(shownGap);
     }
     // Ниже всех строк: у самого низа — в конец последней карточки, дальше — новая карточка.
     const reach = endTop + height + NEW_BLOCK_REACH_PX - (wasNewBlock ? NEW_BLOCK_HYSTERESIS_PX : 0);
-    if (pointerY >= reach) return { gap: null, into: null, center: null, newBlock: true };
+    if (pointerY >= reach) return zone(null, { newBlock: true });
     return plain(compact.length);
 };
+
+/** На сколько раздвигаются карточки под чертой, когда на ней раскрыта новая
+ *  карточка: её строка и воздух под ней (над ней воздух даёт сама черта). */
+export const splitSpread = (height) => height + BLOCK_GAP_PX;
+
+/* Сдвиг строки i на экране: щель shownGap раздвигает строки начиная с себя,
+   раздвинутая черта shownSplit — строки под собой. */
+const shownShift = (i, shownGap, shownSplit, height) => (
+    (shownGap !== null && i >= shownGap ? height : 0)
+    + (shownSplit !== null && i > shownSplit ? splitSpread(height) : 0)
+);
 
 const memberOf = (row, folderId) => Boolean(row && row.kind === 'item' && row.folder && row.folder === folderId);
 
@@ -182,11 +206,13 @@ export const dropTarget = (compact, gap, dragged, shiftX = 0) => {
 export const gapTop = (compact, gap, rows) => (gap < compact.length ? compact[gap].ctop : compactBottom(compact, rows));
 
 /** На сколько сдвинуть каждую оставшуюся строку: index строки → dy.
- *  gap === null — щели нет (раздел кладут в папку): дыра просто закрывается. */
-export const rowShifts = (rows, compact, gap, height) => {
+ *  gap === null — щели нет (раздел кладут в папку): дыра просто закрывается.
+ *  split — черта, на которой раскрыта новая карточка: строки под ней
+ *  отъезжают на её место. */
+export const rowShifts = (rows, compact, gap, height, split = null) => {
     const shifts = new Map();
     compact.forEach((row, i) => {
-        const virtual = row.ctop + (gap !== null && i >= gap ? height : 0);
+        const virtual = row.ctop + shownShift(i, gap, split, height);
         shifts.set(row.index, virtual - rows[row.index].top);
     });
     return shifts;

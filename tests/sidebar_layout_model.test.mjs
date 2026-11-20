@@ -265,6 +265,19 @@ test('бросок ниже последнего раздела — новая �
     assert.deepEqual([...layoutItemKeys(layout)].sort(), ['А', 'Б', 'В', 'Г']);
 });
 
+test('бросок между двумя карточками — новая карточка ровно между ними', () => {
+    const layout = layoutOf([['А', 'Б'], ['В'], ['Г', 'Д']]);
+    assert.deepEqual(moveEntry(layout, 'Д', { newBlock: true, at: 1 }).blocks, [['А', 'Б'], ['Д'], ['В'], ['Г']]);
+    assert.deepEqual(moveEntry(layout, 'А', { newBlock: true, at: 2 }).blocks, [['Б'], ['В'], ['А'], ['Г', 'Д']]);
+    // Опустевшая карточка, откуда унесли, уходит уже после вставки — новая встаёт, куда бросили.
+    assert.deepEqual(moveEntry(layout, 'В', { newBlock: true, at: 2 }).blocks, [['А', 'Б'], ['В'], ['Г', 'Д']]);
+    assert.ok(sameLayout(moveEntry(layout, 'В', { newBlock: true, at: 1 }), layout), 'одиночку на своё же место — без изменений');
+    // С панели и за краями.
+    assert.deepEqual(placeEntry(layout, 'Е', { newBlock: true, at: 1 }).blocks, [['А', 'Б'], ['Е'], ['В'], ['Г', 'Д']]);
+    assert.deepEqual(placeEntry(layout, 'Е', { newBlock: true, at: 99 }).blocks.at(-1), ['Е']);
+    assert.deepEqual(placeEntry(layout, 'Е', { newBlock: true, at: -3 }).blocks[0], ['Е']);
+});
+
 test('раздел с панели встаёт куда бросили, не дублируется; уносится обратно', () => {
     let layout = layoutOf([]);
     layout = placeEntry(layout, 'Б');
@@ -345,37 +358,61 @@ test('щель идёт за курсором: четверти строки —
     // Щель уже за «В» (2): «В» поднялся на 40–80, щель — 80–120; тот же курсор в щели — стоим.
     assert.equal(at(115, 2).gap, 2);
     assert.equal(at(100, 2).gap, 2);
-    // Черта: верхняя половина — в конец карточки над ней, нижняя — в начало следующей.
-    assert.equal(at(243).gap, 5);
-    assert.equal(at(248).gap, 6);
+    // Конец верхней карточки и начало нижней — четвертями крайних строк.
+    assert.equal(at(238).gap, 5, 'нижняя четверть «С» — в конец карточки');
+    assert.equal(at(253).gap, 6, 'верхняя четверть «Д» — в начало следующей');
+});
+
+test('черта между карточками — новая карточка на этом месте; раздвинутая черта держит курсор', () => {
+    /* Просьба владельца 20.11: «нельзя между двумя существующими блоками
+       создать другой — нужно спускаться вниз; перенести в центр к двум блокам —
+       должен создаваться новый блок». */
+    const rows = zoneRows();
+    const compact = compactRows(rows, { start: 1, end: 1 });
+    // Щель 1: черта (№5) на экране 240–250.
+    const at = (pointerY, shownGap, shownSplit = null) => pointerZone(compact, { pointerY, shownGap, shownSplit, height: H, dragged: ITEM });
+    assert.deepEqual(at(243, 1), { gap: null, into: null, center: null, newBlock: false, split: 5 });
+    assert.equal(at(248, 1).split, 5, 'вся черта — одно место, без половин');
+    // Черта раздвинута: под ней пустая карточка и воздух (200–200+10+40+10), «Д» отъехал на 260–300.
+    for (const y of [201, 215, 245, 259]) {
+        assert.equal(at(y, null, 5).split, 5, `курсор на ${y} не соскальзывает с раздвинутой черты`);
+    }
+    assert.deepEqual(at(265, null, 5), { gap: 6, into: null, center: null, newBlock: false, split: null }, 'ниже — в начало нижней карточки');
+    assert.equal(at(195, null, 5).gap, 5, 'выше — в конец верхней карточки');
+    // Строки под чертой отъезжают на её место — карточку строки и воздух под ней.
+    const shifts = rowShifts(rows, compact, null, H, 5);
+    assert.equal(shifts.get(7), 210 + H + 10 - 250, '«Д» — на высоту строки и воздуха ниже');
+    assert.equal(shifts.get(6), 200 - 240, 'черта — где стоит без поднятой строки, раздвижка её не трогает');
+    // Папку тоже можно бросить между карточками.
+    assert.equal(pointerZone(compact, { pointerY: 243, shownGap: 1, height: H, dragged: { kind: 'folder' } }).split, 5);
 });
 
 test('над серединой строки щель замирает: раздел — папка из двух, папка — «в неё», раздел папки — ничего', () => {
     const compact = compactRows(zoneRows(), { start: 1, end: 1 });
     const at = (pointerY, shownGap, dragged = ITEM) => pointerZone(compact, { pointerY, shownGap, height: H, dragged });
     // Середина «В» (щель вплотную над ним): щель на месте, «В» — кандидат в папку.
-    assert.deepEqual(at(100, 1), { gap: 1, into: null, center: 1, newBlock: false });
+    assert.deepEqual(at(100, 1), { gap: 1, into: null, center: 1, newBlock: false, split: null });
     // Середина «А» (щель вплотную под ним) — тоже.
-    assert.deepEqual(at(20, 1), { gap: 1, into: null, center: 0, newBlock: false });
+    assert.deepEqual(at(20, 1), { gap: 1, into: null, center: 0, newBlock: false, split: null });
     // Середина шапки папки (щель за «В», вплотную над папкой: шапка на 120–160) — в папку.
-    assert.deepEqual(at(140, 2), { gap: 2, into: 'fp', center: null, newBlock: false });
+    assert.deepEqual(at(140, 2), { gap: 2, into: 'fp', center: null, newBlock: false, split: null });
     // Середина раздела в папке (щель вплотную под «Р»: он на 120–160) — щель
     // замирает, но папки из него не делают: вложенных папок нет.
-    assert.deepEqual(at(140, 4), { gap: 4, into: null, center: null, newBlock: false });
+    assert.deepEqual(at(140, 4), { gap: 4, into: null, center: null, newBlock: false, split: null });
     // Папку несут — ни «в папку», ни «на раздел».
-    assert.deepEqual(at(100, 1, { kind: 'folder' }), { gap: 1, into: null, center: null, newBlock: false });
+    assert.deepEqual(at(100, 1, { kind: 'folder' }), { gap: 1, into: null, center: null, newBlock: false, split: null });
     // Курсор перескочил далеко — щель сперва подходит к строке по половинам.
-    assert.deepEqual(at(265, 1), { gap: 6, into: null, center: null, newBlock: false });
-    assert.deepEqual(at(278, 1), { gap: 7, into: null, center: null, newBlock: false });
+    assert.deepEqual(at(265, 1), { gap: 6, into: null, center: null, newBlock: false, split: null });
+    assert.deepEqual(at(278, 1), { gap: 7, into: null, center: null, newBlock: false, split: null });
 });
 
 test('с панели (щели ещё нет): над разделом щель открывается по половинам, над папкой — сразу в неё', () => {
     const rows = zoneRows();
     const compact = rows.map((row, index) => ({ ...row, index, ctop: row.top }));
     const at = (pointerY) => pointerZone(compact, { pointerY, shownGap: null, height: H, dragged: ITEM });
-    assert.deepEqual(at(55), { gap: 1, into: null, center: null, newBlock: false }, 'середина «Б», верхняя половина — перед ним');
-    assert.deepEqual(at(65), { gap: 2, into: null, center: null, newBlock: false }, 'нижняя половина — за ним');
-    assert.deepEqual(at(140), { gap: null, into: 'fp', center: null, newBlock: false });
+    assert.deepEqual(at(55), { gap: 1, into: null, center: null, newBlock: false, split: null }, 'середина «Б», верхняя половина — перед ним');
+    assert.deepEqual(at(65), { gap: 2, into: null, center: null, newBlock: false, split: null }, 'нижняя половина — за ним');
+    assert.deepEqual(at(140), { gap: null, into: 'fp', center: null, newBlock: false, split: null });
     assert.deepEqual(pointerZone([], { pointerY: 30, shownGap: null, height: H, dragged: ITEM }).gap, 0, 'пустое меню — в первую карточку');
 });
 
@@ -385,8 +422,8 @@ test('ниже последнего раздела: у самого низа —
     const at = (pointerY, wasNewBlock = false) => pointerZone(compact, { pointerY, shownGap: 7, height: H, dragged: ITEM, wasNewBlock });
     const reach = 250 + H + NEW_BLOCK_REACH_PX;
     assert.equal(at(270).gap, 7, 'в щели в конце — в конец последней карточки');
-    assert.deepEqual(at(reach - 1), { gap: 7, into: null, center: null, newBlock: false });
-    assert.deepEqual(at(reach), { gap: null, into: null, center: null, newBlock: true });
+    assert.deepEqual(at(reach - 1), { gap: 7, into: null, center: null, newBlock: false, split: null });
+    assert.deepEqual(at(reach), { gap: null, into: null, center: null, newBlock: true, split: null });
     assert.equal(at(reach - 1, true).newBlock, true, 'вернулись чуть выше порога — всё ещё новая карточка');
     assert.equal(at(reach - NEW_BLOCK_HYSTERESIS_PX - 1, true).newBlock, false);
 });

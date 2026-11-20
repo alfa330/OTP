@@ -250,8 +250,9 @@ export const locateEntry = (layout, entry) => {
  *  в конец. «Сразу за» нужно для «в конец того, что видно»: за видимыми
  *  разделами в раскладке бывают спрятанные сейчас (чужой отдел в селекторе), и
  *  перенос в конец массива уводил бы раздел за них — даже бросок на то же
- *  место менял бы раскладку. { newBlock: true } — своей новой карточкой в
- *  самом низу меню. Папка в папку не кладётся. */
+ *  место менял бы раскладку. { newBlock: true } — своей новой карточкой: с
+ *  `at` — перед карточкой номер at (бросили между двумя карточками), без него —
+ *  в самом низу меню. Папка в папку не кладётся. */
 export const moveEntry = (layout, entry, target) => {
     if (!target || (isFolderRef(entry) && target.folder)) return layout;
     const next = cloneLayout(layout);
@@ -262,11 +263,21 @@ export const moveEntry = (layout, entry, target) => {
         : (target.folder ? next.folders[target.folder]?.items : next.blocks[target.block]);
     if (!into && !target.newBlock) return layout;
     (from.folder ? next.folders[from.folder].items : next.blocks[from.block]).splice(from.index, 1);
-    if (target.newBlock) next.blocks.push([entry]);
+    if (target.newBlock) insertBlock(next, entry, target);
     else insertAt(into, entry, target);
     next.blocks = next.blocks.filter((block) => block.length);
     return next;
 };
+
+/* Новая карточка из одной записи. Опустевшую карточку, откуда запись унесли,
+   убирают только ПОСЛЕ вставки: иначе номера карточек сдвинулись бы, и новая
+   встала бы на одну ниже, чем её бросили. */
+function insertBlock(layout, entry, target) {
+    const at = Number.isInteger(target.at)
+        ? Math.max(0, Math.min(layout.blocks.length, target.at))
+        : layout.blocks.length;
+    layout.blocks.splice(at, 0, [entry]);
+}
 
 function insertAt(into, entry, target) {
     const before = target.before == null || target.before === entry ? -1 : into.indexOf(target.before);
@@ -295,13 +306,13 @@ export const layoutItemKeys = (layout) => {
 };
 
 /** Поставить раздел с панели на место target ({ block, folder, before, after }
- *  или { newBlock: true }, как у moveEntry). Раздел, который уже в раскладке,
- *  не дублируется. */
+ *  или { newBlock: true, at }, как у moveEntry). Раздел, который уже в
+ *  раскладке, не дублируется. */
 export const placeEntry = (layout, key, target = {}) => {
     if (typeof key !== 'string' || isFolderRef(key) || layoutItemKeys(layout).has(key)) return layout;
     const next = cloneLayout(layout);
     if (target.newBlock) {
-        next.blocks.push([key]);
+        insertBlock(next, key, target);
         return next;
     }
     if (!next.blocks.length) next.blocks.push([]);

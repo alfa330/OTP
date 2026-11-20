@@ -543,7 +543,7 @@ const viewport = () => ({
 
 /* Пояснение под заголовком панели — два жеста, которых не видно, пока о них
    не скажешь: папка — раздел на раздел, новая карточка — ниже последнего. */
-const GESTURES_NOTE = 'Раздел на раздел — папка, ниже последнего раздела — новый блок.';
+const GESTURES_NOTE = 'Раздел на раздел — папка, между блоками или ниже последнего — новый блок.';
 
 function SidebarPalette({ mode, keys, iconFor, handlers, paletteRef, onReset, canReset }) {
     const closing = mode === 'closing';
@@ -939,7 +939,11 @@ export default function SidebarMenuArranger({
         let slotAt = null;
         let roundTop = true;
         let roundBottom = true;
-        if (session.overList && compact.length && session.newBlock) {
+        const split = session.split !== null ? compact[session.split] : null;
+        if (session.overList && split) {
+            // Между карточками: сразу под чертой, карточки ниже отъехали на её место.
+            top = split.ctop + split.height;
+        } else if (session.overList && compact.length && session.newBlock) {
             top = compactBottom(compact, session.geo) + BLOCK_GAP_PX;
         } else if (session.overList && compact.length && session.gap !== null) {
             slotAt = session.gap;
@@ -968,7 +972,7 @@ export default function SidebarMenuArranger({
         slot.style.transform = transform;
         slot.style.height = `${session.unitH}px`;
         slot.classList.add('is-shown');
-        slot.classList.toggle('is-new', Boolean(session.newBlock));
+        slot.classList.toggle('is-new', Boolean(session.newBlock || split));
         slot.classList.toggle('is-muted', Boolean(session.into || session.stack));
         slot.classList.toggle('round-top', roundTop);
         slot.classList.toggle('round-bottom', roundBottom);
@@ -993,6 +997,7 @@ export default function SidebarMenuArranger({
             zone = pointerZone(session.compact, {
                 pointerY: y - listRect.top + list.scrollTop,
                 shownGap: session.gap,
+                shownSplit: session.split,
                 height: session.unitH,
                 dragged: session.dragged,
                 wasNewBlock: session.newBlock,
@@ -1015,10 +1020,13 @@ export default function SidebarMenuArranger({
             ? session.compact[zone.center]
             : null;
         const { gap, into, newBlock } = zone;
+        const split = overList ? (zone.split ?? null) : null;
         let target = null;
         if (overList) {
             const intoRow = into ? session.compact.find((row) => row.kind === 'folder' && row.id === into) : null;
-            if (newBlock) target = { newBlock: true };
+            // Черта несёт номер карточки под ней: новая встаёт перед ней.
+            if (split !== null) target = { newBlock: true, at: session.compact[split].block };
+            else if (newBlock) target = { newBlock: true };
             else if (intoRow) target = { block: intoRow.block, folder: into, before: null };
             else target = dropTarget(session.compact, gap ?? session.compact.length, session.dragged, x - session.startX);
         }
@@ -1027,13 +1035,15 @@ export default function SidebarMenuArranger({
         session.overPalette = overPalette;
         session.newBlock = Boolean(overList && newBlock);
         session.stack = stackRow ? stackRow.entry : null;
-        if (gap !== session.gap) {
+        if (gap !== session.gap || split !== session.split) {
             // Нет щели: строка ушла из сайдбара (дыра на её месте закрывается)
-            // или раздел с панели ещё не над ним (строки стоят).
-            rowShifts(session.geo, session.compact, gap, session.unitH).forEach((delta, index) => {
+            // или раздел с панели ещё не над ним (строки стоят). Раздвинутая
+            // черта — карточки под ней отъезжают на место новой.
+            rowShifts(session.geo, session.compact, gap, session.unitH, split).forEach((delta, index) => {
                 session.geo[index].el.style.transform = Math.abs(delta) > 0.5 ? `translate3d(0, ${delta}px, 0)` : '';
             });
             session.gap = gap;
+            session.split = split;
         }
         if (session.into !== into) {
             session.intoEl?.classList.remove('sb-drop-into');
@@ -1153,6 +1163,7 @@ export default function SidebarMenuArranger({
             stack: null,
             stackEl: null,
             newBlock: false,
+            split: null,
             cardSize: paletteCard ? { width: paletteCard.width, height: paletteCard.height } : null,
             shownW: rect.width,
             shownH: rect.height,
@@ -1239,6 +1250,7 @@ export default function SidebarMenuArranger({
                    та же папка (или та же верхняя ступень). */
                 const samePlace = !session.into
                     && !session.newBlock
+                    && session.split === null
                     && session.gap === session.unit.start
                     && (session.target.folder ?? null) === (session.folder ?? null);
                 const working = store.workingLayout();
