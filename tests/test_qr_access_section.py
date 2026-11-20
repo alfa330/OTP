@@ -559,6 +559,9 @@ class ShortQrCodeTests(unittest.TestCase):
             ('голым токеном', self.token),
             ('строчными буквами', self.token.lower()),
             ('ссылкой с кодом', f'https://portal.example/qr?token={self.token}'),
+            # Так код виден под QR в iCORE Phone и на сайте — четвёрками (20.11.2026).
+            ('набран руками четвёрками', 'OTPQ: ' + ' '.join(self.token[i:i + 4] for i in range(0, len(self.token), 4))),
+            ('с переносом строки', self.payload[:20] + '\n' + self.payload[20:]),
         ):
             with self.subTest(name):
                 self.assertEqual(decode(normalize(raw))['session_id'], self.sid)

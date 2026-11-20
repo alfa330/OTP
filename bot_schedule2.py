@@ -13188,6 +13188,11 @@ def _normalize_sensitive_qr_token(raw_value):
 
     Прежняя приставка понимается наравне с нынешней: коды с ней живут пять
     минут после выкладки, а в чьей-нибудь переписке строка лежит и дольше.
+
+    Пробелы и переносы внутри кода выбрасываются (20.11.2026): iCORE Phone и
+    сайт показывают код под QR четвёрками — «GEZD GNBV …», — и набранный
+    руками так, как виден, он тоже должен открывать доступ. В base32 и в
+    прежнем коде пробелов не бывает, так что ничего чужого это не склеит.
     """
     token = (raw_value or '').strip()
     if not token:
@@ -13204,7 +13209,7 @@ def _normalize_sensitive_qr_token(raw_value):
                 token = query_token.strip()
         except Exception:
             pass
-    return token
+    return ''.join(token.split())
 
 
 def _resolve_sensitive_qr_target(approver_id, raw_value):
