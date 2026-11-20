@@ -658,7 +658,11 @@ const DialListView = ({ user, showToast, apiBaseUrl, withAccessTokenHeader, canE
                                         showToast={showToast}
                                         profile={sectionProfile}
                                     />
+                                    {/* key: итоги сохраняются сами (20.11.2026) — при смене отдела панель
+                                        досохраняет правки своего отдела и рождается заново для нового,
+                                        а не несёт рабочую копию одного отдела в сохранение другого. */}
                                     <DialListOutcomesPanel
+                                        key={selected.department_id}
                                         apiBaseUrl={apiBaseUrl}
                                         authHeaders={authHeaders}
                                         departmentId={selected.department_id}

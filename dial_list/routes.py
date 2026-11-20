@@ -1055,13 +1055,20 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
     @require_api_key
     @_guard
     def outcomes(department_id):
+        """Справочник итогов и его версия (version). PUT {items, version?}: редактор сохраняет сам по каждой
+        правке (20.11.2026) и шлёт версию, с которой начинал; справочник уже другой — 409 error_kind 'stale'.
+        Без version — старая сборка сайта, как раньше."""
         requester_id, _scope = _manager(department_id)
         if request.method == 'PUT':
             payload = request.get_json(silent=True) or {}
             items = payload.get('items')
-            return jsonify({"status": "success",
-                            "outcomes": svc.save_outcomes(department_id, items, changed_by=requester_id)}), 200
-        return jsonify({"status": "success", "outcomes": svc.outcomes(department_id)}), 200
+            version = payload.get('version')
+            rows, current = svc.save_outcomes(department_id, items, changed_by=requester_id,
+                                              version=None if version is None else str(version),
+                                              with_version=True)
+            return jsonify({"status": "success", "outcomes": rows, "version": current}), 200
+        rows, current = svc.outcomes(department_id, with_version=True)
+        return jsonify({"status": "success", "outcomes": rows, "version": current}), 200
 
     # ── автообзвон Тез: офферы, WhatsApp, поездки (15.10.2026) ─────────────────
     def _tez_department(department_id):

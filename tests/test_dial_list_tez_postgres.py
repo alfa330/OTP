@@ -605,6 +605,45 @@ def test_whatsapp_template_goes_to_own_driver_once_a_day(env):
     assert env.svc.analytics(TEZ)["whatsapp"] == {"sent": 1, "failed": 0}
 
 
+def test_outcomes_save_from_a_stale_editor_is_refused_and_loses_nothing(env):
+    """20.11.2026: «причины в разделе Воронка Тез иногда сбрасываются сами по себе». Редактор итогов теперь
+    сохраняет сам по каждой правке и шлёт версию справочника, с которой начинал. Справочник уже другой
+    (в другой вкладке добавили причину) — 409 stale и ничего не меняется: причина другой вкладки не
+    выключается. Тот же список ещё раз — та же версия, не конфликт. Без версии (старая сборка сайта) —
+    как раньше, без проверки."""
+    env.enroll()
+    rows, v1 = env.svc.outcomes(TEZ, with_version=True)
+    assert rows == env.svc.outcomes(TEZ) and len(v1) == 16
+    refusal = next(o for o in rows if o["name"] == 'Отказ')
+    # Вкладка A добавляет «Отказу» причину «Дорого».
+    tab_a = [dict(o, subtypes=[{"name": 'Дорого'}]) if o["id"] == refusal["id"] else dict(o) for o in rows]
+    saved_a, v2 = env.svc.save_outcomes(TEZ, tab_a, changed_by=1, version=v1, with_version=True)
+    assert v2 != v1
+    assert [s["name"] for o in saved_a if o["id"] == refusal["id"] for s in o["subtypes"]] == ['Дорого']
+    # Вкладка B открыта раньше (версия v1) и меняет цвет «Отказа» — отказ, ничего не тронуто.
+    tab_b = [dict(o, color='#000000') if o["id"] == refusal["id"] else dict(o) for o in rows]
+    message, status, kind = env.refused(env.svc.save_outcomes, TEZ, tab_b, changed_by=1, version=v1,
+                                        with_version=True)
+    assert (message, status, kind) == (dial_service.OUTCOMES_STALE, 409, 'stale')
+    assert env.q("SELECT name, is_active FROM dial_list_outcome_subtypes WHERE department_id = %s", (TEZ,)) == [
+        ('Дорого', True)]
+    assert env.one("SELECT color FROM dial_list_outcomes WHERE id = %s", (refusal["id"],))[0] == refusal["color"]
+    # Тот же список ещё раз (повтор автосохранения) — версия не меняется.
+    again, v3 = env.svc.save_outcomes(TEZ, [dict(o) for o in saved_a], changed_by=1, version=v2, with_version=True)
+    assert v3 == v2 and again == saved_a
+    # Число использований версию не меняет: его двигают телефоны, а не руководитель.
+    lead = env.leads(1)['77010000001']
+    assignment = env.svc.issue_next_portion(OPERATOR, phone_version=GUARDED)["portion"]["items"][0]["assignment_id"]
+    env.q("INSERT INTO dial_list_attempts (assignment_id, operator_id, outcome_id) VALUES (%s, %s, %s)",
+          (assignment, OPERATOR, refusal["id"]))
+    used_rows, v4 = env.svc.outcomes(TEZ, with_version=True)
+    assert v4 == v2 and next(o for o in used_rows if o["id"] == refusal["id"])["used"] == 1
+    assert lead
+    # Старая сборка сайта (без версии) — без проверки, список целиком, как раньше.
+    env.svc.save_outcomes(TEZ, tab_b, changed_by=1)
+    assert env.one("SELECT color FROM dial_list_outcomes WHERE id = %s", (refusal["id"],))[0] == '#000000'
+
+
 def _allow_bonus(env):
     env.svc.save_whatsapp(TEZ, {"license_id": 70651, "allowed": [
         {"id": "tpl-bonus", "title": "Бонус", "text": "Здравствуйте, {{1}}! Бонус за выход",

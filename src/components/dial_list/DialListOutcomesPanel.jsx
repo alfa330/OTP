@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FaIcon from '../common/FaIcon';
-import { iosCard, iosInput, iosGroupLabel, iosBtnPrimary, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented, IosToggle } from '../ui/ios';
+import { iosCard, iosInput, iosGroupLabel, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented, IosToggle } from '../ui/ios';
 import {
-    DUE_KIND_OPTIONS, SUBTYPES_MAX, SUBTYPE_NAME_MAX, isNewId, normalizeDueKind, outcomeLabel, outcomeSubtypeName,
-    outcomesSnapshot, remapExpanded, serializeOutcomes, serverHasSubtypes, subtypesToggleLabel, toEditable, validateOutcomes,
+    DUE_KIND_OPTIONS, SUBTYPES_MAX, SUBTYPE_NAME_MAX, applyIdMap, isNewId, normalizeDueKind, outcomeLabel,
+    outcomeSubtypeName, outcomesSnapshot, savedIdMap, serializeOutcomes, serverHasSubtypes, subtypesToggleLabel,
+    toEditable, validateOutcomes,
 } from './outcomeFormat';
 
 /*
@@ -26,7 +27,20 @@ import {
  * на линию» — когда водитель выйдет. Водитель вернётся к этому же оператору к
  * сроку, поэтому итог с датой всегда «перезвонить» — переключатель тогда включён и
  * заперт (так же решает сервер). У удалённого КЦ выбора нет вовсе.
+ *
+ * Сохранение — само, без кнопки (20.11.2026: «причины в разделе Воронка Тез иногда
+ * сбрасываются сами по себе»). Раньше у карточки была своя «Сохранить» под списком,
+ * отдельная от «Сохранить» настроек выше: причины, добавленные без неё, жили только на
+ * экране и пропадали при переходе на другую вкладку — у Тез КЦ за всё время на сервер не
+ * дошло ни одной. Теперь каждая правка уходит на сервер через AUTOSAVE_MS после последней;
+ * уход со вкладки и закрытие страницы досохраняют сразу. Новая строка без названия —
+ * черновик (outcomeFormat.isDraftSubtype): не уходит и не держит остальное. Сервер
+ * получает версию справочника, с которой начинали: список успел измениться (другая
+ * вкладка) — отказ 409 и свежий список, а не тихое выключение чужих причин.
  */
+const AUTOSAVE_MS = 600;
+// Сколько видна отметка «Сохранено».
+const SAVED_SHOW_MS = 2500;
 
 // Системная палитра iOS — те же цвета, что у бейджей сайта.
 export const OUTCOME_PALETTE = [
@@ -178,15 +192,72 @@ const SubtypeList = ({ outcome, canEdit, onPatch, onMove, onAdd, onRemove }) => 
     );
 };
 
+/* Справа в подвале — что с сохранением: исправить (повтор названия и т. п. — до запроса,
+   те же правила, что у сервера), идёт, сохранено (ненадолго), не сохранилось — с повтором.
+   Пока всё тихо — ничего. */
+const SaveStatus = ({ state, error, problem, onRetry }) => {
+    if (problem) {
+        return <span className="text-right text-[12px] text-amber-600">{problem} — пока не исправите, изменения не сохранятся</span>;
+    }
+    if (state === 'failed') {
+        return (
+            <span className="flex items-center gap-2 text-[12px] text-rose-600">
+                <span className="text-right">Не сохранено: {error}</span>
+                <button type="button" onClick={onRetry} className={`${iosBtnSecondary} py-1.5`}>Повторить</button>
+            </span>
+        );
+    }
+    if (state === 'saving') {
+        return <span className="text-[12px] text-slate-500"><FaIcon className="fas fa-spinner fa-spin" /> Сохраняем…</span>;
+    }
+    if (state === 'saved') {
+        return <span className="text-[12px] text-slate-500"><FaIcon className="fas fa-check" /> Сохранено</span>;
+    }
+    return null;
+};
+
+/* Раскрытые списки типов — по id итога: после сохранения временный id стал настоящим. */
+const remapExpandedIds = (expanded, idMap) => {
+    const out = {};
+    for (const [id, open] of Object.entries(expanded || {})) out[idMap[id] || id] = open;
+    return out;
+};
+
+/* Число использований — у сервера свежее (его двигают телефоны): переносим его в рабочую
+   копию, ничего больше в ней не трогая. */
+const withServerUsage = (items, serverOutcomes) => {
+    const used = new Map();
+    for (const o of Array.isArray(serverOutcomes) ? serverOutcomes : []) {
+        used.set(o.id, o.used);
+        for (const s of Array.isArray(o.subtypes) ? o.subtypes : []) used.set(s.id, s.used);
+    }
+    return items.map((o) => ({
+        ...o,
+        used: used.has(o.id) ? used.get(o.id) : o.used,
+        subtypes: (o.subtypes || []).map((s) => (used.has(s.id) ? { ...s, used: used.get(s.id) } : s)),
+    }));
+};
+
 const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit = true, showToast, dueKinds = false }) => {
     const [items, setItems] = useState(null);     // рабочая копия
     const [saved, setSaved] = useState(null);     // что на сервере (для «есть изменения»)
     const [error, setError] = useState('');
-    const [saving, setSaving] = useState(false);
+    // Сохранение: state '' | 'saving' | 'saved' | 'failed', error — текст отказа.
+    const [save, setSave] = useState({ state: '', error: '' });
     // Раскрытые списки типов: {id итога: true}. Только вид, на сервер не уходит.
     const [expanded, setExpanded] = useState({});
     // Старый сервер (раскатка/откат по частям) типы не хранит — не предлагаем их.
     const [typesSupported, setTypesSupported] = useState(true);
+    // Версия справочника, с которой работаем (сервер отклонит сохранение, если список уже другой).
+    const versionRef = useRef(null);
+    // Сохранения идут по одному: правка во время запроса уйдёт следующим.
+    const inFlightRef = useRef(false);
+    const mountedRef = useRef(true);
+    // Ушли со вкладки, пока шёл запрос: досохранить, когда он вернётся.
+    const flushAfterRef = useRef(false);
+    // Последнее, что на экране, — для сохранения из таймера, при уходе со вкладки и закрытии страницы.
+    const latestRef = useRef({ items: null, saved: null, dueKinds, canEdit });
+    const sendRef = useRef(null);
 
     const toast = useCallback((msg, kind = 'success') => {
         if (typeof showToast === 'function') showToast(msg, kind);
@@ -198,6 +269,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
             const list = toEditable(data.outcomes);
+            versionRef.current = data.version ?? null;
             setTypesSupported(serverHasSubtypes(data.outcomes));
             setItems(list);
             setSaved(outcomesSnapshot(list, { dueKinds }));
@@ -211,7 +283,96 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
 
     // Один и тот же снимок для сохранённого и для рабочей копии (outcomeFormat.js).
     const snapshot = useMemo(() => (items ? outcomesSnapshot(items, { dueKinds }) : null), [items, dueKinds]);
-    const dirty = items && snapshot !== saved;
+    const dirty = !!items && snapshot !== saved;
+    // Что не даст сохранить (те же правила, что у сервера) — показываем сразу, запрос не шлём.
+    const problem = useMemo(() => (items ? validateOutcomes(serializeOutcomes(items, { dueKinds })) : ''), [items, dueKinds]);
+    latestRef.current = { items, saved, dueKinds, canEdit };
+
+    // Отправить рабочую копию. keepalive — запрос переживёт закрытие страницы.
+    const send = useCallback(async ({ keepalive = false } = {}) => {
+        const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable } = latestRef.current;
+        if (!current || !editable || inFlightRef.current) return;
+        const payload = serializeOutcomes(current, { dueKinds: dk });
+        if (validateOutcomes(payload)) return;
+        if (outcomesSnapshot(current, { dueKinds: dk }) === savedNow) return;
+        inFlightRef.current = true;
+        if (mountedRef.current) setSave({ state: 'saving', error: '' });
+        try {
+            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/outcomes`, {
+                method: 'PUT', credentials: 'include', keepalive,
+                headers: authHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({ items: payload, version: versionRef.current }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                const failure = new Error(data?.error || `HTTP ${resp.status}`);
+                failure.kind = data?.error_kind || '';
+                throw failure;
+            }
+            versionRef.current = data.version ?? null;
+            // Рабочую копию ответом не заменяем: пока он шёл, могли печатать дальше.
+            const idMap = savedIdMap(current, data.outcomes);
+            const nowSaved = outcomesSnapshot(applyIdMap(current, idMap), { dueKinds: dk });
+            if (!mountedRef.current) {
+                latestRef.current = { ...latestRef.current, items: applyIdMap(latestRef.current.items || [], idMap), saved: nowSaved };
+                return;
+            }
+            setItems((list) => withServerUsage(applyIdMap(list || [], idMap), data.outcomes));
+            setExpanded((cur) => remapExpandedIds(cur, idMap));
+            setTypesSupported(serverHasSubtypes(data.outcomes));
+            setSaved(nowSaved);
+            setSave({ state: 'saved', error: '' });
+        } catch (e) {
+            if (!mountedRef.current) return;
+            if (e.kind === 'stale') {
+                // Список изменили в другой вкладке: показываем свежий, правку повторят на нём.
+                setSave({ state: '', error: '' });
+                toast(e.message, 'error');
+                load();
+                return;
+            }
+            setSave({ state: 'failed', error: e.message || 'не удалось сохранить итоги' });
+        } finally {
+            inFlightRef.current = false;
+            if (flushAfterRef.current) {
+                flushAfterRef.current = false;
+                sendRef.current?.({ keepalive: true });
+            }
+        }
+    }, [apiBaseUrl, authHeaders, departmentId, toast, load]);
+    sendRef.current = send;
+
+    // Сохранить само через AUTOSAVE_MS после последней правки. saved — тоже повод: правка, сделанная, пока
+    // шёл запрос, снимок могла уже не менять, и без него она ждала бы следующей.
+    useEffect(() => {
+        if (!canEdit || !dirty || problem) return undefined;
+        const timer = setTimeout(() => sendRef.current?.(), AUTOSAVE_MS);
+        return () => clearTimeout(timer);
+    }, [canEdit, dirty, problem, snapshot, saved]);
+
+    // «Сохранено» — ненадолго.
+    useEffect(() => {
+        if (save.state !== 'saved') return undefined;
+        const timer = setTimeout(() => setSave((s) => (s.state === 'saved' ? { state: '', error: '' } : s)), SAVED_SHOW_MS);
+        return () => clearTimeout(timer);
+    }, [save.state]);
+
+    // Ушли со вкладки (панель размонтирована) или закрыли страницу — досохранить сразу, не дожидаясь паузы.
+    useEffect(() => {
+        mountedRef.current = true;
+        const flush = () => {
+            const { items: current, saved: savedNow, dueKinds: dk, canEdit: editable } = latestRef.current;
+            if (!current || !editable || outcomesSnapshot(current, { dueKinds: dk }) === savedNow) return;
+            if (inFlightRef.current) { flushAfterRef.current = true; return; }
+            sendRef.current?.({ keepalive: true });
+        };
+        window.addEventListener('pagehide', flush);
+        return () => {
+            window.removeEventListener('pagehide', flush);
+            mountedRef.current = false;
+            flush();
+        };
+    }, []);
 
     const patch = (idx, changes) => setItems((list) => list.map((o, i) => (i === idx ? { ...o, ...changes } : o)));
     const move = (idx, dir) => setItems((list) => {
@@ -240,35 +401,6 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     const addSub = (idx) => patchSubs(idx, (subs) => (subs.length >= SUBTYPES_MAX ? subs : [...subs, { id: tempId(), name: '', is_active: true, used: 0 }]));
     const removeSub = (idx, sIdx) => patchSubs(idx, (subs) => subs.filter((_, j) => j !== sIdx));
     const toggleExpanded = (id) => setExpanded((cur) => ({ ...cur, [id]: !cur[id] }));
-
-    const save = async () => {
-        if (!items) return;
-        // Типы уходят всегда и целиком — и у свёрнутых итогов тоже: для сервера
-        // список полный, и тип, которого в нём нет, выключился бы.
-        const payload = serializeOutcomes(items, { dueKinds });
-        const problem = validateOutcomes(payload);
-        if (problem) { toast(problem, 'error'); return; }
-        setSaving(true);
-        try {
-            const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/outcomes`, {
-                method: 'PUT', credentials: 'include',
-                headers: authHeaders({ 'Content-Type': 'application/json' }),
-                body: JSON.stringify({ items: payload }),
-            });
-            if (!resp.ok) throw new Error(await readError(resp));
-            const data = await resp.json();
-            const list = toEditable(data.outcomes);
-            setExpanded((cur) => remapExpanded(items, cur, list));
-            setTypesSupported(serverHasSubtypes(data.outcomes));
-            setItems(list);
-            setSaved(outcomesSnapshot(list, { dueKinds }));
-            toast('Итоги звонка сохранены. Телефоны подхватят список при следующем обновлении', 'success');
-        } catch (e) {
-            toast(e.message || 'Не удалось сохранить итоги', 'error');
-        } finally {
-            setSaving(false);
-        }
-    };
 
     return (
         <section className="space-y-1.5">
@@ -390,19 +522,15 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                 <button type="button" onClick={add} disabled={items.length >= 30} className={iosBtnSecondary}>
                                     <FaIcon className="fas fa-plus" style={{ width: 11, height: 11 }} /> Добавить итог
                                 </button>
-                                <div className="flex items-center gap-2">
-                                    {dirty && <span className="text-[12px] text-amber-600">Есть несохранённые изменения</span>}
-                                    <button type="button" onClick={save} disabled={!dirty || saving} className={iosBtnPrimary}>
-                                        <FaIcon className={saving ? 'fas fa-spinner fa-spin' : 'fas fa-check'} />
-                                        Сохранить
-                                    </button>
-                                </div>
+                                <SaveStatus state={save.state} error={save.error} problem={problem}
+                                    onRetry={() => sendRef.current?.()} />
                             </div>
                         )}
                     </>
                 )}
             </div>
             <div className="px-1 text-[11.5px] text-slate-500">
+                {canEdit ? 'Правки сохраняются сами, сразу. ' : ''}
                 Выключенный итог пропадает из телефона, но остаётся в истории. Число справа — сколько раз итог уже выбирали.
                 {' '}Если у итога есть включённые типы, оператор после итога обязан выбрать и тип. Выключенный тип тоже
                 пропадает из телефона и остаётся в истории.

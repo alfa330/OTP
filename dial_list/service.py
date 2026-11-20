@@ -114,6 +114,7 @@ Sapar лежит или не настроен — выдаём и звоним, 
 подряд, а следующая порция выдаётся ровно когда текущая закрыта.
 """
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -502,6 +503,11 @@ COMMENT_MAX = 500
 # другом парке»… Выключенные тоже считаются в лимит — список один на итог.
 SUBTYPE_NAME_MAX = 64
 SUBTYPES_MAX = 20
+# Версия справочника итогов (20.11.2026: «причины в разделе Воронка Тез иногда сбрасываются сами по себе»):
+# редактор сохраняет итоги сам по каждой правке и шлёт версию, с которой начинал. Список с сервера успел
+# измениться (другая вкладка, другой руководитель) — сохранение отклоняется 409 kind 'stale', а не выключает
+# молча чужие итоги и типы, которых нет в устаревшем списке.
+OUTCOMES_STALE = "Итоги только что изменили в другой вкладке или другой руководитель — показан свежий список"
 # Маркер «телефон не прислал ключ subtype_id вовсе» — так шлют телефоны до типов
 # итога (≤ 3.22.28). Им тип не нужен, итог сохраняется без него; новый телефон
 # шлёт ключ всегда (null — тип не выбран), и тогда сервер проверяет выбор.
@@ -3542,15 +3548,36 @@ class DialListService:
             """, (int(department_id), name, color, position, requeue))
         log.info("dial_list: отделу %s заведён стартовый набор итогов", department_id)
 
-    def outcomes(self, department_id):
+    def outcomes(self, department_id, with_version=False):
         """Все итоги отдела (включая выключенные) для редактора руководителя — у
-        каждого subtypes: все его типы, тоже с выключенными и числом использований."""
+        каждого subtypes: все его типы, тоже с выключенными и числом использований.
+        with_version — (итоги, версия справочника) из одного запроса к базе (_outcomes_version)."""
         with self.db._get_cursor() as cur:
             rows = self._outcome_rows(cur, department_id)
             if not rows:
                 self._seed_outcomes(cur, department_id)
                 rows = self._outcome_rows(cur, department_id)
+            if with_version:
+                return rows, self._outcomes_version(cur, department_id)
         return rows
+
+    @staticmethod
+    def _outcomes_version(cur, department_id):
+        """Версия справочника итогов отдела — отпечаток того, что правит редактор: итоги и их типы со всеми
+        полями, без числа использований (его меняют телефоны, а не руководитель). Одинаковое содержимое —
+        одна версия, сохранение того же списка из двух вкладок не конфликтует."""
+        cur.execute("""
+            SELECT o.id::text, o.name, o.color, o.position, o.requeue, o.is_active, o.due_kind,
+                   COALESCE((SELECT json_agg(json_build_array(s.id::text, s.name, s.position, s.is_active)
+                                             ORDER BY s.id)
+                             FROM dial_list_outcome_subtypes s WHERE s.outcome_id = o.id), '[]'::json)
+            FROM dial_list_outcomes o
+            WHERE o.department_id = %s
+            ORDER BY o.id
+        """, (int(department_id),))
+        rows = [list(r) for r in cur.fetchall()]
+        digest = hashlib.sha1(json.dumps(rows, ensure_ascii=False, default=str, sort_keys=True).encode("utf-8"))
+        return digest.hexdigest()[:16]
 
     @staticmethod
     def _clean_subtypes(outcome_name, raw):
@@ -3619,13 +3646,17 @@ class DialListService:
             raise DialListError(f"Тип у итога «{outcome_name}» повторяется с сохранённым "
                                 f"в другой вкладке — обновите страницу")
 
-    def save_outcomes(self, department_id, items, changed_by=None):
+    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False):
         """Полный список от редактора: с id — обновить, без id — добавить, отсутствующие
         в списке — выключить (не удалить). Порядок — как в списке.
 
         subtypes у итога — полный список его типов по тем же правилам. Ключа нет —
         типы итога не трогаем: закэшированная старая сборка сайта шлёт итоги без
-        типов, и сохранение из неё не должно стирать настроенное (29.09.2026)."""
+        типов, и сохранение из неё не должно стирать настроенное (29.09.2026).
+
+        version — версия справочника, с которой редактор начинал (20.11.2026, редактор сохраняет сам по
+        каждой правке): справочник уже другой — 409 kind 'stale', ничего не меняется. None — старая
+        сборка сайта, проверки нет. with_version — ответ (итоги, новая версия)."""
         department_id = int(department_id)
         if not isinstance(items, list):
             raise DialListError("items: ожидается список итогов")
@@ -3662,8 +3693,14 @@ class DialListService:
         if not any(c["is_active"] for c in cleaned):
             raise DialListError("Хотя бы один итог должен быть включён")
         with self.db._get_cursor() as cur:
-            cur.execute("SELECT id FROM dial_list_outcomes WHERE department_id = %s", (department_id,))
+            # Строки итогов отдела — под замком до конца сохранения: два сохранения справочника идут друг за
+            # другом, и проверка версии ниже видит уже записанное первым. FOR NO KEY UPDATE не мешает
+            # телефонам ставить итог попытке (проверке внешнего ключа хватает KEY SHARE).
+            cur.execute("SELECT id FROM dial_list_outcomes WHERE department_id = %s FOR NO KEY UPDATE",
+                        (department_id,))
             existing = {str(r[0]) for r in cur.fetchall()}
+            if version is not None and str(version) != self._outcomes_version(cur, department_id):
+                raise DialListError(OUTCOMES_STALE, 409, kind="stale")
             kept = set()
             for position, c in enumerate(cleaned, start=1):
                 if c["id"] and c["id"] in existing:
@@ -3697,7 +3734,7 @@ class DialListService:
                     WHERE department_id = %s AND id = ANY(%s::uuid[])
                 """, (department_id, list(gone)))
         log.info("dial_list: итоги отдела %s сохранены (%d, пользователь %s)", department_id, len(cleaned), changed_by)
-        return self.outcomes(department_id)
+        return self.outcomes(department_id, with_version=with_version)
 
     def _pending_outcome(self, cur, user_id):
         """Последняя попытка оператора, где телефон принял плечо (разговор был), а итог

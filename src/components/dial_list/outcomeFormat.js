@@ -34,6 +34,12 @@ export const SUBTYPE_NONE = 'none';
    уходят без id, и сервер их вставляет. */
 export const isNewId = (id) => String(id ?? '').startsWith('new-');
 
+/* Черновик — новая строка без названия (только что нажали «Добавить тип» и ещё не
+   вписали): редактор сохраняет сам (20.11.2026), и такая строка не уходит на сервер и
+   не держит сохранение остальных правок. Впишут название — уйдёт следующим сохранением. */
+export const isDraftOutcome = (o) => isNewId(o?.id) && !String(o?.name ?? '').trim();
+export const isDraftSubtype = (s) => isNewId(s?.id) && !String(s?.name ?? '').trim();
+
 /* «Нужна дата» у итога (автообзвон Тез, контракт 15.10.2026): '' — нет;
    'callback' — «Перезвонить», оператор обязан указать дату и время перезвона;
    'online' — «Согласен выйти на линию», обязательна дата выхода. Водитель с таким
@@ -101,22 +107,24 @@ export const serverHasSubtypes = (list) => {
  * дата осталась бы. Итог с датой всегда «перезвонить» — см. DUE_KINDS. У удалённого КЦ
  * ключа нет вовсе: его запрос — прежний.
  */
-export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.isArray(items) ? items : []).map((o) => {
-    const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
-    return {
-        id: isNewId(o.id) ? undefined : o.id,
-        name: String(o.name ?? '').trim(),
-        color: o.color,
-        requeue: !!o.requeue || dueKind !== '',
-        is_active: o.is_active !== false,
-        ...(dueKinds ? { due_kind: dueKind } : {}),
-        subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).map((s) => ({
-            id: isNewId(s.id) ? undefined : s.id,
-            name: cleanName(s.name),
-            is_active: s.is_active !== false,
-        })),
-    };
-});
+export const serializeOutcomes = (items, { dueKinds = false } = {}) => (Array.isArray(items) ? items : [])
+    .filter((o) => !isDraftOutcome(o))
+    .map((o) => {
+        const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
+        return {
+            id: isNewId(o.id) ? undefined : o.id,
+            name: String(o.name ?? '').trim(),
+            color: o.color,
+            requeue: !!o.requeue || dueKind !== '',
+            is_active: o.is_active !== false,
+            ...(dueKinds ? { due_kind: dueKind } : {}),
+            subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).filter((s) => !isDraftSubtype(s)).map((s) => ({
+                id: isNewId(s.id) ? undefined : s.id,
+                name: cleanName(s.name),
+                is_active: s.is_active !== false,
+            })),
+        };
+    });
 
 /** Строка-снимок для сравнения «сохранено / в редакторе». Собирается тем же
     serializeOutcomes с теми же опциями, поэтому новое поле итога (due_kind) попадает и сюда. */
@@ -130,6 +138,13 @@ export const validateOutcomes = (payload) => {
     for (const o of payload) {
         if (!o.name) return 'У каждого итога должно быть название';
     }
+    const seenOutcomes = new Set();
+    for (const o of payload) {
+        const key = o.name.toLowerCase();
+        if (seenOutcomes.has(key)) return `Итог «${o.name}» повторяется`;
+        seenOutcomes.add(key);
+    }
+    if (payload.length && !payload.some((o) => o.is_active !== false)) return 'Хотя бы один итог должен быть включён';
     for (const o of payload) {
         // Свёрнутое serializeOutcomes значение всегда допустимо; проверка — для
         // списка, собранного мимо него (а сервер ответил бы 400 уже после запроса).
@@ -150,6 +165,45 @@ export const validateOutcomes = (payload) => {
     }
     return '';
 };
+
+/**
+ * После сохранения: какие временные id (`new-…`) получили настоящие. sent — строки
+ * редактора в том виде, в каком ушли на сервер (по ним и ищем), server — список из
+ * ответа. Итог узнаётся по названию (сервер не даёт двух итогов с одним названием без
+ * учёта регистра), тип — по названию внутри своего итога. Ответ — { временный: настоящий }.
+ *
+ * Редактор сохраняет сам (20.11.2026), и пока ответ шёл, оператор мог продолжить
+ * печатать: рабочую копию ответом не заменяем, а только переписываем в ней id — иначе
+ * набранное после отправки пропало бы.
+ */
+export const savedIdMap = (sent, server) => {
+    const map = {};
+    const byName = new Map();
+    for (const o of Array.isArray(server) ? server : []) {
+        byName.set(String(o?.name ?? '').trim().toLowerCase(), o);
+    }
+    for (const o of Array.isArray(sent) ? sent : []) {
+        if (isDraftOutcome(o)) continue;
+        const match = byName.get(String(o.name ?? '').trim().toLowerCase());
+        if (!match) continue;
+        if (isNewId(o.id)) map[o.id] = match.id;
+        const subs = new Map((Array.isArray(match.subtypes) ? match.subtypes : [])
+            .map((s) => [cleanName(s?.name).toLowerCase(), s]));
+        for (const s of Array.isArray(o.subtypes) ? o.subtypes : []) {
+            if (!isNewId(s.id) || isDraftSubtype(s)) continue;
+            const sm = subs.get(cleanName(s.name).toLowerCase());
+            if (sm) map[s.id] = sm.id;
+        }
+    }
+    return map;
+};
+
+/** Рабочая копия с настоящими id вместо временных (savedIdMap). */
+export const applyIdMap = (items, idMap) => (Array.isArray(items) ? items : []).map((o) => ({
+    ...o,
+    id: idMap[o.id] || o.id,
+    subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).map((s) => (idMap[s.id] ? { ...s, id: idMap[s.id] } : s)),
+}));
 
 /** Сколько включённых типов у итога. */
 export const activeSubtypeCount = (outcome) => (Array.isArray(outcome?.subtypes) ? outcome.subtypes : [])

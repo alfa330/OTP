@@ -95,6 +95,19 @@ class _Svc:
         self.calls.append(('settings', department_id, payload))
         return {"department_id": department_id}
 
+    # Итоги звонка (20.11.2026): версия справочника туда и обратно.
+    def outcomes(self, department_id, with_version=False):
+        self.calls.append(('outcomes', department_id, with_version))
+        rows = [{"id": "o-1", "name": "Отказ"}]
+        return (rows, "v-1") if with_version else rows
+
+    def save_outcomes(self, department_id, items, changed_by=None, version=None, with_version=False):
+        self.calls.append(('save_outcomes', department_id, items, version, with_version))
+        if version == 'old':
+            raise dial_service.DialListError(dial_service.OUTCOMES_STALE, 409, kind='stale')
+        rows = [{"id": "o-1", "name": "Отказ"}]
+        return (rows, "v-2") if with_version else rows
+
     def offers(self, department_id):
         return {"department_id": department_id, "items": []}
 
@@ -230,6 +243,24 @@ class OperatorRoutesTests(unittest.TestCase):
         self.assertIn('not in SENSITIVE_QR_GATED_ROLES', lock)
         self.assertIn('return not _sensitive_access_granted_for_user(', lock)
         self.assertIn('return True', lock)   # сбой проверки — закрыт
+
+    def test_outcomes_route_carries_the_version_both_ways(self):
+        """Редактор итогов сохраняет сам (20.11.2026): GET отдаёт версию справочника, PUT передаёт присланную
+        сервису строкой; устаревшая — 409 error_kind 'stale'; без версии (старая сборка сайта) — None."""
+        svc = _Svc()
+        client = _client(svc, role='admin')
+        got = client.get(f'/api/dial_list/departments/{TEZ}/outcomes')
+        self.assertEqual((got.status_code, got.get_json()["version"]), (200, 'v-1'))
+        self.assertIn(('outcomes', TEZ, True), svc.calls)
+        put = client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": [{"name": "Отказ"}], "version": 'v-1'})
+        self.assertEqual((put.status_code, put.get_json()["version"]), (200, 'v-2'))
+        self.assertEqual(svc.calls[-1], ('save_outcomes', TEZ, [{"name": "Отказ"}], 'v-1', True))
+        stale = client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": [], "version": 'old'})
+        self.assertEqual((stale.status_code, stale.get_json().get("error_kind")), (409, 'stale'))
+        client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": []})
+        self.assertIsNone(svc.calls[-1][3])
+        client.put(f'/api/dial_list/departments/{TEZ}/outcomes', json={"items": [], "version": 7})
+        self.assertEqual(svc.calls[-1][3], '7')
 
     def test_wa_employee_refresh_is_wired_and_defined_before_the_service_is_built(self):
         """Ответственный в чате ChatApp (20.11.2026): освежение справочника сотрудников ChatApp приходит в

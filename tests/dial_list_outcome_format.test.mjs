@@ -21,7 +21,9 @@ import {
     SUBTYPE_NONE,
     SUBTYPE_SEP,
     activeSubtypeCount,
+    applyIdMap,
     isNewId,
+    savedIdMap,
     outcomeLabel,
     outcomeSubtypeName,
     outcomesSnapshot,
@@ -136,9 +138,17 @@ test('снимок: после загрузки чисто, любая прав�
     [moved[0].subtypes[0], moved[0].subtypes[1]] = [moved[0].subtypes[1], moved[0].subtypes[0]];
     assert.notEqual(outcomesSnapshot(moved), saved);
 
+    // Пустая новая строка — черновик (20.11.2026, редактор сохраняет сам): правкой не считается и на
+    // сервер не уходит; вписали название — правка.
+    const draft = toEditable(SERVER_OUTCOMES);
+    draft[1].subtypes.push({ id: 'new-9', name: '', is_active: true, used: 0 });
+    assert.equal(outcomesSnapshot(draft), saved);
     const added = toEditable(SERVER_OUTCOMES);
-    added[1].subtypes.push({ id: 'new-9', name: '', is_active: true, used: 0 });
+    added[1].subtypes.push({ id: 'new-9', name: 'Позже', is_active: true, used: 0 });
     assert.notEqual(outcomesSnapshot(added), saved);
+    const draftOutcome = toEditable(SERVER_OUTCOMES);
+    draftOutcome.push({ id: 'new-8', name: ' ', color: '#8E8E93', requeue: false, is_active: true, subtypes: [] });
+    assert.equal(outcomesSnapshot(draftOutcome), saved);
 
     // Прежние поля итога по-прежнему отслеживаются.
     const requeueOff = toEditable(SERVER_OUTCOMES);
@@ -153,9 +163,19 @@ test('validateOutcomes: те же правила, что у сервера', () 
     const noName = serializeOutcomes([{ ...SERVER_OUTCOMES[1], name: '  ' }]);
     assert.equal(validateOutcomes(noName), 'У каждого итога должно быть название');
 
-    const emptySub = serializeOutcomes([{ ...SERVER_OUTCOMES[0], subtypes: [{ id: 'new-1', name: ' ', is_active: true }] }]);
+    // Новый тип без названия — черновик: не уходит и сохранению не мешает. Стёрли название у
+    // сохранённого — ошибка, как у сервера.
+    const draftSub = serializeOutcomes([{ ...SERVER_OUTCOMES[0], subtypes: [{ id: 'new-1', name: ' ', is_active: true }] }]);
+    assert.deepEqual(draftSub[0].subtypes, []);
+    assert.equal(validateOutcomes(draftSub), '');
+    const emptySub = serializeOutcomes([{ ...SERVER_OUTCOMES[0], subtypes: [{ id: 's-1', name: ' ', is_active: true }] }]);
     assert.match(validateOutcomes(emptySub), /Отказ/);
     assert.match(validateOutcomes(emptySub), /названи/);
+    // Повтор названия итога и «все выключены» — до запроса, как у сервера.
+    assert.equal(validateOutcomes(serializeOutcomes([SERVER_OUTCOMES[0], { ...SERVER_OUTCOMES[1], name: ' отказ' }])),
+        'Итог «отказ» повторяется');
+    assert.equal(validateOutcomes(serializeOutcomes(SERVER_OUTCOMES.map((o) => ({ ...o, is_active: false })))),
+        'Хотя бы один итог должен быть включён');
 
     const dup = serializeOutcomes([{
         ...SERVER_OUTCOMES[0],
@@ -173,6 +193,41 @@ test('validateOutcomes: те же правила, что у сервера', () 
     const many = Array.from({ length: SUBTYPES_MAX + 1 }, (_, i) => ({ id: `new-${i}`, name: `Тип ${i}`, is_active: i % 2 === 0 }));
     assert.equal(validateOutcomes(serializeOutcomes([{ ...SERVER_OUTCOMES[0], subtypes: many }])), 'У итога «Отказ» не больше 20 типов');
     assert.equal(validateOutcomes(serializeOutcomes([{ ...SERVER_OUTCOMES[0], subtypes: many.slice(0, SUBTYPES_MAX) }])), '');
+});
+
+test('после автосохранения: временные id → настоящие, набранное во время запроса не пропадает', () => {
+    // Ушло на сервер: новая причина «Дорого» у «Отказа», новый итог «Думает» с причиной, черновик.
+    const sent = toEditable(SERVER_OUTCOMES);
+    sent[0].subtypes.push({ id: 'new-1', name: 'Дорого ', is_active: true, used: 0 });
+    sent[0].subtypes[0].name = 'Очень дорого';
+    sent.push({ id: 'new-2', name: 'Думает', color: '#8E8E93', requeue: false, is_active: true, used: 0,
+                subtypes: [{ id: 'new-3', name: 'Спросит жену', is_active: true, used: 0 },
+                           { id: 'new-4', name: '', is_active: true, used: 0 }] });
+    // Ответ сервера: выключенные — в конце, у новых — настоящие id.
+    const server = [
+        { ...SERVER_OUTCOMES[0], subtypes: [
+            { id: 's-1', name: 'Очень дорого', is_active: true }, { id: 's-2', name: 'Уже работает в другом парке', is_active: true },
+            { id: 's-9', name: 'Дорого', is_active: true }, { id: 's-3', name: 'Не интересно', is_active: false }] },
+        SERVER_OUTCOMES[1],
+        { id: 'o-7', name: 'Думает', color: '#8E8E93', requeue: false, is_active: true,
+          subtypes: [{ id: 's-10', name: 'Спросит жену', is_active: true }] },
+    ];
+    const idMap = savedIdMap(sent, server);
+    assert.deepEqual(idMap, { 'new-1': 's-9', 'new-2': 'o-7', 'new-3': 's-10' });
+    // Пока шёл ответ, «Дорого» дописали до «Дорого для меня»: id настоящий, текст — набранный.
+    const working = toEditable(sent);
+    working[0].subtypes[3].name = 'Дорого для меня';
+    const mapped = applyIdMap(working, idMap);
+    assert.deepEqual(mapped[0].subtypes.map((s) => [s.id, s.name]), [
+        ['s-1', 'Очень дорого'], ['s-2', 'Уже работает в другом парке'], ['s-3', 'Не интересно'],
+        ['s-9', 'Дорого для меня']]);
+    assert.deepEqual(mapped[2].subtypes.map((s) => s.id), ['s-10', 'new-4']);
+    // Сохранённое = отправленное с настоящими id: без новой правки — чисто, с ней — изменено.
+    const savedNow = outcomesSnapshot(applyIdMap(sent, idMap));
+    assert.equal(outcomesSnapshot(applyIdMap(toEditable(sent), idMap)), savedNow);
+    assert.notEqual(outcomesSnapshot(mapped), savedNow);
+    // Повторное сохранение — уже без «new-»: сервер обновит, а не заведёт вторые «Дорого» и «Думает».
+    assert.ok(serializeOutcomes(mapped).every((o) => o.id && o.subtypes.every((s) => s.id)));
 });
 
 test('раскрывашка типов: «Типы · N» по включённым', () => {
