@@ -9311,8 +9311,10 @@ class DialListService:
         general_call_id, error, kind = None, "", CALL_ERROR_PBX
         try:
             client = self._client(department_id)
+            # callerIdForEmployee — номер клиента на плече оператора: по нему телефон узнаёт СВОЁ плечо и не
+            # примет молча звонок из очереди, пришедший в те же секунды (ICoreRoute::SameNumber).
             general_call_id = client.originate_internal_to_external(
-                internal, phone, pbxNumber=route["pbx_number"], playbackWaiting="FALSE")
+                internal, phone, pbxNumber=route["pbx_number"], playbackWaiting="FALSE", callerIdForEmployee=phone)
         except Exception as exc:
             error = scrub_digits(str(exc))[:500] or exc.__class__.__name__
             kind = exc.kind if isinstance(exc, DialListError) and getattr(exc, "kind", None) else call_error_kind(exc)

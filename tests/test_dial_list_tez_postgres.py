@@ -670,7 +670,9 @@ def test_route_call_dials_from_the_number_of_the_prefix_only_for_tez(env, monkey
 
     res = env.svc.route_call(OPERATOR, '2222', '8 747 352 42 48')
     assert env.binotel.originated == [('601', '77473524248')]
-    assert env.binotel.extras == [{"pbxNumber": '77070800080', "playbackWaiting": 'FALSE'}]
+    # callerIdForEmployee — номер клиента на плече: по нему телефон узнаёт своё плечо (не звонок очереди).
+    assert env.binotel.extras == [{"pbxNumber": '77070800080', "playbackWaiting": 'FALSE',
+                                   "callerIdForEmployee": '77473524248'}]
     assert (res["prefix"], res["from_title"], res["number"]) == ('2222', '8 707 080 00 80 (пассажиры)',
                                                                  dial_service.phone_display('77473524248'))
     assert res["general_call_id"].startswith('gc-1-') and res["api_ms"] >= 0
