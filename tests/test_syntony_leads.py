@@ -314,16 +314,18 @@ class TwinTests(unittest.TestCase):
                         [syn(at(12, 10, 3), tags='forma_dostavka_sait', utm='google', source='website')])
         self.assertEqual(2, result['Google'])
 
-    def test_call_reaches_syntony_minutes_later_and_still_counts_once(self):
-        """Звонок Syntony заводит после amoCRM — на 19.11 до 4 минут, тег линии тот же."""
-        result = counts([amo(at(12, 9, 36, 56), tags='call_itaxi_2gis_wb')],
-                        [syn(at(12, 9, 40, 30), tags='call_itaxi_2gis_wb', source='phone')])
-        self.assertEqual(1, result['2GIS'])
-
-    def test_minutes_apart_without_a_common_key_are_two_leads(self):
-        result = counts([amo(at(12, 9, 36), tags='call_itaxi_wb')],
-                        [syn(at(12, 9, 40), tags='call_jana_wb1', source='phone')])
-        self.assertEqual(2, result['Звонки'])
+    def test_calls_count_from_amocrm_only(self):
+        """Решение владельца 20.11: звонки — как в amoCRM. Syntony заводит заявку на любой звонок
+        с номера без открытой заявки (и от действующих водителей): 276 против 129 сделок amoCRM
+        за 19–20.11. Звонковые заявки Syntony не считаются вовсе — ни с парой, ни без."""
+        deals = [amo(at(12, 9, 36, 56), tags='call_itaxi_2gis_wb')]
+        leads = [syn(at(12, 9, 40, 30), tags='call_itaxi_2gis_wb', source='phone'),
+                 syn(at(12, 9, 50, 0), tags='call_цр_wb', source='phone')]
+        result = amo_leads.combined_counts(deals, leads, *DAY, detail=True)
+        self.assertEqual(1, result['total']['2GIS'])
+        self.assertEqual(0, result['total']['Звонки'], 'линия ЦР WB есть только в Syntony')
+        self.assertEqual((1, 0), (result['amo']['2GIS'], result['syntony']['2GIS']))
+        self.assertEqual((1, 2), (result['amo_calls'], result['syntony_calls']))
 
     def test_same_campaign_is_not_a_twin_key(self):
         """По кампании в 10 минутах идут десятки разных лидов; близнецы лид-форм — в 10 с."""
@@ -332,13 +334,15 @@ class TwinTests(unittest.TestCase):
                         [syn(at(12, 11, 1, 10), utm='facebook', campaign='iTaxi/16.09.2026')])
         self.assertEqual(2, result['FB'])
 
+    # Склейка по тегу работает и для форм сайта; звонками её проверять нагляднее всего
+    # (у них общий тег и задержка в минуты), поэтому здесь — прямо drop_twins.
     def test_call_does_not_steal_the_deal_of_another_line(self):
         """Опыт разбора 19.11: заявка звонка jana в 5 с от сделки itaxi не отнимает её у
-        своей пары — сперва склеиваются звонки одной линии, потом остальное."""
+        своей пары — сперва склеиваются заявки с общим тегом, потом остальное."""
         deals = [amo(at(19, 10, 0, 0), tags='call_jana_wb1'), amo(at(19, 10, 0, 25), tags='call_itaxi_wb')]
         leads = [syn(at(19, 10, 0, 30), tags='call_jana_wb1', source='phone'),
                  syn(at(19, 10, 1, 10), tags='call_itaxi_wb', source='phone')]
-        self.assertEqual(2, counts(deals, leads, window=(at(19, 0), at(20, 0)))['Звонки'])
+        self.assertEqual([], amo_leads.drop_twins(deals, leads))
 
     def test_two_calls_of_one_line_with_a_late_syntony_are_two(self):
         """Опыт разбора 19.11: ближайшая к первой заявке сделка — второго звонка; жадные
@@ -347,7 +351,14 @@ class TwinTests(unittest.TestCase):
         deals = [amo(base, tags='call_jana_wb1'), amo(base + timedelta(seconds=420), tags='call_jana_wb1')]
         leads = [syn(base + timedelta(seconds=240), tags='call_jana_wb1', source='phone'),
                  syn(base + timedelta(seconds=660), tags='call_jana_wb1', source='phone')]
-        self.assertEqual(2, counts(deals, leads, window=(at(20, 0), at(21, 0)))['Звонки'])
+        self.assertEqual([], amo_leads.drop_twins(deals, leads))
+
+    def test_site_form_twin_minutes_later_counts_once(self):
+        """Тот же тег формы в двух CRM в пределах 10 минут — один лид."""
+        result = counts([amo(at(18, 15, 30, 0), tags='forma_jana_sait', utm='google')],
+                        [syn(at(18, 15, 33, 0), tags='forma_jana_sait', utm='google', source='website')],
+                        window=(at(18, 0), at(19, 0)))
+        self.assertEqual(1, result['Google'])
 
     def test_call_and_site_form_seconds_apart_are_two_leads(self):
         result = counts([amo(at(12, 10, 0, 0), tags='call_jana_google')],
@@ -423,6 +434,101 @@ class TwinTests(unittest.TestCase):
                          campaign='Жана/2% комиссия/23.07.2026'))
         result = counts(deals, leads)
         self.assertEqual(12, result['FB'], '10 общих + Global только в Syntony + Жана только в amoCRM')
+
+
+class BulkImportTests(unittest.TestCase):
+    """Догрузка истории: подключая форму, Syntony заводит её старые лиды разом (19.11:
+    «Жана» — 504 заявки за 14:53–14:55, «Честный» — 213 за 14:01–14:03; отбивка за 19.11
+    показала FB 846 против 103). Обычный поток кампании — до 5 заявок за 10 минут."""
+
+    WINDOW = (at(19, 0), at(20, 0))
+
+    def burst(self, n, start, campaign='Жана/2% комиссия/23.07.2026', step=1):
+        return [syn(start + timedelta(seconds=i * step), utm='facebook', campaign=campaign)
+                for i in range(n)]
+
+    def test_history_dumped_at_once_is_not_counted_but_the_new_flow_is(self):
+        dump = self.burst(504, at(19, 14, 53), step=0.3)
+        flow = [syn(at(19, 15, 26) + timedelta(minutes=40 * i), utm='facebook',
+                    campaign='Жана/2% комиссия/23.07.2026') for i in range(12)]
+        result = amo_leads.combined_counts([], dump + flow, *self.WINDOW, detail=True)
+        self.assertEqual(12, result['total']['FB'])
+        self.assertEqual(504, result['imported']['FB'])
+
+    def test_a_busy_but_normal_campaign_is_not_mistaken_for_a_dump(self):
+        """19 заявок в 20 минутах — вчетверо выше обычного максимума, но ещё не догрузка."""
+        result = amo_leads.combined_counts([], self.burst(19, at(19, 10), step=60), *self.WINDOW,
+                                           detail=True)
+        self.assertEqual(19, result['total']['FB'])
+        self.assertEqual(0, result['imported']['FB'])
+
+    def test_different_campaigns_at_the_same_time_are_not_one_dump(self):
+        leads = (self.burst(10, at(19, 10), campaign='iTaxi/16.09.2026', step=30)
+                 + self.burst(10, at(19, 10), campaign='Global/28.10.26', step=30))
+        self.assertEqual(20, counts([], leads, window=self.WINDOW)['FB'])
+
+    def test_dump_across_midnight_is_cut_on_both_days(self):
+        """Окно читается шире на 10 минут — догрузка видна целиком и у края суток."""
+        dump = self.burst(40, at(19, 23, 58), step=6)
+        margin = amo_leads.TWIN_MARGIN
+        today = (at(20, 0), at(21, 0))
+        rows = [r for r in dump if today[0] - margin <= r['created_at'] < today[1] + margin]
+        result = amo_leads.combined_counts([], rows, *today, detail=True)
+        self.assertEqual(0, result['total']['FB'])
+        self.assertGreater(result['imported']['FB'], 0)
+
+    def test_measured_dump_of_19_11_is_cut_to_the_real_day(self):
+        """Срез 19.11: 719 догруженных FB-заявок и обычный поток — в счёт только поток."""
+        dump = (self.burst(504, at(19, 14, 53), step=0.4)
+                + self.burst(215, at(19, 14, 1), campaign='Честный/27.07.2026', step=0.6))
+        flow = [syn(at(19, h, 7), utm='facebook', campaign='iTaxi/16.09.2026') for h in range(24)]
+        result = amo_leads.combined_counts([], dump + flow, *self.WINDOW, detail=True)
+        self.assertEqual((24, 719), (result['total']['FB'], result['imported']['FB']))
+
+
+class SplitColumnTests(unittest.TestCase):
+    """Столбец «amo+Syn» — откуда лиды (просьба владельца 20.11)."""
+
+    def detail(self):
+        deals = [amo(at(19, 9), tags='call_jana_wb1'), amo(at(19, 9, 30), tags='forma_jana_sait', utm='google')]
+        leads = [syn(at(19, 10), utm='facebook', campaign='iTaxi/16.09.2026'),
+                 syn(at(19, 11), tags='forma_jana_sait', utm='google', source='website')]
+        extra = [{'tags': 'forma_olx_itaxi', 'utm_source': '', 'created_at': at(19, 12)}]
+        return amo_leads.combined_counts(deals, leads, at(19, 0), at(20, 0), extra_rows=extra, detail=True)
+
+    def test_parts_add_up_to_the_total_in_every_line(self):
+        result = self.detail()
+        for name in amo_leads.SOURCE_ORDER + ['Общее']:
+            self.assertEqual(result['total'][name], result['amo'][name] + result['syntony'][name], name)
+        self.assertEqual((1, 1), (result['amo']['Google'], result['syntony']['Google']))
+        self.assertEqual((0, 1), (result['amo']['OLX'], result['syntony']['OLX']),
+                         'обращения OLX ведёт Syntony — в разбивке они на её стороне')
+
+    def render(self, split):
+        rows = amo_leads.analyze(split['total'], split['total'])
+        return amo_leads.render_alert_report(rows, 'w', 'b', split=split)
+
+    def test_table_shows_where_the_leads_come_from_and_fits_a_phone(self):
+        text = self.render(self.detail())
+        table = text[text.index('<pre>') + 5:text.index('</pre>')].strip().splitlines()
+        self.assertEqual(['Источник', 'лиды', 'база', 'Δ', 'amo+Syn'], table[0].split())
+        self.assertEqual(['Google', '2', '2', '+0%', '1+1'], next(l for l in table if l.startswith('Google')).split())
+        self.assertEqual(['FB', '1', '1', '+0%', '0+1'], next(l for l in table if l.startswith('FB')).split())
+        self.assertEqual(['Общее', '5', '5', '+0%', '2+3'], table[-1].split())
+        self.assertTrue(all(len(line) <= 40 for line in table), max(table, key=len))
+
+    def test_dumped_history_and_silent_amocrm_calls_are_said_under_the_table(self):
+        split = self.detail()
+        split['imported'] = dict(split['imported'], FB=719, TikTok=1)
+        split['amo_calls'], split['syntony_calls'] = 0, 36
+        text = self.render(split)
+        self.assertIn('Не в счёт — Syntony догрузила старые заявки: TikTok 1, FB 719.', text)
+        self.assertIn('⚠️ Звонков в amoCRM нет, в Syntony — 36: «Звонки» считаются по amoCRM.', text)
+
+    def test_nothing_extra_under_the_table_on_an_ordinary_day(self):
+        text = self.render(self.detail())
+        self.assertNotIn('Не в счёт', text)
+        self.assertNotIn('Звонков в amoCRM нет', text)
 
 
 class FooterTests(unittest.TestCase):
@@ -698,8 +804,8 @@ class AlertTextTests(unittest.TestCase):
 
         text = ns['_amo_leads_alert_text'](now=self.NOW)
 
-        self.assertEqual(['FB', '12', '12', '+0%'], self.line(text, 'FB'))
-        self.assertEqual(['OLX', '1', '0', '—'], self.line(text, 'OLX'))
+        self.assertEqual(['FB', '12', '12', '+0%', '0+12'], self.line(text, 'FB'))
+        self.assertEqual(['OLX', '1', '0', '—', '0+1'], self.line(text, 'OLX'))
         self.assertIn('Данные обновлены: amoCRM 12:05, Syntony 12:05.', text)
         self.assertNotIn('Критично', text)
         self.assertEqual(1, len(fake.calls), 'перед ответом Syntony догружается')
@@ -716,7 +822,29 @@ class AlertTextTests(unittest.TestCase):
         ns = bot_namespace(db, FakeSyntonyClient(configured=False))
         text = ns['_amo_leads_alert_text'](now=self.NOW)
         self.assertNotIn('Syntony', text)
+        self.assertNotIn('amo+Syn', text, 'без Syntony столбец «откуда» не нужен')
+        self.assertEqual(['FB', '1', '0', '—'], self.line(text, 'FB'))
         self.assertIn('Данные обновлены 12:05.', text)
+
+    def test_dumped_history_is_left_out_and_said_under_the_table(self):
+        """Отбивка 20.11 00:00 за 19.11 показала FB 846: Syntony догрузила 719 старых заявок."""
+        dump = [self.stored(at(19, 14, 53) + timedelta(seconds=i), utm_source='facebook',
+                            utm_campaign='Жана/2% комиссия/23.07.2026') for i in range(60)]
+        fresh = [self.stored(at(19, 9, i * 5), utm_source='facebook', utm_campaign='iTaxi/16.09.2026')
+                 for i in range(3)]
+        db = FakeDb(syntony_rows=dump + fresh, clock={'now': at(20, 0, 5)})
+        ns = bot_namespace(db, FakeSyntonyClient())
+        text = ns['_amo_leads_alert_text'](now=at(20, 0, 0))
+        self.assertEqual(['FB', '3', '0', '—', '0+3'], self.line(text, 'FB'))
+        self.assertIn('Не в счёт — Syntony догрузила старые заявки: FB 60.', text)
+
+    def test_syntony_calls_are_not_counted_and_a_silent_amocrm_is_flagged(self):
+        calls = [self.stored(at(19, 9, i), tags='call_jana_wb1', source='phone') for i in range(4)]
+        db = FakeDb(syntony_rows=calls)
+        ns = bot_namespace(db, FakeSyntonyClient())
+        text = ns['_amo_leads_alert_text'](now=self.NOW)
+        self.assertEqual(['Звонки', '0', '0', '—', '0+0'], self.line(text, 'Звонки'))
+        self.assertIn('⚠️ Звонков в amoCRM нет, в Syntony — 4: «Звонки» считаются по amoCRM.', text)
 
     def test_empty_amocrm_window_is_not_a_reason_to_fail_when_syntony_has_leads(self):
         """Опыт разбора 19.11: лиды ушли в Syntony, в окне amoCRM пусто, досинк amoCRM упал —
@@ -731,7 +859,7 @@ class AlertTextTests(unittest.TestCase):
         ns = bot_namespace(db, FakeSyntonyClient(), amo_sync=amo_down)
         text = ns['_amo_leads_alert_text'](now=self.NOW)
         self.assertEqual(1, len(calls), 'выгрузки amoCRM не было — досинк пробуем')
-        self.assertEqual(['FB', '1', '0', '—'], self.line(text, 'FB'))
+        self.assertEqual(['FB', '1', '0', '—', '0+1'], self.line(text, 'FB'))
 
     def test_nothing_in_either_crm_and_a_failed_resync_is_an_error_not_zeros(self):
         def amo_down():

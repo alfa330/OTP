@@ -37345,14 +37345,15 @@ def _olx_received_rows(start, end):
     return rows
 
 
-def _leads_counts_between(start, end):
-    """Лиды по источникам за [start, end): amoCRM + Syntony без близнецов + журнал OLX."""
+def _leads_counts_between(start, end, detail=False):
+    """Лиды по источникам за [start, end): amoCRM + Syntony без близнецов, без звонков и без
+    догрузки истории + журнал OLX. `detail` — с разбивкой «откуда» (amo_leads.combined_counts)."""
     margin = amo_leads.TWIN_MARGIN
     amo_rows = db.get_amo_leads_between(start - margin, end + margin)
     syntony_rows = [amo_leads.syntony_row(lead)
                     for lead in db.get_syntony_leads_between(start - margin, end + margin)]
     return amo_leads.combined_counts(amo_rows, syntony_rows, start, end,
-                                     extra_rows=_olx_received_rows(start, end))
+                                     extra_rows=_olx_received_rows(start, end), detail=detail)
 
 
 def _amo_leads_alert_text(now=None, day=None):
@@ -37412,8 +37413,9 @@ def _amo_leads_alert_text(now=None, day=None):
             last, failed, fresh = _amo_leads_journal()
             windows = amo_leads.clamp_windows(asked, _leads_data_until(fresh, s_fresh))
 
+    current = _leads_counts_between(windows["current_start"], windows["current_end"], detail=True)
     rows = amo_leads.analyze(
-        _leads_counts_between(windows["current_start"], windows["current_end"]),
+        current["total"],
         _leads_counts_between(windows["base_start"], windows["base_end"]),
         period=amo_leads.PERIOD_12H,
     )
@@ -37433,6 +37435,8 @@ def _amo_leads_alert_text(now=None, day=None):
         sync_error=last.get('error') if failed else None,
         failed_at=last.get('finished_at') if failed else None,
         more_sources=more_sources,
+        # Столбец «откуда» — когда в цифрах есть Syntony; без неё отбивка прежняя.
+        split=current if more_sources else None,
     )
 
 

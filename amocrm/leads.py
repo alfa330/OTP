@@ -600,7 +600,50 @@ def syntony_row(lead):
         "utm_campaign": campaign,
         "created_at": lead.get("created_at"),
         "first_tag": first.lower(),
+        "source": lead.get("source") or "",
     }
+
+
+# Звонки отбивка считает только по amoCRM — «как в amo», решение владельца 20.11.2026. Сделку
+# amoCRM заводит по звонку нового человека, а заявку Syntony — по любому звонку с номера без
+# открытой заявки, в том числе от действующих водителей, и с линий, которых в amoCRM не было
+# (ЦР WB): 19.11 08:00 — 20.11 12:00, когда звонки шли в обе CRM, — 129 сделок против 276 заявок.
+SYNTONY_UNCOUNTED_SOURCES = ("phone",)
+
+# Догрузка истории. Подключая форму, Syntony разом заводит её прошлые лиды — со временем
+# подключения, а не лида: 19.11 «Жана/2% комиссия» — 504 заявки за 14:53–14:55 (та же форма в
+# amoCRM за месяц до того — 523 сделки), «Честный» — 213 за 14:01–14:03; отбивка за 19.11 показала
+# FB 846 против 103. Обычный поток одной кампании — не больше 5 заявок за 10 минут (замер 01–20.11),
+# поэтому догрузкой считаются 20 и больше заявок одной кампании в пределах ±10 минут.
+BULK_IMPORT_MIN = 20
+BULK_IMPORT_WINDOW = timedelta(minutes=10)
+
+
+def _bulk_key(row):
+    """Чем заявки одной догрузки похожи: источник и кампания (без неё — первый тег)."""
+    return (row.get("source") or "", (row.get("utm_campaign") or "").strip().lower()
+            or row.get("first_tag") or "")
+
+
+def split_bulk_imports(rows):
+    """(обычные заявки, догрузка истории) — см. `BULK_IMPORT_MIN`."""
+    groups = {}
+    for index, row in enumerate(rows or []):
+        if row.get("created_at") is not None:
+            groups.setdefault(_bulk_key(row), []).append(index)
+    imported = set()
+    for indexes in groups.values():
+        if len(indexes) < BULK_IMPORT_MIN:
+            continue
+        indexes.sort(key=lambda i: rows[i]["created_at"])
+        times = [rows[i]["created_at"] for i in indexes]
+        for position, index in enumerate(indexes):
+            low = bisect.bisect_left(times, times[position] - BULK_IMPORT_WINDOW)
+            high = bisect.bisect_right(times, times[position] + BULK_IMPORT_WINDOW)
+            if high - low >= BULK_IMPORT_MIN:
+                imported.add(index)
+    kept = [row for index, row in enumerate(rows or []) if index not in imported]
+    return kept, [row for index, row in enumerate(rows or []) if index in imported]
 
 
 def _hits(row):
@@ -702,23 +745,42 @@ def drop_twins(amo_rows, syntony_rows):
     return [row for index, row in enumerate(syntony_rows) if index not in paired]
 
 
-def combined_counts(amo_rows, syntony_rows, start, end, extra_rows=()):
+def combined_counts(amo_rows, syntony_rows, start, end, extra_rows=(), detail=False):
     """Лиды по источникам за [start, end) из обеих CRM.
 
     `amo_rows` и `syntony_rows` читаются шире окна на `TWIN_MARGIN` с обеих
-    сторон — только ради пар на краю; считаются строки внутри окна. Заявки
-    Syntony — уже через `syntony_row`. `extra_rows` — строки не из CRM (журнал
-    робота OLX, когда сделки он больше не заводит), считаются как есть.
+    сторон — ради пар на краю и догрузки, начатой до окна; считаются строки
+    внутри окна. Заявки Syntony — уже через `syntony_row`; звонки и догрузка
+    истории из них не считаются (`SYNTONY_UNCOUNTED_SOURCES`, `BULK_IMPORT_MIN`).
+    `extra_rows` — строки не из CRM (журнал робота OLX: эти обращения ведёт
+    Syntony, в разбивке они на её стороне), считаются как есть.
+
+    `detail=True` — словарь: total (как без detail), amo и syntony (откуда цифры,
+    в сумме total), imported (догрузка внутри окна, не в счёт), amo_calls и
+    syntony_calls (звонков внутри окна в каждой CRM — для предупреждения, если
+    звонки перестанут приходить в amoCRM).
     """
     def inside(row):
         created = row.get("created_at")
         return created is not None and start <= created < end
 
-    kept = drop_twins(amo_rows, syntony_rows)
-    rows = [r for r in amo_rows or [] if inside(r)]
-    rows += [r for r in kept if inside(r)]
-    rows += [r for r in extra_rows or [] if inside(r)]
-    return count_by_source(rows)
+    calls = [r for r in syntony_rows or [] if r.get("source") in SYNTONY_UNCOUNTED_SOURCES]
+    counted = [r for r in syntony_rows or [] if r.get("source") not in SYNTONY_UNCOUNTED_SOURCES]
+    counted, imported = split_bulk_imports(counted)
+    kept = drop_twins(amo_rows, counted)
+    amo_in = [r for r in amo_rows or [] if inside(r)]
+    syntony_in = [r for r in kept if inside(r)] + [r for r in extra_rows or [] if inside(r)]
+    total = count_by_source(amo_in + syntony_in)
+    if not detail:
+        return total
+    return {
+        "total": total,
+        "amo": count_by_source(amo_in),
+        "syntony": count_by_source(syntony_in),
+        "imported": count_by_source([r for r in imported if inside(r)]),
+        "amo_calls": sum(1 for r in amo_in if any(_is_call_tag(t) for t in _deal_tags(r))),
+        "syntony_calls": sum(1 for r in calls if inside(r)),
+    }
 
 
 # ==== Алерты по отклонению от нормы ==========================================
@@ -812,7 +874,7 @@ def _pct(value):
 
 def render_alert_report(rows, window_label="", base_label="",
                         synced_at=None, sync_error=None, failed_at=None,
-                        more_sources=None):
+                        more_sources=None, split=None):
     """Текст отбивки: таблица с отклонениями и список того, что требует реакции.
 
     `synced_at` — время последней УДАЧНОЙ выгрузки, то есть настоящий возраст
@@ -823,6 +885,11 @@ def render_alert_report(rows, window_label="", base_label="",
 
     `more_sources` — другие CRM в тех же цифрах (Syntony): список словарей
     {name, synced_at, error, failed_at}. С ними подпись называет каждую CRM.
+
+    `split` — `combined_counts(..., detail=True)` текущего окна. С ним в таблице
+    столбец «amo+Syn» — откуда лиды (просьба владельца 20.11.2026), а под ней —
+    догрузка истории Syntony, которую не считали, и предупреждение, если звонки
+    перестали приходить в amoCRM (их отбивка считает только по ней).
     """
     lines = ["<b>Лиды: проверка за %s</b>" % window_label]
     if base_label:
@@ -834,14 +901,27 @@ def render_alert_report(rows, window_label="", base_label="",
     width = max(len(r["source"]) for r in body) + 1
 
     lines.append("<pre>")
-    lines.append("%-*s %6s %6s %8s" % (width, "Источник", "лиды", "база", "Δ"))
-    for r in body:
-        lines.append("%-*s %6d %6d %8s" % (width, r["source"], r["leads"],
-                                           r["base_leads"], _pct(r["delta_leads"])))
-    if total:
-        lines.append("-" * (width + 23))
-        lines.append("%-*s %6d %6d %8s" % (width, "Общее", total["leads"],
-                                           total["base_leads"], _pct(total["delta_leads"])))
+    if split:
+        # Поуже прежнего, чтобы со столбцом «amo+Syn» строка влезала в экран телефона.
+        def line(name, leads, base, delta):
+            origin = "%d+%d" % (split["amo"].get(name, 0), split["syntony"].get(name, 0))
+            return "%-*s %5d %5d %6s %7s" % (width, name, leads, base, _pct(delta), origin)
+
+        lines.append("%-*s %5s %5s %6s %7s" % (width, "Источник", "лиды", "база", "Δ", "amo+Syn"))
+        for r in body:
+            lines.append(line(r["source"], r["leads"], r["base_leads"], r["delta_leads"]))
+        if total:
+            lines.append("-" * (width + 28))
+            lines.append(line("Общее", total["leads"], total["base_leads"], total["delta_leads"]))
+    else:
+        lines.append("%-*s %6s %6s %8s" % (width, "Источник", "лиды", "база", "Δ"))
+        for r in body:
+            lines.append("%-*s %6d %6d %8s" % (width, r["source"], r["leads"],
+                                               r["base_leads"], _pct(r["delta_leads"])))
+        if total:
+            lines.append("-" * (width + 23))
+            lines.append("%-*s %6d %6d %8s" % (width, "Общее", total["leads"],
+                                               total["base_leads"], _pct(total["delta_leads"])))
     lines.append("</pre>")
 
     problems = [r for r in rows if r["verdict"] in ("АЛЕРТ", "Проверить")]
@@ -854,6 +934,16 @@ def render_alert_report(rows, window_label="", base_label="",
         lines.append(problems[0]["advice"])
     else:
         lines.append("🟢 Отклонений нет.")
+
+    if split:
+        imported = [(name, split["imported"].get(name, 0)) for name in SOURCE_ORDER
+                    if split["imported"].get(name)]
+        if imported:
+            lines.append("Не в счёт — Syntony догрузила старые заявки: %s."
+                         % ", ".join("%s %d" % item for item in imported))
+        if not split.get("amo_calls") and split.get("syntony_calls"):
+            lines.append("⚠️ Звонков в amoCRM нет, в Syntony — %d: «Звонки» считаются по amoCRM."
+                         % split["syntony_calls"])
 
     def clock(value):
         return value.astimezone(TZ).strftime("%H:%M")
