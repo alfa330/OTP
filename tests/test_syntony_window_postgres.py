@@ -301,3 +301,96 @@ def test_routes_over_real_sql_register_and_follow_the_link(db):
     with db._get_cursor() as cur:
         cur.execute('SELECT action FROM syntony_window_access_log ORDER BY id')
         assert [row[0] for row in cur.fetchall()] == ['grant', 'grant', 'email', 'revoke']
+
+
+# ── Сторож автодобавления (autogrant.py): запросы и прогон на настоящем SQL ─────
+
+def test_new_staff_are_working_people_of_the_departments_outside_the_list_never_revoked(db):
+    with db._get_cursor() as cur:
+        queries.grant(cur, SV, 'sv@icore.kz', SUPER)
+        queries.log(cur, 'revoke', user_id=BORIS, user_name='Борис Оператор', email='',
+                    actor_id=SUPER, actor_name='Супер Админов')
+    with db._get_cursor() as cur:
+        found = queries.new_staff(cur, ('OP', 'szov'), 10)
+        limited = queries.new_staff(cur, ('op',), 1)
+        elsewhere = queries.new_staff(cur, ('szov',), 10)
+    # SV уже в списке, Бориса снимали, Глеб уволен, бывший глава — в другом отделе, супер-админ — без отдела.
+    assert found == [{'id': HEAD, 'name': 'Глава Продаж', 'card_email': ''},
+                     {'id': ANNA, 'name': 'Анна Верификатор', 'card_email': 'anna@icore.kz'}]
+    assert [person['id'] for person in limited] == [HEAD]
+    assert elsewhere == []
+
+
+def test_rows_awaiting_card_email_are_empty_rows_with_a_good_card_email_only(db):
+    with db._get_cursor() as cur:
+        cur.execute("UPDATE users SET email = 'тоже не почта' WHERE id = %s", (HEAD,))
+        for user_id in (HEAD, ANNA, BORIS, FIRED):
+            queries.grant(cur, user_id, '', SUPER)
+        queries.grant(cur, SV, 'manual@icore.kz', SUPER)
+    with db._get_cursor() as cur:
+        rows = queries.rows_awaiting_card_email(cur, 10)
+        first = queries.rows_awaiting_card_email(cur, 1)
+    assert rows == [{'id': ANNA, 'name': 'Анна Верификатор', 'card_email': 'anna@icore.kz'}]
+    assert first == rows, 'негодная почта главы (id меньше) не занимает место годной'
+
+
+def test_filling_an_empty_row_never_overwrites_a_typed_email_and_resets_the_link(db):
+    with db._get_cursor() as cur:
+        queries.grant(cur, ANNA, '', SUPER)
+        queries.set_link_state(cur, ANNA, rules.LINK_NOT_LINKED)
+        queries.grant(cur, SV, 'manual@icore.kz', SUPER)
+    with db._get_cursor() as cur:
+        assert queries.fill_empty_email(cur, ANNA, 'anna@icore.kz') is True
+        assert queries.fill_empty_email(cur, ANNA, 'other@icore.kz') is False
+        assert queries.fill_empty_email(cur, SV, 'sv@icore.kz') is False
+        assert queries.fill_empty_email(cur, BORIS, 'boris@icore.kz') is False
+        anna = queries.get_item(cur, ANNA)
+        assert (anna['email'], anna['link_state'], anna['link_checked_at']) == ('anna@icore.kz', 'unknown', None)
+        assert queries.get_item(cur, SV)['email'] == 'manual@icore.kz'
+
+
+def test_unregistered_are_working_rows_syntony_never_answered_about(db):
+    with db._get_cursor() as cur:
+        for user_id in (SV, ANNA, BORIS, FIRED):
+            queries.grant(cur, user_id, '', SUPER)
+        queries.set_link_state(cur, BORIS, rules.LINK_NOT_LINKED)
+    with db._get_cursor() as cur:
+        assert queries.unregistered(cur, 10) == [SV, ANNA]
+        assert queries.unregistered(cur, 1) == [SV]
+
+
+def test_autogrant_run_adds_newcomers_registers_them_and_leaves_the_rest(db):
+    from syntony_window import autogrant
+
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs['json'])
+        return _Reply(409, {'error': {'code': 'operator_not_linked', 'message': 'не связан'}})
+
+    def run():
+        return autogrant.run_once(
+            db, load_config=lambda: client.Config(url=client.DEFAULT_URL, key=KEY),
+            request_window=lambda config, body: client.request_window(config, body, post=post),
+            sleep=lambda seconds: None, backoff={})
+
+    with db._get_cursor() as cur:
+        queries.grant(cur, SV, '', SUPER)
+        queries.set_link_state(cur, SV, rules.LINK_NOT_LINKED)
+    first = run()
+    assert first['granted'] == [HEAD, ANNA, BORIS]
+    assert first['emails'] == [SV], 'у SV в карточке рабочая почта — пустая строка её получает'
+    assert first['registered'] == {'not_linked': 4} and first['stopped'] == ''
+    assert sorted(call['partnerUserId'] for call in calls) == sorted(map(str, (HEAD, ANNA, BORIS, SV)))
+    sent = {call['partnerUserId']: call for call in calls}
+    assert sent[str(ANNA)]['partnerUserEmail'] == 'anna@icore.kz' and 'partnerUserEmail' not in sent[str(HEAD)]
+    assert sent[str(SV)]['partnerUserEmail'] == 'sv@icore.kz'
+    with db._get_cursor() as cur:
+        cur.execute("SELECT action, user_id, email, actor_id, actor_name FROM syntony_window_access_log ORDER BY id")
+        assert cur.fetchall() == [
+            ('grant', HEAD, '', None, 'Автоматически'), ('grant', ANNA, 'anna@icore.kz', None, 'Автоматически'),
+            ('grant', BORIS, '', None, 'Автоматически'), ('email', SV, 'sv@icore.kz', None, 'Автоматически')]
+        states = {item['id']: item['link_state'] for item in queries.list_access(cur)}
+    assert states == {HEAD: 'not_linked', ANNA: 'not_linked', BORIS: 'not_linked', SV: 'not_linked'}
+    assert run() == {'granted': [], 'emails': [], 'registered': {}, 'stopped': ''}
+    assert len(calls) == 4, 'второй прогон Syntony не беспокоит'

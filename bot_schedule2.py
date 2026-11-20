@@ -54896,6 +54896,16 @@ try:
 except Exception:
     logging.exception("Окно Syntony: Blueprint НЕ подключён")
 
+# Новые сотрудники ОП и СЗоВ попадают в список окна Syntony сами (владелец, 20.11.2026:
+# «автоматом новые добавлялись»): сторож раз в 15 минут, своим потоком (syntony_window/autogrant.py).
+try:
+    from syntony_window import autogrant as syntony_autogrant  # noqa: E402
+
+    if syntony_autogrant.start_worker(db):
+        logging.info("Окно Syntony: сторож списка запущен — новые ОП и СЗоВ раз в 15 минут")
+except Exception:
+    logging.exception("Окно Syntony: сторож списка НЕ запущен")
+
 
 def _syntony_flags_for(user_id):
     """Что человеку открыто в окне Syntony — те же правила, что у его ручек

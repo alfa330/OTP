@@ -194,6 +194,83 @@ def set_link_state(cursor, user_id, state):
     return cursor.rowcount > 0
 
 
+# ── Сторож автодобавления (autogrant.py) ──────────────────────────────────────
+
+def new_staff(cursor, department_codes, limit):
+    """Работающие сотрудники отделов department_codes, которых нет в списке и кого из него
+    ни разу не убирали (снятие — решение супер-админа, сторож его не отменяет).
+
+    [{'id', 'name', 'card_email'}] по возрастанию id; card_email — рабочая почта карточки
+    (users.email; личная почта сюда не попадает), уже в одном виде или ''.
+    """
+    cursor.execute("""
+        SELECT u.id, u.name, COALESCE(u.email, '')
+          FROM users u
+          JOIN departments d ON d.id = u.department_id
+         WHERE lower(d.code) = ANY(%s)
+           AND {working}
+           AND NOT EXISTS (SELECT 1 FROM syntony_window_access a WHERE a.user_id = u.id)
+           AND NOT EXISTS (SELECT 1 FROM syntony_window_access_log l
+                            WHERE l.user_id = u.id AND l.action = 'revoke')
+         ORDER BY u.id
+         LIMIT %s
+    """.format(working=_WORKING), ([str(code).lower() for code in department_codes], int(limit)))
+    return [{'id': int(row[0]), 'name': row[1] or '', 'card_email': rules.clean_email(row[2])}
+            for row in cursor.fetchall()]
+
+
+def rows_awaiting_card_email(cursor, limit):
+    """Строки списка без почты, чей работающий сотрудник уже записан в карточке с почтой.
+
+    [{'id', 'name', 'card_email'}]; card_email — в одном виде, негодные адреса отброшены.
+    """
+    # Предел — после отбора годных: строки с негодной почтой в карточке не должны занимать
+    # места годных (их не больше нескольких десятков — список целиком невелик).
+    cursor.execute("""
+        SELECT a.user_id, u.name, u.email
+          FROM syntony_window_access a
+          JOIN users u ON u.id = a.user_id
+         WHERE a.email = ''
+           AND btrim(COALESCE(u.email, '')) <> ''
+           AND {working}
+         ORDER BY a.user_id
+    """.format(working=_WORKING))
+    rows = [{'id': int(row[0]), 'name': row[1] or '', 'card_email': rules.clean_email(row[2])}
+            for row in cursor.fetchall()]
+    return [row for row in rows if row['card_email']][:int(limit)]
+
+
+def fill_empty_email(cursor, user_id, email):
+    """Почта в ПУСТУЮ строку списка (сторож). True — подставлена; у строки уже есть почта или
+    строки нет — False, ничего не тронуто: вписанное руками сторож не перетирает, даже если
+    супер-админ успел вписать почту между отбором и записью. Ответ Syntony о связи
+    сбрасывается, как у set_email: новая почта — новая личность для Syntony."""
+    cursor.execute("""
+        UPDATE syntony_window_access
+           SET email = %s, link_state = %s, link_checked_at = NULL
+         WHERE user_id = %s AND email = ''
+        RETURNING user_id
+    """, (email, rules.LINK_UNKNOWN, int(user_id)))
+    return cursor.fetchone() is not None
+
+
+def unregistered(cursor, limit):
+    """id работающих людей из списка, о чьей связи Syntony ещё ни разу не ответила.
+
+    Сюда попадают и добавленные сторожем, и те, кому сменили почту (set_email сбрасывает
+    ответ), и те, за кого запись у Syntony не прошла из-за сбоя."""
+    cursor.execute("""
+        SELECT a.user_id
+          FROM syntony_window_access a
+          JOIN users u ON u.id = a.user_id
+         WHERE a.link_state = %s
+           AND {working}
+         ORDER BY a.granted_at, a.user_id
+         LIMIT %s
+    """.format(working=_WORKING), (rules.LINK_UNKNOWN, int(limit)))
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
 def log(cursor, action, *, user_id, user_name, email, actor_id, actor_name):
     cursor.execute("""
         INSERT INTO syntony_window_access_log (action, user_id, user_name, email, actor_id, actor_name)
