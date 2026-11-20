@@ -166,6 +166,7 @@ class OutboundReturnEndpointTests(unittest.TestCase):
             '_get_authenticated_requester': lambda: (5, {}, None),
             '_dial_list_line_account': lambda user_id: None,
             '_dial_list_phone_settings': lambda user_id: {'enabled': False},
+            '_dial_list_outgoing_routes': lambda user_id: None,
             '_client_cards_phone_settings': lambda user_id: {'enabled': False},
             '_icore_phone_outbound_return': outbound_return,
             '_icore_phone_idle_offline': lambda user_id, provider: None,
