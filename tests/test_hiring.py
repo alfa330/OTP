@@ -201,6 +201,16 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('const body = sourceRequestBody(form, editing);', self.settings)
         self.assertNotIn("value: 'channels'", self.settings)
 
+    def test_chat_handled_button_under_last_candidate_message(self):
+        """Владелец 20.11.2026: «Ответ не нужен» — снизу под последним сообщением кандидата, как в «Чатах ОП», а не в
+        шапке чата."""
+        chats = (ROOT / 'src' / 'components' / 'hiring' / 'ChatsTab.jsx').read_text(encoding='utf-8')
+        self.assertEqual(chats.count('Ответ не нужен\n'), 1)
+        self.assertIn('{data.can_handle && row.id === lastIncoming && (', chats)
+        self.assertIn('const lastIncoming = useMemo(() => lastIncomingId(rows), [rows]);', chats)
+        header = chats[chats.index('<div className="flex flex-wrap items-center gap-2">'):chats.index('<div className="relative min-h-0 flex-1">')]
+        self.assertNotIn('handled', header)
+
     def test_board_scrollbar_and_take_button(self):
         self.assertIn('className="board-scroll -mx-3 overflow-x-auto', self.board)
         block = self.styles[self.styles.index('.board-scroll::-webkit-scrollbar {'):]

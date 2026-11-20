@@ -92,6 +92,16 @@ export function withDays(messages, today = localDay()) {
     return out;
 }
 
+/** Последнее сообщение кандидата в ленте (не наше, не плашка дня, не неотправленное): под ним — «Ответ не нужен», как
+ *  в «Чатах ОП» (владелец 20.11.2026: кнопка «должна быть снизу под последним сообщением кандидата»). */
+export function lastIncomingId(rows) {
+    for (let index = (rows || []).length - 1; index >= 0; index -= 1) {
+        const row = rows[index];
+        if (!row.dayKey && !row.pending && !row.from_me && row.id !== undefined && row.id !== null) return row.id;
+    }
+    return null;
+}
+
 /** Показывать ли автора над нашим сообщением: у первого в серии одного автора (как в «Чатах ОП»). */
 export function showAuthor(message, previous) {
     if (!message?.from_me || !message.author) return false;

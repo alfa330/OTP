@@ -14,8 +14,8 @@ import '../wazzup/chatThread.css';
 import './hiringChats.css';
 import { errorOf, STAGE_LABELS, SUBSTAGE_LABELS } from './hiringMeta';
 import {
-    BLOCK_ACTIONS, MAX_FILE, MAX_TEXT, chatInitials, fileSize, insertAt, listTime, localStamp, matchTemplates, mergeMessages,
-    newClientId, pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, timeOf, withDays,
+    BLOCK_ACTIONS, MAX_FILE, MAX_TEXT, chatInitials, fileSize, insertAt, lastIncomingId, listTime, localStamp, matchTemplates,
+    mergeMessages, newClientId, pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, timeOf, withDays,
 } from './hiringChats';
 import { ConfirmDialog, FIELD, Label, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
@@ -513,6 +513,7 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
     const tail = useMemo(() => pendingTail(data?.pending, local, seenClients.current), [data, local]);
     const rows = useMemo(() => withDays([...messages, ...tail.map((item) => ({ ...item, from_me: true, pending: true }))]),
         [messages, tail]);
+    const lastIncoming = useMemo(() => lastIncomingId(rows), [rows]);
 
     // Лента — у последнего сообщения, пока человек не ушёл вверх: и когда пришло новое, и когда растёт поле ответа,
     // плашка цитаты, строка ошибки или догрузилось фото (как useThreadEnd «Чатов ОП»).
@@ -691,13 +692,6 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
                     </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                    {data.can_handle && (
-                        <button type="button" onClick={handled} disabled={busy === 'handled'} title="Сообщения кандидата не ждут ответа — до нового сообщения"
-                                className="inline-flex items-center gap-1.5 rounded-full border border-orange-500 bg-white py-1 pl-2.5 pr-1 text-xs font-semibold text-orange-600 transition hover:bg-orange-50 disabled:opacity-60">
-                            Ответ не нужен
-                            <span className="flex min-h-5 min-w-5 items-center justify-center rounded-full bg-orange-600 px-1 text-[11px] text-white">{data.chat.waiting}</span>
-                        </button>
-                    )}
                     {card?.id && (
                         <button type="button" onClick={() => onOpenCard(card.id)}
                                 className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-[12px] font-semibold text-slate-600 transition hover:bg-slate-200 active:scale-[0.97]">
@@ -732,9 +726,22 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
                                 <span className="rounded-full bg-slate-500/10 px-3 py-1 text-[11px] font-medium text-slate-500">{row.label}</span>
                             </div>
                         ) : (
-                            <Bubble key={row.key || row.id} message={row} quote={row.quote_id ? quotes[row.quote_id] : null}
-                                    pending={Boolean(row.pending)} showName={showAuthor(row, rows[index - 1]?.dayKey ? null : rows[index - 1])}
-                                    onReply={data.block ? undefined : setReplyTo} onZoom={setZoom} onRetry={retry} onDiscard={discard} />
+                            <React.Fragment key={row.key || row.id}>
+                                <Bubble message={row} quote={row.quote_id ? quotes[row.quote_id] : null}
+                                        pending={Boolean(row.pending)} showName={showAuthor(row, rows[index - 1]?.dayKey ? null : rows[index - 1])}
+                                        onReply={data.block ? undefined : setReplyTo} onZoom={setZoom} onRetry={retry} onDiscard={discard} />
+                                {/* «Ответ не нужен» — под последним сообщением кандидата, как в «Чатах ОП» (владелец 20.11.2026). */}
+                                {data.can_handle && row.id === lastIncoming && (
+                                    <div className="flex justify-start px-3 sm:px-4">
+                                        <button type="button" onClick={handled} disabled={busy === 'handled'}
+                                                title="Сообщения кандидата не ждут ответа — до нового сообщения"
+                                                className="inline-flex items-center gap-1.5 rounded-full border border-orange-500 bg-white py-1 pl-2.5 pr-1 text-xs font-semibold text-orange-600 transition hover:bg-orange-50 disabled:opacity-60">
+                                            Ответ не нужен
+                                            <span className="flex min-h-5 min-w-5 items-center justify-center rounded-full bg-orange-600 px-1 text-[11px] text-white">{data.chat.waiting}</span>
+                                        </button>
+                                    </div>
+                                )}
+                            </React.Fragment>
                         )))}
                     </div>
                 </div>

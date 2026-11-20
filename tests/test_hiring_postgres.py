@@ -2309,8 +2309,9 @@ def test_chat_window_waiting_counter_and_take_before_reply(world):
                                   wa_event('q2', phone='77055558802', ts=WA_TS + 60, text='Здравствуйте')]})
     service.wa_events({'events': [wa_event('q3', phone='77055558801', ts=WA_TS + 30, text='Можно онлайн?')]})
     listed = service.wa_chats(me, {})
-    assert [item['key'] for item in listed['items']] == ['+77055558801', '+77055558802']   # дольше ждёт — выше
-    first = listed['items'][0]
+    # Среди ждущих — свежее сообщение выше (владелец 20.11.2026), а не дольше ждущий: 8802 написал в +60 с, 8801 — в +30 с.
+    assert [item['key'] for item in listed['items']] == ['+77055558802', '+77055558801']
+    first = next(item for item in listed['items'] if item['key'] == '+77055558801')
     assert (first['waiting'], first['stage'], first['stage_label'], first['title']) == (2, 'responses', 'Отклики', 'Айгерим')
     assert first['last']['text'] == 'Можно онлайн?'
     assert listed['totals'] == {'total': 2, 'waiting_chats': 2, 'waiting_messages': 3}
@@ -2338,6 +2339,8 @@ def test_chat_window_waiting_counter_and_take_before_reply(world):
     assert service.wa_chat_summary(me)['waiting_chats'] == 2
     assert service.wa_handled(me, '+77055558801') == {'waiting': 0}
     assert [i['key'] for i in service.wa_chats(me, {'waiting': '1'})['items']] == ['+77055558802']
+    # Ждущий ответа — выше не ждущего, даже если у того сообщение свежее.
+    assert [i['key'] for i in service.wa_chats(me, {})['items']] == ['+77055558802', '+77055558801']
     service.wa_events({'events': [wa_event('q7', phone='77055558801', ts=WA_TS + 1200, text='А адрес?')]})
     assert service.wa_chats(me, {'mode': 'mine'})['items'][0]['waiting'] == 1
     # Поиск: по имени и по хвосту номера.

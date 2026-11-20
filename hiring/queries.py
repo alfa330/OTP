@@ -1734,8 +1734,10 @@ def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_on
 
 def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', waiting_only=False, search='',
                  limit=50, offset=0, phone_own_only=False):
-    """Страница списка чатов: ждущие ответа сверху (дольше всех ждущий — первым), дальше — по последнему
-    сообщению, как в «Чатах ОП». Последнее сообщение — только у строк страницы (LATERAL по индексу чата)."""
+    """Страница списка чатов: ждущие ответа сверху, и внутри них, и ниже — по последнему сообщению, свежее выше
+    (владелец 20.11.2026: «даже у не прочитанных сообщений последнее написанное сообщение отображалось наверху»;
+    раньше среди ждущих первым стоял дольше всех ждущий). Последнее сообщение — только у строк страницы (LATERAL
+    по индексу чата)."""
     where, params = _chat_list_where(scope_sql, scope_params, lead=lead, user_id=user_id, mode=mode,
                                      waiting_only=waiting_only, search=search, phone_own_only=phone_own_only)
     cursor.execute("""
@@ -1745,9 +1747,7 @@ def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', 
                    c.recruiter_id, r.name AS recruiter_name, c.is_closed, c.candidate_no
             """ + _CHAT_LIST_FROM + """
              WHERE """ + where + """
-             ORDER BY (COALESCE(w.waiting, 0) > 0) DESC,
-                      CASE WHEN COALESCE(w.waiting, 0) > 0 THEN w.waiting_since END ASC NULLS LAST,
-                      w.last_at DESC, w.key
+             ORDER BY (COALESCE(w.waiting, 0) > 0) DESC, w.last_at DESC, w.key
              LIMIT %s OFFSET %s
         )
         SELECT p.*, lm.from_me AS last_from_me, lm.kind AS last_kind, lm.body AS last_body, lm.status AS last_status,
@@ -1757,8 +1757,7 @@ def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', 
               SELECT from_me, kind, body, status, deleted_at, author_name FROM hiring_wa_messages m
                WHERE m.chat_key = p.key ORDER BY m.sent_at DESC, m.id DESC LIMIT 1
           ) lm ON TRUE
-         ORDER BY (p.waiting > 0) DESC, CASE WHEN p.waiting > 0 THEN p.waiting_since END ASC NULLS LAST,
-                  p.last_at DESC, p.key
+         ORDER BY (p.waiting > 0) DESC, p.last_at DESC, p.key
     """, params + [int(limit), int(offset)])
     return _all(cursor)
 

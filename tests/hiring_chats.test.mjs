@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    chatInitials, dayLabel, insertAt, listTime, localStamp, matchTemplates, mergeMessages, mergeThread, newClientId, pendingStatus,
-    pendingTail, showAuthor, slashQuery, tickStatus, withDays,
+    chatInitials, dayLabel, insertAt, lastIncomingId, listTime, localStamp, matchTemplates, mergeMessages, mergeThread, newClientId,
+    pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, withDays,
 } from '../src/components/hiring/hiringChats.js';
 
 const TODAY = '2026-11-19';
@@ -107,4 +107,21 @@ test('avatar letters: real letters only — an emoji name is not cut in half', (
     assert.equal(chatInitials('~Meruert~'), 'M');
     assert.equal(chatInitials('Кандидат №12'), 'К1');
     assert.equal(chatInitials(''), '');
+});
+
+test('«Ответ не нужен» sits under the last candidate message, not under ours, a day pill or an unsent one', () => {
+    // Владелец 20.11.2026: кнопка «должна быть снизу под последним сообщением кандидата как в чатах ОП».
+    const rows = [
+        { dayKey: 'd:2026-11-19:0' },
+        { id: 1, from_me: false },
+        { id: 2, from_me: false },
+        { id: 3, from_me: true },
+        { dayKey: 'd:2026-11-20:4' },
+        { key: 'o:7', from_me: true, pending: true },
+    ];
+    assert.equal(lastIncomingId(rows), 2);
+    assert.equal(lastIncomingId([...rows, { id: 9, from_me: false }]), 9);
+    assert.equal(lastIncomingId([{ id: 3, from_me: true }]), null);
+    assert.equal(lastIncomingId([]), null);
+    assert.equal(lastIncomingId(null), null);
 });
