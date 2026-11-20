@@ -5,8 +5,8 @@ import IosDateRangePicker from '../ui/DateRangePicker';
 import { IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosCard } from '../ui/ios';
 import { quickPeriods } from '../ui/periodRange';
 import {
-    POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, daysSince, errorOf, groupCards, groupKey,
-    initials, openICorePhoneCall, shortTime, sourceTone, todayIso, toggleInList, withExpanded,
+    ARCHIVE_STAGE, POOL_STAGES, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES, boardQuery, codeOf, columnCollapsed, daysSince,
+    errorOf, groupCards, groupKey, initials, openICorePhoneCall, shortTime, sourceTone, todayIso, toggleInList, withExpanded,
 } from './hiringMeta';
 import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loading, Pill, SourcePill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
 
@@ -28,12 +28,18 @@ import { FIELD, FiltersRow, FiltersToggle, HOVER_REVEAL, ICON_BTN, Label, Loadin
  * пока их не раскрыли (решение владельца 20.11.2026: сначала видно все каналы с числами), раскрытые запоминаются в
  * браузере; карточки сервер присылает только раскрытым, у длинной — «Показать ещё». Период — только у «Откликов»,
  * в их шапке: остальные этапы им не режутся (так и просил владелец).
+ *
+ * Последняя колонка — «Не отвечает звонок/чат» (владелец 20.11.2026: «отдельный список как архив», «по умолчанию
+ * завёрнутый и серый»): туда сторож уводит из «В работе» тех, кто 72 часа не отвечает ни на звонок, ни на WhatsApp.
+ * Свёрнута, пока её не раскрыли (раскрытие запоминается в браузере), и приглушена серым.
  */
 
 // Колонка растёт, когда экран широкий (на большом мониторе все десять этапов без прокрутки), но не уже 236 px.
 const COLUMN_WIDTH = 'min-w-[236px] flex-1 basis-[272px]';
 const COLLAPSED_KEY = 'hiring.board.collapsed';
 const OPEN_GROUPS_KEY = 'hiring.board.openSources';
+// Раскрытый архив «Не отвечает звонок/чат»: по умолчанию свёрнут — в прежних списках свёрнутых его нет.
+const ARCHIVE_OPEN_KEY = 'hiring.board.openArchive';
 // Быстрые периоды — как у остальных разделов сайта: «Сегодня», «Неделя», «Месяц», «Весь период»; виды — дни и месяцы.
 const PERIOD_PRESETS = quickPeriods();
 const PERIOD_VIEWS = ['days', 'months'];
@@ -200,10 +206,11 @@ const Column = ({
     const cardsById = useMemo(() => new Map(column.cards.map((card) => [card.id, card])), [column.cards]);
     const periodActive = Boolean(onPeriod && (period?.from || period?.to));
     const tone = STAGE_TONES[column.stage];
-    const titleClass = tone === 'red' ? 'text-rose-700' : tone === 'green' ? 'text-emerald-700' : 'text-slate-700';
+    const archive = column.stage === ARCHIVE_STAGE;
+    const titleClass = tone === 'red' ? 'text-rose-700' : tone === 'green' ? 'text-emerald-700' : archive ? 'text-slate-400' : 'text-slate-700';
     const surface = over && dropState !== 'invalid' ? 'bg-blue-50 ring-2 ring-blue-400'
         : dropState === 'valid' ? 'bg-blue-50/60 ring-2 ring-blue-200'
-            : dropState === 'invalid' ? 'bg-slate-100/80 opacity-45' : 'bg-slate-100/80';
+            : dropState === 'invalid' ? 'bg-slate-100/80 opacity-45' : archive ? 'bg-slate-100/50' : 'bg-slate-100/80';
     const dragProps = {
         onDragOver: (event) => { event.preventDefault(); setOver(true); },
         onDragLeave: () => setOver(false),
@@ -215,7 +222,8 @@ const Column = ({
                     className={`flex min-h-[220px] w-11 min-w-[44px] flex-col items-center gap-2 rounded-2xl py-3 transition hover:bg-slate-200/70 ${surface}`}>
                 <ChevronsRight size={14} className="text-slate-400" />
                 <span className={`rounded-full px-1.5 py-0.5 text-[11.5px] font-semibold tabular-nums ring-1 ${periodActive
-                    ? 'bg-blue-50 text-blue-700 ring-blue-200' : 'bg-white text-slate-500 ring-slate-200/70'}`}>{column.total}</span>
+                    ? 'bg-blue-50 text-blue-700 ring-blue-200' : archive ? 'bg-slate-100 text-slate-400 ring-slate-200/60'
+                        : 'bg-white text-slate-500 ring-slate-200/70'}`}>{column.total}</span>
                 <span className={`text-[12.5px] font-semibold [writing-mode:vertical-rl] ${titleClass}`}>{column.label}</span>
             </button>
         );
@@ -237,7 +245,7 @@ const Column = ({
                 </button>
             </header>
             {onPeriod && <ResponsesPeriod period={period} onChange={onPeriod} />}
-            <div className="thin-scroll flex flex-col gap-2 overflow-y-auto px-0.5 pb-1">
+            <div className={`thin-scroll flex flex-col gap-2 overflow-y-auto px-0.5 pb-1 ${archive ? 'opacity-75 transition-opacity hover:opacity-100' : ''}`}>
                 {grouped ? column.groups.map((group) => {
                     const cards = groupCards(group, cardsById);
                     return (
@@ -352,6 +360,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
     const [adding, setAdding] = useState(false);
     const [dragging, setDragging] = useState(null);
     const [collapsed, setCollapsed] = useState(() => readList(COLLAPSED_KEY));
+    const [openedArchive, setOpenedArchive] = useState(() => readList(ARCHIVE_OPEN_KEY));
     // «Отклики»: период (только у них), раскрытые группы источников (по умолчанию свёрнуты все — решение владельца
     // 20.11.2026) и группы, где нажали «Показать ещё».
     const [period, setPeriod] = useState({ from: '', to: '' });
@@ -448,11 +457,21 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
         if (!dragging || dragging.stage === stage) return null;
         return targetsOf(dragging).includes(stage) ? 'valid' : 'invalid';
     };
-    const toggleCollapsed = (stage) => setCollapsed((prev) => {
-        const next = toggleInList(prev, stage);
-        saveList(COLLAPSED_KEY, next);
-        return next;
-    });
+    const toggleCollapsed = (stage) => {
+        if (stage === ARCHIVE_STAGE) {
+            setOpenedArchive((prev) => {
+                const next = toggleInList(prev, stage);
+                saveList(ARCHIVE_OPEN_KEY, next);
+                return next;
+            });
+            return;
+        }
+        setCollapsed((prev) => {
+            const next = toggleInList(prev, stage);
+            saveList(COLLAPSED_KEY, next);
+            return next;
+        });
+    };
     const toggleGroup = (key) => setOpenGroups((prev) => {
         const next = toggleInList(prev, key);
         saveList(OPEN_GROUPS_KEY, next);
@@ -504,7 +523,7 @@ const BoardTab = ({ api, toast, boot, caps, onOpenCard, version, onChanged }) =>
                     <div className="flex items-start gap-3">
                         {columns.map((column) => (
                             <Column key={column.stage} column={column} caps={caps} dropState={dropStateOf(column.stage)}
-                                    collapsed={collapsed.includes(column.stage)} onToggle={() => toggleCollapsed(column.stage)}
+                                    collapsed={columnCollapsed(column.stage, collapsed, openedArchive)} onToggle={() => toggleCollapsed(column.stage)}
                                     onOpen={onOpenCard} onTake={take} onCall={call} canDrag={canDrag} canCall={canCall}
                                     onDragStart={onDragStart} onDragEnd={onDragEnd} onDrop={onDrop}
                                     {...(column.stage === 'responses' ? {

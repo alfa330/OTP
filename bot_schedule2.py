@@ -54143,6 +54143,8 @@ def _hiring_job(name):
             return service.sync_shifts()
         if name == 'wa_watchdog':
             return service.wa_watchdog()
+        if name == 'no_response':
+            return service.archive_silent()
     except Exception:
         logging.exception("Воронка найма: задача %s упала", name)
     return None
@@ -60550,6 +60552,8 @@ if __name__ == '__main__':
         ('shifts_sync', CronTrigger(minute='12,42', timezone=ZoneInfo('Asia/Almaty'))),
         # Номер WhatsApp найма: сервис на шлюзе замолчал или телефон давно не в сети — тревога.
         ('wa_watchdog', CronTrigger(minute='*', timezone=ZoneInfo('Asia/Almaty'))),
+        # «Не отвечает звонок/чат»: 72 часа с первой попытки связаться без ответа — из «В работе» в архив молчащих.
+        ('no_response', CronTrigger(minute='3,13,23,33,43,53', timezone=ZoneInfo('Asia/Almaty'))),
     ):
         scheduler.add_job(
             hiring_job,

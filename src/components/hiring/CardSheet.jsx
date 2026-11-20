@@ -8,7 +8,7 @@ import IosDatePicker from '../ui/DatePicker';
 import IosTimePicker from '../ui/TimePicker';
 import { IosHint, IosMenu, IosModal, IosSegmented, iosBtnPrimary, iosBtnSecondary, iosGroupLabel } from '../ui/ios';
 import {
-    ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES,
+    ARCHIVE_STAGE, ASSIGNMENT_LABELS, CALL_DIRECTION_LABELS, CALL_RESULT_LABELS, CALL_RESULT_TONES, FINAL_STAGES,
     MOTIVATION_LABELS, MOTIVATION_TONES, POOL_STAGES, SOURCE_COLOR_CODES, STAGE_LABELS, STAGE_TONES, SUBSTAGE_LABELS, SUBSTAGE_TONES,
     TOUCH_LABELS, TOUCH_RESULT_LABELS, addDays, codeOf, errorOf, fmtDuration, fullDate, groupSeats, groupWhen, joinDateTime, longTime,
     markGroupFull,
@@ -138,6 +138,8 @@ const GroupPicker = ({ groups, value, onChange }) => {
 const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone }) => {
     const [form, setForm] = useState({});
     const [saving, setSaving] = useState(false);
+    // Из «Не отвечает звонок/чат» — просто снова в работу у того же рекрутера, без повторной активации.
+    const backToWork = target === 'in_work' && card?.stage === ARCHIVE_STAGE;
     // Группы с местами — свежие при каждом открытии: места занимают и другие рекрутеры, а справочник из
     // первого ответа раздела мог устареть. null — ещё грузятся. Не загрузились — показываем справочник из
     // первого ответа с честной пометкой и «Повторить», а не молча старые места.
@@ -192,7 +194,7 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
             payload.comment = form.comment || null;
             if (target === 'dropped') payload.day = form.day ? Number(form.day) : null;
         }
-        if (target === 'in_work') { payload.reactivate = true; payload.recruiter_id = form.recruiter_id ? Number(form.recruiter_id) : null; }
+        if (target === 'in_work' && !backToWork) { payload.reactivate = true; payload.recruiter_id = form.recruiter_id ? Number(form.recruiter_id) : null; }
         setSaving(true);
         try {
             const { data } = await api.post(`/cards/${card.id}/move`, payload);
@@ -219,7 +221,8 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
         refused: 'Сначала инициатор, затем причина из его списка', dropped: 'Инициатор, причина и день отсева',
         on_training: 'Дата первого дня обучения', on_line: 'Дата выхода на линию',
         hired: `Семь отработанных смен подтверждает руководитель отдела — отмечено ${card?.shifts_done || 0} из ${boot.meta.shifts_to_hire}`,
-        in_work: 'Повторная активация: закрепление сохраняется или назначается заново',
+        in_work: backToWork ? 'Снова к закреплённому рекрутеру — 72 часа без ответа считаются заново'
+            : 'Повторная активация: закрепление сохраняется или назначается заново',
     }[target];
     const recruiters = boot.dictionaries?.recruiters || [];
     return (
@@ -294,7 +297,7 @@ const MoveDialog =({ open, onClose, card, target, boot, caps, api, toast, onDone
                         закреплённому рекрутеру{card?.recruiter_name ? ` — ${card.recruiter_name}` : ''}.
                     </div>
                 )}
-                {target === 'in_work' && (
+                {target === 'in_work' && !backToWork && (
                     <div>
                         <Label required>Закрепить за рекрутером</Label>
                         <CustomSelect variant="ios" value={form.recruiter_id} onChange={set('recruiter_id')} placeholder="Выберите рекрутера" searchable
@@ -691,7 +694,12 @@ const CardSheet = ({ api, toast, boot, reloadBoot, caps, cardId, onClose, onChan
         if (!card) return false;
         if (!(card.targets || []).includes(target)) return false;
         if (target === 'hired') return actor.includes('dept_head');
-        if (target === 'in_work') return POOL_STAGES.includes(card.stage) ? caps.take : actor.includes('lead');
+        // Из «Не отвечает звонок/чат» снова в работу — закреплённый рекрутер (владелец 20.11.2026), из «Отказа» и «Отсева» —
+        // повторная активация руководителем.
+        if (target === 'in_work') {
+            if (POOL_STAGES.includes(card.stage)) return caps.take;
+            return card.stage === ARCHIVE_STAGE ? isOwnerOrLead : actor.includes('lead');
+        }
         if (target === 'on_training') return actor.includes('trainer') || isOwnerOrLead;
         if (target === 'on_line' || (target === 'dropped' && card.stage === 'on_training')) return actor.includes('trainer') || isOwnerOrLead;
         if (target === 'dropped' && card.stage === 'on_line') return actor.includes('dept_head') || isOwnerOrLead;

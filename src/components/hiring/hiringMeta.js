@@ -9,7 +9,7 @@
 
 export const STAGES = [
     'contacts', 'responses', 'in_work', 'invited_office', 'invited_training', 'refused', 'on_training',
-    'on_line', 'dropped', 'hired',
+    'on_line', 'dropped', 'hired', 'no_response',
 ];
 export const STAGE_LABELS = {
     contacts: 'Контакты',
@@ -22,7 +22,11 @@ export const STAGE_LABELS = {
     on_line: 'Вышел на линию',
     dropped: 'Отсев',
     hired: 'Отработал 7 дней',
+    no_response: 'Не отвечает звонок/чат',
 };
+/* «Не отвечает звонок/чат» — архив молчащих (владелец 20.11.2026: «отдельный список как архив», «по умолчанию
+   завёрнутый и серый»): последняя колонка доски свёрнута, пока её не раскрыли (BoardTab, ARCHIVE_OPEN_KEY). */
+export const ARCHIVE_STAGE = 'no_response';
 export const POOL_STAGES = ['contacts', 'responses'];
 export const FINAL_STAGES = ['refused', 'dropped', 'hired'];
 export const FUNNEL_STAGES = ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired'];
@@ -68,6 +72,12 @@ export const toggleInList = (list, value) => {
     const items = Array.isArray(list) ? list : [];
     return items.includes(value) ? items.filter((item) => item !== value) : [...items, value];
 };
+
+/** Свёрнута ли колонка доски: обычная — если её свернули (collapsed), архив «Не отвечает звонок/чат» — пока его не
+ *  раскрыли (opened; владелец 20.11.2026: «по умолчанию завёрнутый и серый»). */
+export const columnCollapsed = (stage, collapsed, opened) => (stage === ARCHIVE_STAGE
+    ? !(Array.isArray(opened) && opened.includes(stage))
+    : Array.isArray(collapsed) && collapsed.includes(stage));
 
 /** Ключ группы «Откликов» в списке раскрытых: id источника, у карточек без источника — 'none'. */
 export const groupKey = (group) => (group?.source_id === null || group?.source_id === undefined ? 'none' : String(group.source_id));
@@ -117,7 +127,7 @@ export const sourceRequestBody = (form, existing = null) => {
 
 /* Цвет только со смыслом: завершения (отказ, отсев — красный; найм закрыт — зелёный),
    просрочка — янтарный. Рабочие этапы не красятся. */
-export const STAGE_TONES = { refused: 'red', dropped: 'red', hired: 'green' };
+export const STAGE_TONES = { refused: 'red', dropped: 'red', hired: 'green', no_response: 'gray' };
 export const SUBSTAGE_TONES = { no_answer: 'amber', no_show: 'red', came: 'green', dial: 'green' };
 
 export const TOUCH_LABELS = {

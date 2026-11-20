@@ -1221,6 +1221,41 @@ def idle_cards(cursor, deadline):
     return _all(cursor)
 
 
+def silent_cards(cursor, deadline, card_id=None):
+    """«В работе», а кандидат молчит (владелец 20.11.2026: «не отвечает ни на звонок, ни на ватсап в течение 72 часов»):
+    первая попытка связаться — звонок без ответа или наше сообщение в WhatsApp (касание) — после последнего ответа
+    кандидата была не позже deadline. Ответ — дозвон, его сообщение в WhatsApp, повторный отклик. Всё считается в
+    нынешнем круге работы: с последнего входа в «В работе» (взятие, возврат из «Не отвечает»). С кандидатом не
+    связывались — он не «молчит», карточка остаётся (решение владельца «с первой попытки»). Отдаёт id карточек."""
+    cursor.execute("""
+        WITH work AS (
+            SELECT c.id, c.phone, c.whatsapp,
+                   GREATEST(c.taken_at, (SELECT MAX(s.entered_at) FROM hiring_card_stages s
+                                          WHERE s.card_id = c.id AND s.stage = 'in_work')) AS round_at
+              FROM hiring_cards c
+             WHERE c.stage = 'in_work' AND NOT c.is_closed AND c.taken_at IS NOT NULL
+               AND (%(card)s::int IS NULL OR c.id = %(card)s::int)
+        ),
+        answered AS (
+            SELECT w.id, w.round_at, GREATEST(
+                (SELECT MAX(t.at) FROM hiring_touches t
+                  WHERE t.card_id = w.id AND t.at >= w.round_at
+                    AND ((t.kind = 'call' AND t.result = 'dial') OR t.kind = 'repeat_response')),
+                (SELECT MAX(m.sent_at) FROM hiring_wa_messages m JOIN hiring_wa_chats ch ON ch.key = m.chat_key
+                  WHERE (ch.card_id = w.id OR ch.key = w.phone OR ch.key = w.whatsapp)
+                    AND NOT m.from_me AND m.sent_at >= w.round_at)) AS last_answer
+              FROM work w
+        )
+        SELECT a.id FROM answered a
+         WHERE (SELECT MIN(t.at) FROM hiring_touches t
+                 WHERE t.card_id = a.id AND t.at >= a.round_at
+                   AND (a.last_answer IS NULL OR t.at > a.last_answer)
+                   AND ((t.kind = 'call' AND t.result = 'no_answer') OR t.kind = 'whatsapp')) <= %(deadline)s
+         ORDER BY a.id
+    """, {'card': int(card_id) if card_id else None, 'deadline': deadline})
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
 def due_next_contacts(cursor, now):
     """Наступила дата следующего контакта, рекрутер ещё не предупреждён (ТЗ 8.3)."""
     cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + """
@@ -1245,8 +1280,11 @@ def overdue_cards_by_recruiter(cursor, today_start):
 
 
 def cards_of_recruiter_open(cursor, recruiter_id):
+    """Карточки рекрутера до обучения — с ними он уходит, они — в пул; «Не отвечает звонок/чат» тоже: иначе ответ
+    кандидата вернул бы её «В работу» человеку без выдачи."""
     cursor.execute("SELECT " + _CARD_COLUMNS + _CARD_FROM + """
-         WHERE c.recruiter_id = %s AND NOT c.is_closed AND c.stage IN ('in_work', 'invited_office', 'invited_training')
+         WHERE c.recruiter_id = %s AND NOT c.is_closed
+           AND c.stage IN ('in_work', 'invited_office', 'invited_training', 'no_response')
          ORDER BY c.id
     """, (int(recruiter_id),))
     return _all(cursor)

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from hiring import notices, queries, reports, rules, schema, wa_live, wa_media
+from hiring import access, notices, queries, reports, rules, schema, wa_live, wa_media
 from hiring.service import HiringError, HiringService
 
 PORT = os.environ.get('HIRING_TEST_PORT')
@@ -883,6 +883,166 @@ def test_auto_return_and_next_contact_notifications(world):
     clock.now = NOW + timedelta(days=40)
     assert service.overdue_digest() == 1
     assert 'просроченные задачи' in sent[-1][1]
+
+
+# ─── «Не отвечает звонок/чат» (владелец 20.11.2026) ──────────────────────────────
+
+def _taken(world, user_id, phone):
+    outcome, card = add_response(world, user_id, phone)
+    assert outcome == 'created'
+    return world['service'].take(ctx_of(world, user_id), card['id'])
+
+
+def _stage(world, card_id):
+    with world['db']._get_cursor() as cur:
+        card = queries.get_card(cur, card_id)
+    return card['stage'], card['substage'], card['recruiter_id']
+
+
+def test_silent_candidates_go_to_no_response_after_72_hours(world):
+    """«Те, кто в работе, не отвечают ни на звонок, ни на ватсап в течение 72 часов, уходят в «Не отвечает звонок/чат»»:
+    72 часа с первой попытки связаться (решение владельца «с первой попытки»). Не связывались, дозвонились, кандидат
+    ответил после попытки — карточка остаётся «В работе»; ответ после новой попытки снова запускает 72 часа."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    called = _taken(world, REC1, '+77055558901')            # звонок без ответа
+    written = _taken(world, REC1, '+77055558902')           # наше сообщение в WhatsApp без ответа
+    untouched = _taken(world, REC1, '+77055558903')         # с ним не связывались
+    reached = _taken(world, REC1, '+77055558904')           # дозвонились
+    answered = _taken(world, REC1, '+77055558905')          # не дозвонились, но он написал в WhatsApp
+    invited = take_and_touch(world, REC1, '+77055558906')   # дальше «В работе» — не трогаем
+    reapplied = _taken(world, REC1, '+77055558907')         # не дозвонились, но он откликнулся снова
+    service.touch(me, called['id'], {'kind': 'call', 'result': 'no_answer'})
+    service.touch(me, written['id'], {'kind': 'whatsapp'})
+    service.touch(me, reached['id'], {'kind': 'call', 'result': 'dial'})
+    service.touch(me, answered['id'], {'kind': 'call', 'result': 'no_answer'})
+    service.touch(me, reapplied['id'], {'kind': 'call', 'result': 'no_answer'})
+    # Чат «ответившего» открыт из карточки — его ответ виден только перепиской, без касания «повторный отклик».
+    _chat_poll(service)
+    assert service.wa_open_card_chat(me, answered['id'])['key'] == '+77055558905'
+    service.move(me, invited['id'], 'invited_office', {'office_visit_at': (NOW + timedelta(days=1)).isoformat()})
+    clock.now = NOW + timedelta(hours=10)
+    service.wa_events({'events': [wa_event('nr1', phone='77055558905', ts=WA_TS + 10 * 3600, text='Перезвоните вечером')]})
+    with world['db']._get_cursor() as cur:
+        assert not [t for t in queries.card_touches(cur, answered['id']) if t['kind'] == 'repeat_response']
+    assert add_response(world, REC2, '+77055558907')[0] == 'repeat'
+    clock.now = NOW + timedelta(hours=71, minutes=59)
+    assert service.archive_silent() == 0
+    clock.now = NOW + timedelta(hours=72)
+    assert service.archive_silent() == 2
+    assert _stage(world, called['id']) == ('no_response', None, REC1)
+    assert _stage(world, written['id']) == ('no_response', None, REC1)
+    for card in (untouched, reached, answered, reapplied):
+        assert _stage(world, card['id'])[0] == 'in_work'
+    assert _stage(world, invited['id'])[0] == 'invited_office'
+    assert service.archive_silent() == 0                     # повторный прогон ничего не трогает
+    with world['db']._get_cursor() as cur:
+        stages = queries.card_stages(cur, called['id'])
+        touches = queries.card_touches(cur, called['id'])
+        desk = [card['id'] for card in queries.cards_of_recruiter_open(cur, REC1)]
+    assert (stages[-1]['stage'], stages[-1]['by_user_name']) == ('no_response', 'Система')
+    assert touches[-1]['kind'] == 'system' and touches[-1]['result'] == 'no_response'
+    assert 'Не отвечает звонок/чат' in touches[-1]['body']
+    assert called['id'] in desk                              # за рекрутером, хоть и в архиве
+    # Тот, кто ответил, молчит после нашей новой попытки — 72 часа от неё.
+    clock.now = NOW + timedelta(hours=80)
+    service.touch(me, answered['id'], {'kind': 'whatsapp'})
+    clock.now = NOW + timedelta(hours=151, minutes=59)
+    assert service.archive_silent() == 0
+    clock.now = NOW + timedelta(hours=152)
+    assert service.archive_silent() == 1 and _stage(world, answered['id'])[0] == 'no_response'
+    # Архив — не «В работе»: ни задач на сегодня, ни возврата в пул через месяц без касаний.
+    clock.now = NOW + timedelta(days=40)
+    # Без касаний месяц в пул уходят «не связывались», «дозвонились», «откликнулся снова» и «приглашён в офис» —
+    # архив остаётся.
+    assert service.auto_return() == 4
+    assert _stage(world, called['id'])[0] == 'no_response'
+
+
+def test_no_response_card_comes_back_when_candidate_answers(world):
+    """Из «Не отвечает звонок/чат» карточка возвращается «В работу» к тому же рекрутеру сама — кандидат написал в
+    WhatsApp, дозвонились, повторный отклик — или руками закреплённого рекрутера; тогда 72 часа считаются заново.
+    Отказ — руками, с причиной. Руководитель может вернуть её в пул; рекрутер уходит — его архив уходит в пул."""
+    service, clock = world['service'], world['clock']
+    me, lead, other = ctx_of(world, REC1), ctx_of(world, LEAD_GRANT), ctx_of(world, REC2)
+    cards = [_taken(world, REC1, '+7705555891%d' % index) for index in range(7)]
+    for card in cards:
+        service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
+    _chat_poll(service)
+    service.wa_open_card_chat(me, cards[0]['id'])           # чат открыт из карточки — привязан к ней
+    clock.now = NOW + timedelta(hours=73)
+    assert service.archive_silent() == 7
+    by_whatsapp, by_call, by_repeat, by_hand, refused, released, by_first_message = cards
+    # Написал в WhatsApp: в привязанный чат и первым сообщением на номер найма.
+    service.wa_events({'events': [wa_event('back1', phone='77055558910', ts=WA_TS + 74 * 3600, text='Извините, был занят'),
+                                  wa_event('back2', phone='77055558916', ts=WA_TS + 74 * 3600, text='Здравствуйте')]})
+    assert _stage(world, by_whatsapp['id']) == ('in_work', 'whatsapp', REC1)
+    assert _stage(world, by_first_message['id']) == ('in_work', 'whatsapp', REC1)
+    with world['db']._get_cursor() as cur:
+        touches = queries.card_touches(cur, by_whatsapp['id'])
+        assert touches[-1]['result'] == 'back_to_work' and 'WhatsApp' in touches[-1]['body']
+        assert not [t for t in touches if t['kind'] == 'repeat_response']
+        assert 'WhatsApp' in queries.card_touches(cur, by_first_message['id'])[-1]['body']
+    # Дозвонились из архива; недозвон — остаётся там.
+    service.touch(me, by_call['id'], {'kind': 'call', 'result': 'no_answer'})
+    assert _stage(world, by_call['id'])[0] == 'no_response'
+    service.touch(me, by_call['id'], {'kind': 'call', 'result': 'dial'})
+    assert _stage(world, by_call['id']) == ('in_work', 'dial', REC1)
+    # Откликнулся снова.
+    assert add_response(world, REC2, '+77055558912')[0] == 'repeat'
+    assert _stage(world, by_repeat['id']) == ('in_work', None, REC1)
+    # Вернуть руками может только закреплённый рекрутер или руководитель; 72 часа — заново, с возврата.
+    with pytest.raises(HiringError):
+        service.move(other, by_hand['id'], 'in_work', {})
+    assert service.move(me, by_hand['id'], 'in_work', {})['stage'] == 'in_work'
+    assert service.archive_silent() == 0
+    service.touch(me, by_hand['id'], {'kind': 'call', 'result': 'no_answer'})
+    clock.now = NOW + timedelta(hours=73 + 72)
+    assert service.archive_silent() == 1 and _stage(world, by_hand['id'])[0] == 'no_response'
+    # Отказ из архива — с причиной.
+    with world['db']._get_cursor() as cur:
+        no_contact = queries.reason_by_name(cur, 'refusal_candidate', rules.REASON_NO_CONTACT)
+    closed = service.move(me, refused['id'], 'refused', {'initiator': 'candidate', 'reason_id': no_contact['id']})
+    assert closed['stage'] == 'refused' and closed['is_closed']
+    # Руководитель возвращает в пул; уходящий рекрутер отдаёт пулу и архив.
+    assert service.reassign(lead, released['id'], None, 'другому рекрутеру')['stage'] == 'responses'
+    assert service.deactivate_person(lead, REC1) >= 1
+    assert _stage(world, by_hand['id']) == ('responses', None, None)
+
+
+def test_no_response_rechecks_rule_under_card_lock(world, monkeypatch):
+    """Ответ кандидата, пришедший между выборкой молчащих и блокировкой карточки, её оставляет «В работе»: правило
+    перепроверяется под блокировкой."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    card = _taken(world, REC1, '+77055558930')
+    service.touch(me, card['id'], {'kind': 'call', 'result': 'no_answer'})
+    clock.now = NOW + timedelta(hours=73)
+    real = queries.silent_cards
+
+    def answered_meanwhile(cursor, deadline, card_id=None):
+        return [] if card_id else real(cursor, deadline)
+
+    monkeypatch.setattr(queries, 'silent_cards', answered_meanwhile)
+    assert service.archive_silent() == 0 and _stage(world, card['id'])[0] == 'in_work'
+
+
+def test_board_and_report_show_no_response(world):
+    """Архив — последняя колонка доски; в «Отчётах» — плитка «Не отвечает звонок/чат» по когорте."""
+    service, clock = world['service'], world['clock']
+    me = ctx_of(world, REC1)
+    card = _taken(world, REC1, '+77055558920')
+    service.touch(me, card['id'], {'kind': 'whatsapp'})
+    clock.now = NOW + timedelta(hours=72)
+    assert service.archive_silent() == 1
+    caps = access.capabilities(ctx_of(world, LEAD_GRANT))
+    with world['db']._get_cursor() as cur:
+        columns, counts, _by_source = queries.board(cur, caps, LEAD_GRANT, {})
+        data = reports.dashboard(cur, reports.parse_filters({'month': NOW.strftime('%Y-%m')}), with_ids=True)
+    assert counts.get('no_response') == 1 and [c['id'] for c in columns['no_response']] == [card['id']]
+    assert rules.STAGE_CODES[-1] == 'no_response'
+    tiles = [tile for tile in data['totals'] if tile['key'] == 'total:no_response']
+    assert [(tile['label'], tile['value']) for tile in tiles] == [('Не отвечает звонок/чат', 1)]
 
 
 # ─── Источники: файл, вебхук, OLX (ТЗ 5) ──────────────────────────────────────

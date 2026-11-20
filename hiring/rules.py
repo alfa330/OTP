@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """Правила воронки найма (ТЗ #404, разделы 4–7). Чистая логика: ни базы, ни Flask.
 
-Колонки доски — ровно десять из ТЗ 4.1 и в его порядке; «Отказ» и «Отсев» — завершающие,
+Колонки доски — десять из ТЗ 4.1 и в его порядке, одиннадцатая — «Не отвечает звонок/чат» (архив молчащих,
+владелец 20.11.2026); «Отказ» и «Отсев» — завершающие,
 из них карточку возвращает только руководитель рекрутинга. Переходы — таблица ТЗ 4.2:
 кто и при каком условии. Справочники причин (6.2, 6.3) и источников (5.1, 5.2) — отсюда
 же, одним списком с кодами; в базе они живут строками и правятся руководителем, а здесь —
@@ -19,6 +20,10 @@ ALMATY = ZoneInfo('Asia/Almaty')
 CONTACTS, RESPONSES, IN_WORK, INVITED_OFFICE, INVITED_TRAINING = (
     'contacts', 'responses', 'in_work', 'invited_office', 'invited_training')
 REFUSED, ON_TRAINING, ON_LINE, DROPPED, HIRED = 'refused', 'on_training', 'on_line', 'dropped', 'hired'
+# «Не отвечает звонок/чат» (владелец 20.11.2026: «те, кто в работе, не отвечают ни на звонок, ни на ватсап в течение
+# 72 часов, уходили в «Не отвечает звонок/чат». Это отдельный список, как архив»): последняя колонка доски, свёрнута
+# и серая, пока её не раскрыли. Карточка остаётся за рекрутером и открытой; ответ кандидата возвращает её «В работу».
+NO_RESPONSE = 'no_response'
 
 STAGES = (
     (CONTACTS, 'Контакты'),
@@ -31,6 +36,7 @@ STAGES = (
     (ON_LINE, 'Вышел на линию'),
     (DROPPED, 'Отсев'),
     (HIRED, 'Отработал 7 дней'),
+    (NO_RESPONSE, 'Не отвечает звонок/чат'),
 )
 STAGE_CODES = tuple(code for code, _ in STAGES)
 STAGE_LABELS = dict(STAGES)
@@ -41,6 +47,11 @@ FINAL_STAGES = (REFUSED, DROPPED, HIRED)
 # Карточка «в работе» у рекрутера — закреплена и ещё не на обучении: по этим этапам
 # считается срок без касаний (ТЗ 7.1) и задачи на сегодня.
 ASSIGNED_STAGES = (IN_WORK, INVITED_OFFICE, INVITED_TRAINING)
+# Сколько кандидат может молчать с первой попытки связаться (звонок без ответа или наше сообщение в WhatsApp),
+# прежде чем карточка уйдёт из «В работе» в «Не отвечает звонок/чат» (решение владельца 20.11.2026: «с первой попытки»).
+NO_RESPONSE_HOURS = 72
+# В пул руководитель возвращает и карточку из «Не отвечает»: её закрепление то же, что «В работе».
+RELEASABLE_STAGES = ASSIGNED_STAGES + (NO_RESPONSE,)
 # Этапы, по которым строится воронка дашборда (ТЗ 8.1, блок 2), в порядке ТЗ.
 FUNNEL_STAGES = (IN_WORK, 'dialed', INVITED_OFFICE, INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED)
 FUNNEL_LABELS = dict(STAGES, dialed='Дозвон (хотя бы один успешный)')
@@ -92,7 +103,7 @@ SEAT_STAGES = (INVITED_TRAINING, ON_TRAINING, ON_LINE, HIRED)
 GROUP_CAPACITY_MAX = 500
 # Этапы, на которых тренер карточку своей группы не видит: до приглашения на обучение она — работа рекрутера.
 # Повторная активация и возврат в пул оставляют у карточки старую группу, а в пуле — телефон (разбор 18.11.2026).
-TRAINER_HIDDEN_STAGES = POOL_STAGES + (IN_WORK, INVITED_OFFICE)
+TRAINER_HIDDEN_STAGES = POOL_STAGES + (IN_WORK, INVITED_OFFICE, NO_RESPONSE)
 
 
 def parse_capacity(value):
@@ -156,6 +167,10 @@ TRANSITIONS = {
     (ON_LINE, DROPPED): {'who': ('dept_head', 'owner', 'lead'), 'needs': ('drop',)},
     (REFUSED, IN_WORK): {'who': ('lead',), 'reactivate': True},
     (DROPPED, IN_WORK): {'who': ('lead',), 'reactivate': True},
+    # Из «Не отвечает звонок/чат» уходят сами (ответ кандидата) или руками закреплённого рекрутера: снова в работу —
+    # 72 часа считаются заново, — или в «Отказ». Туда карточку переводит только сторож (HiringService.archive_silent).
+    (NO_RESPONSE, IN_WORK): {'who': ('owner', 'lead')},
+    (NO_RESPONSE, REFUSED): {'who': ('owner', 'lead'), 'needs': ('refusal',)},
 }
 
 # Подсказки интерфейсу: какие переходы вообще есть из этапа (в порядке колонок).

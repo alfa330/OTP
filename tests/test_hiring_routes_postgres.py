@@ -227,7 +227,9 @@ def test_boot_rights_and_dictionaries(client):
     lead = client.get('/api/hiring', headers=as_user(HR_HEAD)).get_json()
     assert lead['capabilities']['lead'] and lead['capabilities']['manage']
     assert lead['me']['scope_label'] == 'Руководитель рекрутинга'
-    assert len(lead['meta']['stages']) == 10 and lead['meta']['shifts_to_hire'] == 7
+    # Десять этапов ТЗ и архив «Не отвечает звонок/чат» последним (владелец 20.11.2026).
+    assert len(lead['meta']['stages']) == 11 and lead['meta']['shifts_to_hire'] == 7
+    assert lead['meta']['stages'][-1] == {'code': 'no_response', 'label': 'Не отвечает звонок/чат'}
     assert {row['code'] for row in lead['integrations']} == {'hh', 'olx', 'webhook', 'whatsapp'}
     assert lead['dictionaries']['departments']
     recruiter = client.get('/api/hiring', headers=as_user(REC1)).get_json()

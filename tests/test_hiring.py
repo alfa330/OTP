@@ -49,8 +49,14 @@ class PhoneTests(unittest.TestCase):
 
 class StageTests(unittest.TestCase):
     def test_ten_columns_in_tz_order(self):
+        # Десять колонок ТЗ 4.1 и одиннадцатая — архив «Не отвечает звонок/чат» (владелец 20.11.2026).
         self.assertEqual(rules.STAGE_CODES, ('contacts', 'responses', 'in_work', 'invited_office', 'invited_training',
-                                             'refused', 'on_training', 'on_line', 'dropped', 'hired'))
+                                             'refused', 'on_training', 'on_line', 'dropped', 'hired', 'no_response'))
+        self.assertEqual(rules.STAGE_LABELS['no_response'], 'Не отвечает звонок/чат')
+        self.assertEqual(rules.TARGETS_FROM['no_response'], ['in_work', 'refused'])
+        self.assertNotIn('no_response', rules.ASSIGNED_STAGES)          # без задач и без возврата в пул через месяц
+        self.assertIn('no_response', rules.RELEASABLE_STAGES)
+        self.assertNotIn('no_response', [dst for (_src, dst) in rules.TRANSITIONS])   # туда — только сторож
 
     def test_substages_of_tz_4_1(self):
         self.assertEqual([c for c, _ in rules.SUBSTAGES['in_work']], ['dial', 'no_answer', 'whatsapp'])
@@ -211,6 +217,18 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         header = chats[chats.index('<div className="flex flex-wrap items-center gap-2">'):chats.index('<div className="relative min-h-0 flex-1">')]
         self.assertNotIn('handled', header)
 
+    def test_no_response_archive_column_and_back_to_work(self):
+        """Владелец 20.11.2026: «Не отвечает звонок/чат» — последняя колонка, «по умолчанию завёрнутый и серый»; из карточки —
+        снова в работу закреплённым рекрутером, без повторной активации."""
+        self.assertIn("const ARCHIVE_OPEN_KEY = 'hiring.board.openArchive';", self.board)
+        self.assertIn('collapsed={columnCollapsed(column.stage, collapsed, openedArchive)}', self.board)
+        self.assertIn("archive ? 'bg-slate-100/50' : 'bg-slate-100/80'", self.board)
+        self.assertIn("archive ? 'opacity-75 transition-opacity hover:opacity-100' : ''", self.board)
+        self.assertIn("const backToWork = target === 'in_work' && card?.stage === ARCHIVE_STAGE;", self.sheet)
+        self.assertIn("if (target === 'in_work' && !backToWork) { payload.reactivate = true;", self.sheet)
+        self.assertIn("{target === 'in_work' && !backToWork && (", self.sheet)
+        self.assertIn("return card.stage === ARCHIVE_STAGE ? isOwnerOrLead : actor.includes('lead');", self.sheet)
+
     def test_card_whatsapp_opens_portal_chat(self):
         """Владелец 20.11.2026: «при нажатии на ватсап … полноценный чат, мб просто переход на чаты» — кнопка карточки и
         значок рабочего стола открывают окно «Чаты» с чатом карточки, а не WhatsApp Web; касание пишет отправка."""
@@ -340,7 +358,7 @@ class TransitionTests(unittest.TestCase):
         self.assertEqual(rules.seats_free(10, None), 10)
         self.assertIsNone(rules.seats_free(None, 4))    # группа до 18.11.2026: вместимость не задана
         # До приглашения на обучение карточка — работа рекрутера: тренер её не видит, даже если она помнит группу.
-        self.assertEqual(rules.TRAINER_HIDDEN_STAGES, ('contacts', 'responses', 'in_work', 'invited_office'))
+        self.assertEqual(rules.TRAINER_HIDDEN_STAGES, ('contacts', 'responses', 'in_work', 'invited_office', 'no_response'))
         self.assertFalse(set(rules.TRAINER_HIDDEN_STAGES) & set(rules.SEAT_STAGES))
 
     def test_parse_capacity(self):
@@ -642,6 +660,9 @@ class WiringTests(unittest.TestCase):
         self.assertIn("if name == 'calls_sync':", self.bot)
         self.assertIn("('shifts_sync', CronTrigger(", self.bot)
         self.assertIn("if name == 'shifts_sync':", self.bot)
+        # «Не отвечает звонок/чат» (владелец 20.11.2026): сторож раз в 10 минут.
+        self.assertIn("('no_response', CronTrigger(minute='3,13,23,33,43,53'", self.bot)
+        self.assertIn("if name == 'no_response':\n            return service.archive_silent()", self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
         self.assertIn("id='hiring_%s' % _hiring_name", self.bot)

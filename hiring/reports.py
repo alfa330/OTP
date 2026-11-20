@@ -318,6 +318,9 @@ def dashboard(cursor, filters, *, with_ids=False):
     # в этом статусе (дозвонились, пригласили или закрыли карточку — уже не здесь).
     no_answer_ids = [card['id'] for card in cards if card['stage'] == rules.IN_WORK and card.get('substage') == 'no_answer']
     agg._remember('total:no_answer', no_answer_ids)
+    # «Не отвечает звонок/чат» (владелец 20.11.2026): кто из когорты сейчас в архиве молчащих — 72 часа без ответа.
+    no_response_ids = [card['id'] for card in cards if card['stage'] == rules.NO_RESPONSE]
+    agg._remember('total:no_response', no_response_ids)
 
     plan_fte = 0.0
     if filters.get('month'):
@@ -342,6 +345,9 @@ def dashboard(cursor, filters, *, with_ids=False):
         {'key': 'total:in_work', 'label': 'Взято в работу', 'value': counts[rules.IN_WORK]},
         {'key': 'total:no_answer', 'label': rules.SUBSTAGE_LABELS[rules.IN_WORK]['no_answer'], 'value': len(no_answer_ids),
          'hint': 'из взятых в работу — кто сейчас в этом статусе: не ответил ни на звонок, ни на сообщение в WhatsApp'},
+        {'key': 'total:no_response', 'label': rules.STAGE_LABELS[rules.NO_RESPONSE], 'value': len(no_response_ids),
+         'hint': 'из взятых в работу — кто сейчас в этом списке: %d часа без ответа с первой попытки связаться'
+                 % rules.NO_RESPONSE_HOURS},
         {'key': 'total:on_training', 'label': 'Вышли на обучение', 'value': counts[rules.ON_TRAINING]},
         {'key': 'total:on_line', 'label': 'Вышли на линию', 'value': counts[rules.ON_LINE]},
         {'key': 'total:hired', 'label': 'Отработали 7 дней', 'value': counts[rules.HIRED]},

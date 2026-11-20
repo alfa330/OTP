@@ -8,7 +8,7 @@ import {
     SUBSTAGE_LABELS, TOUCH_RESULT_LABELS, addDays, boardQuery, buildICorePhoneUrl, daysSince, groupCards, groupKey,
     groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull,
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
-    sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded,
+    sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -33,10 +33,12 @@ test('call goes to iCore Phone through a hidden frame, number as digits only', (
     assert.throws(() => openICorePhoneCall('нет номера', doc), /не разобран/);
 });
 
-test('ten stages in the order of the spec', () => {
-    assert.equal(STAGES.length, 10);
+test('ten stages in the order of the spec and the «no response» archive last', () => {
+    assert.equal(STAGES.length, 11);
     assert.deepEqual(STAGES.slice(0, 3), ['contacts', 'responses', 'in_work']);
     assert.equal(STAGE_LABELS.hired, 'Отработал 7 дней');
+    assert.equal(STAGES[10], 'no_response');
+    assert.equal(STAGE_LABELS.no_response, 'Не отвечает звонок/чат');
     assert.deepEqual(FUNNEL_STAGES, ['in_work', 'dialed', 'invited_office', 'invited_training', 'on_training', 'on_line', 'hired']);
 });
 
@@ -248,4 +250,15 @@ test('status «Недозвон / не ответил» covers WhatsApp, the cal
     assert.equal(SUBSTAGE_LABELS.no_answer, 'Недозвон / не ответил');
     assert.equal(TOUCH_RESULT_LABELS.no_answer, 'Недозвон');
     assert.equal(TOUCH_RESULT_LABELS.dial, 'Дозвон');
+});
+
+test('«no response» archive column is collapsed until opened, other columns until collapsed', () => {
+    assert.equal(ARCHIVE_STAGE, 'no_response');
+    assert.equal(columnCollapsed('no_response', [], []), true);           // по умолчанию свёрнут
+    assert.equal(columnCollapsed('no_response', null, undefined), true);
+    assert.equal(columnCollapsed('no_response', ['no_response'], []), true);   // старый список свёрнутых его не раскрывает
+    assert.equal(columnCollapsed('no_response', [], ['no_response']), false);
+    assert.equal(columnCollapsed('refused', ['refused'], []), true);
+    assert.equal(columnCollapsed('refused', [], ['refused']), false);
+    assert.equal(columnCollapsed('in_work', null, null), false);
 });

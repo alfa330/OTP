@@ -238,7 +238,48 @@ class HiringService:
                           meta={'source_id': source['id'], 'received_at': received_at.isoformat(timespec='minutes'),
                                 'platform_ref': platform_ref})
         queries.update_card(cursor, card['id'], updated_at=now)
+        if card.get('stage') == rules.NO_RESPONSE:
+            # Молчавший кандидат откликнулся снова — он на связи: снова «В работе» (владелец 20.11.2026). Отклик пришёл
+            # сообщением на номер найма (wa:…) — значит, переписка.
+            by_whatsapp = str(platform_ref or '').startswith('wa:')
+            self._back_to_work(cursor, card, 'whatsapp' if by_whatsapp else None,
+                               'Кандидат написал в WhatsApp' if by_whatsapp else 'Повторный отклик', now)
         notices.repeat_response(cursor, card, source.get('name'), now)
+
+    @staticmethod
+    def _back_to_work(cursor, card, substage, reason, now):
+        """Из «Не отвечает звонок/чат» — снова «В работе» у того же рекрутера: кандидат ответил (дозвон, сообщение в
+        WhatsApp, повторный отклик). Вход в «В работе» начинает круг заново: 72 часа молчания считаются с него."""
+        queries.update_card(cursor, card['id'], stage=rules.IN_WORK, substage=substage, no_answer_streak=0, updated_at=now)
+        queries.add_stage(cursor, card['id'], rules.IN_WORK, substage, None, 'Система', now)
+        queries.add_touch(cursor, card['id'], rules.TOUCH_SYSTEM, 'back_to_work', '%s — снова «В работе»' % reason,
+                          None, 'Система', now)
+
+    def archive_silent(self, now=None):
+        """Сторож «Не отвечает звонок/чат» (владелец 20.11.2026: «те, кто в работе, не отвечают ни на звонок, ни на
+        ватсап в течение 72 часов, уходили в «Не отвечает звонок/чат». Это отдельный список, как архив. И сразу тех,
+        кто подходит, отправить туда»): 72 часа с первой попытки связаться без единого ответа — карточка уходит из
+        «В работе» и остаётся за рекрутером. Правило перепроверяется под блокировкой карточки: ответ, пришедший во время
+        прогона, её оставляет. Возвращает, сколько карточек ушло."""
+        now = now or self._now()
+        deadline = now - timedelta(hours=rules.NO_RESPONSE_HOURS)
+        moved = 0
+        with self._cursor() as cursor:
+            for card_id in queries.silent_cards(cursor, deadline):
+                card = queries.get_card(cursor, card_id, lock=True)
+                if not card or card['is_closed'] or card['stage'] != rules.IN_WORK:
+                    continue
+                if not queries.silent_cards(cursor, deadline, card_id=card_id):
+                    continue
+                queries.update_card(cursor, card_id, stage=rules.NO_RESPONSE, substage=None, updated_at=now)
+                queries.add_stage(cursor, card_id, rules.NO_RESPONSE, None, None, 'Система', now)
+                queries.add_touch(cursor, card_id, rules.TOUCH_SYSTEM, 'no_response',
+                                  'Не отвечает на звонки и WhatsApp %d часа — в «%s»'
+                                  % (rules.NO_RESPONSE_HOURS, rules.STAGE_LABELS[rules.NO_RESPONSE]), None, 'Система', now)
+                moved += 1
+        if moved:
+            log.info('Воронка найма: в «%s» ушло карточек: %d', rules.STAGE_LABELS[rules.NO_RESPONSE], moved)
+        return moved
 
     def upload_contacts(self, ctx, raw, file_name, source_id):
         """Загрузка базы (ТЗ 5.1): файл → партия → карточки в «Контакты». Итог: загружено, дублей, ошибок."""
@@ -507,6 +548,8 @@ class HiringService:
                     # на звонок, ни на WhatsApp): статус снимает ответ кандидата (_wa_candidate_answered).
                     fields['substage'] = 'whatsapp'
             queries.update_card(cursor, card_id, **fields)
+            if card['stage'] == rules.NO_RESPONSE and kind == rules.TOUCH_CALL and result == 'dial':
+                self._back_to_work(cursor, card, 'dial', 'Дозвонились', now)
             return queries.get_card(cursor, card_id)
 
     def edit_touch(self, ctx, card_id, touch_id, payload):
@@ -544,6 +587,8 @@ class HiringService:
             if fields:
                 queries.update_touch(cursor, touch_id, **fields)
             queries.update_card(cursor, card_id, **card_fields)
+            if card['stage'] == rules.NO_RESPONSE and not card['is_closed'] and result == 'dial':
+                self._back_to_work(cursor, card, 'dial', 'Дозвонились', now)
             return queries.get_card(cursor, card_id)
 
     def set_substage(self, ctx, card_id, substage):
@@ -954,7 +999,7 @@ class HiringService:
                 if motivation and motivation['status'] == rules.MOTIVATION_PENDING:
                     queries.set_motivation(cursor, card_id, now, recruiter_id=new)
             else:
-                if card['stage'] not in rules.ASSIGNED_STAGES:
+                if card['stage'] not in rules.RELEASABLE_STAGES:
                     raise HiringError('HIRING_NOT_RETURNABLE', 'В пул возвращаются карточки до выхода на обучение', 409)
                 pool = rules.pool_stage_for(card['kind'])
                 queries.update_card(cursor, card_id, stage=pool, substage=None, recruiter_id=None, next_contact_at=None,
@@ -1094,6 +1139,8 @@ class HiringService:
                 fields['substage'] = 'dial' if talked else 'no_answer'
                 fields['no_answer_streak'] = 0 if talked else int(card['no_answer_streak'] or 0) + 1
         queries.update_card(cursor, card['id'], **fields)
+        if card['stage'] == rules.NO_RESPONSE and not card['is_closed'] and calls.talked(call):
+            self._back_to_work(cursor, card, 'dial', 'Дозвонились', now)
         return call_id, True
 
     @staticmethod
@@ -1468,6 +1515,12 @@ class HiringService:
         if not card_id:
             return
         card = queries.get_card(cursor, card_id, lock=True)
+        if card and not card['is_closed'] and card['stage'] == rules.NO_RESPONSE:
+            # Молчавший кандидат написал — снова «В работе» у того же рекрутера (владелец 20.11.2026). Сообщение
+            # из прошлого круга (до взятия) — не ответ на наши попытки.
+            if not card.get('taken_at') or (message['at'] or now) >= card['taken_at']:
+                self._back_to_work(cursor, card, 'whatsapp', 'Кандидат написал в WhatsApp', now)
+            return
         if not card or card['is_closed'] or card['stage'] != rules.IN_WORK or card.get('substage') != 'no_answer':
             return
         at = message['at'] or now
