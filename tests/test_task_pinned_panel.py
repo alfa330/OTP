@@ -201,5 +201,31 @@ class PanelBehaviourTests(unittest.TestCase):
         self.assertIn('footer = null;', WIDGET)
 
 
+class PanelDeadlineTests(unittest.TestCase):
+    """Дедлайн в быстрой форме — днём и временем, как в окне задачи (19.11.2026)."""
+
+    def test_quick_form_picks_a_day_not_a_count_of_days(self):
+        form = fragment('const quickTaskForm = quickFormMode ? (', '\n  ) : null;')
+        self.assertIn('<TaskDeadlineField', form)
+        self.assertIn("updateQuickFormField('dueAt', next || '')", form)
+        self.assertNotIn('Дедлайн через', form)
+        self.assertNotRegex(form, r'placeholder="(Дней|Часов|Минут)"')
+
+    def test_quick_form_refuses_a_deadline_in_the_past(self):
+        submit = fragment('const submitQuickForm = useCallback(', 'const payload = buildTaskJsonPayload(quickForm);')
+        self.assertIn('deadlineIssues(quickForm)', submit)
+        self.assertIn('setQuickFormError(pastDeadline.text);', submit)
+
+    def test_pinned_create_sends_the_day_and_time(self):
+        """Новая задача из закреплённой уходит своим сборщиком формы в App.jsx:
+        без due_at в нём выбранный в календаре срок молча терялся бы."""
+        app = (ROOT / 'src' / 'App.jsx').read_text(encoding='utf-8')
+        start = app.index('const appendPinnedTaskPayloadFormData = useCallback(')
+        builder = app[start:app.index('}, []);', start)]
+        self.assertIn("if (payload.due_at) body.append('due_at', String(payload.due_at));", builder)
+        for stale in ('deadline_days', 'deadline_hours', 'deadline_minutes'):
+            self.assertNotIn(stale, builder)
+
+
 if __name__ == '__main__':
     unittest.main()

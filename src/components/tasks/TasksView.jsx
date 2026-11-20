@@ -48,6 +48,15 @@ import InfoHint from '../common/InfoHint';
 import TaskBoardWorkspace from './TaskBoardWorkspace';
 import PriorityScoreControl, { PriorityScoreDot } from './PriorityScoreControl';
 import TaskDateTimeField from './TaskDateTimeField';
+import TaskDeadlineField from './TaskDeadlineField';
+import {
+  deadlineDurationFields,
+  deadlineSummary,
+  isLocalDateTimePast,
+  minutesBetweenLocal,
+  shiftLocalDateTime,
+  splitLocalDateTime,
+} from './taskDateTime';
 import { PRIORITY_SCORE_HINT, awaitsPriorityScore, priorityScoreOf, priorityScoreTitle, scoreBoardMove, unscoreMovesToNew } from './backlogOrder';
 import { BriefIssueNav, ProductionBriefFields, ProductionBriefView, useBriefIssueNav } from './ProductionBriefUi';
 import {
@@ -622,6 +631,22 @@ styleTag.textContent = `
     background: var(--select-bg); border-color: var(--select-border); color: var(--select-ink);
   }
   .tv-composer-presets button:disabled { opacity: .5; cursor: not-allowed; }
+  /* Дедлайн (TaskDeadlineField): быстрые сроки над днём и временем. День и время —
+     классами полей раздела (.tv-person-select, .tv-input), цвета здесь только
+     переменными: в окне «поверх окон» их задаёт палитра панели. */
+  .tv-due-field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .tv-due-pair { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  /* Кнопка дня — ростом с поле времени рядом (на телефоне поля раздела выше кнопок). */
+  .tv-due-pair > .tv-person-select > button { height: 100%; }
+  .tv-due-field .tv-input.tv-due-time {
+    width: 96px; padding-left: 22px; padding-right: 22px;
+    text-align: center; font-variant-numeric: tabular-nums;
+  }
+  /* Срок в прошлом — кайма у дня и времени, как у «Типа» без выбора. */
+  .tv-composer-deadline.is-invalid .tv-due-field .tv-person-select > button:not([aria-expanded="true"]),
+  .tv-composer-deadline.is-invalid .tv-due-field .tv-input:not(:focus) {
+    box-shadow: 0 0 0 2px #fda4af;
+  }
   .tv-stat-card {
     background: var(--surface);
     border: 1px solid transparent;
@@ -1722,11 +1747,6 @@ styleTag.textContent = `
   }
   .tv-notes-panel.is-fullscreen .tv-notes-editor .tv-note-textarea {
     min-height: 96px;
-  }
-  .tv-form-inline-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
   }
   .tv-form-switch {
     display: flex;
@@ -4384,15 +4404,6 @@ const taskDeadlineLabel = (task) => {
   return `${isTaskOverdue(task) ? 'Просрочено' : 'Дедлайн'}: ${fmtShortDateTime(task.due_at)}`;
 };
 
-const splitDeadlineMinutes = (totalMinutes) => {
-  const total = Math.max(0, Number(totalMinutes || 0));
-  const days = Math.floor(total / (24 * 60));
-  const remainder = total % (24 * 60);
-  const hours = Math.floor(remainder / 60);
-  const minutes = remainder % 60;
-  return { days: String(days || ''), hours: String(hours || ''), minutes: String(minutes || '') };
-};
-
 const createEmptyChecklistDraftItem = () => ({ title: '', is_required: true });
 
 const normalizeChecklistItems = (items) => {
@@ -4646,9 +4657,21 @@ const EMPTY_TASK_FORM = {
   tag: 'task',
   priority: 'normal',
   assigneeIds: [],
-  deadlineDays: '',
-  deadlineHours: '',
-  deadlineMinutes: '',
+  /* Дедлайн — днём и временем, строкой поля «ГГГГ-ММ-ДДTЧЧ:ММ» по часам Алматы
+     (так же их отдаёт и принимает сервер); '' — без срока. initial* — с чем
+     задача пришла в правку: срок и напоминание уходят, только если их меняли. */
+  dueAt: '',
+  initialDueAt: '',
+  initialReminderMinutes: '',
+  /* У повторяющейся задачи (шаблона регламента) — начало ближайшего повтора:
+     её «Дедлайн» в форме — срок этого повтора, а на сервер уходит смещение от
+     его начала (deadline_duration_minutes). '' — задача не повторяется. */
+  repeatFrom: '',
+  /* Повтор регламента (итерация): id шаблона, от которого задача родилась.
+     Своего расписания у неё нет — «Повтор» в форме не показываем. */
+  regulationParentId: '',
+  // С каким повтором задача пришла в правку ('' — новая задача, шлём всегда).
+  initialRecurrence: '',
   isRegulation: false,
   recurrenceType: '',
   recurrenceInterval: '1',
@@ -4687,16 +4710,26 @@ const buildEmptyTaskForm = (overrides = {}) => ({
 });
 
 const taskToTaskForm = (task, fallbackAssignedTo = '') => {
-  const deadline = splitDeadlineMinutes(task?.deadline_duration_minutes);
-  return buildEmptyTaskForm({
+  /* Повторяющаяся задача: её собственный срок давно позади, а важен срок
+     повторов — сервер ставит каждому «начало + deadline_duration_minutes».
+     Поэтому в форме — срок ближайшего повтора. */
+  const repeatFrom = task?.recurrence_type ? toDatetimeLocalValue(task?.recurrence_next_at) : '';
+  const repeatMinutes = Number(task?.deadline_duration_minutes) || 0;
+  const dueAt = repeatFrom
+    ? (repeatMinutes > 0 ? shiftLocalDateTime(repeatFrom, repeatMinutes) : '')
+    : toDatetimeLocalValue(task?.due_at);
+  const reminderMinutes = task?.reminder_minutes_before ? String(task.reminder_minutes_before) : '';
+  const form = buildEmptyTaskForm({
     subject: task?.subject || '',
     description: task?.description || '',
     tag: task?.tag || 'task',
     priority: task?.priority || 'normal',
     assigneeIds: formAssigneeIds(task, fallbackAssignedTo),
-    deadlineDays: deadline.days,
-    deadlineHours: deadline.hours,
-    deadlineMinutes: deadline.minutes,
+    dueAt,
+    initialDueAt: dueAt,
+    initialReminderMinutes: reminderMinutes,
+    repeatFrom,
+    regulationParentId: task?.regulation_parent_id ? String(task.regulation_parent_id) : '',
     isRegulation: Boolean(task?.is_regulation || task?.recurrence_type),
     recurrenceType: task?.recurrence_type || '',
     recurrenceInterval: String(task?.recurrence_interval || '1'),
@@ -4705,7 +4738,7 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     estimateMinutes: task?.estimate_minutes ? String(task.estimate_minutes) : '',
     requestedById: task?.requested_by?.id ? String(task.requested_by.id) : '',
     requestedByName: task?.requested_by?.id ? '' : (task?.requested_by?.name || ''),
-    reminderMinutes: task?.reminder_minutes_before ? String(task.reminder_minutes_before) : '',
+    reminderMinutes,
     productionBrief: briefFromTask(task?.production_brief),
     projectId: task?.project?.id ? String(task.project.id) : '',
     watcherIds: (Array.isArray(task?.watchers) ? task.watchers : []).map((person) => String(person.id)),
@@ -4716,6 +4749,8 @@ const taskToTaskForm = (task, fallbackAssignedTo = '') => {
     sectionId: task?.section?.id ? String(task.section.id) : '',
     initialSectionId: task?.section?.id ? String(task.section.id) : '',
   });
+  // Повтор уходит на сервер, только если его поменяли (recurrencePayload).
+  return { ...form, initialRecurrence: recurrenceKey(form) };
 };
 
 const sameIdSet = (left, right) => {
@@ -4731,6 +4766,76 @@ const numberFieldValue = (value) => {
   return Number.isFinite(num) && num > 0 ? String(Math.floor(num)) : '0';
 };
 
+/* Срок поменяли — против того, с чем задача пришла в правку (у новой — пусто). */
+const deadlineChangedInForm = (values) => String(values?.dueAt || '') !== String(values?.initialDueAt || '');
+
+/* Начало ближайшего повтора — пока задача в форме остаётся повторяющейся. Сняли
+   «Повтор» — срок снова срок самой задачи. */
+const repeatAnchorOf = (values) => (values?.isRegulation && values?.repeatFrom ? String(values.repeatFrom) : '');
+
+/* Дедлайн уходит днём и временем (`due_at`), а не «через N дней, часов и минут»,
+   и только когда его правда меняли. Прежняя форма слала «через N» при каждой
+   правке, и сервер отсчитывал его от минуты правки: поправили описание на третий
+   день — срок молча уехал на три дня вперёд. А быстрая правка закреплённой задачи
+   собирает форму из слепка без срока — «пусто» в нём значит «не знаю», а не
+   «снять срок». То же с напоминанием: без срока оно не уходит вовсе.
+   У повторяющейся задачи срок — смещение от начала повтора: уходит «через N»
+   от начала ближайшего повтора. Дата ушла бы смещением от создания шаблона —
+   у шаблона месячной давности каждый повтор получил бы срок через месяц. */
+const deadlinePayload = (values) => {
+  const dueAt = String(values?.dueAt || '');
+  const reminder = dueAt ? (normalizeReminderMinutes(values?.reminderMinutes) || 0) : 0;
+  const payload = {};
+  if (deadlineChangedInForm(values)) {
+    const repeatFrom = repeatAnchorOf(values);
+    if (repeatFrom) Object.assign(payload, deadlineDurationFields(dueAt ? minutesBetweenLocal(repeatFrom, dueAt) : 0));
+    else payload.due_at = dueAt || null;
+  }
+  const deadlineSent = 'due_at' in payload || 'deadline_days' in payload;
+  if (deadlineSent || reminder !== (normalizeReminderMinutes(values?.initialReminderMinutes) || 0)) {
+    payload.reminder_minutes_before = reminder;
+  }
+  return payload;
+};
+
+/* Повтор — как его видит сервер: регламентная ли задача, период и шаг. */
+const recurrenceFields = (values) => (values?.isRegulation
+  ? {
+    is_regulation: true,
+    recurrence_type: values.recurrenceType || 'daily',
+    recurrence_interval: numberFieldValue(values.recurrenceInterval || '1'),
+  }
+  : { is_regulation: false, recurrence_type: '', recurrence_interval: '1' });
+
+const recurrenceKey = (values) => JSON.stringify(recurrenceFields(values));
+
+/* Повтор уходит, только когда его меняли: у новой задачи — всегда (исходного нет),
+   в правке — против того, с чем задача пришла. Прежняя форма слала его всегда, и
+   правка одной темы у повтора регламента (итерации: «регламентная» без периода)
+   уходила «ежедневно» — повтор становился вторым шаблоном; а быстрая правка
+   закреплённой задачи из слепка без повтора выключала повтор у шаблона. */
+const recurrencePayload = (values) => (
+  values?.initialRecurrence && values.initialRecurrence === recurrenceKey(values) ? {} : recurrenceFields(values)
+);
+
+const DEADLINE_PAST_ISSUE = 'Срок уже прошёл — выберите время позже';
+
+/* Срок в прошлом: задача была бы просрочена с первой минуты. Проверяем только
+   изменённый срок — правка задачи, срок которой уже прошёл, сама по себе не
+   должна упираться в него. У повторяющейся — срок повтора не раньше его начала. */
+const deadlineIssues = (values, now = new Date()) => {
+  if (!values?.dueAt || !deadlineChangedInForm(values)) return [];
+  const repeatFrom = repeatAnchorOf(values);
+  if (repeatFrom) {
+    const offset = minutesBetweenLocal(repeatFrom, values.dueAt);
+    return offset > 0 ? [] : [{
+      key: 'deadline',
+      text: `Срок повтора — позже его начала: ${deadlineSummary(repeatFrom, now).toLowerCase()}`,
+    }];
+  }
+  return isLocalDateTimePast(values.dueAt, now) ? [{ key: 'deadline', text: DEADLINE_PAST_ISSUE }] : [];
+};
+
 const buildTaskJsonPayload = (values) => ({
   subject: String(values.subject || '').trim(),
   description: String(values.description || '').trim(),
@@ -4739,21 +4844,13 @@ const buildTaskJsonPayload = (values) => ({
   // Первый исполнитель уходит и отдельным полем: у сервера это tasks.assigned_to.
   assigned_to: Number((values.assigneeIds || [])[0] || 0),
   assignee_ids: (values.assigneeIds || []).map(Number).filter((id) => id > 0),
-  deadline_days: numberFieldValue(values.deadlineDays),
-  deadline_hours: numberFieldValue(values.deadlineHours),
-  deadline_minutes: numberFieldValue(values.deadlineMinutes),
-  is_regulation: Boolean(values.isRegulation),
-  recurrence_type: values.isRegulation ? (values.recurrenceType || 'daily') : '',
-  recurrence_interval: values.isRegulation ? numberFieldValue(values.recurrenceInterval || '1') : '1',
+  ...deadlinePayload(values),
+  ...recurrencePayload(values),
   checklist_items: formChecklistItems(values.checklistItems),
   estimate_minutes: numberFieldValue(values.estimateMinutes),
   // Пустые оба поля = своя инициатива; id имеет приоритет над свободным текстом.
   requested_by_id: values.requestedById ? String(values.requestedById) : '',
   requested_by_name: values.requestedById ? '' : String(values.requestedByName || '').trim(),
-  // Без дедлайна напоминание не отправляем — незачем.
-  reminder_minutes_before: deadlineMinutesOfForm(values) > 0
-    ? (normalizeReminderMinutes(values.reminderMinutes) || 0)
-    : 0,
   // null у задачи другого типа — сервер уберёт бриф, если тип сменили с продакшна.
   production_brief: values.tag === PRODUCTION_TAG ? briefToPayload(values.productionBrief) : null,
   /* Проект и наблюдатели уходят, только когда их правда меняли. Быстрая правка
@@ -4779,18 +4876,18 @@ const appendTaskFormData = (body, values) => {
   body.append('priority', payload.priority);
   body.append('assigned_to', String(payload.assigned_to || ''));
   body.append('assignee_ids', payload.assignee_ids.join(','));
-  body.append('deadline_days', payload.deadline_days);
-  body.append('deadline_hours', payload.deadline_hours);
-  body.append('deadline_minutes', payload.deadline_minutes);
-  body.append('is_regulation', payload.is_regulation ? '1' : '0');
-  body.append('recurrence_type', payload.recurrence_type);
-  body.append('recurrence_interval', payload.recurrence_interval);
+  if (payload.due_at) body.append('due_at', payload.due_at);
+  if ('is_regulation' in payload) {
+    body.append('is_regulation', payload.is_regulation ? '1' : '0');
+    body.append('recurrence_type', payload.recurrence_type);
+    body.append('recurrence_interval', payload.recurrence_interval);
+  }
   body.append('checklist_items', JSON.stringify(payload.checklist_items));
   body.append('estimate_minutes', payload.estimate_minutes);
   body.append('is_backlog', values.isBacklog ? '1' : '0');
   body.append('requested_by_id', payload.requested_by_id);
   body.append('requested_by_name', payload.requested_by_name);
-  body.append('reminder_minutes_before', String(payload.reminder_minutes_before));
+  if (payload.reminder_minutes_before) body.append('reminder_minutes_before', String(payload.reminder_minutes_before));
   // Форма multipart, вложенный объект в ней иначе не передать — JSON-строкой.
   if (payload.production_brief) body.append('production_brief', JSON.stringify(payload.production_brief));
   if (payload.project_id) body.append('project_id', String(payload.project_id));
@@ -5921,19 +6018,6 @@ const ChecklistDraftEditor = React.memo(({ items, disabled = false, onChange, co
  * остальное добавляется кнопками-чипами. Одна и та же форма обслуживает создание и правку —
  * при правке секции с уже заполненными значениями раскрыты сразу.
  */
-const deadlineMinutesOfForm = (values) => (
-  (Number(values?.deadlineDays) || 0) * 24 * 60
-  + (Number(values?.deadlineHours) || 0) * 60
-  + (Number(values?.deadlineMinutes) || 0)
-);
-
-const DEADLINE_PRESETS = [
-  { label: 'Сегодня', days: 0, hours: 8 },
-  { label: 'Завтра', days: 1 },
-  { label: '3 дня', days: 3 },
-  { label: 'Неделя', days: 7 },
-];
-
 const COMPOSER_SECTIONS = [
   {
     id: 'priority',
@@ -5952,9 +6036,12 @@ const COMPOSER_SECTIONS = [
   {
     id: 'deadline',
     label: 'Дедлайн',
-    hasValue: (v) => deadlineMinutesOfForm(v) > 0,
-    summary: (v) => formatSpentMinutes(deadlineMinutesOfForm(v)),
-    clear: () => ({ deadlineDays: '', deadlineHours: '', deadlineMinutes: '', reminderMinutes: '' }),
+    hasValue: (v) => Boolean(v.dueAt),
+    /* Подписи на чипе нет: открытый «Дедлайн» показывает день и время прямо под
+       чипами, а закрыть его — значит снять срок. Подпись была бы дублем поля, а
+       на телефоне её длина («Пт, 27 нояб., 18:00») переносила чипы на новую
+       строку, и строка срока уезжала из-под пальца при выборе быстрого срока. */
+    clear: () => ({ dueAt: '', reminderMinutes: '' }),
     // Появился срок — сразу предлагаем напомнить за день, как просили по умолчанию.
     open: (v) => ({ reminderMinutes: v.reminderMinutes || String(REMINDER_DEFAULT_MINUTES) }),
   },
@@ -5989,6 +6076,9 @@ const COMPOSER_SECTIONS = [
   {
     id: 'recurrence',
     label: 'Повтор',
+    // У повтора регламента (итерации) расписания нет — оно у шаблона, и чип
+    // показывал бы «Ежедневно» у повтора еженедельного шаблона.
+    hiddenForRepeatCopy: true,
     hasValue: (v) => Boolean(v.isRegulation),
     summary: (v) => RECURRENCE_OPTIONS.find((item) => item.value === (v.recurrenceType || 'daily'))?.label,
     clear: () => ({ isRegulation: false, recurrenceType: '' }),
@@ -6094,11 +6184,13 @@ const TaskComposerForm = ({
   const isProduction = values.tag === PRODUCTION_TAG;
   const marketingIds = useMemo(() => productionPersonIds(recipients), [recipients]);
   const supportsFiles = typeof onFilesChange === 'function';
+  const isRepeatCopy = Boolean(values.regulationParentId);
   const sections = useMemo(
     () => COMPOSER_SECTIONS.filter((section) => (
       (!section.requiresFiles || supportsFiles) && (!section.requiresWatchers || supportsWatchers)
+      && !(section.hiddenForRepeatCopy && isRepeatCopy)
     )),
-    [supportsFiles, supportsWatchers]
+    [supportsFiles, supportsWatchers, isRepeatCopy]
   );
   const sectionCtx = useMemo(() => ({ recipients }), [recipients]);
   const assigneeSelectId = useId();
@@ -6159,14 +6251,10 @@ const TaskComposerForm = ({
     });
   };
 
-  const applyDeadlinePreset = (preset) => onChange({
-    deadlineDays: preset.days ? String(preset.days) : '',
-    deadlineHours: preset.hours ? String(preset.hours) : '',
-    deadlineMinutes: '',
-  });
-
   const isOpen = (id) => openIds.has(id);
   const tagIssue = issueFor('tag');
+  const deadlineIssue = issueFor('deadline');
+  const repeatFrom = repeatAnchorOf(values);
 
   return (
     <div className="tv-composer">
@@ -6374,41 +6462,38 @@ const TaskComposerForm = ({
             />
           )}
 
+          {/* Дедлайн — день в календаре и время, а не «через N дней, часов и
+              минут»: до нужного дня человеку приходилось считать самому. */}
           {isOpen('deadline') && (
-            <div className="tv-composer-row">
-              <span className="tv-composer-row-label">Дедлайн через</span>
+            <div
+              className={`tv-composer-row tv-composer-deadline${deadlineIssue ? ' is-invalid' : ''}`}
+              data-issue-anchor="deadline"
+            >
+              <span className="tv-composer-row-label">
+                Дедлайн
+                {repeatFrom && (
+                  <InfoHint
+                    text={`Задача повторяется: здесь срок ближайшего повтора — он появится ${deadlineSummary(repeatFrom).toLowerCase()}. Следующие повторы получат такой же срок от своего начала.`}
+                  />
+                )}
+              </span>
               <div className="tv-composer-row-body">
-                <div className="tv-composer-presets">
-                  {DEADLINE_PRESETS.map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      disabled={disabled}
-                      onClick={() => applyDeadlinePreset(preset)}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-                <div className="tv-form-inline-grid">
-                  <input className="tv-input" type="number" min="0" placeholder="Дней"
-                    value={values.deadlineDays} disabled={disabled}
-                    onChange={(event) => onChange({ deadlineDays: event.target.value })} />
-                  <input className="tv-input" type="number" min="0" max="23" placeholder="Часов"
-                    value={values.deadlineHours} disabled={disabled}
-                    onChange={(event) => onChange({ deadlineHours: event.target.value })} />
-                  <input className="tv-input" type="number" min="0" max="59" placeholder="Минут"
-                    value={values.deadlineMinutes} disabled={disabled}
-                    onChange={(event) => onChange({ deadlineMinutes: event.target.value })} />
-                </div>
-                <div title={deadlineMinutesOfForm(values) > 0 ? '' : 'Сначала задайте дедлайн'}>
+                <TaskDeadlineField
+                  value={values.dueAt}
+                  disabled={disabled}
+                  presets={!repeatFrom}
+                  fromDate={splitLocalDateTime(repeatFrom).date}
+                  onChange={(next) => onChange({ dueAt: next || '' })}
+                />
+                {deadlineIssue && <p className="tv-brief-issue">{deadlineIssue}</p>}
+                <div title={values.dueAt ? '' : 'Сначала задайте дедлайн'}>
                   <CustomSelect
                     className="tv-person-select"
                     variant="ios"
                     ariaLabel="Напомнить в Telegram"
                     value={String(normalizeReminderMinutes(values.reminderMinutes) || 0)}
                     options={COMPOSER_REMINDER_OPTIONS}
-                    disabled={disabled || deadlineMinutesOfForm(values) <= 0}
+                    disabled={disabled || !values.dueAt}
                     onChange={(next) => onChange({ reminderMinutes: String(next) })}
                   />
                 </div>
@@ -8058,6 +8143,11 @@ export const PinnedTaskWidget = React.memo(({
       setQuickFormError('Выберите исполнителя');
       return;
     }
+    const [pastDeadline] = deadlineIssues(quickForm);
+    if (pastDeadline) {
+      setQuickFormError(pastDeadline.text);
+      return;
+    }
     const payload = buildTaskJsonPayload(quickForm);
     setQuickFormLoading(true);
     setQuickFormError('');
@@ -8487,16 +8577,19 @@ export const PinnedTaskWidget = React.memo(({
         />
       </div>
       <div className="tv-form-field">
-        <label>Дедлайн через</label>
-        <div className="tv-form-inline-grid">
-          <input className="tv-input" type="number" min="0" placeholder="Дней" value={quickForm.deadlineDays} disabled={quickFormLoading}
-            onChange={(event) => updateQuickFormField('deadlineDays', event.target.value)} />
-          <input className="tv-input" type="number" min="0" max="23" placeholder="Часов" value={quickForm.deadlineHours} disabled={quickFormLoading}
-            onChange={(event) => updateQuickFormField('deadlineHours', event.target.value)} />
-          <input className="tv-input" type="number" min="0" max="59" placeholder="Минут" value={quickForm.deadlineMinutes} disabled={quickFormLoading}
-            onChange={(event) => updateQuickFormField('deadlineMinutes', event.target.value)} />
-        </div>
+        <label>Дедлайн</label>
+        {/* У повторяющейся — срок ближайшего повтора (см. repeatAnchorOf); «i» здесь
+            нет: подсказка рисуется в главном окне, а форма живёт и в окне PiP. */}
+        <TaskDeadlineField
+          value={quickForm.dueAt}
+          disabled={quickFormLoading}
+          presets={!repeatAnchorOf(quickForm)}
+          fromDate={splitLocalDateTime(repeatAnchorOf(quickForm)).date}
+          onChange={(next) => updateQuickFormField('dueAt', next || '')}
+        />
       </div>
+      {/* У повтора регламента (итерации) расписания нет — оно у шаблона. */}
+      {!quickForm.regulationParentId && (
       <div className="tv-soft-block">
         {/* Да/нет — переключателем iOS, как в настройках, а не системной галочкой. */}
         <label className="tv-pin-switch-row">
@@ -8545,6 +8638,7 @@ export const PinnedTaskWidget = React.memo(({
           </div>
         )}
       </div>
+      )}
       <div className="tv-form-field">
         <label>Чек-лист</label>
         <ChecklistDraftEditor
@@ -10059,13 +10153,18 @@ const TasksView = ({
   /* Проект обязателен, когда выбирать есть из чего: задача без доски у
      человека с досками — это задача, которую никто из отдела не увидит. */
   const composerProjects = useMemo(() => creatableProjects(projects), [projects]);
-  const createIssues = useMemo(() => [
+  const createBaseIssues = useMemo(() => [
     ...(composerProjects.length && !form.projectId
       ? [{ key: 'project', text: 'Выберите проект — задача попадёт на его доску' }]
       : []),
     ...formIssues(form),
   ], [composerProjects, formIssues, form]);
-  const editIssues = useMemo(() => formIssues(editForm, editModal), [formIssues, editForm, editModal]);
+  const editBaseIssues = useMemo(() => formIssues(editForm, editModal), [formIssues, editForm, editModal]);
+  /* Срок в прошлом сверяется с часами на каждой отрисовке и ещё раз при
+     сохранении, а не запоминается вместе с формой: форму со сроком «сегодня,
+     18:00», открытую в 17:50, могут сохранить и в 18:10. */
+  const createIssues = [...createBaseIssues, ...deadlineIssues(form)];
+  const editIssues = [...editBaseIssues, ...deadlineIssues(editForm)];
   const createIssueNav = useBriefIssueNav(createBodyRef, createIssues.map((issue) => issue.key));
   const editIssueNav = useBriefIssueNav(editBodyRef, editIssues.map((issue) => issue.key));
   const createIssueFor = useCallback(
@@ -10101,7 +10200,7 @@ const TasksView = ({
     e.preventDefault();
     if (!form.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
     if (!(form.assigneeIds || []).length) { notify('Выберите сотрудника', 'error'); return; }
-    if (createIssues.length) {
+    if (createBaseIssues.length || deadlineIssues(form).length) {
       setCreateIssuesShown(true);
       createIssueNav.first();
       return;
@@ -10157,7 +10256,7 @@ const TasksView = ({
     if (!editModal.taskId) return;
     if (!editForm.subject.trim()) { notify('Укажите тему задачи', 'error'); return; }
     if (!(editForm.assigneeIds || []).length) { notify('Выберите исполнителя', 'error'); return; }
-    if (editIssues.length) {
+    if (editBaseIssues.length || deadlineIssues(editForm).length) {
       setEditIssuesShown(true);
       editIssueNav.first();
       return;
@@ -10181,7 +10280,7 @@ const TasksView = ({
     } finally {
       setActionLoadingKey('');
     }
-  }, [editModal, editForm, editIssues, editIssueNav, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
+  }, [editModal, editForm, editBaseIssues, editIssueNav, apiBaseUrl, buildHeaders, notify, closeEditModal, refreshTasksData]);
 
   /* Наблюдатели из карточки — одним PATCH, только этим полем: остальное в задаче
      не трогаем (правит её тот же постановщик, сервер сверит доступ к доске). */

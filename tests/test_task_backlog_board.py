@@ -907,7 +907,7 @@ class DeadlineReminderTests(unittest.TestCase):
 
     def test_reminder_select_disabled_without_deadline(self):
         self.assertIn("disabled={isSaving || !normalizedDraft.due_at}", self.view)
-        self.assertIn("disabled={disabled || deadlineMinutesOfForm(values) <= 0}", self.view)
+        self.assertIn("disabled={disabled || !values.dueAt}", self.view)
 
     def test_cli_reminder_parsing(self):
         module = _load_cli_module()

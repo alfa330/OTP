@@ -911,6 +911,14 @@ body.mobile-shell .tv-root .tv-modal-overlay .tv-select {
     font-size: 15px;
 }
 
+/* Дедлайн: день, время и «Напомнить» под ними — одним кеглем и ростом, как
+   выбор из списка в этой форме (13 px, 40 px), а не как поля набора (15 px):
+   три поля одного блока не должны быть разными. Увеличение страницы на телефоне
+   выключено (viewport), так что 13 px в поле набора экран при фокусе не дёргают. */
+body.mobile-shell .tv-root .tv-modal-overlay .tv-due-pair .tv-input.tv-due-time {
+    font-size: 13px;
+}
+
 /* ── Заметки ── */
 
 body.mobile-shell .tv-root .tv-notes-panel.is-wide .tv-notes-toolbar {

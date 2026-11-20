@@ -37,7 +37,7 @@ await build({
   packages: 'external', loader: { '.js': 'jsx', '.jsx': 'jsx', '.css': 'empty' },
   logLevel: 'silent',
   // Помощники формы не экспортируются из модуля раздела — достаём их в сборке теста.
-  footer: { js: 'export { buildTaskJsonPayload as __payload, taskToTaskForm as __toForm, buildEmptyTaskForm as __empty };' },
+  footer: { js: 'export { buildTaskJsonPayload as __payload, taskToTaskForm as __toForm, buildEmptyTaskForm as __empty, appendTaskFormData as __multipart, deadlineIssues as __deadlineIssues };' },
   // PDF.js просмотра вложений грузится лениво, но esbuild всё равно кладёт его в
   // бандл, а его импорт воркера с «?url» понимает только Vite — node падал бы на
   // загрузке модуля раздела. Форме задачи PDF не нужен: подменяем пустышкой.
@@ -52,7 +52,10 @@ await build({
     },
   }],
 });
-const { __payload: payloadOf, __toForm: toForm, __empty: emptyForm } = await import(`file://${outfile.replace(/\\/g, '/')}`);
+const {
+  __payload: payloadOf, __toForm: toForm, __empty: emptyForm, __multipart: appendMultipart,
+  __deadlineIssues: deadlineIssuesOf,
+} = await import(`file://${outfile.replace(/\\/g, '/')}`);
 
 const SNAPSHOT = {
   id: 116, subject: 'Шаблон приказа', status: 'assigned', tag: 'task',
@@ -106,4 +109,200 @@ test('раздел уходит, только когда его меняли; «
   assert.equal('section_id' in payloadOf({ ...toForm(SNAPSHOT, 22), subject: 'x' }), false);
   const created = payloadOf(emptyForm({ subject: 'н', assigneeIds: ['98'], projectId: '1', sectionId: '11' }));
   assert.equal(created.section_id, 11);
+});
+
+/* ── Дедлайн днём и временем ──
+   Форма шлёт срок строкой поля «ГГГГ-ММ-ДДTЧЧ:ММ» — стенными часами Алматы, в
+   которых его отдаёт и принимает сервер. И только когда срок меняли: прежняя
+   форма слала «через N дней» при каждой правке, сервер отсчитывал его от минуты
+   правки, и срок молча уезжал вперёд. */
+const DEADLINE_KEYS = ['deadline_days', 'deadline_hours', 'deadline_minutes'];
+const DUE_TASK = {
+  ...FULL, due_at: '2026-11-27T18:00:00', reminder_minutes_before: 1440, deadline_duration_minutes: 12345,
+};
+
+test('форма из задачи показывает её срок теми же стенными часами', () => {
+  const form = toForm(DUE_TASK, 22);
+  assert.equal(form.dueAt, '2026-11-27T18:00');
+  assert.equal(form.reminderMinutes, '1440');
+  assert.equal(toForm(SNAPSHOT, 22).dueAt, '');
+});
+
+test('правка без смены срока не шлёт ни срок, ни напоминание, ни «через N»', () => {
+  const payload = payloadOf({ ...toForm(DUE_TASK, 22), subject: 'Новая тема' });
+  [...DEADLINE_KEYS, 'due_at', 'reminder_minutes_before'].forEach((key) => {
+    assert.equal(key in payload, false, key);
+  });
+});
+
+test('быстрая правка из слепка без срока срок и напоминание не снимает', () => {
+  const payload = payloadOf({ ...toForm(SNAPSHOT, 22), subject: 'x' });
+  assert.equal('due_at' in payload, false);
+  assert.equal('reminder_minutes_before' in payload, false);
+});
+
+test('новый срок уходит строкой поля вместе с напоминанием', () => {
+  const payload = payloadOf({ ...toForm(DUE_TASK, 22), dueAt: '2026-11-30T10:00' });
+  assert.equal(payload.due_at, '2026-11-30T10:00');
+  assert.equal(payload.reminder_minutes_before, 1440);
+  DEADLINE_KEYS.forEach((key) => assert.equal(key in payload, false, key));
+});
+
+test('снятый срок — null, напоминание без срока — 0', () => {
+  const payload = payloadOf({ ...toForm(DUE_TASK, 22), dueAt: '', reminderMinutes: '' });
+  assert.equal(payload.due_at, null);
+  assert.equal(payload.reminder_minutes_before, 0);
+  // Напоминание, оставшееся в поле, без срока тоже не уходит.
+  assert.equal(payloadOf({ ...toForm(DUE_TASK, 22), dueAt: '' }).reminder_minutes_before, 0);
+});
+
+test('смена одного напоминания уходит без срока', () => {
+  const payload = payloadOf({ ...toForm(DUE_TASK, 22), reminderMinutes: '60' });
+  assert.equal('due_at' in payload, false);
+  assert.equal(payload.reminder_minutes_before, 60);
+});
+
+test('новая задача: срок и напоминание уходят, без срока — ни того, ни другого', () => {
+  const base = { subject: 'н', assigneeIds: ['98'] };
+  const created = payloadOf(emptyForm({ ...base, dueAt: '2026-11-20T18:00', reminderMinutes: '1440' }));
+  assert.equal(created.due_at, '2026-11-20T18:00');
+  assert.equal(created.reminder_minutes_before, 1440);
+  const plain = payloadOf(emptyForm({ ...base, reminderMinutes: '1440' }));
+  assert.equal('due_at' in plain, false);
+  assert.equal('reminder_minutes_before' in plain, false);
+});
+
+const multipartOf = (values) => {
+  const fields = [];
+  appendMultipart({ append: (key, value) => fields.push([key, value]) }, values);
+  return fields;
+};
+
+test('создание формой раздела (multipart) несёт due_at и не несёт «через N»', () => {
+  const fields = multipartOf(emptyForm({
+    subject: 'н', assigneeIds: ['98'], dueAt: '2026-11-20T18:00', reminderMinutes: '1440',
+  }));
+  const keys = fields.map(([key]) => key);
+  assert.deepEqual(fields.filter(([key]) => key === 'due_at'), [['due_at', '2026-11-20T18:00']]);
+  assert.deepEqual(fields.filter(([key]) => key === 'reminder_minutes_before'), [['reminder_minutes_before', '1440']]);
+  DEADLINE_KEYS.forEach((key) => assert.equal(keys.includes(key), false, key));
+  // Без срока — ни срока, ни напоминания: сервер оставит задачу без дедлайна.
+  const plainKeys = multipartOf(emptyForm({ subject: 'н', assigneeIds: ['98'] })).map(([key]) => key);
+  assert.equal(plainKeys.includes('due_at'), false);
+  assert.equal(plainKeys.includes('reminder_minutes_before'), false);
+});
+
+test('срок в прошлом — ошибка формы, но только если его меняли', () => {
+  const now = new Date(2026, 10, 19, 19, 40);
+  const issue = deadlineIssuesOf(emptyForm({ dueAt: '2026-11-19T18:00' }), now);
+  assert.deepEqual(issue.map((item) => item.key), ['deadline']);
+  assert.match(issue[0].text, /прошёл/);
+  assert.deepEqual(deadlineIssuesOf(emptyForm({ dueAt: '2026-11-19T20:00' }), now), []);
+  assert.deepEqual(deadlineIssuesOf(emptyForm({ dueAt: '' }), now), []);
+  // Просроченная задача: правка темы не упирается в её прошедший срок…
+  const overdue = toForm({ ...DUE_TASK, due_at: '2026-11-01T18:00:00' }, 22);
+  assert.deepEqual(deadlineIssuesOf({ ...overdue, subject: 'x' }, now), []);
+  // …а перенос на другое прошедшее время — упирается.
+  assert.equal(deadlineIssuesOf({ ...overdue, dueAt: '2026-11-19T09:00' }, now).length, 1);
+});
+
+/* ── Повторяющаяся задача (шаблон регламента) ──
+   Сервер ставит каждому повтору срок «начало повтора + deadline_duration_minutes».
+   Дата из календаря ушла бы смещением от создания шаблона — у шаблона месячной
+   давности каждый повтор получил бы срок через месяц. */
+const REPEATING = {
+  ...FULL, recurrence_type: 'daily', recurrence_interval: 1, is_regulation: true,
+  created_at: '2026-10-01T10:00:37.190563', due_at: '2026-10-01T18:00:37',
+  recurrence_next_at: '2026-11-20T10:00:37.190563', deadline_duration_minutes: 480,
+  reminder_minutes_before: 60,
+};
+
+test('у повторяющейся в форме — срок ближайшего повтора, а не давний срок шаблона', () => {
+  const form = toForm(REPEATING, 22);
+  assert.equal(form.repeatFrom, '2026-11-20T10:00');
+  assert.equal(form.dueAt, '2026-11-20T18:00');
+  // Без срока у повторов — без срока и в форме.
+  assert.equal(toForm({ ...REPEATING, deadline_duration_minutes: null }, 22).dueAt, '');
+  // Повтор задачи (итерация) — обычная задача со своим сроком.
+  const iteration = { ...FULL, is_regulation: true, regulation_parent_id: 7, due_at: '2026-11-19T18:00:00' };
+  assert.equal(toForm(iteration, 22).repeatFrom, '');
+  assert.equal(toForm(iteration, 22).dueAt, '2026-11-19T18:00');
+});
+
+test('новый срок повтора уходит смещением от его начала, без даты', () => {
+  const payload = payloadOf({ ...toForm(REPEATING, 22), dueAt: '2026-11-21T12:30' });
+  assert.equal('due_at' in payload, false);
+  assert.deepEqual(
+    [payload.deadline_days, payload.deadline_hours, payload.deadline_minutes],
+    ['1', '2', '30'],
+  );
+  assert.equal(payload.reminder_minutes_before, 60);
+  // Не трогали — ничего не уходит.
+  const untouched = payloadOf({ ...toForm(REPEATING, 22), subject: 'тема' });
+  ['due_at', ...DEADLINE_KEYS, 'reminder_minutes_before'].forEach((key) => assert.equal(key in untouched, false, key));
+  // Сняли срок — нулевое смещение, сервер снимет срок у шаблона.
+  const cleared = payloadOf({ ...toForm(REPEATING, 22), dueAt: '' });
+  assert.deepEqual([cleared.deadline_days, cleared.deadline_hours, cleared.deadline_minutes], ['0', '0', '0']);
+  assert.equal(cleared.reminder_minutes_before, 0);
+});
+
+test('сняли «Повтор» в той же правке — срок снова дата самой задачи', () => {
+  const payload = payloadOf({ ...toForm(REPEATING, 22), isRegulation: false, dueAt: '2026-11-25T18:00' });
+  assert.equal(payload.due_at, '2026-11-25T18:00');
+  DEADLINE_KEYS.forEach((key) => assert.equal(key in payload, false, key));
+});
+
+test('срок повтора раньше его начала — ошибка формы с началом повтора', () => {
+  const now = new Date(2026, 10, 19, 19, 40);
+  const early = deadlineIssuesOf({ ...toForm(REPEATING, 22), dueAt: '2026-11-20T09:00' }, now);
+  assert.deepEqual(early.map((item) => item.key), ['deadline']);
+  assert.match(early[0].text, /повтора/);
+  assert.match(early[0].text, /10:00/);
+  assert.deepEqual(deadlineIssuesOf({ ...toForm(REPEATING, 22), dueAt: '2026-11-20T10:00' }, now).length, 1);
+  assert.deepEqual(deadlineIssuesOf({ ...toForm(REPEATING, 22), dueAt: '2026-11-20T10:05' }, now), []);
+});
+
+/* ── Повтор уходит, только когда его меняли ──
+   Прежняя форма слала повтор всегда. У повтора регламента (итерации) — задача
+   «регламентная», но без своего периода — это уходило «ежедневно», и правка одной
+   темы делала повтор вторым шаблоном; а быстрая правка закреплённой из слепка
+   без повтора выключала повтор у шаблона. */
+const RECURRENCE_KEYS = ['is_regulation', 'recurrence_type', 'recurrence_interval'];
+const REPEAT_COPY = {
+  ...FULL, is_regulation: true, recurrence_type: null, recurrence_interval: null,
+  regulation_parent_id: 171, due_at: '2026-11-20T18:00:00',
+};
+
+test('правка повтора регламента (итерации) повтор не шлёт и в форме его не показывает', () => {
+  const form = toForm(REPEAT_COPY, 22);
+  assert.equal(form.regulationParentId, '171');
+  const payload = payloadOf({ ...form, subject: 'тема повтора' });
+  RECURRENCE_KEYS.forEach((key) => assert.equal(key in payload, false, key));
+});
+
+test('шаблон: без смены повтора — не шлётся, сменили период или шаг — уходит целиком', () => {
+  const untouched = payloadOf({ ...toForm(REPEATING, 22), subject: 'тема шаблона' });
+  RECURRENCE_KEYS.forEach((key) => assert.equal(key in untouched, false, key));
+  const weekly = payloadOf({ ...toForm(REPEATING, 22), recurrenceType: 'weekly' });
+  assert.deepEqual([weekly.is_regulation, weekly.recurrence_type, weekly.recurrence_interval], [true, 'weekly', '1']);
+  const everyTwo = payloadOf({ ...toForm(REPEATING, 22), recurrenceInterval: '2' });
+  assert.deepEqual([everyTwo.recurrence_type, everyTwo.recurrence_interval], ['daily', '2']);
+  // Сняли «Повтор» — уходит «не регламентная».
+  const off = payloadOf({ ...toForm(REPEATING, 22), isRegulation: false, recurrenceType: '' });
+  assert.deepEqual([off.is_regulation, off.recurrence_type], [false, '']);
+});
+
+test('быстрая правка закреплённой из слепка повтор шаблона не выключает', () => {
+  const payload = payloadOf({ ...toForm(SNAPSHOT, 22), subject: 'тема из слепка' });
+  RECURRENCE_KEYS.forEach((key) => assert.equal(key in payload, false, key));
+});
+
+test('новая задача повтор шлёт всегда — и без повтора, и с ним', () => {
+  const plain = payloadOf(emptyForm({ subject: 'н', assigneeIds: ['98'] }));
+  assert.deepEqual([plain.is_regulation, plain.recurrence_type, plain.recurrence_interval], [false, '', '1']);
+  const daily = payloadOf(emptyForm({ subject: 'н', assigneeIds: ['98'], isRegulation: true, recurrenceType: 'daily' }));
+  assert.deepEqual([daily.is_regulation, daily.recurrence_type], [true, 'daily']);
+  const fields = multipartOf(emptyForm({ subject: 'н', assigneeIds: ['98'] }));
+  assert.deepEqual(fields.filter(([key]) => RECURRENCE_KEYS.includes(key)),
+    [['is_regulation', '0'], ['recurrence_type', ''], ['recurrence_interval', '1']]);
 });

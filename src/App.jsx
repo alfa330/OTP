@@ -47656,9 +47656,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Тот же формат, что у формы раздела: id через запятую.
                 body.append('assignee_ids', (Array.isArray(payload.assignee_ids) ? payload.assignee_ids : [])
                     .map(Number).filter((id) => id > 0).join(','));
-                body.append('deadline_days', String(payload.deadline_days || '0'));
-                body.append('deadline_hours', String(payload.deadline_hours || '0'));
-                body.append('deadline_minutes', String(payload.deadline_minutes || '0'));
+                // Дедлайн — днём и временем, как его ставит форма (не «через N дней»).
+                if (payload.due_at) body.append('due_at', String(payload.due_at));
                 body.append('is_regulation', payload.is_regulation ? '1' : '0');
                 body.append('recurrence_type', String(payload.recurrence_type || ''));
                 body.append('recurrence_interval', String(payload.recurrence_interval || '1'));

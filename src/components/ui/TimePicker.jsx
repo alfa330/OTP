@@ -115,6 +115,23 @@ export const maskTimeInput = (raw, caret) => {
     return { text, caret: digitsBefore >= 2 ? digitsBefore + 1 : digitsBefore };
 };
 
+/* Что сделать с полем, когда из него уходят (blur, Enter):
+ *   keep     — в поле ровно текущее значение: человек прошёл поле Tab'ом или
+ *              щелчком и ничего не набирал. Трогать нечего — к шагу приводится
+ *              НАБОР, а не время, пришедшее извне. Иначе срок задачи «10:37»
+ *              молча становился «10:35» от одного прохода по форме;
+ *   clear    — поле очистили, и пустое значение разрешено;
+ *   rollback — набор негодный (или пусто там, где пустого не бывает);
+ *   set      — новое время, `total` минут от полуночи (шаг и границы — в emit).
+ */
+export const commitPlan = (draft, value, allowEmpty) => {
+    const text = String(draft ?? '').trim();
+    if (text === String(value || '')) return { kind: 'keep' };
+    if (!text) return { kind: allowEmpty ? 'clear' : 'rollback' };
+    const total = parseTimeInput(text);
+    return total === null ? { kind: 'rollback' } : { kind: 'set', total };
+};
+
 /* Приводим к шагу и границам. Округляем к БЛИЖАЙШЕМУ шагу, а не вниз: человек,
    набравший 09:33 при шаге 5, имел в виду 09:35 ровно с той же вероятностью,
    что и 09:30, но «вниз» всегда выглядит как потеря набранного. */
@@ -310,17 +327,14 @@ export function IosTimePicker({
         setDraft(back);
     };
 
-    // Приведение к ЧЧ:ММ. Непонятный набор откатываем к прежнему значению.
+    // Приведение к ЧЧ:ММ. Непонятный набор откатываем к прежнему значению (см. commitPlan).
     const commit = () => {
-        const text = draft.trim();
-        if (!text) {
-            if (allowEmpty) { guessedFromRef.current = null; emit(null); setDraft(''); } else rollback();
-            return;
-        }
-        const total = parseTimeInput(text);
-        if (total === null) { rollback(); return; }
+        const plan = commitPlan(draft, value, allowEmpty);
+        if (plan.kind === 'keep') { guessedFromRef.current = null; setDraft(value || ''); return; }
+        if (plan.kind === 'rollback') { rollback(); return; }
         guessedFromRef.current = null;
-        setDraft(emit(total));
+        if (plan.kind === 'clear') { emit(null); setDraft(''); return; }
+        setDraft(emit(plan.total));
     };
 
     const nudge = (delta) => {

@@ -1329,7 +1329,9 @@ class TasksMixin:
                     t.production_brief,
                     t.project_id, t.project_number,
                     (SELECT p.code FROM task_projects p WHERE p.id = t.project_id),
-                    t.section_id
+                    t.section_id,
+                    -- Шаблон, от которого задача родилась (повтор регламента).
+                    t.regulation_parent_id
                 FROM tasks t
                 WHERE t.id = %s
             """, (task_id,))
@@ -1498,6 +1500,14 @@ class TasksMixin:
                 recurrence_type_input = recurrence_type if has_recurrence_type else current_recurrence_type
                 recurrence_interval_input = recurrence_interval if has_recurrence_interval else current_recurrence_interval
                 is_regulation_input = is_regulation if has_is_regulation else current_is_regulation
+            current_regulation_parent_id = row[25]
+            if current_regulation_parent_id is not None:
+                # Повтор регламента — экземпляр своего шаблона: расписания у него нет и
+                # быть не может, оно правится у шаблона. Форма правки знает только
+                # «регламентная» и слала «ежедневно» по умолчанию — правка одной темы
+                # делала повтор вторым шаблоном, и он плодил копии рядом с родителем.
+                recurrence_type_input = None
+                recurrence_interval_input = None
             is_regulation_new, recurrence_type_new, recurrence_interval_new = self._normalize_task_recurrence(
                 is_regulation=is_regulation_input,
                 recurrence_type=recurrence_type_input,

@@ -88,3 +88,25 @@ test('пустой ввод остаётся пустым', () => {
   assert.equal(maskTimeInput('', 0).text, '');
   assert.equal(maskTimeInput(null, null).text, '');
 });
+
+/* ── Уход из поля: нетронутое время не округляется ──
+   Поле прошли Tab'ом или щелчком и ничего не набрали — значение остаётся как
+   есть. Раньше blur приводил к шагу и его: срок задачи «10:37» молча становился
+   «10:35», форма видела изменённый срок, у просроченной задачи сохранение
+   упиралось в «срок уже прошёл», у будущей заново уходило напоминание. */
+const { commitPlan } = await loadPicker();
+
+test('нетронутое значение при уходе из поля остаётся как есть, даже не по шагу', () => {
+  assert.deepEqual(commitPlan('10:37', '10:37', false), { kind: 'keep' });
+  assert.deepEqual(commitPlan(' 23:59 ', '23:59', false), { kind: 'keep' });
+  assert.deepEqual(commitPlan('', '', true), { kind: 'keep' });
+});
+
+test('набранное разбирается, как раньше: новое время, очистка или откат', () => {
+  assert.deepEqual(commitPlan('1037', '10:37', false), { kind: 'set', total: 637 });
+  assert.deepEqual(commitPlan('10:35', '10:37', false), { kind: 'set', total: 635 });
+  assert.deepEqual(commitPlan('930', '', true), { kind: 'set', total: 570 });
+  assert.deepEqual(commitPlan('', '10:37', true), { kind: 'clear' });
+  assert.deepEqual(commitPlan('', '10:37', false), { kind: 'rollback' });
+  assert.deepEqual(commitPlan('99:99', '10:37', false), { kind: 'rollback' });
+});
