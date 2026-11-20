@@ -530,10 +530,54 @@ _STATEMENTS = [
 ]
 
 
+# Окно «Чаты» в реальном времени (hiring/wa_live.py, владелец 20.11.2026): изменение переписки, чата или очереди
+# отправки — тычок NOTIFY hiring_wa с номером карточки чата (0 — без карточки), уходит при коммите. Пустое обновление
+# (сторож пересчитал «ждут ответа» в то же число) тычка не шлёт. Повтор одного тычка в транзакции PostgreSQL сливает.
+LIVE_NOTIFY = """
+    CREATE OR REPLACE FUNCTION hiring_wa_live_card() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN
+        PERFORM pg_notify('hiring_wa', json_build_object('c', COALESCE(NEW.card_id, 0))::text);
+        RETURN NULL;
+    END $$;
+    CREATE OR REPLACE FUNCTION hiring_wa_live_message() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    DECLARE card INTEGER;
+    BEGIN
+        SELECT card_id INTO card FROM hiring_wa_chats WHERE key = NEW.chat_key;
+        PERFORM pg_notify('hiring_wa', json_build_object('c', COALESCE(card, 0))::text);
+        RETURN NULL;
+    END $$;
+"""
+LIVE_TRIGGERS = (
+    ('hiring_wa_chats', 'hiring_wa_live_card'),
+    ('hiring_wa_outbox', 'hiring_wa_live_card'),
+    ('hiring_wa_messages', 'hiring_wa_live_message'),
+)
+
+
 def init_hiring_schema(cursor):
     for statement in _STATEMENTS:
         cursor.execute(statement)
     _seed(cursor)
+    _install_live_notify(cursor)
+
+
+def _install_live_notify(cursor):
+    """Триггеры тычков окна «Чаты» — своим SAVEPOINT'ом: не встали — окно живёт на опросе, раздел работает. Триггер
+    заводится, только если его нет: каждый старт не берёт на таблицы переписки исключительную блокировку."""
+    cursor.execute("SAVEPOINT hiring_wa_live")
+    try:
+        cursor.execute(LIVE_NOTIFY)
+        for table, function in LIVE_TRIGGERS:
+            for name, event, condition in (('hiring_wa_live_ins', 'INSERT', ''),
+                                           ('hiring_wa_live_upd', 'UPDATE', 'WHEN (OLD.* IS DISTINCT FROM NEW.*) ')):
+                cursor.execute("SELECT 1 FROM pg_trigger WHERE tgname = %s AND tgrelid = %s::regclass", (name, table))
+                if cursor.fetchone() is None:
+                    cursor.execute('CREATE TRIGGER %s AFTER %s ON %s FOR EACH ROW %sEXECUTE FUNCTION %s()'
+                                   % (name, event, table, condition, function))
+        cursor.execute("RELEASE SAVEPOINT hiring_wa_live")
+    except Exception as exc:  # noqa: BLE001
+        cursor.execute("ROLLBACK TO SAVEPOINT hiring_wa_live")
+        log.warning('hiring: тычки окна «Чаты» не подключены — окно на опросе: %s', exc)
 
 
 def _seed(cursor):

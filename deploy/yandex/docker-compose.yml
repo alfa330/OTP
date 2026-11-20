@@ -60,6 +60,7 @@ services:
       SHIFT_AUCTION_STREAM_LIMIT: "200"
       PBX_STREAM_LIMIT: "50"
       OP_WALLBOARD_LIVE_STREAM_LIMIT: "50"
+      HIRING_WA_STREAM_LIMIT: "50"
     expose:
       - "8080"
     stop_grace_period: 20s

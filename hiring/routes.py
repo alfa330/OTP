@@ -46,6 +46,7 @@ Blueprint собирается фабрикой и получает зависи
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
@@ -53,7 +54,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, notices, queries, reports, rules, wa_chat
+from . import access, notices, queries, reports, rules, wa_chat, wa_live
 from .service import HiringError
 
 log = logging.getLogger(__name__)
@@ -142,10 +143,12 @@ def public_card(card, ctx):
 
 
 def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response, resolve_requester, service,
-                           dial_list=None):
+                           dial_list=None, listen_connect=None, stream_limit=20):
     """dial_list — () -> сервис раздела «Удаленный КЦ» (dial_list.service.DialListService) или None.
     Через него руководитель рекрутинга сажает рекрутера на линию Binotel прямо из настроек воронки,
-    чтобы отклики прозванивались из iCore Phone (владелец 30.10.2026). Без него линии недоступны."""
+    чтобы отклики прозванивались из iCore Phone (владелец 30.10.2026). Без него линии недоступны.
+    listen_connect — () -> отдельное соединение с базой для слушателя тычков окна «Чаты» (hiring/wa_live.py),
+    stream_limit — сколько окон держат живой канал одновременно; без listen_connect окно живёт на опросе."""
     bp = Blueprint('hiring', __name__, url_prefix='/api/hiring')
 
     def _dial_list():
@@ -950,6 +953,43 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
     @hiring_route('/wa/chats/summary')
     def hiring_wa_chat_summary(ctx):
         return jsonify(_json(service.wa_chat_summary(ctx)))
+
+    # Живой канал окна «Чаты» (владелец 20.11.2026: «чаты работают не так быстро и не в реальном времени»): тычок
+    # «изменилась переписка карточек …» — окно перечитывает список и открытый чат обычными запросами (wa_live.py).
+    # Поток держит нить waitress: мест stream_limit, сверх — 503, и окно остаётся на опросе.
+    @hiring_route('/wa/stream')
+    def hiring_wa_stream(ctx):
+        service.wa_live_check(ctx)
+        if listen_connect is None:
+            return _bad('Живой канал не подключён — окно обновляется опросом', 'HIRING_WA_LIVE_OFF', 503)
+        wa_live.ensure_listener(listen_connect)
+        if not wa_live.hub.acquire(stream_limit):
+            response = jsonify({"error": "Мест под живые окна нет — окно обновляется опросом",
+                                "code": "HIRING_WA_LIVE_BUSY"})
+            response.status_code = 503
+            response.headers['Retry-After'] = '120'
+            return response
+
+        def generate():
+            cursor_seq = wa_live.hub.current_seq()
+            yield ': connected %d\n\n' % int(time.time())
+            deadline = time.monotonic() + wa_live.STREAM_MAX_SECONDS
+            while time.monotonic() < deadline:
+                cards, cursor_seq = wa_live.hub.wait(cursor_seq, wa_live.HEARTBEAT_SECONDS)
+                if cards is None or cards:
+                    yield wa_live.frame(cards)
+                else:
+                    yield ': ping %d\n\n' % int(time.time())
+                # Открытое окно держит шлюз в частом опросе (ответ уходит быстрее), как его запросы списка.
+                service.wa_live_beat()
+            yield wa_live.sse('bye', {'reason': 'lifetime'})
+
+        response = Response(generate(), mimetype='text/event-stream')
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        # Место возвращается, когда сервер закрывает ответ: у ни разу не прочитанного генератора finally не сработал бы.
+        response.call_on_close(wa_live.hub.release)
+        return response
 
     @hiring_route('/wa/chats/<key>/messages')
     def hiring_wa_thread(key, ctx):

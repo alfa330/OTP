@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
     chatInitials, dayLabel, insertAt, lastIncomingId, listTime, localStamp, matchTemplates, mergeMessages, mergeThread, newClientId,
-    pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, withDays,
+    pendingStatus, pendingTail, pulseOf, pulseTouches, showAuthor, slashQuery, tickStatus, withDays,
 } from '../src/components/hiring/hiringChats.js';
 
 const TODAY = '2026-11-19';
@@ -124,4 +124,17 @@ test('«Ответ не нужен» sits under the last candidate message, not 
     assert.equal(lastIncomingId([{ id: 3, from_me: true }]), null);
     assert.equal(lastIncomingId([]), null);
     assert.equal(lastIncomingId(null), null);
+});
+
+test('live pulse: frame → cards; open chat reloads only on its card, chats without card on 0, «all» — everyone', () => {
+    assert.deepEqual(pulseOf({ c: [12, 0] }, 1), { n: 1, cards: [12, 0] });
+    assert.deepEqual(pulseOf({ all: 1 }, 2), { n: 2, cards: null });
+    assert.deepEqual(pulseOf(null, 3), { n: 3, cards: null });
+    assert.deepEqual(pulseOf({ c: ['7', -1, 'x', 2.5] }, 4), { n: 4, cards: [7] });
+    assert.equal(pulseTouches(null, 12), false);
+    assert.equal(pulseTouches({ n: 1, cards: [12] }, 12), true);
+    assert.equal(pulseTouches({ n: 1, cards: [12] }, 13), false);
+    assert.equal(pulseTouches({ n: 1, cards: [0] }, null), true);
+    assert.equal(pulseTouches({ n: 1, cards: [0] }, 12), false);
+    assert.equal(pulseTouches({ n: 1, cards: null }, 12), true);
 });

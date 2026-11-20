@@ -102,6 +102,21 @@ export function lastIncomingId(rows) {
     return null;
 }
 
+/** Касается ли тычок живого канала (hiring/wa_live.py) открытого чата: «перечитать всё» (cards = null) или среди
+ *  карточек есть его карточка (0 — чат без карточки). */
+export function pulseTouches(pulse, cardId) {
+    if (!pulse) return false;
+    if (!pulse.cards) return true;
+    return pulse.cards.includes(Number(cardId) || 0);
+}
+
+/** Тычок из кадра потока: {"c": [12, 0]} — эти карточки, {"all": 1} или непонятное — перечитать всё. */
+export function pulseOf(payload, n) {
+    const cards = payload && !payload.all && Array.isArray(payload.c)
+        ? payload.c.map(Number).filter((value) => Number.isInteger(value) && value >= 0) : null;
+    return { n, cards };
+}
+
 /** Показывать ли автора над нашим сообщением: у первого в серии одного автора (как в «Чатах ОП»). */
 export function showAuthor(message, previous) {
     if (!message?.from_me || !message.author) return false;

@@ -1610,6 +1610,15 @@ class HiringService:
     def _wa_ui_touch(self):
         self._wa_ui_seen = time.monotonic()
 
+    def wa_live_check(self, ctx):
+        """Живой канал окна «Чаты» (wa_live.py) — тем же, кому открыт список чатов."""
+        self._wa_chat_reader(ctx)
+        self._wa_ui_touch()
+
+    def wa_live_beat(self):
+        """Открытое окно держит шлюз в частом опросе — как его запросы списка и ленты."""
+        self._wa_ui_touch()
+
     def _wa_ui_active(self):
         return time.monotonic() - self._wa_ui_seen < self.WA_UI_ACTIVE_SEC
 

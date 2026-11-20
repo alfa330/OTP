@@ -20,6 +20,7 @@
 """
 
 import contextlib
+import json
 import os
 import threading
 import time
@@ -28,7 +29,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from hiring import notices, queries, reports, rules, schema, wa_media
+from hiring import notices, queries, reports, rules, schema, wa_live, wa_media
 from hiring.service import HiringError, HiringService
 
 PORT = os.environ.get('HIRING_TEST_PORT')
@@ -2586,6 +2587,84 @@ def test_card_whatsapp_opens_chat_and_writes_first(world):
     assert _thread(world, REC1, '+77055558850')['block'] is None
     clock.now = datetime(2026, 10, 15, 18, 31)
     assert _thread(world, REC1, '+77055558855')['block'] is None
+
+
+def _listen(db):
+    conn = db.connect()
+    conn.set_session(autocommit=True)
+    with conn.cursor() as cur:
+        cur.execute('LISTEN ' + wa_live.CHANNEL)
+    return conn
+
+
+def _pokes(conn):
+    """Тычки, пришедшие слушателю: NOTIFY доставляется при коммите — даём ему долететь."""
+    time.sleep(0.3)
+    conn.poll()
+    got = [json.loads(note.payload) for note in conn.notifies]
+    conn.notifies.clear()
+    return got
+
+
+def test_chat_live_pokes_on_commit(world):
+    """Окно «Чаты» в реальном времени (wa_live.py, владелец 20.11.2026): сообщение кандидата, ответ из портала, его
+    отправка шлюзом, отметка доставки, «Ответ не нужен» — тычок с номером карточки чата при коммите. Пустой пересчёт
+    «ждут ответа» и откат транзакции тычка не дают."""
+    service = world['service']
+    me = ctx_of(world, REC1)
+    _chat_poll(service)
+    listener = _listen(world['db'])
+    try:
+        _pokes(listener)
+        service.wa_events({'events': [wa_event('lv1', phone='77055558870', text='Здравствуйте')]})
+        card_id = _thread(world, REC1, '+77055558870')['card']['id']
+        assert {'c': card_id} in _pokes(listener)
+        service.take(me, card_id)
+        sent = service.wa_send(me, '+77055558870', {'text': 'Добрый день!'})['item']
+        assert _pokes(listener) == [{'c': card_id}]                    # очередь отправки
+        _chat_poll(service)
+        assert _pokes(listener) == [{'c': card_id}]                    # шлюз взял
+        service.wa_events({'events': [{'type': 'sent', 'outbox': sent['outbox_id'], 'id': '3EB0CC01', 'ts': WA_TS + 60}]})
+        assert _pokes(listener) == [{'c': card_id}]                    # повторы одной транзакции слиты в один
+        service.wa_events({'events': [{'type': 'receipt', 'ids': ['3EB0CC01'], 'status': 'read', 'ts': WA_TS + 61}]})
+        assert _pokes(listener) == [{'c': card_id}]
+        service.wa_events({'events': [wa_event('lv2', phone='77055558870', ts=WA_TS + 120, text='Спасибо')]})
+        _pokes(listener)
+        service.wa_handled(me, '+77055558870')
+        assert _pokes(listener) == [{'c': card_id}]
+        # Сторож пересчитал «ждут ответа» в то же число — тычка нет; откат — тоже нет.
+        with world['db']._get_cursor() as cur:
+            queries.wa_recount_waiting(cur, '+77055558870')
+        assert _pokes(listener) == []
+        with pytest.raises(RuntimeError):
+            with world['db']._get_cursor() as cur:
+                queries.wa_mark_outbound(cur, '+77055558870', NOW + timedelta(hours=1))
+                raise RuntimeError('откат')
+        assert _pokes(listener) == []
+        # Чат без карточки (иностранный номер) — тычок с нулём: окно перечитает чаты без карточки.
+        service.wa_events({'events': [wa_event('lv3', phone='4915112345678', text='Hallo')]})
+        assert {'c': 0} in _pokes(listener)
+    finally:
+        listener.close()
+
+
+def test_chat_live_listener_relays_pokes(world):
+    """Слушатель процесса (wa_live._run_listener): после подключения — «перечитать всё», дальше — тычки базы в кольцо."""
+    hub = wa_live.Hub()
+    threading.Thread(target=wa_live._run_listener, args=(world['db'].connect, hub), daemon=True).start()
+    deadline = time.monotonic() + 5
+    while hub.current_seq() < 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert hub.wait(0, 0) == (None, 1)
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT pg_notify(%s, %s), pg_notify(%s, %s), pg_notify(%s, 'мусор')",
+                    (wa_live.CHANNEL, '{"c":41}', wa_live.CHANNEL, '{"c":0}', wa_live.CHANNEL))
+    cards, _seq = hub.wait(1, 5)
+    deadline = time.monotonic() + 5
+    while cards != {41, 0} and time.monotonic() < deadline:
+        more, _seq = hub.wait(1, 0.2)
+        cards = more if more is not None else cards
+    assert cards == {41, 0}
 
 
 def test_chat_templates_are_shared_and_edited_by_recruiters(world):

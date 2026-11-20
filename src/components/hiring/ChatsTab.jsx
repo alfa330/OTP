@@ -15,9 +15,11 @@ import './hiringChats.css';
 import { errorOf, STAGE_LABELS, SUBSTAGE_LABELS } from './hiringMeta';
 import {
     BLOCK_ACTIONS, MAX_FILE, MAX_TEXT, chatInitials, fileSize, insertAt, lastIncomingId, listTime, localStamp, matchTemplates,
-    mergeMessages, newClientId, pendingStatus, pendingTail, showAuthor, slashQuery, tickStatus, timeOf, withDays,
+    mergeMessages, newClientId, pendingStatus, pendingTail, pulseOf, pulseTouches, showAuthor, slashQuery, tickStatus, timeOf,
+    withDays,
 } from './hiringChats';
 import { ConfirmDialog, FIELD, Label, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } from './hiringUi';
+import { runSseStream } from '../common/sseClient';
 
 /*
  * Окно «Чаты» раздела «Воронка найма» (владелец 19.11.2026: «рекрутер разбирает таргетные отклики в приложении в
@@ -36,6 +38,11 @@ import { ConfirmDialog, FIELD, Label, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY } f
 
 const LIST_POLL_MS = 5000;
 const THREAD_POLL_MS = 3500;
+// Живой канал (hiring/wa_live.py, владелец 20.11.2026: «чаты работают не так быстро и не в реальном времени»): тычок
+// «изменилась переписка карточек …» — список и открытый чат перечитываются сразу. Опрос остаётся страховкой — реже,
+// пока канал жив, и прежний, когда его нет (мест нет, сеть рвётся).
+const LIVE_POLL_MS = 30000;
+const PULSE_COALESCE_MS = 150;
 
 const MODES = [
     { value: 'all', label: 'Все' },
@@ -49,6 +56,49 @@ const KIND_LABELS = { image: 'Фото', video: 'Видео', audio: 'Аудио
 const ROW = (columns, extra = {}) => ({ display: 'grid', gridTemplateColumns: columns, alignItems: 'center', ...extra });
 
 const visible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+
+/* Живой канал окна: {live, pulse}. pulse меняется на каждый тычок ({n, cards}: cards — карточки затронутых чатов,
+   null — перечитать всё); подключился (и переподключился после обрыва) — тоже «перечитать всё»: пока канала не
+   было, тычки не копились. Скрытая вкладка соединение рвёт — место под поток держит только видимое окно. */
+const useChatPulse = (api) => {
+    const [live, setLive] = useState(false);
+    const [pulse, setPulse] = useState(null);
+    useEffect(() => {
+        if (!api.streamUrl || typeof document === 'undefined') return undefined;
+        let stream = null;
+        let n = 0;
+        let wasLive = false;
+        const bump = (payload) => { n += 1; setPulse(pulseOf(payload, n)); };
+        const open = () => {
+            if (stream || !visible()) return;
+            stream = runSseStream({
+                url: api.streamUrl('/wa/stream'),
+                getHeaders: api.headers,
+                onEvent: (event, payload) => { if (event === 'chats') bump(payload); },
+                onState: (state) => {
+                    const now = state === 'live';
+                    if (now && !wasLive) bump({ all: 1 });
+                    wasLive = now;
+                    setLive(now);
+                },
+            });
+        };
+        const close = () => {
+            stream?.close();
+            stream = null;
+            wasLive = false;
+            setLive(false);
+        };
+        const onVisibility = () => (visible() ? open() : close());
+        open();
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            document.removeEventListener('visibilitychange', onVisibility);
+            close();
+        };
+    }, [api]);
+    return { live, pulse };
+};
 
 // Буквы имени — только буквы и цифры: имя из одного эмодзи («💌») давало половинку символа «�».
 const Avatar = ({ name, size = 'h-11 w-11' }) => {
@@ -456,7 +506,7 @@ const Composer = ({ chatKey, replyTo, onCancelReply, onSend, templates, onTempla
 
 // ─── Открытый чат ─────────────────────────────────────────────────────────
 
-const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) => {
+const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps, live = false, pulse = null }) => {
     const [data, setData] = useState(null);
     const [error, setError] = useState('');
     const [messages, setMessages] = useState([]);
@@ -499,16 +549,27 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps }) =>
             });
     }, [api, chatKey]);
 
+    const liveRef = useRef(live);
+    liveRef.current = live;
     useEffect(() => {
         let timer = null;
         let stop = false;
         const tick = () => {
             const run = visible() ? load() : Promise.resolve();
-            run.finally(() => { if (!stop) timer = setTimeout(tick, THREAD_POLL_MS); });
+            run.finally(() => { if (!stop) timer = setTimeout(tick, liveRef.current ? LIVE_POLL_MS : THREAD_POLL_MS); });
         };
         tick();
         return () => { stop = true; clearTimeout(timer); };
     }, [load]);
+
+    // Тычок живого канала про этот чат — перечитать сразу (тычки одной пачки шлюза — одним запросом).
+    const cardId = data?.card?.id || 0;
+    const pulseTimer = useRef(null);
+    useEffect(() => {
+        if (!pulseTouches(pulse, cardId) || pulseTimer.current) return;
+        pulseTimer.current = setTimeout(() => { pulseTimer.current = null; load(); }, PULSE_COALESCE_MS);
+    }, [pulse]); // eslint-disable-line react-hooks/exhaustive-deps -- только на новый тычок
+    useEffect(() => () => clearTimeout(pulseTimer.current), []);
 
     const tail = useMemo(() => pendingTail(data?.pending, local, seenClients.current), [data, local]);
     const rows = useMemo(() => withDays([...messages, ...tail.map((item) => ({ ...item, from_me: true, pending: true }))]),
@@ -825,16 +886,28 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
 
     // Догруженные страницы сбрасывает только смена фильтра — не ответ, не «Взять в работу» (version).
     useEffect(() => { setExtra([]); setMoreAfterExtra(true); }, [paramsKey]);
+    const { live, pulse } = useChatPulse(api);
+    const liveRef = useRef(live);
+    liveRef.current = live;
     useEffect(() => {
         let timer = null;
         let stop = false;
         const tick = () => {
             const run = visible() ? loadList() : Promise.resolve();
-            run.finally(() => { if (!stop) timer = setTimeout(tick, LIST_POLL_MS); });
+            run.finally(() => { if (!stop) timer = setTimeout(tick, liveRef.current ? LIVE_POLL_MS : LIST_POLL_MS); });
         };
         tick();
         return () => { stop = true; clearTimeout(timer); };
     }, [loadList, version]);
+    // Тычок живого канала — список перечитывается сразу; тычки одной пачки шлюза — одним запросом.
+    const pulseTimer = useRef(null);
+    const loadListRef = useRef(loadList);
+    loadListRef.current = loadList;
+    useEffect(() => {
+        if (!pulse || pulseTimer.current) return;
+        pulseTimer.current = setTimeout(() => { pulseTimer.current = null; loadListRef.current(); }, PULSE_COALESCE_MS);
+    }, [pulse]);
+    useEffect(() => () => clearTimeout(pulseTimer.current), []);
 
     const loadMore = async () => {
         if (!list || loadingMore) return;
@@ -910,7 +983,7 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
             </div>
             <div className={`${selectedKey ? 'flex' : 'hidden md:flex'} relative isolate min-w-0 flex-1 flex-col bg-[#f2f2f7]`}>
                 {selectedKey ? (
-                    <Thread key={selectedKey} api={api} toast={toast} chatKey={selectedKey} caps={caps}
+                    <Thread key={selectedKey} api={api} toast={toast} chatKey={selectedKey} caps={caps} live={live} pulse={pulse}
                             onBack={() => setSelectedKey(null)} onOpenCard={onOpenCard} onChanged={changed} />
                 ) : (
                     <div className="flex flex-1 items-center justify-center px-6">

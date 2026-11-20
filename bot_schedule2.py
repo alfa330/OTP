@@ -54077,6 +54077,9 @@ try:
         # Линии Binotel «Удаленного КЦ» для рекрутеров (владелец 30.10.2026): сервис раздела
         # появляется ниже по файлу, поэтому берётся по требованию, а не при подключении.
         dial_list=lambda: _dial_list_service,
+        # Окно «Чаты» в реальном времени (hiring/wa_live.py): слушатель NOTIFY на своём соединении.
+        listen_connect=lambda: psycopg2.connect(**_build_postgres_connection_params()),
+        stream_limit=_env_int('HIRING_WA_STREAM_LIMIT', 20, minimum=2, maximum=WAITRESS_THREADS),
     ))
     app.register_blueprint(build_hiring_external_blueprint(
         db=db,

@@ -229,6 +229,21 @@ class GroupsAndBoardInterfaceTests(unittest.TestCase):
         self.assertIn('api.post(`/cards/${focus.cardId}/chat`)', chats)
         self.assertIn('.then(({ data }) => { if (data?.key) setSelectedKey(data.key); })', chats)
 
+    def test_chats_live_channel_wiring(self):
+        """Владелец 20.11.2026: «чаты работают не так быстро и не в реальном времени» — окно держит живой канал
+        (/api/hiring/wa/stream), по тычку перечитывает список и открытый чат; опрос — страховка, реже при живом канале."""
+        chats = (ROOT / 'src' / 'components' / 'hiring' / 'ChatsTab.jsx').read_text(encoding='utf-8')
+        self.assertIn("import { runSseStream } from '../common/sseClient';", chats)
+        self.assertIn("url: api.streamUrl('/wa/stream'),", chats)
+        self.assertIn("onEvent: (event, payload) => { if (event === 'chats') bump(payload); },", chats)
+        self.assertIn('if (now && !wasLive) bump({ all: 1 });', chats)
+        self.assertIn("const onVisibility = () => (visible() ? open() : close());", chats)
+        self.assertEqual(chats.count('liveRef.current ? LIVE_POLL_MS :'), 2)
+        self.assertIn('if (!pulseTouches(pulse, cardId) || pulseTimer.current) return;', chats)
+        self.assertIn('live={live} pulse={pulse}', chats)
+        self.assertIn('streamUrl: url,', self.view)
+        self.assertIn("headers: () => (headersRef.current ? headersRef.current() : {}),", self.view)
+
     def test_board_scrollbar_and_take_button(self):
         self.assertIn('className="board-scroll -mx-3 overflow-x-auto', self.board)
         block = self.styles[self.styles.index('.board-scroll::-webkit-scrollbar {'):]

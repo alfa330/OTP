@@ -122,6 +122,9 @@ const HiringView = ({ apiBaseUrl, withAccessTokenHeader, showToast, focusRequest
             patch: (path, body) => axios.patch(url(path), body || {}, config()),
             delete: (path) => axios.delete(url(path), config()),
             blob: (path, params) => axios.get(url(path), config({ params, responseType: 'blob' })),
+            // Живой канал окна «Чаты» читается fetch'ем (sseClient.js) — ему нужны адрес и те же заголовки входа.
+            streamUrl: url,
+            headers: () => (headersRef.current ? headersRef.current() : {}),
         };
     }, [apiBaseUrl]);
 
