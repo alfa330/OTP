@@ -446,7 +446,7 @@ SIGN_LINKS_API_LANES=4              # одновременных обращен�
 |---|---|---|
 | Ручка знаний | материал помощника вики в правах оператора СЗоВ: парк + вопрос → куски статей, куда регистрировать водителя, карточка парка с акциями, офисы, комиссии; для ИИ Syntony (`knowledge_api/`, инструкция партнёру — `docs/SYNTONY_KNOWLEDGE_API.md`) | `POST /api/knowledge/search`, `GET /api/knowledge/parks`, `GET /api/knowledge/ping` |
 | Ссылки на подписание | внешний вход раздела «Ссылка на подписание»: ссылки eGov по списку ИИН; открыта и ключу Syntony — их ИИ выдаёт ссылку водителю в чате (инструкция партнёру — `docs/SYNTONY_SIGN_LINKS_API.md`) | `POST /api/sign_links/external/links` |
-| Окно «Чатов ОП» в CRM | сервер CRM получает ссылку на окно чатов для своего пользователя (принимается и `Authorization: Bearer`) | `POST /api/wazzup/embed/launch` |
+| Окно «Чатов ОП» в CRM | сервер CRM получает ссылку на окно чатов для своего пользователя (принимается и `Authorization: Bearer`); с `window: "syntony"` — одноразовую ссылку на окно Syntony за его учётку iCORE (из списка доступа окна Syntony, без QR; `phone` — переписка водителя, `scope: "leads"` — «Заявки») | `POST /api/wazzup/embed/launch` |
 | Чаты OLX | чаты девяти кабинетов OLX: кабинеты, список чатов, переписка живьём, ответ кандидату, журнал откликов робота и подписка на события вебхуком (`olx_amo/partner_routes.py`, инструкция партнёру — `docs/OLX_PARTNER_API.md`) | `GET /api/olx/cabinets`, `GET /api/olx/threads…`, `POST /api/olx/threads/{cabinet}/{thread}/messages`, `GET /api/olx/journal`, `GET|PUT|DELETE /api/olx/webhook` |
 
 Ключ без нужной области получает `403`, неизвестный или отозванный — `401`.

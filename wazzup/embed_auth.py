@@ -23,6 +23,17 @@ CRM (POTOK_CRM_WEBHOOK_API_KEY): решение владельца.
 чужой учёткой, но не весь портал, — среди совпавших по ФИО бывают админы. Куки такой сессии
 не ставятся: окно живёт на токенах, а общие куки домена API перебили бы сессию портала в том
 же браузере.
+
+ОКНО SYNTONY (владелец, 20.11.2026: «этот iframe надо переключить на syntony iframe и
+передать им»). Номер Help Taxi ушёл из Wazzup, и CRM ставит у себя окно Syntony. Та же ручка
+с window: "syntony" отдаёт не адрес портала, а одноразовую ссылку Syntony (60 с) — CRM кладёт
+её в свой <iframe>, портал iCORE в окне не грузится вовсе. Учётку за пользователем CRM ищем
+теми же правилами (пара, иначе ФИО); дальше — правила окна Syntony (syntony_window/service.py:
+только список доступа, без QR). Номер водителя (phone/phones) — переписка водителя, без
+номера — «Чаты», scope: "leads" — «Заявки». Без window — прежнее окно «Чатов ОП», ничего не
+меняется: CRM переключается сама, когда Syntony откроет окно на её адресе. Пользователь CRM
+без учётки по-прежнему получает адрес окна портала (window: "chats") — один вход паролем,
+пара запоминается, и со следующего раза ему придёт окно Syntony.
 """
 import hashlib
 import hmac
@@ -47,12 +58,29 @@ log = logging.getLogger(__name__)
 SCOPE = 'crm_embed'
 KEY_ENV = crm_identity.KEY_ENV
 LAUNCH_TTL_SECONDS = 120
+# Ссылка Syntony живёт 60 секунд (ТЗ Syntony, раздел 8) — столько и сообщаем CRM.
+SYNTONY_LINK_TTL_SECONDS = 60
 ALLOWED_PREFIXES = ('/api/wazzup/',)
 ALLOWED_PATHS = frozenset({'/api/auth/me', '/api/auth/refresh', '/api/logout', '/api/login',
                            '/api/auth/embed-launch'})
 SCOPE_REFUSAL = 'В окне CRM открыты только «Чаты ОП»'
 MAX_CODE = 100
 DISMISSED = ('fired', 'dismissal')
+
+# Какое окно просит CRM: прежнее «Чаты ОП» (по умолчанию) или окно Syntony.
+WINDOW_CHATS = 'chats'
+WINDOW_SYNTONY = 'syntony'
+WINDOWS = (WINDOW_CHATS, WINDOW_SYNTONY)
+
+
+def requested_window(payload):
+    """window из тела запроса CRM → 'chats' | 'syntony', или None — такого окна нет."""
+    value = payload.get('window') if isinstance(payload, dict) else None
+    if value is None or value == '':
+        return WINDOW_CHATS
+    if isinstance(value, str) and value.strip().lower() in WINDOWS:
+        return value.strip().lower()
+    return None
 
 
 def path_allowed(path):
@@ -254,13 +282,27 @@ class RateLimiter:
             return True
 
 
+def _open_syntony_window_for(db):
+    """Окно Syntony за учётку iCORE: (HTTP-статус, тело как у Syntony). Пакет окна Syntony
+    подключается при первом запросе — вход в «Чаты ОП» от него не зависит."""
+    def open_window(user_id, payload):
+        from syntony_window import service as syntony_service
+        reply = syntony_service.open_for_partner(db, user_id, payload)
+        return reply.status, reply.body
+    return open_window
+
+
 def build_embed_blueprint(*, db, preflight, portal_base_url, load_user, issue_session,
-                          client_ip=lambda: request.remote_addr):
+                          client_ip=lambda: request.remote_addr, open_syntony_window=None):
     """load_user(user_id) -> строка users (db.get_user).
     issue_session(user, auth_transport, crm_user_id) -> ответ Flask: сессия scope crm_embed,
     помеченная как сессия из CRM, токены, без кук, чаты открыты без QR.
-    client_ip() -> адрес человека за прокси Render (bot_schedule2._client_ip)."""
+    client_ip() -> адрес человека за прокси Render (bot_schedule2._client_ip).
+    open_syntony_window(user_id, payload) -> (статус, тело): окно Syntony за учётку
+    (syntony_window/service.py); шов для тестов."""
     bp = Blueprint('wazzup_embed', __name__)
+    if open_syntony_window is None:
+        open_syntony_window = _open_syntony_window_for(db)
     per_crm_user = RateLimiter(30)
     overall = RateLimiter(600)
     per_ip = RateLimiter(60)
@@ -287,45 +329,85 @@ def build_embed_blueprint(*, db, preflight, portal_base_url, load_user, issue_se
                 if not expected and status in (partner_auth.NOT_READY, partner_auth.ERROR):
                     return jsonify(error='Вход из CRM не настроен', code='EMBED_DISABLED'), 503
                 return jsonify(error='unauthorized'), 401
-        identity = crm_identity.clean_identity(request.get_json(silent=True))
+        payload = request.get_json(silent=True)
+        identity = crm_identity.clean_identity(payload)
         if identity is None:
             return jsonify(error='Нужен crmUserId — id пользователя CRM', code='BAD_IDENTITY'), 400
         crm_user_id, crm_user_name = identity
+        window = requested_window(payload)
+        if window is None:
+            return jsonify(error='Неизвестное окно: window — "chats" или "syntony"', code='BAD_WINDOW'), 400
 
-        def _note(linked, how, user_id=None):
+        def _note(linked, how, user_id=None, *, outcome=None, http_status=200, syntony_code=''):
             if not partner:
                 return
+            if linked:
+                result = 'учётка %s, %s' % (user_id, how)
+                if window == WINDOW_SYNTONY:
+                    result += ', окно Syntony' + (' — %s' % syntony_code if syntony_code else '')
+            else:
+                result = how
+            details = {'crm_user_id': crm_user_id, 'crm_user_name': crm_user_name,
+                       'linked': bool(linked), 'matched_by': how, 'icore_user_id': user_id,
+                       'window': window}
+            if syntony_code:
+                details['syntony_code'] = syntony_code
             partner_journal.record(
                 db, partner, scope=partner_scopes.CRM_EMBED, endpoint=request.path,
-                outcome='ok' if linked else 'no_link', http_status=200,
+                outcome=outcome or ('ok' if linked else 'no_link'), http_status=http_status,
                 summary='CRM %s%s — %s' % (
-                    crm_user_id, ' (%s)' % crm_user_name if crm_user_name else '',
-                    'учётка %s, %s' % (user_id, how) if linked else how),
-                details={'crm_user_id': crm_user_id, 'crm_user_name': crm_user_name,
-                         'linked': bool(linked), 'matched_by': how, 'icore_user_id': user_id},
-                ip=client_ip(), user_agent=request.headers.get('User-Agent'))
+                    crm_user_id, ' (%s)' % crm_user_name if crm_user_name else '', result),
+                details=details, ip=client_ip(), user_agent=request.headers.get('User-Agent'))
 
         if not overall.allow('all') or not per_crm_user.allow(crm_user_id):
             return jsonify(error='Слишком часто', code='RATE_LIMITED'), 429, {'Retry-After': '60'}
         with db._get_cursor() as cursor:
             user_id, how = resolve_user(cursor, crm_user_id, crm_user_name)
             if user_id is None:
+                # И для окна Syntony — адрес окна портала: человек один раз войдёт своей
+                # учёткой, окно запомнит пару, и со следующего раза придёт окно Syntony.
                 url = launch_url(portal_base_url, crm_user_id=crm_user_id, crm_user_name=crm_user_name,
                                  key=expected)
                 log.info('Чаты ОП: вход из CRM без учётки (%s)', how)
                 _note(False, how)
-                return jsonify(status='success', linked=False, reason=how, url=url)
+                return jsonify(status='success', linked=False, reason=how, window=WINDOW_CHATS, url=url)
             if how == 'name':
                 crm_identity.bind(cursor, user_id, crm_user_id, crm_user_name)
-            code = create_launch(cursor, user_id, crm_user_id)
+            code = create_launch(cursor, user_id, crm_user_id) if window == WINDOW_CHATS else None
         user = load_user(user_id)
+        icore_user = {'id': user_id, 'name': user[2] if user else None}
+        if window == WINDOW_SYNTONY:
+            # Курсор уже закрыт: Syntony отвечает до 10 с, соединение пула ей не держим.
+            try:
+                status, body = open_syntony_window(user_id, payload)
+            except Exception:  # noqa: BLE001
+                # Без тела запроса и ответа в журнале: там почта оператора и ссылка окна.
+                log.exception('Окно Syntony: вход из CRM — учётка %s, внутренняя ошибка', user_id)
+                status, body = 500, {'error': {'code': 'icore_internal_error',
+                                               'message': 'Внутренняя ошибка iCORE. Попробуйте ещё раз.'}}
+            body = body if isinstance(body, dict) else {}
+            url = body.get('url') if status == 200 else None
+            if url:
+                log.info('Окно Syntony: вход из CRM — учётка %s (%s)', user_id, how)
+                _note(True, how, user_id)
+                return jsonify(status='success', linked=True, matchedBy=how, window=WINDOW_SYNTONY,
+                               url=url, expiresAt=body.get('expiresAt'),
+                               expiresInSeconds=SYNTONY_LINK_TTL_SECONDS, icoreUser=icore_user)
+            error = body.get('error') if isinstance(body.get('error'), dict) else {}
+            error_code = str(error.get('code') or 'icore_unreachable')[:64]
+            status = status if isinstance(status, int) and 400 <= status <= 599 else 502
+            log.info('Окно Syntony: вход из CRM — учётка %s (%s), отказ %s (HTTP %s)',
+                     user_id, how, error_code, status)
+            _note(True, how, user_id, outcome='syntony_error', http_status=status, syntony_code=error_code)
+            return jsonify(status='error', linked=True, matchedBy=how, window=WINDOW_SYNTONY,
+                           error={'code': error_code, 'message': str(error.get('message') or '')[:300]},
+                           icoreUser=icore_user), status
         log.info('Чаты ОП: вход из CRM — учётка %s (%s)', user_id, how)
         _note(True, how, user_id)
-        return jsonify(status='success', linked=True, matchedBy=how,
+        return jsonify(status='success', linked=True, matchedBy=how, window=WINDOW_CHATS,
                        url=launch_url(portal_base_url, crm_user_id=crm_user_id, crm_user_name=crm_user_name,
                                       code=code, user_id=user_id, key=expected),
-                       expiresInSeconds=LAUNCH_TTL_SECONDS,
-                       icoreUser={'id': user_id, 'name': user[2] if user else None})
+                       expiresInSeconds=LAUNCH_TTL_SECONDS, icoreUser=icore_user)
 
     @bp.route('/api/auth/embed-launch', methods=['POST', 'OPTIONS'])
     def embed_exchange():

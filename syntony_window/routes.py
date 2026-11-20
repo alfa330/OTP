@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 from flask import Blueprint, jsonify, request, send_file
 
-from . import access, client, queries, report, rules
+from . import access, client, queries, report, rules, service
 
 logger = logging.getLogger(__name__)
 
@@ -126,36 +126,18 @@ def build_syntony_window_blueprint(*, db, require_api_key, build_cors_preflight_
 
     # ── Разговор с Syntony ───────────────────────────────────────────────────
 
+    # Выдача окна — общая с окном для CRM (service.py): одни правила запроса, журнала и
+    # отметки о связи, где бы окно ни открывали.
     def _ask(window, *, user_id, name, email):
         """Запросить ссылку за человека. None — ключ Syntony на сервере не задан."""
-        config = load_config()
-        if config is None:
-            return None
-        body = rules.build_request_body(window, user_id=user_id, name=name, email=email)
-        return request_window(config, body)
+        return service.ask(window, user_id=user_id, name=name, email=email,
+                           load_config=load_config, request_window=request_window)
 
     def _remember_link(user_id, reply, known_state):
-        """Записать, что Syntony ответила о связи, — только если ответ о ней и он новый."""
-        state = rules.link_state_of(reply.status, reply.body)
-        if not state or state == known_state:
-            return
-        try:
-            with db._get_cursor() as cursor:
-                store.set_link_state(cursor, user_id, state)
-        except Exception:  # noqa: BLE001
-            # Отметка о связи — справка для списка доступа; окно из-за неё не падает.
-            logger.exception('syntony_window: не записалось состояние связи пользователя %s', user_id)
+        service.remember_link(db, store, user_id, reply, known_state, log=logger)
 
     def _note_reply(what, user_id, reply):
-        code = reply.code
-        if not code:
-            return
-        if code not in rules.SYNTONY_ERROR_CODES and code not in rules.ICORE_ERROR_CODES:
-            logger.warning('syntony_window: незнакомый код ошибки Syntony %r (HTTP %s, %s, пользователь %s)',
-                           code[:64], reply.status, what, user_id)
-        else:
-            logger.info('syntony_window: %s, пользователь %s — %s (HTTP %s)',
-                        what, user_id, code, reply.status)
+        service.note_reply(what, user_id, reply, log=logger)
 
     def _syntony_note(reply):
         """Что сказать ведущему список о разговоре с Syntony — рядом со строкой человека."""

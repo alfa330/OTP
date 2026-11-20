@@ -34,9 +34,17 @@ class FakeDb:
         self.binding, self.users, self.consumed = binding, list(users), consumed
         self.pairs = dict(pairs or {})  # учётка → пользователь CRM, за которым она закреплена
         self.queries, self.launches, self.binds = [], [], []
+        self.open = 0  # сколько курсоров открыто сейчас
 
     @contextmanager
     def _get_cursor(self):
+        self.open += 1
+        try:
+            yield from self._cursor()
+        finally:
+            self.open -= 1
+
+    def _cursor(self):
         db = self
 
         class Cursor:
@@ -69,7 +77,7 @@ class FakeDb:
         yield Cursor()
 
 
-def app_for(db, *, users=None, issued=None):
+def app_for(db, *, users=None, issued=None, syntony=None):
     users = users if users is not None else {}
     issued = issued if issued is not None else []
 
@@ -81,8 +89,30 @@ def app_for(db, *, users=None, issued=None):
     app.register_blueprint(embed_auth.build_embed_blueprint(
         db=db, preflight=lambda: ('', 204), portal_base_url=BASE,
         load_user=lambda user_id: users.get(user_id),
-        issue_session=issue, client_ip=lambda: '203.0.113.7'))
+        issue_session=issue, client_ip=lambda: '203.0.113.7',
+        open_syntony_window=syntony))
     return app.test_client()
+
+
+class FakeSyntony:
+    """Окно Syntony за учётку (syntony_window/service.py): копит вызовы, отвечает по очереди."""
+
+    def __init__(self, *replies, db=None):
+        self.replies = list(replies) or [(200, {'url': SYNTONY_URL, 'expiresAt': '2026-11-20T09:12:00Z'})]
+        self.calls = []
+        self.db, self.open_cursors = db, []
+
+    def __call__(self, user_id, payload):
+        self.calls.append((user_id, payload))
+        if self.db is not None:
+            self.open_cursors.append(self.db.open)
+        reply = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+SYNTONY_URL = 'https://app.syntony.kz/ru/embed/one-time-code'
 
 
 def launch(client, body, key=KEY):
@@ -185,6 +215,118 @@ def test_rate_limiter_counts_per_key_inside_the_window():
 
 
 # ── ссылка для CRM ──────────────────────────────────────────────────────────
+
+# ── окно Syntony для CRM (владелец, 20.11.2026: «переключить на syntony iframe») ─────────
+
+def test_without_window_the_crm_gets_the_portal_window_as_before(key_env):
+    syntony = FakeSyntony()
+    db = FakeDb(binding=42)
+    for body in ({'crmUserId': '352'}, {'crmUserId': '352', 'window': 'chats'}, {'crmUserId': '352', 'window': ''}):
+        data = launch(app_for(db, users={42: user_row(42)}, syntony=syntony), body).get_json()
+        assert (data['window'], data['expiresInSeconds']) == ('chats', embed_auth.LAUNCH_TTL_SECONDS)
+        assert urlsplit(data['url']).netloc == 'portal.example.test'
+    assert len(db.launches) == 3 and syntony.calls == []
+
+
+def test_syntony_window_for_a_known_pair_is_the_link_of_syntony(key_env):
+    db = FakeDb(binding=42)
+    syntony = FakeSyntony(db=db)
+    body = {'crmUserId': '352', 'crmUserName': 'Айгерим', 'window': 'Syntony', 'phone': '+7 701 019 02 19'}
+    response = launch(app_for(db, users={42: user_row(42)}, syntony=syntony), body)
+    data = response.get_json()
+    assert response.status_code == 200
+    assert data == {'status': 'success', 'linked': True, 'matchedBy': 'binding', 'window': 'syntony',
+                    'url': SYNTONY_URL, 'expiresAt': '2026-11-20T09:12:00Z',
+                    'expiresInSeconds': embed_auth.SYNTONY_LINK_TTL_SECONDS,
+                    'icoreUser': {'id': 42, 'name': 'Иванова Айгерим'}}
+    assert syntony.calls == [(42, body)], 'за учётку пары, тело CRM — целиком: окно и номер разбирает service'
+    assert syntony.open_cursors == [0], 'Syntony отвечает до 10 с — соединение пула ей не держим'
+    assert not db.launches, 'кода входа в портал для окна Syntony нет'
+
+
+def test_syntony_window_by_name_remembers_the_pair(key_env):
+    syntony = FakeSyntony()
+    db = FakeDb(users=[{'id': 7, 'name': 'Аскаров Адильжан', 'role': 'admin'}])
+    data = launch(app_for(db, users={7: user_row(7, 'Аскаров Адильжан', 'admin')}, syntony=syntony),
+                  {'crmUserId': '500', 'crmUserName': 'Адильжан Аскаров', 'window': 'syntony'}).get_json()
+    assert (data['window'], data['matchedBy'], data['icoreUser']['id']) == ('syntony', 'name', 7)
+    assert db.binds == [(7, '500', 'Адильжан Аскаров')] and syntony.calls[0][0] == 7
+
+
+def test_refusal_of_syntony_keeps_its_code_and_status(key_env):
+    syntony = FakeSyntony((409, {'error': {'code': 'operator_not_linked', 'message': 'Оператор не связан…'}}))
+    response = launch(app_for(FakeDb(binding=42), users={42: user_row(42)}, syntony=syntony),
+                      {'crmUserId': '352', 'window': 'syntony'})
+    data = response.get_json()
+    assert response.status_code == 409
+    assert (data['status'], data['linked'], data['window'], data['error']) == (
+        'error', True, 'syntony', {'code': 'operator_not_linked', 'message': 'Оператор не связан…'})
+    assert 'url' not in data
+
+
+@pytest.mark.parametrize('reply,status,code', [
+    ((403, {'error': {'code': 'icore_no_access', 'message': 'нет в списке'}}), 403, 'icore_no_access'),
+    ((409, {'url': SYNTONY_URL, 'error': {'code': 'operator_not_linked'}}), 409, 'operator_not_linked'),
+    ((200, {'expiresAt': 'x'}), 502, 'icore_unreachable'),
+    ((302, {'error': {'code': 'embed_disabled'}}), 502, 'embed_disabled'),
+    ((503, 'не словарь'), 503, 'icore_unreachable'),
+    (RuntimeError('база упала'), 500, 'icore_internal_error'),
+])
+def test_any_failure_of_the_syntony_window_is_a_json_refusal_without_a_link(key_env, reply, status, code):
+    response = launch(app_for(FakeDb(binding=42), users={42: user_row(42)}, syntony=FakeSyntony(reply)),
+                      {'crmUserId': '352', 'window': 'syntony'})
+    data = response.get_json()
+    assert (response.status_code, data['error']['code'], data['window']) == (status, code, 'syntony')
+    assert 'url' not in data
+
+
+def test_syntony_window_without_an_account_offers_the_one_time_sign_in(key_env):
+    syntony = FakeSyntony()
+    db = FakeDb(users=[])
+    data = launch(app_for(db, syntony=syntony),
+                  {'crmUserId': '352', 'crmUserName': 'Иванова Айгерим', 'window': 'syntony'}).get_json()
+    assert (data['linked'], data['reason'], data['window']) == (False, 'NOT_FOUND', 'chats')
+    query = parse_qs(urlsplit(data['url']).query)
+    assert 'launch' not in query and crm_identity.identity_signed(
+        KEY, '352', 'Иванова Айгерим', query['crmExp'][0], query['crmSig'][0])
+    assert syntony.calls == [] and not db.launches
+
+
+@pytest.mark.parametrize('window', ['wazzup', 'portal', 1, ['syntony'], {'a': 1}])
+def test_unknown_window_is_refused_before_anything(key_env, window):
+    syntony = FakeSyntony()
+    db = FakeDb(binding=42)
+    response = launch(app_for(db, syntony=syntony), {'crmUserId': '352', 'window': window})
+    assert (response.status_code, response.get_json()['code']) == (400, 'BAD_WINDOW')
+    assert db.queries == [] and syntony.calls == []
+
+
+def test_syntony_window_reaches_the_rules_of_the_syntony_window_by_default(key_env):
+    # Без подмены вход CRM зовёт настоящий syntony_window/service.py: учётки нет в списке
+    # доступа (поддельная база его не знает) — отказ icore_no_access, и в Syntony ни шагу.
+    response = launch(app_for(FakeDb(binding=42), users={42: user_row(42)}),
+                      {'crmUserId': '352', 'window': 'syntony'})
+    assert (response.status_code, response.get_json()['error']['code']) == (403, 'icore_no_access')
+
+
+def test_partner_journal_names_the_window_and_the_refusal(monkeypatch):
+    from partner_keys import auth as partner_auth, journal as partner_journal
+
+    monkeypatch.delenv(embed_auth.KEY_ENV, raising=False)
+    partner = {'id': 7, 'name': 'CRM', 'mark': 'abcd1234', 'scopes': ['crm_embed']}
+    recorded = []
+    monkeypatch.setattr(partner_auth, 'lookup', lambda db, presented, *, scope: (partner_auth.OK, partner))
+    monkeypatch.setattr(partner_journal, 'record', lambda db, key, **fields: recorded.append(fields))
+    syntony = FakeSyntony((200, {'url': SYNTONY_URL}), (409, {'error': {'code': 'operator_not_linked'}}))
+    client = app_for(FakeDb(binding=10), users={10: user_row(10, 'Иван Петров')}, syntony=syntony)
+    launch(client, {'crmUserId': '352', 'window': 'syntony'}, key='otpk_partner')
+    launch(client, {'crmUserId': '352', 'window': 'syntony'}, key='otpk_partner')
+    ok, refused = recorded
+    assert (ok['outcome'], ok['http_status'], ok['details']['window']) == ('ok', 200, 'syntony')
+    assert 'окно Syntony' in ok['summary'] and SYNTONY_URL not in str(ok)
+    assert (refused['outcome'], refused['http_status'], refused['details']['syntony_code']) == (
+        'syntony_error', 409, 'operator_not_linked')
+
 
 def test_launch_needs_the_configured_key(monkeypatch):
     monkeypatch.delenv(embed_auth.KEY_ENV, raising=False)
