@@ -11,6 +11,10 @@
     начисление мотивации                    рекрутер
     номер WhatsApp найма остановлен / не на связи / телефон давно не в сети — руководители рекрутинга
 
+Руководитель рекрутинга для тревог — HR и выдача «lead» (queries.alert_user_ids); супер-админам раздел открыт, но
+тревоги — только с выдачей (владелец 20.11.2026). Тревога номера в колоколе одна — о нынешнем состоянии: новая гасит
+прежние, прошедшая беда гаснет сама (сторож, HiringService.wa_watchdog).
+
 В Telegram дублируются только нарушения сроков: возврат в пул по сроку и просроченные
 задачи (утренняя сводка), — и остановка номера WhatsApp найма: пока он стоит, отклики
 из рекламы в воронку не попадают. Остальное — колокол. Отправка живёт в bot_schedule2
@@ -75,7 +79,7 @@ def next_contact(cursor, card, now):
 
 
 def returned_to_pool(cursor, card, recruiter_id, now):
-    leads = queries.lead_user_ids(cursor)
+    leads = queries.alert_user_ids(cursor)
     recipients = set(leads) | ({int(recruiter_id)} if recruiter_id else set())
     return queries.push_notification(cursor, recipients, KIND_RETURNED,
                                      'Вернулась в пул: %s' % card_title(card),
@@ -138,11 +142,12 @@ def returned_html(card, link):
 
 
 def whatsapp_alert(cursor, alert, now, tone='warning'):
-    """Тревога номера WhatsApp найма — руководителям рекрутинга, одна на ключ (hiring/whatsapp.alert_for).
-    Отдаёт тех, кому строка колокола создана впервые: им же уходит Telegram."""
+    """Тревога номера WhatsApp найма — руководителям рекрутинга, одна на ключ (hiring/whatsapp.alert_for). Новая
+    гасит прежние: они о прошлом состоянии номера. Отдаёт тех, кому строка колокола создана впервые: им же Telegram."""
     key, title, body = alert
+    queries.wa_alerts_read(cursor, now, except_key=key)
     created = []
-    for user_id in queries.lead_user_ids(cursor):
+    for user_id in queries.alert_user_ids(cursor):
         if queries.push_notification(cursor, [user_id], KIND_WHATSAPP, title, body, None, now, tone=tone, dedupe_key=key):
             created.append(user_id)
     return created

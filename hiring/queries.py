@@ -135,6 +135,42 @@ def lead_user_ids(cursor):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
+def alert_user_ids(cursor):
+    """Кому тревоги раздела — номер WhatsApp найма, возврат карточки в пул по сроку: руководители рекрутинга (глава и
+    сотрудники HR, выдачи «lead»). Супер-админы — только с выдачей: раздел им открыт, но тревоги не их (владелец
+    20.11.2026: «у всех суперадминов какие-то уведомления касательно данного раздела, которые не исчезают»)."""
+    cursor.execute("""
+        SELECT u.id FROM users u
+          LEFT JOIN departments d ON d.id = u.department_id
+         WHERE u.status NOT IN ('fired', 'dismissal')
+           AND (lower(COALESCE(d.code, '')) = 'hr'
+                OR EXISTS (SELECT 1 FROM departments h WHERE h.head_user_id = u.id AND lower(h.code) = 'hr')
+                OR EXISTS (SELECT 1 FROM hiring_people p WHERE p.user_id = u.id AND p.is_active AND p.kind = 'lead'))
+    """)
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
+def wa_alerts_read(cursor, now, *, prefixes=None, except_key=None, before=None, not_users=None):
+    """Погасить тревоги номера WhatsApp найма в колоколе (строки без карточки — их не гасит открытие карточки): по виду
+    ключа (prefixes — 'wa:park:' и т. п., hiring/whatsapp.alert_for), кроме тревоги с ключом except_key, созданные
+    раньше before, у всех, кроме not_users (кому тревоги положены). Возвращает, сколько погашено."""
+    where, params = ["kind = 'whatsapp'", "read_at IS NULL"], []
+    if prefixes:
+        where.append("(" + " OR ".join(["dedupe_key LIKE %s"] * len(prefixes)) + ")")
+        params.extend(prefix + '%' for prefix in prefixes)
+    if except_key:
+        where.append("dedupe_key IS DISTINCT FROM %s")
+        params.append(except_key)
+    if before is not None:
+        where.append("created_at < %s")
+        params.append(before)
+    if not_users is not None:
+        where.append("NOT (user_id = ANY(%s))")
+        params.append([int(user_id) for user_id in not_users])
+    cursor.execute("UPDATE hiring_notifications SET read_at = %s WHERE " + " AND ".join(where), [now] + params)
+    return cursor.rowcount
+
+
 def recruiter_user_ids(cursor):
     cursor.execute("""
         SELECT p.user_id FROM hiring_people p JOIN users u ON u.id = p.user_id

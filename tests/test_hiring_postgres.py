@@ -865,6 +865,9 @@ def test_auto_return_and_next_contact_notifications(world):
         kinds = {row['kind'] for row in queries.bell(cur, REC1, 20)[1]}
         assert notices.KIND_RETURNED in kinds
         assert notices.KIND_RETURNED in {row['kind'] for row in queries.bell(cur, HR_HEAD, 20)[1]}
+        # Супер-админу без выдачи «Вернулась в пул» не приходит (владелец 20.11.2026).
+        cur.execute("SELECT user_id FROM hiring_notifications WHERE kind = %s ORDER BY user_id", (notices.KIND_RETURNED,))
+        assert [row[0] for row in cur.fetchall()] == [HR_HEAD, LEAD_GRANT, REC1]
         assert queries.get_card(cur, fresh['id'])['stage'] == 'in_work'
     assert len(sent) == 1 and sent[0][0] == 1010 and 'вернулась в пул' in sent[0][1]
     assert sent[0][2]['inline_keyboard'][0][0]['url'] == 'https://portal.test/?view=hiring&card=%s' % idle['id']
@@ -2229,6 +2232,13 @@ def test_whatsapp_edit_revoke_and_access(world):
     assert stranger.value.status == 404
 
 
+def _unread_alerts(world):
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT user_id, title FROM hiring_notifications WHERE kind = 'whatsapp' AND read_at IS NULL "
+                    "ORDER BY user_id, id")
+        return [tuple(row) for row in cur.fetchall()]
+
+
 def test_whatsapp_poll_commands_alerts_and_watchdog(world):
     service, clock = world['service'], world['clock']
     lead = ctx_of(world, HR_HEAD)
@@ -2253,7 +2263,8 @@ def test_whatsapp_poll_commands_alerts_and_watchdog(world):
     assert service.wa_status(lead)['pending'] is None
     service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'number': '77001112233',
                                                        'connected_since': '2026-10-15T12:00:00'}})
-    # Остановка — тревога руководителям один раз, сколько бы опросов ни пришло; Telegram — у кого он есть.
+    # Остановка — тревога руководителям рекрутинга один раз, сколько бы опросов ни пришло; Telegram — у кого он есть.
+    # Супер-админу без выдачи — нет (владелец 20.11.2026: «у всех суперадминов какие-то уведомления… не исчезают»).
     parked = {'state': 'parked', 'detail': {'paired': True, 'park': {'reason': 'temp_ban', 'code': 101,
                                                                       'since': '2026-10-15T12:01:00', 'until': '2026-10-16T12:01:00'}}}
     service.wa_poll(parked)
@@ -2261,7 +2272,7 @@ def test_whatsapp_poll_commands_alerts_and_watchdog(world):
     with world['db']._get_cursor() as cur:
         cur.execute("SELECT user_id, body, tone FROM hiring_notifications WHERE kind = 'whatsapp' ORDER BY user_id")
         rows = cur.fetchall()
-    assert [row[0] for row in rows] == [SUPER, HR_HEAD, LEAD_GRANT]
+    assert [row[0] for row in rows] == [HR_HEAD, LEAD_GRANT]
     assert all('временно ограничил' in row[1] and row[2] == 'warning' for row in rows)
     assert [chat_id for chat_id, _text, _markup in world['sent']] == [2020]
     assert service.wa_status(lead)['reason'].startswith('WhatsApp временно ограничил номер')
@@ -2272,21 +2283,68 @@ def test_whatsapp_poll_commands_alerts_and_watchdog(world):
     service.wa_poll({'state': 'connected', 'ack': resume['id'],
                      'detail': {'paired': True, 'connected_since': '2026-10-15T13:00:00',
                                 'phone_seen_at': (NOW - timedelta(days=13)).isoformat()}})
-    with world['db']._get_cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM hiring_notifications WHERE kind = 'whatsapp' AND title LIKE '%%снова%%'")
-        assert cur.fetchone()[0] == 3
+    # В колоколе — одна тревога о нынешнем состоянии: «снова подключён» гасит «остановлен».
+    assert _unread_alerts(world) == [(HR_HEAD, 'WhatsApp найма снова подключён'), (LEAD_GRANT, 'WhatsApp найма снова подключён')]
     assert len(world['sent']) == 1
     # Сторож: телефон 13 дней не в сети — тревога раз в сутки.
     assert service.wa_watchdog() == 'wa:phone:2026-10-15'
     service.wa_watchdog()
     assert len(world['sent']) == 2
+    assert {title for _user, title in _unread_alerts(world)} == {'WhatsApp найма: телефон давно не в сети'}
     # Сервис замолчал дольше трёх минут — «не на связи», тревога один раз.
     clock.now = NOW + timedelta(minutes=5)
     assert service.wa_watchdog().startswith('wa:offline:')
     assert service.wa_watchdog() is None
     assert service.wa_status(lead)['state'] == 'offline' and len(world['sent']) == 3
+    assert {title for _user, title in _unread_alerts(world)} == {'WhatsApp найма: сервис на шлюзе не на связи'}
     with pytest.raises(HiringError):
         service.wa_command(lead, 'logout')
+
+
+def test_whatsapp_alerts_go_out_when_trouble_is_over(world):
+    """Тревоги номера не висят вечно (владелец 20.11.2026: «уведомления… которые не исчезают»): после новой привязки по
+    QR (без «снова подключён») сторож гасит «остановлен», телефон снова в сети — «давно не в сети», «снова подключён» —
+    через сутки, супер-админу без выдачи — всё, что успело прийти; супер-админ с выдачей «lead» тревоги получает."""
+    service = world['service']
+    with world['db']._get_cursor() as cur:
+        assert sorted(queries.alert_user_ids(cur)) == [HR_HEAD, LEAD_GRANT]
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True}})
+    service.wa_poll({'state': 'parked', 'detail': {'paired': True, 'park': {'reason': 'logged_out',
+                                                                             'since': '2026-10-15T12:00:00'}}})
+    assert _unread_alerts(world) == [(HR_HEAD, 'WhatsApp найма: сервис остановлен'),
+                                     (LEAD_GRANT, 'WhatsApp найма: сервис остановлен')]
+    # Новая привязка: «остановлен» → привязка по QR → на связи. «Снова подключён» так не приходит — гасит сторож.
+    service.wa_poll({'state': 'pairing', 'detail': {'qr': '2@fresh'}})
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'phone_seen_at': NOW.isoformat()}})
+    # Строка из прошлого: тревога, пришедшая супер-админу до правила, — сторож гасит и её.
+    with world['db']._get_cursor() as cur:
+        queries.push_notification(cur, [SUPER], 'whatsapp', 'WhatsApp найма снова подключён', 'старая', None, NOW,
+                                  dedupe_key='wa:back:old')
+    assert [user for user, _title in _unread_alerts(world)] == [SUPER, HR_HEAD, LEAD_GRANT]
+    assert service.wa_watchdog() is None
+    assert _unread_alerts(world) == []
+    # Телефон давно не в сети — тревога; телефон вышел в WhatsApp — гаснет.
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'phone_seen_at': (NOW - timedelta(days=13)).isoformat()}})
+    assert service.wa_watchdog() == 'wa:phone:2026-10-15'
+    assert len(_unread_alerts(world)) == 2
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'phone_seen_at': NOW.isoformat()}})
+    service.wa_watchdog()
+    assert _unread_alerts(world) == []
+    # «Снова подключён» — висит сутки, потом гаснет сам.
+    service.wa_poll({'state': 'parked', 'detail': {'paired': True, 'park': {'reason': 'refused', 'since': '2026-10-15T12:05:00'}}})
+    service.wa_poll({'state': 'connected', 'detail': {'paired': True, 'phone_seen_at': NOW.isoformat(),
+                                                       'connected_since': '2026-10-15T12:06:00'}})
+    service.wa_watchdog()
+    assert {title for _user, title in _unread_alerts(world)} == {'WhatsApp найма снова подключён'}
+    with world['db']._get_cursor() as cur:
+        cur.execute("UPDATE hiring_notifications SET created_at = created_at - interval '25 hours' WHERE dedupe_key LIKE %s",
+                    ('wa:back:%',))
+    service.wa_watchdog()
+    assert _unread_alerts(world) == []
+    # Супер-админ с выдачей «lead» — руководитель рекрутинга: тревоги ему приходят.
+    with world['db']._get_cursor() as cur:
+        queries.upsert_person(cur, SUPER, 'lead', SUPER, NOW)
+        assert SUPER in queries.alert_user_ids(cur)
 
 
 # ─── Окно «Чаты»: переписка из портала (владелец 19.11.2026, hiring/wa_chat.py) ─────────────────────────────

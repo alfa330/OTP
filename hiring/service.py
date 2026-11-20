@@ -2171,7 +2171,12 @@ class HiringService:
 
     def wa_watchdog(self):
         """Сторож (раз в минуту): сервис замолчал — «не на связи» и тревога; телефон с номером давно не
-        выходил в WhatsApp — тревога раз в сутки (через 14 дней привязка слетает)."""
+        выходил в WhatsApp — тревога раз в сутки (через 14 дней привязка слетает).
+
+        Он же гасит тревоги, которые больше не про сейчас (владелец 20.11.2026: уведомления «не исчезают» — у тревог
+        нет карточки, открытием которой гаснет остальное): номер на связи — «остановлен» и «не на связи» (после новой
+        привязки по QR «снова подключён» не приходит), телефон снова в сети — «давно не в сети», «снова подключён» —
+        через сутки, у тех, кому тревоги больше не положены (супер-админы без выдачи), — все."""
         now = self._now()
         alert, chats = None, {}
         with self._cursor() as cursor:
@@ -2186,12 +2191,17 @@ class HiringService:
                          'С %s новые сообщения в воронку не попадают' % last_run.strftime('%d.%m %H:%M'))
                 chats = queries.telegram_chats(cursor, notices.whatsapp_alert(cursor, alert, now))
             elif row.get('state') == whatsapp.CONNECTED:
+                queries.wa_alerts_read(cursor, now, prefixes=('wa:park:', 'wa:offline:'))
                 days = whatsapp.phone_seen_days(detail, now)
                 if days is not None and days >= whatsapp.PHONE_ALERT_DAYS:
                     alert = ('wa:phone:%s' % now.date().isoformat(), 'WhatsApp найма: телефон давно не в сети',
                              'Телефон с номером не выходил в WhatsApp %d дн. Откройте на нём WhatsApp Business — '
                              'через 14 дней без телефона привязка слетает' % days)
                     chats = queries.telegram_chats(cursor, notices.whatsapp_alert(cursor, alert, now))
+                else:
+                    queries.wa_alerts_read(cursor, now, prefixes=('wa:phone:',))
+            queries.wa_alerts_read(cursor, now, prefixes=('wa:back:',), before=now - timedelta(days=1))
+            queries.wa_alerts_read(cursor, now, not_users=queries.alert_user_ids(cursor))
         for chat_id in chats.values():
             self._telegram(chat_id, notices.whatsapp_alert_html(alert[1], alert[2], self._base_url), None)
         try:
