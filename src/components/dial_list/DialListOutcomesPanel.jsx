@@ -3,8 +3,8 @@ import FaIcon from '../common/FaIcon';
 import { iosCard, iosInput, iosGroupLabel, iosBtnSecondary, iosBtnGhost, IosBadge, IosHint, IosSegmented, IosToggle } from '../ui/ios';
 import {
     DUE_KIND_OPTIONS, SUBTYPES_MAX, SUBTYPE_NAME_MAX, applyIdMap, isNewId, normalizeDueKind, outcomeLabel,
-    outcomeSubtypeName, outcomesSnapshot, savedIdMap, serializeOutcomes, serverHasSubtypes, subtypesToggleLabel,
-    toEditable, validateOutcomes,
+    outcomeSubtypeName, outcomesSnapshot, rowKey, savedIdMap, serializeOutcomes, serverHasSubtypes, subtypesOpen,
+    subtypesToggleLabel, toEditable, validateOutcomes,
 } from './outcomeFormat';
 
 /*
@@ -37,8 +37,24 @@ import {
  * черновик (outcomeFormat.isDraftSubtype): не уходит и не держит остальное. Сервер
  * получает версию справочника, с которой начинали: список успел измениться (другая
  * вкладка) — отказ 409 и свежий список, а не тихое выключение чужих причин.
+ *
+ * Вечером того же дня «типы всё ещё исчезают» — на экране, в базе все 20 причин были на месте:
+ *   • ключ строки был её id, а первое автосохранение меняет временный id на настоящий — React
+ *     пересоздавал строку, курсор выпадал из поля, допечатанное после паузы терялось. Ключ теперь
+ *     постоянный (outcomeFormat.rowKey);
+ *   • список типов был свёрнут по умолчанию: вернулся на вкладку — видна одна серая строчка
+ *     «Типы · 20». Теперь у итога с типами он раскрыт, пока его не свернут (outcomeFormat.subtypesOpen),
+ *     а свёрнутое и раскрытое руками помнится до перезагрузки страницы (expandedByDepartment);
+ *   • вернулся на вкладку раньше, чем дошло досохранение при уходе, — загрузка показала бы список без
+ *     последней причины. Загрузка теперь ждёт сохранение своего отдела (pendingSaves).
  */
 const AUTOSAVE_MS = 600;
+
+// Сохранение, которое ещё идёт, — по отделу: панель, рождённая заново (вернулись на вкладку), читает
+// список только после него. Иначе досохранение при уходе со вкладки и загрузка при возврате расходились.
+const pendingSaves = new Map();
+// Что руководитель раскрыл или свернул руками — по отделу, до перезагрузки страницы.
+const expandedByDepartment = new Map();
 // Сколько видна отметка «Сохранено».
 const SAVED_SHOW_MS = 2500;
 
@@ -143,7 +159,7 @@ const SubtypeList = ({ outcome, canEdit, onPatch, onMove, onAdd, onRemove }) => 
             {subs.length > 0 && (
                 <ul className="space-y-1">
                     {subs.map((s, sIdx) => (
-                        <li key={s.id} className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+                        <li key={rowKey(s)} className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
                             <span className={`h-2 w-2 shrink-0 rounded-full ${s.is_active !== false ? '' : 'opacity-40'}`} style={{ backgroundColor: color }} />
                             <input
                                 value={s.name}
@@ -177,17 +193,20 @@ const SubtypeList = ({ outcome, canEdit, onPatch, onMove, onAdd, onRemove }) => 
                     ))}
                 </ul>
             )}
-            {canEdit && (
+            {canEdit && (subs.length >= SUBTYPES_MAX ? (
+                // Предел виден словами, а не только подсказкой на погасшей кнопке.
+                <div className="mt-1 px-2 py-1 text-[12px] text-slate-500">
+                    Типов {SUBTYPES_MAX} из {SUBTYPES_MAX} — больше у итога не добавить; ненужный можно переименовать
+                </div>
+            ) : (
                 <button
                     type="button"
                     onClick={onAdd}
-                    disabled={subs.length >= SUBTYPES_MAX}
-                    title={subs.length >= SUBTYPES_MAX ? `Не больше ${SUBTYPES_MAX} типов у итога` : undefined}
-                    className={`${iosBtnGhost} mt-1 px-2 py-1 text-[12.5px] disabled:opacity-50`}
+                    className={`${iosBtnGhost} mt-1 px-2 py-1 text-[12.5px]`}
                 >
                     <FaIcon className="fas fa-plus" style={{ width: 10, height: 10 }} /> Добавить тип
                 </button>
-            )}
+            ))}
         </div>
     );
 };
@@ -244,8 +263,10 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
     const [error, setError] = useState('');
     // Сохранение: state '' | 'saving' | 'saved' | 'failed', error — текст отказа.
     const [save, setSave] = useState({ state: '', error: '' });
-    // Раскрытые списки типов: {id итога: true}. Только вид, на сервер не уходит.
-    const [expanded, setExpanded] = useState({});
+    // Раскрытые и свёрнутые руками списки типов: {id итога: true | false}; не нажимали — раскрыт, если
+    // типы есть (subtypesOpen). Только вид, на сервер не уходит; переживает уход со вкладки.
+    const [expanded, setExpanded] = useState(() => expandedByDepartment.get(String(departmentId)) || {});
+    useEffect(() => { expandedByDepartment.set(String(departmentId), expanded); }, [departmentId, expanded]);
     // Старый сервер (раскатка/откат по частям) типы не хранит — не предлагаем их.
     const [typesSupported, setTypesSupported] = useState(true);
     // Версия справочника, с которой работаем (сервер отклонит сохранение, если список уже другой).
@@ -265,6 +286,12 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
 
     const load = useCallback(async () => {
         try {
+            // Досохранение этого отдела ещё идёт (ушли со вкладки и сразу вернулись) — сначала оно,
+            // иначе список пришёл бы без последней правки. Пока ждали, могло начаться следующее.
+            for (let pending = pendingSaves.get(String(departmentId)); pending; pending = pendingSaves.get(String(departmentId))) {
+                await pending;
+            }
+            if (!mountedRef.current) return;
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/outcomes`, { credentials: 'include', headers: authHeaders() });
             if (!resp.ok) throw new Error(await readError(resp));
             const data = await resp.json();
@@ -296,6 +323,11 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         if (validateOutcomes(payload)) return;
         if (outcomesSnapshot(current, { dueKinds: dk }) === savedNow) return;
         inFlightRef.current = true;
+        // Видно панели, рождённой заново для этого отдела (load ждёт его).
+        const deptKey = String(departmentId);
+        let release = () => {};
+        const pending = new Promise((resolve) => { release = resolve; });
+        pendingSaves.set(deptKey, pending);
         if (mountedRef.current) setSave({ state: 'saving', error: '' });
         try {
             const resp = await fetch(`${apiBaseUrl}/api/dial_list/departments/${departmentId}/outcomes`, {
@@ -334,10 +366,13 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
             setSave({ state: 'failed', error: e.message || 'не удалось сохранить итоги' });
         } finally {
             inFlightRef.current = false;
+            if (pendingSaves.get(deptKey) === pending) pendingSaves.delete(deptKey);
+            // Досохранение — до release: ждущая загрузка увидит уже его, а не пустое место.
             if (flushAfterRef.current) {
                 flushAfterRef.current = false;
                 sendRef.current?.({ keepalive: true });
             }
+            release();
         }
     }, [apiBaseUrl, authHeaders, departmentId, toast, load]);
     sendRef.current = send;
@@ -382,10 +417,14 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         [next[idx], next[j]] = [next[j], next[idx]];
         return next;
     });
-    const add = () => setItems((list) => [...(list || []), {
-        id: tempId(), name: '', color: OUTCOME_PALETTE[(list?.length || 0) % OUTCOME_PALETTE.length],
-        requeue: false, is_active: true, used: 0, subtypes: [], due_kind: '',
-    }]);
+    // _key — постоянный ключ строки (outcomeFormat.rowKey): id после сохранения станет настоящим, ключ — нет.
+    const add = () => setItems((list) => {
+        const id = tempId();
+        return [...(list || []), {
+            id, _key: id, name: '', color: OUTCOME_PALETTE[(list?.length || 0) % OUTCOME_PALETTE.length],
+            requeue: false, is_active: true, used: 0, subtypes: [], due_kind: '',
+        }];
+    });
     const remove = (idx) => setItems((list) => list.filter((_, i) => i !== idx));
 
     // Типы итога idx: те же операции, что у итогов, но внутри его subtypes.
@@ -398,9 +437,13 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
         [next[sIdx], next[j]] = [next[j], next[sIdx]];
         return next;
     });
-    const addSub = (idx) => patchSubs(idx, (subs) => (subs.length >= SUBTYPES_MAX ? subs : [...subs, { id: tempId(), name: '', is_active: true, used: 0 }]));
+    const addSub = (idx) => patchSubs(idx, (subs) => {
+        if (subs.length >= SUBTYPES_MAX) return subs;
+        const id = tempId();
+        return [...subs, { id, _key: id, name: '', is_active: true, used: 0 }];
+    });
     const removeSub = (idx, sIdx) => patchSubs(idx, (subs) => subs.filter((_, j) => j !== sIdx));
-    const toggleExpanded = (id) => setExpanded((cur) => ({ ...cur, [id]: !cur[id] }));
+    const toggleExpanded = (outcome) => setExpanded((cur) => ({ ...cur, [outcome.id]: !subtypesOpen(outcome, cur) }));
 
     return (
         <section className="space-y-1.5">
@@ -425,7 +468,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                         <ul className="divide-y divide-slate-100">
                             {items.map((o, idx) => {
                                 const typesLabel = typesSupported ? subtypesToggleLabel(o, canEdit) : '';
-                                const open = !!expanded[o.id];
+                                const open = subtypesOpen(o, expanded);
                                 // Итог с датой всегда «перезвонить» (outcomeFormat.js, DUE_KINDS).
                                 const dueKind = dueKinds ? normalizeDueKind(o.due_kind) : '';
                                 const requeueForced = dueKind !== '';
@@ -435,7 +478,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                         ? 'Водитель снова попадёт в пачки через первый интервал недозвона'
                                         : 'Водитель снова попадёт в порции через «Повтор через, часов»';
                                 return (
-                                    <li key={o.id} className={`px-3 py-2.5 ${o.is_active ? '' : 'bg-slate-50/60'}`}>
+                                    <li key={rowKey(o)} className={`px-3 py-2.5 ${o.is_active ? '' : 'bg-slate-50/60'}`}>
                                         <div className="flex flex-wrap items-center gap-3 sm:flex-nowrap">
                                             <ColorPicker value={o.color} onChange={(c) => patch(idx, { color: c })} disabled={!canEdit} />
                                             <input
@@ -492,7 +535,7 @@ const DialListOutcomesPanel = ({ apiBaseUrl, authHeaders, departmentId, canEdit 
                                         {typesLabel && (
                                             <button
                                                 type="button"
-                                                onClick={() => toggleExpanded(o.id)}
+                                                onClick={() => toggleExpanded(o)}
                                                 aria-expanded={open}
                                                 className="ml-[38px] mt-1 inline-flex items-center gap-1.5 rounded-lg px-1.5 py-0.5 text-[12px] font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
                                             >

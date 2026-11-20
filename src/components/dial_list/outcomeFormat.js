@@ -198,12 +198,32 @@ export const savedIdMap = (sent, server) => {
     return map;
 };
 
-/** Рабочая копия с настоящими id вместо временных (savedIdMap). */
+/** Рабочая копия с настоящими id вместо временных (savedIdMap). Ключ строки (_key, rowKey) не трогаем. */
 export const applyIdMap = (items, idMap) => (Array.isArray(items) ? items : []).map((o) => ({
     ...o,
     id: idMap[o.id] || o.id,
     subtypes: (Array.isArray(o.subtypes) ? o.subtypes : []).map((s) => (idMap[s.id] ? { ...s, id: idMap[s.id] } : s)),
 }));
+
+/**
+ * Ключ строки редактора для React. Новая строка получает _key, равный своему временному id, и держит его,
+ * когда автосохранение переписывает id на настоящий (applyIdMap): с ключом по id React пересоздавал строку,
+ * поле ввода теряло курсор, и всё, что руководитель допечатывал после паузы, уходило в никуда — «Хочет
+ * другой тариф» сохранялся как «Хоч» (20.11.2026, «типы сами по себе исчезают»). На сервер _key не уходит:
+ * serializeOutcomes собирает поля поимённо.
+ */
+export const rowKey = (row) => String(row?._key ?? row?.id ?? '');
+
+/**
+ * Раскрыт ли список типов итога. expanded — что руководитель нажимал сам ({id итога: true | false});
+ * не нажимал — список раскрыт, если у итога есть типы. Свёрнутые по умолчанию типы после возврата на
+ * вкладку выглядели так, будто их нет (20.11.2026): видна была только серая строчка «Типы · 20».
+ */
+export const subtypesOpen = (outcome, expanded) => {
+    const own = expanded?.[outcome?.id];
+    if (own !== undefined) return !!own;
+    return Array.isArray(outcome?.subtypes) && outcome.subtypes.length > 0;
+};
 
 /** Сколько включённых типов у итога. */
 export const activeSubtypeCount = (outcome) => (Array.isArray(outcome?.subtypes) ? outcome.subtypes : [])

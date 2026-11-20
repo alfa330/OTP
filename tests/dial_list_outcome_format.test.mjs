@@ -28,9 +28,11 @@ import {
     outcomeSubtypeName,
     outcomesSnapshot,
     remapExpanded,
+    rowKey,
     serializeOutcomes,
     serverHasSubtypes,
     subtypeChips,
+    subtypesOpen,
     subtypesToggleLabel,
     toEditable,
     validateOutcomes,
@@ -228,6 +230,36 @@ test('после автосохранения: временные id → нас�
     assert.notEqual(outcomesSnapshot(mapped), savedNow);
     // Повторное сохранение — уже без «new-»: сервер обновит, а не заведёт вторые «Дорого» и «Думает».
     assert.ok(serializeOutcomes(mapped).every((o) => o.id && o.subtypes.every((s) => s.id)));
+});
+
+test('ключ строки не меняется, когда автосохранение даёт настоящий id (курсор не выпадает из поля)', () => {
+    // Новая строка: _key = временный id. После сохранения id настоящий, ключ — прежний.
+    const working = toEditable(SERVER_OUTCOMES);
+    working[0].subtypes.push({ id: 'new-7', _key: 'new-7', name: 'Хоч', is_active: true, used: 0 });
+    working.push({ id: 'new-8', _key: 'new-8', name: 'Подумает', color: '#8E8E93', requeue: false, is_active: true,
+                   used: 0, subtypes: [] });
+    const mapped = applyIdMap(working, { 'new-7': 's-21', 'new-8': 'o-22' });
+    assert.equal(mapped[0].subtypes[3].id, 's-21');
+    assert.equal(rowKey(mapped[0].subtypes[3]), 'new-7');
+    assert.equal(rowKey(mapped[2]), 'new-8');
+    // Строки с сервера — ключ по id, как раньше.
+    assert.equal(rowKey(mapped[0].subtypes[0]), 's-1');
+    assert.equal(rowKey(mapped[0]), 'o-1');
+    // На сервер и в снимок «сохранено» ключ не попадает.
+    assert.ok(!JSON.stringify(serializeOutcomes(mapped)).includes('_key'));
+    assert.equal(outcomesSnapshot(mapped), outcomesSnapshot(mapped.map((o) => ({
+        ...o, _key: undefined, subtypes: o.subtypes.map((s) => ({ ...s, _key: undefined })) }))));
+});
+
+test('список типов раскрыт, если типы есть и его не сворачивали руками', () => {
+    const refusal = SERVER_OUTCOMES[0];
+    const empty = SERVER_OUTCOMES[1];
+    assert.equal(subtypesOpen(refusal, {}), true);
+    assert.equal(subtypesOpen(refusal, undefined), true);
+    assert.equal(subtypesOpen(empty, {}), false);
+    assert.equal(subtypesOpen(refusal, { 'o-1': false }), false);
+    assert.equal(subtypesOpen(empty, { 'o-2': true }), true);
+    assert.equal(subtypesOpen({ id: 'o-3' }, {}), false);
 });
 
 test('раскрывашка типов: «Типы · N» по включённым', () => {
