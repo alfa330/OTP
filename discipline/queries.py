@@ -1017,7 +1017,15 @@ def controls_by_ids(cursor, control_ids):
 
 
 def violations_in_controls(cursor, control_ids):
-    """{контроль: число записей, заведённых под ним (неотменённых)}.
+    """{контроль: нарушения в его период (неотменённые)}.
+
+    Нарушение в период контроля — запись, заведённая под этим контролем, или
+    запись, заведённая под ДРУГИМ контролем того же человека, но в дни этого
+    (п. 19.5: испытательный срок и контроль после акта идут рядом, а запись
+    помнит только главный — у строки испытательного срока такие нарушения иначе
+    пропадали бы). Период решённого контроля — до момента решения: досрочно снятый
+    не считает нарушений, случившихся уже после него. Запись-основание акта — не
+    нарушение «в период» контроля, начатого этим актом.
 
     «Без меры» — только ОТКРЫТЫЕ записи: закрыть запись под контролем без
     утверждённой меры нельзя, а меру, которую руководитель потом снял с уже
@@ -1028,12 +1036,19 @@ def violations_in_controls(cursor, control_ids):
         return {}
     cursor.execute(
         """
-        SELECT control_id, COUNT(*) AS total,
-               COUNT(*) FILTER (WHERE measure_state IS DISTINCT FROM 'approved' AND closed_at IS NULL)
+        SELECT c.id, COUNT(r.id) AS total,
+               COUNT(r.id) FILTER (WHERE r.measure_state IS DISTINCT FROM 'approved' AND r.closed_at IS NULL)
                    AS without_measure
-          FROM discipline_records
-         WHERE control_id = ANY(%s) AND cancelled_at IS NULL
-         GROUP BY control_id
+          FROM discipline_controls c
+          LEFT JOIN discipline_acts a ON a.id = c.act_id
+          JOIN discipline_records r
+            ON r.operator_id = c.operator_id AND r.cancelled_at IS NULL AND r.control_id IS NOT NULL
+           AND (r.control_id = c.id
+                OR (r.occurred_at::date BETWEEN c.start_date AND c.end_date
+                    AND (c.decided_at IS NULL OR r.occurred_at < c.decided_at)
+                    AND r.id IS DISTINCT FROM a.trigger_record_id))
+         WHERE c.id = ANY(%s)
+         GROUP BY c.id
         """, (ids,))
     return {int(row[0]): {'total': int(row[1]), 'without_measure': int(row[2])} for row in cursor.fetchall()}
 

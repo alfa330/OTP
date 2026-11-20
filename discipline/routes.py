@@ -677,7 +677,9 @@ def build_discipline_blueprint(*, db, require_api_key, build_cors_preflight_resp
     def discipline_act_update(ctx, today, act_id, outbox, **_kw):
         now = service.now_almaty()
         with db._get_cursor() as cursor:
-            act, record = service.load_act(cursor, ctx, act_id, today)
+            # Под блокировкой: второе «Утвердить» подряд ждёт первое и получает
+            # ACT_APPROVED, а не второй act_approve и вторую весть о денежной мере.
+            act, record = service.load_act(cursor, ctx, act_id, today, for_update=True)
             service.update_act(cursor, ctx, act, record, _payload(), now=now, base_url=web_app_base_url,
                                outbox=outbox)
         return jsonify({'ok': True})

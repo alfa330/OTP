@@ -859,19 +859,19 @@ def settle_ladder(cursor, ctx, operator_id, before, *, since, now, today, base_u
 
 
 def _next_is_act(cursor, operator_id, settings, now):
-    """Следующее нарушение человека потребует акта — то же правило, что у жёлтого
-    блока «Сводки» (routes.discipline_summary): человек не на особом контроле, а
-    период, уже покрытый составленным актом, второго акта не требует. Иначе СВ
-    получал «следующее нарушение — акт», а следующая запись шла объяснительной
-    или мерой под контролем."""
-    if queries.active_controls(cursor, [operator_id]).get(int(operator_id)):
-        return False
+    """Следующее нарушение человека действительно потребует акта (п. 12: «второе
+    нарушение за период — руководителю группы»): период, уже покрытый составленным
+    актом, второго акта не требует, и под контролем после акта ступень «акт» —
+    объяснительная (effective_action). На испытательном сроке и под контролем
+    решением руководителя лестница идёт как есть — весть уходит. Иначе СВ получал
+    «следующее нарушение — акт», а следующая запись шла объяснительной или мерой."""
     history = queries.operator_histories(cursor, [operator_id], since=now - timedelta(days=HISTORY_DAYS)).get(
         int(operator_id), [])
     triggers, members = history_act_sets(cursor, [history])
     step = catalog.next_step(history, now, settings, settings_for=SettingsCache(cursor),
                              act_triggers=triggers, act_members=members)
-    return step['action'] == catalog.STEP_ACT
+    control = queries.active_controls(cursor, [operator_id]).get(int(operator_id))
+    return catalog.effective_action(step['action'], control) == catalog.STEP_ACT
 
 
 def _notify_new_record(cursor, ctx, record, info, profile, settings, control, *, now, today, base_url, outbox):
@@ -906,8 +906,8 @@ def _notify_new_record(cursor, ctx, record, info, profile, settings, control, *,
         notify.push(cursor, outbox, event='act', user_ids=managers, settings=settings,
                     title='%s: %s — нужен акт' % (name, notify.ordinal_text(info).lower()),
                     body=line, record_id=record_id, tone='warning', base_url=base_url, exclude=[me])
-    elif (act_index and info.get('weighted') == act_index - 1 and not control
-          and _next_is_act(cursor, record['operator_id'], settings, now)):
+    elif act_index and info.get('weighted') == act_index - 1 and _next_is_act(cursor, record['operator_id'],
+                                                                                settings, now):
         supervisors = queries.group_supervisors(cursor, [record.get('group_id')], today)
         notify.push(cursor, outbox, event='pre_act', user_ids=supervisors, settings=settings,
                     title='%s: следующее нарушение — акт' % name, body=line, record_id=record_id,
@@ -1328,7 +1328,7 @@ def _notify_finance(cursor, ctx, record, measure, changes, *, base_url, outbox):
 
 
 def _notify_decision_finance(cursor, ctx, *, department_id, operator_id, title, finance, amount, percent, basis,
-                             record_id, base_url, outbox, removed_reason=None):
+                             record_id, base_url, outbox, removed_reason=None, control_id=None):
     """Весть руководителям о мере с финансовым эффектом, назначенной решением по
     акту или по особому контролю (п. 12), и о её снятии. Мера без денег — молча,
     как у меры записи (_notify_finance)."""
@@ -1347,8 +1347,8 @@ def _notify_decision_finance(cursor, ctx, *, department_id, operator_id, title, 
         body = ('%s — %s, причина: %s. Если удержание уже ушло в выгрузку, сообщите бухгалтерии'
                 % (name, basis, removed_reason))
     notify.push(cursor, outbox, event='measure_finance', user_ids=managers, settings=settings, title=title_text,
-                body=body, record_id=record_id, tone='warning' if removed_reason else 'default', base_url=base_url,
-                exclude=[ctx['user_id']])
+                body=body, record_id=record_id, control_id=control_id,
+                tone='warning' if removed_reason else 'default', base_url=base_url, exclude=[ctx['user_id']])
 
 
 def _removal_reason(reason):
@@ -1411,8 +1411,8 @@ def remove_control_measure(cursor, ctx, control_id, reason, *, now, base_url=Non
     _notify_decision_finance(cursor, ctx, department_id=department, operator_id=control['operator_id'],
                              title=control.get('decision_measure_title'), finance=control.get('decision_finance'),
                              amount=control.get('decision_amount'), percent=control.get('decision_percent'),
-                             basis='по итогам особого контроля', record_id=None, base_url=base_url, outbox=outbox,
-                             removed_reason=reason)
+                             basis='по итогам особого контроля', record_id=None, control_id=control['id'],
+                             base_url=base_url, outbox=outbox, removed_reason=reason)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1661,7 +1661,7 @@ def decide_control(cursor, ctx, control_id, payload, *, now, today, base_url=Non
                                  title=measure_fields['decision_measure_title'],
                                  finance=measure_fields['decision_finance'], amount=measure_fields['decision_amount'],
                                  percent=measure_fields['decision_percent'], basis='по итогам особого контроля',
-                                 record_id=None, base_url=base_url, outbox=outbox)
+                                 record_id=None, control_id=control['id'], base_url=base_url, outbox=outbox)
 
 
 def control_rows(cursor, ctx, controls, today):

@@ -81,6 +81,32 @@ def test_probation_and_section_control_are_separate_bases(db):
         assert _probation(cur, OP_B)
 
 
+def test_violations_count_in_every_control_whose_period_they_fall_in(db):
+    """Нарушение в дни испытательного срока — нарушение в его период, даже если запись
+    легла в контроль после акта; досрочно снятый контроль не считает нарушений после
+    своего решения; запись-основание акта — не нарушение в период его контроля."""
+    with db.cursor() as cur:
+        head = ctx_of(cur, HEAD_SZOV)
+        probation = _probation(cur, OP_A)
+        remark = measure_id(cur, SZOV, 'Устное замечание')
+        for days in (6, 4, 2):
+            create(cur, HEAD_SZOV, OP_A, NOW - timedelta(days=days), measure_id=remark)
+        after_act = queries.active_controls(cur, [OP_A])[OP_A]['id']
+        create(cur, HEAD_SZOV, OP_A, NOW - timedelta(hours=3), measure_id=remark)
+
+        def counts():
+            rows = service.control_rows(cur, head, queries.list_controls(cur, [SZOV], state='all'), TODAY)
+            return {row['id']: row['violations'] for row in rows}
+
+        assert counts() == {probation: 4, after_act: 1}
+        # Контроль после акта сняли в 12:00: нарушение в 11:00 было ещё в его период,
+        # а в 12:00 и позже — уже только в период испытательного срока.
+        service.decide_control(cur, head, after_act, {'decision': 'removed'}, now=NOW, today=TODAY)
+        create(cur, HEAD_SZOV, OP_A, NOW - timedelta(hours=1), measure_id=remark)
+        create(cur, HEAD_SZOV, OP_A, NOW, measure_id=remark)
+        assert counts() == {probation: 6, after_act: 2}
+
+
 def test_violation_under_both_controls_goes_to_the_section_one(db):
     """Новое нарушение при двух контролях ложится в контроль раздела (после акта),
     а задним числом, раньше его начала, — в испытательный срок."""
@@ -164,6 +190,8 @@ def test_head_removes_measure_applied_by_control_decision(db):
             controls = queries.list_controls(cur, [SZOV], state='all')
             return next(r for r in service.control_rows(cur, head, controls, TODAY) if r['id'] == control_id)
 
+        cur.execute("SELECT control_id FROM discipline_notifications WHERE kind = 'measure_finance'")
+        assert {r[0] for r in cur.fetchall()} == {control_id}  # весть ведёт к самому контролю
         assert row()['can_remove_measure'] is True
         assert row()['can_remove_measure'] is not service.control_rows(
             cur, ctx_of(cur, SV_B), queries.list_controls(cur, [SZOV], state='all'), TODAY)[0]['can_remove_measure']
@@ -183,15 +211,33 @@ def test_head_removes_measure_applied_by_control_decision(db):
 # ── П. 12: «следующее нарушение — акт» — как жёлтый блок ────────────────────
 
 def test_pre_act_bell_only_where_the_next_violation_is_an_act(db):
+    """П. 12: «второе нарушение за период — руководителю группы». Весть уходит, когда
+    следующее нарушение действительно потребует акта — и без контроля, и на
+    испытательном сроке (там лестница идёт как есть)."""
     with db.cursor() as cur:
-        # Без контроля — как раньше: после второго нарушения СВ группы узнаёт, что дальше акт.
         for days in (6, 4):
             create(cur, HEAD_SZOV, OP_B, NOW - timedelta(days=days))
         assert sum(PRE_ACT in t for t in bell_titles(cur, SV_B)) == 1
-        # Человек на особом контроле — его держит красный блок, а не «за шаг до акта».
         _probation(cur, OP_A)
         remark = measure_id(cur, SZOV, 'Устное замечание')
         for days in (6, 4):
+            create(cur, HEAD_SZOV, OP_A, NOW - timedelta(days=days), measure_id=remark)
+        assert sum(PRE_ACT in t for t in bell_titles(cur, SV_A)) == 1
+
+
+def test_pre_act_bell_is_silent_under_the_after_act_control(db):
+    """Под контролем после акта второго акта нет (ступень «акт» — объяснительная и
+    мера), даже когда окно уже не видит основание акта: «следующее — акт» не уходит."""
+    from discipline import catalog
+    with db.cursor() as cur:
+        queries.save_settings(cur, SZOV, catalog.normalize_settings({'control_days': 60}), HEAD_SZOV)
+        for days in (45, 42, 40):
+            create(cur, HEAD_SZOV, OP_A, NOW - timedelta(days=days))
+        control = queries.active_controls(cur, [OP_A])[OP_A]
+        assert control['source'] == 'act' and control['end_date'] == (NOW - timedelta(days=40)).date() + timedelta(
+            days=60)
+        remark = measure_id(cur, SZOV, 'Устное замечание')
+        for days in (5, 1):
             create(cur, HEAD_SZOV, OP_A, NOW - timedelta(days=days), measure_id=remark)
         assert not any(PRE_ACT in t for t in bell_titles(cur, SV_A))
 
