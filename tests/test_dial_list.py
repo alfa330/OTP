@@ -1611,6 +1611,17 @@ class WorkedTabsTests(unittest.TestCase):
         operator_part = src[src.index('# ── телефон оператора'):src.index('# ── руководитель')]
         self.assertIn("/api/operator/dial_list/worked", operator_part)
         self.assertNotIn('phone_norm', dial_service.DialListService._WORKED_SQL)
+        # Номер — только автообзвону Тез с телефоном прямого звонка (20.11.2026, как в строках пачки):
+        # отдельный вариант запроса с номером последней колонкой; удалённому КЦ запрос его не выбирает
+        # (проверка на Postgres — test_dial_list_tez_postgres.py).
+        svc = dial_service.DialListService
+        self.assertEqual(svc._WORKED_PHONE_SQL.replace('l.department_id, l.phone_norm', 'l.department_id', 1),
+                         svc._WORKED_SQL)
+        self.assertEqual(svc._WORKED_PHONE_SQL.count('phone_norm'), 1)
+        worked = inspect.getsource(svc.operator_worked)
+        self.assertIn('with_phone = is_tez(ctx.get("settings") or {}) and phone_dials_direct(phone_version)', worked)
+        self.assertIn('cur.execute(self._WORKED_PHONE_SQL if with_phone else self._WORKED_SQL,', worked)
+        self.assertIn('**({"phone": phone_display(r[30])} if with_phone and len(r) > 30 and r[30] else {}),', worked)
         self.assertIn('current_period()', inspect.getsource(dial_service.DialListService.operator_worked))
         # По водителю — последняя строка этого оператора за месяц, как «Мой прогресс».
         sql = dial_service.DialListService._WORKED_SQL
@@ -1895,9 +1906,12 @@ class WorkedTabsTests(unittest.TestCase):
         res = self._worked_q(rows, outcomes, 'семен ' + 'я' * 300)
         self.assertLessEqual(len(res['q']), dial_service.WORKED_QUERY_MAX)
         self.assertEqual(dial_service.WORKED_QUERY_MAX, 100)
-        # Ищем только по ФИО: ни номера, ни ИИН в отборе нет (и SQL не меняется).
+        # Ищем только по ФИО: ни номера, ни ИИН в отборе нет (и SQL не меняется). Номер у Тез уходит
+        # строкой (with_phone, 20.11.2026), но в отбор по q не входит: отбор — одно условие по ФИО.
         src = inspect.getsource(dial_service.DialListService.operator_worked)
-        self.assertNotIn('phone', src)
+        search = src[src.index('full_name = r[2] or "Без имени"'):src.index('at = (r[8] or r[5] or r[6])')]
+        self.assertIn('if query and not name_matches(full_name, query):', search)
+        self.assertNotIn('phone', search)
         self.assertNotIn('iin', src)
         self.assertNotIn('ILIKE', dial_service.DialListService._WORKED_SQL)
 
@@ -1906,7 +1920,7 @@ class WorkedTabsTests(unittest.TestCase):
         seen = []
 
         class Svc:
-            def operator_worked(self, user_id, q=''):
+            def operator_worked(self, user_id, q='', phone_version=None):
                 seen.append((user_id, q))
                 return {"q": q, "tabs": [], "items": []}
 
@@ -4280,8 +4294,9 @@ class PhoneVersionGateTests(unittest.TestCase):
         # Разбирает и решает сервис — у ручек своей копии правила нет.
         src = inspect.getsource(dial_routes.build_dial_list_blueprint)
         self.assertIn('request.headers.get(PHONE_VERSION_HEADER)', src)
-        # Пятая — автоцикл Тез (POST …/auto/next, 15.10.2026): его ответ — то же состояние.
-        self.assertEqual(src.count('phone_version=_phone_version()'), 5)
+        # Пятая — автоцикл Тез (POST …/auto/next, 15.10.2026): его ответ — то же состояние. Шестая — вкладки
+        # итогов (20.11.2026): номер на них — автообзвону Тез с телефоном прямого звонка.
+        self.assertEqual(src.count('phone_version=_phone_version()'), 6)
         for own_rule in ('phone_guards_speech(', 'parse_phone_version(', 'SPEECH_GUARD_PHONE_VERSION',
                          'phone_has_ring_timer(', 'RING_TIMER_MIN_VERSION'):
             self.assertNotIn(own_rule, src)

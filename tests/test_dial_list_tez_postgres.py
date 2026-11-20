@@ -838,6 +838,33 @@ def test_whatsapp_template_with_a_picture_needs_a_file_and_sends_it(env):
     assert len(env.chatapp.sent) == 1
 
 
+def test_worked_tabs_show_the_driver_number_to_a_direct_dial_phone(env, settle_now):
+    """20.11.2026: «надо добавить номера водителей в категориях, куда распределяются водители, для Тез КЦ».
+    На вкладке итога у строки — номер водителя, как в строке пачки: телефону с прямым звонком (3.22.46+); старому
+    телефону — нет (у него номер в звонок не ходит вовсе). На «Не дозвонились» — тоже."""
+    env.enroll()
+    leads = env.leads(2)
+    nxt = env.svc.auto_next(OPERATOR, status='active', phone_version=GUARDED)["next"]
+    call = env.svc.start_call(OPERATOR, nxt["assignment_id"], auto=True, operator_status='active')
+    env.finish(call, 'ANSWER', 30)
+    env.svc.set_attempt_outcome(OPERATOR, call["attempt_id"], env.outcome('Отказ'), '')
+    nxt2 = env.svc.auto_next(OPERATOR, status='active', phone_version=GUARDED)["next"]
+    call2 = env.svc.start_call(OPERATOR, nxt2["assignment_id"], auto=True, operator_status='active')
+    env.finish(call2, 'NOANSWER')
+
+    def by_lead(worked):
+        return {i["lead_id"]: i for i in worked["items"]}
+
+    direct = by_lead(env.svc.operator_worked(OPERATOR, phone_version='3.22.60'))
+    phones = {lead_id: phone for phone, lead_id in leads.items()}
+    assert {lead_id: (i["tab"], i.get("phone")) for lead_id, i in direct.items()} == {
+        nxt["lead_id"]: (env.outcome('Отказ'), dial_service.phone_display(phones[nxt["lead_id"]])),
+        nxt2["lead_id"]: (dial_service.WORKED_NO_ANSWER, dial_service.phone_display(phones[nxt2["lead_id"]]))}
+    old = by_lead(env.svc.operator_worked(OPERATOR, phone_version=GUARDED))
+    assert all('phone' not in i for i in old.values()) and len(old) == 2
+    assert all('phone' not in i for i in env.svc.operator_worked(OPERATOR)["items"])
+
+
 def test_requeue_takes_off_the_own_deadline(env, settle_now):
     env.enroll()
     lead = env.leads(1)['77010000001']

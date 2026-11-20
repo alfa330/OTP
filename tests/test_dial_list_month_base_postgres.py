@@ -228,6 +228,8 @@ def test_worked_tabs_show_only_the_current_base(env):
     worked = env.svc.operator_worked(OPERATOR)
     assert [i["lead_id"] for i in worked["items"]] == [new_lead]
     assert env.svc.operator_worked(OPERATOR, q='Октябрев')["items"] == []
+    # Номер на вкладках — только автообзвону Тез (20.11.2026): удалённому КЦ его нет и с новым телефоном.
+    assert all('phone' not in i for i in env.svc.operator_worked(OPERATOR, phone_version='3.22.60')["items"])
 
 
 def test_previous_base_made_active_again_comes_back(env):

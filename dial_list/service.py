@@ -6122,7 +6122,7 @@ class DialListService:
     # почему плечо последней попытки строки положил сам аппарат (auto_hangup), r[26:29] —
     # _LAST_COMMENT_COLUMNS (последний комментарий оператора по водителю), r[29] — отдел базы
     # водителя (из другого отдела «Позвонить ещё раз» нельзя).
-    _WORKED_SQL = """
+    _WORKED_SQL_TEMPLATE = """
         WITH latest AS (
             SELECT DISTINCT ON (a.lead_id)
                    a.id, a.lead_id, a.state, a.result, a.done_at, a.created_at
@@ -6138,7 +6138,7 @@ class DialListService:
                o.name, o.color, o.position, l.status, st.name,
                (l.signed_at IS NOT NULL OR l.sign_status = 'processing'),
                COALESCE(o.requeue, FALSE), """ + _RECALL_COLUMNS + """,
-               t.auto_hangup, """ + _LAST_COMMENT_COLUMNS + """, l.department_id
+               t.auto_hangup, """ + _LAST_COMMENT_COLUMNS + """, l.department_id{phone}
         FROM latest s
         JOIN dial_list_leads l ON l.id = s.lead_id
         LEFT JOIN LATERAL (
@@ -6153,13 +6153,21 @@ class DialListService:
     """
     # %(period)s — база месяца, водителей которой видит телефон (_dial_base): отработанные из
     # прошлой базы на вкладках не показываются (10.11.2026); NULL (автообзвон Тез) — все.
+    # Номер водителя на вкладках — только автообзвону Тез с прямым звонком (with_phone, 20.11.2026): отдельный
+    # вариант запроса с номером последней колонкой, как _PORTION_PHONE_COLUMN у пачки, — запрос удалённого КЦ
+    # номер не выбирает вовсе.
+    _WORKED_SQL = _WORKED_SQL_TEMPLATE.replace("{phone}", "")
+    _WORKED_PHONE_SQL = _WORKED_SQL_TEMPLATE.replace("{phone}", ", l.phone_norm")
 
-    def operator_worked(self, user_id, q=""):
+    def operator_worked(self, user_id, q="", phone_version=None):
         """Вкладки итогов на телефоне: кого оператор отработал за месяц и с каким итогом.
 
         Вкладка на каждый включённый итог отдела (в порядке справочника, даже пустая —
         набор вкладок не прыгает), выключенный — только если по нему кто-то есть, и
-        последней «Не дозвонились». Только ФИО, время и свой комментарий — номера нет.
+        последней «Не дозвонились». ФИО, время и свой комментарий; номер водителя (phone) —
+        только автообзвону Тез с телефоном прямого звонка (владелец 20.11.2026: «надо добавить
+        номера водителей в категориях, куда распределяются водители, для Тез КЦ») — как в строках
+        пачки (phone_dials_direct); удалённому КЦ и старому телефону номера нет.
 
         can_call_again (12.10.2026) — можно ли нажать «Позвонить ещё раз» на любой вкладке:
         водитель свой (последним ему звонил этот оператор) и свободен — recall_verdict, как
@@ -6182,9 +6190,11 @@ class DialListService:
         query = search_key(str(q or "")[:WORKED_QUERY_MAX])
         month = current_period()
         today = _today()
+        with_phone = is_tez(ctx.get("settings") or {}) and phone_dials_direct(phone_version)
         with self.db._get_cursor() as cur:
             outcomes = self._outcome_rows(cur, ctx["department_id"], active_only=True)
-            cur.execute(self._WORKED_SQL, {"operator_id": ctx["user_id"], "month": month,
+            cur.execute(self._WORKED_PHONE_SQL if with_phone else self._WORKED_SQL,
+                        {"operator_id": ctx["user_id"], "month": month,
                                            "period": self._dial_base(ctx.get("settings") or {})})
             rows = cur.fetchall()
         tabs = {o["id"]: {"key": o["id"], "name": o["name"], "color": o["color"], "position": o["position"],
@@ -6234,6 +6244,8 @@ class DialListService:
                 "auto_hangup": r[25] or "",
                 # Что оператор записал по водителю в прошлый раз — на любой вкладке.
                 **self._last_comment_fields(r[26], r[27], r[28], today),
+                # Номер водителя — автообзвону Тез с прямым звонком (with_phone), как в строке пачки.
+                **({"phone": phone_display(r[30])} if with_phone and len(r) > 30 and r[30] else {}),
             })
         no_answer = {"key": WORKED_NO_ANSWER, "name": WORKED_NO_ANSWER_NAME, "color": WORKED_NO_ANSWER_COLOR,
                      "count": 0}
