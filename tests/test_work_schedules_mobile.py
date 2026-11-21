@@ -119,9 +119,15 @@ class PhoneBranchTests(unittest.TestCase):
     def test_read_only_trainer_cannot_edit_from_the_phone(self):
         """Тренеру раздел открыт только на просмотр: нажатие по человеку ведёт
         на экран дней, а не в правку, и подвал экрана дня пуст."""
-        self.assertIn('if (plannerReadOnly) return;\n                    setModalActiveTab', PHONE_BRANCH)
-        self.assertIn('if (plannerReadOnly) return null;', PHONE_BRANCH)
-        self.assertIn('plannerReadOnly\n                                    ? setPlannerPhoneOperatorId(op.id)', PHONE_BRANCH)
+        # С 21.11.2026 правку открывает и поимённый правщик смен (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS) —
+        # только на строке оператора своего отдела допуска; у тренера флаги те же, что раньше.
+        self.assertIn('const plannerEditsShifts = !plannerReadOnly || plannerViewerIsShiftEditor;', APP)
+        self.assertIn('if (!plannerEditsShifts) return;\n                    setModalActiveTab', PHONE_BRANCH)
+        self.assertIn('const wsModalShiftsReadOnly = plannerReadOnly && !plannerCanEditShiftsOf(wsModalOperator);',
+                      PHONE_BRANCH)
+        self.assertIn('if (wsModalShiftsReadOnly) return null;', PHONE_BRANCH)
+        self.assertIn('(plannerReadOnly && !plannerCanEditShiftsOf(op))\n'
+                      '                                    ? setPlannerPhoneOperatorId(op.id)', PHONE_BRANCH)
 
     def test_side_modals_are_shared_between_both_trees(self):
         """Окна тренинга, тех. причины, офлайн-активности и штрафа, очередь

@@ -2920,6 +2920,61 @@ def _resolve_scoped_operator_for_requester(
     return target_user, scope_error
 
 
+# Поимённая правка смен и выходных (владелец, 21.11.2026: «Надо ещё выдать доступ
+# на изменение смен»; выбрал «Только СЗоВ» и «Смены и выходные»): users.id →
+# коды отделов. Человек ставит, сдвигает и убирает смены и выходные операторов
+# этих отделов — кроме своих, — и только это: ручки shift (POST, DELETE),
+# day_off, shifts_bulk, bulk_actions (у неё лишь смена, выходной и очистка дня).
+# Статусы (отпуск, больничный, увольнение), штрафы, ЧС, перерывы, тренинги —
+# прежние проверки, допуск их не открывает. Снять — убрать id отсюда и из App.jsx.
+WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = {170: ('szov',), 225: ('szov',)}
+
+
+def _work_schedule_shift_editor_codes(requester_id):
+    """Коды отделов, чьи смены и выходные человек правит поимённо; пусто — допуска нет."""
+    try:
+        codes = WORK_SCHEDULE_SHIFT_EDITOR_GRANTS.get(int(requester_id)) or ()
+    except (TypeError, ValueError):
+        codes = ()
+    return frozenset(str(code).strip().lower() for code in codes)
+
+
+def _resolve_work_schedule_shift_editor():
+    """Кто правит смены и выходные: тот, кто ведёт графики (_resolve_work_schedule_editor),
+    и поимённый допуск WORK_SCHEDULE_SHIFT_EDITOR_GRANTS. Только для ручек смен и выходных."""
+    requester_id, requester, auth_error = _resolve_work_schedule_editor()
+    if not auth_error or auth_error[1] != 403:
+        return requester_id, requester, auth_error
+    requester_id, requester, auth_error = _get_authenticated_requester()
+    if auth_error:
+        return None, None, auth_error
+    if _work_schedule_shift_editor_codes(requester_id):
+        return requester_id, requester, None
+    return None, None, ("Forbidden", 403)
+
+
+def _resolve_shift_target_for_requester(requester, requester_id, operator_id):
+    """Чьи смены и выходные requester правит: граница его роли, а если она не пускает —
+    оператор отдела поимённого допуска (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS), не он сам."""
+    target_user, scope_error = _resolve_scoped_operator_for_requester(requester, requester_id, operator_id)
+    if not scope_error or scope_error[1] != 403:
+        return target_user, scope_error
+    codes = _work_schedule_shift_editor_codes(requester_id)
+    if not codes:
+        return target_user, scope_error
+    try:
+        target_id = int(operator_id)
+        if target_id == int(requester_id):
+            return target_user, scope_error
+    except (TypeError, ValueError):
+        return target_user, scope_error
+    target = db.get_user(id=target_id)
+    if (target and _normalize_user_role(target[3]) == 'operator'
+            and _department_code_of_user(target_id) in codes):
+        return target, None
+    return target_user, scope_error
+
+
 def _ensure_call_access_for_requester(call_operator_id, requester, requester_id):
     role = _normalize_user_role(requester[3])
     headed_dept_ids = _headed_department_ids(requester_id)
@@ -41415,7 +41470,7 @@ def save_work_shift():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_work_schedule_editor()
+        user_id, user_data, auth_error = _resolve_work_schedule_shift_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41433,7 +41488,7 @@ def save_work_shift():
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        target_operator, scope_error = _resolve_shift_target_for_requester(user_data, user_id, operator_id)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41472,7 +41527,7 @@ def delete_work_shift():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_work_schedule_editor()
+        user_id, user_data, auth_error = _resolve_work_schedule_shift_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41486,7 +41541,7 @@ def delete_work_shift():
         if not all([operator_id, shift_date, start_time, end_time]):
             return jsonify({"error": "Missing required fields"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        target_operator, scope_error = _resolve_shift_target_for_requester(user_data, user_id, operator_id)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41518,7 +41573,7 @@ def toggle_work_day_off():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_work_schedule_editor()
+        user_id, user_data, auth_error = _resolve_work_schedule_shift_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41530,7 +41585,7 @@ def toggle_work_day_off():
         if not all([operator_id, day_off_date]):
             return jsonify({"error": "Missing required fields"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        target_operator, scope_error = _resolve_shift_target_for_requester(user_data, user_id, operator_id)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41775,7 +41830,7 @@ def save_shifts_bulk():
     }
     """
     try:
-        user_id, user_data, auth_error = _resolve_work_schedule_editor()
+        user_id, user_data, auth_error = _resolve_work_schedule_shift_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41790,7 +41845,7 @@ def save_shifts_bulk():
         if not shifts:
             return jsonify({"error": "No shifts provided"}), 400
 
-        target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, user_id, operator_id)
+        target_operator, scope_error = _resolve_shift_target_for_requester(user_data, user_id, operator_id)
         if scope_error:
             message, status_code = scope_error
             return jsonify({"error": message}), status_code
@@ -41823,7 +41878,7 @@ def apply_work_schedule_bulk_actions():
     }
     """
     try:
-        requester_id, user_data, auth_error = _resolve_work_schedule_editor()
+        requester_id, user_data, auth_error = _resolve_work_schedule_shift_editor()
         if auth_error:
             message, status_code = auth_error
             return jsonify({"error": message}), status_code
@@ -41835,7 +41890,7 @@ def apply_work_schedule_bulk_actions():
 
         for action in actions:
             operator_id = (action or {}).get('operator_id')
-            target_operator, scope_error = _resolve_scoped_operator_for_requester(user_data, requester_id, operator_id)
+            target_operator, scope_error = _resolve_shift_target_for_requester(user_data, requester_id, operator_id)
             if scope_error:
                 message, status_code = scope_error
                 return jsonify({"error": message}), status_code

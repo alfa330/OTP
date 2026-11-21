@@ -61,6 +61,11 @@ UNDER_TEST = (
     # Проверка ручек ведения графика (смены, выходные, статусы) с 09.11.2026:
     # управленцы — как прежде, плюс отдел кадров.
     "_resolve_work_schedule_editor",
+    # Ручки смен и выходных с 21.11.2026 — через проверку правки смен (поимённый допуск
+    # WORK_SCHEDULE_SHIFT_EDITOR_GRANTS, tests/test_work_schedule_shift_editor.py).
+    "_work_schedule_shift_editor_codes",
+    "_resolve_work_schedule_shift_editor",
+    "_resolve_shift_target_for_requester",
     "_can_remove_dismissal_blacklist",
     "_normalize_management_role",
     "get_operators_with_schedules",
@@ -202,6 +207,7 @@ class _Portal:
             "ROLE_HIERARCHY": _constant("ROLE_HIERARCHY"),
             "TRAINING_TARGET_ROLES": _constant("TRAINING_TARGET_ROLES"),
             "WORK_SCHEDULE_SUPERVISOR_GRANTS": _constant("WORK_SCHEDULE_SUPERVISOR_GRANTS"),
+            "WORK_SCHEDULE_SHIFT_EDITOR_GRANTS": _constant("WORK_SCHEDULE_SHIFT_EDITOR_GRANTS"),
             "_get_authenticated_requester": lambda: (requester_id, portal.user(requester_id), None),
             "_headed_department_ids": headed,
             "_headed_department_id": lambda user_id: next(iter(sorted(headed(user_id))), None),
@@ -542,10 +548,15 @@ class WiringTests(unittest.TestCase):
 
     # Пишущие ручки раздела, где допуск обязан действовать, и где он закрыт.
     GRANTED_WRITES = {
-        "add_training_rejection", "recalculate_work_schedule_breaks", "save_work_shift",
-        "delete_work_shift", "toggle_work_day_off", "save_work_schedule_status_period",
-        "delete_work_schedule_status_period", "save_shifts_bulk", "apply_work_schedule_bulk_actions",
+        "add_training_rejection", "recalculate_work_schedule_breaks",
+        "save_work_schedule_status_period", "delete_work_schedule_status_period",
         "aggregate_work_schedule_metrics", "resolve_work_schedule_auto_flag",
+        # Смены и выходные (с 21.11.2026) — через неё; допуск действует так же.
+        "_resolve_shift_target_for_requester",
+    }
+    SHIFT_WRITES = {
+        "save_work_shift", "delete_work_shift", "toggle_work_day_off", "save_shifts_bulk",
+        "apply_work_schedule_bulk_actions",
     }
     CLOSED = {"remove_work_schedule_dismissal_blacklist", "add_work_schedule_fine"}
 
@@ -555,6 +566,9 @@ class WiringTests(unittest.TestCase):
             for call in _calls_in(node, "_resolve_scoped_operator_for_requester"):
                 callers.setdefault(name, []).append(call)
         self.assertEqual(set(callers), self.GRANTED_WRITES | self.CLOSED)
+        for name in self.SHIFT_WRITES:
+            with self.subTest(name=name):
+                self.assertEqual(len(_calls_in(self.FUNCS[name], "_resolve_shift_target_for_requester")), 1)
         for name, calls in callers.items():
             for call in calls:
                 keywords = {item.arg: item.value for item in call.keywords}

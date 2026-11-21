@@ -227,17 +227,23 @@ def _kw(call, name):
 class RouteWiringTests(unittest.TestCase):
     ROUTES = _route_functions()
 
-    EDITOR_ROUTES = [
+    # Смены и выходные (с 21.11.2026): проверка правки смен — она пускает всех, кого пускает
+    # _resolve_work_schedule_editor (кадровика в том числе), и поимённый допуск
+    # WORK_SCHEDULE_SHIFT_EDITOR_GRANTS (tests/test_work_schedule_shift_editor.py).
+    SHIFT_ROUTES = [
         ('/api/work_schedules/shift', 'POST'),
         ('/api/work_schedules/shift', 'DELETE'),
         ('/api/work_schedules/day_off', 'POST'),
+        ('/api/work_schedules/shifts_bulk', 'POST'),
+        ('/api/work_schedules/bulk_actions', 'POST'),
+    ]
+
+    EDITOR_ROUTES = [
         # Тот же вызов делает карточка в «Учете сотрудников», когда кадровик ставит
         # статус с периодом (отпуск, Б/С, больничный, увольнение): до решения сервер
         # отвечал ему отказом.
         ('/api/work_schedules/status_period', 'POST'),
         ('/api/work_schedules/status_period', 'DELETE'),
-        ('/api/work_schedules/shifts_bulk', 'POST'),
-        ('/api/work_schedules/bulk_actions', 'POST'),
         ('/api/work_schedules/export_excel', 'GET'),
     ]
 
@@ -254,6 +260,14 @@ class RouteWiringTests(unittest.TestCase):
             node = self.ROUTES[key]
             self.assertEqual(len(_calls(node, '_resolve_work_schedule_editor')), 1, key)
             self.assertEqual(_calls(node, '_resolve_management_requester'), [], key)
+        for key in self.SHIFT_ROUTES:
+            node = self.ROUTES[key]
+            self.assertEqual(len(_calls(node, '_resolve_work_schedule_shift_editor')), 1, key)
+            self.assertEqual(_calls(node, '_resolve_work_schedule_editor'), [], key)
+            self.assertEqual(_calls(node, '_resolve_management_requester'), [], key)
+        # Внутри проверки правки смен — та же проверка «ведёт графики»: кадровик проходит, как раньше.
+        gate = source_cache.function_node(BOT, '_resolve_work_schedule_shift_editor')
+        self.assertEqual(len(_calls(gate, '_resolve_work_schedule_editor')), 1)
 
     def test_line_routes_keep_manager_gate_and_bounded_targets(self):
         for key in self.LINE_ROUTES:

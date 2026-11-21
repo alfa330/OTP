@@ -107,6 +107,56 @@ test('экран: сетка в режиме просмотра, свой экз
     assert.ok(appSource.includes('} else if (workSchedulesViewOnly) {'));
 });
 
+test('правка смен и выходных (владелец, 21.11.2026) — строки операторов СЗоВ, без статусов и «Контроля»', () => {
+    // Тот же список, что на сервере (tests/test_work_schedule_shift_editor.py сверяет и его).
+    assert.match(appSource, /^const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object\.freeze\(\{ 170: Object\.freeze\(\['szov'\]\), 225: Object\.freeze\(\['szov'\]\) \}\);$/m);
+    const start = appSource.indexOf('function ShiftPlannerViewWithCalendar(');
+    const planner = appSource.slice(start, appSource.indexOf('\n        function startConfetti(', start));
+    // Правщик — только в экземпляре просмотра всех графиков.
+    assert.ok(planner.includes('const plannerShiftEditCodes = viewOnlyAll ? (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS[Number(user?.id)] || []) : [];'));
+    assert.ok(planner.includes('const plannerEditsShifts = !plannerReadOnly || plannerViewerIsShiftEditor;'));
+
+    // Чью строку можно править — настоящее объявление над строками сетки.
+    const declarationIn = (source, name) => {
+        const at = source.indexOf(`const ${name} = `);
+        assert.ok(at >= 0, name);
+        return source.slice(at, source.indexOf(';\n', at) + 1);
+    };
+    const canEdit = new Function('plannerViewerIsShiftEditor', 'user', 'normalizeRole', 'plannerShiftEditCodes',
+        'plannerDepartmentCodeById',
+        `${declarationIn(planner, 'plannerCanEditShiftsOf')} return plannerCanEditShiftsOf;`);
+    const codes = new Map([['1', 'szov'], ['367', 'op']]);
+    const editor = canEdit(true, { id: 170 }, normalizeRole, ['szov'], codes);
+    assert.equal(editor({ id: 5, role: 'operator', department_id: 1 }), true, 'оператор СЗоВ');
+    assert.equal(editor({ id: 5, role: 'sv', department_id: 1 }), false, 'СВ СЗоВ');
+    assert.equal(editor({ id: 5, role: 'trainee', department_id: 1 }), false, 'стажёр');
+    assert.equal(editor({ id: 5, role: 'operator', department_id: 367 }), false, 'другой отдел');
+    assert.equal(editor({ id: 170, role: 'operator', department_id: 1 }), false, 'свои смены');
+    assert.equal(editor(null), false);
+    assert.equal(canEdit(false, { id: 170 }, normalizeRole, [], codes)({ id: 5, role: 'operator', department_id: 1 }), false);
+
+    // Открыть день и выходной — через замок строки; замок правщика — его правило.
+    for (const name of ['openEditModal', 'toggleDayOff', 'openEditModalForMultipleTargets', 'wsOpenDay']) {
+        const at = planner.indexOf(`const ${name} = `);
+        assert.ok(planner.slice(at, at + 200).includes('if (!plannerEditsShifts) return;'), name);
+    }
+    assert.ok(planner.includes('? !plannerCanEditShiftsOf(operators.find(o => String(o?.id) === String(opId)))'));
+    // Окно дня: только «Смены» и «История»; статус на период не рисуется.
+    assert.ok(planner.includes("const plannerShiftEditorTabs = (key) => !plannerViewerIsShiftEditor || key === 'shifts' || key === 'history';"));
+    assert.ok(planner.includes('.filter(Boolean).filter(tab => plannerShiftEditorTabs(tab.key)).map(tab => {'));
+    assert.ok(planner.includes('].filter(Boolean).filter(tab => plannerShiftEditorTabs(tab.value))}'));
+    assert.ok(planner.includes("const modalTabStatus = !plannerViewerIsShiftEditor && (!modalShowTabs || modalActiveTab === 'status');"));
+    // Телефон: смены и выходной — по строке окна; статус, «Контроль», штраф — как в просмотре.
+    assert.ok(planner.includes('const wsModalShiftsReadOnly = plannerReadOnly && !plannerCanEditShiftsOf(wsModalOperator);'));
+    for (const guard of ['{!wsModalShiftsReadOnly ? (\n                                            <WsPhoneGroup label="День">',
+        'onEdit={wsModalShiftsReadOnly ? null', 'onRemove={wsModalShiftsReadOnly ? null',
+        '{!wsModalShiftsReadOnly && !modalState.isDayOff && wsModalEditing ? (']) {
+        assert.ok(planner.includes(guard), guard);
+    }
+    assert.ok(planner.includes('{!plannerReadOnly && !plannerModalIsNonLineRow && plannerModalCanFine ? ('));
+    assert.ok(planner.includes('modalActiveScheduleStatus.isBlacklist && plannerModalCanRemoveBlacklist && !plannerReadOnly ? ('));
+});
+
 test('сетка в режиме просмотра — зритель, а не оператор', () => {
     const start = appSource.indexOf('function ShiftPlannerViewWithCalendar(');
     const end = appSource.indexOf('\n        function startConfetti(', start);

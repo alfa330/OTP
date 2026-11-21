@@ -572,6 +572,11 @@ const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set([170, 225]);
 // Сетка всех графиков у такого зрителя — отдельный раздел меню: «Графики работы» оператора
 // (work_schedules) — его «Мои смены», и отнимать их на время просмотра нельзя.
 const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';
+// Поимённая правка смен и выходных в той же сетке (владелец, 21.11.2026: «Надо ещё выдать доступ
+// на изменение смен», выбрал «Только СЗоВ» и «Смены и выходные»): users.id → коды отделов, чьи смены
+// и выходные человек правит (операторов, не свои). Статус, «Контроль» и прочее — как в просмотре.
+// Зеркало WORK_SCHEDULE_SHIFT_EDITOR_GRANTS в bot_schedule2.py — решающий сервер.
+const WORK_SCHEDULE_SHIFT_EDITOR_GRANTS = Object.freeze({ 170: Object.freeze(['szov']), 225: Object.freeze(['szov']) });
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -17094,6 +17099,14 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // просмотром открывает здесь сетку руководителя: для экрана он зритель,
             // как тренер, и все ветки «оператор → только себя» его не касаются.
             const isOperatorSelfSchedules = user?.role === 'operator' && !viewOnlyAll;
+            // Правка смен и выходных поимённо (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS): зритель всех
+            // графиков правит смены и выходные операторов своих отделов допуска (строки —
+            // plannerCanEditShiftsOf ниже); статус, «Контроль» и остальное остаются просмотром.
+            const plannerShiftEditCodes = viewOnlyAll ? (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS[Number(user?.id)] || []) : [];
+            const plannerViewerIsShiftEditor = plannerShiftEditCodes.length > 0;
+            // Открывать правку смены: всем, кто не только смотрит, и правщику смен — дальше
+            // строку решает замок (isPlannerRowLocked).
+            const plannerEditsShifts = !plannerReadOnly || plannerViewerIsShiftEditor;
             // Строки СВ (задача #352): их график ведёт РОП. Рядовой СВ видит свою
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
@@ -19127,6 +19140,9 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 () => [{ value: '', label: 'Все отделы' }, ...plannerDepartmentOptions],
                 [plannerDepartmentOptions]
             );
+            // «Только просмотр» в шапке: правщику смен — лишь когда открыт чужой отдел.
+            const plannerShowsReadOnlyBadge = plannerReadOnly && !(plannerViewerIsShiftEditor
+                && (!plannerScopeDepartmentCode || plannerShiftEditCodes.includes(plannerScopeDepartmentCode)));
             // Отдел TEZ грузит статусы вручную (CSV/XLSX) и не использует синки Oktell/Chat2Desk.
             const isTezPlanner = plannerScopeDepartmentCode === 'tez';
             /* Цвета статусов — по отделу ОПЕРАТОРА строки (задача #416: у Тез КЦ своя
@@ -20464,12 +20480,21 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 if (plannerViewerIsPlainSupervisor || plannerGrantedDepartmentIds.has(String(op?.department_id ?? ''))) return true;
                 return plannerViewerIsScopedHead && isAdminLikeRoleFn(op?.role);
             };
+            // Правщику смен (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS) открыта строка оператора его
+            // отдела допуска, кроме своей; остальные строки — только смотреть. Сервер
+            // правит так же (_resolve_shift_target_for_requester).
+            const plannerCanEditShiftsOf = (op) => plannerViewerIsShiftEditor && !!op
+                && String(op?.id) !== String(user?.id)
+                && normalizeRole(op?.role) === 'operator'
+                && plannerShiftEditCodes.includes(plannerDepartmentCodeById.get(String(op?.department_id ?? '')) || '');
             const isPlannerRowLocked = (opId) => (
-                isPlannerNonLineRowLocked(operators.find(o => String(o?.id) === String(opId)))
+                plannerViewerIsShiftEditor
+                    ? !plannerCanEditShiftsOf(operators.find(o => String(o?.id) === String(opId)))
+                    : isPlannerNonLineRowLocked(operators.find(o => String(o?.id) === String(opId)))
             );
 
             const openEditModal = (opId, date, editIndex = null) => {
-                if (plannerReadOnly) return;
+                if (!plannerEditsShifts) return;
                 if (isPlannerRowLocked(opId)) return;
                 const op = operators.find(o => o.id === opId);
                 const arr = op?.shifts?.[date] ?? [];
@@ -20512,7 +20537,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const toggleDayOff = async (opId, date) => {
-                if (plannerReadOnly) return;
+                if (!plannerEditsShifts) return;
                 if (isPlannerRowLocked(opId)) return;
                 try {
                     // Отправляем на сервер
@@ -20732,7 +20757,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const openEditModalForMultipleTargets = (targets) => {
-                if (plannerReadOnly) return;
+                if (!plannerEditsShifts) return;
                 const normalizedTargets = normalizeBulkTargets(targets).filter(t => !isPlannerRowLocked(t.opId));
                 if (normalizedTargets.length === 0) return;
                 if (normalizedTargets.length === 1) {
@@ -25209,10 +25234,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // Табы модалки дня показываем только для одиночного дня (не bulk и не мультидаты).
             const modalShowTabs = !isBulkSelectionModal && !modalState?.multipleDates;
             const modalTabShifts = !modalShowTabs || modalActiveTab === 'shifts';
-            const modalTabStatus = !modalShowTabs || modalActiveTab === 'status';
+            // Правщику смен (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS) — только «Смены» и «История»:
+            // статусы на период и «Контроль» ему не выдавали.
+            const modalTabStatus = !plannerViewerIsShiftEditor && (!modalShowTabs || modalActiveTab === 'status');
             // «Контроль» — автоотметки, тренинги, штраф: кадровику их не выдавали.
-            // Тренер вкладку по-прежнему видит — у него это просмотр.
+            // Тренер вкладку по-прежнему видит — у него это просмотр. Правщику смен
+            // вкладки нет вовсе (plannerShiftEditorTabs), а без вкладок «Контроль» не рисуется.
             const modalTabControl = !plannerViewerIsHrScheduler && (!modalShowTabs || modalActiveTab === 'control');
+            // Вкладки окна дня у правщика смен (WORK_SCHEDULE_SHIFT_EDITOR_GRANTS): «Смены» и «История».
+            const plannerShiftEditorTabs = (key) => !plannerViewerIsShiftEditor || key === 'shifts' || key === 'history';
             // Вкладка «История» показывается только вместе с табами: в массовом
             // режиме дней несколько, и «история этого дня» теряет смысл.
             const modalTabHistory = modalShowTabs && modalActiveTab === 'history';
@@ -33486,7 +33516,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
                 const wsOperator = filteredOperators.find(op => Number(op?.id) === Number(plannerPhoneOperatorId)) || null;
                 const wsOpenDay = (opId, date) => {
-                    if (plannerReadOnly) return;
+                    if (!plannerEditsShifts) return;
                     setModalActiveTab('shifts');
                     openEditModal(opId, date);
                 };
@@ -33522,7 +33552,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 tone={tone}
                                 marker={markers || null}
                                 note={cell.workMin > 0 ? formatPlannerPhoneHours(cell.workMin) : null}
-                                onClick={() => (plannerReadOnly
+                                onClick={() => ((plannerReadOnly && !plannerCanEditShiftsOf(op))
                                     ? setPlannerPhoneOperatorId(op.id)
                                     : wsOpenDay(op.id, wsDayDate))}
                             />
@@ -33631,6 +33661,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                    же обработчики. Массовой правки (Ctrl + клик по дням) на
                    телефоне нет — нет и ветки isBulkSelectionModal. */
                 const wsModalOperator = operators.find(o => o.id === modalState.opId) || null;
+                // Смены и выходной дня правит и правщик смен — на строке его отдела допуска.
+                const wsModalShiftsReadOnly = plannerReadOnly && !plannerCanEditShiftsOf(wsModalOperator);
                 const wsModalShifts = wsModalOperator?.shifts?.[modalState.date] ?? [];
                 const wsModalParts = (wsModalOperator && modalState.date)
                     ? getShiftPartsForDate(wsModalOperator, modalState.date)
@@ -33766,7 +33798,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     {plannerDepartmentId
                                         ? (plannerDepartmentSelectOptions.find(opt => String(opt.value) === String(plannerDepartmentId))?.label || '')
                                         : 'Все отделы'}
-                                    {plannerReadOnly ? ' · только просмотр' : ''}
+                                    {plannerShowsReadOnlyBadge ? ' · только просмотр' : ''}
                                 </p>
                             </header>
 
@@ -33922,12 +33954,12 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     caption={caption}
                                                     tone={tone}
                                                     hours={cell.workMin > 0 ? formatPlannerPhoneHours(cell.workMin) : null}
-                                                    onClick={plannerReadOnly ? null : () => wsOpenDay(wsOperator.id, date)}
+                                                    onClick={(plannerReadOnly && !plannerCanEditShiftsOf(wsOperator)) ? null : () => wsOpenDay(wsOperator.id, date)}
                                                 />
                                             );
                                         })}
                                     </WsPhoneGroup>
-                                    {plannerReadOnly ? (
+                                    {(plannerReadOnly && !plannerCanEditShiftsOf(wsOperator)) ? (
                                         <p className="px-1 text-[13px] leading-snug text-slate-500">
                                             Раздел открыт только на просмотр — правка графика недоступна.
                                         </p>
@@ -33944,7 +33976,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                             title={wsModalOperator?.name || 'Смена'}
                             subtitle={modalState.date ? wsDayTitle(modalState.date) : ''}
                             footer={(() => {
-                                if (plannerReadOnly) return null;
+                                if (wsModalShiftsReadOnly) return null;
                                 if (modalActiveTab === 'shifts') {
                                     if (modalState.isDayOff) return null;
                                     if (wsModalEditing) {
@@ -34001,7 +34033,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         { value: 'status', label: 'Статус' },
                                         plannerViewerIsHrScheduler ? null : { value: 'control', label: 'Контроль' },
                                         { value: 'history', label: 'История', count: modalHistoryCount }
-                                    ].filter(Boolean)}
+                                    ].filter(Boolean).filter(tab => plannerShiftEditorTabs(tab.value))}
                                 />
 
                                 {modalActiveTab === 'shifts' ? (
@@ -34012,7 +34044,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             emptyLabel={modalState.isDayOff ? 'Выходной' : 'Смен нет'}
                                             caption="Янтарным внутри полосы — перерывы."
                                         />
-                                        {!plannerReadOnly ? (
+                                        {!wsModalShiftsReadOnly ? (
                                             <WsPhoneGroup label="День">
                                                 <WsPhoneRow
                                                     title="Выходной"
@@ -34047,7 +34079,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                             ? { label: 'Редактируется', tone: 'editing' } : null
                                                     ].filter(Boolean)}
                                                     breaks={wsBreaksForShift(idx)}
-                                                    onEdit={plannerReadOnly ? null : () => setModalState(m => ({
+                                                    onEdit={wsModalShiftsReadOnly ? null : () => setModalState(m => ({
                                                         ...m,
                                                         start: seg.start,
                                                         end: seg.end,
@@ -34056,7 +34088,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                         breaks: [],
                                                         showAddPanel: true
                                                     }))}
-                                                    onRemove={plannerReadOnly ? null : () => removeSegment({
+                                                    onRemove={wsModalShiftsReadOnly ? null : () => removeSegment({
                                                         opId: modalState.opId,
                                                         date: modalState.date,
                                                         index: idx
@@ -34065,7 +34097,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             ))}
                                         </WsPhoneGroup>
 
-                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing ? (
+                                        {!wsModalShiftsReadOnly && !modalState.isDayOff && wsModalEditing ? (
                                             <WsPhoneGroup
                                                 label={modalState.editIndex !== null ? 'Редактирование смены' : 'Новая смена'}
                                                 right={(
@@ -34112,7 +34144,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             </WsPhoneGroup>
                                         ) : null}
 
-                                        {!plannerReadOnly && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
+                                        {!wsModalShiftsReadOnly && !modalState.isDayOff && wsModalEditing && modalBreakEditorContext ? (
                                             <WsPhoneGroup
                                                 label="Перерывы"
                                                 hint={modalBreaksManualOnly
@@ -34865,7 +34897,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                         ariaLabel="Отдел"
                                     />
                                 )}
-                                {plannerReadOnly && (
+                                {plannerShowsReadOnlyBadge && (
                                     <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-1 text-[11.5px] font-medium text-slate-500" title="Раздел доступен только для просмотра">
                                         <FaIcon className="fas fa-eye text-slate-400"></FaIcon>
                                         Только просмотр
@@ -36605,7 +36637,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     { key: 'status', label: 'Статус', icon: 'fa-user-clock' },
                                     plannerViewerIsHrScheduler ? null : { key: 'control', label: 'Контроль', icon: 'fa-shield-alt' },
                                     { key: 'history', label: 'История', icon: 'fa-clock-rotate-left', count: modalHistoryCount }
-                                ].filter(Boolean).map(tab => {
+                                ].filter(Boolean).filter(tab => plannerShiftEditorTabs(tab.key)).map(tab => {
                                     const active = modalActiveTab === tab.key;
                                     return (
                                         <button
