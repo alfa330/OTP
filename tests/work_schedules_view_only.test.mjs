@@ -1,0 +1,125 @@
+// Временный просмотр «Графиков работы», как у админа, но без правки (владелец, 21.11.2026:
+// «Сотрудникам … в сзов надо открыть админский доступ временный к разделам Удаленный КЦ и
+// Графики работы чисто на просмотр»).
+//
+// У оператора «Графики работы» (work_schedules) — его «Мои смены», и отнимать их нельзя.
+// Поэтому сетка всех отделов у такого зрителя — свой раздел меню (work_schedules_view): тот же
+// экран сетки в режиме «только просмотр», как у тренера. Что он видит и что ему нельзя
+// править, решает сервер (tests/test_work_schedule_view_only.py); здесь — флаг, пункт меню,
+// экран и то, что в режиме просмотра сетка не уходит ни в одну ветку «оператор → только себя».
+//
+// Запуск: node --test tests/work_schedules_view_only.test.mjs
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+import { BACK_OFFICE_EMPLOYEE_ROLES } from '../src/utils/departmentViews.js';
+import { headedDepartmentId, isAdminLikeRole, isDepartmentHead, normalizeRole } from '../src/utils/roles.js';
+
+const readLf = (name) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
+    .split('\r\n').join('\n');
+
+const appSource = readLf('src/App.jsx');
+
+/* Объявление `const NAME ...;` из App.jsx целиком — как в tests/dial_list_section_access.test.mjs. */
+const declarationOf = (name) => {
+    const at = appSource.indexOf(`const ${name} `);
+    assert.ok(at >= 0, `объявление ${name} не найдено — проверь тест`);
+    let depth = 0;
+    for (let i = at; i < appSource.length; i += 1) {
+        const ch = appSource[i];
+        const next = appSource[i + 1];
+        if (ch === '/' && next === '/') { i = appSource.indexOf('\n', i); continue; }
+        if (ch === '/' && next === '*') { i = appSource.indexOf('*/', i) + 1; continue; }
+        if (ch === "'" || ch === '"' || ch === '`') {
+            let j = i + 1;
+            while (j < appSource.length && appSource[j] !== ch) j += appSource[j] === '\\' ? 2 : 1;
+            i = j;
+            continue;
+        }
+        if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+        else if (ch === ')' || ch === ']' || ch === '}') depth -= 1;
+        else if (ch === ';' && depth === 0) return appSource.slice(at, i + 1);
+    }
+    throw new Error(`не нашёл конец объявления ${name} — проверь тест`);
+};
+
+const NAMES = ['RANK_AND_FILE_ROLES', 'isRankAndFileRole', 'WORK_SCHEDULE_VIEW_ONLY_USER_IDS',
+    'currentUserRole', 'isSuperAdmin', 'isDepartmentHeadUser', 'scopedDepartmentId', 'isScopedDepartmentHead',
+    'workSchedulesViewOnly'];
+const evaluate = new Function(
+    'user', 'normalizeRole', 'isDepartmentHead', 'headedDepartmentId', 'isAdminLikeRoleFn', 'BACK_OFFICE_EMPLOYEE_ROLES',
+    `${NAMES.map(declarationOf).join('\n')}
+     return workSchedulesViewOnly;`,
+);
+const viewOnly = (user) => evaluate(user, normalizeRole, isDepartmentHead, headedDepartmentId, isAdminLikeRole,
+    BACK_OFFICE_EMPLOYEE_ROLES);
+
+const viewers = [...appSource.match(/^const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set\(\[([\d,\s]*)\]\);$/m)[1]
+    .matchAll(/\d+/g)].map((m) => Number(m[0]));
+
+const profile = (overrides = {}) => ({
+    id: 700, role: 'operator', login: 'op_szov', department_id: 1, department_code: 'szov',
+    headed_department_id: null, headed_department_ids: [], headed_department_code: null,
+    headed_department_codes: [], ...overrides,
+});
+
+test('список людей — тот же, что на сервере', () => {
+    assert.ok(viewers.length > 0);
+    const server = readLf('bot_schedule2.py').match(/^WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset\(\{([\d,\s]*)\}\)$/m);
+    assert.ok(server, 'список на сервере не найден');
+    assert.deepEqual([...server[1].matchAll(/\d+/g)].map((m) => Number(m[0])).sort(), [...viewers].sort());
+});
+
+test('просмотр — только у рядовых из списка', () => {
+    for (const id of viewers) assert.equal(viewOnly(profile({ id })), true, id);
+    assert.equal(viewOnly(profile()), false, 'оператор не из списка');
+    // У СВ, админа и главы «Графики работы» и так свои — отдельный пункт им не нужен.
+    for (const role of ['sv', 'admin', 'trainer']) {
+        assert.equal(viewOnly(profile({ id: viewers[0], role })), false, role);
+    }
+    assert.equal(viewOnly(profile({ id: viewers[0], headed_department_id: 1, headed_department_ids: [1] })), false);
+});
+
+test('пункт меню — у рядового, рядом с его «Мои смены», которые остаются', () => {
+    const nav = 'handleSidebarViewNavigation(e, WORK_SCHEDULES_VIEW_ONLY_VIEW)';
+    const at = appSource.indexOf(nav);
+    assert.ok(at > 0, 'пункта нет');
+    assert.equal(appSource.indexOf(nav, at + 1), -1, 'пункт один');
+    const branch = appSource.lastIndexOf('{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && (', at);
+    const otherBranch = appSource.lastIndexOf('{isAdminLikeRole && (', at);
+    assert.ok(branch > otherBranch, 'пункт — в ветке рядового');
+    const gate = appSource.lastIndexOf('{workSchedulesViewOnly && (', at);
+    assert.ok(gate > branch && at - gate < 400, 'над пунктом нет своего условия');
+    assert.match(appSource.slice(at, at + 600), /<span className="sidebar-text">Графики работы<\/span>/);
+    // «Мои смены» рядового на месте.
+    assert.ok(appSource.includes("{isEmployeeAccountingManager ? 'Графики работы' : 'Мои смены'}"));
+    assert.ok(appSource.includes("const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';"));
+});
+
+test('экран: сетка в режиме просмотра, свой экземпляр', () => {
+    assert.ok(appSource.includes('{( view === WORK_SCHEDULES_VIEW_ONLY_VIEW && workSchedulesViewOnly && ('));
+    assert.match(appSource, /<ShiftPlannerViewWithCalendar key=\{WORK_SCHEDULES_VIEW_ONLY_VIEW\} viewOnlyAll /);
+    // Сняли допуск — ссылка ведёт в «Графики работы» роли, а не на пустую страницу.
+    assert.ok(appSource.includes("if (!user?.id || view !== WORK_SCHEDULES_VIEW_ONLY_VIEW || workSchedulesViewOnly) return;\n                redirectToView('work_schedules');"));
+    // Справочник отделов — для выбора отдела в шапке сетки.
+    assert.ok(appSource.includes('} else if (workSchedulesViewOnly) {'));
+});
+
+test('сетка в режиме просмотра — зритель, а не оператор', () => {
+    const start = appSource.indexOf('function ShiftPlannerViewWithCalendar(');
+    const end = appSource.indexOf('\n        function startConfetti(', start);
+    assert.ok(start > 0 && end > start, 'границы экрана сетки не найдены — проверь тест');
+    const planner = appSource.slice(start, end);
+    assert.ok(planner.startsWith('function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null, viewOnlyAll = false })'));
+    assert.ok(planner.includes("const plannerReadOnly = normalizeRole(user?.role) === 'trainer' || !!viewOnlyAll;"));
+    assert.ok(planner.includes("const isOperatorSelfSchedules = user?.role === 'operator' && !viewOnlyAll;"));
+    // Ни одной проверки роли оператора в обход флага: иначе экран просмотра молча ушёл бы
+    // в ветку «Мои смены» (или не стал бы грузить сетку) — как было бы с 23 местами до правки.
+    const stray = planner.split("const isOperatorSelfSchedules = user?.role === 'operator' && !viewOnlyAll;").join('')
+        .match(/user\?\.role [!=]== 'operator'/g);
+    assert.equal(stray, null, `проверки роли мимо isOperatorSelfSchedules: ${stray}`);
+    // Флаг объявлен до первого использования (в эффектах и колбэках ниже).
+    assert.ok(planner.indexOf('const isOperatorSelfSchedules') < planner.indexOf('isOperatorSelfSchedules)'));
+});

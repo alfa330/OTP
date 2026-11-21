@@ -48,14 +48,15 @@ const declarationOf = (name) => {
 };
 
 const MODULE_NAMES = ['DIAL_LIST_DEPARTMENT_CODES', 'DIAL_LIST_PILOT_LOGINS', 'DIAL_LIST_OVERSEER_DEPARTMENT_CODES',
-    'DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES', 'DIAL_LIST_GROUP_REPORT_HEAD_CODES', 'dialListPilotAllows',
-    'normalizeDepartmentCode', 'aiQaHeadDepartmentCodesOf'];
+    'DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES', 'DIAL_LIST_GROUP_REPORT_HEAD_CODES',
+    'DIAL_LIST_VIEW_ONLY_USER_IDS', 'dialListPilotAllows', 'normalizeDepartmentCode', 'aiQaHeadDepartmentCodesOf'];
 const FLAG_NAMES = ['currentUserRole', 'isSuperAdmin', 'isDepartmentHeadUser', 'scopedDepartmentId',
     'isScopedDepartmentHead', 'isAdminLikeRole', 'isDepartmentManager'];
+const SECTION_FLAGS = ['canManageDialListSection', 'dialListViewOnly', 'canAccessDialListSection'];
 const evaluateFlags = new Function(
     'user', 'normalizeRole', 'isDepartmentHead', 'headedDepartmentId', 'isAdminLikeRoleFn', 'isSupervisorRole',
-    `${[...MODULE_NAMES, ...FLAG_NAMES, 'canAccessDialListSection'].map(declarationOf).join('\n')}
-     return { canAccessDialListSection, isAdminLikeRole, isDepartmentManager };`,
+    `${[...MODULE_NAMES, ...FLAG_NAMES, ...SECTION_FLAGS].map(declarationOf).join('\n')}
+     return { canAccessDialListSection, dialListViewOnly, isAdminLikeRole, isDepartmentManager };`,
 );
 const flags = (user) => evaluateFlags(user, normalizeRole, isDepartmentHead, headedDepartmentId, isAdminLikeRole, isSupervisorRole);
 const canOpen = (user) => flags(user).canAccessDialListSection;
@@ -122,16 +123,44 @@ test('глава «Регионов» (фронт-офисы) видит раз�
     assert.match(appSource, /^const DIAL_LIST_GROUP_REPORT_HEAD_CODES = new Set\(\['front_office'\]\);$/m);
 });
 
+test('временный просмотр (владелец, 21.11.2026): двое операторов СЗоВ — раздел без правки', () => {
+    // «Сотрудникам … в сзов надо открыть админский доступ временный к разделам Удаленный КЦ
+    // и Графики работы чисто на просмотр». Что внутри открыто и что запись закрыта, решает
+    // сервер (tests/test_dial_list_view_only.py); портал — пункт меню и экран без кнопок правки.
+    const viewers = [...appSource.match(/^const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set\(\[([\d,\s]*)\]\);$/m)[1]
+        .matchAll(/\d+/g)].map((m) => Number(m[0]));
+    assert.ok(viewers.length > 0);
+    const server = readLf('dial_list/service.py').match(/^DIAL_LIST_VIEW_ONLY_USER_IDS = frozenset\(\{([\d,\s]*)\}\)$/m);
+    assert.ok(server, 'список на сервере не найден');
+    assert.deepEqual([...server[1].matchAll(/\d+/g)].map((m) => Number(m[0])).sort(), [...viewers].sort());
+    for (const id of viewers) {
+        const f = flags(profile({ id, role: 'operator' }));
+        assert.equal(f.canAccessDialListSection, true, id);
+        assert.equal(f.dialListViewOnly, true, id);
+        assert.equal(f.isDepartmentManager, false, 'пункт — в ветке рядового');
+    }
+    // Остальные операторы — как раньше.
+    assert.equal(canOpen(profile({ id: 99999, role: 'operator' })), false);
+    // Своё право сильнее просмотра: тот же человек СВ СЗоВ — раздел с правкой.
+    const sv = flags(profile({ id: viewers[0], role: 'sv' }));
+    assert.equal(sv.canAccessDialListSection, true);
+    assert.equal(sv.dialListViewOnly, false);
+    // Экран раздела получает «без правки» ровно у просмотра.
+    assert.ok(appSource.includes('canEdit={!dialListViewOnly}'));
+});
+
 test('пункт меню, страж маршрута и экран держатся на этом флаге', () => {
     const nav = "handleSidebarViewNavigation(e, 'dial_list')";
     const items = [...appSource.matchAll(/handleSidebarViewNavigation\(e, 'dial_list'\)/g)].map((m) => m.index);
-    assert.equal(items.length, 2, `${nav}: ждём пункт у админов и у руководителей`);
-    // Второй пункт — в ветке руководителей (СВ и главы), её СВ СЗоВ и видит.
-    const branches = ['{isAdminLikeRole && (', '{isDepartmentManager && !isAdminLikeRole && ('];
+    assert.equal(items.length, 3, `${nav}: ждём пункт у админов, у руководителей и у рядового (временный просмотр)`);
+    // По пункту в каждой ветке: админов, руководителей (СВ и главы — её СВ СЗоВ и видит) и
+    // рядового (временный просмотр).
+    const branches = ['{isAdminLikeRole && (', '{isDepartmentManager && !isAdminLikeRole && (',
+        '{isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead && ('];
     const owner = (at) => branches
         .map((opener) => ({ opener, index: appSource.lastIndexOf(opener, at) }))
         .sort((a, b) => b.index - a.index)[0].opener;
-    assert.equal(owner(items[1]), '{isDepartmentManager && !isAdminLikeRole && (');
+    assert.deepEqual(items.map(owner).sort(), [...branches].sort());
     for (const at of items) {
         const gate = appSource.lastIndexOf('{canAccessDialListSection && (', at);
         assert.ok(gate > 0 && at - gate < 600, 'над пунктом нет своего условия');

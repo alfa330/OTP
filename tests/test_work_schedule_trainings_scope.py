@@ -143,6 +143,8 @@ def _load(portal, requester_id, args):
         '_is_global_admin_requester': is_global_admin,
         '_headed_department_id': lambda user_id: next(iter(headed(user_id)), None),
         '_headed_department_ids': lambda user_id: frozenset(headed(user_id)),
+        # Временный просмотр «Графиков работы» — свой тест (test_work_schedule_view_only.py).
+        '_is_work_schedule_view_only': lambda user_id: False,
         '_department_scope_id_for_requester': lambda user_id: (
             next(iter(headed(user_id)), None) or portal.department_of(user_id)),
         '_trainer_work_schedule_member_ids': lambda: set(portal.TRAINER_PLANNER),

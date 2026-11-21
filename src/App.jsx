@@ -562,6 +562,16 @@ const TEZ_AUTODIAL_DEPARTMENT_CODES = new Set(['tez']);
 // пункт меню есть, внутри — одна «Детализация». Что именно ей можно, решает сервер —
 // dial_list.service.DIAL_LIST_GROUP_REPORT_HEAD_CODES (ответ /departments несёт report_groups).
 const DIAL_LIST_GROUP_REPORT_HEAD_CODES = new Set(['front_office']);
+// Временный просмотр, как у админа, но без правки (владелец, 21.11.2026: «открыть админский
+// доступ временный к разделам Удаленный КЦ и Графики работы чисто на просмотр»): users.id
+// операторов СЗоВ. Решающие — сервер: dial_list.service.DIAL_LIST_VIEW_ONLY_USER_IDS (все
+// отделы раздела, запись — 403) и WORK_SCHEDULE_VIEW_ONLY_USER_IDS в bot_schedule2.py (сетка
+// всех отделов). Здесь — пункты меню и экраны без кнопок правки. Снять — убрать id в обоих местах.
+const DIAL_LIST_VIEW_ONLY_USER_IDS = new Set([170, 225]);
+const WORK_SCHEDULE_VIEW_ONLY_USER_IDS = new Set([170, 225]);
+// Сетка всех графиков у такого зрителя — отдельный раздел меню: «Графики работы» оператора
+// (work_schedules) — его «Мои смены», и отнимать их на время просмотра нельзя.
+const WORK_SCHEDULES_VIEW_ONLY_VIEW = 'work_schedules_view';
 const dialListPilotAllows = (userLike) => (
     DIAL_LIST_PILOT_LOGINS.size === 0
     || DIAL_LIST_PILOT_LOGINS.has(String(userLike?.login || '').trim().toLowerCase())
@@ -1028,7 +1038,8 @@ const APP_VIEW_ANALYTICS_NAMES = Object.freeze({
     technical_issues: 'Technical issues',
     trainings: 'Trainings',
     wiki: 'Wiki',
-    work_schedules: 'Work schedules'
+    work_schedules: 'Work schedules',
+    work_schedules_view: 'Work schedules (view only)'
 });
 const APP_SUBVIEW_ANALYTICS_NAMES = Object.freeze({
     call_evaluation_analytics: 'Call evaluation analytics',
@@ -17060,7 +17071,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
         };
         const plannerRowDirectionLabel = (op) => plannerGroupKeyLabel(plannerRowGroupKey(op));
 
-        function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null }) {
+        function ShiftPlannerViewWithCalendar({ initialOperators, user, departments = [], shiftRequestFocus = null, viewOnlyAll = false }) {
             /* «Мы на телефоне» — только для шапки окна «Запроса на замену»: там
                окно едет отдельным экраном, и уход с него делает шеврон «Назад»
                слева вместо крестика справа. Читающий хук, а не useMobileShell:
@@ -17076,7 +17087,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // редактирующие действия скрыты, бэкенд тоже отклоняет запись.
             // Состав операторов задаёт сервер (отделы СЗоВ и ОП), поэтому seed
             // из общего списка пользователей для тренера не используется.
-            const plannerReadOnly = normalizeRole(user?.role) === 'trainer';
+            // Так же — временный просмотр всех графиков (viewOnlyAll,
+            // WORK_SCHEDULE_VIEW_ONLY_USER_IDS): состав — все отделы, решает сервер.
+            const plannerReadOnly = normalizeRole(user?.role) === 'trainer' || !!viewOnlyAll;
+            // «Мои смены» оператора — его собственный график. Оператор с временным
+            // просмотром открывает здесь сетку руководителя: для экрана он зритель,
+            // как тренер, и все ветки «оператор → только себя» его не касаются.
+            const isOperatorSelfSchedules = user?.role === 'operator' && !viewOnlyAll;
             // Строки СВ (задача #352): их график ведёт РОП. Рядовой СВ видит свою
             // смену и смены коллег-СВ, но не правит их — сервер такую запись всё
             // равно отклонит, а открытое окно правки обещало бы обратное.
@@ -18035,7 +18052,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 setPlannerGrantedDepartments(prev => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
             }, []);
             const fetchPlannerSchedulesByMonths = useCallback(async (monthKeys = [], { force = false, signal } = {}) => {
-                if (!user?.id || user?.role === 'operator') return null;
+                if (!user?.id || isOperatorSelfSchedules) return null;
                 const uniqueMonthKeys = Array.from(new Set(
                     (Array.isArray(monthKeys) ? monthKeys : [])
                         .map(key => String(key || '').trim())
@@ -18200,7 +18217,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 return `${start}|${end}`;
             }, []);
             const fetchPlannerImportedStatusesForRange = useCallback(async (startDate, endDate, { force = false, signal } = {}) => {
-                if (!user?.id || user?.role === 'operator') return null;
+                if (!user?.id || isOperatorSelfSchedules) return null;
                 const start = String(startDate || '').trim();
                 const end = String(endDate || '').trim();
                 if (!start || !end) return null;
@@ -18248,7 +18265,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // /operators нельзя — тот и так тяжёлый и после каждой правки
             // перезапрашивается сразу на три месяца.
             const fetchPlannerHistorySummary = useCallback(async (startDate, endDate, { signal } = {}) => {
-                if (!user?.id || user?.role === 'operator') return null;
+                if (!user?.id || isOperatorSelfSchedules) return null;
                 const start = String(startDate || '').trim();
                 const end = String(endDate || '').trim();
                 if (!start || !end) return null;
@@ -18453,7 +18470,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             ]);
 
             useEffect(() => {
-                if (user?.role !== 'operator') return;
+                if (!isOperatorSelfSchedules) return;
                 const timer = setInterval(() => {
                     setMyNowTick(v => v + 1);
                 }, 60000);
@@ -18462,7 +18479,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
 
             useEffect(() => {
                 if (!user?.id) return;
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 plannerLoadedMonthKeysRef.current = new Set();
                 plannerLoadingMonthKeysRef.current = new Set();
                 plannerLoadedStatusRangeKeysRef.current = new Set();
@@ -18479,7 +18496,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // текущий месяц + соседние, чтобы не делать запрос на каждый клик по дате.
             useEffect(() => {
                 if (!user) return;
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 const abortController = new AbortController();
                 const loadTimer = setTimeout(() => {
                     fetchPlannerSchedulesByMonths(plannerPreloadMonthKeys, {
@@ -18496,7 +18513,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [user?.id, user?.role, plannerPreloadMonthKeysKey, fetchPlannerSchedulesByMonths]);
             useEffect(() => {
                 if (!user) return;
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 let cancelled = false;
                 const loadBreakRules = async () => {
                     try {
@@ -19333,7 +19350,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, [user?.id, visibleRange, fetchPlannerTrainingsForMonth, fetchPlannerTrainingRejectionsForMonth]);
             useEffect(() => {
                 if (!user?.id) return;
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 if (plannerStatusAnomalyAnalysis) return;
                 if (!shouldLoadPlannerVisibleImportedStatuses) return;
                 const rangeStart = String(plannerStatusFetchRange?.start || '').trim();
@@ -19377,7 +19394,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             ]);
             useEffect(() => {
                 if (!user?.id) return;
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 if (plannerStatusAnomalyAnalysis) return;
                 if (!modalState?.open || !modalState?.date) return;
                 if (!showEditTimelineModal && !showEditStatusJournal) return;
@@ -19409,7 +19426,6 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             const computeLeftPercent = (m) => (m / minutesInDay) * 100;
             const cellMinWidth = viewMode === 'month' ? 110 : viewMode === 'week' ? 110 : undefined;
             const plannerStatusSpecialDayViewEnabled = viewMode === 'day' && !!plannerStatusSpecialViewEnabled;
-            const isOperatorSelfSchedules = user?.role === 'operator';
             // Фронт офисы: оператору нельзя видеть смены коллег — табы
             // «Замены»/«Смены коллег» и кнопки обмена сменами скрыты.
             const operatorColleagueShiftsHidden = isOperatorSelfSchedules && departmentHidesColleagueSchedules(user);
@@ -19471,7 +19487,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                где статусы приезжают выгрузкой по расписанию, и таймер тогда не
                заводится вовсе. */
             const loadPlannerStatusTrack = useCallback(async (dateKey, { silent = true } = {}) => {
-                if (!user?.id || user?.role === 'operator') return { available: false };
+                if (!user?.id || isOperatorSelfSchedules) return { available: false };
                 const date = String(dateKey || '').trim();
                 if (!date) return { available: false };
                 if (!silent) setPlannerStatusTrackLoading(true);
@@ -19515,7 +19531,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 ? String(visibleRange[0] || '')
                 : '';
             useEffect(() => {
-                if (!user?.id || user?.role === 'operator') return;
+                if (!user?.id || isOperatorSelfSchedules) return;
                 // Живой хвост есть только у сегодняшнего дня: вчерашние сутки
                 // закрыты, и перечитывать их каждые полминуты незачем.
                 if (!plannerLiveStatusDateKey || plannerLiveStatusDateKey !== operatorTodayKey) {
@@ -19651,7 +19667,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             useEffect(() => {
                 if (!showPlannerStatusGroupingModal) return;
                 if (!plannerStatusGroupingEffectiveDayKey) return;
-                if (!user?.id || user?.role === 'operator') return;
+                if (!user?.id || isOperatorSelfSchedules) return;
 
                 const dateKey = String(plannerStatusGroupingEffectiveDayKey || '').trim();
                 if (!dateKey) return;
@@ -21019,7 +21035,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const handlePlannerBreaksRecalculate = async () => {
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 const sortedDates = (Array.isArray(visibleRange) ? [...visibleRange] : [])
                     .map(date => String(date || '').trim())
                     .filter(Boolean)
@@ -21449,7 +21465,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const handlePlannerExcelExport = async () => {
-                if (user?.role === 'operator') return;
+                if (isOperatorSelfSchedules) return;
                 if (!Array.isArray(visibleRange) || visibleRange.length === 0) {
                     emitAppToast('Нет дат для экспорта', 'warning');
                     return;
@@ -22422,7 +22438,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             };
 
             const handlePlannerStatusMatchExport = async () => {
-                if (user?.role === 'operator' || plannerStatusMatchExportLoading) return;
+                if (isOperatorSelfSchedules || plannerStatusMatchExportLoading) return;
                 const normalizedRange = normalizePlannerStatusMatchExportRange(plannerStatusMatchExportRange);
                 if (!normalizedRange) {
                     setPlannerStatusMatchExportError('Проверьте даты периода');
@@ -28887,7 +28903,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             }, []);
 
             useEffect(() => {
-                if (user?.role !== 'operator') return;
+                if (!isOperatorSelfSchedules) return;
                 if (!breakReminderEnabled) return;
                 if (!Array.isArray(breakReminderCandidates) || breakReminderCandidates.length === 0) return;
 
@@ -34857,7 +34873,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                 )}
                             </div>
                             <div className="flex items-center gap-2">
-                        {user?.role !== 'operator' && (
+                        {!isOperatorSelfSchedules && (
                             <>
                             <input
                                 ref={plannerExcelImportInputRef}
@@ -37820,7 +37836,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 {plannerSideModals}
 
                 <SimpleModal
-                    open={!!showPlannerStatusMatchExportModal && user?.role !== 'operator'}
+                    open={!!showPlannerStatusMatchExportModal && !isOperatorSelfSchedules}
                     onClose={() => {
                         if (!plannerStatusMatchExportLoading) setShowPlannerStatusMatchExportModal(false);
                     }}
@@ -38085,7 +38101,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </SimpleModal>
 
                 <SimpleModal
-                    open={!!showPlannerOktellSyncModal && user?.role !== 'operator'}
+                    open={!!showPlannerOktellSyncModal && !isOperatorSelfSchedules}
                     onClose={() => {
                         if (!plannerOktellSyncLoading) setShowPlannerOktellSyncModal(false);
                     }}
@@ -38758,7 +38774,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     );
                 })()}
 
-                <SimpleModal open={!!excelImportReport && user?.role !== 'operator'} onClose={() => setExcelImportReport(null)}>
+                <SimpleModal open={!!excelImportReport && !isOperatorSelfSchedules} onClose={() => setExcelImportReport(null)}>
                     {excelImportReport && (() => {
                         const report = excelImportReport;
                         const tone = report.kind === 'error'
@@ -39172,7 +39188,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </SimpleModal>
 
                 <SimpleModal
-                    open={!!showPlannerStatusGroupingModal && user?.role !== 'operator'}
+                    open={!!showPlannerStatusGroupingModal && !isOperatorSelfSchedules}
                     onClose={() => {
                         setShowPlannerStatusGroupingModal(false);
                         setPlannerStatusHourlyExpandedKey('');
@@ -40018,7 +40034,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     })()}
                 </SimpleModal>
                 <SimpleModal
-                    open={!!showPlannerStatusAnomalyModal && user?.role !== 'operator'}
+                    open={!!showPlannerStatusAnomalyModal && !isOperatorSelfSchedules}
                     onClose={() => {
                         setShowPlannerStatusAnomalyModal(false);
                         setPlannerStatusModalFocus(null);
@@ -40745,7 +40761,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 </SimpleModal>
 
                 <SimpleModal
-                    open={!!showBreakRulesSettingsModal && user?.role !== 'operator'}
+                    open={!!showBreakRulesSettingsModal && !isOperatorSelfSchedules}
                     onClose={() => {
                         if (plannerBreakRulesSaving) return;
                         setShowBreakRulesSettingsModal(false);
@@ -44963,7 +44979,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
             // им сервер отдаёт весь раздел, как админам. И СВ СЗоВ
             // (DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES) — с тем же, что у главы.
             // Глава «Регионов» (DIAL_LIST_GROUP_REPORT_HEAD_CODES) — только отчёты своей группы.
-            const canAccessDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
+            const canManageDialListSection = dialListPilotAllows(user) && (isAdminLikeRole
                 || (isDepartmentHead(user)
                     && aiQaHeadDepartmentCodesOf(user).some((code) => DIAL_LIST_DEPARTMENT_CODES.has(code)
                         || DIAL_LIST_OVERSEER_DEPARTMENT_CODES.has(code)
@@ -44971,6 +44987,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 || (isSupervisorRole(currentUserRole)
                     && DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES.has(
                         normalizeDepartmentCode(user?.department_code ?? user?.departmentCode))));
+            // Временный просмотр (DIAL_LIST_VIEW_ONLY_USER_IDS): раздел, как у админа, но экран без
+            // кнопок правки — только тому, у кого своего права в разделе нет.
+            const dialListViewOnly = !canManageDialListSection && dialListPilotAllows(user)
+                && DIAL_LIST_VIEW_ONLY_USER_IDS.has(Number(user?.id));
+            const canAccessDialListSection = canManageDialListSection || dialListViewOnly;
+            // То же для «Графиков работы» (WORK_SCHEDULE_VIEW_ONLY_USER_IDS): сетка всех отделов
+            // на просмотр — у рядового отдельным пунктом меню рядом с «Мои смены».
+            const workSchedulesViewOnly = isRankAndFileRole(currentUserRole) && !isScopedDepartmentHead
+                && WORK_SCHEDULE_VIEW_ONLY_USER_IDS.has(Number(user?.id));
             // «Воронка ОП Tez» (15.10.2026, до 03.11.2026 — «Автообзвон Тез»): тот же движок, что «Удаленный КЦ», но раздел
             // отдела Тез КЦ (профиль tez) — админы, глава Тез КЦ и его супервайзеры. Решающий —
             // сервер (dial_list.service.manager_scope: СВ отдела из DIAL_LIST_OWN_SUPERVISOR_CODES
@@ -55094,13 +55119,18 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     fetchUsers({ initial: true });
                     fetchDirections();
                     fetchDepartments();
+                } else if (workSchedulesViewOnly) {
+                    /* Временный просмотр всех графиков (WORK_SCHEDULE_VIEW_ONLY_USER_IDS):
+                       сетке — справочник отделов для выбора в шапке, остальное ей
+                       отдаёт сервер. */
+                    fetchDepartments();
                 }
 
                 if (user.role !== 'operator' || isDepartmentHead(user)) {
                     fetchSensitiveAccessStatus();
                     fetchSurveysPendingBadgeCount();
                 }
-            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager, isPlainTrainer, isEmployeeAccountingManager]);
+            }, [user?.id, user?.role, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentManager, isPlainTrainer, isEmployeeAccountingManager, workSchedulesViewOnly]);
 
             // Гард видимости разделов по отделу (Этап 10): если отдел ограничивает
             // набор разделов и текущий view недоступен — перенаправляем на разрешённый.
@@ -55146,6 +55176,8 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                     && (canAccessSipSettingsFleet || canAccessSipSettingsTez)) return;
                 // «Удаленный КЦ» — раздел отделов на Binotel, вне allowlist отдела.
                 if (view === 'dial_list' && canAccessDialListSection) return;
+                // Временный просмотр всех графиков — поимённый пункт рядового, вне allowlist отдела.
+                if (view === WORK_SCHEDULES_VIEW_ONLY_VIEW && workSchedulesViewOnly) return;
                 // «Воронка ОП Tez» — так же, свой круг доступа.
                 if (view === 'tez_autodial' && canAccessTezAutodialSection) return;
                 // Ограничитель «Перезвона» — тоже общий раздел вне allowlist отдела.
@@ -55244,7 +55276,15 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                 // Перенаправляем на первый разрешённый раздел роли (для sv это manage_operators, для оператора — salary).
                 const fallback = firstAllowedView(user, []) || 'salary';
                 if (fallback && fallback !== view) redirectToView(fallback);
-            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, isEmployeeAccountingManager, wikiSectionEnabled, view]);
+            }, [user?.id, user?.role, user?.department_code, user?.departmentCode, user?.headed_department_id, user?.headedDepartmentId, isAdminLikeRole, isDepartmentHeadUser, canUseAdminEmployeeAccounting, canAccessAiQaSection, canAccessVerifierChatsSection, canAccessChatAppSection, canAccessSzovWallboardSection, canAccessTezWallboardSection, canAccessOpWallboardSection, canAccessGroupLateBotSection, canAccessCrmSection, canAccessComplaintsSection, canAccessParcelsSection, canAccessWaterSection, canAccessDisciplineSection, canAccessThermoboxesSection, canAccessTestNumbersSection, canAccessBaigaSection, canAccessSignLinksSection, canAccessOlxLeadsSection, canAccessOlxAdsSection, canAccessTouchesSection, canAccessOpFunnelSection, canAccessLibrarySection, canAccessSipSettingsFleet, canAccessSipSettingsTez, canAccessPaymentsSection, canAccessProductionSection, canAccessTwofaSection, canAccessSyntonySection, canAccessRentalSection, canAccessHiringSection, canAccessClientCardsSection, canAccessDressCodeSection, canAccessHrOfficeSection, canAccessMailSection, isEmployeeAccountingManager, workSchedulesViewOnly, wikiSectionEnabled, view]);
+
+            /* Временный просмотр всех графиков сняли (WORK_SCHEDULE_VIEW_ONLY_USER_IDS), а
+               адрес раздела остался в ссылке или истории — уводим в «Графики работы» роли
+               (у рядового это «Мои смены»), а не на пустую страницу. */
+            useEffect(() => {
+                if (!user?.id || view !== WORK_SCHEDULES_VIEW_ONLY_VIEW || workSchedulesViewOnly) return;
+                redirectToView('work_schedules');
+            }, [user?.id, view, workSchedulesViewOnly, redirectToView]);
 
             // Держим список отделов свежим для селекта в карточке и фильтра сотрудников
             // (отдел мог быть создан в разделе «Отделы» уже после первичной загрузки).
@@ -57480,6 +57520,31 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 </button>
                                             </li>
                                             )}
+                                            {/* Временный просмотр, как у админа, без правки (владелец, 21.11.2026):
+                                                у рядового своих пунктов этих разделов нет — блок только для
+                                                поимённых (WORK_SCHEDULE_VIEW_ONLY_USER_IDS, DIAL_LIST_VIEW_ONLY_USER_IDS).
+                                                «Мои смены» ниже остаются его собственными. */}
+                                            {renderDividerIfInner(workSchedulesViewOnly, canAccessDialListSection)}
+                                            {workSchedulesViewOnly && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, WORK_SCHEDULES_VIEW_ONLY_VIEW)}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === WORK_SCHEDULES_VIEW_ONLY_VIEW ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-calendar-alt"></FaIcon> <span className="sidebar-text">Графики работы</span>
+                                                </button>
+                                            </li>
+                                            )}
+                                            {canAccessDialListSection && (
+                                            <li>
+                                                <button
+                                                    onClick={(e) => handleSidebarViewNavigation(e, 'dial_list')}
+                                                    className={`w-full text-left py-3 px-4 rounded-lg hover:bg-blue-700 transition-all duration-200 flex items-center gap-3 ${view === 'dial_list' ? 'bg-blue-700' : ''}`}
+                                                >
+                                                    <FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>
+                                                </button>
+                                            </li>
+                                            )}
                                             {renderDividerIfInner(
                                                 departmentAllowsView(user, 'profile'),
                                                 departmentAllowsView(user, 'hours'),
@@ -58903,7 +58968,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     ? 'p-0 bg-white h-full min-h-0 min-w-0 overflow-hidden'
                                 : (canAccessLmsSection && view === 'lms')
                                     ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
-                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
+                                    : (view === 'four_you' || view === 'tasks' || view === 'work_schedules' || view === WORK_SCHEDULES_VIEW_ONLY_VIEW || view === 'shift_auction' || view === 'contests' || view === 'wiki' || ((view === 'resource_fte' || view === 'resource_fte_chat') && canAccessResourceFteSection))
                                         ? 'p-0 bg-gray-50 min-h-screen overflow-y-auto overflow-x-hidden custom-scrollbar'
                                     /* «Оплата счетов» и «Продакшн» держат края сами
                                        (SECTION_COLUMN, как у «Задач»): общие p-8
@@ -60790,7 +60855,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     showToast={showToast}
                                     apiBaseUrl={API_BASE_URL}
                                     withAccessTokenHeader={withAccessTokenHeader}
-                                    canEdit={canAccessDialListSection}
+                                    canEdit={!dialListViewOnly}
                                 />
                             </Suspense>
                         ))}
@@ -61842,6 +61907,11 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                     />
                                 ))}
                                 {( view === "work_schedules" && (<ShiftPlannerViewWithCalendar initialOperators={users} user={user} departments={departments} shiftRequestFocus={shiftRequestFocus}/>))}
+                                {/* Временный просмотр всех графиков (WORK_SCHEDULE_VIEW_ONLY_USER_IDS): сетка
+                                    руководителя без правки. key — свой экземпляр, не «Мои смены» того же человека. */}
+                                {( view === WORK_SCHEDULES_VIEW_ONLY_VIEW && workSchedulesViewOnly && (
+                                    <ShiftPlannerViewWithCalendar key={WORK_SCHEDULES_VIEW_ONLY_VIEW} viewOnlyAll initialOperators={users} user={user} departments={departments}/>
+                                ))}
                                 {( view === "surveys" && (<SurveysView user={user} operators={users} directions={directions} departments={departments} showToast={showToast} apiBaseUrl={API_BASE_URL} onSurveyProgressChanged={fetchSurveysPendingBadgeCount} />))}
                                 {/* «Деление звонков»: пункт меню у рядового есть (ветка выше), а
                                     экран до сих пор был объявлен только в блоках админа и

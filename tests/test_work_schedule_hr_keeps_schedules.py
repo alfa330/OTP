@@ -70,6 +70,8 @@ def _base_namespace(requester_id):
         '_headed_department_id': lambda uid: next(iter(HEADS.get(uid, ())), None),
         '_headed_department_ids': lambda uid: set(HEADS.get(uid, ())),
         '_is_employee_accounting_manager': lambda uid: uid is not None and PEOPLE.get(uid, (None, None))[1] == HR_DEPT,
+        # Временный просмотр «Графиков работы» — свой тест (test_work_schedule_view_only.py).
+        '_is_work_schedule_view_only': lambda uid: False,
         '_is_global_admin_requester': lambda role, uid=None: _role(role) == 'super_admin' or (
             _role(role) == 'admin' and not HEADS.get(uid)),
     }

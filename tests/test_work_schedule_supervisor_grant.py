@@ -206,6 +206,8 @@ class _Portal:
             "_headed_department_ids": headed,
             "_headed_department_id": lambda user_id: next(iter(sorted(headed(user_id))), None),
             "_is_employee_accounting_manager": lambda *_a, **_k: False,
+            # Временный просмотр «Графиков работы» — свой тест (test_work_schedule_view_only.py).
+            "_is_work_schedule_view_only": lambda *_a, **_k: False,
             "_trainer_work_schedule_member_ids": lambda: set(),
             "_ws_query_bool": lambda _name, default=False: default,
             "_record_elapsed_server_timing": lambda *_a, **_k: None,

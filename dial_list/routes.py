@@ -278,9 +278,9 @@ from io import BytesIO
 from flask import Blueprint, jsonify, request, send_file
 
 from . import calls_export as calls_export_report
-from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT, WA_MEDIA,
-                      DialListError, DialListService, parse_period, phone_shows_qr_lock, pilot_allows,
-                      webhook_remote_addr)
+from .service import (PHONE_VERSION_HEADER, PROFILE_REMOTE_CC, PROFILE_TEZ, PROFILES, SUBTYPE_NOT_SENT,
+                      VIEW_ONLY_DENIED, WA_MEDIA, DialListError, DialListService, parse_period, phone_shows_qr_lock,
+                      pilot_allows, view_only_user, webhook_remote_addr)
 
 log = logging.getLogger(__name__)
 
@@ -395,11 +395,23 @@ def build_dial_list_blueprint(*, db, require_api_key, build_cors_preflight_respo
         extra = {"supervisor_id": requester_id} if supervisor_code is not None else {}
         scope = svc.manager_scope(_section_admin(role, headed), headed, login=login,
                                   supervisor_department_code=supervisor_code, **extra)
+        if scope is not None and not scope and pilot_allows(login):
+            scope = _view_only_scope(requester_id)
         if scope is not None and not scope:
             raise DialListError("Раздел «Удаленный КЦ» вам недоступен", 403)
         if department_id is not None and scope is not None and int(department_id) not in set(scope):
             raise DialListError("Это не ваш отдел", 403)
         return requester_id, scope
+
+    def _view_only_scope(requester_id):
+        """Временный просмотр раздела (DIAL_LIST_VIEW_ONLY_USER_IDS, владелец 21.11.2026): все отделы «Удаленного
+        КЦ», как у админа, но только чтение — запись (не GET) отбивается здесь, до ручки. Отделы автообзвона Тез в
+        зону не входят: это другой раздел сайта. Не из списка — [] (раздел не его)."""
+        if not view_only_user(requester_id):
+            return []
+        if request.method not in ('GET', 'HEAD'):
+            raise DialListError(VIEW_ONLY_DENIED, 403)
+        return [d["department_id"] for d in svc.list_departments(None, profile=PROFILE_REMOTE_CC)]
 
     def _global_admin():
         """Администратор всей компании (is_global_admin). Глава отдела с ролью «админ» им не

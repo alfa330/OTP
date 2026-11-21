@@ -568,6 +568,14 @@ DIAL_LIST_FULL_ACCESS_SUPERVISOR_DEPARTMENT_CODES = frozenset({"szov"})
 # «Детализация»: звонки тех, кто в день звонка состоял в группах его отдела; ни вкладок, ни
 # остальных ручек. Тот же список на фронте — в App.jsx (пункт меню).
 DIAL_LIST_GROUP_REPORT_HEAD_CODES = frozenset({"front_office"})
+
+# Временный просмотр раздела, как у админа, но без правки (владелец, 21.11.2026: «Сотрудникам … в сзов надо
+# открыть админский доступ временный к разделам Удаленный КЦ и Графики работы чисто на просмотр»): users.id
+# операторов СЗоВ. Им — все отделы «Удаленного КЦ» и только чтение: ручки руководителя пускают их лишь методом
+# GET (routes._manager), любая запись — 403. Работает, только пока своей зоны в разделе у человека нет: станет
+# главой или СВ СЗоВ — правила его роли. Снять — убрать id отсюда и из App.jsx (DIAL_LIST_VIEW_ONLY_USER_IDS).
+DIAL_LIST_VIEW_ONLY_USER_IDS = frozenset({170, 225})
+VIEW_ONLY_DENIED = "Раздел «Удаленный КЦ» открыт вам только на просмотр"
 SEAT_ANYONE_DENIED = ("Сотрудника другого отдела сажают на линию и снимают с неё глава и супервайзеры СЗоВ "
                       "и суперадмины")
 # «Привязку к линии вызывающий не читал»: None занято под «прочитал — её нет».
@@ -1118,6 +1126,14 @@ def pilot_allows(login):
     if not DIAL_LIST_PILOT_LOGINS:
         return True
     return str(login or "").strip().lower() in DIAL_LIST_PILOT_LOGINS
+
+
+def view_only_user(user_id):
+    """Открыт ли человеку раздел только на просмотр (DIAL_LIST_VIEW_ONLY_USER_IDS)."""
+    try:
+        return int(user_id) in DIAL_LIST_VIEW_ONLY_USER_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def full_access_supervisor(supervisor_department_code):

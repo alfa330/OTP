@@ -2571,6 +2571,25 @@ def _load_target_user_with_scope(
 TRAINER_WORK_SCHEDULE_DEPARTMENT_CODES = ('szov', 'op')
 
 
+# Временный просмотр «Графиков работы», как у админа, но без правки (владелец,
+# 21.11.2026: «Сотрудникам … в сзов надо открыть админский доступ временный к
+# разделам Удаленный КЦ и Графики работы чисто на просмотр»): users.id
+# операторов СЗоВ. Им — сетка всех отделов (_filter_operators_for_requester_role)
+# и справочники к ней (отделы, правила перерывов); правка по-прежнему идёт через
+# _resolve_management_requester / _resolve_work_schedule_editor, куда оператору
+# хода нет. Граница сетки не шире роли: станет СВ или главой — правила роли.
+# Снять — убрать id отсюда и из App.jsx (WORK_SCHEDULE_VIEW_ONLY_USER_IDS).
+WORK_SCHEDULE_VIEW_ONLY_USER_IDS = frozenset({170, 225})
+
+
+def _is_work_schedule_view_only(requester_id):
+    """Открыты ли человеку «Графики работы» всех отделов только на просмотр."""
+    try:
+        return int(requester_id) in WORK_SCHEDULE_VIEW_ONLY_USER_IDS
+    except (TypeError, ValueError):
+        return False
+
+
 def _trainer_work_schedule_member_ids():
     """Множество id сотрудников отделов, доступных тренеру в «Графиках работы»."""
     allowed_codes = set(TRAINER_WORK_SCHEDULE_DEPARTMENT_CODES)
@@ -2738,6 +2757,10 @@ def _filter_operators_for_requester_role(requester, requester_id, operators):
             ]
         member_ids = db.get_department_member_ids(scope)
         return [it for it in items if _operator_item_id(it) in member_ids]
+    # Временный просмотр (WORK_SCHEDULE_VIEW_ONLY_USER_IDS) — все отделы, как у
+    # админа. Последней веткой: у СВ, главы и тренера граница своя.
+    if _is_work_schedule_view_only(requester_id):
+        return items
     return []
 
 
@@ -2824,7 +2847,8 @@ def _resolve_work_schedule_viewer():
     только по отделам СЗоВ и ОП (скоуп задаётся в
     _filter_operators_for_requester_scope). Мутационные эндпоинты графиков
     по-прежнему идут через _resolve_management_requester и тренеру недоступны.
-    И отдел кадров — он графики ведёт (_resolve_work_schedule_editor).
+    И отдел кадров — он графики ведёт (_resolve_work_schedule_editor). И
+    временный просмотр (WORK_SCHEDULE_VIEW_ONLY_USER_IDS) — тоже только чтение.
     """
     requester_id, requester, auth_error = _get_authenticated_requester()
     if auth_error:
@@ -2835,6 +2859,7 @@ def _resolve_work_schedule_viewer():
         or _headed_department_id(requester_id) is not None
         or _normalize_user_role(requester[3]) == 'trainer'
         or _is_employee_accounting_manager(requester_id)
+        or _is_work_schedule_view_only(requester_id)
     ):
         return requester_id, requester, None
     return None, None, ("Forbidden", 403)
@@ -14862,9 +14887,11 @@ def api_admin_departments():
             # Список отделов доступен админам (для назначения главы и т.п.)
             # и наблюдателю «Маркетинга»: «Журнал оценок» и «Деление звонков»
             # рисуют по нему селектор отдела. Это справочник имён отделов —
-            # данных сотрудников в нём нет.
+            # данных сотрудников в нём нет. Временному просмотру графиков
+            # (WORK_SCHEDULE_VIEW_ONLY_USER_IDS) — для выбора отдела в сетке.
             if not (_is_admin_role(requester_role) or requester_role == 'trainer'
-                    or _is_marketing_observer(requester_id, requester_role)):
+                    or _is_marketing_observer(requester_id, requester_role)
+                    or _is_work_schedule_view_only(requester_id)):
                 return jsonify({"error": "Forbidden"}), 403
             departments = db.get_departments()
             return jsonify({"status": "success", "departments": departments}), 200
@@ -40272,7 +40299,10 @@ def get_work_schedule_status_track():
         except ValueError:
             return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
 
-        if _normalize_user_role(requester[3]) == 'operator':
+        # Временный просмотр всех графиков (WORK_SCHEDULE_VIEW_ONLY_USER_IDS) —
+        # по периметру зрителя: «Мои смены» находят в ответе себя по id.
+        if (_normalize_user_role(requester[3]) == 'operator'
+                and not _is_work_schedule_view_only(requester_id)):
             operator_ids = [int(requester_id)]
         else:
             viewer_id, viewer, viewer_error = _resolve_work_schedule_viewer()
@@ -41188,7 +41218,10 @@ def get_work_schedule_break_rules():
         # правил перерывов смена оператора, поставленная кадровиком, легла бы без
         # перерывов — раздел раскладывает их по правилам направления. Читать —
         # всё; менять правила (POST ниже) — по-прежнему руководителю линии.
-        keeps_all_schedules = _is_employee_accounting_manager(requester_id)
+        # Временный просмотр всех графиков (WORK_SCHEDULE_VIEW_ONLY_USER_IDS) — по
+        # той же причине: сетка без правил легла бы без перерывов.
+        keeps_all_schedules = (_is_employee_accounting_manager(requester_id)
+                               or _is_work_schedule_view_only(requester_id))
         if not (
             _is_admin_role(role) or _is_supervisor_role(role)
             or _headed_department_id(requester_id) is not None or keeps_all_schedules

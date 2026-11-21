@@ -1053,9 +1053,11 @@ class SectionNameTests(unittest.TestCase):
     def test_menu_and_header_carry_the_new_name(self):
         app = _read(APP_PATH)
         item = '<FaIcon className="fas fa-list-check"></FaIcon> <span className="sidebar-text">Удаленный КЦ</span>'
-        self.assertEqual(app.count(item), 2)                                   # ветка админа и ветка главы отдела
+        # Ветка админа, ветка главы отдела и (с 21.11.2026) ветка рядового — временный просмотр раздела
+        # поимённо (DIAL_LIST_VIEW_ONLY_USER_IDS, tests/test_dial_list_view_only.py).
+        self.assertEqual(app.count(item), 3)
         self.assertNotIn('<span className="sidebar-text">Обзвон из телефона</span>', app)
-        self.assertEqual(app.count("handleSidebarViewNavigation(e, 'dial_list')"), 2)
+        self.assertEqual(app.count("handleSidebarViewNavigation(e, 'dial_list')"), 3)
         view = _read(os.path.join(ROOT, 'src', 'components', 'dial_list', 'DialListView.jsx'))
         self.assertIn("const SECTION_TITLE = 'Удаленный КЦ';", view)
         # С 15.10.2026 тот же экран — и «Автообзвон Тез» (profile='tez'): заголовок — по профилю,

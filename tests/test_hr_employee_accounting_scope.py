@@ -622,6 +622,8 @@ class DepartmentsDirectoryTests(unittest.TestCase):
                 "_is_admin_role": lambda value: str(value or "").lower() in ("admin", "super_admin"),
                 "_is_marketing_observer": lambda *_a, **_k: False,
                 "_is_employee_accounting_manager": lambda _user_id: manager,
+                # Временный просмотр «Графиков работы» (tests/test_work_schedule_view_only.py) — не здесь.
+                "_is_work_schedule_view_only": lambda _user_id: False,
             },
         )
         return endpoint()

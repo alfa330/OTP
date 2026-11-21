@@ -205,8 +205,11 @@ class LiveStatusScopeTests(unittest.TestCase):
         end = BOT_SRC.index("@app.route('/api/work_schedules/direction'", start)
         handler = BOT_SRC[start:end]
         # Оператор получает только себя, руководитель — своих людей тем же
-        # фильтром, что и в сетке: своего правила видимости здесь нет.
-        self.assertIn("if _normalize_user_role(requester[3]) == 'operator':", handler)
+        # фильтром, что и в сетке: своего правила видимости здесь нет. Оператор
+        # с временным просмотром всех графиков — по периметру зрителя
+        # (tests/test_work_schedule_view_only.py).
+        self.assertIn("if (_normalize_user_role(requester[3]) == 'operator'\n"
+                      "                and not _is_work_schedule_view_only(requester_id)):", handler)
         self.assertIn('operator_ids = [int(requester_id)]', handler)
         self.assertIn('_resolve_work_schedule_viewer()', handler)
         self.assertIn('_filter_operators_for_requester_scope(', handler)
