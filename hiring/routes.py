@@ -26,6 +26,8 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/dashboard[/export]       итоговый дашборд (ТЗ 8.1), выгрузка
     GET    /reports/cards?key=               список карточек за цифрой дашборда
     GET    /reports/motivation[/export]      начисления месяца
+    GET    /reports/day[/export|/cards]      отчёт за день (HR-3): воронка дня по каналам, по рекрутерам, эффективность
+    PUT    /reports/day/note                 «Другая работа» за день — свой текст рекрутера
     …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки; у источника — цвет (каналы слиты
                                              с источниками 20.11.2026, своих ручек у каналов больше нет)
     PUT    /integrations/hh/settings         вакансии hh.kz: какие отслеживать и с какой вакансией iCORE
@@ -55,7 +57,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, hh, notices, queries, reports, rules, wa_chat, wa_live
+from . import access, day_report, hh, notices, queries, reports, rules, wa_chat, wa_live
 from .service import HiringError
 
 log = logging.getLogger(__name__)
@@ -549,6 +551,72 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = reports.motivation_report(cursor, filters)
         label = filters.get('month') or '%s — %s' % (filters['cohort_from'].date(), (filters['cohort_to'] - timedelta(days=1)).date())
         return _xlsx(reports.export_motivation(_json(rows), label), 'Мотивация рекрутеров %s.xlsx' % label)
+
+    # ─── Отчёт за день (HR-3) ────────────────────────────────────────────────
+
+    def _day_scope(ctx):
+        """День и чей отчёт. Рекрутеру — только свой; руководителю — команда или выбранный рекрутер. Тренеру и главе
+        отдела отчёта за день нет: в нём работа рекрутеров с откликами."""
+        caps = access.capabilities(ctx)
+        if not caps['recruiter']:
+            raise HiringError('HIRING_FORBIDDEN', 'Отчёт за день — у рекрутеров и руководителя рекрутинга', 403)
+        day = day_report.parse_day(request.args.get('day'), rules.now_almaty().date())
+        recruiter = _int(request.args.get('recruiter_id')) if caps['reports'] else int(ctx['user_id'])
+        return day, recruiter
+
+    def _day_payload(cursor, ctx, day, recruiter):
+        data = day_report.build(cursor, day, recruiter_id=recruiter, viewer_id=ctx['user_id'])
+        # «Другую работу» рекрутер пишет сам — в своём отчёте и в отчёте команды; чужой текст только читают.
+        data['can_note'] = bool(not recruiter or int(recruiter) == int(ctx['user_id']))
+        return data
+
+    @hiring_route('/reports/day')
+    def hiring_report_day(ctx):
+        day, recruiter = _day_scope(ctx)
+        with db._get_cursor() as cursor:
+            data = _day_payload(cursor, ctx, day, recruiter)
+        return jsonify(_json(data))
+
+    @hiring_route('/reports/day/export')
+    def hiring_report_day_export(ctx):
+        day, recruiter = _day_scope(ctx)
+        with db._get_cursor() as cursor:
+            data = _day_payload(cursor, ctx, day, recruiter)
+        who = (' — ' + data['recruiter']['name']) if data.get('recruiter') and data['recruiter'].get('name') else ''
+        return _xlsx(day_report.export_day(_json(data)), 'Отчёт за день %s%s.xlsx' % (day.isoformat(), who))
+
+    @hiring_route('/reports/day/cards')
+    def hiring_report_day_cards(ctx):
+        caps = access.capabilities(ctx)
+        day, recruiter = _day_scope(ctx)
+        key = str(request.args.get('key') or '').strip()
+        if not key:
+            return _bad('Не указано, какую цифру раскрыть', 'HIRING_NEED_KEY')
+        with db._get_cursor() as cursor:
+            ids = day_report.card_ids_for(cursor, day, key, recruiter_id=recruiter)
+            total, rows = queries.list_cards(cursor, caps, ctx['user_id'], {'ids': ids or [0]}, limit=500)
+        return jsonify({'total': total, 'items': [public_card(card, ctx) for card in rows]})
+
+    @hiring_route('/reports/day/note', methods=('PUT',))
+    def hiring_report_day_note(ctx):
+        if not access.is_recruiter(ctx):
+            return _bad('«Другую работу» пишут рекрутеры', 'HIRING_FORBIDDEN', 403)
+        body = _body()
+        today = rules.now_almaty().date()
+        try:
+            day = datetime.strptime(str(body.get('day') or '')[:10], '%Y-%m-%d').date()
+        except ValueError:
+            return _bad('Укажите день', 'HIRING_BAD_DAY')
+        if day > today:
+            return _bad('Отчёта за этот день ещё нет', 'HIRING_BAD_DAY')
+        text = body.get('body')
+        if text is not None and not isinstance(text, str):
+            return _bad('Текст — строкой', 'HIRING_BAD_NOTE')
+        if len(text or '') > day_report.NOTE_MAX:
+            return _bad('Не длиннее %d знаков' % day_report.NOTE_MAX, 'HIRING_NOTE_TOO_LONG')
+        with db._get_cursor() as cursor:
+            note = day_report.save_note(cursor, ctx['user_id'], day, text, rules.now_almaty())
+        return jsonify({'note': _json(note)})
 
     def _xlsx(content, name):
         return Response(content, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={

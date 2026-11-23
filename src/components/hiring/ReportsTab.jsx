@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download } from 'lucide-react';
 import CustomSelect from '../ui/CustomSelect';
 import IosDatePicker from '../ui/DatePicker';
-import { IosModal, IosSegmented, iosBtnSecondary, iosCard } from '../ui/ios';
+import { IosSegmented, iosCard } from '../ui/ios';
+import DayReport from './DayReport';
+import ReportCardsModal from './ReportCardsModal';
+import { REPORT_VIEW_KEY, pickReportView, reportViews } from './dayReportMeta';
 import {
-    FUNNEL_LABELS, FUNNEL_STAGES, MOTIVATION_LABELS, MOTIVATION_TONES, STAGE_LABELS, currentMonth,
+    FUNNEL_LABELS, FUNNEL_STAGES, MOTIVATION_LABELS, MOTIVATION_TONES, currentMonth,
     errorOf, fullDate, monthLabel, percent, shortTime,
 } from './hiringMeta';
 import { DATE_TRIGGER, Empty, FiltersRow, FiltersToggle, Group, Loading, MonthSwitch, Pill, Stat, TOOLBAR_BTN, Table } from './hiringUi';
@@ -23,9 +26,11 @@ const saveBlob = (blob, name) => {
 };
 
 /*
- * Вкладка «Отчёты» (ТЗ 8.1, 8.2): итоговый дашборд воронки одним экраном — плитки, воронка
+ * Вкладка «Отчёты» (ТЗ 8.1, 8.2): «За день» — отчёт рекрутера за день одним листом для скриншота руководству
+ * (задача HR-3, DayReport.jsx); итоговый дашборд воронки одним экраном — плитки, воронка
  * по этапам (ширина пропорциональна количеству, под ней таблица), потери, разрез по
  * рекрутерам и источникам (с партиями), время на этапах; отдельно — мотивация за месяц.
+ * Выбранный вид запоминается в браузере (dayReportMeta.REPORT_VIEW_KEY).
  *
  * Когорта — карточки, взятые в работу в отчётном месяце; «достиг этапа» — хоть раз был в
  * колонке; фильтры действуют на все блоки разом. Клик по любой цифре открывает список
@@ -33,10 +38,13 @@ const saveBlob = (blob, name) => {
  * В панели инструментов — только период и выгрузка; отборы — за кнопкой «Фильтры».
  */
 
-const VIEWS = [
-    { value: 'dashboard', label: 'Дашборд' },
-    { value: 'motivation', label: 'Мотивация' },
-];
+const readStoredView = () => {
+    try {
+        return window.localStorage.getItem(REPORT_VIEW_KEY) || '';
+    } catch (storageError) {
+        return '';
+    }
+};
 
 const FunnelBars = ({ rows, onCell }) => {
     const max = Math.max(1, ...rows.map((row) => row.count));
@@ -58,41 +66,18 @@ const FunnelBars = ({ rows, onCell }) => {
     );
 };
 
-const CardsModal = ({ api, toast, request, onClose, onOpenCard, filters }) => {
-    const [rows, setRows] = useState(null);
-    useEffect(() => {
-        if (!request) return undefined;
-        let alive = true;
-        setRows(null);
-        api.get('/reports/cards', { ...filters, key: request.key })
-            .then(({ data }) => { if (alive) setRows(data.items); })
-            .catch((error) => toast(errorOf(error, 'Список не открылся'), 'error'));
-        return () => { alive = false; };
-    }, [api, request, filters, toast]);
-    return (
-        <IosModal open={Boolean(request)} onClose={onClose} title={request?.label || ''} subtitle={rows ? `${rows.length} карточек` : ''}
-                  footer={<div className="flex justify-end"><button type="button" className={iosBtnSecondary} onClick={onClose}>Закрыть</button></div>}>
-            {!rows ? <Loading text="Собираем список…" /> : rows.length === 0 ? <Empty>Карточек нет</Empty> : (
-                <ul className="divide-y divide-slate-100">
-                    {rows.map((card) => (
-                        <li key={card.id}>
-                            <button type="button" onClick={() => onOpenCard(card.id)} className="flex w-full items-center gap-3 py-2 text-left hover:bg-slate-50">
-                                <div className="min-w-0 grow basis-0">
-                                    <div className="truncate text-[13.5px] font-medium text-slate-900">{card.full_name || 'Без имени'}{card.candidate_no ? <span className="ml-1.5 text-[12px] font-normal text-slate-400">№{card.candidate_no}</span> : null}</div>
-                                    <div className="truncate text-[12px] text-slate-500">{[card.recruiter_name, card.source_name, card.vacancy_name || card.vacancy_text, card.city].filter(Boolean).join(' · ')}</div>
-                                </div>
-                                <Pill tone={card.stage === 'hired' ? 'green' : ['refused', 'dropped'].includes(card.stage) ? 'red' : 'slate'}>{STAGE_LABELS[card.stage]}</Pill>
-                            </button>
-                        </li>
-                    ))}
-                </ul>
-            )}
-        </IosModal>
-    );
-};
-
 const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
-    const [view, setView] = useState('dashboard');
+    const views = useMemo(() => reportViews(caps), [caps]);
+    const [storedView, setStoredView] = useState(readStoredView);
+    const view = pickReportView(storedView, views);
+    const setView = (next) => {
+        setStoredView(next);
+        try {
+            window.localStorage.setItem(REPORT_VIEW_KEY, next);
+        } catch (storageError) {
+            // Приватное окно: вид просто не запомнится.
+        }
+    };
     const [month, setMonth] = useState(currentMonth);
     // Период вместо месяца (ТЗ 8.2 «Воронка»: фильтр «период»): когорта — взятые в работу в эти даты.
     const [periodMode, setPeriodMode] = useState('month');
@@ -127,6 +112,8 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
     }), [month, byPeriod, periodFrom, periodTo, recruiters, sources, vacancyId, city, stage, stageFrom, stageTo]);
 
     const load = useCallback(() => {
+        // «За день» загружает себя сам (DayReport) — дашборд и мотивацию тогда не считаем.
+        if (view === 'day') return Promise.resolve();
         setLoading(true);
         const call = view === 'dashboard' ? api.get('/reports/dashboard', filters).then(({ data: payload }) => setData(payload))
             : api.get('/reports/motivation', filters).then(({ data: payload }) => setMotivation(payload));
@@ -165,13 +152,17 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
     ];
 
     const dashboard = view === 'dashboard';
+    const switcher = <IosSegmented value={view} onChange={setView} options={views} ariaLabel="Отчёт" />;
+    if (view === 'day') {
+        return <DayReport api={api} toast={toast} boot={boot} caps={caps} onOpenCard={onOpenCard} version={version} switcher={switcher} />;
+    }
     const activeFilters = [vacancyId, city, recruiters.length, sources.length, stage && (stageFrom || stageTo)].filter(Boolean).length;
     const resetFilters = () => { setVacancyId(''); setCity(''); setRecruiters([]); setSources([]); setStage(''); setStageFrom(''); setStageTo(''); };
 
     return (
         <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-                <IosSegmented value={view} onChange={setView} options={VIEWS} ariaLabel="Отчёт" />
+                {switcher}
                 {dashboard && (
                     <IosSegmented size="xs" value={periodMode} onChange={setPeriodMode} ariaLabel="Месяц или период"
                                   options={[{ value: 'month', label: 'Месяц' }, { value: 'period', label: 'Период' }]} />
@@ -345,7 +336,7 @@ const ReportsTab = ({ api, toast, boot, caps, onOpenCard, version }) => {
                 </div>
             )}
 
-            <CardsModal api={api} toast={toast} request={request} onClose={() => setRequest(null)} onOpenCard={onOpenCard} filters={filters} />
+            <ReportCardsModal api={api} toast={toast} request={request} onClose={() => setRequest(null)} onOpenCard={onOpenCard} params={filters} />
         </div>
     );
 };

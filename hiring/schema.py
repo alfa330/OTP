@@ -546,6 +546,28 @@ _STATEMENTS = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_created ON hiring_hh_topics (created_at)",
+
+    # Отчёт за день (HR-3, hiring/day_report.py): «Другая работа» — текст рекрутера за день о том, что не касается
+    # кандидатов (владелец 23.11.2026: поле под таблицей, цифры таблицы руками не правятся). Одна запись на человека и
+    # день; пустой текст — записи нет.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_day_notes (
+        user_id          INTEGER NOT NULL,
+        day              DATE NOT NULL,
+        body             TEXT NOT NULL,
+        created_at       TIMESTAMP NOT NULL,
+        updated_at       TIMESTAMP NOT NULL,
+        PRIMARY KEY (user_id, day)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_day_notes_day ON hiring_day_notes (day)",
+    # Выборки отчёта за день — по времени события, а не по карточке: поступление, взятие в работу, касания дня,
+    # собеседования дня (этапы и звонки по времени уже покрыты idx_hiring_card_stages_stage / idx_hiring_calls_recruiter).
+    "CREATE INDEX IF NOT EXISTS idx_hiring_cards_received ON hiring_cards (received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_cards_office_visit ON hiring_cards (office_visit_at) WHERE office_visit_at IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_assignments_at ON hiring_assignments (assigned_at)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_touches_at ON hiring_touches (at)",
+    "CREATE INDEX IF NOT EXISTS idx_hiring_calls_started ON hiring_calls (started_at)",
 ]
 
 
