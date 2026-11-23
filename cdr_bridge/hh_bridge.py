@@ -110,6 +110,11 @@ MAX_PAGES = 10
 ORDER_SLACK = timedelta(days=1)
 PUSH_BATCH = 50
 SEEN_LIMIT = 20000
+# Рекрутер в hh успевает перевести свежий отклик дальше по этапам («Телефонное интервью» у «Оператора call-центра» —
+# 71 из 153 на 23.11.2026) раньше, чем мост его увидит в «Откликах». Поэтому, когда растёт счётчик этапа, мост смотрит
+# и первую страницу его папки (имя папки — состояние строчными буквами). Отказы — нет: отклонённый в hh кандидат в
+# пул рекрутеров не нужен.
+WATCHED_STATES = ('CONSIDER', 'PHONE_INTERVIEW', 'ASSESSMENT', 'INTERVIEW', 'OFFER', 'HIRED')
 SUMMARY_SECONDS = 600
 CRASH_PAUSE_SECONDS = 30.0
 
@@ -398,9 +403,24 @@ class Site:
     def counts(self, vacancy_id):
         return counts_fingerprint(self._get('/shards/employer/candidates/counts', {'vacancyId': vacancy_id}))
 
-    def responses(self, vacancy, page):
-        return items_from_page(self._get('/shards/employer/vacancyresponses/candidates_list',
-                                         {'vacancyId': vacancy['id'], 'order': 'DATE', 'page': page}), vacancy)
+    def responses(self, vacancy, page, collection=None):
+        """Страница выдачи «по дате»: без collection — папка «Отклики», иначе папка этапа (phone_interview и т. п.)."""
+        params = {'vacancyId': vacancy['id'], 'order': 'DATE', 'page': page}
+        if collection:
+            params['collection'] = collection
+        return items_from_page(self._get('/shards/employer/vacancyresponses/candidates_list', params), vacancy)
+
+
+def grown_states(previous, current):
+    """Этапы из WATCHED_STATES, у которых счётчик вырос (previous None — первый взгляд: все непустые)."""
+    now_total = (json.loads(current).get('total') or {}) if current else {}
+    before_total = (json.loads(previous).get('total') or {}) if previous else None
+    grown = []
+    for state in WATCHED_STATES:
+        count = now_total.get(state) or 0
+        if count and (before_total is None or count > (before_total.get(state) or 0)):
+            grown.append(state)
+    return grown
 
 
 # ─── Мост ─────────────────────────────────────────────────────────────────────
@@ -559,13 +579,13 @@ class HhBridge:
 
     # ── hh ──────────────────────────────────────────────────────────────────
 
-    def _scan(self, vacancy):
+    def _scan(self, vacancy, collection=None):
         """Свежие отклики вакансии, которых портал ещё не видел. Выдача «по дате»: следующая страница нужна, только
         если на этой все отклики ещё новее отсечки (с запасом в сутки — порядок у hh почти, а не строго, по дате)."""
         horizon = (self.since - ORDER_SLACK) if self.since else None
         fresh = []
         for page in range(MAX_PAGES):
-            items = self.site.responses(vacancy, page)
+            items = self.site.responses(vacancy, page, collection)
             reached_old = False
             for item in items:
                 moment = parse_moment(item.get('responded_at'))
@@ -593,12 +613,16 @@ class HhBridge:
             if vacancy['id'] in self.off:
                 continue
             mark = self.site.counts(vacancy['id'])
-            if fingerprints.get(vacancy['id']) == mark:
+            previous = fingerprints.get(vacancy['id'])
+            if previous == mark:
                 continue
-            for item in self._scan(vacancy):
-                if item['topic_id'] not in queued:
-                    self.pending.append(item)
-                    queued.add(item['topic_id'])
+            # «Отклики» — всегда; этапы, где прибавилось, — тоже: свежий отклик могли успеть перевести туда.
+            collections = [None] + [state.lower() for state in grown_states(previous, mark)]
+            for collection in collections:
+                for item in self._scan(vacancy, collection):
+                    if item['topic_id'] not in queued:
+                        self.pending.append(item)
+                        queued.add(item['topic_id'])
             fingerprints[vacancy['id']] = mark
         live = {vacancy['id'] for vacancy in self.vacancies}
         for key in [key for key in fingerprints if key not in live]:

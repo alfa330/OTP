@@ -156,10 +156,13 @@ class HhBridgeTests(unittest.TestCase):
                      response(5000000002, '2026-11-23T10:09:00+03:00'),         # 12:09 — после
                      response(5000000001, '2026-11-23T10:07:59+03:00'),         # 12:07:59 — до отсечки
                      response(5000000004, '2026-11-23T10:30:00+03:00', invitation=True)]
+        # Папки выдачи: «Отклики» (без collection) и этапы, куда рекрутер в hh переводит отклики.
+        self.folders = {None: self.rows, 'phone_interview': []}
         self.http = FakeHttp({
             '/employer/vacancies': lambda params: FakeResponse(200, vacancies_page(), url='https://almaty.hh.kz/employer/vacancies'),
             '/shards/employer/candidates/counts': lambda params: self.fingerprint,
-            '/shards/employer/vacancyresponses/candidates_list': lambda params: page(*self.rows) if params['page'] == 0 else page(),
+            '/shards/employer/vacancyresponses/candidates_list': lambda params: (
+                page(*self.folders.get(params.get('collection'), [])) if params['page'] == 0 else page()),
         })
         os.environ['CDR_AGENT_KEYS'] = PUBLIC_B64
         self.addCleanup(os.environ.pop, 'CDR_AGENT_KEYS', None)
@@ -231,12 +234,14 @@ class HhBridgeTests(unittest.TestCase):
         self.assertEqual(second['account']['employer'], 'Ресурс Плюс KZ')
         # Маркетолог выключен порталом — ни счётчиков, ни выдачи.
         self.assertEqual([p['vacancyId'] for p in self.calls('/shards/employer/candidates/counts')], [OPERATOR])
+        # Первый взгляд: «Отклики» и непустые этапы (там могли оказаться отклики после отсечки).
         self.assertEqual(self.calls('/shards/employer/vacancyresponses/candidates_list'),
-                         [{'vacancyId': OPERATOR, 'order': 'DATE', 'page': 0}])
+                         [{'vacancyId': OPERATOR, 'order': 'DATE', 'page': 0},
+                          {'vacancyId': OPERATOR, 'order': 'DATE', 'page': 0, 'collection': 'phone_interview'}])
         self.assertTrue(os.path.exists(self.heartbeat))
         # Счётчики не сдвинулись — выдачу не читаем, порталу — только «я на связи».
         bridge.cycle()
-        self.assertEqual(len(self.calls('/shards/employer/vacancyresponses/candidates_list')), 1)
+        self.assertEqual(len(self.calls('/shards/employer/vacancyresponses/candidates_list')), 2)
         self.assertEqual(self.portal.payloads[-1]['items'], [])
         self.assertIsNone(self.portal.payloads[-1]['vacancies'])             # каталог свежий — не повторяем
         # Пришёл новый отклик — уходит только он.
@@ -244,6 +249,16 @@ class HhBridgeTests(unittest.TestCase):
         self.fingerprint = counts(32, 25)
         bridge.cycle()
         self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000005'])
+        self.assertEqual(self.calls('/shards/employer/vacancyresponses/candidates_list')[-1].get('collection'), None)
+        # Рекрутер в hh успел перевести свежий отклик в «Телефонное интервью» до такта моста: в «Откликах» его нет, но
+        # счётчик этапа вырос — мост смотрит и эту папку.
+        self.folders['phone_interview'] = [response(5000000009, '2026-11-23T11:10:00+03:00')]
+        self.fingerprint = {'counts': {'totalCandidatesByEmployerState': {'RESPONSE': 32, 'PHONE_INTERVIEW': 2},
+                                       'totalUnreadCandidatesByEmployerState': {'RESPONSE': 25}}}
+        bridge.cycle()
+        self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000009'])
+        self.assertEqual(self.calls('/shards/employer/vacancyresponses/candidates_list')[-1].get('collection'),
+                         'phone_interview')
         # Перезапуск моста: отданное помнится, повторов нет.
         self.fingerprint = counts(32, 24)
         again = self.bridge()
