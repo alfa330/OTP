@@ -28,7 +28,7 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/motivation[/export]      начисления месяца
     …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки; у источника — цвет (каналы слиты
                                              с источниками 20.11.2026, своих ручек у каналов больше нет)
-    PUT    /integrations/hh/settings         вакансии hh.kz: какие переносить и с какой вакансией iCORE
+    PUT    /integrations/hh/settings         вакансии hh.kz: какие отслеживать и с какой вакансией iCORE
     GET    /groups[?pick=1], POST /groups,   группы на обучение с вместимостью: тренер ведёт свои, руководитель —
     PATCH  /groups/<id>                      любые; pick — выбор при приглашении (действующие, свободные места)
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
@@ -908,8 +908,9 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     @hiring_route('/integrations/hh/settings', methods=('PUT',))
     def hiring_hh_settings(ctx):
-        """Вакансии hh.kz: какие переносить в воронку и с какой вакансией iCORE (владелец 23.11.2026: новые вакансии hh
-        идут сами, выключает их руководитель). Тело: {"vacancies": {"<id вакансии hh>": {"on": bool, "vacancy_id": id}}}."""
+        """Вакансии hh.kz: какие отслеживать и с какой вакансией iCORE (владелец 23.11.2026: новые вакансии hh идут сами;
+        «Добавь в настройки возможность выбрать какие вакансии отслеживать»). Включённая после выключения — с этой
+        минуты. Тело: {"vacancies": {"<id вакансии hh>": {"on": bool, "vacancy_id": id}}}."""
         _manage_only(ctx)
         service.hh_settings(_body().get('vacancies'))
         with db._get_cursor() as cursor:

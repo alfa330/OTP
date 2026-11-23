@@ -170,27 +170,42 @@ export const INTEGRATION_STATE_LABELS = { ok: 'Работает', not_configured
 /* Вакансии hh.kz в «Интеграциях» (владелец 23.11.2026: новые вакансии hh переносятся сами, руководитель выключает их или
    ставит вакансию iCORE). Выбор в списке — одним значением: 'off' — не переносить, 'on' — без вакансии, 'v<id>' — с
    вакансией iCORE. Правило с сервера: {on, vacancy_id}. */
-export const hhChoice = (rule) => {
-    if (!rule || rule.on === false) return rule ? 'off' : 'on';
-    return rule.vacancy_id ? `v${rule.vacancy_id}` : 'on';
-};
+/* Вакансии hh.kz в «Настройках → Интеграции» (владелец 23.11.2026: «Добавь в настройки возможность выбрать какие
+ * вакансии отслеживать»): тумблер «отслеживать» у каждой, у отслеживаемой — с какой вакансией iCORE заводить карточки. */
+export const HH_NO_ICORE = 'Без вакансии iCORE';
+export const HH_LINK_ICORE = 'Связать с вакансией iCORE';
 
-export const hhChoiceOptions = (vacancies) => [
-    { value: 'off', label: 'Не переносить' },
-    { value: 'on', label: 'Без вакансии' },
-    ...(vacancies || []).filter((v) => v.is_active !== false).map((v) => ({ value: `v${v.id}`, label: v.name })),
+/* Варианты выбора вакансии iCORE: действующие вакансии воронки; у связанной — первым «Без вакансии iCORE», чтобы
+ * связь можно было снять. Несвязанная показывает серую подсказку HH_LINK_ICORE, а не одинаковую надпись в каждой строке. */
+export const hhIcoreOptions = (vacancies, linked = false) => [
+    ...(linked ? [{ value: '', label: HH_NO_ICORE }] : []),
+    ...(vacancies || []).filter((v) => v.is_active !== false).map((v) => ({ value: String(v.id), label: v.name })),
 ];
 
-/* Тело PUT /integrations/hh/settings: прежние правила (и вакансий, которых мост сейчас не видит) + выбранное здесь. */
-export const hhSettingsBody = (savedRules, choices) => {
+/* Значение выбора вакансии iCORE: связанная вакансия, если её ещё можно выбрать, иначе null (подсказка) — так же
+ * поступает сервер (выключенную вакансию iCORE отклику не ставит). */
+export const hhIcoreValue = (vacancyId, options) => {
+    const value = vacancyId ? String(vacancyId) : '';
+    return value && (options || []).some((option) => option.value === value) ? value : null;
+};
+
+/* Подпись под вакансией hh: город, отклики в кабинете и — у включённой позже — с какого момента её отклики идут. */
+export const hhVacancyMeta = (vacancy) => [
+    vacancy.area,
+    vacancy.responses != null ? `откликов ${vacancy.responses}` : null,
+    vacancy.on && vacancy.tracked_since ? `отслеживается с ${shortTime(vacancy.tracked_since)}` : null,
+].filter(Boolean).join(' · ');
+
+/* Тело PUT /integrations/hh/settings: прежние правила (и вакансий, которых мост сейчас не видит) + правка одной.
+ * Выключение связь с вакансией iCORE не стирает: включили снова — она на месте. */
+export const hhSettingsBody = (savedRules, id, change) => {
     const vacancies = {};
-    Object.entries(savedRules || {}).forEach(([id, rule]) => {
-        if (rule && typeof rule === 'object') vacancies[id] = { on: rule.on !== false, vacancy_id: rule.vacancy_id || null };
+    Object.entries(savedRules || {}).forEach(([key, rule]) => {
+        if (rule && typeof rule === 'object') vacancies[key] = { on: rule.on !== false, vacancy_id: rule.vacancy_id || null };
     });
-    Object.entries(choices || {}).forEach(([id, choice]) => {
-        vacancies[id] = choice === 'off' ? { on: false, vacancy_id: null }
-            : { on: true, vacancy_id: /^v\d+$/.test(choice) ? Number(choice.slice(1)) : null };
-    });
+    if (id != null && change) {
+        vacancies[String(id)] = { on: change.on !== false, vacancy_id: change.vacancy_id || null };
+    }
     return { vacancies };
 };
 

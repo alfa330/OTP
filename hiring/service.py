@@ -508,7 +508,9 @@ class HiringService:
             log.info('Воронка найма: мост hh принёс откликов %s', taken)
         return {'results': results,
                 'settings': {'since': since.replace(tzinfo=rules.ALMATY).isoformat(timespec='seconds'),
-                             'off': hh.off_ids(settings)},
+                             'off': hh.off_ids(settings),
+                             'since_by_vacancy': {key: moment.replace(tzinfo=rules.ALMATY).isoformat(timespec='seconds')
+                                                  for key, moment in hh.since_by_vacancy(settings).items()}},
                 'next_poll_sec': next_poll}
 
     def _hh_take(self, cursor, item, settings, since, source, icore_vacancies, now):
@@ -520,7 +522,7 @@ class HiringService:
         phone = rules.normalize_phone(item['phone'])
         if not rule['on']:
             outcome = 'vacancy_off'
-        elif item['responded_at'] < since:
+        elif item['responded_at'] < (rule['since'] or since):
             outcome = 'before_since'
         elif not phone:
             outcome = 'no_phone'
@@ -555,14 +557,16 @@ class HiringService:
             return key
 
     def hh_settings(self, vacancies_raw):
-        """Правка руководителя: какие вакансии hh переносить и с какой вакансией iCORE (права проверяет ручка)."""
+        """Правка руководителя: какие вакансии hh отслеживать и с какой вакансией iCORE (права проверяет ручка).
+        Включённая после выключения — с этой минуты (hh.merge_vacancy_settings)."""
         now = self._now()
         with self._cursor() as cursor:
-            queries.hh_lock_integration(cursor, now)
+            row = queries.hh_lock_integration(cursor, now)
             try:
                 vacancies = hh.clean_vacancy_settings(vacancies_raw, queries.hh_vacancy_ids(cursor))
             except ValueError as exc:
                 raise HiringError('HIRING_BAD_SETTINGS', str(exc))
+            vacancies = hh.merge_vacancy_settings((row.get('settings') or {}).get('vacancies'), vacancies, now)
             queries.hh_save_settings(cursor, now, vacancies)
         return vacancies
 

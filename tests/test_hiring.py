@@ -627,14 +627,35 @@ class HHTests(unittest.TestCase):
                     'vacancies': {'139508734': {'on': False}, '139079696': {'on': True, 'vacancy_id': 2}}}
         self.assertEqual(hh.since(settings), datetime(2026, 11, 23, 12, 8))
         self.assertEqual(hh.since({}), rules.HH_SINCE_DEFAULT)
-        self.assertEqual(hh.vacancy_rule(settings, '139508734'), {'on': False, 'vacancy_id': None})
-        self.assertEqual(hh.vacancy_rule(settings, 139079696), {'on': True, 'vacancy_id': 2})
+        self.assertEqual(hh.vacancy_rule(settings, '139508734'), {'on': False, 'vacancy_id': None, 'since': None})
+        self.assertEqual(hh.vacancy_rule(settings, 139079696), {'on': True, 'vacancy_id': 2, 'since': None})
         # Новая вакансия hh — переносится, без вакансии iCORE (владелец 23.11.2026).
-        self.assertEqual(hh.vacancy_rule(settings, '1'), {'on': True, 'vacancy_id': None})
+        self.assertEqual(hh.vacancy_rule(settings, '1'), {'on': True, 'vacancy_id': None, 'since': None})
         self.assertEqual(hh.off_ids(settings), ['139508734'])
         # Решения владельца 23.11.2026: только новые с этой минуты, все вакансии, кроме «Младший маркетолог».
         self.assertEqual(rules.HH_SINCE_DEFAULT, datetime(2026, 11, 23, 12, 8))
         self.assertEqual(rules.HH_OFF_DEFAULT, ('139508734',))
+        # «Добавь в настройки возможность выбрать какие вакансии отслеживать»: вакансию включили позже — её отклики с
+        # минуты включения (то же «только новые с этой минуты», что у всего моста).
+        later = {'since': '2026-11-23T12:08:00', 'vacancies': {'1': {'on': True, 'since': '2026-11-24T10:15:00'},
+                                                               '2': {'on': True, 'since': '2026-11-01T00:00:00'},
+                                                               '3': {'on': False, 'since': '2026-11-24T10:15:00'}}}
+        self.assertEqual(hh.vacancy_rule(later, '1')['since'], datetime(2026, 11, 24, 10, 15))
+        self.assertIsNone(hh.vacancy_rule(later, '2')['since'])              # раньше общей отсечки — действует общая
+        self.assertIsNone(hh.vacancy_rule(later, '3')['since'])              # выключена — не в счёт
+        self.assertEqual(hh.vacancy_since(later, '1'), datetime(2026, 11, 24, 10, 15))
+        self.assertEqual(hh.vacancy_since(later, '2'), datetime(2026, 11, 23, 12, 8))
+        self.assertEqual(hh.vacancy_since(later, '9'), datetime(2026, 11, 23, 12, 8))   # новая вакансия — общая
+        self.assertEqual(hh.since_by_vacancy(later), {'1': datetime(2026, 11, 24, 10, 15)})
+        merged = hh.merge_vacancy_settings(
+            {'1': {'on': False}, '2': {'on': True, 'since': '2026-11-24T10:15:00'}, '3': {'on': True}},
+            {'1': {'on': True}, '2': {'on': True, 'vacancy_id': 7}, '3': {'on': False}, '4': {'on': True}},
+            datetime(2026, 11, 25, 9, 30))
+        self.assertEqual(merged, {'1': {'on': True, 'since': '2026-11-25T09:30:00'},          # включили — с этой минуты
+                                  '2': {'on': True, 'vacancy_id': 7, 'since': '2026-11-24T10:15:00'},   # момент цел
+                                  '3': {'on': False},                                          # выключили — момента нет
+                                  '4': {'on': True}})                                          # новая — общая отсечка
+        self.assertEqual(hh.merge_vacancy_settings(None, {'1': {'on': True}}, datetime(2026, 11, 25)), {'1': {'on': True}})
 
     def test_bridge_pace(self):
         """Владелец 23.11.2026: «максимально безопасно… чтобы не получить банов», затем «добавь случайный тайминг в

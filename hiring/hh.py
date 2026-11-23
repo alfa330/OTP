@@ -24,10 +24,12 @@ API hh.ru отдаёт отклики работодателю только с �
 (hiring_integrations.settings у кода hh):
 
     {"since": "2026-11-23T12:08:00",
-     "vacancies": {"139508734": {"on": false}, "139079696": {"on": true, "vacancy_id": 2}}}
+     "vacancies": {"139508734": {"on": false}, "139079696": {"on": true, "vacancy_id": 2},
+                   "138923446": {"on": true, "since": "2026-11-24T10:15:00"}}}
 
 Вакансия hh, которой в настройках нет, переносится без вакансии iCORE: новые вакансии hh идут сами (владелец
-23.11.2026). Последний доклад моста (кто вошёл, какие вакансии видит, когда был на связи) — в cursor той же строки.
+23.11.2026). Какие отслеживать, руководитель выбирает тумблером (владелец 23.11.2026: «Добавь в настройки возможность
+выбрать какие вакансии отслеживать»); включённая после выключения — с минуты включения (since у вакансии). Последний доклад моста (кто вошёл, какие вакансии видит, когда был на связи) — в cursor той же строки.
 """
 
 import re
@@ -167,11 +169,48 @@ def since(settings):
 
 
 def vacancy_rule(settings, vacancy_id):
-    """{'on': переносить ли, 'vacancy_id': вакансия iCORE или None}. Вакансии нет в настройках — переносится, без вакансии."""
+    """{'on': отслеживать ли, 'vacancy_id': вакансия iCORE или None, 'since': с какого момента её отклики нужны, если
+    её включили позже общей отсечки, иначе None}. Вакансии нет в настройках — отслеживается, без вакансии iCORE."""
     rule = ((settings or {}).get('vacancies') or {}).get(str(vacancy_id)) or {}
     icore = rule.get('vacancy_id')
-    return {'on': rule.get('on') is not False,
-            'vacancy_id': icore if isinstance(icore, int) and not isinstance(icore, bool) and icore > 0 else None}
+    on = rule.get('on') is not False
+    own = parse_moment(rule.get('since')) if on else None
+    return {'on': on,
+            'vacancy_id': icore if isinstance(icore, int) and not isinstance(icore, bool) and icore > 0 else None,
+            'since': own if own and own > since(settings) else None}
+
+
+def vacancy_since(settings, vacancy_id):
+    """С какого момента переносятся отклики вакансии: общая отсечка или минута, когда её включили."""
+    return vacancy_rule(settings, vacancy_id)['since'] or since(settings)
+
+
+def since_by_vacancy(settings):
+    """{id вакансии hh: момент} — вакансии, включённые позже общей отсечки: мост не листает их выдачу глубже."""
+    out = {}
+    for key in ((settings or {}).get('vacancies') or {}):
+        moment = vacancy_rule(settings, key)['since']
+        if moment:
+            out[str(key)] = moment
+    return out
+
+
+def merge_vacancy_settings(previous, cleaned, now):
+    """Правка руководителя поверх прежних правил. Вакансию, которая была выключена, включили — она отслеживается с
+    этой минуты: её прежние отклики в воронку не идут (как решение владельца 23.11.2026 «только новые с этой минуты»
+    для всего моста). Уже отслеживаемая сохраняет свой момент; выключенная его теряет."""
+    previous = previous if isinstance(previous, dict) else {}
+    out = {}
+    for key, rule in cleaned.items():
+        entry = dict(rule)
+        before = previous.get(key) if isinstance(previous.get(key), dict) else None
+        if entry.get('on') is not False and before is not None:
+            if before.get('on') is False:
+                entry['since'] = now.isoformat(timespec='seconds')
+            elif before.get('since'):
+                entry['since'] = before['since']
+        out[key] = entry
+    return out
 
 
 def off_ids(settings):
@@ -215,7 +254,8 @@ def view(row, now):
     vacancies = []
     for item in report.get('vacancies') or []:
         rule = vacancy_rule(settings, item.get('id'))
-        vacancies.append(dict(item, on=rule['on'], vacancy_id=rule['vacancy_id']))
+        vacancies.append(dict(item, on=rule['on'], vacancy_id=rule['vacancy_id'],
+                              tracked_since=rule['since'].isoformat(timespec='minutes') if rule['since'] else None))
     return {
         'since': since(settings).isoformat(timespec='minutes'),
         'seen_at': seen_at.isoformat(timespec='seconds') if seen_at else None,

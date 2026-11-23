@@ -129,11 +129,12 @@ export const iosBtnSecondary =
 export const iosBtnGhost =
     'inline-flex items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-[13px] font-medium text-slate-500 transition-all hover:bg-slate-100 active:scale-[0.98]';
 
-export const IosToggle = ({ checked, onChange, disabled = false }) => (
+export const IosToggle = ({ checked, onChange, disabled = false, ariaLabel }) => (
     <button
         type="button"
         role="switch"
         aria-checked={!!checked}
+        aria-label={ariaLabel}
         disabled={disabled}
         onClick={() => { if (!disabled) onChange(!checked); }}
         className={`relative inline-flex h-[26px] w-[44px] shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/60 ${

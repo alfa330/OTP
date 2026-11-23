@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from hiring import access, notices, queries, reports, rules, schema, wa_live, wa_media
+from hiring import access, hh, notices, queries, reports, rules, schema, wa_live, wa_media
 from hiring.service import HiringError, HiringService
 
 PORT = os.environ.get('HIRING_TEST_PORT')
@@ -1334,7 +1334,7 @@ def test_hh_bridge_intake(world):
     ])
     assert [r['outcome'] for r in reply['results']] == [
         'created', 'repeat', 'vacancy_off', 'before_since', 'no_phone', 'employee', 'invalid']
-    assert reply['settings'] == {'since': '2026-11-23T12:08:00+05:00', 'off': [HH_MARKETER]}
+    assert reply['settings'] == {'since': '2026-11-23T12:08:00+05:00', 'off': [HH_MARKETER], 'since_by_vacancy': {}}
     assert 120 <= reply['next_poll_sec'] <= 300               # днём — случайно, 2–5 минут
     with world['db']._get_cursor() as cur:
         card = queries.open_card_by_phone(cur, '+77015550001')
@@ -1390,8 +1390,30 @@ def test_hh_vacancy_settings(world):
     reply = hh_push(world, [hh_item(12, '+7 701 555 01 12')])
     assert reply['results'][0]['outcome'] == 'vacancy_off'
     assert reply['settings']['off'] == [HH_OPERATOR, HH_MARKETER]
+    assert reply['settings']['since_by_vacancy'] == {}
     with world['db']._get_cursor() as cur:
         assert queries.get_integration(cur, 'hh')['settings']['since'] == '2026-11-23T12:08:00'
+    # Вакансии снова включили в 15:00 — их отклики с минуты включения: прежние в воронку не идут (владелец 23.11.2026:
+    # «только новые с этой минуты», и для вакансии, которую начали отслеживать позже). Мост узнаёт её момент.
+    world['clock'].now = datetime(2026, 11, 23, 15, 0)
+    service.hh_settings({HH_OPERATOR: {'on': True, 'vacancy_id': world['vacancy_id']}, HH_MARKETER: {'on': True}})
+    world['clock'].now = datetime(2026, 11, 23, 16, 0)
+    reply = hh_push(world, [hh_item(13, '+7 701 555 01 13', vacancy=HH_MARKETER, at='2026-11-23T11:30:00+03:00'),   # 13:30
+                            hh_item(14, '+7 701 555 01 14', vacancy=HH_MARKETER, at='2026-11-23T13:30:00+03:00')])  # 15:30
+    assert [r['outcome'] for r in reply['results']] == ['before_since', 'created']
+    assert reply['settings']['off'] == []
+    assert reply['settings']['since_by_vacancy'] == {HH_OPERATOR: '2026-11-23T15:00:00+05:00',
+                                                     HH_MARKETER: '2026-11-23T15:00:00+05:00'}
+    # Правка уже включённой (поставили вакансию iCORE) момент не сдвигает; «Интеграции» показывают его у вакансии.
+    world['clock'].now = datetime(2026, 11, 23, 17, 0)
+    service.hh_settings({HH_OPERATOR: {'on': True}, HH_MARKETER: {'on': True, 'vacancy_id': world['vacancy_id']}})
+    with world['db']._get_cursor() as cur:
+        row = queries.get_integration(cur, 'hh')
+        assert row['settings']['vacancies'][HH_MARKETER] == {'on': True, 'vacancy_id': world['vacancy_id'],
+                                                             'since': '2026-11-23T15:00:00'}
+        view = hh.view(row, world['clock'].now)
+    assert {v['id']: v['tracked_since'] for v in view['vacancies']} == {HH_OPERATOR: '2026-11-23T15:00',
+                                                                        HH_MARKETER: '2026-11-23T15:00'}
 
 
 def test_hh_bridge_alerts(world):

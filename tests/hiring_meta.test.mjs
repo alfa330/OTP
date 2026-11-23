@@ -9,7 +9,7 @@ import {
     groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull,
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
     sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
-    hhChoice, hhChoiceOptions, hhSettingsBody,
+    HH_NO_ICORE, hhIcoreOptions, hhIcoreValue, hhSettingsBody, hhVacancyMeta,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -267,22 +267,28 @@ test('«no response» archive column is collapsed until opened, other columns un
     assert.equal(columnCollapsed('in_work', null, null), false);
 });
 
-test('hh.kz vacancies: one choice per vacancy — off, without an iCORE vacancy, or with one', () => {
-    // Владелец 23.11.2026: новые вакансии hh переносятся сами; руководитель выключает их или ставит вакансию iCORE.
-    assert.equal(hhChoice(undefined), 'on');
-    assert.equal(hhChoice({ on: true, vacancy_id: null }), 'on');
-    assert.equal(hhChoice({ on: false, vacancy_id: 2 }), 'off');
-    assert.equal(hhChoice({ on: true, vacancy_id: 2 }), 'v2');
-    assert.deepEqual(hhChoiceOptions([{ id: 1, name: 'Оператор', is_active: true }, { id: 2, name: 'Закрытая', is_active: false }]),
-        [{ value: 'off', label: 'Не переносить' }, { value: 'on', label: 'Без вакансии' }, { value: 'v1', label: 'Оператор' }]);
-    // Правила вакансий, которых мост сейчас не видит, не теряются; выбранное здесь — поверх.
-    assert.deepEqual(hhSettingsBody({ 7: { on: false }, 8: { on: true, vacancy_id: 1 } }, { 8: 'off', 9: 'v2', 10: 'on' }), {
-        vacancies: {
-            7: { on: false, vacancy_id: null },
-            8: { on: false, vacancy_id: null },
-            9: { on: true, vacancy_id: 2 },
-            10: { on: true, vacancy_id: null },
-        },
+test('hh.kz vacancies: a toggle per vacancy, an iCORE vacancy only for tracked ones', () => {
+    // Владелец 23.11.2026: «Добавь в настройки возможность выбрать какие вакансии отслеживать»; новые вакансии hh идут сами.
+    const icore = [{ id: 1, name: 'Оператор', is_active: true }, { id: 2, name: 'Закрытая', is_active: false }];
+    const options = hhIcoreOptions(icore);
+    assert.deepEqual(options, [{ value: '1', label: 'Оператор' }]);       // не связана — серая подсказка, без пункта «нет»
+    assert.deepEqual(hhIcoreOptions(icore, true), [{ value: '', label: HH_NO_ICORE }, { value: '1', label: 'Оператор' }]);
+    assert.equal(hhIcoreValue(1, options), '1');
+    assert.equal(hhIcoreValue(null, options), null);
+    assert.equal(hhIcoreValue(2, options), null);         // выключенную вакансию iCORE сервер отклику не ставит — и здесь её нет
+    // Правка одной вакансии: правила остальных (и тех, кого мост сейчас не видит) не теряются; выключение связь с
+    // вакансией iCORE не стирает — включили снова, она на месте.
+    assert.deepEqual(hhSettingsBody({ 7: { on: false }, 8: { on: true, vacancy_id: 1, since: '2026-11-24T10:15:00' } }, '8',
+        { on: false, vacancy_id: 1 }), {
+        vacancies: { 7: { on: false, vacancy_id: null }, 8: { on: false, vacancy_id: 1 } },
     });
-    assert.deepEqual(hhSettingsBody(null, {}), { vacancies: {} });
+    assert.deepEqual(hhSettingsBody({ 7: { on: false } }, '9', { on: true, vacancy_id: null }), {
+        vacancies: { 7: { on: false, vacancy_id: null }, 9: { on: true, vacancy_id: null } },
+    });
+    assert.deepEqual(hhSettingsBody(null, null, null), { vacancies: {} });
+    // Подпись: город и отклики; у включённой позже — с какого момента.
+    assert.equal(hhVacancyMeta({ area: 'Алматы', responses: 153, on: true }), 'Алматы · откликов 153');
+    assert.equal(hhVacancyMeta({ area: 'Алматы', responses: 251, on: true, tracked_since: '2026-11-24T10:15' }),
+        'Алматы · откликов 251 · отслеживается с 24.11 10:15');
+    assert.equal(hhVacancyMeta({ area: null, responses: null, on: false, tracked_since: '2026-11-24T10:15' }), '');
 });

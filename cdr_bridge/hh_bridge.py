@@ -19,8 +19,8 @@
 лидов а ночью от 45 мин до 2 часов»): днём (8–21 по Алматы) от 2 до 5 минут, ночью от 45 минут до 2 часов — мост
 выдерживает её как есть. Раз в час он перечитывает список вакансий кабинета (страница «Вакансии»). В каждый такт — по
 одному маленькому запросу счётчиков на вакансию; полную выдачу откликов (сотни килобайт) он берёт, только когда
-счётчики сдвинулись. Портал отвечает исходом по каждому отклику и настройками: с какого момента отклики нужны и какие
-вакансии выключены (их мост не читает вовсе).
+счётчики сдвинулись. Портал отвечает исходом по каждому отклику и настройками: с какого момента отклики нужны (у
+вакансии, которую включили позже, — свой момент) и какие вакансии выключены (их мост не читает вовсе).
 
 Что мост НЕ делает
 ------------------
@@ -80,7 +80,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.1.0'
+VERSION = 'hh/1.2.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -444,6 +444,7 @@ class HhBridge:
         self.stop_event = threading.Event()
         # Что сказал портал: с какого момента отклики нужны и какие вакансии выключены. Пока не спросили — None.
         self.since = None
+        self.vacancy_since = {}        # вакансии, включённые позже общей отсечки: id → с какого момента
         self.off = set()
         self.account = None
         self.vacancies = None
@@ -553,6 +554,14 @@ class HhBridge:
             if off != self.off:
                 log.info('портал: выключены вакансии %s', ', '.join(sorted(off)) or '—')
             self.off = off
+        by_vacancy = settings.get('since_by_vacancy')
+        if isinstance(by_vacancy, dict):
+            parsed = {str(key): moment for key, moment in ((key, parse_moment(value)) for key, value in by_vacancy.items())
+                      if moment is not None}
+            for key in sorted(key for key in parsed if parsed[key] != self.vacancy_since.get(key)):
+                log.info('портал: вакансия %s — отклики с %s', key,
+                         parsed[key].astimezone(timezone(timedelta(hours=5))).strftime('%d.%m %H:%M'))
+            self.vacancy_since = parsed
         if 'next_poll_sec' in reply:
             self.interval = _clamp_interval(reply.get('next_poll_sec'), self.interval)
         for row in reply.get('results') or []:
@@ -592,8 +601,13 @@ class HhBridge:
 
     def _scan(self, vacancy, collection=None):
         """Свежие отклики вакансии, которых портал ещё не видел. Выдача «по дате»: следующая страница нужна, только
-        если на этой все отклики ещё новее отсечки (с запасом в сутки — порядок у hh почти, а не строго, по дате)."""
-        horizon = (self.since - ORDER_SLACK) if self.since else None
+        если на этой все отклики ещё новее отсечки (с запасом в сутки — порядок у hh почти, а не строго, по дате).
+        Отсечка — общая или своя у вакансии, которую включили позже: её прежние отклики порталу не нужны."""
+        since = self.since
+        own = self.vacancy_since.get(vacancy['id'])
+        if own is not None and (since is None or own > since):
+            since = own
+        horizon = (since - ORDER_SLACK) if since else None
         fresh = []
         for page in range(MAX_PAGES):
             items = self.site.responses(vacancy, page, collection)
@@ -603,7 +617,7 @@ class HhBridge:
                 if moment is not None and horizon is not None and moment < horizon:
                     reached_old = True
                 if (item['topic_id'] in self._seen or moment is None
-                        or (self.since is not None and moment < self.since)):
+                        or (since is not None and moment < since)):
                     continue
                 fresh.append(item)
             if len(items) < PAGE_SIZE or reached_old:

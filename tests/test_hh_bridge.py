@@ -120,6 +120,7 @@ class FakePortal:
         self.down = False
         self.off = [MARKETER]
         self.since = '2026-11-23T12:08:00+05:00'
+        self.since_by_vacancy = {}
         self.next_poll = 180
         service = SimpleNamespace(hh_agent_push=self._push)
         app = Flask('hh-bridge-test')
@@ -130,7 +131,8 @@ class FakePortal:
     def _push(self, payload):
         self.payloads.append(payload)
         return {'results': [{'topic_id': item['topic_id'], 'outcome': 'created'} for item in payload['items']],
-                'settings': {'since': self.since, 'off': list(self.off)}, 'next_poll_sec': self.next_poll}
+                'settings': {'since': self.since, 'off': list(self.off), 'since_by_vacancy': dict(self.since_by_vacancy)},
+                'next_poll_sec': self.next_poll}
 
     def post(self, url, data=None, timeout=None, headers=None):
         if self.down:
@@ -306,6 +308,19 @@ class HhBridgeTests(unittest.TestCase):
         sent = len(self.portal.payloads)
         fresh.cycle()
         self.assertEqual([[i['topic_id'] for i in p['items']] for p in self.portal.payloads[sent:]], [[], ['5000000007']])
+
+    def test_vacancy_tracked_later_brings_only_responses_after_it(self):
+        """Вакансию включили в «Настройках» позже общей отсечки — мост отдаёт порталу только её отклики после минуты
+        включения: 12:20 — да, 12:09 (после общей отсечки 12:08, но до включения в 12:15) — нет."""
+        self.portal.since_by_vacancy = {OPERATOR: '2026-11-23T12:15:00+05:00'}
+        bridge = self.bridge()
+        bridge.cycle()
+        self.assertEqual([i['topic_id'] for p in self.portal.payloads for i in p['items']], ['5000000003'])
+        # Включили ещё раз (момент сдвинулся) — уже отданное не повторяется.
+        self.portal.since_by_vacancy = {OPERATOR: '2026-11-23T12:30:00+05:00'}
+        self.fingerprint = counts(32, 25)
+        bridge.cycle()
+        self.assertEqual(self.portal.payloads[-1]['items'], [])
 
     def test_portal_outage_does_not_speed_up_hh(self):
         """Портал лёг — мост стучится только к нему, hh не читает; ответил — очередь дослана, и до следующего чтения hh
