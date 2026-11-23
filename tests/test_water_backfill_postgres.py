@@ -422,6 +422,57 @@ def test_activity_trips_older_than_the_crm_list_are_counted_by_dates(db, client)
     assert replay(db, office_id) == ([], 35, 35)
 
 
+def test_the_same_request_twice_gives_one_block(db, client):
+    """Разбор 23.11.2026: повтор того же запроса на ту же минуту (обрыв связи,
+    вторая вкладка) — второй блок за активность не вносится, приветственный на
+    этот аккаунт после него — тоже."""
+    office_id = office(db, HISTORY)
+    card = crm()
+    card['orders']['first_order_at'] = '2026-11-22 10:03:05'
+    client.driver['card'] = card
+    with db._get_cursor() as cur:
+        cur.execute('UPDATE water_settings SET min_trips = 3 WHERE id = 1')
+    assert backfill(client, office_id, kind='activity').status_code == 201
+    again = backfill(client, office_id, kind='activity')
+    assert again.status_code == 409
+    assert 'к этой выдаче с прошлой (22.11.2026) прошло 0 дней из 7' in again.get_json()['error']
+    welcome = backfill(client, office_id)
+    assert welcome.status_code == 409
+    assert 'на этом аккаунте вода уже выдавалась 22.11.2026' in welcome.get_json()['error']
+    assert rows(db, 'SELECT count(*) FROM water_issues WHERE backfilled_at IS NOT NULL') == [(1,)]
+    assert replay(db, office_id) == ([], 35, 35)
+
+
+def test_upper_bound_by_dates_refuses_a_proven_shortage(db, client):
+    """Прошлая выдача — на другом аккаунте человека (по ИИН): её дня до неё не
+    знаем, CRM считает целые дни 10–22.11 — «не больше». Меньше порога — отказ."""
+    office_id = office(db, HISTORY)
+    elsewhere = office(db, [('recount', '2026-11-01 10:00', 5)], wiki_id=None)
+    driver_issue(db, elsewhere, 'activity', '2026-11-10 12:00', account='o' * 32, orders_today=4)
+    client.counts['value'] = 7
+    response = backfill(client, office_id, kind='activity')
+    assert response.status_code == 409
+    assert response.get_json()['error'] == 'Внести нельзя: менее 20 поездок с прошлой выдачи до этой — было не больше 7'
+    assert client.counts['calls'] == [(ACCOUNT, '2026-11-10', '2026-11-22')]
+    assert replay(db, office_id) == ([], 36, 36)
+
+
+def test_backfilled_issue_before_a_recount_is_not_canceled(db, client):
+    """Выдачу задним числом раньше пересчёта уже учла его разница — её отмена
+    вернула бы блок на остаток второй раз (разбор 23.11.2026)."""
+    history = HISTORY[:5] + [('recount', '2026-11-22 18:00', 36), ('issue', '2026-11-23 08:00', 1)]
+    office_id = office(db, history)
+    response = backfill(client, office_id)
+    assert response.status_code == 201
+    issue_id = response.get_json()['issue']['id']
+    cancel = client.post('/api/water/issues/%d/cancel' % issue_id, json={'reason': 'не тот водитель'})
+    assert cancel.status_code == 409
+    assert cancel.get_json()['code'] == 'WATER_CANCEL_AFTER_RECOUNT'
+    assert 'пересчёта 22.11.2026 18:00' in cancel.get_json()['error']
+    assert rows(db, 'SELECT canceled_at FROM water_issues WHERE id = %s', (issue_id,)) == [(None,)]
+    assert replay(db, office_id) == ([], 35, 35)
+
+
 def test_welcome_is_refused_after_an_issue_on_the_same_account_only(db, client):
     office_id = office(db, HISTORY)
     earlier = driver_issue(db, office_id, 'activity', '2026-11-10 12:00', account='o' * 32)

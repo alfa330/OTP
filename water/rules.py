@@ -437,19 +437,23 @@ def backfill_period_request(driver, settings, *, moment, prev):
     Блок за активность выдают не чаще раза в `cooldown_days` дней, а список
     CRM — это последние 7 дней. Поэтому отрезок «с прошлой выдачи до этой»
     почти никогда не лежит в списке целиком. Его досчитывает CRM за календарные
-    даты, как у стойки (_activity / period_request): со дня прошлой выдачи по
-    день этой, минус заказы дня прошлой ДО неё (`orders.today` её снимка) и
-    заказы дня этой ПОСЛЕ неё (по списку — если он доходит до момента).
-    `bound` — что даст ответ: 'exact' — точное число; 'lower' — не меньше
-    (чего-то из двух вычетов не знаем — день отбрасывается целиком); 'upper' —
-    не больше (без прошлой выдачи: «7 суток до выдачи» по датам не отрезать,
-    первый день идёт целиком).
+    даты, как у стойки (_activity / period_request): со дня прошлой выдачи
+    (без неё — со дня «момент минус 7 суток») по день этой, минус то, что
+    известно на краях: заказы дня прошлой ДО неё (`orders.today` её снимка,
+    только тот же аккаунт) и заказы дня этой ПОСЛЕ неё (по списку — если он
+    доходит до момента).
 
-    В отличие от стойки, точное число спрашивается и тогда, когда порог уже
-    набран по списку: внос задним числом редок, а в колонке «Заказы» журнала
-    должно стоять число, а не «—». Не спрашивается, когда ответ ничего не
-    добавит: список и так точен; «не меньше» по CRM при пороге, уже набранном
-    списком; «не больше» без порога или при пороге, уже набранном списком.
+    `bound` — что даст ответ:
+      'exact' — известны оба края: точное число;
+      'upper' — край не известен и не вычтен: целые дни дают «не больше». Это
+                и нужно: «не меньше» нарушения не докажет никогда, а «не больше
+                N» при N меньше порога — доказанный отказ (разбор 23.11.2026).
+
+    Точное число спрашивается и тогда, когда порог уже набран по списку: внос
+    задним числом редок, а в колонке «Заказы» журнала должно стоять число, а
+    не «—». «Не больше» не спрашивается, когда отказать оно не сможет: порог
+    уже набран по списку или правило поездок выключено. Список и так точен —
+    запрос не нужен вовсе.
     """
     when = moment_of(moment)
     if when is None:
@@ -462,29 +466,19 @@ def backfill_period_request(driver, settings, *, moment, prev):
     frm = since if since is not None else when - timedelta(days=7)
     if _covers(listing, frm):
         return None
-    lower = _list_trips(listing, since, frm, when)
-    proven = bool(need and lower is not None and lower >= need)
     after = (sum(1 for item in listing['moments'] if item >= when and item.date() == when.date())
              if _covers(listing, when) else None)
-    if since is not None:
-        same = (prev.get('driver_account_id') or '') == (driver.get('account_id') or '')
-        before = as_count(prev.get('orders_today')) if same else None
-        first_day = since.date() if before is not None else since.date() + timedelta(days=1)
-        bound = 'exact' if before is not None and after is not None else 'lower'
-        if bound == 'lower' and proven:
+    before = None
+    if since is not None and (prev.get('driver_account_id') or '') == (driver.get('account_id') or ''):
+        before = as_count(prev.get('orders_today'))
+    exact = since is not None and before is not None and after is not None
+    if not exact:
+        lower = _list_trips(listing, since, frm, when)
+        if not need or (lower is not None and lower >= need):
             return None
-    else:
-        # Без прошлой выдачи нужен конец ровно в момент: иначе ни «не больше», ни «не меньше».
-        if after is None or not need or proven:
-            return None
-        before = None
-        first_day = frm.date()
-        bound = 'upper'
-    last_day = when.date() if after is not None else when.date() - timedelta(days=1)
-    if first_day > last_day:
-        return None
-    return {'issue_id': prev.get('id') if prev else None, 'date_from': first_day.isoformat(),
-            'date_to': last_day.isoformat(), 'subtract': (before or 0) + (after or 0), 'bound': bound}
+    return {'issue_id': prev.get('id') if prev else None, 'date_from': frm.date().isoformat(),
+            'date_to': when.date().isoformat(), 'subtract': (before or 0) + (after or 0),
+            'bound': 'exact' if exact else 'upper'}
 
 
 def _backfill_activity(driver, settings, when, prev, reasons, period=None):
@@ -522,8 +516,6 @@ def _backfill_activity(driver, settings, when, prev, reasons, period=None):
         if value is not None and value >= 0:
             if request['bound'] == 'exact':
                 trips, exact = value, True
-            elif request['bound'] == 'lower':
-                trips = max(trips or 0, value)
             else:
                 upper = value
     state.update(trips=trips, trips_exact=exact, trips_upper=upper)

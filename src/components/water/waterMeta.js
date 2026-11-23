@@ -510,17 +510,23 @@ export const BACKFILL_NEEDS_MOMENT = 'Выберите дату и время в
 
 /* Основание блока за активность: поездки до этой выдачи. Точное число — когда
    CRM отдала все заказы отрезка (списком «7 дней» или счётом за даты), иначе
-   «не меньше». Пояснение — только когда «не меньше» не дотягивает до порога:
-   иначе экран говорил бы «можно» и «мало» сразу. */
+   границы: «не меньше» по списку и «не больше» по счёту за целые дни.
+   Пояснение — только когда «не меньше» не дотягивает до порога: иначе экран
+   говорил бы «можно» и «мало» сразу. */
 export const backfillBasis = (verdict) => {
     if (!verdict || verdict.kind !== 'activity' || !verdict.allowed) return '';
     const where = verdict.trips_basis === 'since_last' ? 'с прошлой выдачи до этой' : 'за 7 дней до этой выдачи';
-    if (verdict.trips === null || verdict.trips === undefined) {
-        return 'Сколько было поездок до этой выдачи, CRM не показала';
+    const trips = verdict.trips === null || verdict.trips === undefined ? null : Number(verdict.trips);
+    const upper = verdict.trips_upper === null || verdict.trips_upper === undefined ? null : Number(verdict.trips_upper);
+    if (verdict.trips_exact && trips !== null) return `${tripsWord(trips)} ${where}`;
+    const short = Number(verdict.min_trips) > 0 && (trips ?? 0) < Number(verdict.min_trips);
+    const unsure = ' — точнее CRM не показала';
+    if (short && upper !== null) {
+        return trips ? `От ${trips} до ${tripsGenitive(upper)} ${where}${unsure}`
+            : `Не больше ${tripsGenitive(upper)} ${where}${unsure}`;
     }
-    if (verdict.trips_exact) return `${tripsWord(verdict.trips)} ${where}`;
-    const short = Number(verdict.min_trips) > 0 && verdict.trips < Number(verdict.min_trips);
-    return `Не меньше ${tripsGenitive(verdict.trips)} ${where}${short ? ' — точнее CRM не показала' : ''}`;
+    if (trips === null) return 'Сколько было поездок до этой выдачи, CRM не показала';
+    return `Не меньше ${tripsGenitive(trips)} ${where}${short ? unsure : ''}`;
 };
 
 /* Момент выдачи для сервера: «ГГГГ-ММ-ДДTЧЧ:ММ», местное время. */

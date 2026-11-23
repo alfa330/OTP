@@ -507,6 +507,15 @@ test('backfill: the verdict plate says what it can prove', () => {
     'Не меньше 1 поездки с прошлой выдачи до этой — точнее CRM не показала');
   assert.equal(backfillBasis({ ...exact, trips: null, trips_exact: false }),
     'Сколько было поездок до этой выдачи, CRM не показала');
+  // Счёт CRM за целые дни — «не больше»: обе границы, когда «не меньше» не дотягивает.
+  assert.equal(backfillBasis({ ...exact, trips: 5, trips_exact: false, trips_upper: 30 }),
+    'От 5 до 30 поездок с прошлой выдачи до этой — точнее CRM не показала');
+  assert.equal(backfillBasis({ ...exact, trips: 0, trips_exact: false, trips_upper: 21, trips_basis: 'week' }),
+    'Не больше 21 поездки за 7 дней до этой выдачи — точнее CRM не показала');
+  assert.equal(backfillBasis({ ...exact, trips: null, trips_exact: false, trips_upper: 25 }),
+    'Не больше 25 поездок с прошлой выдачи до этой — точнее CRM не показала');
+  assert.equal(backfillBasis({ ...exact, trips: 25, trips_exact: false, trips_upper: 40 }),
+    'Не меньше 25 поездок с прошлой выдачи до этой');
   // У приветственного и у отказа строки основания нет.
   assert.equal(backfillBasis({ kind: 'welcome', allowed: true, trips: 0, trips_exact: null }), '');
   assert.equal(backfillBasis({ ...exact, allowed: false }), '');

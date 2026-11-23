@@ -782,21 +782,35 @@ class BackfillPeriodTests(unittest.TestCase):
             self.assertTrue(verdict['allowed'], (period, verdict['reasons']))
             self.assertEqual((verdict['trips'], verdict['trips_exact']), (5, False))
 
-    def test_other_account_or_no_snapshot_drops_the_previous_issue_day(self):
+    def test_other_account_or_no_snapshot_gives_an_upper_bound(self):
+        """Заказов дня прошлой выдачи до неё не знаем (другой аккаунт, снимок без
+        today): день идёт целиком — число «не больше». Меньше порога — отказ
+        доказан; больше — не доказано ни то ни другое: «не меньше» по списку."""
         for prev in (self.prev(account='z' * 32), self.prev(orders_today=None)):
-            request = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=self.MOMENT, prev=prev)
-            self.assertEqual((request['date_from'], request['subtract'], request['bound']), ('2026-09-21', 2, 'lower'))
-            verdict = self.verdict(self.driver_with_week(), prev, dict(request, count=2 + 12))
-            # «Не меньше 12» — порог не доказан, но и нарушение тоже: не отказ.
-            self.assertTrue(verdict['allowed'], verdict['reasons'])
-            self.assertEqual((verdict['trips'], verdict['trips_exact']), (12, False))
+            drv = self.driver_with_week()
+            request = rules.backfill_period_request(drv, SETTINGS, moment=self.MOMENT, prev=prev)
+            self.assertEqual(request, {'issue_id': 1, 'date_from': '2026-09-20', 'date_to': '2026-09-29',
+                                       'subtract': 2, 'bound': 'upper'})
+            refused = self.verdict(drv, prev, dict(request, count=2 + 12))
+            self.assertEqual(refused['reasons'], ['Менее 20 поездок с прошлой выдачи до этой — было не больше 12'])
+            unknown = self.verdict(drv, prev, dict(request, count=2 + 30))
+            self.assertTrue(unknown['allowed'], unknown['reasons'])
+            self.assertEqual((unknown['trips'], unknown['trips_exact'], unknown['trips_upper']), (5, False, 30))
 
-    def test_moment_older_than_the_list_drops_its_own_day(self):
-        prev = self.prev(days_ago=20)
+    def test_moment_older_than_the_list_counts_its_whole_day(self):
+        """Момент раньше начала списка — заказов его дня после него не знаем:
+        день идёт целиком, вычитается только известное — «не больше»."""
+        prev = self.prev(days_ago=20)                  # 10.09 12:00, в снимке 3 заказа до неё
         old_moment = datetime(2026, 9, 20, 12, 0)
         request = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=old_moment, prev=prev)
-        self.assertEqual((request['date_from'], request['date_to'], request['subtract'], request['bound']),
-                         ('2026-09-10', '2026-09-19', 3, 'lower'))
+        self.assertEqual(request, {'issue_id': 1, 'date_from': '2026-09-10', 'date_to': '2026-09-20',
+                                   'subtract': 3, 'bound': 'upper'})
+        # Без прошлой выдачи — тоже «не больше» за целые дни недели до момента.
+        week = rules.backfill_period_request(self.driver_with_week(), SETTINGS, moment=old_moment, prev=None)
+        self.assertEqual(week, {'issue_id': None, 'date_from': '2026-09-13', 'date_to': '2026-09-20',
+                                'subtract': 0, 'bound': 'upper'})
+        refused = backfill(self.driver_with_week(), moment=old_moment, kind='activity', period=dict(week, count=2))
+        self.assertEqual(refused['reasons'], ['Менее 20 поездок за 7 дней до этой выдачи — было не больше 2'])
 
     def test_without_a_previous_issue_the_dates_give_an_upper_bound(self):
         """Без прошлой выдачи «7 суток до выдачи» по датам не отрезать: первый

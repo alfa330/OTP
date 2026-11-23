@@ -798,6 +798,16 @@ def build_water_blueprint(*, db, require_api_key, build_cors_preflight_response,
             # мы ждали очереди, и вернуть блоки дважды было бы нельзя.
             if issue['canceled_at']:
                 return _bad('Эта выдача уже отменена', 'WATER_ISSUE_ALREADY_CANCELED', 409)
+            # Выдачу задним числом раньше пересчёта уже учла его разница
+            # (queries.backfill_plan): отмена вернула бы блок на остаток второй раз.
+            recount = (queries.recount_after(cursor, issue['water_office_id'], issue['created_at'])
+                       if issue.get('backfilled_at') else None)
+            if recount:
+                at = rules.moment_of(recount[1])
+                return _bad('Отменить нельзя: выдачу внесли задним числом раньше пересчёта %s — он уже '
+                            'учёл её блок, и отмена исказила бы остаток. Остаток правится новым '
+                            'пересчётом' % (at.strftime('%d.%m.%Y %H:%M') if at else ''),
+                            'WATER_CANCEL_AFTER_RECOUNT', 409)
             item = queries.cancel_issue(cursor, issue, reason=reason, actor=_actor(ctx))
             office = queries.read_office(cursor, issue['water_office_id'], settings)
         logging.info('Вода: выдача %s отменена (%s бл. вернулись в «%s»), отменил %s',

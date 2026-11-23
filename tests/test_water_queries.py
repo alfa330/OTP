@@ -123,10 +123,13 @@ class CanceledIssuesTests(unittest.TestCase):
                          ('ул. Байзакова 78А', 0, 'buy', 15))
 
     def test_cancel_locks_the_row_and_never_cancels_twice(self):
-        cursor = ScriptedCursor([(7, 3, ACCOUNT, None, 2, None)])
+        at = datetime(2026, 9, 29, 12, 0)
+        cursor = ScriptedCursor([(7, 3, ACCOUNT, None, 2, None, at, None)])
         issue = queries.issue_for_cancel(cursor, 7, for_update=True)
         self.assertIn('FOR UPDATE', cursor.sql[0][0])
         self.assertEqual(issue['blocks'], 2)
+        # Отмене нужно и время выдачи, и внесена ли она задним числом (пересчёт после неё).
+        self.assertEqual((issue['created_at'], issue['backfilled_at']), (at, None))
         cursor = ScriptedCursor([], [], [])
         queries.cancel_issue(cursor, issue, reason='ошиблись', actor={'user_id': 1, 'name': 'Р'})
         self.assertIn('AND canceled_at IS NULL', cursor.sql[0][0])

@@ -192,7 +192,14 @@ class Store:
             return None
         return {'id': item['id'], 'water_office_id': item['water_office_id'],
                 'driver_account_id': item['driver_account_id'], 'driver_iin': item.get('driver_iin'),
-                'blocks': item['blocks'], 'canceled_at': item.get('canceled_at')}
+                'blocks': item['blocks'], 'canceled_at': item.get('canceled_at'),
+                'created_at': item['created_at'], 'backfilled_at': item.get('backfilled_at')}
+
+    def recount_after(self, cursor, water_office_id, moment):
+        later = [item for item in self.movements if item['kind'] == 'recount'
+                 and item.get('water_office_id', water_office_id) == water_office_id
+                 and item.get('created_at', NOW) > moment]
+        return (later[0]['id'], later[0].get('created_at', NOW)) if later else None
 
     def cancel_issue(self, cursor, issue, reason, actor):
         item = next(row for row in self.issues if row['id'] == issue['id'])
@@ -259,7 +266,7 @@ class Store:
         return dict(item, created_at=moment.isoformat(), backfilled_at=NOW.isoformat())
 
     def issues_before(self, cursor, account_id, iin, moment):
-        live = [item for item in self.issues if not item.get('canceled_at') and item['created_at'] < moment]
+        live = [item for item in self.issues if not item.get('canceled_at') and item['created_at'] <= moment]
         person = [item for item in live if item['driver_account_id'] == account_id
                   or (iin and item.get('driver_iin') == iin)]
         account = [item for item in live if item['driver_account_id'] == account_id]
@@ -374,7 +381,7 @@ class _Base(unittest.TestCase):
                      'dashboard', 'notify_candidates', 'front_office_head_ids',
                      'notify_recipients', 'access_ready', 'issue_office_ids', 'access_state',
                      'apply_access_changes', 'backfill_plan', 'apply_backfill_shift',
-                     'create_backfill_issue', 'office_issuers', 'issues_before'):
+                     'create_backfill_issue', 'office_issuers', 'issues_before', 'recount_after'):
             patches[name] = getattr(store, name)
         patcher = mock.patch.multiple(water_queries, **patches)
         patcher.start()
@@ -1763,6 +1770,53 @@ class BackfillTests(_Base):
         response = self.backfill(kind='activity')
         self.assertEqual(response.status_code, 201, response.get_json())
         self.assertEqual(self.store.issues[-1]['orders_counted'], None)
+
+    def test_the_same_request_twice_does_not_give_two_blocks_in_one_minute(self):
+        """Повтор того же запроса (обрыв связи, вторая вкладка): у выдачи задним
+        числом секунды всегда :00, и строка той же минуты — это она же (разбор
+        23.11.2026). Второй блок за активность — «прошло 0 дней из 7»."""
+        self.assertEqual(self.backfill(kind='activity').status_code, 201)
+        again = self.backfill(kind='activity')
+        self.assertEqual(again.status_code, 409)
+        self.assertEqual(again.get_json()['error'],
+                         'Внести нельзя: к этой выдаче с прошлой (29.09.2026) прошло 0 дней из 7')
+        # И приветственный на ту же минуту после блока на этом же аккаунте — нет.
+        welcome = self.backfill(kind='welcome')
+        self.assertEqual(welcome.status_code, 409)
+        self.assertIn('на этом аккаунте вода уже выдавалась 29.09.2026', welcome.get_json()['error'])
+        self.assertEqual(len(self.store.issues), 1)
+
+    def test_upper_bound_from_crm_refuses_a_proven_shortage(self):
+        """Прошлая выдача — на другом аккаунте человека: заказов её дня до неё не
+        знаем, и CRM за целые дни даёт «не больше». Меньше порога — отказ."""
+        self._issue('activity', datetime(2026, 9, 19, 12, 0), account='e' * 32)
+        self.activity_card([datetime(2026, 9, 24, 10, 0), datetime(2026, 9, 29, 15, 0)])
+        self.period_count = 1 + 9                       # 1 — заказ дня выдачи после неё (по списку)
+        response = self.backfill(kind='activity')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['error'],
+                         'Внести нельзя: менее 20 поездок с прошлой выдачи до этой — было не больше 9')
+        self.assertEqual(self.period_calls, [(ACCOUNT, '2026-09-19', '2026-09-29', 0)])
+
+    def test_backfilled_issue_older_than_a_recount_is_not_canceled(self):
+        """Разбор 23.11.2026: выдачу задним числом раньше пересчёта учла его
+        разница — отмена вернула бы блок на остаток второй раз. Обычная отмена
+        (и выдачи задним числом без пересчёта после неё) — как раньше."""
+        self.assertEqual(self.backfill().status_code, 201)
+        issue_id = self.store.issues[0]['id']
+        self.store.movements.append({'id': 1, 'kind': 'recount', 'delta': 0, 'stock_after': 49,
+                                     'water_office_id': self.office, 'created_at': datetime(2026, 9, 29, 18, 0)})
+        response = self.client.post('/api/water/issues/%d/cancel' % issue_id, json={'reason': 'не тот водитель'})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()['code'], 'WATER_CANCEL_AFTER_RECOUNT')
+        self.assertIn('пересчёта 29.09.2026 18:00', response.get_json()['error'])
+        self.assertIsNone(self.store.issues[0].get('canceled_at'))
+        self.assertEqual(self.store.offices[self.office]['stock'], 49)
+        # Пересчёт раньше выдачи — не помеха.
+        self.store.movements[0]['created_at'] = datetime(2026, 9, 29, 9, 0)
+        response = self.client.post('/api/water/issues/%d/cancel' % issue_id, json={'reason': 'не тот водитель'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.store.offices[self.office]['stock'], 50)
 
     def test_welcome_after_an_issue_on_the_same_account_is_refused(self):
         self._issue('activity', datetime(2026, 9, 20, 10, 0))

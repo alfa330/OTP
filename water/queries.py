@@ -350,12 +350,18 @@ def person_history(cursor, account_id, iin=None, limit=20):
 
 
 def issues_before(cursor, account_id, iin, moment):
-    """Последняя живая выдача человека до момента — и последняя на этом аккаунте.
+    """Последняя живая выдача человека к моменту — и последняя на этом аккаунте.
 
     Для выдачи задним числом: от первой считаются дни и поездки блока за
     активность, вторая говорит, что аккаунт к тому моменту уже получал воду
     (приветственный тогда не вносится). Отдельным запросом, а не из
     person_history: у той окно последних 20 выдач, а момент может быть старше.
+
+    Момент включительно (разбор 23.11.2026): у выдач задним числом секунды
+    всегда :00, и повтор того же запроса (обрыв связи, вторая вкладка) иначе
+    не увидел бы только что внесённую строку той же минуты — у водителя
+    оказалось бы два блока за активность в одну минуту. Выдача той же минуты —
+    не «следующая», а та же самая: «прошло 0 дней из 7».
     Возвращает {'person': строка|None, 'account': строка|None}.
     """
     params = {'account': str(account_id or ''), 'iin': str(iin or ''), 'moment': moment}
@@ -366,7 +372,7 @@ def issues_before(cursor, account_id, iin, moment):
         cursor.execute(
             """
             SELECT %s FROM water_issues
-             WHERE %s AND canceled_at IS NULL AND created_at < %%(moment)s
+             WHERE %s AND canceled_at IS NULL AND created_at <= %%(moment)s
              ORDER BY created_at DESC, id DESC
              LIMIT 1
             """ % (_HISTORY_SELECT, who), params)
@@ -435,14 +441,28 @@ def issue_for_cancel(cursor, issue_id, *, for_update=False):
     for_update запирает строку: две отмены одной выдачи не вернут блоки дважды.
     """
     cursor.execute(
-        'SELECT id, water_office_id, driver_account_id, driver_iin, blocks, canceled_at '
+        'SELECT id, water_office_id, driver_account_id, driver_iin, blocks, canceled_at, '
+        'created_at, backfilled_at '
         'FROM water_issues WHERE id = %s' + (' FOR UPDATE' if for_update else ''),
         (int(issue_id),))
     row = cursor.fetchone()
     if not row:
         return None
     return {'id': row[0], 'water_office_id': row[1], 'driver_account_id': row[2],
-            'driver_iin': row[3], 'blocks': int(row[4]), 'canceled_at': row[5]}
+            'driver_iin': row[3], 'blocks': int(row[4]), 'canceled_at': row[5],
+            'created_at': row[6], 'backfilled_at': row[7]}
+
+
+def recount_after(cursor, water_office_id, moment):
+    """Первый пересчёт офиса после момента — (id, created_at) или None.
+
+    Выдачу задним числом, вставленную раньше пересчёта, учитывает разница
+    этого пересчёта (backfill_plan): полку он насчитал уже без её блока.
+    Отмена такой выдачи вернула бы блок на остаток второй раз."""
+    cursor.execute(
+        "SELECT id, created_at FROM water_movements WHERE water_office_id = %s AND kind = 'recount' "
+        "AND created_at > %s ORDER BY created_at, id LIMIT 1", (int(water_office_id), moment))
+    return cursor.fetchone()
 
 
 def cancel_issue(cursor, issue, *, reason, actor):
@@ -515,6 +535,11 @@ def backfill_plan(cursor, water_office_id, moment, blocks):
     if plan['stock_after'] < 0:
         plan['shortage'] = {'at': _iso(moment), 'stock': stock_before}
         return plan
+    # Выдачи, отменённые позже, в цепочке остаются как были: «остаток после» у
+    # них — то, что система считала тогда, и нехватку они дают тоже. Это
+    # осторожно: отмена после момента значит, что вода по ним не ушла, и
+    # отказ «в офисе было 0» в таком редком случае лишний (разбор 23.11.2026) —
+    # остаток тогда правит пересчёт.
     cursor.execute(
         """
         SELECT 'issue' AS kind, id, created_at, stock_after, NULL::integer AS delta
