@@ -213,7 +213,9 @@ CONTROL_WARN_DAYS = 3
 # ── Файлы (ТЗ п. 8.1, 9, 13) ─────────────────────────────────────────────────
 
 MB = 1024 * 1024
-_DOCS = ('pdf', 'jpg', 'jpeg', 'png', 'heic', 'doc', 'docx')
+# DOC (Word 97–2003) не принимается: макросы внутри него без антивируса не
+# проверить (владелец, 23.11.2026) — DOCX проверяется, его и просим.
+_DOCS = ('pdf', 'jpg', 'jpeg', 'png', 'heic', 'docx')
 FILE_KINDS = {
     'evidence': {'label': 'Доказательство', 'ext': _DOCS + ('mp4',), 'max_bytes': 10 * MB,
                  'video_max_bytes': 50 * MB, 'max_files': 5},

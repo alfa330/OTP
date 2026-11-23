@@ -11,6 +11,10 @@
 * тяжёлый шаблон акта раздувал память сервера при каждом черновике, а
   вложенные таблицы с объединёнными ячейками держали процессор минутами.
 
+Ещё две — 23.11.2026 («закрой дыры»): DOC (Word 97–2003) не принимается вовсе,
+макросы в нём без антивируса не проверить; PDF со скриптом или запуском
+программы — тоже (проверка — tests/test_discipline_pdf_guard.py).
+
 Документы здесь только безобидные (обычный DOCX, раздутый текстом шаблон,
 битый архив); решения о связях и типах частей проверяются на строках.
 Базы не нужно.
@@ -25,7 +29,8 @@ import pytest
 docx = pytest.importorskip('docx')
 from docx import Document  # noqa: E402
 
-from discipline import act_docx, files, report  # noqa: E402
+from discipline import act_docx, files, pdf_guard, report  # noqa: E402
+from tests import pdf_samples  # noqa: E402
 
 RLO = chr(0x202E)          # разворачивает строку справа налево
 ZWSP = chr(0x200B)         # пробел нулевой ширины
@@ -33,7 +38,7 @@ BOM = chr(0xFEFF)
 ISOLATE, POP_ISOLATE = chr(0x2067), chr(0x2069)
 NBSP, NARROW_NBSP = chr(0xA0), chr(0x202F)
 HANGUL_FILLER = chr(0x3164)
-PDF = b'%PDF-1.4\n' + b'0' * 200
+PDF = pdf_samples.pdf()
 W_NS = ('xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
         'xmlns:v="urn:schemas-microsoft-com:vml"')
 
@@ -238,15 +243,71 @@ def test_template_limits_follow_the_part_type_not_its_name():
     assert [p.text for p in Document(io.BytesIO(small)).paragraphs] == ['{{ФИО}}']
 
 
-def test_doc_must_be_a_real_word_97_file():
-    """RTF, HTML и текст с расширением .doc Word открывает по содержимому, и
-    проверка DOCX обходилась бы «Сохранить как .doc» (разбор, 30.10.2026)."""
-    for data in (b'{\\rtf1\\ansi hello}', b'<html><body>hello</body></html>', 'просто текст'.encode()):
+WORD97 = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + b'\0' * 512
+
+
+def _doc_refusal(kind, filename, data):
+    with pytest.raises(files.FileError) as caught:
+        files.check(kind, filename=filename, data=data)
+    assert caught.value.code == 'DISCIPLINE_DOC_REFUSED', caught.value.message
+    return caught.value.message
+
+
+def test_doc_is_not_accepted_at_all():
+    """Макросы в настоящем DOC без антивируса не проверить — DOC не принимается
+    ни по имени, ни по содержимому (владелец, 23.11.2026). RTF и HTML под .doc
+    Word тоже открывает, а DOC под .docx или без расширения — всё равно DOC."""
+    for data in (WORD97, b'{\\rtf1\\ansi hello}', b'<html><body>hello</body></html>'):
+        message = _doc_refusal('explanation', 'объяснительная.doc', data)
+        assert message == ('«объяснительная.doc»: старый формат Word (DOC) не принимается — '
+                           'сохраните документ как DOCX или PDF')
+    _doc_refusal('evidence', 'служебная.docx', WORD97)
+    _doc_refusal('explanation', 'объяснительная', WORD97)
+    # Шаблону акта годится только DOCX — PDF ему не предлагаем.
+    assert _doc_refusal('act_template', 'акт.doc', WORD97).endswith('сохраните документ как DOCX')
+    # Виду без Word (акт) — общий список подходящих типов.
+    with pytest.raises(files.FileError) as caught:
+        files.check('act', filename='акт.doc', data=WORD97)
+    assert caught.value.message == '«акт.doc»: для вида «акт» подходят PDF, JPG, PNG'
+    assert 'doc' not in files._CONTENT_TYPES
+
+
+# ── PDF: вердикт проверки → ответ человеку ──────────────────────────────────
+
+@pytest.mark.parametrize('verdict, text', [
+    (pdf_guard.SCRIPT, 'в PDF встроен скрипт или запуск программы — такой файл не принимается. '
+                       'Сохраните его заново через «Печать» → «Сохранить как PDF» или приложите скан'),
+    (pdf_guard.PASSWORD, 'PDF защищён паролем — загрузите его без пароля'),
+    (pdf_guard.BROKEN, 'PDF повреждён или не читается. '
+                       'Сохраните его заново через «Печать» → «Сохранить как PDF» или приложите скан'),
+    (pdf_guard.HEAVY, 'PDF слишком сложный для проверки. '
+                      'Сохраните его заново через «Печать» → «Сохранить как PDF» или приложите скан'),
+])
+def test_refused_pdf_is_explained(monkeypatch, verdict, text):
+    monkeypatch.setattr(pdf_guard, 'verdict', lambda data: verdict)
+    for kind in ('evidence', 'explanation', 'act', 'refusal_act'):
         with pytest.raises(files.FileError) as caught:
-            files.check('explanation', filename='объяснительная.doc', data=data)
-        assert 'не документ Word 97–2003' in caught.value.message
-    word97 = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + b'\0' * 512
-    assert files.check('explanation', filename='объяснительная.doc', data=word97)[1:] == ('doc', 'application/msword')
+            files.check(kind, filename='скан.pdf', data=PDF)
+        assert (caught.value.code, caught.value.status) == ('DISCIPLINE_PDF_REFUSED', 400)
+        assert caught.value.message == '«скан.pdf»: ' + text
+
+
+def test_pdf_check_that_did_not_run_asks_to_retry(monkeypatch):
+    monkeypatch.setattr(pdf_guard, 'verdict', lambda data: pdf_guard.FAILED)
+    with pytest.raises(files.FileError) as caught:
+        files.check('explanation', filename='скан.pdf', data=PDF)
+    assert (caught.value.code, caught.value.status) == ('DISCIPLINE_PDF_CHECK_FAILED', 503)
+    assert 'попробуйте ещё раз' in caught.value.message
+
+
+def test_every_pdf_goes_through_the_check(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pdf_guard, 'verdict', lambda data: seen.append(data) or pdf_guard.OK)
+    # Без расширения PDF узнаётся по содержимому — и тоже проверяется.
+    assert files.check('explanation', filename='скан', data=PDF)[:2] == ('скан.pdf', 'pdf')
+    files.check('act', filename='акт.pdf', data=PDF)
+    files.check('evidence', filename='фото.png', data=b'\x89PNG' + b'0' * 20)
+    assert seen == [PDF, PDF]
 
 
 def test_template_xml_and_elements_are_bounded():

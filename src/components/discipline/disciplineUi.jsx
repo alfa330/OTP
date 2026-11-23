@@ -392,7 +392,7 @@ export const AttachButton = ({ label = 'Приложить файл', accept, mu
     );
 };
 
-export const ACCEPT_DOCS = '.pdf,.jpg,.jpeg,.png,.heic,.doc,.docx,image/*,application/pdf';
+export const ACCEPT_DOCS = '.pdf,.jpg,.jpeg,.png,.heic,.docx,image/*,application/pdf';
 export const ACCEPT_EVIDENCE = `${ACCEPT_DOCS},.mp4,video/mp4`;
 export const ACCEPT_ACT = '.pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf';
 

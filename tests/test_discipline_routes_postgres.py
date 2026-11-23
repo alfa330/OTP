@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from discipline import catalog, report
+from tests import pdf_samples
 from tests.test_discipline_postgres import (  # noqa: F401 — фикстура db
     ADMIN, HEAD_SZOV, OP, OP_A, OP_B, OP_OP, SUPER, SV_A, SV_B, SZOV, TRAINEE_A, PORT, db, section_open_for_all,
     use_sample_ladder)
@@ -23,7 +24,7 @@ from tests.test_discipline_postgres import (  # noqa: F401 — фикстура 
 flask = pytest.importorskip('flask')
 pytestmark = pytest.mark.skipif(not PORT, reason='needs local PostgreSQL (DISCIPLINE_TEST_PORT)')
 
-PDF = b'%PDF-1.4\n' + b'0' * 200
+PDF = pdf_samples.pdf()
 PNG = b'\x89PNG\r\n\x1a\n' + b'0' * 200
 
 
@@ -990,7 +991,7 @@ def test_request_body_cap_on_the_real_routes(client):
     now = datetime.now().replace(second=0, microsecond=0)
     record_id = _create(client, SV_A, OP_A, now - timedelta(hours=1)).get_json()['id']
     limit = catalog.FILE_KINDS['explanation']['max_bytes']
-    exact = b'%PDF-1.4\n' + b'0' * (limit - 9)
+    exact = pdf_samples.pdf_of_size(limit)
 
     def explanation(data):
         return client.post('/api/discipline/records/%d/explanation' % record_id, headers=h(OP_A),
@@ -1002,12 +1003,12 @@ def test_request_body_cap_on_the_real_routes(client):
     over = explanation(exact + b'0' * catalog.REQUEST_RESERVE_BYTES)
     assert (over.status_code, over.get_json()['code']) == (413, 'DISCIPLINE_REQUEST_TOO_LARGE')
     pushed = client.post('/api/discipline/records/%d/evidence' % record_id, headers=h(OP_A),
-                         data={'files': (io.BytesIO(PDF + b'0' * (2 * catalog.MB)), 'док.pdf')},
+                         data={'files': (io.BytesIO(pdf_samples.pdf(padding=2 * catalog.MB)), 'док.pdf')},
                          content_type='multipart/form-data')
     assert (pushed.status_code, pushed.get_json()['error']) == (413, 'Запрос слишком большой')
     # СВ тот же файл прикладывает — его потолок «доказательств».
     added = client.post('/api/discipline/records/%d/evidence' % record_id, headers=h(SV_A),
-                        data={'files': (io.BytesIO(PDF + b'0' * (2 * catalog.MB)), 'док.pdf')},
+                        data={'files': (io.BytesIO(pdf_samples.pdf(padding=2 * catalog.MB)), 'док.pdf')},
                         content_type='multipart/form-data')
     assert added.status_code == 200, added.get_json()
     assert len(client.store) == 2

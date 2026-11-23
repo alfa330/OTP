@@ -541,6 +541,22 @@ class FileNameDisplayTests(unittest.TestCase):
         self.assertIn('{typeLabel ? <span className="text-[10px] font-bold tracking-wide">{typeLabel}</span> '
                       ': <Icon size={16} />}', self.UI)
 
+    def test_file_picker_offers_exactly_what_the_server_takes(self):
+        """DOC больше не принимается (владелец, 23.11.2026) — окно выбора файла его
+        и не предлагает; остальное — тот же белый список, что у сервера."""
+        def offered(name):
+            value = re.search(r"export const %s = [`']([^`']+)[`'];" % name, self.UI).group(1)
+            if '${ACCEPT_DOCS}' in value:
+                value = value.replace('${ACCEPT_DOCS}', offered('ACCEPT_DOCS'))
+            return value
+
+        def extensions(accept):
+            return {item.strip()[1:] for item in accept.split(',') if item.strip().startswith('.')}
+
+        for name, kind in (('ACCEPT_DOCS', 'explanation'), ('ACCEPT_EVIDENCE', 'evidence'), ('ACCEPT_ACT', 'act')):
+            self.assertEqual(extensions(offered(name)), set(catalog.FILE_KINDS[kind]['ext']), name)
+        self.assertNotIn('.doc,', offered('ACCEPT_DOCS'))
+
     def test_extension_stays_visible_wherever_a_stored_name_is_shown(self):
         self.assertIn('<span className="truncate">{ext ? text.slice(0, dot) : text}</span>', self.UI)
         self.assertIn('{ext && <span className="shrink-0">{ext}</span>}', self.UI)

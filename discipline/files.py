@@ -23,6 +23,10 @@
   шаблон или объект по сети, макросы, ActiveX — такой документ не принимается.
   Шаблон акта, кроме того, ограничен по объёму распакованного XML: сервер
   разбирает его при каждом черновике.
+* **DOC (Word 97–2003) не принимается вовсе**: макросы в нём без антивируса не
+  проверить. Просим DOCX или PDF (владелец, 23.11.2026).
+* **PDF без скриптов и запуска программ** (pdf_guard): разбор в отдельном
+  процессе с потолком памяти и времени.
 """
 
 import hashlib
@@ -39,7 +43,7 @@ from zoneinfo import ZoneInfo
 
 from lxml import etree
 
-from . import catalog
+from . import catalog, pdf_guard
 
 ALMATY = ZoneInfo('Asia/Almaty')
 PREFIX = 'discipline'
@@ -50,15 +54,12 @@ _CONTENT_TYPES = {
     'jpeg': 'image/jpeg',
     'png': 'image/png',
     'heic': 'image/heic',
-    'doc': 'application/msword',
     'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     'mp4': 'video/mp4',
 }
 
 
-# DOC — тоже строго: RTF, HTML или XML с расширением .doc Word открывает по
-# содержимому, и проверка DOCX обходилась бы простым «Сохранить как .doc».
-_STRICT_SIGNATURE = ('pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx', 'mp4')
+_STRICT_SIGNATURE = ('pdf', 'jpg', 'jpeg', 'png', 'docx', 'mp4')
 
 
 class FileError(Exception):
@@ -140,6 +141,12 @@ def check(kind, *, filename, data):
     name = safe_name(filename)
     ext = extension(name)
     sniffed = _sniff(data)
+    # DOC узнаётся и по имени, и по содержимому: RTF или HTML с расширением .doc
+    # Word тоже откроет, а настоящий DOC под именем .docx — это всё равно DOC.
+    if 'doc' in (ext, sniffed) and 'docx' in spec['ext']:
+        instead = 'DOCX или PDF' if 'pdf' in spec['ext'] else 'DOCX'
+        raise FileError('«%s»: старый формат Word (DOC) не принимается — сохраните документ как %s'
+                        % (name, instead), code='DISCIPLINE_DOC_REFUSED')
     if ext not in spec['ext']:
         if sniffed and sniffed in spec['ext']:
             ext = sniffed
@@ -148,8 +155,8 @@ def check(kind, *, filename, data):
             allowed = ', '.join(e.upper() for e in spec['ext'] if e != 'jpeg')
             raise FileError('«%s»: для вида «%s» подходят %s' % (name, spec['label'].lower(), allowed))
     # Сигнатура не должна спорить с расширением: «акт.pdf», внутри которого
-    # исполняемый файл, — не акт. У PDF, JPG, PNG, DOC, DOCX и MP4 сигнатура
-    # есть всегда и обязана совпасть. HEIC бывает с редкими заголовками — ему
+    # исполняемый файл, — не акт. У PDF, JPG, PNG, DOCX и MP4 сигнатура есть
+    # всегда и обязана совпасть. HEIC бывает с редкими заголовками — ему
     # незнакомая сигнатура прощается, но не исполняемая.
     head = bytes((data or b'')[:4])
     if head.startswith(b'MZ') or head.startswith(b'\x7fELF') or head.startswith(b'#!'):
@@ -158,8 +165,6 @@ def check(kind, *, filename, data):
     expected = family.get(ext, ext)
     if ext in _STRICT_SIGNATURE:
         if family.get(sniffed, sniffed) != expected:
-            if ext == 'doc':
-                raise FileError('«%s»: это не документ Word 97–2003 — сохраните его как DOCX или PDF' % name)
             raise FileError('«%s»: содержимое не совпадает с расширением' % name)
     elif sniffed and sniffed != expected and not (ext == 'heic' and sniffed == 'mp4'):
         raise FileError('«%s»: содержимое не совпадает с расширением' % name)
@@ -171,7 +176,32 @@ def check(kind, *, filename, data):
         raise FileError('Файл «%s» больше %d МБ' % (name, limit // catalog.MB), code='DISCIPLINE_FILE_TOO_LARGE')
     if ext == 'docx':
         check_docx(data, name=name, template=kind == 'act_template')
+    if ext == 'pdf':
+        check_pdf(data, name=name)
     return name, ext, _CONTENT_TYPES.get(ext, 'application/octet-stream')
+
+
+# ── PDF: что просмотрщик выполнит сам, когда файл откроют ────────────────────
+# Как и DOCX с макросами, такой файл не принимается вовсе: хранится подлинник,
+# вырезать из него скрипт мы не вправе. Печать в PDF скриптов не переносит.
+
+_RESAVE = 'Сохраните его заново через «Печать» → «Сохранить как PDF» или приложите скан'
+_PDF_REFUSALS = {
+    pdf_guard.SCRIPT: 'в PDF встроен скрипт или запуск программы — такой файл не принимается. ' + _RESAVE,
+    pdf_guard.PASSWORD: 'PDF защищён паролем — загрузите его без пароля',
+    pdf_guard.BROKEN: 'PDF повреждён или не читается. ' + _RESAVE,
+    pdf_guard.HEAVY: 'PDF слишком сложный для проверки. ' + _RESAVE,
+}
+
+
+def check_pdf(data, *, name):
+    verdict = pdf_guard.verdict(data)
+    if verdict == pdf_guard.OK:
+        return
+    if verdict in _PDF_REFUSALS:
+        raise FileError('«%s»: %s' % (name, _PDF_REFUSALS[verdict]), code='DISCIPLINE_PDF_REFUSED')
+    raise FileError('«%s»: не удалось проверить PDF — попробуйте ещё раз через минуту' % name,
+                    code='DISCIPLINE_PDF_CHECK_FAILED', status=503)
 
 
 # ── DOCX: что Word сделает сам, когда документ откроют ──────────────────────

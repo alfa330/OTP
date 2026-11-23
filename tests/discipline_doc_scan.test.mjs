@@ -687,7 +687,7 @@ test('PDF: страницы, размер A4 и таблица смещений 
 });
 
 test('куда скан годится: по accept поля', () => {
-    assert.deepEqual(scanFormats('.pdf,.jpg,.jpeg,.png,.heic,.doc,.docx,image/*,application/pdf'), { jpeg: true, pdf: true, any: true });
+    assert.deepEqual(scanFormats('.pdf,.jpg,.jpeg,.png,.heic,.docx,image/*,application/pdf'), { jpeg: true, pdf: true, any: true });
     assert.deepEqual(scanFormats('.pdf,.jpg,.jpeg,.png,image/jpeg,image/png,application/pdf'), { jpeg: true, pdf: true, any: true });
     assert.deepEqual(scanFormats('.docx'), { jpeg: false, pdf: false, any: false });
     assert.deepEqual(scanFormats('.pdf'), { jpeg: false, pdf: true, any: true });

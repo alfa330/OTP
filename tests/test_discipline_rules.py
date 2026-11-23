@@ -12,6 +12,7 @@ from unittest import mock
 from datetime import date, datetime, timedelta
 
 from discipline import access, catalog, files, queries, service
+from tests import pdf_samples
 
 AT = datetime(2026, 10, 20, 12, 0)
 
@@ -268,7 +269,7 @@ class AccessTests(unittest.TestCase):
 
 class FileCheckTests(unittest.TestCase):
     def test_signature_must_match(self):
-        name, ext, mime = files.check('act', filename='акт.pdf', data=b'%PDF-1.4' + b'0' * 20)
+        name, ext, mime = files.check('act', filename='акт.pdf', data=pdf_samples.pdf())
         self.assertEqual((name, ext, mime), ('акт.pdf', 'pdf', 'application/pdf'))
         with self.assertRaises(files.FileError):
             files.check('act', filename='акт.pdf', data=b'MZ' + b'0' * 20)
@@ -284,7 +285,7 @@ class FileCheckTests(unittest.TestCase):
             files.check('explanation', filename='o.pdf', data=big)
 
     def test_name_without_extension_gets_it_from_signature(self):
-        name, ext, _mime = files.check('explanation', filename='pdf', data=b'%PDF-1.4' + b'0' * 20)
+        name, ext, _mime = files.check('explanation', filename='pdf', data=pdf_samples.pdf())
         self.assertEqual(ext, 'pdf')
         self.assertTrue(name.endswith('.pdf'))
 

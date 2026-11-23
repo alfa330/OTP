@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from discipline import access, catalog, files, queries, schema
+from tests import pdf_samples
 
 try:
     import flask
@@ -179,7 +180,7 @@ class RequestSizeCapTests(unittest.TestCase):
             return real(kind, filename=filename, data=data)
 
         def send(size):
-            body = b'%PDF-1.4\n' + b'0' * (size - 9)
+            body = pdf_samples.pdf_of_size(size)
             return self.client.post('/api/discipline/records/1/explanation', headers={'X-User-Id': str(OPERATOR)},
                                     data={'file': (io.BytesIO(body), 'объяснительная.pdf')},
                                     content_type='multipart/form-data')
