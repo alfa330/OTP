@@ -171,7 +171,7 @@ def test_what_a_failed_check_means(monkeypatch, caplog, returncode, stdout, stde
 
 
 def test_check_process_gets_no_portal_secrets(monkeypatch):
-    monkeypatch.setenv('DATABASE_URL', 'postgresql://user:secret@example.com/db')
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://example.com/portal')
     monkeypatch.setenv('BOT_TOKEN', 'secret')
     env = pdf_guard._child_env()
     assert 'DATABASE_URL' not in env and 'BOT_TOKEN' not in env
