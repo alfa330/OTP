@@ -10,6 +10,7 @@ import {
 import {
     ConfirmDialog, DATE_TRIGGER, Empty, FIELD, Group, Label, Loading, MonthSwitch, Pill, TOOLBAR_BTN, TOOLBAR_BTN_PRIMARY,
 } from './hiringUi';
+import { HhIntegration } from './HhIntegration';
 import { WhatsAppIntegration } from './WhatsAppPanel';
 
 /*
@@ -21,8 +22,9 @@ import { WhatsAppIntegration } from './WhatsAppPanel';
  *   причины     отказа и отсева по инициаторам (ТЗ 6.2, 6.3), не трогают закрытые карточки;
  *   план        месячные задачи на найм в FTE (ТЗ 1.2, 3);
  * Группы на обучение — своей вкладкой раздела (GroupsTab.jsx): их ведёт и тренер (владелец 18.11.2026).
- *   интеграции  HeadHunter, OLX, вебхук площадок — состояние и запуск вручную; номер WhatsApp найма —
- *               состояние сервиса на шлюзе, привязка по QR (WhatsAppPanel.jsx).
+ *   интеграции  OLX, вебхук площадок — состояние и запуск вручную; HeadHunter — мост hh.kz на шлюзе и какие вакансии
+ *               hh переносить (HhIntegration.jsx); номер WhatsApp найма — состояние сервиса на шлюзе, привязка по QR
+ *               (WhatsAppPanel.jsx).
  *
  * Формы добавления — за кнопкой «Добавить» (окно), а не постоянной полосой полей над списком:
  * справочник читают чаще, чем пополняют. Подтверждения — окнами раздела, не системными.
@@ -37,7 +39,7 @@ const SECTIONS = [
     { value: 'integrations', label: 'Интеграции' },
 ];
 
-const PLATFORM_LABELS = { webhook: 'вебхук', hh: 'API hh.ru', olx: 'робот OLX', whatsapp: 'номер WhatsApp' };
+const PLATFORM_LABELS = { webhook: 'вебхук', hh: 'мост hh.kz', olx: 'робот OLX', whatsapp: 'номер WhatsApp' };
 
 const Row = ({ children, muted }) => (
     <li className={`flex items-center gap-3 px-4 py-2.5 ${muted ? 'opacity-50' : ''}`}>{children}</li>
@@ -658,14 +660,15 @@ const IntegrationsSection = ({ api, toast, boot }) => {
         }
     };
     const hints = {
-        hh: 'Нужны переменные окружения HH_ACCESS_TOKEN и HH_USER_AGENT (токен приложения работодателя hh.ru). Опрос раз в 15 минут: активные вакансии → отклики → контакты резюме.',
         olx: 'Раз в 5 минут из журнала робота OLX берутся обращения с номером телефона — только из кабинетов, выбранных здесь как «для найма». Кабинеты лидов (таксопарки) к рекрутерам не попадают.',
         webhook: 'Площадки без API (Kaspi, таргет, лид-формы) присылают отклики на POST /api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма» («Сессии → Ключи»).',
     };
     return (
         <div className={`${iosCard} overflow-hidden`}>
             <ul className="divide-y divide-slate-100">
-                {items.map((row) => (row.code === 'whatsapp' ? <WhatsAppIntegration key={row.code} api={api} toast={toast} /> : (
+                {items.map((row) => (row.code === 'whatsapp' ? <WhatsAppIntegration key={row.code} api={api} toast={toast} />
+                    : row.code === 'hh' ? <HhIntegration key={row.code} row={row} api={api} toast={toast} onItems={setItems}
+                                                         vacancies={boot.dictionaries?.vacancies} /> : (
                     <Row key={row.code}>
                         <div className="min-w-0 grow basis-0">
                             <div className="flex items-center gap-2 text-[13.5px] font-medium text-slate-900">

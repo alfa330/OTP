@@ -150,11 +150,12 @@ def alert_user_ids(cursor):
     return [int(row[0]) for row in cursor.fetchall()]
 
 
-def wa_alerts_read(cursor, now, *, prefixes=None, except_key=None, before=None, not_users=None):
+def wa_alerts_read(cursor, now, *, prefixes=None, except_key=None, before=None, not_users=None, kind='whatsapp'):
     """Погасить тревоги номера WhatsApp найма в колоколе (строки без карточки — их не гасит открытие карточки): по виду
     ключа (prefixes — 'wa:park:' и т. п., hiring/whatsapp.alert_for), кроме тревоги с ключом except_key, созданные
-    раньше before, у всех, кроме not_users (кому тревоги положены). Возвращает, сколько погашено."""
-    where, params = ["kind = 'whatsapp'", "read_at IS NULL"], []
+    раньше before, у всех, кроме not_users (кому тревоги положены). kind — чьи тревоги: номера WhatsApp или моста hh.kz
+    ('hh'). Возвращает, сколько погашено."""
+    where, params = ["kind = %s", "read_at IS NULL"], [kind]
     if prefixes:
         where.append("(" + " OR ".join(["dedupe_key LIKE %s"] * len(prefixes)) + ")")
         params.extend(prefix + '%' for prefix in prefixes)
@@ -1001,6 +1002,59 @@ def set_integration(cursor, code, now, *, state=None, ok=False, error=None, curs
          WHERE code = %s
     """, (state, now, bool(ok), now, error, json.dumps(cursor_value) if cursor_value is not None else None,
           int(received or 0), now, code))
+
+
+# ─── Мост hh.kz (hiring/hh.py) ────────────────────────────────────────────────
+
+def hh_lock_integration(cursor, now):
+    """Строка интеграции hh под замком: доклады моста, сторож и правка руководителя идут по очереди."""
+    cursor.execute("""
+        INSERT INTO hiring_integrations (code, updated_at) VALUES ('hh', %s) ON CONFLICT (code) DO NOTHING
+    """, (now,))
+    cursor.execute("SELECT code, state, last_run_at, last_ok_at, last_error, cursor, settings, received_total, updated_at "
+                   "FROM hiring_integrations WHERE code = 'hh' FOR UPDATE")
+    return _parse_json_fields(_one(cursor), 'cursor', 'settings')
+
+
+def hh_claim_topic(cursor, item, now):
+    """Занять тему hh за этим приёмом. False — её уже принимали (повтор после перезапуска моста или потерянного
+    ответа портала): второй раз карточку она не заводит. Одновременный второй приём ждёт первый на ключе."""
+    cursor.execute("""
+        INSERT INTO hiring_hh_topics (topic_id, hh_vacancy_id, responded_at, outcome, created_at)
+        VALUES (%s, %s, %s, 'pending', %s) ON CONFLICT (topic_id) DO NOTHING
+    """, (int(item['topic_id']), int(item['vacancy_id']), item.get('responded_at'), now))
+    return cursor.rowcount == 1
+
+
+def hh_finish_topic(cursor, topic_id, outcome, card_id):
+    cursor.execute("UPDATE hiring_hh_topics SET outcome = %s, card_id = %s WHERE topic_id = %s",
+                   (outcome, card_id, int(topic_id)))
+
+
+def hh_save_report(cursor, now, *, state, error, report, received, ok):
+    """Доклад моста: состояние входа, что он видит, сколько карточек завёл. last_run_at — последний обмен с мостом."""
+    set_integration(cursor, 'hh', now, state=state, ok=ok, error=error, cursor_value=report, received=received)
+
+
+def hh_mark_state(cursor, now, state, error):
+    """Сторож: мост замолчал — состояние и текст ошибки, без «последнего обмена» (его не было)."""
+    cursor.execute("UPDATE hiring_integrations SET state = %s, last_error = %s, updated_at = %s WHERE code = 'hh'",
+                   (state, error, now))
+
+
+def hh_save_settings(cursor, now, vacancies):
+    """Правка руководителя: правила вакансий hh целиком; «с какого момента» и остальное в настройках остаются."""
+    cursor.execute("""
+        UPDATE hiring_integrations
+           SET settings = settings || jsonb_build_object('vacancies', %s::jsonb), updated_at = %s
+         WHERE code = 'hh'
+    """, (json.dumps(vacancies, ensure_ascii=False), now))
+
+
+def hh_vacancy_ids(cursor):
+    """Вакансии iCORE, которые руководитель может поставить отклику hh."""
+    cursor.execute("SELECT id FROM hiring_vacancies")
+    return {int(row[0]) for row in cursor.fetchall()}
 
 
 def olx_tables_exist(cursor):

@@ -1277,6 +1277,164 @@ def test_olx_feed(world):
         assert queries.open_card_by_phone(cur, '+77055550005') is None   # кабинет лидов — мимо воронки
 
 
+# ─── Мост hh.kz (hiring/hh.py, владелец 23.11.2026) ────────────────────────────
+
+HH_NOW = datetime(2026, 11, 23, 13, 0)
+HH_OPERATOR, HH_SUPERVISOR, HH_MARKETER = '139079696', '139445254', '139508734'
+
+
+def hh_item(topic, phone, vacancy=HH_OPERATOR, at='2026-11-23T10:30:00.37+03:00', **extra):
+    item = {'topic_id': str(topic), 'vacancy_id': vacancy, 'vacancy_name': 'Оператор call-центра', 'responded_at': at,
+            'last_name': 'Кандидатов', 'first_name': 'Кандидат', 'middle_name': '', 'phone': phone, 'city': 'Алматы',
+            'resume_hash': 'a' * 38}
+    item.update(extra)
+    return item
+
+
+def hh_push(world, items=(), **extra):
+    payload = {'version': 'hh/1.0.0', 'session': 'ok', 'items': list(items),
+               'account': {'manager': 'Руслан Тестов', 'employer': 'Ресурс Плюс KZ', 'employer_id': '10106941'},
+               'vacancies': [{'id': HH_OPERATOR, 'name': 'Оператор call-центра', 'area': 'Алматы', 'responses': 152},
+                             {'id': HH_MARKETER, 'name': 'Младший маркетолог', 'area': 'Алматы', 'responses': 250}]}
+    payload.update(extra)
+    return world['service'].hh_agent_push(payload)
+
+
+def hh_alerts(world):
+    with world['db']._get_cursor() as cur:
+        cur.execute("SELECT user_id, title, body FROM hiring_notifications WHERE kind = 'hh' AND read_at IS NULL "
+                    "ORDER BY user_id")
+        return cur.fetchall()
+
+
+def test_hh_seed_keeps_owner_decisions(world):
+    """Решения владельца 23.11.2026 («только новые с этой минуты», «все, кроме маркетолога») ложатся в настройки один
+    раз: правку руководителя рестарт прода назад не возвращает."""
+    with world['db']._get_cursor() as cur:
+        row = queries.get_integration(cur, 'hh')
+        assert row['settings'] == {'since': '2026-11-23T12:08:00', 'vacancies': {HH_MARKETER: {'on': False}}}
+        assert row['state'] == 'not_configured' and row['last_error'] is None
+        queries.hh_save_settings(cur, NOW, {HH_MARKETER: {'on': True}})
+        schema.init_hiring_schema(cur)
+        assert queries.get_integration(cur, 'hh')['settings']['vacancies'] == {HH_MARKETER: {'on': True}}
+    # Мост ещё ни разу не приходил — сторожу тревожить не о чем.
+    assert world['service'].hh_watchdog() is None
+
+
+def test_hh_bridge_intake(world):
+    world['clock'].now = HH_NOW
+    reply = hh_push(world, [
+        hh_item(1, '+7 (701) 555-00-01'),                                                   # новый отклик
+        hh_item(2, '+7 (701) 555-00-01', vacancy=HH_SUPERVISOR, vacancy_name='Супервайзер КЦ'),  # он же на вторую вакансию
+        hh_item(3, '+7 (701) 555-00-03', vacancy=HH_MARKETER),                              # маркетолог выключен
+        hh_item(4, '+7 (701) 555-00-04', at='2026-11-23T10:07:59+03:00'),                   # до отсечки 12:08 Алматы
+        hh_item(5, '+998 90 123 45 67'),                                                    # номер не казахстанский
+        hh_item(6, '+7 777 999 88 77'),                                                     # телефон сотрудника
+        {'topic_id': '7', 'vacancy_id': HH_OPERATOR},                                       # без времени — не разобрать
+    ])
+    assert [r['outcome'] for r in reply['results']] == [
+        'created', 'repeat', 'vacancy_off', 'before_since', 'no_phone', 'employee', 'invalid']
+    assert reply['settings'] == {'since': '2026-11-23T12:08:00+05:00', 'off': [HH_MARKETER]}
+    assert reply['next_poll_sec'] == 180                      # днём — три минуты
+    with world['db']._get_cursor() as cur:
+        card = queries.open_card_by_phone(cur, '+77015550001')
+        assert (card['source_code'], card['stage'], card['kind']) == ('hh', 'responses', 'response')
+        assert card['full_name'] == 'Кандидатов Кандидат' and card['city'] == 'Алматы'
+        assert card['vacancy_text'] == 'Оператор call-центра' and card['vacancy_id'] is None
+        assert card['received_at'] == datetime(2026, 11, 23, 12, 30, 0, 370000)
+        assert card['platform_ref'] == 'https://hh.kz/resume/%s?vacancyId=%s&t=1' % ('a' * 38, HH_OPERATOR)
+        assert [t['kind'] for t in queries.card_touches(cur, card['id'])] == ['repeat_response']
+        for phone in ('+77015550003', '+77015550004'):
+            assert queries.open_card_by_phone(cur, phone) is None
+        row = queries.get_integration(cur, 'hh')
+        assert row['state'] == 'ok' and row['last_error'] is None and row['received_total'] == 2
+        assert row['last_ok_at'] == HH_NOW and row['cursor']['bridge']['session'] == 'ok'
+        assert row['cursor']['account']['employer'] == 'Ресурс Плюс KZ'
+        assert [v['id'] for v in row['cursor']['vacancies']] == [HH_OPERATOR, HH_MARKETER]
+        cur.execute("SELECT topic_id, outcome, card_id IS NOT NULL FROM hiring_hh_topics ORDER BY topic_id")
+        assert cur.fetchall() == [(1, 'created', True), (2, 'repeat', True), (3, 'vacancy_off', False),
+                                  (4, 'before_since', False), (5, 'no_phone', False), (6, 'employee', False)]
+        # Новый отклик — в колокол всем рекрутерам (ТЗ 8.3), как с любой площадки.
+        cur.execute("SELECT user_id FROM hiring_notifications WHERE kind = 'new_response' AND card_id = %s ORDER BY user_id",
+                    (card['id'],))
+        assert [row[0] for row in cur.fetchall()] == [REC1, REC2, REMOTE]
+    # Тот же доклад ещё раз (мост перезапустился, ответ портала потерялся) — второй карточки и счёта нет; каталог
+    # вакансий без перечитывания (vacancies: null) — прежний.
+    again = hh_push(world, [hh_item(1, '+7 (701) 555-00-01'), hh_item(3, '+7 (701) 555-00-03', vacancy=HH_MARKETER)],
+                    vacancies=None, account=None)
+    assert [r['outcome'] for r in again['results']] == ['known', 'known']
+    with world['db']._get_cursor() as cur:
+        row = queries.get_integration(cur, 'hh')
+        assert row['received_total'] == 2 and len(row['cursor']['vacancies']) == 2
+        assert row['cursor']['account']['manager'] == 'Руслан Тестов'
+    with pytest.raises(HiringError):
+        hh_push(world, [hh_item(100 + n, '+7 701 555 10 %02d' % n) for n in range(101)])
+
+
+def test_hh_vacancy_settings(world):
+    """Руководитель ставит вакансии hh вакансию iCORE или выключает её: отклики выключенной мимо воронки, а мост
+    узнаёт об этом из ответа и перестаёт её читать."""
+    world['clock'].now = HH_NOW
+    service = world['service']
+    hh_push(world)
+    service.hh_settings({HH_OPERATOR: {'on': True, 'vacancy_id': world['vacancy_id']}, HH_MARKETER: {'on': False}})
+    hh_push(world, [hh_item(11, '+7 701 555 01 11')])
+    with world['db']._get_cursor() as cur:
+        assert queries.open_card_by_phone(cur, '+77015550111')['vacancy_id'] == world['vacancy_id']
+    with pytest.raises(HiringError):
+        service.hh_settings({HH_OPERATOR: {'on': True, 'vacancy_id': 999999}})
+    with pytest.raises(HiringError):
+        service.hh_settings(['не словарь'])
+    service.hh_settings({HH_OPERATOR: {'on': False}, HH_MARKETER: {'on': False}})
+    reply = hh_push(world, [hh_item(12, '+7 701 555 01 12')])
+    assert reply['results'][0]['outcome'] == 'vacancy_off'
+    assert reply['settings']['off'] == [HH_OPERATOR, HH_MARKETER]
+    with world['db']._get_cursor() as cur:
+        assert queries.get_integration(cur, 'hh')['settings']['since'] == '2026-11-23T12:08:00'
+
+
+def test_hh_bridge_alerts(world):
+    """Беда моста — одна тревога руководителям рекрутинга на случай; короткий сбой — тишина; прошла — гаснет."""
+    world['clock'].now = HH_NOW
+    service = world['service']
+    hh_push(world)
+    hh_push(world, session='login_required', detail='редирект на вход', vacancies=None)
+    with world['db']._get_cursor() as cur:
+        row = queries.get_integration(cur, 'hh')
+        assert row['state'] == 'error' and 'потерял вход' in row['last_error'] and 'редирект на вход' in row['last_error']
+        assert row['last_ok_at'] == HH_NOW
+    assert hh_alerts(world) == []                               # десяти минут ещё нет
+    world['clock'].now = HH_NOW + timedelta(minutes=11)
+    hh_push(world, session='login_required', vacancies=None)
+    hh_push(world, session='login_required', vacancies=None)
+    alerts = hh_alerts(world)
+    assert [user for user, _title, _body in alerts] == [HR_HEAD, LEAD_GRANT]   # одна на человека, не на каждый доклад
+    assert alerts[0][1] == 'HeadHunter: новые отклики не приходят'
+    hh_push(world)                                              # вход вернулся
+    assert hh_alerts(world) == []
+    # Мост замолчал: сторож через 20 минут — «не на связи» и тревога; повтор сторожа — та же тревога.
+    world['clock'].now += timedelta(minutes=15)
+    assert service.hh_watchdog() is None
+    world['clock'].now += timedelta(minutes=10)
+    key = service.hh_watchdog()
+    assert key.startswith('hh:silent:') and service.hh_watchdog() == key
+    assert len(hh_alerts(world)) == 2
+    with world['db']._get_cursor() as cur:
+        row = queries.get_integration(cur, 'hh')
+        assert row['state'] == 'error' and 'не выходит на связь' in row['last_error']
+    hh_push(world)
+    assert hh_alerts(world) == []
+    with world['db']._get_cursor() as cur:
+        assert queries.get_integration(cur, 'hh')['state'] == 'ok'
+    # Ночью такт — полчаса: сорок минут тишины — ещё не «не на связи», полтора часа — уже да.
+    world['clock'].now = datetime(2026, 11, 24, 2, 0)
+    assert hh_push(world)['next_poll_sec'] == 1800
+    world['clock'].now = datetime(2026, 11, 24, 2, 40)
+    assert service.hh_watchdog() is None and hh_alerts(world) == []
+    world['clock'].now = datetime(2026, 11, 24, 3, 30)
+    assert service.hh_watchdog().startswith('hh:silent:')
+
+
 # ─── Дашборд (ТЗ 8.1) и рабочий стол (ТЗ 3) ───────────────────────────────────
 
 def test_dashboard_cohort_and_click_through(world):

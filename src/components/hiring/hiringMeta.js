@@ -167,6 +167,33 @@ export const ASSIGNMENT_LABELS = {
 export const INTEGRATION_LABELS = { hh: 'HeadHunter', olx: 'OLX', webhook: 'Вебхук площадок' };
 export const INTEGRATION_STATE_LABELS = { ok: 'Работает', not_configured: 'Не настроена', error: 'Ошибка' };
 
+/* Вакансии hh.kz в «Интеграциях» (владелец 23.11.2026: новые вакансии hh переносятся сами, руководитель выключает их или
+   ставит вакансию iCORE). Выбор в списке — одним значением: 'off' — не переносить, 'on' — без вакансии, 'v<id>' — с
+   вакансией iCORE. Правило с сервера: {on, vacancy_id}. */
+export const hhChoice = (rule) => {
+    if (!rule || rule.on === false) return rule ? 'off' : 'on';
+    return rule.vacancy_id ? `v${rule.vacancy_id}` : 'on';
+};
+
+export const hhChoiceOptions = (vacancies) => [
+    { value: 'off', label: 'Не переносить' },
+    { value: 'on', label: 'Без вакансии' },
+    ...(vacancies || []).filter((v) => v.is_active !== false).map((v) => ({ value: `v${v.id}`, label: v.name })),
+];
+
+/* Тело PUT /integrations/hh/settings: прежние правила (и вакансий, которых мост сейчас не видит) + выбранное здесь. */
+export const hhSettingsBody = (savedRules, choices) => {
+    const vacancies = {};
+    Object.entries(savedRules || {}).forEach(([id, rule]) => {
+        if (rule && typeof rule === 'object') vacancies[id] = { on: rule.on !== false, vacancy_id: rule.vacancy_id || null };
+    });
+    Object.entries(choices || {}).forEach(([id, choice]) => {
+        vacancies[id] = choice === 'off' ? { on: false, vacancy_id: null }
+            : { on: true, vacancy_id: /^v\d+$/.test(choice) ? Number(choice.slice(1)) : null };
+    });
+    return { vacancies };
+};
+
 const MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа',
     'сентября', 'октября', 'ноября', 'декабря'];
 const MONTHS_NOM = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август',

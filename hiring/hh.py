@@ -1,81 +1,75 @@
 # -*- coding: utf-8 -*-
-"""Отклики HeadHunter (ТЗ 5.2): API hh.ru от имени работодателя.
+"""Отклики hh.kz (ТЗ 5.2): что приносит мост на шлюзе и как это читает портал. Чистая логика.
 
-Нужны переменные окружения (без них интеграция «не настроена», раздел это показывает):
+Откуда отклики
+--------------
+API hh.ru отдаёт отклики работодателю только с платным доступом к API и приложением, прошедшим модерацию.
+Поэтому их носит мост на шлюзе (cdr_bridge/hh_bridge.py, владелец 23.11.2026): под входом владельца в кабинет
+работодателя hh.kz он раз в такт смотрит счётчики откликов вакансий и, если они сдвинулись, читает свежие отклики
+той же выдачей, что страница «Отклики» сайта. Отклик у hh — тема (topic): кандидат + вакансия, со своим номером.
 
-    HH_ACCESS_TOKEN   токен приложения работодателя (OAuth, выдаётся в dev.hh.ru)
-    HH_USER_AGENT     обязательный у hh.ru заголовок вида «iCore/1.0 (почта)»
-    HH_EMPLOYER_ID    id работодателя; без него берётся из GET /me
+Порталу мост присылает (POST /api/hiring/hh/agent/push, подпись шлюза):
 
-Как опрашивается: активные вакансии работодателя → по каждой отклики (коллекция
-`response`), новые с прошлого опроса → по каждому резюме контакты (GET /resumes/{id}
-?with_contact=true, телефон типа cell). Отклик без телефона в пул не попадает — телефон
-здесь ключ (ТЗ 5.3), раздел покажет это в состоянии интеграции.
+    {"version": "hh/1.0.0", "session": "ok" | "login_required" | "blocked" | "error", "detail": "…",
+     "account": {"manager": "…", "employer": "…", "employer_id": "…"},
+     "vacancies": [{"id": "139079696", "name": "…", "area": "Алматы", "responses": 152}]   (null — не перечитывал),
+     "items": [{"topic_id": "…", "vacancy_id": "…", "vacancy_name": "…",
+                "responded_at": "2026-11-23T12:30:00+03:00", "last_name": "…", "first_name": "…",
+                "middle_name": "…", "phone": "+7 (701) 234-56-78", "city": "Алматы", "resume_hash": "…"}]}
 
-Транспорт подменяемый — тесты ходят в словари, не в сеть.
+Портал отвечает исходом по каждой теме и настройками: с какого момента отклики переносятся и какие вакансии
+выключены (их мост не читает вовсе). Настройки руководителя (hiring_integrations.settings у кода hh):
+
+    {"since": "2026-11-23T12:08:00",
+     "vacancies": {"139508734": {"on": false}, "139079696": {"on": true, "vacancy_id": 2}}}
+
+Вакансия hh, которой в настройках нет, переносится без вакансии iCORE: новые вакансии hh идут сами (владелец
+23.11.2026). Последний доклад моста (кто вошёл, какие вакансии видит, когда был на связи) — в cursor той же строки.
 """
 
-import logging
-import os
-from datetime import datetime, timedelta
+import re
+from datetime import datetime
 
 from . import rules
 
-log = logging.getLogger(__name__)
+PLATFORM = 'hh'
+MAX_ITEMS = 100
+# Состояние входа моста в кабинет hh.kz. Не «ok» — интеграция с ошибкой, руководителям тревога.
+SESSION_OK = 'ok'
+SESSION_TEXTS = {
+    'login_required': 'Мост потерял вход в кабинет hh.kz — новые отклики не приходят. Нужно войти заново',
+    'blocked': 'hh.kz не пускает мост (защита сайта) — новые отклики не приходят',
+    'error': 'hh.kz отвечает мосту с ошибкой — новые отклики не приходят',
+}
+SESSIONS = (SESSION_OK,) + tuple(SESSION_TEXTS)
+# Исходы темы: created/repeat/employee — как у _intake_one; остальные — почему отклик не перенесён.
+OUTCOMES = ('created', 'repeat', 'employee', 'known', 'vacancy_off', 'before_since', 'no_phone', 'invalid')
 
-API = 'https://api.hh.ru'
-PAGES_PER_VACANCY = 2
-PER_PAGE = 50
-SEEN_LIMIT = 3000
-TIMEOUT = 20
-
-
-class HHError(Exception):
-    pass
-
-
-def config_from_env(environ=None):
-    env = environ if environ is not None else os.environ
-    token = str(env.get('HH_ACCESS_TOKEN') or '').strip()
-    agent = str(env.get('HH_USER_AGENT') or '').strip()
-    if not token or not agent:
-        return None
-    return {'token': token, 'user_agent': agent, 'employer_id': str(env.get('HH_EMPLOYER_ID') or '').strip() or None}
+# Номера тем и вакансий hh — 9–10 цифр; больше 18 не влезло бы в BIGINT, и доклад моста падал бы целиком.
+_DIGITS = re.compile(r'^\d{1,18}$')
+_HASH = re.compile(r'^[0-9a-f]{16,64}$')
+_RESUME_HOST = 'https://hh.kz'
 
 
-def _requests_transport(method, url, headers, params):
-    import requests
-    response = requests.request(method, url, headers=headers, params=params, timeout=TIMEOUT)
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    return response.status_code, payload
+def _text(value, limit):
+    text = ' '.join(str(value or '').split())
+    return text[:limit] if text else None
 
 
-def _get(config, path, params=None, transport=None):
-    transport = transport or _requests_transport
-    headers = {'Authorization': 'Bearer ' + config['token'], 'HH-User-Agent': config['user_agent'],
-               'User-Agent': config['user_agent']}
-    status, payload = transport('GET', API + path, headers, params or {})
-    if status in (401, 403):
-        raise HHError('hh.ru отверг токен (%s)' % status)
-    if status == 429:
-        raise HHError('hh.ru: превышен лимит запросов')
-    if status >= 400 or payload is None:
-        raise HHError('hh.ru ответил %s на %s' % (status, path))
-    return payload
+def _digits(value):
+    text = str(value if value is not None else '').strip()
+    return text if _DIGITS.match(text) else None
 
 
-def _parse_moment(text):
-    """«2026-10-29T12:34:56+0300» → наивное время Алматы."""
+def parse_moment(value):
+    """«2026-11-23T12:30:00.37+03:00» (время hh — московское, с поясом) → наивное время Алматы. Без пояса — уже Алматы."""
+    text = str(value or '').strip()
     if not text:
         return None
-    value = str(text).strip()
-    if len(value) >= 5 and value[-5] in '+-' and value[-3] != ':':
-        value = value[:-2] + ':' + value[-2:]
+    if len(text) >= 5 and text[-5] in '+-' and text[-3] != ':':
+        text = text[:-2] + ':' + text[-2:]
     try:
-        moment = datetime.fromisoformat(value)
+        moment = datetime.fromisoformat(text.replace('Z', '+00:00'))
     except ValueError:
         return None
     if moment.tzinfo is not None:
@@ -83,103 +77,134 @@ def _parse_moment(text):
     return moment
 
 
-def _phone_from_resume(resume):
-    best = None
-    for contact in (resume or {}).get('contact') or []:
-        kind = ((contact.get('type') or {}).get('id') or '')
-        value = contact.get('value')
-        raw = None
-        if isinstance(value, dict):
-            raw = value.get('formatted') or ''.join(str(value.get(key) or '') for key in ('country', 'city', 'number'))
-        elif value:
-            raw = str(value)
-        phone = rules.normalize_phone(raw)
-        if not phone:
+def resume_url(resume_hash, vacancy_id, topic_id):
+    """Резюме кандидата в кабинете работодателя — с откликом (так ссылку собирает сам сайт: vacancyId и t)."""
+    if not resume_hash or not _HASH.match(resume_hash):
+        return None
+    return '%s/resume/%s?vacancyId=%s&t=%s' % (_RESUME_HOST, resume_hash, vacancy_id, topic_id)
+
+
+def clean_item(raw):
+    """Одна тема от моста → поля для приёма или None (не разобрать: нет номера темы, вакансии или времени отклика)."""
+    if not isinstance(raw, dict):
+        return None
+    topic_id = _digits(raw.get('topic_id'))
+    vacancy_id = _digits(raw.get('vacancy_id'))
+    responded_at = parse_moment(raw.get('responded_at'))
+    if not topic_id or not vacancy_id or responded_at is None:
+        return None
+    full_name = ' '.join(part for part in (_text(raw.get(key), 80) for key in ('last_name', 'first_name', 'middle_name'))
+                         if part)
+    resume_hash = str(raw.get('resume_hash') or '').strip().lower()
+    return {
+        'topic_id': int(topic_id),
+        'vacancy_id': vacancy_id,
+        'vacancy_name': _text(raw.get('vacancy_name'), 200),
+        'responded_at': responded_at,
+        'full_name': full_name[:200],
+        'phone': _text(raw.get('phone'), 40),
+        'city': _text(raw.get('city'), 120),
+        'resume_url': resume_url(resume_hash, vacancy_id, topic_id),
+    }
+
+
+def clean_vacancies(raw):
+    """Вакансии, которые мост видит в кабинете. None — мост в этот раз их не перечитывал (каталог остаётся прежним)."""
+    if not isinstance(raw, list):
+        return None
+    out, seen = [], set()
+    for item in raw[:200]:
+        if not isinstance(item, dict):
             continue
-        if kind == 'cell' or contact.get('preferred'):
-            return phone
-        best = best or phone
-    return best
-
-
-def _full_name(resume):
-    return ' '.join(str(resume.get(key) or '').strip() for key in ('last_name', 'first_name', 'middle_name')).strip()
-
-
-def fetch_responses(config, state, transport=None):
-    """(отклики, новая закладка, замечания). Отклик — {full_name, phone, city, vacancy, ref, received_at}."""
-    state = dict(state or {})
-    seen = list(state.get('seen') or [])
-    seen_set = set(seen)
-    since = _parse_moment(state.get('since')) or (rules.now_almaty() - timedelta(days=1))
-    problems = []
-
-    employer_id = config.get('employer_id')
-    if not employer_id:
-        me = _get(config, '/me', transport=transport)
-        employer_id = str(((me or {}).get('employer') or {}).get('id') or '')
-        if not employer_id:
-            raise HHError('Токен не принадлежит работодателю: у /me нет employer.id')
-
-    vacancies = []
-    page = 0
-    while True:
-        payload = _get(config, '/employers/%s/vacancies/active' % employer_id,
-                       {'page': page, 'per_page': PER_PAGE}, transport=transport)
-        vacancies.extend(payload.get('items') or [])
-        page += 1
-        if page >= int(payload.get('pages') or 1) or page > 10:
-            break
-
-    items = []
-    newest = since
-    for vacancy in vacancies:
-        vacancy_id = vacancy.get('id')
-        if not vacancy_id:
+        vacancy_id = _digits(item.get('id'))
+        name = _text(item.get('name'), 200)
+        if not vacancy_id or not name or vacancy_id in seen:
             continue
-        for page in range(PAGES_PER_VACANCY):
+        seen.add(vacancy_id)
+        responses = item.get('responses')
+        out.append({'id': vacancy_id, 'name': name, 'area': _text(item.get('area'), 120),
+                    'responses': responses if isinstance(responses, int) and responses >= 0 else None})
+    return out
+
+
+def clean_session(payload):
+    """(состояние входа, пояснение моста)."""
+    session = str((payload or {}).get('session') or '').strip()
+    if session not in SESSIONS:
+        session = 'error'
+    return session, _text((payload or {}).get('detail'), 300)
+
+
+def clean_account(raw):
+    raw = raw if isinstance(raw, dict) else {}
+    return {'manager': _text(raw.get('manager'), 120), 'employer': _text(raw.get('employer'), 160),
+            'employer_id': _digits(raw.get('employer_id'))}
+
+
+# ─── Настройки руководителя ───────────────────────────────────────────────────
+
+def since(settings):
+    """С какого момента отклики hh переносятся (решение владельца 23.11.2026 — «только новые с этой минуты»)."""
+    moment = parse_moment((settings or {}).get('since'))
+    return moment or rules.HH_SINCE_DEFAULT
+
+
+def vacancy_rule(settings, vacancy_id):
+    """{'on': переносить ли, 'vacancy_id': вакансия iCORE или None}. Вакансии нет в настройках — переносится, без вакансии."""
+    rule = ((settings or {}).get('vacancies') or {}).get(str(vacancy_id)) or {}
+    icore = rule.get('vacancy_id')
+    return {'on': rule.get('on') is not False,
+            'vacancy_id': icore if isinstance(icore, int) and not isinstance(icore, bool) and icore > 0 else None}
+
+
+def off_ids(settings):
+    return sorted(key for key, rule in ((settings or {}).get('vacancies') or {}).items()
+                  if isinstance(rule, dict) and rule.get('on') is False)
+
+
+def clean_vacancy_settings(raw, known_icore_ids):
+    """Правка руководителя: {id вакансии hh: {on, vacancy_id}} → чистый словарь. ValueError — с текстом для человека."""
+    if not isinstance(raw, dict):
+        raise ValueError('Нужен список вакансий hh')
+    out = {}
+    for key, rule in list(raw.items())[:200]:
+        vacancy_id = _digits(key)
+        if not vacancy_id or not isinstance(rule, dict):
+            raise ValueError('Неизвестная вакансия hh: %s' % str(key)[:40])
+        icore = rule.get('vacancy_id')
+        if icore in (None, '', 0):
+            icore = None
+        else:
             try:
-                payload = _get(config, '/negotiations/response',
-                               {'vacancy_id': vacancy_id, 'page': page, 'per_page': PER_PAGE,
-                                'order_by': 'created_at', 'order': 'desc'}, transport=transport)
-            except HHError as exc:
-                problems.append('%s: %s' % (vacancy.get('name') or vacancy_id, exc))
-                break
-            batch = payload.get('items') or []
-            stop = False
-            for negotiation in batch:
-                negotiation_id = str(negotiation.get('id') or '')
-                created = _parse_moment(negotiation.get('created_at'))
-                if created and created < since:
-                    stop = True
-                    continue
-                if not negotiation_id or negotiation_id in seen_set:
-                    continue
-                resume = negotiation.get('resume') or {}
-                resume_id = resume.get('id')
-                phone = _phone_from_resume(resume)
-                if not phone and resume_id:
-                    try:
-                        full = _get(config, '/resumes/%s' % resume_id, {'with_contact': 'true'}, transport=transport)
-                        phone = _phone_from_resume(full)
-                        resume = dict(full, **{k: v for k, v in resume.items() if k not in full})
-                    except HHError as exc:
-                        problems.append('резюме %s: %s' % (resume_id, exc))
-                seen.append(negotiation_id)
-                seen_set.add(negotiation_id)
-                if created and created > newest:
-                    newest = created
-                items.append({
-                    'full_name': _full_name(resume),
-                    'phone': phone,
-                    'city': ((resume.get('area') or {}).get('name')),
-                    'vacancy': (negotiation.get('vacancy') or vacancy).get('name') or vacancy.get('name'),
-                    'ref': resume.get('alternate_url') or ('hh:negotiation:%s' % negotiation_id),
-                    'received_at': created,
-                })
-            if stop or len(batch) < PER_PAGE:
-                break
+                icore = int(icore)
+            except (TypeError, ValueError):
+                raise ValueError('Вакансия iCORE задана неверно')
+            if icore not in known_icore_ids:
+                raise ValueError('Такой вакансии iCORE нет')
+        entry = {'on': rule.get('on') is not False}
+        if icore:
+            entry['vacancy_id'] = icore
+        out[vacancy_id] = entry
+    return out
 
-    new_state = {'since': (newest - timedelta(hours=1)).isoformat(timespec='seconds'), 'seen': seen[-SEEN_LIMIT:],
-                 'employer_id': employer_id}
-    return items, new_state, problems
+
+def view(row, now):
+    """Строка интеграции hh для «Настроек»: мост, вход, вакансии с правилами руководителя."""
+    row = row or {}
+    report = row.get('cursor') or {}
+    settings = row.get('settings') or {}
+    bridge = report.get('bridge') or {}
+    seen_at = parse_moment(bridge.get('seen_at'))
+    vacancies = []
+    for item in report.get('vacancies') or []:
+        rule = vacancy_rule(settings, item.get('id'))
+        vacancies.append(dict(item, on=rule['on'], vacancy_id=rule['vacancy_id']))
+    return {
+        'since': since(settings).isoformat(timespec='minutes'),
+        'seen_at': seen_at.isoformat(timespec='seconds') if seen_at else None,
+        'silent': bool(seen_at and now - seen_at > rules.hh_silent_after(bridge.get('expect_sec'))),
+        'session': bridge.get('session'),
+        'version': bridge.get('version'),
+        'account': report.get('account') or {},
+        'vacancies': vacancies,
+    }

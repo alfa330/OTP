@@ -82,7 +82,7 @@ def _spawn_thread(target, *args):
 
 
 class HiringService:
-    def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None, hh_transport=None,
+    def __init__(self, cursor_factory, *, send_telegram=None, web_app_base_url=None, now=None,
                  dial_list=None, storage=None, transcriber=None, spawn=None):
         """dial_list — () -> сервис «Удаленного КЦ» или None: клиент Binotel отдела для истории звонков
         линии рекрутера и ссылки на запись разговора. storage — бакет файлов WhatsApp найма
@@ -92,7 +92,6 @@ class HiringService:
         self._send_telegram = send_telegram
         self._base_url = web_app_base_url
         self._now = now or rules.now_almaty
-        self._hh_transport = hh_transport
         self._dial_list = dial_list
         self._storage = storage
         self._transcriber = transcriber
@@ -439,50 +438,131 @@ class HiringService:
         finally:
             self._pull_lock.release()
 
-    def pull_hh(self, environ=None):
-        """Отклики HeadHunter (ТЗ 5.2) — когда в окружении есть токен работодателя.
-        Под тем же замком, что OLX: кнопка «Опросить» рядом с планировщиком не должна дважды
-        разобрать одни отклики с одной закладкой."""
-        if not self._pull_lock.acquire(blocking=False):
-            return None
-        try:
-            return self._pull_hh(environ)
-        finally:
-            self._pull_lock.release()
+    # ─── Мост hh.kz на шлюзе (hiring/hh.py, cdr_bridge/hh_bridge.py) ─────────
 
-    def _pull_hh(self, environ):
-        config = hh.config_from_env(environ)
+    # Такт моста называет портал (rules.hh_poll_seconds): днём три минуты, ночью полчаса — hh видит раз в такт по
+    # маленькому запросу счётчиков на вакансию, не чаще, чем смотрел бы рекрутер.
+    # Сбой входа или сайта дольше этого — тревога руководителям; короткий сбой (hh ответил 502 один раз) — тишина.
+    HH_PROBLEM_ALERT_AFTER = timedelta(minutes=10)
+
+    def hh_agent_push(self, payload):
+        """Доклад моста hh.kz (владелец 23.11.2026: «по данному сайту нужно автоматизировать передачу откликов в icore
+        в воронку найма»): вход в кабинет, вакансии и новые отклики. Отклик принимается, как отклики всех площадок, через
+        _intake_one: карточка в «Отклики» пула с источником HeadHunter, телефон открытой карточки — повторный отклик. Тема
+        hh принимается один раз (hiring_hh_topics). В ответ — исход по каждой теме и настройки: с какого момента отклики
+        нужны и какие вакансии выключены."""
+        payload = payload if isinstance(payload, dict) else {}
+        session, detail = hh.clean_session(payload)
+        raw_items = payload.get('items') if isinstance(payload.get('items'), list) else []
+        if len(raw_items) > hh.MAX_ITEMS:
+            raise HiringError('HIRING_HH_TOO_MANY', 'Не больше %d откликов за раз' % hh.MAX_ITEMS)
+        vacancies = hh.clean_vacancies(payload.get('vacancies'))
         now = self._now()
-        if not config:
-            with self._cursor() as cursor:
-                queries.set_integration(cursor, 'hh', now, state='not_configured',
-                                        error='Не заданы HH_ACCESS_TOKEN и HH_USER_AGENT')
-            return 0
+        results, counts = [], {}
         with self._cursor() as cursor:
-            state = queries.get_integration(cursor, 'hh') or {}
-        try:
-            items, new_cursor, problems = hh.fetch_responses(config, state.get('cursor') or {}, transport=self._hh_transport)
-        except hh.HHError as exc:
-            with self._cursor() as cursor:
-                queries.set_integration(cursor, 'hh', now, state='error', error=str(exc)[:500])
-            return None
-        received = 0
-        with self._cursor() as cursor:
-            source = queries.source_by_code(cursor, 'hh')
-            for item in items:
-                phone = rules.normalize_phone(item.get('phone'))
-                if not phone:
-                    problems.append('без телефона: %s' % (item.get('full_name') or item.get('ref') or '?'))
+            row = queries.hh_lock_integration(cursor, now)
+            settings = row.get('settings') or {}
+            previous = row.get('cursor') or {}
+            since = hh.since(settings)
+            source = queries.source_by_code(cursor, rules.SOURCE_HH)
+            if not source:
+                raise HiringError('HIRING_HH_NO_SOURCE', 'В справочнике нет источника HeadHunter', 503)
+            icore_vacancies = queries.hh_vacancy_ids(cursor)
+            for raw in raw_items:
+                item = hh.clean_item(raw)
+                if item is None:
+                    topic = str(raw.get('topic_id') or '')[:20] if isinstance(raw, dict) else ''
+                    results.append({'topic_id': topic, 'outcome': 'invalid'})
+                    counts['invalid'] = counts.get('invalid', 0) + 1
                     continue
-                outcome, _card_id = self._intake_one(
-                    cursor, phone=phone, kind=rules.KIND_RESPONSE, source=source, now=now, by_name='HeadHunter',
-                    full_name=item.get('full_name'), city=item.get('city'), vacancy_text=item.get('vacancy'),
-                    platform_ref=item.get('ref'), received_at=item.get('received_at') or now)
-                if outcome in ('created', 'repeat'):
-                    received += 1
-            queries.set_integration(cursor, 'hh', now, state='ok', ok=True,
-                                    error=('; '.join(problems)[:500] or None), cursor_value=new_cursor, received=received)
-        return received
+                outcome = self._hh_take(cursor, item, settings, since, source, icore_vacancies, now)
+                results.append({'topic_id': str(item['topic_id']), 'outcome': outcome})
+                counts[outcome] = counts.get(outcome, 0) + 1
+            ok = session == hh.SESSION_OK
+            next_poll = rules.hh_poll_seconds(now)
+            bridge = {'version': str(payload.get('version') or '')[:40] or None, 'session': session, 'detail': detail,
+                      'seen_at': now.isoformat(timespec='seconds'), 'expect_sec': next_poll}
+            # Начало беды со входом — чтобы тревога была одна на случай, а короткий сбой не будил никого.
+            problem_since = None if ok else ((previous.get('bridge') or {}).get('problem_since')
+                                             if (previous.get('bridge') or {}).get('session') == session else None)
+            if not ok:
+                bridge['problem_since'] = problem_since or bridge['seen_at']
+            account = hh.clean_account(payload.get('account'))
+            report = {'bridge': bridge,
+                      'account': account if any(account.values()) else (previous.get('account') or {}),
+                      'vacancies': vacancies if vacancies is not None else (previous.get('vacancies') or [])}
+            error = None if ok else hh.SESSION_TEXTS[session] + (' (%s)' % detail if detail else '')
+            queries.hh_save_report(cursor, now, state='ok' if ok else 'error', error=error, report=report,
+                                   received=counts.get('created', 0) + counts.get('repeat', 0), ok=ok)
+            if ok:
+                queries.wa_alerts_read(cursor, now, kind=notices.KIND_HH)
+            else:
+                started = hh.parse_moment(bridge['problem_since']) or now
+                if now - started >= self.HH_PROBLEM_ALERT_AFTER:
+                    notices.hh_alert(cursor, ('hh:%s:%s' % (session, started.isoformat(timespec='minutes')),
+                                              'HeadHunter: новые отклики не приходят', error), now)
+        taken = {key: value for key, value in counts.items() if key != 'known'}
+        if taken:
+            log.info('Воронка найма: мост hh принёс откликов %s', taken)
+        return {'results': results,
+                'settings': {'since': since.replace(tzinfo=rules.ALMATY).isoformat(timespec='seconds'),
+                             'off': hh.off_ids(settings)},
+                'next_poll_sec': next_poll}
+
+    def _hh_take(self, cursor, item, settings, since, source, icore_vacancies, now):
+        """Одна тема hh → исход. Тема занимается первой: повтор той же темы — «known», без второй карточки."""
+        if not queries.hh_claim_topic(cursor, item, now):
+            return 'known'
+        rule = hh.vacancy_rule(settings, item['vacancy_id'])
+        card_id = None
+        phone = rules.normalize_phone(item['phone'])
+        if not rule['on']:
+            outcome = 'vacancy_off'
+        elif item['responded_at'] < since:
+            outcome = 'before_since'
+        elif not phone:
+            outcome = 'no_phone'
+        else:
+            outcome, card_id = self._intake_one(
+                cursor, phone=phone, kind=rules.KIND_RESPONSE, source=source, now=now, by_name='HeadHunter',
+                full_name=item['full_name'], city=item['city'],
+                vacancy_id=rule['vacancy_id'] if rule['vacancy_id'] in icore_vacancies else None,
+                vacancy_text=item['vacancy_name'], platform_ref=item['resume_url'] or 'hh:topic:%s' % item['topic_id'],
+                received_at=item['responded_at'])
+        queries.hh_finish_topic(cursor, item['topic_id'], outcome, card_id)
+        return outcome
+
+    def hh_watchdog(self):
+        """Сторож моста hh.kz (раз в 5 минут): мост молчит дольше, чем положено при названном ему такте
+        (rules.hh_silent_after: днём 20 минут, ночью — больше часа), — «не на связи» и одна тревога руководителям
+        рекрутинга. Снова на связи — тревоги гасит его же доклад. Мост ни разу не приходил — молчим: интеграция
+        «не настроена», а не сломана."""
+        now = self._now()
+        with self._cursor() as cursor:
+            row = queries.hh_lock_integration(cursor, now)
+            bridge = (row.get('cursor') or {}).get('bridge') or {}
+            seen_at = hh.parse_moment(bridge.get('seen_at'))
+            queries.wa_alerts_read(cursor, now, kind=notices.KIND_HH, not_users=queries.alert_user_ids(cursor))
+            if seen_at is None or now - seen_at <= rules.hh_silent_after(bridge.get('expect_sec')):
+                return None
+            text = ('Мост hh.kz на шлюзе не выходит на связь с %s — новые отклики не приходят'
+                    % seen_at.strftime('%d.%m %H:%M'))
+            queries.hh_mark_state(cursor, now, 'error', text)
+            key = 'hh:silent:%s' % seen_at.isoformat(timespec='minutes')
+            notices.hh_alert(cursor, (key, 'HeadHunter: мост не на связи', text), now)
+            return key
+
+    def hh_settings(self, vacancies_raw):
+        """Правка руководителя: какие вакансии hh переносить и с какой вакансией iCORE (права проверяет ручка)."""
+        now = self._now()
+        with self._cursor() as cursor:
+            queries.hh_lock_integration(cursor, now)
+            try:
+                vacancies = hh.clean_vacancy_settings(vacancies_raw, queries.hh_vacancy_ids(cursor))
+            except ValueError as exc:
+                raise HiringError('HIRING_BAD_SETTINGS', str(exc))
+            queries.hh_save_settings(cursor, now, vacancies)
+        return vacancies
 
     # ─── Работа с карточкой ──────────────────────────────────────────────────
 

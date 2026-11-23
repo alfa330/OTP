@@ -9,6 +9,7 @@ import {
     groupNameAfterStart, groupNameFor, groupRequestBody, groupSeats, groupWhen, hiringTabs, joinDateTime, longTime, markGroupFull,
     matchesQuery, monthLabel, openICorePhoneCall, percent, plural, prettyPhone, reasonKindFor, shiftMonth, shortTime, sourceChoices,
     sourceRequestBody, sourceTone, splitDateTime, stepCapacity, toggleInList, withExpanded, ARCHIVE_STAGE, columnCollapsed,
+    hhChoice, hhChoiceOptions, hhSettingsBody,
 } from '../src/components/hiring/hiringMeta.js';
 
 test('call goes to iCore Phone through a hidden frame, number as digits only', () => {
@@ -264,4 +265,24 @@ test('«no response» archive column is collapsed until opened, other columns un
     assert.equal(columnCollapsed('refused', ['refused'], []), true);
     assert.equal(columnCollapsed('refused', [], ['refused']), false);
     assert.equal(columnCollapsed('in_work', null, null), false);
+});
+
+test('hh.kz vacancies: one choice per vacancy — off, without an iCORE vacancy, or with one', () => {
+    // Владелец 23.11.2026: новые вакансии hh переносятся сами; руководитель выключает их или ставит вакансию iCORE.
+    assert.equal(hhChoice(undefined), 'on');
+    assert.equal(hhChoice({ on: true, vacancy_id: null }), 'on');
+    assert.equal(hhChoice({ on: false, vacancy_id: 2 }), 'off');
+    assert.equal(hhChoice({ on: true, vacancy_id: 2 }), 'v2');
+    assert.deepEqual(hhChoiceOptions([{ id: 1, name: 'Оператор', is_active: true }, { id: 2, name: 'Закрытая', is_active: false }]),
+        [{ value: 'off', label: 'Не переносить' }, { value: 'on', label: 'Без вакансии' }, { value: 'v1', label: 'Оператор' }]);
+    // Правила вакансий, которых мост сейчас не видит, не теряются; выбранное здесь — поверх.
+    assert.deepEqual(hhSettingsBody({ 7: { on: false }, 8: { on: true, vacancy_id: 1 } }, { 8: 'off', 9: 'v2', 10: 'on' }), {
+        vacancies: {
+            7: { on: false, vacancy_id: null },
+            8: { on: false, vacancy_id: null },
+            9: { on: true, vacancy_id: 2 },
+            10: { on: true, vacancy_id: null },
+        },
+    });
+    assert.deepEqual(hhSettingsBody(null, {}), { vacancies: {} });
 });

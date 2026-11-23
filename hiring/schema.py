@@ -23,6 +23,7 @@ SAVEPOINT'ом, как у «Аренды авто»: не развернулас
   одному человеку, колокол читает её, триггер bell будит адресата.
 """
 
+import json
 import logging
 
 from . import rules
@@ -531,6 +532,20 @@ _STATEMENTS = [
     # «Отработал 10 дней» (SZOV-10): когда кандидату засчитана десятая смена — категория тренера группы. Карточка при
     # этом остаётся в «Отработал 7 дней»; смены после седьмой считаются дальше, пока отметки нет.
     "ALTER TABLE hiring_cards ADD COLUMN IF NOT EXISTS hired10_at TIMESTAMP",
+
+    # Отклики hh.kz, которые принёс мост на шлюзе (hiring/hh.py): одна строка на тему hh — исход приёма и карточка.
+    # Повтор той же темы (мост перезапустился, ответ портала потерялся) ничего не заводит заново: номер темы уже здесь.
+    """
+    CREATE TABLE IF NOT EXISTS hiring_hh_topics (
+        topic_id         BIGINT PRIMARY KEY,
+        hh_vacancy_id    BIGINT NOT NULL,
+        responded_at     TIMESTAMP,
+        outcome          VARCHAR(16) NOT NULL,
+        card_id          INTEGER,
+        created_at       TIMESTAMP NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_hiring_hh_topics_created ON hiring_hh_topics (created_at)",
 ]
 
 
@@ -619,6 +634,29 @@ def _seed(cursor):
             INSERT INTO hiring_integrations (code, updated_at) VALUES (%s, %s)
             ON CONFLICT (code) DO NOTHING
         """, (code, now))
+    _seed_hh(cursor, now)
+
+
+def _seed_hh(cursor, now):
+    """Решения владельца о мосте hh.kz (23.11.2026: «только новые с этой минуты», «все, кроме маркетолога») — в
+    настройки интеграции один раз: пока там нет отметки «с какого момента». Дальше их правит руководитель, старт их не
+    трогает. Прежнее состояние «не заданы HH_ACCESS_TOKEN» (опрос через API) снимается тем же разом."""
+    cursor.execute("SELECT settings FROM hiring_integrations WHERE code = 'hh' FOR UPDATE")
+    row = cursor.fetchone()
+    settings = dict((row[0] if row else None) or {})
+    if 'since' in settings:
+        return
+    settings['since'] = rules.HH_SINCE_DEFAULT.isoformat(timespec='seconds')
+    vacancies = dict(settings.get('vacancies') or {})
+    for vacancy_id in rules.HH_OFF_DEFAULT:
+        vacancies.setdefault(vacancy_id, {'on': False})
+    settings['vacancies'] = vacancies
+    cursor.execute("""
+        UPDATE hiring_integrations
+           SET settings = %s::jsonb, last_error = NULL, updated_at = %s,
+               state = CASE WHEN last_ok_at IS NULL THEN 'not_configured' ELSE state END
+         WHERE code = 'hh'
+    """, (json.dumps(settings, ensure_ascii=False), now))
 
 
 def _merge_channels_into_sources(cursor, now):

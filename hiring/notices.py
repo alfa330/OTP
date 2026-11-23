@@ -11,6 +11,7 @@
     начисление мотивации (7 смен)           рекрутер
     «Отработал 10 дней» (10 смен)           тренер группы кандидата
     номер WhatsApp найма остановлен / не на связи / телефон давно не в сети — руководители рекрутинга
+    мост hh.kz потерял вход / сайт его не пускает / мост не на связи        — руководители рекрутинга
 
 Руководитель рекрутинга для тревог — HR и выдача «lead» (queries.alert_user_ids); супер-админам раздел открыт, но
 тревоги — только с выдачей (владелец 20.11.2026). Тревога номера в колоколе одна — о нынешнем состоянии: новая гасит
@@ -34,6 +35,7 @@ KIND_ON_LINE = 'on_line'
 KIND_MOTIVATION = 'motivation'
 KIND_REASSIGNED = 'reassigned'
 KIND_WHATSAPP = 'whatsapp'
+KIND_HH = 'hh'
 
 
 def _esc(text):
@@ -154,6 +156,15 @@ def whatsapp_alert(cursor, alert, now, tone='warning'):
         if queries.push_notification(cursor, [user_id], KIND_WHATSAPP, title, body, None, now, tone=tone, dedupe_key=key):
             created.append(user_id)
     return created
+
+
+def hh_alert(cursor, alert, now):
+    """Тревога моста hh.kz (потерян вход в кабинет, сайт не пускает, мост замолчал) — руководителям рекрутинга, одна
+    на случай: ключ — вид беды и её начало. Новая гасит прежние; беда прошла — их гасит доклад моста. Только колокол."""
+    key, title, body = alert
+    queries.wa_alerts_read(cursor, now, kind=KIND_HH, except_key=key)
+    return queries.push_notification(cursor, queries.alert_user_ids(cursor), KIND_HH, title, body, None, now,
+                                     tone='warning', dedupe_key=key)
 
 
 def whatsapp_alert_html(title, body, base_url):

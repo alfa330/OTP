@@ -28,6 +28,7 @@ Blueprint собирается фабрикой и получает зависи
     GET    /reports/motivation[/export]      начисления месяца
     …/people, /sources, /vacancies, /reasons, /plans, /integrations — настройки; у источника — цвет (каналы слиты
                                              с источниками 20.11.2026, своих ручек у каналов больше нет)
+    PUT    /integrations/hh/settings         вакансии hh.kz: какие переносить и с какой вакансией iCORE
     GET    /groups[?pick=1], POST /groups,   группы на обучение с вместимостью: тренер ведёт свои, руководитель —
     PATCH  /groups/<id>                      любые; pick — выбор при приглашении (действующие, свободные места)
     GET    /whatsapp, POST /whatsapp/command номер WhatsApp найма: состояние, QR, «Подключить / Возобновить / Отвязать»
@@ -41,7 +42,8 @@ Blueprint собирается фабрикой и получает зависи
     …/wa/templates                           общие шаблоны ответов команды найма
 
 Внешний вход откликов (Kaspi, таргет, любой интегратор) — отдельный Blueprint
-/api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма».
+/api/hiring/external/responses по ключу партнёра с областью «Отклики в воронку найма». Отклики hh.kz приносит мост
+на шлюзе — POST /api/hiring/hh/agent/push по подписи шлюза (build_hiring_hh_agent_blueprint).
 """
 
 import logging
@@ -53,7 +55,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, request
 
-from . import access, notices, queries, reports, rules, wa_chat, wa_live
+from . import access, hh, notices, queries, reports, rules, wa_chat, wa_live
 from .service import HiringError
 
 log = logging.getLogger(__name__)
@@ -870,6 +872,9 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
         for row in rows:
             if row['code'] == 'olx':
                 row['cabinets_available'] = _olx_cabinet_catalog(cursor)
+            elif row['code'] == 'hh':
+                # Мост hh.kz: кто вошёл в кабинет, какие вакансии видит, с какого момента переносит, когда был на связи.
+                row['hh'] = _json(hh.view(queries.get_integration(cursor, 'hh'), rules.now_almaty()))
         return rows
 
     @hiring_route('/integrations')
@@ -901,18 +906,26 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
             rows = _integrations_payload(cursor)
         return jsonify({'items': rows})
 
+    @hiring_route('/integrations/hh/settings', methods=('PUT',))
+    def hiring_hh_settings(ctx):
+        """Вакансии hh.kz: какие переносить в воронку и с какой вакансией iCORE (владелец 23.11.2026: новые вакансии hh
+        идут сами, выключает их руководитель). Тело: {"vacancies": {"<id вакансии hh>": {"on": bool, "vacancy_id": id}}}."""
+        _manage_only(ctx)
+        service.hh_settings(_body().get('vacancies'))
+        with db._get_cursor() as cursor:
+            rows = _integrations_payload(cursor)
+        return jsonify({'items': rows})
+
     @hiring_route('/integrations/<code>/run', methods=('POST',))
     def hiring_integration_run(code, ctx):
+        """«Опросить» — у OLX. Отклики hh.kz мост приносит сам раз в две минуты, опрашивать с портала нечего."""
         _manage_only(ctx)
-        if code == 'olx':
-            received = service.pull_olx()
-        elif code == 'hh':
-            received = service.pull_hh()
-        else:
+        if code != 'olx':
             return _bad('Такой интеграции нет', 'HIRING_NOT_FOUND', 404)
+        received = service.pull_olx()
         with db._get_cursor() as cursor:
-            rows = queries.list_integrations(cursor)
-        return jsonify({'received': received, 'items': _json(rows)})
+            rows = _integrations_payload(cursor)
+        return jsonify({'received': received, 'items': rows})
 
     # Номер WhatsApp найма: состояние сервиса на шлюзе, QR привязки и команды — руководителю.
     @hiring_route('/whatsapp')
@@ -1148,6 +1161,46 @@ def build_hiring_wa_agent_blueprint(*, service, build_cors_preflight_response):
             log.exception('WhatsApp найма: файл исходящего сообщения не отдан шлюзу')
             return _bad('Внутренняя ошибка', 'HIRING_WA_INTERNAL', 500)
         return Response(data, mimetype=ctype)
+
+    return bp
+
+
+# ─── Мост hh.kz на шлюзе (cdr_bridge/hh_bridge.py) ───────────────────────────
+
+def build_hiring_hh_agent_blueprint(*, service, build_cors_preflight_response):
+    """Мост hh.kz на шлюзе (владелец 23.11.2026). Без логина портала: мост доказывает, что он шлюз, подписью Ed25519 —
+    тем же протоколом и ключами, что мост «Касаний» и сервис WhatsApp найма (cdr/agent_auth.py, CDR_AGENT_KEYS).
+
+        POST /api/hiring/hh/agent/push   {session, detail, account, vacancies, items} → {results, settings, next_poll_sec}
+    """
+    from cdr import agent_auth
+    from cdr import config as cdr_config
+
+    bp = Blueprint('hiring_hh_agent', __name__, url_prefix='/api/hiring/hh/agent')
+
+    @bp.route('/push', methods=['POST', 'OPTIONS'], endpoint='hiring_hh_agent_push')
+    def push():
+        if request.method == 'OPTIONS':
+            return build_cors_preflight_response()
+        raw_keys = cdr_config.agent_keys_raw()
+        if not raw_keys:
+            return _bad('Шлюз не настроен на сервере: нет открытых ключей', 'HIRING_HH_NOT_READY', 503)
+        try:
+            keys = agent_auth.parse_public_keys(raw_keys)
+        except ValueError as exc:
+            log.error('Мост hh: CDR_AGENT_KEYS задан с ошибкой: %s', exc)
+            return _bad('Шлюз не настроен на сервере: ключи заданы с ошибкой', 'HIRING_HH_NOT_READY', 503)
+        kid, reason = agent_auth.verify(request.headers, request.method, request.path, request.get_data(cache=True), keys)
+        if kid is None:
+            log.warning('Мост hh: шлюз не авторизован — %s', reason)
+            return _bad('Шлюз не авторизован', 'HIRING_HH_UNAUTHORIZED', 401)
+        try:
+            return jsonify(_json(service.hh_agent_push(request.get_json(silent=True) or {})))
+        except HiringError as exc:
+            return _bad(exc.message, exc.code, exc.status)
+        except Exception:  # noqa: BLE001
+            log.exception('Мост hh: доклад не принят')
+            return _bad('Внутренняя ошибка', 'HIRING_HH_INTERNAL', 500)
 
     return bp
 

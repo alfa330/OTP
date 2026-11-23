@@ -13,9 +13,9 @@
     service.py      операции: взять, касание, переход, загрузка базы, приём откликов, авто-возврат
     notices.py      уведомления: колокол (hiring_notifications) и Telegram
     upload.py       разбор файла базы контактов (xlsx / csv)
-    hh.py           отклики HeadHunter (API hh.ru), когда задан токен
+    hh.py           отклики hh.kz — их приносит мост на шлюзе (cdr_bridge/hh_bridge.py): разбор и настройки
     reports.py      итоговый дашборд, отчёты и выгрузка в Excel
-    routes.py       /api/hiring и внешний вход откликов /api/hiring/external/responses
+    routes.py       /api/hiring, внешний вход откликов /api/hiring/external/responses, мост hh /api/hiring/hh/agent/push
 
 Фронт — src/components/hiring/. Имя каталога зеркалит его.
 """

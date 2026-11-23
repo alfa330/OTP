@@ -204,6 +204,7 @@ def client():
         db=db, service=service, partner_auth=_FakeAuth(), partner_scopes=SimpleNamespace(HIRING_LEADS='hiring_leads'),
         partner_journal=journal, rate_limiter=RateLimiter(100)))
     app.register_blueprint(routes.build_hiring_wa_agent_blueprint(service=service, build_cors_preflight_response=lambda: ('', 204)))
+    app.register_blueprint(routes.build_hiring_hh_agent_blueprint(service=service, build_cors_preflight_response=lambda: ('', 204)))
     test_client = app.test_client()
     test_client.world = {'vacancy_id': vacancy_id, 'group_id': group_id, 'journal': journal, 'db': db, 'dial_list': dial_list,
                          'service': service}
@@ -776,6 +777,57 @@ def test_whatsapp_bridge_is_signed_and_buttons_are_lead_only(client, monkeypatch
     assert resent.status_code == 200 and resent.get_json() == {'stored': True}
     shown = client.get('/api/hiring/cards/%s/whatsapp' % card['id'], headers=lead).get_json()['messages']
     assert [m['media']['state'] for m in shown if m['wa_id'] == 'w4'] == ['stored']
+
+
+def test_hh_bridge_is_signed_and_vacancies_are_lead_only(client, monkeypatch):
+    """Мост hh.kz на шлюзе входит подписью моста (CDR_AGENT_KEYS): без подписи и с подменённым телом — отказ. Вакансии
+    hh в «Интеграциях» правит только руководитель рекрутинга; «Опросить» у hh нет — отклики мост приносит сам."""
+    import json as _json_mod
+
+    from cdr_bridge import signing
+
+    private_b64, public_b64, _kid = signing.generate()
+    monkeypatch.setenv('CDR_AGENT_KEYS', public_b64)
+    signer = signing.Signer(signing.load_private_key(private_b64))
+    push = '/api/hiring/hh/agent/push'
+    payload = {'version': 'hh/1.0.0', 'session': 'ok',
+               'account': {'manager': 'Руслан Тестов', 'employer': 'Ресурс Плюс KZ', 'employer_id': '10106941'},
+               'vacancies': [{'id': '139079696', 'name': 'Оператор call-центра', 'area': 'Алматы', 'responses': 3},
+                             {'id': '139508734', 'name': 'Младший маркетолог', 'area': 'Алматы', 'responses': 9}],
+               'items': [{'topic_id': '9001', 'vacancy_id': '139079696', 'vacancy_name': 'Оператор call-центра',
+                          'responded_at': rules.now_almaty().isoformat(timespec='seconds'), 'last_name': 'Сейтова',
+                          'first_name': 'Алия', 'phone': '+7 (705) 555-90-01', 'city': 'Алматы', 'resume_hash': 'b' * 38}]}
+    body = _json_mod.dumps(payload).encode('utf-8')
+    assert client.post(push, json=payload).status_code == 401
+    tampered = signer.headers('POST', push, body)
+    assert client.post(push, data=body.replace(b'9001', b'9002'), content_type='application/json',
+                       headers=tampered).status_code == 401
+    accepted = client.post(push, data=body, content_type='application/json', headers=signer.headers('POST', push, body))
+    assert accepted.status_code == 200
+    reply = accepted.get_json()
+    assert reply['results'] == [{'topic_id': '9001', 'outcome': 'created'}]
+    assert reply['settings']['off'] == ['139508734'] and reply['next_poll_sec'] in (180, 1800)   # день / ночь
+
+    lead, recruiter = as_user(HR_HEAD), as_user(REC1)
+    hh_row = next(row for row in client.get('/api/hiring/integrations', headers=lead).get_json()['items']
+                  if row['code'] == 'hh')
+    assert hh_row['state'] == 'ok' and hh_row['received_total'] == 1
+    assert hh_row['hh']['account']['employer'] == 'Ресурс Плюс KZ' and hh_row['hh']['since'] == '2026-11-23T12:08'
+    assert [(v['id'], v['on'], v['vacancy_id']) for v in hh_row['hh']['vacancies']] == [
+        ('139079696', True, None), ('139508734', False, None)]
+    assert client.post('/api/hiring/integrations/hh/run', headers=lead).status_code == 404
+
+    vacancy_id = client.world['vacancy_id']
+    change = {'vacancies': {'139079696': {'on': True, 'vacancy_id': vacancy_id}, '139508734': {'on': False}}}
+    assert client.put('/api/hiring/integrations/hh/settings', json=change, headers=recruiter).status_code == 403
+    bad = client.put('/api/hiring/integrations/hh/settings', json={'vacancies': {'139079696': {'vacancy_id': 999999}}},
+                     headers=lead)
+    assert bad.status_code == 400 and bad.get_json()['code'] == 'HIRING_BAD_SETTINGS'
+    saved = client.put('/api/hiring/integrations/hh/settings', json=change, headers=lead)
+    assert saved.status_code == 200
+    hh_row = next(row for row in saved.get_json()['items'] if row['code'] == 'hh')
+    assert [(v['id'], v['on'], v['vacancy_id']) for v in hh_row['hh']['vacancies']] == [
+        ('139079696', True, vacancy_id), ('139508734', False, None)]
 
 
 def test_chats_live_stream(client, monkeypatch):

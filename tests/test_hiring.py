@@ -575,56 +575,98 @@ class UploadTests(unittest.TestCase):
 
 
 class HHTests(unittest.TestCase):
-    def test_not_configured_without_env(self):
-        self.assertIsNone(hh.config_from_env({}))
-        self.assertIsNone(hh.config_from_env({'HH_ACCESS_TOKEN': 'x'}))
-        self.assertEqual(hh.config_from_env({'HH_ACCESS_TOKEN': 'x', 'HH_USER_AGENT': 'iCore/1.0 (a@b)'})['employer_id'], None)
+    """Отклики hh.kz от моста на шлюзе (hiring/hh.py): разбор темы, настройки руководителя, вид для «Настроек»."""
 
-    def test_fetch_responses_with_fake_transport(self):
-        calls = []
+    RAW = {'topic_id': '5735665687', 'vacancy_id': '139445254', 'vacancy_name': '  Супервайзер   контакт-центра ',
+           'responded_at': '2026-11-23T12:30:00.370925+03:00', 'last_name': 'Иванов', 'first_name': 'Иван',
+           'middle_name': '', 'phone': '+7 (701) 234-56-78', 'city': 'Алматы',
+           'resume_hash': '9F2c4a1b0d3e5f6a7b8c9d0e1f2a3b4c5d6e7f'}
 
-        def transport(method, url, headers, params):
-            calls.append((url, dict(params)))
-            self.assertEqual(headers['Authorization'], 'Bearer tok')
-            self.assertEqual(headers['HH-User-Agent'], 'iCore/1.0 (a@b)')
-            if url.endswith('/me'):
-                return 200, {'employer': {'id': '42'}}
-            if '/vacancies/active' in url:
-                return 200, {'items': [{'id': '100', 'name': 'Водитель'}], 'pages': 1}
-            if url.endswith('/negotiations/response'):
-                return 200, {'items': [
-                    {'id': 'n1', 'created_at': '2026-10-29T12:00:00+0500',
-                     'resume': {'id': 'r1', 'first_name': 'Иван', 'last_name': 'Иванов', 'area': {'name': 'Алматы'},
-                                'alternate_url': 'https://hh.kz/resume/r1'}, 'vacancy': {'id': '100', 'name': 'Водитель'}},
-                    {'id': 'n2', 'created_at': '2026-10-29T11:00:00+0500',
-                     'resume': {'id': 'r2', 'first_name': 'Пётр', 'last_name': 'Петров',
-                                'contact': [{'type': {'id': 'cell'}, 'value': {'formatted': '+7 (701) 000-00-00'}}]},
-                     'vacancy': {'id': '100', 'name': 'Водитель'}},
-                    {'id': 'old', 'created_at': '2026-10-01T11:00:00+0500', 'resume': {'id': 'r9'}},
-                ]}
-            if url.endswith('/resumes/r1'):
-                return 200, {'id': 'r1', 'contact': [{'type': {'id': 'cell'}, 'value': {'country': '7', 'city': '705', 'number': '1234567'}}]}
-            return 404, None
+    def test_clean_item(self):
+        item = hh.clean_item(self.RAW)
+        self.assertEqual(item['topic_id'], 5735665687)
+        self.assertEqual(item['vacancy_id'], '139445254')
+        self.assertEqual(item['vacancy_name'], 'Супервайзер контакт-центра')
+        # Время hh — московское с поясом; у портала — наивное время Алматы (+2 часа).
+        self.assertEqual(item['responded_at'], datetime(2026, 11, 23, 14, 30, 0, 370925))
+        self.assertEqual(item['full_name'], 'Иванов Иван')
+        self.assertEqual(rules.normalize_phone(item['phone']), '+77012345678')
+        self.assertEqual(item['resume_url'], 'https://hh.kz/resume/9f2c4a1b0d3e5f6a7b8c9d0e1f2a3b4c5d6e7f'
+                                             '?vacancyId=139445254&t=5735665687')
 
-        config = {'token': 'tok', 'user_agent': 'iCore/1.0 (a@b)', 'employer_id': None}
-        items, state, problems = hh.fetch_responses(config, {'since': '2026-10-20T00:00:00'}, transport=transport)
-        self.assertEqual(problems, [])
-        self.assertEqual([i['phone'] for i in items], ['+77051234567', '+77010000000'])
-        self.assertEqual(items[0]['full_name'], 'Иванов Иван')
-        self.assertEqual(items[0]['city'], 'Алматы')
-        self.assertEqual(items[0]['ref'], 'https://hh.kz/resume/r1')
-        self.assertEqual(items[0]['received_at'], datetime(2026, 10, 29, 12, 0))
-        self.assertEqual(state['employer_id'], '42')
-        self.assertEqual(state['seen'], ['n1', 'n2'])
-        self.assertTrue(state['since'].startswith('2026-10-29T11:00'))
-        # Второй опрос с закладкой: те же отклики не повторяются.
-        items2, _state2, _problems = hh.fetch_responses(config, state, transport=transport)
-        self.assertEqual(items2, [])
+    def test_clean_item_refuses_what_it_cannot_place(self):
+        for broken in ({}, {'topic_id': 'x1', 'vacancy_id': '1', 'responded_at': '2026-11-23T10:00:00+03:00'},
+                       dict(self.RAW, vacancy_id=None), dict(self.RAW, responded_at='вчера'), 'тема'):
+            self.assertIsNone(hh.clean_item(broken))
+        # Хеш резюме — только шестнадцатеричный: иначе ссылки нет, отклик всё равно принимается.
+        self.assertIsNone(hh.clean_item(dict(self.RAW, resume_hash='../../evil'))['resume_url'])
+        self.assertIsNone(hh.resume_url('', '1', '2'))
 
-    def test_token_rejected(self):
-        with self.assertRaises(hh.HHError):
-            hh.fetch_responses({'token': 't', 'user_agent': 'u', 'employer_id': '1'}, {},
-                               transport=lambda *_args: (403, {}))
+    def test_parse_moment(self):
+        self.assertEqual(hh.parse_moment('2026-11-23T09:28:27+0300'), datetime(2026, 11, 23, 11, 28, 27))
+        self.assertEqual(hh.parse_moment('2026-11-23T09:28:27Z'), datetime(2026, 11, 23, 14, 28, 27))
+        self.assertEqual(hh.parse_moment('2026-11-23T12:08:00'), datetime(2026, 11, 23, 12, 8))
+        self.assertIsNone(hh.parse_moment(None))
+        self.assertIsNone(hh.parse_moment('завтра'))
+
+    def test_session_and_vacancies(self):
+        self.assertEqual(hh.clean_session({'session': 'ok'}), ('ok', None))
+        self.assertEqual(hh.clean_session({'session': 'login_required', 'detail': ' редирект  на вход '}),
+                         ('login_required', 'редирект на вход'))
+        self.assertEqual(hh.clean_session({'session': 'что-то'})[0], 'error')
+        self.assertIsNone(hh.clean_vacancies(None))
+        self.assertEqual(hh.clean_vacancies([{'id': '1', 'name': 'A', 'area': 'Алматы', 'responses': 5},
+                                             {'id': '1', 'name': 'дубль'}, {'id': 'x', 'name': 'B'},
+                                             {'id': '2', 'name': ''}, {'id': '3', 'name': 'C', 'responses': -1}]),
+                         [{'id': '1', 'name': 'A', 'area': 'Алматы', 'responses': 5},
+                          {'id': '3', 'name': 'C', 'area': None, 'responses': None}])
+
+    def test_settings_rules(self):
+        settings = {'since': '2026-11-23T12:08:00',
+                    'vacancies': {'139508734': {'on': False}, '139079696': {'on': True, 'vacancy_id': 2}}}
+        self.assertEqual(hh.since(settings), datetime(2026, 11, 23, 12, 8))
+        self.assertEqual(hh.since({}), rules.HH_SINCE_DEFAULT)
+        self.assertEqual(hh.vacancy_rule(settings, '139508734'), {'on': False, 'vacancy_id': None})
+        self.assertEqual(hh.vacancy_rule(settings, 139079696), {'on': True, 'vacancy_id': 2})
+        # Новая вакансия hh — переносится, без вакансии iCORE (владелец 23.11.2026).
+        self.assertEqual(hh.vacancy_rule(settings, '1'), {'on': True, 'vacancy_id': None})
+        self.assertEqual(hh.off_ids(settings), ['139508734'])
+        # Решения владельца 23.11.2026: только новые с этой минуты, все вакансии, кроме «Младший маркетолог».
+        self.assertEqual(rules.HH_SINCE_DEFAULT, datetime(2026, 11, 23, 12, 8))
+        self.assertEqual(rules.HH_OFF_DEFAULT, ('139508734',))
+
+    def test_bridge_pace(self):
+        """Владелец 23.11.2026: «максимально безопасно… чтобы не получить банов» — днём три минуты, ночью полчаса;
+        «не на связи» — не раньше двух с половиной тактов (и не раньше 20 минут)."""
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 8, 0)), 180)
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 20, 59)), 180)
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 21, 0)), 1800)
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 24, 7, 59)), 1800)
+        self.assertEqual(rules.hh_silent_after(180).total_seconds(), 1200)
+        self.assertEqual(rules.hh_silent_after(1800).total_seconds(), 4800)
+        self.assertEqual(rules.hh_silent_after(None).total_seconds(), 1200)
+        self.assertEqual(rules.hh_silent_after('мусор').total_seconds(), 1200)
+
+    def test_clean_vacancy_settings(self):
+        self.assertEqual(hh.clean_vacancy_settings({'1': {'on': False}, '2': {'on': True, 'vacancy_id': '7'},
+                                                    '3': {'vacancy_id': None}}, {7}),
+                         {'1': {'on': False}, '2': {'on': True, 'vacancy_id': 7}, '3': {'on': True}})
+        for broken in (None, [], {'x': {'on': True}}, {'1': 'on'}, {'1': {'vacancy_id': 'abc'}}, {'1': {'vacancy_id': 8}}):
+            with self.assertRaises(ValueError):
+                hh.clean_vacancy_settings(broken, {7})
+
+    def test_view(self):
+        now = datetime(2026, 11, 23, 13, 0)
+        row = {'settings': {'vacancies': {'2': {'on': False}}},
+               'cursor': {'bridge': {'seen_at': '2026-11-23T12:59:00', 'session': 'ok', 'version': 'hh/1.0.0'},
+                          'account': {'manager': 'Руслан', 'employer': 'Ресурс Плюс KZ'},
+                          'vacancies': [{'id': '1', 'name': 'Оператор'}, {'id': '2', 'name': 'Маркетолог'}]}}
+        view = hh.view(row, now)
+        self.assertEqual(view['since'], '2026-11-23T12:08')
+        self.assertFalse(view['silent'])
+        self.assertEqual([(v['id'], v['on']) for v in view['vacancies']], [('1', True), ('2', False)])
+        self.assertTrue(hh.view(row, datetime(2026, 11, 23, 13, 30))['silent'])
+        self.assertEqual(hh.view(None, now)['vacancies'], [])
 
 
 class CallsTests(unittest.TestCase):
@@ -740,6 +782,10 @@ class WiringTests(unittest.TestCase):
         # «Не отвечает звонок/чат» (владелец 20.11.2026): сторож раз в 10 минут.
         self.assertIn("('no_response', CronTrigger(minute='3,13,23,33,43,53'", self.bot)
         self.assertIn("if name == 'no_response':\n            return service.archive_silent()", self.bot)
+        # Отклики hh.kz приносит мост на шлюзе по подписи моста; задача hh — его сторож (владелец 23.11.2026).
+        self.assertIn('app.register_blueprint(build_hiring_hh_agent_blueprint(', self.bot)
+        self.assertIn("if name == 'hh':\n            return service.hh_watchdog()", self.bot)
+        self.assertNotIn('pull_hh', self.bot)
         for name in ('olx', 'hh', 'next_contacts', 'auto_return', 'overdue'):
             self.assertIn("('%s', CronTrigger(" % name, self.bot)
         self.assertIn("id='hiring_%s' % _hiring_name", self.bot)

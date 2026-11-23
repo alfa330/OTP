@@ -54310,9 +54310,9 @@ except Exception:
 
 
 # ── Раздел «Воронка найма» (рабочий стол рекрутера и канбан-воронка, #404) ──────
-# Отклики OLX подтягиваются из журнала робота (olx_amo) раз в 5 минут, HeadHunter — раз в
-# 15 минут при заданном токене (hiring/hh.py), площадки без API шлют отклики вебхуком по
-# ключу партнёра (область «Отклики в воронку найма»). Планировщик ниже: дата следующего
+# Отклики OLX подтягиваются из журнала робота (olx_amo) раз в 5 минут, hh.kz приносит мост на
+# шлюзе (cdr_bridge/hh_bridge.py → /api/hiring/hh/agent/push), площадки без API шлют отклики
+# вебхуком по ключу партнёра (область «Отклики в воронку найма»). Планировщик ниже: дата следующего
 # контакта (колокол), возврат в пул без касаний месяц и утренняя сводка просрочек в Telegram.
 _HIRING = {'service': None}
 
@@ -54375,6 +54375,10 @@ try:
     from hiring.routes import build_hiring_wa_agent_blueprint  # noqa: E402
     app.register_blueprint(build_hiring_wa_agent_blueprint(
         service=_HIRING['service'], build_cors_preflight_response=_build_cors_preflight_response))
+    # Отклики hh.kz (владелец 23.11.2026): мост на шлюзе читает кабинет работодателя и приносит их по подписи моста.
+    from hiring.routes import build_hiring_hh_agent_blueprint  # noqa: E402
+    app.register_blueprint(build_hiring_hh_agent_blueprint(
+        service=_HIRING['service'], build_cors_preflight_response=_build_cors_preflight_response))
     logging.info("Раздел «Воронка найма»: Blueprint подключён на /api/hiring")
 except Exception:
     logging.exception("Раздел «Воронка найма»: Blueprint НЕ подключён")
@@ -54402,7 +54406,7 @@ def _hiring_section_open_for(user_id):
 
 
 def _hiring_job(name):
-    """Задача планировщика раздела «Воронка найма» по имени: olx, hh, next_contacts, auto_return, overdue."""
+    """Задача планировщика раздела «Воронка найма» по имени: olx, hh (сторож моста hh.kz), next_contacts, auto_return, overdue."""
     service = _HIRING.get('service')
     if service is None:
         logging.warning("Воронка найма: задача %s пропущена — раздел не подключён", name)
@@ -54411,7 +54415,7 @@ def _hiring_job(name):
         if name == 'olx':
             return service.pull_olx()
         if name == 'hh':
-            return service.pull_hh()
+            return service.hh_watchdog()
         if name == 'next_contacts':
             return service.notify_next_contacts()
         if name == 'auto_return':
@@ -60914,8 +60918,8 @@ if __name__ == '__main__':
         )
     logging.info("⏰ Аренда авто: ночной отчёт в 01:00 и 07:00")
 
-    # «Воронка найма» (#404): отклики OLX из журнала робота раз в 5 минут, HeadHunter раз в
-    # 15 минут (ТЗ 5.2), дата следующего контакта — колокол раз в 10 минут (ТЗ 8.3), возврат
+    # «Воронка найма» (#404): отклики OLX из журнала робота раз в 5 минут, сторож моста hh.kz раз
+    # в 5 минут (ТЗ 5.2), дата следующего контакта — колокол раз в 10 минут (ТЗ 8.3), возврат
     # в пул без касаний месяц — ночью (ТЗ 7.1), сводка просрочек в Telegram — утром.
     async def hiring_job(name):
         try:
@@ -60926,7 +60930,8 @@ if __name__ == '__main__':
 
     for _hiring_name, _hiring_trigger in (
         ('olx', CronTrigger(minute='2,7,12,17,22,27,32,37,42,47,52,57', timezone=ZoneInfo('Asia/Almaty'))),
-        ('hh', CronTrigger(minute='4,19,34,49', timezone=ZoneInfo('Asia/Almaty'))),
+        # Мост hh.kz на шлюзе замолчал или потерял вход в кабинет — тревога руководителям.
+        ('hh', CronTrigger(minute='4,9,14,19,24,29,34,39,44,49,54,59', timezone=ZoneInfo('Asia/Almaty'))),
         ('next_contacts', CronTrigger(minute='1,11,21,31,41,51', timezone=ZoneInfo('Asia/Almaty'))),
         ('auto_return', CronTrigger(hour=3, minute=20, timezone=ZoneInfo('Asia/Almaty'))),
         ('overdue', CronTrigger(hour=9, minute=5, timezone=ZoneInfo('Asia/Almaty'))),
