@@ -15,11 +15,12 @@
                                  └─ счётчик сдвинулся — свежие отклики вакансии (выдача страницы «Отклики»)
     мост (VM шлюза) ── POST /api/hiring/hh/agent/push ──► портал: карточки в «Отклики» пула
 
-Такт называет портал: днём (8–21 по Алматы) три минуты, ночью полчаса; мост добавляет к нему случайный разброс. Раз в
-час он перечитывает список вакансий кабинета (страница «Вакансии»). В каждый такт — по одному маленькому запросу
-счётчиков на вакансию; полную выдачу откликов (сотни килобайт) он берёт, только когда счётчики сдвинулись. Портал
-отвечает исходом по каждому отклику и настройками: с какого момента отклики нужны и какие вакансии выключены (их мост
-не читает вовсе).
+Паузу до следующего опроса называет портал, и она случайная (владелец 23.11.2026: «добавь случайный тайминг в опросе
+лидов а ночью от 45 мин до 2 часов»): днём (8–21 по Алматы) от 2 до 5 минут, ночью от 45 минут до 2 часов — мост
+выдерживает её как есть. Раз в час он перечитывает список вакансий кабинета (страница «Вакансии»). В каждый такт — по
+одному маленькому запросу счётчиков на вакансию; полную выдачу откликов (сотни килобайт) он берёт, только когда
+счётчики сдвинулись. Портал отвечает исходом по каждому отклику и настройками: с какого момента отклики нужны и какие
+вакансии выключены (их мост не читает вовсе).
 
 Что мост НЕ делает
 ------------------
@@ -34,8 +35,10 @@
   * вход потерян (вместо кабинета — страница входа) — портал узнаёт «нужен вход», руководителям рекрутинга уходит
     тревога, мост проверяет вход раз в полчаса. Лечится новым входом владельца и заменой файла сессии;
   * hh не пускает (защита сайта) — то же, мост отступает на 15 минут, потом на полчаса и на час: стук в закрытую
-    дверь — худшее, что можно сделать; прочие сбои hh — паузы 2, 5, 10 минут;
-  * портал не отвечает — отклики ждут в очереди моста: отданными они считаются только по ответу портала.
+    дверь — худшее, что можно сделать; прочие сбои hh — паузы 2, 5, 10 минут. Отступ не короче паузы портала: ночью
+    hh не опрашивается чаще ночного правила и при сбоях;
+  * портал не отвечает — отклики ждут в очереди моста: отданными они считаются только по ответу портала. Пока портал
+    не ответил, мост стучится только к нему, hh не читает: в простой портала опрос hh не учащается.
 
 Запуск
 ------
@@ -51,8 +54,8 @@
     HH_BRIDGE_STATE_FILE          что мост уже отдал порталу (по умолчанию — рядом с файлом сессии)
     HH_BRIDGE_HOST                кабинет, https://almaty.hh.kz
     HH_BRIDGE_PROXY               прокси к hh.kz (по умолчанию тот же, что к порталу)
-    HH_BRIDGE_INTERVAL_SECONDS    такт, пока портал не назвал свой (180)
-    HH_BRIDGE_HEARTBEAT_FILE      файл пульса для проверки живости контейнера
+    HH_BRIDGE_INTERVAL_SECONDS    пауза, пока портал не назвал свою (180)
+    HH_BRIDGE_HEARTBEAT_FILE      файл пульса для проверки живости контейнера (после такта и раз в 5 минут паузы)
 """
 
 import argparse
@@ -77,7 +80,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cdr_bridge.agent import Bridge, _env_file_values  # noqa: E402
 
-VERSION = 'hh/1.0.0'
+VERSION = 'hh/1.1.0'
 log = logging.getLogger('cdr_bridge.hh_bridge')
 
 PUSH_PATH = '/api/hiring/hh/agent/push'
@@ -85,15 +88,18 @@ PORTAL_TIMEOUT = (10, 30)
 SITE_TIMEOUT = (10, 40)
 DEFAULT_HOST = 'https://almaty.hh.kz'
 
-# Бережность к hh (владелец 23.11.2026: «максимально безопасно… чтобы не получить банов»). Такт называет портал: днём
-# три минуты, ночью полчаса (hiring/rules.hh_poll_seconds); мост добавляет к нему случайный разброс ±15 %, чтобы
-# запросы не шли ровной сеткой. Чаще минуты hh не опрашиваем, что бы ни назвал портал.
+# Бережность к hh (владелец 23.11.2026: «максимально безопасно… чтобы не получить банов»). Паузу до следующего опроса
+# называет портал, уже случайную: днём 2–5 минут, ночью 45 минут – 2 часа (hiring/rules.hh_poll_seconds) — мост её не
+# разбавляет, иначе вышел бы за названные владельцем границы. Чаще минуты hh не опрашиваем, что бы ни назвал портал.
 DEFAULT_INTERVAL_SECONDS = 180.0
 MIN_INTERVAL_SECONDS = 60.0
-MAX_INTERVAL_SECONDS = 3600.0
-INTERVAL_JITTER = 0.15
+MAX_INTERVAL_SECONDS = 3 * 3600.0
+# Проверка живости контейнера ждёт пульс не реже раза в 15 минут, а ночная пауза — до двух часов: пока последний такт
+# прошёл как надо, пульс обновляется и во время паузы.
+HEARTBEAT_SECONDS = 300.0
 # Беда с hh — отступить надолго, а не стучать: вход потерян — сам он не вернётся (нужен человек), проверка раз в
-# полчаса; защита сайта не пускает — 15 минут, потом полчаса и час; прочие сбои hh — 2, 5, 10 минут.
+# полчаса; защита сайта не пускает — 15 минут, потом полчаса и час; прочие сбои hh — 2, 5, 10 минут. Отступ не короче
+# паузы портала: ночное правило действует и при сбоях.
 TROUBLE_PAUSES = {'login_required': (1800,), 'blocked': (900, 1800, 3600), 'error': (120, 300, 600)}
 PORTAL_BACKOFF_SECONDS = (5, 15, 30, 60, 120)
 # Пауза между запросами к hh внутри такта — случайная, как у человека, листающего страницы.
@@ -442,9 +448,11 @@ class HhBridge:
         self.account = None
         self.vacancies = None
         self.catalog_at = None
+        self.catalog_unsent = False    # список вакансий перечитан, а портал его ещё не получил
         self.trouble = None            # (kind, текст) — беда со входом или сайтом
         self.trouble_count = 0
         self.portal_failures = 0
+        self.healthy = False           # последний такт прошёл как надо — пульс можно обновлять и в паузе
         self.pending = []              # отклики, которые портал ещё не подтвердил
         self.state = self._load_state()
         self._summary_at = None
@@ -529,7 +537,7 @@ class HhBridge:
     def _payload(self, items, with_catalog):
         session, detail = (SESSION_OK, None) if self.trouble is None else self.trouble
         return {'version': '%s/%s' % (VERSION, platform.python_version()), 'agent_id': self.agent_id,
-                'session': session, 'detail': detail, 'account': self.account,
+                'session': session, 'detail': detail, 'pause_sec': self._trouble_pause(), 'account': self.account,
                 'vacancies': self.vacancies if with_catalog else None, 'items': items}
 
     def _apply_reply(self, reply):
@@ -552,12 +560,14 @@ class HhBridge:
                 outcome = str(row.get('outcome') or '?')
                 self._outcomes[outcome] = self._outcomes.get(outcome, 0) + 1
 
-    def exchange(self, with_catalog=False):
+    def exchange(self):
         """Отдать порталу очередь порциями и состояние; отклик с исходом портала — «отдан», без исхода остаётся в
-        очереди до следующего такта. Пустая очередь — один доклад «я на связи»."""
+        очереди до следующего такта. Пустая очередь — один доклад «я на связи». Перечитанный список вакансий едет с
+        первой порцией — и со следующим обменом, если этот не дошёл."""
         batches = [self.pending[start:start + PUSH_BATCH] for start in range(0, len(self.pending), PUSH_BATCH)] or [[]]
         for index, batch in enumerate(batches):
-            reply = self._post(self._payload(batch, with_catalog and index == 0))
+            reply = self._post(self._payload(batch, self.catalog_unsent and index == 0))
+            self.catalog_unsent = False
             self._apply_reply(reply)
             done = {str(row.get('topic_id')) for row in reply.get('results') or [] if isinstance(row, dict)}
             for item in batch:
@@ -572,6 +582,7 @@ class HhBridge:
 
     def _portal_failed(self, exc):
         self.portal_failures += 1
+        self.healthy = False
         pause = PORTAL_BACKOFF_SECONDS[min(self.portal_failures, len(PORTAL_BACKOFF_SECONDS)) - 1]
         if self.portal_failures in (1, 5) or self.portal_failures % 20 == 0:
             log.warning('портал недоступен (%s), повтор через %d с', exc, pause)
@@ -600,13 +611,12 @@ class HhBridge:
         return fresh
 
     def read_site(self):
-        """Один проход по кабинету: список вакансий (раз в полчаса), счётчики, выдача сдвинувшихся. True — каталог свежий."""
+        """Один проход по кабинету: список вакансий (раз в час), счётчики, выдача сдвинувшихся."""
         now = self.clock()
-        refreshed = False
         if self.vacancies is None or self.catalog_at is None or now - self.catalog_at >= CATALOG_SECONDS:
             self.account, self.vacancies = self.site.catalog()
             self.catalog_at = now
-            refreshed = True
+            self.catalog_unsent = True
         queued = {item['topic_id'] for item in self.pending}
         fingerprints = self.state['fingerprints']
         for vacancy in self.vacancies:
@@ -628,19 +638,42 @@ class HhBridge:
         for key in [key for key in fingerprints if key not in live]:
             fingerprints.pop(key)
         self.site.save_session()
-        return refreshed
+
+    def _trouble_pause(self):
+        """Свой отступ моста, пока кабинет hh не читается; без беды — None."""
+        if self.trouble is None:
+            return None
+        pauses = TROUBLE_PAUSES.get(self.trouble[0]) or TROUBLE_PAUSES['error']
+        return float(pauses[min(max(self.trouble_count, 1), len(pauses)) - 1])
+
+    def _next_wait(self):
+        """Пауза до следующего чтения hh — та, что назвал портал; кабинет не читается — свой отступ, но не короче
+        паузы портала. Пульс — только при живом входе и принятом докладе."""
+        pause = self._trouble_pause()
+        self.healthy = pause is None
+        if pause is None:
+            self._heartbeat()
+            return self.interval
+        return max(pause, self.interval)
 
     def cycle(self):
         """Один такт. Возвращает паузу до следующего."""
-        if self.since is None:
-            # Первый обмен — за настройками: без отсечки мост hh не читает, чтобы не нести порталу всю историю.
+        first = self.since is None
+        if first or self.portal_failures:
+            # Первый обмен — за настройками: без отсечки мост hh не читает, чтобы не нести порталу всю историю. Прошлый
+            # доклад не дошёл — сначала дослать его, а hh не читать, пока портал не ответит: иначе в простой портала
+            # мост опрашивал бы hh каждые пару минут, и ночью тоже.
             try:
                 self.exchange()
             except Exception as exc:  # noqa: BLE001
                 return self._portal_failed(exc)
+            if self.portal_failures:
+                log.info('портал снова отвечает (после %d отказов)', self.portal_failures)
             self.portal_failures = 0
+            if not first:
+                return self._next_wait()
         try:
-            refreshed = self.read_site()
+            self.read_site()
             if self.trouble is not None:
                 log.info('кабинет hh снова читается (после %d неудачных попыток)', self.trouble_count)
             self.trouble, self.trouble_count = None, 0
@@ -649,19 +682,11 @@ class HhBridge:
             if self.trouble is None or self.trouble[0] != exc.kind or self.trouble_count in (5, 20):
                 log.warning('кабинет hh: %s', exc)
             self.trouble = (exc.kind, str(exc)[:300])
-            refreshed = False
         try:
-            self.exchange(with_catalog=refreshed)
+            self.exchange()
         except Exception as exc:  # noqa: BLE001
             return self._portal_failed(exc)
-        if self.portal_failures:
-            log.info('портал снова отвечает (после %d отказов)', self.portal_failures)
-        self.portal_failures = 0
-        if self.trouble is not None:
-            pauses = TROUBLE_PAUSES.get(self.trouble[0]) or TROUBLE_PAUSES['error']
-            return float(pauses[min(self.trouble_count, len(pauses)) - 1])
-        self._heartbeat()
-        return self.interval * random.uniform(1 - INTERVAL_JITTER, 1 + INTERVAL_JITTER)
+        return self._next_wait()
 
     def _summary(self):
         now = self.clock()
@@ -677,19 +702,36 @@ class HhBridge:
         self._summary_at, self._sent, self._outcomes = now, 0, {}
 
     def run(self):
-        log.info('Мост hh %s запущен. Портал: %s (ключ %s), кабинет: %s, такт %.0f с, id: %s', VERSION, self.portal,
-                 self.signer.key_id if self.signer else '—', self.config['host'], self.interval, self.agent_id)
+        log.info('Мост hh %s запущен. Портал: %s (ключ %s), кабинет: %s, id: %s', VERSION, self.portal,
+                 self.signer.key_id if self.signer else '—', self.config['host'], self.agent_id)
         while not self.stop_event.is_set():
             try:
                 wait = self.cycle()
             except Exception:  # noqa: BLE001
                 log.exception('такт упал')
-                wait = CRASH_PAUSE_SECONDS
+                # Упал разбор кабинета — следующая попытка не раньше обычной паузы: ошибка в коде не должна учащать
+                # опрос hh.
+                self.healthy = False
+                wait = max(CRASH_PAUSE_SECONDS, self.interval)
             self._summary()
-            if self.stop_event.wait(max(1.0, wait)):
+            if self.rest(max(1.0, wait)):
                 break
         log.info('Мост hh остановлен')
         return 0
+
+    def rest(self, wait):
+        """Пауза до следующего такта; пока последний такт прошёл как надо, пульс обновляется раз в HEARTBEAT_SECONDS
+        (ночная пауза — до двух часов, а проверка контейнера ждёт пульс не реже раза в 15 минут). True — мост
+        останавливают."""
+        left = wait
+        while left > 0:
+            step = min(left, HEARTBEAT_SECONDS)
+            if self.stop_event.wait(step):
+                return True
+            left -= step
+            if left > 0 and self.healthy:
+                self._heartbeat()
+        return False
 
     def stop(self, *_args):
         self.stop_event.set()
@@ -726,7 +768,7 @@ def check(bridge):
     try:
         reply = bridge._post(bridge._payload([], with_catalog=bridge.vacancies is not None))
         settings = reply.get('settings') or {}
-        print('портал   %s — принял: отклики с %s, выключены вакансии %s, такт %s с'
+        print('портал   %s — принял: отклики с %s, выключены вакансии %s, пауза до опроса %s с'
               % (bridge.portal, settings.get('since'), ', '.join(settings.get('off') or []) or '—', reply.get('next_poll_sec')))
     except Exception as exc:  # noqa: BLE001
         ok = False

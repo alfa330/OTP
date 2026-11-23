@@ -5,20 +5,23 @@
 --------------
 API hh.ru отдаёт отклики работодателю только с платным доступом к API и приложением, прошедшим модерацию.
 Поэтому их носит мост на шлюзе (cdr_bridge/hh_bridge.py, владелец 23.11.2026): под входом владельца в кабинет
-работодателя hh.kz он раз в такт смотрит счётчики откликов вакансий и, если они сдвинулись, читает свежие отклики
-той же выдачей, что страница «Отклики» сайта. Отклик у hh — тема (topic): кандидат + вакансия, со своим номером.
+работодателя hh.kz он через случайную паузу (её называет портал — rules.hh_poll_seconds) смотрит счётчики откликов
+вакансий и, если они сдвинулись, читает свежие отклики той же выдачей, что страница «Отклики» сайта. Отклик у hh —
+тема (topic): кандидат + вакансия, со своим номером.
 
 Порталу мост присылает (POST /api/hiring/hh/agent/push, подпись шлюза):
 
-    {"version": "hh/1.0.0", "session": "ok" | "login_required" | "blocked" | "error", "detail": "…",
+    {"version": "hh/1.1.0", "session": "ok" | "login_required" | "blocked" | "error", "detail": "…",
+     "pause_sec": 1800   (только когда кабинет не читается: свой отступ моста),
      "account": {"manager": "…", "employer": "…", "employer_id": "…"},
      "vacancies": [{"id": "139079696", "name": "…", "area": "Алматы", "responses": 152}]   (null — не перечитывал),
      "items": [{"topic_id": "…", "vacancy_id": "…", "vacancy_name": "…",
                 "responded_at": "2026-11-23T12:30:00+03:00", "last_name": "…", "first_name": "…",
                 "middle_name": "…", "phone": "+7 (701) 234-56-78", "city": "Алматы", "resume_hash": "…"}]}
 
-Портал отвечает исходом по каждой теме и настройками: с какого момента отклики переносятся и какие вакансии
-выключены (их мост не читает вовсе). Настройки руководителя (hiring_integrations.settings у кода hh):
+Портал отвечает исходом по каждой теме, настройками (с какого момента отклики переносятся и какие вакансии
+выключены — их мост не читает вовсе) и паузой до следующего опроса (next_poll_sec). Настройки руководителя
+(hiring_integrations.settings у кода hh):
 
     {"since": "2026-11-23T12:08:00",
      "vacancies": {"139508734": {"on": false}, "139079696": {"on": true, "vacancy_id": 2}}}
@@ -34,6 +37,7 @@ from . import rules
 
 PLATFORM = 'hh'
 MAX_ITEMS = 100
+PAUSE_MAX_SECONDS = 4 * 3600
 # Состояние входа моста в кабинет hh.kz. Не «ok» — интеграция с ошибкой, руководителям тревога.
 SESSION_OK = 'ok'
 SESSION_TEXTS = {
@@ -133,6 +137,19 @@ def clean_session(payload):
     if session not in SESSIONS:
         session = 'error'
     return session, _text((payload or {}).get('detail'), 300)
+
+
+def clean_pause(payload):
+    """Своя пауза моста до следующего опроса, когда кабинет hh не читается (вход потерян, защита сайта, сбой): мост
+    отступает на неё, если она длиннее паузы портала. Секунды; без беды или мусор — 0."""
+    value = (payload or {}).get('pause_sec')
+    if isinstance(value, bool):
+        return 0
+    try:
+        seconds = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(seconds, PAUSE_MAX_SECONDS))
 
 
 def clean_account(raw):

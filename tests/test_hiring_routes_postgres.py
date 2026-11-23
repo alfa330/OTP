@@ -806,7 +806,7 @@ def test_hh_bridge_is_signed_and_vacancies_are_lead_only(client, monkeypatch):
     assert accepted.status_code == 200
     reply = accepted.get_json()
     assert reply['results'] == [{'topic_id': '9001', 'outcome': 'created'}]
-    assert reply['settings']['off'] == ['139508734'] and reply['next_poll_sec'] in (180, 1800)   # день / ночь
+    assert reply['settings']['off'] == ['139508734'] and 120 <= reply['next_poll_sec'] <= 7500   # случайная пауза
 
     lead, recruiter = as_user(HR_HEAD), as_user(REC1)
     hh_row = next(row for row in client.get('/api/hiring/integrations', headers=lead).get_json()['items']

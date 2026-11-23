@@ -9,6 +9,7 @@ import re
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from openpyxl import Workbook
 
@@ -636,16 +637,31 @@ class HHTests(unittest.TestCase):
         self.assertEqual(rules.HH_OFF_DEFAULT, ('139508734',))
 
     def test_bridge_pace(self):
-        """Владелец 23.11.2026: «максимально безопасно… чтобы не получить банов» — днём три минуты, ночью полчаса;
-        «не на связи» — не раньше двух с половиной тактов (и не раньше 20 минут)."""
-        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 8, 0)), 180)
-        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 20, 59)), 180)
-        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 23, 21, 0)), 1800)
-        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 24, 7, 59)), 1800)
-        self.assertEqual(rules.hh_silent_after(180).total_seconds(), 1200)
-        self.assertEqual(rules.hh_silent_after(1800).total_seconds(), 4800)
+        """Владелец 23.11.2026: «максимально безопасно… чтобы не получить банов», затем «добавь случайный тайминг в
+        опросе лидов а ночью от 45 мин до 2 часов» — пауза случайная: днём 2–5 минут, ночью 45 минут – 2 часа, но не
+        дальше начала дня; «не на связи» — не раньше полутора пауз с пятью минутами запаса (и не раньше 20 минут)."""
+        low, high = SimpleNamespace(randint=lambda a, _b: a), SimpleNamespace(randint=lambda _a, b: b)
+        self.assertEqual([rules.hh_poll_seconds(datetime(2026, 11, 23, 8, 0), low),
+                          rules.hh_poll_seconds(datetime(2026, 11, 23, 20, 59), high)], [120, 300])
+        self.assertEqual([rules.hh_poll_seconds(datetime(2026, 11, 23, 21, 0), r) for r in (low, high)], [2700, 7200])
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 24, 5, 0), low), 2700)
+        # Под утро ночная пауза не перескакивает начало дня: первый опрос — в 8:02–8:05, а не к девяти-десяти.
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 24, 7, 0), high), 3600 + 300)
+        self.assertEqual(rules.hh_poll_seconds(datetime(2026, 11, 24, 7, 30), low), 1800 + 120)
+        for _ in range(300):
+            self.assertTrue(120 <= rules.hh_poll_seconds(datetime(2026, 11, 23, 13, 0)) <= 300)
+            self.assertTrue(2700 <= rules.hh_poll_seconds(datetime(2026, 11, 24, 0, 30)) <= 7200)
+        self.assertGreater(len({rules.hh_poll_seconds(datetime(2026, 11, 23, 13, 0)) for _ in range(50)}), 1)
+        self.assertEqual(rules.hh_silent_after(300).total_seconds(), 1200)
+        self.assertEqual(rules.hh_silent_after(7200).total_seconds(), 11100)
         self.assertEqual(rules.hh_silent_after(None).total_seconds(), 1200)
         self.assertEqual(rules.hh_silent_after('мусор').total_seconds(), 1200)
+        # Свой отступ моста при беде с hh (сторож ждёт не раньше него): секунды, мусор — ноль.
+        self.assertEqual(hh.clean_pause({'pause_sec': 1800.0}), 1800)
+        self.assertEqual(hh.clean_pause({'pause_sec': 10 ** 9}), hh.PAUSE_MAX_SECONDS)
+        for broken in (None, {}, {'pause_sec': None}, {'pause_sec': True}, {'pause_sec': 'полчаса'},
+                       {'pause_sec': -5}, {'pause_sec': float('nan')}, {'pause_sec': float('inf')}):
+            self.assertEqual(hh.clean_pause(broken), 0)
 
     def test_clean_vacancy_settings(self):
         self.assertEqual(hh.clean_vacancy_settings({'1': {'on': False}, '2': {'on': True, 'vacancy_id': '7'},

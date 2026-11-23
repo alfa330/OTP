@@ -11,8 +11,12 @@
     работодателя — мимо; страница входа и чужой тип пользователя — «нужен вход», защита сайта — «не пускает»;
   * первый обмен — за отсечкой: без неё hh не читается; отклики старше отсечки порталу не уходят;
   * полная выдача — только когда сдвинулись счётчики вакансии; выключенную вакансию мост не трогает вовсе;
-  * отклик «отдан» только по исходу портала; портал лёг — отклики ждут в очереди, в том числе через перезапуск;
-  * hh обновил cookie — они дописаны в файл сессии; пульс — только при живом входе и принятом докладе.
+  * отклик «отдан» только по исходу портала; портал лёг — отклики ждут в очереди, в том числе через перезапуск, а
+    hh не читается, пока портал не ответит;
+  * пауза — та, что назвал портал (случайная, ночью до двух часов), без своего разброса; беда с hh — свой отступ, но
+    не короче паузы портала, и портал о нём знает;
+  * hh обновил cookie — они дописаны в файл сессии; пульс — только при живом входе и принятом докладе, в длинной
+    паузе — раз в 5 минут.
 """
 import html as html_lib
 import json
@@ -116,6 +120,7 @@ class FakePortal:
         self.down = False
         self.off = [MARKETER]
         self.since = '2026-11-23T12:08:00+05:00'
+        self.next_poll = 180
         service = SimpleNamespace(hh_agent_push=self._push)
         app = Flask('hh-bridge-test')
         app.register_blueprint(hiring_routes.build_hiring_hh_agent_blueprint(
@@ -125,7 +130,7 @@ class FakePortal:
     def _push(self, payload):
         self.payloads.append(payload)
         return {'results': [{'topic_id': item['topic_id'], 'outcome': 'created'} for item in payload['items']],
-                'settings': {'since': self.since, 'off': list(self.off)}, 'next_poll_sec': 180}
+                'settings': {'since': self.since, 'off': list(self.off)}, 'next_poll_sec': self.next_poll}
 
     def post(self, url, data=None, timeout=None, headers=None):
         if self.down:
@@ -225,10 +230,11 @@ class HhBridgeTests(unittest.TestCase):
     def test_cycle_brings_only_fresh_responses_once(self):
         bridge = self.bridge()
         wait = bridge.cycle()
-        self.assertTrue(153 <= wait <= 207)                                  # такт портала 180 с ± 15 %
+        self.assertEqual(wait, 180.0)                       # пауза портала — как есть: случайную выбирает портал
         # Первый обмен — за отсечкой, без чтения hh; второй — каталог и отклики после 12:08 Алматы.
         first, second = self.portal.payloads
         self.assertEqual((first['items'], first['vacancies'], first['session']), ([], None, 'ok'))
+        self.assertIsNone(second['pause_sec'])                                # кабинет читается — своего отступа нет
         self.assertEqual([i['topic_id'] for i in second['items']], ['5000000003', '5000000002'])
         self.assertEqual([v['id'] for v in second['vacancies']], [OPERATOR, MARKETER])
         self.assertEqual(second['account']['employer'], 'Ресурс Плюс KZ')
@@ -259,6 +265,9 @@ class HhBridgeTests(unittest.TestCase):
         self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000009'])
         self.assertEqual(self.calls('/shards/employer/vacancyresponses/candidates_list')[-1].get('collection'),
                          'phone_interview')
+        # Ночью портал называет паузу до двух часов — мост выдерживает её как есть.
+        self.portal.next_poll = 7200
+        self.assertEqual(bridge.cycle(), 7200.0)
         # Перезапуск моста: отданное помнится, повторов нет.
         self.fingerprint = counts(32, 24)
         again = self.bridge()
@@ -298,6 +307,43 @@ class HhBridgeTests(unittest.TestCase):
         fresh.cycle()
         self.assertEqual([[i['topic_id'] for i in p['items']] for p in self.portal.payloads[sent:]], [[], ['5000000007']])
 
+    def test_portal_outage_does_not_speed_up_hh(self):
+        """Портал лёг — мост стучится только к нему, hh не читает; ответил — очередь дослана, и до следующего чтения hh
+        мост выжидает названную паузу: простой портала не учащает опрос hh, ночью тоже."""
+        bridge = self.bridge()
+        bridge.cycle()
+        self.rows.insert(0, response(5000000006, '2026-11-23T11:30:00+03:00'))
+        self.fingerprint = counts(33, 26)
+        self.portal.down = True
+        self.assertEqual(bridge.cycle(), 5.0)                               # отклик прочитан, доклад не дошёл
+        read = len(self.http.calls)
+        self.assertEqual([bridge.cycle() for _ in range(3)], [15.0, 30.0, 60.0])
+        self.assertEqual(len(self.http.calls), read)                        # в hh — ни запроса
+        self.portal.down = False
+        self.portal.next_poll = 5400
+        self.assertEqual(bridge.cycle(), 5400.0)
+        self.assertEqual([i['topic_id'] for i in self.portal.payloads[-1]['items']], ['5000000006'])
+        self.assertEqual(len(self.http.calls), read)
+        bridge.cycle()                                                      # пауза вышла — снова кабинет
+        self.assertGreater(len(self.http.calls), read)
+
+    def test_heartbeat_during_long_pause(self):
+        """Ночная пауза — до двух часов, а проверка контейнера ждёт пульс не реже раза в 15 минут: пока такт прошёл как
+        надо, пульс обновляется и в паузе; при беде — нет."""
+        bridge = self.bridge()
+        waits = []
+        bridge.stop_event = SimpleNamespace(wait=lambda seconds: waits.append(seconds) or False)
+        bridge.healthy = True
+        self.assertFalse(bridge.rest(700.0))
+        self.assertEqual(waits, [300.0, 300.0, 100.0])
+        self.assertTrue(os.path.exists(self.heartbeat))
+        os.remove(self.heartbeat)
+        bridge.healthy = False
+        bridge.rest(700.0)
+        self.assertFalse(os.path.exists(self.heartbeat))
+        bridge.stop_event = SimpleNamespace(wait=lambda seconds: True)       # остановка посреди паузы — сразу
+        self.assertTrue(bridge.rest(7200.0))
+
     def test_lost_login_is_reported_and_polled_rarely(self):
         bridge = self.bridge()
         bridge.cycle()
@@ -308,17 +354,21 @@ class HhBridgeTests(unittest.TestCase):
         last = self.portal.payloads[-1]
         self.assertEqual((last['session'], last['items'], last['vacancies']), ('login_required', [], None))
         self.assertIn('страницу входа', last['detail'])
+        self.assertEqual(last['pause_sec'], 1800.0)                         # портал знает отступ — сторож не тревожит
         self.assertFalse(os.path.exists(self.heartbeat))                    # без входа пульса нет
         self.assertEqual(bridge.cycle(), 1800.0)
         self.http.routes['/employer/vacancies'] = lambda params: FakeResponse(200, vacancies_page(),
                                                                               url='https://almaty.hh.kz/employer/vacancies')
-        self.assertTrue(153 <= bridge.cycle() <= 207)
-        self.assertEqual(self.portal.payloads[-1]['session'], 'ok')
+        self.assertEqual(bridge.cycle(), 180.0)
+        self.assertEqual((self.portal.payloads[-1]['session'], self.portal.payloads[-1]['pause_sec']), ('ok', None))
         # Защита сайта не пускает — отступить надолго и всё дальше: 15 минут, полчаса, час.
         bridge.catalog_at = None
         self.http.routes['/employer/vacancies'] = FakeResponse(403, 'DDoS-Guard', headers={'Server': 'ddos-guard'})
         self.assertEqual([bridge.cycle() for _ in range(4)], [900.0, 1800.0, 3600.0, 3600.0])
         self.assertEqual(self.portal.payloads[-1]['session'], 'blocked')
+        # Ночью отступ не короче ночной паузы портала: сбой hh не учащает опрос.
+        self.portal.next_poll = 5400
+        self.assertEqual(bridge.cycle(), 5400.0)
 
     def test_daily_request_cap(self):
         """Предохранитель от ошибки в коде: за сутки (Алматы) не больше DAILY_REQUEST_CAP запросов к hh."""

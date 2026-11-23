@@ -440,8 +440,8 @@ class HiringService:
 
     # ─── Мост hh.kz на шлюзе (hiring/hh.py, cdr_bridge/hh_bridge.py) ─────────
 
-    # Такт моста называет портал (rules.hh_poll_seconds): днём три минуты, ночью полчаса — hh видит раз в такт по
-    # маленькому запросу счётчиков на вакансию, не чаще, чем смотрел бы рекрутер.
+    # Паузу моста до следующего опроса называет портал (rules.hh_poll_seconds), случайную: днём 2–5 минут, ночью
+    # 45 минут – 2 часа — hh видит по маленькому запросу счётчиков на вакансию, не чаще, чем смотрел бы рекрутер.
     # Сбой входа или сайта дольше этого — тревога руководителям; короткий сбой (hh ответил 502 один раз) — тишина.
     HH_PROBLEM_ALERT_AFTER = timedelta(minutes=10)
 
@@ -479,9 +479,11 @@ class HiringService:
                 results.append({'topic_id': str(item['topic_id']), 'outcome': outcome})
                 counts[outcome] = counts.get(outcome, 0) + 1
             ok = session == hh.SESSION_OK
+            # Кабинет не читается — мост отступает на свою паузу, если она длиннее названной: сторож ждёт его не
+            # раньше большей из двух.
             next_poll = rules.hh_poll_seconds(now)
             bridge = {'version': str(payload.get('version') or '')[:40] or None, 'session': session, 'detail': detail,
-                      'seen_at': now.isoformat(timespec='seconds'), 'expect_sec': next_poll}
+                      'seen_at': now.isoformat(timespec='seconds'), 'expect_sec': max(next_poll, hh.clean_pause(payload))}
             # Начало беды со входом — чтобы тревога была одна на случай, а короткий сбой не будил никого.
             problem_since = None if ok else ((previous.get('bridge') or {}).get('problem_since')
                                              if (previous.get('bridge') or {}).get('session') == session else None)
@@ -533,8 +535,8 @@ class HiringService:
         return outcome
 
     def hh_watchdog(self):
-        """Сторож моста hh.kz (раз в 5 минут): мост молчит дольше, чем положено при названном ему такте
-        (rules.hh_silent_after: днём 20 минут, ночью — больше часа), — «не на связи» и одна тревога руководителям
+        """Сторож моста hh.kz (раз в 5 минут): мост молчит дольше, чем положено при названной ему паузе
+        (rules.hh_silent_after: днём 20 минут, ночью — полторы паузы), — «не на связи» и одна тревога руководителям
         рекрутинга. Снова на связи — тревоги гасит его же доклад. Мост ни разу не приходил — молчим: интеграция
         «не настроена», а не сломана."""
         now = self._now()

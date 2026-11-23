@@ -1335,7 +1335,7 @@ def test_hh_bridge_intake(world):
     assert [r['outcome'] for r in reply['results']] == [
         'created', 'repeat', 'vacancy_off', 'before_since', 'no_phone', 'employee', 'invalid']
     assert reply['settings'] == {'since': '2026-11-23T12:08:00+05:00', 'off': [HH_MARKETER]}
-    assert reply['next_poll_sec'] == 180                      # днём — три минуты
+    assert 120 <= reply['next_poll_sec'] <= 300               # днём — случайно, 2–5 минут
     with world['db']._get_cursor() as cur:
         card = queries.open_card_by_phone(cur, '+77015550001')
         assert (card['source_code'], card['stage'], card['kind']) == ('hh', 'responses', 'response')
@@ -1349,6 +1349,7 @@ def test_hh_bridge_intake(world):
         row = queries.get_integration(cur, 'hh')
         assert row['state'] == 'ok' and row['last_error'] is None and row['received_total'] == 2
         assert row['last_ok_at'] == HH_NOW and row['cursor']['bridge']['session'] == 'ok'
+        assert row['cursor']['bridge']['expect_sec'] == reply['next_poll_sec']     # сторож ждёт названную паузу
         assert row['cursor']['account']['employer'] == 'Ресурс Плюс KZ'
         assert [v['id'] for v in row['cursor']['vacancies']] == [HH_OPERATOR, HH_MARKETER]
         cur.execute("SELECT topic_id, outcome, card_id IS NOT NULL FROM hiring_hh_topics ORDER BY topic_id")
@@ -1410,6 +1411,10 @@ def test_hh_bridge_alerts(world):
     alerts = hh_alerts(world)
     assert [user for user, _title, _body in alerts] == [HR_HEAD, LEAD_GRANT]   # одна на человека, не на каждый доклад
     assert alerts[0][1] == 'HeadHunter: новые отклики не приходят'
+    # Без входа мост отступает на полчаса и говорит об этом: сторож не добавляет к тревоге «не на связи».
+    hh_push(world, session='login_required', vacancies=None, pause_sec=1800)
+    world['clock'].now += timedelta(minutes=40)
+    assert service.hh_watchdog() is None and len(hh_alerts(world)) == 2
     hh_push(world)                                              # вход вернулся
     assert hh_alerts(world) == []
     # Мост замолчал: сторож через 20 минут — «не на связи» и тревога; повтор сторожа — та же тревога.
@@ -1426,12 +1431,14 @@ def test_hh_bridge_alerts(world):
     assert hh_alerts(world) == []
     with world['db']._get_cursor() as cur:
         assert queries.get_integration(cur, 'hh')['state'] == 'ok'
-    # Ночью такт — полчаса: сорок минут тишины — ещё не «не на связи», полтора часа — уже да.
-    world['clock'].now = datetime(2026, 11, 24, 2, 0)
-    assert hh_push(world)['next_poll_sec'] == 1800
-    world['clock'].now = datetime(2026, 11, 24, 2, 40)
+    # Ночью пауза — от 45 минут до 2 часов (владелец 23.11.2026): «не на связи» — только после полутора пауз и пяти минут.
+    night = datetime(2026, 11, 24, 2, 0)
+    world['clock'].now = night
+    wait = hh_push(world)['next_poll_sec']
+    assert 2700 <= wait <= 7200
+    world['clock'].now = night + timedelta(seconds=wait * 3 // 2 + 299)
     assert service.hh_watchdog() is None and hh_alerts(world) == []
-    world['clock'].now = datetime(2026, 11, 24, 3, 30)
+    world['clock'].now += timedelta(seconds=2)
     assert service.hh_watchdog().startswith('hh:silent:')
 
 

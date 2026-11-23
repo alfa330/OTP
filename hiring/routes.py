@@ -918,7 +918,7 @@ def build_hiring_blueprint(*, db, require_api_key, build_cors_preflight_response
 
     @hiring_route('/integrations/<code>/run', methods=('POST',))
     def hiring_integration_run(code, ctx):
-        """«Опросить» — у OLX. Отклики hh.kz мост приносит сам раз в две минуты, опрашивать с портала нечего."""
+        """«Опросить» — у OLX. Отклики hh.kz мост приносит сам, опрашивать с портала нечего."""
         _manage_only(ctx)
         if code != 'olx':
             return _bad('Такой интеграции нет', 'HIRING_NOT_FOUND', 404)

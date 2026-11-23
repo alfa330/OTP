@@ -9,6 +9,7 @@
 первичное наполнение.
 """
 
+import random
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -427,30 +428,41 @@ SOURCES_WITHOUT_CHANNEL = ('whatsapp', 'manual')
 SOURCE_HH = 'hh'
 HH_SINCE_DEFAULT = datetime(2026, 11, 23, 12, 8)
 HH_OFF_DEFAULT = ('139508734',)
-# Такт моста называет портал (владелец 23.11.2026: «максимально безопасно… чтобы не получить банов»): днём — раз в три
-# минуты, как рекрутер, который поглядывает на отклики; ночью — раз в полчаса: опрос каждые пару минут всю ночь — почерк
-# робота, а ночные отклики рекрутеры всё равно разбирают утром. Часы — Алматы.
+# Паузу моста до следующего опроса hh называет портал, и она случайная (владелец 23.11.2026: «максимально безопасно…
+# чтобы не получить банов», затем «добавь случайный тайминг в опросе лидов а ночью от 45 мин до 2 часов»): опрос ровной
+# сеткой — почерк робота. Днём — от двух до пяти минут, как рекрутер, который поглядывает на отклики; ночью — от 45 минут
+# до двух часов: ночные отклики рекрутеры всё равно разбирают утром. Ночная пауза не перескакивает начало дня — первый
+# утренний опрос в начале девятого, а не к десяти. Часы — Алматы.
 HH_DAY_HOURS = (8, 21)
-HH_POLL_DAY_SECONDS = 180
-HH_POLL_NIGHT_SECONDS = 1800
-# Мост молчит дольше — «не на связи» и тревога руководителям: не меньше 20 минут и не меньше двух с половиной тактов,
-# которые портал ему назвал (ночью такт — полчаса).
+HH_POLL_DAY_SECONDS = (120, 300)
+HH_POLL_NIGHT_SECONDS = (2700, 7200)
+# Мост молчит дольше — «не на связи» и тревога руководителям: не меньше 20 минут и не меньше полутора пауз, которые ему
+# назвали, с запасом в пять минут (ночью пауза — до двух часов).
 HH_SILENT_AFTER = timedelta(minutes=20)
 
 
-def hh_poll_seconds(now):
-    """Такт моста hh на это время суток (Алматы)."""
+def hh_poll_seconds(now, rnd=random):
+    """Случайная пауза моста hh до следующего опроса, секунды (now — Алматы)."""
     start, end = HH_DAY_HOURS
-    return HH_POLL_DAY_SECONDS if start <= now.hour < end else HH_POLL_NIGHT_SECONDS
+    if start <= now.hour < end:
+        return rnd.randint(*HH_POLL_DAY_SECONDS)
+    wait = rnd.randint(*HH_POLL_NIGHT_SECONDS)
+    morning = now.replace(hour=start, minute=0, second=0, microsecond=0)
+    if now.hour >= end:
+        morning += timedelta(days=1)
+    until_morning = int((morning - now).total_seconds())
+    if wait > until_morning:
+        wait = until_morning + rnd.randint(*HH_POLL_DAY_SECONDS)
+    return wait
 
 
 def hh_silent_after(expected_seconds):
-    """Сколько молчания моста — уже «не на связи» при названном ему такте."""
+    """Сколько молчания моста — уже «не на связи» при названной ему паузе."""
     try:
         expected = max(0, int(expected_seconds or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         expected = 0
-    return max(HH_SILENT_AFTER, timedelta(seconds=expected * 5 // 2 + 300))
+    return max(HH_SILENT_AFTER, timedelta(seconds=expected * 3 // 2 + 300))
 
 MOTIVATION_PENDING, MOTIVATION_COUNTED, MOTIVATION_PAID, MOTIVATION_CANCELLED = (
     'pending', 'counted', 'paid', 'cancelled')
