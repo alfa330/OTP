@@ -891,7 +891,7 @@ const VerificatorCalculationResult = ({ salaryResult, label }) => {
 /**
  * Карточка результата для модели ОП «Яндекс Регистрация»: оклад по ставке плюс
  * бонус за личные успешные заявки. Цена успешки — ступень по выполнению плана
- * конверсии ГРУППОЙ, из бонуса удерживают процент по ЛИЧНОМУ качеству звонков.
+ * ЛИЧНОЙ конверсии (SALES-2), из бонуса удерживают процент по ЛИЧНОМУ качеству звонков.
  * Формулы — calculateYandexRegSalary (KPI.xlsx, лист «ЯР»).
  */
 const YandexRegCalculationResult = ({ salaryResult, label }) => {
@@ -900,12 +900,11 @@ const YandexRegCalculationResult = ({ salaryResult, label }) => {
     const hoursPercentage = num(salaryResult.hoursPercentage);
     const hourlyRate = num(salaryResult.hourlyRate) || YANDEX_REG_HOURLY_RATE;
     const oklad = num(salaryResult.oklad);
-    const groupRequests = num(salaryResult.groupRequests);
-    const groupSuccesses = num(salaryResult.groupSuccesses);
+    const requests = num(salaryResult.requests);
+    const successes = num(salaryResult.successes);
     const factConversion = num(salaryResult.factConversion) * 100;
     const targetConversion = num(salaryResult.targetConversion) * 100;
     const planPercent = num(salaryResult.planPercent) * 100;
-    const deals = num(salaryResult.deals);
     const dealPrice = num(salaryResult.dealPrice);
     const bonusDeals = num(salaryResult.bonusDeals);
     const quality = num(salaryResult.quality);
@@ -916,25 +915,25 @@ const YandexRegCalculationResult = ({ salaryResult, label }) => {
     const finalSalary = num(salaryResult.finalSalary);
 
     return (
-        <CardShell subtitle="Сводка по часам, конверсии группы и качеству звонков" finalSalary={finalSalary}>
+        <CardShell subtitle="Сводка по часам, конверсии и качеству звонков" finalSalary={finalSalary}>
             {/* Сводка */}
             <div className="bg-white p-4 rounded border border-gray-100">
                 <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                     <SummaryTile title="Направление" value={label || 'Оператор ОП Яндекс Регистрация'} />
                     <SummaryTile
-                        title="Конверсия группы"
-                        value={groupRequests > 0 ? pct(factConversion) : '—'}
+                        title="Конверсия"
+                        value={requests > 0 ? pct(factConversion) : '—'}
                         tooltip={(
                             <>
                                 <div className="font-medium mb-1">Факт. конверсия</div>
                                 <div className="text-xs text-gray-600">
-                                    Успешные заявки группы ÷ поступившие заявки группы. Показатель общий —
-                                    он задаёт цену успешки всем операторам ЯР.
+                                    Мои успешно закрытые ÷ мои поступившие заявки. От неё зависит
+                                    цена успешки.
                                 </div>
                             </>
                         )}
                     />
-                    <SummaryTile title="Мои успешки" value={simple(deals)} />
+                    <SummaryTile title="Мои успешки" value={simple(successes)} />
                     <SummaryTile
                         title="Цена успешки"
                         value={shortMoney(dealPrice)}
@@ -977,14 +976,14 @@ const YandexRegCalculationResult = ({ salaryResult, label }) => {
                             <>
                                 <div className="font-medium mb-1">Формула</div>
                                 <div className="text-xs text-gray-600 mb-2">
-                                    Бонус = мои успешные заявки × цену успешки по % плана конверсии группы
+                                    Бонус = мои успешно закрытые × цену успешки по % плана конверсии
                                 </div>
                                 <div className="text-sm">
-                                    <div>Конверсия группы: <b>{groupRequests > 0 ? pct(factConversion) : '—'}</b></div>
+                                    <div>Конверсия: <b>{requests > 0 ? pct(factConversion) : '—'}</b></div>
                                     <div>Целевая конверсия: <b>{pct(targetConversion)}</b></div>
                                     <div>% плана: <b>{pct(planPercent)}</b></div>
                                     <div className="mt-2 font-semibold">
-                                        Подстановка: {simple(deals)} × {fmtNum(dealPrice)} = <b>{fmtNum(bonusDeals)}</b>
+                                        Подстановка: {simple(successes)} × {fmtNum(dealPrice)} = <b>{fmtNum(bonusDeals)}</b>
                                     </div>
                                 </div>
                             </>
@@ -1033,10 +1032,10 @@ const YandexRegCalculationResult = ({ salaryResult, label }) => {
                     <DetailRow alt label="Ставка, ₸/час" value={money(hourlyRate)} />
                 </DetailGroup>
 
-                <DetailGroup title="Конверсия группы">
-                    <DetailRow label="Поступило заявок" value={simple(groupRequests)} />
-                    <DetailRow alt label="Успешно закрыто" value={simple(groupSuccesses)} />
-                    <DetailRow label="Факт. конверсия" value={groupRequests > 0 ? pct(factConversion) : '—'} />
+                <DetailGroup title="Конверсия">
+                    <DetailRow label="Поступило заявок" value={simple(requests)} />
+                    <DetailRow alt label="Успешно закрыто" value={simple(successes)} />
+                    <DetailRow label="Факт. конверсия" value={requests > 0 ? pct(factConversion) : '—'} />
                     <DetailRow alt label="Целевая конверсия" value={pct(targetConversion)} />
                     <DetailRow label="% выполнения плана" value={pct(planPercent)} />
                 </DetailGroup>
@@ -1048,7 +1047,7 @@ const YandexRegCalculationResult = ({ salaryResult, label }) => {
 
                 <DetailGroup title="Компоненты выплаты">
                     <DetailRow label="Оклад (часы)" value={money(oklad)} />
-                    <DetailRow alt label={`Бонус за успешки (${fmtNum(dealPrice)} × ${simple(deals)})`} value={money(bonusDeals)} />
+                    <DetailRow alt label={`Бонус за успешки (${fmtNum(dealPrice)} × ${simple(successes)})`} value={money(bonusDeals)} />
                     <DetailRow label="Удержано за качество" value={`− ${money(qualityWithheld)}`} />
                     <DetailRow alt label="Штрафы" value={`− ${money(fines)}`} />
                     <DetailRow label="Премии" value={`+ ${money(bonuses)}`} />
@@ -1083,7 +1082,7 @@ const SalaryCalculationResult = ({ salaryResult, label }) => {
             return <VerificatorCalculationResult salaryResult={salaryResult} label={label} />;
         }
 
-        // ОП «Яндекс Регистрация»: цена успешки от конверсии ГРУППЫ, удержание по личному качеству.
+        // ОП «Яндекс Регистрация»: цена успешки от личной конверсии, удержание по личному качеству.
         if (salaryResult.model === 'op_yandex_reg') {
             return <YandexRegCalculationResult salaryResult={salaryResult} label={label} />;
         }

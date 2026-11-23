@@ -275,9 +275,11 @@ class OpSalesSalaryCalculatorWiringTests(unittest.TestCase):
         self.assertIn("activeSalaryModel === 'op_yandex_reg' ? (", self.app)
         self.assertIn("salaryResult.model === 'op_yandex_reg'", self.result_card)
         self.assertIn("YandexRegCalculationResult", self.result_card)
-        # Конверсия групповая (заявки + успешно закрытые), успешки и качество — личные.
-        for state in ("setGroupRequests", "setGroupSuccesses", "setTargetConversion", "setDeals", "setQuality", "setFines"):
+        # SALES-2: заявки и успешно закрытые — свои, те же успешки идут в бонус.
+        for state in ("setRequests", "setSuccesses", "setTargetConversion", "setQuality", "setFines"):
             self.assertIn(state, self.yandex_reg_calculator)
+        for state in ("setGroupRequests", "setGroupSuccesses", "setDeals"):
+            self.assertNotIn(state, self.yandex_reg_calculator)
 
     def test_hours_section_knows_the_two_new_models(self):
         self.assertIn(

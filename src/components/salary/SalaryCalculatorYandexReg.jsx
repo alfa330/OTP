@@ -34,7 +34,8 @@ const fmtPercent = (share) => `${(Number(share) * 100).toFixed(1).replace('.', '
  * Калькулятор зарплаты направления «Яндекс Регистрация» отдела продаж
  * (модель op_yandex_reg). Формулы — src/utils/salaryFormula.js, перенесены из
  * «KPI.xlsx» (лист «ЯР») и пояснения владельца «KPI_логика_и_калькулятор_ЗП.xlsx».
- * Конверсия групповая, качество и успешки — личные.
+ * С SALES-2 (#427) всё личное: конверсия — свои успешно закрытые ÷ свои заявки
+ * (план 45 %), те же успешно закрытые умножаются на цену успешки.
  * prefill: часы/норма/качество/штрафы из «Моих часов» (по смене prefillNonce).
  * month: 'YYYY-MM' — от него зависит норма часов на 1 FTE (176 / 168 / 160).
  */
@@ -43,16 +44,15 @@ const SalaryCalculatorYandexReg = ({ prefill = null, prefillNonce = 0, month = '
   const [hoursNorm, setHoursNorm] = useState(String(monthNormFte));
   const [hoursWorked, setHoursWorked] = useState('');
   const [hourlyRate, setHourlyRate] = useState(String(YANDEX_REG_HOURLY_RATE));
-  const [groupRequests, setGroupRequests] = useState('');
-  const [groupSuccesses, setGroupSuccesses] = useState('');
+  const [requests, setRequests] = useState('');
+  const [successes, setSuccesses] = useState('');
   const [targetConversion, setTargetConversion] = useState(String(YANDEX_REG_TARGET_CONVERSION * 100));
-  const [deals, setDeals] = useState('');
   const [quality, setQuality] = useState('');
   const [fines, setFines] = useState('');
   const [bonuses, setBonuses] = useState('');
 
   // Переход из «Моих часов»: часы месяца, норма, качество, штрафы и премии.
-  // Заявки группы и личные успешки вносятся руками — источника в системе нет.
+  // Заявки и успешно закрытые оператор вносит руками — источника в системе нет.
   useEffect(() => {
     if (!prefill) return;
     if (prefill.hoursNorm !== undefined) setHoursNorm(String(prefill.hoursNorm ?? ''));
@@ -60,9 +60,8 @@ const SalaryCalculatorYandexReg = ({ prefill = null, prefillNonce = 0, month = '
     if (prefill.quality !== undefined) setQuality(String(prefill.quality ?? ''));
     if (prefill.fines !== undefined) setFines(String(prefill.fines ?? ''));
     if (prefill.bonuses !== undefined) setBonuses(String(prefill.bonuses ?? ''));
-    if (prefill.groupRequests !== undefined) setGroupRequests(String(prefill.groupRequests ?? ''));
-    if (prefill.groupSuccesses !== undefined) setGroupSuccesses(String(prefill.groupSuccesses ?? ''));
-    if (prefill.deals !== undefined) setDeals(String(prefill.deals ?? ''));
+    if (prefill.requests !== undefined) setRequests(String(prefill.requests ?? ''));
+    if (prefill.successes !== undefined) setSuccesses(String(prefill.successes ?? ''));
     if (prefill.targetConversion !== undefined) setTargetConversion(String(prefill.targetConversion ?? ''));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillNonce]);
@@ -78,31 +77,29 @@ const SalaryCalculatorYandexReg = ({ prefill = null, prefillNonce = 0, month = '
       hoursWorked,
       hoursNorm,
       hourlyRate,
-      groupRequests,
-      groupSuccesses,
+      requests,
+      successes,
       targetConversion: targetShare,
-      deals,
       quality,
       fines,
       bonuses,
     }),
-    [hoursWorked, hoursNorm, hourlyRate, groupRequests, groupSuccesses, targetShare, deals, quality, fines, bonuses]
+    [hoursWorked, hoursNorm, hourlyRate, requests, successes, targetShare, quality, fines, bonuses]
   );
 
   const reset = () => {
     setHoursNorm(String(monthNormFte));
     setHoursWorked('');
     setHourlyRate(String(YANDEX_REG_HOURLY_RATE));
-    setGroupRequests('');
-    setGroupSuccesses('');
+    setRequests('');
+    setSuccesses('');
     setTargetConversion(String(YANDEX_REG_TARGET_CONVERSION * 100));
-    setDeals('');
     setQuality('');
     setFines('');
     setBonuses('');
   };
 
-  const hasConversionInputs = result.groupRequests > 0;
+  const hasConversionInputs = result.requests > 0;
 
   return (
     <div>
@@ -132,28 +129,25 @@ const SalaryCalculatorYandexReg = ({ prefill = null, prefillNonce = 0, month = '
         <Field label="Целевая конверсия (%):" icon="fa-flag-checkered" iconColor="text-rose-500">
           {numberInput(targetConversion, setTargetConversion, { min: 0, max: 100, step: '0.1' })}
           <div className="mt-2 text-xs text-gray-500">
-            План группы. По схеме — {YANDEX_REG_TARGET_CONVERSION * 100}%.
+            По схеме — {YANDEX_REG_TARGET_CONVERSION * 100}%.
           </div>
         </Field>
 
-        <Field label="Поступило заявок (по группе):" icon="fa-inbox" iconColor="text-sky-500">
-          {numberInput(groupRequests, setGroupRequests, { min: 0, step: '1' })}
+        <Field label="Поступило заявок:" icon="fa-inbox" iconColor="text-sky-500">
+          {numberInput(requests, setRequests, { min: 0, step: '1' })}
         </Field>
-        <Field label="Успешно закрыто (по группе):" icon="fa-circle-check" iconColor="text-green-500">
-          {numberInput(groupSuccesses, setGroupSuccesses, { min: 0, step: '1' })}
+        <Field label="Успешно закрыто:" icon="fa-circle-check" iconColor="text-green-500">
+          {numberInput(successes, setSuccesses, { min: 0, step: '1' })}
           <div className="mt-2 text-xs text-gray-500">
             Факт. конверсия: <span className="font-medium text-gray-700">{hasConversionInputs ? fmtPercent(result.factConversion) : '—'}</span>
             <span className="ml-1 text-gray-400">— успешные ÷ поступившие</span>
           </div>
-        </Field>
-
-        <Field label="Мои успешные заявки, шт:" icon="fa-user-check" iconColor="text-emerald-500">
-          {numberInput(deals, setDeals, { min: 0, step: '1' })}
-          <div className="mt-2 text-xs text-gray-500">
+          <div className="mt-1 text-xs text-gray-500">
             Цена успешки: <span className="font-medium text-gray-700">{result.dealPrice} ₸</span>
-            <span className="ml-1 text-gray-400">— ступень по % плана группы, бонус {Math.round(result.bonusDeals).toLocaleString('ru-RU')} ₸</span>
+            <span className="ml-1 text-gray-400">— ступень по % плана, бонус {Math.round(result.bonusDeals).toLocaleString('ru-RU')} ₸</span>
           </div>
         </Field>
+
         <Field label="Качество звонков (%):" icon="fa-star" iconColor="text-yellow-500">
           {numberInput(quality, setQuality, { min: 0, max: 100, step: '0.01' })}
           <div className="mt-2 text-xs text-gray-500">
@@ -174,7 +168,7 @@ const SalaryCalculatorYandexReg = ({ prefill = null, prefillNonce = 0, month = '
         Выполнение плана конверсии:
         <span className="font-semibold text-gray-800"> {result.targetConversion > 0 && hasConversionInputs ? fmtPercent(result.planPercent) : '—'}</span>
         <span className="ml-1 text-gray-400">
-          — факт. конверсия ÷ целевую; конверсия общая по группе, качество и успешки — личные
+          — факт. конверсия ÷ целевую; заявки, успешки и качество — личные
         </span>
       </div>
 

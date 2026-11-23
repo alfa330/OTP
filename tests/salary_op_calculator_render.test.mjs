@@ -88,9 +88,12 @@ test('калькулятор «Верификатор» рисуется без 
 test('калькулятор «Яндекс Регистрация» рисуется без данных и не падает', () => {
   const html = plain(renderToStaticMarkup(React.createElement(SalaryCalculatorYandexReg, { month: '2026-08' })));
   assert.ok(html.includes('Модель: Оператор ОП «Яндекс Регистрация»'));
-  assert.ok(html.includes('Поступило заявок (по группе)'));
-  assert.ok(html.includes('Мои успешные заявки, шт'), 'бонус считается по личным успешкам');
-  assert.ok(html.includes('value="50"'), 'целевая конверсия по схеме — 50%');
+  // SALES-2: заявки и успешно закрытые — свои, и бонус считается по тем же успешкам.
+  assert.ok(html.includes('Поступило заявок:'));
+  assert.ok(html.includes('Успешно закрыто:'));
+  assert.ok(!html.includes('по группе'), 'полей «по группе» больше нет');
+  assert.ok(!html.includes('Мои успешные заявки'), 'отдельное поле успешек для бонуса убрано — это те же успешно закрытые');
+  assert.ok(html.includes('value="45"'), 'целевая конверсия по схеме — 45%');
 });
 
 test('карточка результата «Верификатор» показывает сумму из формулы', () => {
@@ -197,25 +200,24 @@ test('карточка «Основа»: сумма по шкале п. 3.1, п�
 });
 
 test('карточка результата «Яндекс Регистрация» показывает сумму из формулы', () => {
-  // Пример владельца: конверсия группы 41/100, план 82%, цена успешки 200 ₸,
-  // качество 93% → удержание 10%. 60 личных успешек.
+  // SALES-2: свои 41 из 100 при плане 45% → 91% плана, цена успешки 240 ₸,
+  // качество 93% → удержание 10%.
   const result = calculateYandexRegSalary({
     hoursWorked: 176,
     hoursNorm: 176,
-    groupRequests: 100,
-    groupSuccesses: 41,
+    requests: 100,
+    successes: 41,
     quality: 93,
-    deals: 60,
   });
   const html = plain(renderToStaticMarkup(
     React.createElement(SalaryCalculationResult, { salaryResult: result, label: 'Оператор ОП «Яндекс Регистрация»' })
   ));
 
-  assert.ok(html.includes('116 400,00 ТГ'), 'итог = оклад + бонус − удержание');
+  assert.ok(html.includes('114 456,00 ТГ'), 'итог = оклад + бонус − удержание');
   assert.ok(html.includes('105 600,00 ТГ'), 'оклад = 176 × 600');
-  assert.ok(html.includes('12 000,00 ТГ'), 'бонус = 60 успешек × 200 ₸');
-  assert.ok(html.includes('Сводка по часам, конверсии группы и качеству звонков'));
-  assert.ok(html.includes('Конверсия группы'));
+  assert.ok(html.includes('9 840,00 ТГ'), 'бонус = 41 успешка × 240 ₸');
+  assert.ok(html.includes('Сводка по часам, конверсии и качеству звонков'));
+  assert.ok(!html.includes('группы'), 'конверсия больше не групповая');
 });
 
 test('карточка не путает модели ОП между собой', () => {
@@ -223,13 +225,13 @@ test('карточка не путает модели ОП между собой
     salaryResult: calculateVerificatorSalary({ hoursWorked: 176, hoursNorm: 176, sales: 440, planPerFte: 440, normHoursFte: 176, quality: 100 }),
   })));
   const yandexReg = plain(renderToStaticMarkup(React.createElement(SalaryCalculationResult, {
-    salaryResult: calculateYandexRegSalary({ hoursWorked: 176, hoursNorm: 176, groupRequests: 100, groupSuccesses: 60, deals: 10, quality: 100 }),
+    salaryResult: calculateYandexRegSalary({ hoursWorked: 176, hoursNorm: 176, requests: 100, successes: 60, quality: 100 }),
   })));
 
   // У «Верификатора» удержания за качество нет вовсе — качество только добавляет бонус.
   assert.ok(!verificator.includes('Удержано за качество'));
   assert.ok(yandexReg.includes('Удержано за качество'));
-  // А у ЯР нет плана продаж — вместо него конверсия группы.
+  // А у ЯР нет плана продаж — вместо него план конверсии.
   assert.ok(!yandexReg.includes('Бонус за план'));
   assert.ok(verificator.includes('Бонус за план'));
 });

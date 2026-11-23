@@ -62160,7 +62160,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                             const isPotokModel = !hasMixedCalculationModels && calculationModelCode === 'op_potok';
                                             // ОП «Верификатор»: сумма за часы × баллы трёх шкал (качество, план, чаты/час).
                                             const isVerificatorModel = !hasMixedCalculationModels && calculationModelCode === 'op_verificator';
-                                            // ОП «Яндекс Регистрация»: цена успешки от конверсии группы, удержание по личному качеству.
+                                            // ОП «Яндекс Регистрация»: цена успешки от личной конверсии, удержание по личному качеству.
                                             const isYandexRegModel = !hasMixedCalculationModels && calculationModelCode === 'op_yandex_reg';
                                             const isOpSalesModel = isOsnovaModel || isPotokModel || isVerificatorModel || isYandexRegModel;
                                             const interactionLabel = isChatModel ? 'Чаты' : 'Звонки';
@@ -62440,13 +62440,13 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                     fines,
                                                 })
                                                 : null;
-                                            // «Яндекс Регистрация»: конверсия группы и личные успешки в системе не хранятся —
+                                            // «Яндекс Регистрация»: заявки и успешки оператора в системе не хранятся —
                                             // в часах видна только постоянная часть.
                                             const estimatedYandexRegSalary = isYandexRegModel
                                                 ? calculateYandexRegSalary({
                                                     hoursWorked: regular,
                                                     hoursNorm: norm,
-                                                    deals: 0,
+                                                    successes: 0,
                                                     quality: salaryQuality,
                                                     fines,
                                                     bonuses,
@@ -62499,7 +62499,7 @@ if (typeof window !== 'undefined' && readStoredSessionUser()) {
                                                 ].filter(Boolean)
                                                 : isYandexRegModel
                                                 ? [
-                                                    'конверсия группы и успешки',
+                                                    'заявки и успешки',
                                                     !hasSalaryQuality ? 'качество' : null,
                                                     safeNum(norm) <= 0 ? 'норма' : null,
                                                 ].filter(Boolean)

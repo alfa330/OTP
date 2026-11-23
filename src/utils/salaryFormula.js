@@ -896,23 +896,26 @@ export function calculateVerificatorSalary({
 // ──────────────────────────────────────────────────────────────────────────
 // МОДЕЛЬ ОП «ЯНДЕКС РЕГИСТРАЦИЯ» (op_yandex_reg).
 // Перенесена из «KPI.xlsx» (лист «ЯР») и пояснения владельца
-// «KPI_логика_и_калькулятор_ЗП.xlsx» (листы «Логика расчёта» / «Калькулятор ЗП»):
-//   Факт. конверсия = успешные заявки группы ÷ поступившие заявки группы (B11)
-//   % плана         = факт. конверсия ÷ целевую конверсию (50%)          (B13)
+// «KPI_логика_и_калькулятор_ЗП.xlsx» (листы «Логика расчёта» / «Калькулятор ЗП»),
+// с ноября 2026 — по задаче SALES-2 (#427): план 45 %, конверсия личная:
+//   Факт. конверсия = мои успешно закрытые ÷ мои поступившие заявки      (B11)
+//   % плана         = факт. конверсия ÷ целевую конверсию (45%)          (B13)
 //   Цена успешки    — ступень по % плана: 0/200/240/280/320/360 ₸        (B14)
 //   Удержание       — ступень по ИНДИВИДУАЛЬНОМУ качеству звонков        (B15)
-//   Бонус           = мои успешные заявки × цену успешки                 (B16)
+//   Бонус           = мои успешно закрытые × цену успешки                (B16)
 //   Оклад           = отработанные часы × 600 ₸/ч                        (B17)
 //   Итого           = оклад + бонус − удержание − штрафы + премии        (B18)
 // ВАЖНО: шаг 6 файла «Логика расчёта» читает «Сумму бонуса» как фиксированную
 // выплату за месяц (200 ₸ рядом со 105 600 ₸ оклада). Владелец подтвердил: это
 // ЦЕНА ЗА ОДНУ УСПЕШНУЮ ЗАЯВКУ — как «Сумма за успешку» в модели «Основа», откуда
 // шкала ЯР и скопирована, поэтому бонус умножается на успешки оператора.
-// Конверсия — ГРУППОВАЯ (общий показатель ЯР), качество — личное.
+// До SALES-2 конверсия была ГРУППОВОЙ (заявки ЯР целиком), а успешки для бонуса
+// вводились отдельным полем; теперь одно «Успешно закрыто» оператора идёт и в
+// конверсию, и в бонус. Ступени цены и удержания не менялись.
 // ──────────────────────────────────────────────────────────────────────────
 export const YANDEX_REG_HOURLY_RATE = 600;          // G3 «Оплата в час»
 export const YANDEX_REG_NORM_HOURS_FTE = 176;       // G12 «Часы»
-export const YANDEX_REG_TARGET_CONVERSION = 0.5;    // G11 «Конверсия» — целевая
+export const YANDEX_REG_TARGET_CONVERSION = 0.45;   // G11 «Конверсия» — целевая (SALES-2: было 0,5)
 
 // Удержание с бонуса по личному качеству (A4:B9 + вспомогательная таблица A15:B20).
 // Границы берём из массива формулы: «74% и ниже» → 0,5, ступень 0,4 начинается с 75%.
@@ -928,7 +931,7 @@ export function yandexRegQualityWithholdRate(quality) {
     return 0;                 // 96-100%
 }
 
-// Цена одной успешной заявки от % выполнения плана конверсии ГРУППОЙ (C4:D9).
+// Цена одной успешной заявки от % выполнения плана конверсии (C4:D9).
 // В формуле это MATCH по возрастающему массиву с первым порогом 0,7, поэтому ниже
 // 70% ступень та же, что и на 70% — ноль.
 export function yandexRegDealPrice(planRatio) {
@@ -943,20 +946,19 @@ export function yandexRegDealPrice(planRatio) {
 
 /**
  * Зарплата оператора ОП «Яндекс Регистрация» за месяц.
- * Конверсия считается по группе: groupRequests/groupSuccesses — заявки ЯР целиком.
- * Если конверсию передали готовой долей (factConversion), группа не нужна.
- * deals — УСПЕШНЫЕ ЗАЯВКИ САМОГО ОПЕРАТОРА, на них умножается цена успешки.
+ * Конверсия ЛИЧНАЯ (SALES-2): requests — поступившие заявки оператора,
+ * successes — его успешно закрытые; на них же умножается цена успешки.
+ * Если конверсию передали готовой долей (factConversion), заявки не нужны.
  * quality — личное качество звонков, 0..100.
  */
 export function calculateYandexRegSalary({
     hoursWorked = 0,
     hoursNorm = 0,
     hourlyRate = YANDEX_REG_HOURLY_RATE,
-    groupRequests = 0,
-    groupSuccesses = 0,
+    requests = 0,
+    successes = 0,
     factConversion = null,
     targetConversion = YANDEX_REG_TARGET_CONVERSION,
-    deals = 0,
     quality = 0,
     fines = 0,
     bonuses = 0,
@@ -965,21 +967,23 @@ export function calculateYandexRegSalary({
     const norm = Math.max(0, parseFloat(hoursNorm) || 0);
     const rate = parseFloat(hourlyRate);
     const rateV = Number.isFinite(rate) ? rate : YANDEX_REG_HOURLY_RATE;
-    const requests = Math.max(0, parseFloat(groupRequests) || 0);
-    const successes = Math.max(0, parseFloat(groupSuccesses) || 0);
-    const dealsV = Math.max(0, parseFloat(deals) || 0);
+    const requestsV = Math.max(0, parseFloat(requests) || 0);
+    const successesV = Math.max(0, parseFloat(successes) || 0);
 
     const parsedConversion = factConversion === null || factConversion === '' ? null : parseFloat(factConversion);
     const conversion = Number.isFinite(parsedConversion)
         ? Math.max(0, parsedConversion)
-        : (requests > 0 ? successes / requests : 0);
+        : (requestsV > 0 ? successesV / requestsV : 0);
     const parsedTarget = parseFloat(targetConversion);
     const target = Number.isFinite(parsedTarget) && parsedTarget > 0 ? parsedTarget : 0;
 
-    const planPercent = target > 0 ? conversion / target : 0;
+    // Доля плана округляется до 1e-9: при цели 0,45 деление даёт 0,7999999999999999
+    // там, где ровно 80 % (36 из 100), и оператор терял бы ступень цены. При 0,5
+    // такого не было — делить на степень двойки двоичная дробь умеет точно.
+    const planPercent = target > 0 ? Math.round((conversion / target) * 1e9) / 1e9 : 0;
     const oklad = hours * rateV;
     const dealPrice = yandexRegDealPrice(planPercent);
-    const bonusDeals = dealsV * dealPrice;
+    const bonusDeals = successesV * dealPrice;
     const qualityWithholdRate = yandexRegQualityWithholdRate(quality);
     const qualityWithheld = bonusDeals * qualityWithholdRate;
     const finesV = parseFloat(fines) || 0;
@@ -990,12 +994,11 @@ export function calculateYandexRegSalary({
         model: 'op_yandex_reg',
         hourlyRate: rateV,
         oklad,
-        groupRequests: requests,
-        groupSuccesses: successes,
+        requests: requestsV,
+        successes: successesV,
         factConversion: conversion,        // доля: 0,41 = 41%
-        targetConversion: target,          // доля: 0,5 = 50%
+        targetConversion: target,          // доля: 0,45 = 45%
         planPercent,                       // доля: 1 = 100%
-        deals: dealsV,
         dealPrice,
         bonusDeals,
         quality: parseFloat(quality) || 0,
