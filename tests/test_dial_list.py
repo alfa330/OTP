@@ -4857,6 +4857,67 @@ class PhoneHeardTests(unittest.TestCase):
         self.assertLess(next(i for i, s in enumerate(sqls) if "SET state = 'finished'" in s),
                         next(i for i, s in enumerate(sqls) if 'auto_hangup, talk_detected' in s))
 
+    def _refusal(self, free_row, hung_up=None, talk=False, disposition='CONGESTION'):
+        """_finish_attempt с финалом сети; free_row — ответ _network_refusal_free: (итога нет, прежних отказов)."""
+        cur = _RoutedCursor([
+            ("SET state = 'finished'", {'one': ('asg-1',)}),
+            ('SELECT operator_hangup_at, ring_timeout_at', {'one': (hung_up, None, '', talk)}),
+            ('SELECT t.outcome_id IS NULL', {'one': free_row}),
+            ('COALESCE(o.requeue, FALSE)', {'one': (False,)}),
+            ('SELECT lead_id, state FROM dial_list_assignments', {'one': ('lead-1', 'issued')}),
+        ])
+        svc = dial_service.DialListService(db=_routed_db(cur))
+        calls = []
+        svc._cancel_attempt = lambda cur, aid, asg, late=False: calls.append(('cancel', late)) or True
+        svc._close_assignment = (lambda cur, asg, lead, result, answered, count_attempt, requeue=False:
+                                 calls.append(('close', result, answered, count_attempt)))
+        svc._touch_lead = (lambda cur, lead, answered, count_attempt, requeue=False:
+                           calls.append(('touch', answered, count_attempt)))
+        self.assertTrue(svc._finish_attempt('att-1', disposition, 0, 7, 'webhook'))
+        return calls, cur
+
+    def test_network_refusal_is_not_counted_to_the_driver(self):
+        # 23.11.2026: Binotel CONGESTION (прямой звонок Тез — SIP 503) — сеть не пропустила звонок, водителю он
+        # не ушёл. Строку не закрываем, лида не трогаем, счётчик строки откатываем — при любом talk_detected:
+        # финал Binotel сильнее «разговора», который будто бы слышал телефон.
+        for talk in (False, None, True):
+            calls, cur = self._refusal((True, 0), talk=talk)
+            self.assertEqual(calls, [], talk)
+            (sql, params), = cur.sql_with('UPDATE dial_list_assignments SET attempts = GREATEST(attempts - 1, 0)')
+            self.assertIn("WHERE id = %s AND state = 'issued'", ' '.join(sql.split()))
+            self.assertEqual(params, ('asg-1',))
+            self.assertEqual(_writes([s for s, _ in cur.executed])[-1], sql)
+        # Регистр — как у прочих финалов Binotel.
+        self.assertEqual(self._refusal((True, 0), disposition=' congestion ')[0], [])
+        # Бесплатный отказ спрашивает итог попытки и прежние отказы её строки — после UPDATE, под замком строки.
+        _, cur = self._refusal((True, 2))
+        (sql, params), = cur.sql_with('SELECT t.outcome_id IS NULL')
+        flat = ' '.join(sql.split())
+        self.assertIn("p.assignment_id = t.assignment_id AND p.id <> t.id AND p.state = 'finished' "
+                      "AND NOT p.cancelled AND UPPER(p.disposition) IN %s", flat)
+        self.assertEqual(params, (('CONGESTION',), 'att-1'))
+        # Отбой оператора до ответа — по-прежнему отмена (тоже не в счёт).
+        self.assertEqual(self._refusal((True, 0), hung_up='t')[0], [('cancel', False)])
+
+    def test_network_refusal_is_counted_after_the_free_ones_or_with_a_saved_outcome(self):
+        free = dial_service.NETWORK_REFUSALS_FREE_PER_ROW
+        self.assertEqual(free, 3)
+        self.assertEqual(self._refusal((True, free - 1))[0], [])
+        counted = [('close', 'other', False, True)]
+        # Бесплатные отказы строки кончились — в счёт, как прочий недозвон.
+        self.assertEqual(self._refusal((True, free))[0], counted)
+        self.assertEqual(self._refusal((True, free + 4))[0], counted)
+        # Итог по попытке оператор уже сохранил (окно итога открыл разговор, который слышал телефон) — как раньше.
+        self.assertEqual(self._refusal((False, 0), talk=True)[0], counted)
+        # Ответа нет (попытка пропала) — в счёт, как раньше.
+        self.assertEqual(self._refusal(None)[0], counted)
+        # Прочие финалы сети в счёт, как были, и про отказы не спрашивают.
+        for disposition, result in (('CHANUNAVAIL', 'other'), ('BUSY', 'busy'), ('NOANSWER', 'no_answer'),
+                                    ('FAILED', 'other')):
+            calls, cur = self._refusal((True, 0), disposition=disposition)
+            self.assertEqual(calls, [('close', result, False, True)], disposition)
+            self.assertEqual(cur.sql_with('SELECT t.outcome_id IS NULL'), [], disposition)
+
     def test_late_final_over_provisional_one_obeys_the_same_rule(self):
         # Попытку закрыли без настоящего исхода (таймаут), потом пришёл ANSWER: дозвон лиду —
         # только если это разговор.

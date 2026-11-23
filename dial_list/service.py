@@ -265,10 +265,21 @@ DIRECT_DIAL_MIN_VERSION = (3, 22, 46)
 QR_LOCK_MIN_VERSION = (3, 22, 47)
 # Срок автосброса у прямого звонка — от первых гудков (180/183), без поправки на сообщение АТС.
 DIRECT_RING_LEAD_IN_SEC = 0
-# Код SIP конца прямого звонка → исход, как у Binotel (map_disposition): занято, не ответил, прочее —
-# «не дозвонились». 0 — звонок не начался вовсе (телефон не смог набрать).
+# Код SIP конца прямого звонка → исход, как у Binotel (map_disposition): занято, не ответил, сеть не
+# пропустила, прочее — «не дозвонились». 0 — звонок не начался вовсе (телефон не смог набрать).
 DIRECT_SIP_BUSY = (486, 600, 603)
 DIRECT_SIP_NO_ANSWER = (408, 480, 487)
+# Сеть не пропустила звонок (23.11.2026). Binotel пишет CONGESTION, когда ни у него, ни у вышестоящего
+# оператора связи нет свободного канала: водителю звонок не ушёл вовсе — ни гудка, ни сообщения сети.
+# Прямой звонок Тез видит то же как SIP 503 (телефон пишет «Линии оператора связи перегружены»). 23.11 с
+# 14:45 так отбивалась половина исходящих обоих кабинетов Binotel (три номера компании, водители всех
+# операторов связи поровну) — сбой связи, а не водителя: такая попытка ему не в счёт (_finish_attempt),
+# строка остаётся в работе, автообзвон наберёт её снова после свежих строк пачки (_auto_ready_at).
+NETWORK_REFUSAL_DISPOSITIONS = frozenset({"CONGESTION"})
+DIRECT_SIP_NETWORK_REFUSAL = (503,)
+# Бесплатных отказов сети у одной строки выдачи — не больше стольких, следующий в счёт, как прочий
+# недозвон: при сплошном блоке номера автообзвон иначе звонил бы одним и тем же водителям по кругу.
+NETWORK_REFUSALS_FREE_PER_ROW = 3
 # Вебхук Binotel о прямом звонке ищет попытку по линии, номеру и времени: звонок начался не раньше
 # заявки (запас — разница часов) и не позже стольких секунд после неё.
 DIRECT_WEBHOOK_EARLY_SEC = 30
@@ -1351,11 +1362,14 @@ def phone_display(phone_norm):
 
 def direct_disposition(talk, sip_code):
     """Исход прямого звонка по тому, что видел телефон: разговор — ANSWER; иначе по коду отбоя SIP —
-    BUSY (занято, отклонил), NOANSWER (не взял трубку, гудки кончились), прочее — FAILED (номер не
-    существует, сеть, АТС)."""
+    BUSY (занято, отклонил), NOANSWER (не взял трубку, гудки кончились), CONGESTION (503: сеть не
+    пропустила звонок — так его пишет и Binotel; водителю не в счёт), прочее — FAILED (номер не
+    существует, АТС)."""
     if talk:
         return "ANSWER"
     code = _to_int(sip_code, 0)
+    if code in DIRECT_SIP_NETWORK_REFUSAL:
+        return "CONGESTION"
     if code in DIRECT_SIP_BUSY:
         return "BUSY"
     if code in DIRECT_SIP_NO_ANSWER:
@@ -7021,7 +7035,8 @@ class DialListService:
         допишет generalCallID и уточнит длительность). sip_code 0 без разговора — звонок не начался
         (статус телефона, звук, линия): попытка failed и не в счёт ни строке, ни водителю. Иначе —
         _finish_attempt с ANSWER (разговор, billsec = leg_sec) или с исходом по коду SIP; отбой
-        оператора до ответа там же становится отменой. Ответ — решение по итогу, как у phone_event."""
+        оператора до ответа там же становится отменой, а 503 (CONGESTION, сеть не пропустила звонок) —
+        тоже не в счёт. Ответ — решение по итогу, как у phone_event."""
         code = _to_int(sip_code, -1)
         with self.db._get_cursor() as cur:
             cur.execute("UPDATE dial_list_attempts SET sip_code = %s WHERE id = %s",
@@ -7374,7 +7389,10 @@ class DialListService:
         сети, которое положил телефон; мгновенный сброс, когда телефон разговора не
         услышал) — недозвон. Что сообщил телефон, читаем ПОСЛЕ своего UPDATE: строка
         попытки уже под замком, и событие ended, пришедшее в ту же секунду, либо уже
-        записано, либо дождётся конца этой транзакции и поправит засчитанное само."""
+        записано, либо дождётся конца этой транзакции и поправит засчитанное само.
+
+        Не в счёт (строка остаётся в работе): отбой оператора до ответа (_cancel_attempt) и
+        отказ сети — CONGESTION (NETWORK_REFUSAL_DISPOSITIONS, _network_refusal_free)."""
         disposition = str(disposition or "").strip().upper()[:32]
         with self.db._get_cursor() as cur:
             cur.execute("""
@@ -7442,6 +7460,19 @@ class DialListService:
                     and hung[3] is not True):
                 self._cancel_attempt(cur, str(attempt_id), assignment_id, late=False)
                 return True
+            # Сеть не пропустила звонок (NETWORK_REFUSAL_DISPOSITIONS, 23.11.2026): водителю он не ушёл —
+            # не в счёт ни строке, ни лиду, строка остаётся в работе. Финал Binotel сильнее разговора,
+            # который будто бы слышал телефон (реплика оператора, фраза сети о перегрузке). В счёт, как
+            # раньше, — если оператор уже сохранил итог по этой попытке или у строки кончились бесплатные
+            # отказы (_network_refusal_free).
+            if disposition in NETWORK_REFUSAL_DISPOSITIONS and self._network_refusal_free(cur, attempt_id):
+                cur.execute("""
+                    UPDATE dial_list_assignments SET attempts = GREATEST(attempts - 1, 0)
+                    WHERE id = %s AND state = 'issued'
+                """, (assignment_id,))
+                log.info("dial_list: попытка %s — сеть не пропустила звонок (%s, %s): водителю не в счёт, "
+                         "строка %s остаётся в работе", attempt_id, disposition, source, assignment_id)
+                return True
             # Оператор мог успеть выбрать итог «перезвонить» раньше, чем приехал исход
             # от АТС: тогда лид не закрываем, а оставляем на повтор.
             cur.execute("""
@@ -7460,6 +7491,20 @@ class DialListService:
                 self._touch_lead(cur, str(a[0]), answered=(result == "answered"), count_attempt=True,
                                  requeue=requeue)
         return True
+
+    @staticmethod
+    def _network_refusal_free(cur, attempt_id):
+        """Отказ сети у попытки бесплатный (_finish_attempt): итога по ней оператор не сохранял, а прежних
+        отказов сети у её строки меньше NETWORK_REFUSALS_FREE_PER_ROW. Нет данных — в счёт, как раньше."""
+        cur.execute("""
+            SELECT t.outcome_id IS NULL,
+                   (SELECT COUNT(*) FROM dial_list_attempts p
+                    WHERE p.assignment_id = t.assignment_id AND p.id <> t.id AND p.state = 'finished'
+                      AND NOT p.cancelled AND UPPER(p.disposition) IN %s)
+            FROM dial_list_attempts t WHERE t.id = %s
+        """, (tuple(sorted(NETWORK_REFUSAL_DISPOSITIONS)), str(attempt_id)))
+        row = cur.fetchone()
+        return bool(row) and bool(row[0]) and int(row[1] or 0) < NETWORK_REFUSALS_FREE_PER_ROW
 
     def _close_assignment(self, cur, assignment_id, lead_id, result, answered, count_attempt, requeue=False):
         cur.execute("""

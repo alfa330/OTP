@@ -572,6 +572,10 @@ class RulesTests(unittest.TestCase):
         self.assertEqual([disp(True, 0), disp(False, 486), disp(False, 603), disp(False, 480), disp(False, 487),
                           disp(False, 404), disp(False, None)],
                          ['ANSWER', 'BUSY', 'BUSY', 'NOANSWER', 'NOANSWER', 'FAILED', 'FAILED'])
+        # 503 — сеть не пропустила звонок (23.11.2026): так его пишет и Binotel, водителю не в счёт.
+        self.assertEqual([disp(False, 503), disp(False, '503'), disp(True, 503), disp(False, 502), disp(False, 500)],
+                         ['CONGESTION', 'CONGESTION', 'ANSWER', 'FAILED', 'FAILED'])
+        self.assertIn('CONGESTION', dial_service.NETWORK_REFUSAL_DISPOSITIONS)
 
     def test_whatsapp_file_type_is_read_from_the_bytes(self):
         kind = dial_service.wa_media_type

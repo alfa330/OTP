@@ -243,9 +243,9 @@ def test_binotel_no_answer_outranks_a_talk_the_phone_thought_it_heard(env):
     # Ревью 13.10.2026: «Абонент недоступен.» — пауза — оператор «алло?» — «Позвоните позднее»:
     # для телефона это обмен репликами (talk_detected true), и окно итога открылось. Binotel
     # закрыл звонок финальным «не дозвонились» — итог не нужен и следующий звонок не держит;
-    # попытка — недозвон в счёте, не отмена «до ответа».
-    results = {'BUSY': 'busy', 'NOANSWER': 'no_answer', 'CANCEL': 'no_answer', 'CHANUNAVAIL': 'other',
-               'CONGESTION': 'other'}
+    # попытка — недозвон в счёте, не отмена «до ответа». CONGESTION (сеть не пропустила звонок)
+    # не в счёт вовсе — test_network_refusal_is_not_counted_whatever_the_phone_heard.
+    results = {'BUSY': 'busy', 'NOANSWER': 'no_answer', 'CANCEL': 'no_answer', 'CHANUNAVAIL': 'other'}
     for n, (disposition, result) in enumerate(results.items()):
         lead, asg = env.lead('Водитель %d' % n, '7701100000%d' % n)
         attempt = env.call(asg)
@@ -278,6 +278,48 @@ def test_binotel_no_answer_outranks_a_talk_the_phone_thought_it_heard(env):
     env.ended(attempt, by_operator=False, leg_sec=30, talk_detected=True)
     env.svc._finish_attempt(attempt["attempt_id"], 'UNKNOWN', 0, 0, 'timeout')
     assert env.pending() == attempt["attempt_id"]
+
+
+def test_network_refusal_is_not_counted_whatever_the_phone_heard(env):
+    # 23.11.2026: с 14:45 Binotel отбивал половину исходящих финалом CONGESTION — сеть не пропустила звонок,
+    # водителю он не ушёл. Такая попытка не в счёт ни строке, ни водителю, строка остаётся в работе, и
+    # следующий звонок она не держит. Разговор, который будто бы слышал телефон (фраза сети о перегрузке,
+    # «алло?» оператора), финала Binotel не перебивает.
+    lead, asg = env.lead('Перегрузов Пётр', '77011000071')
+    before = env.lead_row(lead)
+    for n, (by_operator, talk) in enumerate(((True, True), (False, False), (False, True))):
+        attempt = env.call(asg)
+        env.ended(attempt, by_operator=by_operator, leg_sec=7, talk_detected=talk)
+        env.final(attempt, 'CONGESTION', 0)
+        assert env.attempt_row(attempt)[:3] == ('finished', 'CONGESTION', False), n
+        assert env.assignment(asg) == ('issued', '', 0), n
+        assert env.lead_row(lead) == before, n
+        assert env.pending() is None, n
+        assert env.svc.get_state(OPERATOR, phone_version=GUARDED)["pending_outcome"] is None, n
+    # Бесплатных отказов у строки — NETWORK_REFUSALS_FREE_PER_ROW: четвёртый подряд в счёте, как прочий
+    # недозвон, — при сплошном блоке номера обзвон не крутит одних и тех же водителей без конца.
+    attempt = env.call(asg)
+    env.ended(attempt, by_operator=False, leg_sec=7, talk_detected=False)
+    env.final(attempt, 'CONGESTION', 0)
+    assert env.assignment(asg) == ('done', 'other', 1)
+    assert env.lead_row(lead) == ('in_progress', 1, False)
+    # Итог, сохранённый раньше финала (окно итога открыл разговор, который слышал телефон), — в счёт, как раньше.
+    lead, asg = env.lead('Итогов Иван', '77011000072')
+    attempt = env.call(asg)
+    env.ended(attempt, by_operator=False, leg_sec=40, talk_detected=True)
+    assert env.save(attempt) == 'Отказ'
+    env.final(attempt, 'CONGESTION', 0)
+    assert env.assignment(asg) == ('done', 'other', 1)
+    assert env.lead_row(lead) == ('in_progress', 1, False)
+    # Тот же финал опросом Binotel (вебхук не дошёл) — то же правило.
+    lead, asg = env.lead('Опросов Олег', '77011000073')
+    before = env.lead_row(lead)
+    attempt = env.call(asg)
+    env.ended(attempt, by_operator=False, leg_sec=7, talk_detected=False)
+    env.binotel.live[attempt["general_call_id"]] = {"disposition": 'CONGESTION', "billsec": 0, "waitsec": 7}
+    env.svc._finish_by_call(attempt["attempt_id"], dict(env.binotel.live[attempt["general_call_id"]]), 'poll')
+    assert env.assignment(asg) == ('issued', '', 0)
+    assert env.lead_row(lead) == before
 
 
 def test_no_talk_heard_waits_for_binotel(env):

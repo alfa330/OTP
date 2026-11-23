@@ -1060,6 +1060,89 @@ def test_direct_call_tez_phone_dials_itself_and_closes_by_what_it_saw(env, settl
     assert env.svc.handle_webhook(other, '194.88.218.116')["matched"] is False
 
 
+def test_network_refusal_of_a_direct_call_is_not_counted_and_is_redialled_later(env, settle_now, monkeypatch):
+    """23.11.2026: у двух операторов автообзвона Тез телефон писал «Линии оператора связи перегружены» —
+    Binotel отбивал прямой звонок 503 (у себя — CONGESTION) без единого гудка: водителю звонок не ушёл, а
+    попытка сгорала, водитель уходил на час и дальше, третья такая — в «Не дозвонились». Теперь не в счёт
+    ни строке, ни водителю: автообзвон наберёт его снова — после свежих строк пачки и паузы повтора.
+    Вебхук Binotel с тем же финалом, обогнавший событие телефона, — то же."""
+    from werkzeug.datastructures import ImmutableMultiDict
+    env.enroll(portion_size=3)
+    env.leads(3)
+
+    def dial(assignment_id=None):
+        if assignment_id is None:
+            assignment_id = env.svc.auto_next(OPERATOR, status='active', phone_version=DIRECT)["next"]["assignment_id"]
+        a = env.svc.start_call(OPERATOR, assignment_id, auto=True, operator_status='active', phone_version=DIRECT)
+        assert a["direct"] is True
+        return a
+
+    def ended(attempt, sip_code):
+        return env.svc.phone_event(OPERATOR, attempt["attempt_id"], 'ended', phone_version=DIRECT, by_operator=False,
+                                   leg_sec=0, talk_detected=False, sip_code=sip_code)
+
+    def lead_of(attempt):
+        return str(attempt["lead_id"])
+
+    def lead_row(lead):
+        return env.one("SELECT status, attempts_total, last_attempt_at, next_call_at, owner_operator_id "
+                       "FROM dial_list_leads WHERE id = %s", (lead,))
+
+    def row(attempt):
+        return env.one("SELECT state, result, attempts FROM dial_list_assignments WHERE id = %s",
+                       (attempt["assignment_id"],))
+
+    first = dial()
+    before = lead_row(lead_of(first))
+    res = ended(first, 503)
+    assert (res["state"], res["final"], res["disposition"], res["cancelled"], res["outcome_required"]) == (
+        'finished', True, 'CONGESTION', False, False)
+    assert env.one("SELECT disposition, sip_code FROM dial_list_attempts WHERE id = %s",
+                   (first["attempt_id"],)) == ('CONGESTION', 503)
+    assert row(first) == ('issued', '', 0)
+    assert lead_row(lead_of(first)) == before
+    # Следующий — свежая строка пачки, а не тот же водитель.
+    second = dial()
+    assert lead_of(second) != lead_of(first)
+    # Вебхук Binotel с финалом обогнал событие телефона — тоже не в счёт; ended потом ничего не меняет.
+    before2 = lead_row(lead_of(second))
+    phone = env.one("SELECT phone_norm FROM dial_list_leads WHERE id = %s", (lead_of(second),))[0]
+    start = int(env.one("SELECT extract(epoch FROM requested_at) FROM dial_list_attempts WHERE id = %s",
+                        (second["attempt_id"],))[0])
+    form = ImmutableMultiDict({
+        'requestType': 'apiCallCompleted', 'callDetails[generalCallID]': '777000901',
+        'callDetails[internalNumber]': '601', 'callDetails[externalNumber]': phone,
+        'callDetails[startTime]': str(start + 1), 'callDetails[disposition]': 'CONGESTION',
+        'callDetails[billsec]': '0', 'callDetails[waitsec]': '7'})
+    assert env.svc.handle_webhook(form, '194.88.218.116')["matched"] is True
+    res = ended(second, 503)
+    assert (res["final"], res["cancelled"], res["outcome_required"]) == (True, False, False)
+    assert row(second) == ('issued', '', 0)
+    assert lead_row(lead_of(second)) == before2
+    # Прочий отказ — как был: занято в счёте.
+    third = dial()
+    assert lead_of(third) not in (lead_of(first), lead_of(second))
+    ended(third, 486)
+    assert row(third) == ('done', 'busy', 1)
+    # Свежих строк нет: отбитые ждут паузы повтора, потом цикл набирает их снова — первую раньше.
+    res = env.svc.auto_next(OPERATOR, status='active', phone_version=DIRECT)
+    assert (res["next"], res["reason"]) == (None, 'wait')
+    monkeypatch.setattr(dial_service, 'AUTO_RETRY_GAP_SEC', 0)
+    again = env.svc.auto_next(OPERATOR, status='active', phone_version=DIRECT)["next"]
+    assert again["assignment_id"] == first["assignment_id"]
+    # Отказ сети подряд у той же строки бесплатен NETWORK_REFUSALS_FREE_PER_ROW раз, следующий — в счёте.
+    for n in range(dial_service.NETWORK_REFUSALS_FREE_PER_ROW - 1):
+        ended(dial(first["assignment_id"]), 503)
+        assert row(first) == ('issued', '', 0), n
+    assert lead_row(lead_of(first)) == before
+    ended(dial(first["assignment_id"]), 503)
+    assert row(first) == ('done', 'other', 1)
+    status, attempts_total, _last, next_call_at, _owner = lead_row(lead_of(first))
+    assert (status, attempts_total) == ('in_progress', 1)
+    wait = (next_call_at - _now()).total_seconds() / 60
+    assert 58 <= wait <= 61                        # повтор — по расписанию отдела, как прочий недозвон
+
+
 def test_direct_call_is_only_for_tez(env):
     """Удалённый КЦ и с новым телефоном звонит через АТС: номер его операторам не уходит."""
     svc = env.svc
