@@ -258,6 +258,25 @@ class ItDepartmentMirrorTests(unittest.TestCase):
         # test_it_department_tasks_postgres.py).
         self.assertIn("CASE WHEN {_TASK_EMPLOYEE_SQL} THEN NULL ELSE u.supervisor_id END", tasks_source)
 
+    def test_it_staff_is_open_to_every_department(self):
+        # 23.11.2026: HR не мог поставить задачу Helpdesk — граница «админы + свой
+        # отдел» отсекала рядовых IT. IT открыт для поручений всем отделам.
+        namespace = {}
+        for name in ("TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES", "_TASK_OPEN_ASSIGNEE_SQL"):
+            exec(_segment(name, DB_CORE_PATH), namespace)
+        self.assertEqual({"it"}, set(namespace["TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES"]))
+        self.assertEqual("LOWER(BTRIM(d.code)) IN ('it')", namespace["_TASK_OPEN_ASSIGNEE_SQL"])
+        # Снимается именно граница отдела в списке исполнителей; правило ролей
+        # (кого из отдела можно выбрать) остаётся прежним. Список исполнителей —
+        # и проверка состава при создании и правке задачи (_task_assignees_outside_scope).
+        tasks_source = DB_TASKS_PATH.read_text(encoding="utf-8")
+        start = tasks_source.index("    def get_task_recipients(")
+        end = tasks_source.index("\n    def ", start + 1)
+        recipients = tasks_source[start:end]
+        self.assertIn("OR u.department_id = %s\"\n", recipients)
+        self.assertIn("f\" OR {_TASK_OPEN_ASSIGNEE_SQL})\"", recipients)
+        self.assertEqual(1, tasks_source.count("{_TASK_OPEN_ASSIGNEE_SQL}"))
+
 
 if __name__ == "__main__":
     unittest.main()

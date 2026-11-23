@@ -106,6 +106,7 @@ MODULE_NAMES = {
     'BACK_OFFICE_EMPLOYEE_ROLES', 'TASK_EMPLOYEE_DEPARTMENT_CODES', 'TASK_EMPLOYEE_ROLES',
     'TASK_PERSONAL_SCOPE_ROLES', 'TASK_RECIPIENT_ROLES', '_TASK_RECIPIENT_ROLES_SQL',
     '_TASK_EMPLOYEE_SQL', 'TASK_MANAGER_PRIVATE_DEPARTMENT_CODES', '_TASK_MANAGER_PRIVATE_SQL',
+    'TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES', '_TASK_OPEN_ASSIGNEE_SQL',
 }
 
 
@@ -195,14 +196,19 @@ def _visible(cur, viewer, role):
 
 
 def test_it_operator_assigns_within_it_and_to_admins(cur):
-    # Гард отдаёт рядовому IT его роль и границу своего отдела.
-    assert _recipients(IT_OPERATOR, 'operator', IT) == [IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN]
-    assert _recipients(IT_TRAINEE, 'trainee', IT) == [IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN]
+    # Гард отдаёт рядовому IT его роль и границу своего отдела; рядовой отдела
+    # « IT » в списке — IT открыт всем отделам (TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES).
+    assert _recipients(IT_OPERATOR, 'operator', IT) == [
+        IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN, IT_UNTRIMMED_OPERATOR,
+    ]
+    assert _recipients(IT_TRAINEE, 'trainee', IT) == [
+        IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN, IT_UNTRIMMED_OPERATOR,
+    ]
 
 
 def test_head_and_admin_can_assign_to_it_staff(cur):
     # Глава IT идёт под 'sv' своего отдела (_effective_scoped_manager_role).
-    assert _recipients(IT_HEAD, 'sv', IT) == [IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN]
+    assert _recipients(IT_HEAD, 'sv', IT) == [IT_HEAD, IT_OPERATOR, IT_TRAINEE, ADMIN, IT_UNTRIMMED_OPERATOR]
     # Админ — всех получателей компании; оператор линии и уволенный — нет. Рядовой
     # отдела с кодом « IT » — есть: код сверяется, как в гарде.
     assert _recipients(ADMIN, 'admin', None) == [
@@ -210,11 +216,17 @@ def test_head_and_admin_can_assign_to_it_staff(cur):
     ]
 
 
-def test_other_departments_do_not_get_it_staff(cur):
-    # Граница отдела та же, что у ролей из списка: СВ линии и кадровик
-    # рядовых IT в выпадашке не видят.
-    assert _recipients(LINE_SV, 'sv', SZOV) == [IT_HEAD, LINE_SV, ADMIN]
-    assert _recipients(HR_MANAGER, 'hr_manager', HR) == [IT_HEAD, HR_MANAGER, ADMIN]
+def test_any_department_assigns_to_it_staff(cur):
+    # 23.11.2026: IT открыт для поручений всем отделам (TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES):
+    # СВ линии и кадровик видят рядовых IT, и отдела « IT » тоже — код сверяется, как в
+    # гарде. Уволенного IT нет, а граница чужих отделов цела: кадровик не видит СВ линии,
+    # СВ линии — кадровика, оператора линии не видит никто.
+    assert _recipients(LINE_SV, 'sv', SZOV) == [
+        IT_HEAD, IT_OPERATOR, IT_TRAINEE, LINE_SV, ADMIN, IT_UNTRIMMED_OPERATOR,
+    ]
+    assert _recipients(HR_MANAGER, 'hr_manager', HR) == [
+        IT_HEAD, IT_OPERATOR, IT_TRAINEE, HR_MANAGER, ADMIN, IT_UNTRIMMED_OPERATOR,
+    ]
 
 
 def test_it_operator_sees_own_tasks_and_his_board(cur):

@@ -4,6 +4,7 @@
 без изменений тел. Модульные помощники и константы — в db/core.py."""
 from db.core import (  # noqa: F401
     _TASK_EMPLOYEE_SQL,
+    _TASK_OPEN_ASSIGNEE_SQL,
     _TASK_RECIPIENT_ROLES_SQL,
     _UNSET,
     calendar,
@@ -226,7 +227,12 @@ class TasksMixin:
                 scope_filter = ""
                 params = []
                 if scope_department_id is not None and not role_has_min(role, 'admin'):
-                    scope_filter = "AND (u.role IN ('super_admin', 'admin') OR u.department_id = %s)"
+                    # Люди IT (TASK_OPEN_ASSIGNEE_DEPARTMENT_CODES) — в списке у
+                    # любого отдела: им ставят задачи все, не только свои.
+                    scope_filter = (
+                        "AND (u.role IN ('super_admin', 'admin') OR u.department_id = %s"
+                        f" OR {_TASK_OPEN_ASSIGNEE_SQL})"
+                    )
                     params.append(int(scope_department_id))
                 # Себя включаем всегда: задачу можно поставить самому себе (своя инициатива),
                 # иначе роли вне списка получателей (например trainer) не могут ничего себе записать.
