@@ -12,3 +12,39 @@ body.mobile-shell .hiring-chats {
     height: calc(100dvh - 210px);
     min-height: 420px;
 }
+
+/* На компьютере «Чаты» — на весь экран (23.11.2026: «раздел чата сделать более на весь экран, убрав внешний
+   контейнер, который создаёт отдельный внешний скролл для всей страницы»). Раздел стоит в общем контейнере портала
+   (.main-content в App.jsx) с отступом 32 px и своей прокруткой, внутри — отступы раздела и окно чатов карточкой
+   с рамкой: вместе выше экрана, и страница прокручивалась целиком. Для вкладки «Чаты» (класс оболочки раздела
+   hiring-screen-chats, HiringView) отступы и прокрутка контейнера сняты, шапка раздела — сверху, под ней окно до
+   низа экрана без рамки; прокручиваются только список чатов и лента. На телефоне — как было (правило выше). */
+body:not(.mobile-shell) .main-content:has(> .hiring-screen-chats) {
+    height: 100vh;
+    min-height: 0;
+    padding: 0;
+    overflow: hidden;
+}
+
+body:not(.mobile-shell) .hiring-screen-chats {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+}
+
+body:not(.mobile-shell) .hiring-screen-chats > header {
+    flex: none;
+    margin-bottom: 0;
+    padding: 14px 20px 12px;
+}
+
+body:not(.mobile-shell) .hiring-screen-chats .hiring-chats {
+    flex: 1 1 0;
+    height: auto;
+    min-height: 0;
+    border-radius: 0;
+    border-top: 1px solid rgb(226 232 240);
+    box-shadow: none;
+}

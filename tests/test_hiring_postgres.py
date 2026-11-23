@@ -2710,6 +2710,19 @@ def test_chat_window_waiting_counter_and_take_before_reply(world):
     # Поиск: по имени и по хвосту номера.
     assert [i['key'] for i in service.wa_chats(me, {'q': '8802'})['items']] == ['+77055558802']
     assert len(service.wa_chats(me, {'q': 'айгерим'})['items']) == 2
+    # Отбор по статусам кандидата (23.11.2026): один или несколько сразу; «Ждут ответа» — в пределах отбора.
+    in_work = service.wa_chats(me, {'stages': 'in_work'})
+    assert [i['key'] for i in in_work['items']] == ['+77055558801']
+    assert in_work['totals'] == {'total': 1, 'waiting_chats': 1, 'waiting_messages': 1}
+    assert [i['key'] for i in service.wa_chats(me, {'stages': 'responses,in_work'})['items']] == ['+77055558801', '+77055558802']
+    assert service.wa_chats(me, {'stages': 'hired'})['items'] == []
+    assert service.wa_chats(me, {'stages': 'responses', 'mode': 'mine'})['items'] == []      # отборы складываются
+    # Незнакомый код отбрасывается; ничего годного — отбора нет.
+    assert len(service.wa_chats(me, {'stages': "responses' OR '1'='1"})['items']) == 2
+    assert [i['key'] for i in service.wa_chats(me, {'stages': 'nope,responses'})['items']] == ['+77055558802']
+    assert len(service.wa_chats(me, {'stages': 'nope'})['items']) == 2
+    # Счётчик вкладки (сводка) отбора не знает — он по всем чатам.
+    assert service.wa_chat_summary(me)['waiting_chats'] == 2
 
 
 def test_chat_reply_goes_through_bridge_queue(world):

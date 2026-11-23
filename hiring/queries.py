@@ -1806,10 +1806,12 @@ def _like(text):
     return '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
 
 
-def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_only, search, phone_own_only=False):
+def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_only, search, phone_own_only=False, stages=()):
     """Чаты, куда кандидат писал сам, и чаты карточек, где уже есть сообщения (кандидату написали первыми из карточки,
     владелец 20.11.2026; пустой чат, открытый кнопкой и брошенный, в списке не висит), — в пределах видимости карточек
-    (queries.scope_clause); чаты без карточки (иностранный номер, скрытый) — только руководителю."""
+    (queries.scope_clause); чаты без карточки (иностранный номер, скрытый) — только руководителю. stages — отбор по
+    статусам (этапам) карточки кандидата (23.11.2026: «фильтровать кандидатов по статусам»): чат без карточки в него
+    не входит."""
     where = ["(w.last_inbound_at IS NOT NULL OR (w.card_id IS NOT NULL AND w.messages > 0))",
              "((c.id IS NOT NULL AND %s)%s)" % (scope_sql, " OR c.id IS NULL" if lead else "")]
     params = list(scope_params)
@@ -1820,6 +1822,9 @@ def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_on
         where.append("c.stage IN ('contacts', 'responses') AND NOT c.is_closed")
     if waiting_only:
         where.append("COALESCE(w.waiting, 0) > 0")
+    if stages:
+        where.append("c.stage = ANY(%s)")
+        params.append(list(stages))
     text = ' '.join(str(search or '').split())[:80]
     if text:
         digits = ''.join(ch for ch in text if ch.isdigit())
@@ -1840,13 +1845,13 @@ def _chat_list_where(scope_sql, scope_params, *, lead, user_id, mode, waiting_on
 
 
 def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', waiting_only=False, search='',
-                 limit=50, offset=0, phone_own_only=False):
+                 limit=50, offset=0, phone_own_only=False, stages=()):
     """Страница списка чатов: ждущие ответа сверху, и внутри них, и ниже — по последнему сообщению, свежее выше
     (владелец 20.11.2026: «даже у не прочитанных сообщений последнее написанное сообщение отображалось наверху»;
     раньше среди ждущих первым стоял дольше всех ждущий). Последнее сообщение — только у строк страницы (LATERAL
     по индексу чата)."""
     where, params = _chat_list_where(scope_sql, scope_params, lead=lead, user_id=user_id, mode=mode,
-                                     waiting_only=waiting_only, search=search, phone_own_only=phone_own_only)
+                                     waiting_only=waiting_only, search=search, phone_own_only=phone_own_only, stages=stages)
     cursor.execute("""
         WITH page AS (
             SELECT w.key, w.jid, w.phone, w.push_name, w.card_id, w.last_at, w.last_inbound_at,
@@ -1869,10 +1874,11 @@ def wa_chat_list(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', 
     return _all(cursor)
 
 
-def wa_chat_totals(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', search='', phone_own_only=False):
+def wa_chat_totals(cursor, scope_sql, scope_params, *, lead, user_id, mode='all', search='', phone_own_only=False,
+                   stages=()):
     """Сколько чатов в выборке и сколько из них ждут ответа (счётчик «Ждут ответа» и вкладки)."""
     where, params = _chat_list_where(scope_sql, scope_params, lead=lead, user_id=user_id, mode=mode,
-                                     waiting_only=False, search=search, phone_own_only=phone_own_only)
+                                     waiting_only=False, search=search, phone_own_only=phone_own_only, stages=stages)
     cursor.execute("SELECT COUNT(*), COUNT(*) FILTER (WHERE COALESCE(w.waiting, 0) > 0), "
                    "COALESCE(SUM(COALESCE(w.waiting, 0)), 0) " + _CHAT_LIST_FROM + " WHERE " + where, params)
     total, waiting_chats, waiting_messages = cursor.fetchone()

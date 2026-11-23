@@ -1769,15 +1769,17 @@ class HiringService:
         waiting_only = str(params.get('waiting') or '').strip().lower() in ('1', 'true', 'yes')
         search = str(params.get('q') or '')[:80]
         offset = max(0, _int(params.get('offset')) or 0)
+        # Отбор по статусам кандидата (23.11.2026): коды этапов через запятую; незнакомые отбрасываются.
+        stages = [code for code in dict.fromkeys(str(params.get('stages') or '').split(',')) if code in rules.STAGE_CODES]
         scope_sql, scope_params = queries.scope_clause(caps, ctx['user_id'])
         remote = access.is_remote(ctx)
         now = self._now()
         with self._cursor() as cursor:
             rows = queries.wa_chat_list(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'],
                                         mode=mode, waiting_only=waiting_only, search=search,
-                                        limit=self.WA_CHAT_PAGE, offset=offset, phone_own_only=remote)
+                                        limit=self.WA_CHAT_PAGE, offset=offset, phone_own_only=remote, stages=stages)
             totals = queries.wa_chat_totals(cursor, scope_sql, scope_params, lead=caps['lead'], user_id=ctx['user_id'],
-                                            mode=mode, search=search, phone_own_only=remote)
+                                            mode=mode, search=search, phone_own_only=remote, stages=stages)
             connection = self._wa_connection(cursor, now)
         self._wa_ui_touch()
         return {'items': [self._wa_chat_row(ctx, row) for row in rows], 'totals': totals, 'connection': connection,

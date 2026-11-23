@@ -4,6 +4,7 @@ import {
     Search, Send, Slash, Smile, Trash2, UserRound, X,
 } from 'lucide-react';
 import { IosLightbox, IosModal, IosSegmented, iosInput } from '../ui/ios';
+import CustomSelect from '../ui/CustomSelect';
 import { startFileDownload } from '../../utils/fileDownload';
 import MessageDeliveryStatus from '../wazzup/MessageDeliveryStatus';
 import ChatMessageText from '../wazzup/ChatMessageText';
@@ -840,9 +841,16 @@ const Thread = ({ api, toast, chatKey, onBack, onOpenCard, onChanged, caps, live
 
 // ─── Вкладка ──────────────────────────────────────────────────────────────
 
-const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting, focus, onFocusConsumed }) => {
+// Отбор по статусам кандидата (23.11.2026: «в чате надо добавить возможность фильтровать кандидатов по статусам»): этапы
+// воронки, можно несколько сразу; чаты без карточки в отбор не входят.
+const stagesValue = (stages, labels) => (stages.length === 1 ? (labels[stages[0]] || stages[0]) : `Статусов: ${stages.length}`);
+
+const ChatsTab = ({ api, toast, boot, caps, onOpenCard, onChanged, version, onWaiting, focus, onFocusConsumed }) => {
     const [mode, setMode] = useState('all');
     const [waitingOnly, setWaitingOnly] = useState(false);
+    const [stages, setStages] = useState([]);
+    const stageOptions = useMemo(() => (boot?.meta?.stages || []).map((stage) => ({ value: stage.code, label: stage.label })), [boot]);
+    const stageLabels = useMemo(() => ({ ...STAGE_LABELS, ...Object.fromEntries(stageOptions.map((o) => [o.value, o.label])) }), [stageOptions]);
     const [search, setSearch] = useState('');
     const [query, setQuery] = useState('');
     const [list, setList] = useState(null);
@@ -852,7 +860,9 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
     const [loadingMore, setLoadingMore] = useState(false);
     const [moreAfterExtra, setMoreAfterExtra] = useState(true);
     const listSeq = useRef(0);
-    const params = useMemo(() => ({ mode, q: query || undefined, waiting: waitingOnly ? 1 : undefined }), [mode, query, waitingOnly]);
+    const params = useMemo(() => ({
+        mode, q: query || undefined, waiting: waitingOnly ? 1 : undefined, stages: stages.length ? stages.join(',') : undefined,
+    }), [mode, query, waitingOnly, stages]);
     const paramsKey = JSON.stringify(params);
 
     useEffect(() => {
@@ -879,7 +889,7 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
                 setList(data);
                 setListError('');
                 // Счётчик на вкладке раздела — тот же, что «Ждут ответа» во всех чатах: сразу, без своего опроса.
-                if (params.mode === 'all' && !params.q) onWaiting?.(Number(data.totals?.waiting_chats) || 0);
+                if (params.mode === 'all' && !params.q && !params.stages) onWaiting?.(Number(data.totals?.waiting_chats) || 0);
             })
             .catch((error) => { if (mine === listSeq.current) setListError(errorOf(error, 'Чаты не загрузились')); });
     }, [api, params, onWaiting]);
@@ -954,6 +964,10 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
                             Ждут ответа · {totals.waiting_chats}
                         </button>
                     </div>
+                    {stageOptions.length > 0 && (
+                        <CustomSelect variant="ios" multiple value={stages} onChange={setStages} options={stageOptions}
+                                      placeholder="Все статусы" ariaLabel="Статус кандидата" renderValue={(values) => stagesValue(values, stageLabels)} />
+                    )}
                 </div>
                 <div className="wazzup-scrollbar flex-1 overflow-y-auto">
                     {list === null && !listError && (
@@ -962,7 +976,8 @@ const ChatsTab = ({ api, toast, caps, onOpenCard, onChanged, version, onWaiting,
                     {listError && <div className="py-6 text-center text-sm text-rose-500"><AlertCircle size={15} className="mr-1 inline" />{listError}</div>}
                     {list && items.length === 0 && !listError && (
                         <div className="px-4 py-8 text-center text-sm text-slate-400">
-                            {waitingOnly ? 'Все ответили — ждущих нет' : query ? 'Ничего не нашлось' : 'Чатов пока нет'}
+                            {waitingOnly ? 'Все ответили — ждущих нет' : query ? 'Ничего не нашлось'
+                                : stages.length ? 'С таким статусом чатов нет' : 'Чатов пока нет'}
                         </div>
                     )}
                     {items.map((chat) => (

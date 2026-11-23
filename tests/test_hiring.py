@@ -157,6 +157,36 @@ class StageTests(unittest.TestCase):
             self.assertNotRegex(text, r'channel_id|channel_name|channel_color|ChannelPill|/channels|list_channels', path.name)
 
 
+class ChatsWindowInterfaceTests(unittest.TestCase):
+    """23.11.2026: в «Чатах» — отбор кандидатов по статусам, и окно на весь экран без внешнего контейнера со своей
+    прокруткой страницы. Поведение отбора проверяет tests/test_hiring_postgres.py (wa_chats с stages)."""
+
+    @classmethod
+    def setUpClass(cls):
+        ui = ROOT / 'src' / 'components' / 'hiring'
+        cls.view = (ui / 'HiringView.jsx').read_text(encoding='utf-8')
+        cls.chats = (ui / 'ChatsTab.jsx').read_text(encoding='utf-8')
+        cls.css = (ui / 'hiringChats.css').read_text(encoding='utf-8')
+
+    def test_status_filter_goes_to_the_list_request(self):
+        self.assertIn("stages: stages.length ? stages.join(',') : undefined", self.chats)
+        self.assertIn('options={stageOptions}', self.chats)
+        self.assertIn('placeholder="Все статусы"', self.chats)
+        # Счётчик «Ждут ответа» на вкладке раздела — по всем чатам: отбор по статусам его не трогает.
+        self.assertIn("if (params.mode === 'all' && !params.q && !params.stages) onWaiting?.(", self.chats)
+        self.assertIn("{active === 'chats' && <ChatsTab {...shared}", self.view)   # boot — в shared
+
+    def test_full_screen_only_for_chats_and_only_on_computer(self):
+        self.assertIn("boot && current === 'chats' ? ' hiring-screen-chats' : ''", self.view)
+        self.assertIn('body:not(.mobile-shell) .main-content:has(> .hiring-screen-chats) {', self.css)
+        rules_text = self.css[self.css.index('body:not(.mobile-shell) .main-content'):]
+        for prop in ('padding: 0;', 'overflow: hidden;', 'height: 100vh;'):
+            self.assertIn(prop, rules_text[:rules_text.index('}')])
+        # Телефон — как было: своя высота окна под оболочкой.
+        self.assertIn('body.mobile-shell .hiring-chats {', self.css)
+        self.assertNotIn('body.mobile-shell .main-content', self.css)
+
+
 class GroupsAndBoardInterfaceTests(unittest.TestCase):
     """Владелец 18.11.2026: тренер ведёт группы с вместимостью, рекрутер при приглашении видит свободные места;
     полоса прокрутки под доской тонкая до наведения, «Взять в работу» — маленькая кнопка в углу карточки."""
