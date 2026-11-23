@@ -12,7 +12,8 @@ import {
 import CustomSelect from '../ui/CustomSelect';
 import { IosDateRangePicker, isoDate, rangeLabel } from '../ui/DateRangePicker';
 import {
-    amoAnsweredNote, amoMark, hms, hours, lineCaption, missedHint, percent, prettyPhone, reportParams,
+    amoAnsweredNote, amoMark, hms, hours, lineCaption, missedFilterShown, missedHint, percent,
+    prettyPhone, reportParams,
     REPORTS, reportState, resultTone, ringSeconds, seconds, shortDay, shortTime, silence,
     splitCallType, TYPE_IN_BEFORE_QUEUE,
 } from './touchMeta';
@@ -368,11 +369,8 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
     const bridge = coverage.bridge || meta?.bridge || null;
     const bridgeDown = bridge && !bridge.connected;
 
-    /* Фильтр «переданные в CRM» — только там, где он может что-то найти: робот включён
-       или переданные за период уже есть. Иначе это обещание пустой таблицы. CRM их две:
-       amoCRM до переадресации в Syntony (SALES-4) и Syntony после — фильтр берёт обе. */
-    const amoFilterShown = Boolean(meta?.missed_amo?.enabled || summary.amo_transferred
-        || summary.syntony_transferred || filters.amoOnly);
+    /* Фильтр «переданные в CRM» — только там, где он может что-то найти (missedFilterShown). */
+    const amoFilterShown = missedFilterShown(meta, summary, filters);
 
     return (
         /* Раздел тянется до 1480px: на 1240 таблица из десяти колонок упиралась в край
@@ -603,8 +601,9 @@ export default function TouchesView({ apiBaseUrl, withAccessTokenHeader, showToa
                 позвонили; под номером — таксопарк и очередь звонка.
                 «Не дошёл до очереди» — клиент положил трубку на приветствии: строка есть,
                 но в «Касаний», «Операторы», «По дням» и «Сделки» такие звонки не входят.
-                «В amoCRM» — по непринятому звонку заведена сделка на перезвон: через минуту
-                после звонка клиент так и не дозвонился.
+                «В amoCRM» и «в Syntony» — непринятый звонок передан на перезвон: через минуту
+                после звонка клиент так и не дозвонился. У Syntony без ссылки — номера заявки
+                она не отдаёт.
                 Ссылки на записи открываются только из внутренней сети.
                 {meta?.cached_from ? ` В базе уже есть данные с ${shortDay(meta.cached_from)}.` : ''}
             </p>

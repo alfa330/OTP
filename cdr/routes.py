@@ -323,7 +323,9 @@ def build_cdr_blueprint(*, db, require_api_key, build_cors_preflight_response,
         if filters.get('talked_only'):
             parts.append('только состоявшиеся разговоры')
         if filters.get('amo_only'):
-            parts.append('только переданные в amoCRM')
+            # Фильтр берёт обе CRM робота пропущенных: amoCRM до переадресации и Syntony после
+            # (SALES-4) — подпись та же, что у фильтра на экране.
+            parts.append('только переданные в CRM')
         return '; '.join(parts)
 
     # ── справочник номеров ───────────────────────────────────────────────────

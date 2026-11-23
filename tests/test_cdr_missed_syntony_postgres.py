@@ -175,6 +175,9 @@ def test_retry_queue_sees_syntony_rows(cursor):
                        crm='syntony')
     rows = mq.due_retries(cursor)
     assert [(r['linkedid'], r['status'], r['queue']) for r in rows] == [('1.1', 'error', '3010')]
+    # Повтор знает, куда уходила строка и чем кончилась: при смене CRM строку, по которой
+    # запрос мог дойти, вслепую во вторую CRM не шлют (missed_service._Context.retry).
+    assert (rows[0]['crm'], rows[0]['error']) == ('syntony', 'Syntony недоступна')
 
 
 def test_touches_show_both_crms_and_count_them_apart(cursor):

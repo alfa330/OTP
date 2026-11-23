@@ -129,7 +129,10 @@ export const missedCrmName = (touch) => (touch?.missed_crm === 'syntony' ? 'Synt
  *  Сервер отдаёт у касания `amo_state` и `missed_crm` (cdr/queries.py:_missed_view):
  *    sent     — сделка на перезвон в amoCRM есть: заведена по этому звонку или раньше по
  *               тому же клиенту (перезвонил и снова не дозвонился) — метка-ссылка на неё;
- *               в Syntony — заявку приняли: метка без ссылки, номера заявки Syntony не отдаёт;
+ *               в Syntony — передан: Syntony заводит новую заявку или, если у номера уже есть
+ *               открытая, дописывает текст в неё комментарием; что именно, она не сообщает,
+ *               номера заявки не отдаёт — поэтому метка без ссылки и подсказка не обещает
+ *               «заявку»;
  *    error    — передать не вышло: метка видна, чтобы клиенту перезвонили руками;
  *    answered — клиент дозвонился, передавать было нечего: метки НЕТ, причина уходит
  *               в подсказку плашки результата (amoAnsweredNote) — шум на каждой строке
@@ -139,7 +142,7 @@ export const amoMark = (touch) => {
     const state = touch?.amo_state || '';
     const crm = missedCrmName(touch);
     if (state === 'sent' && crm === 'Syntony') {
-        const lead = 'Заявка на перезвон в Syntony';
+        const lead = 'Передан в Syntony — новой заявкой или комментарием в открытую заявку этого номера';
         return {
             kind: 'sent',
             label: 'в Syntony',
@@ -178,7 +181,7 @@ export const amoAnsweredNote = (touch) => (
 /** Подпись под «Входящих»: сколько не приняли и сколько из них ушло на перезвон в CRM.
  *  В периоде, захватившем переезд в Syntony (SALES-4), бывают обе CRM — тогда обе. */
 export const missedHint = (summary) => {
-    const parts = [`не приняли ${summary?.incoming_missed || 0}`];
+    const parts = [`не приняли ${(summary?.incoming_missed || 0).toLocaleString('ru-RU')}`];
     if (summary?.syntony_transferred) {
         parts.push(`в Syntony ${summary.syntony_transferred.toLocaleString('ru-RU')}`);
     }
@@ -187,6 +190,13 @@ export const missedHint = (summary) => {
     }
     return parts.join(' · ');
 };
+
+/** Показывать ли фильтр «Только переданные в CRM» — только там, где он может что-то найти:
+ *  робот включён или переданные за период уже есть, в какой бы CRM они ни были (amoCRM до
+ *  переадресации в Syntony, Syntony после). Иначе это обещание пустой таблицы. */
+export const missedFilterShown = (meta, summary, filters) => Boolean(
+    meta?.missed_amo?.enabled || summary?.amo_transferred || summary?.syntony_transferred
+    || filters?.amoOnly);
 
 /** «2026-08-24 09:00:00» → «09:00:00». */
 export const shortTime = (value) => (value ? String(value).slice(11, 19) : '—');

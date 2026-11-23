@@ -112,7 +112,8 @@ class FakeStore(object):
                             'call_day': row['started_at'].date(), 'started_at': row['started_at'],
                             'status': row['status'], 'attempts': row['attempts'],
                             'sent_epoch': row.get('sent_epoch'), 'line_number': '',
-                            'queue': '3010', 'wait_seconds': 40})
+                            'queue': '3010', 'wait_seconds': 40, 'crm': row.get('crm'),
+                            'error': row.get('error')})
         return out[:limit]
 
     # запись
@@ -515,6 +516,32 @@ class CycleTests(unittest.TestCase):
         self.assertEqual((summary['recovered'], summary['failed']), (1, 0))
         self.assertEqual(self.row(store)['status'], 'created')
 
+    def test_syntony_row_without_an_answer_is_not_sent_to_amo_after_rollback(self):
+        # Робот вернули в amoCRM, а строка ушла в Syntony без ответа: заявка там могла
+        # появиться. Сделка amoCRM поверх неё — два перезвона; строка видна в разделе.
+        for status, error in (('sending', None), ('error', 'Syntony не ответила вовремя'),
+                              ('error', 'Syntony: сбой запроса (ConnectionError)')):
+            with self.subTest(status=status, error=error):
+                store = self.stuck_store(status=status, stale=status == 'sending', crm='syntony',
+                                         error=error)
+                writer = FakeWriter(store)
+                summary = self.run_cycle(store, writer=writer)
+                self.assertEqual(summary['failed'], 1)
+                self.assertEqual(writer.created, [])
+                self.assertEqual(writer.recent_calls, [])
+                row = self.row(store)
+                self.assertEqual(row['status'], 'failed')
+                self.assertEqual(row['error'], missed_service.SYNTONY_UNKNOWN_TEXT)
+
+    def test_syntony_row_rejected_with_a_code_goes_to_amo(self):
+        store = self.stuck_store(status='error', stale=False, crm='syntony',
+                                 error='форма Syntony не найдена — ключ формы сменили? '
+                                       '(HTTP 404 unknown_form)')
+        writer = FakeWriter(store)
+        summary = self.run_cycle(store, writer=writer)
+        self.assertEqual(summary['created'], 1)
+        self.assertEqual(self.row(store)['crm'], 'amo')
+
     def test_reclaim_compares_status_and_attempts(self):
         store = self.stuck_store(status='error', stale=False)
         self.assertIsNone(store.reclaim(None, '1.1', PHONE, 'error', 0), 'чужое число попыток')
@@ -603,9 +630,11 @@ class SyntonyCycleTests(unittest.TestCase):
     seeded_store = CycleTests.seeded_store
     stuck_store = CycleTests.stuck_store
 
-    def run_syntony(self, store, writer=None, factory=None, now=NOW, queries=None):
+    def run_syntony(self, store, writer=None, factory=None, now=NOW, queries=None,
+                    amo_check=None):
         queries = queries or FakeQueries(live_at=(now - timedelta(seconds=5)).isoformat())
         self.syntony = writer or getattr(self, 'syntony', None) or FakeSyntonyWriter(store)
+        self.amo = getattr(self, 'amo', None) or FakeWriter(store)
         self.factory_calls = 0
 
         def default_factory():
@@ -615,10 +644,12 @@ class SyntonyCycleTests(unittest.TestCase):
         with mock.patch.object(missed_service, 'mq', store), \
                 mock.patch.object(missed_service, 'queries', queries):
             return missed_service.run_cycle(_Db(), now=now, writer_factory=factory or default_factory,
-                                            crm=missed_config.SYNTONY)
+                                            crm=missed_config.SYNTONY,
+                                            amo_check_factory=amo_check or (lambda: self.amo))
 
     def setUp(self):
         self.syntony = None
+        self.amo = None
 
     def test_missed_call_goes_to_syntony_with_the_mark_written_first(self):
         store = FakeStore([missed_touch('1.1', NOW - timedelta(minutes=5))],
@@ -720,6 +751,50 @@ class SyntonyCycleTests(unittest.TestCase):
         self.assertEqual(summary['created'], 1)
         row = self.row(store)
         self.assertEqual((row['crm'], row['syntony_sent']), ('syntony', True))
+        # Сначала спросили amoCRM, не завела ли сделку прошлая попытка.
+        self.assertEqual(self.amo.recent_calls, [1790000000 - 120])
+
+    def test_amo_row_whose_lead_exists_is_closed_by_it_not_sent_to_syntony(self):
+        # Перезапуск при включении Syntony убил процесс после того, как amoCRM завела сделку,
+        # но до отметки: строка `sending`. Сделка есть — в Syntony клиента второй раз не шлём.
+        store = self.stuck_store(crm=None)
+        self.amo = FakeWriter(store)
+        self.amo.recent = 57200001
+        summary = self.run_syntony(store)
+        self.assertEqual((summary['recovered'], summary['created']), (1, 0))
+        self.assertEqual(self.syntony.rows_at_send, [])
+        row = self.row(store)
+        self.assertEqual((row['status'], row['amo_lead_id']), ('created', 57200001))
+        self.assertEqual(self.amo.notes[0][0], 57200001)
+
+    def test_amo_row_is_not_sent_blindly_when_amo_cannot_be_asked(self):
+        store = self.stuck_store(crm=None)
+
+        def no_amo():
+            raise RuntimeError('amoCRM не настроена')
+        summary = self.run_syntony(store, amo_check=no_amo)
+        self.assertEqual(self.syntony.rows_at_send, [])
+        self.assertEqual(self.row(store)['status'], 'sending')
+        self.assertFalse(summary['created'])
+        # За горизонтом — «не передан», чтобы перезвонили руками, а не вечное ожидание.
+        old = self.stuck_store(crm=None, started_at=NOW - timedelta(
+            hours=missed_service.HORIZON_HOURS, minutes=1))
+        self.syntony = None
+        self.assertEqual(self.run_syntony(old, amo_check=no_amo)['failed'], 1)
+        self.assertEqual(self.syntony.rows_at_send, [])
+
+    def test_failed_posts_also_count_toward_the_cap(self):
+        # Форма отвечает 429 на всё: упавшие запросы тоже тратят лимит цикла, иначе робот
+        # долбил бы форму сорока запросами за цикл и не выходил из 429.
+        start = NOW - timedelta(minutes=30)
+        calls = [missed_touch('1.%d' % i, start + timedelta(seconds=i), phone='70155520%02d' % i)
+                 for i in range(missed_service.SYNTONY_POSTS_PER_CYCLE + 3)]
+        store = FakeStore(calls, enabled_since=self.since())
+        writer = FakeSyntonyWriter(store)
+        writer.fail = missed_service_syntony_error('больше 30 заявок в минуту (HTTP 429)')
+        summary = self.run_syntony(store, writer=writer)
+        self.assertEqual(len(writer.rows_at_send), missed_service.SYNTONY_POSTS_PER_CYCLE)
+        self.assertEqual(summary['errors'], missed_service.SYNTONY_POSTS_PER_CYCLE)
 
     def test_amo_row_failing_again_in_syntony_names_syntony(self):
         # Повтор упал и в Syntony: подпись «не передан в …» обязана назвать Syntony — туда

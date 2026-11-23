@@ -278,6 +278,28 @@ class ExportTests(unittest.TestCase):
         index = [key for key, _t, _w in report.COLUMNS].index('amo_lead_id')
         self.assertIsNone(report._touch_row(sheet, touch)[index])
 
+    def test_context_sheet_explains_the_column_and_the_filter_for_both_crms(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        import pathlib
+        book = Workbook(write_only=True)
+        sheet = book.create_sheet('Контекст')
+        report._fill_context(sheet, '2026-11-23', '2026-11-23', {'total': 10, 'talks': 5},
+                             datetime(2026, 11, 23, 12, 0), 'Админ', 'только переданные в CRM', {})
+        stream = BytesIO()
+        book.save(stream)
+        loaded = load_workbook(BytesIO(stream.getvalue()))
+        text = ' '.join(str(c.value) for ws in loaded.worksheets for r in ws.iter_rows()
+                        for c in r if c.value is not None)
+        header = report.COLUMNS[[key for key, _t, _w in report.COLUMNS].index('amo_lead_id')][1]
+        self.assertIn('«%s»' % header, text, 'пояснение называет колонку так же, как шапка')
+        self.assertIn('Syntony', text)
+        self.assertNotIn('Сделка amoCRM', text)
+        # Подпись фильтра для файла — как на экране: фильтр берёт обе CRM.
+        routes = pathlib.Path(report.__file__).with_name('routes.py').read_text(encoding='utf-8')
+        self.assertIn("'только переданные в CRM'", routes)
+        self.assertNotIn('только переданные в amoCRM', routes)
+
     def test_syntony_transfer_is_named_in_the_same_column(self):
         sheet = Workbook(write_only=True).create_sheet('Касания')
         index = [key for key, _t, _w in report.COLUMNS].index('amo_lead_id')

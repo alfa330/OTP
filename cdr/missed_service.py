@@ -88,6 +88,15 @@ def _writer():
         return _writer_state['writer']
 
 
+def _amo_check_writer():
+    """Писатель amoCRM для одной проверки в режиме Syntony: не заведена ли сделка по строке,
+    запрос по которой ушёл в amoCRM до переадресации. Без учётки amoCRM — спросить нечем."""
+    from amocrm import leads as amo_leads
+    if not amo_leads.is_configured():
+        raise RuntimeError('amoCRM не настроена — проверить строку до переадресации нечем')
+    return _writer()
+
+
 def _syntony_writer():
     """Писатель Syntony на жизнь процесса: ключ формы читается из окружения один раз."""
     with _writer_lock:
@@ -130,12 +139,13 @@ def _queue_calls_of(calls, phone):
     return out
 
 
-def run_cycle(db, now=None, writer_factory=None, crm=None):
+def run_cycle(db, now=None, writer_factory=None, crm=None, amo_check_factory=None):
     """Один проход. Возвращает счётчик исходов — джоба пишет его в лог, только когда он
     не пустой (цикл будит себя 5760 раз в сутки).
 
     crm — куда передавать (missed_config.AMO | SYNTONY); по умолчанию — что выбрано
-    окружением, а без него amoCRM, как до переезда."""
+    окружением, а без него amoCRM, как до переезда. amo_check_factory — писатель amoCRM для
+    проверки строк, ушедших в amoCRM до переадресации (только в режиме Syntony)."""
     now = now or queries.now_almaty()
     crm = crm or missed_config.target() or missed_config.AMO
     writer_factory = writer_factory or (
@@ -154,7 +164,8 @@ def run_cycle(db, now=None, writer_factory=None, crm=None):
 
     fresh_until = _local(bridge.get('live_at'))
     queue_until = _local(queue_at)
-    context = _Context(db, writer_factory, now, summary, crm=crm)
+    context = _Context(db, writer_factory, now, summary, crm=crm,
+                       amo_check_factory=amo_check_factory or _amo_check_writer)
 
     # Повторы — первыми: строка «в полёте» держит новые сделки того же клиента (см.
     # transfer), и чем раньше она разобрана, тем раньше они пойдут.
@@ -192,12 +203,24 @@ _DEFER = 'defer'
 REPEAT_REASON = ('У клиента уже есть сделка на перезвон, её ещё не взяли в работу — '
                  'дописано примечание')
 FAILED_TEXT = 'передать не удалось — перезвоните клиенту вручную'
+# Строка ушла в Syntony, ответа не было (обрыв, таймаут, процесс умер посреди запроса), а
+# робот уже вернулся в amoCRM. Syntony могла заявку принять — номера она не отдаёт, и
+# проверить нечем; вторая передача в amoCRM дала бы клиенту два перезвона.
+SYNTONY_UNKNOWN_TEXT = ('запрос в Syntony мог дойти, а робот вернулся в amoCRM — проверьте '
+                        'заявку в Syntony, иначе перезвоните клиенту вручную')
+
+
+def _syntony_rejected(error):
+    """Syntony ответила отказом с кодом (HTTP 4xx/5xx, переадресация) — заявки точно нет.
+    Обрыв, таймаут и зависший `sending` — неизвестно: запрос мог дойти."""
+    return 'HTTP ' in str(error or '')
 
 
 class _Context(object):
     """Всё, что нужно одному циклу: база, писатель (заводится при первой передаче) и счётчики."""
 
-    def __init__(self, db, writer_factory, now, summary, crm=missed_config.AMO):
+    def __init__(self, db, writer_factory, now, summary, crm=missed_config.AMO,
+                 amo_check_factory=None):
         self.db = db
         self._factory = writer_factory
         self._writer = None
@@ -209,6 +232,19 @@ class _Context(object):
         self.syntony = crm == missed_config.SYNTONY
         # Запросов в Syntony за этот цикл (SYNTONY_POSTS_PER_CYCLE).
         self.posts = 0
+        # Писатель amoCRM для проверки строк, ушедших туда до переадресации (режим Syntony).
+        self._amo_check_factory = amo_check_factory
+        self._amo_check = None
+        self._amo_check_failed = False
+
+    def amo_check(self):
+        if self._amo_check is None and not self._amo_check_failed and self._amo_check_factory:
+            try:
+                self._amo_check = self._amo_check_factory()
+            except Exception as exc:  # noqa: BLE001 — проверка подождёт, вслепую не шлём
+                self._amo_check_failed = True
+                log.warning('Пропущенные→syntony: проверить строку в amoCRM нечем: %s', exc)
+        return self._amo_check
 
     def writer(self):
         if self._writer is None and not self._writer_failed:
@@ -368,9 +404,9 @@ class _Context(object):
 
     # ── повторы ──────────────────────────────────────────────────────────────
 
-    def _fail(self, linkedid, phone):
+    def _fail(self, linkedid, phone, text=FAILED_TEXT):
         with self.db._get_cursor() as cursor:
-            mq.mark_error(cursor, linkedid, phone, FAILED_TEXT, final=True)
+            mq.mark_error(cursor, linkedid, phone, text, final=True)
         self.summary['failed'] += 1
 
     def retry(self, row):
@@ -384,13 +420,22 @@ class _Context(object):
         too_old = started is None or started < self.now - timedelta(hours=HORIZON_HOURS)
         exhausted = int(row.get('attempts') or 0) >= MAX_ATTEMPTS
         park = lines_mod.park_of_queue(row.get('queue'))
+        sent = int(row.get('sent_epoch') or 0)
+
+        # Откат из Syntony в amoCRM (SALES-4): запрос по строке ушёл в Syntony, а ответа не
+        # было. Заявка там могла появиться — номера Syntony не отдаёт, спросить нечем. Сделка
+        # amoCRM поверх неё дала бы клиенту два перезвона; строка видна в разделе, и человек
+        # решит сам. Строка, которой Syntony отказала с кодом, — обычный повтор в amoCRM.
+        if (row.get('crm') == missed_config.SYNTONY and sent
+                and not (row.get('status') == mq.ERROR and _syntony_rejected(row.get('error')))):
+            self._fail(linkedid, phone, SYNTONY_UNKNOWN_TEXT)
+            return
         writer = self.writer()
 
         # Запрос по строке уходил — он мог дойти до amoCRM, а ответ потеряться. Ищем
         # заведённую сделку ДО того, как объявить строку проваленной или повторять:
         # иначе клиенту перезвонили бы дважды, по сделке и «вручную». Не смогли спросить —
         # вслепую не повторяем; строку за горизонтом закрываем, чтобы не висела вечно.
-        sent = int(row.get('sent_epoch') or 0)
         if sent:
             if writer is None:
                 if too_old:
@@ -441,13 +486,40 @@ class _Context(object):
         self._create(row, park)
 
     def _retry_syntony(self, row):
-        """Повтор заявки в Syntony. Проверять «не дошёл ли прошлый запрос» нечем (номера
-        заявки Syntony не отдаёт) и незачем: дошедший завёл заявку, и повтор ляжет в неё
-        комментарием, а не второй заявкой. Строку, ушедшую из amoCRM до переезда, повтор
-        тоже отправляет в Syntony — amoCRM робот больше не трогает."""
+        """Повтор заявки в Syntony. Проверять «не дошёл ли прошлый запрос в Syntony» нечем
+        (номера заявки она не отдаёт) и незачем: дошедший завёл заявку, и повтор ляжет в неё
+        комментарием, а не второй заявкой.
+
+        Строка, ушедшая в amoCRM до переадресации, — другое дело: запрос туда мог дойти и
+        завести сделку, а ответ потеряться (смена окружения — это перезапуск, он такие
+        строки и оставляет). Поэтому сначала спрашиваем amoCRM, как спросил бы повтор в
+        amoCRM: сделка нашлась — строка закрыта ею, в Syntony не шлём; спросить нельзя —
+        вслепую не шлём, ждём до горизонта."""
         linkedid, phone = str(row['linkedid']), str(row['phone'])
         started = missed._moment(row.get('started_at'))
         too_old = started is None or started < self.now - timedelta(hours=HORIZON_HOURS)
+        sent = int(row.get('sent_epoch') or 0)
+        if row.get('crm') != missed_config.SYNTONY and sent:
+            amo = self.amo_check()
+            try:
+                if amo is None:
+                    raise RuntimeError('писателя amoCRM нет')
+                existing = amo.recent_own_lead(phone, sent - 120)
+            except Exception as exc:  # noqa: BLE001
+                log.warning('Пропущенные→syntony: строку %s из amoCRM не проверить: %s',
+                            linkedid, exc)
+                if too_old:
+                    self._fail(linkedid, phone)
+                return
+            if existing:
+                with self.db._get_cursor() as cursor:
+                    mq.mark_created(cursor, linkedid, phone, existing)
+                    if started is not None:
+                        mq.resolve_chain(cursor, phone, started, lead_id=existing)
+                park = lines_mod.park_of_queue(row.get('queue'))
+                amo.add_note(existing, missed.note_text(row, park))
+                self.summary['recovered'] += 1
+                return
         if too_old or int(row.get('attempts') or 0) >= MAX_ATTEMPTS:
             self._fail(linkedid, phone)
             return

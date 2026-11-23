@@ -133,6 +133,22 @@ test('ReportsModal: пока собирается один файл, второ�
     assert.equal(isOff(inboundButton), true);
 });
 
+test('TouchesTable: «в Syntony» — текстом без ссылки, «в amoCRM» — ссылкой на сделку', () => {
+    const missed = { ...touch, call_type: 'Входящий (не приняли)', result: 'Занято', talk_seconds: 0 };
+    const table = tableMarkup(renderTable({
+        touches: [
+            { ...missed, linkedid: 'syn', amo_state: 'sent', missed_crm: 'syntony', amo_url: '' },
+            { ...missed, linkedid: 'amo', amo_state: 'sent', missed_crm: 'amo', amo_lead_id: 57009999,
+              amo_url: 'https://example.amocrm.ru/leads/detail/57009999' },
+        ],
+        total: 2, page: 1, pageCount: 1, onPage: () => {},
+    }));
+    assert.match(table, />в Syntony</);
+    // Пустая ссылка открыла бы портал во второй вкладке.
+    assert.doesNotMatch(table, /<a[^>]*href=""/);
+    assert.match(table, /<a[^>]*href="https:\/\/example\.amocrm\.ru\/leads\/detail\/57009999"/);
+});
+
 test('TouchesTable: отсутствие pbx не мешает показать касания', () => {
     const table = tableMarkup(renderTable({
         touches: [touch], total: 1, page: 1, pageCount: 1, onPage: () => {},

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-    REPORTS, RESULT_CLIENT_HUNG_UP, RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark, missedHint,
+    REPORTS, RESULT_CLIENT_HUNG_UP, RESULT_DROPPED, RESULT_TALK, amoAnsweredNote, amoMark,
+    missedFilterShown, missedHint,
     exportFileName, hms, hours, inboundReportFileName, percent, fullDay, prettyPhone, reportParams,
     reportState, resultTone, ringSeconds, shortDay, shortTime, silence,
 } from '../src/components/cdr/touchMeta.js';
@@ -216,7 +217,10 @@ test('принятая Syntony заявка — метка без ссылки',
     assert.equal(mark.kind, 'sent');
     assert.equal(mark.label, 'в Syntony');
     assert.equal(mark.href, '');
-    assert.equal(mark.title, 'Заявка на перезвон в Syntony. За минуту после звонка клиенту не ответили');
+    // Syntony не говорит, завела ли новую заявку или дописала комментарий в открытую, — подсказка
+    // не обещает «заявку».
+    assert.equal(mark.title, 'Передан в Syntony — новой заявкой или комментарием в открытую заявку '
+        + 'этого номера. За минуту после звонка клиенту не ответили');
 });
 
 test('сбой и «дозвонился» в Syntony называют Syntony', () => {
@@ -239,8 +243,18 @@ test('подпись под «Входящих»: сколько ушло в к�
     assert.equal(missedHint({ incoming_missed: 12 }), 'не приняли 12');
     assert.equal(missedHint({ incoming_missed: 12, amo_transferred: 9 }), 'не приняли 12 · в amoCRM 9');
     assert.equal(missedHint({ incoming_missed: 1200, syntony_transferred: 1040 }),
-                 `не приняли 1200 · в Syntony ${(1040).toLocaleString('ru-RU')}`);
+                 `не приняли ${(1200).toLocaleString('ru-RU')} · в Syntony ${(1040).toLocaleString('ru-RU')}`);
     assert.equal(missedHint({ incoming_missed: 30, syntony_transferred: 7, amo_transferred: 20 }),
                  'не приняли 30 · в Syntony 7 · в amoCRM 20');
     assert.equal(missedHint(null), 'не приняли 0');
+});
+
+test('фильтр «Только переданные в CRM» — только там, где он может что-то найти', () => {
+    assert.equal(missedFilterShown({ missed_amo: { enabled: true } }, {}, {}), true);
+    assert.equal(missedFilterShown({}, { amo_transferred: 2 }, {}), true);
+    // Робот выключен, а передачи за период были только в Syntony.
+    assert.equal(missedFilterShown({ missed_amo: { enabled: false } }, { syntony_transferred: 3 }, {}), true);
+    assert.equal(missedFilterShown(null, {}, { amoOnly: true }), true);
+    assert.equal(missedFilterShown({ missed_amo: { enabled: false } }, {}, {}), false);
+    assert.equal(missedFilterShown(undefined, undefined, undefined), false);
 });

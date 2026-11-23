@@ -228,11 +228,14 @@ def reclaim(cursor, linkedid, phone, status, attempts, crm=None):
 
 
 _RETRY_KEYS = ('linkedid', 'phone', 'call_day', 'started_at', 'status', 'attempts',
-               'sent_epoch', 'line_number', 'queue', 'wait_seconds', 'result')
+               'sent_epoch', 'line_number', 'queue', 'wait_seconds', 'result', 'crm', 'error')
 
 # sent_epoch пустой — запроса в amoCRM по строке не было вовсе (amoCRM была недоступна
 # ещё при входе): искать «заведённую, но потерянную» сделку тогда не нужно и нельзя —
 # поиск от начала эпохи нашёл бы любую нашу старую сделку этого клиента.
+#
+# crm и error — для смены CRM (SALES-4): строку, по которой запрос уже уходил в ДРУГУЮ CRM,
+# повтор не отправляет вслепую в текущую — см. missed_service._Context.retry.
 
 
 def due_retries(cursor, limit=20):
@@ -243,7 +246,7 @@ def due_retries(cursor, limit=20):
     cursor.execute("""
         SELECT m.linkedid, m.phone, m.call_day, m.started_at, m.status, m.attempts,
                EXTRACT(EPOCH FROM m.sent_at)::BIGINT, t.line_number, t.queue, t.wait_seconds,
-               t.result
+               t.result, m.crm, m.error
           FROM cdr_missed_leads m
           LEFT JOIN cdr_touches t ON t.linkedid = m.linkedid AND t.phone = m.phone
          WHERE ((m.status = 'error'
